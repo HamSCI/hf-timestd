@@ -1,13 +1,13 @@
 """
-GRAPE Signal Recorder API Interfaces
+HF Time Standard API Interfaces
 
-Defines the contracts between the 6 core functions:
+Defines the contracts between core functions:
 1. Quality & time_snap analysis (producer)
 2. Full-bandwidth archive storage
 3. WWV/WWVH/CHU tone discrimination  
-4. Decimation to 10 Hz
-5. Digital RF format conversion
-6. Upload to repository
+
+Note: Functions 4-6 (decimation, Digital RF, upload) moved to grape-recorder package.
+See: https://github.com/mijahauan/grape-recorder
 
 These interfaces allow testing, implementation swapping, and clear separation of concerns.
 """

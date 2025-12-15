@@ -21,7 +21,8 @@ Phase 2: Analytical Engine (Clock Offset Series)
 - Output: Separate versionable CSV/JSON files
 - Key: AnalyticsService, Phase2TemporalEngine
 
-Note: Phase 3 (decimation, spectrograms, PSWS upload) is in separate grape app.
+Note: Phase 3 (decimation, spectrograms, PSWS upload) is in separate grape-recorder package.
+See: https://github.com/mijahauan/grape-recorder
 
 Example:
     from hf_timestd.core import create_pipeline
@@ -47,12 +48,6 @@ from .analytics_service import AnalyticsService
 from .wwvh_discrimination import WWVHDiscriminator
 from .wwv_test_signal import WWVTestSignalDetector
 from .discrimination_csv_writers import DiscriminationCSVWriters
-
-# Decimation
-from .decimation import decimate_for_upload, get_decimator, StatefulDecimator
-
-# DRF output
-from .drf_batch_writer import DRFBatchWriter
 
 # Supporting components
 from .wwv_geographic_predictor import WWVGeographicPredictor
@@ -145,17 +140,6 @@ from .phase2_temporal_engine import (
     create_phase2_engine
 )
 
-# Phase 3: Product Generation Engine (10 Hz Decimated DRF with Timing Annotations)
-from .phase3_product_engine import (
-    Phase3ProductEngine,
-    Phase3Config,
-    GapInfo,
-    GapAnalysis,
-    TimingAnnotation,
-    create_phase3_engine,
-    process_channel_day
-)
-
 # GPSDO Monitoring
 from .gpsdo_monitor import (
     GPSDOMonitor,
@@ -171,36 +155,8 @@ from .sliding_window_monitor import (
     SignalQuality
 )
 
-# Decimated Binary Buffer (stores 10 Hz IQ with timing metadata)
-from .decimated_buffer import (
-    DecimatedBuffer,
-    DayMetadata,
-    MinuteMetadata,
-    get_decimated_buffer
-)
-
-# Spectrogram Generation - CarrierSpectrogramGenerator is the CANONICAL implementation
-# Supports solar zenith overlays, quality grades, gap visualization, rolling spectrograms
-from .carrier_spectrogram import (
-    CarrierSpectrogramGenerator,
-    SpectrogramConfig as CarrierSpectrogramConfig,
-    generate_all_channel_spectrograms
-)
-
-# DEPRECATED: SpectrogramGenerator - use CarrierSpectrogramGenerator instead
-# Kept for backward compatibility but will be removed in future version
-from .spectrogram_generator import (
-    SpectrogramGenerator,  # DEPRECATED
-    SpectrogramConfig,     # DEPRECATED - use CarrierSpectrogramConfig
-    generate_spectrograms_for_day  # DEPRECATED
-)
-
-# Daily DRF Packager (for PSWS upload)
-from .daily_drf_packager import (
-    DailyDRFPackager,
-    StationConfig,
-    package_for_upload
-)
+# Note: Phase 3 modules (decimation, spectrograms, DRF packaging, upload) moved to grape-recorder
+# See: https://github.com/mijahauan/grape-recorder
 
 __all__ = [
     # Core recorder
@@ -212,12 +168,6 @@ __all__ = [
     "WWVHDiscriminator",
     "WWVTestSignalDetector",
     "DiscriminationCSVWriters",
-    # Decimation
-    "decimate_for_upload",
-    "get_decimator",
-    "StatefulDecimator",
-    # DRF
-    "DRFBatchWriter",
     # Supporting
     "WWVGeographicPredictor",
     "wwv_tone_schedule",
@@ -289,14 +239,6 @@ __all__ = [
     "ChannelCharacterization",
     "TransmissionTimeSolution",
     "create_phase2_engine",
-    # Phase 3: Product Generation Engine
-    "Phase3ProductEngine",
-    "Phase3Config",
-    "GapInfo",
-    "GapAnalysis",
-    "TimingAnnotation",
-    "create_phase3_engine",
-    "process_channel_day",
     # GPSDO Monitoring
     "GPSDOMonitor",
     "AnchorState",
@@ -306,17 +248,4 @@ __all__ = [
     "WindowMetrics",
     "MinuteSummary",
     "SignalQuality",
-    # Decimated Binary Buffer
-    "DecimatedBuffer",
-    "DayMetadata",
-    "MinuteMetadata",
-    "get_decimated_buffer",
-    # Carrier Spectrogram Generator
-    "CarrierSpectrogramGenerator",
-    "CarrierSpectrogramConfig",
-    "generate_all_channel_spectrograms",
-    # Daily DRF Packager
-    "DailyDRFPackager",
-    "StationConfig",
-    "package_for_upload",
 ]

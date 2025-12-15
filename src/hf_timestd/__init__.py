@@ -102,8 +102,8 @@ from ka9q import rtp_to_wallclock, parse_rtp_header
 # Re-export ka9q functions for backward compatibility
 discover_channels_via_control = discover_channels  # Legacy alias
 
-# Upload (exists but not yet integrated into daemon)
-from .uploader import UploadManager, SSHRsyncUpload
+# Note: Upload functionality moved to grape-recorder package
+# See: https://github.com/mijahauan/grape-recorder
 
 __all__ = [
     # === Stream API (primary interface) ===
@@ -153,9 +153,6 @@ __all__ = [
     # Timing (from ka9q-python)
     "rtp_to_wallclock",
     "parse_rtp_header",
-    # Upload
-    "UploadManager",
-    "SSHRsyncUpload",
 ]
 
 # =============================================================================

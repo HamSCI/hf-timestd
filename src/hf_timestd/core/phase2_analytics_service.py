@@ -249,22 +249,12 @@ class Phase2AnalyticsService:
         self.audio_tones_dir.mkdir(parents=True, exist_ok=True)
         self._init_audio_tones_csv()
         
-        # Decimated 10 Hz output buffer (Phase 3 products)
-        from .decimated_buffer import DecimatedBuffer
-        self.decimated_buffer = DecimatedBuffer(self.output_dir.parent.parent, channel_name)
-        
-        # Initialize stateful decimation filter (preserves state across minute boundaries)
-        from .decimation import StatefulDecimator, is_rate_supported
-        if is_rate_supported(sample_rate):
-            self.decimator = StatefulDecimator(sample_rate, 10)
-            logger.info(f"  Decimation: {sample_rate} Hz → 10 Hz enabled (stateful)")
-        else:
-            self.decimator = None
-            logger.warning(f"  Decimation: {sample_rate} Hz not supported")
-        
-        # Decimation parameters
+        # Note: Decimation (Phase 3 products) moved to grape-recorder package
+        # See: https://github.com/mijahauan/grape-recorder
+        self.decimated_buffer = None
+        self.decimator = None
         self.decimation_factor = int(sample_rate / 10)  # 2000 for 20kHz
-        self.output_rate = 10  # 10 Hz output
+        self.output_rate = 10  # 10 Hz output (for reference only)
         
         # Initialize Phase 2 engine
         from .phase2_temporal_engine import Phase2TemporalEngine
@@ -1133,61 +1123,16 @@ class Phase2AnalyticsService:
                            d_clock_ms: float = 0.0, uncertainty_ms: float = 999.0,
                            quality_grade: str = 'X', gap_samples: int = 0) -> bool:
         """
-        Decimate 20kHz IQ to 10Hz and store in binary buffer.
+        DEPRECATED: Decimation moved to grape-recorder package.
         
-        Args:
-            iq_samples: 20kHz complex IQ samples (1 minute = 1.2M samples)
-            minute_boundary: Unix timestamp of minute start
-            d_clock_ms: D_clock correction from Phase 2
-            uncertainty_ms: Timing uncertainty
-            quality_grade: Quality grade (A-X)
-            gap_samples: Number of gap samples detected
-            
+        This method is a no-op stub. For decimation and 10 Hz output,
+        use the grape-recorder package: https://github.com/mijahauan/grape-recorder
+        
         Returns:
-            True if decimation succeeded
+            False (decimation disabled)
         """
-        if self.decimator is None:
-            logger.debug("Decimation skipped - no decimator configured")
-            return False
-        
-        try:
-            # Apply high-quality decimation filter: 20kHz → 10Hz (stateful)
-            decimated_iq = self.decimator.process(iq_samples)
-            
-            if decimated_iq is None or len(decimated_iq) == 0:
-                logger.warning(f"Decimation produced no output for minute {minute_boundary}")
-                return False
-            
-            # Ensure exactly 600 samples (10 Hz × 60 seconds)
-            expected_samples = 600
-            if len(decimated_iq) != expected_samples:
-                logger.debug(f"Decimation produced {len(decimated_iq)} samples, expected {expected_samples}")
-                # Pad or truncate
-                if len(decimated_iq) < expected_samples:
-                    padded = np.zeros(expected_samples, dtype=np.complex64)
-                    padded[:len(decimated_iq)] = decimated_iq
-                    decimated_iq = padded
-                else:
-                    decimated_iq = decimated_iq[:expected_samples]
-            
-            # Write to binary buffer with metadata
-            success = self.decimated_buffer.write_minute(
-                minute_utc=float(minute_boundary),
-                decimated_iq=decimated_iq.astype(np.complex64),
-                d_clock_ms=d_clock_ms,
-                uncertainty_ms=uncertainty_ms,
-                quality_grade=quality_grade,
-                gap_samples=gap_samples
-            )
-            
-            if success:
-                logger.debug(f"Decimated minute {minute_boundary}: {len(decimated_iq)} samples")
-            
-            return success
-            
-        except Exception as e:
-            logger.error(f"Decimation error at {minute_boundary}: {e}")
-            return False
+        # Decimation moved to grape-recorder package
+        return False
     
     def _write_status(self):
         """Write status file for web-ui monitoring."""

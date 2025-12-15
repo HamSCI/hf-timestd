@@ -1,30 +1,33 @@
 # GRAPE Application Separation Guide
 
-**Date**: 2025-12-14  
-**Status**: Files identified, ready for separation
+**Date**: 2025-12-15  
+**Status**: ✅ COMPLETE - Files removed from hf-timestd
 
-This document lists the files that should be moved to a separate GRAPE application.
-These files handle decimation to 10 Hz, spectrograms, power graphs, and PSWS upload.
+Phase 3 functionality (decimation, spectrograms, PSWS upload) has been fully separated
+to the grape-recorder package. The files have been **removed** from this repository.
+
+**New Repository**: https://github.com/mijahauan/grape-recorder  
+**Local Path**: `/home/wsprdaemon/grape-recorder`
 
 ---
 
-## Files to Move to GRAPE App
+## Files Removed from hf-timestd (Dec 15, 2025)
 
-### Python Modules (src/hf_timestd/core/)
+### Python Modules Removed (were in src/hf_timestd/core/)
 
 **Phase 3 Products (decimation, spectrograms, upload):**
-- `decimation.py` - 20 kHz → 10 Hz decimation filters
-- `decimated_buffer.py` - 10 Hz binary buffer storage
-- `spectrogram_generator.py` - Legacy spectrogram generator (DEPRECATED)
-- `carrier_spectrogram.py` - Carrier spectrogram generator (CANONICAL)
-- `phase3_product_engine.py` - Phase 3 product generation
-- `phase3_products_service.py` - Phase 3 real-time service
-- `daily_drf_packager.py` - PSWS DRF packaging
-- `drf_batch_writer.py` - DRF batch writing
+- `decimation.py` - 20 kHz → 10 Hz decimation filters ❌ REMOVED
+- `decimated_buffer.py` - 10 Hz binary buffer storage ❌ REMOVED
+- `spectrogram_generator.py` - Legacy spectrogram generator ❌ REMOVED
+- `carrier_spectrogram.py` - Carrier spectrogram generator ❌ REMOVED
+- `phase3_product_engine.py` - Phase 3 product generation ❌ REMOVED
+- `phase3_products_service.py` - Phase 3 real-time service ❌ REMOVED
+- `daily_drf_packager.py` - PSWS DRF packaging ❌ REMOVED
+- `drf_batch_writer.py` - DRF batch writing ❌ REMOVED
 
-**Upload functionality:**
-- `uploader.py` (in src/hf_timestd/) - SFTP upload manager
-- `upload_tracker.py` (in src/hf_timestd/) - Upload state tracking
+**Upload functionality (were in src/hf_timestd/):**
+- `uploader.py` - SFTP upload manager ❌ REMOVED
+- `upload_tracker.py` - Upload state tracking ❌ REMOVED
 
 ### Scripts (scripts/)
 
@@ -76,32 +79,33 @@ These services were NOT renamed and should move to grape app:
 
 ---
 
-## Separation Strategy
+## Separation Complete (Dec 15, 2025)
 
-1. **Create new grape-app repository**
-2. **Copy identified files** to new repo
-3. **Update imports** in grape-app to use `hf_timestd` as dependency
-4. **Remove copied files** from hf_timestd (optional - can keep for reference)
-5. **Update grape-app scripts** to use new paths
+### What Was Done
+
+1. ✅ Created grape-recorder repository at https://github.com/mijahauan/grape-recorder
+2. ✅ Copied Phase 3 files to grape-recorder
+3. ✅ Updated imports in grape-recorder to use `grape_recorder` package
+4. ✅ **Removed Phase 3 files from hf-timestd** (this session)
+5. ✅ Updated stub methods in `analytics_service.py` and `phase2_analytics_service.py`
 
 ### Dependency Direction
 ```
-grape-app (decimation, spectrograms, upload)
+grape-recorder (decimation, spectrograms, upload)
     ↓ depends on
-hf_timestd (recording, timing analysis, D_clock)
+hf-timestd (recording, timing analysis, D_clock)
 ```
 
-The grape-app will import from hf_timestd:
+grape-recorder imports from hf-timestd:
 ```python
 from hf_timestd.core import Phase2TemporalEngine, ClockOffsetSeries
-from hf_timestd.paths import GRAPEPaths
 ```
 
 ---
 
 ## Notes
 
-- The `decimation.py` contains `StatefulDecimator` which is also used by Phase 2 analytics
-  for sliding window monitoring. May need to keep a copy or refactor.
-- The `carrier_spectrogram.py` is the canonical spectrogram implementation.
-- Upload functionality requires SSH keys and PSWS credentials.
+- Decimation methods in `analytics_service.py` and `phase2_analytics_service.py` are now
+  no-op stubs that return immediately. For 10 Hz output, use grape-recorder.
+- Upload functionality requires SSH keys and PSWS credentials (configured in grape-recorder).
+- The interfaces in `hf_timestd/interfaces/decimation.py` remain as abstract contracts.

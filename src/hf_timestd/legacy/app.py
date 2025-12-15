@@ -19,7 +19,8 @@ from ..core import CoreRecorderManager
 discover_channels_via_control = discover_channels
 from .processor import get_processor
 from .storage import StorageManager
-from .uploader import UploadManager
+# Note: Upload functionality moved to grape-recorder package
+# See: https://github.com/mijahauan/grape-recorder
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +47,8 @@ class SignalRecorderApp:
         # Keep legacy storage for backward compatibility (if needed)
         self.storage = StorageManager(config)
 
-        # Initialize uploader if configured
-        upload_config = config.get('uploader', {})
-        if upload_config.get('enabled', False) or upload_config.get('upload_enabled', False):
-            self.uploader = UploadManager(upload_config, self.storage)
-        else:
-            self.uploader = None
-            logger.info("Uploader disabled")
+        # Note: Upload functionality moved to grape-recorder package
+        self.uploader = None
 
         # Setup signal handlers
         signal.signal(signal.SIGTERM, self._signal_handler)
