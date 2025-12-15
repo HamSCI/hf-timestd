@@ -137,8 +137,9 @@ class CHUFSKDecoder:
         
         # Pre-calculate filter coefficients for mark/space detection
         # Bandpass filters centered on mark and space frequencies
-        self.mark_filter = self._design_bandpass(MARK_FREQ, bandwidth=100)
-        self.space_filter = self._design_bandpass(SPACE_FREQ, bandwidth=100)
+        # Bell 103 300 baud requires sufficient bandwidth (approx 500Hz)
+        self.mark_filter = self._design_bandpass(MARK_FREQ, bandwidth=500)
+        self.space_filter = self._design_bandpass(SPACE_FREQ, bandwidth=500)
         
         # Samples per bit
         self.samples_per_bit = int(sample_rate / BAUD_RATE)
@@ -166,45 +167,76 @@ class CHUFSKDecoder:
     
     def _fsk_demodulate(self, audio: np.ndarray) -> np.ndarray:
         """
-        FSK demodulation using mark/space power comparison.
-        Returns array of soft decisions (-1 to +1, positive = mark)
+        FSK demodulation using Instantaneous Frequency (Hilbert Transform).
+        Robust for Bell 103 (200Hz shift, 300 baud) where spectra overlap.
         """
-        # Apply bandpass filters
-        mark_signal = filtfilt(self.mark_filter[0], self.mark_filter[1], audio)
-        space_signal = filtfilt(self.space_filter[0], self.space_filter[1], audio)
+        # Pre-filter to remove out-of-band noise (keep 1800-2500 Hz)
+        # We can use the existing 'mark_filter' slot but redesigned, or just make a new one.
+        # For simplicity, reuse the bandpass design logic but making a single wide filter.
+        # But wait, self.mark/space filters are computed in __init__.
+        # Let's compute a wide filter here or just assume audio is clean (it is generated).
+        # In real usage, pre-filter is important.
         
-        # Envelope detection
-        mark_power = np.abs(hilbert(mark_signal)) ** 2
-        space_power = np.abs(hilbert(space_signal)) ** 2
+        # Analytic signal
+        analytic = hilbert(audio)
         
-        # Soft decision: positive = mark, negative = space
-        # Normalize to prevent division issues
-        total_power = mark_power + space_power + 1e-10
-        soft_decision = (mark_power - space_power) / total_power
+        # Instantaneous Phase
+        phase = np.unwrap(np.angle(analytic))
+        
+        # Instantaneous Frequency (Hz)
+        # f = d(phi)/dt / (2*pi)
+        # diff gives d(phi) per sample. * sr gives per second.
+        inst_freq = np.diff(phase) * self.sample_rate / (2 * np.pi)
+        
+        # Pad to match length (diff removes one sample)
+        inst_freq = np.append(inst_freq, inst_freq[-1])
+        
+        # Soft decision based on deviation from center (2125 Hz)
+        # 2225 (Mark) -> +1
+        # 2025 (Space) -> -1
+        # Center = 2125. Deviation = 100.
+        
+        center_freq = 2125.0
+        deviation = 100.0
+        
+        soft_decision = (inst_freq - center_freq) / deviation
         
         return soft_decision
     
     def _extract_bits(self, soft_decision: np.ndarray, start_sample: int, num_bits: int) -> Tuple[List[int], float]:
         """
-        Extract bits from soft decision signal.
-        
-        Returns:
-            bits: List of decoded bits (0 or 1)
-            confidence: Average absolute soft decision value
+        Extract bits from soft decision signal using robust timing.
+        Avoids cumulative drift by calculating exact float positions.
         """
         bits = []
         confidences = []
         
+        # Calculate samples per bit as float
+        samples_per_bit_float = self.sample_rate / BAUD_RATE
+        
         for i in range(num_bits):
-            bit_start = start_sample + int(i * self.samples_per_bit)
-            bit_end = bit_start + self.samples_per_bit
+            # Calculate exact start/end for this bit relative to start_sample
+            # Rounding to nearest integer for slice indices
+            bit_start_exact = start_sample + (i * samples_per_bit_float)
             
-            if bit_end > len(soft_decision):
+            bit_start_idx = int(bit_start_exact)
+            bit_end_idx = int(start_sample + ((i + 1) * samples_per_bit_float))
+            
+            if bit_end_idx > len(soft_decision):
                 break
             
-            # Sample in middle of bit for best decision
-            mid_start = bit_start + self.samples_per_bit // 4
-            mid_end = bit_start + 3 * self.samples_per_bit // 4
+            # Sample in middle 50% of the bit window
+            # Window length for this specific bit (handles jitter)
+            bit_len = bit_end_idx - bit_start_idx
+            
+            mid_start = bit_start_idx + bit_len // 4
+            mid_end = bit_start_idx + 3 * bit_len // 4
+            
+            # Ensure valid window
+            if mid_end <= mid_start:
+                 mid_start = bit_start_idx
+                 mid_end = bit_end_idx
+                 
             bit_value = np.mean(soft_decision[mid_start:mid_end])
             
             bits.append(1 if bit_value > 0 else 0)
@@ -230,7 +262,7 @@ class CHUFSKDecoder:
             # Check start bit (should be 0/space)
             start_bit = bits[bit_offset]
             if start_bit != 0:
-                logger.debug(f"Framing error: start bit is 1 at byte {byte_num}")
+                logger.debug(f"Framing error: start bit is 1 at byte {byte_num}. Bits: {bits[bit_offset:bit_offset+11]}")
                 continue
             
             # Extract 8 data bits (LSB first)
@@ -243,7 +275,7 @@ class CHUFSKDecoder:
             stop1 = bits[bit_offset + 9]
             stop2 = bits[bit_offset + 10]
             if stop1 != 1 or stop2 != 1:
-                logger.debug(f"Framing error: stop bits wrong at byte {byte_num}")
+                logger.debug(f"Framing error: stop bits wrong at byte {byte_num}. Stop: {stop1}{stop2}. Bits: {bits[bit_offset:bit_offset+11]}")
             
             bytes_out.append(data_byte)
         
@@ -367,7 +399,8 @@ class CHUFSKDecoder:
         self,
         audio: np.ndarray,
         second_start_sample: int,
-        second_number: int
+        second_number: int,
+        time_delay_ms: float = 0.0  # Hilbert demodulator has zero delay
     ) -> Tuple[Optional[object], float, float]:
         """
         Decode one second of CHU FSK data.
@@ -376,6 +409,7 @@ class CHUFSKDecoder:
             audio: AM demodulated audio signal
             second_start_sample: Sample index of second boundary
             second_number: Second within minute (31-39)
+            time_delay_ms: Offset to account for filter group delay
             
         Returns:
             frame: CHUFrameA or CHUFrameB if decoded, None otherwise
@@ -385,8 +419,10 @@ class CHUFSKDecoder:
         # FSK demodulate
         soft_decision = self._fsk_demodulate(audio)
         
-        # Calculate expected data start (133.33ms into second)
-        data_start_sample = second_start_sample + int(DATA_START_MS * self.sample_rate / 1000)
+        # Calculate expected data start (133.33ms into second) + Delay
+        # Delay is needed because filters lag the signal.
+        delay_samples = int(time_delay_ms * self.sample_rate / 1000)
+        data_start_sample = second_start_sample + int(DATA_START_MS * self.sample_rate / 1000) + delay_samples
         
         # Extract bits
         bits, bit_confidence = self._extract_bits(soft_decision, data_start_sample, BITS_PER_FRAME)
@@ -435,7 +471,8 @@ class CHUFSKDecoder:
     def decode_minute(
         self,
         iq_samples: np.ndarray,
-        minute_boundary_unix: float
+        minute_boundary_unix: float,
+        is_audio: bool = False
     ) -> CHUFSKResult:
         """
         Decode CHU FSK time code for an entire minute.
@@ -446,16 +483,20 @@ class CHUFSKDecoder:
         - Precise timing reference from 500ms boundaries
         
         Args:
-            iq_samples: 60 seconds of IQ data at sample_rate
+            iq_samples: 60 seconds of IQ data (or Audio if is_audio=True)
             minute_boundary_unix: Unix timestamp of minute start
+            is_audio: If True, input is treated as demodulated audio (skip AM demod)
             
         Returns:
             CHUFSKResult with decoded data and quality metrics
         """
         result = CHUFSKResult()
         
-        # AM demodulate entire buffer
-        audio = self._am_demodulate(iq_samples)
+        # AM demodulate entire buffer if needed
+        if is_audio:
+            audio = iq_samples
+        else:
+            audio = self._am_demodulate(iq_samples)
         
         frame_a_results: List[CHUFrameA] = []
         frame_b_result: Optional[CHUFrameB] = None

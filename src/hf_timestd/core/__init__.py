@@ -7,28 +7,27 @@ Architecture:
 =============
 Two-Phase Robust Time-Aligned Data Pipeline:
 
-Phase 1: Immutable Raw Archive (20 kHz IQ DRF)
+Phase 1: Immutable raw_buffer (20 kHz IQ binary)
 - Stores raw data with system time only (no UTC corrections)
 - Fixed-duration file splitting (1 hour) - NOT event-based
 - Lossless compression (Shuffle + ZSTD/gzip)
 - NEVER modified based on subsequent analysis
-- Key: RawArchiveWriter, CoreRecorder
+- Key: BinaryArchiveWriter, CoreRecorder
 
 Phase 2: Analytical Engine (Clock Offset Series)
-- Reads from Phase 1 raw archive
+- Reads from Phase 1 raw_buffer
 - Produces D_clock = t_system - t_UTC
 - Uses tone detection, discrimination, propagation modeling
 - Output: Separate versionable CSV/JSON files
-- Key: AnalyticsService, Phase2TemporalEngine
+- Key: Phase2AnalyticsService, Phase2TemporalEngine
 
-Note: Phase 3 (decimation, spectrograms, PSWS upload) is in separate grape-recorder package.
-See: https://github.com/mijahauan/grape-recorder
+Note: hf-timestd does not use DigitalRF or decimation.
 
 Example:
     from hf_timestd.core import create_pipeline
     
     orchestrator = create_pipeline(
-        data_dir=Path('/data/grape'),
+        data_dir=Path('/data/timestd'),
         channel_name='WWV_10MHz',
         frequency_hz=10e6,
         receiver_grid='EM38ww',
@@ -44,20 +43,26 @@ Example:
 from .tone_detector import ToneDetector
 
 # Analytics and discrimination
-from .analytics_service import AnalyticsService
 from .wwvh_discrimination import WWVHDiscriminator
 from .wwv_test_signal import WWVTestSignalDetector
 from .discrimination_csv_writers import DiscriminationCSVWriters
-
+from .phase2_analytics_service import Phase2AnalyticsService
 # Supporting components
 from .wwv_geographic_predictor import WWVGeographicPredictor
+from .standard_signal_generator import StandardTimeSignalGenerator
 from .wwv_tone_schedule import schedule as wwv_tone_schedule
 from .wwv_bcd_encoder import WWVBCDEncoder
 from .quality_metrics import QualityMetricsTracker, MinuteQualityMetrics
 from .timing_metrics_writer import TimingMetricsWriter
 from .solar_zenith_calculator import calculate_solar_zenith_for_day
-from .gap_backfill import find_gaps, backfill_gaps
 from .core_recorder import CoreRecorder
+
+# Phase 1 raw_buffer (binary archive)
+from .binary_archive_writer import (
+    BinaryArchiveWriter,
+    BinaryArchiveConfig,
+    BinaryArchiveReader,
+)
 
 # Cross-channel coordination (Station Lock)
 from .global_station_voter import GlobalStationVoter, StationAnchor, AnchorQuality
@@ -94,13 +99,6 @@ from .pipeline_recorder import (
     PipelineRecorderState,
     create_pipeline_recorder
 )
-from .raw_archive_writer import (
-    RawArchiveWriter,
-    RawArchiveReader,
-    RawArchiveConfig,
-    SystemTimeReference,
-    create_raw_archive_writer
-)
 from .clock_offset_series import (
     ClockOffsetEngine,
     ClockOffsetSeries,
@@ -131,6 +129,7 @@ from .transmission_time_solver import (
 )
 
 # Phase 2: Temporal Analysis Engine (Refined temporal analysis order)
+# Phase 2: Temporal Analysis Engine (Refined temporal analysis order)
 from .phase2_temporal_engine import (
     Phase2TemporalEngine,
     Phase2Result,
@@ -155,29 +154,25 @@ from .sliding_window_monitor import (
     SignalQuality
 )
 
-# Note: Phase 3 modules (decimation, spectrograms, DRF packaging, upload) moved to grape-recorder
-# See: https://github.com/mijahauan/grape-recorder
-
 __all__ = [
     # Core recorder
     "CoreRecorder",
     # Tone detection
     "ToneDetector",
     # Analytics
-    "AnalyticsService",
+    "Phase2AnalyticsService",
     "WWVHDiscriminator",
     "WWVTestSignalDetector",
     "DiscriminationCSVWriters",
     # Supporting
     "WWVGeographicPredictor",
+    "StandardTimeSignalGenerator",
     "wwv_tone_schedule",
     "WWVBCDEncoder",
     "QualityMetricsTracker",
     "MinuteQualityMetrics",
     "TimingMetricsWriter",
     "calculate_solar_zenith_for_day",
-    "find_gaps",
-    "backfill_gaps",
     # Cross-channel coordination
     "GlobalStationVoter",
     "StationAnchor",
@@ -207,11 +202,9 @@ __all__ = [
     "PipelineRecorderConfig",
     "PipelineRecorderState",
     "create_pipeline_recorder",
-    "RawArchiveWriter",
-    "RawArchiveReader",
-    "RawArchiveConfig",
-    "SystemTimeReference",
-    "create_raw_archive_writer",
+    "BinaryArchiveWriter",
+    "BinaryArchiveConfig",
+    "BinaryArchiveReader",
     "ClockOffsetEngine",
     "ClockOffsetSeries",
     "ClockOffsetMeasurement",

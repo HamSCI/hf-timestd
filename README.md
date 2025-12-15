@@ -339,7 +339,7 @@ Beyond voting, independent measurements validate each other:
 
 ## Configuration Example
 
-Edit `config/grape-config.toml` or use Web UI (recommended):
+Edit `config/timestd-config.toml` or use Web UI (recommended):
 
 ```toml
 [station]
@@ -364,8 +364,8 @@ enabled = false  # Set true after PSWS credentials configured
 **Setup:**
 1. Install ka9q-radio
 2. Run `./scripts/install.sh --mode test`
-3. Edit `config/grape-config.toml` with station details
-4. Test with `./scripts/grape-all.sh -start` (verify 5 min)
+3. Edit `config/timestd-config.toml` with station details
+4. Test with `./scripts/timestd-all.sh -start` (verify 5 min)
 5. Deploy production: `sudo ./scripts/install.sh --mode production`
 6. Configure PSWS SSH keys for uploads
 
@@ -461,6 +461,8 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 - **ka9q-python 3.1.0** - SSRC-free API integration
 - **Stream API** - `subscribe_stream()` hides SSRC from applications
 - **Generic Recording Infrastructure** - Protocol-based design for multi-app support
+- **Standard Time Signal Generator** - High-fidelity synthesis of WWV/WWVH/CHU/BPM signals (ticks, BCD, AFSK, test modulations) for loopback verification.
+
 
 ### Previous (Nov 28-30, 2025)
 - **12 Voting Methods** - BCD, timing tones, ticks, 440/500/600 Hz, Doppler, test signal
