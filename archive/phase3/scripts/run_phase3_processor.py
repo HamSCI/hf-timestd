@@ -7,15 +7,15 @@ decimated 10 Hz DRF products for PSWS upload.
 
 Usage:
     # Process a single day for one channel
-    python run_phase3_processor.py --data-root /tmp/grape-test \
+    python run_phase3_processor.py --data-root /tmp/timestd-test \
         --channel "WWV 10 MHz" --date 2025-12-04
 
     # Process all channels for yesterday
-    python run_phase3_processor.py --data-root /tmp/grape-test \
+    python run_phase3_processor.py --data-root /tmp/timestd-test \
         --all-channels --yesterday
 
     # Real-time streaming mode
-    python run_phase3_processor.py --data-root /tmp/grape-test \
+    python run_phase3_processor.py --data-root /tmp/timestd-test \
         --channel "WWV 10 MHz" --streaming
 
 Output Structure:
@@ -224,7 +224,7 @@ def main():
     
     # Required arguments
     parser.add_argument('--data-root', type=Path, required=True,
-                       help='Root data directory (e.g., /tmp/grape-test)')
+                       help='Root data directory (e.g., /tmp/timestd-test)')
     
     # Channel selection
     channel_group = parser.add_mutually_exclusive_group(required=True)
@@ -248,7 +248,7 @@ def main():
     
     # Configuration
     parser.add_argument('--config', type=Path,
-                       help='Path to grape-config.toml for station config')
+                       help='Path to timestd-config.toml for station config')
     parser.add_argument('--callsign', type=str,
                        help='Station callsign (overrides config)')
     parser.add_argument('--grid', type=str,

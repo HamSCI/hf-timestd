@@ -373,7 +373,7 @@ class AnalyticsService:
         # Global Timing Coordinator - writes detections to shared file for cross-channel solving
         self.global_coordinator: Optional[GlobalTimingCoordinator] = None
         try:
-            # Data root is typically output_dir's grandparent (e.g., /tmp/grape-test)
+            # Data root is typically output_dir's grandparent (e.g., /tmp/timestd-test)
             data_root = output_dir.parent.parent
             if receiver_grid:
                 self.global_coordinator = create_coordinator(data_root, receiver_grid)
@@ -409,8 +409,8 @@ class AnalyticsService:
         self.discrimination_log_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize separate CSV writers for each discrimination method
-        # CSVWriters expects the root data directory (e.g., /tmp/grape-test)
-        # output_dir is /tmp/grape-test/analytics/WWV_10_MHz, so go up 2 levels
+        # CSVWriters expects the root data directory (e.g., /tmp/timestd-test)
+        # output_dir is /tmp/timestd-test/analytics/WWV_10_MHz, so go up 2 levels
         data_root = output_dir.parent.parent
         self.csv_writers = DiscriminationCSVWriters(
             data_root=str(data_root),
