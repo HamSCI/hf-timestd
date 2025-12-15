@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gap Analysis - GRAPE Signal Recorder</title>
+  <title>Gap Analysis - hf-timestd</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <script>
-    window.GRAPE_CURRENT_PAGE = 'gaps';
+    window.TIMESTD_CURRENT_PAGE = 'gaps';
   </script>
   <style>
     /* Page-specific styles for Gap Analysis */
@@ -167,7 +167,7 @@
 <body>
   <div class="container">
     <!-- Unified Navigation -->
-    <div id="grape-navigation"></div>
+    <div id="timestd-navigation"></div>
     
     <div class="page-header">
       <h1>📈 Gap Analysis</h1>
@@ -316,7 +316,7 @@
       const currentVal = selector.value;
       
       // Get unique channels from gaps, sorted by frequency
-      const channels = window.GRAPE_UTILS.sortChannelsByFrequency(
+      const channels = window.TIMESTD_UTILS.sortChannelsByFrequency(
         [...new Set(gaps.map(g => g.channel))]
       );
       
@@ -361,7 +361,7 @@
       // Gaps are too short (seconds) to show as lines on 24hr scale, so use markers
       const traces = [];
       // Sort channels by frequency (WWV 2.5 first, WWV 25 last)
-      const channels = window.GRAPE_UTILS.sortChannelsByFrequency(
+      const channels = window.TIMESTD_UTILS.sortChannelsByFrequency(
         [...new Set(data.gaps.map(g => g.channel))]
       );
       

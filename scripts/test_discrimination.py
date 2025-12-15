@@ -267,7 +267,7 @@ def main():
     if args.archive_dir:
         archive_dir = Path(args.archive_dir)
     else:
-        archive_dir = Path(f"/tmp/grape-test/archives/{args.channel}")
+        archive_dir = Path(f"/tmp/timestd-test/archives/{args.channel}")
     
     if not archive_dir.exists():
         logger.error(f"Archive directory not found: {archive_dir}")

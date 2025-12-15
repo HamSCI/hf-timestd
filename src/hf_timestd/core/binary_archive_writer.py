@@ -41,7 +41,7 @@ class BinaryArchiveConfig:
     channel_name: str
     frequency_hz: float
     sample_rate: int = 20000
-    output_dir: Path = Path('/tmp/grape-test/raw_buffer')
+    output_dir: Path = Path('/tmp/timestd-test/raw_buffer')
     station_config: Dict[str, Any] = field(default_factory=dict)
     compress_completed: bool = False  # Async compression of old minutes
     compression: str = 'none'  # 'none', 'zstd', or 'lz4' - reduces disk I/O by ~2-3x

@@ -1,13 +1,144 @@
-# HF Time Standard Analysis - AI Context Document
-
+# HF Time Standard Analysis (hf-timestd) - AI Context Document
+ 
 **Author:** Michael James Hauan (AC0G)  
 **Last Updated:** 2025-12-15  
-**Version:** 3.14.0  
-**Project:** `hf-timestd` - HF Time Signal Analysis for UTC(NIST) Extraction
+**Version:** 0.x (cleanup in progress)  
+**Next Session Focus:** Pare down active code + docs to the minimal, best-supported hf-timestd feature set; archive legacy/defunct GRAPE/Phase-3/DRF/decimation/NPZ paths.
 
 ---
 
-## 🎯 PROJECT MISSION
+## Project Scope (what hf-timestd is)
+
+`hf-timestd` records and analyzes HF time standard stations:
+
+- WWV
+- WWVH
+- CHU
+- BPM
+
+The repository focus is a **two-phase** pipeline for time-transfer analytics.
+
+**Explicit non-goals in this repo:**
+
+- DigitalRF
+- Decimation / 10 Hz products
+- PSWS/GRAPE uploads
+- Phase 3 derived-product generation
+
+Those belong in a separate project (e.g. `grape-recorder`).
+
+---
+
+## Architecture (authoritative)
+
+### Phase 1: Immutable raw_buffer (binary IQ)
+
+Phase 1 is the scientific record. It stores raw complex IQ with **system time only** (no UTC correction).
+
+Directory layout:
+
+```
+{data_root}/raw_buffer/{CHANNEL_DIR}/{YYYYMMDD}/
+    {minute_boundary}.bin[.zst|.lz4]
+    {minute_boundary}.json
+```
+
+Key invariants:
+
+- The path mapping must use `channel_name_to_dir()`.
+- Files are minute-aligned.
+- hf-timestd does not decimate.
+
+Implementation:
+
+- `src/hf_timestd/core/binary_archive_writer.py` (`BinaryArchiveWriter`, `BinaryArchiveReader`)
+- Orchestration: `src/hf_timestd/core/pipeline_orchestrator.py`
+
+### Phase 2: Analytics (D_clock)
+
+Phase 2 reads Phase 1 `raw_buffer` and produces timing products:
+
+- `D_clock = t_system - t_UTC`
+- Tone detections
+- Station discrimination (WWV vs WWVH where applicable)
+- Confidence/uncertainty metrics
+
+Phase 2 output layout:
+
+```
+{data_root}/phase2/{CHANNEL_DIR}/clock_offset/
+```
+
+Key entry points:
+
+- `src/hf_timestd/core/phase2_temporal_engine.py`
+- `src/hf_timestd/core/clock_offset_series.py`
+- `src/hf_timestd/core/phase2_analytics_service.py` (daemon wrapper)
+
+CLI expectations:
+
+- `phase2_analytics_service.py` expects `--archive-dir` to point to `raw_buffer/{CHANNEL_DIR}`.
+
+---
+
+## Web UI (scope + invariants)
+
+The web UI is for monitoring Phase 1/2 status and visualizing Phase 2 outputs.
+
+Key files:
+
+- `web-ui/monitoring-server-v3.js`
+- `web-ui/timestd-paths.js` (path helpers; must stay consistent with `src/hf_timestd/paths.py`)
+- `web-ui/WEB_UI_ARCHITECTURE.md`
+
+Invariants:
+
+- Active web UI code must not depend on GRAPE/PSWS/DigitalRF/decimation/NPZ assumptions.
+- Use `raw_buffer` naming everywhere.
+
+---
+
+## What changed in the most recent cleanup phase (high-level)
+
+- Phase 3/decimation-related modules were moved under `archive/`.
+- `raw_archive` naming was removed from active runtime code and replaced with `raw_buffer`.
+- Monitoring server and path helpers now use `raw_buffer`.
+- DigitalRF references are being removed from docs/config.
+
+---
+
+## Next Session: Recommended AI Task List
+
+Goal: make the repository feel like a clean, coherent hf-timestd project.
+
+1. Archive or delete (as appropriate) any remaining legacy GRAPE/Phase-3 code paths that are not used by hf-timestd.
+2. Audit docs for GRAPE/PSWS/DRF/decimation content; keep only short stubs that point to `grape-recorder` where necessary.
+3. Web UI cleanup:
+   - Move `web-ui/grape-paths.js` into `web-ui/archive/` (and ensure nothing imports it).
+   - Remove any remaining GRAPE tokens from active html/js.
+4. Optional: decide what to do with NPZ-only tooling (e.g. `src/hf_timestd/core/gap_backfill.py`):
+   - Keep as archived legacy, or
+   - Port to raw_buffer/phase2-native approach.
+5. Run a final repo-wide grep excluding `archive/` and `venv/`:
+   - `grape`, `psws`, `digital_rf`, `raw_archive`, `decimat`, `npz`.
+
+---
+
+## Known pitfalls / “don’t break these”
+
+- Multicast IP stability: do not change the hash key inputs used to derive multicast destinations.
+- Path mapping: always use `channel_name_to_dir()` consistently across Python and JS.
+
+---
+
+## Legacy (archived) context
+
+The remainder of this file is historical context from the earlier GRAPE/three-phase implementation.
+It is kept temporarily for reference, but should be treated as **archived** and not as authoritative hf-timestd behavior.
+
+---
+
+## LEGACY (pre-cleanup) - Archived Session Notes
 
 Extract **D_clock = T_system - T_UTC(NIST)** from WWV/WWVH/CHU time signal broadcasts with sub-millisecond accuracy using a GPSDO-disciplined SDR receiver.
 
@@ -138,18 +269,39 @@ Rearranging:
    - Theoretical limit: ~0.1 ms (with perfect mode identification)
    - Key file: `ionospheric_model.py` (IRI-2020)
 
-2. **Mode Disambiguation Accuracy**
+2. **Optional zstd/lz4 Compression**
+- **Feature**: Raw IQ files can now be compressed to reduce disk I/O by 2-3x
+- **Configuration** (in `timestd-config.toml`):
+  ```toml
+  [recorder]
+  compression = "zstd"  # 'none', 'zstd', or 'lz4'
+  compression_level = 3  # zstd: 1-22, lz4: 1-12
+  ```
+- **Storage Impact**:
+  | Mode | Rate | Daily | Monthly |
+  |------|------|-------|---------|
+  | none | 86 MB/min | 124 GB | 3.7 TB |
+  | zstd | ~35 MB/min | ~50 GB | ~1.5 TB |
+  | lz4 | ~50 MB/min | ~72 GB | ~2.2 TB |
+- **Dependencies** (optional):
+  ```bash
+  pip install zstandard  # for zstd
+  pip install lz4        # for lz4
+  ```
+- **Files Changed**: `binary_archive_writer.py`, `phase2_analytics_service.py`, `pipeline_orchestrator.py`, `stream_recorder_v2.py`, `core_recorder_v2.py`
+
+3. **Mode Disambiguation Accuracy**
    - 1E (single-hop E-layer): ~3-5 ms delay
    - 1F (single-hop F-layer): ~5-10 ms delay
    - Multi-hop: 2F, 3F with increasing uncertainty
    - Key file: `transmission_time_solver.py`
 
-3. **Station Discrimination on Shared Frequencies**
+4. **Station Discrimination on Shared Frequencies**
    - 2.5, 5, 10, 15 MHz have both WWV and WWVH
    - 8-vote weighted discrimination system
    - Key file: `wwvh_discrimination.py`
 
-4. **Convergence Model Tuning**
+5. **Convergence Model Tuning**
    - Kalman filter parameters (process noise, measurement noise)
    - Lock threshold: currently 1.0 ms uncertainty
    - Key file: `clock_convergence.py`
@@ -174,21 +326,79 @@ tail -5 /tmp/grape-test/phase2/WWV_10_MHz/clock_offset/*.csv
 
 ## 🏗️ DATA FLOW
 
+### Pre-Installation Checklist
+
+| Area | Status | Reference |
+|------|--------|-----------|
+| **Core Recording** | ✅ Stable | `core/` modules, `core-recorder.toml` |
+| **Phase 2 Analytics** | ✅ Stable | `docs/PHASE2_CRITIQUE.md` - 16 fixes applied |
+| **Phase 3 Products** | ✅ Stable | `docs/PHASE3_CRITIQUE.md` - 7 fixes applied |
+| **Decimation** | ✅ Fixed | `StatefulDecimator` eliminates boundary artifacts |
+| **Spectrogram Gen** | ✅ Canonical | `carrier_spectrogram.py` is the one to use |
+| **Daily Upload** | ⚠️ Test | `daily-drf-upload.sh` exists but needs PSWS testing |
+| **Systemd Services** | ✅ Updated | All use `EnvironmentFile=`, three-phase naming |
+| **Install Script** | ✅ Updated | `scripts/install.sh` supports test/production modes |
+| **Web UI** | ✅ Working | `grape-ui.sh`, port 3000 |
+
+### Key Configuration Files
+
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 1: RAW ARCHIVE (core_recorder_v2.py)                                  │
-│   ka9q-radio RTP → Binary IQ @ 20 kHz (complex64)                           │
-│   Output: raw_buffer/{CHANNEL}/{YYYYMMDD}/{timestamp}.bin                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ PHASE 2: TIMING ANALYSIS (phase2_analytics_service.py × 9 channels)         │
-│   Tone detection → D_clock → Discrimination → Fusion                        │
-│   Output: phase2/{CHANNEL}/clock_offset/*.csv                               │
-│   Fusion: phase2/fusion/fused_d_clock.csv → Chrony SHM                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ PHASE 3: DATA PRODUCTS (grape-recorder - separate repo)                     │
-│   Decimation 20kHz→10Hz, spectrograms, PSWS upload                          │
-│   See: https://github.com/mijahauan/grape-recorder                          │
-└─────────────────────────────────────────────────────────────────────────────┘
+config/
+├── timestd-config.toml     # Main config: station, channels, paths, uploader
+├── core-recorder.toml    # Core recorder: ka9q connection, DRF writer
+└── environment           # Environment variables (create from .template)
+```
+
+### Production Path Structure
+
+```toml
+# timestd-config.toml - PRODUCTION settings
+[recorder]
+mode = "production"
+data_root = "/var/lib/timestd"   # vs /tmp/timestd-test
+
+[station]
+callsign = "AC0G"
+grid_square = "EM38ww40pk"
+latitude = 38.xxxx
+longitude = -90.xxxx
+```
+
+### Systemd Services
+
+**Continuous Services** (run 24/7):
+
+| Service | Purpose |
+|---------|---------|
+| `timestd-core-recorder.service` | Phase 1: RTP → DRF raw archive |
+| `timestd-analytics.service` | Phase 2: Timing analysis (9 channels + fusion) |
+| `timestd-web-ui.service` | Web monitoring UI |
+
+**Periodic Timers** (Phase 3 products):
+
+| Timer | Interval | Purpose |
+|-------|----------|---------|
+| `grape-spectrograms.timer` | Every 10 min | Regenerate spectrograms |
+| `grape-daily-upload.timer` | Daily 00:30 UTC | Package 10 Hz DRF + PSWS upload |
+
+### PSWS Upload Configuration
+
+```toml
+# timestd-config.toml [uploader] section
+[uploader]
+enabled = true                              # Enable for production
+protocol = "sftp"
+host = "pswsnetwork.eng.ua.edu"
+user = "YOUR_PSWS_USERNAME"
+ssh_key = "/home/wsprdaemon/.ssh/psws_key"  # Must exist!
+remote_base = "/incoming/grape"
+bandwidth_limit_kbps = 0                    # 0 = unlimited
+```
+
+**Pre-requisite:** Generate SSH key and register with PSWS:
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/psws_key -N ""
+# Send public key to PSWS administrators
 ```
 
 ---
@@ -231,17 +441,22 @@ tail -5 /tmp/grape-test/phase2/WWV_10_MHz/clock_offset/*.csv
 ## 🚀 STARTUP COMMANDS
 
 ```bash
-# Start Phase 1 (recording)
-./scripts/grape-core.sh -start
+# Start all services
+./scripts/grape-core.sh -start       # Phase 1
+./scripts/timestd-analytics.sh -start  # Phase 2
+./scripts/grape-ui.sh -start         # Web UI (port 3000)
 
-# Start Phase 2 (timing analysis)
-./scripts/grape-analytics.sh -start
+# Generate spectrograms
+source venv/bin/activate
+python3 -m grape_recorder.grape.carrier_spectrogram \
+    --data-root /tmp/timestd-test --all-channels --date $(date -u +%Y%m%d) --grid EM38ww
+```
 
-# Start Web UI (port 3000)
-./scripts/grape-ui.sh -start
-
-# Check Chrony integration
-chronyc sources  # Look for TMGR with Reach > 0
+### Production Mode (after installation)
+```bash
+sudo systemctl enable timestd-core-recorder timestd-analytics timestd-web-ui
+sudo systemctl start timestd-core-recorder timestd-analytics timestd-web-ui
+sudo systemctl enable --now grape-daily-upload.timer
 ```
 
 ---
@@ -249,14 +464,21 @@ chronyc sources  # Look for TMGR with Reach > 0
 ## 🔄 RECOVERY COMMANDS
 
 ```bash
-# Reset D_clock convergence (if Kalman state corrupted)
-./scripts/grape-analytics.sh -stop
-rm -f /tmp/grape-test/phase2/*/status/convergence_state.json
-rm -f /tmp/grape-test/phase2/fusion/calibration_state.json
-./scripts/grape-analytics.sh -start
+./scripts/timestd-analytics.sh -stop
+rm -f /tmp/timestd-test/phase2/*/status/convergence_state.json
+rm -f /tmp/timestd-test/phase2/*/clock_offset/*.csv
+./scripts/timestd-analytics.sh -start
 
-# View real-time logs
-journalctl -u grape-analytics -f
+# DRF Writer Stall
+./scripts/grape-core.sh -stop
+# Check for locked HDF5 files
+lsof +D /tmp/timestd-test/raw_archive/
+./scripts/grape-core.sh -start
+
+# Web UI Not Responding
+./scripts/grape-ui.sh -restart
+# Check port 3000
+ss -tlnp | grep 3000
 ```
 
 ---
@@ -268,3 +490,70 @@ journalctl -u grape-analytics -f
 3. **Station-Level Truth:** Each station has one atomic clock; frequency variations are ionospheric
 4. **Weighted Fusion:** Combine all broadcasts with confidence-based weights
 5. **Robust Outliers:** MAD-based rejection prevents single-channel corruption
+
+---
+
+## 📊 STANDARD ENVIRONMENT
+
+```bash
+# Standard GRAPE environment (set in systemd or shell)
+export GRAPE_DATA_ROOT=/tmp/timestd-test          # or /var/lib/timestd
+export GRAPE_CONFIG=/home/wsprdaemon/grape-recorder/config/timestd-config.toml
+export GRAPE_VENV=/home/wsprdaemon/grape-recorder/venv
+export GRAPE_LOG_DIR=/tmp/timestd-test/logs
+```
+
+---
+
+## SESSION HISTORY (Recent)
+
+| Date | Focus | Key Changes |
+|------|-------|-------------|
+| Dec 13 PM | Chrony Integration | ka9q-python 3.2.2, Chrony SHM refclock, web UI fix, raw_buffer paths |
+| Dec 13 AM | IRI-2020 Upgrade | Ionospheric model upgraded, mode switching cleanup |
+| Dec 8 Night | Production Deployed | Systemd services running, matplotlib added, docs updated |
+| Dec 8 Eve | Production Mode | TEST/PRODUCTION architecture, install.sh, systemd services |
+| Dec 8 PM | Phase 3 Fixes | StatefulDecimator, path consolidation, spectrogram canonical |
+| Dec 8 AM | Clock Drift | RTP timestamp bug, Kalman state reset, channel discovery |
+| Dec 7 PM | Phase 2 Critique | 16 methodology fixes, uncertainty replaces grades |
+| Dec 7 AM | BCD Correlation | Fixed BCD detection, 440Hz filtering, noise floor band |
+
+---
+
+## ARCHITECTURE CHANGES (Dec 13, 2025)
+
+### Data Storage Format Change
+
+| Component | Before | After |
+|-----------|--------|-------|
+| Phase 1 Output | `raw_archive/{CH}/` (DRF HDF5) | `raw_buffer/{CH}/` (binary IQ) |
+| File Format | Digital RF HDF5 | Raw complex64 binary + JSON sidecar |
+| Analytics Input | Read from DRF | Read from raw_buffer binary |
+
+### New Dependencies
+
+```bash
+pip install sysv_ipc                                    # Chrony SHM
+pip install git+https://github.com/mijahauan/ka9q-python.git  # ka9q-python 3.2.2
+```
+
+### Key Configuration
+
+**timestd-config.toml** is now the single source of truth for:
+- `mode` ("test" or "production")
+- `test_data_root` / `production_data_root`
+- All channel definitions
+
+---
+
+## CHANNELS (9 Total)
+
+| Station | Frequencies |
+|---------|-------------|
+| WWV (Ft. Collins, CO) | 2.5, 5, 10, 15, 20, 25 MHz |
+| WWVH (Kauai, HI) | 2.5, 5, 10, 15 MHz (shared with WWV) |
+| CHU (Ottawa, Canada) | 3.33, 7.85, 14.67 MHz |
+
+**Channel naming convention:**
+- Directory format: `WWV_10_MHz`, `CHU_7.85_MHz`
+- Display format: `WWV 10 MHz`, `CHU 7.85 MHz`

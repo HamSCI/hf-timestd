@@ -2,7 +2,7 @@
 """
 Run Three-Phase Pipeline on All Channels
 
-Starts the new three-phase pipeline for all channels defined in grape-config.toml.
+Starts the new three-phase pipeline for all channels defined in timestd-config.toml.
 Records raw 20 kHz IQ to Phase 1 immutable archive.
 
 Usage:
@@ -267,7 +267,7 @@ def run_all_channels(
     Run three-phase pipeline on all channels.
     
     Args:
-        config_path: Path to grape-config.toml
+        config_path: Path to timestd-config.toml
         output_dir: Output directory for all channels
         duration_sec: Recording duration (None = run until Ctrl+C)
         quota_gb: Storage quota per channel in GB (None = unlimited)
@@ -561,7 +561,7 @@ def main():
     parser.add_argument(
         '--config', '-f',
         type=Path,
-        default=Path('config/grape-config.toml'),
+        default=Path('config/timestd-config.toml'),
         help='Config file path'
     )
     parser.add_argument(

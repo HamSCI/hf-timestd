@@ -306,7 +306,7 @@ class QualityAnalyzer:
 
 def main():
     parser = argparse.ArgumentParser(description='Generate quality analysis for dashboard')
-    parser.add_argument('--data-root', default='/tmp/grape-test', help='Data root directory')
+    parser.add_argument('--data-root', default='/tmp/timestd-test', help='Data root directory')
     parser.add_argument('--date', help='Date (YYYYMMDD), default=today')
     
     args = parser.parse_args()

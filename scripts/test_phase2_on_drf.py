@@ -114,8 +114,8 @@ def test_phase2_engine():
     """Test Phase 2 engine on real DRF data."""
     
     # Configuration
-    drf_base = Path('/tmp/grape-test/phase1_raw/raw_archive/raw_archive')
-    output_dir = Path('/tmp/grape-test/phase2_test')
+    drf_base = Path('/tmp/timestd-test/phase1_raw/raw_archive/raw_archive')
+    output_dir = Path('/tmp/timestd-test/phase2_test')
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Test channels

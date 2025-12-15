@@ -76,7 +76,7 @@ import math
 
 # Issue 4.1 Fix (2025-12-07): Import coordinates from single source of truth
 from .wwv_constants import (
-    WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, CHU_LAT, CHU_LON
+    WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, CHU_LAT, CHU_LON, BPM_LAT, BPM_LON
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,7 @@ STATION_LOCATIONS = {
     'WWV': (WWV_LAT, WWV_LON),     # Fort Collins, Colorado - NIST verified
     'WWVH': (WWVH_LAT, WWVH_LON),  # Kekaha, Kauai, Hawaii - NIST verified
     'CHU': (CHU_LAT, CHU_LON),     # Ottawa, Canada - NRC verified
+    'BPM': (BPM_LAT, BPM_LON),     # Pucheng, China - NTSC verified
 }
 
 # Ionospheric group delay coefficient (TEC-dependent)

@@ -1,9 +1,9 @@
 #!/bin/bash
-# Start GRAPE Monitoring Server V3
+# Start hf-timestd Monitoring Server V3
 
 cd "$(dirname "$0")"
 
-echo "🚀 Starting GRAPE Monitoring Server V3..."
+echo "🚀 Starting hf-timestd Monitoring Server V3..."
 echo ""
 
 # Stop any existing instance
@@ -24,7 +24,7 @@ if pgrep -f monitoring-server-v3 > /dev/null; then
     echo "   http://localhost:3000/summary.html"
     echo "   http://localhost:3000/carrier.html"
     echo "   http://localhost:3000/discrimination.html"
-    echo "   http://localhost:3000/timing-dashboard.html"
+    echo "   http://localhost:3000/timing-dashboard-enhanced.html"
     echo ""
     echo "📝 View logs:"
     echo "   tail -f monitoring-server.log"

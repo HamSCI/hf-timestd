@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Phase 2 Analytics Service - Continuous Processing of Digital RF Archives
+Phase 2 Analytics Service - Continuous Processing of Phase 1 raw_buffer
 
 ================================================================================
 PURPOSE
 ================================================================================
 The Phase 2 Analytics Service is the RUNTIME WRAPPER that continuously monitors
-the Phase 1 Digital RF archive and processes new data through the Phase 2
+the Phase 1 raw_buffer archive and processes new data through the Phase 2
 Temporal Analysis Engine.
 
-This service runs as a systemd daemon (grape-phase2-analytics.service) and:
+This service can be run as a daemon and:
     1. Polls for new minute-aligned data in the raw archive
     2. Invokes Phase2TemporalEngine.process_minute() for each new minute
     3. Writes results to CSV time series files
     4. Updates status JSON for web-ui monitoring
-    5. Manages decimation buffer for Phase 3 upload
 
 ================================================================================
 ARCHITECTURE: SERVICE vs ENGINE
@@ -28,7 +27,6 @@ ARCHITECTURE: SERVICE vs ENGINE
 │   - CSV time series management (per-method files)                           │
 │   - Status file updates for web-ui                                          │
 │   - Clock convergence model integration                                     │
-│   - Decimation buffer for Phase 3                                           │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -47,18 +45,17 @@ DATA FLOW
 ================================================================================
                         Phase 1 Archive
                               │
-    raw_archive/{CHANNEL}/    │   (Digital RF HDF5 files)
+    raw_buffer/{CHANNEL}/     │   (binary complex64 + JSON sidecars)
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                     Phase2AnalyticsService.run()                            │
 │                                                                             │
 │   1. Poll for new minute-aligned data                                       │
-│   2. Read IQ samples from Digital RF                                        │
+│   2. Read IQ samples from raw_buffer                                        │
 │   3. Call engine.process_minute(iq_samples, system_time, rtp_timestamp)     │
 │   4. Write results to CSV files                                             │
 │   5. Update status JSON                                                     │
-│   6. Write decimated 10 Hz data to buffer                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -111,17 +108,13 @@ This provides:
 ================================================================================
 USAGE
 ================================================================================
-The service is typically started via systemd:
-
-    systemctl start grape-phase2-analytics@WWV_10_MHz
-
 Or directly for testing:
 
-    python -m hf_timestd.core.phase2_analytics_service \\
-        --archive /data/raw_archive/WWV_10_MHz \\
-        --output /data/phase2/WWV_10_MHz \\
-        --channel "WWV 10 MHz" \\
-        --frequency 10e6 \\
+    python -m hf_timestd.core.phase2_analytics_service \
+        --archive-dir /data/raw_buffer/WWV_10_MHz \
+        --output /data/phase2/WWV_10_MHz \
+        --channel "WWV 10 MHz" \
+        --frequency 10e6 \
         --grid EM38ww
 
 ================================================================================
@@ -150,9 +143,9 @@ logger = logging.getLogger(__name__)
 
 class Phase2AnalyticsService:
     """
-    Phase 2 Analytics Service - reads DRF, produces timing analysis.
+    Phase 2 Analytics Service - reads raw_buffer, produces timing analysis.
     
-    Monitors raw_archive/{CHANNEL}/ for new Digital RF data and
+    Monitors raw_buffer/{CHANNEL}/ for new binary minute files and
     processes each minute through Phase2TemporalEngine.
     """
     
@@ -171,7 +164,7 @@ class Phase2AnalyticsService:
         Initialize Phase 2 analytics service.
         
         Args:
-            archive_dir: Directory containing Digital RF from Phase 1
+            archive_dir: Directory containing raw_buffer for Phase 1 (raw_buffer/{CHANNEL})
             output_dir: Output directory for Phase 2 products
             channel_name: Channel identifier
             frequency_hz: Center frequency in Hz
@@ -255,7 +248,7 @@ class Phase2AnalyticsService:
         self.decimator = None
         self.decimation_factor = int(sample_rate / 10)  # 2000 for 20kHz
         self.output_rate = 10  # 10 Hz output (for reference only)
-        
+
         # Initialize Phase 2 engine
         from .phase2_temporal_engine import Phase2TemporalEngine
         
@@ -268,7 +261,7 @@ class Phase2AnalyticsService:
             logger.info(f"Using precise coordinates: {precise_lat:.6f}°N, {precise_lon:.6f}°W")
         
         self.engine = Phase2TemporalEngine(
-            raw_archive_dir=self.archive_dir.parent,  # parent contains all channels
+            raw_buffer_dir=self.archive_dir.parent,  # parent contains all channels
             output_dir=self.output_dir,
             channel_name=channel_name,
             frequency_hz=frequency_hz,
@@ -839,9 +832,7 @@ class Phase2AnalyticsService:
     
     def _read_drf_minute(self, target_minute: int):
         """
-        Read one minute of data from the binary archive (or DRF fallback).
-        
-        First tries binary format (raw_buffer), then falls back to DRF.
+        Read one minute of data from the binary archive.
         
         Args:
             target_minute: Unix timestamp of minute boundary
@@ -849,31 +840,14 @@ class Phase2AnalyticsService:
         Returns:
             Tuple of (iq_samples, system_time, rtp_timestamp) or None if not available
         """
-        # Try binary format first (new format)
-        result = self._read_binary_minute(target_minute)
-        if result is not None:
-            return result
-        
-        # Fall back to DRF (legacy format)
-        return self._read_drf_minute_legacy(target_minute)
+        return self._read_binary_minute(target_minute)
     
     def _read_binary_minute(self, target_minute: int):
         """Read from binary archive format."""
         from datetime import datetime, timezone
         
-        # Binary files are in raw_buffer directory
-        # Path: {data_root}/raw_buffer/{channel}/YYYYMMDD/{minute}.bin
-        # archive_dir can be either:
-        #   - raw_buffer/{channel} (new: direct path)
-        #   - raw_archive/{channel} (legacy: need to find raw_buffer sibling)
-        if 'raw_buffer' in str(self.archive_dir):
-            # Direct path to raw_buffer channel
-            channel_dir = self.archive_dir
-        else:
-            # Legacy: archive_dir is raw_archive/{channel}, find raw_buffer sibling
-            from ..paths import channel_name_to_dir
-            binary_dir = self.archive_dir.parent.parent / 'raw_buffer'
-            channel_dir = binary_dir / channel_name_to_dir(self.channel_name)
+        # Path: raw_buffer/{CHANNEL}/YYYYMMDD/{minute}.bin
+        channel_dir = self.archive_dir
         
         dt = datetime.fromtimestamp(target_minute, tz=timezone.utc)
         date_str = dt.strftime('%Y%m%d')
@@ -959,89 +933,12 @@ class Phase2AnalyticsService:
             logger.debug(f"Error reading binary: {e}")
             return None
     
-    def _read_drf_minute_legacy(self, target_minute: int):
-        """Read from legacy DRF format (fallback)."""
-        try:
-            import digital_rf as drf
-        except ImportError:
-            return None
-        
-        if not self.archive_dir.exists():
-            return None
-        
-        try:
-            reader = drf.DigitalRFReader(str(self.archive_dir))
-            channels = reader.get_channels()
-            
-            if not channels:
-                return None
-            
-            target_start_index = int(target_minute * self.sample_rate)
-            samples_per_minute = self.sample_rate * 60
-            
-            channel = None
-            bounds = None
-            for ch in sorted(channels, reverse=True):
-                ch_bounds = reader.get_bounds(ch)
-                if ch_bounds[0] is not None and ch_bounds[1] is not None:
-                    if ch_bounds[0] <= target_start_index < ch_bounds[1]:
-                        channel = ch
-                        bounds = ch_bounds
-                        break
-                    if bounds is None or ch_bounds[1] > bounds[1]:
-                        channel = ch
-                        bounds = ch_bounds
-            
-            if channel is None or bounds is None:
-                return None
-            
-            if target_start_index < bounds[0] or target_start_index >= bounds[1]:
-                return None
-            
-            iq_samples = reader.read_vector(target_start_index, samples_per_minute, channel)
-            
-            if iq_samples is None or len(iq_samples) < samples_per_minute:
-                return None
-            
-            iq_samples = iq_samples.squeeze().astype(np.complex64)
-            system_time = target_start_index / self.sample_rate
-            rtp_timestamp = target_start_index
-            
-            return iq_samples, system_time, rtp_timestamp
-            
-        except Exception as e:
-            logger.debug(f"Error reading DRF: {e}")
-            return None
-    
     def _get_latest_minute(self) -> int:
         """Get the latest complete minute boundary from available data."""
-        # Try binary format first
         latest = self._get_latest_binary_minute()
         if latest is not None:
             return latest
-        
-        # Fall back to DRF
-        try:
-            import digital_rf as drf
-            reader = drf.DigitalRFReader(str(self.archive_dir))
-            channels = reader.get_channels()
-            
-            if channels:
-                latest_sample = None
-                for ch in channels:
-                    bounds = reader.get_bounds(ch)
-                    if bounds[1] is not None:
-                        if latest_sample is None or bounds[1] > latest_sample:
-                            latest_sample = bounds[1]
-                
-                if latest_sample is not None:
-                    latest_time = latest_sample / self.sample_rate
-                    latest_minute = ((int(latest_time) // 60) - 3) * 60
-                    return latest_minute
-        except Exception as e:
-            logger.debug(f"Could not get DRF bounds: {e}")
-        
-        # Fallback to wall-clock time
+
         now = time.time()
         return ((int(now) // 60) - 2) * 60
     
@@ -1118,7 +1015,7 @@ class Phase2AnalyticsService:
         snr_db = 10 * np.log10(carrier_power / noise_power)
         
         return float(snr_db)
-    
+
     def _decimate_to_10hz(self, iq_samples: np.ndarray, minute_boundary: int,
                            d_clock_ms: float = 0.0, uncertainty_ms: float = 999.0,
                            quality_grade: str = 'X', gap_samples: int = 0) -> bool:
@@ -1133,7 +1030,7 @@ class Phase2AnalyticsService:
         """
         # Decimation moved to grape-recorder package
         return False
-    
+
     def _write_status(self):
         """Write status file for web-ui monitoring."""
         try:
@@ -1263,7 +1160,8 @@ class Phase2AnalyticsService:
         
         try:
             # Process through Phase 2 engine
-            result = self.engine.process_minute(
+            # Returns LIST of results (one per detected station)
+            results = self.engine.process_minute(
                 iq_samples=iq_samples,
                 system_time=system_time,
                 rtp_timestamp=rtp_timestamp
@@ -1273,32 +1171,48 @@ class Phase2AnalyticsService:
             self.last_processed_minute = minute_boundary
             self.processed_minutes.add(minute_boundary)
             
-            if result:
-                self.last_result = result
+            if results:
+                # Identify the "primary" result for status reporting and single-row CSVs
+                # Sort by confidence so the "best" one is last keys
+                # (We want last_convergence_result to be the best one)
+                results.sort(key=lambda r: r.confidence)
+                primary_result = results[-1]
+                
+                self.last_result = primary_result
                 
                 # Write to CSV time series (coordinated path)
-                self._write_clock_offset(result, minute_boundary, rtp_timestamp)
+                # Loop through ALL results to capture multi-station data
+                for res in results:
+                    self._write_clock_offset(res, minute_boundary, rtp_timestamp)
                 
                 # Write carrier power for power graphs
-                solution = result.solution if hasattr(result, 'solution') else None
-                time_snap = result.time_snap if hasattr(result, 'time_snap') else None
-                channel_char = result.channel if hasattr(result, 'channel') else None
-                
-                # Compute quality_grade from uncertainty for logging/CSV
-                result_unc = result.uncertainty_ms
-                result_grade = 'A' if result_unc < 1.0 else 'B' if result_unc < 3.0 else 'C' if result_unc < 10.0 else 'D'
-                
-                self._write_carrier_power(
-                    minute_boundary=minute_boundary,
-                    power_db=self.last_carrier_power_db,
-                    snr_db=self.last_carrier_snr_db,
-                    wwv_tone_db=time_snap.wwv_snr_db if time_snap else None,
-                    wwvh_tone_db=time_snap.wwvh_snr_db if time_snap else None,
-                    station=solution.station if solution else None,
-                    quality_grade=result_grade
-                )
+                # Loop through ALL results to capture per-station power metadata
+                for res in results:
+                    solution = res.solution if hasattr(res, 'solution') else None
+                    time_snap = res.time_snap if hasattr(res, 'time_snap') else None
+                    
+                    # Compute quality_grade from uncertainty for logging/CSV
+                    result_unc = res.uncertainty_ms
+                    result_grade = 'A' if result_unc < 1.0 else 'B' if result_unc < 3.0 else 'C' if result_unc < 10.0 else 'D'
+                    
+                    self._write_carrier_power(
+                        minute_boundary=minute_boundary,
+                        power_db=self.last_carrier_power_db,
+                        snr_db=self.last_carrier_snr_db,
+                        wwv_tone_db=time_snap.wwv_snr_db if time_snap else None,
+                        wwvh_tone_db=time_snap.wwvh_snr_db if time_snap else None,
+                        station=solution.station if solution else None,
+                        quality_grade=result_grade
+                    )
                 
                 # Write discrimination method CSVs
+                # These are "per-minute" analyses, generally shared across detections
+                # We use the PRIMARY result to avoid duplicate rows
+                time_snap = primary_result.time_snap
+                channel_char = primary_result.channel
+                primary_solution = primary_result.solution
+                primary_unc = primary_result.uncertainty_ms
+                
                 if time_snap:
                     self._write_tone_detections(minute_boundary, time_snap)
                 
@@ -1306,19 +1220,20 @@ class Phase2AnalyticsService:
                     self._write_bcd_discrimination(minute_boundary, channel_char)
                     self._write_doppler(minute_boundary, channel_char)
                     self._write_station_id(minute_boundary, channel_char)
-                    self._write_discrimination(minute_boundary, result, time_snap, channel_char)
+                    self._write_discrimination(minute_boundary, primary_result, time_snap, channel_char)
                 
                 logger.info(
-                    f"Processed minute {minute_boundary}: "
-                    f"D_clock={result.d_clock_ms:+.2f}ms, "
-                    f"uncertainty={result_unc:.1f}ms, "
-                    f"carrier_snr={self.last_carrier_snr_db:.1f}dB"
+                    f"Processed minute {minute_boundary}: {len(results)} stations detected. "
+                    f"Primary: {primary_solution.station if primary_solution else '?'}, "
+                    f"D_clock={primary_result.d_clock_ms:+.2f}ms, "
+                    f"uncertainty={primary_unc:.1f}ms"
                 )
             else:
                 logger.debug(
                     f"Processed minute {minute_boundary}: no timing result, "
                     f"carrier_snr={self.last_carrier_snr_db:.1f}dB"
                 )
+                self.last_result = None
             
             # Write test signal for minutes 8 and 44 (channel sounding minutes)
             # Run OUTSIDE of if result: block since test signal detection doesn't need timing lock
@@ -1328,29 +1243,6 @@ class Phase2AnalyticsService:
             
             # Write audio tones (500/600 Hz + intermodulation) for every minute
             self._write_audio_tones(minute_boundary, iq_samples)
-            
-            # Decimate to 10 Hz and store in binary buffer (for spectrograms and daily upload)
-            # Pass Phase 2 results for metadata
-            if result:
-                self._decimate_to_10hz(
-                    iq_samples=iq_samples,
-                    minute_boundary=minute_boundary,
-                    d_clock_ms=result.d_clock_ms,
-                    uncertainty_ms=getattr(self, 'last_convergence_result', None) and 
-                                   self.last_convergence_result.uncertainty_ms or 999.0,
-                    quality_grade=result_grade,  # Use computed grade from uncertainty
-                    gap_samples=gap_samples
-                )
-            else:
-                # No Phase 2 result - still store decimated data for completeness
-                self._decimate_to_10hz(
-                    iq_samples=iq_samples,
-                    minute_boundary=minute_boundary,
-                    d_clock_ms=0.0,
-                    uncertainty_ms=999.0,
-                    quality_grade='X',
-                    gap_samples=gap_samples
-                )
             
             return True
                 
@@ -1392,9 +1284,9 @@ class Phase2AnalyticsService:
 def main():
     """Command-line entry point."""
     parser = argparse.ArgumentParser(
-        description='Phase 2 Analytics Service - Process Digital RF to timing products'
+        description='Phase 2 Analytics Service - Process raw_buffer to timing products'
     )
-    parser.add_argument('--archive-dir', required=True, help='Digital RF archive directory')
+    parser.add_argument('--archive-dir', required=True, help='raw_buffer/{CHANNEL} directory')
     parser.add_argument('--output-dir', required=True, help='Output directory')
     parser.add_argument('--channel-name', required=True, help='Channel name')
     parser.add_argument('--frequency-hz', type=float, required=True, help='Center frequency')

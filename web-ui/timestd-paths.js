@@ -1,57 +1,10 @@
 /**
  * HF Time Standard Paths - JavaScript/Node.js Implementation
  * 
- * Centralized path management for HF Time Standard data structures.
+ * Centralized path management for hf-timestd data structures.
  * MUST stay synchronized with Python implementation in src/hf_timestd/paths.py
  * 
  * SYNC VERSION: 2025-12-08-v3-discovery-fix
- * 
- * Change History:
- *   2025-12-08-v3: Issue 2.2 fix - Python discover_channels() now matches JS
- *   2025-12-04-v2: Three-phase architecture paths
- *   2025-11-01-v1: Initial implementation
- * 
- * Three-Phase Architecture:
- *   data_root/
- *   ├── raw_archive/{CHANNEL}/               # PHASE 1: Immutable Raw Archive (DRF)
- *   │   └── {YYYYMMDD}/
- *   │       ├── {YYYY-MM-DDTHH}/
- *   │       │   └── rf@{ts}.h5               # 20 kHz complex64 IQ
- *   │       └── metadata/
- *   │
- *   ├── phase2/{CHANNEL}/                    # PHASE 2: Analytical Engine
- *   │   ├── clock_offset/                    # D_clock(t) time series
- *   │   ├── carrier_analysis/                # Amplitude, phase, Doppler
- *   │   ├── discrimination/                  # WWV/WWVH per-minute
- *   │   ├── tone_detections/                 # 1000/1200 Hz markers
- *   │   └── state/
- *   │
- *   ├── products/{CHANNEL}/                  # PHASE 3: Derived Products
- *   │   ├── decimated/                       # 10 Hz DRF time series
- *   │   ├── spectrograms/                    # PNG images
- *   │   └── psws_upload/                     # PSWS format files
- *   │
- *   ├── state/                               # Global state
- *   ├── status/                              # System status (gpsdo_status.json, etc.)
- *   │   ├── gpsdo_status.json                # GPSDO monitor state
- *   │   └── timing_status.json               # Primary time reference
- *   └── logs/
- *   
- * Legacy paths (archives/, analytics/) have been removed - using new three-phase architecture only.
- * 
- * Usage:
- *   import { GRAPEPaths, loadPathsFromConfig } from './timestd-paths.js';
- *   
- *   // From config
- *   const paths = loadPathsFromConfig('./config/timestd-config.toml');
- *   
- *   // Or explicit data root
- *   const paths = new GRAPEPaths('/tmp/timestd-test');
- *   
- *   // Get paths
- *   const archiveDir = paths.getArchiveDir('WWV 10 MHz');
- *   const drfDir = paths.getDigitalRFDir('WWV 10 MHz');
- *   const specPath = paths.getSpectrogramPath('WWV 10 MHz', '20251115', 'decimated');
  */
 
 import { join, dirname } from 'path';
@@ -105,7 +58,7 @@ function dirToChannelName(dirName) {
 /**
  * Central path manager for HF Time Standard data structures.
  */
-class GRAPEPaths {
+class TimeStdPaths {
     /**
      * @param {string} dataRoot - Root data directory (e.g., /tmp/timestd-test)
      */
@@ -260,16 +213,6 @@ class GRAPEPaths {
     }
     
     /**
-     * Get decimated data directory (10 Hz DRF from Phase 3 products).
-     * 
-     * @param {string} channelName - Channel name
-     * @returns {string} Path: {data_root}/products/{CHANNEL}/decimated/
-     */
-    getDecimatedDir(channelName) {
-        return this.getProductsDecimatedDir(channelName);
-    }
-    
-    /**
      * Get channel status file (per-channel status in Phase 2).
      * 
      * @param {string} channelName - Channel name
@@ -277,31 +220,6 @@ class GRAPEPaths {
      */
     getChannelStatusFile(channelName) {
         return join(this.getPhase2StateDir(channelName), 'channel-status.json');
-    }
-    
-    // ========================================================================
-    // Spectrogram Paths (from Phase 3 Products)
-    // ========================================================================
-    
-    /**
-     * Get spectrogram path for a channel (from products directory).
-     * 
-     * @param {string} channelName - Channel name
-     * @param {string} date - Date in YYYYMMDD format
-     * @returns {string} Path: {data_root}/products/{CHANNEL}/spectrograms/{YYYYMMDD}_spectrogram.png
-     */
-    getSpectrogramPath(channelName, date) {
-        return join(this.getProductsSpectrogramsDir(channelName), `${date}_spectrogram.png`);
-    }
-    
-    /**
-     * Get spectrograms directory for a channel.
-     * 
-     * @param {string} channelName - Channel name
-     * @returns {string} Path: {data_root}/products/{CHANNEL}/spectrograms/
-     */
-    getSpectrogramsDir(channelName) {
-        return this.getProductsSpectrogramsDir(channelName);
     }
     
     // ========================================================================
@@ -382,27 +300,27 @@ class GRAPEPaths {
     }
     
     // ========================================================================
-    // PHASE 1: RAW ARCHIVE (Immutable Digital RF)
+    // PHASE 1: RAW BUFFER (binary complex64 + JSON sidecars)
     // ========================================================================
     
     /**
-     * Get raw archive root directory.
+     * Get raw buffer root directory.
      * 
-     * @returns {string} Path: {data_root}/raw_archive/
+     * @returns {string} Path: {data_root}/raw_buffer/
      */
-    getRawArchiveRoot() {
-        return join(this.dataRoot, 'raw_archive');
+    getRawBufferRoot() {
+        return join(this.dataRoot, 'raw_buffer');
     }
     
     /**
-     * Get raw archive directory for a channel.
+     * Get raw buffer directory for a channel.
      * 
      * @param {string} channelName - Channel name (e.g., "WWV 10 MHz")
-     * @returns {string} Path: {data_root}/raw_archive/{CHANNEL}/
+     * @returns {string} Path: {data_root}/raw_buffer/{CHANNEL}/
      */
-    getRawArchiveDir(channelName) {
+    getRawBufferDir(channelName) {
         const channelDir = channelNameToDir(channelName);
-        return join(this.getRawArchiveRoot(), channelDir);
+        return join(this.getRawBufferRoot(), channelDir);
     }
     
     // ========================================================================
@@ -449,49 +367,7 @@ class GRAPEPaths {
         return join(this.getPhase2Dir(channelName), 'discrimination');
     }
     
-    // ========================================================================
-    // PHASE 3: DERIVED PRODUCTS
-    // ========================================================================
-    
-    /**
-     * Get products root directory.
-     * 
-     * @returns {string} Path: {data_root}/products/
-     */
-    getProductsRoot() {
-        return join(this.dataRoot, 'products');
-    }
-    
-    /**
-     * Get products directory for a channel.
-     * 
-     * @param {string} channelName - Channel name
-     * @returns {string} Path: {data_root}/products/{CHANNEL}/
-     */
-    getProductsDir(channelName) {
-        const channelDir = channelNameToDir(channelName);
-        return join(this.getProductsRoot(), channelDir);
-    }
-    
-    /**
-     * Get Phase 3 decimated directory (10 Hz DRF).
-     * 
-     * @param {string} channelName - Channel name
-     * @returns {string} Path: {data_root}/products/{CHANNEL}/decimated/
-     */
-    getProductsDecimatedDir(channelName) {
-        return join(this.getProductsDir(channelName), 'decimated');
-    }
-    
-    /**
-     * Get Phase 3 spectrograms directory.
-     * 
-     * @param {string} channelName - Channel name
-     * @returns {string} Path: {data_root}/products/{CHANNEL}/spectrograms/
-     */
-    getProductsSpectrogramsDir(channelName) {
-        return join(this.getProductsDir(channelName), 'spectrograms');
-    }
+    // Phase 3 products are handled externally.
     
     // ========================================================================
     // Discovery Methods
@@ -499,7 +375,7 @@ class GRAPEPaths {
     
     /**
      * Discover all channels from any available data source.
-     * Checks raw_archive/ (Phase 1), phase2/ (Phase 2), and products/ (Phase 3).
+     * Checks raw_buffer/ (Phase 1) and phase2/ (Phase 2).
      * 
      * @returns {string[]} List of channel names (human-readable format)
      */
@@ -515,10 +391,10 @@ class GRAPEPaths {
             return name.startsWith('WWV') || name.startsWith('CHU');
         };
         
-        // Check raw_archive/ (Phase 1)
-        const rawArchiveDir = this.getRawArchiveRoot();
-        if (existsSync(rawArchiveDir)) {
-            const entries = readdirSync(rawArchiveDir, { withFileTypes: true });
+        // Check raw_buffer/ (Phase 1)
+        const rawBufferDir = this.getRawBufferRoot();
+        if (existsSync(rawBufferDir)) {
+            const entries = readdirSync(rawBufferDir, { withFileTypes: true });
             for (const entry of entries) {
                 if (entry.isDirectory() && !excludeDirs.includes(entry.name) && isValidChannelDir(entry.name)) {
                     channelSet.add(dirToChannelName(entry.name));
@@ -530,17 +406,6 @@ class GRAPEPaths {
         const phase2Dir = this.getPhase2Root();
         if (existsSync(phase2Dir)) {
             const entries = readdirSync(phase2Dir, { withFileTypes: true });
-            for (const entry of entries) {
-                if (entry.isDirectory() && !excludeDirs.includes(entry.name) && isValidChannelDir(entry.name)) {
-                    channelSet.add(dirToChannelName(entry.name));
-                }
-            }
-        }
-        
-        // Check products/ (Phase 3)
-        const productsDir = this.getProductsRoot();
-        if (existsSync(productsDir)) {
-            const entries = readdirSync(productsDir, { withFileTypes: true });
             for (const entry of entries) {
                 if (entry.isDirectory() && !excludeDirs.includes(entry.name) && isValidChannelDir(entry.name)) {
                     channelSet.add(dirToChannelName(entry.name));
@@ -579,36 +444,16 @@ class GRAPEPaths {
         return channels.sort();
     }
     
-    /**
-     * Discover all channels with Phase 3 products.
-     * 
-     * @returns {string[]} List of channel names (human-readable format)
-     */
     discoverProductChannels() {
-        const productsDir = this.getProductsRoot();
-        
-        if (!existsSync(productsDir)) {
-            return [];
-        }
-        
-        const channels = [];
-        const entries = readdirSync(productsDir, { withFileTypes: true });
-        
-        for (const entry of entries) {
-            if (entry.isDirectory()) {
-                channels.push(dirToChannelName(entry.name));
-            }
-        }
-        
-        return channels.sort();
+        return [];
     }
 }
 
 /**
- * Load GRAPEPaths from configuration file.
+ * Load TimeStdPaths from configuration file.
  * 
  * @param {string} configPath - Path to timestd-config.toml (default: ./config/timestd-config.toml)
- * @returns {GRAPEPaths} GRAPEPaths instance configured from TOML
+ * @returns {TimeStdPaths} TimeStdPaths instance configured from TOML
  */
 async function loadPathsFromConfig(configPath = null) {
     // Dynamic import to avoid breaking if toml not installed
@@ -637,16 +482,16 @@ async function loadPathsFromConfig(configPath = null) {
     
     let dataRoot;
     if (mode === 'production') {
-        dataRoot = (config.recorder && config.recorder.production_data_root) || '/var/lib/signal-recorder';
+        dataRoot = (config.recorder && config.recorder.production_data_root) || '/var/lib/hf-timestd';
     } else {
         dataRoot = (config.recorder && config.recorder.test_data_root) || '/tmp/timestd-test';
     }
     
-    return new GRAPEPaths(dataRoot);
+    return new TimeStdPaths(dataRoot);
 }
 
 export {
-    GRAPEPaths,
+    TimeStdPaths,
     loadPathsFromConfig,
     channelNameToKey,
     channelNameToDir,

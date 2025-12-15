@@ -9,8 +9,8 @@
 // Theme Management
 // ============================================================================
 
-const THEME_KEY = 'grape-theme';
-const CHART_THEME_KEY = 'grape-chart-theme';
+const THEME_KEY = 'timestd-theme';
+const CHART_THEME_KEY = 'timestd-chart-theme';
 
 /**
  * Available themes
@@ -356,7 +356,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Export for use in other modules
-window.GRAPETheme = {
+window.TIMESTDTheme = {
   getTheme,
   setTheme,
   toggleTheme,

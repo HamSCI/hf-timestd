@@ -41,9 +41,9 @@ from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 logger = logging.getLogger(__name__)
 
 
-def generate_grape_multicast_ip(station_id: str, instrument_id: str) -> str:
+def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
     """
-    Generate deterministic multicast IP for GRAPE channels.
+    Generate deterministic multicast IP for hf-timestd channels.
     
     Uses station_id and instrument_id to create a unique, persistent
     multicast address in the 239.x.x.x administratively scoped range.
@@ -94,7 +94,7 @@ class CoreRecorderV2:
         # Generate dedicated multicast IP from station/instrument ID
         station_id = self.station_config.get('id', 'S000000')
         instrument_id = self.station_config.get('instrument_id', '0')
-        self.data_destination = generate_grape_multicast_ip(station_id, instrument_id)
+        self.data_destination = generate_timestd_multicast_ip(station_id, instrument_id)
         
         # Channel specs and defaults
         self.channel_specs = config.get('channels', [])
@@ -113,7 +113,7 @@ class CoreRecorderV2:
         self.recorders: Dict[int, StreamRecorderV2] = {}
         
         logger.info(f"CoreRecorderV2: {len(self.channel_specs)} channels configured")
-        logger.info(f"  GRAPE multicast: {self.data_destination}")
+        logger.info(f"  hf-timestd multicast: {self.data_destination}")
         logger.info(f"  Defaults: preset={self.channel_defaults.get('preset')}, "
                    f"sample_rate={self.channel_defaults.get('sample_rate')}")
         
@@ -133,7 +133,7 @@ class CoreRecorderV2:
     
     def run(self):
         """Main run loop."""
-        logger.info("Starting GRAPE Core Recorder V2 (using ka9q-python RadiodStream)")
+        logger.info("Starting hf-timestd core recorder v2 (using ka9q-python RadiodStream)")
         
         # Ensure channels exist and get ChannelInfo
         if not self._initialize_channels():
@@ -513,9 +513,9 @@ def main():
     # Determine output directory based on mode
     mode = config.get('recorder', {}).get('mode', 'test')
     if mode == 'test':
-        output_dir = config.get('recorder', {}).get('test_data_root', '/tmp/grape-test')
+        output_dir = config.get('recorder', {}).get('test_data_root', '/tmp/timestd-test')
     else:
-        output_dir = config.get('recorder', {}).get('production_data_root', '/var/lib/grape-recorder')
+        output_dir = config.get('recorder', {}).get('production_data_root', '/var/lib/timestd')
     
     # Build recorder config
     recorder_section = config.get('recorder', {})

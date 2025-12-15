@@ -174,7 +174,7 @@ def main():
     parser.add_argument('--channel', required=True, help='Channel name (e.g., "WWV 10 MHz")')
     parser.add_argument('--start-hour', type=int, required=True, help='Start hour (0-23)')
     parser.add_argument('--end-hour', type=int, required=True, help='End hour (1-24)')
-    parser.add_argument('--data-root', default='/tmp/grape-test', help='Data root directory')
+    parser.add_argument('--data-root', default='/tmp/timestd-test', help='Data root directory')
     args = parser.parse_args()
     
     reprocess_timerange(args.date, args.channel, args.start_hour, args.end_hour, args.data_root)

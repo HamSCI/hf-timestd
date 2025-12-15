@@ -4,10 +4,10 @@
 #
 # INSTALLATION:
 #   TEST MODE:       Copy to $PROJECT_DIR/config/environment (optional)
-#   PRODUCTION MODE: Copy to /etc/grape-recorder/environment
+#   PRODUCTION MODE: Copy to /etc/hf-timestd/environment
 #
 # The scripts (common.sh) source this file in order:
-#   1. /etc/grape-recorder/environment (production)
+#   1. /etc/hf-timestd/environment (production)
 #   2. $PROJECT_DIR/config/environment (test override)
 #
 # USAGE: Uncomment and set values for your installation.
@@ -17,26 +17,26 @@
 # MODE SELECTION (CRITICAL - determines all paths)
 # ===========================================================================
 # Values: "test" or "production"
-#   test:       /tmp/grape-test, runs via scripts, development
-#   production: /var/lib/grape-recorder, runs via systemd, 24/7 operation
+#   test:       /tmp/timestd-test, runs via scripts, development
+#   production: /var/lib/timestd, runs via systemd, 24/7 operation
 GRAPE_MODE=test
 
 # ===========================================================================
 # PATH CONFIGURATION
 # ===========================================================================
 # Data root directory (where all IQ data, analytics, products are stored)
-#   test:       /tmp/grape-test
-#   production: /var/lib/grape-recorder
-GRAPE_DATA_ROOT=/tmp/grape-test
+#   test:       /tmp/timestd-test
+#   production: /var/lib/timestd
+GRAPE_DATA_ROOT=/tmp/timestd-test
 
 # Log directory (FHS standard: /var/log/<app>/ for production)
-#   test:       /tmp/grape-test/logs
-#   production: /var/log/grape-recorder
-GRAPE_LOG_DIR=/tmp/grape-test/logs
+#   test:       /tmp/timestd-test/logs
+#   production: /var/log/hf-timestd
+GRAPE_LOG_DIR=/tmp/timestd-test/logs
 
 # Configuration file path
 #   test:       $PROJECT_DIR/config/grape-config.toml
-#   production: /etc/grape-recorder/grape-config.toml
+#   production: /etc/hf-timestd/grape-config.toml
 GRAPE_CONFIG=/home/wsprdaemon/grape-recorder/config/grape-config.toml
 
 # ===========================================================================

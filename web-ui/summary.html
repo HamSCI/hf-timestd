@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GRAPE - System Summary</title>
+  <title>hf-timestd - System Summary</title>
   <link rel="stylesheet" href="/styles.css">
   <script>
     // Set current page for navigation
-    window.GRAPE_CURRENT_PAGE = 'summary';
+    window.TIMESTD_CURRENT_PAGE = 'summary';
   </script>
   <style>
     /* Page-specific overrides for Summary page */
@@ -367,7 +367,7 @@
 <body>
   <div class="container">
     <!-- Unified Navigation -->
-    <div id="grape-navigation"></div>
+    <div id="timestd-navigation"></div>
     
     <!-- Station Information -->
     <div id="stationInfo"></div>
@@ -386,13 +386,13 @@
   <div id="audio-player" class="audio-player-panel">
     <div class="audio-player-header">
       <span class="audio-player-title" id="audio-channel-name">No channel</span>
-      <button class="audio-player-close" onclick="grapeAudio.stop()">✕</button>
+      <button class="audio-player-close" onclick="timeStdAudio.stop()">✕</button>
     </div>
     <div class="audio-player-status" id="audio-status">Ready</div>
     <div class="audio-player-controls">
-      <button class="audio-stop-btn" onclick="grapeAudio.stop()">⏹ Stop</button>
+      <button class="audio-stop-btn" onclick="timeStdAudio.stop()">⏹ Stop</button>
       <input type="range" class="volume-slider" id="audio-volume" min="0" max="100" value="80" 
-             onchange="grapeAudio.setVolume(this.value / 100)">
+             onchange="timeStdAudio.setVolume(this.value / 100)">
       <span id="audio-volume-label">80%</span>
     </div>
   </div>
@@ -501,7 +501,7 @@
           <div class="process-item">
             <div>
               <div class="process-name">Core Recorder</div>
-              <div style="font-size: 12px; color: #7f8c8d;">RTP → Digital RF</div>
+              <div style="font-size: 12px; color: #7f8c8d;">RTP → raw_buffer</div>
             </div>
             <div class="process-status">
               <span class="status-indicator ${core.running ? 'status-running' : 'status-stopped'}"></span>
@@ -516,7 +516,7 @@
           <div class="process-item">
             <div>
               <div class="process-name">Analytics Service</div>
-              <div style="font-size: 12px; color: #7f8c8d;">Digital RF → Time precision, WWV/H discrimination, GRAPE uploads</div>
+              <div style="font-size: 12px; color: #7f8c8d;">raw_buffer → time precision, discrimination</div>
             </div>
             <div class="process-status">
               <span class="status-indicator ${analytics.running ? 'status-running' : 'status-stopped'}"></span>
@@ -635,7 +635,7 @@
       let audioCells = '<th>Audio</th>';
       channels.forEach(ch => {
         const channelKey = ch.name.replace(/ /g, '_');
-        const isPlaying = grapeAudio && grapeAudio.currentChannel === ch.name;
+        const isPlaying = timeStdAudio && timeStdAudio.currentChannel === ch.name;
         const buttonClass = isPlaying ? 'listen-button playing' : 'listen-button';
         const buttonIcon = isPlaying ? '🔊' : '🔈';
         const buttonTitle = isPlaying ? 'Click to stop' : `Listen to ${ch.name}`;
@@ -770,7 +770,7 @@
         html += '</div>';
         
         // Sort channels by frequency before rendering
-        const sortedChannels = window.GRAPE_UTILS.sortByChannelFrequency(data.channels || [], 'name');
+        const sortedChannels = window.TIMESTD_UTILS.sortByChannelFrequency(data.channels || [], 'name');
         html += renderChannels(sortedChannels);
         
         // Reception matrix (all 13 broadcasts) - now includes station info in headers
@@ -803,10 +803,10 @@
     }
     
     // ========================================================================
-    // GRAPE Audio Player - WebSocket-based audio streaming
+    // Audio Player - WebSocket-based audio streaming
     // ========================================================================
     
-    class GRAPEAudioPlayer {
+    class TimeStdAudioPlayer {
       constructor() {
         this.ws = null;
         this.audioContext = null;
@@ -1034,14 +1034,14 @@
     }
     
     // Global audio player instance
-    const grapeAudio = new GRAPEAudioPlayer();
+    const timeStdAudio = new TimeStdAudioPlayer();
     
     // Toggle audio for a channel
     function toggleAudio(channelName) {
-      if (grapeAudio.currentChannel === channelName && grapeAudio.isPlaying) {
-        grapeAudio.stop();
+      if (timeStdAudio.currentChannel === channelName && timeStdAudio.isPlaying) {
+        timeStdAudio.stop();
       } else {
-        grapeAudio.start(channelName);
+        timeStdAudio.start(channelName);
       }
     }
     

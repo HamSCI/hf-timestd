@@ -86,11 +86,11 @@ class CoreRecorder:
         self.recorder_config = config.get('recorder', {})
         
         # Generate dedicated multicast IP from station/instrument ID
-        # This ensures GRAPE channels have their own exclusive RTP stream
-        from ..channel_manager import generate_grape_multicast_ip
+        # This ensures hf-timestd channels have their own exclusive RTP stream
+        from ..channel_manager import generate_timestd_multicast_ip
         station_id = self.station_config.get('id', 'S000000')
         instrument_id = self.station_config.get('instrument_id', '0')
-        self.data_destination = generate_grape_multicast_ip(station_id, instrument_id)
+        self.data_destination = generate_timestd_multicast_ip(station_id, instrument_id)
         
         # Store channel configs and defaults
         self.channel_specs = config.get('channels', [])  # Raw channel specs
@@ -113,7 +113,7 @@ class CoreRecorder:
         self.max_gap_seconds = self.recorder_config.get('max_gap_seconds', 60.0)
         
         logger.info(f"CoreRecorder: {len(self.channel_specs)} channels configured")
-        logger.info(f"  GRAPE multicast: {self.data_destination} (exclusive stream)")
+        logger.info(f"  hf-timestd multicast: {self.data_destination} (exclusive stream)")
         logger.info(f"  Defaults: preset={self.channel_defaults.get('preset')}, "
                    f"sample_rate={self.channel_defaults.get('sample_rate')}")
         
@@ -134,8 +134,8 @@ class CoreRecorder:
     
     def run(self):
         """Main run loop"""
-        logger.info("Starting GRAPE Core Recorder")
-        logger.info("Responsibility: RTP → NPZ archives (no analytics)")
+        logger.info("Starting hf-timestd core recorder")
+        logger.info("Responsibility: RTP → raw_buffer (no analytics)")
         
         # Ensure all channels exist in radiod and initialize recorders
         logger.info("Verifying radiod channels...")
@@ -219,7 +219,7 @@ class CoreRecorder:
                 'overall': {
                     'channels_active': 0,
                     'channels_total': len(self.channels),
-                    'total_npz_written': 0,
+                    'total_minutes_written': 0,
                     'total_packets_received': 0,
                     'total_gaps_detected': 0
                 }
@@ -233,7 +233,7 @@ class CoreRecorder:
                 # Aggregate overall stats
                 if ch_stats.get('packets_received', 0) > 0:
                     status['overall']['channels_active'] += 1
-                status['overall']['total_npz_written'] += ch_stats.get('npz_files_written', 0)
+                status['overall']['total_minutes_written'] += ch_stats.get('minutes_written', 0)
                 status['overall']['total_packets_received'] += ch_stats.get('packets_received', 0)
                 # PipelineRecorder doesn't track gaps the same way
                 # status['overall']['total_gaps_detected'] += ch_stats.get('gaps_detected', 0)
@@ -569,7 +569,7 @@ def main():
     if mode == 'production':
         output_dir = recorder_config.get('production_data_root', '/var/lib/signal-recorder')
     else:
-        output_dir = recorder_config.get('test_data_root', '/tmp/grape-test')
+        output_dir = recorder_config.get('test_data_root', '/tmp/timestd-test')
     
     # Get KA9Q config
     ka9q_config = toml_config.get('ka9q', {})

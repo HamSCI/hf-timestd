@@ -141,7 +141,7 @@ def main():
     )
     parser.add_argument(
         '--data-root',
-        default='/tmp/grape-test',
+        default='/tmp/timestd-test',
         help='Data root directory'
     )
     parser.add_argument(

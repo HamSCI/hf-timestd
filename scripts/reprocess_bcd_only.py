@@ -34,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def reprocess_bcd_only(date_str: str, channel_name: str, hour: int = None, data_root: str = '/tmp/grape-test'):
+def reprocess_bcd_only(date_str: str, channel_name: str, hour: int = None, data_root: str = '/tmp/timestd-test'):
     """
     Reprocess ONLY BCD discrimination for a specific date/channel
     
@@ -187,8 +187,8 @@ def main():
                        help='Channel name (e.g., "WWV 10 MHz")')
     parser.add_argument('--hour', type=int, default=None,
                        help='Optional specific hour (0-23)')
-    parser.add_argument('--data-root', type=str, default='/tmp/grape-test',
-                       help='Root data directory (default: /tmp/grape-test)')
+    parser.add_argument('--data-root', type=str, default='/tmp/timestd-test',
+                       help='Root data directory (default: /tmp/timestd-test)')
     
     args = parser.parse_args()
     

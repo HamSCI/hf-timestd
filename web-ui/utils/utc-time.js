@@ -1,7 +1,7 @@
 /**
  * UTC Time Formatting Utilities
  * 
- * All GRAPE displays should use UTC for scientific consistency.
+ * All displays should use UTC for scientific consistency.
  * This module provides formatting functions that always output UTC.
  */
 

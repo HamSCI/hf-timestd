@@ -35,7 +35,7 @@ sudo ./scripts/install.sh --mode production --user $USER
 ### Test Mode
 
 ```
-/tmp/grape-test/                    # GRAPE_DATA_ROOT
+/tmp/timestd-test/                    # GRAPE_DATA_ROOT
 ├── raw_archive/                    # Phase 1: Immutable DRF archive (20 kHz)
 ├── raw_buffer/                     # Phase 1: Real-time minute buffers
 ├── phase2/                         # Phase 2: Analytical outputs
@@ -44,14 +44,14 @@ sudo ./scripts/install.sh --mode production --user $USER
 ├── status/                         # Health status
 └── logs/                           # Application logs
 
-config/grape-config.toml            # Configuration
+config/timestd-config.toml            # Configuration
 config/environment                  # Environment variables
 ```
 
 ### Production Mode (FHS-Compliant)
 
 ```
-/var/lib/grape-recorder/            # GRAPE_DATA_ROOT - Application data
+/var/lib/timestd/            # GRAPE_DATA_ROOT - Application data
 ├── raw_archive/                    # Phase 1: Immutable DRF archive (20 kHz)
 ├── raw_buffer/                     # Phase 1: Real-time minute buffers
 ├── phase2/                         # Phase 2: Analytical outputs (D_clock, discrimination)
@@ -64,8 +64,8 @@ config/environment                  # Environment variables
 ├── analytics.log
 └── daily-upload.log
 
-/etc/grape-recorder/                # Configuration
-├── grape-config.toml
+/etc/hf-timestd/                # Configuration
+├── timestd-config.toml
 └── environment
 
 /opt/grape-recorder/                # Application binaries
@@ -77,22 +77,22 @@ config/environment                  # Environment variables
 
 ## Configuration
 
-The mode is determined by the environment file or `grape-config.toml`:
+The mode is determined by the environment file or `timestd-config.toml`:
 
 ```toml
 [recorder]
 mode = "test"                              # or "production"
-test_data_root = "/tmp/grape-test"
-production_data_root = "/var/lib/grape-recorder"
+test_data_root = "/tmp/timestd-test"
+production_data_root = "/var/lib/timestd"
 ```
 
-Environment file (`/etc/grape-recorder/environment` or `config/environment`):
+Environment file (`/etc/hf-timestd/environment` or `config/environment`):
 
 ```bash
 GRAPE_MODE=production
-GRAPE_DATA_ROOT=/var/lib/grape-recorder
+GRAPE_DATA_ROOT=/var/lib/timestd
 GRAPE_LOG_DIR=/var/log/grape-recorder
-GRAPE_CONFIG=/etc/grape-recorder/grape-config.toml
+GRAPE_CONFIG=/etc/hf-timestd/timestd-config.toml
 ```
 
 ---
@@ -252,10 +252,10 @@ All code MUST use this API. Located in `src/grape_recorder/paths.py`.
 from grape_recorder.paths import GRAPEPaths, load_paths_from_config
 
 # From config file (recommended - respects test/production mode)
-paths = load_paths_from_config('/path/to/grape-config.toml')
+paths = load_paths_from_config('/path/to/timestd-config.toml')
 
 # Direct initialization (testing only)
-paths = GRAPEPaths('/tmp/grape-test')
+paths = GRAPEPaths('/tmp/timestd-test')
 ```
 
 ### Archive Methods
@@ -263,11 +263,11 @@ paths = GRAPEPaths('/tmp/grape-test')
 ```python
 paths.get_archive_dir(channel_name: str) -> Path
     # Returns: {data_root}/archives/{CHANNEL}/
-    # Example: /tmp/grape-test/archives/WWV_5_MHz/
+    # Example: /tmp/timestd-test/archives/WWV_5_MHz/
 
 paths.get_archive_path(channel_name: str, timestamp: float, freq_hz: int) -> Path
     # Returns: {archive_dir}/{TIMESTAMP}_{FREQ}_iq.npz
-    # Example: /tmp/grape-test/archives/WWV_5_MHz/20251119T120000Z_5000000_iq.npz
+    # Example: /tmp/timestd-test/archives/WWV_5_MHz/20251119T120000Z_5000000_iq.npz
 ```
 
 ### Analytics Methods - Directories
@@ -379,4 +379,4 @@ const csvPath = paths.getDiscriminationCSV(channelName, date);
 - `docs/API_REFERENCE.md` - Function signatures and data models
 - `src/grape_recorder/paths.py` - Implementation
 - `web-ui/grape-paths.js` - JavaScript implementation
-- `config/grape-config.toml` - Configuration
+- `config/timestd-config.toml` - Configuration

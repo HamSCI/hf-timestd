@@ -3,7 +3,7 @@
 Real Data Test: Three-Phase Pipeline with Live radiod
 
 This script tests the three-phase pipeline with actual RTP data from radiod.
-Uses the channels defined in grape-config.toml.
+Uses the channels defined in timestd-config.toml.
 
 Usage:
     python scripts/test_real_data_pipeline.py [--channel WWV_10_MHz] [--duration 120]
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_config(config_path: Path) -> dict:
-    """Load grape-config.toml"""
+    """Load timestd-config.toml"""
     return load_toml(config_path)
 
 
@@ -73,7 +73,7 @@ def run_pipeline_test(
     Run the three-phase pipeline with real radiod data.
     
     Args:
-        config: Loaded grape-config.toml
+        config: Loaded timestd-config.toml
         channel_desc: Channel description (e.g., 'WWV 10 MHz')
         duration_sec: Test duration in seconds
         output_dir: Output directory for test data
@@ -399,7 +399,7 @@ def main():
     parser.add_argument(
         '--config', '-f',
         type=Path,
-        default=Path('config/grape-config.toml'),
+        default=Path('config/timestd-config.toml'),
         help='Config file path'
     )
     parser.add_argument(

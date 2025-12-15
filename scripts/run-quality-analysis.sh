@@ -2,7 +2,7 @@
 # Automated Quality Analysis Runner
 # Run every 15 minutes to keep dashboard updated
 
-DATA_ROOT="${1:-/tmp/grape-test}"
+DATA_ROOT="${1:-/tmp/timestd-test}"
 cd "$(dirname "$0")/.." || exit 1
 
 # Activate venv if available

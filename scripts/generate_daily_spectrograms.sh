@@ -5,7 +5,7 @@
 set -e
 
 # Configuration
-DATA_ROOT="${GRAPE_DATA_ROOT:-/tmp/grape-test}"
+DATA_ROOT="${GRAPE_DATA_ROOT:-/tmp/timestd-test}"
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 LOG_DIR="${DATA_ROOT}/logs"
 mkdir -p "${LOG_DIR}"

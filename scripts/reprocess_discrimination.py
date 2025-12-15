@@ -323,8 +323,8 @@ def main():
         epilog=__doc__
     )
     
-    parser.add_argument('--data-root', type=str, default='/tmp/grape-test',
-                       help='Data root directory (default: /tmp/grape-test)')
+    parser.add_argument('--data-root', type=str, default='/tmp/timestd-test',
+                       help='Data root directory (default: /tmp/timestd-test)')
     parser.add_argument('--channel', type=str, required=True,
                        help='Channel name (e.g., "WWV 10 MHz")')
     parser.add_argument('--date', type=str,

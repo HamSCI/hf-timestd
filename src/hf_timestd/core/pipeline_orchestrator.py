@@ -108,8 +108,8 @@ class PipelineConfig:
     station_config: Dict[str, Any] = field(default_factory=dict)
     
     # Phase 1 settings
-    raw_archive_compression: str = 'gzip'
-    raw_archive_file_duration_sec: int = 3600  # 1 hour files
+    raw_buffer_compression: str = 'gzip'
+    raw_buffer_file_duration_sec: int = 3600  # 1 hour files
     compression: str = 'none'  # 'none', 'zstd', or 'lz4'
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
     # Note: Storage quota is managed at top-level, not per-channel
@@ -126,14 +126,15 @@ class PipelineConfig:
         self.data_dir = Path(self.data_dir)
         
         # Derive subdirectories
-        self.raw_archive_dir = self.data_dir / 'raw_archive'
+        # Phase 1 binary archive lives under raw_buffer/
+        self.raw_buffer_dir = self.data_dir / 'raw_buffer'
         # Phase 2 output goes to phase2/{channel}/clock_offset/ for fusion service compatibility
         from ..paths import channel_name_to_dir
         self.clock_offset_dir = self.data_dir / 'phase2' / channel_name_to_dir(self.channel_name) / 'clock_offset'
         self.processed_dir = self.data_dir / 'processed'
         
         # Create directories
-        for d in [self.raw_archive_dir, self.clock_offset_dir, self.processed_dir]:
+        for d in [self.raw_buffer_dir, self.clock_offset_dir, self.processed_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -165,7 +166,7 @@ class PipelineOrchestrator:
         from .binary_archive_writer import BinaryArchiveWriter, BinaryArchiveConfig
         
         raw_config = BinaryArchiveConfig(
-            output_dir=config.data_dir / 'raw_buffer',  # Separate from raw_archive
+            output_dir=config.data_dir / 'raw_buffer',
             channel_name=config.channel_name,
             frequency_hz=config.frequency_hz,
             sample_rate=config.sample_rate,
@@ -173,7 +174,7 @@ class PipelineOrchestrator:
             compression=config.compression,
             compression_level=config.compression_level,
         )
-        self.raw_archive_writer = BinaryArchiveWriter(raw_config)
+        self.raw_buffer_writer = BinaryArchiveWriter(raw_config)
         
         # GPSDO-calibrated timing system (must be initialized before ClockOffsetEngine)
         # Manages bootstrap (wide search) -> calibrated (narrow search) transition
@@ -187,7 +188,7 @@ class PipelineOrchestrator:
         from .clock_offset_series import ClockOffsetEngine
         
         self.clock_offset_engine = ClockOffsetEngine(
-            raw_archive_dir=config.raw_archive_dir,
+            raw_buffer_dir=config.raw_buffer_dir,
             output_dir=config.clock_offset_dir,
             channel_name=config.channel_name,
             frequency_hz=config.frequency_hz,
@@ -196,11 +197,9 @@ class PipelineOrchestrator:
             timing_calibrator=self.timing_calibrator
         )
         
-        # Phase 3: Product generation is now handled separately as batch processing
-        # See phase3_product_engine.py and scripts/timestd-phase3.sh
-        # The streaming product generator is disabled - Phase 3 runs as batch job
+        # Phase 3 is handled in the separate grape-recorder project.
         self.product_generator = None
-        logger.info("Phase 3 streaming disabled - use batch processing via grape-phase3.sh")
+        logger.info("Phase 3 disabled in hf-timestd (handled by grape-recorder)")
         
         # Audio buffer for web UI playback (simple AM demod from IQ)
         from .audio_buffer import AudioBufferManager
@@ -268,7 +267,7 @@ class PipelineOrchestrator:
                     packets_out_of_order, sequence_errors, timestamp_jumps
         """
         self.stream_health_metrics = metrics
-        self.raw_archive_writer.set_stream_health(metrics)
+        self.raw_buffer_writer.set_stream_health(metrics)
     
     def stop(self):
         """Stop the pipeline gracefully."""
@@ -287,7 +286,7 @@ class PipelineOrchestrator:
         
         # Flush all writers
         self._flush_current_minute()
-        self.raw_archive_writer.close()
+        self.raw_buffer_writer.close()
         self.clock_offset_engine.save_series()
         if self.product_generator:
             self.product_generator.close()
@@ -322,9 +321,9 @@ class PipelineOrchestrator:
         
         self.stats['packets_received'] += 1
         
-        # Phase 1: Write to raw archive (system time only)
+        # Phase 1: Write to raw_buffer (system time only)
         # CRITICAL: This writes raw data WITHOUT any UTC correction
-        samples_written = self.raw_archive_writer.write_samples(
+        samples_written = self.raw_buffer_writer.write_samples(
             samples=samples,
             rtp_timestamp=rtp_timestamp,
             system_time=system_time
@@ -572,7 +571,7 @@ class PipelineOrchestrator:
                 'minutes_analyzed': self.stats['minutes_analyzed'],
                 'products_generated': self.stats['products_generated'],
                 'queue_depth': self.analysis_queue.qsize(),
-                'phase1_stats': self.raw_archive_writer.get_stats(),
+                'phase1_stats': self.raw_buffer_writer.get_stats(),
                 'phase2_stats': self.clock_offset_engine.get_stats(),
                 'phase3_stats': self.product_generator.get_stats() if self.product_generator else {'status': 'disabled'},
                 'timing_calibrator': self.timing_calibrator.get_status()
@@ -652,7 +651,7 @@ class BatchReprocessor:
         self.station_config = station_config
         
         # Directories
-        self.raw_archive_dir = data_dir / 'raw_archive'
+        self.raw_buffer_dir = data_dir / 'raw_buffer'
         self.clock_offset_dir = data_dir / 'clock_offset'
         self.processed_dir = data_dir / 'processed'
         
@@ -676,7 +675,6 @@ class BatchReprocessor:
             Processing results summary
         """
         from .clock_offset_series import ClockOffsetEngine
-        from .raw_archive_writer import RawArchiveReader
         
         # Create versioned output directory
         versioned_output = self.clock_offset_dir / output_version
@@ -684,15 +682,18 @@ class BatchReprocessor:
         
         # Initialize engine with versioned output
         engine = ClockOffsetEngine(
-            raw_archive_dir=self.raw_archive_dir,
+            raw_buffer_dir=self.raw_buffer_dir,
             output_dir=versioned_output,
             channel_name=self.channel_name,
             frequency_hz=self.frequency_hz,
             receiver_grid=self.receiver_grid
         )
         
-        # Initialize reader
-        reader = RawArchiveReader(self.raw_archive_dir, self.channel_name)
+        # Batch reprocessing from binary raw_buffer is not yet implemented here.
+        # Use scripts that operate on raw_buffer minute files, or extend this class.
+        raise NotImplementedError(
+            "BatchReprocessor.reprocess_phase2 is not implemented for binary raw_buffer storage."
+        )
         
         results = {
             'start_time': start_time,

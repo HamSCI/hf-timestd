@@ -30,7 +30,7 @@ Usage:
     monitor = SlidingWindowMonitor(
         channel_name='WWV 10 MHz',
         sample_rate=20000,
-        output_dir=Path('/tmp/grape-test/status')
+        output_dir=Path('/tmp/timestd-test/status')
     )
     
     # Feed 10-second chunks

@@ -6,7 +6,7 @@
 
 import fs from 'fs';
 import { join } from 'path';
-import { channelNameToKey } from '../grape-paths.js';
+import { channelNameToKey } from '../timestd-paths.js';
 
 /**
  * Parse CSV file and return rows

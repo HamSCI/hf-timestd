@@ -34,7 +34,7 @@ Usage:
 ------
     standard = PrimaryTimeStandard(
         receiver_grid='EM38ww',
-        data_root='/tmp/grape-test'
+        data_root='/tmp/timestd-test'
     )
     
     # Process a minute's worth of data
@@ -604,5 +604,5 @@ def create_test_standard():
     """Create a test time standard for AC0G (EM38ww)"""
     return PrimaryTimeStandard(
         receiver_grid='EM38ww',
-        data_root=Path('/tmp/grape-test')
+        data_root=Path('/tmp/timestd-test')
     )

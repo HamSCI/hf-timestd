@@ -1,7 +1,7 @@
 #!/bin/bash
 # Validate Python and JavaScript GRAPEPaths API Synchronization
 #
-# This script ensures that paths.py and grape-paths.js produce identical paths.
+# This script ensures that paths.py and timestd-paths.js produce identical paths.
 # Run this after any changes to either file to prevent web-ui/analytics drift.
 
 set -e
@@ -15,7 +15,7 @@ echo "=============================="
 echo ""
 echo "Testing path consistency between:"
 echo "  • Python:     src/grape_recorder/paths.py"
-echo "  • JavaScript: web-ui/grape-paths.js"
+echo "  • JavaScript: web-ui/timestd-paths.js"
 echo ""
 
 # Create temporary test data
@@ -115,7 +115,7 @@ chmod +x /tmp/test-python-paths.py
 
 # Create JavaScript test script
 cat > /tmp/test-js-paths.mjs <<'EOF'
-import { GRAPEPaths } from '/home/mjh/git/signal-recorder/web-ui/grape-paths.js';
+import { GRAPEPaths } from '/home/mjh/git/signal-recorder/web-ui/timestd-paths.js';
 
 const dataRoot = process.argv[2];
 const paths = new GRAPEPaths(dataRoot);

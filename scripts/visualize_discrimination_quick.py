@@ -145,7 +145,7 @@ def analyze_discrimination_csv(csv_path):
 
 if __name__ == '__main__':
     # Find the most recent WWV 10 MHz discrimination CSV
-    csv_dir = Path('/tmp/grape-test/analytics/WWV_10_MHz/discrimination')
+    csv_dir = Path('/tmp/timestd-test/analytics/WWV_10_MHz/discrimination')
     
     # Try Nov 15 (we know it has BCD data)
     csv_file = csv_dir / 'WWV_10_MHz_discrimination_20251115_00-24.csv'

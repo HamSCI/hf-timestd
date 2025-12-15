@@ -1,5 +1,5 @@
-# GRAPE Recorder - Core Dependencies
-# For GRAPE Digital RF recording from ka9q-radio RTP streams
+# hf-timestd - Core Dependencies
+# For HF time standard recording/analysis from ka9q-radio RTP streams
 
 # Configuration parsing
 toml>=0.10.2
@@ -7,20 +7,17 @@ toml>=0.10.2
 # Numerical computing and array operations
 numpy>=1.24.0
 
-# Signal processing and resampling (12 kHz → 10 Hz)
+# Signal processing
 scipy>=1.10.0
 
 # Audio file I/O (for compatibility with existing code)
 soundfile>=0.12.0
 
-# Digital RF format I/O (HamSCI PSWS compatible)
-digital_rf>=2.6.0
-
 # mDNS/Avahi service discovery for ka9q-radio streams
 zeroconf>=0.132.0
 
 # ka9q-radio control library (general-purpose radiod interface)
-ka9q>=3.2.0
+ka9q-python>=3.2.0
 
 # WWV Timing Analysis & Visualization (optional, for plot_wwv_timing.py)
 pandas>=2.0.0
@@ -30,16 +27,13 @@ matplotlib>=3.7.0
 # Requires: sudo apt install gfortran (before pip install)
 # IRI-2020 provides better topside electron density, storm-time corrections,
 # and high-latitude coverage compared to IRI-2016
-# NOTE: Not on PyPI, install from GitHub:
-#   pip install git+https://github.com/space-physics/iri2020.git
-# Or for IRI-2016 fallback (on PyPI):
-#   pip install iri2016
+iri2020 @ git+https://github.com/space-physics/iri2020.git
 
 # Compression (optional, for reduced disk I/O)
-# Enable in grape-config.toml: compression = "zstd" or "lz4"
+# Enable in timestd-config.toml: compression = "zstd" or "lz4"
 # zstd: Best compression ratio (~2-3x), moderate CPU
 # lz4: Fastest compression/decompression, lower ratio (~1.5-2x)
-# zstandard>=0.22.0
+zstandard>=0.22.0
 # lz4>=4.3.0
 
 # Chrony SHM integration (for UTC(NIST) clock discipline)

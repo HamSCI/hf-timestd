@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Carrier Analysis - GRAPE Signal Recorder</title>
+  <title>Carrier Analysis - hf-timestd</title>
   <link rel="stylesheet" href="/styles.css">
   <script>
-    window.GRAPE_CURRENT_PAGE = 'carrier';
+    window.TIMESTD_CURRENT_PAGE = 'carrier';
   </script>
   <style>
     /* Page-specific styles for Carrier Analysis */
@@ -183,14 +183,8 @@
       margin-bottom: var(--spacing-md);
     }
     
-    .spectrogram-container {
+    .carrier-power-container {
       margin: var(--spacing-md) 0;
-    }
-    
-    .spectrogram {
-      width: 100%;
-      border-radius: var(--radius-md);
-      background: rgba(15, 23, 42, 0.4);
     }
     
     
@@ -261,11 +255,11 @@
 <body>
   <div class="container">
     <!-- Unified Navigation -->
-    <div id="grape-navigation"></div>
+    <div id="timestd-navigation"></div>
     
     <div class="page-header">
       <h1>📡 Carrier Analysis</h1>
-      <div class="page-header-subtitle">Data Quality • Spectrograms • Power Analysis</div>
+      <div class="page-header-subtitle">Data Quality • Power Analysis</div>
       <div class="controls-row">
         <div class="control-group">
           <label>Date:</label>
@@ -280,7 +274,6 @@
           </select>
         </div>
         <button id="btn-refresh" class="btn btn-primary" title="Refresh data from server">🔄 Refresh</button>
-        <button id="btn-regenerate" class="btn btn-secondary" title="Regenerate spectrograms (takes ~30s)">📊 Regenerate</button>
         <div class="control-group" style="margin-left: auto;">
           <label>Auto-refresh:</label>
           <input type="checkbox" id="auto-refresh" checked>
@@ -312,11 +305,10 @@
     /**
      * Load solar zenith data for the current date
      * Used for overlaying solar elevation on carrier power charts
-     * Note: Static spectrogram images already have solar zenith baked in from Python
      */
     async function loadSolarZenith() {
       try {
-        // Get station info for grid square
+        const response = await fetch(`/api/v1/solar-zenith/${currentChannel.replace(/ /g, '_')}/${currentDate}`);
         const stationResponse = await fetch('/api/v1/station/info');
         let gridSquare = 'EM38ww'; // Default fallback
         if (stationResponse.ok) {
@@ -356,14 +348,11 @@
           return;
         }
         
-        // Add options for each date - show channels and spectrogram status
+        // Add options for each date
         availableDates.forEach(d => {
           const option = document.createElement('option');
           option.value = d.date;
-          const spectroStatus = d.hasSpectrograms 
-            ? `📊 ${d.spectrogramCount} spectrograms` 
-            : `📁 ${d.count} channels`;
-          option.textContent = `${d.formatted} - ${spectroStatus}`;
+          option.textContent = `${d.formatted} - 📁 ${d.count} channels`;
           picker.appendChild(option);
         });
         
@@ -389,7 +378,7 @@
       }
       
       // Sort channels by frequency (WWV 2.5 first, WWV 25 last)
-      const sorted = window.GRAPE_UTILS.sortByChannelFrequency(channels, 'name');
+      const sorted = window.TIMESTD_UTILS.sortByChannelFrequency(channels, 'name');
       
       sorted.forEach(ch => {
         const option = document.createElement('option');
@@ -434,28 +423,6 @@
         resetCountdown();
       } catch (err) {
         console.error('Refresh error:', err);
-      } finally {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }
-    });
-    
-    // Regenerate - trigger server-side spectrogram regeneration
-    document.getElementById('btn-regenerate').addEventListener('click', async () => {
-      const btn = document.getElementById('btn-regenerate');
-      const originalText = btn.textContent;
-      btn.textContent = '⏳ Regenerating...';
-      btn.disabled = true;
-      
-      try {
-        // Trigger spectrogram regeneration on server
-        await fetch(`/api/v1/spectrograms/regenerate?date=${currentDate}`, { method: 'POST' });
-        // Wait a moment for generation to complete, then refresh
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        await fetchData();
-        resetCountdown();
-      } catch (err) {
-        console.error('Regeneration error:', err);
       } finally {
         btn.textContent = originalText;
         btn.disabled = false;
@@ -568,14 +535,14 @@
           </div>
       `;
       
-      // Show significant gaps (>= 5 minutes) that explain black bars in spectrogram
+      // Show significant gaps (>= 5 minutes)
       const significantGaps = gaps.filter(g => g.duration_minutes >= 5).slice(0, 20);
       
       if (significantGaps.length > 0) {
         html += `
           <div class="gap-timeline">
             <div style="font-size: 12px; color: var(--accent-light); margin-bottom: var(--spacing-sm); text-transform: uppercase;">
-              Significant Gaps (≥5 min) - explains black bars in spectrogram
+              Significant Gaps (≥5 min)
             </div>
         `;
         
@@ -761,10 +728,14 @@
             </div>
           ` : ''}
           
-          <div class="spectrogram-container">
-            <div class="chart-label">📊 Carrier Power + Spectrogram (10 Hz Decimated)</div>
-            <img src="${ch.spectrogram_url}?t=${Date.now()}" alt="${ch.name} spectrogram" class="spectrogram" 
-                 onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22800%22 height=%22300%22%3E%3Crect fill=%22%23f0f0f0%22 width=%22800%22 height=%22300%22/%3E%3Ctext x=%22400%22 y=%22150%22 text-anchor=%22middle%22 fill=%22%23999%22%3ESpectrogram not available%3C/text%3E%3C/svg%3E'">
+          <div class="carrier-power-container">
+            <div class="chart-label">📊 Carrier Power (Phase 2 CSV)</div>
+            <div class="card" style="padding: var(--spacing-md); background: rgba(15, 23, 42, 0.4); border: 1px solid var(--surface-border); border-radius: var(--radius-md);">
+              <div style="font-size: 13px; color: var(--text-secondary);">
+                Use the per-channel endpoint:
+                <code>/api/v1/channels/${currentChannel.replace(/ /g, '_')}/carrier-power/${currentDate}</code>
+              </div>
+            </div>
           </div>
         </div>
       `;
@@ -773,7 +744,7 @@
     }
     
     
-    // Auto-refresh configuration: 10 minutes to match spectrogram generation timer
+    // Auto-refresh configuration
     const AUTO_REFRESH_INTERVAL_MS = 10 * 60 * 1000;  // 10 minutes
     let countdownSeconds = AUTO_REFRESH_INTERVAL_MS / 1000;
     let countdownInterval = null;

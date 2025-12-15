@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Command Line Interface for Signal Recorder
+Command Line Interface for hf-timestd
 """
 
 import sys
@@ -9,7 +9,7 @@ import argparse
 from .core_recorder import CoreRecorder
 
 def main():
-    """Main entry point for signal-recorder command"""
+    """Main entry point for hf-timestd command"""
     # Configure logging to show INFO level and above
     # Force level on root logger in case it was already configured
     root_logger = logging.getLogger()
@@ -29,7 +29,7 @@ def main():
     logging.info("✓ Logging configured at INFO level")
     
     parser = argparse.ArgumentParser(
-        description='Signal Recorder for GRAPE',
+        description='hf-timestd',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
@@ -139,7 +139,7 @@ def main():
         mode = recorder_section.get('mode', 'test')
         
         if mode == 'test':
-            output_dir = recorder_section.get('test_data_root', '/tmp/grape-test')
+            output_dir = recorder_section.get('test_data_root', '/tmp/timestd-test')
         else:
             output_dir = recorder_section.get('production_data_root', '/var/lib/signal-recorder')
         

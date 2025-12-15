@@ -123,7 +123,7 @@ USAGE
 For batch processing:
 
     engine = ClockOffsetEngine(
-        raw_archive_dir=Path('/data/raw_archive'),
+        raw_buffer_dir=Path('/data/raw_buffer'),
         output_dir=Path('/data/phase2/WWV_10MHz/clock_offset'),
         channel_name='WWV_10MHz',
         frequency_hz=10e6,
@@ -486,7 +486,7 @@ class ClockOffsetSeriesWriter:
 
 class ClockOffsetEngine:
     """
-    Phase 2 Analytical Engine - Generate Clock Offset Series from Raw Archive.
+    Phase 2 Analytical Engine - Generate Clock Offset Series from raw_buffer.
     
     This engine:
     1. Reads raw 20 kHz IQ from Phase 1 archive
@@ -498,7 +498,7 @@ class ClockOffsetEngine:
     
     def __init__(
         self,
-        raw_archive_dir: Path,
+        raw_buffer_dir: Path,
         output_dir: Path,
         channel_name: str,
         frequency_hz: float,
@@ -510,7 +510,7 @@ class ClockOffsetEngine:
         Initialize the clock offset engine.
         
         Args:
-            raw_archive_dir: Directory containing Phase 1 raw archive
+            raw_buffer_dir: Directory containing Phase 1 raw_buffer
             output_dir: Output directory for D_clock series
             channel_name: Channel identifier
             frequency_hz: Center frequency
@@ -518,7 +518,7 @@ class ClockOffsetEngine:
             sample_rate: Sample rate (default 20000)
             timing_calibrator: Optional TimingCalibrator for RTP-first timing
         """
-        self.raw_archive_dir = Path(raw_archive_dir)
+        self.raw_buffer_dir = Path(raw_buffer_dir)
         self.output_dir = Path(output_dir)
         self.channel_name = channel_name
         self.frequency_hz = frequency_hz
@@ -545,7 +545,7 @@ class ClockOffsetEngine:
         self.measurements_processed = 0
         
         logger.info(f"ClockOffsetEngine initialized for {channel_name}")
-        logger.info(f"  Raw archive: {raw_archive_dir}")
+        logger.info(f"  Raw buffer: {raw_buffer_dir}")
         logger.info(f"  Output: {output_dir}")
         logger.info(f"  Receiver: {receiver_grid}")
     
@@ -553,14 +553,14 @@ class ClockOffsetEngine:
         """Initialize analysis components."""
         try:
             from .phase2_temporal_engine import Phase2TemporalEngine
-            from .raw_archive_writer import RawArchiveReader
+            from .binary_archive_writer import BinaryArchiveReader
             
             # Phase 2 Temporal Engine - implements refined analysis order:
             # 1. Fundamental Tone Detection → Time Snap Anchor
             # 2. Ionospheric Channel Characterization → Confidence Scoring
             # 3. Transmission Time Solution → D_clock
             self.phase2_engine = Phase2TemporalEngine(
-                raw_archive_dir=self.raw_archive_dir,
+                raw_buffer_dir=self.raw_buffer_dir,
                 output_dir=self.output_dir,
                 channel_name=self.channel_name,
                 frequency_hz=self.frequency_hz,
@@ -575,8 +575,8 @@ class ClockOffsetEngine:
                 logger.info("✅ RTP calibration callback wired for GPSDO-first timing")
             
             # Raw archive reader (for batch processing)
-            self.archive_reader = RawArchiveReader(
-                self.raw_archive_dir,
+            self.archive_reader = BinaryArchiveReader(
+                self.raw_buffer_dir,
                 self.channel_name
             )
             
@@ -751,7 +751,7 @@ class ClockOffsetEngine:
 
 # Convenience function
 def create_clock_offset_engine(
-    raw_archive_dir: Path,
+    raw_buffer_dir: Path,
     output_dir: Path,
     channel_name: str,
     frequency_hz: float,
@@ -762,7 +762,7 @@ def create_clock_offset_engine(
     Create a clock offset engine with standard configuration.
     
     Args:
-        raw_archive_dir: Directory containing Phase 1 raw archive
+        raw_buffer_dir: Directory containing Phase 1 raw_buffer
         output_dir: Output directory for D_clock series
         channel_name: Channel identifier
         frequency_hz: Center frequency
@@ -773,7 +773,7 @@ def create_clock_offset_engine(
         Configured ClockOffsetEngine
     """
     return ClockOffsetEngine(
-        raw_archive_dir=raw_archive_dir,
+        raw_buffer_dir=raw_buffer_dir,
         output_dir=output_dir,
         channel_name=channel_name,
         frequency_hz=frequency_hz,

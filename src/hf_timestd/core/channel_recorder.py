@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-GRAPE Channel Recorder - Single-channel process for distributed CPU load
+hf-timestd Channel Recorder - Single-channel process for distributed CPU load
 
 This module runs as a standalone process for ONE channel, allowing the OS
 to distribute multiple channel recorders across CPU cores.
 
 Usage:
     python -m hf_timestd.core.channel_recorder \
-        --config /path/to/grape-config.toml \
+        --config /path/to/timestd-config.toml \
         --channel "WWV 10 MHz" \
         --frequency 10000000
 
@@ -33,8 +33,8 @@ from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 logger = logging.getLogger(__name__)
 
 
-def generate_grape_multicast_ip(station_id: str, instrument_id: str) -> str:
-    """Generate deterministic multicast IP for GRAPE channels."""
+def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
+    """Generate deterministic multicast IP for hf-timestd channels."""
     key = f"GRAPE:{station_id}:{instrument_id}"
     hash_bytes = hashlib.sha256(key.encode()).digest()
     octet2 = (hash_bytes[0] % 254) + 1
@@ -62,9 +62,9 @@ class ChannelRecorder:
         # Output directory
         mode = self.recorder_config.get('mode', 'test')
         if mode == 'production':
-            self.output_dir = Path(self.recorder_config.get('production_data_root', '/var/lib/grape-recorder'))
+            self.output_dir = Path(self.recorder_config.get('production_data_root', '/var/lib/timestd'))
         else:
-            self.output_dir = Path(self.recorder_config.get('test_data_root', '/tmp/grape-test'))
+            self.output_dir = Path(self.recorder_config.get('test_data_root', '/tmp/timestd-test'))
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # ka9q connection
@@ -74,7 +74,7 @@ class ChannelRecorder:
         # Generate multicast IP
         station_id = self.station_config.get('id', 'S000000')
         instrument_id = self.station_config.get('instrument_id', '0')
-        self.data_destination = generate_grape_multicast_ip(station_id, instrument_id)
+        self.data_destination = generate_timestd_multicast_ip(station_id, instrument_id)
         
         # Channel defaults
         self.channel_defaults = config.get('recorder', {}).get('channel_defaults', {})
@@ -203,8 +203,8 @@ class ChannelRecorder:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='GRAPE Single-Channel Recorder')
-    parser.add_argument('--config', required=True, help='Path to grape-config.toml')
+    parser = argparse.ArgumentParser(description='hf-timestd Single-Channel Recorder')
+    parser.add_argument('--config', required=True, help='Path to timestd-config.toml')
     parser.add_argument('--channel', required=True, help='Channel name (e.g., "WWV 10 MHz")')
     parser.add_argument('--frequency', type=int, required=True, help='Frequency in Hz')
     parser.add_argument('--log-level', default='INFO', help='Log level')

@@ -1,5 +1,5 @@
 /**
- * Advanced Timing Visualizations for GRAPE Recorder
+ * Advanced Timing Visualizations for hf-timestd
  * 
  * Four specialized scientific visualizations for timing analysis:
  * 1. KalmanFunnelChart - Clock stability convergence over time

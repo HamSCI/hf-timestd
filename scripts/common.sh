@@ -9,12 +9,12 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Source environment file if exists (production mode)
 # Order: /etc/hf-timestd/environment -> PROJECT_DIR/config/environment
-# Legacy support: also check /etc/grape-recorder/environment
+# Legacy support: also check /etc/hf-timestd/environment
 if [ -f "/etc/hf-timestd/environment" ]; then
     source "/etc/hf-timestd/environment"
-elif [ -f "/etc/grape-recorder/environment" ]; then
+elif [ -f "/etc/hf-timestd/environment" ]; then
     # Legacy path - will be removed in future version
-    source "/etc/grape-recorder/environment"
+    source "/etc/hf-timestd/environment"
 elif [ -f "$PROJECT_DIR/config/environment" ]; then
     source "$PROJECT_DIR/config/environment"
 fi
@@ -40,7 +40,7 @@ fi
 if [ -f "$PROJECT_DIR/config/timestd-config.toml" ]; then
     DEFAULT_CONFIG="${TIMESTD_CONFIG:-$PROJECT_DIR/config/timestd-config.toml}"
 else
-    DEFAULT_CONFIG="${TIMESTD_CONFIG:-${GRAPE_CONFIG:-$PROJECT_DIR/config/grape-config.toml}}"
+    DEFAULT_CONFIG="${TIMESTD_CONFIG:-$PROJECT_DIR/config/timestd-config.toml}"
 fi
 
 # Helper to get current mode - CONFIG FILE IS AUTHORITATIVE

@@ -24,7 +24,7 @@
 let currentData = null;
 let solarZenithData = null;
 
-// GRAPE Color Palette (matches styles.css)
+// Color Palette (matches styles.css)
 // Station colors are theme-independent
 const COLORS = {
   wwv: '#3498db',

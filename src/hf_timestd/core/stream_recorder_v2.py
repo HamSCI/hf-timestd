@@ -61,8 +61,8 @@ class StreamRecorderConfig:
     station_config: Dict[str, Any] = None
     
     # Phase 1 settings
-    raw_archive_compression: str = 'gzip'
-    raw_archive_file_duration_sec: int = 3600
+    raw_buffer_compression: str = 'gzip'
+    raw_buffer_file_duration_sec: int = 3600
     compression: str = 'none'  # 'none', 'zstd', or 'lz4'
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
     
@@ -134,8 +134,8 @@ class StreamRecorderV2:
             sample_rate=config.sample_rate,
             receiver_grid=config.receiver_grid,
             station_config=config.station_config,
-            raw_archive_compression=config.raw_archive_compression,
-            raw_archive_file_duration_sec=config.raw_archive_file_duration_sec,
+            raw_buffer_compression=config.raw_buffer_compression,
+            raw_buffer_file_duration_sec=config.raw_buffer_file_duration_sec,
             analysis_latency_sec=config.analysis_latency_sec,
             output_sample_rate=config.output_sample_rate,
             streaming_latency_minutes=config.streaming_latency_minutes,

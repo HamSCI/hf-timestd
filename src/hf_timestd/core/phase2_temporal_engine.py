@@ -137,13 +137,12 @@ OUTPUT:
     - confidence: 0-1 confidence in the solution
     - uncertainty_ms: Estimated timing uncertainty
 
-================================================================================
 INPUT DATA REQUIREMENTS
 ================================================================================
 - Data format: np.complex64 (32-bit float I + 32-bit float Q)
 - Sample rate: 20,000 Hz (full Phase 1 resolution)
 - Buffer duration: 60 seconds (one complete minute)
-- Source: Phase 1 Digital RF archive (IMMUTABLE - never modified)
+- Source: Phase 1 raw_buffer (IMMUTABLE - never modified)
 
 32-BIT FLOAT RATIONALE:
     - 144 dB dynamic range vs 96 dB for 16-bit
@@ -157,7 +156,7 @@ USAGE
     from hf_timestd.core.phase2_temporal_engine import Phase2TemporalEngine
     
     engine = Phase2TemporalEngine(
-        raw_archive_dir=Path('/data/raw_archive'),
+        raw_buffer_dir=Path('/data/raw_buffer'),
         output_dir=Path('/data/phase2'),
         channel_name='WWV_10MHz',
         frequency_hz=10e6,
@@ -421,7 +420,7 @@ class Phase2TemporalEngine:
     
     def __init__(
         self,
-        raw_archive_dir: Path,
+        raw_buffer_dir: Path,
         output_dir: Path,
         channel_name: str,
         frequency_hz: float,
@@ -436,7 +435,7 @@ class Phase2TemporalEngine:
         Initialize the Phase 2 Temporal Engine.
         
         Args:
-            raw_archive_dir: Directory containing Phase 1 raw archive
+            raw_buffer_dir: Directory containing Phase 1 raw_buffer
             output_dir: Output directory for Phase 2 products
             channel_name: Channel identifier (e.g., 'WWV_10MHz')
             frequency_hz: Center frequency in Hz
@@ -447,7 +446,7 @@ class Phase2TemporalEngine:
             discriminator: Optional discriminator instance (dependency injection)
             solver: Optional transmission time solver (dependency injection)
         """
-        self.raw_archive_dir = Path(raw_archive_dir)
+        self.raw_buffer_dir = Path(raw_buffer_dir)
         self.output_dir = Path(output_dir)
         self.channel_name = channel_name
         self.frequency_hz = frequency_hz
@@ -1190,7 +1189,8 @@ class Phase2TemporalEngine:
         time_snap: TimeSnapResult,
         channel: ChannelCharacterization,
         system_time: float,
-        rtp_timestamp: int
+        rtp_timestamp: int,
+        forced_station: Optional[str] = None
     ) -> TransmissionTimeSolution:
         """
         Step 3: Transmission Time Solution.
@@ -1203,6 +1203,7 @@ class Phase2TemporalEngine:
             channel: Result from Step 2 (channel metrics)
             system_time: System time of first sample
             rtp_timestamp: RTP timestamp of first sample
+            forced_station: Optional station to force solution for (for multi-station output)
             
         Returns:
             TransmissionTimeSolution with final D_clock
@@ -1215,66 +1216,74 @@ class Phase2TemporalEngine:
         # CHU-only: 3.33, 7.85, 14.67 MHz
         #
         # Priority 0: Non-shared channels - station is unambiguous from channel name
+        
         station = None
-        channel_station = self._station_from_channel_name()
-        is_shared_frequency = self._is_shared_frequency()
         
-        if not is_shared_frequency:
-            # CHU, WWV 20/25 MHz, etc. - no discrimination needed
-            station = channel_station
-            logger.debug(f"Station = {station} (non-shared frequency, no discrimination)")
-        
-        # For shared frequencies only: use discrimination
-        if not station:
-            # Priority 1: Ground truth (500/600 Hz exclusive minutes, 440 Hz)
-            if channel.ground_truth_station:
-                station = channel.ground_truth_station
-                logger.debug(f"Station from ground truth: {station}")
+        if forced_station:
+            # Explicit override for multi-station output loop
+            station = forced_station
+            logger.debug(f"Station forced: {station}")
+        else:
+            # Legacy/Fallback logic for single-station determination
+            channel_station = self._station_from_channel_name()
+            is_shared_frequency = self._is_shared_frequency()
             
-            # Check RTP prediction early
-            rtp_predicted_station = None
-            rtp_conf = 0.0
-            if self.station_predictor is not None:
-                rtp_predicted_station, rtp_conf = self.station_predictor(
-                    self.channel_name,
-                    rtp_timestamp,
-                    channel.dominant_station or channel_station,
-                    channel.station_confidence
-                )
-
-            # Priority 2: RTP Prediction (High Confidence) - ROBUST LOCK
-            # If we have a strong RTP history lock (>0.8), we trust it over 
-            # acoustic noise, unless ground truth contradicted it (Priority 1)
-            if not station and rtp_predicted_station and rtp_conf > 0.8:
-                station = rtp_predicted_station
-                logger.debug(f"Station from RTP prediction (HIGH confidence overrides acoustic): {station} (conf={rtp_conf:.2f})")
-
-            # Priority 3: High confidence discrimination (detected via voting)
-            elif not station and channel.station_confidence == 'high' and channel.dominant_station not in ['UNKNOWN', 'BALANCED', None]:
-                station = channel.dominant_station
-                logger.debug(f"Station from discrimination (high confidence): {station}")
-            
-            # Priority 4: RTP Prediction (Moderate Confidence)
-            # If we have a decent RTP history (>0.5), it's better than medium confidence acoustic
-            elif not station and rtp_predicted_station and rtp_conf > 0.5:
-                station = rtp_predicted_station
-                logger.debug(f"Station from RTP prediction (MODERATE confidence): {station} (conf={rtp_conf:.2f})")
-
-            # Priority 5: Medium confidence discrimination only (NOT low confidence)
-            # Low confidence discrimination on shared frequencies causes flip-flopping
-            elif not station and channel.station_confidence == 'medium' and channel.dominant_station not in ['UNKNOWN', 'BALANCED', 'NONE', None, '']:
-                station = channel.dominant_station
-                logger.debug(f"Station from discrimination (medium confidence): {station}")
-            
-            # Priority 6: Low confidence - use channel name fallback
-            if not station:
+            if not is_shared_frequency:
+                # CHU, WWV 20/25 MHz, etc. - no discrimination needed
                 station = channel_station
-                logger.debug(f"Station from channel name fallback (low confidence discrimination rejected): {station}")
-        
-        # Final fallback
-        if not station or station in ['BALANCED', 'UNKNOWN', 'NONE', '']:
-            station = 'WWV'
-            logger.debug(f"Station fallback to WWV")
+                logger.debug(f"Station = {station} (non-shared frequency, no discrimination)")
+            
+            # For shared frequencies only: use discrimination
+            if not station:
+                # Priority 1: Ground truth (500/600 Hz exclusive minutes, 440 Hz)
+                if channel.ground_truth_station:
+                    station = channel.ground_truth_station
+                    logger.debug(f"Station from ground truth: {station}")
+                
+                # Check RTP prediction early
+                rtp_predicted_station = None
+                rtp_conf = 0.0
+                if self.station_predictor is not None:
+                    rtp_predicted_station, rtp_conf = self.station_predictor(
+                        self.channel_name,
+                        rtp_timestamp,
+                        channel.dominant_station or channel_station,
+                        channel.station_confidence
+                    )
+
+                # Priority 2: RTP Prediction (High Confidence) - ROBUST LOCK
+                # If we have a strong RTP history lock (>0.8), we trust it over 
+                # acoustic noise, unless ground truth contradicted it (Priority 1)
+                if not station and rtp_predicted_station and rtp_conf > 0.8:
+                    station = rtp_predicted_station
+                    logger.debug(f"Station from RTP prediction (HIGH confidence overrides acoustic): {station} (conf={rtp_conf:.2f})")
+
+                # Priority 3: High confidence discrimination (detected via voting)
+                elif not station and channel.station_confidence == 'high' and channel.dominant_station not in ['UNKNOWN', 'BALANCED', None]:
+                    station = channel.dominant_station
+                    logger.debug(f"Station from discrimination (high confidence): {station}")
+                
+                # Priority 4: RTP Prediction (Moderate Confidence)
+                # If we have a decent RTP history (>0.5), it's better than medium confidence acoustic
+                elif not station and rtp_predicted_station and rtp_conf > 0.5:
+                    station = rtp_predicted_station
+                    logger.debug(f"Station from RTP prediction (MODERATE confidence): {station} (conf={rtp_conf:.2f})")
+
+                # Priority 5: Medium confidence discrimination only (NOT low confidence)
+                # Low confidence discrimination on shared frequencies causes flip-flopping
+                elif not station and channel.station_confidence == 'medium' and channel.dominant_station not in ['UNKNOWN', 'BALANCED', 'NONE', None, '']:
+                    station = channel.dominant_station
+                    logger.debug(f"Station from discrimination (medium confidence): {station}")
+                
+                # Priority 6: Low confidence - use channel name fallback
+                if not station:
+                    station = channel_station
+                    logger.debug(f"Station from channel name fallback (low confidence discrimination rejected): {station}")
+            
+            # Final fallback
+            if not station or station in ['BALANCED', 'UNKNOWN', 'NONE', '']:
+                station = 'WWV'
+                logger.debug(f"Station fallback to WWV")
         
         # Prepare channel metrics for solver
         delay_spread_ms = channel.delay_spread_ms or 0.5
@@ -1331,8 +1340,25 @@ class Phase2TemporalEngine:
             expected_second_rtp = rtp_timestamp + samples_to_boundary
             logger.info(f"Bootstrap: establishing RTP-to-minute mapping from first detection")
         
-        # Get arrival RTP from time snap
-        arrival_rtp = time_snap.arrival_rtp
+        # Get arrival RTP from time snap - USE STATION SPECIFIC TIMING
+        t_arrival_ms = None
+        if station == 'WWV':
+            t_arrival_ms = time_snap.wwv_timing_ms
+        elif station == 'WWVH':
+            t_arrival_ms = time_snap.wwvh_timing_ms
+        elif station == 'CHU':
+            t_arrival_ms = time_snap.chu_timing_ms
+            
+        # Fallback to generic timing error if specific not available (e.g. single station anchor)
+        if t_arrival_ms is None:
+             t_arrival_ms = time_snap.timing_error_ms
+        
+        # Recalculate arrival RTP based on specific timing
+        if t_arrival_ms is not None:
+            timing_offset_samples = round(t_arrival_ms * self.sample_rate / 1000.0)
+            arrival_rtp = rtp_timestamp + timing_offset_samples
+        else:
+            arrival_rtp = time_snap.arrival_rtp # Fallback
         
         try:
             solver_result = self.solver.solve(
@@ -1363,7 +1389,7 @@ class Phase2TemporalEngine:
             solution = TransmissionTimeSolution(
                 d_clock_ms=d_clock_ms,
                 t_emission_ms=solver_result.emission_offset_ms,
-                t_arrival_ms=time_snap.timing_error_ms,
+                t_arrival_ms=t_arrival_ms,
                 t_propagation_ms=solver_result.propagation_delay_ms,
                 propagation_mode=solver_result.mode.value,
                 n_hops=solver_result.n_hops,
@@ -1431,8 +1457,6 @@ class Phase2TemporalEngine:
                 uncertainty_ms=100.0,
                 utc_verified=False
             )
-    
-        return self._calculate_physics_based_uncertainty(channel, solver_result.confidence)[0]
     
     def _calculate_physics_based_uncertainty(
         self,
@@ -1511,16 +1535,16 @@ class Phase2TemporalEngine:
         iq_samples: np.ndarray,
         system_time: float,
         rtp_timestamp: int
-    ) -> Optional[Phase2Result]:
+    ) -> List[Phase2Result]:
         """
         Process one minute of IQ data through the complete Phase 2 pipeline.
         
         This is the main entry point for Phase 2 analysis, implementing the
         refined temporal analysis order:
         
-        1. Fundamental Tone Detection -> Time Snap Anchor
-        2. Ionospheric Channel Characterization -> Confidence Scoring
-        3. Transmission Time Solution -> D_clock
+        1. Fundamental Tone Detection → Time Snap Anchor
+        2. Ionospheric Channel Characterization → Confidence Scoring
+        3. Transmission Time Solution → D_clock
         
         Args:
             iq_samples: Complex64 IQ samples (60 seconds at sample_rate)
@@ -1528,8 +1552,8 @@ class Phase2TemporalEngine:
             rtp_timestamp: RTP timestamp of first sample
             
         Returns:
-            Phase2Result containing all analysis outputs and final D_clock,
-            or None if analysis fails completely
+            List of Phase2Result containing analysis for ALL detected stations.
+            Returns empty list if analysis fails completely.
         """
         # Calculate minute boundary
         minute_boundary = (int(system_time) // 60) * 60
@@ -1540,6 +1564,8 @@ class Phase2TemporalEngine:
         
         if validation_metrics.get('amplitude_warning'):
             logger.warning(f"Input amplitude warning - proceeding with caution")
+        
+        results = []
         
         try:
             # === STEP 1: Fundamental Tone Detection ===
@@ -1557,53 +1583,89 @@ class Phase2TemporalEngine:
                 minute_number=minute_number
             )
             
-            # === STEP 3: Transmission Time Solution ===
-            solution = self._step3_transmission_time_solution(
-                time_snap=time_snap,
-                channel=channel,
-                system_time=system_time,
-                rtp_timestamp=rtp_timestamp
-            )
+            # === STEP 3: Transmission Time Solution (MULTI-STATION LOOP) ===
+            # Identify which stations are candidates for solution
+            candidate_stations = []
             
-            # Calculate final UTC time
-            utc_time = system_time - (solution.d_clock_ms / 1000.0)
+            # Add stations based on detection in Step 1
+            # Only add if confidence is sufficient to warrant CPU time
+            if time_snap.wwv_detected:
+                candidate_stations.append('WWV')
+            if time_snap.wwvh_detected:
+                candidate_stations.append('WWVH')
+            if time_snap.chu_detected or self._station_from_channel_name() == 'CHU':
+                candidate_stations.append('CHU')
+                
+            # If no specific tone detections, fallback to dominant/channel station
+            if not candidate_stations:
+                dominant = channel.dominant_station or self._station_from_channel_name()
+                if dominant and dominant not in ['UNKNOWN', 'BALANCED', 'NONE', '']:
+                    candidate_stations.append(dominant)
+                else:
+                    candidate_stations.append('WWV') # Ultimate fallback
             
-            # Estimate uncertainty (Issue 6.2 fix: replaced arbitrary grades)
-            uncertainty_ms, confidence = self._estimate_uncertainty(solution, channel)
+            # Remove duplicates
+            candidate_stations = list(set(candidate_stations))
             
-            # Assemble complete result
-            result = Phase2Result(
-                minute_boundary_utc=minute_boundary,
-                system_time=system_time,
-                rtp_timestamp=rtp_timestamp,
-                time_snap=time_snap,
-                channel=channel,
-                solution=solution,
-                d_clock_ms=solution.d_clock_ms,
-                utc_time=utc_time,
-                uncertainty_ms=uncertainty_ms,
-                confidence=confidence,
-                processing_version='2.1.0',
-                processed_at=datetime.now(tz=timezone.utc).timestamp()
-            )
+            logger.debug(f"Multi-station candidates: {candidate_stations}")
             
-            # Update state
+            for station in candidate_stations:
+                try:
+                    # Solve for this specific station
+                    solution = self._step3_transmission_time_solution(
+                        time_snap=time_snap,
+                        channel=channel,
+                        system_time=system_time,
+                        rtp_timestamp=rtp_timestamp,
+                        forced_station=station
+                    )
+                    
+                    # Calculate final UTC time
+                    utc_time = system_time - (solution.d_clock_ms / 1000.0)
+                    
+                    # Estimate uncertainty (Issue 6.2 fix: replaced arbitrary grades)
+                    uncertainty_ms, confidence = self._estimate_uncertainty(solution, channel)
+                    
+                    # Assemble complete result
+                    result = Phase2Result(
+                        minute_boundary_utc=minute_boundary,
+                        system_time=system_time,
+                        rtp_timestamp=rtp_timestamp,
+                        time_snap=time_snap,
+                        channel=channel,
+                        solution=solution,
+                        d_clock_ms=solution.d_clock_ms,
+                        utc_time=utc_time,
+                        uncertainty_ms=uncertainty_ms,
+                        confidence=confidence,
+                        processing_version='2.2.0', # Multi-station support
+                        processed_at=datetime.now(tz=timezone.utc).timestamp()
+                    )
+                    
+                    results.append(result)
+                    
+                     # Update state (only for primary result to keep stats simple? or track last)
+                    with self._lock:
+                        self.last_result = result
+
+                    logger.info(
+                        f"Phase 2 processing complete for {station}: D_clock={solution.d_clock_ms:+.2f}ms, "
+                        f"uncertainty={uncertainty_ms:.1f}ms"
+                    )
+                    
+                except Exception as e:
+                     logger.error(f"Failed to solve for station {station}: {e}")
+            
             with self._lock:
                 self.minutes_processed += 1
-                self.last_result = result
             
-            logger.info(
-                f"Phase 2 complete: D_clock={solution.d_clock_ms:+.2f}ms, "
-                f"uncertainty={uncertainty_ms:.1f}ms, station={solution.station}"
-            )
-            
-            return result
+            return results
             
         except Exception as e:
             logger.error(f"Phase 2 processing failed: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            return []
     
     def get_stats(self) -> Dict[str, Any]:
         """Get engine statistics."""
@@ -1624,7 +1686,7 @@ class Phase2TemporalEngine:
 # =============================================================================
 
 def create_phase2_engine(
-    raw_archive_dir: Path,
+    raw_buffer_dir: Path,
     output_dir: Path,
     channel_name: str,
     frequency_hz: float,
@@ -1635,7 +1697,7 @@ def create_phase2_engine(
     Create a Phase 2 Temporal Engine with standard configuration.
     
     Args:
-        raw_archive_dir: Directory containing Phase 1 raw archive
+        raw_buffer_dir: Directory containing Phase 1 raw_buffer
         output_dir: Output directory for Phase 2 products
         channel_name: Channel identifier
         frequency_hz: Center frequency in Hz
@@ -1646,7 +1708,7 @@ def create_phase2_engine(
         Configured Phase2TemporalEngine
     """
     return Phase2TemporalEngine(
-        raw_archive_dir=raw_archive_dir,
+        raw_buffer_dir=raw_buffer_dir,
         output_dir=output_dir,
         channel_name=channel_name,
         frequency_hz=frequency_hz,

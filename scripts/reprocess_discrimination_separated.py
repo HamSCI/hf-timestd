@@ -223,7 +223,7 @@ def main():
     parser.add_argument('--date', required=True, help='Date in YYYYMMDD format')
     parser.add_argument('--channel', required=True, help='Channel name (e.g., "WWV 5 MHz")')
     parser.add_argument('--data-root', default=None, help='Data root directory (default: from config based on mode)')
-    parser.add_argument('--config', default=None, help='Path to grape-config.toml (default: ../config/grape-config.toml)')
+    parser.add_argument('--config', default=None, help='Path to timestd-config.toml (default: ../config/timestd-config.toml)')
     
     args = parser.parse_args()
     
@@ -232,7 +232,7 @@ def main():
         data_root = args.data_root
     else:
         # Load from config based on test/production mode
-        config_path = args.config or str(Path(__file__).parent.parent / 'config' / 'grape-config.toml')
+        config_path = args.config or str(Path(__file__).parent.parent / 'config' / 'timestd-config.toml')
         paths = load_paths_from_config(config_path)
         data_root = str(paths.data_root)
         logger.info(f"Using data_root from config: {data_root}")

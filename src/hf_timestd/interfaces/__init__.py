@@ -47,12 +47,6 @@ from .tone_detection import (
     MultiStationToneDetector,
 )
 
-from .decimation import (
-    DecimatorWriter,
-    DigitalRFReader,
-    DecimationFilter,
-)
-
 from .upload import (
     UploadQueue,
     UploadProtocol,
@@ -88,11 +82,6 @@ __all__ = [
     # Function 3: Tone detection
     'ToneDetector',
     'MultiStationToneDetector',
-    
-    # Functions 4+5: Decimation + Digital RF
-    'DecimatorWriter',
-    'DigitalRFReader',
-    'DecimationFilter',
     
     # Function 6: Upload
     'UploadQueue',

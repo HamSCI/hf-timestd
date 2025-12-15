@@ -1,11 +1,11 @@
 /**
  * Shared Navigation Component
  * 
- * Creates consistent navigation across all GRAPE web-UI pages
+ * Creates consistent navigation across all hf-timestd web UI pages
  * 
  * 7 Core Pages:
  * 1. Summary - Station info, processes, reception matrix, propagation paths
- * 2. Carrier - 10 Hz spectrograms, quality
+ * 2. Carrier - Carrier power, quality
  * 3. Discrimination - WWV/WWVH analysis (all methods), diurnal patterns
  * 4. Timing - D_clock fusion, UTC(NIST) alignment, 13-broadcast consensus
  * 5. Advanced Timing - Kalman, Constellation, KDE, Mode visualizations
@@ -13,7 +13,7 @@
  * 7. Logs - System and analytics log viewer
  */
 
-class GRAPENavigation {
+class TimeStdNavigation {
   constructor(containerId, currentPage) {
     this.container = document.getElementById(containerId);
     this.currentPage = currentPage;
@@ -34,10 +34,10 @@ class GRAPENavigation {
     ];
     
     const navHTML = `
-      <nav class="grape-nav">
+      <nav class="timestd-nav">
         <div class="nav-brand">
-          <span class="nav-logo">🍇</span>
-          <span class="nav-title">GRAPE Signal Recorder</span>
+          <span class="nav-logo">📡</span>
+          <span class="nav-title">hf-timestd</span>
         </div>
         <div class="nav-links">
           ${pages.map(page => `
@@ -62,12 +62,12 @@ class GRAPENavigation {
   }
   
   addStyles() {
-    if (document.getElementById('grape-nav-styles')) return;
+    if (document.getElementById('timestd-nav-styles')) return;
     
     const style = document.createElement('style');
-    style.id = 'grape-nav-styles';
+    style.id = 'timestd-nav-styles';
     style.textContent = `
-      .grape-nav {
+      .timestd-nav {
         display: flex;
         align-items: center;
         background: linear-gradient(135deg, #1e3a8a 0%, #312e81 100%);
@@ -156,7 +156,7 @@ class GRAPENavigation {
       }
       
       @media (max-width: 900px) {
-        .grape-nav {
+        .timestd-nav {
           flex-direction: column;
           gap: 12px;
           padding: 16px;
@@ -203,11 +203,11 @@ class GRAPENavigation {
   }
 }
 
-// Auto-initialize if grape-navigation element exists
+// Auto-initialize if navigation element exists
 document.addEventListener('DOMContentLoaded', () => {
-  const navContainer = document.getElementById('grape-navigation');
-  if (navContainer && window.GRAPE_CURRENT_PAGE) {
-    new GRAPENavigation('grape-navigation', window.GRAPE_CURRENT_PAGE);
+  const navContainer = document.getElementById('timestd-navigation');
+  if (navContainer && window.TIMESTD_CURRENT_PAGE) {
+    new TimeStdNavigation('timestd-navigation', window.TIMESTD_CURRENT_PAGE);
   }
 });
 
@@ -216,9 +216,9 @@ document.addEventListener('DOMContentLoaded', () => {
  * Extracts frequency from channel names like "WWV 10 MHz" or "CHU 3.33 MHz"
  * and sorts by ascending frequency
  */
-window.GRAPE_UTILS = window.GRAPE_UTILS || {};
+window.TIMESTD_UTILS = window.TIMESTD_UTILS || {};
 
-window.GRAPE_UTILS.getChannelFrequency = function(channelName) {
+window.TIMESTD_UTILS.getChannelFrequency = function(channelName) {
   // Extract frequency number from channel name
   // Handles: "WWV 10 MHz", "CHU 3.33 MHz", "WWV_10_MHz", etc.
   const match = channelName.match(/(\d+\.?\d*)\s*(MHz|kHz)?/i);
@@ -233,19 +233,19 @@ window.GRAPE_UTILS.getChannelFrequency = function(channelName) {
   return 999; // Unknown frequencies sort last
 };
 
-window.GRAPE_UTILS.sortChannelsByFrequency = function(channels) {
+window.TIMESTD_UTILS.sortChannelsByFrequency = function(channels) {
   return [...channels].sort((a, b) => {
-    const freqA = window.GRAPE_UTILS.getChannelFrequency(a);
-    const freqB = window.GRAPE_UTILS.getChannelFrequency(b);
+    const freqA = window.TIMESTD_UTILS.getChannelFrequency(a);
+    const freqB = window.TIMESTD_UTILS.getChannelFrequency(b);
     return freqA - freqB;
   });
 };
 
 // Convenience: sort array of objects by channel property
-window.GRAPE_UTILS.sortByChannelFrequency = function(items, channelKey = 'channel') {
+window.TIMESTD_UTILS.sortByChannelFrequency = function(items, channelKey = 'channel') {
   return [...items].sort((a, b) => {
-    const freqA = window.GRAPE_UTILS.getChannelFrequency(a[channelKey]);
-    const freqB = window.GRAPE_UTILS.getChannelFrequency(b[channelKey]);
+    const freqA = window.TIMESTD_UTILS.getChannelFrequency(a[channelKey]);
+    const freqB = window.TIMESTD_UTILS.getChannelFrequency(b[channelKey]);
     return freqA - freqB;
   });
 };

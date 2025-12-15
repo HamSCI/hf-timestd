@@ -32,14 +32,21 @@ CHU - NRC Radio Station, Ottawa, Ontario, Canada
     Timing Tone: 1000 Hz, 500ms duration (1000ms at hour)
     Special: FSK time code at seconds 31-39 (Bell 103 AFSK)
 
+BPM - NTSC, Pucheng County, Shaanxi, China
+    Coordinates: 34.9489°N, 109.5430°E
+    Frequencies: 2.5, 5, 10, 15 MHz
+    Timing Tone: 1000 Hz ticks (10ms UTC, 100ms UT1)
+
+
 ================================================================================
 SHARED vs UNIQUE FREQUENCIES
 ================================================================================
 SHARED (require discrimination):
-    2.5 MHz  - WWV + WWVH
-    5 MHz    - WWV + WWVH
-    10 MHz   - WWV + WWVH
-    15 MHz   - WWV + WWVH
+    2.5 MHz  - WWV + WWVH + BPM
+    5 MHz    - WWV + WWVH + BPM
+    10 MHz   - WWV + WWVH + BPM
+    15 MHz   - WWV + WWVH + BPM
+
 
 UNIQUE (no discrimination needed):
     20 MHz   - WWV only
@@ -97,6 +104,7 @@ REFERENCES
 - NIST Special Publication 432, "NIST Time and Frequency Services" (2012)
 - NIST Special Publication 250-67, "NIST Time and Frequency Radio Stations"
 - NRC CHU Technical Specifications
+- BPM (Time Service) Wikipedia / NTSC Publications
 - ITU-R P.531-14, "Ionospheric propagation data and prediction methods"
 
 ================================================================================
@@ -212,7 +220,8 @@ STANDARD_CHANNELS = [
     'WWV 2.5 MHz', 'WWV 5 MHz', 'WWV 10 MHz', 'WWV 15 MHz', 
     'WWV 20 MHz', 'WWV 25 MHz',
     'WWVH 2.5 MHz', 'WWVH 5 MHz', 'WWVH 10 MHz', 'WWVH 15 MHz',
-    'CHU 3.33 MHz', 'CHU 7.85 MHz', 'CHU 14.67 MHz'
+    'CHU 3.33 MHz', 'CHU 7.85 MHz', 'CHU 14.67 MHz',
+    'BPM 2.5 MHz', 'BPM 5 MHz', 'BPM 10 MHz', 'BPM 15 MHz'
 ]
 
 # =============================================================================
@@ -252,11 +261,19 @@ WWVH_LON = -159.7636
 CHU_LAT = 45.2953
 CHU_LON = -75.7544
 
+# BPM - Pucheng County, Shaanxi, China
+# 34°56′55.96″N 109°32′34.93″E
+# Decimal: 34 + 56/60 + 55.96/3600 = 34.94887...
+#          109 + 32/60 + 34.93/3600 = 109.54303...
+BPM_LAT = 34.9489
+BPM_LON = 109.5430
+
 # Convenience dictionary for programmatic access
 STATION_LOCATIONS = {
     'WWV': {'lat': WWV_LAT, 'lon': WWV_LON, 'name': 'Fort Collins, CO, USA'},
     'WWVH': {'lat': WWVH_LAT, 'lon': WWVH_LON, 'name': 'Kekaha, Kauai, HI, USA'},
     'CHU': {'lat': CHU_LAT, 'lon': CHU_LON, 'name': 'Ottawa, ON, Canada'},
+    'BPM': {'lat': BPM_LAT, 'lon': BPM_LON, 'name': 'Pucheng, Shaanxi, China'},
 }
 
 # =============================================================================
@@ -267,6 +284,7 @@ STATION_LOCATIONS = {
 WWV_TICK_FREQ = 1000   # Hz - WWV uses 1000 Hz tick
 WWVH_TICK_FREQ = 1200  # Hz - WWVH uses 1200 Hz tick
 CHU_TICK_FREQ = 1000   # Hz - CHU uses 1000 Hz tick
+BPM_TICK_FREQ = 1000   # Hz - BPM uses 1000 Hz tick
 
 # =============================================================================
 # CHU TIMING STRUCTURE (Reference: NRC CHU Technical Specifications)
@@ -303,6 +321,16 @@ CHU_FSK_BAUD_RATE = 300    # bits per second
 TONE_440_HZ = 440
 TONE_500_HZ = 500
 TONE_600_HZ = 600
+
+# =============================================================================
+# BPM TIMING STRUCTURE
+# =============================================================================
+BPM_UTC_TICK_DURATION = 0.010  # 10 ms
+BPM_UT1_TICK_DURATION = 0.100  # 100 ms
+BPM_MINUTE_MARKER_DURATION = 0.300 # 300 ms
+
+# UT1 Minutes: 25-29, 55-59
+BPM_UT1_MINUTES = set(range(25, 30)) | set(range(55, 60))
 
 # =============================================================================
 # DETECTION THRESHOLDS
@@ -375,6 +403,7 @@ PROPAGATION_BOUNDS_MS = {
     'WWV': (2.0, 35.0),    # Continental US to Fort Collins
     'WWVH': (12.0, 60.0),  # Continental US to Hawaii (longer path)
     'CHU': (3.0, 40.0),    # Continental US to Ottawa
+    'BPM': (25.0, 50.0),   # Continental US to China (very long path)
 }
 
 # Default bounds for unknown stations

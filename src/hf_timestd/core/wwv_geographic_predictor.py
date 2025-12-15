@@ -153,7 +153,8 @@ import json
 from pathlib import Path
 
 # Issue 4.1 Fix (2025-12-07): Import coordinates from single source of truth
-from .wwv_constants import WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON
+from .wwv_constants import WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, BPM_LAT, BPM_LON
+
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,8 @@ class WWVGeographicPredictor:
     # Issue 4.1 Fix: Now imported from wwv_constants.py (NIST verified)
     WWV_LOCATION = (WWV_LAT, WWV_LON)     # Fort Collins, Colorado - NIST verified
     WWVH_LOCATION = (WWVH_LAT, WWVH_LON)  # Kekaha, Kauai, Hawaii - NIST verified
+    BPM_LOCATION = (BPM_LAT, BPM_LON)     # Pucheng, China - NTSC verified
+
     
     # Speed of light
     C_LIGHT_KM_PER_MS = 299.792458  # km/ms
@@ -206,7 +209,11 @@ class WWVGeographicPredictor:
         wwvh_dist = self._haversine_distance(
             self.receiver_lat, self.receiver_lon, *self.WWVH_LOCATION
         )
-        logger.info(f"Great circle distances: WWV={wwv_dist:.0f}km, WWVH={wwvh_dist:.0f}km")
+        bpm_dist = self._haversine_distance(
+            self.receiver_lat, self.receiver_lon, *self.BPM_LOCATION
+        )
+        logger.info(f"Great circle distances: WWV={wwv_dist:.0f}km, WWVH={wwvh_dist:.0f}km, BPM={bpm_dist:.0f}km")
+
     
     @staticmethod
     def grid_to_latlon(grid: str) -> Tuple[float, float]:
@@ -370,11 +377,14 @@ class WWVGeographicPredictor:
             history = self.toa_history[frequency_mhz]
             wwv_delays = [m['peak_delay_ms'] for m in history.get('WWV', []) if m['peak_delay_ms'] is not None]
             wwvh_delays = [m['peak_delay_ms'] for m in history.get('WWVH', []) if m['peak_delay_ms'] is not None]
-            
+            bpm_delays = [m['peak_delay_ms'] for m in history.get('BPM', []) if m['peak_delay_ms'] is not None]
+        
             if wwv_delays:
                 wwv_delay_ms = sum(wwv_delays) / len(wwv_delays)
             if wwvh_delays:
                 wwvh_delay_ms = sum(wwvh_delays) / len(wwvh_delays)
+            # Currently ignoring BPM history for simple average until requested
+
         
         # Determine variance (empirical or default)
         wwv_variance, wwvh_variance, confidence = self._calculate_variance(frequency_mhz)
@@ -442,6 +452,14 @@ class WWVGeographicPredictor:
         overall_conf = (wwv_conf + wwvh_conf) / 2
         
         return wwv_var, wwvh_var, overall_conf
+
+    def calculate_expected_delay_bpm(self, frequency_mhz: float) -> float:
+        """Calculate expected delay for BPM"""
+        dist_km = self._haversine_distance(
+            self.receiver_lat, self.receiver_lon, *self.BPM_LOCATION
+        )
+        return self._estimate_propagation_delay(dist_km, frequency_mhz)
+
     
     def classify_single_peak(
         self,

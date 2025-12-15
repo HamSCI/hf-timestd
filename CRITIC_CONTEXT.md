@@ -224,19 +224,19 @@ LAYER 4: Multi-Broadcast Fusion
 
 ```bash
 # Check timing calibration state
-cat /tmp/grape-test/state/timing_calibration.json | python3 -m json.tool
+cat /tmp/timestd-test/state/timing_calibration.json | python3 -m json.tool
 
 # Check broadcast calibration state
-cat /tmp/grape-test/state/broadcast_calibration.json | python3 -m json.tool
+cat /tmp/timestd-test/state/broadcast_calibration.json | python3 -m json.tool
 
 # Monitor fusion convergence
-tail -f /tmp/grape-test/logs/phase2-fusion.log
+tail -f /tmp/timestd-test/logs/phase2-fusion.log
 
 # Check intra-station spread
-grep "intra-station" /tmp/grape-test/logs/phase2-fusion.log | tail -10
+grep "intra-station" /tmp/timestd-test/logs/phase2-fusion.log | tail -10
 
 # Verify discrimination corrections
-grep "RTP prediction overrides" /tmp/grape-test/logs/phase1-*.log
+grep "RTP prediction overrides" /tmp/timestd-test/logs/phase1-*.log
 ```
 
 ---
@@ -583,7 +583,7 @@ products/{CHANNEL}/
 
 **Input:**
 - `products/{CHANNEL}/decimated/YYYYMMDD.bin` - 10 Hz carrier data
-- Station coordinates from `grape-config.toml`
+- Station coordinates from `timestd-config.toml`
 - Transmitter coordinates (WWV: 40.68°N, 105.04°W)
 
 **Output:**
@@ -664,7 +664,7 @@ solar_data = calculate_solar_zenith_for_day(date_str, receiver_grid)
 **Configuration to Check:**
 | File | Setting | Purpose |
 |------|---------|---------|
-| `grape-config.toml` | `[uploader]` section | Upload credentials/endpoint |
+| `timestd-config.toml` | `[uploader]` section | Upload credentials/endpoint |
 | `config/environment` | `GRAPE_UPLOAD_*` | Environment variables |
 
 ---
@@ -728,7 +728,7 @@ solar_data = calculate_solar_zenith_for_day(date_str, receiver_grid)
 |------|--------|
 | `requirements.txt` | Add `astropy` for solar calculations |
 | `systemd/grape-daily-upload.service` | Update for new pipeline |
-| `grape-config.toml` | Add Phase 3 configuration section |
+| `timestd-config.toml` | Add Phase 3 configuration section |
 
 ---
 

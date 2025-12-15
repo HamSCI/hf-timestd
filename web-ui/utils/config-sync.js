@@ -34,7 +34,7 @@ export function parseConfigFile(configPath) {
         agc: parseInt(ch.agc || 0),
         gain: parseInt(ch.gain || 0),
         enabled: ch.enabled !== false,
-        processor: ch.processor || 'grape'
+        processor: ch.processor || 'timestd'
       }))
     };
   } catch (error) {

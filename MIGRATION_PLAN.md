@@ -20,8 +20,8 @@ This document outlines the migration from "grape-recorder" to "HF Time Standard 
 | `grape_recorder/grape/` (core module) | `hf_timestd/core/` |
 | `grape-*.sh` (scripts) | `timestd-*.sh` |
 | `grape-*.service` (systemd) | `timestd-*.service` |
-| `grape-config.toml` | `timestd-config.toml` |
-| `/etc/grape-recorder/` | `/etc/hf-timestd/` |
+| `timestd-config.toml` | `timestd-config.toml` |
+| `/etc/hf-timestd/` | `/etc/hf-timestd/` |
 | `/var/log/grape-recorder/` | `/var/log/hf-timestd/` |
 | `GRAPE_*` (env vars) | `TIMESTD_*` |
 
@@ -47,8 +47,8 @@ These GRAPE-specific functions will be moved to a separate application:
 ### Files to Rename
 | Old Name | New Name |
 |----------|----------|
-| `scripts/grape-all.sh` | `scripts/timestd-all.sh` |
-| `scripts/grape-analytics.sh` | `scripts/timestd-analytics.sh` |
+| `scripts/timestd-all.sh` | `scripts/timestd-all.sh` |
+| `scripts/timestd-analytics.sh` | `scripts/timestd-analytics.sh` |
 | `scripts/grape-core.sh` | `scripts/timestd-core.sh` |
 | `scripts/grape-core-v3.sh` | `scripts/timestd-core-v3.sh` |
 | `scripts/grape-ui.sh` | `scripts/timestd-ui.sh` |
@@ -61,8 +61,8 @@ These GRAPE-specific functions will be moved to a separate application:
 
 ### Internal Changes in Scripts
 - `common.sh`: Update all `GRAPE_*` env vars to `TIMESTD_*`
-- Update references to `grape-config.toml` → `timestd-config.toml`
-- Update references to `/etc/grape-recorder/` → `/etc/hf-timestd/`
+- Update references to `timestd-config.toml` → `timestd-config.toml`
+- Update references to `/etc/hf-timestd/` → `/etc/hf-timestd/`
 - Update references to `/var/log/grape-recorder/` → `/var/log/hf-timestd/`
 - Update Python module references `grape_recorder` → `hf_timestd`
 
@@ -73,10 +73,10 @@ These GRAPE-specific functions will be moved to a separate application:
 ### Files to Rename
 | Old Name | New Name |
 |----------|----------|
-| `systemd/grape-analytics.service` | `systemd/timestd-analytics.service` |
-| `systemd/grape-core-recorder.service` | `systemd/timestd-core-recorder.service` |
+| `systemd/timestd-analytics.service` | `systemd/timestd-analytics.service` |
+| `systemd/timestd-core-recorder.service` | `systemd/timestd-core-recorder.service` |
 | `systemd/grape-radiod-monitor.service` | `systemd/timestd-radiod-monitor.service` |
-| `systemd/grape-web-ui.service` | `systemd/timestd-web-ui.service` |
+| `systemd/timestd-web-ui.service` | `systemd/timestd-web-ui.service` |
 
 ### Services Staying with GRAPE App (not migrated)
 - `systemd/grape-daily-upload.service`
@@ -98,8 +98,8 @@ These GRAPE-specific functions will be moved to a separate application:
 ### Files to Rename
 | Old Name | New Name |
 |----------|----------|
-| `config/grape-config.toml` | `config/timestd-config.toml` |
-| `config/grape-config.toml.template` | `config/timestd-config.toml.template` |
+| `config/timestd-config.toml` | `config/timestd-config.toml` |
+| `config/timestd-config.toml.template` | `config/timestd-config.toml.template` |
 | `config/environment` | `config/environment` (update contents) |
 | `config/environment.template` | `config/environment.template` (update contents) |
 | `config/environment.production` | `config/environment.production` (update contents) |

@@ -10,7 +10,7 @@ Usage:
         --date 20251119 \
         --channel "WWV 10 MHz" \
         --ground-truth data/ground_truth_periods.csv \
-        --discrimination-csv /tmp/grape-test/analytics/WWV_10_MHz/discrimination/ \
+        --discrimination-csv /tmp/timestd-test/analytics/WWV_10_MHz/discrimination/ \
         --output baseline_performance.json
 """
 

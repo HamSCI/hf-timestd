@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GRAPE - Timing Methodology</title>
+    <title>Timing Methodology - hf-timestd</title>
     <link rel="stylesheet" href="/styles.css">
-    <script>window.GRAPE_CURRENT_PAGE = 'docs';</script>
+    <script>window.TIMESTD_CURRENT_PAGE = 'docs';</script>
     <script src="/components/navigation.js"></script>
     <style>
         body {
@@ -188,15 +188,13 @@
     </style>
 </head>
 <body>
-    <div id="navigation"></div>
+    <div id="timestd-navigation"></div>
     
     <div class="doc-container">
-        <a href="/timing-advanced.html" class="back-link">← Back to Advanced Timing</a>
-        
-        <div class="doc-header">
-            <div class="doc-title">📡 Timing Methodology</div>
-            <div class="doc-subtitle">How GRAPE measures your clock offset from UTC(NIST)</div>
-        </div>
+        <header class="doc-header">
+            <div class="doc-title">Timing Methodology</div>
+            <div class="doc-subtitle">How D_clock is measured and fused across broadcasts</div>
+        </header>
         
         <div class="toc">
             <h4>Contents</h4>
@@ -214,7 +212,7 @@
         
         <h2 id="overview">Overview</h2>
         <p>
-            GRAPE measures the offset between your system clock and UTC(NIST) atomic time by 
+            hf-timestd measures the offset between your system clock and UTC(NIST) atomic time by 
             analyzing time standard broadcasts from <strong>WWV</strong> (Colorado), 
             <strong>WWVH</strong> (Hawaii), and <strong>CHU</strong> (Canada).
         </p>
@@ -317,15 +315,15 @@
         <h3>Fusion Service</h3>
         <p>
             The fusion service is <strong>started automatically</strong> as part of the 
-            <code>grape-analytics</code> systemd service. It runs every 60 seconds, reading 
+            analytics service. It runs every 60 seconds, reading 
             Phase 2 results from all channels and producing a fused D_clock estimate stored 
             in <code>phase2/fusion/fused_d_clock.csv</code>.
         </p>
         <pre><code># Check fusion status
-journalctl -u grape-analytics | grep -i fusion
+journalctl -u hf-timestd-analytics | grep -i fusion
 
 # View fusion output
-tail -f $GRAPE_DATA_ROOT/phase2/fusion/fused_d_clock.csv</code></pre>
+tail -f $TIMESTD_DATA_ROOT/phase2/fusion/fused_d_clock.csv</code></pre>
         
         <h2 id="kalman-funnel">Clock Stability Convergence</h2>
         <p>
@@ -520,20 +518,20 @@ tail -f $GRAPE_DATA_ROOT/phase2/fusion/fused_d_clock.csv</code></pre>
             <h4>Service Management (Production Mode)</h4>
             <p>To restart the timing services after configuration changes:</p>
             <pre><code># Restart Phase 2 Analytics (includes all 9 channels + fusion service)
-sudo systemctl restart grape-analytics
+sudo systemctl restart hf-timestd-analytics
 
-# Restart Phase 1 Core Recorder (RTP → Digital RF)
-sudo systemctl restart grape-core-recorder
+# Restart Phase 1 Core Recorder
+sudo systemctl restart hf-timestd-core-recorder
 
 # Restart Web UI (for display changes)
-sudo systemctl restart grape-web-ui
+sudo systemctl restart hf-timestd-web-ui
 
 # View service logs
-journalctl -u grape-analytics -f
-journalctl -u grape-core-recorder -f
+journalctl -u hf-timestd-analytics -f
+journalctl -u hf-timestd-core-recorder -f
 
-# Check all GRAPE services
-sudo systemctl status grape-core-recorder grape-analytics grape-web-ui</code></pre>
+# Check all services
+sudo systemctl status hf-timestd-core-recorder hf-timestd-analytics hf-timestd-web-ui</code></pre>
         </div>
     </div>
     

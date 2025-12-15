@@ -7,7 +7,7 @@
 
 set -e
 
-OUTPUT_BASE="/tmp/grape-test/discrimination_analysis"
+OUTPUT_BASE="/tmp/timestd-test/discrimination_analysis"
 
 # Channels to process (prioritize propagation-diverse frequencies)
 CHANNELS=(
@@ -82,7 +82,7 @@ echo "----------------------------------------------------------------------"
 
 for channel in "${CHANNELS[@]}"; do
     channel_safe=$(echo "$channel" | tr ' ' '_' | tr '.' '_')
-    ANALYTICS_DIR="/tmp/grape-test/analytics/${channel_safe}"
+    ANALYTICS_DIR="/tmp/timestd-test/analytics/${channel_safe}"
     MASTER_CSV="$OUTPUT_BASE/csvs/discrimination_${channel_safe}.csv"
     
     echo ""
@@ -195,7 +195,7 @@ import csv
 from collections import defaultdict
 
 channels = ["WWV_5_MHz", "WWV_10_MHz", "WWV_15_MHz"]
-base = "/tmp/grape-test/discrimination_analysis"
+base = "/tmp/timestd-test/discrimination_analysis"
 
 # Load discrimination results for each frequency
 freq_data = {}

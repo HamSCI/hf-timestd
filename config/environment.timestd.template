@@ -8,7 +8,7 @@
 #
 # The scripts (common.sh) source this file in order:
 #   1. /etc/hf-timestd/environment (production)
-#   2. /etc/grape-recorder/environment (legacy fallback)
+#   2. /etc/hf-timestd/environment (legacy fallback)
 #   3. $PROJECT_DIR/config/environment (test override)
 #
 # USAGE: Uncomment and set values for your installation.

@@ -1,48 +1,14 @@
 """
-GRAPE Path Specification - Three-Phase Pipeline Architecture
+TimeStd Path Specification
 
-This module provides the canonical path structure for all GRAPE data.
+This module provides the canonical path structure for all TimeStd data.
 ALL producers and consumers MUST use these functions to avoid path mismatches.
 
 SYNC VERSION: 2025-12-08-v3-discovery-fix
-Must stay synchronized with web-ui/grape-paths.js
+Must stay synchronized with web-ui/timestd-paths.js
 
-Change History:
-  2025-12-08-v3: Issue 2.2 fix - discover_channels() now checks all phases
-  2025-12-04-v2: Three-phase architecture paths
-  2025-11-01-v1: Initial implementation
-
-Three-Phase Architecture:
-
-    data_root/
-    ├── raw_archive/               # PHASE 1: Immutable Raw Archive (DRF)
-    │   └── {CHANNEL}/              
-    │       └── {YYYYMMDD}/         
-    │           ├── {YYYY-MM-DDTHH}/ 
-    │           │   └── rf@{ts}.h5  # 20 kHz complex64 IQ
-    │           ├── drf_properties.h5
-    │           └── metadata/       # NTP status, gaps, provenance
-    │
-    ├── phase2/                    # PHASE 2: Analytical Engine
-    │   └── {CHANNEL}/
-    │       ├── clock_offset/       # D_clock(t) time series
-    │       ├── carrier_analysis/   # Amplitude, phase, Doppler
-    │       ├── channel_quality/    # Delay spread, coherence
-    │       ├── discrimination/     # WWV/WWVH per-minute
-    │       ├── bcd_correlation/    # 100 Hz BCD analysis
-    │       ├── tone_detections/    # 1000/1200 Hz markers
-    │       ├── ground_truth/       # 440/500/600 Hz station ID
-    │       └── state/              # Processing state
-    │
-    ├── products/                  # PHASE 3: Derived Products
-    │   └── {CHANNEL}/
-    │       ├── decimated/          # 10 Hz DRF time series
-    │       ├── spectrograms/       # PNG images
-    │       └── psws_upload/        # PSWS format files
-    │
-    ├── state/                     # Global state
-    ├── status/                    # System status
-    └── logs/                      # Global logs
+Phase 1 storage uses per-minute binary complex64 files in raw_buffer/.
+Phase 2 writes analytical outputs in phase2/.
 
 CRITICAL: Use channel_name_to_key() for consistent channel naming.
 """
@@ -108,68 +74,66 @@ def dir_to_channel_name(dir_name: str) -> str:
     return dir_name.replace('_', ' ')
 
 
-class GRAPEPaths:
-    """Central path manager for GRAPE three-phase pipeline.
+class TimeStdPaths:
+    """Central path manager for TimeStd three-phase pipeline.
     
     Usage:
-        from hf_timestd.paths import GRAPEPaths
+        from hf_timestd.paths import TimeStdPaths
         
-        paths = GRAPEPaths('/tmp/grape-test')
+        paths = TimeStdPaths('/tmp/timestd-test')
         
-        # Phase 1: Raw archive (immutable DRF)
-        raw_dir = paths.get_raw_archive_dir('WWV 10 MHz')
+        # Phase 1: Raw buffer (binary complex64 + JSON sidecars)
+        raw_dir = paths.get_raw_buffer_dir('WWV 10 MHz')
         
         # Phase 2: Analytical engine outputs
         clock_dir = paths.get_clock_offset_dir('WWV 10 MHz')
-        
-        # Phase 3: Derived products
-        spec_dir = paths.get_spectrograms_dir('WWV 10 MHz')
     """
     
     def __init__(self, data_root: str | Path):
         """Initialize path manager.
         
         Args:
-            data_root: Root data directory (e.g., /tmp/grape-test)
+            data_root: Root data directory (e.g., /tmp/timestd-test)
         """
         self.data_root = Path(data_root)
-    
+
+
     # ========================================================================
-    # PHASE 1: RAW ARCHIVE (Immutable Digital RF)
+    # PHASE 1: RAW BUFFER (Binary complex64 + JSON sidecars)
     # ========================================================================
     
-    def get_raw_archive_root(self) -> Path:
-        """Get raw archive root directory.
+    def get_raw_buffer_root(self) -> Path:
+        """Get raw buffer root directory.
         
-        Returns: {data_root}/raw_archive/
+        Returns: {data_root}/raw_buffer/
         """
-        return self.data_root / 'raw_archive'
+        return self.data_root / 'raw_buffer'
     
-    def get_raw_archive_dir(self, channel_name: str) -> Path:
-        """Get raw archive directory for a channel.
+    def get_raw_buffer_dir(self, channel_name: str) -> Path:
+        """Get raw buffer directory for a channel.
         
-        Returns: {data_root}/raw_archive/{CHANNEL}/
+        Returns: {data_root}/raw_buffer/{CHANNEL}/
         """
         channel_dir = channel_name_to_dir(channel_name)
-        return self.get_raw_archive_root() / channel_dir
+        return self.get_raw_buffer_root() / channel_dir
     
-    def get_raw_archive_date_dir(self, channel_name: str, date: str) -> Path:
+    def get_raw_buffer_date_dir(self, channel_name: str, date: str) -> Path:
         """Get raw archive date directory.
         
         Args:
             channel_name: Channel name
             date: Date in YYYYMMDD format
         
-        Returns: {data_root}/raw_archive/{CHANNEL}/{YYYYMMDD}/
+        Returns: {data_root}/raw_buffer/{CHANNEL}/{YYYYMMDD}/
         """
-        return self.get_raw_archive_dir(channel_name) / date
+        return self.get_raw_buffer_dir(channel_name) / date
     
-    def get_raw_archive_metadata_dir(self, channel_name: str, date: str) -> Path:
+    def get_raw_buffer_metadata_dir(self, channel_name: str, date: str) -> Path:
         """Get raw archive metadata directory.
         
-        Returns: {data_root}/raw_archive/{CHANNEL}/{YYYYMMDD}/metadata/
+        Returns: {data_root}/raw_buffer/{CHANNEL}/{YYYYMMDD}/metadata/
         """
-        return self.get_raw_archive_date_dir(channel_name, date) / 'metadata'
+        return self.get_raw_buffer_date_dir(channel_name, date) / 'metadata'
     
     # ========================================================================
     # PHASE 2: ANALYTICAL ENGINE
@@ -270,57 +234,13 @@ class GRAPEPaths:
         return self.get_phase2_dir(channel_name) / 'state'
     
     # ========================================================================
-    # PHASE 3: DERIVED PRODUCTS
-    # ========================================================================
-    
-    def get_products_root(self) -> Path:
-        """Get products root directory.
-        
-        Returns: {data_root}/products/
-        """
-        return self.data_root / 'products'
-    
-    def get_products_dir(self, channel_name: str) -> Path:
-        """Get products directory for a channel.
-        
-        Returns: {data_root}/products/{CHANNEL}/
-        """
-        channel_dir = channel_name_to_dir(channel_name)
-        return self.get_products_root() / channel_dir
-    
-    def get_decimated_dir(self, channel_name: str) -> Path:
-        """Get decimated time series directory.
-        
-        Contains 10 Hz DRF files for telemetry.
-        
-        Returns: {data_root}/products/{CHANNEL}/decimated/
-        """
-        return self.get_products_dir(channel_name) / 'decimated'
-    
-    def get_spectrograms_dir(self, channel_name: str) -> Path:
-        """Get spectrograms directory for a channel.
-        
-        Returns: {data_root}/products/{CHANNEL}/spectrograms/
-        """
-        return self.get_products_dir(channel_name) / 'spectrograms'
-    
-    def get_psws_upload_dir(self, channel_name: str) -> Path:
-        """Get PSWS upload directory.
-        
-        Contains files formatted for PSWS upload.
-        
-        Returns: {data_root}/products/{CHANNEL}/psws_upload/
-        """
-        return self.get_products_dir(channel_name) / 'psws_upload'
-    
-    # ========================================================================
     # LEGACY COMPATIBILITY (deprecated - use phase-specific methods)
     # ========================================================================
     
     def get_archive_dir(self, channel_name: str) -> Path:
         """DEPRECATED: Get legacy NPZ archive directory.
         
-        Use get_raw_archive_dir() for new code.
+        Use get_raw_buffer_dir() for new code.
         
         Returns: {data_root}/archives/{CHANNEL}/
         """
@@ -389,102 +309,6 @@ class GRAPEPaths:
         return self.get_analytics_dir(channel_name) / 'status'
     
     # ========================================================================
-    # Spectrogram Paths (Legacy - now in products)
-    # ========================================================================
-    
-    def get_spectrograms_root(self) -> Path:
-        """DEPRECATED: Get legacy spectrograms root.
-        
-        Returns: {data_root}/spectrograms/
-        """
-        return self.data_root / 'spectrograms'
-    
-    def get_spectrograms_date_dir(self, date: str) -> Path:
-        """DEPRECATED: Get spectrograms directory for a date.
-        
-        Returns: {data_root}/spectrograms/{YYYYMMDD}/
-        """
-        return self.get_spectrograms_root() / date
-    
-    def get_spectrogram_path(self, channel_name: str, date: str, spec_type: str = 'decimated') -> Path:
-        """Get path for a spectrogram PNG.
-        
-        Now routes to Phase 3 products directory.
-        
-        Returns: {data_root}/products/{CHANNEL}/spectrograms/{date}_{type}.png
-        """
-        filename = f"{date}_{spec_type}.png"
-        return self.get_spectrograms_dir(channel_name) / filename
-    
-    # ========================================================================
-    # State Paths (Service persistence)
-    # ========================================================================
-    
-    def get_state_dir(self) -> Path:
-        """Get state directory.
-        
-        Returns: {data_root}/state/
-        """
-        return self.data_root / 'state'
-    
-    def get_analytics_state_file(self, channel_name: str) -> Path:
-        """Get analytics state file for a channel.
-        
-        Args:
-            channel_name: Channel name
-        
-        Returns: {data_root}/state/analytics-{key}.json
-        
-        Example:
-            WWV 10 MHz -> analytics-wwv10.json
-        """
-        channel_key = channel_name_to_key(channel_name)
-        return self.get_state_dir() / f"analytics-{channel_key}.json"
-    
-    def get_core_status_file(self) -> Path:
-        """Get core recorder status file.
-        
-        Returns: {data_root}/status/core-recorder-status.json
-        """
-        return self.get_status_dir() / 'core-recorder-status.json'
-    
-    # ========================================================================
-    # System Status Paths
-    # ========================================================================
-    
-    def get_status_dir(self) -> Path:
-        """Get system status directory.
-        
-        Returns: {data_root}/status/
-        """
-        return self.data_root / 'status'
-    
-    def get_analytics_service_status_file(self) -> Path:
-        """Get analytics service status file.
-        
-        Returns: {data_root}/status/analytics-service-status.json
-        """
-        return self.get_status_dir() / 'analytics-service-status.json'
-    
-    def get_gpsdo_status_file(self) -> Path:
-        """Get GPSDO monitor status file.
-        
-        Written by analytics service GPSDOMonitor, read by web-ui.
-        
-        Returns: {data_root}/status/gpsdo_status.json
-        """
-        return self.get_status_dir() / 'gpsdo_status.json'
-    
-    def get_timing_status_file(self) -> Path:
-        """Get timing status file (primary time reference).
-        
-        Written by analytics service, read by web-ui.
-        
-        Returns: {data_root}/status/timing_status.json
-        """
-        return self.get_status_dir() / 'timing_status.json'
-    
-    # ========================================================================
     # Discovery Methods
     # ========================================================================
     
@@ -494,20 +318,17 @@ class GRAPEPaths:
     def discover_channels(self) -> list[str]:
         """Discover all channels from any available data source.
         
-        Issue 2.2 Fix (2025-12-08): Now checks all three phases (raw_archive,
-        phase2, products) to find channels. Previously only checked raw_archive,
-        which missed channels that had Phase 2/3 data but no raw archive
-        (e.g., after storage quota cleanup).
+        Checks Phase 1 (raw_buffer) and Phase 2 (phase2) to find channels.
         
-        This now matches the JavaScript implementation in grape-paths.js.
+        This now matches the JavaScript implementation in timestd-paths.js.
         
         Returns:
             List of channel names (human-readable format)
         """
         channels = set()
         
-        # Check Phase 1: raw_archive/
-        raw_dir = self.get_raw_archive_root()
+        # Check Phase 1: raw_buffer/
+        raw_dir = self.get_raw_buffer_root()
         if raw_dir.exists():
             for channel_dir in raw_dir.iterdir():
                 if channel_dir.is_dir() and channel_dir.name not in self._EXCLUDE_DIRS:
@@ -517,13 +338,6 @@ class GRAPEPaths:
         phase2_dir = self.get_phase2_root()
         if phase2_dir.exists():
             for channel_dir in phase2_dir.iterdir():
-                if channel_dir.is_dir() and channel_dir.name not in self._EXCLUDE_DIRS:
-                    channels.add(dir_to_channel_name(channel_dir.name))
-        
-        # Check Phase 3: products/
-        products_dir = self.get_products_root()
-        if products_dir.exists():
-            for channel_dir in products_dir.iterdir():
                 if channel_dir.is_dir() and channel_dir.name not in self._EXCLUDE_DIRS:
                     channels.add(dir_to_channel_name(channel_dir.name))
         
@@ -555,31 +369,18 @@ class GRAPEPaths:
         return sorted(channels)
     
     def discover_products_channels(self) -> list[str]:
-        """Discover channels with Phase 3 derived products.
-        
-        Returns:
-            List of channel names with Phase 3 products
-        """
-        products_dir = self.get_products_root()
-        if not products_dir.exists():
-            return []
-        
-        channels = []
-        for channel_dir in products_dir.iterdir():
-            if channel_dir.is_dir() and channel_dir.name not in self._EXCLUDE_DIRS:
-                channels.append(dir_to_channel_name(channel_dir.name))
-        
-        return sorted(channels)
+        """Discover channels with Phase 3 derived products."""
+        return []
 
 
-def load_paths_from_config(config_path: Optional[str | Path] = None) -> GRAPEPaths:
-    """Load GRAPEPaths from configuration file.
+def load_paths_from_config(config_path: Optional[str | Path] = None) -> TimeStdPaths:
+    """Load TimeStdPaths from configuration file.
     
     Args:
-        config_path: Path to grape-config.toml (default: ./config/grape-config.toml)
+        config_path: Path to timestd-config.toml (default: ./config/timestd-config.toml)
     
     Returns:
-        GRAPEPaths instance configured from TOML
+        TimeStdPaths instance configured from TOML
     
     Raises:
         FileNotFoundError: If config file doesn't exist
@@ -587,7 +388,7 @@ def load_paths_from_config(config_path: Optional[str | Path] = None) -> GRAPEPat
     """
     if config_path is None:
         # Default location
-        config_path = Path(__file__).parent.parent.parent / 'config' / 'grape-config.toml'
+        config_path = Path(__file__).parent.parent.parent / 'config' / 'timestd-config.toml'
     
     config_path = Path(config_path)
     
@@ -601,36 +402,36 @@ def load_paths_from_config(config_path: Optional[str | Path] = None) -> GRAPEPat
     mode = config.get('recorder', {}).get('mode', 'test')
     
     if mode == 'production':
-        data_root = config.get('recorder', {}).get('production_data_root', '/var/lib/grape-recorder')
+        data_root = config.get('recorder', {}).get('production_data_root', '/var/lib/timestd')
     else:
-        data_root = config.get('recorder', {}).get('test_data_root', '/tmp/grape-test')
+        data_root = config.get('recorder', {}).get('test_data_root', '/tmp/timestd-test')
     
-    return GRAPEPaths(data_root)
+    return TimeStdPaths(data_root)
 
 
 # Convenience function for scripts
 def get_paths(data_root: Optional[str | Path] = None, 
-              config_path: Optional[str | Path] = None) -> GRAPEPaths:
-    """Get GRAPEPaths instance.
+              config_path: Optional[str | Path] = None) -> TimeStdPaths:
+    """Get TimeStdPaths instance.
     
     Args:
         data_root: Explicit data root (overrides config)
         config_path: Path to config file (if using config)
     
     Returns:
-        GRAPEPaths instance
+        TimeStdPaths instance
     
     Usage:
         # Use explicit data root
-        paths = get_paths('/tmp/grape-test')
+        paths = get_paths('/tmp/timestd-test')
         
         # Use config file
-        paths = get_paths(config_path='config/grape-config.toml')
+        paths = get_paths(config_path='config/timestd-config.toml')
         
         # Use default config
         paths = get_paths()
     """
     if data_root is not None:
-        return GRAPEPaths(data_root)
+        return TimeStdPaths(data_root)
     
     return load_paths_from_config(config_path)

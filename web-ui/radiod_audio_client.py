@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Radiod Audio Client - AM Audio Channel Management for GRAPE
+Radiod Audio Client - AM Audio Channel Management for hf-timestd
 
 Creates AM audio channels with AGC for listening to WWV/CHU signals.
 SSRC allocation is handled automatically by ka9q.
@@ -216,7 +216,7 @@ def list_audio_channels(radiod_host: str) -> Dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='GRAPE Audio Channel Manager - Creates AM channels with AGC for WWV/CHU listening'
+        description='hf-timestd Audio Channel Manager - Creates AM channels with AGC for WWV/CHU listening'
     )
     parser.add_argument('--radiod-host', required=True, 
                        help='Radiod hostname (e.g., bee1-hf-status.local)')

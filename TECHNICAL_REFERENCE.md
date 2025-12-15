@@ -710,21 +710,21 @@ class GRAPEPaths {
 
 | Mode | Environment File | Data Root |
 |------|-----------------|-----------|
-| Test | `config/environment` | `/tmp/grape-test/` |
-| Production | `/etc/grape-recorder/environment` | `/var/lib/grape-recorder/` |
+| Test | `config/environment` | `/tmp/timestd-test/` |
+| Production | `/etc/hf-timestd/environment` | `/var/lib/timestd/` |
 
 ```bash
 # Production environment file
 GRAPE_MODE=production
-GRAPE_DATA_ROOT=/var/lib/grape-recorder
+GRAPE_DATA_ROOT=/var/lib/timestd
 GRAPE_LOG_DIR=/var/log/grape-recorder
-GRAPE_CONFIG=/etc/grape-recorder/grape-config.toml
+GRAPE_CONFIG=/etc/hf-timestd/timestd-config.toml
 GRAPE_VENV=/opt/grape-recorder/venv
 ```
 
 ### Config File
 
-**File**: `config/grape-config.toml` (or `/etc/grape-recorder/grape-config.toml` in production)
+**File**: `config/timestd-config.toml` (or `/etc/hf-timestd/timestd-config.toml` in production)
 
 ```toml
 [station]
@@ -736,8 +736,8 @@ status_address = "myhost-hf-status.local"  # mDNS name from radiod config
 
 [recorder]
 mode = "test"                              # "test" or "production"
-test_data_root = "/tmp/grape-test"
-production_data_root = "/var/lib/grape-recorder"
+test_data_root = "/tmp/timestd-test"
+production_data_root = "/var/lib/timestd"
 sample_rate = 20000                        # Config-driven (default 20 kHz)
 
 [[recorder.channels]]
@@ -758,12 +758,12 @@ processor = "grape"
 ```bash
 # Test mode (development)
 ./scripts/install.sh --mode test
-./scripts/grape-all.sh -start
+./scripts/timestd-all.sh -start
 
 # Production mode (24/7 operation)
 sudo ./scripts/install.sh --mode production --user $USER
-sudo systemctl start grape-recorder grape-analytics grape-webui
-sudo systemctl enable grape-recorder grape-analytics grape-webui
+sudo systemctl start grape-recorder timestd-analytics grape-webui
+sudo systemctl enable grape-recorder timestd-analytics grape-webui
 ```
 
 ### Manual Startup (Development)
@@ -771,7 +771,7 @@ sudo systemctl enable grape-recorder grape-analytics grape-webui
 ```bash
 cd ~/grape-recorder
 source venv/bin/activate
-python -m grape_recorder.grape.core_recorder --config config/grape-config.toml
+python -m grape_recorder.grape.core_recorder --config config/timestd-config.toml
 ```
 
 ### Production (systemd)
@@ -779,12 +779,12 @@ python -m grape_recorder.grape.core_recorder --config config/grape-config.toml
 ```bash
 # Service control
 sudo systemctl start|stop|status grape-recorder
-sudo systemctl start|stop|status grape-analytics
+sudo systemctl start|stop|status timestd-analytics
 sudo systemctl start|stop|status grape-webui
 
 # View logs
 journalctl -u grape-recorder -f
-journalctl -u grape-analytics -f
+journalctl -u timestd-analytics -f
 
 # Enable daily uploads
 sudo systemctl enable --now grape-upload.timer
@@ -794,8 +794,8 @@ sudo systemctl enable --now grape-upload.timer
 
 | Mode | Data | Logs | Config |
 |------|------|------|--------|
-| Test | `/tmp/grape-test/` | `/tmp/grape-test/logs/` | `config/` |
-| Production | `/var/lib/grape-recorder/` | `/var/log/grape-recorder/` | `/etc/grape-recorder/` |
+| Test | `/tmp/timestd-test/` | `/tmp/timestd-test/logs/` | `config/` |
+| Production | `/var/lib/timestd/` | `/var/log/grape-recorder/` | `/etc/hf-timestd/` |
 
 ---
 
@@ -922,13 +922,13 @@ python3 -c "from grape_recorder.grape.time_snap_reference import TimeSnapReferen
 
 ### Test Recorder
 ```bash
-./scripts/grape-all.sh -start
+./scripts/timestd-all.sh -start
 # Should see: channel connections, NPZ file writes
 ```
 
 ### Verify Output Files
 ```bash
-ls /tmp/grape-test/archives/WWV_10_MHz/*.npz
+ls /tmp/timestd-test/archives/WWV_10_MHz/*.npz
 # Should show timestamped NPZ files
 ```
 
@@ -937,7 +937,7 @@ ls /tmp/grape-test/archives/WWV_10_MHz/*.npz
 python3 -c "
 import numpy as np
 from pathlib import Path
-f = sorted(Path('/tmp/grape-test/archives/WWV_10_MHz/').glob('*.npz'))[-1]
+f = sorted(Path('/tmp/timestd-test/archives/WWV_10_MHz/').glob('*.npz'))[-1]
 d = np.load(f, allow_pickle=True)
 print(f'Time_snap source: {d[\"time_snap_source\"]}')
 print(f'PPM: {d.get(\"ppm\", \"N/A\")}')
@@ -954,7 +954,7 @@ print(f'Clock ratio: {d.get(\"clock_ratio\", \"N/A\")}')
 python3 -c "
 import numpy as np
 from pathlib import Path
-f = sorted(Path('/tmp/grape-test/archives/WWV_10_MHz/').glob('*.npz'))[-1]
+f = sorted(Path('/tmp/timestd-test/archives/WWV_10_MHz/').glob('*.npz'))[-1]
 d = np.load(f, allow_pickle=True)
 print(f'File: {f.name}')
 print(f'Samples: {len(d[\"iq\"])}')
@@ -1086,7 +1086,7 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 **v2.2.0 Release (Dec 2, 2025):**
 - **Unified Install Script** - `install.sh` for test/production modes
-- **FHS-Compliant Paths** - `/var/lib/grape-recorder/`, `/var/log/grape-recorder/`
+- **FHS-Compliant Paths** - `/var/lib/timestd/`, `/var/log/grape-recorder/`
 - **systemd Services** - Production-ready 24/7 operation
 - **Cross-Channel Coherent Timing** - Global Station Lock, ensemble anchor selection
 - **Primary Time Standard** - UTC(NIST) back-calculation from arrival time

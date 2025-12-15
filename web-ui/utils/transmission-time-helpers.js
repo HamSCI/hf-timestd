@@ -53,7 +53,7 @@ function parseClockOffsetCSV(filePath) {
  * @param {string} channel - Channel name (e.g., "WWV 10 MHz")
  * @param {string} date - Date in YYYYMMDD format (optional, defaults to today)
  * @param {number} hours - Hours of data to return (default 24)
- * @param {object} paths - GRAPEPaths instance
+ * @param {object} paths - TimeStdPaths instance
  * @returns {object} Clock offset data
  */
 async function getClockOffsetSeries(channel, date, hours = 24, paths) {
@@ -174,7 +174,7 @@ async function getClockOffsetSeries(channel, date, hours = 24, paths) {
  * Reads from phase2/{CHANNEL}/status/analytics-service-status.json
  * 
  * @param {string} channel - Channel name
- * @param {object} paths - GRAPEPaths instance
+ * @param {object} paths - TimeStdPaths instance
  * @returns {object} Analytics status
  */
 async function getPhase2AnalyticsStatus(channel, paths) {
@@ -235,7 +235,7 @@ async function getPhase2AnalyticsStatus(channel, paths) {
 /**
  * Get Phase 2 status for all channels
  * 
- * @param {object} paths - GRAPEPaths instance  
+ * @param {object} paths - TimeStdPaths instance  
  * @param {object} config - Config object with recorder.channels
  * @returns {object} All channels Phase 2 status
  */
@@ -284,7 +284,7 @@ async function getAllPhase2Status(paths, config) {
 /**
  * Get latest D_clock value across all channels (best quality)
  * 
- * @param {object} paths - GRAPEPaths instance
+ * @param {object} paths - TimeStdPaths instance
  * @param {object} config - Config object
  * @returns {object} Best D_clock reference
  */
@@ -336,7 +336,7 @@ async function getBestDClock(paths, config) {
  * Get Phase 2 pipeline status (3-step process)
  * 
  * @param {string} channel - Channel name
- * @param {object} paths - GRAPEPaths instance
+ * @param {object} paths - TimeStdPaths instance
  * @returns {object} Pipeline status
  */
 async function getPhase2PipelineStatus(channel, paths) {

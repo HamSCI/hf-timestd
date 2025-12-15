@@ -162,13 +162,13 @@ def main():
     
     if args.auto:
         # Find a recent NPZ file automatically
-        archive_dir = Path('/tmp/grape-test/archives/WWV_10_MHz')
+        archive_dir = Path('/tmp/timestd-test/archives/WWV_10_MHz')
         npz_files = sorted(archive_dir.glob('*.npz'))
         if npz_files:
             npz_file = npz_files[-1]  # Most recent
             logger.info(f"Auto-selected: {npz_file}")
         else:
-            logger.error("No NPZ files found in /tmp/grape-test/archives/WWV_10_MHz")
+            logger.error("No NPZ files found in /tmp/timestd-test/archives/WWV_10_MHz")
             return 1
     elif args.npz_file:
         npz_file = Path(args.npz_file)

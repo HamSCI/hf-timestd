@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Get data root from config or use default
-DATA_ROOT="${GRAPE_DATA_ROOT:-/tmp/grape-test}"
+DATA_ROOT="${GRAPE_DATA_ROOT:-/tmp/timestd-test}"
 
 # Get today's date in YYYYMMDD format
 TODAY=$(date +%Y%m%d)

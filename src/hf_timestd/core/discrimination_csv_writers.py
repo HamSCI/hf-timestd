@@ -18,7 +18,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
-from ..paths import GRAPEPaths
+from ..paths import TimeStdPaths
 
 logger = logging.getLogger(__name__)
 
@@ -178,16 +178,16 @@ class DiscriminationCSVWriters:
     
     def __init__(self, data_root: str, channel_name: str):
         """
-        Initialize CSV writers using GRAPEPaths API
+        Initialize CSV writers using TimeStdPaths API
         
         Args:
-            data_root: Root directory for analytics (e.g., /tmp/grape-test)
+            data_root: Root directory for analytics (e.g., /tmp/timestd-test)
             channel_name: Channel name (e.g., "WWV 10 MHz")
         """
         self.channel_name = channel_name
-        self.paths = GRAPEPaths(data_root)
+        self.paths = TimeStdPaths(data_root)
         
-        # Method-specific directories (using GRAPEPaths API)
+        # Method-specific directories (using TimeStdPaths API)
         self.tone_dir = self.paths.get_tone_detections_dir(channel_name)
         self.tick_dir = self.paths.get_tick_windows_dir(channel_name)
         self.id_440_dir = self.paths.get_station_id_440hz_dir(channel_name)

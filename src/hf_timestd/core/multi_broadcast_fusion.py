@@ -221,7 +221,6 @@ class MultiBroadcastFusion:
     since CHU FSK provides exact 500ms boundary alignment.
     """
     
-    # Issue 4.3 Fix: No more hardcoded defaults
     # Calibration starts at 0 with high uncertainty and learns from data.
     # Per-broadcast calibration (Issue 3.2) accounts for frequency-dependent delays.
     #
@@ -250,6 +249,10 @@ class MultiBroadcastFusion:
         self.phase2_dir = self.data_root / 'phase2'
         self.auto_calibrate = auto_calibrate
         self.reference_station = reference_station
+        
+        # Initialize TEC Estimator (Coherent Multi-Frequency Physics)
+        from .tec_estimator import TECEstimator
+        self.tec_estimator = TECEstimator()
         
         # Calibration state
         self.calibration_file = calibration_file or (
@@ -687,6 +690,77 @@ class MultiBroadcastFusion:
         # Calculate weights
         weights = self._calculate_weights(measurements)
         
+        # ====================================================================
+        # TEC ESTIMATION (Physics-Based Propagation Correction)
+        # ====================================================================
+        # Attempt to solve for TEC using multi-frequency data from same station
+        # This "removes the ionosphere" mathematically rather than modelling it
+        
+        # Group by station
+        by_station = defaultdict(list)
+        for m in measurements:
+            by_station[m.station].append(m)
+            
+        for station, station_meas in by_station.items():
+            if len(station_meas) >= 2:
+                # Prepare input for estimator
+                tec_input = []
+                for m in station_meas:
+                    # Input to TEC solver is Total Observed Time (not differential)
+                    # T_obs = T_measured + T_sys_offset (calibration)
+                    # We use uncalibrated d_clock + existing model delay to estimate ToA
+                    # Actually, d_clock = T_arrival - T_prop_model
+                    # So T_arrival = d_clock + T_prop_model
+                    #
+                    # But we want to solve: ToA = Vacuum + K*TEC/f^2
+                    # The "ToA" here is the measured arrival time relative to minute boundary
+                    
+                    # Approximating ToA as d_clock_ms (assuming model was roughly right)
+                    # Wait, d_clock is (Arrival - Model). 
+                    # If we feed (d_clock + Model) we get pure Arrival.
+                    # That is exactly what we want.
+                    
+                    toa_ms = m.d_clock_ms + m.propagation_delay_ms
+                    
+                    tec_input.append({
+                        'frequency_hz': m.frequency_mhz * 1e6,
+                        'toa_ms': toa_ms,
+                        'uncertainty_ms': 1.0 / m.confidence # Inverse confidence weighting
+                    })
+                
+                # Run Solver
+                tec_result = self.tec_estimator.estimate_tec(
+                    tec_input, station, measurements[0].timestamp
+                )
+                
+                if tec_result:
+                    if tec_result.confidence > 0.9:
+                        logger.info(f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f})")
+                        
+                        # Update measurements with Physics-Derived delays
+                        for m in station_meas:
+                            if m.frequency_mhz in tec_result.group_delay_ms:
+                                new_delay = tec_result.group_delay_ms[m.frequency_mhz]
+                                
+                                # Update D_clock with NEW delay
+                                # D_clock_new = T_arrival - T_delay_new
+                                # T_arrival was (d_clock_old + T_delay_old)
+                                t_arrival = m.d_clock_ms + m.propagation_delay_ms
+                                m.d_clock_ms = t_arrival - new_delay
+                                
+                                # Update metadata
+                                m.propagation_delay_ms = new_delay
+                                m.propagation_mode = 'TEC_SOLVED' # Flag as physics-derived
+                                m.confidence = min(1.0, m.confidence * 1.2) # Boost confidence
+                    else:
+                        logger.warning(f"TEC poor fit for {station}: R2={tec_result.confidence:.2f} (Needs >0.9)")
+                else:
+                    logger.warning(f"TEC solver returned None for {station} (inputs: {len(tec_input)})")
+            else:
+                 logger.info(f"Skipping TEC for {station}: Only {len(station_meas)} measurements (Need >=2)")
+        
+        # ====================================================================
+        
         # Reject outliers
         measurements, weights, n_rejected = self._reject_outliers(
             measurements, weights
@@ -695,6 +769,11 @@ class MultiBroadcastFusion:
         if len(measurements) < 2:
             logger.debug("Too few measurements after outlier rejection")
             return None
+        
+        # ====================================================================
+        
+        
+        # ====================================================================
         
         # Update calibration (before applying)
         self._update_calibration(measurements)
@@ -913,7 +992,12 @@ class MultiBroadcastFusion:
         }
 
 
-def run_fusion_service(data_root: Path, interval_sec: float = 60.0, enable_chrony: bool = True):
+def run_fusion_service(
+    data_root: Path, 
+    interval_sec: float = 60.0, 
+    enable_chrony: bool = True,
+    lookback_minutes: int = 10
+):
     """
     Run continuous fusion service.
     
@@ -923,7 +1007,9 @@ def run_fusion_service(data_root: Path, interval_sec: float = 60.0, enable_chron
     Args:
         data_root: Base data directory
         interval_sec: Fusion interval in seconds
+        interval_sec: Fusion interval in seconds
         enable_chrony: If True, write fused time to Chrony SHM refclock
+        lookback_minutes: Number of minutes to look back for measurements
     """
     fusion = MultiBroadcastFusion(data_root)
     
@@ -949,7 +1035,7 @@ def run_fusion_service(data_root: Path, interval_sec: float = 60.0, enable_chron
     
     while True:
         try:
-            result = fusion.fuse()
+            result = fusion.fuse(lookback_minutes=lookback_minutes)
             
             if result:
                 # Log main fusion result
@@ -972,7 +1058,7 @@ def run_fusion_service(data_root: Path, interval_sec: float = 60.0, enable_chron
                 if intra_stds:
                     logger.debug(
                         f"  Intra-station σ: {', '.join(intra_stds)} ms | "
-                        f"Inter-station spread: {result.inter_station_spread_ms:.1f} ms | "
+                        f"Inter-station spread: {result.inter_station_spread_ms if result.inter_station_spread_ms is not None else 0.0:.1f} ms | "
                         f"Flag: {result.consistency_flag}"
                     )
                 
@@ -1010,6 +1096,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Multi-Broadcast D_clock Fusion')
     parser.add_argument('--data-root', type=Path, required=True)
     parser.add_argument('--interval', type=float, default=60.0)
+    parser.add_argument('--lookback', type=int, default=10, help='Lookback window in minutes')
     parser.add_argument('--log-level', default='INFO')
     parser.add_argument('--enable-chrony', action='store_true', default=True,
                         help='Enable Chrony SHM refclock output (default: enabled)')
@@ -1020,8 +1107,14 @@ if __name__ == '__main__':
     
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
-        format='%(asctime)s %(levelname)s:%(name)s:%(message)s'
+        format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
+        force=True
     )
     
     enable_chrony = args.enable_chrony and not args.disable_chrony
-    run_fusion_service(args.data_root, args.interval, enable_chrony=enable_chrony)
+    run_fusion_service(
+        args.data_root, 
+        args.interval, 
+        enable_chrony=enable_chrony,
+        lookback_minutes=args.lookback
+    )

@@ -14,7 +14,7 @@ from grape_recorder.grape.wwvh_discrimination import WWVHDiscriminator
 
 def main():
     # Find a recent NPZ file
-    archive_dir = Path('/tmp/grape-test/archives/WWV_10_MHz')
+    archive_dir = Path('/tmp/timestd-test/archives/WWV_10_MHz')
     
     if not archive_dir.exists():
         print(f"Archive directory not found: {archive_dir}")

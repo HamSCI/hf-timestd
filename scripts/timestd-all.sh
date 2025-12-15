@@ -28,7 +28,7 @@ done
 if [ -f "$PROJECT_DIR/config/timestd-config.toml" ]; then
     CONFIG="${CONFIG:-$PROJECT_DIR/config/timestd-config.toml}"
 else
-    CONFIG="${CONFIG:-$PROJECT_DIR/config/grape-config.toml}"
+    CONFIG="${CONFIG:-$PROJECT_DIR/config/timestd-config.toml}"
 fi
 
 if [ -z "$ACTION" ]; then

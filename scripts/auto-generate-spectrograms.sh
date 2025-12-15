@@ -5,9 +5,9 @@
 # Input:  products/{CHANNEL}/decimated/ (Phase 3 decimated buffer)
 # Output: products/{CHANNEL}/spectrograms/ (PNG images with solar zenith overlay)
 
-DATA_ROOT="${1:-/tmp/grape-test}"
+DATA_ROOT="${1:-/tmp/timestd-test}"
 INTERVAL="${2:-900}"  # 15 minutes default
-CONFIG_FILE="${3:-config/grape-config.toml}"
+CONFIG_FILE="${3:-config/timestd-config.toml}"
 
 # Get grid square from config
 GRID="EM38ww"  # Default

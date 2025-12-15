@@ -47,6 +47,7 @@ from .wwvh_discrimination import WWVHDiscriminator
 from .wwv_test_signal import WWVTestSignalDetector
 from .discrimination_csv_writers import DiscriminationCSVWriters
 from .phase2_analytics_service import Phase2AnalyticsService
+
 # Supporting components
 from .wwv_geographic_predictor import WWVGeographicPredictor
 from .standard_signal_generator import StandardTimeSignalGenerator
@@ -92,7 +93,7 @@ from .primary_time_standard import (
 )
 from .time_standard_csv_writer import TimeStandardCSVWriter, TimeStandardSummaryWriter
 
-# Three-Phase Pipeline (New Architecture)
+# Pipeline
 from .pipeline_recorder import (
     PipelineRecorder,
     PipelineRecorderConfig,

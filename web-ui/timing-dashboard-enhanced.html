@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Timing Analysis Dashboard - GRAPE Signal Recorder</title>
+    <title>Timing Analysis Dashboard - hf-timestd</title>
     <link rel="stylesheet" href="/styles.css">
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script>
-        window.GRAPE_CURRENT_PAGE = 'timing';
+        window.TIMESTD_CURRENT_PAGE = 'timing';
     </script>
     <style>
         * {
@@ -803,7 +803,7 @@
 <body>
     <div class="container">
         <!-- Unified Navigation -->
-        <div id="grape-navigation"></div>
+        <div id="timestd-navigation"></div>
 
         <div class="header">
         <h1>⏱️ Timing Analysis Dashboard</h1>
@@ -887,7 +887,7 @@
             
             // Extract channel names for chart dropdowns from phase2 status
             if (phase2Status.channels) {
-                availableChannels = window.GRAPE_UTILS.sortChannelsByFrequency(
+                availableChannels = window.TIMESTD_UTILS.sortChannelsByFrequency(
                     Object.keys(phase2Status.channels)
                 );
             }
@@ -1307,14 +1307,14 @@
                 ? `±${rmsOffset.toFixed(3)} ms`
                 : '—';
             
-            // Get GRAPE fusion offset for comparison
-            let grapeOffset = '—';
+            // Get fused offset for comparison
+            let fusedOffset = '—';
             let deltaStr = '—';
             if (fusionData && fusionData.status === 'active' && fusionData.latest) {
-                const grapeMs = fusionData.latest.d_clock_fused_ms;
-                grapeOffset = `${grapeMs >= 0 ? '+' : ''}${grapeMs.toFixed(3)} ms`;
+                const fusedMs = fusionData.latest.d_clock_fused_ms;
+                fusedOffset = `${fusedMs >= 0 ? '+' : ''}${fusedMs.toFixed(3)} ms`;
                 if (lastOffset !== undefined) {
-                    const delta = grapeMs - lastOffset;
+                    const delta = fusedMs - lastOffset;
                     deltaStr = `${delta >= 0 ? '+' : ''}${delta.toFixed(3)} ms`;
                 }
             }
@@ -1341,12 +1341,12 @@
                                 <div style="font-size: 10px; color: #94a3b8; text-transform: uppercase;">RMS Range</div>
                             </div>
                             <div style="border-left: 1px solid #334155; padding-left: 20px;">
-                                <div style="font-size: 20px; font-weight: 600; color: #10b981; font-family: monospace;">${grapeOffset}</div>
-                                <div style="font-size: 10px; color: #94a3b8; text-transform: uppercase;">GRAPE Fusion</div>
+                                <div style="font-size: 20px; font-weight: 600; color: #10b981; font-family: monospace;">${fusedOffset}</div>
+                                <div style="font-size: 10px; color: #94a3b8; text-transform: uppercase;">Fused Offset</div>
                             </div>
                             <div>
                                 <div style="font-size: 20px; font-weight: 600; color: #f59e0b; font-family: monospace;">${deltaStr}</div>
-                                <div style="font-size: 10px; color: #94a3b8; text-transform: uppercase;">Δ (GRAPE−NTP)</div>
+                                <div style="font-size: 10px; color: #94a3b8; text-transform: uppercase;">Δ (Fused−NTP)</div>
                             </div>
                         </div>
                     </div>
@@ -1997,7 +1997,7 @@
         
         function renderChannelTable(data, phase2Status) {
             // Sort channels by frequency
-            const sortedChannels = window.GRAPE_UTILS.sortByChannelFrequency(data.channels, 'channel');
+            const sortedChannels = window.TIMESTD_UTILS.sortByChannelFrequency(data.channels, 'channel');
             const gradeColors = { 'A': '#22c55e', 'B': '#3b82f6', 'C': '#eab308', 'D': '#f97316', 'X': '#ef4444' };
             
             const rows = sortedChannels.map(ch => {

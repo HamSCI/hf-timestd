@@ -15,7 +15,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-DATA_ROOT="${1:-/tmp/grape-test}"
+DATA_ROOT="${1:-/tmp/timestd-test}"
 CHANNEL="WWV_10_MHz"
 TODAY=$(date -u +%Y%m%d)
 

@@ -27,7 +27,7 @@ Example Improvement:
 
 Usage:
 ------
-    coordinator = StationLockCoordinator(data_root='/tmp/grape-test')
+    coordinator = StationLockCoordinator(data_root='/tmp/timestd-test')
     
     # Process a minute across all channels
     results = coordinator.process_minute(minute_utc)

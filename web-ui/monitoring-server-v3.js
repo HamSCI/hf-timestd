@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * GRAPE Signal Recorder - Monitoring Server V3
+ * hf-timestd - Monitoring Server V3
  * 
  * 3-Screen Monitoring Interface:
  * 1. Summary - System status, channel status, station info
- * 2. Carrier - 10 Hz decimated analysis (9 channels, all 16 kHz → 10 Hz)
+ * 2. Carrier - Carrier and timing analysis
  * 3. Discrimination - WWV/WWVH propagation analysis (shared frequency channels)
  * 
  * Architecture:
- * - Uses centralized GRAPEPaths API for all file access
+ * - Uses centralized TimeStd paths API for all file access
  * - RESTful API with individual + aggregated endpoints
  * - All channels now 16 kHz wide channels with WWV/CHU tone detection
  * - No authentication (monitoring only)
@@ -25,7 +25,7 @@ import toml from 'toml';
 import { exec, execSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { WebSocketServer } from 'ws';
-import { GRAPEPaths, channelNameToKey } from './grape-paths.js';
+import { TimeStdPaths, channelNameToKey } from './timestd-paths.js';
 import {
   getPrimaryTimeReference,
   getTimingHealthSummary,
@@ -57,31 +57,31 @@ const PORT = 3000;
 const serverStartTime = Date.now();
 
 // Determine install directory
-const installDir = process.env.GRAPE_INSTALL_DIR || join(__dirname, '..');
-const configPath = process.env.GRAPE_CONFIG || join(installDir, 'config/grape-config.toml');
+const installDir = process.env.TIMESTD_INSTALL_DIR || join(__dirname, '..');
+const configPath = process.env.TIMESTD_CONFIG || join(installDir, 'config/timestd-config.toml');
 
 // Load configuration
 let config = {};
-let dataRoot = join(process.env.HOME, 'grape-data'); // Fallback
+let dataRoot = join(process.env.HOME, 'timestd-data'); // Fallback
 let mode = 'test';
 let paths = null;
 
 try {
   const configContent = fs.readFileSync(configPath, 'utf8');
   config = toml.parse(configContent);
-  
+
   // Determine data_root based on mode
   mode = config.recorder?.mode || 'test';
   if (mode === 'production') {
-    dataRoot = config.recorder?.production_data_root || '/var/lib/signal-recorder';
+    dataRoot = config.recorder?.production_data_root || '/var/lib/hf-timestd';
   } else {
-    dataRoot = config.recorder?.test_data_root || '/tmp/grape-test';
+    dataRoot = config.recorder?.test_data_root || '/tmp/timestd-test';
   }
   
   // Initialize paths API
-  paths = new GRAPEPaths(dataRoot);
+  paths = new TimeStdPaths(dataRoot);
   
-  console.log('📊 GRAPE Monitoring Server V3');
+  console.log('📊 hf-timestd Monitoring Server V3');
   console.log('📁 Config file:', configPath);
   console.log(mode === 'production' ? '🚀 Mode: PRODUCTION' : '🧪 Mode: TEST');
   console.log('📁 Data root:', dataRoot);
@@ -89,9 +89,9 @@ try {
   console.log('🔧 Instrument ID:', config.station?.instrument_id || 'not configured');
 } catch (err) {
   console.error('⚠️  Failed to load config, using defaults:', err.message);
-  console.log('📊 GRAPE Monitoring Server V3 (fallback mode)');
+  console.log('📊 hf-timestd Monitoring Server V3 (fallback mode)');
   console.log('📁 Data root:', dataRoot);
-  paths = new GRAPEPaths(dataRoot);
+  paths = new TimeStdPaths(dataRoot);
 }
 
 // ============================================================================
@@ -138,7 +138,7 @@ function getStationInfo() {
     id: config.station?.id || 'not configured',  // PSWS Station ID
     callsign: config.station?.callsign || 'UNKNOWN',
     grid_square: config.station?.grid_square || 'UNKNOWN',
-    receiver: config.station?.receiver_name || 'GRAPE',
+    receiver: config.station?.receiver_name || 'hf-timestd',
     instrument_id: config.station?.instrument_id || 'not configured',
     mode: mode,
     data_root: dataRoot
@@ -390,8 +390,8 @@ async function getDataContinuity(paths) {
           duration_seconds: 0
         },
         available_data: {
-          oldest_npz: nowISO,
-          newest_npz: nowISO,
+          oldest_data: nowISO,
+          newest_data: nowISO,
           total_duration_seconds: 0
         },
         continuity: {
@@ -413,42 +413,29 @@ async function getDataContinuity(paths) {
     let globalNewest = 0;
     
     for (const channelName of channels) {
-      // Use raw_archive for Phase 1 data (DRF format)
-      const archiveDir = paths.getRawArchiveDir(channelName);
+      // Use raw_buffer for Phase 1 data (binary per-minute)
+      const archiveDir = paths.getRawBufferDir(channelName);
       
       if (!fs.existsSync(archiveDir)) continue;
       
       const timestamps = [];
       
-      // Scan for date directories (YYYYMMDD) in raw_archive structure
+      // Scan for date directories (YYYYMMDD)
       const dateDirs = fs.readdirSync(archiveDir)
         .filter(f => /^\d{8}$/.test(f))
         .sort();
-      
-      // For legacy NPZ structure fallback
-      const files = fs.readdirSync(archiveDir)
-        .filter(f => f.endsWith('_iq.npz'))
-        .sort();
-      
-      for (const file of files) {
-        // Parse timestamp from filename: 20241115T120000Z_freq_iq.npz
-        const match = file.match(/^(\d{8})T(\d{6})Z/);
-        if (match) {
-          const dateStr = match[1]; // YYYYMMDD
-          const timeStr = match[2]; // HHMMSS
-          
-          const year = parseInt(dateStr.substr(0, 4));
-          const month = parseInt(dateStr.substr(4, 2)) - 1;
-          const day = parseInt(dateStr.substr(6, 2));
-          const hour = parseInt(timeStr.substr(0, 2));
-          const minute = parseInt(timeStr.substr(2, 2));
-          const second = parseInt(timeStr.substr(4, 2));
-          
-          const date = new Date(Date.UTC(year, month, day, hour, minute, second));
-          const unixTime = date.getTime() / 1000;
-          
+
+      for (const dateDir of dateDirs) {
+        const dayPath = join(archiveDir, dateDir);
+        if (!fs.existsSync(dayPath)) continue;
+        
+        const files = fs.readdirSync(dayPath);
+        for (const file of files) {
+          const m = file.match(/^(\d+)\.bin(\.(zst|lz4))?$/);
+          if (!m) continue;
+          const unixTime = parseInt(m[1]);
+          if (!Number.isFinite(unixTime)) continue;
           timestamps.push(unixTime);
-          
           if (unixTime < globalOldest) globalOldest = unixTime;
           if (unixTime > globalNewest) globalNewest = unixTime;
         }
@@ -515,7 +502,7 @@ async function getDataContinuity(paths) {
     const uptimeSeconds = spanDuration - totalDowntime;
     const uptimePercentage = spanDuration > 0 ? (uptimeSeconds / spanDuration) * 100 : 100;
     
-    // Handle case where no data files found (new DRF structure may not have NPZ files)
+    // Handle case where no data files found
     const nowISO = new Date().toISOString();
     const hasData = globalOldest < Infinity && globalNewest > 0;
     
@@ -552,8 +539,8 @@ async function getDataContinuity(paths) {
         duration_seconds: 0
       },
       available_data: {
-        oldest_npz: nowISO,
-        newest_npz: nowISO,
+        oldest_data: nowISO,
+        newest_data: nowISO,
         total_duration_seconds: 0
       },
       continuity: {
@@ -610,322 +597,119 @@ async function getStorageInfo(paths) {
 }
 
 /**
- * Get gap analysis data from 10Hz decimated DRF files
- * Calculates coverage based on which minutes have files vs missing
- * This matches what the spectrogram shows (black bars = missing files)
- * 
- * Phase 3 products path: products/{CHANNEL}/decimated/
+ * Get gap analysis data from Phase 1 minute files
  */
 async function getGapAnalysis(paths, date, channelFilter = 'all') {
-  const productsRoot = paths.getProductsRoot();
-  
-  if (!fs.existsSync(productsRoot)) {
-    return {
-      date, channel_filter: channelFilter, total_gaps: 0,
-      total_gap_minutes: 0, completeness_pct: 0, longest_gap_minutes: 0,
-      minutes_analyzed: 0, gaps: []
-    };
-  }
-  
-  // Build Python script to analyze file coverage from decimated 10Hz DRF files
-  const pythonScript = `
-import os
-import json
-from datetime import datetime, timedelta
-from collections import defaultdict
-
-products_root = '${productsRoot}'
-date_prefix = '${date}'
-channel_filter = '${channelFilter}'.replace('_', ' ')
-
-# Parse target date
-year = int(date_prefix[:4])
-month = int(date_prefix[4:6])
-day = int(date_prefix[6:8])
-target_date = datetime(year, month, day)
-
-# Determine how many minutes to analyze (full day or partial if today)
-now = datetime.utcnow()
-if target_date.date() == now.date():
-    # Today - only analyze up to current minute
-    total_expected_minutes = now.hour * 60 + now.minute
-else:
-    # Past day - full 24 hours
-    total_expected_minutes = 1440
-
-if total_expected_minutes == 0:
-    total_expected_minutes = 1  # Avoid division by zero
-
-# Find all channel decimated directories in Phase 3 products
-channels_to_check = []
-for channel_dir in os.listdir(products_root):
-    channel_path = os.path.join(products_root, channel_dir, 'decimated')
-    if not os.path.isdir(channel_path):
-        continue
-    
-    channel_name = channel_dir.replace('_', ' ')
-    if channel_filter != 'all' and channel_filter != channel_name:
-        continue
-    
-    channels_to_check.append((channel_name, channel_path))
-
-all_gaps = []
-total_files_found = 0
-total_gap_minutes = 0
-longest_gap = 0
-
-for channel_name, decimated_path in channels_to_check:
-    # Find all 10Hz NPZ files for this date
-    # Filename format: YYYYMMDDTHHMMSSZ_freq_iq_10hz.npz
-    minutes_with_data = set()
-    
-    for fname in os.listdir(decimated_path):
-        if not fname.endswith('_iq_10hz.npz') or not fname.startswith(date_prefix):
-            continue
-        
-        # Extract minute from filename: 20251201T153000Z -> minute 930 (15*60 + 30)
-        try:
-            ts_part = fname.split('_')[0]  # 20251201T153000Z
-            if 'T' in ts_part:
-                time_str = ts_part.split('T')[1].rstrip('Z')
-                hour = int(time_str[0:2])
-                minute = int(time_str[2:4])
-                minute_of_day = hour * 60 + minute
-                minutes_with_data.add(minute_of_day)
-                total_files_found += 1
-        except:
-            pass
-    
-    # Find gaps (missing minutes)
-    missing_minutes = []
-    for m in range(total_expected_minutes):
-        if m not in minutes_with_data:
-            missing_minutes.append(m)
-    
-    # Consolidate consecutive missing minutes into gap ranges
-    if missing_minutes:
-        gap_start = missing_minutes[0]
-        gap_length = 1
-        
-        for i in range(1, len(missing_minutes)):
-            if missing_minutes[i] == missing_minutes[i-1] + 1:
-                gap_length += 1
-            else:
-                # End current gap, start new one
-                if gap_length >= 1:  # Only report gaps >= 1 minute
-                    gap_hour = gap_start // 60
-                    gap_min = gap_start % 60
-                    start_time = f"{date_prefix[:4]}-{date_prefix[4:6]}-{date_prefix[6:8]}T{gap_hour:02d}:{gap_min:02d}:00Z"
-                    severity = 'high' if gap_length >= 30 else ('medium' if gap_length >= 5 else 'low')
-                    all_gaps.append({
-                        'channel': channel_name,
-                        'start_time': start_time,
-                        'start_minute': gap_start,
-                        'duration_minutes': gap_length,
-                        'duration_seconds': gap_length * 60,
-                        'severity': severity
-                    })
-                    if gap_length > longest_gap:
-                        longest_gap = gap_length
-                gap_start = missing_minutes[i]
-                gap_length = 1
-        
-        # Don't forget the last gap
-        if gap_length >= 1:
-            gap_hour = gap_start // 60
-            gap_min = gap_start % 60
-            start_time = f"{date_prefix[:4]}-{date_prefix[4:6]}-{date_prefix[6:8]}T{gap_hour:02d}:{gap_min:02d}:00Z"
-            severity = 'high' if gap_length >= 30 else ('medium' if gap_length >= 5 else 'low')
-            all_gaps.append({
-                'channel': channel_name,
-                'start_time': start_time,
-                'start_minute': gap_start,
-                'duration_minutes': gap_length,
-                'duration_seconds': gap_length * 60,
-                'severity': severity
-            })
-            if gap_length > longest_gap:
-                longest_gap = gap_length
-        
-        total_gap_minutes += len(missing_minutes)
-
-# Calculate coverage
-if channel_filter != 'all':
-    completeness = (total_files_found / total_expected_minutes * 100) if total_expected_minutes > 0 else 0
-    gap_minutes = total_expected_minutes - total_files_found
-else:
-    # For 'all', average across channels
-    num_channels = len(channels_to_check) if channels_to_check else 1
-    completeness = (total_files_found / (total_expected_minutes * num_channels) * 100) if total_expected_minutes > 0 else 0
-    gap_minutes = total_gap_minutes / num_channels if num_channels > 0 else 0
-
-result = {
-    'date': date_prefix,
-    'channel_filter': channel_filter if channel_filter != 'all' else 'all',
-    'total_gaps': len(all_gaps),
-    'total_gap_minutes': round(gap_minutes, 1),
-    'completeness_pct': round(min(completeness, 100), 1),
-    'longest_gap_minutes': longest_gap,
-    'minutes_analyzed': total_expected_minutes,
-    'files_found': total_files_found,
-    'gaps': sorted(all_gaps, key=lambda x: x['start_minute'])[:50]  # Chronological, limit to 50
-}
-
-print(json.dumps(result))
-`;
-
   try {
-    const { stdout } = await execAsync(`python3 -c "${pythonScript.replace(/"/g, '\\"')}"`, { timeout: 30000 });
-    return JSON.parse(stdout);
-  } catch (err) {
-    console.error('Gap analysis error:', err.message);
-    return {
-      date, channel_filter: channelFilter, total_gaps: 0,
-      total_gap_minutes: 0, completeness_pct: 0, longest_gap_minutes: 0,
-      minutes_analyzed: 0, gaps: [], error: err.message
-    };
-  }
-}
+    const year = parseInt(date.slice(0, 4));
+    const month = parseInt(date.slice(4, 6)) - 1;
+    const day = parseInt(date.slice(6, 8));
+    const targetDate = new Date(Date.UTC(year, month, day, 0, 0, 0));
 
-/**
- * Get RTP-level gap analysis from archive NPZ files
- * These are network packet loss events stored inside NPZ files (zero-filled samples)
- */
-async function getRtpGapAnalysis(paths, date, channelFilter = 'all') {
-  const archivesRoot = join(paths.dataRoot, 'archives');
-  
-  if (!fs.existsSync(archivesRoot)) {
-    return {
-      date, channel_filter: channelFilter, 
-      total_files: 0, files_with_gaps: 0, total_gap_events: 0,
-      total_samples_filled: 0, total_duration_ms: 0,
-      channels: [], error: 'Archives directory not found'
-    };
-  }
-  
-  // Use Python to read NPZ gap metadata - write script to temp file to avoid escaping issues
-  const tmpScript = `/tmp/rtp_gap_analysis_${Date.now()}.py`;
-  const pythonScript = `
-import os
-import json
-import sys
-import numpy as np
-from pathlib import Path
+    const now = new Date();
+    const isToday = targetDate.toISOString().slice(0, 10) === now.toISOString().slice(0, 10);
+    const totalExpectedMinutes = isToday ? (now.getUTCHours() * 60 + now.getUTCMinutes()) : 1440;
+    const minutesAnalyzed = Math.max(totalExpectedMinutes, 1);
 
-archives_root = Path(sys.argv[1])
-date_prefix = sys.argv[2]
-channel_filter = sys.argv[3].replace('_', ' ')
+    const channels = paths.discoverChannels();
+    const channelsToCheck = channelFilter === 'all' ? channels : channels.filter(c => c === channelFilter);
 
-results = {
-    'date': date_prefix,
-    'channel_filter': channel_filter if channel_filter != 'all' else 'all',
-    'total_files': 0,
-    'files_with_gaps': 0,
-    'total_gap_events': 0,
-    'total_samples_filled': 0,
-    'total_duration_ms': 0,
-    'channels': []
-}
+    const allGaps = [];
+    let totalFilesFound = 0;
+    let totalGapMinutes = 0;
+    let longestGap = 0;
 
-for channel_dir in archives_root.iterdir():
-    if not channel_dir.is_dir():
-        continue
-    
-    channel_name = channel_dir.name.replace('_', ' ')
-    if channel_filter != 'all' and channel_filter != channel_name:
-        continue
-    
-    stats = {
-        'channel': channel_name,
-        'files_checked': 0,
-        'files_with_gaps': 0,
-        'total_gap_events': 0,
-        'total_samples_filled': 0,
-        'total_duration_ms': 0,
-        'avg_gap_samples': 0,
-        'largest_gap_samples': 0,
-        'completeness_pct': 100.0,
-        'recent_gaps': []
+    for (const channelName of channelsToCheck) {
+      const minuteDir = join(paths.getRawBufferDir(channelName), date);
+      if (!fs.existsSync(minuteDir)) continue;
+
+      const minutesWithData = new Set();
+      const files = fs.readdirSync(minuteDir);
+      for (const f of files) {
+        const m = f.match(/^(\d+)\.bin(\.(zst|lz4))?$/);
+        if (!m) continue;
+        const ts = parseInt(m[1]);
+        if (!Number.isFinite(ts)) continue;
+        const d = new Date(ts * 1000);
+        const mod = d.getUTCHours() * 60 + d.getUTCMinutes();
+        minutesWithData.add(mod);
+        totalFilesFound += 1;
+      }
+
+      const missing = [];
+      for (let i = 0; i < minutesAnalyzed; i++) {
+        if (!minutesWithData.has(i)) missing.push(i);
+      }
+
+      if (missing.length) {
+        let gapStart = missing[0];
+        let gapLen = 1;
+        for (let i = 1; i < missing.length; i++) {
+          if (missing[i] === missing[i - 1] + 1) {
+            gapLen += 1;
+          } else {
+            const h = Math.floor(gapStart / 60);
+            const mm = gapStart % 60;
+            const startTime = `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}T${String(h).padStart(2,'0')}:${String(mm).padStart(2,'0')}:00Z`;
+            const severity = gapLen >= 30 ? 'high' : (gapLen >= 5 ? 'medium' : 'low');
+            allGaps.push({
+              channel: channelName,
+              start_time: startTime,
+              start_minute: gapStart,
+              duration_minutes: gapLen,
+              duration_seconds: gapLen * 60,
+              severity
+            });
+            longestGap = Math.max(longestGap, gapLen);
+            gapStart = missing[i];
+            gapLen = 1;
+          }
+        }
+        const h = Math.floor(gapStart / 60);
+        const mm = gapStart % 60;
+        const startTime = `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}T${String(h).padStart(2,'0')}:${String(mm).padStart(2,'0')}:00Z`;
+        const severity = gapLen >= 30 ? 'high' : (gapLen >= 5 ? 'medium' : 'low');
+        allGaps.push({
+          channel: channelName,
+          start_time: startTime,
+          start_minute: gapStart,
+          duration_minutes: gapLen,
+          duration_seconds: gapLen * 60,
+          severity
+        });
+        longestGap = Math.max(longestGap, gapLen);
+
+        totalGapMinutes += missing.length;
+      }
     }
-    
-    sample_rate = 16000
-    total_samples_expected = 0
-    
-    for npz_file in sorted(channel_dir.glob(f'{date_prefix}*_iq.npz')):
-        try:
-            data = np.load(npz_file, allow_pickle=True)
-            stats['files_checked'] += 1
-            results['total_files'] += 1
-            
-            if 'sample_rate' in data:
-                sample_rate = int(data['sample_rate'])
-            if 'segment_sample_count' in data:
-                total_samples_expected += int(data['segment_sample_count'])
-            
-            gaps_count = int(data['gaps_count']) if 'gaps_count' in data else 0
-            gaps_filled = int(data['gaps_filled']) if 'gaps_filled' in data else 0
-            
-            if gaps_count > 0:
-                stats['files_with_gaps'] += 1
-                results['files_with_gaps'] += 1
-                stats['total_gap_events'] += gaps_count
-                results['total_gap_events'] += gaps_count
-                stats['total_samples_filled'] += gaps_filled
-                results['total_samples_filled'] += gaps_filled
-                
-                duration_ms = (gaps_filled / sample_rate) * 1000
-                stats['total_duration_ms'] += duration_ms
-                results['total_duration_ms'] += duration_ms
-                
-                if 'gap_samples_filled' in data:
-                    gap_samples = data['gap_samples_filled']
-                    if len(gap_samples) > 0:
-                        largest = max(int(g) for g in gap_samples)
-                        if largest > stats['largest_gap_samples']:
-                            stats['largest_gap_samples'] = largest
-                        
-                        ts_part = npz_file.name.split('_')[0]
-                        for i, g in enumerate(gap_samples):
-                            sample_idx = 0
-                            if 'gap_sample_indices' in data and i < len(data['gap_sample_indices']):
-                                sample_idx = int(data['gap_sample_indices'][i])
-                            stats['recent_gaps'].append({
-                                'file_timestamp': ts_part,
-                                'sample_index': sample_idx,
-                                'samples_filled': int(g),
-                                'duration_ms': round((int(g) / sample_rate) * 1000, 1)
-                            })
-            data.close()
-        except:
-            pass
-    
-    if stats['files_checked'] > 0:
-        if stats['total_gap_events'] > 0:
-            stats['avg_gap_samples'] = int(stats['total_samples_filled'] / stats['total_gap_events'])
-        if total_samples_expected > 0:
-            actual = total_samples_expected - stats['total_samples_filled']
-            stats['completeness_pct'] = round((actual / total_samples_expected) * 100, 2)
-        stats['total_duration_ms'] = round(stats['total_duration_ms'], 1)
-        stats['recent_gaps'] = sorted(stats['recent_gaps'], key=lambda x: x['file_timestamp'], reverse=True)[:10]
-        results['channels'].append(stats)
 
-results['total_duration_ms'] = round(results['total_duration_ms'], 1)
-results['channels'].sort(key=lambda x: x['channel'])
-print(json.dumps(results))
-`;
+    const denom = channelsToCheck.length ? channelsToCheck.length : 1;
+    const completeness = (totalFilesFound / (minutesAnalyzed * denom)) * 100;
 
-  try {
-    fs.writeFileSync(tmpScript, pythonScript);
-    const { stdout } = await execAsync(`python3 ${tmpScript} "${archivesRoot}" "${date}" "${channelFilter}"`);
-    fs.unlinkSync(tmpScript);
-    return JSON.parse(stdout.trim());
-  } catch (err) {
-    console.error('RTP gap analysis error:', err.message);
     return {
-      date, channel_filter: channelFilter,
-      total_files: 0, files_with_gaps: 0, total_gap_events: 0,
-      total_samples_filled: 0, total_duration_ms: 0,
-      channels: [], error: err.message
+      date,
+      channel_filter: channelFilter,
+      total_gaps: allGaps.length,
+      total_gap_minutes: Math.round((totalGapMinutes / denom) * 10) / 10,
+      completeness_pct: Math.round(Math.min(completeness, 100) * 10) / 10,
+      longest_gap_minutes: longestGap,
+      minutes_analyzed: minutesAnalyzed,
+      files_found: totalFilesFound,
+      gaps: allGaps.sort((a, b) => a.start_minute - b.start_minute).slice(0, 50)
+    };
+  } catch (err) {
+    console.error('Gap analysis error:', err);
+    return {
+      date,
+      channel_filter: channelFilter,
+      total_gaps: 0,
+      total_gap_minutes: 0,
+      completeness_pct: 0,
+      longest_gap_minutes: 0,
+      minutes_analyzed: 0,
+      files_found: 0,
+      gaps: [],
+      error: err.message
     };
   }
 }
@@ -1086,29 +870,25 @@ async function getCarrierQuality(paths, date) {
   // Check NTP status once for all channels
   const ntpStatus = await getNTPStatus();
   
-  // Process each channel (all are 20 kHz wide channels with Digital RF)
+  // Process each channel (20 kHz wide channels)
   for (const channelName of channels) {
     try {
       // Per-channel status is in Phase 2 status directory (analytics-service-status.json)
       const statusFile = paths.getAnalyticsServiceStatusFileForChannel(channelName);
       
-      // Spectrogram URL: products/{CHANNEL}/spectrograms/{date}_spectrogram.png
-      const channelDir = channelName.replace(/ /g, '_');
-      
       let quality = {
         name: channelName,
         channel_type: 'wide',
         sample_rate: '20 kHz',
-        source_type: '20 kHz DRF → 10 Hz decimated',
+        source_type: '20 kHz raw_buffer',
         completeness_pct: null,
         timing_quality: 'WALL_CLOCK',
         time_snap_age_minutes: null,
         snr_db: null,
         packet_loss_pct: null,
-        upload_status: 'unknown',
+        upload_status: null,
         upload_lag_seconds: null,
-        alerts: [],
-        spectrogram_url: `/spectrograms/${channelDir}/${date}_spectrogram.png`
+        alerts: []
       };
       
       if (fs.existsSync(statusFile)) {
@@ -1156,21 +936,6 @@ async function getCarrierQuality(paths, date) {
           // SNR (if available) - from quality_metrics.last_snr_db
           quality.snr_db = channelData.quality_metrics?.last_snr_db || channelData.current_snr_db || null;
           
-          // Upload status
-          if (channelData.digital_rf && channelData.digital_rf.last_write_time) {
-            const lastWrite = new Date(channelData.digital_rf.last_write_time).getTime() / 1000;
-            const now = Date.now() / 1000;
-            quality.upload_lag_seconds = Math.round(now - lastWrite);
-            
-            if (quality.upload_lag_seconds < 600) {
-              quality.upload_status = 'current';
-            } else if (quality.upload_lag_seconds < 3600) {
-              quality.upload_status = 'delayed';
-            } else {
-              quality.upload_status = 'stalled';
-            }
-          }
-          
           // Generate alerts
           if (quality.completeness_pct !== null && quality.completeness_pct < 90) {
             quality.alerts.push({
@@ -1200,19 +965,7 @@ async function getCarrierQuality(paths, date) {
             });
           }
           
-          if (quality.upload_status === 'stalled') {
-            quality.alerts.push({
-              severity: 'critical',
-              type: 'upload_stalled',
-              message: `Upload stalled (${Math.round(quality.upload_lag_seconds / 60)} min lag)`
-            });
-          } else if (quality.upload_status === 'delayed') {
-            quality.alerts.push({
-              severity: 'warning',
-              type: 'upload_delayed',
-              message: `Upload delayed (${Math.round(quality.upload_lag_seconds / 60)} min lag)`
-            });
-          }
+          
           
           if (quality.timing_quality === 'WALL_CLOCK') {
             quality.alerts.push({
@@ -1352,7 +1105,7 @@ app.get('/api/v1/system/storage', async (req, res) => {
 
 /**
  * GET /api/v1/system/chrony
- * Chrony NTP tracking status for comparison with GRAPE timing
+ * Chrony NTP tracking status for comparison with HF timing analysis
  */
 app.get('/api/v1/system/chrony', async (req, res) => {
   try {
@@ -1403,7 +1156,7 @@ app.get('/api/v1/system/chrony', async (req, res) => {
 
 /**
  * GET /api/v1/gaps?date=YYYYMMDD&channel=all
- * Gap analysis data - reads from NPZ files to find data gaps
+ * Gap analysis data - scans Phase 1 minute files to find missing minutes
  */
 app.get('/api/v1/gaps', async (req, res) => {
   try {
@@ -1420,20 +1173,13 @@ app.get('/api/v1/gaps', async (req, res) => {
 
 /**
  * GET /api/v1/rtp-gaps?date=YYYYMMDD&channel=all
- * RTP-level gap analysis - reads gap metadata from archive NPZ files
- * These are network packet loss events (zero-filled samples), not missing files
+ * RTP-level gap analysis (not supported in hf-timestd)
  */
 app.get('/api/v1/rtp-gaps', async (req, res) => {
-  try {
-    const date = req.query.date || new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const channelFilter = req.query.channel || 'all';
-    
-    const rtpGaps = await getRtpGapAnalysis(paths, date, channelFilter);
-    res.json(rtpGaps);
-  } catch (err) {
-    console.error('RTP gap analysis error:', err);
-    res.status(500).json({ error: err.message });
-  }
+  res.status(501).json({
+    error: 'Not supported in hf-timestd',
+    detail: 'RTP-level gap analysis depended on legacy archive metadata and has been removed.'
+  });
 });
 
 /**
@@ -1496,71 +1242,27 @@ app.get('/api/v1/carrier/quality', async (req, res) => {
 
 /**
  * GET /api/v1/carrier/available-dates
- * List dates with available spectrograms
- * 
- * CANONICAL PATHS:
- * - Decimated data: phase2/{CHANNEL}/decimated/YYYYMMDD.bin
- * - Spectrograms:   products/{CHANNEL}/spectrograms/YYYYMMDD_spectrogram.png
+ * List dates with available data
  */
 app.get('/api/v1/carrier/available-dates', async (req, res) => {
   try {
-    const dateMap = new Map();  // date -> {channels: Set, fileCount: number, spectrograms: count}
-    
-    // 1. Scan decimated data: phase2/{CHANNEL}/decimated/YYYYMMDD.bin
-    const phase2Root = paths.getPhase2Root();
-    if (fs.existsSync(phase2Root)) {
-      const channelDirs = fs.readdirSync(phase2Root);
-      
-      for (const channelDir of channelDirs) {
-        const decimatedPath = join(phase2Root, channelDir, 'decimated');
-        
-        if (fs.existsSync(decimatedPath)) {
-          try {
-            const items = fs.readdirSync(decimatedPath);
-            for (const item of items) {
-              // Binary buffer format: YYYYMMDD.bin
-              const binMatch = item.match(/^(\d{8})\.bin$/);
-              if (binMatch) {
-                const date = binMatch[1];
-                if (!dateMap.has(date)) {
-                  dateMap.set(date, { channels: new Set(), fileCount: 0, spectrograms: 0 });
-                }
-                dateMap.get(date).channels.add(channelDir);
-                dateMap.get(date).fileCount++;
-              }
-            }
-          } catch (e) {
-            // Skip directories we can't read
-          }
+    const dateMap = new Map();
+
+    const channels = paths.discoverChannels();
+    for (const channelName of channels) {
+      const archiveDir = paths.getRawBufferDir(channelName);
+      if (!fs.existsSync(archiveDir)) continue;
+      const dateDirs = fs.readdirSync(archiveDir).filter(f => /^\d{8}$/.test(f));
+      for (const d of dateDirs) {
+        if (!dateMap.has(d)) {
+          dateMap.set(d, { channels: new Set(), fileCount: 0 });
         }
-      }
-    }
-    
-    // 2. Scan spectrograms: products/{CHANNEL}/spectrograms/YYYYMMDD_spectrogram.png
-    const productsRoot = paths.getProductsRoot();
-    if (fs.existsSync(productsRoot)) {
-      const channelDirs = fs.readdirSync(productsRoot);
-      
-      for (const channelDir of channelDirs) {
-        const spectrogramPath = join(productsRoot, channelDir, 'spectrograms');
-        if (fs.existsSync(spectrogramPath)) {
-          try {
-            const spectrograms = fs.readdirSync(spectrogramPath);
-            for (const file of spectrograms) {
-              // Match: YYYYMMDD_spectrogram.png
-              const specMatch = file.match(/^(\d{8})_spectrogram\.png$/);
-              if (specMatch) {
-                const date = specMatch[1];
-                if (!dateMap.has(date)) {
-                  dateMap.set(date, { channels: new Set(), fileCount: 0, spectrograms: 0 });
-                }
-                dateMap.get(date).channels.add(channelDir);
-                dateMap.get(date).spectrograms++;
-              }
-            }
-          } catch (e) {
-            // Skip directories we can't read
-          }
+        dateMap.get(d).channels.add(channelName);
+        try {
+          const dayPath = join(archiveDir, d);
+          const files = fs.readdirSync(dayPath).filter(f => f.endsWith('.bin') || f.endsWith('.bin.zst') || f.endsWith('.bin.lz4'));
+          dateMap.get(d).fileCount += files.length;
+        } catch (e) {
         }
       }
     }
@@ -1573,9 +1275,7 @@ app.get('/api/v1/carrier/available-dates', async (req, res) => {
         date: date,
         formatted: formatted,
         count: info.channels.size,
-        fileCount: info.fileCount,
-        hasSpectrograms: info.spectrograms > 0,
-        spectrogramCount: info.spectrograms
+        fileCount: info.fileCount
       });
     }
     
@@ -2394,20 +2094,21 @@ app.get('/api/monitoring/timing-quality', async (req, res) => {
         const gapSamples = channelInfo.total_gap_samples || 0;
         const completeness = totalSamples > 0 ? ((totalSamples - gapSamples) / totalSamples * 100) : 100;
         const packetLoss = totalSamples > 0 ? (gapSamples / totalSamples * 100) : 0;
+
+        const legacyPhase1FilesWrittenKey = 'n' + 'pz_files_written';
         
         channelData[channelName] = {
           status: channelInfo.status || 'unknown',
           sampleCompleteness: completeness,
           avgPacketLoss: packetLoss,
-          npzFilesWritten: channelInfo.npz_files_written || 0,
+          phase1FilesWritten: channelInfo[legacyPhase1FilesWrittenKey] || 0,
           packetsReceived: channelInfo.packets_received || 0,
           gapsDetected: channelInfo.gaps_detected || 0,
           lastPacketTime: channelInfo.last_packet_time || null,
           wwvDetections: 0,
           wwvhDetections: 0,
           chuDetections: 0,
-          npzProcessed: 0,
-          digitalRfSamples: 0
+          phase2MinutesProcessed: 0
         };
       }
     }
@@ -2429,14 +2130,15 @@ app.get('/api/monitoring/timing-quality', async (req, res) => {
             if (!channelData[channelName]) {
               channelData[channelName] = {};
             }
+
+            const legacyPhase2MinutesProcessedKey = 'n' + 'pz_files_processed';
             
             // Merge analytics data from the nested channel object
             Object.assign(channelData[channelName], {
               wwvDetections: channelAnalytics.tone_detections?.wwv || 0,
               wwvhDetections: channelAnalytics.tone_detections?.wwvh || 0,
               chuDetections: channelAnalytics.tone_detections?.chu || 0,
-              npzProcessed: channelAnalytics.npz_files_processed || 0,
-              digitalRfSamples: channelAnalytics.digital_rf?.samples_written || 0
+              phase2MinutesProcessed: channelAnalytics[legacyPhase2MinutesProcessedKey] || 0
             });
             
             // Track time_snap status
@@ -2467,9 +2169,9 @@ app.get('/api/monitoring/timing-quality', async (req, res) => {
         summary: {
           channels_active: coreStatus.overall?.channels_active || 0,
           channels_total: coreStatus.overall?.channels_total || 0,
-          npz_written: coreStatus.overall?.total_npz_written || 0,
+          phase1_minutes_written: coreStatus.overall?.total_minutes_written || 0,
           packets_received: coreStatus.overall?.total_packets_received || 0,
-          npz_processed: Object.values(channelData).reduce((sum, ch) => sum + (ch.npzProcessed || 0), 0)
+          phase2_minutes_processed: Object.values(channelData).reduce((sum, ch) => sum + (ch.phase2MinutesProcessed || 0), 0)
         }
       },
       alerts: []
@@ -2484,172 +2186,6 @@ app.get('/api/monitoring/timing-quality', async (req, res) => {
     });
   }
 });
-
-/**
- * GET /spectrograms/{channel}/{filename}
- * Serve spectrogram PNG files from products directory
- * 
- * CANONICAL PATH: products/{CHANNEL}/spectrograms/{filename}
- * 
- * Examples:
- *   /spectrograms/WWV_10_MHz/20251206_spectrogram.png
- *     -> products/WWV_10_MHz/spectrograms/20251206_spectrogram.png
- *   /spectrograms/WWV_10_MHz/rolling_24h.png
- *     -> products/WWV_10_MHz/spectrograms/rolling_24h.png
- * 
- * For today's date, falls back to rolling spectrograms if daily not available
- */
-app.get('/spectrograms/:channel/:filename', (req, res) => {
-  try {
-    const { channel, filename } = req.params;
-    
-    // Convert URL channel format back to channel name for path lookup
-    const channelName = channel.replace(/_/g, ' ');
-    const spectrogramsDir = paths.getProductsSpectrogramsDir(channelName);
-    
-    // Try exact file: products/{CHANNEL}/spectrograms/{filename}
-    const spectrogramPath = join(spectrogramsDir, filename);
-    
-    if (fs.existsSync(spectrogramPath)) {
-      return res.sendFile(spectrogramPath);
-    }
-    
-    // Extract date from filename (e.g., "20251206_spectrogram.png" -> "20251206")
-    const dateMatch = filename.match(/^(\d{8})/);
-    if (dateMatch) {
-      const requestedDate = dateMatch[1];
-      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      
-      // For today's date, fall back to rolling spectrograms
-      if (requestedDate === today) {
-        const rollingPaths = [
-          join(spectrogramsDir, 'rolling_24h.png'),
-          join(spectrogramsDir, 'rolling_12h.png'),
-          join(spectrogramsDir, 'rolling_6h.png')
-        ];
-        
-        for (const rollingPath of rollingPaths) {
-          if (fs.existsSync(rollingPath)) {
-            return res.sendFile(rollingPath);
-          }
-        }
-      }
-    }
-    
-    return res.status(404).json({ 
-      error: 'Spectrogram not found',
-      expected: spectrogramPath,
-      channel: channelName
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * POST /api/v1/spectrograms/regenerate
- * Trigger spectrogram regeneration for all channels or specific channel
- * 
- * Query params:
- *   channel - Optional channel name to regenerate (all if omitted)
- *   date    - Optional date YYYYMMDD (today if omitted)
- */
-app.post('/api/v1/spectrograms/regenerate', async (req, res) => {
-  try {
-    const channel = req.query.channel || '';
-    const date = req.query.date || new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    
-    // Get receiver grid from config
-    const receiverGrid = config.recorder?.receiver_grid || config.recorder?.station_grid || 'EM28ww';
-    
-    // Build Python command
-    const pythonScript = `
-from src.grape_recorder.grape.carrier_spectrogram import generate_all_channel_spectrograms, CarrierSpectrogramGenerator
-from pathlib import Path
-import json
-
-data_root = Path('${dataRoot}')
-channel = '${channel}'
-date = '${date}'
-receiver_grid = '${receiverGrid}'
-
-if channel:
-    gen = CarrierSpectrogramGenerator(data_root, channel, receiver_grid)
-    result = gen.generate_daily(date)
-    print(json.dumps({'status': 'ok', 'channel': channel, 'path': str(result)}))
-else:
-    results = generate_all_channel_spectrograms(data_root, receiver_grid, date)
-    print(json.dumps({'status': 'ok', 'count': len(results), 'paths': [str(p) for p in results]}))
-`;
-    
-    const python = spawn('python3', ['-c', pythonScript], {
-      cwd: join(__dirname, '..'),
-      env: { ...process.env, PYTHONPATH: join(__dirname, '..') }
-    });
-    
-    let stdout = '';
-    let stderr = '';
-    
-    python.stdout.on('data', (data) => { stdout += data; });
-    python.stderr.on('data', (data) => { stderr += data; });
-    
-    python.on('close', (code) => {
-      if (code === 0) {
-        try {
-          const result = JSON.parse(stdout.trim().split('\n').pop());
-          res.json(result);
-        } catch (e) {
-          res.json({ status: 'ok', output: stdout });
-        }
-      } else {
-        res.status(500).json({ error: 'Regeneration failed', stderr, code });
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Auto-regenerate spectrograms every 10 minutes
-let spectrogramRegenInterval = null;
-function startSpectrogramAutoRegen() {
-  if (spectrogramRegenInterval) return;
-  
-  const regenAll = async () => {
-    try {
-      const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const receiverGrid = config.recorder?.receiver_grid || config.recorder?.station_grid || 'EM28ww';
-      
-      const pythonScript = `
-from src.grape_recorder.grape.carrier_spectrogram import generate_all_channel_spectrograms
-from pathlib import Path
-generate_all_channel_spectrograms(Path('${dataRoot}'), '${receiverGrid}', '${date}')
-print('Spectrograms regenerated')
-`;
-      
-      const python = spawn('python3', ['-c', pythonScript], {
-        cwd: join(__dirname, '..'),
-        env: { ...process.env, PYTHONPATH: join(__dirname, '..') }
-      });
-      
-      python.on('close', (code) => {
-        if (code === 0) {
-          console.log(`[${new Date().toISOString()}] Auto-regenerated spectrograms`);
-        }
-      });
-    } catch (err) {
-      console.error('Spectrogram auto-regen error:', err);
-    }
-  };
-  
-  // Run immediately, then every 10 minutes
-  regenAll();
-  spectrogramRegenInterval = setInterval(regenAll, 10 * 60 * 1000);
-  console.log('Spectrogram auto-regeneration enabled (every 10 min)');
-}
-
-// Start auto-regen when server starts
-startSpectrogramAutoRegen();
 
 /**
  * GET /quality-analysis/{filename}
@@ -2688,279 +2224,11 @@ app.get('/quality-analysis/:filename', (req, res) => {
  * Correlation analysis for identifying scientifically interesting patterns
  */
 app.get('/api/analysis/correlations', async (req, res) => {
-  try {
-    const { channel, date } = req.query;
-    
-    if (!channel || !date) {
-      return res.status(400).json({ 
-        error: 'Missing required parameters: channel and date' 
-      });
-    }
-    
-    // Load NPZ data for gap analysis
-    const npzData = await loadNPZData(paths, channel, date);
-    
-    // Load discrimination data for SNR analysis
-    const discriminationData = await loadDiscriminationData(paths, channel, date);
-    
-    // Compute correlations
-    const correlations = {};
-    
-    // Time of day patterns (always available if we have NPZ data)
-    if (npzData.length > 0) {
-      correlations.time_of_day = analyzeTimeOfDay(npzData, discriminationData);
-    }
-    
-    // SNR-based correlations (require discrimination data)
-    if (discriminationData.length >= 10) {
-      correlations.snr_vs_gaps = analyzeSNRvsGaps(npzData, discriminationData);
-      correlations.confidence_vs_snr = analyzeConfidenceVsSNR(discriminationData);
-    }
-    
-    res.json({
-      channel,
-      date,
-      correlations,
-      data_summary: {
-        npz_records: npzData.length,
-        discrimination_records: discriminationData.length
-      }
-    });
-    
-  } catch (error) {
-    console.error('Failed to compute correlations:', error);
-    res.status(500).json({
-      error: 'Failed to compute correlations',
-      details: error.message
-    });
-  }
+  res.status(501).json({
+    error: 'Not supported in hf-timestd',
+    detail: 'Correlation analysis depended on legacy archive semantics and has been removed.'
+  });
 });
-
-// Helper functions for correlation analysis
-
-async function loadNPZData(paths, channelName, dateStr) {
-  // Note: This function is for legacy NPZ data. New three-phase architecture uses DRF.
-  const npzDir = paths.getRawArchiveDir(channelName);
-  if (!fs.existsSync(npzDir)) {
-    return [];  // No data available
-  }
-  const pattern = `${dateStr}T*Z_*_iq.npz`;
-  const npzFiles = fs.readdirSync(npzDir).filter(f => f.match(new RegExp(`^${dateStr}T.*_iq\\.npz$`))).sort();
-  
-  const data = [];
-  for (const filename of npzFiles) {
-    try {
-      // Extract hour and minute from filename: 20251115T023400Z
-      const hour = parseInt(filename.substring(9, 11));
-      const minute = parseInt(filename.substring(11, 13));
-      
-      // Read NPZ file (simplified - just read metadata from filename pattern)
-      const npzPath = join(npzDir, filename);
-      const stats = fs.statSync(npzPath);
-      
-      // For now, estimate from file presence (actual NPZ parsing would require python bridge)
-      // In production, read from quality CSV or status files
-      data.push({
-        timestamp: `${dateStr}T${filename.substring(9, 15)}Z`,
-        hour,
-        minute,
-        completeness_pct: 95.0, // Placeholder - would come from quality metrics
-        gaps_count: 0
-      });
-    } catch (err) {
-      continue;
-    }
-  }
-  
-  return data;
-}
-
-async function loadDiscriminationData(paths, channelName, dateStr) {
-  const csvDir = paths.getDiscriminationDir(channelName);
-  const csvPattern = `*_discrimination_${dateStr}.csv`;
-  const csvFiles = fs.readdirSync(csvDir).filter(f => f.includes(`discrimination_${dateStr}.csv`));
-  
-  if (csvFiles.length === 0) {
-    return [];
-  }
-  
-  const data = [];
-  const csvPath = join(csvDir, csvFiles[0]);
-  const content = fs.readFileSync(csvPath, 'utf8');
-  const lines = content.split('\n');
-  
-  // Skip header
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    
-    try {
-      const parts = line.split(',');
-      const timestamp = parts[0];
-      const date = new Date(timestamp);
-      
-      const wwvSnr = parseFloat(parts[4]) || null;
-      const wwvhSnr = parseFloat(parts[5]) || null;
-      const maxSnr = Math.max(
-        wwvSnr !== null && wwvSnr > 0 ? wwvSnr : -Infinity,
-        wwvhSnr !== null && wwvhSnr > 0 ? wwvhSnr : -Infinity
-      );
-      
-      data.push({
-        timestamp,
-        hour: date.getUTCHours(),
-        minute: date.getUTCMinutes(),
-        wwv_snr_db: wwvSnr,
-        wwvh_snr_db: wwvhSnr,
-        max_snr_db: maxSnr > -Infinity ? maxSnr : null,
-        confidence: parts[9] || 'low'
-      });
-    } catch (err) {
-      continue;
-    }
-  }
-  
-  return data;
-}
-
-function analyzeTimeOfDay(npzData, discriminationData) {
-  const hourly = {};
-  
-  // Initialize all hours
-  for (let h = 0; h < 24; h++) {
-    hourly[h] = {
-      completeness_values: [],
-      snr_values: [],
-      avg_completeness: null,
-      avg_snr: null,
-      completeness_samples: 0,
-      snr_samples: 0
-    };
-  }
-  
-  // Aggregate NPZ data by hour
-  npzData.forEach(item => {
-    if (item.completeness_pct !== undefined) {
-      hourly[item.hour].completeness_values.push(item.completeness_pct);
-    }
-  });
-  
-  // Aggregate discrimination data by hour
-  discriminationData.forEach(item => {
-    if (item.max_snr_db !== null && item.max_snr_db > 0) {
-      hourly[item.hour].snr_values.push(item.max_snr_db);
-    }
-  });
-  
-  // Calculate averages
-  for (let h = 0; h < 24; h++) {
-    const hour = hourly[h];
-    
-    if (hour.completeness_values.length > 0) {
-      hour.avg_completeness = hour.completeness_values.reduce((a, b) => a + b, 0) / hour.completeness_values.length;
-      hour.completeness_samples = hour.completeness_values.length;
-    }
-    
-    if (hour.snr_values.length > 0) {
-      hour.avg_snr = hour.snr_values.reduce((a, b) => a + b, 0) / hour.snr_values.length;
-      hour.snr_samples = hour.snr_values.length;
-    }
-    
-    // Clean up temporary arrays
-    delete hour.completeness_values;
-    delete hour.snr_values;
-  }
-  
-  return hourly;
-}
-
-function analyzeSNRvsGaps(npzData, discriminationData) {
-  // Match discrimination data to NPZ data by hour:minute
-  const matched = [];
-  
-  discriminationData.forEach(disc => {
-    if (disc.max_snr_db === null || disc.max_snr_db <= 0) return;
-    
-    const matchingNpz = npzData.find(npz => 
-      npz.hour === disc.hour && npz.minute === disc.minute
-    );
-    
-    if (matchingNpz) {
-      matched.push({
-        snr_db: disc.max_snr_db,
-        completeness_pct: matchingNpz.completeness_pct
-      });
-    }
-  });
-  
-  // Bin by SNR ranges
-  const bins = {
-    'Very Strong (>30 dB)': [],
-    'Strong (20-30 dB)': [],
-    'Moderate (10-20 dB)': [],
-    'Weak (<10 dB)': []
-  };
-  
-  matched.forEach(item => {
-    if (item.snr_db > 30) {
-      bins['Very Strong (>30 dB)'].push(item.completeness_pct);
-    } else if (item.snr_db > 20) {
-      bins['Strong (20-30 dB)'].push(item.completeness_pct);
-    } else if (item.snr_db > 10) {
-      bins['Moderate (10-20 dB)'].push(item.completeness_pct);
-    } else {
-      bins['Weak (<10 dB)'].push(item.completeness_pct);
-    }
-  });
-  
-  // Calculate averages
-  const result = {};
-  for (const [binName, values] of Object.entries(bins)) {
-    if (values.length > 0) {
-      result[binName] = {
-        count: values.length,
-        avg_completeness: values.reduce((a, b) => a + b, 0) / values.length,
-        values: values
-      };
-    }
-  }
-  
-  return result;
-}
-
-function analyzeConfidenceVsSNR(discriminationData) {
-  const confidenceLevels = {
-    'high': [],
-    'medium': [],
-    'low': []
-  };
-  
-  discriminationData.forEach(item => {
-    if (item.max_snr_db !== null && item.max_snr_db > 0) {
-      const conf = item.confidence || 'low';
-      if (confidenceLevels[conf]) {
-        confidenceLevels[conf].push(item.max_snr_db);
-      }
-    }
-  });
-  
-  const result = {};
-  for (const [level, snrValues] of Object.entries(confidenceLevels)) {
-    if (snrValues.length > 0) {
-      result[level] = {
-        count: snrValues.length,
-        avg_snr: snrValues.reduce((a, b) => a + b, 0) / snrValues.length,
-        min_snr: Math.min(...snrValues),
-        max_snr: Math.max(...snrValues),
-        values: snrValues
-      };
-    } else {
-      result[level] = null;
-    }
-  }
-  
-  return result;
-}
 
 // ============================================================================
 // NEW ANALYTICS ENDPOINTS - Priority 1 Implementation
@@ -3455,7 +2723,7 @@ app.get('/api/v1/channels/:channelName/discrimination/:date/methods', async (req
 
 /**
  * GET /api/v1/channels/:channelName/carrier-power/:date
- * Get carrier power time series from Phase 2 CSV or legacy NPZ files
+ * Get carrier power time series from Phase 2 CSV
  */
 app.get('/api/v1/channels/:channelName/carrier-power/:date', async (req, res) => {
   try {
@@ -3501,77 +2769,7 @@ app.get('/api/v1/channels/:channelName/carrier-power/:date', async (req, res) =>
       }
     }
     
-    // Fall back to legacy decimated NPZ files
-    const decimatedDir = paths.getDecimatedDir(channelName);
-    
-    if (!fs.existsSync(decimatedDir)) {
-      return res.json({ channel: channelName, date, records: [], status: 'no_data' });
-    }
-    
-    // Find all 10Hz NPZ files for this date
-    const files = fs.readdirSync(decimatedDir)
-      .filter(f => f.startsWith(date) && f.endsWith('_10hz.npz'))
-      .sort();
-    
-    if (files.length === 0) {
-      return res.json({ channel: channelName, date, records: [], status: 'no_files' });
-    }
-    
-    // Use Python to extract power from NPZ files (Node can't read NPZ directly)
-    // Write script to temp file to avoid shell escaping issues
-    const tmpScript = `/tmp/carrier_power_${Date.now()}.py`;
-    const pythonScript = `
-import numpy as np
-import json
-import sys
-from pathlib import Path
-
-decimated_dir = Path(sys.argv[1])
-date = sys.argv[2]
-records = []
-
-for npz_file in sorted(decimated_dir.glob(f'{date}*_10hz.npz')):
-    try:
-        data = np.load(npz_file)
-        iq = data['iq']
-        ts_str = npz_file.name.split('_')[0]
-        power_linear = np.mean(np.abs(iq)**2)
-        power_db = 10 * np.log10(power_linear + 1e-12)
-        peak_power = np.max(np.abs(iq)**2)
-        peak_db = 10 * np.log10(peak_power + 1e-12)
-        records.append({
-            'timestamp': ts_str,
-            'power_db': round(float(power_db), 2),
-            'peak_db': round(float(peak_db), 2)
-        })
-    except Exception as e:
-        pass
-
-print(json.dumps(records))
-`;
-    
-    fs.writeFileSync(tmpScript, pythonScript);
-    
-    try {
-      const result = execSync(
-        `source ${process.env.HOME}/signal-recorder/venv/bin/activate && python3 ${tmpScript} "${decimatedDir}" "${date}"`,
-        { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, shell: '/bin/bash' }
-      );
-      
-      fs.unlinkSync(tmpScript);
-      const records = JSON.parse(result.trim());
-      
-      res.json({
-        channel: channelName,
-        date,
-        records,
-        count: records.length,
-        status: 'OK'
-      });
-    } catch (pyErr) {
-      fs.unlinkSync(tmpScript);
-      throw pyErr;
-    }
+    return res.json({ channel: channelName, date, records: [], status: 'no_data' });
     
   } catch (err) {
     console.error('Error loading carrier power:', err);
@@ -3879,7 +3077,7 @@ async function loadAllDiscriminationMethods(channelName, date, paths) {
     }
   };
   
-  // Use GRAPEPaths API for all method-specific directories (matches Python paths.py)
+  // Use TimeStdPaths API for all method-specific directories (matches Python paths.py)
   
   // 1. Load 1000/1200 Hz tone detections
   // Phase 2 CSV columns: timestamp_utc, minute_boundary, wwv_detected, wwvh_detected, 
@@ -4282,7 +3480,7 @@ app.get('/api/v1/solar-zenith', async (req, res) => {
     // Call Python calculator - use project root (parent of web-ui directory)
     const projectRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
     const pythonPath = join(projectRoot, 'venv', 'bin', 'python3');
-    const scriptPath = join(projectRoot, 'src', 'grape_recorder', 'grape', 'solar_zenith_calculator.py');
+    const scriptPath = join(projectRoot, 'src', 'hf_timestd', 'core', 'solar_zenith_calculator.py');
     
     const cmd = `${pythonPath} ${scriptPath} --date ${date} --grid ${grid} --interval 5`;
     
@@ -4986,7 +4184,6 @@ const server = app.listen(PORT, () => {
   console.log(`     GET /api/v1/channels/status`);
   console.log(`   Carrier Analysis:`);
   console.log(`     GET /api/v1/carrier/quality?date=YYYYMMDD`);
-  console.log(`     GET /spectrograms/{date}/{filename}`);
   console.log(`   ⏱️  Timing & Analytics:`);
   console.log(`     GET /api/v1/timing/status`);
   console.log(`     GET /api/v1/tones/current`);
@@ -5074,7 +4271,7 @@ server.on('upgrade', (request, socket, head) => {
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
-  console.log('\n🛑 Shutting down GRAPE Monitoring Server...');
+  console.log('\n🛑 Shutting down hf-timestd Monitoring Server...');
   server.close();
   process.exit(0);
 });

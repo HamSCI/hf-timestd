@@ -16,7 +16,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-CONFIG_FILE="${PROJECT_ROOT}/config/grape-config.toml"
+CONFIG_FILE="${PROJECT_ROOT}/config/timestd-config.toml"
 
 # Colors for output
 RED='\033[0;31m'

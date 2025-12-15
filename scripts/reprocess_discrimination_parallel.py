@@ -254,7 +254,7 @@ def main():
                        help='End date (YYYYMMDD)')
     parser.add_argument('--all', action='store_true',
                        help='Process all available data')
-    parser.add_argument('--data-root', type=str, default='/tmp/grape-test',
+    parser.add_argument('--data-root', type=str, default='/tmp/timestd-test',
                        help='Root data directory')
     parser.add_argument('--workers', type=int,
                        help=f'Number of worker processes (default: {cpu_count()})')

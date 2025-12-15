@@ -52,9 +52,9 @@ def resolve_mdns_to_ip(name: str) -> Optional[str]:
     return None
 
 
-def generate_grape_multicast_ip(station_id: str, instrument_id: str) -> str:
+def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
     """
-    Generate a deterministic multicast IP for GRAPE channels.
+    Generate a deterministic multicast IP for hf-timestd channels.
     
     Uses station_id and instrument_id to create a unique, persistent
     multicast address in the 239.x.x.x administratively scoped range.
@@ -80,7 +80,7 @@ def generate_grape_multicast_ip(station_id: str, instrument_id: str) -> str:
     octet4 = (hash_bytes[2] % 254) + 1   # 1-254
     
     ip = f"239.{octet2}.{octet3}.{octet4}"
-    logger.info(f"Generated GRAPE multicast IP: {ip} (from {station_id}/{instrument_id})")
+    logger.info(f"Generated hf-timestd multicast IP: {ip} (from {station_id}/{instrument_id})")
     return ip
 
 

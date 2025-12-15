@@ -124,7 +124,7 @@ def write_status(status, output_file):
 
 def main():
     # Configuration
-    output_file = sys.argv[1] if len(sys.argv) > 1 else '/tmp/grape-test/state/radiod-status.json'
+    output_file = sys.argv[1] if len(sys.argv) > 1 else '/tmp/timestd-test/state/radiod-status.json'
     poll_interval = int(sys.argv[2]) if len(sys.argv) > 2 else 10  # seconds
     
     logger.info(f"Starting radiod health monitor")

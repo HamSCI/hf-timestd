@@ -15,7 +15,7 @@ from grape_recorder.wwv_bcd_encoder import WWVBCDEncoder
 
 def main():
     # Find a recent NPZ file
-    archive_dir = Path('/tmp/grape-test/archives/WWV_10_MHz')
+    archive_dir = Path('/tmp/timestd-test/archives/WWV_10_MHz')
     npz_files = sorted(archive_dir.glob('20251119T1[45]*.npz'))
     
     if not npz_files:

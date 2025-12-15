@@ -133,7 +133,7 @@ RTPReceiver + ka9q-python (multicast, parsing, timing)
 - **RecordingSession** - Generic packet flow, resequencing, segmentation
 - **RTPReceiver** - Multi-SSRC demultiplexing, transport timing
 
-### 1. Core Recorder (`src/grape_recorder/grape/core_recorder_v2.py`)
+### 1. Core Recorder (`src/hf_timestd/core/core_recorder_v2.py`)
 
 Rock-solid RTP capture using ka9q-python RadiodStream:
 - Uses `RadiodStream` for RTP reception, resequencing, and sample decoding
@@ -152,7 +152,7 @@ Rock-solid RTP capture using ka9q-python RadiodStream:
 - **Gap Provenance:** Detailed gap locations, sizes, and packet loss counts
 - **Quality Indicators:** Packets received vs expected, completeness
 
-### 2. Analytics Service (`src/grape_recorder/grape/analytics_service.py`)
+### 2. Analytics Service (`src/hf_timestd/core/phase2_temporal_engine.py`)
 
 Processes 20 kHz archives to derived products:
 
@@ -167,16 +167,10 @@ Processes 20 kHz archives to derived products:
 **Additional Analytics:**
 - **Doppler Estimation:** Per-tick frequency shift measurement
 - **Timing Metrics:** Time_snap quality, NTP drift, timing accuracy
-- **Decimation:** 20 kHz → 10 Hz (optimized multi-stage CIC+FIR filter)
 
-**Output:** Separated CSVs per method + 10 Hz NPZ with embedded metadata
+**Output:** Separated CSVs per method + D_clock time series for system clock discipline
 
-### 3. DRF Writer (`src/grape_recorder/grape/drf_batch_writer.py`)
-
-Wsprdaemon-compatible Digital RF output:
-- Reads 10 Hz NPZ → writes Digital RF HDF5 (float32 I/Q pairs)
-- Multi-subchannel format: all 9 frequencies in single ch0
-- Automated SFTP upload to HamSCI PSWS with trigger directories
+**Note:** Phase 3 products (decimation/10 Hz, spectrogram products, PSWS/GRAPE uploads) are handled by the separate `grape-recorder` project.
 
 ### Design Principles
 

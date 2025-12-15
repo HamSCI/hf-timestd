@@ -1,4 +1,4 @@
-# Web UI Architecture - GRAPE Signal Recorder
+# Web UI Architecture - hf-timestd
 
 **Last Updated**: Nov 28, 2025  
 **Status**: Beta Testing
@@ -10,7 +10,7 @@
 **Core Principle**: The web UI is a **presentation layer only**.
 
 ### What the Web UI Knows
-✅ **WHERE** data files are located (via `grape-paths.js`)  
+✅ **WHERE** data files are located (via `timestd-paths.js`)  
 ✅ **HOW** to display data effectively (charts, tables, visualizations)  
 ✅ **WHEN** to refresh/update displays
 
@@ -36,7 +36,7 @@
                           │ File System
                           ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│ grape-paths.js (Node.js)                                         │
+│ timestd-paths.js (Node.js)                                        │
 │ ├─ Definitive data location reference                            │
 │ ├─ Synchronized with Python PathConfig                           │
 │ └─ Single source of truth for file locations                     │
@@ -57,7 +57,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │ HTML Dashboards (Browser)                                        │
 │ ├─ summary.html       - Main system status                       │
-│ ├─ carrier.html       - Carrier analysis & spectrograms          │
+│ ├─ carrier.html       - Carrier analysis                         │
 │ ├─ discrimination.html - WWV/WWVH 6-method discrimination         │
 │ ├─ timing-dashboard-enhanced.html - Timing quality metrics       │
 │ └─ gaps.html          - Gap analysis                             │
@@ -68,22 +68,20 @@
 
 ## Core Components
 
-### 1. grape-paths.js (Data Location Authority)
+### 1. timestd-paths.js (Data Location Authority)
 
 **Purpose**: Single source of truth for all data file locations
 
-**Synchronization**: Must stay in sync with Python `GRAPEPaths` class (`src/signal_recorder/paths.py`)
+**Synchronization**: Must stay in sync with Python `TimeStdPaths` class (`src/hf_timestd/paths.py`)
 
 **Key Paths**:
 ```javascript
 {
   dataRoot: "/path/to/data",
-  archives: "/path/to/data/archives/{channel}/",
-  analytics: "/path/to/data/analytics/{channel}/",
-  decimated: "/path/to/data/analytics/{channel}/decimated/",
-  spectrograms: "/path/to/data/spectrograms/{date}/",
-  discrimination: "/path/to/data/analytics/{channel}/discrimination/{date}.csv",
-  bcd_discrimination: "/path/to/data/analytics/{channel}/bcd_discrimination/{date}.csv",
+  raw_buffer: "/path/to/data/raw_buffer/{channel}/{YYYYMMDD}/",
+  phase2: "/path/to/data/phase2/{channel}/",
+  discrimination: "/path/to/data/phase2/{channel}/discrimination/{date}.csv",
+  bcd_discrimination: "/path/to/data/phase2/{channel}/bcd_discrimination/{date}.csv",
   status: {
     core: "/path/to/data/status/core_recorder_status.json",
     analytics: "/path/to/data/status/analytics_status.json"
@@ -93,11 +91,11 @@
 
 **Usage**:
 ```javascript
-const paths = require('./grape-paths.js');
+const paths = require('./timestd-paths.js');
 const archivePath = paths.getArchiveDir('WWV_5.0_MHz');
 ```
 
-**Critical**: When Python PathConfig changes, `grape-paths.js` must be updated.
+**Critical**: When Python PathConfig changes, `timestd-paths.js` must be updated.
 
 ### 2. monitoring-server-v3.js (API Server)
 
@@ -106,7 +104,7 @@ const archivePath = paths.getArchiveDir('WWV_5.0_MHz');
 **Responsibilities**:
 - Serve HTML/JS/CSS static files
 - Provide JSON API endpoints
-- Read data files (using grape-paths.js)
+- Read data files (using timestd-paths.js)
 - Format data for display (no domain logic)
 - Health checks and system status
 
@@ -122,7 +120,6 @@ GET /api/v1/system/status        - System processes
 GET /api/v1/channels/status      - Per-channel status
 GET /api/v1/carrier/quality      - Carrier metrics
 GET /api/v1/channels/:name/discrimination/:date - Discrimination data
-GET /spectrograms/:date/:subdirectory/:filename - Image files
 ```
 
 ### 3. HTML Dashboards
@@ -133,8 +130,8 @@ GET /spectrograms/:date/:subdirectory/:filename - Image files
 - **Updates**: Real-time polling (5s interval)
 
 #### carrier.html
-- **Purpose**: Carrier analysis and spectrograms
-- **Data**: Spectrograms (PNG), quality metrics (JSON)
+- **Purpose**: Carrier analysis
+- **Data**: Phase 2 carrier power/quality metrics
 - **Features**: Date navigation, frequency selection
 
 #### discrimination.html
@@ -148,7 +145,7 @@ GET /spectrograms/:date/:subdirectory/:filename - Image files
 
 #### gaps.html
 - **Purpose**: Gap analysis and data completeness
-- **Data**: Gap statistics from NPZ metadata
+- **Data**: Gap statistics from raw_buffer indexing
 
 ---
 
@@ -158,17 +155,14 @@ GET /spectrograms/:date/:subdirectory/:filename - Image files
 
 ```
 1. Analytics Service (Python)
-   ↓ Writes NPZ/CSV/JSON
+   ↓ Writes CSV/JSON
    
 2. File System
-   ├─ /data/archives/{channel}/YYYYMMDDTHHMMSSZ_{freq}_iq.npz
-   ├─ /data/analytics/{channel}/decimated/
-   ├─ /data/analytics/{channel}/bcd_discrimination/
-   ├─ /data/analytics/{channel}/discrimination/
-   ├─ /data/spectrograms/{date}/
-   └─ ... (6 discrimination method directories)
+   ├─ /data/raw_buffer/{CHANNEL}/{YYYYMMDD}/
+   ├─ /data/phase2/{CHANNEL}/
+   └─ /data/status/
    
-3. grape-paths.js
+3. timestd-paths.js
    ↓ Provides file paths
    
 4. monitoring-server-v3.js
@@ -180,27 +174,23 @@ GET /spectrograms/:date/:subdirectory/:filename - Image files
 
 ### Path Configuration Sync
 
-**Python** (`src/signal_recorder/paths.py`):
+**Python** (`src/hf_timestd/paths.py`):
 ```python
-class GRAPEPaths:
+class TimeStdPaths:
     def __init__(self, data_root: Path):
         self.data_root = Path(data_root)
     
-    def get_archive_dir(self, channel_name: str) -> Path:
-        return self.data_root / 'archives' / channel_name_to_dir(channel_name)
-    
-    def get_analytics_dir(self, channel_name: str) -> Path:
-        return self.data_root / 'analytics' / channel_name_to_dir(channel_name)
+    def get_raw_buffer_dir(self, channel_name: str) -> Path:
+        return self.data_root / 'raw_buffer' / channel_name_to_dir(channel_name)
+
+    def get_phase2_dir(self, channel_name: str) -> Path:
+        return self.data_root / 'phase2' / channel_name_to_dir(channel_name)
 ```
 
-**JavaScript** (`web-ui/grape-paths.js`):
+**JavaScript** (`web-ui/timestd-paths.js`):
 ```javascript
-module.exports = {
-  getDataRoot: () => dataRoot,
-  getArchiveRoot: () => path.join(dataRoot, "archives"),
-  getDecimatedRoot: () => path.join(dataRoot, "decimated"),
-  // ... must mirror Python structure
-};
+import { TimeStdPaths } from './timestd-paths.js';
+const paths = new TimeStdPaths(dataRoot);
 ```
 
 **Validation**: Run `scripts/validate-paths-sync.sh` to check consistency.
@@ -213,14 +203,12 @@ module.exports = {
 
 **Recorder** (Terminal 1):
 ```bash
-cd ~/signal-recorder
-source venv/bin/activate
-python -m signal_recorder.grape_recorder --config config/grape-config.toml
+python -m hf_timestd --help
 ```
 
 **Web UI** (Terminal 2):
 ```bash
-cd ~/signal-recorder/web-ui
+cd /path/to/hf-timestd/web-ui
 npm start
 ```
 
@@ -244,7 +232,7 @@ Systemd services in `systemd/` directory (not yet recommended).
 ```
 web-ui/
 ├── monitoring-server-v3.js      # ⭐ Production API server
-├── grape-paths.js               # ⭐ Data location authority
+├── timestd-paths.js             # ⭐ Data location authority
 │
 ├── index.html                   # Entry point (redirects to summary)
 ├── summary.html                 # ⭐ Main dashboard
@@ -302,14 +290,14 @@ web-ui/archive/legacy-pages/
 
 1. **Create HTML file** with standard header/nav
 2. **Add API endpoint** in `monitoring-server-v3.js`
-3. **Use grape-paths.js** for all file locations
+3. **Use timestd-paths.js** for all file locations
 4. **No domain logic** in JavaScript
 5. **Update** this documentation
 
 ### Modifying Data Locations
 
 1. **Update Python** `PathConfig` first
-2. **Update** `grape-paths.js` to match
+2. **Update** `timestd-paths.js` to match
 3. **Run** `scripts/validate-paths-sync.sh`
 4. **Test** all dashboards
 5. **Document** changes
@@ -355,10 +343,10 @@ tail -f web-ui/monitoring-server.log
 
 ```bash
 # Verify paths are correct
-node -e "const p = require('./grape-paths.js'); console.log(p.getDataRoot())"
+node -e "import('./timestd-paths.js').then(m => console.log(new m.TimeStdPaths('/tmp/timestd-test').getDataRoot()))"
 
 # Check if files exist
-ls -lh /path/to/data/archives/
+ls -lh /path/to/data/raw_buffer/
 
 # Check API directly
 curl http://localhost:3000/api/v1/summary | jq
@@ -368,7 +356,7 @@ curl http://localhost:3000/api/v1/summary | jq
 
 ```bash
 # Validate Python/JavaScript path consistency
-cd /home/mjh/git/signal-recorder
+cd /path/to/hf-timestd
 ./scripts/validate-paths-sync.sh
 ```
 
@@ -393,7 +381,7 @@ cd /home/mjh/git/signal-recorder
 
 ## Related Documentation
 
-- **Python GRAPEPaths**: `src/signal_recorder/paths.py`
+- **Python TimeStdPaths**: `src/hf_timestd/paths.py`
 - **Path Validation**: `scripts/validate-paths-sync.sh`
 - **API Reference**: `web-ui/PATHS_API_QUICK_REFERENCE.md`
 - **Operational Summary**: `../OPERATIONAL_SUMMARY.md`

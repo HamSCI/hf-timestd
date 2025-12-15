@@ -10,8 +10,8 @@ Correlations analyzed:
 5. WWV/WWVH discrimination confidence vs SNR (detection reliability)
 
 Usage:
-    python3 scripts/analyze_correlations.py --date 20251116 --channel "WWV 10 MHz" --data-root /tmp/grape-test
-    python3 scripts/analyze_correlations.py --date 20251116 --channel "WWV 10 MHz" --data-root /tmp/grape-test --export correlations.json
+    python3 scripts/analyze_correlations.py --date 20251116 --channel "WWV 10 MHz" --data-root /tmp/timestd-test
+    python3 scripts/analyze_correlations.py --date 20251116 --channel "WWV 10 MHz" --data-root /tmp/timestd-test --export correlations.json
 """
 
 import argparse

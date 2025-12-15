@@ -517,7 +517,7 @@ def main():
         archive_path = Path(args.archive)
     else:
         # Find most recent archive
-        archive_dir = Path(f"/tmp/grape-test/archives/{args.channel}")
+        archive_dir = Path(f"/tmp/timestd-test/archives/{args.channel}")
         archives = sorted(archive_dir.glob("*.npz"))
         
         if args.minute is not None:

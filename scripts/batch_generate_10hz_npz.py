@@ -7,8 +7,8 @@ in analytics/{channel}/decimated/ directory, matching the output format
 of the real-time analytics service.
 
 Usage:
-    python3 scripts/batch_generate_10hz_npz.py --data-root /tmp/grape-test
-    python3 scripts/batch_generate_10hz_npz.py --data-root /tmp/grape-test --channel "WWV 10 MHz"
+    python3 scripts/batch_generate_10hz_npz.py --data-root /tmp/timestd-test
+    python3 scripts/batch_generate_10hz_npz.py --data-root /tmp/timestd-test --channel "WWV 10 MHz"
 """
 
 import argparse
@@ -124,7 +124,7 @@ def process_channel(data_root: Path, channel_name: str, overwrite: bool = False)
 def main():
     parser = argparse.ArgumentParser(description='Generate 10 Hz decimated NPZ files')
     parser.add_argument('--data-root', type=Path, required=True,
-                        help='Data root directory (e.g., /tmp/grape-test)')
+                        help='Data root directory (e.g., /tmp/timestd-test)')
     parser.add_argument('--channel', type=str,
                         help='Process single channel (e.g., "WWV 10 MHz"). If omitted, processes all.')
     parser.add_argument('--overwrite', action='store_true',

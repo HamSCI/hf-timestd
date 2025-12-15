@@ -170,7 +170,7 @@ def test_config_file():
     """Test config file parsing"""
     print("\n=== Testing Config File ===")
     
-    config_path = Path(__file__).parent.parent / 'config' / 'grape-config.toml'
+    config_path = Path(__file__).parent.parent / 'config' / 'timestd-config.toml'
     
     if not config_path.exists():
         print(f"⚠️  Config file not found: {config_path}")
@@ -244,7 +244,7 @@ def main():
         print("=" * 60)
         print("\nThe config-driven sample rate architecture is working correctly.")
         print("To change sample rate:")
-        print("  1. Edit sample_rate in grape-config.toml")
+        print("  1. Edit sample_rate in timestd-config.toml")
         print("  2. If new rate, add to SUPPORTED_INPUT_RATES in decimation.py")
         print("  3. Configure radiod for matching rate")
         

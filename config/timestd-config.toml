@@ -1,4 +1,4 @@
-# HF Time Standard Analysis Configuration
+# GRAPEAgiglRl Recoecerfiguration
 # Station: AC0G-BEE1
 
 [station]
@@ -17,7 +17,7 @@ auto_create_channels = true
 [recorder]
 mode = "test"
 test_data_root = "/tmp/timestd-test"
-production_data_root = "/var/lib/hf-timestd"
+production_data_root = "/var/lib/timestd"
 recording_interval = 60
 continuous = true
 blocktime_ms = 20

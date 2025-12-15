@@ -12,8 +12,8 @@ echo ""
 source venv/bin/activate
 
 python3 -m grape_recorder.gap_backfill \
-  --archive-dir "/tmp/grape-test/archives/${CHANNEL// /_}" \
-  --discrimination-csv "/tmp/grape-test/analytics/${CHANNEL// /_}/discrimination/${CHANNEL// /_}_discrimination_$(date +%Y%m%d).csv"
+  --archive-dir "/tmp/timestd-test/archives/${CHANNEL// /_}" \
+  --discrimination-csv "/tmp/timestd-test/analytics/${CHANNEL// /_}/discrimination/${CHANNEL// /_}_discrimination_$(date +%Y%m%d).csv"
 
 echo ""
 echo "Now reprocessing gaps..."
@@ -31,13 +31,13 @@ import os
 channel = os.environ.get('CHANNEL', 'WWV 10 MHz')
 max_files = int(os.environ.get('MAX_FILES', '60'))
 
-archive_dir = Path(f"/tmp/grape-test/archives/{channel.replace(' ', '_')}")
-csv_file = Path(f"/tmp/grape-test/analytics/{channel.replace(' ', '_')}/discrimination/{channel.replace(' ', '_')}_discrimination_{Path.cwd().name.split('-')[0]}.csv")
+archive_dir = Path(f"/tmp/timestd-test/archives/{channel.replace(' ', '_')}")
+csv_file = Path(f"/tmp/timestd-test/analytics/{channel.replace(' ', '_')}/discrimination/{channel.replace(' ', '_')}_discrimination_{Path.cwd().name.split('-')[0]}.csv")
 
 # For today
 import datetime
 today = datetime.datetime.now().strftime('%Y%m%d')
-csv_file = Path(f"/tmp/grape-test/analytics/{channel.replace(' ', '_')}/discrimination/{channel.replace(' ', '_')}_discrimination_{today}.csv")
+csv_file = Path(f"/tmp/timestd-test/analytics/{channel.replace(' ', '_')}/discrimination/{channel.replace(' ', '_')}_discrimination_{today}.csv")
 
 gaps = find_gaps(archive_dir, csv_file)
 print(f"Found {len(gaps)} gaps")

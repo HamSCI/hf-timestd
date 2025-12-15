@@ -1,13 +1,13 @@
-# HF Time Standard Analysis Configuration Template
-# Copy this to grape-config.toml and customize for your station
+# hf-timestd Configuration Template
+# Copy this to timestd-config.toml and customize for your station
 #
 # REQUIRED: Update all values marked with <YOUR_...>
 
 [station]
 callsign = "<YOUR_CALLSIGN>"           # e.g., "W1ABC"
 grid_square = "<YOUR_GRID>"            # e.g., "FN31pr"
-id = "<YOUR_PSWS_STATION_ID>"          # PSWS assigns this, e.g., "S000123"
-instrument_id = "<YOUR_INSTRUMENT_ID>" # PSWS assigns this, e.g., "456"
+id = "<YOUR_STATION_ID>"               # e.g., "AC0G"
+instrument_id = "<YOUR_INSTRUMENT_ID>" # e.g., "RX888"
 description = "<YOUR_DESCRIPTION>"     # e.g., "RX888 MkII with resonant dipole"
 
 [ka9q]
@@ -24,7 +24,7 @@ mode = "test"
 
 # Data paths (auto-created based on mode)
 test_data_root = "/tmp/timestd-test"
-production_data_root = "/var/lib/hf-timestd"  # Linux standard for generated data
+production_data_root = "/var/lib/hf-timestd"
 
 # Recording parameters
 recording_interval = 60
@@ -40,7 +40,6 @@ preset = "iq"
 sample_rate = 16000
 description = "WWV 2.5 MHz"
 enabled = true
-processor = "grape"
 
 [[recorder.channels]]
 ssrc = 5000000
@@ -49,7 +48,6 @@ preset = "iq"
 sample_rate = 16000
 description = "WWV 5 MHz"
 enabled = true
-processor = "grape"
 
 [[recorder.channels]]
 ssrc = 10000000
@@ -58,7 +56,6 @@ preset = "iq"
 sample_rate = 16000
 description = "WWV 10 MHz"
 enabled = true
-processor = "grape"
 
 [[recorder.channels]]
 ssrc = 15000000
@@ -67,7 +64,6 @@ preset = "iq"
 sample_rate = 16000
 description = "WWV 15 MHz"
 enabled = true
-processor = "grape"
 
 [[recorder.channels]]
 ssrc = 20000000
@@ -76,7 +72,6 @@ preset = "iq"
 sample_rate = 16000
 description = "WWV 20 MHz"
 enabled = true
-processor = "grape"
 
 [[recorder.channels]]
 ssrc = 25000000
@@ -85,7 +80,6 @@ preset = "iq"
 sample_rate = 16000
 description = "WWV 25 MHz"
 enabled = true
-processor = "grape"
 
 # === CHU Channels (3.33, 7.85, 14.67 MHz) ===
 # Useful for Canadian/northern US stations
@@ -97,7 +91,6 @@ preset = "iq"
 sample_rate = 16000
 description = "CHU 3.33 MHz"
 enabled = true
-processor = "grape"
 
 [[recorder.channels]]
 ssrc = 7850000
@@ -106,7 +99,6 @@ preset = "iq"
 sample_rate = 16000
 description = "CHU 7.85 MHz"
 enabled = true
-processor = "grape"
 
 [[recorder.channels]]
 ssrc = 14670000
@@ -115,10 +107,8 @@ preset = "iq"
 sample_rate = 16000
 description = "CHU 14.67 MHz"
 enabled = true
-processor = "grape"
 
 [uploader]
-# PSWS upload - enable after you have credentials
 enabled = false
 protocol = "sftp"
 upload_time = "00:30"

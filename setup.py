@@ -14,10 +14,10 @@ setup(
     version="3.0.0",
     author="Michael James Hauan AC0G",
     author_email="ac0g@hauan.org",
-    description="HF Time Standard Analysis - WWV/WWVH/CHU timing via ka9q-radio",
+    description="HF Time Standard Analysis - WWV/WWVH/CHU/BPM timing via ka9q-radio",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/mijahauan/grape-recorder",
+    url="https://github.com/mijahauan/hf-timestd",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     classifiers=[
@@ -36,11 +36,10 @@ setup(
         "numpy>=1.24.0",
         "scipy>=1.10.0",  # For signal processing and resampling
         "soundfile>=0.12.0",
-        "digital_rf>=2.6.0",
         "zeroconf>=0.132.0",  # For mDNS discovery
-        "ka9q>=3.2.0",  # ka9q-radio control library (PyPI)
-        "matplotlib>=3.7.0",  # For spectrogram generation
-        "pandas>=2.0.0",  # For timing analysis
+        "ka9q-python>=3.2.0",  # ka9q-radio control library (PyPI)
+        "sysv_ipc>=1.1.0",    # For Chrony SHM shared memory
+        "iri2020 @ git+https://github.com/space-physics/iri2020.git",  # IRI-2020 (requires gfortran)
     ],
     extras_require={
         "dev": [
@@ -49,9 +48,6 @@ setup(
             "black>=23.0.0",
             "flake8>=6.0.0",
             "mypy>=1.0.0",
-        ],
-        "iri": [
-            "iri2020 @ git+https://github.com/space-physics/iri2020.git",  # IRI-2020 (requires gfortran)
         ],
     },
     entry_points={
