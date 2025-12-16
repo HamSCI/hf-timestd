@@ -46,19 +46,19 @@ encoding = "float"
 
 [[recorder.channels]]
 frequency_hz = 2500000
-description = "WWV 2.5 MHz"
+description = "SHARED 2.5 MHz"
 
 [[recorder.channels]]
 frequency_hz = 5000000
-description = "WWV 5 MHz"
+description = "SHARED 5 MHz"
 
 [[recorder.channels]]
 frequency_hz = 10000000
-description = "WWV 10 MHz"
+description = "SHARED 10 MHz"
 
 [[recorder.channels]]
 frequency_hz = 15000000
-description = "WWV 15 MHz"
+description = "SHARED 15 MHz"
 
 [[recorder.channels]]
 frequency_hz = 20000000

@@ -17,7 +17,7 @@ soundfile>=0.12.0
 zeroconf>=0.132.0
 
 # ka9q-radio control library (general-purpose radiod interface)
-ka9q-python>=3.2.0
+ka9q-python>=3.2.4
 
 # WWV Timing Analysis & Visualization (optional, for plot_wwv_timing.py)
 pandas>=2.0.0
