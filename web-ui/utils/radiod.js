@@ -8,7 +8,7 @@ import { spawn } from 'child_process';
 import { join } from 'path';
 
 const isProduction = process.env.NODE_ENV === 'production';
-const installDir = isProduction ? '/usr/local/lib/signal-recorder' : join(process.cwd(), '..');
+const installDir = isProduction ? '/opt/hf-timestd' : join(process.cwd(), '..');
 const venvPython = join(installDir, 'venv', 'bin', 'python');
 
 /**

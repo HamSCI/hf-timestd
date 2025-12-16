@@ -9,7 +9,7 @@ import { join } from 'path';
 import fs from 'fs';
 
 // Ensure log directory exists
-const logDir = '/var/log/signal-recorder';
+const logDir = '/var/log/hf-timestd';
 try {
   fs.mkdirSync(logDir, { recursive: true, mode: 0o750 });
 } catch (err) {
@@ -18,7 +18,7 @@ try {
 
 const logFile = fs.existsSync(logDir) 
   ? join(logDir, 'audit.log')
-  : '/tmp/signal-recorder-audit.log';
+  : '/tmp/hf-timestd-audit.log';
 
 /**
  * Audit logger instance

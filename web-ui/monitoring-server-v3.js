@@ -215,56 +215,49 @@ async function getRadiodStatus(paths) {
 
 /**
  * Get core recorder status
+ * Uses pgrep to detect running channel_recorder processes (per-channel architecture)
  */
 async function getCoreRecorderStatus(paths) {
   try {
-    const statusFile = paths.getCoreStatusFile();
-    
-    if (!fs.existsSync(statusFile)) {
-      return { 
-        running: false, 
-        error: 'Status file not found'
-      };
+    // Check for running channel_recorder processes via pgrep
+    // execSync is already imported at top of file
+    let processCount = 0;
+    try {
+      const result = execSync('pgrep -c -f "hf_timestd\\.core\\.channel_recorder"', { encoding: 'utf8' });
+      processCount = parseInt(result.trim()) || 0;
+    } catch (e) {
+      // pgrep returns exit code 1 if no processes found
+      processCount = 0;
     }
     
-    const content = fs.readFileSync(statusFile, 'utf8');
-    const status = JSON.parse(content);
+    const running = processCount > 0;
     
-    // Parse ISO 8601 timestamp
-    const statusTimestamp = new Date(status.timestamp).getTime() / 1000;
-    const age = Date.now() / 1000 - statusTimestamp;
-    const running = age < 30;
-    
-    // Get channel info - handle both old and new status formats
-    let channelsActive = 0;
-    let channelsTotal = 0;
-    let totalPackets = 0;
+    // Also try to read status file if it exists (for additional info)
+    const statusFile = paths.getCoreStatusFile();
     let uptime = 0;
+    let totalPackets = 0;
     
-    if (status.recorders && typeof status.recorders === 'object') {
-      // New format: status.recorders = {frequency: {...}}
-      const recorders = Object.values(status.recorders);
-      channelsActive = recorders.filter(r => r.packets_received > 0).length;
-      channelsTotal = status.channels || recorders.length;
-      totalPackets = recorders.reduce((sum, r) => sum + (r.packets_received || 0), 0);
-      uptime = status.recording_duration_sec || 0;
-    } else if (status.channels && typeof status.channels === 'object') {
-      // Old format: status.channels = {ssrc: {...}}
-      const channels = Object.values(status.channels);
-      channelsActive = channels.length;
-      channelsTotal = channels.length;
-      totalPackets = channels.reduce((sum, ch) => sum + (ch.packets_received || 0), 0);
-      uptime = status.uptime_seconds || 0;
+    if (fs.existsSync(statusFile)) {
+      try {
+        const content = fs.readFileSync(statusFile, 'utf8');
+        const status = JSON.parse(content);
+        uptime = status.recording_duration_sec || status.uptime_seconds || 0;
+        if (status.recorders) {
+          totalPackets = Object.values(status.recorders).reduce((sum, r) => sum + (r.packets_received || 0), 0);
+        }
+      } catch (e) {
+        // Ignore status file errors
+      }
     }
     
     return {
       running,
       uptime_seconds: uptime,
-      channels_active: channelsActive,
-      channels_total: channelsTotal,
+      channels_active: processCount,
+      channels_total: processCount,
       packets_received: totalPackets,
-      last_update: status.timestamp,
-      age_seconds: age
+      last_update: new Date().toISOString(),
+      age_seconds: 0
     };
   } catch (err) {
     return { 
@@ -889,18 +882,24 @@ async function getChannelStatuses(paths) {
       console.error('Error reading core status:', err.message);
     }
     
-    for (const channelName of channels) {
-      // Check per-channel RTP status from core recorder
-      let rtpStreaming = false;
-      for (const [ssrc, chInfo] of Object.entries(coreChannels)) {
-        if (chInfo.description === channelName) {
-          // Check if last_packet_time is recent (within 10 seconds)
-          const lastPacket = new Date(chInfo.last_packet_time).getTime() / 1000;
-          const age = Date.now() / 1000 - lastPacket;
-          rtpStreaming = age < 10;  // 10 second timeout for per-channel status
-          break;
+    // Check which channel_recorder processes are running via pgrep
+    let runningChannels = new Set();
+    try {
+      const result = execSync('pgrep -af "hf_timestd\\.core\\.channel_recorder"', { encoding: 'utf8' });
+      // Parse each line to extract channel name
+      for (const line of result.split('\n')) {
+        const match = line.match(/--channel\s+"?([^"]+)"?\s+--frequency/);
+        if (match) {
+          runningChannels.add(match[1].trim());
         }
       }
+    } catch (e) {
+      // pgrep returns exit code 1 if no processes found
+    }
+    
+    for (const channelName of channels) {
+      // Check if channel_recorder process is running for this channel
+      let rtpStreaming = runningChannels.has(channelName);
       
       // Get analytics status for this channel (Phase 2 status directory)
       const statusFile = paths.getAnalyticsServiceStatusFileForChannel(channelName);
@@ -917,8 +916,10 @@ async function getChannelStatuses(paths) {
           // Get channel-specific data
           const channelData = status.channels?.[channelName];
           
-          // Get SNR (if available)
-          snrDb = channelData?.quality_metrics?.last_snr_db || status.current_snr_db || null;
+          // Get SNR (if available) - use explicit null check since 0 is valid
+          const lastSnr = channelData?.quality_metrics?.last_snr_db;
+          snrDb = (lastSnr !== null && lastSnr !== undefined && !isNaN(lastSnr)) ? lastSnr : 
+                  (status.current_snr_db !== null && status.current_snr_db !== undefined) ? status.current_snr_db : null;
           
           // Determine time basis
           // Priority: TONE_LOCKED > NTP_SYNCED > WALL_CLOCK
@@ -4019,6 +4020,25 @@ app.get('/api/v1/phase2/reception-matrix', async (req, res) => {
       const canReceiveWWVH = !isCHU && [2.5, 5, 10, 15].includes(freqMhz);
       const canReceiveBPM = !isCHU && [2.5, 5, 10, 15].includes(freqMhz);
       
+      // Read base channel SNR from analytics status (radiod SNR)
+      let baseChannelSnr = null;
+      const statusFile = paths.getAnalyticsServiceStatusFileForChannel(channelName);
+      if (statusFile && fs.existsSync(statusFile)) {
+        try {
+          const statusContent = fs.readFileSync(statusFile, 'utf8');
+          const statusData = JSON.parse(statusContent);
+          const channelData = statusData.channels?.[channelName];
+          baseChannelSnr = channelData?.quality_metrics?.last_snr_db;
+        } catch (e) { /* ignore */ }
+      }
+      
+      // For SHARED channels: use per-station tick SNR from tone detection when available,
+      // otherwise fall back to base channel SNR (all stations share the channel)
+      // For unshared channels (WWV 20/25, CHU): base channel SNR = station SNR
+      const wwvTickSnr = latestDiscrim?.wwv_snr_db || latestTones.wwv_snr_db;
+      const wwvhTickSnr = latestDiscrim?.wwvh_snr_db || latestTones.wwvh_snr_db;
+      const bpmTickSnr = latestTones.bpm_snr_db;
+      
       result.channels.push({
         channel: channelName,
         canReceiveWWVH: canReceiveWWVH,
@@ -4026,13 +4046,15 @@ app.get('/api/v1/phase2/reception-matrix', async (req, res) => {
         wwv_detected: !isCHU && (latestTones.wwv_detected || latestDiscrim?.wwv_snr_db > 0),
         wwvh_detected: canReceiveWWVH && (latestTones.wwvh_detected || latestDiscrim?.wwvh_snr_db > 0),
         bpm_detected: canReceiveBPM && latestTones.bpm_detected,
-        chu_detected: isCHU && latestPower?.snr_db > 10,
-        wwv_snr_db: latestDiscrim?.wwv_snr_db || latestTones.wwv_snr_db || (latestPower?.station === 'WWV' ? latestPower.snr_db : null),
-        wwvh_snr_db: canReceiveWWVH ? (latestDiscrim?.wwvh_snr_db || latestTones.wwvh_snr_db || (latestPower?.station === 'WWVH' ? latestPower.snr_db : null)) : null,
-        bpm_snr_db: canReceiveBPM ? latestTones.bpm_snr_db : null,
+        chu_detected: isCHU && baseChannelSnr > 0,
+        // Per-station tick SNR (from tone detection) or base channel SNR as fallback
+        wwv_snr_db: !isCHU ? (wwvTickSnr || baseChannelSnr) : null,
+        wwvh_snr_db: canReceiveWWVH ? (wwvhTickSnr || baseChannelSnr) : null,
+        bpm_snr_db: canReceiveBPM ? (bpmTickSnr || baseChannelSnr) : null,
         bpm_timing_mode: canReceiveBPM ? latestTones.bpm_timing_mode : null,
         bpm_usable_for_utc: canReceiveBPM ? latestTones.bpm_usable_for_utc : null,
-        chu_snr_db: isCHU ? latestPower?.snr_db : null,
+        chu_snr_db: isCHU ? baseChannelSnr : null,
+        base_channel_snr_db: baseChannelSnr,  // Always include base channel SNR for reference
         dominant_station: latestDiscrim?.dominant_station || latestPower?.station || 'NONE',
         confidence: latestDiscrim?.confidence || 'low',
         quality_grade: latestPower?.quality || 'X'
@@ -4145,6 +4167,7 @@ app.get('/api/v1/phase2/propagation-paths', async (req, res) => {
     const stations = {
       'WWV': { lat: 40.6781, lon: -105.0469, name: 'Fort Collins, CO' },
       'WWVH': { lat: 21.9886, lon: -159.7642, name: 'Kauai, HI' },
+      'BPM': { lat: 34.95, lon: 109.55, name: 'Pucheng, China' },
       'CHU': { lat: 45.2945, lon: -75.7513, name: 'Ottawa, ON' }
     };
     

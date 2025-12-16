@@ -385,10 +385,10 @@ class TimeStdPaths {
         // Non-channel directories to exclude
         const excludeDirs = ['status', 'metadata', 'state', 'logs', 'fusion', 'upload'];
         
-        // Valid channel name pattern: must start with WWV or CHU
+        // Valid channel name pattern: must start with SHARED, WWV, or CHU
         // This filters out stray directories like "2", "8", "E", "M", "w"
         const isValidChannelDir = (name) => {
-            return name.startsWith('WWV') || name.startsWith('CHU');
+            return name.startsWith('SHARED') || name.startsWith('WWV') || name.startsWith('CHU');
         };
         
         // Check raw_buffer/ (Phase 1)
@@ -433,10 +433,10 @@ class TimeStdPaths {
         const entries = readdirSync(phase2Dir, { withFileTypes: true });
         
         for (const entry of entries) {
-            // Valid channel names must start with WWV or CHU
+            // Valid channel names must start with SHARED, WWV, or CHU
             if (entry.isDirectory() && 
                 !excludeDirs.includes(entry.name) &&
-                (entry.name.startsWith('WWV') || entry.name.startsWith('CHU'))) {
+                (entry.name.startsWith('SHARED') || entry.name.startsWith('WWV') || entry.name.startsWith('CHU'))) {
                 channels.push(dirToChannelName(entry.name));
             }
         }

@@ -709,24 +709,32 @@
         return '<span style="color: ' + color + '; font-weight: 600;">' + snr.toFixed(1) + '</span>';
       }
       
-      // Filter to only valid channel names (WWV or CHU prefixed)
+      // Filter to only valid channel names (SHARED, WWV, or CHU prefixed)
       // This removes extraneous entries like "2", "8", "E", "M", "W"
       const validChannels = data.channels.filter(ch => {
         const name = ch.channel || '';
-        return name.startsWith('WWV') || name.startsWith('CHU');
+        return name.startsWith('SHARED') || name.startsWith('WWV') || name.startsWith('CHU');
       });
       
       const rows = validChannels.map(ch => {
-        const isWWV = ch.channel.startsWith('WWV');
+        const isShared = ch.channel.startsWith('SHARED');  // 2.5, 5, 10, 15 MHz (WWV+WWVH+BPM)
+        const isWWVOnly = ch.channel.startsWith('WWV');    // 20, 25 MHz (WWV only)
         const isCHU = ch.channel.startsWith('CHU');
-        const wwvCell = isWWV ? snrBadge(ch.wwv_snr_db, ch.wwv_detected) : '—';
-        const wwvhCell = !isWWV ? '—' : !ch.canReceiveWWVH ? '<span style="color: #64748b; font-size: 10px;">N/A</span>' : snrBadge(ch.wwvh_snr_db, ch.wwvh_detected);
+        
+        // WWV column: SHARED frequencies + WWV-only frequencies
+        const wwvCell = (isShared || isWWVOnly) ? snrBadge(ch.wwv_snr_db, ch.wwv_detected) : '—';
+        // WWVH column: Only SHARED frequencies (2.5, 5, 10, 15 MHz)
+        const wwvhCell = isShared ? snrBadge(ch.wwvh_snr_db, ch.wwvh_detected) : '—';
+        // BPM column: Only SHARED frequencies (2.5, 5, 10, 15 MHz)
+        const bpmCell = isShared ? snrBadge(ch.bpm_snr_db, ch.bpm_detected) : '—';
+        // CHU column: Only CHU frequencies
         const chuCell = isCHU ? snrBadge(ch.chu_snr_db, ch.chu_detected) : '—';
         
         return '<tr>' +
           '<td style="font-weight: 600;">' + ch.channel + '</td>' +
           '<td style="text-align: center;">' + wwvCell + '</td>' +
           '<td style="text-align: center;">' + wwvhCell + '</td>' +
+          '<td style="text-align: center;">' + bpmCell + '</td>' +
           '<td style="text-align: center;">' + chuCell + '</td>' +
         '</tr>';
       }).join('');
@@ -740,6 +748,7 @@
               '<th>Channel</th>' +
               stationHeader('WWV', '#10b981') +
               stationHeader('WWVH', '#3b82f6') +
+              stationHeader('BPM', '#ec4899') +
               stationHeader('CHU', '#f59e0b') +
             '</tr></thead>' +
             '<tbody>' + rows + '</tbody>' +
