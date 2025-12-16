@@ -1,24 +1,317 @@
 # NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION:
 
-Primary Instruction:  In this context you will perform a critical review of the GRAPE Recorder project, either in its entirety or in a specific component, as specified by the user.  This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation.  It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation.  It should also look for obsolete, deprecated, or "zombie" code that should be removed.  Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
+Primary Instruction:  In this context you will perform a critical review of the HF Time Standard (hf-timestd) project, either in its entirety or in a specific component, as specified by the user.  This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation.  It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation.  It should also look for obsolete, deprecated, or "zombie" code that should be removed.  Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
 
 # The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session):
 
 ---
 
-## 🔴 CURRENT FOCUS: GPSDO-FIRST TIMING CALIBRATION METHODOLOGY
+## 🔴 CURRENT FOCUS: DATA PIPELINE ROBUSTNESS ANALYSIS
 
-**Purpose:** Critically examine the GPSDO-first timing calibration architecture, looking for mistakes, weaknesses, inconsistencies, and missed opportunities in the methodology.
+**Purpose:** Critically examine the `hf_timestd.core` data pipeline for robustness, identifying weak points, error handling gaps, race conditions, data integrity issues, and opportunities for hardening.
 
 **Author:** Michael James Hauan (AC0G)  
-**Date:** 2025-12-13 (Updated 2025-12-14)  
-**Status:** 🟡 In Progress - RTP-First Timing Implemented
+**Date:** 2025-12-16  
+**Status:** 🟡 Ready for Analysis
 
 ---
 
-### THE GPSDO-FIRST TIMING CALIBRATION ARCHITECTURE
+### DATA PIPELINE ARCHITECTURE OVERVIEW
 
-#### Core Philosophy
+The `hf_timestd.core` module implements a two-phase data pipeline for HF time standard analysis:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        PHASE 1: RAW DATA CAPTURE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  RTP Stream (ka9q-radio)                                                    │
+│       ↓                                                                     │
+│  RTPReceiver → PacketResequencer → RecordingSession → BinaryArchiveWriter   │
+│       ↓              ↓                    ↓                  ↓              │
+│  UDP packets    Gap detection      Minute boundaries    raw_buffer/*.bin    │
+│                 Reordering         Session state        + metadata.json     │
+└─────────────────────────────────────────────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        PHASE 2: ANALYTICAL ENGINE                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Phase2AnalyticsService                                                     │
+│       ↓                                                                     │
+│  Phase2TemporalEngine (3-step analysis)                                     │
+│       ├─ Step 1: Time Snap (tone detection, minute boundary)                │
+│       ├─ Step 2: Channel Characterization (discrimination, SNR)             │
+│       └─ Step 3: Transmission Time Solution (D_clock calculation)           │
+│       ↓                                                                     │
+│  ClockOffsetSeries → MultiBroadcastFusion → ClockConvergenceModel           │
+│       ↓                    ↓                       ↓                        │
+│  clock_offset/*.csv   fusion/*.csv          convergence_state.json          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### CORE MODULE INVENTORY (54 files, ~1.2M bytes)
+
+#### Phase 1 - Data Capture Pipeline
+
+| File | Size | Purpose | Robustness Concerns |
+|------|------|---------|---------------------|
+| `rtp_receiver.py` | 15 KB | UDP socket, RTP parsing | Socket errors, buffer overflow |
+| `packet_resequencer.py` | 17 KB | Gap detection, reordering | Memory growth, sequence wrap |
+| `recording_session.py` | 22 KB | Session state, minute boundaries | State persistence, crash recovery |
+| `binary_archive_writer.py` | 18 KB | Binary IQ + JSON metadata | Disk full, partial writes |
+| `core_recorder.py` | 24 KB | Pipeline orchestration | Thread safety, shutdown |
+| `audio_buffer.py` | 5 KB | Ring buffer for samples | Overflow, underflow |
+
+#### Phase 2 - Analytical Engine
+
+| File | Size | Purpose | Robustness Concerns |
+|------|------|---------|---------------------|
+| `phase2_analytics_service.py` | 66 KB | Service orchestration | File watching, state reload |
+| `phase2_temporal_engine.py` | 79 KB | 3-step temporal analysis | Exception handling, timeouts |
+| `tone_detector.py` | 68 KB | Matched filter detection | FFT errors, edge cases |
+| `wwvh_discrimination.py` | 184 KB | 8-vote discrimination | Vote correlation, confidence |
+| `clock_offset_series.py` | 30 KB | D_clock calculation | RTP calibration, outliers |
+| `multi_broadcast_fusion.py` | 50 KB | 13-broadcast Kalman fusion | State poisoning, divergence |
+| `clock_convergence.py` | 42 KB | Convergence tracking | State persistence, reset |
+
+#### Supporting Modules
+
+| File | Size | Purpose | Robustness Concerns |
+|------|------|---------|---------------------|
+| `timing_calibrator.py` | 39 KB | Bootstrap → Calibrated phases | Multi-process coordination |
+| `global_station_voter.py` | 26 KB | Cross-channel station lock | IPC race conditions |
+| `station_lock_coordinator.py` | 18 KB | Guided detection | Lock file contention |
+| `propagation_mode_solver.py` | 28 KB | Ionospheric mode ID | Model assumptions |
+| `ionospheric_model.py` | 43 KB | IRI-2016 layer heights | External data dependencies |
+
+#### New Matched Filter Templates (2025-12-16)
+
+| File | Size | Purpose | Robustness Concerns |
+|------|------|---------|---------------------|
+| `tick_matched_filter.py` | 23 KB | Per-second tick detection | Window edge effects |
+| `signal_templates.py` | 35 KB | BCD/AFSK/BPM templates | Template accuracy |
+
+---
+
+### CRITIQUE CHECKLIST: PIPELINE ROBUSTNESS
+
+#### 1. Error Handling and Recovery
+
+- [ ] **RTP packet loss**: How does the system handle sustained packet loss (>5%)?
+  - Check: `packet_resequencer.py` gap handling
+  - Check: Does `recording_session.py` mark minutes as incomplete?
+
+- [ ] **Disk full conditions**: What happens when disk is full during write?
+  - Check: `binary_archive_writer.py` exception handling
+  - Check: Is partial data cleaned up or left corrupted?
+
+- [ ] **Service crash recovery**: Can Phase 2 resume after crash?
+  - Check: `phase2_analytics_service.py` state persistence
+  - Check: Are incomplete analyses marked and retried?
+
+- [ ] **Network interruption**: How does RTP receiver handle network drops?
+  - Check: `rtp_receiver.py` socket timeout handling
+  - Check: Reconnection logic
+
+#### 2. State Management and Persistence
+
+- [ ] **State file atomicity**: Are state files written atomically?
+  - Pattern: Write to temp file, then rename
+  - Check: `timing_calibrator.py`, `clock_convergence.py`, `multi_broadcast_fusion.py`
+
+- [ ] **State file corruption**: What if JSON is malformed?
+  - Check: All `json.load()` calls for exception handling
+  - Check: Fallback to default state
+
+- [ ] **State file versioning**: Can old state files cause issues?
+  - Check: Version fields in state files
+  - Check: Migration logic for schema changes
+
+- [ ] **Multi-process state coordination**: 9 channels share state files
+  - Check: File locking in `timing_calibrator.py`
+  - Check: Race conditions in `global_station_voter.py`
+
+#### 3. Data Integrity
+
+- [ ] **Sample count validation**: Is 1,200,000 samples/minute enforced?
+  - Check: `recording_session.py` minute boundary logic
+  - Check: What happens with short/long minutes?
+
+- [ ] **RTP timestamp continuity**: Are timestamp jumps detected?
+  - Check: `packet_resequencer.py` sequence validation
+  - Check: `clock_offset_series.py` RTP calibration
+
+- [ ] **Binary file integrity**: Are binary files validated on read?
+  - Check: `binary_archive_writer.py` reader validation
+  - Check: Checksum or size validation
+
+- [ ] **Metadata consistency**: Does JSON metadata match binary data?
+  - Check: `sample_count` in JSON vs actual file size
+  - Check: `start_rtp_timestamp` accuracy
+
+#### 4. Resource Management
+
+- [ ] **Memory growth**: Are there unbounded data structures?
+  - Check: `packet_resequencer.py` buffer limits
+  - Check: `phase2_temporal_engine.py` result accumulation
+  - Check: `wwvh_discrimination.py` history buffers
+
+- [ ] **File handle leaks**: Are files properly closed?
+  - Check: Context managers (`with open(...)`)
+  - Check: Exception paths that might skip cleanup
+
+- [ ] **Thread safety**: Are shared resources protected?
+  - Check: `core_recorder.py` threading model
+  - Check: `phase2_analytics_service.py` file watcher
+
+- [ ] **Graceful shutdown**: Does the system shut down cleanly?
+  - Check: Signal handlers in services
+  - Check: Pending writes flushed
+
+#### 5. Edge Cases and Boundary Conditions
+
+- [ ] **Minute boundary alignment**: What if first packet isn't at :00?
+  - Check: `recording_session.py` initial alignment
+
+- [ ] **Leap second handling**: How are leap seconds handled?
+  - Check: 61-second minutes
+  - Check: RTP timestamp discontinuity
+
+- [ ] **Day/hour boundaries**: Any issues at 00:00 UTC?
+  - Check: File naming, directory creation
+  - Check: State file rotation
+
+- [ ] **Low SNR conditions**: Does the system degrade gracefully?
+  - Check: `tone_detector.py` minimum SNR thresholds
+  - Check: `wwvh_discrimination.py` low-confidence handling
+
+#### 6. Logging and Observability
+
+- [ ] **Error logging**: Are all exceptions logged with context?
+  - Check: `logger.exception()` vs `logger.error()`
+  - Check: Sufficient context for debugging
+
+- [ ] **Performance metrics**: Can we identify bottlenecks?
+  - Check: Processing time logging
+  - Check: Queue depth monitoring
+
+- [ ] **Health checks**: Can we verify system is working?
+  - Check: Status files, heartbeats
+  - Check: Stale data detection
+
+---
+
+### SPECIFIC FILES TO AUDIT (Priority Order)
+
+#### Critical Path (Phase 1)
+
+1. **`rtp_receiver.py`** - Entry point for all data
+   - Socket error handling
+   - Buffer management
+   - Packet validation
+
+2. **`packet_resequencer.py`** - Data integrity gate
+   - Gap detection accuracy
+   - Memory bounds
+   - Sequence number wrap (32-bit)
+
+3. **`recording_session.py`** - Minute boundary logic
+   - State machine correctness
+   - Crash recovery
+   - Partial minute handling
+
+4. **`binary_archive_writer.py`** - Data persistence
+   - Atomic writes
+   - Compression errors
+   - Disk space handling
+
+#### Critical Path (Phase 2)
+
+5. **`phase2_analytics_service.py`** - Service orchestration
+   - File watcher reliability
+   - State reload safety
+   - Exception isolation
+
+6. **`clock_offset_series.py`** - D_clock calculation
+   - RTP calibration correctness
+   - Outlier handling
+   - Numerical stability
+
+7. **`multi_broadcast_fusion.py`** - Kalman fusion
+   - State persistence
+   - Divergence detection
+   - Measurement rejection
+
+8. **`timing_calibrator.py`** - Multi-process coordination
+   - File locking
+   - State consistency
+   - Bootstrap exit conditions
+
+---
+
+### KNOWN ISSUES FROM PREVIOUS SESSIONS
+
+#### 1. Kalman State Poisoning (Fixed 2025-12-08)
+- **Issue**: Corrupted Kalman state persisted across restarts
+- **Fix**: Added state versioning and sanity checks
+- **Verify**: Check `clock_convergence.py` for validation
+
+#### 2. Multi-Process State Race (Partially Fixed)
+- **Issue**: 9 channel processes share state files
+- **Current**: Reload-before-update pattern
+- **Remaining**: No file locking - race conditions possible
+
+#### 3. Discrimination Flip-Flopping (Ongoing)
+- **Issue**: Station ID changes between minutes
+- **Impact**: ~50ms D_clock errors when wrong station
+- **Mitigation**: RTP-based station prediction
+
+---
+
+### VALIDATION COMMANDS
+
+```bash
+# Check for Python exceptions in logs
+grep -r "Traceback\|Exception\|Error" /tmp/timestd-test/logs/
+
+# Monitor file descriptor usage
+ls -la /proc/$(pgrep -f phase2_analytics)/fd/ | wc -l
+
+# Check state file sizes (should be stable)
+watch -n 60 'ls -la /tmp/timestd-test/state/*.json'
+
+# Verify minute file integrity
+for f in /tmp/timestd-test/raw_buffer/*/*.bin; do
+  size=$(stat -c%s "$f")
+  expected=$((1200000 * 4))  # 1.2M samples * 4 bytes (complex int16)
+  if [ "$size" -ne "$expected" ]; then
+    echo "INCOMPLETE: $f ($size bytes)"
+  fi
+done
+
+# Check for stale processing
+find /tmp/timestd-test/phase2 -name "*.json" -mmin +5 -ls
+```
+
+---
+
+### SUCCESS CRITERIA FOR ROBUSTNESS
+
+| Metric | Target | How to Verify |
+|--------|--------|---------------|
+| Packet loss tolerance | <5% loss → no data corruption | Inject packet loss, verify output |
+| Crash recovery | Resume within 1 minute | Kill process, verify restart |
+| State file integrity | No corruption after 24h | Monitor state files continuously |
+| Memory stability | <500 MB after 24h | Monitor RSS over time |
+| File handle stability | <100 handles | Monitor /proc/*/fd |
+| Error rate | <1 exception/hour | Count log exceptions |
+
+---
+
+### PREVIOUS FOCUS: GPSDO-FIRST TIMING CALIBRATION METHODOLOGY
+
+**Status:** ✅ Implemented (2025-12-14)
 
 The system leverages GPSDO-disciplined RTP timestamps as the **primary timing foundation**, then progressively refines with tone detections and multi-broadcast fusion:
 
