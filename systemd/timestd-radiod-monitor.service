@@ -1,6 +1,6 @@
 [Unit]
 Description=HF Time Standard Radiod Health Monitor
-Documentation=https://github.com/mijahauan/grape-recorder
+Documentation=https://github.com/mijahauan/hf-timestd
 After=network.target radiod@ac0g-bee1-rx888.service
 Wants=radiod@ac0g-bee1-rx888.service
 
@@ -13,7 +13,7 @@ WorkingDirectory=/home/mjh/git/signal-recorder
 # Run the radiod health monitor
 ExecStart=/home/mjh/git/signal-recorder/venv/bin/python3 \
     /home/mjh/git/signal-recorder/scripts/monitor_radiod_health.py \
-    /tmp/grape-test/state/radiod-status.json \
+    /tmp/timestd-test/state/radiod-status.json \
     10
 
 # Restart policy

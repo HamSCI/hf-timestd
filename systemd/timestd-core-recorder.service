@@ -1,6 +1,6 @@
 [Unit]
 Description=HF Time Standard Core Recorder - Phase 1 RTP to Digital RF Archive
-Documentation=https://github.com/mijahauan/grape-recorder
+Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target
 Wants=network-online.target
 # Wait for radiod if running on same machine
@@ -18,7 +18,6 @@ Group=hf-timestd
 # Environment from file (set by install.sh)
 # Try new path first, fall back to legacy
 EnvironmentFile=-/etc/hf-timestd/environment
-EnvironmentFile=-/etc/grape-recorder/environment
 
 # Working directory
 WorkingDirectory=${TIMESTD_PROJECT}
@@ -33,7 +32,7 @@ RestartSec=10
 StartLimitInterval=300
 StartLimitBurst=5
 
-# Logging to journal (viewable via journalctl -u grape-core-recorder)
+# Logging to journal (viewable via journalctl -u timestd-core-recorder)
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=timestd-core-recorder
@@ -53,8 +52,8 @@ ProtectSystem=strict
 ProtectHome=read-only
 
 # Paths we need write access to
-ReadWritePaths=/var/lib/hf-timestd /var/log/hf-timestd /var/lib/grape-recorder /var/log/grape-recorder
-ReadOnlyPaths=/etc/hf-timestd /etc/grape-recorder
+ReadWritePaths=/var/lib/hf-timestd /var/log/hf-timestd
+ReadOnlyPaths=/etc/hf-timestd
 
 # Network access for RTP multicast
 PrivateNetwork=false

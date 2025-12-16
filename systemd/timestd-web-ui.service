@@ -1,6 +1,6 @@
 [Unit]
 Description=HF Time Standard Web UI
-Documentation=https://github.com/mijahauan/grape-recorder
+Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target timestd-core-recorder.service
 Wants=network-online.target
 
@@ -14,7 +14,6 @@ Group=hf-timestd
 # Environment from file
 # Try new path first, fall back to legacy
 EnvironmentFile=-/etc/hf-timestd/environment
-EnvironmentFile=-/etc/grape-recorder/environment
 
 # Node.js production settings
 Environment="NODE_ENV=production"
@@ -23,8 +22,8 @@ Environment="PORT=3000"
 # Working directory
 WorkingDirectory=${TIMESTD_WEBUI}
 
-# Start command - simple-server.js reads GRAPE_DATA_ROOT from environment
-ExecStart=/usr/bin/node simple-server.js
+# Start command - monitoring-server-v3.js reads config from TIMESTD_CONFIG
+ExecStart=/usr/bin/node monitoring-server-v3.js
 
 # Restart policy
 Restart=on-failure
@@ -43,8 +42,8 @@ ProtectSystem=strict
 ProtectHome=read-only
 
 # Paths - read-only access to data, read-write for web-ui data dir
-ReadWritePaths=/var/lib/hf-timestd /var/log/hf-timestd /var/lib/grape-recorder /var/log/grape-recorder ${TIMESTD_WEBUI}/data
-ReadOnlyPaths=/etc/hf-timestd /etc/grape-recorder
+ReadWritePaths=/var/lib/hf-timestd /var/log/hf-timestd ${TIMESTD_WEBUI}/data
+ReadOnlyPaths=/etc/hf-timestd
 
 # Network - bind to port 3000
 PrivateNetwork=false
