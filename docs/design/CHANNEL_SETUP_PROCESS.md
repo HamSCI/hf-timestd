@@ -288,20 +288,8 @@ def detect_encoding(payload: bytes, samples_per_packet: int) -> str:
 
 ## Digital RF Output
 
-Currently writing to `raw_buffer/` as binary. Should write 20 kHz Digital RF to `raw_archive/`:
-
-```
-raw_archive/{CHANNEL}/{YYYYMMDD}/
-  {YYYY-MM-DDTHH}/
-    rf@{timestamp}.h5      # Digital RF HDF5
-    metadata/
-      drf_properties.h5
-```
-
-This requires:
-1. Use `digital_rf` library for writing
-2. Proper metadata (sample_rate, center_freq, etc.)
-3. Continuous sample indices across files
+`hf-timestd` writes Phase 1 data as per-minute binary complex64 under `raw_buffer/`.
+Digital RF output (`raw_archive/`) is not used in this repository.
 
 ## Summary
 

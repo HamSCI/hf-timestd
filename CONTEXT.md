@@ -310,16 +310,16 @@ Rearranging:
 
 ```bash
 # Check current D_clock convergence state
-cat /tmp/grape-test/phase2/*/status/convergence_state.json | jq .
+cat /tmp/timestd-test/phase2/*/status/convergence_state.json | jq .
 
 # View fused D_clock output
-tail -20 /tmp/grape-test/phase2/fusion/fused_d_clock.csv
+tail -20 /tmp/timestd-test/phase2/fusion/fused_d_clock.csv
 
 # Check calibration state
-cat /tmp/grape-test/phase2/fusion/calibration_state.json | jq .
+cat /tmp/timestd-test/phase2/fusion/calibration_state.json | jq .
 
 # View per-channel clock offsets
-tail -5 /tmp/grape-test/phase2/WWV_10_MHz/clock_offset/*.csv
+tail -5 /tmp/timestd-test/phase2/WWV_10_MHz/clock_offset/*.csv
 ```
 
 ---
@@ -332,20 +332,16 @@ tail -5 /tmp/grape-test/phase2/WWV_10_MHz/clock_offset/*.csv
 |------|--------|-----------|
 | **Core Recording** | ✅ Stable | `core/` modules, `core-recorder.toml` |
 | **Phase 2 Analytics** | ✅ Stable | `docs/PHASE2_CRITIQUE.md` - 16 fixes applied |
-| **Phase 3 Products** | ✅ Stable | `docs/PHASE3_CRITIQUE.md` - 7 fixes applied |
-| **Decimation** | ✅ Fixed | `StatefulDecimator` eliminates boundary artifacts |
-| **Spectrogram Gen** | ✅ Canonical | `carrier_spectrogram.py` is the one to use |
-| **Daily Upload** | ⚠️ Test | `daily-drf-upload.sh` exists but needs PSWS testing |
-| **Systemd Services** | ✅ Updated | All use `EnvironmentFile=`, three-phase naming |
+| **Systemd Services** | ✅ Updated | All use `EnvironmentFile=` |
 | **Install Script** | ✅ Updated | `scripts/install.sh` supports test/production modes |
-| **Web UI** | ✅ Working | `grape-ui.sh`, port 3000 |
+| **Web UI** | ✅ Working | `timestd-ui.sh`, port 3000 |
 
 ### Key Configuration Files
 
 ```
 config/
-├── timestd-config.toml     # Main config: station, channels, paths, uploader
-├── core-recorder.toml    # Core recorder: ka9q connection, DRF writer
+├── timestd-config.toml     # Main config: station, channels, paths
+├── core-recorder.toml    # Core recorder: ka9q connection, raw_buffer writer
 └── environment           # Environment variables (create from .template)
 ```
 
@@ -370,36 +366,12 @@ longitude = -90.xxxx
 
 | Service | Purpose |
 |---------|---------|
-| `timestd-core-recorder.service` | Phase 1: RTP → DRF raw archive |
+| `timestd-core-recorder.service` | Phase 1: RTP → raw_buffer (binary IQ) |
 | `timestd-analytics.service` | Phase 2: Timing analysis (9 channels + fusion) |
 | `timestd-web-ui.service` | Web monitoring UI |
 
-**Periodic Timers** (Phase 3 products):
-
-| Timer | Interval | Purpose |
-|-------|----------|---------|
-| `grape-spectrograms.timer` | Every 10 min | Regenerate spectrograms |
-| `grape-daily-upload.timer` | Daily 00:30 UTC | Package 10 Hz DRF + PSWS upload |
-
-### PSWS Upload Configuration
-
-```toml
-# timestd-config.toml [uploader] section
-[uploader]
-enabled = true                              # Enable for production
-protocol = "sftp"
-host = "pswsnetwork.eng.ua.edu"
-user = "YOUR_PSWS_USERNAME"
-ssh_key = "/home/wsprdaemon/.ssh/psws_key"  # Must exist!
-remote_base = "/incoming/grape"
-bandwidth_limit_kbps = 0                    # 0 = unlimited
-```
-
-**Pre-requisite:** Generate SSH key and register with PSWS:
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/psws_key -N ""
-# Send public key to PSWS administrators
-```
+Phase 3 products (decimation, spectrograms, PSWS uploads) are out of scope for `hf-timestd`.
+If you need them, use the separate `grape-recorder` project.
 
 ---
 
@@ -423,7 +395,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/psws_key -N ""
 | Per-second tick SNR | Vote 4 not connected | Added `detect_tick_windows()` call | `phase2_temporal_engine.py` |
 | CHU FSK timing | FSK decoder not confirming D_clock | Compare FSK offset with D_clock | `phase2_temporal_engine.py` |
 | RTP station prediction | Low-confidence discrimination flip-flopping | Use RTP history to predict station | `timing_calibrator.py` |
-| Phase 3 separation | Codebase too large | Moved decimation/spectrograms to grape-recorder | Multiple files |
+| Phase 3 separation | Codebase too large | Moved Phase 3 responsibilities to grape-recorder | Multiple files |
 
 ---
 
@@ -434,7 +406,6 @@ ssh-keygen -t ed25519 -f ~/.ssh/psws_key -N ""
 | `ARCHITECTURE.md` | System design, data flow, module responsibilities |
 | `TECHNICAL_REFERENCE.md` | API details, data formats, algorithms |
 | `CRITIC_CONTEXT.md` | Deep technical context for code review |
-| `GRAPE_SEPARATION.md` | Phase 3 separation to grape-recorder |
 
 ---
 
@@ -442,21 +413,13 @@ ssh-keygen -t ed25519 -f ~/.ssh/psws_key -N ""
 
 ```bash
 # Start all services
-./scripts/grape-core.sh -start       # Phase 1
-./scripts/timestd-analytics.sh -start  # Phase 2
-./scripts/grape-ui.sh -start         # Web UI (port 3000)
-
-# Generate spectrograms
-source venv/bin/activate
-python3 -m grape_recorder.grape.carrier_spectrogram \
-    --data-root /tmp/timestd-test --all-channels --date $(date -u +%Y%m%d) --grid EM38ww
+./scripts/timestd-all.sh -start
 ```
 
 ### Production Mode (after installation)
 ```bash
 sudo systemctl enable timestd-core-recorder timestd-analytics timestd-web-ui
 sudo systemctl start timestd-core-recorder timestd-analytics timestd-web-ui
-sudo systemctl enable --now grape-daily-upload.timer
 ```
 
 ---
@@ -464,21 +427,10 @@ sudo systemctl enable --now grape-daily-upload.timer
 ## 🔄 RECOVERY COMMANDS
 
 ```bash
-./scripts/timestd-analytics.sh -stop
+./scripts/timestd-all.sh -stop
 rm -f /tmp/timestd-test/phase2/*/status/convergence_state.json
 rm -f /tmp/timestd-test/phase2/*/clock_offset/*.csv
-./scripts/timestd-analytics.sh -start
-
-# DRF Writer Stall
-./scripts/grape-core.sh -stop
-# Check for locked HDF5 files
-lsof +D /tmp/timestd-test/raw_archive/
-./scripts/grape-core.sh -start
-
-# Web UI Not Responding
-./scripts/grape-ui.sh -restart
-# Check port 3000
-ss -tlnp | grep 3000
+./scripts/timestd-all.sh -start
 ```
 
 ---
@@ -496,11 +448,10 @@ ss -tlnp | grep 3000
 ## 📊 STANDARD ENVIRONMENT
 
 ```bash
-# Standard GRAPE environment (set in systemd or shell)
-export GRAPE_DATA_ROOT=/tmp/timestd-test          # or /var/lib/timestd
-export GRAPE_CONFIG=/home/wsprdaemon/grape-recorder/config/timestd-config.toml
-export GRAPE_VENV=/home/wsprdaemon/grape-recorder/venv
-export GRAPE_LOG_DIR=/tmp/timestd-test/logs
+# Standard hf-timestd environment (set in systemd or shell)
+export TIMESTD_DATA_ROOT=/tmp/timestd-test          # or /var/lib/timestd
+export TIMESTD_CONFIG=/etc/hf-timestd/timestd-config.toml
+export TIMESTD_VENV=/home/wsprdaemon/hf-timestd/venv
 ```
 
 ---
@@ -513,7 +464,6 @@ export GRAPE_LOG_DIR=/tmp/timestd-test/logs
 | Dec 13 AM | IRI-2020 Upgrade | Ionospheric model upgraded, mode switching cleanup |
 | Dec 8 Night | Production Deployed | Systemd services running, matplotlib added, docs updated |
 | Dec 8 Eve | Production Mode | TEST/PRODUCTION architecture, install.sh, systemd services |
-| Dec 8 PM | Phase 3 Fixes | StatefulDecimator, path consolidation, spectrogram canonical |
 | Dec 8 AM | Clock Drift | RTP timestamp bug, Kalman state reset, channel discovery |
 | Dec 7 PM | Phase 2 Critique | 16 methodology fixes, uncertainty replaces grades |
 | Dec 7 AM | BCD Correlation | Fixed BCD detection, 440Hz filtering, noise floor band |

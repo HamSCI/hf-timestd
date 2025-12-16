@@ -43,7 +43,6 @@ RTP Packets
 ┌─────────────────────────────────────────────────────┐
 │  Phase 2: Analytics Service                         │
 │  - Reads binary via memory-map (zero-copy)          │
-│  - Falls back to DRF for legacy data                │
 │  - Produces D_clock, tone detection, etc.           │
 └─────────────────────────────────────────────────────┘
 ```
@@ -51,7 +50,7 @@ RTP Packets
 ### File Structure
 
 ```
-/tmp/grape-test/raw_buffer/
+/tmp/timestd-test/raw_buffer/
   WWV_10_MHz/
     20251206/
       1765032240.bin      # 9.6 MB raw complex64
@@ -97,18 +96,16 @@ RTP Packets
 ## Files Changed
 
 ### New Files
-- `src/grape_recorder/grape/binary_archive_writer.py` - Simple binary writer
+- `src/hf_timestd/core/binary_archive_writer.py` - Simple binary writer
 
 ### Modified Files
-- `src/grape_recorder/grape/pipeline_orchestrator.py` - Use BinaryArchiveWriter
-- `src/grape_recorder/grape/phase2_analytics_service.py` - Read from binary first
-- `src/grape_recorder/grape/raw_archive_writer.py` - Disabled sliding window monitor
+- `src/hf_timestd/core/pipeline_orchestrator.py` - Use BinaryArchiveWriter
+- `src/hf_timestd/core/phase2_analytics_service.py` - Read from binary raw_buffer
 
 ## Future Work
 
 1. **Async Compression**: Compress completed minutes with zstd in background
-2. **DRF Conversion**: Convert binary to DRF for PSWS upload (Phase 3)
-3. **Cleanup Policy**: Delete old binary files after DRF conversion confirmed
+2. **Cleanup Policy**: Delete/relocate old raw_buffer data after downstream consumers confirm retention needs
 
 ## Why Not Fix DRF?
 

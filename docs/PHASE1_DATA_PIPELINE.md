@@ -2,9 +2,9 @@
 
 ## Overview
 
-Phase 1 is the foundation of the GRAPE recording system. It captures raw 20 kHz IQ
-samples from ka9q-radio's RTP multicast stream and stores them in Digital RF (DRF)
-format as the immutable source of truth.
+Phase 1 is the foundation of the `hf-timestd` pipeline. It captures raw 20 kHz IQ
+samples from ka9q-radio's RTP multicast stream and stores them as per-minute binary
+complex64 files under `raw_buffer/` as the immutable source of truth.
 
 **Design Principle:** Raw data integrity > all other concerns.
 
@@ -39,21 +39,18 @@ format as the immutable source of truth.
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    RawArchiveWriter (raw_archive_writer.py)                 │
-│  - Establishes RTP→SystemTime mapping (SystemTimeReference)                 │
-│  - Writes to Digital RF format (HDF5-based)                                 │
-│  - DRF global_index = system_time × sample_rate (64-bit, no wraparound)     │
-│  - Validates samples (NaN, Inf, clipping)                                   │
-│  - Records gaps and quality metrics                                         │
-│  - Periodic flush, watchdog, and heartbeat (resilience)                     │
+│                 BinaryArchiveWriter (binary_archive_writer.py)              │
+│  - Writes per-minute binary complex64 IQ                                    │
+│  - Writes JSON sidecar metadata (expected/written samples, gaps, etc.)      │
+│  - Append-only / immutable record                                            │
 └─────────────────────────────────────────────────────────────────────────────┘
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Digital RF Archive                                │
-│  Directory: raw_archive/{CHANNEL}/{YYYYMMDD}/{ISO-TIMESTAMP}/               │
-│  Files: rf@{GLOBAL_INDEX}.h5 (60-second file cadence)                       │
-│  Metadata: Station, frequency, sample rate, compression, NTP status         │
+│                          Phase 1 raw_buffer (binary)                        │
+│  Directory: raw_buffer/{CHANNEL_DIR}/{YYYYMMDD}/                            │
+│  Files: {minute_boundary}.bin[.zst|.lz4]                                    │
+│         {minute_boundary}.json                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,9 +74,9 @@ format as the immutable source of truth.
 | **Resolution** | Nanosecond precision |
 | **Wraparound** | Never (billions of years) |
 | **Source** | Host system clock (NTP-synchronized) |
-| **Used for** | DRF global index, absolute timing reference |
+| **Used for** | Absolute timing reference |
 
-### 3. DRF Global Sample Index
+### 3. Binary Archive Index
 | Property | Value |
 |----------|-------|
 | **Width** | 64-bit integer |

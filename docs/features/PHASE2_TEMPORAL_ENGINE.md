@@ -136,10 +136,10 @@ def _validate_input(self, iq_samples):
 ## Usage
 
 ```python
-from grape_recorder.grape import create_phase2_engine
+from hf_timestd.core import create_phase2_engine
 
 engine = create_phase2_engine(
-    raw_archive_dir=Path('/data/raw_archive'),
+    raw_buffer_dir=Path('/data/raw_buffer'),
     output_dir=Path('/data/phase2'),
     channel_name='WWV_10MHz',
     frequency_hz=10e6,
