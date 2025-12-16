@@ -2,10 +2,8 @@
 # HF Time Standard All Services Control: Core + Analytics + Web-UI
 #
 # Two-Phase Pipeline Architecture:
-#   Phase 1: Core Recorder → raw_archive/ (20 kHz Digital RF)
+#   Phase 1: Core Recorder → raw_buffer/ (20 kHz binary IQ)
 #   Phase 2: Analytics → phase2/ (timing analysis, D_clock)
-#
-# Note: Phase 3 (decimation, spectrograms, PSWS upload) is in separate grape app
 #
 # Usage: timestd-all.sh -start|-stop|-status [config-file]
 
@@ -58,7 +56,7 @@ start)
     echo "📋 Config: $CONFIG"
     echo "📁 Data: $DATA_ROOT"
     echo ""
-    echo "📦 Phase 1: Core Recorder (20 kHz raw archive)"
+    echo "📦 Phase 1: Core Recorder (20 kHz raw_buffer)"
     "$SCRIPT_DIR/timestd-core.sh" -start "$CONFIG"
     echo ""
     echo "📊 Phase 2: Analytics (timing analysis, D_clock)"
@@ -116,15 +114,15 @@ status)
     echo ""
     echo "📁 Data Structure:"
     echo "   $DATA_ROOT/"
-    echo "   ├── raw_archive/     Phase 1: 20 kHz Digital RF"
+    echo "   ├── raw_buffer/      Phase 1: 20 kHz binary IQ"
     echo "   ├── phase2/          Phase 2: Timing analysis, D_clock"
     echo "   └── logs/            Service logs"
     
     # Show disk usage if data exists
-    if [ -d "$DATA_ROOT/raw_archive" ]; then
-        RAW_SIZE=$(du -sh "$DATA_ROOT/raw_archive" 2>/dev/null | cut -f1)
+    if [ -d "$DATA_ROOT/raw_buffer" ]; then
+        RAW_SIZE=$(du -sh "$DATA_ROOT/raw_buffer" 2>/dev/null | cut -f1)
         echo ""
-        echo "💾 Storage: raw_archive=$RAW_SIZE"
+        echo "💾 Storage: raw_buffer=$RAW_SIZE"
     fi
     ;;
 esac

@@ -87,7 +87,7 @@ def subscribe_stream(
             - spec: The stream specification
             
     Example:
-        # WWV 10 MHz IQ for GRAPE
+        # WWV 10 MHz IQ for hf-timestd
         stream = subscribe_stream(
             radiod="bee1-hf.local",
             frequency_hz=10.0e6,
@@ -304,7 +304,7 @@ def subscribe_batch(
     """
     Subscribe to multiple streams with the same parameters.
     
-    Efficient batch creation for applications like GRAPE that need
+    Efficient batch creation for applications like hf-timestd that need
     many streams with identical settings.
     
     Args:
@@ -319,7 +319,7 @@ def subscribe_batch(
         List of StreamHandles
         
     Example:
-        # GRAPE: 9 WWV/CHU channels
+        # hf-timestd: 9 WWV/CHU channels
         streams = subscribe_batch(
             radiod="bee1-hf.local",
             frequencies=[2.5e6, 5.0e6, 10.0e6, 15.0e6, 20.0e6, 25.0e6,

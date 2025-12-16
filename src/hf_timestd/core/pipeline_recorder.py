@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
-Pipeline Recorder - Three-Phase Architecture Integration
+Pipeline Recorder - Two-Phase Architecture Integration
 
-This module provides a GrapeRecorder-compatible interface that uses the
-new three-phase robust time-aligned data pipeline:
+This module provides the pipeline recorder interface for the
+two-phase time-aligned data pipeline:
 
-- Phase 1: Immutable Raw Archive (20 kHz IQ DRF)
-- Phase 2: Analytical Engine (Clock Offset Series)
-- Phase 3: Corrected Telemetry Product (10 Hz DRF)
-
-It serves as a drop-in replacement for GrapeRecorder when the new
-architecture is enabled.
+- Phase 1: Immutable Raw Archive (20 kHz IQ binary)
+- Phase 2: Analytical Engine (Clock Offset Series, D_clock)
 
 Usage:
 ------
@@ -18,7 +14,7 @@ Usage:
         ssrc=20100,
         frequency_hz=10e6,
         sample_rate=20000,
-        output_dir=Path('/data/grape'),
+        output_dir=Path('/data/timestd'),
         receiver_grid='EM38ww',
         station_config={'callsign': 'W3PM', ...}
     )
@@ -61,8 +57,7 @@ class PipelineRecorderConfig:
     """
     Configuration for pipeline recorder.
     
-    This configuration enables the three-phase architecture while
-    maintaining compatibility with the existing GrapeConfig interface.
+    Configuration for the two-phase pipeline recorder.
     """
     # Channel identification
     ssrc: int
@@ -118,12 +113,10 @@ class PipelineRecorderConfig:
 
 class PipelineRecorder:
     """
-    GRAPE recorder using the three-phase architecture.
+    HF Time Standard recorder using the two-phase architecture.
     
-    This is a drop-in replacement for GrapeRecorder that:
     1. Writes raw IQ to Phase 1 immutable archive
     2. Queues data for Phase 2 analysis
-    3. Produces Phase 3 corrected products
     
     The architecture ensures:
     - Raw data is never modified
@@ -388,7 +381,7 @@ class PipelineRecorder:
             'samples_written': self.samples_written,
             'last_packet_time': last_packet_iso,
             'pipeline_state': stats.get('pipeline', {}).get('state', 'unknown'),
-            'architecture': 'three_phase_pipeline',
+            'architecture': 'two_phase_pipeline',
             # Compatibility fields
             'time_snap_source': 'phase2_analysis',  # D_clock from Phase 2
             'time_snap_confidence': 0.0,  # Set from Phase 2 results

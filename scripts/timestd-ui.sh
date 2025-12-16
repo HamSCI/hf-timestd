@@ -1,11 +1,9 @@
 #!/bin/bash
 # HF Time Standard Web-UI Control (Monitoring Dashboard)
 #
-# Provides real-time visualization of all three phases:
-#   - Phase 1: Raw archive status, recording quality
+# Provides real-time visualization of Phase 1 + Phase 2:
+#   - Phase 1: raw_buffer recording status
 #   - Phase 2: Timing analysis, D_clock, discrimination
-#   - Phase 3: Product status, PSWS upload readiness
-#   - 10-second sliding window metrics
 #
 # Usage: timestd-ui.sh -start|-stop|-status [config-file]
 
@@ -44,7 +42,7 @@ start)
     mkdir -p "$DATA_ROOT/logs"
     cd "$PROJECT_DIR/web-ui"
     
-    nohup env TIMESTD_CONFIG="$CONFIG" GRAPE_CONFIG="$CONFIG" node monitoring-server-v3.js \
+    nohup env TIMESTD_CONFIG="$CONFIG" node monitoring-server-v3.js \
         > "$DATA_ROOT/logs/webui.log" 2>&1 &
     
     PID=$!
@@ -79,7 +77,6 @@ status)
         echo "✅ Web-UI: RUNNING → http://localhost:3000/"
         echo "   Dashboard pages:"
         echo "   - /            Overview and channel status"
-        echo "   - /spectrogram Spectrograms and signal quality"
         echo "   - /timing      Timing analysis and D_clock"
         echo "   - /carriers    Carrier tracking and Doppler"
     else

@@ -20,7 +20,7 @@ class QualityAnalyzedSampleProvider(ABC):
     """
     Interface for Function 1: Quality & Time_Snap Analysis
     
-    This is the primary producer in the GRAPE architecture.
+    This is the primary producer in the hf-timestd architecture.
     It receives RTP packets, performs resequencing, gap detection,
     time_snap correction, and quality analysis.
     

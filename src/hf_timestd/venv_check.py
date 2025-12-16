@@ -1,5 +1,5 @@
 """
-Virtual environment check for grape-recorder.
+Virtual environment check for hf-timestd.
 
 Import this at the top of any script entry point to ensure
 the venv is being used:
@@ -41,7 +41,7 @@ def require_venv(exit_on_fail: bool = True) -> bool:
     venv_path = project_dir / "venv"
     
     msg = f"""
-❌ ERROR: grape-recorder must be run from its virtual environment.
+❌ ERROR: hf-timestd must be run from its virtual environment.
 
 Current Python: {sys.executable}
 Expected venv:  {venv_path}

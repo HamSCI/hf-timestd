@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quality Metrics and Tracking for GRAPE Data
+Quality Metrics and Tracking for HF Time Standard Data
 
 Comprehensive tracking of data quality, timing accuracy, and gaps
 for scientific provenance and validation.

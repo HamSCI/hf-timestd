@@ -75,7 +75,7 @@ def dir_to_channel_name(dir_name: str) -> str:
 
 
 class TimeStdPaths:
-    """Central path manager for TimeStd three-phase pipeline.
+    """Central path manager for TimeStd two-phase pipeline.
     
     Usage:
         from hf_timestd.paths import TimeStdPaths

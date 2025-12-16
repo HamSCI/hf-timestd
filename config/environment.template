@@ -1,6 +1,6 @@
-# GRAPE Recorder Environment Configuration
-# =========================================
-# This file sets environment variables for all GRAPE services and scripts.
+# hf-timestd Environment Configuration
+# ===================================
+# This file sets environment variables for hf-timestd services and scripts.
 #
 # INSTALLATION:
 #   TEST MODE:       Copy to $PROJECT_DIR/config/environment (optional)
@@ -19,7 +19,7 @@
 # Values: "test" or "production"
 #   test:       /tmp/timestd-test, runs via scripts, development
 #   production: /var/lib/timestd, runs via systemd, 24/7 operation
-GRAPE_MODE=test
+TIMESTD_MODE=test
 
 # ===========================================================================
 # PATH CONFIGURATION
@@ -27,54 +27,41 @@ GRAPE_MODE=test
 # Data root directory (where all IQ data, analytics, products are stored)
 #   test:       /tmp/timestd-test
 #   production: /var/lib/timestd
-GRAPE_DATA_ROOT=/tmp/timestd-test
+TIMESTD_DATA_ROOT=/tmp/timestd-test
 
 # Log directory (FHS standard: /var/log/<app>/ for production)
 #   test:       /tmp/timestd-test/logs
 #   production: /var/log/hf-timestd
-GRAPE_LOG_DIR=/tmp/timestd-test/logs
+TIMESTD_LOG_DIR=/tmp/timestd-test/logs
 
 # Configuration file path
-#   test:       $PROJECT_DIR/config/grape-config.toml
-#   production: /etc/hf-timestd/grape-config.toml
-GRAPE_CONFIG=/home/wsprdaemon/grape-recorder/config/grape-config.toml
+#   test:       $PROJECT_DIR/config/timestd-config.toml
+#   production: /etc/hf-timestd/timestd-config.toml
+TIMESTD_CONFIG=/etc/hf-timestd/timestd-config.toml
 
 # ===========================================================================
 # INSTALLATION PATHS
 # ===========================================================================
 # Python virtual environment (created during installation)
-GRAPE_VENV=/home/wsprdaemon/grape-recorder/venv
+TIMESTD_VENV=/home/wsprdaemon/hf-timestd/venv
 
 # Project/source directory
-GRAPE_PROJECT=/home/wsprdaemon/grape-recorder
+TIMESTD_PROJECT=/home/wsprdaemon/hf-timestd
 
 # Web UI directory
-GRAPE_WEBUI=/home/wsprdaemon/grape-recorder/web-ui
+TIMESTD_WEBUI=/home/wsprdaemon/hf-timestd/web-ui
 
 # ===========================================================================
 # LOGGING
 # ===========================================================================
 # Log level: DEBUG, INFO, WARNING, ERROR
-GRAPE_LOG_LEVEL=INFO
+TIMESTD_LOG_LEVEL=INFO
 
 # ===========================================================================
 # STATION IDENTIFICATION (optional overrides - normally read from config)
 # ===========================================================================
-# GRAPE_CALLSIGN=AC0G
-# GRAPE_GRID_SQUARE=EM38ww
-# GRAPE_STATION_ID=S000171
+# TIMESTD_CALLSIGN=AC0G
+# TIMESTD_GRID_SQUARE=EM38ww
 
-# ===========================================================================
-# PSWS UPLOAD SETTINGS
-# ===========================================================================
-# SFTP host for PSWS data upload
-GRAPE_PSWS_HOST=pswsnetwork.eng.ua.edu
-
-# Your PSWS username (usually station ID)
-# GRAPE_PSWS_USER=S000171
-
-# SSH private key for PSWS authentication
-# GRAPE_SSH_KEY=/home/wsprdaemon/.ssh/id_rsa
-
-# Daily upload time (UTC)
-GRAPE_UPLOAD_TIME=00:30
+# NOTE
+# Phase 3 products and uploads are out of scope for hf-timestd.

@@ -27,7 +27,7 @@ Frame Types:
 - Frame A (seconds 32-39): 6d dd hh mm ss (BCD day/time)
 - Frame B (second 31): xz yy yy tt aa (DUT1, year, TAI-UTC, DST pattern)
 
-Author: GRAPE Recorder Team
+Author: HF Time Standard Team
 """
 
 import numpy as np

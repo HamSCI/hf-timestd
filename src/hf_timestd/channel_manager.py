@@ -69,7 +69,7 @@ def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
     import hashlib
     
     # Create deterministic hash from station + instrument
-    key = f"GRAPE:{station_id}:{instrument_id}"
+    key = f"TIMESTD:{station_id}:{instrument_id}"
     hash_bytes = hashlib.sha256(key.encode()).digest()
     
     # Use first 3 bytes for octets 2-4
@@ -337,7 +337,7 @@ class ChannelManager:
                 - agc: int (default 0)
                 - gain: float (default 0.0)
                 - encoding: str (default "float")
-            destination: RTP destination for all channels (our GRAPE multicast IP)
+            destination: RTP destination for all channels (our multicast IP)
         
         Returns:
             Dict mapping frequency_hz -> allocated SSRC

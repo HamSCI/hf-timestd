@@ -2,7 +2,7 @@
 """
 Primary Time Standard - HF Time Transfer Implementation
 
-This module integrates all components to transform the GRAPE receiver
+This module integrates all components to transform the hf-timestd receiver
 into a PRIMARY TIME STANDARD that can verify UTC(NIST) directly.
 
 The Chain of Trust:

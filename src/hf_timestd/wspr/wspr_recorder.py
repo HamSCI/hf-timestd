@@ -3,7 +3,7 @@
 WSPR Recorder - Simple Application Recorder
 
 A straightforward recorder for WSPR signals using the generic recording
-infrastructure. Unlike GRAPE (which needs startup tone detection), WSPR
+infrastructure. Unlike hf-timestd (which needs startup tone detection), WSPR
 recording is simpler:
 
 - No startup phase needed
@@ -83,7 +83,7 @@ class WsprRecorder:
     2. Segments into 2-minute chunks aligned to even minutes
     3. Writes WAV files compatible with wsprd decoder
     
-    No startup phase or tone detection needed (unlike GRAPE).
+    No startup phase or tone detection needed (unlike hf-timestd).
     
     Example:
         config = WsprConfig(

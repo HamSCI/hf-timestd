@@ -1,5 +1,5 @@
 """
-Data Models for GRAPE Signal Recorder API Interfaces
+Data Models for HF Time Standard API Interfaces
 
 These data structures define the contracts between the 6 core functions.
 They formalize what Function 1 (quality/time_snap analysis) produces

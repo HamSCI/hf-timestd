@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Advanced Signal Analysis for GRAPE Phase 2 Analytics
+Advanced Signal Analysis for Phase 2 Analytics
 
 ================================================================================
 ENHANCEMENTS IMPLEMENTED (Issues 5.1-5.4 from PHASE2_CRITIQUE.md)

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
     """Generate deterministic multicast IP for hf-timestd channels."""
-    key = f"GRAPE:{station_id}:{instrument_id}"
+    key = f"TIMESTD:{station_id}:{instrument_id}"
     hash_bytes = hashlib.sha256(key.encode()).digest()
     octet2 = (hash_bytes[0] % 254) + 1
     octet3 = hash_bytes[1]

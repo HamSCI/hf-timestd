@@ -14,18 +14,24 @@ with UTC(NIST).
 ================================================================================
 BROADCAST STRUCTURE
 ================================================================================
-The GRAPE system monitors up to 13 time signal broadcasts:
+The hf-timestd system monitors up to 17 time signal broadcasts:
 
     STATION | FREQUENCIES
     --------|----------------------------------------------------
     WWV     | 2.5, 5, 10, 15, 20, 25 MHz (6 broadcasts)
     WWVH    | 2.5, 5, 10, 15 MHz (4 broadcasts, shared with WWV)
     CHU     | 3.33, 7.85, 14.67 MHz (3 broadcasts, unique)
+    BPM     | 2.5, 5, 10, 15 MHz (4 broadcasts, shared with WWV/WWVH)
 
 SHARED vs UNIQUE FREQUENCIES:
-    - Shared (WWV + WWVH): 2.5, 5, 10, 15 MHz → 8 broadcasts (need discrimination)
+    - Shared (WWV + WWVH + BPM): 2.5, 5, 10, 15 MHz → 12 broadcasts (need discrimination)
     - WWV-only: 20, 25 MHz → 2 broadcasts
     - CHU-only: 3.33, 7.85, 14.67 MHz → 3 broadcasts (FSK timing reference)
+
+BPM SPECIAL HANDLING:
+    - Minutes 25-29, 55-59: UT1 timing (DO NOT USE for UTC without DUT1 correction)
+    - Minutes 0-24, 30-54: UTC timing (usable)
+    - Tick duration: 10ms (UTC) vs 100ms (UT1) - used for mode detection
 
 ================================================================================
 FUSION THEORY
@@ -137,7 +143,7 @@ logger = logging.getLogger(__name__)
 class BroadcastMeasurement:
     """Single D_clock measurement from one broadcast."""
     timestamp: float           # Unix time of measurement
-    station: str              # WWV, WWVH, CHU
+    station: str              # WWV, WWVH, CHU, BPM
     frequency_mhz: float      # Broadcast frequency
     d_clock_ms: float         # Raw D_clock measurement
     propagation_delay_ms: float
@@ -160,8 +166,12 @@ class BroadcastCalibration:
     
     Issue 4.3 Fix: No more hardcoded defaults. Initial offset is 0 with high
     uncertainty, and the system learns from data using ground truth validation.
+    
+    BPM Note: BPM calibration must account for UT1/UTC alternation.
+    UT1 minutes (25-29, 55-59) are excluded from calibration unless
+    DUT1 correction is applied.
     """
-    station: str              # WWV, WWVH, CHU
+    station: str              # WWV, WWVH, CHU, BPM
     frequency_mhz: float      # Broadcast frequency (key for correlation)
     offset_ms: float          # Calibration offset to apply
     uncertainty_ms: float     # Uncertainty in offset
@@ -193,9 +203,11 @@ class FusedResult:
     wwv_mean_ms: Optional[float] = None
     wwvh_mean_ms: Optional[float] = None
     chu_mean_ms: Optional[float] = None
+    bpm_mean_ms: Optional[float] = None
     wwv_count: int = 0
     wwvh_count: int = 0
     chu_count: int = 0
+    bpm_count: int = 0
     
     # Calibration applied
     calibration_applied: bool = False
@@ -209,16 +221,21 @@ class FusedResult:
     wwv_intra_std_ms: Optional[float] = None   # Std dev within WWV frequencies
     wwvh_intra_std_ms: Optional[float] = None  # Std dev within WWVH frequencies
     chu_intra_std_ms: Optional[float] = None   # Std dev within CHU frequencies
+    bpm_intra_std_ms: Optional[float] = None   # Std dev within BPM frequencies
     inter_station_spread_ms: Optional[float] = None  # Spread between station means
     consistency_flag: str = 'OK'  # OK, INTRA_ANOMALY, INTER_ANOMALY, DISCRIMINATION_SUSPECT
 
 
 class MultiBroadcastFusion:
     """
-    Fuse D_clock estimates from all 13 broadcasts.
+    Fuse D_clock estimates from all 17 broadcasts (WWV/WWVH/CHU/BPM).
     
     Uses CHU FSK-verified timing as the reference for calibration,
     since CHU FSK provides exact 500ms boundary alignment.
+    
+    BPM handling:
+    - Automatically filters out UT1 minutes (25-29, 55-59)
+    - Long propagation path (~10,000 km) requires multi-hop F-layer modeling
     """
     
     # Calibration starts at 0 with high uncertainty and learns from data.
@@ -368,11 +385,11 @@ class MultiBroadcastFusion:
                 writer.writerow([
                     'timestamp', 'd_clock_fused_ms', 'd_clock_raw_ms',
                     'uncertainty_ms', 'n_broadcasts', 'n_stations',
-                    'wwv_mean_ms', 'wwvh_mean_ms', 'chu_mean_ms',
-                    'wwv_count', 'wwvh_count', 'chu_count',
+                    'wwv_mean_ms', 'wwvh_mean_ms', 'chu_mean_ms', 'bpm_mean_ms',
+                    'wwv_count', 'wwvh_count', 'chu_count', 'bpm_count',
                     'calibration_applied', 'quality_grade',
                     'outliers_rejected',
-                    'wwv_intra_std_ms', 'wwvh_intra_std_ms', 'chu_intra_std_ms',
+                    'wwv_intra_std_ms', 'wwvh_intra_std_ms', 'chu_intra_std_ms', 'bpm_intra_std_ms',
                     'inter_station_spread_ms', 'consistency_flag'
                 ])
     
@@ -384,7 +401,13 @@ class MultiBroadcastFusion:
         Read latest D_clock measurements from all channels.
         
         Returns measurements from the last N minutes.
+        
+        BPM filtering: Automatically excludes BPM measurements from UT1 minutes
+        (25-29, 55-59) since those transmit UT1 time, not UTC.
         """
+        from datetime import datetime, timezone
+        from .wwv_constants import BPM_UT1_MINUTES
+        
         measurements = []
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
@@ -403,9 +426,21 @@ class MultiBroadcastFusion:
                             if ts < cutoff:
                                 continue
                             
+                            station = row.get('station', 'UNKNOWN')
+                            
+                            # BPM UT1 filtering: Skip minutes 25-29 and 55-59
+                            # These transmit UT1 time, not UTC
+                            if station == 'BPM':
+                                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                                if dt.minute in BPM_UT1_MINUTES:
+                                    logger.debug(
+                                        f"Skipping BPM measurement at minute {dt.minute} (UT1 mode)"
+                                    )
+                                    continue
+                            
                             m = BroadcastMeasurement(
                                 timestamp=ts,
-                                station=row.get('station', 'UNKNOWN'),
+                                station=station,
                                 frequency_mhz=float(row.get('frequency_mhz', 0)),
                                 d_clock_ms=float(row.get('clock_offset_ms', 0)),
                                 propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
@@ -804,11 +839,13 @@ class MultiBroadcastFusion:
         wwv_cal = [c for m, c in zip(measurements, calibrated) if m.station == 'WWV']
         wwvh_cal = [c for m, c in zip(measurements, calibrated) if m.station == 'WWVH']
         chu_cal = [c for m, c in zip(measurements, calibrated) if m.station == 'CHU']
+        bpm_cal = [c for m, c in zip(measurements, calibrated) if m.station == 'BPM']
         
         # Raw values for reporting
         wwv_m = [m.d_clock_ms for m in measurements if m.station == 'WWV']
         wwvh_m = [m.d_clock_ms for m in measurements if m.station == 'WWVH']
         chu_m = [m.d_clock_ms for m in measurements if m.station == 'CHU']
+        bpm_m = [m.d_clock_ms for m in measurements if m.station == 'BPM']
         
         # Unique stations
         stations = set(m.station for m in measurements)
@@ -825,6 +862,7 @@ class MultiBroadcastFusion:
         wwv_intra_std = np.std(wwv_cal) if len(wwv_cal) > 1 else None
         wwvh_intra_std = np.std(wwvh_cal) if len(wwvh_cal) > 1 else None
         chu_intra_std = np.std(chu_cal) if len(chu_cal) > 1 else None
+        bpm_intra_std = np.std(bpm_cal) if len(bpm_cal) > 1 else None
         
         # Inter-station spread (difference between station means)
         station_means = {}
@@ -834,6 +872,8 @@ class MultiBroadcastFusion:
             station_means['WWVH'] = np.mean(wwvh_cal)
         if chu_cal:
             station_means['CHU'] = np.mean(chu_cal)
+        if bpm_cal:
+            station_means['BPM'] = np.mean(bpm_cal)
         inter_station_spread = (max(station_means.values()) - min(station_means.values())) if len(station_means) > 1 else None
         
         # Consistency flag logic
@@ -841,7 +881,7 @@ class MultiBroadcastFusion:
         INTRA_THRESHOLD_MS = 5.0  # Same-station should agree within 5ms (ionospheric limit)
         
         # Check for intra-station anomalies (same station, different frequencies disagree)
-        intra_stds = [s for s in [wwv_intra_std, wwvh_intra_std, chu_intra_std] if s is not None]
+        intra_stds = [s for s in [wwv_intra_std, wwvh_intra_std, chu_intra_std, bpm_intra_std] if s is not None]
         suspect_count = 0
         
         if intra_stds and max(intra_stds) > INTRA_THRESHOLD_MS:
@@ -895,9 +935,10 @@ class MultiBroadcastFusion:
             wwv_str = f"{wwv_intra_std:.1f}" if wwv_intra_std is not None else "N/A"
             wwvh_str = f"{wwvh_intra_std:.1f}" if wwvh_intra_std is not None else "N/A"
             chu_str = f"{chu_intra_std:.1f}" if chu_intra_std is not None else "N/A"
+            bpm_str = f"{bpm_intra_std:.1f}" if bpm_intra_std is not None else "N/A"
             logger.warning(
                 f"High intra-station spread: WWV σ={wwv_str}ms, "
-                f"WWVH σ={wwvh_str}ms, CHU σ={chu_str}ms | "
+                f"WWVH σ={wwvh_str}ms, CHU σ={chu_str}ms, BPM σ={bpm_str}ms | "
                 f"{suspect_count} suspect measurements"
             )
         
@@ -921,9 +962,11 @@ class MultiBroadcastFusion:
             wwv_mean_ms=np.mean(wwv_m) if wwv_m else None,
             wwvh_mean_ms=np.mean(wwvh_m) if wwvh_m else None,
             chu_mean_ms=np.mean(chu_m) if chu_m else None,
+            bpm_mean_ms=np.mean(bpm_m) if bpm_m else None,
             wwv_count=len(wwv_m),
             wwvh_count=len(wwvh_m),
             chu_count=len(chu_m),
+            bpm_count=len(bpm_m),
             calibration_applied=True,
             reference_station=self.reference_station,
             outliers_rejected=n_rejected,
@@ -931,6 +974,7 @@ class MultiBroadcastFusion:
             wwv_intra_std_ms=wwv_intra_std,
             wwvh_intra_std_ms=wwvh_intra_std,
             chu_intra_std_ms=chu_intra_std,
+            bpm_intra_std_ms=bpm_intra_std,
             inter_station_spread_ms=inter_station_spread,
             consistency_flag=consistency_flag
         )
@@ -954,15 +998,18 @@ class MultiBroadcastFusion:
                 result.wwv_mean_ms or '',
                 result.wwvh_mean_ms or '',
                 result.chu_mean_ms or '',
+                result.bpm_mean_ms or '',
                 result.wwv_count,
                 result.wwvh_count,
                 result.chu_count,
+                result.bpm_count,
                 result.calibration_applied,
                 result.quality_grade,
                 result.outliers_rejected,
                 result.wwv_intra_std_ms or '',
                 result.wwvh_intra_std_ms or '',
                 result.chu_intra_std_ms or '',
+                result.bpm_intra_std_ms or '',
                 result.inter_station_spread_ms or '',
                 result.consistency_flag
             ])

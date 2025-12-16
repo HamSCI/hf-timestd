@@ -3,11 +3,10 @@
 #
 # Phase 1 captures raw IQ data from radiod RTP stream:
 #   - 20 kHz sample rate, complex float32
-#   - Digital RF format with gzip compression
-#   - System time tagging (NO UTC corrections)
-#   - 10-second sliding window monitoring
+#   - Per-minute binary complex64 + JSON sidecar
+#   - System time tagging
 #
-# Output: raw_archive/{CHANNEL}/ (immutable source of truth)
+# Output: raw_buffer/{CHANNEL}/ (immutable source of truth)
 #
 # Usage: timestd-core.sh -start|-stop|-status [config-file]
 
@@ -49,8 +48,8 @@ start)
         exit 1
     fi
     
-    # Create three-phase directory structure
-    mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/raw_archive" "$DATA_ROOT/status"
+    # Create required directory structure
+    mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/raw_buffer" "$DATA_ROOT/status"
     cd "$PROJECT_DIR"
     
     # Use V2 recorder (ka9q-python RadiodStream)
@@ -63,7 +62,7 @@ start)
     if ps -p $PID > /dev/null 2>&1; then
         echo "   ✅ Started (PID: $PID)"
         echo "   📄 Log: $DATA_ROOT/logs/phase1-core.log"
-        echo "   📦 Output: $DATA_ROOT/raw_archive/{CHANNEL}/"
+        echo "   📦 Output: $DATA_ROOT/raw_buffer/{CHANNEL}/"
     else
         echo "   ❌ Failed to start"
         tail -5 "$DATA_ROOT/logs/phase1-core.log" 2>/dev/null
@@ -92,11 +91,11 @@ stop)
 status)
     if pgrep -f "hf_timestd.core.core_recorder_v2" > /dev/null; then
         echo "✅ Phase 1 Core Recorder: RUNNING (PID: $(pgrep -f 'hf_timestd.core.core_recorder_v2'))"
-        echo "   Output: $DATA_ROOT/raw_archive/{CHANNEL}/"
+        echo "   Output: $DATA_ROOT/raw_buffer/{CHANNEL}/"
         
-        # Show channel count if raw_archive exists
-        if [ -d "$DATA_ROOT/raw_archive" ]; then
-            CHANNELS=$(ls -d "$DATA_ROOT/raw_archive"/*/  2>/dev/null | wc -l)
+        # Show channel count if raw_buffer exists
+        if [ -d "$DATA_ROOT/raw_buffer" ]; then
+            CHANNELS=$(ls -d "$DATA_ROOT/raw_buffer"/*/  2>/dev/null | wc -l)
             echo "   Active channels: $CHANNELS"
         fi
     else

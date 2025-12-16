@@ -44,6 +44,8 @@ from .tone_detector import ToneDetector
 
 # Analytics and discrimination
 from .wwvh_discrimination import WWVHDiscriminator
+from .bpm_discriminator import BPMDiscriminator, BPMTimingMode, BPMDiscriminationResult
+from .physics_propagation import PhysicsPropagationModel, PropagationResult, PropagationModelTier
 from .wwv_test_signal import WWVTestSignalDetector
 from .discrimination_csv_writers import DiscriminationCSVWriters
 from .phase2_analytics_service import Phase2AnalyticsService
@@ -198,7 +200,15 @@ __all__ = [
     "MinuteTimeStandardResult",
     "TimeStandardCSVWriter",
     "TimeStandardSummaryWriter",
-    # Three-Phase Pipeline (New Architecture)
+    # BPM Discrimination
+    "BPMDiscriminator",
+    "BPMTimingMode",
+    "BPMDiscriminationResult",
+    # Physics Propagation Model
+    "PhysicsPropagationModel",
+    "PropagationResult",
+    "PropagationModelTier",
+    # Two-Phase Pipeline
     "PipelineRecorder",
     "PipelineRecorderConfig",
     "PipelineRecorderState",

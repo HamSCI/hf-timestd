@@ -11,7 +11,7 @@ precision D_clock measurement:
 
     D_clock = T_system - T_UTC(NIST)
 
-This is the "System Clock Offset" - the primary output of the GRAPE system.
+This is the "System Clock Offset" - the primary output of the hf-timestd system.
 
 ================================================================================
 ARCHITECTURAL OVERVIEW

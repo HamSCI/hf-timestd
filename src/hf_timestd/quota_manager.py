@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GRAPE Quota Manager
+HF Time Standard Quota Manager
 
 Monitors disk usage and removes oldest data files when usage exceeds threshold.
 Designed to run periodically (e.g., every hour via cron or systemd timer).
@@ -60,7 +60,7 @@ class QuotaManager:
         Initialize quota manager.
         
         Args:
-            data_root: Root directory for grape data
+            data_root: Root directory for hf-timestd data
             threshold_percent: Disk usage threshold (0-100)
             min_days_to_keep: Never delete files newer than this
             dry_run: If True, only log what would be deleted
@@ -274,13 +274,13 @@ class QuotaManager:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='GRAPE Quota Manager - Enforce disk space limits'
+        description='HF Time Standard Quota Manager - Enforce disk space limits'
     )
     parser.add_argument(
         '--data-root',
         type=Path,
-        default=Path.home() / 'grape-data',
-        help='Root directory for grape data'
+        default=Path.home() / 'timestd-data',
+        help='Root directory for hf-timestd data'
     )
     parser.add_argument(
         '--threshold',

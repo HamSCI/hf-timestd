@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GRAPE Core Recorder V2 - Using ka9q-python RadiodStream
+HF Time Standard Core Recorder V2 - Using ka9q-python RadiodStream
 
 Simplified recorder that uses ka9q-python's RadiodStream for RTP handling.
 This eliminates custom RTPReceiver and PacketResequencer code.
@@ -48,7 +48,7 @@ def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
     Uses station_id and instrument_id to create a unique, persistent
     multicast address in the 239.x.x.x administratively scoped range.
     """
-    key = f"GRAPE:{station_id}:{instrument_id}"
+    key = f"TIMESTD:{station_id}:{instrument_id}"
     hash_bytes = hashlib.sha256(key.encode()).digest()
     octet2 = (hash_bytes[0] % 254) + 1
     octet3 = hash_bytes[1]
@@ -495,7 +495,7 @@ def main():
     import argparse
     import toml
     
-    parser = argparse.ArgumentParser(description='GRAPE Core Recorder V2')
+    parser = argparse.ArgumentParser(description='HF Time Standard Core Recorder V2')
     parser.add_argument('--config', required=True, help='Path to config file')
     args = parser.parse_args()
     

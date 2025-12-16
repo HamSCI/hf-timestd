@@ -145,7 +145,7 @@ class StationLockCoordinator:
         Initialize coordinator.
         
         Args:
-            data_root: Root directory for GRAPE data
+            data_root: Root directory for hf-timestd data
             channels: List of channel names (auto-discovered if None)
             enable_stacking: Whether to compute stacked correlations
             guided_search_threshold_db: SNR below which to use guided search

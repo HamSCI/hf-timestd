@@ -242,12 +242,8 @@ class Phase2AnalyticsService:
         self.audio_tones_dir.mkdir(parents=True, exist_ok=True)
         self._init_audio_tones_csv()
         
-        # Note: Decimation (Phase 3 products) moved to grape-recorder package
-        # See: https://github.com/mijahauan/grape-recorder
-        self.decimated_buffer = None
-        self.decimator = None
-        self.decimation_factor = int(sample_rate / 10)  # 2000 for 20kHz
-        self.output_rate = 10  # 10 Hz output (for reference only)
+        # Note: Decimation is not part of hf-timestd (timing-focused)
+        # For decimated output, see separate projects
 
         # Initialize Phase 2 engine
         from .phase2_temporal_engine import Phase2TemporalEngine
@@ -1016,20 +1012,6 @@ class Phase2AnalyticsService:
         
         return float(snr_db)
 
-    def _decimate_to_10hz(self, iq_samples: np.ndarray, minute_boundary: int,
-                           d_clock_ms: float = 0.0, uncertainty_ms: float = 999.0,
-                           quality_grade: str = 'X', gap_samples: int = 0) -> bool:
-        """
-        DEPRECATED: Decimation moved to grape-recorder package.
-        
-        This method is a no-op stub. For decimation and 10 Hz output,
-        use the grape-recorder package: https://github.com/mijahauan/grape-recorder
-        
-        Returns:
-            False (decimation disabled)
-        """
-        # Decimation moved to grape-recorder package
-        return False
 
     def _write_status(self):
         """Write status file for web-ui monitoring."""
@@ -1295,14 +1277,14 @@ def main():
     parser.add_argument('--poll-interval', type=float, default=10.0, help='Poll interval')
     parser.add_argument('--log-level', default='INFO', help='Log level')
     
-    # Additional args for compatibility with grape-analytics.sh
+    # Additional args
     parser.add_argument('--state-file', help='State file (not used)')
     parser.add_argument('--backfill-gaps', action='store_true', help='Backfill gaps (not used)')
     parser.add_argument('--max-backfill', type=int, help='Max backfill (not used)')
     parser.add_argument('--callsign', help='Callsign')
     parser.add_argument('--receiver-name', help='Receiver name')
-    parser.add_argument('--psws-station-id', help='PSWS station ID')
-    parser.add_argument('--psws-instrument-id', help='PSWS instrument ID')
+    parser.add_argument('--station-id', help='Station ID')
+    parser.add_argument('--instrument-id', help='Instrument ID')
     parser.add_argument('--latitude', type=float, help='Precise latitude (improves timing ~16μs)')
     parser.add_argument('--longitude', type=float, help='Precise longitude (improves timing ~16μs)')
     
@@ -1314,13 +1296,16 @@ def main():
         format='%(asctime)s %(levelname)s:%(name)s:%(message)s'
     )
     
+    station_id = args.station_id
+    instrument_id = args.instrument_id
+
     # Build station config
     station_config = {
         'callsign': args.callsign,
         'grid_square': args.grid_square,
         'receiver_name': args.receiver_name,
-        'station_id': args.psws_station_id,
-        'instrument_id': args.psws_instrument_id,
+        'station_id': station_id,
+        'instrument_id': instrument_id,
         'latitude': args.latitude,
         'longitude': args.longitude
     }

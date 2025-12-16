@@ -1,14 +1,11 @@
 """
-GRAPE Recorder Version Information
+HF Time Standard Analysis - Version Information
 
-Centralized version constants for all GRAPE components.
+Centralized version constants for hf-timestd.
 All modules should import version from here rather than defining their own.
 
-Issue 3.1 Fix (2025-12-08): Centralizes version info that was previously
-scattered across multiple files with inconsistent values.
-
-Issue 3.2 Fix (2025-12-08): Provides standardized timestamp utilities
-that always use UTC with explicit timezone markers.
+Provides standardized timestamp utilities that always use UTC with explicit
+timezone markers.
 """
 
 from datetime import datetime, timezone
@@ -18,8 +15,8 @@ from typing import Optional
 # VERSION CONSTANTS
 # =============================================================================
 
-# Main GRAPE version - follows semantic versioning
-GRAPE_VERSION = "2.2.1"
+# Main hf-timestd version - follows semantic versioning
+TIMESTD_VERSION = "3.0.0"
 
 # Component versions (for tracking algorithm changes)
 COMPONENT_VERSIONS = {
@@ -28,7 +25,6 @@ COMPONENT_VERSIONS = {
     'phase2_temporal_engine': '2.1.0',
     'clock_convergence': '2.0',  # Kalman filter version
     'multi_broadcast_fusion': '1.1',  # Per-broadcast calibration
-    'phase3_products': '3.0.0',
 }
 
 # State file version - increment when state schema changes
@@ -61,7 +57,7 @@ def utc_isoformat() -> str:
     
     Example: '2025-12-08T21:05:00Z'
     
-    All GRAPE status files should use this format for timestamps.
+    All hf-timestd status files should use this format for timestamps.
     """
     return utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -105,7 +101,7 @@ def parse_utc_isoformat(timestamp: str) -> Optional[datetime]:
 def create_status_header(service_name: str, extra_fields: dict = None) -> dict:
     """Create standard status file header.
     
-    All GRAPE status files should start with this header for consistency.
+    All hf-timestd status files should start with this header for consistency.
     
     Args:
         service_name: Name of the service (e.g., 'core_recorder', 'phase2_analytics')
@@ -116,8 +112,8 @@ def create_status_header(service_name: str, extra_fields: dict = None) -> dict:
     """
     header = {
         'service': service_name,
-        'version': COMPONENT_VERSIONS.get(service_name, GRAPE_VERSION),
-        'grape_version': GRAPE_VERSION,
+        'version': COMPONENT_VERSIONS.get(service_name, TIMESTD_VERSION),
+        'timestd_version': TIMESTD_VERSION,
         'timestamp': utc_isoformat(),
         'data_contract_version': DATA_CONTRACT_VERSION,
     }
@@ -132,7 +128,7 @@ def create_status_header(service_name: str, extra_fields: dict = None) -> dict:
 
 def get_version_string() -> str:
     """Get formatted version string for logging."""
-    return f"GRAPE Recorder v{GRAPE_VERSION}"
+    return f"hf-timestd v{TIMESTD_VERSION}"
 
 
 def log_version_info(logger) -> None:
@@ -141,6 +137,6 @@ def log_version_info(logger) -> None:
     Args:
         logger: Logger instance to use
     """
-    logger.info(f"🍇 {get_version_string()}")
+    logger.info(f"📡 {get_version_string()}")
     logger.info(f"   Data contract: {DATA_CONTRACT_VERSION}")
     logger.info(f"   State file version: {STATE_FILE_VERSION}")

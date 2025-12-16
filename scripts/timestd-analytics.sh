@@ -1,11 +1,10 @@
 #!/bin/bash
 # HF Time Standard Phase 2 Analytics Services Control (all 9 channels)
 #
-# Phase 2 processes raw archive data to produce:
+# Phase 2 processes Phase 1 raw_buffer data to produce:
 #   - D_clock (timing correction for UTC alignment)
 #   - Station discrimination (WWV vs WWVH)
 #   - Quality metrics and tone detections
-#   - 10-second sliding window monitoring
 #
 # Input:  raw_buffer/{CHANNEL}/ (20 kHz binary IQ from Phase 1)
 # Output: phase2/{CHANNEL}/      (timing analysis, clock offset CSV)
@@ -65,9 +64,9 @@ start)
         echo "   📍 Using precise coordinates: ${LATITUDE}°N, ${LONGITUDE}°W"
     fi
     
-    # Create directories for three-phase structure
+    # Create directories
     mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/state" "$DATA_ROOT/status"
-    mkdir -p "$DATA_ROOT/phase2" "$DATA_ROOT/products"
+    mkdir -p "$DATA_ROOT/phase2"
     cd "$PROJECT_DIR"
     
     # WWV Channels (PYTHON is set by common.sh)
@@ -89,7 +88,7 @@ start)
           --log-level INFO \
           --callsign "$CALLSIGN" --grid-square "$GRID" \
           --receiver-name "HF-TimeStd" \
-          --psws-station-id "$STATION_ID" --psws-instrument-id "$INSTRUMENT_ID" \
+          --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
           $COORD_ARGS \
           > "$DATA_ROOT/logs/phase2-wwv${freq_mhz}.log" 2>&1 &
         
@@ -113,7 +112,7 @@ start)
           --log-level INFO \
           --callsign "$CALLSIGN" --grid-square "$GRID" \
           --receiver-name "HF-TimeStd" \
-          --psws-station-id "$STATION_ID" --psws-instrument-id "$INSTRUMENT_ID" \
+          --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
           $COORD_ARGS \
           > "$DATA_ROOT/logs/phase2-chu${freq_mhz}.log" 2>&1 &
         

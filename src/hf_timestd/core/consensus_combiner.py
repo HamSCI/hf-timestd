@@ -425,7 +425,7 @@ class ConsensusCombiner:
 
 
 def create_combiner_from_config(config: dict, data_root: Path) -> ConsensusCombiner:
-    """Create a ConsensusCombiner from GRAPE config."""
+    """Create a ConsensusCombiner from config."""
     channels = []
     for ch in config.get('recorder', {}).get('channels', []):
         if ch.get('enabled', True):

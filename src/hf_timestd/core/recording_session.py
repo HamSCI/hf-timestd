@@ -8,7 +8,7 @@ Provides a clean interface for recording RTP streams with:
 - Transport timing from radiod (GPS_TIME/RTP_TIMESNAP)
 - Callbacks for application-specific storage
 
-This module is application-agnostic. GRAPE, WSPR, CODAR, etc. 
+This module is application-agnostic. hf-timestd, WSPR, CODAR, etc. 
 implement their own storage and processing via callbacks.
 
 Architecture:
@@ -79,7 +79,7 @@ class SegmentWriter(Protocol):
     Protocol for segment writers - applications implement this.
     
     Example implementations:
-    - NPZWriter for GRAPE
+    - BinaryWriter for hf-timestd
     - WAVWriter for WSPR/FT8
     - RawWriter for CODAR
     """
@@ -453,7 +453,7 @@ class RecordingSession:
         Check if we should start a new segment based on boundary alignment.
         
         For WSPR: align to even 2-minute boundaries (0, 120, 240, ... seconds)
-        For GRAPE: align to minute boundaries (0, 60, 120, ... seconds)
+        For hf-timestd: align to minute boundaries (0, 60, 120, ... seconds)
         """
         if not self.config.align_to_boundary:
             return True  # No alignment needed

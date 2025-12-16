@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ground Truth Validation Framework for GRAPE Phase 2 Analytics
+Ground Truth Validation Framework for Phase 2 Analytics
 
 ================================================================================
 VULNERABILITY ADDRESSED (Issue 6.1 from PHASE2_CRITIQUE.md)

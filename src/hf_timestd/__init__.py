@@ -6,7 +6,7 @@ via ka9q-radio RTP streams. Produces precise timing measurements (D_clock) for
 UTC alignment and clock discipline.
 
 Key Features:
-- Phase 1: Core recording of 20 kHz IQ data to Digital RF archive
+- Phase 1: Core recording of 20 kHz IQ data to raw_buffer (binary + JSON)
 - Phase 2: Timing analysis - tone detection, station discrimination, D_clock
 - Multi-broadcast fusion for UTC(NIST) convergence
 - Chrony SHM integration for system clock discipline
@@ -29,15 +29,14 @@ See ARCHITECTURE.md for design details.
 Copyright 2025
 """
 
-__version__ = "3.0.0"  # Major version: renamed from grape_recorder to hf_timestd
+__version__ = "3.0.0"
 __author__ = "HF Time Standard Analysis Project"
 
 # =============================================================================
 # CORE INFRASTRUCTURE (application-agnostic)
 # Located in hf_timestd/core/ package
-# Note: 'core' was renamed from 'grape' - contains timing analysis modules
 # =============================================================================
-# Core RTP infrastructure is in the 'core' subpackage (formerly 'grape')
+# Core RTP infrastructure is in the 'core' subpackage
 # These are re-exported for convenience
 try:
     from .core import (
@@ -71,7 +70,7 @@ from .stream import (
 
 # =============================================================================
 # TIME STANDARD APPLICATION (WWV/WWVH/CHU time signals)
-# Located in hf_timestd/core/ package (renamed from grape/)
+# Located in hf_timestd/core/ package
 # Two-phase pipeline: recording + timing analysis
 # =============================================================================
 try:
@@ -102,8 +101,6 @@ from ka9q import rtp_to_wallclock, parse_rtp_header
 # Re-export ka9q functions for backward compatibility
 discover_channels_via_control = discover_channels  # Legacy alias
 
-# Note: Upload functionality moved to grape-recorder package
-# See: https://github.com/mijahauan/grape-recorder
 
 __all__ = [
     # === Stream API (primary interface) ===
@@ -156,9 +153,9 @@ __all__ = [
 ]
 
 # =============================================================================
-# Package structure (Dec 14, 2025 - renamed from grape_recorder):
+# Package structure:
 #   hf_timestd/
-#   ├── core/       - Time standard analysis (renamed from grape/)
+#   ├── core/       - Time standard analysis
 #   ├── stream/     - Stream API: subscribe, discover, manage
 #   ├── interfaces/ - Data contracts and interfaces
 #   └── wspr/       - WSPR app: 2-minute WAV recording

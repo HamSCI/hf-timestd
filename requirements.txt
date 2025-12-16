@@ -29,6 +29,12 @@ matplotlib>=3.7.0
 # and high-latitude coverage compared to IRI-2016
 iri2020 @ git+https://github.com/space-physics/iri2020.git
 
+# PyLap - PHaRLAP Ray Tracing (optional, for physics-based propagation)
+# Requires: Intel Fortran runtime libraries and PHaRLAP toolbox
+# See: https://github.com/HamSCI/PyLap for installation instructions
+# Provides 3D ray tracing through IRI ionosphere for accurate group delay
+# pylap @ git+https://github.com/HamSCI/PyLap.git
+
 # Compression (optional, for reduced disk I/O)
 # Enable in timestd-config.toml: compression = "zstd" or "lz4"
 # zstd: Best compression ratio (~2-3x), moderate CPU

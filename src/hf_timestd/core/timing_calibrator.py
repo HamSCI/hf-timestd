@@ -1,7 +1,7 @@
 """
 GPSDO-Calibrated Timing System
 
-This module implements a three-phase timing calibration approach that leverages
+This module implements a multi-phase timing calibration approach that leverages
 the deterministic nature of GPSDO-locked RTP timestamps:
 
 Phase 1 - BOOTSTRAP (first ~3-5 minutes):

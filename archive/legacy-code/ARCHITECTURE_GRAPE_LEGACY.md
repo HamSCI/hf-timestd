@@ -42,19 +42,14 @@ Extract precise timing measurements from HF time standard broadcasts:
 3. **Propagation mode estimation** - Ionospheric hop identification
 4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination
 
-### Channel Configuration (17 broadcasts)
+### Channel Configuration (9+ frequencies)
 
 | Station | Location | Frequencies | Notes |
 |---------|----------|-------------|-------|
 | **WWV** | Ft. Collins, CO | 2.5, 5, 10, 15, 20, 25 MHz | 1000 Hz tone, BCD subcarrier |
 | **WWVH** | Kauai, HI | 2.5, 5, 10, 15 MHz | 1200 Hz tone, shares 4 frequencies |
 | **CHU** | Ottawa, Canada | 3.33, 7.85, 14.67 MHz | FSK time code (seconds 31-39) |
-| **BPM** | Pucheng, China | 2.5, 5, 10, 15 MHz | 1000 Hz tone, UT1/UTC alternating |
-
-**BPM Special Handling:**
-- Minutes 0-24, 30-54: UTC timing (usable)
-- Minutes 25-29, 55-59: UT1 timing (filtered out automatically)
-- Tick duration: 10ms (UTC) vs 100ms (UT1)
+| **BPM** | Xi'an, China | 2.5, 5, 10, 15 MHz | UT1/UTC alternating, future support |
 
 ---
 

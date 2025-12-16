@@ -185,7 +185,7 @@ class FileBackend(VoterBackend):
     File-based backend for multi-process use.
     Uses /dev/shm (RAM disk) for low-latency IPC.
     """
-    def __init__(self, root_dir: Path = Path('/dev/shm/grape_voter')):
+    def __init__(self, root_dir: Path = Path('/dev/shm/timestd_voter')):
         self.root_dir = root_dir
         self.root_dir.mkdir(parents=True, exist_ok=True)
         # Clean up old files on startup? Maybe not, other processes might be running.
@@ -298,7 +298,7 @@ class GlobalStationVoter:
         # Select backend
         if use_ipc:
             self.backend = FileBackend()
-            logger.info("GlobalStationVoter: Using FileBackend (IPC) at /dev/shm/grape_voter")
+            logger.info("GlobalStationVoter: Using FileBackend (IPC) at /dev/shm/timestd_voter")
         else:
             self.backend = MemoryBackend()
             logger.info("GlobalStationVoter: Using MemoryBackend (Local)")

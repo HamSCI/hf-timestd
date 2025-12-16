@@ -6,8 +6,7 @@ Defines the contracts between core functions:
 2. Full-bandwidth archive storage
 3. WWV/WWVH/CHU tone discrimination  
 
-Note: Functions 4-6 (decimation, Digital RF, upload) moved to grape-recorder package.
-See: https://github.com/mijahauan/grape-recorder
+Note: Functions 4-6 (decimation, Digital RF, upload) are not part of hf-timestd.
 
 These interfaces allow testing, implementation swapping, and clear separation of concerns.
 """

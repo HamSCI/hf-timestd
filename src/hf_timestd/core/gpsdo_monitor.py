@@ -1,5 +1,5 @@
 """
-GPSDO Monitoring Architecture for Grape Recorder
+GPSDO Monitoring Architecture for HF Time Standard
 
 This module implements the "Set, Monitor, Intervention" strategy for GPSDO-disciplined
 timing. Instead of constantly recalibrating the time anchor from noisy tone detections,

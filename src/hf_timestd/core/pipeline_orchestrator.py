@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Three-Phase Pipeline Orchestrator
+Two-Phase Pipeline Orchestrator
 
 Coordinates the robust time-aligned data pipeline:
-- Phase 1: Immutable Raw Archive (20 kHz IQ DRF)
+- Phase 1: Immutable Raw Archive (20 kHz IQ binary)
 - Phase 2: Analytical Engine (Clock Offset Series D_clock)
-- Phase 3: Corrected Telemetry Product (10 Hz DRF)
 
 This orchestrator ensures the strict, non-circular hierarchy of time sources
 to guarantee data integrity and the ability to reprocess results.
@@ -48,7 +47,7 @@ Architecture:
 Usage:
 ------
     orchestrator = PipelineOrchestrator(
-        data_dir=Path('/data/grape'),
+        data_dir=Path('/data/timestd'),
         channel_name='WWV_10MHz',
         frequency_hz=10e6,
         receiver_grid='EM38ww',
@@ -91,7 +90,7 @@ class PipelineState(Enum):
 @dataclass
 class PipelineConfig:
     """
-    Configuration for the three-phase pipeline.
+    Configuration for the two-phase pipeline.
     """
     # Base directories
     data_dir: Path
@@ -140,7 +139,7 @@ class PipelineConfig:
 
 class PipelineOrchestrator:
     """
-    Coordinates the three-phase robust time-aligned data pipeline.
+    Coordinates the two-phase robust time-aligned data pipeline.
     
     Ensures strict separation between:
     - Phase 1: Raw data (system time only)
@@ -197,9 +196,8 @@ class PipelineOrchestrator:
             timing_calibrator=self.timing_calibrator
         )
         
-        # Phase 3 is handled in the separate grape-recorder project.
+        # Phase 3 (decimation/DRF) is not part of hf-timestd
         self.product_generator = None
-        logger.info("Phase 3 disabled in hf-timestd (handled by grape-recorder)")
         
         # Audio buffer for web UI playback (simple AM demod from IQ)
         from .audio_buffer import AudioBufferManager
@@ -540,8 +538,8 @@ class PipelineOrchestrator:
                 except Exception as e:
                     logger.error(f"Phase 2 analysis error: {e}", exc_info=True)
                 
-                # Phase 3: Generate corrected product (disabled in three-phase architecture)
-                # Phase 3 now runs as batch processing via grape-phase3.sh
+                # Phase 3: Not implemented in hf-timestd
+                # Phase 3 not implemented in hf-timestd
                 if self.product_generator:
                     try:
                         # Add to streaming generator (will process when D_clock available)
@@ -755,7 +753,7 @@ class BatchReprocessor:
         Reprocess Phase 1 data through Phase 3 with specific D_clock version.
         
         Note: This method has been deprecated. Use Phase3ProductEngine directly
-        via the grape-phase3.sh script for batch processing.
+        Phase 3 is not implemented in hf-timestd.
         
         Args:
             start_time: Start time
@@ -770,5 +768,5 @@ class BatchReprocessor:
         # See: scripts/timestd-phase3.sh and src/hf_timestd/core/phase3_product_engine.py
         raise NotImplementedError(
             "BatchReprocessor.reprocess_phase3() is deprecated. "
-            "Use Phase3ProductEngine directly via grape-phase3.sh for batch processing."
+            "Phase 3 is not implemented in hf-timestd."
         )

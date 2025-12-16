@@ -86,7 +86,7 @@ class StreamRecorderConfig:
 
 class StreamRecorderV2:
     """
-    GRAPE recorder using ka9q-python RadiodStream.
+    HF Time Standard recorder using ka9q-python RadiodStream.
     
     This is a simplified replacement for PipelineRecorder that delegates
     RTP handling entirely to ka9q-python's RadiodStream.

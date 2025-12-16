@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-GRAPE Core Recorder - Battle-Tested Data Acquisition
+HF Time Standard Core Recorder - Battle-Tested Data Acquisition
 
-Minimal, rock-solid recorder that ONLY writes NPZ archives.
-NO analytics, NO tone detection, NO decimation, NO quality metrics.
+Minimal, rock-solid recorder that writes raw IQ archives.
+NO analytics, NO tone detection, NO quality metrics.
 
 Responsibilities:
 1. Receive RTP packets from ka9q-radio multicast
 2. Resequence packets (handle out-of-order delivery)
 3. Detect gaps via RTP timestamp discontinuities
 4. Fill gaps with zeros (maintain sample count integrity)
-5. Write complete NPZ archives with RTP timestamps
+5. Write complete archives with RTP timestamps
 
 That's it. Everything else is analytics (separate process).
 """
@@ -105,7 +105,7 @@ class CoreRecorder:
         # RTP receiver will be initialized after channels are created
         self.rtp_receiver = None
         
-        # Per-channel recorders (using PipelineRecorder for three-phase architecture)
+        # Per-channel recorders (using PipelineRecorder for two-phase architecture)
         self.channels: Dict[int, PipelineRecorder] = {}
         
         # Timing parameters
@@ -424,7 +424,7 @@ class CoreRecorder:
         """
         Get the multicast address for RTP receiver.
         
-        Returns the deterministic GRAPE multicast IP generated from
+        Returns the deterministic multicast IP generated from
         station_id and instrument_id in __init__.
         
         Returns:
@@ -547,7 +547,7 @@ def main():
     import toml
     import argparse
     
-    parser = argparse.ArgumentParser(description='GRAPE Core Recorder')
+    parser = argparse.ArgumentParser(description='HF Time Standard Core Recorder')
     parser.add_argument('--config', required=True, help='Configuration file (TOML)')
     args = parser.parse_args()
     
