@@ -21,8 +21,8 @@ src_path = str(Path(__file__).parent.parent / 'src')
 if src_path not in sys.path:
     sys.path.append(src_path)
 
-from grape_recorder.grape.global_station_voter import GlobalStationVoter, StationAnchor, AnchorQuality
-from grape_recorder.grape.phase2_temporal_engine import Phase2TemporalEngine
+from hf_timestd.core import GlobalStationVoter, StationAnchor, AnchorQuality
+from hf_timestd.core import Phase2TemporalEngine
 
 class TestGlobalStationLock(unittest.TestCase):
     def setUp(self):

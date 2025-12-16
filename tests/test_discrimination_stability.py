@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import numpy as np
-from grape_recorder.grape.phase2_temporal_engine import (
+from hf_timestd.core import (
     Phase2TemporalEngine, 
     TimeSnapResult, 
     ChannelCharacterization,
@@ -13,7 +13,7 @@ class TestDiscriminationStability(unittest.TestCase):
     def setUp(self):
         # Initialize engine with dummy paths
         self.engine = Phase2TemporalEngine(
-            raw_archive_dir='/tmp/raw',
+            raw_buffer_dir='/tmp/raw',
             output_dir='/tmp/out',
             channel_name='WWV_10MHz',
             frequency_hz=10000000,

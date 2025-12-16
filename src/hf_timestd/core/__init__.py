@@ -39,6 +39,21 @@ Example:
     orchestrator.process_samples(iq_samples, rtp_timestamp)
 """
 
+# RTP infrastructure
+from .rtp_receiver import RTPReceiver
+from .packet_resequencer import PacketResequencer, RTPPacket, GapInfo
+from .recording_session import (
+    RecordingSession,
+    SessionConfig,
+    SessionState,
+    SegmentInfo,
+    SessionMetrics,
+    SegmentWriter,
+)
+
+# Re-export ka9q types for convenience
+from ka9q import RTPHeader
+
 # Tone detection and timing
 from .tone_detector import ToneDetector
 
@@ -157,7 +172,48 @@ from .sliding_window_monitor import (
     SignalQuality
 )
 
+# Tick Matched Filter (per-second tick detection with overlapping windows)
+from .tick_matched_filter import (
+    TickMatchedFilter,
+    TickTemplate,
+    TickDetectionResult,
+    MinuteTickAnalysis,
+    create_tick_filter,
+    WWV_TEMPLATE,
+    WWVH_TEMPLATE,
+    CHU_TEMPLATE,
+    BPM_TEMPLATE,
+    STATION_TEMPLATES,
+)
+
+# Signal Templates (BCD, AFSK, BPM modulation patterns)
+from .signal_templates import (
+    BCDTemplateGenerator,
+    BCDCorrelationResult,
+    CHUAFSKTemplateGenerator,
+    AFSKCorrelationResult,
+    BPMTemplateGenerator,
+    BPMCorrelationResult,
+    SignalTemplateCorrelator,
+    create_bcd_generator,
+    create_afsk_generator,
+    create_bpm_generator,
+    create_correlator,
+)
+
 __all__ = [
+    # RTP infrastructure
+    "RTPReceiver",
+    "RTPHeader",
+    "PacketResequencer",
+    "RTPPacket",
+    "GapInfo",
+    "RecordingSession",
+    "SessionConfig",
+    "SessionState",
+    "SegmentInfo",
+    "SessionMetrics",
+    "SegmentWriter",
     # Core recorder
     "CoreRecorder",
     # Tone detection
@@ -252,4 +308,27 @@ __all__ = [
     "WindowMetrics",
     "MinuteSummary",
     "SignalQuality",
+    # Tick Matched Filter
+    "TickMatchedFilter",
+    "TickTemplate",
+    "TickDetectionResult",
+    "MinuteTickAnalysis",
+    "create_tick_filter",
+    "WWV_TEMPLATE",
+    "WWVH_TEMPLATE",
+    "CHU_TEMPLATE",
+    "BPM_TEMPLATE",
+    "STATION_TEMPLATES",
+    # Signal Templates (BCD, AFSK, BPM)
+    "BCDTemplateGenerator",
+    "BCDCorrelationResult",
+    "CHUAFSKTemplateGenerator",
+    "AFSKCorrelationResult",
+    "BPMTemplateGenerator",
+    "BPMCorrelationResult",
+    "SignalTemplateCorrelator",
+    "create_bcd_generator",
+    "create_afsk_generator",
+    "create_bpm_generator",
+    "create_correlator",
 ]

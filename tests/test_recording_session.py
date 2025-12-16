@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Add src to path for development
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from grape_recorder import (
+from hf_timestd import (
     RTPReceiver, RTPHeader,
     RecordingSession, SessionConfig, SessionState,
     SegmentInfo, SegmentWriter, GapInfo,

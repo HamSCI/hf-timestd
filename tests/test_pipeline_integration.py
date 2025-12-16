@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import numpy as np
-from grape_recorder.grape.phase2_temporal_engine import (
+from hf_timestd.core import (
     Phase2TemporalEngine, 
     ChannelCharacterization,
     TransmissionTimeSolution
@@ -18,7 +18,7 @@ class TestPipelineIntegration(unittest.TestCase):
         mock_solver = MagicMock()
         
         engine = Phase2TemporalEngine(
-            raw_archive_dir='/tmp/raw',
+            raw_buffer_dir='/tmp/raw',
             output_dir=self.output_dir,
             channel_name='WWV_10MHz',
             frequency_hz=10000000,
@@ -37,7 +37,7 @@ class TestPipelineIntegration(unittest.TestCase):
     def test_uncertainty_scaling(self):
         """Verify that uncertainty scales logically with SNR."""
         engine = Phase2TemporalEngine(
-            raw_archive_dir='/tmp/raw',
+            raw_buffer_dir='/tmp/raw',
             output_dir=self.output_dir,
             channel_name='WWV_10MHz',
             frequency_hz=10000000,
