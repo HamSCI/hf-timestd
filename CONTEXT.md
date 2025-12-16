@@ -2,7 +2,7 @@
 
 **Author:** Michael James Hauan (AC0G)  
 **Last Updated:** 2025-12-16  
-**Version:** 5.0 (Physics-Based Multi-Station Detection)
+**Version:** 5.1 (Web UI BPM Integration + Deployment Review Prep)
 
 ---
 
@@ -209,9 +209,17 @@ The web UI monitors Phase 1/2 status and visualizes Phase 2 outputs.
 - `web-ui/monitoring-server-v3.js`
 - `web-ui/timestd-paths.js` (must stay consistent with `src/hf_timestd/paths.py`)
 
+**Recent Updates (2025-12-16):**
+- **BPM Station Support:** Reception matrix API now includes `bpm_detected`, `bpm_snr_db`, `bpm_timing_mode`, `bpm_usable_for_utc`
+- **Multi-Station API:** New endpoint `GET /api/v1/phase2/multi-station/:channel` exposes ALL detected stations
+- **Header-Based CSV Parsing:** `loadDiscriminationRecords()` now uses column name lookup (robust to schema changes)
+- **Tiered Storage Status:** `GET /api/v1/system/storage` includes hot/cold buffer stats
+- **Security Hardening:** Path traversal protection with `path.resolve()`, channel name validation
+
 **Invariants:**
 - Uses `raw_buffer` naming everywhere
 - No GRAPE/PSWS/DigitalRF/decimation dependencies
+- CSV parsing uses header-based column lookup (not hardcoded indices)
 
 ---
 
@@ -316,6 +324,41 @@ pip install lz4        # for lz4
 
 ---
 
+## Deployment Environments
+
+The system supports two deployment modes controlled by `timestd-config.toml`:
+
+### Test Environment
+- **Data Root:** `/tmp/timestd-test` (or configured `test_data_root`)
+- **Purpose:** Development, debugging, feature testing
+- **Characteristics:** Ephemeral data, can be wiped without consequence
+
+### Production Environment
+- **Data Root:** `/var/lib/timestd` (or configured `production_data_root`)
+- **Purpose:** Continuous scientific data collection
+- **Characteristics:** Persistent data, requires careful management
+
+### Key Deployment Files to Review
+
+| Location | Purpose |
+|----------|---------|
+| `config/timestd-config.toml` | Mode selection, data roots, channel definitions |
+| `config/environment` | Environment variables for services |
+| `systemd/timestd-*.service` | Systemd unit files |
+| `scripts/` | Start/stop/status scripts |
+
+### Deployment Review Checklist (Next Session)
+
+1. **Mode Switching:** How does `mode = "test"` vs `mode = "production"` affect paths?
+2. **Service Scripts:** Are there dedicated start/stop/restart/status scripts?
+3. **Path Consistency:** Do all services use the same `TIMESTD_DATA_ROOT`?
+4. **Hot Buffer Location:** Is `/dev/shm/timestd` used in both modes?
+5. **Log Locations:** Where do logs go in test vs production?
+6. **Service Dependencies:** What order should services start/stop?
+7. **Health Checks:** How to verify all components are running correctly?
+
+---
+
 ## Related Documentation
 
 | Document | Purpose |
@@ -323,3 +366,4 @@ pip install lz4        # for lz4
 | `ARCHITECTURE.md` | System design, data flow, module responsibilities |
 | `TECHNICAL_REFERENCE.md` | API details, data formats, algorithms |
 | `DIRECTORY_STRUCTURE.md` | Complete path specifications |
+| `INSTALLATION.md` | Deployment and setup instructions |

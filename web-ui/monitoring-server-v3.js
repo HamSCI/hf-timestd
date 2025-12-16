@@ -18,7 +18,7 @@
 import express from 'express';
 import cors from 'cors';
 import fs from 'fs';
-import { join, basename, dirname } from 'path';
+import { join, basename, dirname, resolve } from 'path';
 import { parse as csvParse } from 'csv-parse/sync';
 import { fileURLToPath } from 'url';
 import toml from 'toml';
@@ -559,11 +559,36 @@ async function getDataContinuity(paths) {
 }
 
 /**
- * Get storage information
+ * Validate channel name against configured channels
+ * Returns the validated channel name or null if invalid
+ */
+function validateChannelName(channelName) {
+  if (!channelName || typeof channelName !== 'string') return null;
+  
+  const channels = config.recorder?.channels || [];
+  const validChannel = channels.find(ch => 
+    (ch.description || `Channel ${ch.ssrc}`) === channelName
+  );
+  
+  return validChannel ? channelName : null;
+}
+
+/**
+ * Get list of valid channel names from config
+ */
+function getValidChannelNames() {
+  const channels = config.recorder?.channels || [];
+  return channels
+    .filter(ch => ch.enabled !== false)
+    .map(ch => ch.description || `Channel ${ch.ssrc}`);
+}
+
+/**
+ * Get storage information including tiered storage status
  */
 async function getStorageInfo(paths) {
   try {
-    // Use df command to get disk usage
+    // Use df command to get disk usage for main data directory
     const { stdout } = await execAsync(`df -B1 ${dataRoot} | tail -1`);
     const parts = stdout.trim().split(/\s+/);
     
@@ -573,11 +598,103 @@ async function getStorageInfo(paths) {
     const usedPercent = (usedBytes / totalBytes) * 100;
     
     // Estimate write rate (very rough - based on current usage)
-    // This would be better calculated from actual archive sizes over time
-    const archiveSize = usedBytes; // Simplified - actual would be archive dir only
-    const writeRatePerDay = archiveSize / 7; // Assume ~1 week of data (very rough)
-    
+    const archiveSize = usedBytes;
+    const writeRatePerDay = archiveSize / 7; // Assume ~1 week of data
     const daysUntilFull = availableBytes / writeRatePerDay;
+    
+    // Tiered storage status (hot buffer in RAM, cold buffer on disk)
+    let tieredStorage = null;
+    const hotBufferPath = '/dev/shm/timestd';
+    const coldBufferPath = join(dataRoot, 'raw_buffer');
+    
+    try {
+      // Check hot buffer (RAM-based /dev/shm)
+      let hotBufferInfo = null;
+      if (fs.existsSync(hotBufferPath)) {
+        const { stdout: hotDf } = await execAsync(`df -B1 ${hotBufferPath} | tail -1`);
+        const hotParts = hotDf.trim().split(/\s+/);
+        const hotUsed = parseInt(hotParts[2]);
+        const hotTotal = parseInt(hotParts[1]);
+        
+        // Count files in hot buffer
+        let hotFileCount = 0;
+        try {
+          const channels = fs.readdirSync(hotBufferPath);
+          for (const ch of channels) {
+            const chPath = join(hotBufferPath, ch);
+            if (fs.statSync(chPath).isDirectory()) {
+              const dates = fs.readdirSync(chPath);
+              for (const d of dates) {
+                const datePath = join(chPath, d);
+                if (fs.statSync(datePath).isDirectory()) {
+                  hotFileCount += fs.readdirSync(datePath).length;
+                }
+              }
+            }
+          }
+        } catch (e) { /* ignore */ }
+        
+        hotBufferInfo = {
+          path: hotBufferPath,
+          used_bytes: hotUsed,
+          total_bytes: hotTotal,
+          used_percent: (hotUsed / hotTotal) * 100,
+          file_count: hotFileCount,
+          type: 'RAM (tmpfs)'
+        };
+      }
+      
+      // Check cold buffer (disk-based)
+      let coldBufferInfo = null;
+      if (fs.existsSync(coldBufferPath)) {
+        let coldUsed = 0;
+        let coldFileCount = 0;
+        try {
+          const { stdout: duOut } = await execAsync(`du -sb ${coldBufferPath} 2>/dev/null || echo "0"`);
+          coldUsed = parseInt(duOut.split('\t')[0]) || 0;
+          
+          // Count files
+          const channels = fs.readdirSync(coldBufferPath);
+          for (const ch of channels) {
+            const chPath = join(coldBufferPath, ch);
+            if (fs.statSync(chPath).isDirectory()) {
+              const dates = fs.readdirSync(chPath);
+              for (const d of dates) {
+                const datePath = join(chPath, d);
+                if (fs.statSync(datePath).isDirectory()) {
+                  coldFileCount += fs.readdirSync(datePath).length;
+                }
+              }
+            }
+          }
+        } catch (e) { /* ignore */ }
+        
+        coldBufferInfo = {
+          path: coldBufferPath,
+          used_bytes: coldUsed,
+          file_count: coldFileCount,
+          type: 'Disk'
+        };
+      }
+      
+      // Check tiered storage status file if exists
+      const tieredStatusFile = join(paths.getStateDir(), 'tiered_storage_status.json');
+      let archivalStatus = null;
+      if (fs.existsSync(tieredStatusFile)) {
+        try {
+          archivalStatus = JSON.parse(fs.readFileSync(tieredStatusFile, 'utf-8'));
+        } catch (e) { /* ignore */ }
+      }
+      
+      tieredStorage = {
+        enabled: hotBufferInfo !== null,
+        hot_buffer: hotBufferInfo,
+        cold_buffer: coldBufferInfo,
+        archival: archivalStatus
+      };
+    } catch (e) {
+      tieredStorage = { enabled: false, error: e.message };
+    }
     
     return {
       location: dataRoot,
@@ -586,7 +703,8 @@ async function getStorageInfo(paths) {
       available_bytes: availableBytes,
       used_percent: usedPercent,
       write_rate_bytes_per_day: writeRatePerDay,
-      estimated_days_until_full: Math.floor(daysUntilFull)
+      estimated_days_until_full: Math.floor(daysUntilFull),
+      tiered_storage: tieredStorage
     };
   } catch (err) {
     return {
@@ -1304,13 +1422,62 @@ function loadDiscriminationRecords(channelName, date) {
   }
   
   const lines = csvContent.split('\n');
+  if (lines.length < 2) {
+    return { filePath, records: [] };
+  }
+  
+  // Parse header row to get column indices (robust to schema changes)
+  const headerLine = lines[0];
+  const headers = [];
+  let inQuotes = false;
+  let current = '';
+  for (let j = 0; j < headerLine.length; j++) {
+    const char = headerLine[j];
+    if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      headers.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  headers.push(current.trim());
+  
+  const colIdx = {};
+  headers.forEach((h, i) => colIdx[h] = i);
+  
+  // Helper functions for safe value extraction
+  const getVal = (parts, colName) => {
+    const idx = colIdx[colName];
+    return idx !== undefined && parts[idx] !== undefined ? parts[idx].trim() : '';
+  };
+  const getBool = (parts, colName) => getVal(parts, colName) === '1';
+  const getFloat = (parts, colName) => {
+    const v = getVal(parts, colName);
+    return v !== '' ? parseFloat(v) : null;
+  };
+  const getInt = (parts, colName) => {
+    const v = getVal(parts, colName);
+    return v !== '' ? parseInt(v, 10) : null;
+  };
+  const getJSON = (parts, colName) => {
+    const v = getVal(parts, colName);
+    if (!v) return null;
+    try {
+      return JSON.parse(v);
+    } catch (e) {
+      return null;
+    }
+  };
+  
   const records = [];
   
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     const parts = [];
-    let inQuotes = false;
-    let current = '';
+    inQuotes = false;
+    current = '';
     
     for (let j = 0; j < line.length; j++) {
       const char = line[j];
@@ -1330,164 +1497,60 @@ function loadDiscriminationRecords(channelName, date) {
     }
     parts.push(current);
     
-    if (parts.length >= 21) {
-      let timestamp = parts[0].trim();
-      if (timestamp.endsWith('+00:00')) {
-        timestamp = timestamp.replace('+00:00', 'Z');
-      }
-      
-      let tick_windows = null;
-      if (parts[15] && parts[15].trim() !== '') {
-        try {
-          tick_windows = JSON.parse(parts[15].trim());
-        } catch (e) {
-          console.warn(`Failed to parse tick_windows_10sec JSON at line ${i}:`, e);
-        }
-      }
-      
-      let bcd_windows = null;
-      if (parts[20] && parts[20].trim() !== '') {
-        try {
-          bcd_windows = JSON.parse(parts[20].trim());
-        } catch (e) {
-          console.warn(`Failed to parse bcd_windows JSON at line ${i}:`, e);
-        }
-      }
-      
-      // Parse inter-method validation arrays (columns 27-28)
-      let inter_method_agreements = null;
-      let inter_method_disagreements = null;
-      if (parts[27] && parts[27].trim() !== '') {
-        try {
-          inter_method_agreements = JSON.parse(parts[27].trim());
-        } catch (e) {}
-      }
-      if (parts[28] && parts[28].trim() !== '') {
-        try {
-          inter_method_disagreements = JSON.parse(parts[28].trim());
-        } catch (e) {}
-      }
-      
-      records.push({
-        timestamp_utc: timestamp,
-        minute_timestamp: parseInt(parts[1]),
-        minute_number: parseInt(parts[2]),
-        wwv_detected: parts[3] === '1',
-        wwvh_detected: parts[4] === '1',
-        wwv_power_db: parts[5] !== '' ? parseFloat(parts[5]) : null,
-        wwvh_power_db: parts[6] !== '' ? parseFloat(parts[6]) : null,
-        power_ratio_db: parts[7] !== '' ? parseFloat(parts[7]) : null,
-        differential_delay_ms: parts[8] !== '' ? parseFloat(parts[8]) : null,
-        tone_440hz_wwv_detected: parts[9] === '1',
-        tone_440hz_wwv_power_db: parts[10] !== '' ? parseFloat(parts[10]) : null,
-        tone_440hz_wwvh_detected: parts[11] === '1',
-        tone_440hz_wwvh_power_db: parts[12] !== '' ? parseFloat(parts[12]) : null,
-        dominant_station: parts[13],
-        confidence: parts[14],
-        tick_windows_10sec: tick_windows,
-        bcd_wwv_amplitude: parts[16] !== '' ? parseFloat(parts[16]) : null,
-        bcd_wwvh_amplitude: parts[17] !== '' ? parseFloat(parts[17]) : null,
-        bcd_differential_delay_ms: parts[18] !== '' ? parseFloat(parts[18]) : null,
-        bcd_correlation_quality: parts[19] !== '' ? parseFloat(parts[19]) : null,
-        bcd_windows: bcd_windows,
-        // New 500/600 Hz ground truth columns (21-24)
-        tone_500_600_detected: parts[21] === '1',
-        tone_500_600_power_db: parts[22] !== '' ? parseFloat(parts[22]) : null,
-        tone_500_600_freq_hz: parts[23] !== '' ? parseInt(parts[23]) : null,
-        tone_500_600_ground_truth_station: parts[24] || null,
-        // New BCD validation columns (25-26)
-        bcd_minute_validated: parts[25] === '1',
-        bcd_correlation_peak_quality: parts[26] !== '' ? parseFloat(parts[26]) : null,
-        // Inter-method cross-validation (27-28)
-        inter_method_agreements: inter_method_agreements,
-        inter_method_disagreements: inter_method_disagreements
-      });
-    } else if (parts.length >= 16) {
-      let timestamp = parts[0].trim();
-      if (timestamp.endsWith('+00:00')) {
-        timestamp = timestamp.replace('+00:00', 'Z');
-      }
-      
-      let tick_windows = null;
-      if (parts[15] && parts[15].trim() !== '') {
-        try {
-          tick_windows = JSON.parse(parts[15].trim());
-        } catch (e) {
-          console.warn(`Failed to parse tick_windows_10sec JSON at line ${i}:`, e);
-        }
-      }
-      
-      records.push({
-        timestamp_utc: timestamp,
-        minute_timestamp: parseInt(parts[1]),
-        minute_number: parseInt(parts[2]),
-        wwv_detected: parts[3] === '1',
-        wwvh_detected: parts[4] === '1',
-        wwv_snr_db: parts[5] !== '' ? parseFloat(parts[5]) : null,
-        wwvh_snr_db: parts[6] !== '' ? parseFloat(parts[6]) : null,
-        power_ratio_db: parts[7] !== '' ? parseFloat(parts[7]) : null,
-        differential_delay_ms: parts[8] !== '' ? parseFloat(parts[8]) : null,
-        tone_440hz_wwv_detected: parts[9] === '1',
-        tone_440hz_wwv_power_db: parts[10] !== '' ? parseFloat(parts[10]) : null,
-        tone_440hz_wwvh_detected: parts[11] === '1',
-        tone_440hz_wwvh_power_db: parts[12] !== '' ? parseFloat(parts[12]) : null,
-        dominant_station: parts[13],
-        confidence: parts[14],
-        tick_windows_10sec: tick_windows,
-        bcd_wwv_amplitude: null,
-        bcd_wwvh_amplitude: null,
-        bcd_differential_delay_ms: null,
-        bcd_correlation_quality: null,
-        bcd_windows: null
-      });
-    } else if (parts.length >= 15) {
-      let timestamp = parts[0].trim();
-      if (timestamp.endsWith('+00:00')) {
-        timestamp = timestamp.replace('+00:00', 'Z');
-      }
-      
-      records.push({
-        timestamp_utc: timestamp,
-        minute_timestamp: parseInt(parts[1]),
-        minute_number: parseInt(parts[2]),
-        wwv_detected: parts[3] === '1',
-        wwvh_detected: parts[4] === '1',
-        wwv_snr_db: parts[5] !== '' ? parseFloat(parts[5]) : null,
-        wwvh_snr_db: parts[6] !== '' ? parseFloat(parts[6]) : null,
-        power_ratio_db: parts[7] !== '' ? parseFloat(parts[7]) : null,
-        differential_delay_ms: parts[8] !== '' ? parseFloat(parts[8]) : null,
-        tone_440hz_wwv_detected: parts[9] === '1',
-        tone_440hz_wwv_power_db: parts[10] !== '' ? parseFloat(parts[10]) : null,
-        tone_440hz_wwvh_detected: parts[11] === '1',
-        tone_440hz_wwvh_power_db: parts[12] !== '' ? parseFloat(parts[12]) : null,
-        dominant_station: parts[13],
-        confidence: parts[14],
-        tick_windows_10sec: null
-      });
-    } else if (parts.length >= 10) {
-      let timestamp = parts[0].trim();
-      if (timestamp.endsWith('+00:00')) {
-        timestamp = timestamp.replace('+00:00', 'Z');
-      }
-      
-      records.push({
-        timestamp_utc: timestamp,
-        minute_timestamp: parseInt(parts[1]),
-        minute_number: null,
-        wwv_detected: parts[2] === '1',
-        wwvh_detected: parts[3] === '1',
-        wwv_snr_db: parts[4] !== '' ? parseFloat(parts[4]) : null,
-        wwvh_snr_db: parts[5] !== '' ? parseFloat(parts[5]) : null,
-        power_ratio_db: parts[6] !== '' ? parseFloat(parts[6]) : null,
-        differential_delay_ms: parts[7] !== '' ? parseFloat(parts[7]) : null,
-        tone_440hz_wwv_detected: false,
-        tone_440hz_wwv_power_db: null,
-        tone_440hz_wwvh_detected: false,
-        tone_440hz_wwvh_power_db: null,
-        dominant_station: parts[8],
-        confidence: parts[9]
-      });
+    if (parts.length < 5) continue; // Skip malformed rows
+    
+    let timestamp = getVal(parts, 'timestamp_utc') || parts[0]?.trim() || '';
+    if (timestamp.endsWith('+00:00')) {
+      timestamp = timestamp.replace('+00:00', 'Z');
     }
+    
+    records.push({
+      timestamp_utc: timestamp,
+      minute_timestamp: getInt(parts, 'minute_timestamp') ?? parseInt(parts[1]),
+      minute_number: getInt(parts, 'minute_number'),
+      // WWV/WWVH detection
+      wwv_detected: getBool(parts, 'wwv_detected'),
+      wwvh_detected: getBool(parts, 'wwvh_detected'),
+      wwv_power_db: getFloat(parts, 'wwv_power_db') ?? getFloat(parts, 'wwv_snr_db'),
+      wwvh_power_db: getFloat(parts, 'wwvh_power_db') ?? getFloat(parts, 'wwvh_snr_db'),
+      power_ratio_db: getFloat(parts, 'power_ratio_db'),
+      differential_delay_ms: getFloat(parts, 'differential_delay_ms'),
+      // 440 Hz station ID
+      tone_440hz_wwv_detected: getBool(parts, 'tone_440hz_wwv_detected'),
+      tone_440hz_wwv_power_db: getFloat(parts, 'tone_440hz_wwv_power_db'),
+      tone_440hz_wwvh_detected: getBool(parts, 'tone_440hz_wwvh_detected'),
+      tone_440hz_wwvh_power_db: getFloat(parts, 'tone_440hz_wwvh_power_db'),
+      // Voting result
+      dominant_station: getVal(parts, 'dominant_station'),
+      confidence: getVal(parts, 'confidence'),
+      // Tick windows
+      tick_windows_10sec: getJSON(parts, 'tick_windows_10sec'),
+      // BCD correlation
+      bcd_wwv_amplitude: getFloat(parts, 'bcd_wwv_amplitude'),
+      bcd_wwvh_amplitude: getFloat(parts, 'bcd_wwvh_amplitude'),
+      bcd_differential_delay_ms: getFloat(parts, 'bcd_differential_delay_ms'),
+      bcd_correlation_quality: getFloat(parts, 'bcd_correlation_quality'),
+      bcd_windows: getJSON(parts, 'bcd_windows'),
+      // 500/600 Hz ground truth
+      tone_500_600_detected: getBool(parts, 'tone_500_600_detected'),
+      tone_500_600_power_db: getFloat(parts, 'tone_500_600_power_db'),
+      tone_500_600_freq_hz: getInt(parts, 'tone_500_600_freq_hz'),
+      tone_500_600_ground_truth_station: getVal(parts, 'tone_500_600_ground_truth_station') || null,
+      // BCD validation
+      bcd_minute_validated: getBool(parts, 'bcd_minute_validated'),
+      bcd_correlation_peak_quality: getFloat(parts, 'bcd_correlation_peak_quality'),
+      // Inter-method validation
+      inter_method_agreements: getJSON(parts, 'inter_method_agreements'),
+      inter_method_disagreements: getJSON(parts, 'inter_method_disagreements'),
+      // BPM (China) station - new fields
+      bpm_detected: getBool(parts, 'bpm_detected'),
+      bpm_snr_db: getFloat(parts, 'bpm_snr_db'),
+      bpm_timing_ms: getFloat(parts, 'bpm_timing_ms'),
+      bpm_timing_mode: getVal(parts, 'bpm_timing_mode') || null,
+      bpm_usable_for_utc: colIdx['bpm_is_usable_for_utc'] !== undefined ? getBool(parts, 'bpm_is_usable_for_utc') : true,
+      bcd_bpm_amplitude: getFloat(parts, 'bcd_bpm_amplitude'),
+      bcd_bpm_toa_ms: getFloat(parts, 'bcd_bpm_toa_ms')
+    });
   }
   
   return { filePath, records };
@@ -2547,6 +2610,15 @@ app.get('/api/v1/timing/phase2-status', async (req, res) => {
 app.get('/api/v1/timing/phase2-status/:channel', async (req, res) => {
   try {
     const channel = decodeURIComponent(req.params.channel);
+    
+    // Validate channel name against config
+    if (!validateChannelName(channel)) {
+      return res.status(404).json({ 
+        error: `Channel not found: ${channel}`,
+        valid_channels: getValidChannelNames()
+      });
+    }
+    
     const status = await getPhase2AnalyticsStatus(channel, paths);
     res.json(status);
   } catch (err) {
@@ -2577,6 +2649,15 @@ app.get('/api/v1/timing/best-d-clock', async (req, res) => {
 app.get('/api/v1/timing/pipeline/:channel', async (req, res) => {
   try {
     const channel = decodeURIComponent(req.params.channel);
+    
+    // Validate channel name against config
+    if (!validateChannelName(channel)) {
+      return res.status(404).json({ 
+        error: `Channel not found: ${channel}`,
+        valid_channels: getValidChannelNames()
+      });
+    }
+    
     const status = await getPhase2PipelineStatus(channel, paths);
     res.json(status);
   } catch (err) {
@@ -3563,11 +3644,12 @@ app.get('/api/v1/logs/content', async (req, res) => {
       return res.status(400).json({ error: 'path parameter required' });
     }
     
-    // Security: Ensure path is within logs directory
-    const logsDir = join(paths.dataRoot, 'logs');
-    const normalizedPath = logPath;
-    if (!normalizedPath.startsWith(logsDir)) {
-      return res.status(403).json({ error: 'Access denied' });
+    // Security: Normalize path and ensure it is within logs directory
+    // Use path.resolve to prevent path traversal attacks with ../
+    const logsDir = resolve(paths.dataRoot, 'logs');
+    const normalizedPath = resolve(logPath);
+    if (!normalizedPath.startsWith(logsDir + '/') && normalizedPath !== logsDir) {
+      return res.status(403).json({ error: 'Access denied: path outside logs directory' });
     }
     
     if (!fs.existsSync(normalizedPath)) {
@@ -3760,13 +3842,97 @@ app.get('/api/v1/timing/global', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/phase2/multi-station/:channel
+ * Multi-station detection results for a channel
+ * Shows ALL detected stations with propagation analysis (not just dominant)
+ */
+app.get('/api/v1/phase2/multi-station/:channel', async (req, res) => {
+  try {
+    const channelName = decodeURIComponent(req.params.channel);
+    
+    // Validate channel exists in config
+    const channels = config.recorder?.channels || [];
+    const validChannel = channels.find(ch => 
+      (ch.description || `Channel ${ch.ssrc}`) === channelName
+    );
+    if (!validChannel) {
+      return res.status(404).json({ error: `Channel not found: ${channelName}` });
+    }
+    
+    const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
+    const fileChannel = channelName.replace(/ /g, '_').replace(/\./g, '_');
+    
+    // Read multi-station detection results from Phase 2
+    const multiStationDir = paths.getPhase2Dir(channelName);
+    const multiStationFile = multiStationDir ? 
+      join(multiStationDir, 'multi_station', `${fileChannel}_multi_station_${today}.json`) : null;
+    
+    let multiStationData = null;
+    if (multiStationFile && fs.existsSync(multiStationFile)) {
+      try {
+        multiStationData = JSON.parse(fs.readFileSync(multiStationFile, 'utf-8'));
+      } catch (e) {
+        console.warn(`Failed to parse multi-station JSON: ${e.message}`);
+      }
+    }
+    
+    // Also check analytics state file for latest multi_station_result
+    const channelKey = channelName.toLowerCase().replace(' mhz', '').replace(/ /g, '');
+    const stateFile = join(paths.getStateDir(), `analytics-${channelKey}.json`);
+    
+    let latestResult = null;
+    if (fs.existsSync(stateFile)) {
+      try {
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        if (state.multi_station_result) {
+          latestResult = state.multi_station_result;
+        }
+      } catch (e) {
+        console.warn(`Failed to parse state file: ${e.message}`);
+      }
+    }
+    
+    // Extract frequency for station capability info
+    const freqMatch = channelName.match(/([\d.]+)\s*MHz/);
+    const freqMhz = freqMatch ? parseFloat(freqMatch[1]) : 0;
+    const isCHU = channelName.includes('CHU');
+    
+    // Determine which stations can be received on this frequency
+    const receivableStations = [];
+    if (!isCHU) {
+      receivableStations.push('WWV'); // WWV on all frequencies
+      if ([2.5, 5, 10, 15].includes(freqMhz)) {
+        receivableStations.push('WWVH');
+        receivableStations.push('BPM');
+      }
+    } else {
+      receivableStations.push('CHU');
+    }
+    
+    res.json({
+      channel: channelName,
+      frequency_mhz: freqMhz,
+      receivable_stations: receivableStations,
+      latest: latestResult,
+      history: multiStationData?.detections || [],
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (err) {
+    console.error('Error getting multi-station data:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============================================================================
 // PHASE 2 ANALYSIS DASHBOARD API ENDPOINTS
 // ============================================================================
 
 /**
  * GET /api/v1/phase2/reception-matrix
- * Station-Channel reception matrix showing all 13 broadcasts
+ * Station-Channel reception matrix showing all 17 broadcasts
+ * (6 WWV + 4 WWVH + 3 CHU + 4 BPM)
  */
 app.get('/api/v1/phase2/reception-matrix', async (req, res) => {
   try {
@@ -3820,36 +3986,52 @@ app.get('/api/v1/phase2/reception-matrix', async (req, res) => {
       const tonesDir = paths.getToneDetectionsDir ? paths.getToneDetectionsDir(channelName) : null;
       const tonesFile = tonesDir ? join(tonesDir, `${fileChannel}_tones_${today}.csv`) : null;
       
-      let latestTones = { wwv_detected: false, wwvh_detected: false };
+      let latestTones = { wwv_detected: false, wwvh_detected: false, bpm_detected: false };
       if (tonesFile && fs.existsSync(tonesFile)) {
         const lines = fs.readFileSync(tonesFile, 'utf-8').trim().split('\n');
         if (lines.length > 1) {
+          // Parse header to get column indices (robust to schema changes)
+          const headers = lines[0].split(',');
+          const colIdx = {};
+          headers.forEach((h, i) => colIdx[h.trim()] = i);
+          
           const lastLine = lines[lines.length - 1].split(',');
           latestTones = {
-            wwv_detected: lastLine[2] === '1',
-            wwvh_detected: lastLine[3] === '1',
-            wwv_snr_db: parseFloat(lastLine[4]) || null,
-            wwvh_snr_db: parseFloat(lastLine[5]) || null
+            wwv_detected: lastLine[colIdx['wwv_detected']] === '1',
+            wwvh_detected: lastLine[colIdx['wwvh_detected']] === '1',
+            bpm_detected: lastLine[colIdx['bpm_detected']] === '1',
+            wwv_snr_db: colIdx['wwv_snr_db'] !== undefined ? parseFloat(lastLine[colIdx['wwv_snr_db']]) || null : null,
+            wwvh_snr_db: colIdx['wwvh_snr_db'] !== undefined ? parseFloat(lastLine[colIdx['wwvh_snr_db']]) || null : null,
+            bpm_snr_db: colIdx['bpm_snr_db'] !== undefined ? parseFloat(lastLine[colIdx['bpm_snr_db']]) || null : null,
+            bpm_timing_mode: colIdx['bpm_timing_mode'] !== undefined ? lastLine[colIdx['bpm_timing_mode']] || null : null,
+            bpm_usable_for_utc: colIdx['bpm_is_usable_for_utc'] !== undefined ? lastLine[colIdx['bpm_is_usable_for_utc']] === '1' : true
           };
         }
       }
       
       const isCHU = channelName.includes('CHU');
       
-      // Check if this channel can receive WWVH
-      // WWVH only broadcasts on 2.5, 5, 10, 15 MHz (NOT 20 or 25 MHz)
+      // Check if this channel can receive WWVH and BPM
+      // WWVH broadcasts on 2.5, 5, 10, 15 MHz (NOT 20 or 25 MHz)
+      // BPM (China) broadcasts on 2.5, 5, 10, 15 MHz (same as WWVH)
       const freqMatch = channelName.match(/([\d.]+)\s*MHz/);
       const freqMhz = freqMatch ? parseFloat(freqMatch[1]) : 0;
       const canReceiveWWVH = !isCHU && [2.5, 5, 10, 15].includes(freqMhz);
+      const canReceiveBPM = !isCHU && [2.5, 5, 10, 15].includes(freqMhz);
       
       result.channels.push({
         channel: channelName,
         canReceiveWWVH: canReceiveWWVH,
+        canReceiveBPM: canReceiveBPM,
         wwv_detected: !isCHU && (latestTones.wwv_detected || latestDiscrim?.wwv_snr_db > 0),
         wwvh_detected: canReceiveWWVH && (latestTones.wwvh_detected || latestDiscrim?.wwvh_snr_db > 0),
+        bpm_detected: canReceiveBPM && latestTones.bpm_detected,
         chu_detected: isCHU && latestPower?.snr_db > 10,
         wwv_snr_db: latestDiscrim?.wwv_snr_db || latestTones.wwv_snr_db || (latestPower?.station === 'WWV' ? latestPower.snr_db : null),
         wwvh_snr_db: canReceiveWWVH ? (latestDiscrim?.wwvh_snr_db || latestTones.wwvh_snr_db || (latestPower?.station === 'WWVH' ? latestPower.snr_db : null)) : null,
+        bpm_snr_db: canReceiveBPM ? latestTones.bpm_snr_db : null,
+        bpm_timing_mode: canReceiveBPM ? latestTones.bpm_timing_mode : null,
+        bpm_usable_for_utc: canReceiveBPM ? latestTones.bpm_usable_for_utc : null,
         chu_snr_db: isCHU ? latestPower?.snr_db : null,
         dominant_station: latestDiscrim?.dominant_station || latestPower?.station || 'NONE',
         confidence: latestDiscrim?.confidence || 'low',
