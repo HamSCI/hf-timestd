@@ -66,6 +66,10 @@ class StreamRecorderConfig:
     compression: str = 'none'  # 'none', 'zstd', or 'lz4'
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
     
+    # Tiered storage: hot buffer in /dev/shm, cold storage on disk
+    tiered_storage: bool = False
+    hot_buffer_root: Path = None  # e.g., /dev/shm/timestd
+    
     # Phase 2 settings
     enable_analysis: bool = True
     analysis_latency_sec: int = 120
@@ -141,6 +145,7 @@ class StreamRecorderV2:
             streaming_latency_minutes=config.streaming_latency_minutes,
             compression=config.compression,
             compression_level=config.compression_level,
+            use_tiered_storage=config.tiered_storage,
         )
         
         self.orchestrator = PipelineOrchestrator(pipeline_config)
@@ -172,12 +177,19 @@ class StreamRecorderV2:
             self.orchestrator.start()
             
             # Create and start RadiodStream
+            # radiod splits 20ms blocks (400 samples at 20kHz) into 2 packets:
+            #   - Small packet: 20 samples (160 bytes), ts_delta=360  
+            #   - Large packet: 180 samples (1440 bytes), ts_delta=40
+            # The resequencer uses samples_per_packet to predict next_expected_ts,
+            # but with variable packet sizes this causes false gap detection.
+            # Set to 200 (average of 360+40)/2 to minimize false gaps.
+            samples_per_packet = 200  # Average timestamp delta per packet
             self.stream = RadiodStream(
                 channel=self.channel_info,
                 on_samples=self._handle_samples,
-                samples_per_packet=int(self.config.sample_rate * 0.020),  # 20ms default
-                resequence_buffer_size=64,
-                deliver_interval_packets=10  # Deliver every ~200ms
+                samples_per_packet=samples_per_packet,
+                resequence_buffer_size=128,
+                deliver_interval_packets=20
             )
             self.stream.start()
             

@@ -136,6 +136,12 @@ class ChannelRecorder:
             
             self.channel_info = all_channels[ssrc]
             
+            # Tiered storage config
+            tiered_storage = self.recorder_config.get('tiered_storage', False)
+            hot_buffer_root = self.recorder_config.get('hot_buffer_root')
+            if hot_buffer_root:
+                hot_buffer_root = Path(hot_buffer_root)
+            
             # Create recorder
             recorder_config = StreamRecorderConfig(
                 ssrc=ssrc,
@@ -147,6 +153,8 @@ class ChannelRecorder:
                 receiver_grid=self.station_config.get('grid_square', ''),
                 compression=self.recorder_config.get('compression', 'none'),
                 compression_level=self.recorder_config.get('compression_level', 3),
+                tiered_storage=tiered_storage,
+                hot_buffer_root=hot_buffer_root,
             )
             
             self.recorder = StreamRecorderV2(
