@@ -174,7 +174,7 @@ create_dir() {
 
 # Data directories - THREE-PHASE ARCHITECTURE
 create_dir "$DATA_ROOT"
-create_dir "$DATA_ROOT/raw_archive"   # Phase 1: Immutable DRF archive
+create_dir "$DATA_ROOT/raw_buffer"    # Phase 1: Immutable binary IQ archive
 create_dir "$DATA_ROOT/phase2"        # Phase 2: Analytical engine outputs
 create_dir "$DATA_ROOT/products"      # Phase 3: Derived products (decimated, spectrograms)
 create_dir "$DATA_ROOT/state"         # Global state files

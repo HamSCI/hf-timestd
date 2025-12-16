@@ -5,7 +5,7 @@
 #   - Phase 1: raw_buffer recording status
 #   - Phase 2: Timing analysis, D_clock, discrimination
 #
-# Usage: timestd-ui.sh -start|-stop|-status [config-file]
+# Usage: timestd-ui.sh {start|stop|restart|status} [config-file]
 
 # Source common settings (sets PYTHON, PROJECT_DIR, etc.)
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -13,11 +13,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 ACTION=""
 CONFIG=""
 
+# First positional arg is the action
+ACTION="$1"
+shift 2>/dev/null || true
+
+# Remaining args could be config file
 for arg in "$@"; do
     case $arg in
-        -start) ACTION="start" ;;
-        -stop) ACTION="stop" ;;
-        -status) ACTION="status" ;;
+        start|stop|restart|status) ;; # ignore if repeated
         *) CONFIG="$arg" ;;
     esac
 done
@@ -25,7 +28,7 @@ done
 CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
 
 if [ -z "$ACTION" ]; then
-    echo "Usage: $0 -start|-stop|-status [config-file]"
+    echo "Usage: $0 {start|stop|restart|status} [config-file]"
     exit 1
 fi
 
@@ -70,6 +73,13 @@ stop)
     pkill -f "monitoring-server" 2>/dev/null
     sleep 1
     echo "   ✅ Stopped"
+    ;;
+
+restart)
+    echo "🔄 Restarting Web-UI..."
+    "$0" stop "$CONFIG"
+    sleep 1
+    "$0" start "$CONFIG"
     ;;
 
 status)

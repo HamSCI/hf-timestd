@@ -9,7 +9,7 @@
 # Input:  raw_buffer/{CHANNEL}/ (20 kHz binary IQ from Phase 1)
 # Output: phase2/{CHANNEL}/      (timing analysis, clock offset CSV)
 #
-# Usage: timestd-analytics.sh -start|-stop|-status [config-file]
+# Usage: timestd-analytics.sh {start|stop|restart|status} [config-file]
 
 # Source common settings (sets PYTHON, PROJECT_DIR, etc.)
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -17,11 +17,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 ACTION=""
 CONFIG=""
 
+# First positional arg is the action
+ACTION="$1"
+shift 2>/dev/null || true
+
+# Remaining args could be config file
 for arg in "$@"; do
     case $arg in
-        -start) ACTION="start" ;;
-        -stop) ACTION="stop" ;;
-        -status) ACTION="status" ;;
+        start|stop|restart|status) ;; # ignore if repeated
         *) CONFIG="$arg" ;;
     esac
 done
@@ -29,7 +32,7 @@ done
 CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
 
 if [ -z "$ACTION" ]; then
-    echo "Usage: $0 -start|-stop|-status [config-file]"
+    echo "Usage: $0 {start|stop|restart|status} [config-file]"
     exit 1
 fi
 
@@ -69,15 +72,37 @@ start)
     mkdir -p "$DATA_ROOT/phase2"
     cd "$PROJECT_DIR"
     
-    # WWV Channels (PYTHON is set by common.sh)
+    # SHARED Channels (2.5, 5, 10, 15 MHz - WWV/WWVH/BPM all broadcast here)
+    # Input: raw_buffer/SHARED_X_MHz/ (Phase 1 binary IQ)
+    # Output: phase2/SHARED_X_MHz/    (D_clock, timing metrics)
+    for freq_mhz in 2.5 5 10 15; do
+        freq_hz=$(echo "$freq_mhz * 1000000" | bc | cut -d. -f1)
+        channel_dir="SHARED_${freq_mhz}_MHz"
+        
+        nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
+          --archive-dir "$DATA_ROOT/raw_buffer/$channel_dir" \
+          --output-dir "$DATA_ROOT/phase2/$channel_dir" \
+          --channel-name "SHARED ${freq_mhz} MHz" \
+          --frequency-hz "$freq_hz" \
+          --state-file "$DATA_ROOT/state/phase2-shared${freq_mhz}.json" \
+          --poll-interval 10.0 --backfill-gaps --max-backfill 100 \
+          --log-level INFO \
+          --callsign "$CALLSIGN" --grid-square "$GRID" \
+          --receiver-name "HF-TimeStd" \
+          --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
+          $COORD_ARGS \
+          > "$DATA_ROOT/logs/phase2-shared${freq_mhz}.log" 2>&1 &
+        
+        sleep 0.2
+    done
+    
+    # WWV-only Channels (20, 25 MHz - only WWV broadcasts here)
     # Input: raw_buffer/WWV_X_MHz/ (Phase 1 binary IQ)
     # Output: phase2/WWV_X_MHz/    (D_clock, timing metrics)
-    for freq_mhz in 2.5 5 10 15 20 25; do
+    for freq_mhz in 20 25; do
         freq_hz=$(echo "$freq_mhz * 1000000" | bc | cut -d. -f1)
         channel_dir="WWV_${freq_mhz}_MHz"
         
-        # Phase 2 reads from raw_buffer (Phase 1 binary output)
-        # and writes timing analysis to phase2/
         nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
           --archive-dir "$DATA_ROOT/raw_buffer/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
@@ -161,6 +186,13 @@ stop)
     fi
     
     echo "   ✅ Stopped $COUNT Phase 2 services + fusion"
+    ;;
+
+restart)
+    echo "🔄 Restarting Phase 2 Analytics Services..."
+    "$0" stop "$CONFIG"
+    sleep 2
+    "$0" start "$CONFIG"
     ;;
 
 status)
