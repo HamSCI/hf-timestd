@@ -2,7 +2,7 @@
 
 **Author:** Michael James Hauan (AC0G)  
 **Last Updated:** 2025-12-16  
-**Version:** 4.0 (Two-Phase Pipeline)
+**Version:** 5.0 (Physics-Based Multi-Station Detection)
 
 ---
 
@@ -99,22 +99,24 @@ Rearranging:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 1: TIME SNAP (±500ms → ±50ms)                                          │
-│   File: tone_detector.py                                                    │
+│ STEP 1: TIME SNAP + MULTI-STATION DETECTION                                 │
+│   Files: tone_detector.py, multi_station_detector.py                        │
 │   Method: Quadrature matched filter for 800ms timing tones                  │
-│   Output: timing_error_ms, anchor_station, SNR                              │
-│   Tones: WWV=1000Hz, WWVH=1200Hz, CHU=1000Hz (0.5s)                         │
+│   Output: ALL detected stations (WWV, WWVH, BPM, CHU) with ToA/SNR          │
+│   Key: GPSDO is timing reference, not loudest station                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ STEP 2: CHANNEL CHARACTERIZATION                                            │
-│   2A. BCD Correlation → differential_delay_ms (WWV vs WWVH)                 │
+│   2A. BCD Correlation → differential_delay_ms (WWV vs WWVH vs BPM)          │
 │   2B. Doppler Estimation → ionospheric motion, channel stability            │
 │   2C. Station Discrimination → 8-vote weighted system                       │
 │   2D. Test Signal Analysis → FSS, delay spread (minutes 8/44)               │
+│   2E. BPM Detection → 10ms tick duration, UT1/UTC mode                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ STEP 3: TRANSMISSION TIME SOLUTION (→ D_clock)                              │
 │   File: transmission_time_solver.py                                         │
 │   Method: Mode disambiguation (1E, 1F, 2F, 3F, ground wave)                 │
 │   Output: D_clock, propagation_mode, confidence, uncertainty                │
+│   All stations passed to fusion with uncertainty weighting                  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -124,21 +126,27 @@ Rearranging:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ 13 BROADCASTS → WEIGHTED FUSION → FUSED D_clock                             │
+│ 17 BROADCASTS → WEIGHTED FUSION → FUSED D_clock                             │
 │                                                                             │
 │   WWV:  2.5, 5, 10, 15, 20, 25 MHz (6 broadcasts)                          │
 │   WWVH: 2.5, 5, 10, 15 MHz (4 broadcasts, shared frequencies)              │
 │   CHU:  3.33, 7.85, 14.67 MHz (3 broadcasts, FSK timing reference)         │
+│   BPM:  2.5, 5, 10, 15 MHz (4 broadcasts, shared with WWV/WWVH)            │
 │                                                                             │
-│   Weight = confidence × grade_weight × mode_weight × snr_factor             │
+│   Weight = confidence × uncertainty_weight × mode_weight × snr_factor       │
 │   Outlier rejection: Weighted MAD, 3σ threshold                             │
 │   Auto-calibration: Station-level offsets (not per-broadcast)               │
 │                                                                             │
-│   Output: phase2/fusion/fused_d_clock.csv → Chrony SHM                      │
+│   Output: phase2/fusion/fused_d_clock.csv → Chrony SHM (rate-limited 8s)   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Philosophy:** Calibrate at the **station level**, not per-broadcast. Each station transmits from a single location using a single atomic clock. Frequency-to-frequency variations reveal ionospheric propagation effects.
+**Philosophy:** 
+- **GPSDO is the timing reference**, not the loudest station
+- **Detect ALL receivable stations** on each frequency
+- Each station's ToA reveals **propagation conditions** on that path
+- Calibrate at the **station level**, not per-broadcast
+- Frequency-to-frequency variations reveal ionospheric propagation effects
 
 ---
 
@@ -147,15 +155,25 @@ Rearranging:
 | File | Purpose |
 |------|---------|
 | `phase2_temporal_engine.py` | Central orchestrator - 3-step D_clock extraction |
-| `multi_broadcast_fusion.py` | Combines 13 broadcasts into fused D_clock |
+| `multi_station_detector.py` | **NEW** Physics-based multi-station detection (replaces voting) |
+| `multi_broadcast_fusion.py` | Combines 17 broadcasts into fused D_clock |
+| `bpm_discriminator.py` | BPM (China) detection - 10ms ticks, UT1/UTC modes |
 | `clock_convergence.py` | Kalman filter for D_clock convergence |
 | `tone_detector.py` | Matched filter tone detection (1000/1200 Hz) |
 | `transmission_time_solver.py` | Propagation mode disambiguation |
-| `wwvh_discrimination.py` | WWV vs WWVH 8-vote weighted system |
+| `wwvh_discrimination.py` | WWV vs WWVH 8-vote weighted system + BCD downsampling |
 | `ionospheric_model.py` | IRI-2020 propagation delay estimation |
-| `chrony_shm.py` | Write fused D_clock to Chrony SHM |
+| `chrony_shm.py` | Write fused D_clock to Chrony SHM (rate-limited) |
+| `tiered_storage.py` | **NEW** RAM hot buffer + disk cold storage |
 | `binary_archive_writer.py` | Phase 1 raw_buffer writer |
 | `phase2_analytics_service.py` | Phase 2 daemon wrapper |
+
+### Deprecated Files (Do Not Use for New Code)
+
+| File | Replacement | Reason |
+|------|-------------|--------|
+| `global_station_voter.py` | `multi_station_detector.py` | Voting approach was flawed |
+| `station_lock_coordinator.py` | `multi_station_detector.py` | Anchor selection replaced |
 
 ---
 
@@ -237,11 +255,14 @@ sudo systemctl start timestd-core-recorder timestd-analytics timestd-web-ui
 ## Design Principles
 
 1. **GPSDO-First:** Trust the GPSDO-disciplined RTP timestamps as primary reference
-2. **Variations ARE Science:** Once locked, D_clock variations reveal ionospheric propagation
-3. **Station-Level Truth:** Each station has one atomic clock; frequency variations are ionospheric
-4. **Weighted Fusion:** Combine all broadcasts with confidence-based weights
-5. **Robust Outliers:** MAD-based rejection prevents single-channel corruption
-6. **Two-Phase Separation:** Raw data (Phase 1) is immutable; analytics (Phase 2) can be reprocessed
+2. **Physics-Based Detection:** Detect ALL receivable stations, not just the loudest
+3. **No Voting:** The GPSDO is the timing reference; each station's ToA reveals propagation
+4. **Variations ARE Science:** Once locked, D_clock variations reveal ionospheric propagation
+5. **Station-Level Truth:** Each station has one atomic clock; frequency variations are ionospheric
+6. **Weighted Fusion:** Combine all broadcasts with uncertainty-based weights
+7. **Robust Outliers:** MAD-based rejection prevents single-channel corruption
+8. **Two-Phase Separation:** Raw data (Phase 1) is immutable; analytics (Phase 2) can be reprocessed
+9. **Tiered Storage:** RAM hot buffer for low-latency access; disk cold buffer for persistence
 
 ---
 

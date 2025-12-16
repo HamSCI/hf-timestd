@@ -194,8 +194,7 @@ class Phase2AnalyticsService:
         # Status file for web-ui
         self.status_file = self.status_dir / 'analytics-service-status.json'
         
-        # CSV time series for D_clock (coordinated path)
-        self.clock_offset_csv = self.clock_offset_dir / 'clock_offset_series.csv'
+        # CSV time series for D_clock (coordinated path) - daily rotation
         self._init_clock_offset_csv()
         
         # CSV time series for carrier power (for power graphs)
@@ -300,7 +299,11 @@ class Phase2AnalyticsService:
         logger.info(f"  Grid: {receiver_grid}")
     
     def _init_clock_offset_csv(self):
-        """Initialize clock offset CSV file with headers if needed."""
+        """Initialize clock offset CSV file with headers if needed (daily rotation)."""
+        today = datetime.now(timezone.utc).strftime('%Y%m%d')
+        file_channel = self._get_file_channel_name()
+        self.clock_offset_csv = self.clock_offset_dir / f'{file_channel}_clock_offset_{today}.csv'
+        
         if not self.clock_offset_csv.exists():
             with open(self.clock_offset_csv, 'w', newline='') as f:
                 writer = csv.writer(f)
@@ -319,6 +322,14 @@ class Phase2AnalyticsService:
     def _write_clock_offset(self, result, minute_boundary: int, rtp_timestamp: int):
         """Append D_clock measurement to CSV time series with convergence tracking."""
         try:
+            # Check for daily rotation
+            today = datetime.now(timezone.utc).strftime('%Y%m%d')
+            file_channel = self._get_file_channel_name()
+            expected_csv = self.clock_offset_dir / f'{file_channel}_clock_offset_{today}.csv'
+            if self.clock_offset_csv != expected_csv:
+                self.clock_offset_csv = expected_csv
+                self._init_clock_offset_csv()
+            
             # Extract values from Phase2Result
             solution = result.solution if hasattr(result, 'solution') else None
             station = solution.station if solution else 'UNKNOWN'
@@ -872,9 +883,13 @@ class Phase2AnalyticsService:
             # Read metadata
             metadata = {}
             if json_path.exists():
-                with open(json_path) as f:
-                    metadata = json.load(f)
-                samples_written = metadata.get('samples_written', 0)
+                try:
+                    with open(json_path) as f:
+                        metadata = json.load(f)
+                    samples_written = metadata.get('samples_written', 0)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Corrupted metadata file {json_path}: {e}")
+                    samples_written = bin_path.stat().st_size // 8  # Fallback
             else:
                 samples_written = bin_path.stat().st_size // 8  # complex64 = 8 bytes
             
@@ -1229,7 +1244,7 @@ class Phase2AnalyticsService:
             return True
                 
         except Exception as e:
-            logger.error(f"Error processing minute {minute_boundary}: {e}")
+            logger.error(f"Error processing minute {minute_boundary}: {e}", exc_info=True)
             return False
     
     def run(self):

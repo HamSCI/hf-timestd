@@ -2,6 +2,11 @@
 """
 Global Station Voter - Cross-Channel Coherent Processing
 
+DEPRECATED: This module is replaced by MultiStationDetector which uses a
+physics-based approach. The "voting" concept was flawed - the GPSDO is the
+timing reference, not the loudest station. All detected stations should be
+passed to fusion, not voted on. Use MultiStationDetector for new code.
+
 Leverages the GPS-disciplined RTP timestamps shared across all channels to
 implement "Station Lock" - using strong detections on one frequency to guide
 detection on weaker frequencies.

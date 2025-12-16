@@ -30,6 +30,13 @@ storage_quota = "80%"
 compression = "zstd"
 compression_level = 3  # zstd: 1-22, lz4: 1-12
 
+# Tiered Storage: Use /dev/shm (RAM) for hot buffer, disk for cold storage
+# Eliminates disk round-trip for real-time pipeline
+# Auto-configures based on available RAM (default: 20% of RAM for hot buffer)
+tiered_storage = true
+hot_buffer_root = "/dev/shm/timestd"
+ram_percent = 20  # Percentage of available RAM to use for hot buffer
+
 [recorder.channel_defaults]
 preset = "iq"
 sample_rate = 20000

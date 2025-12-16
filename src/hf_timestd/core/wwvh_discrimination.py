@@ -2190,7 +2190,8 @@ class WWVHDiscriminator:
         timing_power_ratio_db: Optional[float] = None,  # WWV-WWVH power from 1000/1200 Hz (positive=WWV stronger)
         ground_truth_station: Optional[str] = None,  # From 500/600 Hz exclusive minutes ('WWV' or 'WWVH')
         wwv_tick_snr_db: Optional[float] = None,  # SNR of 1000 Hz tick
-        wwvh_tick_snr_db: Optional[float] = None  # SNR of 1200 Hz tick
+        wwvh_tick_snr_db: Optional[float] = None,  # SNR of 1200 Hz tick
+        downsample_factor: int = 4  # Downsample for CPU efficiency (4x = 5kHz, safe for 100Hz BCD)
     ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], List[Dict[str, float]]]:
         """
         Discriminate WWV/WWVH using 100 Hz BCD cross-correlation with sliding windows
@@ -2256,9 +2257,21 @@ class WWVHDiscriminator:
             # Normalize signal for correlation
             bcd_signal = bcd_signal - np.mean(bcd_signal)
             
+            # Step 2b: Downsample for CPU efficiency (BCD is 100 Hz, 5 kHz is 50x oversampling)
+            # This reduces correlation CPU by ~75% with negligible accuracy loss
+            # Timing resolution at 5 kHz = 0.2 ms, well within ionospheric uncertainty (~3-10 ms)
+            effective_sample_rate = sample_rate
+            if downsample_factor > 1:
+                # Anti-alias filter before decimation (already bandpass filtered to 50-150 Hz)
+                # scipy.signal.decimate applies proper anti-aliasing
+                bcd_signal = scipy_signal.decimate(bcd_signal, downsample_factor, ftype='fir', zero_phase=True)
+                effective_sample_rate = sample_rate // downsample_factor
+                logger.debug(f"{self.channel_name}: BCD downsampled {sample_rate}→{effective_sample_rate} Hz ({downsample_factor}x)")
+            
             # Step 3: Generate expected BCD template for this minute (full 60 seconds)
             # Template includes 100 Hz carrier modulated by BCD pattern
-            bcd_template_full = self._generate_bcd_template(minute_timestamp, sample_rate, envelope_only=False)
+            # Generate at effective (downsampled) rate
+            bcd_template_full = self._generate_bcd_template(minute_timestamp, effective_sample_rate, envelope_only=False)
             
             if bcd_template_full is None:
                 logger.warning(f"{self.channel_name}: Failed to generate BCD template")
@@ -2267,8 +2280,8 @@ class WWVHDiscriminator:
             # Step 5: Sliding window correlation to find delay AND amplitudes
             # The 100 Hz BCD signal IS the carrier - both stations transmit on 100 Hz
             # Correlation peak heights give us the individual station amplitudes
-            window_samples = int(window_seconds * sample_rate)
-            step_samples = int(step_seconds * sample_rate)
+            window_samples = int(window_seconds * effective_sample_rate)
+            step_samples = int(step_seconds * effective_sample_rate)
             
             # Calculate number of windows - CRITICAL: limit by BOTH signal AND template length
             # Template is exactly 60 seconds; signal may be longer
@@ -2293,7 +2306,7 @@ class WWVHDiscriminator:
                 if end_sample > template_samples:
                     break
                     
-                window_start_time = start_sample / sample_rate  # Seconds into the minute
+                window_start_time = start_sample / effective_sample_rate  # Seconds into the minute
                 
                 # Extract BCD signal window and template
                 signal_window = bcd_signal[start_sample:end_sample]
@@ -2315,15 +2328,15 @@ class WWVHDiscriminator:
                     
                     # Search ±15ms around each expected delay (tight window with good timing)
                     search_window_ms = 15.0
-                    search_window_samples = int(search_window_ms * sample_rate / 1000)
+                    search_window_samples = int(search_window_ms * effective_sample_rate / 1000)
                     
                     # WWV search window
-                    wwv_center_idx = zero_lag_idx + int(wwv_expected_ms * sample_rate / 1000)
+                    wwv_center_idx = zero_lag_idx + int(wwv_expected_ms * effective_sample_rate / 1000)
                     wwv_start = max(0, wwv_center_idx - search_window_samples)
                     wwv_end = min(len(correlation), wwv_center_idx + search_window_samples)
                     
                     # WWVH search window
-                    wwvh_center_idx = zero_lag_idx + int(wwvh_expected_ms * sample_rate / 1000)
+                    wwvh_center_idx = zero_lag_idx + int(wwvh_expected_ms * effective_sample_rate / 1000)
                     wwvh_start = max(0, wwvh_center_idx - search_window_samples)
                     wwvh_end = min(len(correlation), wwvh_center_idx + search_window_samples)
                     
@@ -2369,7 +2382,7 @@ class WWVHDiscriminator:
                             properties = {'peak_heights': np.array([])}
                 else:
                     # Fallback: broad search ±150ms (no geographic predictor)
-                    search_radius_samples = int(0.150 * sample_rate)
+                    search_radius_samples = int(0.150 * effective_sample_rate)
                     search_start = max(0, zero_lag_idx - search_radius_samples)
                     search_end = min(len(correlation), zero_lag_idx + search_radius_samples)
                     
@@ -2379,7 +2392,7 @@ class WWVHDiscriminator:
                     std_corr = np.std(search_region)
                     threshold = mean_corr + 0.5 * std_corr
                     
-                    min_peak_distance = int(0.003 * sample_rate)  # 3ms minimum
+                    min_peak_distance = int(0.003 * effective_sample_rate)  # 3ms minimum
                     
                     peaks_local, properties = scipy_signal.find_peaks(
                         search_region,
@@ -2401,8 +2414,8 @@ class WWVHDiscriminator:
                     peak2_idx = sorted_indices[1]
                     
                     # Peak times relative to zero-lag (positive = signal delayed from template)
-                    peak1_time = (peaks[peak1_idx] - zero_lag_idx) / sample_rate
-                    peak2_time = (peaks[peak2_idx] - zero_lag_idx) / sample_rate
+                    peak1_time = (peaks[peak1_idx] - zero_lag_idx) / effective_sample_rate
+                    peak2_time = (peaks[peak2_idx] - zero_lag_idx) / effective_sample_rate
                     
                     delay_ms = (peak2_time - peak1_time) * 1000
                     
@@ -2424,7 +2437,7 @@ class WWVHDiscriminator:
                         peak_late_delay_ms = peak2_time * 1000
                         
                         # Compute template autocorrelation at delay Δτ
-                        delay_samples = int(delay_ms * sample_rate / 1000)
+                        delay_samples = int(delay_ms * effective_sample_rate / 1000)
                         
                         # R(0) = template autocorrelation at zero lag (template energy)
                         R_0 = float(np.sum(template_window**2))
@@ -2526,8 +2539,8 @@ class WWVHDiscriminator:
                             width_ms = (width_samples / sample_rate) * 1000.0
                             return width_ms
                         
-                        wwv_delay_spread_ms = measure_peak_width(correlation, peaks[peak1_idx], sample_rate)
-                        wwvh_delay_spread_ms = measure_peak_width(correlation, peaks[peak2_idx], sample_rate)
+                        wwv_delay_spread_ms = measure_peak_width(correlation, peaks[peak1_idx], effective_sample_rate)
+                        wwvh_delay_spread_ms = measure_peak_width(correlation, peaks[peak2_idx], effective_sample_rate)
                         
                         # === DUAL-STATION TIME RECOVERY ===
                         # Both stations transmit at the same UTC second boundary.
@@ -2604,7 +2617,7 @@ class WWVHDiscriminator:
                 elif len(peaks) == 1 and enable_single_station_detection:
                     # SINGLE PEAK: One station detected - use multi-evidence classification
                     peak_idx = 0
-                    peak_time = (peaks[peak_idx] - zero_lag_idx) / sample_rate
+                    peak_time = (peaks[peak_idx] - zero_lag_idx) / effective_sample_rate
                     peak_delay_ms = peak_time * 1000
                     peak_height = float(properties['peak_heights'][peak_idx])
                     

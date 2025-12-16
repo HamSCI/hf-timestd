@@ -129,6 +129,7 @@ REVISION HISTORY
 import logging
 import json
 import csv
+import os
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -374,8 +375,13 @@ class MultiBroadcastFusion:
                 'last_updated': cal.last_updated,
                 'reference_station': cal.reference_station
             }
-        with open(self.calibration_file, 'w') as f:
+        # Atomic write: write to temp file, fsync, then rename
+        temp_file = self.calibration_file.with_suffix('.tmp')
+        with open(temp_file, 'w') as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        temp_file.replace(self.calibration_file)
     
     def _init_fusion_csv(self):
         """Initialize fused D_clock CSV."""
@@ -1075,10 +1081,17 @@ def run_fusion_service(
             logger.warning(f"Chrony SHM not available: {e}")
             chrony_shm = None
     
+    # Chrony update rate limiting - match chrony poll interval (poll 3 = 8 seconds)
+    # Only update chrony at this cadence to avoid unnecessary SHM writes
+    chrony_poll_interval = 8.0  # seconds (matches "poll 3" in chrony.conf)
+    last_chrony_update = 0.0
+    
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_csv}")
     logger.info(f"  Chrony SHM: {'enabled' if chrony_shm else 'disabled'}")
+    if chrony_shm:
+        logger.info(f"  Chrony update cadence: {chrony_poll_interval}s (matching poll interval)")
     
     while True:
         try:
@@ -1113,19 +1126,23 @@ def run_fusion_service(
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
                 # Write to Chrony SHM if available and quality is acceptable
+                # Rate-limit updates to match chrony poll interval (avoid unnecessary writes)
                 # Allow grade D during initial calibration - Chrony will weight by precision
+                now = time.time()
                 if chrony_shm and result.quality_grade in ('A', 'B', 'C', 'D'):
-                    # D_clock = T_system - T_UTC(NIST)
-                    # So T_UTC(NIST) = T_system - D_clock
-                    system_time = time.time()
-                    reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
-                    
-                    # Precision based on uncertainty (log2 of seconds)
-                    # uncertainty_ms=1 -> precision=-10, uncertainty_ms=10 -> precision=-7
-                    precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
-                    
-                    if chrony_shm.update(reference_time, system_time, precision):
-                        logger.debug(f"Chrony SHM updated: ref={reference_time:.6f}, precision={precision}")
+                    if now - last_chrony_update >= chrony_poll_interval:
+                        # D_clock = T_system - T_UTC(NIST)
+                        # So T_UTC(NIST) = T_system - D_clock
+                        system_time = now
+                        reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
+                        
+                        # Precision based on uncertainty (log2 of seconds)
+                        # uncertainty_ms=1 -> precision=-10, uncertainty_ms=10 -> precision=-7
+                        precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
+                        
+                        if chrony_shm.update(reference_time, system_time, precision):
+                            last_chrony_update = now
+                            logger.debug(f"Chrony SHM updated: ref={reference_time:.6f}, precision={precision}")
             
             time.sleep(interval_sec)
             

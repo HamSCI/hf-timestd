@@ -112,6 +112,33 @@ class CoreRecorder:
         self.blocktime_ms = self.recorder_config.get('blocktime_ms', 20.0)
         self.max_gap_seconds = self.recorder_config.get('max_gap_seconds', 60.0)
         
+        # Storage quota (parse "80%" string to float 80.0)
+        storage_quota_str = self.recorder_config.get('storage_quota', '80%')
+        if isinstance(storage_quota_str, str) and storage_quota_str.endswith('%'):
+            self.storage_quota_percent = float(storage_quota_str.rstrip('%'))
+        else:
+            self.storage_quota_percent = float(storage_quota_str) if storage_quota_str else 80.0
+        
+        # Tiered storage configuration (RAM hot buffer + disk cold storage)
+        self.use_tiered_storage = self.recorder_config.get('tiered_storage', False)
+        if self.use_tiered_storage:
+            from .tiered_storage import init_tiered_storage
+            hot_buffer_root = self.recorder_config.get('hot_buffer_root', '/dev/shm/timestd')
+            ram_percent = self.recorder_config.get('ram_percent', 20)
+            num_channels = len(self.channel_specs)
+            
+            self._tiered_manager = init_tiered_storage(
+                num_channels=num_channels,
+                hot_buffer_root=hot_buffer_root,
+                cold_buffer_root=str(self.output_dir),
+                ram_percent=ram_percent,
+                auto_start=True
+            )
+            logger.info(f"Tiered storage enabled: hot={hot_buffer_root}, "
+                       f"hot_minutes={self._tiered_manager.hot_minutes}")
+        else:
+            self._tiered_manager = None
+        
         logger.info(f"CoreRecorder: {len(self.channel_specs)} channels configured")
         logger.info(f"  hf-timestd multicast: {self.data_destination} (exclusive stream)")
         logger.info(f"  Defaults: preset={self.channel_defaults.get('preset')}, "
@@ -404,6 +431,8 @@ class CoreRecorder:
                     receiver_grid=self.station_config.get('grid_square', ''),
                     blocktime_ms=self.blocktime_ms,
                     max_gap_seconds=self.max_gap_seconds,
+                    storage_quota_percent=self.storage_quota_percent,
+                    use_tiered_storage=self.use_tiered_storage,
                 )
                 
                 recorder = PipelineRecorder(

@@ -82,9 +82,28 @@ from .binary_archive_writer import (
     BinaryArchiveReader,
 )
 
-# Cross-channel coordination (Station Lock)
+# Tiered Storage (RAM hot buffer + disk cold storage)
+from .tiered_storage import (
+    TieredStorageManager,
+    TieredStorageConfig,
+    get_tiered_storage_manager,
+    init_tiered_storage,
+    calculate_hot_minutes,
+    get_available_ram_bytes,
+)
+
+# Cross-channel coordination (Station Lock) - Legacy
 from .global_station_voter import GlobalStationVoter, StationAnchor, AnchorQuality
 from .station_lock_coordinator import StationLockCoordinator, GuidedDetection, MinuteProcessingResult
+
+# Multi-Station Detection (Physics-based approach - replaces voting)
+from .multi_station_detector import (
+    MultiStationDetector,
+    StationDetection,
+    MinuteDetectionResult,
+    DetectionQuality,
+    create_detector,
+)
 
 # Clock Convergence Model ("Set, Monitor, Intervention" for GPSDO)
 from .clock_convergence import (
@@ -272,6 +291,13 @@ __all__ = [
     "BinaryArchiveWriter",
     "BinaryArchiveConfig",
     "BinaryArchiveReader",
+    # Tiered Storage
+    "TieredStorageManager",
+    "TieredStorageConfig",
+    "get_tiered_storage_manager",
+    "init_tiered_storage",
+    "calculate_hot_minutes",
+    "get_available_ram_bytes",
     "ClockOffsetEngine",
     "ClockOffsetSeries",
     "ClockOffsetMeasurement",
@@ -319,6 +345,12 @@ __all__ = [
     "CHU_TEMPLATE",
     "BPM_TEMPLATE",
     "STATION_TEMPLATES",
+    # Multi-Station Detection (Physics-based)
+    "MultiStationDetector",
+    "StationDetection",
+    "MinuteDetectionResult",
+    "DetectionQuality",
+    "create_detector",
     # Signal Templates (BCD, AFSK, BPM)
     "BCDTemplateGenerator",
     "BCDCorrelationResult",

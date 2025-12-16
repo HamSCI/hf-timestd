@@ -36,8 +36,10 @@ Author: Cascade AI
 Date: 2025-12-13
 """
 
+import fcntl
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -46,7 +48,16 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
+# Import centralized version constant
+try:
+    from ..version import STATE_FILE_VERSION
+except ImportError:
+    STATE_FILE_VERSION = 2  # Fallback for standalone testing
+
 logger = logging.getLogger(__name__)
+
+# Timing calibrator state file version (increment on schema changes)
+TIMING_CALIBRATOR_STATE_VERSION = 1
 
 
 class CalibrationPhase(Enum):
@@ -227,13 +238,27 @@ class TimingCalibrator:
                 )
     
     def _load_state(self):
-        """Load calibration state from disk."""
+        """Load calibration state from disk with file locking and version validation."""
         if not self.state_file.exists():
             return
             
         try:
             with open(self.state_file) as f:
-                state = json.load(f)
+                # Acquire shared lock for reading (allows multiple readers)
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                try:
+                    state = json.load(f)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            
+            # Version validation - discard stale state files
+            file_version = state.get('version', 0)
+            if file_version < TIMING_CALIBRATOR_STATE_VERSION:
+                logger.warning(
+                    f"Timing calibrator state file version {file_version} < current "
+                    f"{TIMING_CALIBRATOR_STATE_VERSION}, discarding stale state"
+                )
+                return
             
             # Restore phase
             phase_str = state.get('phase', 'bootstrap')
@@ -275,43 +300,106 @@ class TimingCalibrator:
             logger.warning(f"Failed to load timing calibration: {e}")
     
     def _save_state(self):
-        """Save calibration state to disk."""
+        """Save calibration state to disk with file locking for multi-process safety."""
+        # Use a lock file for exclusive access during save
+        lock_file = self.state_file.with_suffix('.lock')
+        
         try:
-            state = {
-                'phase': self.phase.value,
-                'station_calibration': {
-                    station: {
-                        'propagation_delay_ms': cal.propagation_delay_ms,
-                        'propagation_delay_std_ms': cal.propagation_delay_std_ms,
-                        'n_samples': cal.n_samples,
-                        'last_updated': cal.last_updated,
-                        'frequencies_contributing': cal.frequencies_contributing
-                    }
-                    for station, cal in self.station_calibration.items()
-                },
-                'rtp_calibration': {
-                    channel: {
-                        'frequency_hz': rtp.frequency_hz,
-                        'sample_rate': rtp.sample_rate,
-                        'reference_minute_utc': rtp.reference_minute_utc,
-                        'reference_rtp_timestamp': rtp.reference_rtp_timestamp,
-                        'rtp_offset_samples': rtp.rtp_offset_samples,
-                        'calibration_snr_db': rtp.calibration_snr_db,
-                        'calibration_confidence': rtp.calibration_confidence,
-                        'n_confirmations': rtp.n_confirmations,
-                        'last_confirmed': rtp.last_confirmed
-                    }
-                    for channel, rtp in self.rtp_calibration.items()
-                },
-                'stats': self.stats,
-                'saved_at': datetime.now(timezone.utc).isoformat()
-            }
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
             
-            with open(self.state_file, 'w') as f:
-                json.dump(state, f, indent=2)
+            # Acquire exclusive lock before read-modify-write
+            with open(lock_file, 'w') as lf:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+                try:
+                    # Re-load state to merge with other processes' changes
+                    if self.state_file.exists():
+                        with open(self.state_file) as f:
+                            existing_state = json.load(f)
+                        # Merge: keep our station/rtp calibration, but check for newer data
+                        existing_stations = existing_state.get('station_calibration', {})
+                        existing_rtp = existing_state.get('rtp_calibration', {})
+                        
+                        # Merge station calibration (keep higher n_samples)
+                        for station, cal_data in existing_stations.items():
+                            if station not in self.station_calibration:
+                                self.station_calibration[station] = StationCalibration(
+                                    station=station,
+                                    propagation_delay_ms=cal_data['propagation_delay_ms'],
+                                    propagation_delay_std_ms=cal_data['propagation_delay_std_ms'],
+                                    n_samples=cal_data['n_samples'],
+                                    last_updated=cal_data['last_updated'],
+                                    frequencies_contributing=cal_data.get('frequencies_contributing', [])
+                                )
+                            elif cal_data['n_samples'] > self.station_calibration[station].n_samples:
+                                # Other process has more samples, use theirs
+                                self.station_calibration[station] = StationCalibration(
+                                    station=station,
+                                    propagation_delay_ms=cal_data['propagation_delay_ms'],
+                                    propagation_delay_std_ms=cal_data['propagation_delay_std_ms'],
+                                    n_samples=cal_data['n_samples'],
+                                    last_updated=cal_data['last_updated'],
+                                    frequencies_contributing=cal_data.get('frequencies_contributing', [])
+                                )
+                        
+                        # Merge RTP calibration (each channel is independent)
+                        for channel, rtp_data in existing_rtp.items():
+                            if channel not in self.rtp_calibration:
+                                self.rtp_calibration[channel] = RPTCalibration(
+                                    channel_name=channel,
+                                    frequency_hz=rtp_data['frequency_hz'],
+                                    sample_rate=rtp_data['sample_rate'],
+                                    reference_minute_utc=rtp_data['reference_minute_utc'],
+                                    reference_rtp_timestamp=rtp_data['reference_rtp_timestamp'],
+                                    rtp_offset_samples=rtp_data['rtp_offset_samples'],
+                                    calibration_snr_db=rtp_data['calibration_snr_db'],
+                                    calibration_confidence=rtp_data['calibration_confidence'],
+                                    n_confirmations=rtp_data['n_confirmations'],
+                                    last_confirmed=rtp_data['last_confirmed']
+                                )
+                    
+                    state = {
+                        'version': TIMING_CALIBRATOR_STATE_VERSION,
+                        'phase': self.phase.value,
+                        'station_calibration': {
+                            station: {
+                                'propagation_delay_ms': cal.propagation_delay_ms,
+                                'propagation_delay_std_ms': cal.propagation_delay_std_ms,
+                                'n_samples': cal.n_samples,
+                                'last_updated': cal.last_updated,
+                                'frequencies_contributing': cal.frequencies_contributing
+                            }
+                            for station, cal in self.station_calibration.items()
+                        },
+                        'rtp_calibration': {
+                            channel: {
+                                'frequency_hz': rtp.frequency_hz,
+                                'sample_rate': rtp.sample_rate,
+                                'reference_minute_utc': rtp.reference_minute_utc,
+                                'reference_rtp_timestamp': rtp.reference_rtp_timestamp,
+                                'rtp_offset_samples': rtp.rtp_offset_samples,
+                                'calibration_snr_db': rtp.calibration_snr_db,
+                                'calibration_confidence': rtp.calibration_confidence,
+                                'n_confirmations': rtp.n_confirmations,
+                                'last_confirmed': rtp.last_confirmed
+                            }
+                            for channel, rtp in self.rtp_calibration.items()
+                        },
+                        'stats': self.stats,
+                        'saved_at': datetime.now(timezone.utc).isoformat()
+                    }
+                    
+                    # Atomic write: write to temp file, fsync, then rename
+                    temp_file = self.state_file.with_suffix('.tmp')
+                    with open(temp_file, 'w') as f:
+                        json.dump(state, f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    temp_file.replace(self.state_file)
+                finally:
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
                 
         except Exception as e:
-            logger.error(f"Failed to save timing calibration: {e}")
+            logger.error(f"Failed to save timing calibration: {e}", exc_info=True)
     
     def predict_station(
         self,

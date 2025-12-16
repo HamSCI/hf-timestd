@@ -82,6 +82,8 @@ class PipelineRecorderConfig:
     # Phase 1 settings
     raw_buffer_compression: str = 'gzip'
     raw_buffer_file_duration_sec: int = 3600
+    storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
+    use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
     
     # Phase 2 settings
     enable_analysis: bool = True
@@ -168,6 +170,8 @@ class PipelineRecorder:
             station_config=config.station_config,
             raw_buffer_compression=config.raw_buffer_compression,
             raw_buffer_file_duration_sec=config.raw_buffer_file_duration_sec,
+            storage_quota_percent=config.storage_quota_percent,
+            use_tiered_storage=config.use_tiered_storage,
             analysis_latency_sec=config.analysis_latency_sec,
             output_sample_rate=config.output_sample_rate,
             streaming_latency_minutes=config.streaming_latency_minutes

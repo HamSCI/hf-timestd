@@ -18,9 +18,12 @@ File structure:
         1765031040.bin.zst  # Compressed older minute (optional)
 """
 
+import errno
 import json
 import logging
 import numpy as np
+import os
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
@@ -46,6 +49,8 @@ class BinaryArchiveConfig:
     compress_completed: bool = False  # Async compression of old minutes
     compression: str = 'none'  # 'none', 'zstd', or 'lz4' - reduces disk I/O by ~2-3x
     compression_level: int = 3  # zstd: 1-22 (3 = good balance), lz4: 1-12
+    storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
+    use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
 
 
 @dataclass
@@ -80,7 +85,16 @@ class BinaryArchiveWriter:
     
     def __init__(self, config: BinaryArchiveConfig):
         self.config = config
-        self.archive_dir = config.output_dir / self._sanitize_channel_name()
+        
+        # Use tiered storage if enabled (writes to /dev/shm, archives to disk)
+        if config.use_tiered_storage:
+            from .tiered_storage import get_tiered_storage_manager
+            self._tiered_manager = get_tiered_storage_manager()
+            self.archive_dir = self._tiered_manager.get_hot_buffer_path(config.channel_name)
+        else:
+            self._tiered_manager = None
+            self.archive_dir = config.output_dir / self._sanitize_channel_name()
+        
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         
         # Current minute buffer
@@ -139,8 +153,55 @@ class BinaryArchiveWriter:
         logger.debug(f"Started new minute buffer: {minute_boundary}")
         return buffer
     
+    def _check_disk_space(self, path: Path, required_bytes: int) -> bool:
+        """Check if sufficient disk space is available based on storage quota.
+        
+        Uses the configured storage_quota_percent to determine if we're over quota.
+        Also checks for absolute minimum free space (100MB headroom).
+        """
+        try:
+            stat = shutil.disk_usage(path)
+            
+            # Check storage quota percentage
+            current_usage_percent = (stat.used / stat.total) * 100
+            if current_usage_percent >= self.config.storage_quota_percent:
+                logger.error(
+                    f"Storage quota exceeded: {current_usage_percent:.1f}% used, "
+                    f"quota is {self.config.storage_quota_percent:.1f}%. "
+                    "Run quota manager to free space."
+                )
+                return False
+            
+            # Also check absolute minimum free space (100MB headroom)
+            min_free = required_bytes + 100 * 1024 * 1024
+            if stat.free < min_free:
+                logger.error(
+                    f"Insufficient disk space: {stat.free / 1024 / 1024:.1f}MB free, "
+                    f"need {min_free / 1024 / 1024:.1f}MB"
+                )
+                return False
+            
+            return True
+        except OSError as e:
+            logger.warning(f"Could not check disk space: {e}")
+            return True  # Proceed anyway, let write fail if needed
+    
+    def _cleanup_partial_write(self, *paths: Path) -> None:
+        """Clean up partial files after a failed write."""
+        for path in paths:
+            try:
+                if path.exists():
+                    path.unlink()
+                    logger.debug(f"Cleaned up partial file: {path}")
+            except OSError as e:
+                logger.warning(f"Failed to clean up {path}: {e}")
+    
     def _flush_minute(self, buffer: MinuteBuffer) -> bool:
-        """Write completed minute buffer to disk."""
+        """Write completed minute buffer to disk with disk full handling."""
+        bin_path = None
+        json_path = None
+        temp_json = None
+        
         try:
             minute_dir = self._get_minute_dir(buffer.minute_boundary)
             
@@ -157,6 +218,11 @@ class BinaryArchiveWriter:
             # Write binary data (just the filled portion)
             actual_samples = min(buffer.write_pos, SAMPLES_PER_MINUTE)
             raw_data = buffer.samples[:actual_samples].tobytes()
+            
+            # Check disk space before writing (raw size + some overhead)
+            if not self._check_disk_space(minute_dir, len(raw_data) + 10000):
+                self.write_errors += 1
+                return False
             
             # Apply compression if configured
             if compression == 'zstd':
@@ -209,8 +275,13 @@ class BinaryArchiveWriter:
                 'station': self.config.station_config
             }
             
-            with open(json_path, 'w') as f:
+            # Atomic write: write to temp file, fsync, then rename
+            temp_json = json_path.with_suffix('.tmp')
+            with open(temp_json, 'w') as f:
                 json.dump(metadata, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            temp_json.replace(json_path)
             
             self.minutes_written += 1
             logger.info(
@@ -222,8 +293,23 @@ class BinaryArchiveWriter:
             
             return True
             
+        except OSError as e:
+            # Handle disk full specifically
+            if e.errno == errno.ENOSPC:
+                logger.error(
+                    f"DISK FULL: Failed to write minute {buffer.minute_boundary}. "
+                    "Consider freeing disk space or enabling compression."
+                )
+            else:
+                logger.error(f"OS error writing minute {buffer.minute_boundary}: {e}")
+            # Clean up any partial files
+            self._cleanup_partial_write(bin_path, json_path, temp_json)
+            self.write_errors += 1
+            return False
         except Exception as e:
-            logger.error(f"Failed to write minute {buffer.minute_boundary}: {e}")
+            logger.error(f"Failed to write minute {buffer.minute_boundary}: {e}", exc_info=True)
+            # Clean up any partial files
+            self._cleanup_partial_write(bin_path, json_path, temp_json)
             self.write_errors += 1
             return False
     
@@ -431,8 +517,12 @@ class BinaryArchiveReader:
         if not json_path.exists():
             return None
         
-        with open(json_path) as f:
-            return json.load(f)
+        try:
+            with open(json_path) as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Corrupted metadata file {json_path}: {e}")
+            return None
     
     def get_latest_complete_minute(self) -> Optional[int]:
         """Get the most recent complete minute boundary."""

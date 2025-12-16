@@ -478,10 +478,13 @@ class ClockOffsetSeriesWriter:
         if not input_file.exists():
             return None
         
-        with open(input_file, 'r') as f:
-            data = json.load(f)
-        
-        return ClockOffsetSeries.from_dict(data)
+        try:
+            with open(input_file, 'r') as f:
+                data = json.load(f)
+            return ClockOffsetSeries.from_dict(data)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Corrupted series file {input_file}: {e}")
+            return None
 
 
 class ClockOffsetEngine:

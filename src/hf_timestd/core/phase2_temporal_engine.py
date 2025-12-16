@@ -242,12 +242,23 @@ class TimeSnapResult:
     wwv_detected: bool
     wwvh_detected: bool
     chu_detected: bool = False
+    bpm_detected: bool = False
     wwv_snr_db: Optional[float] = None
     wwvh_snr_db: Optional[float] = None
     chu_snr_db: Optional[float] = None
+    bpm_snr_db: Optional[float] = None
     wwv_timing_ms: Optional[float] = None
     wwvh_timing_ms: Optional[float] = None
     chu_timing_ms: Optional[float] = None
+    bpm_timing_ms: Optional[float] = None
+    
+    # BPM-specific fields
+    bpm_timing_mode: Optional[str] = None  # 'UTC' or 'UT1' (UT1 minutes not usable for UTC timing)
+    bpm_is_usable_for_utc: bool = True  # False during UT1 minutes (25-29, 55-59)
+    
+    # Multi-station detection result (physics-based approach)
+    # Contains ALL detected stations with propagation analysis
+    multi_station_result: Optional[Any] = None  # MinuteDetectionResult
     
     # Quality metrics
     anchor_station: str = 'UNKNOWN'  # Station used for time snap ('WWV', 'WWVH', 'CHU')
@@ -268,10 +279,12 @@ class ChannelCharacterization:
     # BCD Correlation (Step 2A)
     bcd_wwv_amplitude: Optional[float] = None
     bcd_wwvh_amplitude: Optional[float] = None
+    bcd_bpm_amplitude: Optional[float] = None  # BPM uses same 100 Hz BCD
     bcd_differential_delay_ms: Optional[float] = None
     bcd_correlation_quality: Optional[float] = None
     bcd_wwv_toa_ms: Optional[float] = None    # Absolute ToA from minute start
     bcd_wwvh_toa_ms: Optional[float] = None
+    bcd_bpm_toa_ms: Optional[float] = None    # BPM ToA (long path from China)
     
     # Doppler and Coherence (Step 2B)
     doppler_wwv_hz: Optional[float] = None
@@ -505,6 +518,15 @@ class Phase2TemporalEngine:
                     receiver_grid=self.receiver_grid,
                     sample_rate=self.sample_rate
                 )
+            
+            # Step 2c: BPM Discriminator (China, shares 2.5/5/10/15 MHz)
+            # BPM uses 10ms ticks (vs 5ms WWV) and has UT1 minutes (25-29, 55-59)
+            from .bpm_discriminator import BPMDiscriminator
+            self.bpm_discriminator = BPMDiscriminator(
+                receiver_lat=self.precise_lat,
+                receiver_lon=self.precise_lon,
+                channel_name=self.channel_name
+            )
 
             # Step 2b: Probabilistic Discriminator (Shadow Mode)
             # This is the new ML-based discriminator running in parallel
@@ -527,26 +549,19 @@ class Phase2TemporalEngine:
                 precise_lon=self.precise_lon
             )
 
-            # Step 4: Global Station Voter (IPC Mode)
-            # Enables cross-channel "Station Lock" using /dev/shm
-            from .global_station_voter import GlobalStationVoter
-            from .wwv_constants import STANDARD_CHANNELS  # Need list of all channels
+            # Step 4: Multi-Station Detector (Physics-based approach)
+            # Detects ALL receivable stations and extracts propagation info
+            # GPSDO is the timing reference, not the loudest station
+            # All detected stations are passed to fusion with their uncertainties
+            from .multi_station_detector import MultiStationDetector
             
-            # Determine known channels (if STANDARD_CHANNELS is not available, default to list)
-            # For now we use the standard list as the voter needs to know what frequencies exist
-            known_channels = [
-                'WWV 2.5 MHz', 'WWV 5 MHz', 'WWV 10 MHz', 'WWV 15 MHz', 'WWV 20 MHz', 'WWV 25 MHz',
-                'WWVH 2.5 MHz', 'WWVH 5 MHz', 'WWVH 10 MHz', 'WWVH 15 MHz', 
-                'CHU 3.33 MHz', 'CHU 7.85 MHz', 'CHU 14.67 MHz'
-            ]
-            
-            self.voter = GlobalStationVoter(
-                channels=known_channels,
-                sample_rate=self.sample_rate,
-                use_ipc=True
+            self.multi_station_detector = MultiStationDetector(
+                receiver_lat=self.precise_lat,
+                receiver_lon=self.precise_lon,
+                sample_rate=self.sample_rate
             )
             
-            logger.info("✅ Phase 2 components initialized (including Global Station Voter)")
+            logger.info("✅ Phase 2 components initialized (MultiStationDetector)")
             
         except ImportError as e:
             logger.error(f"Failed to initialize Phase 2 components: {e}")
@@ -621,7 +636,7 @@ class Phase2TemporalEngine:
         Step 1: Detect 1000/1200 Hz tones to establish approximate timing.
         
         Uses matched filtering (via ToneDetector) to find signals.
-        If signal is ambiguous or weak, checks GlobalStationVoter for anchors.
+        MultiStationDetector processes ALL detected stations for fusion.
         """
         # A. Initial Wide Search (or Calibration Window)
         # The original code used self.config_search_window_ms or 500.0
@@ -648,6 +663,7 @@ class Phase2TemporalEngine:
         wwv_det = None
         wwvh_det = None
         chu_det = None
+        bpm_det = None
         
         if detections:
             from ..interfaces.data_models import StationType
@@ -659,68 +675,79 @@ class Phase2TemporalEngine:
                 elif det.station == StationType.CHU:
                     chu_det = det
         
-        # C. Global Station Lock Logic
-        # Report what we found to the ecosystem
-        if wwv_det:
-            self.voter.report_detection_result(self.channel_name, wwv_det, rtp_timestamp)
-        if wwvh_det:
-            self.voter.report_detection_result(self.channel_name, wwvh_det, rtp_timestamp)
-        if chu_det:
-            self.voter.report_detection_result(self.channel_name, chu_det, rtp_timestamp)
-            
-        # D. Ambiguity Resolution & Guided Search
-        # If we have NO strong signal, or an ambiguous one, ask for help
+        # B2. BPM Detection (separate discriminator - uses tick duration)
+        # BPM shares 2.5/5/10/15 MHz with WWV/WWVH but has 10ms ticks (vs 5ms)
+        # Only check on shared frequencies
+        bpm_timing_mode = None
+        bpm_is_usable = True
+        if self.frequency_mhz in (2.5, 5.0, 10.0, 15.0):
+            try:
+                # Get minute number for UT1/UTC mode detection
+                minute_of_hour = int((system_time % 3600) // 60)
+                bpm_result = self.bpm_discriminator.analyze(
+                    iq_samples=iq_samples,
+                    sample_rate=self.sample_rate,
+                    minute=minute_of_hour
+                )
+                if bpm_result and bpm_result.is_bpm_detected:
+                    # Create a detection-like object for BPM
+                    bpm_det = bpm_result
+                    bpm_timing_mode = bpm_result.timing_mode.value
+                    bpm_is_usable = bpm_result.is_usable_for_utc
+                    if not bpm_is_usable:
+                        logger.debug(f"BPM detected but minute {minute_of_hour} is UT1 mode (not usable for UTC)")
+                    else:
+                        logger.info(f"📡 BPM detected: delay={bpm_result.measured_delay_ms:.1f}ms, SNR={bpm_result.snr_db:.1f}dB")
+            except Exception as e:
+                logger.debug(f"BPM detection failed: {e}")
+        
+        # C. Multi-Station Detection (Physics-based approach)
+        # Process ALL detected stations and extract propagation info
+        # This replaces the old "voting" approach
+        minute_boundary = int(system_time) - int(system_time) % 60
+        tone_detections = {
+            'wwv': wwv_det,
+            'wwvh': wwvh_det,
+            'chu': chu_det
+        }
+        
+        multi_station_result = self.multi_station_detector.process_detections(
+            channel=self.channel_name,
+            frequency_mhz=self.frequency_mhz,
+            minute_boundary=minute_boundary,
+            rtp_timestamp=rtp_timestamp,
+            system_time=system_time,
+            tone_detections=tone_detections,
+            bpm_detection=bpm_det
+        )
+        
+        # Save detections for cross-frequency coordination
+        for detection in multi_station_result.detections.values():
+            if detection.detected:
+                self.multi_station_detector.save_detection_for_cross_freq(detection, minute_boundary)
+        
+        # D. Use multi-station result for timing (physics-based, no voting)
+        # The best timing comes from the station with lowest uncertainty
+        # ALL stations are passed to fusion - we just need one for the TimeSnapResult
+        timing_error_ms = 0.0
         anchor_station = 'UNKNOWN'
         anchor_confidence = 0.0
-        timing_error_ms = 0.0
         
-        # 1. Try local detection first
-        if wwv_det and wwvh_det:
-             # Both detected - use stronger
-             if wwv_det.confidence >= wwvh_det.confidence:
-                 anchor_station = 'WWV'
-                 anchor_confidence = wwv_det.confidence
-                 timing_error_ms = wwv_det.timing_error_ms or 0.0 # Ensure float
-             else:
-                 anchor_station = 'WWVH'
-                 anchor_confidence = wwvh_det.confidence
-                 timing_error_ms = wwvh_det.timing_error_ms or 0.0 # Ensure float
-        elif wwv_det:
-             anchor_station = 'WWV'
-             anchor_confidence = wwv_det.confidence
-             timing_error_ms = wwv_det.timing_error_ms or 0.0 # Ensure float
-        elif chu_det:
-             anchor_station = 'CHU'
-             anchor_confidence = chu_det.confidence
-             timing_error_ms = chu_det.timing_error_ms or 0.0 # Ensure float
-        elif wwvh_det:
-             anchor_station = 'WWVH'
-             anchor_confidence = wwvh_det.confidence
-             timing_error_ms = wwvh_det.timing_error_ms or 0.0 # Ensure float
-             
-        # 2. If weak/none, check for Global Anchor
-        if anchor_confidence < 0.7:
-             # Look for "Unambiguous Anchors" first (CHU, WWV 20/25)
-             # The voter logic prefers these
-             best_anchor = self.voter.get_best_time_snap_anchor(rtp_timestamp)
-             
-             if best_anchor and best_anchor['snr_db'] > 10.0:
-                 # Found a strong anchor elsewhere!
-                 # If we detected NOTHING, use the anchor's timing directly (rescue)
-                 if anchor_confidence < 0.3:
-                     logger.info(f"⚓ Global Lock: Rescuing weak signal using {best_anchor['station']} on {best_anchor['channel']}")
-                     anchor_station = best_anchor['station']
-                     anchor_confidence = 0.6 # Provisional confidence for rescue
-                     # Calculate expected local timing based on dispersion?
-                     # For now use anchor timing (assuming < 3ms dispersion)
-                     timing_error_ms = (best_anchor['toa_offset_samples'] / self.sample_rate) * 1000.0
-                 else:
-                     # We detected something weak, does it match the anchor?
-                     # If so, boost confidence
-                     pass
+        if multi_station_result.best_timing_station:
+            anchor_station = multi_station_result.best_timing_station
+            best_det = multi_station_result.detections.get(anchor_station)
+            if best_det and best_det.detected:
+                timing_error_ms = best_det.measured_toa_ms
+                anchor_confidence = best_det.confidence
+        else:
+            # Fallback: use any detected station
+            for det in multi_station_result.get_all_usable_detections():
+                timing_error_ms = det.measured_toa_ms
+                anchor_station = det.station
+                anchor_confidence = det.confidence
+                break
 
         # Calculate arrival RTP from timing error
-        # Use round() not int() for proper rounding
         timing_offset_samples = round(timing_error_ms * self.sample_rate / 1000)
         arrival_rtp = rtp_timestamp + timing_offset_samples
         
@@ -731,12 +758,18 @@ class Phase2TemporalEngine:
             wwv_detected=wwv_det is not None,
             wwvh_detected=wwvh_det is not None,
             chu_detected=chu_det is not None,
+            bpm_detected=bpm_det is not None,
             wwv_snr_db=wwv_det.snr_db if wwv_det else None,
             wwvh_snr_db=wwvh_det.snr_db if wwvh_det else None,
             chu_snr_db=chu_det.snr_db if chu_det else None,
+            bpm_snr_db=bpm_det.snr_db if bpm_det else None,
             wwv_timing_ms=wwv_det.timing_error_ms if wwv_det else None,
             wwvh_timing_ms=wwvh_det.timing_error_ms if wwvh_det else None,
             chu_timing_ms=chu_det.timing_error_ms if chu_det else None,
+            bpm_timing_ms=bpm_det.measured_delay_ms if bpm_det else None,
+            bpm_timing_mode=bpm_timing_mode,
+            bpm_is_usable_for_utc=bpm_is_usable,
+            multi_station_result=multi_station_result,  # Physics-based multi-station detection
             anchor_station=anchor_station,
             anchor_confidence=anchor_confidence,
             search_window_ms=self.config_search_window_ms or 500.0  # Use calibrated window if available

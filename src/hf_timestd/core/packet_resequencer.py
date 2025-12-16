@@ -198,13 +198,14 @@ class PacketResequencer:
     
     def _add_to_buffer(self, packet: RTPPacket):
         """Add packet to circular buffer"""
+        # If buffer is at capacity, deque will auto-pop oldest on append
+        # We need to remove its sequence from the set BEFORE the append
+        if len(self.buffer) >= self.buffer_size:
+            oldest = self.buffer[0]  # Will be popped by append
+            self.buffer_seq_nums.discard(oldest.sequence)
+        
         self.buffer.append(packet)
         self.buffer_seq_nums.add(packet.sequence)
-        
-        # If buffer full, remove oldest
-        if len(self.buffer) > self.buffer_size:
-            oldest = self.buffer.popleft()
-            self.buffer_seq_nums.discard(oldest.sequence)
     
     def _try_output(self) -> Tuple[Optional[np.ndarray], Optional[GapInfo]]:
         """Try to output next packet in sequence"""

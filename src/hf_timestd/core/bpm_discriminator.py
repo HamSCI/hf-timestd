@@ -308,6 +308,10 @@ class BPMDiscriminator:
         # Measure tick duration from signal
         measured_tick_ms = self._measure_tick_duration(iq_samples, sample_rate)
         
+        # Measure SNR if not provided
+        if snr_db <= 0.0:
+            snr_db = self._measure_snr(iq_samples, sample_rate)
+        
         # Check if tick duration matches expected
         tick_tolerance_ms = 5.0  # Allow 5ms tolerance
         tick_match = abs(measured_tick_ms - expected_tick_ms) < tick_tolerance_ms
@@ -426,6 +430,48 @@ class BPMDiscriminator:
         else:
             # Default to UTC tick duration
             return BPM_UTC_TICK_DURATION * 1000.0
+    
+    def _measure_snr(
+        self,
+        iq_samples: np.ndarray,
+        sample_rate: int
+    ) -> float:
+        """
+        Measure SNR of 1000 Hz tone (BPM tick frequency).
+        
+        Args:
+            iq_samples: Complex IQ samples
+            sample_rate: Sample rate in Hz
+            
+        Returns:
+            Estimated SNR in dB
+        """
+        try:
+            from scipy.signal import welch
+            
+            # Compute power spectral density
+            freqs, psd = welch(np.abs(iq_samples), fs=sample_rate, nperseg=min(4096, len(iq_samples)//4))
+            
+            # Find 1000 Hz bin
+            tone_idx = np.argmin(np.abs(freqs - 1000))
+            
+            # Signal power: peak around 1000 Hz (±50 Hz)
+            tone_mask = (freqs > 950) & (freqs < 1050)
+            signal_power = np.max(psd[tone_mask]) if np.any(tone_mask) else 0
+            
+            # Noise power: median of spectrum excluding tone region
+            noise_mask = ~tone_mask
+            noise_power = np.median(psd[noise_mask]) if np.any(noise_mask) else 1e-10
+            
+            # SNR in dB
+            if noise_power > 0 and signal_power > noise_power:
+                snr_db = 10 * np.log10(signal_power / noise_power)
+                return float(min(40.0, max(0.0, snr_db)))  # Clamp to reasonable range
+            else:
+                return 0.0
+        except Exception as e:
+            logger.debug(f"BPM SNR measurement failed: {e}")
+            return 0.0
     
     def _calculate_confidence(
         self,

@@ -111,7 +111,8 @@ class PipelineConfig:
     raw_buffer_file_duration_sec: int = 3600  # 1 hour files
     compression: str = 'none'  # 'none', 'zstd', or 'lz4'
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
-    # Note: Storage quota is managed at top-level, not per-channel
+    storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
+    use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
     
     # Phase 2 settings
     analysis_latency_sec: int = 120  # Wait for complete minute
@@ -172,6 +173,8 @@ class PipelineOrchestrator:
             station_config=config.station_config,
             compression=config.compression,
             compression_level=config.compression_level,
+            storage_quota_percent=config.storage_quota_percent,
+            use_tiered_storage=config.use_tiered_storage,
         )
         self.raw_buffer_writer = BinaryArchiveWriter(raw_config)
         

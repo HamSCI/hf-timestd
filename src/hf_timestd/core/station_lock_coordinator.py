@@ -2,6 +2,10 @@
 """
 Station Lock Coordinator - Two-Phase Cross-Channel Detection
 
+DEPRECATED: This module is being replaced by MultiStationDetector which uses
+a physics-based approach. The voting/anchor selection logic is no longer
+the preferred method. Use MultiStationDetector for new code.
+
 Implements the "Global Station Lock" strategy:
 
 Phase 0: Anchor Discovery
@@ -46,7 +50,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 
-from .global_station_voter import GlobalStationVoter, StationAnchor, AnchorQuality
+from .multi_station_detector import MultiStationDetector, StationDetection, DetectionQuality
 from .wwvh_discrimination import WWVHDiscriminator, DiscriminationResult
 
 logger = logging.getLogger(__name__)
@@ -162,8 +166,11 @@ class StationLockCoordinator:
         
         self.channels = channels
         
-        # Initialize global voter
-        self.voter = GlobalStationVoter(channels=channels)
+        # Initialize multi-station detector (physics-based, replaces voting)
+        self.multi_station_detector = MultiStationDetector(
+            receiver_lat=self.receiver_lat,
+            receiver_lon=self.receiver_lon
+        )
         
         # Per-channel discriminators (lazy-loaded)
         self.discriminators: Dict[str, WWVHDiscriminator] = {}

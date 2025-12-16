@@ -27,6 +27,7 @@ from ka9q import ChannelInfo, RTPHeader
 
 from .rtp_receiver import RTPReceiver
 from .packet_resequencer import PacketResequencer, RTPPacket, GapInfo
+from .leap_second import LeapSecondDetector
 
 logger = logging.getLogger(__name__)
 
@@ -198,9 +199,13 @@ class RecordingSession:
             max_gap_samples=config.max_gap_samples
         )
         
+        # Leap second detector for handling 61-second minutes
+        self.leap_detector = LeapSecondDetector(sample_rate=config.sample_rate)
+        
         # Segment timing
         self.segment_start_rtp: Optional[int] = None
         self.segment_sample_count = 0
+        self.segment_start_wallclock: Optional[float] = None  # For leap second detection
         # Use RTP timestamp increment for segment completion check
         # RTP timestamp increments at sample_rate regardless of payload format
         # (e.g., IQ mode has 160 samples per packet but RTP increments by 320)
@@ -389,8 +394,9 @@ class RecordingSession:
         self.segment_rtp_count = 0  # Reset RTP-based count
         self.segment_start_rtp = rtp_timestamp
         
-        # Determine start time
+        # Determine start time and track for leap second detection
         start_time = wallclock if wallclock else time.time()
+        self.segment_start_wallclock = start_time
         
         self.current_segment = SegmentInfo(
             segment_id=self.segment_counter,
@@ -498,11 +504,25 @@ class RecordingSession:
         return should_start
     
     def _is_segment_complete(self) -> bool:
-        """Check if current segment is complete based on RTP timestamp progression"""
+        """Check if current segment is complete based on RTP timestamp progression.
+        
+        Handles leap seconds: during a leap second minute (last minute of June 30
+        or December 31), expects 61 seconds of samples instead of 60.
+        """
         if self.rtp_samples_per_segment is None:
             return False  # Continuous mode
+        
+        # Check for leap second minute - need 61 seconds instead of 60
+        expected_samples = self.rtp_samples_per_segment
+        if self.segment_start_wallclock is not None:
+            minute_boundary = int(self.segment_start_wallclock // 60) * 60
+            leap_expected = self.leap_detector.get_expected_samples(minute_boundary)
+            if leap_expected > expected_samples:
+                logger.info(f"Leap second minute: expecting {leap_expected} samples instead of {expected_samples}")
+                expected_samples = leap_expected
+        
         # Use RTP-based count for accurate timing regardless of payload format
-        return self.segment_rtp_count >= self.rtp_samples_per_segment
+        return self.segment_rtp_count >= expected_samples
     
     def _finish_segment(self, final: bool = False):
         """Finish current segment

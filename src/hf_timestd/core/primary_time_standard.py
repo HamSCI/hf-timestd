@@ -63,7 +63,7 @@ from .propagation_mode_solver import (
     ModeIdentificationResult,
     EmissionTimeResult
 )
-from .global_station_voter import GlobalStationVoter, StationAnchor, AnchorQuality
+from .multi_station_detector import MultiStationDetector, StationDetection, DetectionQuality
 from ..interfaces.data_models import TimeSnapReference
 
 logger = logging.getLogger(__name__)
@@ -232,8 +232,11 @@ class PrimaryTimeStandard:
         
         self.channels = channels
         
-        # Initialize global voter for cross-channel coordination
-        self.voter = GlobalStationVoter(channels=channels)
+        # Initialize multi-station detector for physics-based detection
+        self.multi_station_detector = MultiStationDetector(
+            receiver_lat=self.receiver_lat,
+            receiver_lon=self.receiver_lon
+        )
         
         # Output directory for results
         if self.data_root:

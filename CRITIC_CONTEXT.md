@@ -6,13 +6,255 @@ Primary Instruction:  In this context you will perform a critical review of the 
 
 ---
 
-## 🔴 CURRENT FOCUS: DATA PIPELINE ROBUSTNESS ANALYSIS
+## 🔴 CURRENT FOCUS: WEB UI INTEGRATION REVIEW
 
-**Purpose:** Critically examine the `hf_timestd.core` data pipeline for robustness, identifying weak points, error handling gaps, race conditions, data integrity issues, and opportunities for hardening.
+**Purpose:** Critically examine the `web-ui/` directory for inconsistencies, incompleteness, vulnerabilities, and missed opportunities in its integration with the recently updated backend analytics modules.
 
 **Author:** Michael James Hauan (AC0G)  
 **Date:** 2025-12-16  
 **Status:** 🟡 Ready for Analysis
+
+---
+
+### RECENT BACKEND CHANGES (2025-12-16 Session)
+
+The following significant changes were made to the backend that the Web UI must integrate with:
+
+#### 1. MultiStationDetector (Replaces Voting)
+
+**Old Approach (DEPRECATED):**
+- `GlobalStationVoter` picked the "loudest" station
+- Single station used for timing
+- Other detected stations discarded
+
+**New Approach:**
+- `MultiStationDetector` detects ALL receivable stations
+- GPSDO is the timing reference, not the loudest station
+- Each station's ToA reveals propagation conditions
+- ALL measurements passed to fusion with uncertainty weighting
+
+**Files Changed:**
+- `phase2_temporal_engine.py` - Now uses `MultiStationDetector`
+- `multi_station_detector.py` - **NEW** Physics-based detection
+- `global_station_voter.py` - **DEPRECATED**
+- `station_lock_coordinator.py` - **DEPRECATED**
+
+**Web UI Impact:**
+- [ ] Does the UI still reference "voting" or "anchor" concepts?
+- [ ] Are there displays that only show one station per frequency?
+- [ ] Does the UI show multi-station detection results?
+
+#### 2. BPM (China) Station Integration
+
+**New Capability:**
+- BPM broadcasts on 2.5, 5, 10, 15 MHz (shared with WWV/WWVH)
+- 10ms tick duration (vs 5ms WWV)
+- UT1 minutes (25-29, 55-59) not usable for UTC timing
+- Now detected and passed to fusion
+
+**Files Changed:**
+- `phase2_temporal_engine.py` - BPM detection in Step 1
+- `bpm_discriminator.py` - BPM-specific analysis
+- `phase2_analytics_service.py` - BPM fields in CSV outputs
+
+**Web UI Impact:**
+- [ ] Does the UI display BPM detections?
+- [ ] Are BPM timing modes (UTC/UT1) shown?
+- [ ] Is BPM included in station lists and charts?
+
+#### 3. Tiered Storage (RAM Hot Buffer)
+
+**New Capability:**
+- `/dev/shm/timestd` for hot buffer (RAM)
+- Disk for cold buffer with background archival
+- Auto-configured based on available RAM
+
+**Files Changed:**
+- `tiered_storage.py` - **NEW** Storage manager
+- `binary_archive_writer.py` - Tiered storage integration
+
+**Web UI Impact:**
+- [ ] Does the UI show storage tier status?
+- [ ] Are file paths updated for tiered storage?
+
+#### 4. BCD Downsampling (CPU Optimization)
+
+**Change:**
+- BCD correlation now uses 4x downsampling (20 kHz → 5 kHz)
+- Reduces CPU by ~75% with negligible accuracy loss
+
+**Files Changed:**
+- `wwvh_discrimination.py` - `downsample_factor` parameter
+
+**Web UI Impact:**
+- [ ] None expected (internal optimization)
+
+#### 5. Chrony Update Rate Limiting
+
+**Change:**
+- Chrony SHM updates now rate-limited to 8 seconds
+- Matches chrony poll interval
+
+**Files Changed:**
+- `multi_broadcast_fusion.py` - Rate limiting logic
+
+**Web UI Impact:**
+- [ ] Does the UI show chrony update frequency?
+
+#### 6. CSV Schema Changes
+
+**Tone Detections CSV:**
+- Added: `bpm_detected`, `bpm_snr_db`, `bpm_timing_ms`, `bpm_timing_mode`, `bpm_usable_for_utc`
+
+**BCD Discrimination CSV:**
+- Added: `bpm_amplitude`, `bpm_toa_ms`
+
+**Web UI Impact:**
+- [ ] Does the UI parse the new CSV columns?
+- [ ] Are there hardcoded column indices that will break?
+
+---
+
+### WEB UI FILE INVENTORY
+
+| File | Purpose | Review Priority |
+|------|---------|-----------------|
+| `monitoring-server-v3.js` | Express server, API endpoints | HIGH |
+| `timestd-paths.js` | Path construction (must match Python) | HIGH |
+| `timing-dashboard-enhanced.html` | Main dashboard | HIGH |
+| `discrimination-charts.js` | Station discrimination visualization | MEDIUM |
+| `components/navigation.js` | Navigation component | LOW |
+| `components/theme-toggle.js` | Theme switching | LOW |
+
+---
+
+### CRITIQUE CHECKLIST: WEB UI INTEGRATION
+
+#### 1. Data Contract Consistency
+
+- [ ] **CSV Column Names**: Do JS parsers match Python CSV writers?
+  - Check: `monitoring-server-v3.js` CSV parsing
+  - Check: New BPM columns in tone_detections and bcd_discrimination
+
+- [ ] **JSON Schema**: Do status file readers match writers?
+  - Check: `analytics-service-status.json` schema
+  - Check: `convergence_state.json` schema
+
+- [ ] **Path Construction**: Does `timestd-paths.js` match `paths.py`?
+  - Check: `raw_buffer` vs `raw_archive` naming
+  - Check: Channel name sanitization (`WWV 10 MHz` → `WWV_10_MHz`)
+
+#### 2. Deprecated Concept References
+
+- [ ] **Voting/Anchor References**: Remove or update
+  - Search for: "voter", "voting", "anchor", "best station"
+  - Replace with: Multi-station detection concepts
+
+- [ ] **13 Broadcasts**: Update to 17 broadcasts
+  - Search for: "13 broadcasts", "13-broadcast"
+  - Update to include BPM (4 additional)
+
+#### 3. Missing Features
+
+- [ ] **BPM Display**: Add BPM to station lists
+  - Station selector dropdowns
+  - Detection charts
+  - Timing displays
+
+- [ ] **Multi-Station View**: Show all detected stations per frequency
+  - Currently may only show "dominant" station
+  - Should show all with SNR/ToA
+
+- [ ] **Propagation Analysis**: Show measured vs expected delay
+  - New `delay_residual_ms` field available
+  - Indicates ionospheric conditions
+
+#### 4. Security Vulnerabilities
+
+- [ ] **Path Traversal**: Are file paths validated?
+  - Check: API endpoints that read files
+  - Check: User-supplied channel names
+
+- [ ] **Injection**: Are inputs sanitized?
+  - Check: Query parameters
+  - Check: File path construction
+
+#### 5. Error Handling
+
+- [ ] **Missing Files**: Graceful handling?
+  - Check: What happens when CSV doesn't exist?
+  - Check: What happens when status file is stale?
+
+- [ ] **Malformed Data**: Validation before use?
+  - Check: JSON parse errors
+  - Check: CSV with wrong column count
+
+#### 6. Performance
+
+- [ ] **File Watching**: Efficient?
+  - Check: Are files re-read unnecessarily?
+  - Check: Is there caching?
+
+- [ ] **Large CSV Handling**: Memory-safe?
+  - Check: Are entire files loaded into memory?
+  - Check: Is there pagination?
+
+---
+
+### SPECIFIC AREAS TO AUDIT
+
+#### API Endpoints (monitoring-server-v3.js)
+
+| Endpoint | Purpose | Check For |
+|----------|---------|-----------|
+| `/api/channels` | List channels | BPM channels included? |
+| `/api/status/:channel` | Channel status | New fields present? |
+| `/api/detections/:channel` | Tone detections | BPM columns parsed? |
+| `/api/discrimination/:channel` | Discrimination data | BPM fields included? |
+| `/api/fusion` | Fused D_clock | 17 broadcasts shown? |
+
+#### Dashboard Components
+
+| Component | Purpose | Check For |
+|-----------|---------|-----------|
+| Station selector | Choose station | BPM option? |
+| Detection chart | Show detections | Multi-station view? |
+| Timing display | Show D_clock | All stations shown? |
+| Propagation panel | Show delays | Residual display? |
+
+---
+
+### VALIDATION COMMANDS
+
+```bash
+# Check for deprecated references
+grep -r "voter\|voting\|anchor" web-ui/
+
+# Check for hardcoded broadcast counts
+grep -r "13 broadcast\|13-broadcast" web-ui/
+
+# Check path consistency
+diff <(grep -o "raw_buffer\|raw_archive" web-ui/*.js | sort -u) \
+     <(grep -o "raw_buffer\|raw_archive" src/hf_timestd/*.py | sort -u)
+
+# Check CSV column references
+grep -r "bpm_detected\|bpm_snr\|bpm_timing" web-ui/
+
+# List all API endpoints
+grep -E "app\.(get|post|put|delete)" web-ui/monitoring-server-v3.js
+```
+
+---
+
+### SUCCESS CRITERIA
+
+| Metric | Target | How to Verify |
+|--------|--------|---------------|
+| BPM display | Shown in UI | Visual inspection |
+| Multi-station view | All stations shown | Check detection charts |
+| No deprecated refs | Zero "voter" mentions | grep search |
+| CSV parsing | No errors | Check browser console |
+| Path consistency | 100% match | Diff Python vs JS |
 
 ---
 

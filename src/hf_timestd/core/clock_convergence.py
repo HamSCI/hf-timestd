@@ -177,6 +177,7 @@ from typing import Dict, List, Optional, Tuple
 import json
 import math
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -946,8 +947,13 @@ class ClockConvergenceModel:
         
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.state_file, 'w') as f:
+            # Atomic write: write to temp file, fsync, then rename
+            temp_file = self.state_file.with_suffix('.tmp')
+            with open(temp_file, 'w') as f:
                 json.dump(state, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            temp_file.replace(self.state_file)
         except Exception as e:
             logger.warning(f"Failed to save convergence state: {e}")
     
