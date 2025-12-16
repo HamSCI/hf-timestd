@@ -1430,7 +1430,7 @@ class Phase2TemporalEngine:
                 station=station,
                 frequency_mhz=self.frequency_mhz,
                 confidence=solver_result.confidence,
-                uncertainty_ms=self._calculate_uncertainty(solver_result, channel),
+                uncertainty_ms=self._calculate_physics_based_uncertainty(channel, solver_result.confidence)[0],
                 utc_verified=solver_result.utc_nist_verified,
                 mode_candidates=mode_candidates
             )

@@ -288,6 +288,7 @@ class Phase2AnalyticsService:
         self.last_result = None
         self.last_carrier_snr_db = None  # Carrier SNR from IQ data
         self.last_carrier_power_db = None  # Carrier power from IQ data
+        self.last_radiod_snr_db = None  # SNR from radiod (base channel SNR)
         
         # Track which minutes we've processed
         self.processed_minutes = set()
@@ -879,6 +880,8 @@ class Phase2AnalyticsService:
             logger.debug(f"Binary file not found: {base_path}.bin[.zst|.lz4]")
             return None
         
+        logger.debug(f"Found binary file: {bin_path}, compression={compression}")
+        
         try:
             # Read metadata
             metadata = {}
@@ -918,8 +921,10 @@ class Phase2AnalyticsService:
                 iq_samples = np.memmap(bin_path, dtype=np.complex64, mode='r')
             
             samples_per_minute = self.sample_rate * 60
-            if len(iq_samples) < samples_per_minute * 0.9:  # Need at least 90%
-                logger.debug(f"Incomplete minute: {len(iq_samples)}/{samples_per_minute}")
+            completeness = 100 * len(iq_samples) / samples_per_minute
+            logger.debug(f"Read {len(iq_samples)} samples ({completeness:.1f}% of {samples_per_minute})")
+            if len(iq_samples) < samples_per_minute * 0.4:  # Need at least 40% (relaxed for partial RTP streams)
+                logger.warning(f"Incomplete minute: {len(iq_samples)}/{samples_per_minute} ({completeness:.1f}%)")
                 return None
             
             # Pad if slightly short
@@ -998,39 +1003,80 @@ class Phase2AnalyticsService:
     
     def _calculate_carrier_snr(self, iq_samples: np.ndarray) -> float:
         """
-        Calculate carrier SNR from IQ samples.
+        Calculate base channel SNR from IQ samples.
         
-        This measures the signal-to-noise ratio of the carrier (DC component)
-        which is independent of tone detection. Works for all channels.
-        
-        Method: Compare mean power (signal) to variance (noise fluctuations)
+        This measures the signal-to-noise ratio of the carrier using
+        the ratio of mean amplitude to standard deviation of amplitude.
+        This is the base channel SNR before station discrimination.
         
         Args:
             iq_samples: Complex IQ samples
             
         Returns:
-            SNR in dB
+            SNR in dB, or None if calculation fails
         """
-        # Calculate carrier power (mean of |IQ|^2)
-        power = np.abs(iq_samples) ** 2
-        carrier_power = np.mean(power)
-        
-        # Estimate noise power from variance of power (fluctuations around mean)
-        noise_power = np.var(power)
-        
-        # Avoid division by zero
-        if noise_power < 1e-20:
-            noise_power = 1e-20
-        
-        # SNR in dB
-        snr_db = 10 * np.log10(carrier_power / noise_power)
-        
-        return float(snr_db)
+        try:
+            # Filter out zero-padded samples (gaps in data)
+            non_zero_mask = (iq_samples.real != 0) | (iq_samples.imag != 0)
+            valid_samples = iq_samples[non_zero_mask]
+            
+            if len(valid_samples) < 1000:  # Need minimum samples
+                return None
+            
+            # Calculate amplitude (magnitude)
+            amplitude = np.abs(valid_samples)
+            
+            # Signal is mean amplitude, noise is std dev of amplitude
+            signal = np.mean(amplitude)
+            noise = np.std(amplitude)
+            
+            # Avoid division by zero
+            if noise < 1e-10 or signal < 1e-10:
+                return None
+            
+            # SNR in dB = 20 * log10(signal/noise) for amplitude ratio
+            snr_db = 20 * np.log10(signal / noise)
+            
+            # Clamp to reasonable range for HF signals
+            if np.isnan(snr_db) or np.isinf(snr_db):
+                return None
+            
+            return float(np.clip(snr_db, -20, 60))
+        except Exception:
+            return None
 
+    def _query_radiod_snr(self) -> Optional[float]:
+        """
+        Query radiod for current channel SNR.
+        
+        This is the base channel SNR before any station discrimination.
+        Returns SNR in dB or None if unavailable.
+        """
+        try:
+            from ka9q import discover_channels
+            # Use default status address - could be made configurable
+            status_address = '239.192.152.141'
+            channels = discover_channels(status_address, listen_duration=1.0)
+            
+            # Find our channel by frequency
+            for ssrc, ch_info in channels.items():
+                if abs(ch_info.frequency - self.frequency_hz) < 100:  # Within 100 Hz
+                    snr = ch_info.snr
+                    # Handle -inf (no signal)
+                    if snr is not None and not np.isinf(snr):
+                        return float(snr)
+                    return None
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to query radiod SNR: {e}")
+            return None
 
     def _write_status(self):
         """Write status file for web-ui monitoring."""
         try:
+            # Query radiod for current channel SNR (base channel SNR)
+            self.last_radiod_snr_db = self._query_radiod_snr()
+            
             # Build time_snap info from last result
             time_snap_dict = None
             if self.last_result and self.last_result.time_snap:
@@ -1060,7 +1106,8 @@ class Phase2AnalyticsService:
                         'quality_metrics': {
                             'last_completeness_pct': 100.0 if self.last_result else 0.0,
                             'last_packet_loss_pct': 0.0,
-                            'last_snr_db': self.last_carrier_snr_db  # Carrier SNR from IQ data
+                            'last_snr_db': self.last_radiod_snr_db,  # Base channel SNR from radiod
+                            'carrier_snr_db': self.last_carrier_snr_db  # Carrier SNR from IQ calculation
                         }
                     }
                 },
@@ -1135,16 +1182,15 @@ class Phase2AnalyticsService:
         if minute_boundary in self.processed_minutes:
             return False
         
-        # Read DRF data for this minute
-        data = self._read_drf_minute(minute_boundary)
+        # Read binary data for this minute
+        data = self._read_binary_minute(minute_boundary)
         if data is None:
             logger.debug(f"No data available for minute {minute_boundary}")
             return False
         
         iq_samples, system_time, rtp_timestamp = data
         
-        # Always calculate carrier SNR and power from the raw IQ samples
-        # This works for all channels regardless of tone detection
+        # Calculate base channel SNR (before station discrimination)
         self.last_carrier_snr_db = self._calculate_carrier_snr(iq_samples)
         
         # Calculate carrier power in dB (for power graphs)
@@ -1226,9 +1272,10 @@ class Phase2AnalyticsService:
                     f"uncertainty={primary_unc:.1f}ms"
                 )
             else:
+                snr_str = f"{self.last_carrier_snr_db:.1f}" if self.last_carrier_snr_db is not None else "N/A"
                 logger.debug(
                     f"Processed minute {minute_boundary}: no timing result, "
-                    f"carrier_snr={self.last_carrier_snr_db:.1f}dB"
+                    f"carrier_snr={snr_str}dB"
                 )
                 self.last_result = None
             

@@ -227,8 +227,8 @@ class MultiStationDetector:
     
     def __init__(
         self,
-        receiver_lat: float,
-        receiver_lon: float,
+        receiver_lat: Optional[float] = None,
+        receiver_lon: Optional[float] = None,
         sample_rate: int = SAMPLE_RATE_FULL,
         ipc_dir: Path = Path('/dev/shm/timestd_detector')
     ):
@@ -236,13 +236,14 @@ class MultiStationDetector:
         Initialize multi-station detector.
         
         Args:
-            receiver_lat: Receiver latitude (degrees)
-            receiver_lon: Receiver longitude (degrees)
+            receiver_lat: Receiver latitude (degrees), defaults to US center if None
+            receiver_lon: Receiver longitude (degrees), defaults to US center if None
             sample_rate: Sample rate in Hz
             ipc_dir: Directory for cross-process coordination
         """
-        self.receiver_lat = receiver_lat
-        self.receiver_lon = receiver_lon
+        # Default to approximate US center if coordinates not provided
+        self.receiver_lat = receiver_lat if receiver_lat is not None else 39.0
+        self.receiver_lon = receiver_lon if receiver_lon is not None else -98.0
         self.sample_rate = sample_rate
         self.ipc_dir = ipc_dir
         
@@ -251,7 +252,7 @@ class MultiStationDetector:
         self.station_expected_delays: Dict[str, float] = {}
         
         for station, (lat, lon) in self.STATION_LOCATIONS.items():
-            dist = self._haversine_distance(receiver_lat, receiver_lon, lat, lon)
+            dist = self._haversine_distance(self.receiver_lat, self.receiver_lon, lat, lon)
             self.station_distances[station] = dist
             # Base delay estimate (will be refined by frequency-dependent model)
             self.station_expected_delays[station] = self._estimate_base_delay(dist)
@@ -267,7 +268,7 @@ class MultiStationDetector:
             'cross_validations_failed': 0,
         }
         
-        logger.info(f"MultiStationDetector initialized at ({receiver_lat:.4f}, {receiver_lon:.4f})")
+        logger.info(f"MultiStationDetector initialized at ({self.receiver_lat:.4f}, {self.receiver_lon:.4f})")
         for station, dist in self.station_distances.items():
             logger.info(f"  {station}: {dist:.0f} km, base delay ~{self.station_expected_delays[station]:.1f} ms")
     

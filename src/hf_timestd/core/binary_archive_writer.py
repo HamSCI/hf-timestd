@@ -51,6 +51,7 @@ class BinaryArchiveConfig:
     compression_level: int = 3  # zstd: 1-22 (3 = good balance), lz4: 1-12
     storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
     use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
+    radiod_snr_db: Optional[float] = None  # SNR from radiod (updated periodically)
 
 
 @dataclass
@@ -271,6 +272,7 @@ class BinaryArchiveWriter:
                 'dtype': 'complex64',
                 'byte_order': 'little',
                 'compression': compression if compression != 'none' else None,
+                'radiod_snr_db': self.config.radiod_snr_db,  # SNR from radiod
                 'written_at': datetime.now(timezone.utc).isoformat(),
                 'station': self.config.station_config
             }

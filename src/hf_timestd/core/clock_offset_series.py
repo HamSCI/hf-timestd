@@ -641,7 +641,7 @@ class ClockOffsetEngine:
         """
         # Delegate to Phase2TemporalEngine for refined analysis order
         try:
-            phase2_result = self.phase2_engine.process_minute(
+            phase2_results = self.phase2_engine.process_minute(
                 iq_samples=iq_samples,
                 system_time=system_time,
                 rtp_timestamp=rtp_timestamp
@@ -650,9 +650,13 @@ class ClockOffsetEngine:
             logger.warning(f"Phase 2 processing failed: {e}")
             return None
         
-        if phase2_result is None:
-            logger.debug("Phase 2 returned no result")
+        # process_minute returns a list of results (one per detected station)
+        # Use the first/primary result for clock offset measurement
+        if not phase2_results:
+            logger.debug("Phase 2 returned no results")
             return None
+        
+        phase2_result = phase2_results[0]  # Primary result
         
         # Convert Phase2Result to ClockOffsetMeasurement
         solution = phase2_result.solution

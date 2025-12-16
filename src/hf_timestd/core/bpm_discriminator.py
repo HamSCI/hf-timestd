@@ -156,8 +156,8 @@ class BPMDiscriminator:
     
     def __init__(
         self,
-        receiver_lat: float,
-        receiver_lon: float,
+        receiver_lat: Optional[float] = None,
+        receiver_lon: Optional[float] = None,
         dut1_ms: float = 0.0,  # Current DUT1 value (UT1-UTC) in ms
         enable_ut1_correction: bool = False,  # Allow using UT1 minutes with correction
         channel_name: str = "BPM"
@@ -166,21 +166,23 @@ class BPMDiscriminator:
         Initialize BPM discriminator.
         
         Args:
-            receiver_lat: Receiver latitude (degrees)
-            receiver_lon: Receiver longitude (degrees)
+            receiver_lat: Receiver latitude (degrees), defaults to US center if None
+            receiver_lon: Receiver longitude (degrees), defaults to US center if None
             dut1_ms: Current DUT1 value (UT1-UTC) in milliseconds
             enable_ut1_correction: If True, allow using UT1 minutes with DUT1 correction
             channel_name: Channel identifier for logging
         """
-        self.receiver_lat = receiver_lat
-        self.receiver_lon = receiver_lon
+        # Default to approximate US center if coordinates not provided
+        # This gives reasonable BPM distance estimates for continental US
+        self.receiver_lat = receiver_lat if receiver_lat is not None else 39.0
+        self.receiver_lon = receiver_lon if receiver_lon is not None else -98.0
         self.dut1_ms = dut1_ms
         self.enable_ut1_correction = enable_ut1_correction
         self.channel_name = channel_name
         
         # Pre-calculate great circle distance to BPM
         self.distance_to_bpm_km = self._haversine_distance(
-            receiver_lat, receiver_lon, BPM_LAT, BPM_LON
+            self.receiver_lat, self.receiver_lon, BPM_LAT, BPM_LON
         )
         
         # Expected propagation delay (rough estimate for discrimination)
