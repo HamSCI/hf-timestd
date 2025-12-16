@@ -20,10 +20,15 @@ The repository implements a **two-phase** pipeline for time-transfer analytics.
 **Primary Output:** `D_clock = T_system - T_UTC(NIST)` with sub-millisecond accuracy.
 
 **17 Broadcasts Total:**
-- WWV: 6 frequencies
-- WWVH: 4 frequencies (shared with WWV)
-- CHU: 3 frequencies (unique)
-- BPM: 4 frequencies (shared with WWV/WWVH)
+- WWV: 6 frequencies (2 unique: 20, 25 MHz; 4 shared: 2.5, 5, 10, 15 MHz)
+- WWVH: 4 frequencies (all shared: 2.5, 5, 10, 15 MHz)
+- CHU: 3 frequencies (unique: 3.33, 7.85, 14.67 MHz)
+- BPM: 4 frequencies (all shared: 2.5, 5, 10, 15 MHz)
+
+**Channel Naming Convention:**
+- `SHARED X MHz` - Frequencies where WWV, WWVH, and BPM all broadcast (2.5, 5, 10, 15 MHz)
+- `WWV X MHz` - WWV-only frequencies (20, 25 MHz)
+- `CHU X MHz` - CHU-only frequencies (3.33, 7.85, 14.67 MHz)
 
 **Explicit Non-Goals:**
 - DigitalRF format conversion

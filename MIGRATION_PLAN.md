@@ -50,7 +50,7 @@ These GRAPE-specific functions will be moved to a separate application:
 | `scripts/timestd-all.sh` | `scripts/timestd-all.sh` |
 | `scripts/timestd-analytics.sh` | `scripts/timestd-analytics.sh` |
 | `scripts/grape-core.sh` | `scripts/timestd-core.sh` |
-| `scripts/grape-core-v3.sh` | `scripts/timestd-core-v3.sh` |
+| `scripts/grape-core-v3.sh` | `scripts/timestd-core.sh` |
 | `scripts/grape-ui.sh` | `scripts/timestd-ui.sh` |
 
 ### Scripts Staying with GRAPE App (not migrated)
