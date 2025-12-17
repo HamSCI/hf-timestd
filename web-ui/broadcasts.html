@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Broadcast Characterization - hf-timestd</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <link rel="stylesheet" href="/styles.css">
+    <style>
+        /* Broadcasts Page Specific Styles */
+        .piano-roll-container {
+            display: block;
+            background: #0f172a;
+            padding: 0;
+            border-radius: var(--radius-md);
+            overflow-x: auto;
+            height: 600px;
+        }
+
+        .lane-buffer {
+            min-width: 40px;
+            position: relative;
+        }
+
+        .lane-header {
+            writing-mode: vertical-rl;
+            transform: rotate(180deg);
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 11px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid var(--surface-border);
+            height: 100px;
+        }
+
+        .lane-group-label {
+            grid-column: span 1;
+            text-align: center;
+            background: #1e293b;
+            color: #fff;
+            font-size: 10px;
+            padding: 2px 0;
+            border-radius: 2px;
+            margin-bottom: 4px;
+        }
+
+        /* Override grid for headers */
+        .header-row {
+            display: grid;
+            grid-template-columns: repeat(17, 1fr);
+            gap: 2px;
+            margin-bottom: 5px;
+        }
+
+        /* Canvas for drawing the waterfall/piano roll */
+        #matrix-canvas {
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+        }
+
+        .waterfall-section {
+            margin-top: 20px;
+            height: 400px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div id="timestd-navigation"></div>
+
+        <div class="page-header">
+            <h1>📡 Broadcast Characterization</h1>
+            <div class="page-header-subtitle">
+                17 Broadcasts • Presence Matrix • Propagation Stability
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <section class="section">
+            <div class="controls-grid">
+                <div>
+                    <label>Date (UTC)</label>
+                    <input type="date" id="date-selector">
+                </div>
+                <div>
+                    <label>&nbsp;</label>
+                    <button class="load-btn" onclick="loadData()">🔄 Reload</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Visual 1: Presence Matrix (Piano Roll) -->
+        <section class="section">
+            <div class="section-title">🎹 Presence Matrix (24h)</div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">
+                Likelihood of signal presence. <span style="color:#4ade80">■ High Conf</span> <span
+                    style="color:#facc15">■ Ambiguous</span> <span style="color:#ef4444">■ Unlikely</span>
+            </p>
+
+            <!-- Headers -->
+            <div style="display: flex; margin-bottom: 5px;">
+                <div style="width: 50px; flex-shrink: 0;"></div> <!-- Spacer for Axis -->
+                <div class="header-row" id="matrix-headers" style="flex-grow: 1; margin-bottom: 0;">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <div id="matrix-wrapper" class="piano-roll-container"
+                style="display: flex; height: 500px; overflow: hidden;">
+                <!-- Time Axis -->
+                <div style="width: 50px; flex-shrink: 0; background: #0f172a; border-right: 1px solid #1e293b;">
+                    <canvas id="axis-canvas"></canvas>
+                </div>
+                <!-- Matrix -->
+                <div style="flex-grow: 1; overflow-x: auto; overflow-y: scroll;">
+                    <canvas id="matrix-canvas"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Visual 2: Historical Waterfall -->
+        <section class="section">
+            <div class="section-title">🌊 Historical ToA Waterfall (Residuals)</div>
+            <p style="font-size: 12px; color: var(--text-secondary);">
+                Vertical pillars indicate stable propagation. Deviation = D_clock + Prop Error.
+            </p>
+            <div id="waterfall-plot" class="waterfall-section"></div>
+        </section>
+
+        <footer class="page-footer">
+            Last updated: <span id="last-update">Never</span>
+        </footer>
+    </div>
+
+    <script src="/components/theme-toggle.js"></script>
+    <script src="/components/navigation.js"></script>
+    <script>
+        window.TIMESTD_CURRENT_PAGE = 'broadcasts';
+
+        // Broadcast Defs
+        const BROADCASTS = [
+            { name: 'WWV', freq: 2.5 }, { name: 'WWVH', freq: 2.5 }, { name: 'BPM', freq: 2.5 },
+            { name: 'CHU', freq: 3.33 },
+            { name: 'WWV', freq: 5 }, { name: 'WWVH', freq: 5 }, { name: 'BPM', freq: 5 },
+            { name: 'CHU', freq: 7.85 },
+            { name: 'WWV', freq: 10 }, { name: 'WWVH', freq: 10 }, { name: 'BPM', freq: 10 },
+            { name: 'CHU', freq: 14.67 },
+            { name: 'WWV', freq: 15 }, { name: 'WWVH', freq: 15 }, { name: 'BPM', freq: 15 },
+            { name: 'WWV', freq: 20 },
+            { name: 'WWV', freq: 25 }
+        ];
+
+        // Init Date
+        document.getElementById('date-selector').valueAsDate = new Date();
+
+        async function loadData() {
+            const dateStr = document.getElementById('date-selector').value.replace(/-/g, '');
+            try {
+                const res = await fetch(`/api/v1/broadcasts/history?date=${dateStr}`);
+                const json = await res.json();
+                renderMatrix(json.history);
+                renderWaterfall(json.history);
+
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+            } catch (e) {
+                console.error(e);
+                alert('Failed to load data');
+            }
+        }
+
+        function renderMatrix(history) {
+            const canvas = document.getElementById('matrix-canvas');
+            const ctx = canvas.getContext('2d');
+            const headers = document.getElementById('matrix-headers');
+
+            // Setup Headers
+            headers.innerHTML = '';
+            headers.style.gridTemplateColumns = `repeat(${BROADCASTS.length}, 1fr)`;
+
+            BROADCASTS.forEach(b => {
+                const div = document.createElement('div');
+                div.className = 'lane-group-label';
+                div.textContent = `${b.name} ${b.freq}`;
+                div.style.fontSize = '9px';
+                headers.appendChild(div);
+            });
+
+            // CSS Grid uses 'gap: 2px' on the headers
+            // We need to match that.
+
+            // Re-measure container to be safe
+            const wrapper = document.getElementById('matrix-wrapper');
+            const axisCanvas = document.getElementById('axis-canvas');
+
+            // Width available for the matrix canvas
+            const width = wrapper.clientWidth - 50; // 50px for axis
+            const height = 1440; // 1 pixel per minute
+
+            // Logical size
+            canvas.width = width;
+            canvas.height = height;
+            axisCanvas.width = 50;
+            axisCanvas.height = height;
+
+            // CSS sizes
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+            axisCanvas.style.width = '50px';
+            axisCanvas.style.height = `${height}px`;
+
+            // Draw Backgrounds
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, 0, width, height);
+
+            const axisCtx = axisCanvas.getContext('2d');
+            axisCtx.fillStyle = '#0f172a';
+            axisCtx.fillRect(0, 0, 50, height);
+
+            // Draw Time Axis Labels & Grid
+            axisCtx.fillStyle = '#94a3b8';
+            axisCtx.font = '10px monospace';
+            axisCtx.textAlign = 'right';
+            axisCtx.textBaseline = 'middle';
+
+            // Draw horizontal grid lines on matrix
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1;
+
+            // 24 hours * 60 minutes = 1440
+            for (let h = 0; h < 24; h++) {
+                const y = h * 60;
+                const label = `${h.toString().padStart(2, '0')}:00`;
+
+                // Axis Label
+                axisCtx.fillText(label, 42, y);
+
+                // Grid line on matrix
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // CSS Grid uses 'gap: 2px'
+            // We must replicate this layout logic
+            // Scroll Sync Logic
+            const axisContainer = wrapper.children[0];
+            const matrixContainer = wrapper.children[1];
+
+            // Set axis container to hidden scroll
+            axisContainer.style.overflow = 'hidden';
+            axisContainer.classList.add('hide-scrollbar'); // Clean look
+
+            // Sync
+            matrixContainer.onscroll = () => {
+                axisContainer.scrollTop = matrixContainer.scrollTop;
+            };
+
+            const gap = 2;
+            const numLanes = BROADCASTS.length;
+            const totalGapWidth = (numLanes - 1) * gap;
+            const laneWidth = (width - totalGapWidth) / numLanes;
+
+            BROADCASTS.forEach((b, i) => {
+                const key = `${b.name}_${b.freq}`;
+                const laneData = history[key];
+                if (!laneData || !laneData.data) return;
+
+                // Calculate x position exactly as CSS Grid does
+                // x = sum of widths + sum of gaps so far
+                const x = i * (laneWidth + gap);
+
+                laneData.data.forEach(pt => {
+                    // pt.t is unix timestamp. Convert to minute of day (0-1439).
+                    const date = new Date(pt.t * 1000);
+                    const minuteOfDay = date.getUTCHours() * 60 + date.getUTCMinutes();
+
+                    // Width Logic (Likelihood = Width)
+                    // Map SNR to 0-1 range.
+                    // < 0 dB = 0 width (invisible)
+                    // > 12 dB = 100% width
+                    const snr = pt.snr;
+                    let likelihood = 0;
+                    if (snr <= 0) likelihood = 0;
+                    else if (snr >= 12) likelihood = 1.0;
+                    else likelihood = snr / 12.0;
+
+                    if (likelihood > 0) {
+                        ctx.fillStyle = getStationColor(b.name, 1.0); // Solid color
+
+                        // Calculate bar dimensions
+                        const barWidth = laneWidth * likelihood;
+                        const xOffset = (laneWidth - barWidth) / 2; // Center the bar
+
+                        // Draw centered bar
+                        ctx.fillRect(x + xOffset, minuteOfDay, barWidth, 1);
+                    }
+                });
+            });
+        }
+
+        function getStationColor(name, alpha = 1.0) {
+            if (name === 'WWV') return `rgba(56, 189, 248, ${alpha})`; // Sky blue
+            if (name === 'WWVH') return `rgba(168, 85, 247, ${alpha})`; // Purple
+            if (name === 'BPM') return `rgba(244, 63, 94, ${alpha})`;   // Red
+            if (name === 'CHU') return `rgba(252, 211, 77, ${alpha})`;   // Amber
+            return `rgba(148, 163, 184, ${alpha})`; // Gray
+        }
+
+        function renderWaterfall(history) {
+            // Separate data containers for each station to enable legend filtering
+            const traces = {
+                'WWV': { x: [], y: [], text: [], color: '#38bdf8' },
+                'WWVH': { x: [], y: [], text: [], color: '#a855f7' },
+                'BPM': { x: [], y: [], text: [], color: '#f43f5e' },
+                'CHU': { x: [], y: [], text: [], color: '#fcd34d' }
+            };
+
+            BROADCASTS.forEach(b => {
+                const key = `${b.name}_${b.freq}`;
+                const laneData = history[key];
+                if (!laneData) return;
+
+                laneData.data.forEach(pt => {
+                    if (pt.d_clock) {
+                        const date = new Date(pt.t * 1000);
+                        const group = traces[b.name];
+
+                        if (group) {
+                            group.x.push(pt.d_clock);
+                            group.y.push(date.toISOString());
+                            group.text.push(`${b.name} ${b.freq}MHz<br>Unc: ${pt.unc?.toFixed(1)}ms`);
+                        }
+                    }
+                });
+            });
+
+            // Convert data containers to Plotly trace objects
+            const plotlyTraces = Object.keys(traces).map(name => {
+                const t = traces[name];
+                return {
+                    x: t.x,
+                    y: t.y,
+                    mode: 'markers',
+                    type: 'scatter',
+                    name: name,
+                    text: t.text,
+                    marker: { size: 3, color: t.color },
+                    hoverinfo: 'x+y+text',
+                    showlegend: true
+                };
+            });
+
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#94a3b8' },
+                xaxis: {
+                    title: 'D_clock Residual (ms)',
+                    range: [-50, 50],
+                    gridcolor: '#334155'
+                },
+                yaxis: {
+                    title: 'Time (UTC)',
+                    autorange: 'reversed', // Top to bottom
+                    gridcolor: '#334155'
+                },
+                legend: {
+                    orientation: 'h',
+                    y: 1.1,
+                    x: 0.5,
+                    xanchor: 'center'
+                },
+                margin: { t: 40, b: 40, l: 60, r: 20 }
+            };
+
+            Plotly.newPlot('waterfall-plot', plotlyTraces, layout, { responsive: true });
+        }
+
+        loadData();
+    </script>
+</body>
+
+</html>

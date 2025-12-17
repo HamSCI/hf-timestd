@@ -19,20 +19,19 @@ class TimeStdNavigation {
     this.currentPage = currentPage;
     this.render();
   }
-  
+
   render() {
     if (!this.container) return;
-    
+
     const pages = [
       { id: 'summary', label: 'Summary', url: 'summary.html', icon: '📊' },
-      { id: 'carrier', label: 'Carrier Analysis', url: 'carrier.html', icon: '📡' },
-      { id: 'discrimination', label: 'Discrimination', url: 'discrimination.html', icon: '🎯' },
+      { id: 'broadcasts', label: 'Broadcasts', url: 'broadcasts.html', icon: '📡' },
       { id: 'timing', label: 'Timing Analysis', url: 'timing-dashboard-enhanced.html', icon: '⏱️' },
       { id: 'timing-advanced', label: 'Advanced Timing', url: 'timing-advanced.html', icon: '🔬' },
       { id: 'gaps', label: 'Gap Analysis', url: 'gaps.html', icon: '📈' },
       { id: 'logs', label: 'Logs', url: 'logs.html', icon: '📋' }
     ];
-    
+
     const navHTML = `
       <nav class="timestd-nav">
         <div class="nav-brand">
@@ -55,15 +54,15 @@ class TimeStdNavigation {
         </div>
       </nav>
     `;
-    
+
     this.container.innerHTML = navHTML;
     this.addStyles();
     this.startLiveIndicator();
   }
-  
+
   addStyles() {
     if (document.getElementById('timestd-nav-styles')) return;
-    
+
     const style = document.createElement('style');
     style.id = 'timestd-nav-styles';
     style.textContent = `
@@ -180,10 +179,10 @@ class TimeStdNavigation {
         }
       }
     `;
-    
+
     document.head.appendChild(style);
   }
-  
+
   startLiveIndicator() {
     // Ping server periodically to verify live status
     setInterval(async () => {
@@ -218,7 +217,7 @@ document.addEventListener('DOMContentLoaded', () => {
  */
 window.TIMESTD_UTILS = window.TIMESTD_UTILS || {};
 
-window.TIMESTD_UTILS.getChannelFrequency = function(channelName) {
+window.TIMESTD_UTILS.getChannelFrequency = function (channelName) {
   // Extract frequency number from channel name
   // Handles: "WWV 10 MHz", "CHU 3.33 MHz", "WWV_10_MHz", etc.
   const match = channelName.match(/(\d+\.?\d*)\s*(MHz|kHz)?/i);
@@ -233,7 +232,7 @@ window.TIMESTD_UTILS.getChannelFrequency = function(channelName) {
   return 999; // Unknown frequencies sort last
 };
 
-window.TIMESTD_UTILS.sortChannelsByFrequency = function(channels) {
+window.TIMESTD_UTILS.sortChannelsByFrequency = function (channels) {
   return [...channels].sort((a, b) => {
     const freqA = window.TIMESTD_UTILS.getChannelFrequency(a);
     const freqB = window.TIMESTD_UTILS.getChannelFrequency(b);
@@ -242,7 +241,7 @@ window.TIMESTD_UTILS.sortChannelsByFrequency = function(channels) {
 };
 
 // Convenience: sort array of objects by channel property
-window.TIMESTD_UTILS.sortByChannelFrequency = function(items, channelKey = 'channel') {
+window.TIMESTD_UTILS.sortByChannelFrequency = function (items, channelKey = 'channel') {
   return [...items].sort((a, b) => {
     const freqA = window.TIMESTD_UTILS.getChannelFrequency(a[channelKey]);
     const freqB = window.TIMESTD_UTILS.getChannelFrequency(b[channelKey]);

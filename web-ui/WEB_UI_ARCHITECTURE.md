@@ -129,15 +129,10 @@ GET /api/v1/channels/:name/discrimination/:date - Discrimination data
 - **Data**: System status, channel health, completeness
 - **Updates**: Real-time polling (5s interval)
 
-#### carrier.html
-- **Purpose**: Carrier analysis
-- **Data**: Phase 2 carrier power/quality metrics
-- **Features**: Date navigation, frequency selection
-
-#### discrimination.html
-- **Purpose**: WWV/WWVH discrimination (6 methods)
-- **Data**: Per-method CSVs (BCD, timing tones, ticks, 440Hz, test signals)
-- **Visualization**: 7-panel analysis with method labels
+#### broadcasts.html
+- **Purpose**: Broadcast Characterization (17 stations)
+- **Data**: Phase 2 `clock_offset` output, signal presence, propagation stability
+- **Features**: Presence Matrix (Piano Roll), ToA Waterfall, Signal Likelihood
 
 #### timing-dashboard-enhanced.html
 - **Purpose**: Timing quality monitoring
@@ -145,7 +140,7 @@ GET /api/v1/channels/:name/discrimination/:date - Discrimination data
 
 #### gaps.html
 - **Purpose**: Gap analysis and data completeness
-- **Data**: Gap statistics from raw_buffer indexing
+- **Data**: Phase 2 `clock_offset` availability (indicates successful analytics)
 
 ---
 
@@ -236,11 +231,9 @@ web-ui/
 │
 ├── index.html                   # Entry point (redirects to summary)
 ├── summary.html                 # ⭐ Main dashboard
-├── carrier.html                 # ⭐ Carrier analysis
-├── discrimination.html          # ⭐ WWV/WWVH discrimination
+├── broadcasts.html              # ⭐ Broadcast Characterization (17 stations)
 ├── timing-dashboard-enhanced.html # ⭐ Timing quality
-├── gaps.html                    # ⭐ Gap analysis
-├── discrimination.js            # Chart logic for discrimination
+├── gaps.html                    # ⭐ Gap analysis (Phase 2 completeness)
 │
 ├── utils/                       # Server utilities
 │   ├── audit.js                 # Audit logging
@@ -273,6 +266,8 @@ web-ui/
 
 ```
 web-ui/archive/legacy-pages/
+├── carrier.html                 # Removed (replaced by broadcasts.html)
+├── discrimination.html          # Removed (replaced by broadcasts.html)
 ├── simple-dashboard.html        # Superseded by summary.html
 ├── analysis.html                # Linked but useless
 ├── live-status.html             # Not used
