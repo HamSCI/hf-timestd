@@ -158,6 +158,7 @@ class BinaryArchiveWriter:
         """Check if sufficient disk space is available based on storage quota.
         
         Uses the configured storage_quota_percent to determine if we're over quota.
+        If over quota, automatically removes oldest files to make room.
         Also checks for absolute minimum free space (100MB headroom).
         """
         try:
@@ -166,26 +167,107 @@ class BinaryArchiveWriter:
             # Check storage quota percentage
             current_usage_percent = (stat.used / stat.total) * 100
             if current_usage_percent >= self.config.storage_quota_percent:
-                logger.error(
-                    f"Storage quota exceeded: {current_usage_percent:.1f}% used, "
-                    f"quota is {self.config.storage_quota_percent:.1f}%. "
-                    "Run quota manager to free space."
-                )
-                return False
+                # Auto-remove oldest files to make room
+                freed = self._remove_oldest_files(path, required_bytes)
+                if freed > 0:
+                    logger.info(
+                        f"Storage quota reached ({current_usage_percent:.1f}%), "
+                        f"removed oldest files to free {freed / 1024 / 1024:.1f}MB"
+                    )
+                    # Re-check after cleanup
+                    stat = shutil.disk_usage(path)
+                    current_usage_percent = (stat.used / stat.total) * 100
+                    if current_usage_percent >= self.config.storage_quota_percent:
+                        logger.warning(
+                            f"Still over quota after cleanup: {current_usage_percent:.1f}%"
+                        )
+                        # Continue anyway - we tried our best
             
             # Also check absolute minimum free space (100MB headroom)
             min_free = required_bytes + 100 * 1024 * 1024
             if stat.free < min_free:
-                logger.error(
-                    f"Insufficient disk space: {stat.free / 1024 / 1024:.1f}MB free, "
-                    f"need {min_free / 1024 / 1024:.1f}MB"
-                )
-                return False
+                # Try to free more space
+                freed = self._remove_oldest_files(path, min_free - stat.free)
+                if freed > 0:
+                    logger.info(f"Freed {freed / 1024 / 1024:.1f}MB for minimum headroom")
+                else:
+                    logger.error(
+                        f"Insufficient disk space: {stat.free / 1024 / 1024:.1f}MB free, "
+                        f"need {min_free / 1024 / 1024:.1f}MB"
+                    )
+                    return False
             
             return True
         except OSError as e:
             logger.warning(f"Could not check disk space: {e}")
             return True  # Proceed anyway, let write fail if needed
+    
+    def _remove_oldest_files(self, path: Path, bytes_needed: int) -> int:
+        """Remove oldest files from the archive to free space.
+        
+        Args:
+            path: Base path to search for files
+            bytes_needed: Minimum bytes to free
+            
+        Returns:
+            Total bytes freed
+        """
+        try:
+            # Find all .bin and .bin.zst/.bin.lz4 files in the archive
+            archive_root = path.parent if path.name.isdigit() else path
+            
+            # Collect all minute files with their timestamps
+            files_with_time = []
+            for pattern in ['**/*.bin', '**/*.bin.zst', '**/*.bin.lz4']:
+                for f in archive_root.glob(pattern):
+                    try:
+                        # Use file modification time for sorting
+                        mtime = f.stat().st_mtime
+                        size = f.stat().st_size
+                        files_with_time.append((mtime, size, f))
+                    except OSError:
+                        continue
+            
+            if not files_with_time:
+                return 0
+            
+            # Sort by modification time (oldest first)
+            files_with_time.sort(key=lambda x: x[0])
+            
+            # Remove oldest files until we've freed enough space
+            bytes_freed = 0
+            files_removed = 0
+            for mtime, size, filepath in files_with_time:
+                if bytes_freed >= bytes_needed:
+                    break
+                
+                try:
+                    # Also remove the corresponding .json sidecar
+                    json_path = filepath.with_suffix('.json') if filepath.suffix == '.bin' else \
+                                filepath.with_name(filepath.name.replace('.bin.zst', '.json').replace('.bin.lz4', '.json'))
+                    
+                    filepath.unlink()
+                    bytes_freed += size
+                    files_removed += 1
+                    
+                    if json_path.exists():
+                        json_size = json_path.stat().st_size
+                        json_path.unlink()
+                        bytes_freed += json_size
+                    
+                    logger.debug(f"Removed old file: {filepath.name}")
+                except OSError as e:
+                    logger.debug(f"Could not remove {filepath}: {e}")
+                    continue
+            
+            if files_removed > 0:
+                logger.info(f"Quota cleanup: removed {files_removed} oldest files")
+            
+            return bytes_freed
+            
+        except Exception as e:
+            logger.warning(f"Error during quota cleanup: {e}")
+            return 0
     
     def _cleanup_partial_write(self, *paths: Path) -> None:
         """Clean up partial files after a failed write."""

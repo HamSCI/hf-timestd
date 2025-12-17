@@ -680,12 +680,23 @@
         async function loadModeProbability() {
             const container = document.getElementById('mode-ridge-chart');
             const channelSelect = document.getElementById('mode-channel');
-            const channel = channelSelect.value;
+            const selectedValue = channelSelect.value;
             
             try {
-                const url = channel 
-                    ? `/api/v1/timing/mode-probability?channel=${encodeURIComponent(channel)}`
-                    : '/api/v1/timing/mode-probability';
+                // Parse broadcast selection (JSON with broadcast, channel, station, freq)
+                let url = '/api/v1/timing/mode-probability';
+                let broadcastInfo = null;
+                
+                if (selectedValue) {
+                    try {
+                        broadcastInfo = JSON.parse(selectedValue);
+                        // Pass both channel and station to get broadcast-specific mode data
+                        url = `/api/v1/timing/mode-probability?channel=${encodeURIComponent(broadcastInfo.channel)}&station=${encodeURIComponent(broadcastInfo.station)}&freq=${broadcastInfo.freq}`;
+                    } catch (e) {
+                        // Fallback for old-style channel-only values
+                        url = `/api/v1/timing/mode-probability?channel=${encodeURIComponent(selectedValue)}`;
+                    }
+                }
                     
                 const response = await fetch(url);
                 const data = await response.json();
@@ -709,24 +720,51 @@
         }
         
         async function populateChannelDropdown() {
-            try {
-                const response = await fetch('/api/v1/timing/health-summary');
-                const data = await response.json();
-                
-                const select = document.getElementById('mode-channel');
-                select.innerHTML = '<option value="">Best available</option>';
-                
-                if (data.channels) {
-                    data.channels.forEach(ch => {
+            // Use 17 broadcasts instead of 9 channels for propagation mode selection
+            // Each broadcast is a station+frequency combination
+            const broadcasts = [
+                // WWV broadcasts (6)
+                { id: 'WWV 2.5 MHz', station: 'WWV', freq: 2.5, channel: 'SHARED 2.5 MHz' },
+                { id: 'WWV 5 MHz', station: 'WWV', freq: 5, channel: 'SHARED 5 MHz' },
+                { id: 'WWV 10 MHz', station: 'WWV', freq: 10, channel: 'SHARED 10 MHz' },
+                { id: 'WWV 15 MHz', station: 'WWV', freq: 15, channel: 'SHARED 15 MHz' },
+                { id: 'WWV 20 MHz', station: 'WWV', freq: 20, channel: 'WWV 20 MHz' },
+                { id: 'WWV 25 MHz', station: 'WWV', freq: 25, channel: 'WWV 25 MHz' },
+                // WWVH broadcasts (4)
+                { id: 'WWVH 2.5 MHz', station: 'WWVH', freq: 2.5, channel: 'SHARED 2.5 MHz' },
+                { id: 'WWVH 5 MHz', station: 'WWVH', freq: 5, channel: 'SHARED 5 MHz' },
+                { id: 'WWVH 10 MHz', station: 'WWVH', freq: 10, channel: 'SHARED 10 MHz' },
+                { id: 'WWVH 15 MHz', station: 'WWVH', freq: 15, channel: 'SHARED 15 MHz' },
+                // CHU broadcasts (3)
+                { id: 'CHU 3.33 MHz', station: 'CHU', freq: 3.33, channel: 'CHU 3.33 MHz' },
+                { id: 'CHU 7.85 MHz', station: 'CHU', freq: 7.85, channel: 'CHU 7.85 MHz' },
+                { id: 'CHU 14.67 MHz', station: 'CHU', freq: 14.67, channel: 'CHU 14.67 MHz' },
+                // BPM broadcasts (4)
+                { id: 'BPM 2.5 MHz', station: 'BPM', freq: 2.5, channel: 'SHARED 2.5 MHz' },
+                { id: 'BPM 5 MHz', station: 'BPM', freq: 5, channel: 'SHARED 5 MHz' },
+                { id: 'BPM 10 MHz', station: 'BPM', freq: 10, channel: 'SHARED 10 MHz' },
+                { id: 'BPM 15 MHz', station: 'BPM', freq: 15, channel: 'SHARED 15 MHz' }
+            ];
+            
+            const select = document.getElementById('mode-channel');
+            select.innerHTML = '<option value="">Best available</option>';
+            
+            // Group by station for better organization
+            const stations = ['WWV', 'WWVH', 'CHU', 'BPM'];
+            stations.forEach(station => {
+                const stationBroadcasts = broadcasts.filter(b => b.station === station);
+                if (stationBroadcasts.length > 0) {
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = station;
+                    stationBroadcasts.forEach(b => {
                         const option = document.createElement('option');
-                        option.value = ch.channel;
-                        option.textContent = ch.channel;
-                        select.appendChild(option);
+                        option.value = JSON.stringify({ broadcast: b.id, channel: b.channel, station: b.station, freq: b.freq });
+                        option.textContent = b.id;
+                        optgroup.appendChild(option);
                     });
+                    select.appendChild(optgroup);
                 }
-            } catch (err) {
-                console.error('Error populating channel dropdown:', err);
-            }
+            });
         }
         
         // Add pulse animation

@@ -7,7 +7,7 @@
  * 1. Summary - Station info, processes, reception matrix, propagation paths
  * 2. Carrier - Carrier power, quality
  * 3. Discrimination - WWV/WWVH analysis (all methods), diurnal patterns
- * 4. Timing - D_clock fusion, UTC(NIST) alignment, 13-broadcast consensus
+ * 4. Timing - D_clock fusion, UTC(NIST) alignment, 17-broadcast consensus
  * 5. Advanced Timing - Kalman, Constellation, KDE, Mode visualizations
  * 6. Gaps - Data gaps by frequency, time, SNR
  * 7. Logs - System and analytics log viewer

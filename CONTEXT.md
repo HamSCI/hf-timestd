@@ -1,8 +1,8 @@
 # HF Time Standard Analysis (hf-timestd) - AI Context Document
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** 2025-12-16  
-**Version:** 5.1 (Web UI BPM Integration + Deployment Review Prep)
+**Last Updated:** 2025-12-17  
+**Version:** 5.2 (Chrony SHM Fix + Per-Broadcast Propagation Mode + Physical Constraints)
 
 ---
 
@@ -352,15 +352,125 @@ The system supports two deployment modes controlled by `timestd-config.toml`:
 | `systemd/timestd-*.service` | Systemd unit files |
 | `scripts/` | Start/stop/status scripts |
 
-### Deployment Review Checklist (Next Session)
+---
 
-1. **Mode Switching:** How does `mode = "test"` vs `mode = "production"` affect paths?
-2. **Service Scripts:** Are there dedicated start/stop/restart/status scripts?
-3. **Path Consistency:** Do all services use the same `TIMESTD_DATA_ROOT`?
-4. **Hot Buffer Location:** Is `/dev/shm/timestd` used in both modes?
-5. **Log Locations:** Where do logs go in test vs production?
-6. **Service Dependencies:** What order should services start/stop?
-7. **Health Checks:** How to verify all components are running correctly?
+## Recent Session Gains (2025-12-17)
+
+### Chrony SHM Integration Fixed
+- **Issue:** Chrony wasn't receiving samples from fusion service (Reach=0)
+- **Root Cause:** Struct packing format used `xxxx` instead of `4x` for padding
+- **Fix:** `chrony_shm.py` line 235: `'@ii q i 4x q i 4x iiii II 8i'`
+- **Result:** Chrony now receiving samples with +15μs offset, Reach=4+
+
+### Physical Constraint Validation Added
+- **File:** `timing_calibrator.py` - `_validate_physical_constraints()` method
+- **Constraints enforced:**
+  - Minimum light-speed propagation delay per station
+  - Expected ionospheric propagation delay ranges with margin
+  - D_clock bounds ±50ms after calibration
+- **Station-specific delays (from EM38ww):**
+  - WWV: 3.5-15ms (1,119 km)
+  - WWVH: 22-60ms (6,600 km)
+  - CHU: 5-20ms (1,522 km)
+  - BPM: 38-80ms (11,504 km)
+
+### Dynamic Search Window Narrowing
+- **Methods added to `timing_calibrator.py`:**
+  - `get_station_search_window()` - per-station window based on calibration
+  - `get_calibrated_search_window_ms()` - 10-20ms after calibration vs 500ms bootstrap
+- **Integration:** `pipeline_orchestrator.py` wires calibrator to Phase 2 engine
+
+### Fallback Propagation Delay Fix
+- **Issue:** `TransmissionTimeSolver` fallback used `t_propagation_ms=0.0`
+- **Fix:** `phase2_temporal_engine.py` now uses station-typical values:
+  - WWV: 8ms, WWVH: 35ms, CHU: 10ms, BPM: 50ms
+
+### Per-Broadcast Propagation Mode Visualization
+- **Issue:** Propagation mode dropdown showed 9 channels instead of 17 broadcasts
+- **Fix:** `timing-advanced.html` dropdown now shows all 17 broadcasts grouped by station
+- **API:** `/api/v1/timing/mode-probability?station=WWV&freq=10` accepts station/freq params
+- **Backend:** `transmission-time-helpers.js` calculates station-specific mode delays based on geographic distance
+
+### Storage Quota Auto-Cleanup
+- **File:** `binary_archive_writer.py` - `_remove_oldest_files()` method
+- **Behavior:** Automatically removes oldest .bin/.json files when quota exceeded
+
+---
+
+## Next Session Focus: Station Discrimination on SHARED Channels
+
+### The Problem
+The 4 SHARED channels (2.5, 5, 10, 15 MHz) carry signals from **3 stations** (WWV, WWVH, BPM) simultaneously. The system must:
+1. Detect which station(s) are receivable at any moment
+2. Correctly attribute timing measurements to the right station
+3. Handle cases where multiple stations are present
+
+### Current Discrimination Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ SHARED CHANNEL DISCRIMINATION PIPELINE                                       │
+│                                                                             │
+│   Raw IQ → Tone Detection → Station Attribution → D_clock per Station       │
+│                                                                             │
+│   Key Discriminators:                                                       │
+│   1. BCD Subcarrier (100 Hz): WWV vs WWVH timing offset                    │
+│   2. Tick Duration: BPM=10ms vs WWV/WWVH=5ms                               │
+│   3. Voice Announcement: Gender/language (not implemented)                  │
+│   4. Propagation Delay: Physical constraints per station                    │
+│   5. Minute Markers: Different patterns per station                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Files for Discrimination
+
+| File | Purpose |
+|------|---------|
+| `wwvh_discrimination.py` | WWV vs WWVH 8-vote weighted system + BCD correlation |
+| `bpm_discriminator.py` | BPM detection via 10ms tick duration |
+| `multi_station_detector.py` | Physics-based multi-station detection |
+| `timing_calibrator.py` | Physical constraint validation per station |
+
+### Discrimination Methods (from `wwvh_discrimination.py`)
+
+1. **BCD Correlation** - Downsamples to 100 Hz, correlates with WWV/WWVH BCD patterns
+2. **Tick Duration** - Measures 1000 Hz tone duration (5ms vs 10ms)
+3. **Differential Delay** - Compares arrival times to expected propagation delays
+4. **Minute Marker Pattern** - Different second-by-second patterns
+5. **Voice Detection** - Male (WWV) vs Female (WWVH) announcements
+
+### Current Issues to Address
+
+1. **BPM Often Dominates:** On SHARED 10 MHz, BPM (China) is often detected instead of WWV
+2. **Discrimination Confidence:** Need better confidence metrics for station attribution
+3. **Multi-Station Scenarios:** When both WWV and WWVH are receivable, how to handle?
+4. **Propagation Mode per Broadcast:** Each station has different ionospheric path
+
+### API Endpoints for Discrimination
+
+```bash
+# Per-channel discrimination data
+GET /api/v1/channels/:channelName/discrimination/:date
+
+# Multi-station detection results
+GET /api/v1/phase2/multi-station/:channel
+
+# Propagation mode per broadcast
+GET /api/v1/timing/mode-probability?station=WWV&freq=10
+```
+
+### Test Commands
+
+```bash
+# Check which station is detected on SHARED 10 MHz
+curl -s http://localhost:3000/api/v1/timing/phase2-status/SHARED%2010%20MHz | jq '.station'
+
+# View discrimination results
+cat /tmp/timestd-test/phase2/SHARED_10_MHz/discrimination/*.csv | tail -5
+
+# Check BPM detection
+cat /tmp/timestd-test/phase2/SHARED_10_MHz/status/phase2_status.json | jq '.bpm_detected'
+```
 
 ---
 

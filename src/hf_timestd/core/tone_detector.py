@@ -1160,6 +1160,10 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             logger.debug(f"Sample position: decimated={onset_sample_idx}, "
                         f"original={sample_position_original} (scale={scale_factor:.2f})")
         
+        # Use FFT-based tone_power_db as SNR if available (more reliable than correlation-based)
+        # The correlation-based snr_db can be 0 when noise_mean is poorly estimated
+        effective_snr_db = tone_power_db if tone_power_db is not None and tone_power_db > 0 else snr_db
+        
         # Create ToneDetectionResult
         result = ToneDetectionResult(
             station=station_type,
@@ -1167,7 +1171,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             duration_sec=duration,
             timestamp_utc=onset_time,
             timing_error_ms=timing_error_ms,
-            snr_db=snr_db,
+            snr_db=effective_snr_db,
             confidence=confidence,
             use_for_time_snap=use_for_time_snap,
             correlation_peak=float(peak_val),
@@ -1181,7 +1185,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         freq_str = f"{frequency}Hz" if frequency is not None else "??Hz"
         logger.info(f"{self.channel_name}: ✅ {station_type.value} DETECTED! "
                    f"Freq: {freq_str}, Duration: {duration:.1f}s, "
-                   f"Timing error: {timing_error_ms:+.1f}ms, SNR: {snr_db:.1f}dB, "
+                   f"Timing error: {timing_error_ms:+.1f}ms, SNR: {effective_snr_db:.1f}dB, "
                    f"use_for_time_snap={use_for_time_snap}")
         
         return result

@@ -1004,6 +1004,18 @@ class TransmissionTimeSolver:
             emission_offset_samples = emission_rtp - expected_second_rtp
             emission_offset_ms = (emission_offset_samples / self.sample_rate) * 1000
             
+            # STATION-BASED SANITY CHECK: D_clock must be within physical bounds
+            # A properly synchronized system should have D_clock within ~100ms
+            # Even a badly drifted clock should be within ~1000ms
+            # Values like -3700ms indicate corrupted data or wrong second detection
+            MAX_PLAUSIBLE_D_CLOCK_MS = 1000.0
+            if abs(emission_offset_ms) > MAX_PLAUSIBLE_D_CLOCK_MS:
+                logger.warning(
+                    f"D_clock {emission_offset_ms:.1f}ms exceeds plausible bounds "
+                    f"(±{MAX_PLAUSIBLE_D_CLOCK_MS}ms) for {station} - rejecting"
+                )
+                return self._no_solution(arrival_rtp)
+            
             # Check if this looks like valid UTC(NIST)
             # WWV transmits at exact second boundaries, so offset should be ~0
             utc_verified = abs(emission_offset_ms) < 2.0  # Within 2ms of second

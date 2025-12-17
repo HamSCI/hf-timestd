@@ -2728,7 +2728,9 @@ app.get('/api/v1/timing/consensus', async (req, res) => {
 app.get('/api/v1/timing/mode-probability', async (req, res) => {
   try {
     const channel = req.query.channel;
-    const data = await getModeProbabilityData(paths, config, channel);
+    const station = req.query.station;  // For per-broadcast mode data
+    const freq = req.query.freq ? parseFloat(req.query.freq) : null;
+    const data = await getModeProbabilityData(paths, config, channel, station, freq);
     res.json(data);
   } catch (err) {
     console.error('Error getting mode probability data:', err);

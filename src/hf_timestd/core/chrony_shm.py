@@ -132,6 +132,15 @@ class ChronySHM:
                 mode=0o666  # World-readable for chronyd
             )
             logger.info("Created new Chrony SHM segment")
+        except PermissionError as e:
+            # SHM segment exists but we don't have permission
+            # This usually means chronyd created it with restricted permissions
+            logger.error(
+                f"Permission denied accessing Chrony SHM (key=0x{self.key:08x}). "
+                f"The segment exists but is owned by root with restricted permissions. "
+                f"Fix with: sudo ipcrm -M 0x{self.key:08x}  (chronyd will recreate it)"
+            )
+            raise
         
         self._use_sysv = True
     
@@ -223,15 +232,15 @@ class ChronySHM:
             #   64-95: int dummy[8]
             
             data = struct.pack(
-                '@ii q i xxxx q i xxxx iiii II 8i',
+                '@ii q i 4x q i 4x iiii II 8i',
                 1,              # mode = 1 (use count locking)
                 self.count,     # count (sequence number)
                 clock_sec,      # clockTimeStampSec (system time)
                 clock_usec,     # clockTimeStampUSec
-                # xxxx padding
+                # 4x padding for 8-byte alignment
                 recv_sec,       # receiveTimeStampSec (reference/true time)
                 recv_usec,      # receiveTimeStampUSec
-                # xxxx padding
+                # 4x padding for 4-byte alignment
                 leap,           # leap
                 precision,      # precision
                 1,              # nsamples

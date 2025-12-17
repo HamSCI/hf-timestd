@@ -410,57 +410,82 @@ class MultiBroadcastFusion:
         
         BPM filtering: Automatically excludes BPM measurements from UT1 minutes
         (25-29, 55-59) since those transmit UT1 time, not UTC.
+        
+        Note: Analytics service writes daily-rotated CSV files with format:
+            {channel}_clock_offset_{YYYYMMDD}.csv
+        We read today's and yesterday's files to handle day boundaries.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone, timedelta
         from .wwv_constants import BPM_UT1_MINUTES
         
         measurements = []
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
         
+        # Get today and yesterday date strings for daily-rotated files
+        now_dt = datetime.now(timezone.utc)
+        today_str = now_dt.strftime('%Y%m%d')
+        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
+        
         for channel in self.channels:
-            csv_path = self.phase2_dir / channel / 'clock_offset' / 'clock_offset_series.csv'
-            if not csv_path.exists():
+            clock_offset_dir = self.phase2_dir / channel / 'clock_offset'
+            if not clock_offset_dir.exists():
                 continue
             
-            try:
-                with open(csv_path) as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        try:
-                            ts = float(row.get('system_time', 0))
-                            if ts < cutoff:
-                                continue
-                            
-                            station = row.get('station', 'UNKNOWN')
-                            
-                            # BPM UT1 filtering: Skip minutes 25-29 and 55-59
-                            # These transmit UT1 time, not UTC
-                            if station == 'BPM':
-                                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                                if dt.minute in BPM_UT1_MINUTES:
-                                    logger.debug(
-                                        f"Skipping BPM measurement at minute {dt.minute} (UT1 mode)"
-                                    )
+            # Find CSV files matching the daily-rotated pattern
+            # Format: {channel}_clock_offset_{YYYYMMDD}.csv
+            csv_files = []
+            
+            # Try to find today's and yesterday's files (for day boundary handling)
+            for date_str in [today_str, yesterday_str]:
+                # Match pattern: *_clock_offset_{date}.csv
+                for csv_path in clock_offset_dir.glob(f'*_clock_offset_{date_str}.csv'):
+                    csv_files.append(csv_path)
+            
+            # Also check for legacy clock_offset_series.csv (backwards compatibility)
+            legacy_path = clock_offset_dir / 'clock_offset_series.csv'
+            if legacy_path.exists():
+                csv_files.append(legacy_path)
+            
+            for csv_path in csv_files:
+                try:
+                    with open(csv_path) as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            try:
+                                ts = float(row.get('system_time', 0))
+                                if ts < cutoff:
                                     continue
-                            
-                            m = BroadcastMeasurement(
-                                timestamp=ts,
-                                station=station,
-                                frequency_mhz=float(row.get('frequency_mhz', 0)),
-                                d_clock_ms=float(row.get('clock_offset_ms', 0)),
-                                propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
-                                propagation_mode=row.get('propagation_mode', ''),
-                                confidence=float(row.get('confidence', 0)),
-                                snr_db=float(row.get('snr_db', 0)),
-                                quality_grade=row.get('quality_grade', 'D'),
-                                channel_name=channel
-                            )
-                            measurements.append(m)
-                        except (ValueError, KeyError):
-                            continue
-            except Exception as e:
-                logger.debug(f"Error reading {csv_path}: {e}")
+                                
+                                station = row.get('station', 'UNKNOWN')
+                                
+                                # BPM UT1 filtering: Skip minutes 25-29 and 55-59
+                                # These transmit UT1 time, not UTC
+                                if station == 'BPM':
+                                    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                                    if dt.minute in BPM_UT1_MINUTES:
+                                        logger.debug(
+                                            f"Skipping BPM measurement at minute {dt.minute} (UT1 mode)"
+                                        )
+                                        continue
+                                
+                                m = BroadcastMeasurement(
+                                    timestamp=ts,
+                                    station=station,
+                                    frequency_mhz=float(row.get('frequency_mhz', 0)),
+                                    d_clock_ms=float(row.get('clock_offset_ms', 0)),
+                                    propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
+                                    propagation_mode=row.get('propagation_mode', ''),
+                                    confidence=float(row.get('confidence', 0)),
+                                    snr_db=float(row.get('snr_db', 0)),
+                                    quality_grade=row.get('quality_grade', 'D'),
+                                    channel_name=channel
+                                )
+                                measurements.append(m)
+                            except (ValueError, KeyError):
+                                continue
+                except Exception as e:
+                    logger.debug(f"Error reading {csv_path}: {e}")
         
         return measurements
     
@@ -558,19 +583,23 @@ class MultiBroadcastFusion:
         """
         Apply per-broadcast calibration offsets.
         
-        Issue 1.1 Fix (2025-12-08): Now correctly uses per-broadcast keys
-        (station_frequency) instead of per-station keys. This properly accounts
-        for frequency-dependent ionospheric delays (1/f²).
+        Uses per-broadcast keys (station_frequency) to properly account for
+        frequency-dependent systematic offsets including:
+        - Ionospheric delays (1/f² dependence)
+        - Matched filter group delays
+        - Propagation mode differences
         
         Returns calibrated D_clock values.
         """
         calibrated = []
         for m in measurements:
-            # Use station-level calibration (station mean is the ground truth)
-            station_cal = self.calibration.get(m.station)
-            if station_cal:
-                calibrated.append(m.d_clock_ms + station_cal.offset_ms)
+            # Use per-broadcast calibration (station + frequency)
+            broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
+            broadcast_cal = self.calibration.get(broadcast_key)
+            if broadcast_cal:
+                calibrated.append(m.d_clock_ms + broadcast_cal.offset_ms)
             else:
+                # No calibration yet for this broadcast - use raw value
                 calibrated.append(m.d_clock_ms)
         return calibrated
     
@@ -579,19 +608,20 @@ class MultiBroadcastFusion:
         measurements: List[BroadcastMeasurement]
     ):
         """
-        Update calibration offsets per-STATION (not per-broadcast).
+        Update calibration offsets per-BROADCAST (station + frequency).
         
-        Rationale: Each station (WWV, WWVH, CHU) transmits from a single location
-        using a single atomic clock. All frequencies from that station are phase-locked.
-        The station mean is the ground truth; frequency deviations reveal propagation.
+        Each broadcast (e.g., WWV_10.00, CHU_7.85) has its own systematic offset due to:
+        - Ionospheric delays (frequency-dependent, 1/f²)
+        - Matched filter group delays (frequency-dependent)
+        - Propagation mode differences (varies by frequency and time of day)
         
-        Uses CHU as reference (assumed most accurate due to FSK).
-        All stations are calibrated to converge to UTC(NIST) = 0.
+        Per-broadcast calibration learns these offsets to bring each broadcast's
+        D_clock to 0 (UTC alignment).
         """
         if not self.auto_calibrate:
             return
         
-        # Add to history keyed by broadcast (station + frequency) for tracking
+        # Add to history keyed by broadcast (station + frequency)
         for m in measurements:
             broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
             history = self.measurement_history[broadcast_key]
@@ -599,44 +629,38 @@ class MultiBroadcastFusion:
             if len(history) > self.history_max_size:
                 self.measurement_history[broadcast_key] = history[-self.history_max_size:]
         
-        # Aggregate all measurements by STATION (not by broadcast)
-        station_measurements: Dict[str, List[float]] = {'WWV': [], 'WWVH': [], 'CHU': []}
-        
+        # Update calibration per-BROADCAST
         for broadcast_key, history in self.measurement_history.items():
             if len(history) < 5:
                 continue
+            
             recent = history[-30:]
+            d_clocks = [m.d_clock_ms for m in recent]
+            
+            broadcast_mean = np.mean(d_clocks)
+            broadcast_std = np.std(d_clocks)
+            
+            # Offset should bring broadcast mean to 0 (UTC alignment)
+            new_offset = -broadcast_mean
+            
+            # Extract station and frequency from key for logging
             station = recent[0].station
-            if station in station_measurements:
-                station_measurements[station].extend([m.d_clock_ms for m in recent])
-        
-        # Update calibration per-STATION
-        for station, d_clocks in station_measurements.items():
-            if len(d_clocks) < 10:
-                continue
+            freq = recent[0].frequency_mhz
             
-            station_mean = np.mean(d_clocks)
-            station_std = np.std(d_clocks)
-            
-            # Offset should bring station mean to 0 (UTC(NIST) alignment)
-            new_offset = -station_mean
-            
-            logger.debug(f"Calibration update {station}: raw_mean={station_mean:.2f}ms, ideal_offset={new_offset:.2f}ms, n={len(d_clocks)}")
+            logger.debug(f"Calibration update {broadcast_key}: raw_mean={broadcast_mean:.2f}ms, offset={new_offset:.2f}ms, n={len(d_clocks)}")
             
             # Exponential moving average for smooth updates
-            # But don't let alpha get too small or we'll never converge
-            old_cal = self.calibration.get(station)
+            old_cal = self.calibration.get(broadcast_key)
             if old_cal and old_cal.n_samples > 0:
-                # Alpha range: 0.3 (fast) to 0.1 (slow), never slower
-                # This ensures we can track changes within ~10 samples
+                # Alpha range: 0.3 (fast) to 0.1 (slow)
                 alpha = max(0.1, min(0.3, 10.0 / old_cal.n_samples))
                 new_offset = alpha * new_offset + (1 - alpha) * old_cal.offset_ms
             
-            self.calibration[station] = BroadcastCalibration(
+            self.calibration[broadcast_key] = BroadcastCalibration(
                 station=station,
-                frequency_mhz=0.0,  # Station-level, not frequency-specific
+                frequency_mhz=freq,
                 offset_ms=new_offset,
-                uncertainty_ms=station_std / np.sqrt(len(d_clocks)),  # Standard error
+                uncertainty_ms=broadcast_std / np.sqrt(len(d_clocks)),  # Standard error
                 n_samples=len(d_clocks),
                 last_updated=time.time(),
                 reference_station=self.reference_station

@@ -67,6 +67,14 @@ start)
         echo "   📍 Using precise coordinates: ${LATITUDE}°N, ${LONGITUDE}°W"
     fi
     
+    # Check if tiered storage is enabled in config
+    TIERED_STORAGE=$(grep '^tiered_storage' "$CONFIG" | head -1 | awk '{print $3}')
+    TIERED_ARGS=""
+    if [ "$TIERED_STORAGE" = "true" ]; then
+        TIERED_ARGS="--use-tiered-storage"
+        echo "   💾 Tiered storage enabled: reading from /dev/shm hot buffer"
+    fi
+    
     # Create directories
     mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/state" "$DATA_ROOT/status"
     mkdir -p "$DATA_ROOT/phase2"
@@ -90,7 +98,7 @@ start)
           --callsign "$CALLSIGN" --grid-square "$GRID" \
           --receiver-name "HF-TimeStd" \
           --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
-          $COORD_ARGS \
+          $COORD_ARGS $TIERED_ARGS \
           > "$DATA_ROOT/logs/phase2-shared${freq_mhz}.log" 2>&1 &
         
         sleep 0.2
@@ -114,7 +122,7 @@ start)
           --callsign "$CALLSIGN" --grid-square "$GRID" \
           --receiver-name "HF-TimeStd" \
           --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
-          $COORD_ARGS \
+          $COORD_ARGS $TIERED_ARGS \
           > "$DATA_ROOT/logs/phase2-wwv${freq_mhz}.log" 2>&1 &
         
         sleep 0.2
@@ -138,7 +146,7 @@ start)
           --callsign "$CALLSIGN" --grid-square "$GRID" \
           --receiver-name "HF-TimeStd" \
           --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
-          $COORD_ARGS \
+          $COORD_ARGS $TIERED_ARGS \
           > "$DATA_ROOT/logs/phase2-chu${freq_mhz}.log" 2>&1 &
         
         sleep 0.2
@@ -149,7 +157,7 @@ start)
     echo "   ✅ Started $COUNT/9 Phase 2 analytics channels"
     
     # Start Multi-Broadcast Fusion Service
-    # Combines all 13 broadcasts (6 WWV + 4 WWVH + 3 CHU) for UTC(NIST) convergence
+    # Combines all 17 broadcasts (6 WWV + 4 WWVH + 3 CHU + 4 BPM) for UTC(NIST) convergence
     pkill -f "hf_timestd.core.multi_broadcast_fusion" 2>/dev/null
     sleep 0.5
     nohup $PYTHON -m hf_timestd.core.multi_broadcast_fusion \
@@ -158,7 +166,7 @@ start)
       --log-level INFO \
       --enable-chrony \
       > "$DATA_ROOT/logs/phase2-fusion.log" 2>&1 &
-    echo "   🔀 Started Multi-Broadcast Fusion (13 broadcasts → UTC(NIST) → Chrony SHM)"
+    echo "   🔀 Started Multi-Broadcast Fusion (17 broadcasts → UTC(NIST) → Chrony SHM)"
     
     echo "   📄 Logs: $DATA_ROOT/logs/phase2-*.log"
     echo "   📊 Output: $DATA_ROOT/phase2/{CHANNEL}/clock_offset/"

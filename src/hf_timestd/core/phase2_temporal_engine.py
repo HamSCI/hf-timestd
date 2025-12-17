@@ -678,6 +678,7 @@ class Phase2TemporalEngine:
         # B2. BPM Detection (separate discriminator - uses tick duration)
         # BPM shares 2.5/5/10/15 MHz with WWV/WWVH but has 10ms ticks (vs 5ms)
         # Only check on shared frequencies
+        bpm_det = None  # Initialize before conditional block
         bpm_timing_mode = None
         bpm_is_usable = True
         if self.frequency_mhz in (2.5, 5.0, 10.0, 15.0):
@@ -766,7 +767,8 @@ class Phase2TemporalEngine:
             wwv_timing_ms=wwv_det.timing_error_ms if wwv_det else None,
             wwvh_timing_ms=wwvh_det.timing_error_ms if wwvh_det else None,
             chu_timing_ms=chu_det.timing_error_ms if chu_det else None,
-            bpm_timing_ms=bpm_det.measured_delay_ms if bpm_det else None,
+            # BPM timing comes from multi-station detector (measured_toa_ms), not discriminator
+            bpm_timing_ms=multi_station_result.detections.get('BPM', None).measured_toa_ms if multi_station_result.detections.get('BPM') and multi_station_result.detections['BPM'].detected else None,
             bpm_timing_mode=bpm_timing_mode,
             bpm_is_usable_for_utc=bpm_is_usable,
             multi_station_result=multi_station_result,  # Physics-based multi-station detection
@@ -1381,6 +1383,11 @@ class Phase2TemporalEngine:
             t_arrival_ms = time_snap.wwvh_timing_ms
         elif station == 'CHU':
             t_arrival_ms = time_snap.chu_timing_ms
+        elif station == 'BPM':
+            # BPM timing: prefer bpm_timing_ms if available, otherwise use generic timing_error_ms
+            # The generic timing comes from the anchor station (WWV/WWVH) which shares the same
+            # second tick timing as BPM on shared frequencies
+            t_arrival_ms = time_snap.bpm_timing_ms if time_snap.bpm_timing_ms is not None else time_snap.timing_error_ms
             
         # Fallback to generic timing error if specific not available (e.g. single station anchor)
         if t_arrival_ms is None:
@@ -1475,15 +1482,24 @@ class Phase2TemporalEngine:
         except Exception as e:
             logger.error(f"Step 3 TransmissionTimeSolver failed: {e}")
             
+            # Use station's typical propagation delay as fallback (not 0.0)
+            # This ensures physical constraints are satisfied
+            fallback_propagation_ms = {
+                'WWV': 8.0,    # Typical 1-2 hop F-layer
+                'WWVH': 35.0,  # Typical 2-3 hop F-layer
+                'CHU': 10.0,   # Typical 1-2 hop F-layer
+                'BPM': 50.0,   # Typical 3-4 hop F-layer
+            }.get(station, 15.0)
+            
             # Return fallback solution with low confidence
             return TransmissionTimeSolution(
                 d_clock_ms=time_snap.timing_error_ms,  # Use timing error as fallback
                 t_emission_ms=0.0,
                 t_arrival_ms=time_snap.timing_error_ms,
-                t_propagation_ms=0.0,
-                propagation_mode='UNKNOWN',
-                n_hops=0,
-                layer_height_km=0.0,
+                t_propagation_ms=fallback_propagation_ms,
+                propagation_mode='UNK',
+                n_hops=1,
+                layer_height_km=250.0,
                 station=station,
                 frequency_mhz=self.frequency_mhz,
                 confidence=0.1,
@@ -1628,6 +1644,8 @@ class Phase2TemporalEngine:
                 candidate_stations.append('WWVH')
             if time_snap.chu_detected or self._station_from_channel_name() == 'CHU':
                 candidate_stations.append('CHU')
+            if time_snap.bpm_detected:
+                candidate_stations.append('BPM')
                 
             # If no specific tone detections, fallback to dominant/channel station
             if not candidate_stations:

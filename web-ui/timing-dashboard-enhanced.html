@@ -1177,7 +1177,7 @@
                             <span style="font-size: 24px;">🔀</span>
                             <div>
                                 <div style="font-size: 18px; font-weight: 600; color: #fff;">Multi-Broadcast Fusion</div>
-                                <div style="font-size: 13px; color: #6ee7b7;">Combining 13 broadcasts → UTC(NIST)</div>
+                                <div style="font-size: 13px; color: #6ee7b7;">Combining 17 broadcasts → UTC(NIST)</div>
                             </div>
                         </div>
                         <div style="color: #6ee7b7; text-align: center; padding: 20px;">
@@ -1198,7 +1198,7 @@
             
             // Calibration info - aggregate by station
             const rawCal = data.calibration || {};
-            const cal = { WWV: { n_samples: 0 }, WWVH: { n_samples: 0 }, CHU: { n_samples: 0 } };
+            const cal = { WWV: { n_samples: 0 }, WWVH: { n_samples: 0 }, CHU: { n_samples: 0 }, BPM: { n_samples: 0 } };
             
             // Aggregate calibration data by station
             for (const [key, c] of Object.entries(rawCal)) {
@@ -1259,8 +1259,8 @@
                         </div>
                     </div>
                     
-                    <!-- 13 Broadcast Matrix with Convergence -->
-                    <div style="margin-top: 15px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">
+                    <!-- 17 Broadcast Matrix with Convergence -->
+                    <div style="margin-top: 15px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;">
                         <!-- WWV Column -->
                         ${renderStationCalibration('WWV', 'Colorado', '#10b981', '#6ee7b7', '#34d399', 
                             ['2.5', '5', '10', '15', '20', '25'], cal.WWV)}
@@ -1272,10 +1272,14 @@
                         <!-- CHU Column -->
                         ${renderStationCalibration('CHU', 'Canada', '#f59e0b', '#fcd34d', '#fbbf24',
                             ['3.33', '7.85', '14.67'], cal.CHU)}
+                        
+                        <!-- BPM Column -->
+                        ${renderStationCalibration('BPM', 'China', '#f97316', '#fdba74', '#fb923c',
+                            ['2.5', '5', '10', '15'], cal.BPM)}
                     </div>
                     
                     <div style="margin-top: 12px; font-size: 12px; color: #6ee7b7; text-align: center;">
-                        Fusing <strong>${f.n_broadcasts}</strong> of 13 possible broadcasts • Calibration learned from ${Object.values(cal).reduce((sum, c) => sum + (c.n_samples || 0), 0)} samples
+                        Fusing <strong>${f.n_broadcasts}</strong> of 17 possible broadcasts • Calibration learned from ${Object.values(cal).reduce((sum, c) => sum + (c.n_samples || 0), 0)} samples
                     </div>
                 </div>
             `;
@@ -1354,14 +1358,14 @@
             `;
         }
         
-        // 13-Broadcast D_clock Status Table
+        // 17-Broadcast D_clock Status Table
         function renderBroadcastTable(phase2Status) {
             if (!phase2Status || !phase2Status.available) {
                 return `
                     <div class="broadcast-table-container" style="background: #1e293b; border-radius: 10px; 
                                 padding: 20px; margin-bottom: 20px; border: 1px solid #334155;">
                         <div style="font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 10px;">
-                            📻 13-Broadcast D_clock Status
+                            📻 17-Broadcast D_clock Status
                             <a href="/docs/timing-methodology.html#d-clock" class="info-link" title="What is D_clock?">?</a>
                         </div>
                         <div style="color: #64748b; text-align: center; padding: 20px;">
@@ -1371,27 +1375,32 @@
                 `;
             }
             
-            // Define all 13 broadcasts grouped by station
+            // Define all 17 broadcasts grouped by station
             const broadcasts = [
-                // WWV broadcasts (6)
-                { id: 'WWV 2.5 MHz', station: 'WWV', freq: 2.5, channel: 'WWV 2.5 MHz' },
-                { id: 'WWV 5 MHz', station: 'WWV', freq: 5, channel: 'WWV 5 MHz' },
-                { id: 'WWV 10 MHz', station: 'WWV', freq: 10, channel: 'WWV 10 MHz' },
-                { id: 'WWV 15 MHz', station: 'WWV', freq: 15, channel: 'WWV 15 MHz' },
+                // WWV broadcasts (6) - 2.5-15 MHz use SHARED channels, 20/25 MHz are WWV-only
+                { id: 'WWV 2.5 MHz', station: 'WWV', freq: 2.5, channel: 'SHARED 2.5 MHz' },
+                { id: 'WWV 5 MHz', station: 'WWV', freq: 5, channel: 'SHARED 5 MHz' },
+                { id: 'WWV 10 MHz', station: 'WWV', freq: 10, channel: 'SHARED 10 MHz' },
+                { id: 'WWV 15 MHz', station: 'WWV', freq: 15, channel: 'SHARED 15 MHz' },
                 { id: 'WWV 20 MHz', station: 'WWV', freq: 20, channel: 'WWV 20 MHz' },
                 { id: 'WWV 25 MHz', station: 'WWV', freq: 25, channel: 'WWV 25 MHz' },
                 // WWVH broadcasts (4) - shared frequencies with WWV
-                { id: 'WWVH 2.5 MHz', station: 'WWVH', freq: 2.5, channel: 'WWV 2.5 MHz' },
-                { id: 'WWVH 5 MHz', station: 'WWVH', freq: 5, channel: 'WWV 5 MHz' },
-                { id: 'WWVH 10 MHz', station: 'WWVH', freq: 10, channel: 'WWV 10 MHz' },
-                { id: 'WWVH 15 MHz', station: 'WWVH', freq: 15, channel: 'WWV 15 MHz' },
+                { id: 'WWVH 2.5 MHz', station: 'WWVH', freq: 2.5, channel: 'SHARED 2.5 MHz' },
+                { id: 'WWVH 5 MHz', station: 'WWVH', freq: 5, channel: 'SHARED 5 MHz' },
+                { id: 'WWVH 10 MHz', station: 'WWVH', freq: 10, channel: 'SHARED 10 MHz' },
+                { id: 'WWVH 15 MHz', station: 'WWVH', freq: 15, channel: 'SHARED 15 MHz' },
                 // CHU broadcasts (3)
                 { id: 'CHU 3.33 MHz', station: 'CHU', freq: 3.33, channel: 'CHU 3.33 MHz' },
                 { id: 'CHU 7.85 MHz', station: 'CHU', freq: 7.85, channel: 'CHU 7.85 MHz' },
-                { id: 'CHU 14.67 MHz', station: 'CHU', freq: 14.67, channel: 'CHU 14.67 MHz' }
+                { id: 'CHU 14.67 MHz', station: 'CHU', freq: 14.67, channel: 'CHU 14.67 MHz' },
+                // BPM broadcasts (4) - shared frequencies with WWV/WWVH
+                { id: 'BPM 2.5 MHz', station: 'BPM', freq: 2.5, channel: 'SHARED 2.5 MHz' },
+                { id: 'BPM 5 MHz', station: 'BPM', freq: 5, channel: 'SHARED 5 MHz' },
+                { id: 'BPM 10 MHz', station: 'BPM', freq: 10, channel: 'SHARED 10 MHz' },
+                { id: 'BPM 15 MHz', station: 'BPM', freq: 15, channel: 'SHARED 15 MHz' }
             ];
             
-            const stationColors = { 'WWV': '#10b981', 'WWVH': '#3b82f6', 'CHU': '#f59e0b' };
+            const stationColors = { 'WWV': '#10b981', 'WWVH': '#3b82f6', 'CHU': '#f59e0b', 'BPM': '#f97316' };
             
             const rows = broadcasts.map(b => {
                 const chData = phase2Status.channels?.[b.channel];
@@ -1454,7 +1463,7 @@
                             padding: 20px; margin-bottom: 20px; border: 1px solid #334155;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                         <div style="font-size: 16px; font-weight: 600; color: #fff;">
-                            📻 13-Broadcast D_clock Status
+                            📻 17-Broadcast D_clock Status
                             <a href="/docs/timing-methodology.html#d-clock" class="info-link" title="What is D_clock?">?</a>
                         </div>
                         <div style="font-size: 12px; color: #64748b;">

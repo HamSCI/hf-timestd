@@ -486,21 +486,19 @@ class PipelineOrchestrator:
                 calibrator_phase = self.timing_calibrator.phase
                 
                 # Get calibrated search window if available
-                if calibrator_phase != CalibrationPhase.BOOTSTRAP:
-                    # Use narrow search window from calibrator
-                    # Returns (window_half_width_ms, expected_offset_ms)
-                    window_info = self.timing_calibrator.get_search_window_ms(
-                        station=None,  # Will be determined by detection
-                        frequency_mhz=self.config.frequency_hz / 1e6
-                    )
-                    search_window_ms = window_info[0]  # Just the window width
-                    # Update the phase2 engine's search window and station predictor
-                    if hasattr(self.clock_offset_engine, 'phase2_engine'):
-                        self.clock_offset_engine.phase2_engine.config_search_window_ms = search_window_ms
-                        # Wire up station predictor to use RTP calibration history
-                        self.clock_offset_engine.phase2_engine.station_predictor = self.timing_calibrator.predict_station
-                        # Wire up RTP calibration callback for GPSDO-first timing
-                        self.clock_offset_engine.phase2_engine.rtp_calibration_callback = self._get_calibrated_rtp_offset
+                # Use the new get_calibrated_search_window_ms method which returns
+                # a tight window (10-20ms) after calibration vs 500ms during bootstrap
+                search_window_ms = self.timing_calibrator.get_calibrated_search_window_ms()
+                
+                # Update the phase2 engine's search window and station predictor
+                if hasattr(self.clock_offset_engine, 'phase2_engine'):
+                    self.clock_offset_engine.phase2_engine.config_search_window_ms = search_window_ms
+                    # Wire up station predictor to use RTP calibration history
+                    self.clock_offset_engine.phase2_engine.station_predictor = self.timing_calibrator.predict_station
+                    # Wire up RTP calibration callback for GPSDO-first timing
+                    self.clock_offset_engine.phase2_engine.rtp_calibration_callback = self._get_calibrated_rtp_offset
+                    
+                    if calibrator_phase != CalibrationPhase.BOOTSTRAP:
                         logger.debug(f"Using calibrated search window: {search_window_ms:.1f}ms")
                 
                 # Phase 2: Generate D_clock measurement

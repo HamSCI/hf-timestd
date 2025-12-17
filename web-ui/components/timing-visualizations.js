@@ -256,7 +256,8 @@ class ConstellationRadar {
         this.stationVectors = {
             'WWV': { azimuth: 284, label: 'WWV', color: '#3b82f6' },    // Fort Collins, CO (WNW)
             'WWVH': { azimuth: 275, label: 'WWVH', color: '#8b5cf6' },  // Hawaii (W)
-            'CHU': { azimuth: 57, label: 'CHU', color: '#22c55e' }      // Ottawa, Canada (NE)
+            'CHU': { azimuth: 57, label: 'CHU', color: '#22c55e' },     // Ottawa, Canada (NE)
+            'BPM': { azimuth: 342, label: 'BPM', color: '#f97316' }     // Pucheng, China (NNW)
         };
         
         this.chart = null;
@@ -311,8 +312,8 @@ class ConstellationRadar {
         // 2. Group measurements by base station and place pucks on each vector line
         const activeStations = stations.filter(s => s.active !== false);
         
-        // Group by base station (WWV, WWVH, CHU)
-        const stationGroups = { 'WWV': [], 'WWVH': [], 'CHU': [] };
+        // Group by base station (WWV, WWVH, CHU, BPM)
+        const stationGroups = { 'WWV': [], 'WWVH': [], 'CHU': [], 'BPM': [] };
         
         activeStations.forEach(station => {
             const stationUpper = (station.base_station || station.name || '').toUpperCase();
@@ -322,10 +323,12 @@ class ConstellationRadar {
                 stationGroups['WWV'].push(station);
             } else if (stationUpper.includes('CHU')) {
                 stationGroups['CHU'].push(station);
+            } else if (stationUpper.includes('BPM')) {
+                stationGroups['BPM'].push(station);
             }
         });
         
-        // ALWAYS place a puck for each station (3 pucks total)
+        // ALWAYS place a puck for each station (4 pucks total: WWV, WWVH, CHU, BPM)
         Object.entries(this.stationVectors).forEach(([baseStation, vec]) => {
             const measurements = stationGroups[baseStation] || [];
             

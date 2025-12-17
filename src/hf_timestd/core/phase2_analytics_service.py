@@ -158,7 +158,8 @@ class Phase2AnalyticsService:
         sample_rate: int = 20000,
         receiver_grid: str = '',
         station_config: Optional[Dict] = None,
-        poll_interval: float = 10.0
+        poll_interval: float = 10.0,
+        use_tiered_storage: bool = False
     ):
         """
         Initialize Phase 2 analytics service.
@@ -181,6 +182,18 @@ class Phase2AnalyticsService:
         self.receiver_grid = receiver_grid
         self.station_config = station_config or {}
         self.poll_interval = poll_interval
+        self.use_tiered_storage = use_tiered_storage
+        
+        # Initialize tiered storage manager if enabled
+        # This allows reading from hot buffer (/dev/shm) first, then cold (disk)
+        self._tiered_manager = None
+        if use_tiered_storage:
+            try:
+                from .tiered_storage import get_tiered_storage_manager
+                self._tiered_manager = get_tiered_storage_manager()
+                logger.info(f"Tiered storage enabled: hot={self._tiered_manager.hot_root}, cold={self._tiered_manager.cold_root}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize tiered storage: {e}")
         
         # Create output directories using coordinated path structure
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -316,7 +329,8 @@ class Phase2AnalyticsService:
                     'snr_db', 'delay_spread_ms', 'doppler_std_hz', 'fss_db',
                     'wwv_power_db', 'wwvh_power_db', 'discrimination_confidence',
                     'utc_verified', 'multi_station_verified',
-                    'rtp_timestamp', 'processed_at'
+                    'rtp_timestamp', 'processed_at',
+                    'wwv_tick_snr_db', 'wwvh_tick_snr_db', 'chu_tick_snr_db', 'bpm_tick_snr_db'
                 ])
             logger.info(f"Created clock offset CSV: {self.clock_offset_csv}")
     
@@ -385,6 +399,15 @@ class Phase2AnalyticsService:
                     f"({convergence_result.anomaly_sigma:.1f}σ)"
                 )
             
+            # Extract per-station tick SNR values from time_snap
+            # These are the SNR of the detected timing tick for each station
+            # Report 0 if no tick was detected for that station
+            ts = result.time_snap if hasattr(result, 'time_snap') else None
+            wwv_tick_snr = ts.wwv_snr_db if ts and ts.wwv_snr_db is not None else 0.0
+            wwvh_tick_snr = ts.wwvh_snr_db if ts and ts.wwvh_snr_db is not None else 0.0
+            chu_tick_snr = ts.chu_snr_db if ts and ts.chu_snr_db is not None else 0.0
+            bpm_tick_snr = ts.bpm_snr_db if ts and ts.bpm_snr_db is not None else 0.0
+            
             with open(self.clock_offset_csv, 'a', newline='') as f:
                 writer = csv.writer(f)
                 
@@ -401,7 +424,7 @@ class Phase2AnalyticsService:
                     solution.confidence if solution else 0,             # confidence
                     effective_uncertainty,                              # uncertainty_ms (from convergence)
                     quality_grade,                                      # quality_grade (from convergence)
-                    self.last_carrier_snr_db or 0,                      # snr_db
+                    self.last_carrier_snr_db or 0,                      # snr_db (channel SNR)
                     '',                                                 # delay_spread_ms
                     '',                                                 # doppler_std_hz
                     '',                                                 # fss_db
@@ -411,7 +434,11 @@ class Phase2AnalyticsService:
                     convergence_result.is_locked,                       # utc_verified (locked = verified)
                     False,                                              # multi_station_verified
                     rtp_timestamp,                                      # rtp_timestamp
-                    datetime.now(timezone.utc).timestamp()              # processed_at
+                    datetime.now(timezone.utc).timestamp(),             # processed_at
+                    wwv_tick_snr,                                       # wwv_tick_snr_db
+                    wwvh_tick_snr,                                      # wwvh_tick_snr_db
+                    chu_tick_snr,                                       # chu_tick_snr_db
+                    bpm_tick_snr                                        # bpm_tick_snr_db
                 ])
                 
             # Store convergence result for status reporting
@@ -851,34 +878,52 @@ class Phase2AnalyticsService:
         return self._read_binary_minute(target_minute)
     
     def _read_binary_minute(self, target_minute: int):
-        """Read from binary archive format."""
-        from datetime import datetime, timezone
+        """Read from binary archive format.
         
-        # Path: raw_buffer/{CHANNEL}/YYYYMMDD/{minute}.bin
-        channel_dir = self.archive_dir
+        When tiered storage is enabled, checks hot buffer (/dev/shm) first,
+        then falls back to cold buffer (disk). This ensures analytics reads
+        from wherever core recorder wrote the data.
+        """
+        from datetime import datetime, timezone
         
         dt = datetime.fromtimestamp(target_minute, tz=timezone.utc)
         date_str = dt.strftime('%Y%m%d')
         
-        base_path = channel_dir / date_str / f"{target_minute}"
-        json_path = channel_dir / date_str / f"{target_minute}.json"
+        # Use tiered storage manager if available (checks hot buffer first, then cold)
+        if self._tiered_manager is not None:
+            bin_path = self._tiered_manager.find_minute_file(
+                self.channel_name, target_minute, date_str
+            )
+            if bin_path is not None:
+                # Derive json_path from bin_path location
+                json_path = bin_path.parent / f"{target_minute}.json"
+            else:
+                logger.debug(f"Tiered storage: file not found for minute {target_minute}")
+                return None
+        else:
+            # Fallback: use archive_dir directly
+            channel_dir = self.archive_dir
+            base_path = channel_dir / date_str / f"{target_minute}"
+            json_path = channel_dir / date_str / f"{target_minute}.json"
+            
+            # Try to find the binary file (uncompressed or compressed)
+            bin_path = None
+            for ext in ['.bin', '.bin.zst', '.bin.lz4']:
+                candidate = Path(f"{base_path}{ext}")
+                if candidate.exists():
+                    bin_path = candidate
+                    break
+            
+            if bin_path is None:
+                logger.debug(f"Binary file not found: {base_path}.bin[.zst|.lz4]")
+                return None
         
-        # Try to find the binary file (uncompressed or compressed)
-        bin_path = None
+        # Determine compression from file extension
         compression = None
-        for ext in ['.bin', '.bin.zst', '.bin.lz4']:
-            candidate = Path(f"{base_path}{ext}")
-            if candidate.exists():
-                bin_path = candidate
-                if ext == '.bin.zst':
-                    compression = 'zstd'
-                elif ext == '.bin.lz4':
-                    compression = 'lz4'
-                break
-        
-        if bin_path is None:
-            logger.debug(f"Binary file not found: {base_path}.bin[.zst|.lz4]")
-            return None
+        if bin_path.suffix == '.zst' or str(bin_path).endswith('.bin.zst'):
+            compression = 'zstd'
+        elif bin_path.suffix == '.lz4' or str(bin_path).endswith('.bin.lz4'):
+            compression = 'lz4'
         
         logger.debug(f"Found binary file: {bin_path}, compression={compression}")
         
@@ -961,12 +1006,33 @@ class Phase2AnalyticsService:
     def _get_latest_binary_minute(self) -> Optional[int]:
         """Get latest minute from binary archive."""
         from datetime import datetime, timezone
+        from ..paths import channel_name_to_dir
         
+        # If tiered storage is enabled, check hot buffer first
+        if self._tiered_manager is not None:
+            channel_dir_name = channel_name_to_dir(self.channel_name)
+            hot_channel_dir = self._tiered_manager.hot_root / channel_dir_name
+            if hot_channel_dir.exists():
+                today = datetime.now(timezone.utc).strftime('%Y%m%d')
+                day_dir = hot_channel_dir / today
+                if day_dir.exists():
+                    bin_files = list(day_dir.glob('*.bin'))
+                    if bin_files:
+                        minutes = []
+                        for f in bin_files:
+                            try:
+                                minutes.append(int(f.stem))
+                            except ValueError:
+                                pass
+                        if minutes:
+                            latest = max(minutes)
+                            return latest - 120  # 2 minutes behind for safety
+        
+        # Fall back to archive_dir (cold storage)
         # Determine channel_dir based on archive_dir type
         if 'raw_buffer' in str(self.archive_dir):
             channel_dir = self.archive_dir
         else:
-            from ..paths import channel_name_to_dir
             binary_dir = self.archive_dir.parent.parent / 'raw_buffer'
             channel_dir = binary_dir / channel_name_to_dir(self.channel_name)
         
@@ -1134,6 +1200,19 @@ class Phase2AnalyticsService:
                 status['channels'][self.channel_name]['quality_grade'] = quality_grade
                 status['channels'][self.channel_name]['uncertainty_ms'] = unc
                 status['channels'][self.channel_name]['confidence'] = self.last_result.confidence
+                
+                # Add per-station tick SNR values (from multi-station detector)
+                # These are the SNR of the detected timing tick for each station
+                # Report 0 if no tick was detected for that station
+                if self.last_result.time_snap:
+                    ts = self.last_result.time_snap
+                    status['channels'][self.channel_name]['station_snr'] = {
+                        'wwv_snr_db': ts.wwv_snr_db if ts.wwv_snr_db is not None else 0.0,
+                        'wwvh_snr_db': ts.wwvh_snr_db if ts.wwvh_snr_db is not None else 0.0,
+                        'chu_snr_db': ts.chu_snr_db if ts.chu_snr_db is not None else 0.0,
+                        'bpm_snr_db': ts.bpm_snr_db if ts.bpm_snr_db is not None else 0.0,
+                    }
+                
                 if self.last_result.solution:
                     sol = self.last_result.solution
                     status['channels'][self.channel_name]['station'] = sol.station
@@ -1349,6 +1428,8 @@ def main():
     parser.add_argument('--instrument-id', help='Instrument ID')
     parser.add_argument('--latitude', type=float, help='Precise latitude (improves timing ~16μs)')
     parser.add_argument('--longitude', type=float, help='Precise longitude (improves timing ~16μs)')
+    parser.add_argument('--use-tiered-storage', action='store_true',
+                        help='Use tiered storage (read from /dev/shm hot buffer first, then disk)')
     
     args = parser.parse_args()
     
@@ -1381,7 +1462,8 @@ def main():
         sample_rate=args.sample_rate,
         receiver_grid=args.grid_square,
         station_config=station_config,
-        poll_interval=args.poll_interval
+        poll_interval=args.poll_interval,
+        use_tiered_storage=args.use_tiered_storage
     )
     
     # Handle signals

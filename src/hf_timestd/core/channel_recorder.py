@@ -15,7 +15,6 @@ The parent launcher (core_recorder_v3.py) spawns one of these per channel.
 """
 
 import argparse
-import hashlib
 import logging
 import signal
 import sys
@@ -26,7 +25,7 @@ from pathlib import Path
 from typing import Dict, Optional
 from datetime import datetime, timezone
 
-from ka9q import discover_channels, RadiodControl, ChannelInfo
+from ka9q import discover_channels, RadiodControl, ChannelInfo, generate_multicast_ip, Encoding
 
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 
@@ -34,13 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
-    """Generate deterministic multicast IP for hf-timestd channels."""
-    key = f"TIMESTD:{station_id}:{instrument_id}"
-    hash_bytes = hashlib.sha256(key.encode()).digest()
-    octet2 = (hash_bytes[0] % 254) + 1
-    octet3 = hash_bytes[1]
-    octet4 = (hash_bytes[2] % 254) + 1
-    return f"239.{octet2}.{octet3}.{octet4}"
+    """Generate deterministic multicast IP for hf-timestd channels using ka9q."""
+    app_id = f"hf-timestd:{station_id}:{instrument_id}"
+    return generate_multicast_ip(app_id)
 
 
 class ChannelRecorder:
@@ -68,13 +63,16 @@ class ChannelRecorder:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # ka9q connection
-        self.status_address = config.get('ka9q', {}).get('status_address', '239.192.152.141')
+        ka9q_config = config.get('ka9q', {})
+        self.status_address = ka9q_config.get('status_address', '239.192.152.141')
         self.control = RadiodControl(self.status_address)
         
-        # Generate multicast IP
-        station_id = self.station_config.get('id', 'S000000')
-        instrument_id = self.station_config.get('instrument_id', '0')
-        self.data_destination = generate_timestd_multicast_ip(station_id, instrument_id)
+        # Use configured data_destination, or generate from station/instrument IDs as fallback
+        self.data_destination = ka9q_config.get('data_destination')
+        if not self.data_destination:
+            station_id = self.station_config.get('id', 'S000000')
+            instrument_id = self.station_config.get('instrument_id', '0')
+            self.data_destination = generate_timestd_multicast_ip(station_id, instrument_id)
         
         # Channel defaults
         self.channel_defaults = config.get('recorder', {}).get('channel_defaults', {})
@@ -90,51 +88,33 @@ class ChannelRecorder:
         logger.info(f"ChannelRecorder initialized: {channel_name} @ {frequency_hz/1e6:.3f} MHz")
     
     def _setup_channel(self) -> bool:
-        """Create/configure the channel in radiod."""
+        """Request channel from radiod via ka9q ensure_channel API."""
         try:
             sample_rate = self.channel_defaults.get('sample_rate', 20000)
             preset = self.channel_defaults.get('preset', 'iq')
             
-            # Discover existing channels first
-            all_channels = discover_channels(self.status_address, listen_duration=2.0)
+            # Use ka9q ensure_channel to get or create channel with our attributes
+            # This handles: join existing if matches, create new if needed
+            # Get encoding from config (default F32 for 32-bit float IQ data)
+            encoding_str = self.channel_defaults.get('encoding', 'F32').upper()
+            encoding = getattr(Encoding, encoding_str, Encoding.F32)
             
-            # Check if channel already exists at our frequency with our destination
-            existing_ssrc = None
-            for ssrc, ch_info in all_channels.items():
-                if abs(ch_info.frequency - self.frequency_hz) < 100:  # Within 100 Hz
-                    if ch_info.multicast_address == self.data_destination:
-                        existing_ssrc = ssrc
-                        logger.info(f"Found existing channel {self.channel_name}: SSRC={ssrc}")
-                        break
+            self.channel_info = self.control.ensure_channel(
+                frequency_hz=self.frequency_hz,
+                preset=preset,
+                sample_rate=sample_rate,
+                destination=self.data_destination,
+                agc_enable=self.channel_defaults.get('agc', 0),
+                gain=float(self.channel_defaults.get('gain', 0)),
+                encoding=encoding,
+            )
             
-            if existing_ssrc:
-                ssrc = existing_ssrc
-            else:
-                # Create new channel
-                ssrc = self.control.create_channel(
-                    frequency_hz=self.frequency_hz,
-                    sample_rate=sample_rate,
-                    destination=self.data_destination,
-                    preset=preset,
-                    agc_enable=self.channel_defaults.get('agc', 0),
-                    gain=float(self.channel_defaults.get('gain', 0)),
-                )
-                
-                if ssrc is None:
-                    logger.error(f"Failed to create channel for {self.channel_name}")
-                    return False
-                
-                logger.info(f"Created channel {self.channel_name}: SSRC={ssrc}")
-                
-                # Re-discover to get channel info
-                time.sleep(0.5)
-                all_channels = discover_channels(self.status_address, listen_duration=2.0)
-            
-            if ssrc not in all_channels:
-                logger.error(f"Channel {self.channel_name} SSRC={ssrc} not found")
+            if self.channel_info is None:
+                logger.error(f"Failed to get channel for {self.channel_name}")
                 return False
             
-            self.channel_info = all_channels[ssrc]
+            ssrc = self.channel_info.ssrc
+            logger.info(f"Channel ready {self.channel_name}: SSRC={ssrc} on {self.data_destination}")
             
             # Tiered storage config
             tiered_storage = self.recorder_config.get('tiered_storage', False)

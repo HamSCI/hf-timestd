@@ -448,6 +448,11 @@ const STATION_METADATA = {
     azimuth_deg: 35,   // Ottawa, Canada (northeast)
     latitude: 45.2950,
     longitude: -75.7536
+  },
+  'BPM': { 
+    azimuth_deg: 342,  // Pucheng, China (north-northwest)
+    latitude: 34.9,
+    longitude: 109.5
   }
 };
 
@@ -559,6 +564,8 @@ async function getConstellationData(paths, config) {
           baseStation = 'CHU';
         } else if (channelUpper.includes('WWVH')) {
           baseStation = 'WWVH';
+        } else if (channelUpper.includes('BPM')) {
+          baseStation = 'BPM';
         } else if (channelUpper.includes('WWV')) {
           baseStation = 'WWV';
         }
@@ -613,6 +620,7 @@ async function getConsensusData(paths, config) {
         const nameUpper = channelName.toUpperCase();
         if (nameUpper.includes('CHU')) station = 'CHU';
         else if (nameUpper.includes('WWVH')) station = 'WWVH';
+        else if (nameUpper.includes('BPM')) station = 'BPM';
         else if (nameUpper.includes('WWV')) station = 'WWV';
         else station = 'UNKNOWN';
       }
@@ -750,26 +758,89 @@ async function getConsensusData(paths, config) {
 /**
  * Get Mode Probability data - propagation mode ridgeline visualization
  * Uses converged D_clock uncertainty for sharp mode discrimination
+ * 
+ * Now supports per-broadcast (station+frequency) mode calculation:
+ * - station: WWV, WWVH, CHU, or BPM
+ * - freq: frequency in MHz
+ * 
+ * Propagation delays are calculated based on geographic distance to each station.
  */
-async function getModeProbabilityData(paths, config, targetChannel = null) {
+async function getModeProbabilityData(paths, config, targetChannel = null, targetStation = null, targetFreq = null) {
   const channels = config.recorder?.channels || [];
   const enabledChannels = channels.filter(ch => ch.enabled !== false);
   
-  // Expected propagation delays by mode (typical values in ms)
-  // These should ideally come from geographic predictor, but we use typical values
-  const MODE_EXPECTED_DELAYS = {
-    'Ground': { delay_ms: 0.5, spread_ms: 0.3 },   // Ground wave
-    '1E': { delay_ms: 3.5, spread_ms: 0.5 },       // Single E-layer hop
-    '1F': { delay_ms: 4.5, spread_ms: 0.8 },       // Single F-layer hop
-    '2F': { delay_ms: 8.5, spread_ms: 1.2 },       // Double F-layer hop
-    '3F': { delay_ms: 12.5, spread_ms: 1.5 },      // Triple F-layer hop
-    '4F': { delay_ms: 16.5, spread_ms: 2.0 }       // Quad hop
+  // Station distances from receiver (approximate, should come from config)
+  // These are typical distances in km for a Missouri receiver
+  const STATION_DISTANCES_KM = {
+    'WWV': 1120,    // Fort Collins, CO
+    'WWVH': 6600,   // Kekaha, Hawaii
+    'CHU': 1522,    // Ottawa, Canada
+    'BPM': 11500    // Pucheng, China
   };
   
+  // Calculate mode delays based on station distance
+  // Formula: delay = path_length / speed_of_light
+  // For N-hop F2 layer: path_length ≈ N * 2 * sqrt(h² + (d/(2N))²)
+  // where h = F2 layer height (~300 km), d = ground distance
+  function calculateModeDelays(stationName) {
+    const d = STATION_DISTANCES_KM[stationName] || 1500;  // Default 1500 km
+    const h = 300;  // F2 layer height in km
+    const c = 299792.458;  // Speed of light km/s
+    
+    // Ground wave (only viable for short distances)
+    const groundDelay = d / c * 1000;  // ms
+    
+    // N-hop delays
+    const delays = {};
+    delays['Ground'] = { delay_ms: groundDelay, spread_ms: 0.1, viable: d < 200 };
+    
+    for (let n = 1; n <= 4; n++) {
+      const hopDist = d / (2 * n);
+      const pathLength = n * 2 * Math.sqrt(h * h + hopDist * hopDist);
+      const delayMs = pathLength / c * 1000;
+      const spreadMs = 0.3 + n * 0.3;  // Uncertainty increases with hops
+      
+      // Check if mode is viable (elevation angle > 5°)
+      const elevAngle = Math.atan(h / hopDist) * 180 / Math.PI;
+      const viable = elevAngle > 5 && elevAngle < 85;
+      
+      delays[`${n}F`] = { delay_ms: delayMs, spread_ms: spreadMs, viable };
+    }
+    
+    // Also add E-layer modes for shorter paths
+    const eHeight = 110;  // E layer height
+    for (let n = 1; n <= 2; n++) {
+      const hopDist = d / (2 * n);
+      const pathLength = n * 2 * Math.sqrt(eHeight * eHeight + hopDist * hopDist);
+      const delayMs = pathLength / c * 1000;
+      delays[`${n}E`] = { delay_ms: delayMs, spread_ms: 0.3, viable: d < 2000 };
+    }
+    
+    return delays;
+  }
+  
+  // Mode delays will be calculated after we find data (need to know actual station)
+  
   // Filter to specific channel if requested
-  const searchChannels = targetChannel 
-    ? enabledChannels.filter(ch => (ch.description || `Channel ${ch.ssrc}`) === targetChannel)
-    : enabledChannels;
+  // Also filter by frequency if provided (channel names contain frequency, e.g., "SHARED 10 MHz")
+  let searchChannels = enabledChannels;
+  
+  if (targetChannel) {
+    searchChannels = searchChannels.filter(ch => (ch.description || `Channel ${ch.ssrc}`) === targetChannel);
+  } else if (targetFreq) {
+    // Filter by frequency - match channels containing the frequency in their name
+    // e.g., targetFreq=10 matches "SHARED 10 MHz", "WWV 10 MHz", etc.
+    searchChannels = searchChannels.filter(ch => {
+      const name = ch.description || `Channel ${ch.ssrc}`;
+      // Match patterns like "10 MHz", "10.0 MHz", "2.5 MHz"
+      const freqMatch = name.match(/(\d+\.?\d*)\s*MHz/i);
+      if (freqMatch) {
+        const channelFreq = parseFloat(freqMatch[1]);
+        return Math.abs(channelFreq - targetFreq) < 0.1;  // Allow small tolerance
+      }
+      return false;
+    });
+  }
   
   // Find best channel with convergence data
   let bestData = null;
@@ -780,6 +851,11 @@ async function getModeProbabilityData(paths, config, targetChannel = null) {
     const status = await getPhase2AnalyticsStatus(channelName, paths);
     
     if (status.available && status.propagation_delay_ms !== undefined) {
+      // If a specific station was requested, only use data from that station
+      if (targetStation && status.station !== targetStation) {
+        continue;  // Skip - wrong station for this broadcast
+      }
+      
       // Get convergence uncertainty - lower is better
       const uncertainty = status.uncertainty_ms || 100;
       const isLocked = status.convergence?.is_locked || 
@@ -806,10 +882,13 @@ async function getModeProbabilityData(paths, config, targetChannel = null) {
   }
   
   if (!bestData || bestData.measured_delay === null) {
-    // No data - return flat probabilities
+    // No data - return flat probabilities using requested or default station
+    const defaultStation = targetStation || 'WWV';
+    const defaultDelays = calculateModeDelays(defaultStation);
     return {
       available: false,
-      candidates: Object.entries(MODE_EXPECTED_DELAYS).map(([mode, info]) => ({
+      station: defaultStation,
+      candidates: Object.entries(defaultDelays).map(([mode, info]) => ({
         mode,
         delay_ms: info.delay_ms,
         probability: 0.0,
@@ -820,6 +899,11 @@ async function getModeProbabilityData(paths, config, targetChannel = null) {
       message: 'Waiting for convergence...'
     };
   }
+  
+  // Calculate mode delays for the ACTUAL detected station (not the requested one)
+  // This is critical: propagation delays depend on geographic distance to the station
+  const actualStation = bestData.station || targetStation || 'WWV';
+  const MODE_EXPECTED_DELAYS = calculateModeDelays(actualStation);
   
   // Calculate mode probabilities using Gaussian likelihood
   // P(mode|measured) ∝ exp(-0.5 * ((measured - expected) / σ)²)

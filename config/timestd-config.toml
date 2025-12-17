@@ -12,6 +12,7 @@ longitude = -92.127974
 
 [ka9q]
 status_address = "bee1-hf-status.local"
+data_destination = "239.103.26.231"
 auto_create_channels = true
 
 [recorder]
@@ -42,7 +43,7 @@ preset = "iq"
 sample_rate = 20000
 agc = 0
 gain = 0
-encoding = "float"
+encoding = "F32"
 
 [[recorder.channels]]
 frequency_hz = 2500000
@@ -89,17 +90,6 @@ max_retries = 5
 retry_delay_seconds = 300
 exponential_backoff = true
 max_queue_size_gb = 100
-
-[uploader.sftp]
-host = "pswsnetwork.eng.ua.edu"
-port = 22
-user = "S000171"
-ssh_key = "/home/wsprdaemon/.ssh/id_rsa"
-remote_base_path = "/"
-bandwidth_limit_kbps = 0
-verify_after_upload = true
-delete_after_upload = false
-create_trigger_directory = true
 
 [uploader.metadata]
 include_extended_metadata = false

@@ -57,7 +57,48 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Timing calibrator state file version (increment on schema changes)
-TIMING_CALIBRATOR_STATE_VERSION = 1
+TIMING_CALIBRATOR_STATE_VERSION = 2  # Incremented for anchor-based calibration
+
+# =============================================================================
+# ANCHOR STATIONS AND PHYSICAL CONSTRAINTS
+# =============================================================================
+# Anchor stations are unambiguous (unique frequencies or WWV-only frequencies)
+# and provide the reference RTP offset that all other channels must use.
+#
+# Physical arrival order (based on distance from receiver in Missouri):
+#   WWV (Colorado, ~1120 km) < CHU (Ottawa, ~1522 km) < WWVH (Hawaii, ~6600 km) < BPM (China, ~11500 km)
+#
+# Light-speed delays:
+#   WWV: ~3.7 ms, CHU: ~5.1 ms, WWVH: ~22 ms, BPM: ~38 ms
+#
+# With ionospheric propagation (1-3 hops), actual delays are higher but ORDER is preserved.
+
+# Anchor channels: unambiguous stations with unique or WWV-only frequencies
+ANCHOR_CHANNELS = {
+    'CHU 3.33 MHz',    # CHU-only frequency
+    'CHU 7.85 MHz',    # CHU-only frequency  
+    'CHU 14.67 MHz',   # CHU-only frequency
+    'WWV 20 MHz',      # WWV-only frequency
+    'WWV 25 MHz',      # WWV-only frequency
+}
+
+# Minimum light-speed propagation delays (ms) - signals CANNOT arrive before these
+# These are hard physical constraints based on distance
+MINIMUM_PROPAGATION_DELAY_MS = {
+    'WWV': 3.5,    # ~1120 km / c
+    'CHU': 5.0,    # ~1522 km / c
+    'WWVH': 21.0,  # ~6600 km / c
+    'BPM': 37.0,   # ~11500 km / c
+}
+
+# Expected propagation delay ranges (ms) including ionospheric paths
+# (min, typical, max) - used for search window positioning
+EXPECTED_PROPAGATION_DELAY_MS = {
+    'WWV': (4.0, 8.0, 20.0),     # 1-2 hop F-layer
+    'CHU': (5.5, 10.0, 25.0),    # 1-2 hop F-layer
+    'WWVH': (22.0, 35.0, 60.0),  # 2-3 hop F-layer
+    'BPM': (38.0, 50.0, 80.0),   # 3-4 hop F-layer
+}
 
 
 class CalibrationPhase(Enum):
@@ -211,6 +252,13 @@ class TimingCalibrator:
         # Per-channel RTP calibration
         self.rtp_calibration: Dict[str, RPTCalibration] = {}
         
+        # Global anchor RTP offset (shared across all channels since they use same GPSDO)
+        # This is established from anchor channels (CHU, WWV 20/25 MHz) and used to
+        # predict signal locations on shared frequencies
+        self.global_rtp_offset: Optional[int] = None
+        self.global_rtp_offset_source: Optional[str] = None  # Which anchor established it
+        self.global_rtp_offset_confidence: float = 0.0
+        
         # Bootstrap tracking
         self.bootstrap_detections: List[Dict] = []
         self.bootstrap_start_time = time.time()
@@ -292,9 +340,15 @@ class TimingCalibrator:
             
             self.stats = state.get('stats', self.stats)
             
+            # Restore global RTP offset
+            self.global_rtp_offset = state.get('global_rtp_offset')
+            self.global_rtp_offset_source = state.get('global_rtp_offset_source')
+            self.global_rtp_offset_confidence = state.get('global_rtp_offset_confidence', 0.0)
+            
             logger.info(f"Loaded timing calibration: phase={self.phase.value}, "
                        f"{len(self.station_calibration)} stations, "
-                       f"{len(self.rtp_calibration)} channels")
+                       f"{len(self.rtp_calibration)} channels, "
+                       f"global_offset={self.global_rtp_offset}")
                        
         except Exception as e:
             logger.warning(f"Failed to load timing calibration: {e}")
@@ -360,6 +414,9 @@ class TimingCalibrator:
                     state = {
                         'version': TIMING_CALIBRATOR_STATE_VERSION,
                         'phase': self.phase.value,
+                        'global_rtp_offset': self.global_rtp_offset,
+                        'global_rtp_offset_source': self.global_rtp_offset_source,
+                        'global_rtp_offset_confidence': self.global_rtp_offset_confidence,
                         'station_calibration': {
                             station: {
                                 'propagation_delay_ms': cal.propagation_delay_ms,
@@ -501,6 +558,119 @@ class TimingCalibrator:
         }
         return (50.0, default_delays.get(station, 10.0))
     
+    def _validate_physical_constraints(
+        self,
+        station: str,
+        propagation_delay_ms: float,
+        d_clock_ms: float
+    ) -> bool:
+        """
+        Validate detection against physical constraints.
+        
+        Enforces:
+        1. Propagation delay >= minimum light-speed delay for station
+        2. Propagation delay within expected ionospheric range
+        3. D_clock within plausible bounds (±50ms after calibration)
+        
+        Returns:
+            True if detection is physically plausible, False otherwise
+        """
+        # Get minimum delay for this station (light-speed constraint)
+        min_delay = MINIMUM_PROPAGATION_DELAY_MS.get(station, 0.0)
+        if propagation_delay_ms < min_delay - 1.0:  # 1ms tolerance for measurement noise
+            logger.warning(
+                f"Physical constraint violation: {station} propagation_delay={propagation_delay_ms:.1f}ms "
+                f"< minimum={min_delay:.1f}ms (light-speed limit)"
+            )
+            return False
+        
+        # Get expected delay range for this station
+        expected_range = EXPECTED_PROPAGATION_DELAY_MS.get(station)
+        if expected_range:
+            min_expected, typical, max_expected = expected_range
+            # Allow some margin beyond expected range for unusual propagation
+            if propagation_delay_ms < min_expected - 5.0:
+                logger.warning(
+                    f"Physical constraint violation: {station} propagation_delay={propagation_delay_ms:.1f}ms "
+                    f"< expected_min={min_expected:.1f}ms"
+                )
+                return False
+            if propagation_delay_ms > max_expected + 20.0:  # Allow 20ms margin for multi-hop
+                logger.warning(
+                    f"Physical constraint violation: {station} propagation_delay={propagation_delay_ms:.1f}ms "
+                    f"> expected_max={max_expected:.1f}ms + 20ms margin"
+                )
+                return False
+        
+        # After calibration, constrain D_clock to plausible range
+        # Once calibrated, D_clock should be within ±50ms of 0
+        if self.phase != CalibrationPhase.BOOTSTRAP:
+            if abs(d_clock_ms) > 50.0:
+                logger.warning(
+                    f"Physical constraint violation: {station} D_clock={d_clock_ms:+.1f}ms "
+                    f"exceeds ±50ms bound (calibrated phase)"
+                )
+                return False
+        
+        return True
+    
+    def get_station_search_window(self, station: str) -> Tuple[float, float, float]:
+        """
+        Get the search window for a specific station based on calibration state.
+        
+        Returns:
+            Tuple of (center_ms, window_half_width_ms, max_delay_ms)
+            - center_ms: Expected arrival time (propagation delay)
+            - window_half_width_ms: Half-width of search window
+            - max_delay_ms: Maximum plausible delay (hard cutoff)
+        """
+        # Get expected delay range for this station
+        expected_range = EXPECTED_PROPAGATION_DELAY_MS.get(station, (5.0, 15.0, 50.0))
+        min_expected, typical, max_expected = expected_range
+        
+        # If we have calibrated data for this station, use it
+        if station in self.station_calibration:
+            cal = self.station_calibration[station]
+            center_ms = cal.propagation_delay_ms
+            # Window based on observed std dev, but at least 3ms
+            window_half_ms = max(3.0, cal.propagation_delay_std_ms * 3.0)
+            # After calibration, tighten the window significantly
+            if self.phase != CalibrationPhase.BOOTSTRAP and cal.n_samples >= 10:
+                window_half_ms = max(2.0, cal.propagation_delay_std_ms * 2.0)
+        else:
+            # Use typical expected delay
+            center_ms = typical
+            # Wide window during bootstrap
+            window_half_ms = (max_expected - min_expected) / 2.0
+        
+        # Hard cutoff at max expected + margin
+        max_delay_ms = max_expected + 20.0
+        
+        logger.debug(
+            f"Search window for {station}: center={center_ms:.1f}ms, "
+            f"±{window_half_ms:.1f}ms, max={max_delay_ms:.1f}ms"
+        )
+        
+        return (center_ms, window_half_ms, max_delay_ms)
+    
+    def get_calibrated_search_window_ms(self) -> float:
+        """
+        Get the overall search window width based on calibration phase.
+        
+        During bootstrap: 500ms (wide search)
+        After calibration: 10-20ms (narrow search centered on expected)
+        """
+        if self.phase == CalibrationPhase.BOOTSTRAP:
+            return 500.0
+        
+        # After calibration, use narrow window
+        # The window should be tight enough to reject false detections
+        # but wide enough to handle ionospheric variability
+        if self.global_rtp_offset is not None and self.global_rtp_offset_confidence > 0.5:
+            return 10.0  # Very tight - we know exactly where to look
+        else:
+            return 20.0  # Moderately tight
+    
     def update_from_detection(
         self,
         station: str,
@@ -518,7 +688,19 @@ class TimingCalibrator:
         
         During bootstrap, high-quality detections contribute to calibration.
         After bootstrap, detections confirm/refine the calibration.
+        
+        Physical constraints are enforced:
+        - Propagation delay must be >= minimum light-speed delay for station
+        - Propagation delay must be within expected range for station
         """
+        # Validate against physical constraints BEFORE accepting detection
+        if not self._validate_physical_constraints(station, propagation_delay_ms, d_clock_ms):
+            logger.debug(
+                f"Rejected detection: {station} on {channel_name} - "
+                f"propagation_delay={propagation_delay_ms:.1f}ms violates physical constraints"
+            )
+            return  # Reject physically impossible detection
+        
         # Reload state from disk to merge with other processes' updates
         # This is necessary because multiple channel recorder processes share the state file
         self._load_state()
@@ -551,8 +733,9 @@ class TimingCalibrator:
         )
         
         # Update RTP calibration with the detected station
+        # Pass propagation_delay_ms to normalize the RTP offset across channels
         self._update_rtp_calibration(
-            channel_name, frequency_mhz, rtp_timestamp, minute_boundary, snr_db, confidence, station
+            channel_name, frequency_mhz, rtp_timestamp, minute_boundary, snr_db, confidence, station, propagation_delay_ms
         )
         
         # Save state after every detection during bootstrap (multi-process coordination)
@@ -612,10 +795,76 @@ class TimingCalibrator:
         minute_boundary: int,
         snr_db: float,
         confidence: float,
-        station: str = 'WWV'
+        station: str = 'WWV',
+        propagation_delay_ms: float = 0.0
     ):
-        """Update RTP-to-UTC calibration for a channel."""
-        rtp_offset = rtp_timestamp % self.samples_per_minute
+        """Update RTP-to-UTC calibration using anchor-based approach.
+        
+        ANCHOR-BASED CALIBRATION:
+        -------------------------
+        1. Anchor channels (CHU, WWV 20/25 MHz) establish the global RTP offset
+        2. All channels share the same GPSDO clock, so they MUST have the same
+           normalized RTP offset (after subtracting propagation delay)
+        3. Non-anchor channels use the global offset to validate their detections
+        
+        PHYSICAL CONSTRAINTS:
+        ---------------------
+        Signals must arrive in order: WWV < CHU < WWVH < BPM
+        Any detection that violates this order is rejected or re-attributed.
+        """
+        # Normalize RTP offset by subtracting propagation delay
+        # This gives us the RTP timestamp at the emission time (second boundary)
+        propagation_samples = round(propagation_delay_ms * self.sample_rate / 1000.0)
+        normalized_rtp = rtp_timestamp - propagation_samples
+        rtp_offset = normalized_rtp % self.samples_per_minute
+        
+        # Check if this is an anchor channel
+        is_anchor = channel_name in ANCHOR_CHANNELS
+        
+        # Log anchor channel detections at INFO level for visibility
+        if is_anchor:
+            logger.info(f"⚓ Anchor channel {channel_name}: snr_db={snr_db:.1f}, confidence={confidence:.2f}, rtp_offset={rtp_offset}")
+        
+        # Update global RTP offset from anchor channels
+        # Use low SNR threshold since SNR may not always be populated
+        # Accept any anchor detection with reasonable confidence
+        if is_anchor and (snr_db > 5.0 or confidence > 0.3):
+            if self.global_rtp_offset is None:
+                # First anchor detection - establish global offset
+                self.global_rtp_offset = rtp_offset
+                self.global_rtp_offset_source = channel_name
+                self.global_rtp_offset_confidence = min(1.0, snr_db / 30.0)
+                logger.info(
+                    f"🎯 Global RTP offset established from anchor {channel_name}: "
+                    f"{rtp_offset} samples (SNR={snr_db:.1f}dB)"
+                )
+            else:
+                # Verify consistency with existing global offset
+                offset_diff = abs(rtp_offset - self.global_rtp_offset)
+                if offset_diff > 20:  # More than 1ms difference
+                    logger.warning(
+                        f"Anchor {channel_name} offset {rtp_offset} differs from global "
+                        f"{self.global_rtp_offset} by {offset_diff} samples ({offset_diff*0.05:.2f}ms)"
+                    )
+                else:
+                    # Weighted average update
+                    weight = min(1.0, snr_db / 30.0)
+                    old_weight = self.global_rtp_offset_confidence
+                    total_weight = old_weight + weight
+                    self.global_rtp_offset = round(
+                        (self.global_rtp_offset * old_weight + rtp_offset * weight) / total_weight
+                    )
+                    self.global_rtp_offset_confidence = min(1.0, total_weight)
+        
+        # For non-anchor channels, validate against global offset if available
+        if not is_anchor and self.global_rtp_offset is not None:
+            offset_diff = abs(rtp_offset - self.global_rtp_offset)
+            if offset_diff > 40:  # More than 2ms difference - suspicious
+                logger.warning(
+                    f"Channel {channel_name} offset {rtp_offset} differs from global "
+                    f"{self.global_rtp_offset} by {offset_diff} samples ({offset_diff*0.05:.2f}ms) - "
+                    f"possible wrong station attribution"
+                )
         
         if channel_name not in self.rtp_calibration:
             self.rtp_calibration[channel_name] = RPTCalibration(
