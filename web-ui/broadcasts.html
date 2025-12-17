@@ -18,22 +18,6 @@
             height: 600px;
         }
 
-        .lane-buffer {
-            min-width: 40px;
-            position: relative;
-        }
-
-        .lane-header {
-            writing-mode: vertical-rl;
-            transform: rotate(180deg);
-            text-align: center;
-            color: var(--text-secondary);
-            font-size: 11px;
-            padding-bottom: 5px;
-            border-bottom: 1px solid var(--surface-border);
-            height: 100px;
-        }
-
         .lane-group-label {
             grid-column: span 1;
             text-align: center;
@@ -63,6 +47,64 @@
         .waterfall-section {
             margin-top: 20px;
             height: 400px;
+        }
+
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-content {
+            background-color: #0f172a;
+            margin: 5% auto;
+            padding: 20px;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 1200px;
+            height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 10px;
+        }
+
+        .modal-close {
+            color: #94a3b8;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: #fff;
+        }
+
+        .header-clickable {
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .header-clickable:hover {
+            background: #334155 !important;
+            border: 1px solid #64748b;
         }
     </style>
 </head>
@@ -98,6 +140,9 @@
             <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">
                 Likelihood of signal presence. <span style="color:#4ade80">■ High Conf</span> <span
                     style="color:#facc15">■ Ambiguous</span> <span style="color:#ef4444">■ Unlikely</span>
+                <br>
+                <span style="color:#38bdf8">ℹ️ Click column headers to view detailed Signal vs. Solar Zenith
+                    graph</span>
             </p>
 
             <!-- Headers -->
@@ -135,10 +180,22 @@
         </footer>
     </div>
 
+    <!-- Modal for Detailed Graph -->
+    <div id="graph-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-title" style="margin: 0; font-size: 18px;">Detailed Analysis</h2>
+                <span class="modal-close" onclick="closeModal()">&times;</span>
+            </div>
+            <div id="modal-plot" style="width: 100%; flex-grow: 1;"></div>
+        </div>
+    </div>
+
     <script src="/components/theme-toggle.js"></script>
     <script src="/components/navigation.js"></script>
     <script>
         window.TIMESTD_CURRENT_PAGE = 'broadcasts';
+        let CURRENT_HISTORY_DATA = {}; // Store data globally for modal access
 
         // Broadcast Defs
         const BROADCASTS = [
@@ -161,6 +218,7 @@
             try {
                 const res = await fetch(`/api/v1/broadcasts/history?date=${dateStr}`);
                 const json = await res.json();
+                CURRENT_HISTORY_DATA = json.history; // Store for modal
                 renderMatrix(json.history);
                 renderWaterfall(json.history);
 
@@ -182,9 +240,11 @@
 
             BROADCASTS.forEach(b => {
                 const div = document.createElement('div');
-                div.className = 'lane-group-label';
+                div.className = 'lane-group-label header-clickable';
                 div.textContent = `${b.name} ${b.freq}`;
                 div.style.fontSize = '9px';
+                div.title = `Click to view Signal vs Zenith graph for ${b.name} ${b.freq}MHz`;
+                div.onclick = () => openStationGraph(b.name, b.freq);
                 headers.appendChild(div);
             });
 
@@ -244,17 +304,10 @@
                 ctx.stroke();
             }
 
-            // CSS Grid uses 'gap: 2px'
-            // We must replicate this layout logic
-            // Scroll Sync Logic
+            // Sync Scroll
             const axisContainer = wrapper.children[0];
             const matrixContainer = wrapper.children[1];
-
-            // Set axis container to hidden scroll
             axisContainer.style.overflow = 'hidden';
-            axisContainer.classList.add('hide-scrollbar'); // Clean look
-
-            // Sync
             matrixContainer.onscroll = () => {
                 axisContainer.scrollTop = matrixContainer.scrollTop;
             };
@@ -269,19 +322,11 @@
                 const laneData = history[key];
                 if (!laneData || !laneData.data) return;
 
-                // Calculate x position exactly as CSS Grid does
-                // x = sum of widths + sum of gaps so far
                 const x = i * (laneWidth + gap);
 
                 laneData.data.forEach(pt => {
-                    // pt.t is unix timestamp. Convert to minute of day (0-1439).
                     const date = new Date(pt.t * 1000);
                     const minuteOfDay = date.getUTCHours() * 60 + date.getUTCMinutes();
-
-                    // Width Logic (Likelihood = Width)
-                    // Map SNR to 0-1 range.
-                    // < 0 dB = 0 width (invisible)
-                    // > 12 dB = 100% width
                     const snr = pt.snr;
                     let likelihood = 0;
                     if (snr <= 0) likelihood = 0;
@@ -289,18 +334,122 @@
                     else likelihood = snr / 12.0;
 
                     if (likelihood > 0) {
-                        ctx.fillStyle = getStationColor(b.name, 1.0); // Solid color
-
-                        // Calculate bar dimensions
+                        ctx.fillStyle = getStationColor(b.name, 1.0);
                         const barWidth = laneWidth * likelihood;
-                        const xOffset = (laneWidth - barWidth) / 2; // Center the bar
-
-                        // Draw centered bar
+                        const xOffset = (laneWidth - barWidth) / 2;
                         ctx.fillRect(x + xOffset, minuteOfDay, barWidth, 1);
                     }
                 });
             });
         }
+
+        async function openStationGraph(stationName, frequency) {
+            const modal = document.getElementById('graph-modal');
+            const title = document.getElementById('modal-title');
+            title.textContent = `${stationName} ${frequency} MHz - Signal Likelihood & Solar Zenith`;
+            modal.style.display = 'block';
+
+            // Show loading placeholder
+            Plotly.newPlot('modal-plot', [], { title: 'Loading data...' });
+
+            const dateStr = document.getElementById('date-selector').value.replace(/-/g, '');
+
+            // 1. Get Signal Data
+            const key = `${stationName}_${frequency}`;
+            const laneData = CURRENT_HISTORY_DATA[key];
+
+            const signalTrace = {
+                x: [],
+                y: [],
+                mode: 'markers', // DOTS as requested
+                type: 'scatter',
+                name: 'Signal Likelihood',
+                marker: { size: 4, color: getStationColor(stationName, 1.0) },
+                yaxis: 'y1'
+            };
+
+            if (laneData && laneData.data) {
+                laneData.data.forEach(pt => {
+                    if (pt.snr > 0) {
+                        const date = new Date(pt.t * 1000);
+                        let likelihood = Math.min(1.0, pt.snr / 12.0);
+                        signalTrace.x.push(date.toISOString());
+                        signalTrace.y.push(likelihood);
+                    }
+                });
+            }
+
+            // 2. Get Solar Zenith Data
+            const elevationTrace = {
+                x: [],
+                y: [],
+                mode: 'lines',
+                type: 'scatter',
+                name: 'Solar Elevation (Midpoint)',
+                line: { color: '#f59e0b', width: 2, dash: 'dot' },
+                yaxis: 'y2'
+            };
+
+            try {
+                const res = await fetch(`/api/v1/propagation/solar-zenith?station=${stationName}&date=${dateStr}`);
+                if (res.ok) {
+                    const solarData = await res.json();
+                    solarData.series.forEach(pt => {
+                        elevationTrace.x.push(pt.time);
+                        // Convert Zenith to Elevation: Elev = 90 - Zenith
+                        elevationTrace.y.push(90 - pt.zenith);
+                    });
+                } else {
+                    console.warn("Solar zenith fetch failed:", res.status);
+                }
+            } catch (e) {
+                console.error("Solar zenith fetch failed", e);
+            }
+
+            // 3. Render Graph (Robustly, even if solar data missing)
+            const layout = {
+                paper_bgcolor: '#0f172a',
+                plot_bgcolor: '#0f172a',
+                font: { color: '#94a3b8' },
+                xaxis: {
+                    title: 'Time (UTC)',
+                    gridcolor: '#1e293b'
+                },
+                yaxis: {
+                    title: 'Signal Likelihood (0-1)',
+                    range: [0, 1.1],
+                    gridcolor: '#1e293b'
+                },
+                yaxis2: {
+                    title: 'Solar Elevation (°)',
+                    overlaying: 'y',
+                    side: 'right',
+                    range: [-90, 90],
+                    gridcolor: '#1e293b',
+                    zeroline: true,
+                    zerolinecolor: '#475569'
+                },
+                margin: { t: 50, b: 50, l: 60, r: 60 },
+                legend: { x: 0.5, y: 1.1, orientation: 'h', xanchor: 'center' }
+            };
+
+            // Use 'elevationTrace' correctly here
+            Plotly.newPlot('modal-plot', [signalTrace, elevationTrace], layout, { responsive: true });
+        }
+
+        function closeModal() {
+            document.getElementById('graph-modal').style.display = 'none';
+        }
+
+        // Close on outside click
+        window.onclick = function (event) {
+            const modal = document.getElementById('graph-modal');
+            if (event.target == modal) {
+                modal.style.display = 'none';
+            }
+        }
+
+
 
         function getStationColor(name, alpha = 1.0) {
             if (name === 'WWV') return `rgba(56, 189, 248, ${alpha})`; // Sky blue

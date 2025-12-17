@@ -120,6 +120,15 @@ GET /api/v1/system/status        - System processes
 GET /api/v1/channels/status      - Per-channel status
 GET /api/v1/carrier/quality      - Carrier metrics
 GET /api/v1/channels/:name/discrimination/:date - Discrimination data
+- **`GET /api/v1/broadcasts/history?date=YYYYMMDD`**
+  - **Purpose**: Returns 24-hour presence data (SNR, D_clock) for all 17 broadcasts.
+  - **Source**: `analytics/{channel}/{YYYY}/{MM}/clock_offset_series.csv`.
+  - **Response**: `{ history: { "WWV_2.5_MHz": { data: [...] }, ... } }`.
+
+- **`GET /api/v1/propagation/solar-zenith?station={station}&date=YYYYMMDD`**
+  - **Purpose**: Calculates minute-by-minute Solar Zenith and Elevation for the midpoint between the receiver and the specified station (WWV, WWVH, CHU, BPM).
+  - **Algorithm**: NOAA Solar Position Algorithm.
+  - **Response**: `{ station: "WWV", series: [{ time: "...", zenith: 75.2, minute: 0 }, ...], ... }`.
 ```
 
 ### 3. HTML Dashboards

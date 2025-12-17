@@ -4528,6 +4528,196 @@ app.get('/api/v1/phase2/diurnal-pattern', async (req, res) => {
 });
 
 // ============================================================================
+// PROPAGATION & SOLAR ZENITH UTILITIES
+// ============================================================================
+
+/**
+ * Convert Date to Julian Day (valid for 1901-2099)
+ */
+function getJulianDay(date) {
+  return (date.valueOf() / 86400000) - (date.getTimezoneOffset() / 1440) + 2440587.5;
+}
+
+/**
+ * Calculate Solar Zenith Angle using simplified NOAA algorithm
+ * @param {Date} date UTC Date object
+ * @param {number} lat Latitude in degrees
+ * @param {number} lon Longitude in degrees
+ * @returns {number} Zenith angle in degrees (90 - elevation)
+ */
+function calculateSolarZenith(date, lat, lon) {
+  const PI = Math.PI;
+  const RAD = PI / 180.0;
+  const DEG = 180.0 / PI;
+
+  // Julian Century
+  const jd = getJulianDay(date);
+  const t = (jd - 2451545.0) / 36525.0;
+
+  // Geometric Mean Longitude (deg)
+  let L0 = (280.46646 + t * (36000.76983 + t * 0.0003032)) % 360;
+  if (L0 < 0) L0 += 360;
+
+  // Geometric Mean Anomaly (deg)
+  const M = 357.52911 + t * (35999.05029 - 0.0001537 * t);
+  const Mrad = M * RAD;
+
+  // Eccentricity
+  const e = 0.016708634 - t * (0.000042037 + 0.0000001267 * t);
+
+  // Equation of Center
+  const C = Math.sin(Mrad) * (1.914602 - t * (0.004817 + 0.000014 * t)) +
+    Math.sin(2 * Mrad) * (0.019993 - 0.000101 * t) +
+    Math.sin(3 * Mrad) * 0.000289;
+
+  // Sun True Longitude
+  const sunLon = L0 + C;
+  // Sun Apparent Longitude
+  const omega = 125.04 - 1934.136 * t;
+  const apparentLon = sunLon - 0.00569 - 0.00478 * Math.sin(omega * RAD);
+
+  // Mean Obliquity
+  const obliqMean = 23 + (26 + (21.448 - t * (46.815 + t * (0.00059 - t * 0.001813))) / 60) / 60;
+  // Corrected Obliquity
+  const obliqCorr = obliqMean + 0.00256 * Math.cos(omega * RAD);
+
+  // Declination
+  const sinDecl = Math.sin(obliqCorr * RAD) * Math.sin(apparentLon * RAD);
+  const decl = Math.asin(sinDecl); // radians
+
+  // Equation of Time (minutes)
+  const varY = Math.tan((obliqCorr * RAD) / 2) ** 2;
+  const L0rad = L0 * RAD;
+
+  const eqTime = 4 * DEG * (
+    varY * Math.sin(2 * L0rad) -
+    2 * e * Math.sin(Mrad) +
+    4 * e * varY * Math.sin(Mrad) * Math.cos(2 * L0rad) -
+    0.5 * varY * varY * Math.sin(4 * L0rad) -
+    1.25 * e * e * Math.sin(2 * Mrad)
+  );
+
+  // True Solar Time (minutes from midnight)
+  // UTC time in minutes
+  const utcMinutes = date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60;
+
+  let trueSolarTime = (utcMinutes + eqTime + 4 * lon) % 1440;
+  if (trueSolarTime < 0) trueSolarTime += 1440;
+
+  // Hour Angle
+  let hourAngle = trueSolarTime / 4 - 180;
+  if (hourAngle < -180) hourAngle += 360;
+  const hourAngleRad = hourAngle * RAD;
+
+  const latRad = lat * RAD;
+
+  // Zenith Angle
+  const cosZenith = Math.sin(latRad) * Math.sin(decl) +
+    Math.cos(latRad) * Math.cos(decl) * Math.cos(hourAngleRad);
+
+  const zenith = Math.acos(Math.max(-1, Math.min(1, cosZenith))) * DEG;
+  return zenith;
+}
+
+/**
+ * Calculate Geographic Midpoint
+ */
+function calculateMidpoint(lat1, lon1, lat2, lon2) {
+  const RAD = Math.PI / 180;
+  const DEG = 180 / Math.PI;
+
+  const lat1r = lat1 * RAD;
+  const lon1r = lon1 * RAD;
+  const lat2r = lat2 * RAD;
+  const lon2r = lon2 * RAD;
+
+  const x1 = Math.cos(lat1r) * Math.cos(lon1r);
+  const y1 = Math.cos(lat1r) * Math.sin(lon1r);
+  const z1 = Math.sin(lat1r);
+
+  const x2 = Math.cos(lat2r) * Math.cos(lon2r);
+  const y2 = Math.cos(lat2r) * Math.sin(lon2r);
+  const z2 = Math.sin(lat2r);
+
+  const x = (x1 + x2) / 2;
+  const y = (y1 + y2) / 2;
+  const z = (z1 + z2) / 2;
+
+  const lon = Math.atan2(y, x);
+  const hyp = Math.sqrt(x * x + y * y);
+  const lat = Math.atan2(z, hyp);
+
+  return { lat: lat * DEG, lon: lon * DEG };
+}
+
+// Station Coordinates
+const STATIONS = {
+  'WWV': { lat: 40.6782, lon: -105.0408 },
+  'WWVH': { lat: 21.9872, lon: -159.7617 },
+  'CHU': { lat: 45.2978, lon: -75.7525 },
+  'BPM': { lat: 35.0, lon: 109.5 } // Approx
+};
+
+/**
+ * GET /api/v1/propagation/solar-zenith
+ * Calculate solar zenith for station path
+ */
+app.get('/api/v1/propagation/solar-zenith', async (req, res) => {
+  try {
+    const station = (req.query.station || 'WWV').toUpperCase();
+    const dateStr = req.query.date; // YYYYMMDD
+
+    if (!STATIONS[station]) {
+      return res.status(400).json({ error: `Unknown station: ${station}` });
+    }
+
+    // Default receiver location (fallback to generic USA center if not configured)
+    const rxLat = config.station?.latitude || 38.0;
+    const rxLon = config.station?.longitude || -98.0;
+
+    const tx = STATIONS[station];
+    const mid = calculateMidpoint(rxLat, rxLon, tx.lat, tx.lon);
+
+    // Setup timeline
+    let date;
+    if (dateStr && /^\d{8}$/.test(dateStr)) {
+      const y = parseInt(dateStr.slice(0, 4));
+      const m = parseInt(dateStr.slice(4, 6)) - 1;
+      const d = parseInt(dateStr.slice(6, 8));
+      date = new Date(Date.UTC(y, m, d));
+    } else {
+      const now = new Date();
+      date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    }
+
+    // Generate minute-by-minute zenith
+    const series = [];
+    const intervalMinutes = 5;
+
+    for (let i = 0; i < 1440; i += intervalMinutes) {
+      const t = new Date(date.getTime() + i * 60000);
+      const zenith = calculateSolarZenith(t, mid.lat, mid.lon);
+      series.push({
+        time: t.toISOString(),
+        zenith: parseFloat(zenith.toFixed(2)),
+        minute: i
+      });
+    }
+
+    res.json({
+      station: station,
+      receiver: { lat: rxLat, lon: rxLon },
+      midpoint: { lat: mid.lat, lon: mid.lon },
+      date: date.toISOString().split('T')[0],
+      series: series
+    });
+  } catch (err) {
+    console.error('Solar Zenith Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
 // START SERVER WITH WEBSOCKET SUPPORT
 // ============================================================================
 
