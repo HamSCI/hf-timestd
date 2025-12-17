@@ -160,7 +160,8 @@ class BPMDiscriminator:
         receiver_lon: Optional[float] = None,
         dut1_ms: float = 0.0,  # Current DUT1 value (UT1-UTC) in ms
         enable_ut1_correction: bool = False,  # Allow using UT1 minutes with correction
-        channel_name: str = "BPM"
+        channel_name: str = "BPM",
+        expected_delay_ms: Optional[float] = None  # Injected delay from StationModel
     ):
         """
         Initialize BPM discriminator.
@@ -185,9 +186,12 @@ class BPMDiscriminator:
             self.receiver_lat, self.receiver_lon, BPM_LAT, BPM_LON
         )
         
-        # Expected propagation delay (rough estimate for discrimination)
-        # BPM to US is typically 35-50 ms via multi-hop F-layer
-        self.expected_delay_ms = self._estimate_propagation_delay()
+        # Expected propagation delay
+        if expected_delay_ms is not None:
+             self.expected_delay_ms = expected_delay_ms
+        else:
+             # Fallback to internal estimate if not provided
+             self.expected_delay_ms = self._estimate_propagation_delay()
         
         logger.info(
             f"BPMDiscriminator initialized: distance={self.distance_to_bpm_km:.0f}km, "
@@ -222,18 +226,18 @@ class BPMDiscriminator:
         # Ground distance
         ground_km = self.distance_to_bpm_km
         
-        # For long paths like BPM->US, assume 2-3 hop F-layer
-        # Each hop adds ~300km of height (up and down)
-        # Typical: 2.5 hops for ~10,000 km path
-        n_hops = max(2, ground_km / 4000)  # ~4000 km per hop
-        
-        # Approximate path length including ionospheric reflection
-        f_layer_height_km = 300.0
-        hop_overhead_km = 2 * f_layer_height_km * n_hops  # Up and down for each hop
-        total_path_km = np.sqrt(ground_km**2 + hop_overhead_km**2)
-        
-        # Convert to delay
-        delay_ms = (total_path_km / SPEED_OF_LIGHT_KM_S) * 1000.0
+        # Using StationModelFactory logic for consistency:
+        # Distance-dependent path factor heuristic
+        if ground_km < 3000.0:
+            factor = 1.15
+        elif ground_km > 10000.0:
+            factor = 1.05
+        else:
+            slope = -0.1 / 7000.0
+            factor = 1.15 + slope * (ground_km - 3000.0)
+            
+        path_length_km = ground_km * factor
+        delay_ms = (path_length_km / SPEED_OF_LIGHT_KM_S) * 1000.0
         
         return delay_ms
     

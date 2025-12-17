@@ -201,6 +201,8 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, List, Tuple, Any, NamedTuple, Callable
 from dataclasses import dataclass, field
 import threading
+import json
+from .wwv_constants import BPM_PURE_CARRIER_MINUTES
 
 logger = logging.getLogger(__name__)
 
@@ -481,6 +483,9 @@ class Phase2TemporalEngine:
         self.minutes_processed = 0
         self.last_result: Optional[Phase2Result] = None
         
+        # Load persisted calibration
+        self._load_calibration()
+        
         # Configurable search window (can be set by timing calibrator)
         # Default is wide (500ms) for bootstrap, narrowed after calibration
         self.config_search_window_ms: Optional[float] = None
@@ -498,6 +503,58 @@ class Phase2TemporalEngine:
         logger.info(f"  Frequency: {self.frequency_mhz:.2f} MHz")
         logger.info(f"  Receiver: {receiver_grid}")
         logger.info(f"  Sample rate: {sample_rate} Hz")
+        
+    def _load_calibration(self):
+        """Load persisted calibration state."""
+        try:
+            cal_file = self.output_dir / "timing_calibration.json"
+            if cal_file.exists():
+                with open(cal_file, 'r') as f:
+                    data = json.load(f)
+                    
+                # Load BPM calibration
+                if 'bpm' in data and self.bpm_discriminator:
+                    bpm_data = data['bpm']
+                    self.bpm_calibration.update(bpm_data)
+                    
+                    if bpm_data.get('calibrated') and bpm_data.get('delay_offset_ms') is not None:
+                        # Restore expected delay in discriminator
+                        if hasattr(self.bpm_discriminator, 'expected_delay_ms'):
+                            base_delay = self.bpm_discriminator.expected_delay_ms
+                            # Note: expected_delay_ms in discriminator might be reset on init
+                            # We should ideally store the base and offset separately
+                            pass
+                            
+                        # Restore correlator bank offset
+                        if self.correlator_bank:
+                            from .station_model import StationID
+                            self.correlator_bank.update_calibration(
+                                StationID.BPM,
+                                bpm_data.get('delay_offset_ms', 0.0)
+                            )
+                            self.correlator_bank.set_calibrated(True)
+                            
+                    logger.info(f"Loaded calibration state from {cal_file}")
+        except Exception as e:
+            logger.warning(f"Failed to load calibration: {e}")
+
+    def _save_calibration(self):
+        """Save calibration state to file."""
+        try:
+            cal_file = self.output_dir / "timing_calibration.json"
+            data = {
+                'bpm': self.bpm_calibration,
+                'last_updated': datetime.now(timezone.utc).isoformat()
+            }
+            
+            # Atomic write
+            tmp_file = cal_file.with_suffix('.tmp')
+            with open(tmp_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            tmp_file.replace(cal_file)
+            
+        except Exception as e:
+            logger.warning(f"Failed to save calibration: {e}")
     
     def _init_components(self):
         """Initialize analysis sub-components."""
@@ -867,6 +924,10 @@ class Phase2TemporalEngine:
                                 StationID.BPM,
                                 calibration.get('adjustment_ms', 0.0)
                             )
+                            self.correlator_bank.set_calibrated(True)
+                        
+                        # Persist calibration
+                        self._save_calibration()
                         
                         logger.info(f"🎯 BPM UT1 calibration: delay_adj={calibration.get('adjustment_ms', 0):+.2f}ms, "
                                    f"gain={calibration.get('path_gain_db', 0):.1f}dB, "
@@ -920,7 +981,14 @@ class Phase2TemporalEngine:
         # The time snap from Step 1 provides the expected minute boundary,
         # allowing accurate template synchronization
         # Skip if correlator bank already provided amplitudes
-        if result.bcd_wwv_amplitude is None or result.bcd_wwvh_amplitude is None:
+        # optimization: Skip BCD during BPM pure carrier minutes on shared freqs
+        is_bpm_pure_carrier = (
+            self.frequency_mhz in (2.5, 5.0, 10.0, 15.0) and 
+            minute_number in BPM_PURE_CARRIER_MINUTES
+        )
+        
+        if (not is_bpm_pure_carrier and 
+            (result.bcd_wwv_amplitude is None or result.bcd_wwvh_amplitude is None)):
             try:
                 bcd_result = self.discriminator.detect_bcd_discrimination(
                     iq_samples=iq_samples,

@@ -391,11 +391,29 @@ class StationModelFactory:
         """
         Estimate propagation delay for a station.
         
-        Uses simplified model: path_length ≈ 1.15 × ground_distance
-        (accounts for ionospheric reflection adding ~15% to path)
+        Uses distance-dependent heuristic for ionospheric path overhead:
+        - Short paths (<3000km): High take-off angle => higher overhead (~1.15x)
+        - Long paths (>10000km): Low take-off angle => lower overhead (~1.05x)
+        - Intermediate: Linear interpolation
+        
+        See: Davies, "Ionospheric Radio", for path geometry factors.
         """
         ground_km = self.distances[station]
-        path_length_km = ground_km * 1.15  # Ionospheric path multiplier
+        
+        # Distance-dependent path factor
+        # Short paths (high angle) have more overhead relative to ground distance
+        # Long paths (grazing incidence) approach the curvature of the earth
+        if ground_km < 3000.0:
+            factor = 1.15
+        elif ground_km > 10000.0:
+            factor = 1.05
+        else:
+            # Linear interpolation between 3000km and 10000km
+            # Slope = (1.05 - 1.15) / (10000 - 3000) = -0.1 / 7000
+            slope = -0.1 / 7000.0
+            factor = 1.15 + slope * (ground_km - 3000.0)
+            
+        path_length_km = ground_km * factor
         delay_ms = (path_length_km / SPEED_OF_LIGHT_KM_S) * 1000.0
         return delay_ms
     
