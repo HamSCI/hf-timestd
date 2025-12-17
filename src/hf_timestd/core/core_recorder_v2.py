@@ -2,6 +2,10 @@
 """
 HF Time Standard Core Recorder V2 - Using ka9q-python RadiodStream
 
+ACTIVE IMPLEMENTATION (v3.11+, Dec 2025)
+This is the primary recorder implementation, replacing the legacy `CoreRecorder` (v1)
+and `RTPReceiver`.
+
 Simplified recorder that uses ka9q-python's RadiodStream for RTP handling.
 This eliminates custom RTPReceiver and PacketResequencer code.
 

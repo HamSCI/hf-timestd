@@ -89,8 +89,8 @@ journalctl -u timestd-core-recorder -f    # View logs
 **Two-phase design** built on a **generic recording infrastructure**:
 
 ka9q-radio (RTP multicast) → Core Recorder → Analytics → Chrony SHM
-                              20kHz DRF      D_clock    System clock
-                              raw_archive/   phase2/    discipline
+                              20kHz Binary   D_clock    System clock
+                              raw_buffer/    phase2/    discipline
 
 ### ka9q-python Integration (V3.11)
 
@@ -114,7 +114,7 @@ ka9q-radio (radiod) via multicast
 - **discover_channels()** - Enumerate existing channels from radiod status
 - **StreamQuality** - Completeness, packets lost/resequenced, gap metrics
 
-### Generic Recording Infrastructure (New in V3)
+### Generic Recording Infrastructure (V3 - Adapter Pattern)
 
 The recording layer uses a **protocol-based design** enabling multiple applications:
 
@@ -123,15 +123,15 @@ Application Layer (TimeStdRecorder, WsprRecorder, etc.)
         ↓
 SegmentWriter Protocol (GrapeNPZWriter, WAVWriter, etc.)
         ↓
-RecordingSession (generic RTP → segments)
+RecordingSession (generic packet flow, resequencing, segmentation)
         ↓
-RTPReceiver + ka9q-python (multicast, parsing, timing)
+Protocol Adapter (RadiodStream / RTPReceiver)
 ```
 
 **Key Abstractions:**
 - **SegmentWriter Protocol** - Apps implement storage format
 - **RecordingSession** - Generic packet flow, resequencing, segmentation
-- **RTPReceiver** - Multi-SSRC demultiplexing, transport timing
+- **Protocol Adapter** - Abstracts transport (ka9q-python RadiodStream or legacy RTP)
 
 ### 1. Core Recorder (`src/hf_timestd/core/core_recorder_v2.py`)
 

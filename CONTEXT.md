@@ -181,6 +181,11 @@ Rearranging:
 - **Issue:** Padding error in struct packing.
 - **Fix:** Corrected struct format string.
 
+### 4. Documentation Cleanup (2025-12-17)
+- **Legacy Archive:** Moved obsolete design docs and migration notes to `docs/archive/`.
+- **Deprecations:** Marked `RTPReceiver` and `CoreRecorder` (v1) as deprecated in favor of `CoreRecorderV2`.
+- **Docstrings:** Verified Google-style docstrings in active core modules.
+
 ---
 
 ## Current Focus: Web UI Integration & Concordia

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Generic RTP Receiver with ka9q-python Integration
+RTP Receiver - Legacy Multi-SSRC Demultiplexer [DEPRECATED]
 
-Receives RTP packets from multicast and demultiplexes by SSRC.
-Uses ka9q-python for RTP parsing and timing (GPS_TIME/RTP_TIMESNAP).
+.. deprecated:: 3.11.0
+   Use `ka9q.RadiodStream` instead. This module is retained for backward compatibility
+   and will be removed in v4.0.0.
 
 This module provides efficient multi-SSRC demultiplexing on a single
 socket, while leveraging ka9q-python's timing capabilities.

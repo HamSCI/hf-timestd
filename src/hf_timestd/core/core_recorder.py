@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-HF Time Standard Core Recorder - Battle-Tested Data Acquisition
+HF Time Standard Core Recorder (V1) - Legacy Implementation [DEPRECATED]
+
+.. deprecated:: 3.11.0
+   Use `CoreRecorderV2` (core_recorder_v2.py) instead.
+   This implementation uses the legacy `RTPReceiver` and `PacketResequencer`.
+Battle-Tested Data Acquisition
 
 Minimal, rock-solid recorder that writes raw IQ archives.
 NO analytics, NO tone detection, NO quality metrics.
