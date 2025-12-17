@@ -553,6 +553,250 @@ class BPMDiscriminator:
         """
         self.dut1_ms = dut1_ms
         logger.debug(f"BPM DUT1 updated: {dut1_ms:.1f} ms")
+    
+    def detect_ut1_pulses(
+        self,
+        iq_samples: np.ndarray,
+        sample_rate: int,
+        minute: int,
+        timing_offset_ms: float = -20.0
+    ) -> Optional[Dict]:
+        """
+        Detect BPM UT1 pulses (100ms duration) for path calibration.
+        
+        During UT1 minutes (25-29, 55-59), BPM transmits 100ms pulses instead
+        of 10ms UTC ticks. These are 10× longer than WWV's 5ms ticks, making
+        them UNAMBIGUOUS markers for BPM detection and path calibration.
+        
+        This method provides:
+        1. Definitive BPM detection (100ms pulse is unique)
+        2. High-precision ToA measurement (longer pulse = better SNR)
+        3. Path gain calibration (measure BPM signal strength)
+        
+        Args:
+            iq_samples: Complex IQ samples (full minute)
+            sample_rate: Sample rate in Hz
+            minute: Current minute (0-59)
+            timing_offset_ms: BPM timing offset (-20ms advance)
+            
+        Returns:
+            Dict with calibration data, or None if not a UT1 minute or no detection:
+            {
+                'detected': bool,
+                'pulse_count': int,
+                'mean_duration_ms': float,
+                'duration_std_ms': float,
+                'mean_power_db': float,
+                'mean_toa_ms': float,  # Mean ToA from minute boundary
+                'toa_std_ms': float,
+                'snr_db': float,
+                'confidence': float,
+                'calibration_quality': str  # 'excellent', 'good', 'fair', 'poor'
+            }
+        """
+        if minute not in self.UT1_MINUTES:
+            return None
+        
+        from scipy.signal import butter, sosfiltfilt, hilbert
+        from scipy.fft import rfft, rfftfreq
+        
+        # AM demodulation
+        magnitude = np.abs(iq_samples)
+        audio = magnitude - np.mean(magnitude)
+        
+        # Bandpass filter around 1000 Hz (BPM tick frequency)
+        # Use SOS filter for numerical stability
+        nyquist = sample_rate / 2
+        low_hz = 950
+        high_hz = 1050
+        
+        try:
+            sos = butter(4, [low_hz / nyquist, high_hz / nyquist], btype='band', output='sos')
+            filtered = sosfiltfilt(sos, audio)
+        except Exception as e:
+            logger.warning(f"{self.channel_name}: UT1 pulse filter failed: {e}")
+            return None
+        
+        # Compute envelope using Hilbert transform (more accurate than abs)
+        analytic = hilbert(filtered)
+        envelope = np.abs(analytic)
+        
+        # Smooth envelope with moving average (~5ms window)
+        window_samples = max(3, int(0.005 * sample_rate))
+        kernel = np.ones(window_samples) / window_samples
+        envelope_smooth = np.convolve(envelope, kernel, mode='same')
+        
+        # Adaptive threshold: median + 3*MAD (robust to outliers)
+        median_env = np.median(envelope_smooth)
+        mad = np.median(np.abs(envelope_smooth - median_env))
+        threshold = median_env + 3 * mad * 1.4826  # 1.4826 scales MAD to std
+        
+        # Find pulses by threshold crossing
+        above_threshold = envelope_smooth > threshold
+        
+        # Detect pulse boundaries
+        pulses = []
+        in_pulse = False
+        pulse_start = 0
+        
+        for i in range(len(above_threshold)):
+            if above_threshold[i] and not in_pulse:
+                in_pulse = True
+                pulse_start = i
+            elif not above_threshold[i] and in_pulse:
+                in_pulse = False
+                pulse_end = i
+                duration_samples = pulse_end - pulse_start
+                duration_ms = (duration_samples / sample_rate) * 1000.0
+                
+                # UT1 pulses are ~100ms; filter for 70-150ms range
+                if 70.0 <= duration_ms <= 150.0:
+                    # Calculate pulse properties
+                    pulse_samples = envelope_smooth[pulse_start:pulse_end]
+                    pulse_power = np.mean(pulse_samples**2)
+                    pulse_peak_idx = pulse_start + np.argmax(pulse_samples)
+                    
+                    # ToA is at pulse onset (pulse_start)
+                    toa_samples = pulse_start
+                    toa_ms = (toa_samples / sample_rate) * 1000.0
+                    
+                    # Determine which second this pulse belongs to
+                    second = int(toa_ms / 1000.0)
+                    
+                    pulses.append({
+                        'second': second,
+                        'start_sample': pulse_start,
+                        'end_sample': pulse_end,
+                        'duration_ms': duration_ms,
+                        'power': pulse_power,
+                        'toa_ms': toa_ms,
+                        'peak_idx': pulse_peak_idx
+                    })
+        
+        if len(pulses) < 5:
+            logger.debug(f"{self.channel_name}: UT1 minute {minute}: Only {len(pulses)} pulses detected (need ≥5)")
+            return None
+        
+        # Calculate statistics
+        durations = np.array([p['duration_ms'] for p in pulses])
+        powers = np.array([p['power'] for p in pulses])
+        toas = np.array([p['toa_ms'] for p in pulses])
+        
+        mean_duration = float(np.mean(durations))
+        std_duration = float(np.std(durations))
+        
+        # Power in dB (relative to noise floor)
+        noise_power = median_env**2
+        mean_power_linear = np.mean(powers)
+        mean_power_db = 10 * np.log10(mean_power_linear / noise_power) if noise_power > 0 else 0.0
+        
+        # ToA statistics (relative to expected second boundaries)
+        # Each pulse should arrive at second + expected_delay + timing_offset
+        expected_arrival_offset_ms = self.expected_delay_ms + timing_offset_ms
+        toa_residuals = []
+        for p in pulses:
+            expected_toa = p['second'] * 1000.0 + expected_arrival_offset_ms
+            residual = p['toa_ms'] - expected_toa
+            toa_residuals.append(residual)
+        
+        toa_residuals = np.array(toa_residuals)
+        mean_toa_residual = float(np.mean(toa_residuals))
+        std_toa_residual = float(np.std(toa_residuals))
+        
+        # SNR estimate
+        snr_db = float(mean_power_db)
+        
+        # Confidence based on:
+        # - Number of pulses detected (expect ~59 for full minute)
+        # - Duration consistency (std should be small)
+        # - ToA consistency (std should be small)
+        pulse_count_score = min(1.0, len(pulses) / 50.0)
+        duration_score = max(0.0, 1.0 - std_duration / 20.0)
+        toa_score = max(0.0, 1.0 - std_toa_residual / 10.0)
+        snr_score = min(1.0, max(0.0, (snr_db - 6.0) / 20.0))
+        
+        confidence = (pulse_count_score * 0.3 + duration_score * 0.2 + 
+                     toa_score * 0.3 + snr_score * 0.2)
+        
+        # Quality grade
+        if confidence > 0.8 and snr_db > 15:
+            quality = 'excellent'
+        elif confidence > 0.6 and snr_db > 10:
+            quality = 'good'
+        elif confidence > 0.4 and snr_db > 6:
+            quality = 'fair'
+        else:
+            quality = 'poor'
+        
+        result = {
+            'detected': True,
+            'minute': minute,
+            'pulse_count': len(pulses),
+            'mean_duration_ms': mean_duration,
+            'duration_std_ms': std_duration,
+            'mean_power_db': float(mean_power_db),
+            'mean_toa_residual_ms': mean_toa_residual,
+            'toa_std_ms': std_toa_residual,
+            'expected_delay_ms': self.expected_delay_ms,
+            'timing_offset_ms': timing_offset_ms,
+            'snr_db': snr_db,
+            'confidence': float(confidence),
+            'calibration_quality': quality,
+            'pulses': pulses  # Full pulse data for detailed analysis
+        }
+        
+        logger.info(f"{self.channel_name}: BPM UT1 calibration (minute {minute}): "
+                   f"{len(pulses)} pulses, duration={mean_duration:.1f}±{std_duration:.1f}ms, "
+                   f"ToA_residual={mean_toa_residual:+.2f}±{std_toa_residual:.2f}ms, "
+                   f"SNR={snr_db:.1f}dB, quality={quality}")
+        
+        return result
+    
+    def calibrate_from_ut1(
+        self,
+        ut1_result: Dict
+    ) -> Optional[Dict]:
+        """
+        Update calibration parameters from UT1 pulse detection.
+        
+        Uses the UT1 pulse detection results to refine:
+        1. Expected propagation delay
+        2. Path gain estimate
+        3. Timing offset verification
+        
+        Args:
+            ut1_result: Result from detect_ut1_pulses()
+            
+        Returns:
+            Dict with calibration updates, or None if quality too low
+        """
+        if ut1_result is None or not ut1_result.get('detected', False):
+            return None
+        
+        if ut1_result['calibration_quality'] in ['poor']:
+            logger.debug(f"{self.channel_name}: UT1 calibration quality too low: {ut1_result['calibration_quality']}")
+            return None
+        
+        # Update expected delay based on measured ToA residual
+        # New delay = old delay + mean residual
+        old_delay = self.expected_delay_ms
+        toa_residual = ut1_result['mean_toa_residual_ms']
+        new_delay = old_delay + toa_residual
+        
+        # Only update if residual is significant but not implausible
+        if abs(toa_residual) > 0.5 and abs(toa_residual) < 20.0:
+            self.expected_delay_ms = new_delay
+            logger.info(f"{self.channel_name}: BPM delay calibrated: {old_delay:.2f}ms → {new_delay:.2f}ms "
+                       f"(residual: {toa_residual:+.2f}ms)")
+        
+        return {
+            'old_delay_ms': old_delay,
+            'new_delay_ms': new_delay,
+            'adjustment_ms': toa_residual,
+            'path_gain_db': ut1_result['mean_power_db'],
+            'confidence': ut1_result['confidence'],
+            'quality': ut1_result['calibration_quality']
+        }
 
 
 def create_bpm_discriminator(

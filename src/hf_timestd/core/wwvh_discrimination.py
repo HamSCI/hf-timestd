@@ -2945,6 +2945,251 @@ class WWVHDiscriminator:
             logger.error(traceback.format_exc())
             return None
     
+    def bcd_correlation_with_doppler_compensation(
+        self,
+        iq_samples: np.ndarray,
+        sample_rate: int,
+        minute_timestamp: float,
+        frequency_mhz: Optional[float] = None,
+        window_seconds: float = 10.0,
+        overlap_fraction: float = 0.5
+    ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], List[Dict]]:
+        """
+        BCD correlation with Doppler de-rotation for improved coherent integration.
+        
+        This method addresses the phase coherence problem by:
+        1. Estimating Doppler shift from per-tick phase progression
+        2. De-rotating the signal to remove Doppler-induced phase drift
+        3. Using overlapping windows for better time resolution
+        
+        The de-rotation allows longer integration windows without phase destruction,
+        recovering up to 3 dB of coherent gain that would otherwise be lost.
+        
+        Args:
+            iq_samples: Full minute of complex IQ samples
+            sample_rate: Sample rate in Hz
+            minute_timestamp: UTC timestamp of minute boundary
+            frequency_mhz: Operating frequency for geographic prediction
+            window_seconds: Integration window length (default 10s)
+            overlap_fraction: Window overlap (default 0.5 = 50%)
+            
+        Returns:
+            Tuple of (wwv_amp_mean, wwvh_amp_mean, delay_mean, quality_mean, windows_list)
+        """
+        try:
+            # Step 1: Estimate Doppler from per-tick phase progression
+            doppler_info = self.estimate_doppler_shift_from_ticks(iq_samples, sample_rate)
+            
+            wwv_doppler_hz = 0.0
+            wwvh_doppler_hz = 0.0
+            
+            if doppler_info is not None:
+                wwv_doppler_hz = doppler_info.get('wwv_doppler_hz', 0.0)
+                wwvh_doppler_hz = doppler_info.get('wwvh_doppler_hz', 0.0)
+                doppler_quality = doppler_info.get('doppler_quality', 0.0)
+                
+                logger.info(f"{self.channel_name}: Doppler estimate for de-rotation: "
+                           f"WWV={wwv_doppler_hz:+.4f}Hz, WWVH={wwvh_doppler_hz:+.4f}Hz, "
+                           f"quality={doppler_quality:.2f}")
+            
+            # Step 2: AM demodulation
+            magnitude = np.abs(iq_samples)
+            audio = magnitude - np.mean(magnitude)
+            
+            # Step 3: Bandpass filter around 100 Hz BCD
+            nyquist = sample_rate / 2
+            bcd_low = 50 / nyquist
+            bcd_high = 150 / nyquist
+            sos_bcd = scipy_signal.butter(4, [bcd_low, bcd_high], 'bandpass', output='sos')
+            bcd_signal = scipy_signal.sosfilt(sos_bcd, audio)
+            
+            # Step 4: Apply Doppler de-rotation
+            # Use average of WWV and WWVH Doppler (they should be similar for same ionospheric path)
+            avg_doppler_hz = (wwv_doppler_hz + wwvh_doppler_hz) / 2.0
+            
+            if abs(avg_doppler_hz) > 0.001:
+                # Create de-rotation phasor
+                t = np.arange(len(bcd_signal)) / sample_rate
+                derotation = np.exp(-2j * np.pi * avg_doppler_hz * t)
+                
+                # Convert to analytic signal for de-rotation
+                from scipy.signal import hilbert
+                analytic_bcd = hilbert(bcd_signal)
+                
+                # Apply de-rotation
+                derotated = analytic_bcd * derotation
+                bcd_signal_compensated = np.real(derotated)
+                
+                logger.debug(f"{self.channel_name}: Applied Doppler de-rotation: {avg_doppler_hz:+.4f} Hz")
+            else:
+                bcd_signal_compensated = bcd_signal
+            
+            # Step 5: Downsample for efficiency
+            downsample_factor = 4
+            bcd_signal_ds = scipy_signal.decimate(bcd_signal_compensated, downsample_factor, 
+                                                   ftype='fir', zero_phase=True)
+            effective_rate = sample_rate // downsample_factor
+            
+            # Step 6: Generate BCD template
+            bcd_template = self._generate_bcd_template(minute_timestamp, effective_rate, envelope_only=False)
+            if bcd_template is None:
+                return None, None, None, None, []
+            
+            # Step 7: Sliding window correlation with overlap
+            window_samples = int(window_seconds * effective_rate)
+            step_samples = int(window_samples * (1.0 - overlap_fraction))
+            
+            windows_data = []
+            total_samples = min(len(bcd_signal_ds), len(bcd_template))
+            
+            window_idx = 0
+            start_sample = 0
+            
+            while start_sample + window_samples <= total_samples:
+                end_sample = start_sample + window_samples
+                window_start_sec = start_sample / effective_rate
+                
+                # Extract windows
+                signal_window = bcd_signal_ds[start_sample:end_sample]
+                template_window = bcd_template[start_sample:end_sample]
+                
+                # Cross-correlation
+                correlation = scipy_signal.correlate(signal_window, template_window, mode='full', method='fft')
+                correlation = np.abs(correlation)
+                
+                zero_lag_idx = len(template_window) - 1
+                
+                # Search for peaks in ±100ms around zero lag
+                search_radius = int(0.100 * effective_rate)
+                search_start = max(0, zero_lag_idx - search_radius)
+                search_end = min(len(correlation), zero_lag_idx + search_radius)
+                search_region = correlation[search_start:search_end]
+                
+                # Find peaks
+                mean_corr = np.mean(search_region)
+                std_corr = np.std(search_region)
+                threshold = mean_corr + 0.5 * std_corr
+                
+                peaks, properties = scipy_signal.find_peaks(
+                    search_region,
+                    height=threshold,
+                    distance=int(0.003 * effective_rate),
+                    prominence=std_corr * 0.2
+                )
+                peaks = peaks + search_start
+                
+                if len(peaks) >= 2:
+                    # Dual peak detection
+                    peak_heights = properties['peak_heights']
+                    sorted_idx = np.argsort(peak_heights)[-2:]
+                    sorted_idx = np.sort(sorted_idx)
+                    
+                    peak1_idx, peak2_idx = sorted_idx[0], sorted_idx[1]
+                    peak1_time = (peaks[peak1_idx] - zero_lag_idx) / effective_rate
+                    peak2_time = (peaks[peak2_idx] - zero_lag_idx) / effective_rate
+                    
+                    delay_ms = (peak2_time - peak1_time) * 1000
+                    
+                    if 3 <= delay_ms <= 35:
+                        # Extract amplitudes
+                        R_0 = float(np.sum(template_window**2))
+                        early_amp = abs(peak_heights[peak1_idx] / np.sqrt(R_0)) if R_0 > 0 else 0.0
+                        late_amp = abs(peak_heights[peak2_idx] / np.sqrt(R_0)) if R_0 > 0 else 0.0
+                        
+                        # Assign WWV/WWVH based on geographic predictor
+                        if self.geo_predictor and frequency_mhz:
+                            early_delay_ms = peak1_time * 1000
+                            late_delay_ms = peak2_time * 1000
+                            early_station, _ = self.geo_predictor.classify_dual_peaks(
+                                early_delay_ms, late_delay_ms, early_amp, late_amp, frequency_mhz
+                            )
+                            if early_station == 'WWV':
+                                wwv_amp, wwvh_amp = early_amp, late_amp
+                            else:
+                                wwv_amp, wwvh_amp = late_amp, early_amp
+                        else:
+                            wwv_amp, wwvh_amp = early_amp, late_amp
+                        
+                        noise_floor = np.median(correlation)
+                        quality = (peak_heights[peak1_idx] + peak_heights[peak2_idx]) / (2 * noise_floor) if noise_floor > 0 else 0.0
+                        
+                        windows_data.append({
+                            'window_start_sec': float(window_start_sec),
+                            'window_idx': window_idx,
+                            'wwv_amplitude': float(wwv_amp),
+                            'wwvh_amplitude': float(wwvh_amp),
+                            'differential_delay_ms': float(delay_ms),
+                            'correlation_quality': float(quality),
+                            'detection_type': 'dual_peak_doppler_compensated',
+                            'doppler_compensation_hz': float(avg_doppler_hz)
+                        })
+                
+                elif len(peaks) == 1:
+                    # Single peak
+                    peak_time = (peaks[0] - zero_lag_idx) / effective_rate
+                    peak_delay_ms = peak_time * 1000
+                    R_0 = float(np.sum(template_window**2))
+                    peak_amp = abs(properties['peak_heights'][0] / np.sqrt(R_0)) if R_0 > 0 else 0.0
+                    
+                    noise_floor = np.median(correlation)
+                    quality = properties['peak_heights'][0] / noise_floor if noise_floor > 0 else 0.0
+                    
+                    # Classify single peak
+                    if self.geo_predictor and frequency_mhz:
+                        station = self.geo_predictor.classify_single_peak(
+                            peak_delay_ms, peak_amp, frequency_mhz, quality
+                        )
+                    else:
+                        station = 'WWV'  # Default assumption
+                    
+                    if station == 'WWV':
+                        wwv_amp, wwvh_amp = peak_amp, 0.0
+                    else:
+                        wwv_amp, wwvh_amp = 0.0, peak_amp
+                    
+                    windows_data.append({
+                        'window_start_sec': float(window_start_sec),
+                        'window_idx': window_idx,
+                        'wwv_amplitude': float(wwv_amp),
+                        'wwvh_amplitude': float(wwvh_amp),
+                        'differential_delay_ms': None,
+                        'correlation_quality': float(quality),
+                        'detection_type': f'single_peak_{station.lower()}_doppler_compensated',
+                        'peak_delay_ms': float(peak_delay_ms),
+                        'doppler_compensation_hz': float(avg_doppler_hz)
+                    })
+                
+                start_sample += step_samples
+                window_idx += 1
+            
+            # Compute summary statistics
+            if not windows_data:
+                logger.info(f"{self.channel_name}: No valid BCD windows with Doppler compensation")
+                return None, None, None, None, []
+            
+            wwv_amps = [w['wwv_amplitude'] for w in windows_data]
+            wwvh_amps = [w['wwvh_amplitude'] for w in windows_data]
+            delays = [w['differential_delay_ms'] for w in windows_data if w['differential_delay_ms'] is not None]
+            qualities = [w['correlation_quality'] for w in windows_data]
+            
+            wwv_mean = float(np.mean(wwv_amps))
+            wwvh_mean = float(np.mean(wwvh_amps))
+            delay_mean = float(np.mean(delays)) if delays else None
+            quality_mean = float(np.mean(qualities))
+            
+            logger.info(f"{self.channel_name}: BCD Doppler-compensated ({len(windows_data)} windows): "
+                       f"WWV={wwv_mean:.4f}, WWVH={wwvh_mean:.4f}, "
+                       f"ratio={20*np.log10(max(wwv_mean,1e-10)/max(wwvh_mean,1e-10)):+.1f}dB, "
+                       f"Doppler={avg_doppler_hz:+.4f}Hz")
+            
+            return wwv_mean, wwvh_mean, delay_mean, quality_mean, windows_data
+            
+        except Exception as e:
+            logger.error(f"{self.channel_name}: Doppler-compensated BCD failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None, None, None, None, []
+    
     def analyze_minute_with_440hz(
         self,
         iq_samples: np.ndarray,

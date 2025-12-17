@@ -160,16 +160,17 @@ Rearranging:
 | File | Purpose |
 |------|---------|
 | `phase2_temporal_engine.py` | Central orchestrator - 3-step D_clock extraction |
-| `multi_station_detector.py` | **NEW** Physics-based multi-station detection (replaces voting) |
+| `station_model.py` | **NEW** MLE-based StationModel + ChannelAssignment (replaces voting) |
+| `multi_station_detector.py` | Physics-based multi-station detection |
 | `multi_broadcast_fusion.py` | Combines 17 broadcasts into fused D_clock |
 | `bpm_discriminator.py` | BPM (China) detection - 10ms ticks, UT1/UTC modes |
 | `clock_convergence.py` | Kalman filter for D_clock convergence |
 | `tone_detector.py` | Matched filter tone detection (1000/1200 Hz) |
 | `transmission_time_solver.py` | Propagation mode disambiguation |
-| `wwvh_discrimination.py` | WWV vs WWVH 8-vote weighted system + BCD downsampling |
+| `wwvh_discrimination.py` | WWV vs WWVH weighted voting + BCD correlation |
 | `ionospheric_model.py` | IRI-2020 propagation delay estimation |
 | `chrony_shm.py` | Write fused D_clock to Chrony SHM (rate-limited) |
-| `tiered_storage.py` | **NEW** RAM hot buffer + disk cold storage |
+| `tiered_storage.py` | RAM hot buffer + disk cold storage |
 | `binary_archive_writer.py` | Phase 1 raw_buffer writer |
 | `phase2_analytics_service.py` | Phase 2 daemon wrapper |
 
@@ -397,54 +398,79 @@ The system supports two deployment modes controlled by `timestd-config.toml`:
 
 ---
 
-## Next Session Focus: Station Discrimination on SHARED Channels
+## Current Focus: MLE-Based Multi-Station Discrimination
 
-### The Problem
-The 4 SHARED channels (2.5, 5, 10, 15 MHz) carry signals from **3 stations** (WWV, WWVH, BPM) simultaneously. The system must:
-1. Detect which station(s) are receivable at any moment
-2. Correctly attribute timing measurements to the right station
-3. Handle cases where multiple stations are present
+### The Problem: Three-Station Superposition
 
-### Current Discrimination Architecture
+The 4 SHARED channels (2.5, 5, 10, 15 MHz) carry signals from **3 stations** simultaneously:
+
+| Station | Tone (Hz) | Tick Duration | Timing Offset | Distance from EM38 |
+|---------|-----------|---------------|---------------|-------------------|
+| WWV     | 1000      | 5 ms          | 0 ms (UTC)    | 1,119 km (~4 ms)  |
+| WWVH    | 1200      | 5 ms          | 0 ms (UTC)    | 6,600 km (~25 ms) |
+| BPM     | 1000      | 10 ms (UTC)   | **-20 ms**    | 11,504 km (~44 ms)|
+
+**The BPM Challenge:** BPM pulses are emitted 20 ms BEFORE UTC. Combined with ~44 ms propagation:
+- BPM arrival: -20 ms + 44 ms = **+24 ms after UTC**
+- WWV arrival: 0 ms + 4 ms = **+4 ms after UTC**
+- Separation: ~20 ms (exploitable with sub-ms ToA resolution)
+
+### New Architecture: MLE Component Decomposition
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ SHARED CHANNEL DISCRIMINATION PIPELINE                                       │
+│ CORRELATOR BANK (per minute)                                                 │
 │                                                                             │
-│   Raw IQ → Tone Detection → Station Attribution → D_clock per Station       │
+│   IQ Samples ──┬──► WWV Correlator (1000 Hz, 5ms) ──► WWV_power, WWV_ToA    │
+│                │    [search: expected_delay ± 10ms]                         │
+│                │                                                             │
+│                ├──► WWVH Correlator (1200 Hz, 5ms) ──► WWVH_power, WWVH_ToA │
+│                │    [search: expected_delay ± 10ms]                         │
+│                │                                                             │
+│                └──► BPM Correlator (1000 Hz, 10ms) ──► BPM_power, BPM_ToA   │
+│                     [search: expected_delay - 20ms ± 10ms]                  │
 │                                                                             │
-│   Key Discriminators:                                                       │
-│   1. BCD Subcarrier (100 Hz): WWV vs WWVH timing offset                    │
-│   2. Tick Duration: BPM=10ms vs WWV/WWVH=5ms                               │
-│   3. Voice Announcement: Gender/language (not implemented)                  │
-│   4. Propagation Delay: Physical constraints per station                    │
-│   5. Minute Markers: Different patterns per station                         │
+│   Output: ChannelAssignment {                                               │
+│       wwv_component_power_db, wwvh_component_power_db, bpm_component_power_db│
+│       wwv_toa_ms, wwvh_toa_ms, bpm_toa_ms                                   │
+│       residual_noise_db, cross_validation_error_ms                          │
+│   }                                                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### BPM Calibration Windows
+
+BPM has unique features that provide unambiguous calibration:
+
+| Feature | Minutes | Description |
+|---------|---------|-------------|
+| **UT1 Pulses** | 25-29, 55-59 | 100 ms pulses (10× longer than WWV) |
+| **Pure Carrier** | 10-15, 40-45 | No time code modulation |
+| **Tick Duration** | All UTC minutes | 10 ms vs WWV's 5 ms |
+
+**Key Insight:** During UT1 minutes, BPM's 100 ms pulses are **unambiguous** - use these to calibrate BPM path gain and delay.
 
 ### Key Files for Discrimination
 
 | File | Purpose |
 |------|---------|
-| `wwvh_discrimination.py` | WWV vs WWVH 8-vote weighted system + BCD correlation |
-| `bpm_discriminator.py` | BPM detection via 10ms tick duration |
+| `station_model.py` | **NEW** StationModel + ChannelAssignment for MLE approach |
+| `correlator_bank.py` | **NEW** Parallel matched filtering with predicted ToA windows |
+| `wwvh_discrimination.py` | WWV vs WWVH weighted voting + BCD correlation + Doppler compensation |
+| `bpm_discriminator.py` | BPM detection via tick duration + UT1 pulse calibration |
 | `multi_station_detector.py` | Physics-based multi-station detection |
 | `timing_calibrator.py` | Physical constraint validation per station |
 
-### Discrimination Methods (from `wwvh_discrimination.py`)
+### Implementation Phases
 
-1. **BCD Correlation** - Downsamples to 100 Hz, correlates with WWV/WWVH BCD patterns
-2. **Tick Duration** - Measures 1000 Hz tone duration (5ms vs 10ms)
-3. **Differential Delay** - Compares arrival times to expected propagation delays
-4. **Minute Marker Pattern** - Different second-by-second patterns
-5. **Voice Detection** - Male (WWV) vs Female (WWVH) announcements
+1. **Phase 1 (Immediate):** BPM UT1 pulse detection at minutes :25-:29
+2. **Phase 2:** Correlator bank with predicted ToA windows per station
+3. **Phase 3:** Doppler-compensated BCD (10s windows instead of 60s)
+4. **Phase 4:** Super-resolution ToA via parabolic interpolation
 
-### Current Issues to Address
+### Design Document
 
-1. **BPM Often Dominates:** On SHARED 10 MHz, BPM (China) is often detected instead of WWV
-2. **Discrimination Confidence:** Need better confidence metrics for station attribution
-3. **Multi-Station Scenarios:** When both WWV and WWVH are receivable, how to handle?
-4. **Propagation Mode per Broadcast:** Each station has different ionospheric path
+See `docs/design/MULTI_STATION_MLE_DESIGN.md` for full architecture details.
 
 ### API Endpoints for Discrimination
 
@@ -468,8 +494,13 @@ curl -s http://localhost:3000/api/v1/timing/phase2-status/SHARED%2010%20MHz | jq
 # View discrimination results
 cat /tmp/timestd-test/phase2/SHARED_10_MHz/discrimination/*.csv | tail -5
 
-# Check BPM detection
-cat /tmp/timestd-test/phase2/SHARED_10_MHz/status/phase2_status.json | jq '.bpm_detected'
+# Check BPM detection (including UT1 mode)
+cat /tmp/timestd-test/phase2/SHARED_10_MHz/status/phase2_status.json | jq '.bpm_detected, .bpm_timing_mode'
+
+# Test StationModel factory
+python3 -c "from src.hf_timestd.core.station_model import StationModelFactory; \
+  f = StationModelFactory(38.918, -92.128); \
+  [print(f'{k.value}: {v.expected_delay_ms:.1f}ms') for k,v in f.create_all_models().items()]"
 ```
 
 ---

@@ -561,7 +561,32 @@ class Phase2TemporalEngine:
                 sample_rate=self.sample_rate
             )
             
-            logger.info("✅ Phase 2 components initialized (MultiStationDetector)")
+            # Step 5: Correlator Bank (MLE-based component decomposition)
+            # Parallel matched filtering with station-specific templates
+            # Centered on predicted ToA windows for each station
+            from .correlator_bank import CorrelatorBank
+            
+            if self.precise_lat is not None and self.precise_lon is not None:
+                self.correlator_bank = CorrelatorBank(
+                    receiver_lat=self.precise_lat,
+                    receiver_lon=self.precise_lon,
+                    sample_rate=self.sample_rate,
+                    calibrated=False  # Will be set True after UT1 calibration
+                )
+                logger.info("✅ CorrelatorBank initialized for MLE-based discrimination")
+            else:
+                self.correlator_bank = None
+                logger.warning("⚠️ CorrelatorBank not initialized (no precise coordinates)")
+            
+            # BPM calibration state (updated from UT1 pulse detection)
+            self.bpm_calibration = {
+                'calibrated': False,
+                'last_calibration_minute': None,
+                'path_gain_db': None,
+                'delay_offset_ms': None
+            }
+            
+            logger.info("✅ Phase 2 components initialized (MultiStationDetector + CorrelatorBank)")
             
         except ImportError as e:
             logger.error(f"Failed to initialize Phase 2 components: {e}")
@@ -815,54 +840,132 @@ class Phase2TemporalEngine:
         agreements = []
         disagreements = []
         
+        # === Step 2A-PRE: BPM UT1 Calibration (minutes 25-29, 55-59) ===
+        # During UT1 minutes, BPM transmits 100ms pulses (10× longer than WWV's 5ms)
+        # These are UNAMBIGUOUS BPM markers - use them to calibrate BPM path
+        if self.frequency_mhz in (2.5, 5.0, 10.0, 15.0) and minute_number in {25, 26, 27, 28, 29, 55, 56, 57, 58, 59}:
+            try:
+                ut1_result = self.bpm_discriminator.detect_ut1_pulses(
+                    iq_samples=iq_samples,
+                    sample_rate=self.sample_rate,
+                    minute=minute_number
+                )
+                
+                if ut1_result and ut1_result.get('detected'):
+                    # Update BPM calibration
+                    calibration = self.bpm_discriminator.calibrate_from_ut1(ut1_result)
+                    if calibration:
+                        self.bpm_calibration['calibrated'] = True
+                        self.bpm_calibration['last_calibration_minute'] = minute_number
+                        self.bpm_calibration['path_gain_db'] = calibration.get('path_gain_db')
+                        self.bpm_calibration['delay_offset_ms'] = calibration.get('adjustment_ms')
+                        
+                        # Update correlator bank with calibrated BPM delay
+                        if self.correlator_bank:
+                            from .station_model import StationID
+                            self.correlator_bank.update_calibration(
+                                StationID.BPM,
+                                calibration.get('adjustment_ms', 0.0)
+                            )
+                        
+                        logger.info(f"🎯 BPM UT1 calibration: delay_adj={calibration.get('adjustment_ms', 0):+.2f}ms, "
+                                   f"gain={calibration.get('path_gain_db', 0):.1f}dB, "
+                                   f"quality={calibration.get('quality', 'unknown')}")
+            except Exception as e:
+                logger.debug(f"BPM UT1 calibration failed: {e}")
+        
+        # === Step 2A-ALT: Correlator Bank (MLE-based component decomposition) ===
+        # Run parallel matched filtering for all stations on this frequency
+        channel_assignment = None
+        if self.correlator_bank and self.frequency_mhz in (2.5, 5.0, 10.0, 15.0):
+            try:
+                channel_assignment = self.correlator_bank.process_minute(
+                    iq_samples=iq_samples,
+                    frequency_mhz=self.frequency_mhz,
+                    minute=minute_number,
+                    channel=self.channel_name,
+                    minute_timestamp=system_time
+                )
+                
+                if channel_assignment:
+                    # Store correlator bank results in channel characterization
+                    # These provide per-station power decomposition
+                    if channel_assignment.wwv_component_power_db is not None:
+                        result.bcd_wwv_amplitude = 10 ** (channel_assignment.wwv_component_power_db / 20.0)
+                    if channel_assignment.wwvh_component_power_db is not None:
+                        result.bcd_wwvh_amplitude = 10 ** (channel_assignment.wwvh_component_power_db / 20.0)
+                    if channel_assignment.bpm_component_power_db is not None:
+                        result.bcd_bpm_amplitude = 10 ** (channel_assignment.bpm_component_power_db / 20.0)
+                    
+                    # Store ToA values
+                    result.bcd_wwv_toa_ms = channel_assignment.wwv_toa_ms
+                    result.bcd_wwvh_toa_ms = channel_assignment.wwvh_toa_ms
+                    result.bcd_bpm_toa_ms = channel_assignment.bpm_toa_ms
+                    
+                    # Cross-validation from correlator bank
+                    if channel_assignment.cross_validation_error_ms is not None:
+                        if channel_assignment.cross_validation_passed:
+                            agreements.append('correlator_bank_cross_validation')
+                        else:
+                            disagreements.append(f'correlator_bank_error_{channel_assignment.cross_validation_error_ms:.1f}ms')
+                    
+                    logger.info(f"📊 CorrelatorBank: WWV={channel_assignment.wwv_confidence:.2f}, "
+                               f"WWVH={channel_assignment.wwvh_confidence:.2f}, "
+                               f"BPM={channel_assignment.bpm_confidence:.2f} "
+                               f"(mode={channel_assignment.bpm_timing_mode})")
+            except Exception as e:
+                logger.debug(f"Correlator bank processing failed: {e}")
+        
         # === Step 2A: BCD Correlation & Dual-Peak Delay ===
         # The time snap from Step 1 provides the expected minute boundary,
         # allowing accurate template synchronization
-        try:
-            bcd_result = self.discriminator.detect_bcd_discrimination(
-                iq_samples=iq_samples,
-                sample_rate=self.sample_rate,
-                minute_timestamp=system_time,
-                frequency_mhz=self.frequency_mhz
-            )
-            
-            if bcd_result and bcd_result[0] is not None:
-                wwv_amp, wwvh_amp, delay_ms, quality, windows = bcd_result
-                result.bcd_wwv_amplitude = wwv_amp
-                result.bcd_wwvh_amplitude = wwvh_amp
-                result.bcd_differential_delay_ms = delay_ms
-                result.bcd_correlation_quality = quality
-                
-                # Extract ToA and delay spread from windows if available
-                if windows and len(windows) > 0:
-                    # Use first high-quality window
-                    for w in windows:
-                        if w.get('wwv_toa_ms') is not None:
-                            result.bcd_wwv_toa_ms = w['wwv_toa_ms']
-                            result.bcd_wwvh_toa_ms = w['wwvh_toa_ms']
-                            
-                            # Extract delay spread from BCD correlation peak widths
-                            # Use the delay spread of the dominant station
-                            wwv_spread = w.get('wwv_delay_spread_ms')
-                            wwvh_spread = w.get('wwvh_delay_spread_ms')
-                            if wwv_spread is not None and wwvh_spread is not None:
-                                # Use average of both stations' delay spreads
-                                result.delay_spread_ms = (wwv_spread + wwvh_spread) / 2.0
-                            elif wwv_spread is not None:
-                                result.delay_spread_ms = wwv_spread
-                            elif wwvh_spread is not None:
-                                result.delay_spread_ms = wwvh_spread
-                            break
-                
-                # Log with None-safe formatting
-                logger.debug(
-                    f"Step 2A BCD: WWV_amp={wwv_amp if wwv_amp is not None else 'None'}, "
-                    f"WWVH_amp={wwvh_amp if wwvh_amp is not None else 'None'}, "
-                    f"delay={delay_ms if delay_ms is not None else 'None'}ms, "
-                    f"quality={quality if quality is not None else 'None'}"
+        # Skip if correlator bank already provided amplitudes
+        if result.bcd_wwv_amplitude is None or result.bcd_wwvh_amplitude is None:
+            try:
+                bcd_result = self.discriminator.detect_bcd_discrimination(
+                    iq_samples=iq_samples,
+                    sample_rate=self.sample_rate,
+                    minute_timestamp=system_time,
+                    frequency_mhz=self.frequency_mhz
                 )
-        except Exception as e:
-            logger.warning(f"Step 2A BCD correlation failed: {e}")
+                
+                if bcd_result and bcd_result[0] is not None:
+                    wwv_amp, wwvh_amp, delay_ms, quality, windows = bcd_result
+                    result.bcd_wwv_amplitude = wwv_amp
+                    result.bcd_wwvh_amplitude = wwvh_amp
+                    result.bcd_differential_delay_ms = delay_ms
+                    result.bcd_correlation_quality = quality
+                    
+                    # Extract ToA and delay spread from windows if available
+                    if windows and len(windows) > 0:
+                        # Use first high-quality window
+                        for w in windows:
+                            if w.get('wwv_toa_ms') is not None:
+                                result.bcd_wwv_toa_ms = w['wwv_toa_ms']
+                                result.bcd_wwvh_toa_ms = w['wwvh_toa_ms']
+                                
+                                # Extract delay spread from BCD correlation peak widths
+                                # Use the delay spread of the dominant station
+                                wwv_spread = w.get('wwv_delay_spread_ms')
+                                wwvh_spread = w.get('wwvh_delay_spread_ms')
+                                if wwv_spread is not None and wwvh_spread is not None:
+                                    # Use average of both stations' delay spreads
+                                    result.delay_spread_ms = (wwv_spread + wwvh_spread) / 2.0
+                                elif wwv_spread is not None:
+                                    result.delay_spread_ms = wwv_spread
+                                elif wwvh_spread is not None:
+                                    result.delay_spread_ms = wwvh_spread
+                                break
+                    
+                    # Log with None-safe formatting
+                    logger.debug(
+                        f"Step 2A BCD: WWV_amp={wwv_amp if wwv_amp is not None else 'None'}, "
+                        f"WWVH_amp={wwvh_amp if wwvh_amp is not None else 'None'}, "
+                        f"delay={delay_ms if delay_ms is not None else 'None'}ms, "
+                        f"quality={quality if quality is not None else 'None'}"
+                    )
+            except Exception as e:
+                logger.warning(f"Step 2A BCD correlation failed: {e}")
         
         # === Step 2B: Doppler and Coherence Estimation ===
         # Measure ionospheric stability from per-tick phase tracking

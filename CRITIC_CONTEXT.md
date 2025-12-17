@@ -6,13 +6,359 @@ Primary Instruction:  In this context you will perform a critical review of the 
 
 ---
 
-## 🔴 CURRENT FOCUS: WEB UI INTEGRATION REVIEW
+## 🔴 CURRENT FOCUS: TIMING ANALYSIS DEEP REVIEW
 
-**Purpose:** Critically examine the `web-ui/` directory for inconsistencies, incompleteness, vulnerabilities, and missed opportunities in its integration with the recently updated backend analytics modules.
+**Purpose:** Critically examine the timing analysis pipeline for weaknesses, errors, incoherence, inconsistencies, and missed opportunities. Focus on the newly implemented MLE-based multi-station discrimination and its integration with the existing D_clock calculation.
 
 **Author:** Michael James Hauan (AC0G)  
-**Date:** 2025-12-16  
-**Status:** 🟡 Ready for Analysis
+**Date:** 2025-12-17  
+**Status:** 🟡 Ready for Critical Analysis
+
+---
+
+### SESSION 2025-12-17: MLE-BASED MULTI-STATION DISCRIMINATION
+
+This session implemented a significant architectural change: replacing heuristic weighted voting with Maximum Likelihood Estimation (MLE) for station discrimination on shared frequencies.
+
+#### New Files Created
+
+| File | Purpose | Lines | Review Priority |
+|------|---------|-------|-----------------|
+| `station_model.py` | StationModel, ChannelAssignment, StationModelFactory | ~520 | **CRITICAL** |
+| `correlator_bank.py` | Parallel matched filtering with predicted ToA windows | ~450 | **CRITICAL** |
+| `docs/design/MULTI_STATION_MLE_DESIGN.md` | Architecture documentation | ~360 | HIGH |
+
+#### Files Modified
+
+| File | Changes | Review Priority |
+|------|---------|-----------------|
+| `bpm_discriminator.py` | Added `detect_ut1_pulses()`, `calibrate_from_ut1()` | **CRITICAL** |
+| `wwvh_discrimination.py` | Added `bcd_correlation_with_doppler_compensation()` | HIGH |
+| `phase2_temporal_engine.py` | Integrated CorrelatorBank and BPM UT1 calibration | **CRITICAL** |
+| `wwv_constants.py` | Added `BPM_PURE_CARRIER_MINUTES` | LOW |
+
+---
+
+### CRITIQUE CHECKLIST: TIMING ANALYSIS
+
+#### 1. StationModel Correctness (`station_model.py`)
+
+**Question:** Are the physics-based station models accurate?
+
+- [ ] **Propagation delay calculation**: Is `distance_km / 299.792458` correct for HF?
+  - This assumes speed of light in vacuum
+  - HF propagation is via ionospheric reflection, not direct path
+  - **POTENTIAL ERROR**: Should use great-circle distance × 1.1-1.5 factor for ionospheric path
+
+- [ ] **BPM timing offset**: Is `-20 ms` correct?
+  - BPM transmits 20 ms BEFORE UTC second boundary
+  - This means BPM pulses arrive at `expected_delay - 20 ms`
+  - **VERIFY**: Check against actual BPM reception data
+
+- [ ] **Confidence windows**: Are calibration/ground-truth minutes correct?
+  ```python
+  BPM_UT1_MINUTES = {25, 26, 27, 28, 29, 55, 56, 57, 58, 59}
+  BPM_PURE_CARRIER_MINUTES = {10, 11, 12, 13, 14, 15, 40, 41, 42, 43, 44, 45}
+  ```
+  - **VERIFY**: Cross-reference with BPM broadcast schedule
+
+- [ ] **Search window sizing**: Is `±10 ms` (calibrated) / `±50 ms` (bootstrap) appropriate?
+  - Ionospheric delays vary by 2-60 ms typically
+  - Mode changes can cause 5-10 ms jumps
+  - **POTENTIAL ISSUE**: ±10 ms may be too tight for disturbed conditions
+
+#### 2. CorrelatorBank Implementation (`correlator_bank.py`)
+
+**Question:** Is the correlator bank correctly implementing MLE?
+
+- [ ] **Template generation**: Are quadrature templates correct?
+  ```python
+  template_sin = np.sin(2 * np.pi * model.tone_frequency_hz * t) * window
+  template_cos = np.cos(2 * np.pi * model.tone_frequency_hz * t) * window
+  ```
+  - **VERIFY**: Template duration matches station tick duration
+  - **VERIFY**: Tukey window α=0.1 is appropriate
+
+- [ ] **Search window centering**: Is the search centered correctly?
+  ```python
+  center_ms = model.expected_delay_ms + model.timing_offset_ms
+  ```
+  - For BPM: `44.1 ms + (-20 ms) = 24.1 ms`
+  - For WWVH: `25.3 ms + 0 ms = 25.3 ms`
+  - **POTENTIAL ISSUE**: BPM and WWVH windows overlap (~1.2 ms apart)
+
+- [ ] **Sub-sample refinement**: Is parabolic interpolation correct?
+  ```python
+  refined_offset = 0.5 * (y_m1 - y_p1) / (y_m1 - 2*y_0 + y_p1)
+  ```
+  - Standard parabolic interpolation formula
+  - **VERIFY**: Clamping to ±0.5 samples is appropriate
+
+- [ ] **Cross-validation logic**: Is emission time back-calculation correct?
+  ```python
+  t_emission = result.toa_refined_ms - expected_delay
+  ```
+  - All stations transmit at same UTC instant
+  - After correcting for propagation, emission times should agree
+  - **THRESHOLD**: 5 ms cross-validation threshold - is this appropriate?
+
+- [ ] **Multi-second averaging**: Is averaging across seconds 1-10 valid?
+  - Assumes propagation is stable across 10 seconds
+  - **POTENTIAL ISSUE**: Fading can cause significant variation within 10 seconds
+
+#### 3. BPM UT1 Pulse Detection (`bpm_discriminator.py`)
+
+**Question:** Is the 100 ms UT1 pulse detection robust?
+
+- [ ] **Pulse duration filter**: Is 70-150 ms range correct?
+  ```python
+  if 70.0 <= duration_ms <= 150.0:
+  ```
+  - BPM UT1 pulses are nominally 100 ms
+  - **VERIFY**: Is ±30 ms tolerance appropriate for multipath spreading?
+
+- [ ] **Threshold calculation**: Is adaptive threshold robust?
+  ```python
+  threshold = median_env + 3 * mad * 1.4826
+  ```
+  - Uses median + 3×MAD (robust to outliers)
+  - **POTENTIAL ISSUE**: May fail in high-noise conditions
+
+- [ ] **Minimum pulse count**: Is 5 pulses sufficient?
+  ```python
+  if len(pulses) < 5:
+      return None
+  ```
+  - Expect ~59 pulses per minute
+  - **QUESTION**: Why not require more pulses for calibration?
+
+- [ ] **ToA residual calculation**: Is expected arrival correct?
+  ```python
+  expected_arrival_offset_ms = self.expected_delay_ms + timing_offset_ms
+  expected_toa = p['second'] * 1000.0 + expected_arrival_offset_ms
+  ```
+  - **VERIFY**: Does this correctly account for BPM's -20 ms offset?
+
+#### 4. Doppler-Compensated BCD (`wwvh_discrimination.py`)
+
+**Question:** Is Doppler de-rotation improving coherent integration?
+
+- [ ] **Doppler estimation source**: Where does Doppler come from?
+  ```python
+  doppler_info = self.estimate_doppler_shift_from_ticks(iq_samples, sample_rate)
+  ```
+  - Uses per-tick phase progression
+  - **VERIFY**: Is this estimate accurate enough for de-rotation?
+
+- [ ] **De-rotation implementation**: Is the phasor correct?
+  ```python
+  derotation = np.exp(-2j * np.pi * avg_doppler_hz * t)
+  derotated = analytic_bcd * derotation
+  ```
+  - Negative sign removes positive Doppler
+  - **VERIFY**: Sign convention matches Doppler estimation
+
+- [ ] **Window overlap**: Is 50% overlap appropriate?
+  ```python
+  overlap_fraction: float = 0.5
+  ```
+  - 50% overlap is standard for Welch-style averaging
+  - **QUESTION**: Does this provide sufficient time resolution?
+
+- [ ] **Averaging WWV/WWVH Doppler**: Is this valid?
+  ```python
+  avg_doppler_hz = (wwv_doppler_hz + wwvh_doppler_hz) / 2.0
+  ```
+  - **POTENTIAL ISSUE**: WWV and WWVH may have different Doppler if paths differ
+
+#### 5. Phase2TemporalEngine Integration
+
+**Question:** Is the integration correct and complete?
+
+- [ ] **BPM UT1 calibration timing**: When does calibration run?
+  ```python
+  if self.frequency_mhz in (2.5, 5.0, 10.0, 15.0) and minute_number in {25, 26, 27, 28, 29, 55, 56, 57, 58, 59}:
+  ```
+  - Only runs on shared frequencies during UT1 minutes
+  - **VERIFY**: Does calibration persist across minutes?
+
+- [ ] **Correlator bank fallback**: What if correlator bank fails?
+  ```python
+  if result.bcd_wwv_amplitude is None or result.bcd_wwvh_amplitude is None:
+      # Fall back to BCD correlation
+  ```
+  - Falls back to existing BCD correlation
+  - **VERIFY**: Is this fallback tested?
+
+- [ ] **ChannelAssignment usage**: Are all fields being used?
+  - `wwv_component_power_db`, `wwvh_component_power_db`, `bpm_component_power_db`
+  - `wwv_toa_ms`, `wwvh_toa_ms`, `bpm_toa_ms`
+  - `cross_validation_error_ms`, `cross_validation_passed`
+  - **QUESTION**: Is `bpm_usable_for_timing` being respected downstream?
+
+---
+
+### POTENTIAL WEAKNESSES AND ERRORS
+
+#### 1. **Propagation Delay Model**
+
+**Issue:** `StationModelFactory` uses straight-line distance for delay calculation.
+
+```python
+delay_ms = distance_km / 299.792458  # Speed of light
+```
+
+**Problem:** HF propagation is via ionospheric reflection, not direct path. The actual path length is:
+- 1F hop: ~1.1-1.2× great-circle distance
+- 2F hop: ~1.3-1.5× great-circle distance
+
+**Impact:** Expected delays may be 10-50% too short, causing search windows to be misaligned.
+
+**Recommendation:** Add ionospheric path factor based on frequency and time of day.
+
+#### 2. **BPM/WWVH Overlap**
+
+**Issue:** At receiver location EM38, BPM and WWVH arrivals are only ~1.2 ms apart.
+
+| Station | Expected Delay | Net Arrival |
+|---------|----------------|-------------|
+| WWV     | 4.3 ms         | 4.3 ms      |
+| WWVH    | 25.3 ms        | 25.3 ms     |
+| BPM     | 44.1 ms        | 24.1 ms (−20 ms offset) |
+
+**Problem:** With ±10 ms search windows, BPM and WWVH windows overlap significantly.
+
+**Impact:** Correlator may confuse BPM and WWVH, especially during non-UT1 minutes when BPM has 10 ms ticks (vs WWVH's 5 ms).
+
+**Recommendation:** Use tick duration as discriminator - BPM's 10 ms ticks are 2× longer than WWVH's 5 ms.
+
+#### 3. **Calibration Persistence**
+
+**Issue:** BPM calibration updates `self.bpm_calibration` dict, but this is instance state.
+
+**Problem:** If the Phase2TemporalEngine is restarted, calibration is lost.
+
+**Impact:** System must re-calibrate from UT1 minutes after every restart.
+
+**Recommendation:** Persist calibration to state file (like `timing_calibration.json`).
+
+#### 4. **Cross-Validation Threshold**
+
+**Issue:** Cross-validation uses 5 ms threshold.
+
+```python
+assignment.cross_validation_passed = max_error < 5.0
+```
+
+**Problem:** Ionospheric conditions can cause >5 ms variation between stations.
+
+**Impact:** Valid measurements may be flagged as failing cross-validation.
+
+**Recommendation:** Make threshold adaptive based on ionospheric conditions (Kp index, time of day).
+
+#### 5. **Doppler Averaging**
+
+**Issue:** Doppler de-rotation uses average of WWV and WWVH Doppler.
+
+```python
+avg_doppler_hz = (wwv_doppler_hz + wwvh_doppler_hz) / 2.0
+```
+
+**Problem:** WWV and WWVH propagate via different ionospheric paths with potentially different Doppler.
+
+**Impact:** De-rotation may be suboptimal for both stations.
+
+**Recommendation:** Apply station-specific de-rotation, or use dominant station's Doppler.
+
+---
+
+### MISSED OPPORTUNITIES
+
+#### 1. **BPM Pure Carrier Minutes**
+
+BPM transmits pure carrier (no time code) during minutes 10-15 and 40-45. This could be used for:
+- High-precision carrier phase measurement
+- Path gain calibration without BCD interference
+- Doppler estimation from carrier frequency offset
+
+**Current Status:** `BPM_PURE_CARRIER_MINUTES` constant defined but not used.
+
+#### 2. **CHU 1000 Hz Tone Correlation**
+
+CHU also transmits 1000 Hz tones (same as WWV/BPM). On CHU-only frequencies (3.33, 7.85, 14.67 MHz), this provides unambiguous timing.
+
+**Current Status:** CHU is handled separately, not integrated into correlator bank.
+
+#### 3. **Multi-Frequency Consistency**
+
+WWV transmits on 2.5, 5, 10, 15, 20, 25 MHz simultaneously. All should show the same D_clock (after propagation correction).
+
+**Current Status:** Each frequency processed independently; no cross-frequency validation.
+
+#### 4. **Ionospheric Model Integration**
+
+The system has `ionospheric_model.py` with IRI-2016 layer heights, but this isn't used for:
+- Predicted propagation delays
+- Search window sizing
+- Mode disambiguation
+
+**Current Status:** Ionospheric model exists but is underutilized.
+
+---
+
+### VALIDATION COMMANDS
+
+```bash
+# Test StationModel propagation delays
+python3 -c "
+from src.hf_timestd.core.station_model import StationModelFactory
+f = StationModelFactory(38.918, -92.128)
+for sid, model in f.create_all_models().items():
+    print(f'{sid.value}: dist={model.distance_km:.0f}km, delay={model.expected_delay_ms:.1f}ms, offset={model.timing_offset_ms:.1f}ms')
+"
+
+# Test CorrelatorBank search windows
+python3 -c "
+from src.hf_timestd.core.correlator_bank import create_correlator_bank
+bank = create_correlator_bank(38.918, -92.128)
+for model in bank.factory.get_models_for_frequency(10.0):
+    center, width = model.get_search_window(25, calibrated=False)
+    print(f'{model.station.value}: center={center:.1f}ms, width=±{width:.1f}ms')
+"
+
+# Check BPM UT1 detection
+python3 -c "
+from src.hf_timestd.core.bpm_discriminator import create_bpm_discriminator
+bpm = create_bpm_discriminator(38.918, -92.128)
+print(f'UT1 minutes: {sorted(bpm.UT1_MINUTES)}')
+print(f'Expected delay: {bpm.expected_delay_ms:.1f}ms')
+"
+
+# Verify Phase2TemporalEngine integration
+python3 -c "
+from src.hf_timestd.core.phase2_temporal_engine import Phase2TemporalEngine
+import inspect
+src = inspect.getsource(Phase2TemporalEngine._step2_channel_characterization)
+print('BPM UT1 calibration:', 'detect_ut1_pulses' in src)
+print('CorrelatorBank:', 'correlator_bank.process_minute' in src)
+"
+```
+
+---
+
+### SUCCESS CRITERIA FOR TIMING ANALYSIS REVIEW
+
+| Metric | Target | How to Verify |
+|--------|--------|---------------|
+| Propagation delay accuracy | ±5 ms | Compare predicted vs measured ToA |
+| BPM/WWVH discrimination | >95% correct | Check UT1 vs non-UT1 minute detection |
+| Cross-validation pass rate | >80% | Monitor `cross_validation_passed` |
+| D_clock stability | σ < 3 ms | Check intra-station spread |
+| Calibration persistence | Survives restart | Kill/restart service, check state |
+
+---
+
+## 🟡 PREVIOUS FOCUS: WEB UI INTEGRATION REVIEW
 
 ---
 

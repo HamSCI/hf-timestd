@@ -332,6 +332,9 @@ BPM_MINUTE_MARKER_DURATION = 0.300 # 300 ms
 # UT1 Minutes: 25-29, 55-59
 BPM_UT1_MINUTES = set(range(25, 30)) | set(range(55, 60))
 
+# Pure carrier minutes (no time code modulation) - useful for BPM carrier measurement
+BPM_PURE_CARRIER_MINUTES = set(range(10, 16)) | set(range(40, 46))
+
 # =============================================================================
 # DETECTION THRESHOLDS
 # =============================================================================
