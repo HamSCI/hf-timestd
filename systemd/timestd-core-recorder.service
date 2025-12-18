@@ -51,7 +51,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 
 # Paths we need write access to
-ReadWritePaths=/var/lib/hf-timestd /var/log/hf-timestd
+ReadWritePaths=/var/lib/timestd /var/log/timestd /dev/shm/timestd
 ReadOnlyPaths=/etc/hf-timestd
 
 # Network access for RTP multicast

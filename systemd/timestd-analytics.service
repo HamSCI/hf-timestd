@@ -7,25 +7,25 @@ Wants=network-online.target
 Requires=timestd-core-recorder.service
 
 [Service]
-Type=simple
+Type=forking
+RemainAfterExit=yes
 
 # User/Group - same as core recorder
 User=hf-timestd
 Group=hf-timestd
 
 # Environment from file (set by install.sh)
-# Try new path first, fall back to legacy
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Working directory
 WorkingDirectory=${TIMESTD_PROJECT}
 
 # Analytics service launcher script
-# This starts all 9 channel analyzers + multi-broadcast fusion
-ExecStart=${TIMESTD_PROJECT}/scripts/timestd-analytics.sh -start ${TIMESTD_CONFIG}
-ExecStop=${TIMESTD_PROJECT}/scripts/timestd-analytics.sh -stop
+# This starts all 9 channel analyzers + multi-broadcast fusion as background processes
+ExecStart=${TIMESTD_PROJECT}/scripts/timestd-analytics.sh start ${TIMESTD_CONFIG}
+ExecStop=${TIMESTD_PROJECT}/scripts/timestd-analytics.sh stop
 
-# Don't restart automatically - let individual channel processes handle it
+# Restart if the launcher fails
 Restart=on-failure
 RestartSec=30
 StartLimitInterval=300
@@ -48,7 +48,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 
 # Paths we need access to
-ReadWritePaths=/var/lib/hf-timestd /var/log/hf-timestd
+ReadWritePaths=/var/lib/timestd /var/log/timestd /dev/shm/timestd
 ReadOnlyPaths=/etc/hf-timestd
 
 [Install]

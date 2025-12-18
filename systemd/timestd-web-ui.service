@@ -42,7 +42,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 
 # Paths - read-only access to data, read-write for web-ui data dir
-ReadWritePaths=/var/lib/hf-timestd /var/log/hf-timestd ${TIMESTD_WEBUI}/data
+ReadWritePaths=/var/lib/timestd /var/log/timestd ${TIMESTD_WEBUI}/data
 ReadOnlyPaths=/etc/hf-timestd
 
 # Network - bind to port 3000
