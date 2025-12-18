@@ -903,24 +903,39 @@ async function getChannelStatuses(paths) {
       console.error('Error reading core status:', err.message);
     }
 
-    // Check which channel_recorder processes are running via pgrep
+    // Check if core_recorder (unified) or channel_recorder (per-channel) is running
+    let coreRecorderRunning = false;
     let runningChannels = new Set();
+    
+    // First check for unified core_recorder process
     try {
-      const result = execSync('pgrep -af "hf_timestd\\.core\\.channel_recorder"', { encoding: 'utf8' });
-      // Parse each line to extract channel name
-      for (const line of result.split('\n')) {
-        const match = line.match(/--channel\s+"?([^"]+)"?\s+--frequency/);
-        if (match) {
-          runningChannels.add(match[1].trim());
-        }
-      }
+      execSync('pgrep -f "hf_timestd\\.core\\.core_recorder"', { encoding: 'utf8' });
+      coreRecorderRunning = true;
     } catch (e) {
-      // pgrep returns exit code 1 if no processes found
+      // Not running
+    }
+    
+    // Fallback: check for per-channel channel_recorder processes
+    if (!coreRecorderRunning) {
+      try {
+        const result = execSync('pgrep -af "hf_timestd\\.core\\.channel_recorder"', { encoding: 'utf8' });
+        // Parse each line to extract channel name
+        for (const line of result.split('\n')) {
+          const match = line.match(/--channel\s+"?([^"]+)"?\s+--frequency/);
+          if (match) {
+            runningChannels.add(match[1].trim());
+          }
+        }
+      } catch (e) {
+        // pgrep returns exit code 1 if no processes found
+      }
     }
 
     for (const channelName of channels) {
-      // Check if channel_recorder process is running for this channel
-      let rtpStreaming = runningChannels.has(channelName);
+      // Check if recorder is running for this channel
+      // In unified mode (core_recorder), all channels are active if core_recorder is running
+      // In per-channel mode, check if specific channel_recorder process exists
+      let rtpStreaming = coreRecorderRunning || runningChannels.has(channelName);
 
       // Get analytics status for this channel (Phase 2 status directory)
       const statusFile = paths.getAnalyticsServiceStatusFileForChannel(channelName);
