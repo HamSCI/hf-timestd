@@ -523,13 +523,20 @@
                 };
             });
 
+            // Calculate today's UTC date boundaries for fixed x-axis
+            const now = new Date();
+            const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+            const todayEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59));
+
             const layout = {
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 font: { color: '#94a3b8' },
                 xaxis: {
                     title: 'Time (UTC)',
-                    gridcolor: '#334155'
+                    gridcolor: '#334155',
+                    range: [todayStart.toISOString(), todayEnd.toISOString()],
+                    tickformat: '%H:%M'
                 },
                 yaxis: {
                     title: 'D_clock Residual (ms)',
