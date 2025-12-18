@@ -219,15 +219,26 @@ async function getRadiodStatus(paths) {
  */
 async function getCoreRecorderStatus(paths) {
   try {
-    // Check for running channel_recorder processes via pgrep
-    // execSync is already imported at top of file
+    // Check for running recorder processes via pgrep
+    // Supports both core_recorder (unified) and channel_recorder (per-channel) architectures
     let processCount = 0;
     try {
-      const result = execSync('pgrep -c -f "hf_timestd\\.core\\.channel_recorder"', { encoding: 'utf8' });
+      // Try core_recorder first (production unified process)
+      const result = execSync('pgrep -c -f "hf_timestd\\.core\\.core_recorder"', { encoding: 'utf8' });
       processCount = parseInt(result.trim()) || 0;
     } catch (e) {
       // pgrep returns exit code 1 if no processes found
       processCount = 0;
+    }
+    
+    // Fallback: check for channel_recorder processes (per-channel architecture)
+    if (processCount === 0) {
+      try {
+        const result = execSync('pgrep -c -f "hf_timestd\\.core\\.channel_recorder"', { encoding: 'utf8' });
+        processCount = parseInt(result.trim()) || 0;
+      } catch (e) {
+        processCount = 0;
+      }
     }
 
     const running = processCount > 0;
