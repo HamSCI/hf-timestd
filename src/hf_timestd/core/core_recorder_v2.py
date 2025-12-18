@@ -334,7 +334,8 @@ class CoreRecorderV2:
                 recorder = StreamRecorderV2(
                     config=recorder_config,
                     channel_info=channel_info,
-                    get_ntp_status=self.get_ntp_status
+                    get_ntp_status=self.get_ntp_status,
+                    control=self.control,  # Enable auto-recovery via ManagedStream
                 )
                 self.recorders[ssrc] = recorder
             

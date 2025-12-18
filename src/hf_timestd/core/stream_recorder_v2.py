@@ -28,7 +28,7 @@ from typing import Dict, Any, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from ka9q import RadiodStream, ChannelInfo, StreamQuality
+from ka9q import RadiodStream, ChannelInfo, StreamQuality, ManagedStream, RadiodControl
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,10 @@ class StreamRecorderV2:
         self,
         config: StreamRecorderConfig,
         channel_info: ChannelInfo,
-        get_ntp_status: Optional[Callable[[], Dict[str, Any]]] = None
+        get_ntp_status: Optional[Callable[[], Dict[str, Any]]] = None,
+        control: Optional[RadiodControl] = None,
+        on_stream_dropped: Optional[Callable[[str], None]] = None,
+        on_stream_restored: Optional[Callable[[ChannelInfo], None]] = None,
     ):
         """
         Initialize stream recorder.
@@ -116,10 +119,17 @@ class StreamRecorderV2:
             config: StreamRecorderConfig
             channel_info: ChannelInfo from ka9q.discover_channels()
             get_ntp_status: Optional callable for NTP status
+            control: Optional RadiodControl for auto-recovery via ManagedStream.
+                    If provided, uses ManagedStream which auto-restores on radiod restart.
+            on_stream_dropped: Optional callback when stream drops (ManagedStream only)
+            on_stream_restored: Optional callback when stream restores (ManagedStream only)
         """
         self.config = config
         self.channel_info = channel_info
         self.get_ntp_status = get_ntp_status
+        self._control = control
+        self._on_stream_dropped = on_stream_dropped
+        self._on_stream_restored = on_stream_restored
         
         # State
         self.state = StreamRecorderState.IDLE
@@ -176,7 +186,7 @@ class StreamRecorderV2:
             # Start the pipeline orchestrator
             self.orchestrator.start()
             
-            # Create and start RadiodStream
+            # Create and start stream
             # radiod splits 20ms blocks (400 samples at 20kHz) into 2 packets:
             #   - Small packet: 20 samples (160 bytes), ts_delta=360  
             #   - Large packet: 180 samples (1440 bytes), ts_delta=40
@@ -184,14 +194,35 @@ class StreamRecorderV2:
             # but with variable packet sizes this causes false gap detection.
             # Set to 200 (average of 360+40)/2 to minimize false gaps.
             samples_per_packet = 200  # Average timestamp delta per packet
-            self.stream = RadiodStream(
-                channel=self.channel_info,
-                on_samples=self._handle_samples,
-                samples_per_packet=samples_per_packet,
-                resequence_buffer_size=128,
-                deliver_interval_packets=20
-            )
-            self.stream.start()
+            
+            if self._control:
+                # Use ManagedStream for auto-recovery on radiod restart
+                logger.info(f"{self.config.description}: Using ManagedStream (auto-recovery enabled)")
+                self.stream = ManagedStream(
+                    control=self._control,
+                    frequency_hz=self.config.frequency_hz,
+                    preset='iq',
+                    sample_rate=self.config.sample_rate,
+                    on_samples=self._handle_samples,
+                    on_stream_dropped=self._handle_stream_dropped,
+                    on_stream_restored=self._handle_stream_restored,
+                    drop_timeout_sec=5.0,
+                    restore_interval_sec=1.0,
+                    samples_per_packet=samples_per_packet,
+                    resequence_buffer_size=128,
+                    deliver_interval_packets=20,
+                )
+                self.channel_info = self.stream.start()
+            else:
+                # Use basic RadiodStream (no auto-recovery)
+                self.stream = RadiodStream(
+                    channel=self.channel_info,
+                    on_samples=self._handle_samples,
+                    samples_per_packet=samples_per_packet,
+                    resequence_buffer_size=128,
+                    deliver_interval_packets=20
+                )
+                self.stream.start()
             
             self.session_start_time = time.time()
             
@@ -299,6 +330,31 @@ class StreamRecorderV2:
                 
         except Exception as e:
             logger.error(f"{self.config.description}: Sample processing error: {e}", exc_info=True)
+    
+    def _handle_stream_dropped(self, reason: str):
+        """Handle stream drop notification from ManagedStream."""
+        logger.warning(f"{self.config.description}: Stream DROPPED - {reason}")
+        
+        # Forward to external callback if provided
+        if self._on_stream_dropped:
+            try:
+                self._on_stream_dropped(reason)
+            except Exception as e:
+                logger.error(f"Error in stream_dropped callback: {e}")
+    
+    def _handle_stream_restored(self, channel: ChannelInfo):
+        """Handle stream restoration notification from ManagedStream."""
+        logger.info(f"{self.config.description}: Stream RESTORED - SSRC={channel.ssrc}")
+        
+        # Update channel info with new values
+        self.channel_info = channel
+        
+        # Forward to external callback if provided
+        if self._on_stream_restored:
+            try:
+                self._on_stream_restored(channel)
+            except Exception as e:
+                logger.error(f"Error in stream_restored callback: {e}")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get current statistics."""
