@@ -830,6 +830,19 @@
     </div>
 
     <script>
+        // Broadcast definitions (17 broadcasts across 4 stations)
+        const BROADCASTS = [
+            { name: 'WWV', freq: 2.5 }, { name: 'WWVH', freq: 2.5 }, { name: 'BPM', freq: 2.5 },
+            { name: 'CHU', freq: 3.33 },
+            { name: 'WWV', freq: 5 }, { name: 'WWVH', freq: 5 }, { name: 'BPM', freq: 5 },
+            { name: 'CHU', freq: 7.85 },
+            { name: 'WWV', freq: 10 }, { name: 'WWVH', freq: 10 }, { name: 'BPM', freq: 10 },
+            { name: 'CHU', freq: 14.67 },
+            { name: 'WWV', freq: 15 }, { name: 'WWVH', freq: 15 }, { name: 'BPM', freq: 15 },
+            { name: 'WWV', freq: 20 },
+            { name: 'WWV', freq: 25 }
+        ];
+        
         let refreshCountdown = 30;
         let countdownInterval = null;
         let autoRefreshInterval = null;
@@ -2278,80 +2291,91 @@
         
         function populateDClockDropdown() {
             const select = document.getElementById('dclock-channel-select');
-            if (!select || availableChannels.length === 0) return;
+            if (!select) return;
             
-            // Keep "Select Channel" option
-            select.innerHTML = '<option value="">Select Channel...</option>';
+            // Keep "Select Broadcast" option
+            select.innerHTML = '<option value="">Select Broadcast...</option>';
             
-            // Add each channel
-            availableChannels.forEach(ch => {
+            // Add each broadcast (sorted by frequency)
+            BROADCASTS.forEach(b => {
                 const option = document.createElement('option');
-                option.value = ch;
-                option.textContent = ch;
+                const broadcastKey = `${b.name}_${b.freq}`;
+                option.value = broadcastKey;
+                option.textContent = `${b.name} ${b.freq} MHz`;
                 select.appendChild(option);
             });
         }
         
         function autoSelectDClockChannel() {
-            // If Phase 2 status has a channel with D_clock, auto-select it
-            const phase2Status = window.phase2ChannelStatus;
-            if (!phase2Status || !phase2Status.available) return;
-            
             const select = document.getElementById('dclock-channel-select');
             if (!select) return;
             
-            // Find first channel with D_clock data
-            for (const [channelName, status] of Object.entries(phase2Status.channels || {})) {
-                if (status.available && status.d_clock_ms !== undefined) {
-                    select.value = channelName;
-                    loadDClockChart();
-                    break;
-                }
+            // Auto-select first broadcast (WWV 2.5 MHz)
+            if (BROADCASTS.length > 0) {
+                const first = BROADCASTS[0];
+                select.value = `${first.name}_${first.freq}`;
+                loadDClockChart();
             }
         }
         
         async function loadDClockChart() {
-            const channelSelect = document.getElementById('dclock-channel-select');
+            const broadcastSelect = document.getElementById('dclock-channel-select');
             const hoursSelect = document.getElementById('dclock-hours-select');
             const chartDiv = document.getElementById('dclock-chart');
             const statsDiv = document.getElementById('dclock-stats');
             
             if (!chartDiv) return;
             
-            const selectedChannel = channelSelect ? channelSelect.value : '';
+            const selectedBroadcast = broadcastSelect ? broadcastSelect.value : '';
             const hours = hoursSelect ? parseInt(hoursSelect.value) : 24;
             
             // Save user's selection for persistence across refresh
-            if (selectedChannel) userSelectedChannel = selectedChannel;
+            if (selectedBroadcast) userSelectedChannel = selectedBroadcast;
             if (hoursSelect) userSelectedHours = hoursSelect.value;
             
-            if (!selectedChannel) {
-                chartDiv.innerHTML = '<div style="height: 100%; display: flex; align-items: center; justify-content: center; color: #64748b;">Select a channel to view D_clock measurements</div>';
+            if (!selectedBroadcast) {
+                chartDiv.innerHTML = '<div style="height: 100%; display: flex; align-items: center; justify-content: center; color: #64748b;">Select a broadcast to view D_clock measurements</div>';
                 return;
             }
             
+            // Format broadcast name for display (e.g., "WWV_2.5" -> "WWV 2.5 MHz")
+            const [station, freq] = selectedBroadcast.split('_');
+            const displayName = `${station} ${freq} MHz`;
+            
             try {
-                const response = await fetch(`/api/v1/timing/clock-offset?channel=${encodeURIComponent(selectedChannel)}&hours=${hours}`);
-                const data = await response.json();
+                // Use broadcasts/history endpoint which has D_clock data per broadcast
+                const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+                const response = await fetch(`/api/v1/broadcasts/history?date=${dateStr}`);
+                const json = await response.json();
                 
-                if (!data.available || !data.measurements || data.measurements.length === 0) {
-                    chartDiv.innerHTML = `<div style="height: 100%; display: flex; align-items: center; justify-content: center; color: #94a3b8;">No D_clock data available for ${selectedChannel}</div>`;
+                const broadcastData = json.history[selectedBroadcast];
+                
+                if (!broadcastData || !broadcastData.data || broadcastData.data.length === 0) {
+                    chartDiv.innerHTML = `<div style="height: 100%; display: flex; align-items: center; justify-content: center; color: #94a3b8;">No D_clock data available for ${displayName}</div>`;
                     if (statsDiv) statsDiv.innerHTML = '<div style="text-align: center; color: #94a3b8;">No data</div>';
                     return;
                 }
                 
-                const gradeColors = { 'A': '#22c55e', 'B': '#3b82f6', 'C': '#eab308', 'D': '#f97316', 'X': '#ef4444' };
+                // Filter to points with D_clock data and within time window
+                const cutoff = Date.now() - (hours * 3600 * 1000);
+                const measurements = broadcastData.data
+                    .filter(pt => pt.d_clock !== undefined && pt.d_clock !== null)
+                    .filter(pt => (pt.t * 1000) > cutoff)
+                    .sort((a, b) => a.t - b.t);
+                
+                if (measurements.length === 0) {
+                    chartDiv.innerHTML = `<div style="height: 100%; display: flex; align-items: center; justify-content: center; color: #94a3b8;">No D_clock data available for ${displayName} in last ${hours}h</div>`;
+                    if (statsDiv) statsDiv.innerHTML = '<div style="text-align: center; color: #94a3b8;">No data</div>';
+                    return;
+                }
                 
                 // Build main D_clock trace
-                const x = data.measurements.map(m => new Date(m.timestamp));
-                const y = data.measurements.map(m => m.d_clock_ms);
-                const colors = data.measurements.map(m => gradeColors[m.quality_grade] || '#64748b');
-                const hoverText = data.measurements.map(m => 
-                    `D_clock: ${m.d_clock_ms >= 0 ? '+' : ''}${m.d_clock_ms.toFixed(3)} ms<br>` +
-                    `Grade: ${m.quality_grade}<br>` +
-                    `Station: ${m.station}<br>` +
-                    `Mode: ${m.propagation_mode || 'N/A'}<br>` +
-                    `Confidence: ${(m.confidence * 100).toFixed(0)}%`
+                const x = measurements.map(m => new Date(m.t * 1000));
+                const y = measurements.map(m => m.d_clock);
+                const hoverText = measurements.map(m => 
+                    `D_clock: ${m.d_clock >= 0 ? '+' : ''}${m.d_clock.toFixed(3)} ms<br>` +
+                    `Mode: ${m.mode || 'N/A'}<br>` +
+                    `Uncertainty: ±${(m.unc || 0).toFixed(1)} ms`
                 );
                 
                 const traces = [{
@@ -2361,8 +2385,8 @@
                     name: 'D_clock',
                     line: { color: '#3b82f6', width: 2 },
                     marker: { 
-                        size: 8, 
-                        color: colors,
+                        size: 6, 
+                        color: '#3b82f6',
                         line: { color: '#fff', width: 1 }
                     },
                     hovertext: hoverText,
@@ -2370,10 +2394,10 @@
                 }];
                 
                 // Add uncertainty band if available
-                const hasUncertainty = data.measurements.some(m => m.uncertainty_ms !== null);
+                const hasUncertainty = measurements.some(m => m.unc !== undefined && m.unc !== null);
                 if (hasUncertainty) {
-                    const yUpper = data.measurements.map(m => m.d_clock_ms + (m.uncertainty_ms || 0));
-                    const yLower = data.measurements.map(m => m.d_clock_ms - (m.uncertainty_ms || 0));
+                    const yUpper = measurements.map(m => m.d_clock + (m.unc || 0));
+                    const yLower = measurements.map(m => m.d_clock - (m.unc || 0));
                     
                     traces.push({
                         x: [...x, ...x.slice().reverse()],
@@ -2415,33 +2439,31 @@
                 
                 Plotly.newPlot(chartDiv, traces, layout, { responsive: true, displayModeBar: false });
                 
-                // Update stats display
-                if (statsDiv && data.statistics) {
-                    const stats = data.statistics;
-                    const gradeDistHtml = Object.entries(data.grade_distribution || {})
-                        .map(([grade, count]) => `<span style="color: ${gradeColors[grade] || '#64748b'};">${grade}: ${count}</span>`)
-                        .join(' | ');
+                // Calculate and update stats display
+                if (statsDiv) {
+                    const dClockValues = measurements.map(m => m.d_clock);
+                    const mean = dClockValues.reduce((a, b) => a + b, 0) / dClockValues.length;
+                    const variance = dClockValues.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / dClockValues.length;
+                    const std = Math.sqrt(variance);
+                    const min = Math.min(...dClockValues);
+                    const max = Math.max(...dClockValues);
                     
                     statsDiv.innerHTML = `
                         <div style="text-align: center;">
                             <div style="font-size: 13px; color: #94a3b8;">Mean</div>
-                            <div style="font-size: 18px; font-weight: 600; color: #e0e0e0;">${stats.mean_ms} ms</div>
+                            <div style="font-size: 18px; font-weight: 600; color: #e0e0e0;">${mean.toFixed(3)} ms</div>
                         </div>
                         <div style="text-align: center;">
                             <div style="font-size: 13px; color: #94a3b8;">Std Dev</div>
-                            <div style="font-size: 18px; font-weight: 600; color: #e0e0e0;">±${stats.std_ms} ms</div>
+                            <div style="font-size: 18px; font-weight: 600; color: #e0e0e0;">±${std.toFixed(3)} ms</div>
                         </div>
                         <div style="text-align: center;">
                             <div style="font-size: 13px; color: #94a3b8;">Range</div>
-                            <div style="font-size: 18px; font-weight: 600; color: #e0e0e0;">${stats.min_ms} to ${stats.max_ms}</div>
+                            <div style="font-size: 18px; font-weight: 600; color: #e0e0e0;">${min.toFixed(3)} to ${max.toFixed(3)}</div>
                         </div>
                         <div style="text-align: center;">
                             <div style="font-size: 13px; color: #94a3b8;">Samples</div>
-                            <div style="font-size: 18px; font-weight: 600; color: #e0e0e0;">${data.count}</div>
-                        </div>
-                        <div style="text-align: center;">
-                            <div style="font-size: 13px; color: #94a3b8;">Grades</div>
-                            <div style="font-size: 14px; font-weight: 500;">${gradeDistHtml}</div>
+                            <div style="font-size: 18px; font-weight: 600; color: #e0e0e0;">${measurements.length}</div>
                         </div>
                     `;
                 }
@@ -2747,13 +2769,15 @@
             return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
         }
         
-        // Initialize
-        loadDashboard();
-        startAutoRefresh();
     </script>
     </div><!-- end container -->
     <script src="/utils/utc-time.js"></script>
     <script src="/components/theme-toggle.js"></script>
     <script src="/components/navigation.js"></script>
+    <script>
+        // Initialize after all dependencies are loaded
+        loadDashboard();
+        startAutoRefresh();
+    </script>
 </body>
 </html>

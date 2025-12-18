@@ -207,6 +207,8 @@
             <a href="#propagation">Propagation Mode Probability</a>
             <a href="#quality-grades">Quality Grades</a>
             <a href="#accuracy">Accuracy Expectations</a>
+            <a href="#presence-matrix">Presence Matrix</a>
+            <a href="#toa-waterfall">ToA Waterfall</a>
             <a href="#troubleshooting">Troubleshooting</a>
         </div>
         
@@ -475,6 +477,67 @@ tail -f $TIMESTD_DATA_ROOT/phase2/fusion/fused_d_clock.csv</code></pre>
                 <li><strong>Time of day</strong>: Propagation modes change between day and night</li>
                 <li><strong>Signal strength</strong>: SNR below 10 dB is unreliable</li>
                 <li><strong>Calibration status</strong>: Allow 5-10 minutes for initial convergence</li>
+            </ul>
+        </div>
+        
+        <h2 id="presence-matrix">Presence Matrix</h2>
+        <p>
+            The <strong>Presence Matrix</strong> (also called Piano Roll) shows signal detection 
+            across all 17 broadcasts over a 24-hour period. Each column represents one broadcast 
+            (station + frequency), and time runs vertically from 00:00 UTC at the top.
+        </p>
+        
+        <h3>Reading the Matrix</h3>
+        <ul>
+            <li><strong>Colored bars</strong>: Signal detected with sufficient SNR for timing</li>
+            <li><strong>Bar width</strong>: Proportional to signal strength (wider = stronger)</li>
+            <li><strong>Gaps</strong>: No signal detected (propagation fadeout or interference)</li>
+        </ul>
+        
+        <div class="info-box">
+            <h4>Propagation Patterns</h4>
+            <p>
+                Look for diurnal patterns: lower frequencies (2.5-5 MHz) typically propagate better 
+                at night, while higher frequencies (15-25 MHz) work better during daylight hours. 
+                The matrix helps identify which broadcasts are reliable at different times.
+            </p>
+        </div>
+        
+        <h3>Click for Details</h3>
+        <p>
+            Clicking a column header opens a detailed graph showing signal likelihood vs. solar 
+            elevation angle at the path midpoint. This helps understand how ionospheric conditions 
+            affect reception.
+        </p>
+        
+        <h2 id="toa-waterfall">ToA Waterfall (Residuals)</h2>
+        <p>
+            The <strong>ToA Waterfall</strong> displays D_clock residual measurements over time, 
+            with each station shown in a different color. This visualization helps identify:
+        </p>
+        <ul>
+            <li><strong>Systematic offsets</strong>: Stations consistently above/below zero</li>
+            <li><strong>Propagation stability</strong>: Tight clustering indicates stable ionosphere</li>
+            <li><strong>Mode changes</strong>: Sudden jumps indicate propagation mode transitions</li>
+            <li><strong>Outliers</strong>: Points far from the cluster may indicate interference</li>
+        </ul>
+        
+        <h3>Interpreting the Chart</h3>
+        <table>
+            <tr><th>Pattern</th><th>Meaning</th></tr>
+            <tr><td>Tight horizontal band</td><td>Excellent propagation stability</td></tr>
+            <tr><td>Spread across ±10ms</td><td>Normal ionospheric variation</td></tr>
+            <tr><td>Sudden vertical jumps</td><td>Propagation mode change (e.g., 1F→2F)</td></tr>
+            <tr><td>Station consistently offset</td><td>May need calibration adjustment</td></tr>
+        </table>
+        
+        <div class="info-box">
+            <h4>Station Colors</h4>
+            <ul>
+                <li><span style="color:#38bdf8">■</span> <strong>WWV</strong> (Ft. Collins, CO)</li>
+                <li><span style="color:#a855f7">■</span> <strong>WWVH</strong> (Kauai, HI)</li>
+                <li><span style="color:#f43f5e">■</span> <strong>BPM</strong> (Xi'an, China)</li>
+                <li><span style="color:#fcd34d">■</span> <strong>CHU</strong> (Ottawa, Canada)</li>
             </ul>
         </div>
         

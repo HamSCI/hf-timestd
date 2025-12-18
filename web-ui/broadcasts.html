@@ -49,6 +49,29 @@
             height: 400px;
         }
 
+        /* Info Link */
+        .info-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: rgba(59, 130, 246, 0.2);
+            color: #3b82f6;
+            font-size: 11px;
+            font-weight: 700;
+            text-decoration: none;
+            margin-left: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .info-link:hover {
+            background: #3b82f6;
+            color: #fff;
+        }
+
         /* Modal Styles */
         .modal {
             display: none;
@@ -136,11 +159,8 @@
 
         <!-- Visual 1: Presence Matrix (Piano Roll) -->
         <section class="section">
-            <div class="section-title">🎹 Presence Matrix (24h)</div>
+            <div class="section-title">🎹 Presence Matrix (24h) <a href="/docs/timing-methodology.html#presence-matrix" class="info-link" title="Understanding the Presence Matrix">?</a></div>
             <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">
-                Likelihood of signal presence. <span style="color:#4ade80">■ High Conf</span> <span
-                    style="color:#facc15">■ Ambiguous</span> <span style="color:#ef4444">■ Unlikely</span>
-                <br>
                 <span style="color:#38bdf8">ℹ️ Click column headers to view detailed Signal vs. Solar Zenith
                     graph</span>
             </p>
@@ -168,7 +188,7 @@
 
         <!-- Visual 2: Historical Waterfall -->
         <section class="section">
-            <div class="section-title">🌊 Historical ToA Waterfall (Residuals)</div>
+            <div class="section-title">🌊 Historical ToA Waterfall (Residuals) <a href="/docs/timing-methodology.html#toa-waterfall" class="info-link" title="Understanding the ToA Waterfall">?</a></div>
             <p style="font-size: 12px; color: var(--text-secondary);">
                 Vertical pillars indicate stable propagation. Deviation = D_clock + Prop Error.
             </p>
@@ -479,8 +499,8 @@
                         const group = traces[b.name];
 
                         if (group) {
-                            group.x.push(pt.d_clock);
-                            group.y.push(date.toISOString());
+                            group.x.push(date.toISOString());
+                            group.y.push(pt.d_clock);
                             group.text.push(`${b.name} ${b.freq}MHz<br>Unc: ${pt.unc?.toFixed(1)}ms`);
                         }
                     }
@@ -508,13 +528,12 @@
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 font: { color: '#94a3b8' },
                 xaxis: {
-                    title: 'D_clock Residual (ms)',
-                    range: [-50, 50],
+                    title: 'Time (UTC)',
                     gridcolor: '#334155'
                 },
                 yaxis: {
-                    title: 'Time (UTC)',
-                    autorange: 'reversed', // Top to bottom
+                    title: 'D_clock Residual (ms)',
+                    range: [-20, 20],
                     gridcolor: '#334155'
                 },
                 legend: {
