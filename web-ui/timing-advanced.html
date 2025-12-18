@@ -702,7 +702,8 @@
                 const data = await response.json();
                 
                 if (!data.available) {
-                    container.innerHTML = '<div class="chart-loading">No propagation mode data available</div>';
+                    const msg = data.message || 'No propagation mode data available';
+                    container.innerHTML = `<div class="chart-loading">${msg}</div>`;
                     return;
                 }
                 
@@ -710,6 +711,11 @@
                     modeChart = new ModeProbabilityRidge('mode-ridge-chart', {
                         xRange: [0, 18]
                     });
+                }
+                
+                // Show message if using fallback station
+                if (data.message && data.fallback_available) {
+                    console.log('Mode probability fallback:', data.message);
                 }
                 
                 modeChart.update(data);

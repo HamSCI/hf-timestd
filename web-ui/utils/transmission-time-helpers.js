@@ -845,17 +845,14 @@ async function getModeProbabilityData(paths, config, targetChannel = null, targe
   // Find best channel with convergence data
   let bestData = null;
   let bestUncertainty = Infinity;
+  let fallbackData = null;  // Data from channel even if station doesn't match
+  let fallbackUncertainty = Infinity;
   
   for (const ch of searchChannels) {
     const channelName = ch.description || `Channel ${ch.ssrc}`;
     const status = await getPhase2AnalyticsStatus(channelName, paths);
     
     if (status.available && status.propagation_delay_ms !== undefined) {
-      // If a specific station was requested, only use data from that station
-      if (targetStation && status.station !== targetStation) {
-        continue;  // Skip - wrong station for this broadcast
-      }
-      
       // Get convergence uncertainty - lower is better
       const uncertainty = status.uncertainty_ms || 100;
       const isLocked = status.convergence?.is_locked || 
@@ -865,7 +862,10 @@ async function getModeProbabilityData(paths, config, targetChannel = null, targe
       // Prefer locked channels, then lowest uncertainty
       const effectiveUncertainty = isLocked ? uncertainty : uncertainty + 50;
       
-      if (effectiveUncertainty < bestUncertainty) {
+      // If a specific station was requested, check if it matches
+      const stationMatches = !targetStation || status.station === targetStation;
+      
+      if (stationMatches && effectiveUncertainty < bestUncertainty) {
         bestUncertainty = effectiveUncertainty;
         bestData = {
           channel: channelName,
@@ -877,12 +877,50 @@ async function getModeProbabilityData(paths, config, targetChannel = null, targe
           convergence_progress: status.convergence?.convergence_progress || 0,
           n_hops: status.n_hops
         };
+      } else if (!stationMatches && effectiveUncertainty < fallbackUncertainty) {
+        // Keep as fallback - same frequency channel but different station currently active
+        fallbackUncertainty = effectiveUncertainty;
+        fallbackData = {
+          channel: channelName,
+          measured_delay: status.propagation_delay_ms,
+          uncertainty_ms: uncertainty,
+          station: status.station,
+          quality_grade: status.quality_grade,
+          is_locked: isLocked,
+          convergence_progress: status.convergence?.convergence_progress || 0,
+          n_hops: status.n_hops,
+          is_fallback: true  // Flag that this is from a different station
+        };
       }
     }
   }
   
   if (!bestData || bestData.measured_delay === null) {
-    // No data - return flat probabilities using requested or default station
+    // No exact station match - check if we have fallback data from same frequency
+    if (fallbackData && fallbackData.measured_delay !== null) {
+      // Use fallback but show theoretical delays for requested station
+      const requestedStation = targetStation || 'WWV';
+      const theoreticalDelays = calculateModeDelays(requestedStation);
+      return {
+        available: true,
+        station: requestedStation,
+        actual_station_detected: fallbackData.station,
+        channel: fallbackData.channel,
+        candidates: Object.entries(theoreticalDelays).map(([mode, info]) => ({
+          mode,
+          delay_ms: info.delay_ms,
+          probability: 0.0,  // Can't calculate - no data for this station
+          expected_delay_ms: info.delay_ms
+        })),
+        measured_delay: null,
+        uncertainty_ms: 100,
+        message: `${requestedStation} not currently detected on this frequency. Showing ${fallbackData.station} instead.`,
+        fallback_available: true,
+        fallback_station: fallbackData.station
+      };
+    }
+    
+    // No data at all - return flat probabilities using requested or default station
     const defaultStation = targetStation || 'WWV';
     const defaultDelays = calculateModeDelays(defaultStation);
     return {
@@ -896,7 +934,7 @@ async function getModeProbabilityData(paths, config, targetChannel = null, targe
       })),
       measured_delay: null,
       uncertainty_ms: 100,
-      message: 'Waiting for convergence...'
+      message: `No data for ${defaultStation} on this frequency`
     };
   }
   
