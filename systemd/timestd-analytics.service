@@ -37,8 +37,9 @@ StandardError=journal
 SyslogIdentifier=timestd-analytics
 
 # Resource limits (9 channels + fusion = ~10 processes)
+# Yield to radiod which handles real-time USB/FFT
+Nice=5
 MemoryMax=4G
-CPUQuota=200%
 
 # Security hardening
 NoNewPrivileges=true

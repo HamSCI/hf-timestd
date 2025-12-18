@@ -37,10 +37,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=timestd-core-recorder
 
-# Resource limits - prioritize for real-time recording
-Nice=-5
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=50
+# Resource limits - yield to radiod which handles real-time USB/FFT
+# Use nice priority instead of real-time scheduling
+Nice=5
 
 # Memory limit (adjust based on channel count)
 MemoryMax=2G
