@@ -143,10 +143,7 @@
             </div>
         </div>
 
-        <!-- DEBUG PANEL -->
-        <div id="debug-panel"
-            style="background: #330000; color: #ff9999; padding: 10px; margin-bottom: 20px; font-family: monospace; white-space: pre-wrap;">
-            Diagnostic Panel v2.0 - Waiting for JS...</div>
+
 
         <!-- Controls -->
         <section class="section">
@@ -301,10 +298,7 @@
             if (clean['CHU_3330']) dbgText += "CHU_3330 FOUND with " + clean['CHU_3330'].data.length + " pts\n";
             else dbgText += "CHU_3330 NOT FOUND\n";
 
-            // Update panel
-            const p = document.getElementById('debug-panel');
-            p.style.display = 'block';
-            p.textContent = dbgText;
+
 
             return clean;
         }
@@ -716,25 +710,44 @@
 
             // Helper: Linear Regression with Velocity Limit
             function calculateRobustSlope(points) {
-                if (points.length < 5) return 0;
+                try {
+                    const n = points.length;
+                    if (n < 5) return 0;
 
-                // 1. Calculate simple slope
-                let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
-                for (const p of points) {
-                    sumX += p.t;
-                    sumY += p.d;
-                    sumXY += p.t * p.d;
-                    sumXX += p.t * p.t;
+                    // Theil-Sen Estimator: Median of slopes
+                    const slopes = [];
+                    // Relaxed DT to handle small jitter, but avoid 0 division
+                    const MIN_DT = 1.0;
+
+                    for (let i = 0; i < n; i++) {
+                        // Optimization: Limit 'j' horizon to avoid checking pairs too far apart? 
+                        // Actually, far apart pairs are GOOD for slope.
+                        // But limit total pairs for performance if N is huge (N=30 is fine).
+                        for (let j = i + 1; j < n; j++) {
+                            const dt = points[j].t - points[i].t;
+                            if (Math.abs(dt) > MIN_DT) {
+                                const slope = (points[j].d - points[i].d) / dt;
+                                if (Number.isFinite(slope)) {
+                                    slopes.push(slope);
+                                }
+                            }
+                        }
+                    }
+
+                    if (slopes.length === 0) return 0;
+
+                    slopes.sort((a, b) => a - b);
+                    const mid = Math.floor(slopes.length / 2);
+
+                    if (slopes.length % 2 !== 0) {
+                        return slopes[mid];
+                    } else {
+                        return (slopes[mid - 1] + slopes[mid]) / 2.0;
+                    }
+                } catch (e) {
+                    console.error("Theil-Sen error:", e);
+                    return 0;
                 }
-                const n = points.length;
-                const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
-
-                // 2. Reject if slope implies non-physical velocity (> 10 Hz Doppler)
-                // 10 Hz Doppler @ 10 MHz approx 0.05 ms/sec change?
-                // Doppler = f * slope(ms/s * 1e-3). slope = Doppler / f * 1000
-                // 10 Hz / 10e6 * 1000 = 1e-3 ms/s.
-                // It is extremely small.
-                return slope;
             }
 
             BROADCASTS.forEach(b => {
