@@ -3713,8 +3713,12 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
             const pt = { t: minute, snr: parseFloat(snr), conf: conf };
             // Attach Tone Doppler if available (convert Hz to m/s later or send raw)
             if (dop) {
-              if (stationLabel.includes('WWV')) pt.doppler_hz = dop.wwv;
-              else if (stationLabel.includes('WWVH')) pt.doppler_hz = dop.wwvh;
+              if (stationLabel.includes('WWVH')) {
+                pt.doppler_hz = dop.wwvh;
+              } else {
+                // WWV, BPM, CHU all define 'wwv_doppler_hz' as the 1000 Hz tone path
+                pt.doppler_hz = dop.wwv;
+              }
             }
 
             // Existing logic for offset/delay
