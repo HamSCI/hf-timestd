@@ -3666,8 +3666,41 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
         const isWWVOnly = [20, 25].includes(freq);
         const isCHU = [3.33, 7.85, 14.67].includes(freq);
 
+        // Parse Doppler CSV if available (Ionospheric Channel Characterization)
+        const dopplerPath = join(
+          paths.getPhase2Dir(channelName),
+          'doppler',
+          `${safeChannel}_doppler_${dateStr}.csv`
+        );
+
+        const dopplerMap = new Map();
+        if (fs.existsSync(dopplerPath)) {
+          try {
+            const dopContent = fs.readFileSync(dopplerPath, 'utf8');
+            const dopRecords = csvParse(dopContent, { columns: true, skip_empty_lines: true });
+            for (const dr of dopRecords) {
+              // Convert ISO timestamp to minute boundary integer (fallback if missing)
+              // Usually CSV has timestamp_utc "2023-10-27 12:34:00+00:00"
+              // timestamps match the clock_offset file minutes.
+              const ts = new Date(dr.timestamp_utc.replace(' ', 'T')).getTime() / 1000;
+              if (!isNaN(ts)) {
+                dopplerMap.set(ts, {
+                  wwv: parseFloat(dr.wwv_doppler_hz) || 0,
+                  wwvh: parseFloat(dr.wwvh_doppler_hz) || 0,
+                  std: parseFloat(dr.wwv_doppler_std_hz) || 0
+                });
+              }
+            }
+          } catch (e) {
+            // Ignore doppler load errors
+          }
+        }
+
         for (const row of records) {
-          const minute = row.minute_boundary_utc;
+          const minute = parseInt(row.minute_boundary_utc); // ensure int
+
+          // Get Doppler values for this minute
+          const dop = dopplerMap.get(minute);
 
           // Strategy 1: Use specific tick SNR columns if available (newer files)
           // Strategy 2: Fallback to `row.station` + `row.snr_db` (older files)
@@ -3675,21 +3708,39 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
 
           let pushed = false;
 
+          // Helper to add data point
+          const addPoint = (stationLabel, snr, conf, extra = {}) => {
+            const pt = { t: minute, snr: parseFloat(snr), conf: conf };
+            // Attach Tone Doppler if available (convert Hz to m/s later or send raw)
+            if (dop) {
+              if (stationLabel.includes('WWV')) pt.doppler_hz = dop.wwv;
+              else if (stationLabel.includes('WWVH')) pt.doppler_hz = dop.wwvh;
+            }
+
+            // Existing logic for offset/delay
+            if (stationLabel === row.station) {
+              if (row.clock_offset_ms) pt.offset = parseFloat(row.clock_offset_ms);
+              if (row.propagation_delay_ms) pt.delay = parseFloat(row.propagation_delay_ms);
+              if (row.propagation_mode) pt.mode = row.propagation_mode;
+            }
+            getLane(stationLabel, freq).data.push(pt);
+          };
+
           // Check for specific tick data (if column exists and has value)
           if (row.wwv_tick_snr_db && parseFloat(row.wwv_tick_snr_db) > 0) {
-            getLane('WWV', freq).data.push({ t: minute, snr: row.wwv_tick_snr_db, conf: 1 });
+            addPoint('WWV', row.wwv_tick_snr_db, 1);
             pushed = true;
           }
           if (row.wwvh_tick_snr_db && parseFloat(row.wwvh_tick_snr_db) > 0) {
-            getLane('WWVH', freq).data.push({ t: minute, snr: row.wwvh_tick_snr_db, conf: 1 });
+            addPoint('WWVH', row.wwvh_tick_snr_db, 1);
             pushed = true;
           }
           if (row.bpm_tick_snr_db && parseFloat(row.bpm_tick_snr_db) > 0) {
-            getLane('BPM', freq).data.push({ t: minute, snr: row.bpm_tick_snr_db, conf: 1 });
+            addPoint('BPM', row.bpm_tick_snr_db, 1);
             pushed = true;
           }
           if (row.chu_tick_snr_db && parseFloat(row.chu_tick_snr_db) > 0) {
-            getLane('CHU', freq).data.push({ t: minute, snr: row.chu_tick_snr_db, conf: 1 });
+            addPoint('CHU', row.chu_tick_snr_db, 1);
             pushed = true;
           }
 
@@ -3697,12 +3748,10 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
           if (!pushed && row.station && row.station !== 'UNKNOWN') {
             // We have a solution for this station => High Confidence Presence
             const carrierSnr = parseFloat(row.snr_db || 0);
-            getLane(row.station, freq).data.push({
-              t: minute,
-              snr: carrierSnr, // Use carrier SNR as intensity
-              conf: 1
-            });
+            addPoint(row.station, carrierSnr, 1);
+            pushed = true;
           }
+
 
           // Waterfall Data (Residuals)
           // Always attach solution data to the relevant lane for the waterfall

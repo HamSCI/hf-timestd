@@ -812,9 +812,34 @@
                         y: y,
                         mode: 'lines',
                         type: 'scatter',
-                        name: `${b.name} ${b.freqKHz / 1000}`,
+                        name: `${b.name} ${b.freqKHz / 1000} (Group)`,
                         line: { width: 2, shape: 'spline', smoothing: 1.3, color: getStationColor(b.name, 0.9) },
-                        visible: 'legendonly', // Hidden by default as requested
+                        // visible: 'legendonly', // Show D_clock derivative by default if available? Or keep existing behavior?
+                        // If I change the name, I might reset user prefs slightly.
+                        visible: 'legendonly',
+                        hoverinfo: 'x+y+name'
+                    });
+                }
+
+                // Trace 2: Measured Tone Doppler (Phase)
+                const xTone = [];
+                const yTone = [];
+                laneData.data.forEach(pt => {
+                    if (pt.doppler_hz !== undefined && Math.abs(pt.doppler_hz) < 3.0) {
+                        xTone.push(new Date(pt.t * 1000).toISOString());
+                        yTone.push(pt.doppler_hz);
+                    }
+                });
+
+                if (xTone.length > 0) {
+                    traces.push({
+                        x: xTone,
+                        y: yTone,
+                        mode: 'markers',
+                        type: 'scatter',
+                        name: `${b.name} ${b.freqKHz / 1000} (Phase)`,
+                        marker: { size: 3, opacity: 0.5, color: getStationColor(b.name, 0.4), symbol: 'circle' },
+                        visible: 'legendonly',
                         hoverinfo: 'x+y+name'
                     });
                 }
