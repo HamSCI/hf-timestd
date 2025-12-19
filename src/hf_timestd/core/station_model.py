@@ -125,6 +125,9 @@ class StationModel:
     ground_truth_minutes: Set[int] = field(default_factory=set)
     ut1_minutes: Set[int] = field(default_factory=set)
     pure_carrier_minutes: Set[int] = field(default_factory=set)
+    # Active hours (UTC) - Station broadcasts only during these hours.
+    # Default to 0-23 (24 hours).
+    active_hours: Set[int] = field(default_factory=lambda: set(range(24)))
     
     # Propagation bounds (min, max delay in ms)
     delay_bounds_ms: Tuple[float, float] = (0.0, 100.0)
@@ -459,11 +462,30 @@ class StationModelFactory:
             delay_bounds_ms=bounds,
         )
     
-    def create_bpm_model(self) -> StationModel:
-        """Create BPM station model."""
+    def create_bpm_model(self, frequency_mhz: float = 10.0) -> StationModel:
+        """
+        Create BPM station model.
+        
+        Args:
+            frequency_mhz: Carrier frequency (affects active hours)
+        """
         delay = self._estimate_propagation_delay(StationID.BPM)
         bounds = PROPAGATION_BOUNDS_MS.get('BPM', (25.0, 80.0))
         
+        # Define Active Hours based on Schedule (UTC)
+        # 5 MHz & 10 MHz: 00:00 - 24:00 (All)
+        active = set(range(24))
+        
+        # 2.5 MHz: 07:30 - 01:00 UTC (Off 01:00 - 07:30)
+        # We model this as ON for hours 00, and 08-23. (conservative on start)
+        if abs(frequency_mhz - 2.5) < 0.1:
+            active = {0} | set(range(8, 24))
+            
+        # 15 MHz: 01:00 - 09:00 UTC (Off 09:00 - 01:00)
+        # ON for hours 01-08.
+        elif abs(frequency_mhz - 15.0) < 0.1:
+            active = set(range(1, 9))
+
         return StationModel(
             station=StationID.BPM,
             tone_frequency_hz=BPM_TICK_FREQ,
@@ -478,6 +500,7 @@ class StationModelFactory:
             ground_truth_minutes=set(),  # BPM never alone on shared frequencies
             ut1_minutes=BPM_UT1_MINUTES,
             pure_carrier_minutes=BPM_PURE_CARRIER_MINUTES,
+            active_hours=active,
             delay_bounds_ms=bounds,
         )
     
@@ -503,11 +526,15 @@ class StationModelFactory:
         )
     
     def create_all_models(self) -> Dict[StationID, StationModel]:
-        """Create models for all stations."""
+        """
+        Create models for all stations (Default configuration).
+        Note: BPM model here assumes 10MHz (24h) schedule.
+        Use create_bpm_model(frequency) for specific schedules.
+        """
         return {
             StationID.WWV: self.create_wwv_model(),
             StationID.WWVH: self.create_wwvh_model(),
-            StationID.BPM: self.create_bpm_model(),
+            StationID.BPM: self.create_bpm_model(frequency_mhz=10.0),
             StationID.CHU: self.create_chu_model(),
         }
     
@@ -538,8 +565,19 @@ class StationModelFactory:
         freq_key = round(frequency_mhz, 2)
         station_ids = freq_stations.get(freq_key, [])
         
-        all_models = self.create_all_models()
-        return [all_models[sid] for sid in station_ids]
+        models = []
+        for sid in station_ids:
+            if sid == StationID.WWV:
+                models.append(self.create_wwv_model())
+            elif sid == StationID.WWVH:
+                models.append(self.create_wwvh_model())
+            elif sid == StationID.BPM:
+                # Pass frequency to get correct schedule
+                models.append(self.create_bpm_model(frequency_mhz))
+            elif sid == StationID.CHU:
+                models.append(self.create_chu_model())
+        
+        return models
 
 
 def get_calibration_status(minute: int, models: List[StationModel]) -> Dict[str, bool]:

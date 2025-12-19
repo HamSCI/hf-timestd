@@ -578,11 +578,22 @@ class Phase2TemporalEngine:
             
             # Step 2c: BPM Discriminator (China, shares 2.5/5/10/15 MHz)
             # BPM uses 10ms ticks (vs 5ms WWV) and has UT1 minutes (25-29, 55-59)
+            
+            # Determine active hours based on frequency (ROC Specificity)
+            bpm_active_hours = set(range(24)) # Default to all
+            if abs(self.frequency_mhz - 2.5) < 0.1:
+                # 2.5 MHz: 07:30 - 01:00 UTC (Off 01:00 - 07:30) -- ON: 00, 08-23
+                bpm_active_hours = {0} | set(range(8, 24))
+            elif abs(self.frequency_mhz - 15.0) < 0.1:
+                 # 15 MHz: 01:00 - 09:00 UTC -- ON: [1, 2, ..., 8]
+                 bpm_active_hours = set(range(1, 9))
+
             from .bpm_discriminator import BPMDiscriminator
             self.bpm_discriminator = BPMDiscriminator(
                 receiver_lat=self.precise_lat,
                 receiver_lon=self.precise_lon,
-                channel_name=self.channel_name
+                channel_name=self.channel_name,
+                active_hours=bpm_active_hours
             )
 
             # Step 2b: Probabilistic Discriminator (Shadow Mode)
@@ -765,12 +776,16 @@ class Phase2TemporalEngine:
         bpm_is_usable = True
         if self.frequency_mhz in (2.5, 5.0, 10.0, 15.0):
             try:
-                # Get minute number for UT1/UTC mode detection
-                minute_of_hour = int((system_time % 3600) // 60)
+                # Get minute and hour for UT1/UTC mode detection and scheduling
+                dt = datetime.fromtimestamp(system_time, tz=timezone.utc)
+                minute_of_hour = dt.minute
+                hour_of_day = dt.hour
+                
                 bpm_result = self.bpm_discriminator.analyze(
                     iq_samples=iq_samples,
                     sample_rate=self.sample_rate,
-                    minute=minute_of_hour
+                    minute=minute_of_hour,
+                    hour=hour_of_day
                 )
                 if bpm_result and bpm_result.is_bpm_detected:
                     # Create a detection-like object for BPM

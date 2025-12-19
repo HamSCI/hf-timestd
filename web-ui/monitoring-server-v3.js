@@ -230,7 +230,7 @@ async function getCoreRecorderStatus(paths) {
       // pgrep returns exit code 1 if no processes found
       processCount = 0;
     }
-    
+
     // Fallback: check for channel_recorder processes (per-channel architecture)
     if (processCount === 0) {
       try {
@@ -906,7 +906,7 @@ async function getChannelStatuses(paths) {
     // Check if core_recorder (unified) or channel_recorder (per-channel) is running
     let coreRecorderRunning = false;
     let runningChannels = new Set();
-    
+
     // First check for unified core_recorder process
     try {
       execSync('pgrep -f "hf_timestd\\.core\\.core_recorder"', { encoding: 'utf8' });
@@ -914,7 +914,7 @@ async function getChannelStatuses(paths) {
     } catch (e) {
       // Not running
     }
-    
+
     // Fallback: check for per-channel channel_recorder processes
     if (!coreRecorderRunning) {
       try {
@@ -3185,6 +3185,9 @@ async function loadAllDiscriminationMethods(channelName, date, paths) {
         relax_column_count: true,
         trim: true
       });
+      if (channelName.includes('CHU')) {
+        fs.appendFileSync('/tmp/server_debug.txt', `[DEBUG] Loaded ${records.length} rows for ${channelName}\n`);
+      }
 
       return {
         status: 'OK',
@@ -3574,6 +3577,7 @@ const simpleAudioSessions = new Map();
  */
 app.get('/api/v1/broadcasts/history', async (req, res) => {
   try {
+    fs.appendFileSync('/tmp/server_debug.txt', `[DEBUG] Request received: ${req.url}\n`);
     const dateStr = req.query.date || new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const channels = paths.discoverChannels(); // e.g. ["WWV_10_MHz", ...]
 
@@ -3595,11 +3599,37 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
 
       // Path to CSV: phase2/{CHANNEL}/clock_offset/{CHANNEL_safe}_clock_offset_{DATE}.csv
       const safeChannel = channelName.replace(/[ .]/g, '_');
-      const csvPath = join(
+      const channelWithDots = channelName.replace(/ /g, '_'); // Keeps dots e.g. CHU_3.33_MHz
+
+      let csvPath = join(
         paths.getPhase2Dir(channelName),
         'clock_offset',
         `${safeChannel}_clock_offset_${dateStr}.csv`
       );
+
+      // Fallback: Check for dotted filename (new recorder format?)
+      if (!fs.existsSync(csvPath)) {
+        const dottedPath = join(
+          paths.getPhase2Dir(channelName),
+          'clock_offset',
+          `${channelWithDots}_clock_offset_${dateStr}.csv`
+        );
+        if (fs.existsSync(dottedPath)) {
+          csvPath = dottedPath;
+        }
+      }
+
+      if (channelName.includes('CHU')) {
+        const debugMsg = `
+[DEBUG] Loading CHU: ${channelName}
+  Path: ${csvPath}
+  Exists: ${fs.existsSync(csvPath)}
+  Date: ${dateStr}
+`;
+        try {
+          fs.appendFileSync('/tmp/server_debug.txt', debugMsg);
+        } catch (e) { }
+      }
 
       if (!fs.existsSync(csvPath)) continue;
 

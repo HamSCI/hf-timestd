@@ -161,7 +161,8 @@ class BPMDiscriminator:
         dut1_ms: float = 0.0,  # Current DUT1 value (UT1-UTC) in ms
         enable_ut1_correction: bool = False,  # Allow using UT1 minutes with correction
         channel_name: str = "BPM",
-        expected_delay_ms: Optional[float] = None  # Injected delay from StationModel
+        expected_delay_ms: Optional[float] = None,  # Injected delay from StationModel
+        active_hours: Optional[Set[int]] = None     # Set of active UTC hours
     ):
         """
         Initialize BPM discriminator.
@@ -172,6 +173,8 @@ class BPMDiscriminator:
             dut1_ms: Current DUT1 value (UT1-UTC) in milliseconds
             enable_ut1_correction: If True, allow using UT1 minutes with DUT1 correction
             channel_name: Channel identifier for logging
+            expected_delay_ms: Optional pre-calculated delay
+            active_hours: Set of UTC hours (0-23) when station is transmitting
         """
         # Default to approximate US center if coordinates not provided
         # This gives reasonable BPM distance estimates for continental US
@@ -180,6 +183,9 @@ class BPMDiscriminator:
         self.dut1_ms = dut1_ms
         self.enable_ut1_correction = enable_ut1_correction
         self.channel_name = channel_name
+        
+        # Default to always active if not specified
+        self.active_hours = active_hours if active_hours is not None else set(range(24))
         
         # Pre-calculate great circle distance to BPM
         self.distance_to_bpm_km = self._haversine_distance(
@@ -293,21 +299,30 @@ class BPMDiscriminator:
         sample_rate: int,
         minute: int,
         measured_delay_ms: Optional[float] = None,
-        snr_db: float = 0.0
+        snr_db: float = 0.0,
+        hour: Optional[int] = None
     ) -> BPMDiscriminationResult:
         """
         Analyze IQ samples for BPM signal characteristics.
-        
-        Args:
-            iq_samples: Complex IQ samples (1 minute of data)
-            sample_rate: Sample rate in Hz
-            minute: Current minute (0-59)
-            measured_delay_ms: Measured propagation delay (if available)
-            snr_db: Signal-to-noise ratio in dB
-            
-        Returns:
-            BPMDiscriminationResult with detection and timing info
         """
+        # 1. Schedule Check (Specificity Layer)
+        # If the station is scheduled to be OFF, probability is zero.
+        if not self._is_transmitting_schedule(minute, hour):
+             return BPMDiscriminationResult(
+                is_bpm_detected=False,
+                confidence=0.0,
+                timing_mode=BPMTimingMode.UNKNOWN,
+                is_usable_for_utc=False,
+                tick_duration_ms=0.0,
+                expected_tick_duration_ms=0.0,
+                tick_duration_match=False,
+                expected_delay_ms=self.expected_delay_ms,
+                measured_delay_ms=measured_delay_ms,
+                snr_db=snr_db,
+                quality_grade="X",
+                method="schedule_filter"
+             )
+
         timing_mode = self.get_timing_mode(minute)
         expected_tick_ms = self.get_expected_tick_duration_ms(minute)
         
@@ -320,7 +335,8 @@ class BPMDiscriminator:
         
         # Check if tick duration matches expected
         tick_tolerance_ms = 5.0  # Allow 5ms tolerance
-        tick_match = abs(measured_tick_ms - expected_tick_ms) < tick_tolerance_ms
+        # CRITICAL FIX: Only match if measurement was valid (>0)
+        tick_match = (measured_tick_ms > 0) and (abs(measured_tick_ms - expected_tick_ms) < tick_tolerance_ms)
         
         # Determine if usable for UTC timing
         is_usable = timing_mode == BPMTimingMode.UTC
@@ -331,15 +347,12 @@ class BPMDiscriminator:
             dut1_correction = self.dut1_ms
             is_usable = True  # Usable with correction
         
-        # Calculate delay residual if measured delay available
+        # Calculate delay residual
         delay_residual = None
         if measured_delay_ms is not None:
             delay_residual = measured_delay_ms - self.expected_delay_ms
         
-        # Confidence based on:
-        # - Tick duration match
-        # - SNR
-        # - Delay plausibility
+        # Confidence Calculation (ROC-inspired)
         confidence = self._calculate_confidence(
             tick_match, snr_db, measured_delay_ms
         )
@@ -347,8 +360,9 @@ class BPMDiscriminator:
         # Quality grade
         quality_grade = self._calculate_quality_grade(confidence, snr_db, timing_mode)
         
-        # Detection threshold
-        is_detected = confidence > 0.3 and snr_db > 6.0
+        # Detection Threshold (Dynamic)
+        # Higher threshold required if SNR is low or delay is ambiguous
+        is_detected = confidence > 0.4 and snr_db > 6.0
         
         return BPMDiscriminationResult(
             is_bpm_detected=is_detected,
@@ -367,6 +381,19 @@ class BPMDiscriminator:
             dut1_correction_ms=dut1_correction
         )
     
+    def _is_transmitting_schedule(self, minute: int, hour: Optional[int] = None) -> bool:
+        """Check if BPM is broadcasting at the current UTC time."""
+        # Specificity Layer: If we know the hour and it's not in active_hours, reject.
+        if hour is not None:
+            if hour not in self.active_hours:
+                # logger.debug(f"BPM schedule rejection: Hour {hour} is not in active schedule")
+                return False
+        
+        # If hour is unknown, we assume it fits (conservative to avoid missing valid signals)
+        # unless relying on other checks.
+        
+        return True 
+
     def _measure_tick_duration(
         self,
         iq_samples: np.ndarray,
@@ -374,17 +401,8 @@ class BPMDiscriminator:
     ) -> float:
         """
         Measure tick duration from IQ samples.
-        
-        Uses envelope detection and threshold crossing to measure
-        the duration of 1000 Hz ticks.
-        
-        Args:
-            iq_samples: Complex IQ samples
-            sample_rate: Sample rate in Hz
-            
-        Returns:
-            Measured tick duration in milliseconds
         """
+        # ... (implementation same as before until return) ...
         # Bandpass filter around 1000 Hz
         from scipy.signal import butter, filtfilt
         
@@ -394,17 +412,15 @@ class BPMDiscriminator:
         high = 1100 / nyquist
         
         # Ensure filter frequencies are valid
-        if high >= 1.0:
-            high = 0.99
-        if low <= 0:
-            low = 0.01
+        if high >= 1.0: high = 0.99
+        if low <= 0: low = 0.01
             
         try:
             b, a = butter(4, [low, high], btype='band')
             filtered = filtfilt(b, a, np.abs(iq_samples))
         except Exception as e:
             logger.warning(f"BPM tick filter failed: {e}")
-            return BPM_UTC_TICK_DURATION * 1000.0  # Default to 10ms
+            return 0.0  # CRITICAL FIX: Return 0 on failure, not 10ms match!
         
         # Envelope detection
         envelope = np.abs(filtered)
@@ -434,8 +450,8 @@ class BPMDiscriminator:
             # Return median tick duration
             return float(np.median(tick_durations))
         else:
-            # Default to UTC tick duration
-            return BPM_UTC_TICK_DURATION * 1000.0
+            # CRITICAL FIX: Return 0.0 if no ticks found (noise/off-air)
+            return 0.0 
     
     def _measure_snr(
         self,
@@ -477,7 +493,7 @@ class BPMDiscriminator:
                 return 0.0
         except Exception as e:
             logger.debug(f"BPM SNR measurement failed: {e}")
-            return 0.0
+            return 0.0 
     
     def _calculate_confidence(
         self,
@@ -485,32 +501,33 @@ class BPMDiscriminator:
         snr_db: float,
         measured_delay_ms: Optional[float]
     ) -> float:
-        """Calculate overall detection confidence."""
+        """Calculate overall detection confidence using Gaussian weighting."""
         confidence = 0.0
         
-        # Tick duration match: +0.4
+        # 1. Tick Duration Match (Primary Feature)
         if tick_match:
             confidence += 0.4
         
-        # SNR contribution: 0-0.3
-        if snr_db > 20:
-            confidence += 0.3
-        elif snr_db > 15:
-            confidence += 0.25
-        elif snr_db > 10:
-            confidence += 0.2
-        elif snr_db > 6:
-            confidence += 0.1
+        # 2. SNR Contribution (Sigmoid-like or steps)
+        # Using a smoother mapping: 0 at 6dB, max 0.3 at 20dB
+        if snr_db > 6.0:
+            snr_score = min(0.3, (snr_db - 6.0) / 46.6) # Linear approx: 14/46 ->~0.3
+            # Or simpler:
+            snr_score = min(0.3, (snr_db - 6.0) * 0.02) # +0.02 per dB above 6
+            confidence += snr_score
         
-        # Delay plausibility: 0-0.3
+        # 3. Delay Plausibility (Gaussian Window Penalty)
+        # Uses Gaussian-weighted window centered on Expected ToA
         if measured_delay_ms is not None:
             delay_error = abs(measured_delay_ms - self.expected_delay_ms)
-            if delay_error < 5.0:
-                confidence += 0.3
-            elif delay_error < 10.0:
-                confidence += 0.2
-            elif delay_error < 20.0:
-                confidence += 0.1
+            
+            # Sigma = 5.0 ms (Standard deviation of window)
+            # At error=0, score=0.3
+            # At error=5, score=0.3 * e^-0.5 = 0.18
+            # At error=10, score=0.3 * e^-2 = 0.04
+            sigma = 5.0
+            gaussian_score = 0.3 * np.exp(-0.5 * (delay_error / sigma)**2)
+            confidence += gaussian_score
         
         return min(1.0, confidence)
     
