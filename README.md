@@ -6,14 +6,15 @@
 
 ## Overview
 
-HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
+HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
 **Key Capabilities:**
-- 📡 **Multi-channel recording** - Simultaneous WWV 2.5-25 MHz, CHU 3.33-14.67 MHz (9 frequencies)
-- 🎯 **Sub-millisecond timing** - ±0.5 ms via 13-broadcast fusion to UTC(NIST)
-- 🔗 **Multi-broadcast fusion** - Combines WWV/WWVH/CHU with per-station calibration
+- 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts)
+- 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST)
+- 🔗 **Multi-broadcast fusion** - Combines WWV/WWVH/CHU/BPM with per-station calibration
 - ⏱️ **HF time transfer** - D_clock measurement with ionospheric propagation mode estimation
-- 🔬 **Station discrimination** - Power ratio + ground truth for WWV/WWVH on shared frequencies
+- 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID
+- 🔬 **Shared Frequency Analysis** - Resolves WWV/WWVH/BPM on 2.5, 5, 10, 15 MHz
 - 🌐 **Web UI** - Real-time monitoring, timing visualizations, quality metrics
 - ⏰ **Chrony integration** - SHM refclock for system clock discipline
 
@@ -242,9 +243,13 @@ ADC clock drift compensation with **sub-sample precision**:
 
 **Ensemble Anchor Selection** - Cross-channel voting selects best time_snap source based on SNR, timing preference (WWV/CHU over WWVH), and quality metrics.
 
-## 🔬 WWV/WWVH Discrimination (12 Voting Methods)
+## 🧠 Hybrid Station Discrimination (AI + Heuristic)
 
-Separate WWV (Fort Collins) and WWVH (Kauai) signals on shared frequencies (2.5, 5, 10, 15 MHz) using complementary measurement techniques:
+Distinguishes WWV, WWVH, and BPM on shared frequencies (2.5, 5, 10, 15 MHz) using a **Hybrid Intelligence** approach:
+
+1.  **Probabilistic Classifier (Primary):** Logistic Regression model trained on ground truth features. Outputs $P(WWV)$ vs $P(WWVH)$.
+    -   Handles mixed/balanced signals ($P \approx 0.5$) by triggering component decomposition to measure BOTH signals.
+2.  **Heuristic Voting (Feature Extraction):** 12 independent signal analysis methods provide the feature vectors for the AI model:
 
 ### Voting Methods
 
@@ -379,6 +384,12 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 ## Status
 
 **Production Ready** - Core functionality complete and tested. Daily recording and PSWS upload operational at AC0G since November 2025.
+
+### v3.12.0 (Dec 19, 2025)
+- **Active Probabilistic Discrimination** - Logistic Regression Model promoted to primary arbiter for WWV/WWVH/BPM.
+- **BPM Integration** - Full support for BPM (Xi'an, China) on 5/10/15 MHz, including UT1 tick filtering and geometric path weighting.
+- **Robust Visualization** - Web UI now uses Theil-Sen Estimator for Doppler plots (breakdown point 29% vs 0% for Least Squares).
+- **Hybrid Engine** - Heuristic methods now serve as feature extractors for the ML classification layer.
 
 ### v3.11.0 (Dec 13, 2025)
 - **ka9q-python RadiodStream Integration** - Complete refactoring of RTP handling
