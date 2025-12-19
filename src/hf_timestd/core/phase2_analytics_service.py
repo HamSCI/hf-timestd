@@ -159,7 +159,9 @@ class Phase2AnalyticsService:
         receiver_grid: str = '',
         station_config: Optional[Dict] = None,
         poll_interval: float = 10.0,
-        use_tiered_storage: bool = False
+        use_tiered_storage: bool = False,
+        backfill_gaps: bool = False,
+        max_backfill: int = 100
     ):
         """
         Initialize Phase 2 analytics service.
@@ -183,6 +185,8 @@ class Phase2AnalyticsService:
         self.station_config = station_config or {}
         self.poll_interval = poll_interval
         self.use_tiered_storage = use_tiered_storage
+        self.backfill_gaps = backfill_gaps
+        self.max_backfill = max_backfill
         
         # Initialize tiered storage manager if enabled
         # This allows reading from hot buffer (/dev/shm) first, then cold (disk)
@@ -494,8 +498,12 @@ class Phase2AnalyticsService:
     # ========================================================================
     
     def _get_file_channel_name(self) -> str:
-        """Get filename-safe channel name (spaces to underscores, preserve dots)."""
-        return self.channel_name.replace(' ', '_')
+        """Get filename-safe channel name (Station_KHz e.g. WWV_10000)."""
+        # User requested simplified "Station_Freq" format to avoid "MHz" and dots.
+        khz = int(self.frequency_hz / 1000)
+        # Extract station from "WWV 10 MHz" -> "WWV"
+        station = self.channel_name.split(' ')[0].replace('/', '')
+        return f"{station}_{khz}"
     
     def _init_tone_detections_csv(self):
         """Initialize tone detections CSV for today."""
@@ -602,7 +610,7 @@ class Phase2AnalyticsService:
                 writer.writerow([
                     'timestamp_utc', 'minute_boundary', 'wwv_doppler_hz', 'wwvh_doppler_hz',
                     'wwv_doppler_std_hz', 'wwvh_doppler_std_hz', 'doppler_quality',
-                    'max_coherent_window_sec', 'phase_variance_rad'
+                    'max_coherent_window_sec', 'phase_variance_rad', 'carrier_doppler_hz'
                 ])
             logger.info(f"Created Doppler CSV: {self.doppler_csv}")
     
@@ -622,13 +630,14 @@ class Phase2AnalyticsService:
                 writer.writerow([
                     utc_time,
                     minute_boundary,
-                    round(channel_char.doppler_wwv_hz, 4) if channel_char.doppler_wwv_hz else '',
-                    round(channel_char.doppler_wwvh_hz, 4) if channel_char.doppler_wwvh_hz else '',
-                    round(channel_char.doppler_wwv_std_hz, 4) if channel_char.doppler_wwv_std_hz else '',
-                    round(channel_char.doppler_wwvh_std_hz, 4) if channel_char.doppler_wwvh_std_hz else '',
-                    round(channel_char.doppler_quality, 3) if channel_char.doppler_quality else '',
-                    round(channel_char.max_coherent_window_sec, 3) if channel_char.max_coherent_window_sec else '',
-                    round(channel_char.phase_variance_rad, 6) if channel_char.phase_variance_rad else ''
+                    round(channel_char.doppler_wwv_hz, 4) if channel_char.doppler_wwv_hz is not None else '',
+                    round(channel_char.doppler_wwvh_hz, 4) if channel_char.doppler_wwvh_hz is not None else '',
+                    round(channel_char.doppler_wwv_std_hz, 4) if channel_char.doppler_wwv_std_hz is not None else '',
+                    round(channel_char.doppler_wwvh_std_hz, 4) if channel_char.doppler_wwvh_std_hz is not None else '',
+                    round(channel_char.doppler_quality, 3) if channel_char.doppler_quality is not None else '',
+                    round(channel_char.max_coherent_window_sec, 3) if channel_char.max_coherent_window_sec is not None else '',
+                    round(channel_char.phase_variance_rad, 6) if channel_char.phase_variance_rad is not None else '',
+                    round(channel_char.doppler_carrier_hz, 4) if channel_char.doppler_carrier_hz is not None else ''
                 ])
         except Exception as e:
             logger.error(f"Failed to write Doppler: {e}")
@@ -1004,60 +1013,41 @@ class Phase2AnalyticsService:
         return ((int(now) // 60) - 2) * 60
     
     def _get_latest_binary_minute(self) -> Optional[int]:
-        """Get latest minute from binary archive."""
+        """Get latest minute from binary archive (checks hot and cold storage)."""
         from datetime import datetime, timezone
         from ..paths import channel_name_to_dir
         
-        # If tiered storage is enabled, check hot buffer first
-        if self._tiered_manager is not None:
-            channel_dir_name = channel_name_to_dir(self.channel_name)
-            hot_channel_dir = self._tiered_manager.hot_root / channel_dir_name
-            if hot_channel_dir.exists():
-                today = datetime.now(timezone.utc).strftime('%Y%m%d')
-                day_dir = hot_channel_dir / today
-                if day_dir.exists():
-                    bin_files = list(day_dir.glob('*.bin'))
-                    if bin_files:
-                        minutes = []
-                        for f in bin_files:
-                            try:
-                                minutes.append(int(f.stem))
-                            except ValueError:
-                                pass
-                        if minutes:
-                            latest = max(minutes)
-                            return latest - 120  # 2 minutes behind for safety
+        minutes = []
+        channel_dir_name = channel_name_to_dir(self.channel_name)
+        today = datetime.now(timezone.utc).strftime('%Y%m%d')
         
-        # Fall back to archive_dir (cold storage)
-        # Determine channel_dir based on archive_dir type
+        # Check hot buffer (RAM)
+        if self._tiered_manager is not None:
+            hot_channel_dir = self._tiered_manager.hot_root / channel_dir_name
+            day_dir = hot_channel_dir / today
+            if day_dir.exists():
+                bin_files = list(day_dir.glob('*.bin'))
+                for f in bin_files:
+                    try:
+                        minutes.append(int(f.stem))
+                    except ValueError:
+                        pass
+        
+        # Check cold storage (disk)
         if 'raw_buffer' in str(self.archive_dir):
             channel_dir = self.archive_dir
         else:
             binary_dir = self.archive_dir.parent.parent / 'raw_buffer'
-            channel_dir = binary_dir / channel_name_to_dir(self.channel_name)
+            channel_dir = binary_dir / channel_dir_name
         
-        if not channel_dir.exists():
-            return None
-        
-        # Check today's directory
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
         day_dir = channel_dir / today
-        
-        if not day_dir.exists():
-            return None
-        
-        # Find latest .bin file
-        bin_files = list(day_dir.glob('*.bin'))
-        if not bin_files:
-            return None
-        
-        # Extract minute boundaries from filenames
-        minutes = []
-        for f in bin_files:
-            try:
-                minutes.append(int(f.stem))
-            except ValueError:
-                pass
+        if day_dir.exists():
+            bin_files = list(day_dir.glob('*.bin'))
+            for f in bin_files:
+                try:
+                    minutes.append(int(f.stem))
+                except ValueError:
+                    pass
         
         if not minutes:
             return None
@@ -1387,6 +1377,24 @@ class Phase2AnalyticsService:
                 if latest_minute not in self.processed_minutes:
                     self.process_minute(latest_minute)
                 
+                # Backfill gaps if enabled
+                if self.backfill_gaps and latest_minute > 0:
+                    lookback_count = 0
+                    # Standard minute is 60 seconds
+                    back_minute = latest_minute - 60
+                    
+                    while self.running and lookback_count < self.max_backfill:
+                        if back_minute not in self.processed_minutes:
+                            if self.process_minute(back_minute):
+                                logger.info(f"Backfilled missing minute {back_minute} for {self.channel_name}")
+                            else:
+                                # Data might be missing for this minute. 
+                                # Continue backfilling unless we hit a very large gap?
+                                pass
+                        
+                        back_minute -= 60
+                        lookback_count += 1
+                
                 # Write status
                 self._write_status()
                 
@@ -1463,7 +1471,9 @@ def main():
         receiver_grid=args.grid_square,
         station_config=station_config,
         poll_interval=args.poll_interval,
-        use_tiered_storage=args.use_tiered_storage
+        use_tiered_storage=args.use_tiered_storage,
+        backfill_gaps=args.backfill_gaps or False,
+        max_backfill=args.max_backfill or 100
     )
     
     # Handle signals

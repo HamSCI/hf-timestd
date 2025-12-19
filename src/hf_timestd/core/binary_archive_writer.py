@@ -87,14 +87,14 @@ class BinaryArchiveWriter:
     def __init__(self, config: BinaryArchiveConfig):
         self.config = config
         
-        # Use tiered storage if enabled (writes to /dev/shm, archives to disk)
         if config.use_tiered_storage:
             from .tiered_storage import get_tiered_storage_manager
             self._tiered_manager = get_tiered_storage_manager()
             self.archive_dir = self._tiered_manager.get_hot_buffer_path(config.channel_name)
         else:
+            from ..paths import channel_name_to_dir
             self._tiered_manager = None
-            self.archive_dir = config.output_dir / self._sanitize_channel_name()
+            self.archive_dir = config.output_dir / channel_name_to_dir(config.channel_name)
         
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         

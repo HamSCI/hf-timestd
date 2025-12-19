@@ -1,0 +1,107 @@
+# GRAPEAgiglRl Recoecerfiguration
+# Station: AC0G-BEE1
+
+[station]
+callsign = "AC0G"
+grid_square = "EM38ww40pk"
+id = "S000171"
+instrument_id = "172"
+description = "beelink rx888 SAS"
+latitude = 38.918461
+longitude = -92.127974
+
+[ka9q]
+status_address = "bee1-hf-status.local"
+data_destination = "239.103.26.231"
+auto_create_channels = true
+
+[recorder]
+mode = "test"
+test_data_root = "/tmp/timestd-test"
+production_data_root = "/var/lib/timestd"
+recording_interval = 60
+continuous = true
+blocktime_ms = 20
+max_gap_seconds = 60
+storage_quota = "80%"
+# Compression: 'none', 'zstd', or 'lz4' - reduces disk I/O by ~2-3x
+# zstd: best compression ratio, moderate CPU
+# lz4: fastest, lower compression ratio
+# Requires: pip install zstandard (for zstd) or pip install lz4 (for lz4)
+compression = "zstd"
+compression_level = 3  # zstd: 1-22, lz4: 1-12
+
+# Tiered Storage: Use /dev/shm (RAM) for hot buffer, disk for cold storage
+# Eliminates disk round-trip for real-time pipeline
+# Auto-configures based on available RAM (default: 20% of RAM for hot buffer)
+tiered_storage = true
+hot_buffer_root = "/dev/shm/timestd"
+ram_percent = 20  # Percentage of available RAM to use for hot buffer
+
+[recorder.channel_defaults]
+preset = "iq"
+sample_rate = 20000
+agc = 0
+gain = 0
+encoding = "F32"
+
+[[recorder.channels]]
+frequency_hz = 2500000
+description = "SHARED 2.5 MHz"
+
+[[recorder.channels]]
+frequency_hz = 5000000
+description = "SHARED 5 MHz"
+
+[[recorder.channels]]
+frequency_hz = 10000000
+description = "SHARED 10 MHz"
+
+[[recorder.channels]]
+frequency_hz = 15000000
+description = "SHARED 15 MHz"
+
+[[recorder.channels]]
+frequency_hz = 20000000
+description = "WWV 20 MHz"
+
+[[recorder.channels]]
+frequency_hz = 25000000
+description = "WWV 25 MHz"
+
+[[recorder.channels]]
+frequency_hz = 3330000
+description = "CHU 3.33 MHz"
+
+[[recorder.channels]]
+frequency_hz = 7850000
+description = "CHU 7.85 MHz"
+
+[[recorder.channels]]
+frequency_hz = 14670000
+description = "CHU 14.67 MHz"
+
+[uploader]
+enabled = false
+protocol = "sftp"
+upload_time = "00:30"
+upload_timezone = "UTC"
+max_retries = 5
+retry_delay_seconds = 300
+exponential_backoff = true
+max_queue_size_gb = 100
+
+[uploader.metadata]
+include_extended_metadata = false
+
+[logging]
+level = "DEBUG"
+console_output = true
+file_output = true
+
+[monitoring]
+enable_metrics = true
+
+[web_ui]
+port = 3000
+refresh_interval = 60

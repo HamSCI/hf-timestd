@@ -82,8 +82,10 @@ start_channels() {
     while IFS='|' read -r freq desc; do
         if [ -z "$freq" ]; then continue; fi
         
-        # Sanitize channel name for log file
-        log_name=$(echo "$desc" | tr ' ' '_' | tr '.' '_')
+        # Sanitize channel name for log file (Station_kHz)
+        station=$(echo "$desc" | awk '{print $1}' | tr '/' '_')
+        freq_khz=$(echo "$freq / 1000" | bc)
+        log_name="${station}_${freq_khz}"
         log_file="$DATA_ROOT/logs/phase1-${log_name}.log"
         
         echo "   Starting: $desc @ $(echo "scale=3; $freq/1000000" | bc) MHz (core $CORE)"

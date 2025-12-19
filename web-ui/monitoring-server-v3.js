@@ -25,7 +25,7 @@ import toml from 'toml';
 import { exec, execSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { WebSocketServer } from 'ws';
-import { TimeStdPaths, channelNameToKey } from './timestd-paths.js';
+import { TimeStdPaths, channelNameToKey, channelNameToDir } from './timestd-paths.js';
 import {
   getPrimaryTimeReference,
   getTimingHealthSummary,
@@ -3586,57 +3586,26 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
     const history = {};
 
     // Helper to init array
-    const getLane = (station, freq) => {
-      const key = `${station}_${freq}`;
-      if (!history[key]) history[key] = { station, frequency: freq, data: [] };
+    const getLane = (station, freqKHz) => {
+      const key = `${station}_${freqKHz}`;
+      if (!history[key]) history[key] = { station, freqKHz, data: [] };
       return history[key];
     };
 
     for (const channelName of channels) {
-      // Parse frequency from channel name (e.g. "WWV_10_MHz" -> 10)
-      const freqMatch = channelName.match(/(\d+(\.\d+)?)/);
-      const freq = freqMatch ? parseFloat(freqMatch[1]) : 0;
+      // Use centralized paths with kHz naming (e.g. WWV_10000)
+      const kHertzChannel = paths.channelNameToDir(channelName);
+      const csvPath = join(paths.getClockOffsetDir(channelName), `${kHertzChannel}_clock_offset_${dateStr}.csv`);
 
-      // Path to CSV: phase2/{CHANNEL}/clock_offset/{CHANNEL_safe}_clock_offset_{DATE}.csv
-      const safeChannel = channelName.replace(/[ .]/g, '_');
-      const channelWithDots = channelName.replace(/ /g, '_'); // Keeps dots e.g. CHU_3.33_MHz
-
-      let csvPath = join(
-        paths.getPhase2Dir(channelName),
-        'clock_offset',
-        `${safeChannel}_clock_offset_${dateStr}.csv`
-      );
-
-      // Fallback: Check for dotted filename (new recorder format?)
-      if (!fs.existsSync(csvPath)) {
-        const dottedPath = join(
-          paths.getPhase2Dir(channelName),
-          'clock_offset',
-          `${channelWithDots}_clock_offset_${dateStr}.csv`
-        );
-        if (fs.existsSync(dottedPath)) {
-          csvPath = dottedPath;
-        }
-      }
-
-      if (channelName.includes('CHU')) {
-        const debugMsg = `
-[DEBUG] Loading CHU: ${channelName}
-  Path: ${csvPath}
-  Exists: ${fs.existsSync(csvPath)}
-  Date: ${dateStr}
-`;
-        try {
-          fs.appendFileSync('/tmp/server_debug.txt', debugMsg);
-        } catch (e) { }
-      }
+      // Extract station and freqKHz from the unified key (e.g. "WWV_10000")
+      const [stationPrefix, freqKHz] = kHertzChannel.split('_');
 
       if (!fs.existsSync(csvPath)) continue;
 
       try {
         const fileContent = fs.readFileSync(csvPath, 'utf8');
 
-        // Explicit header to handle schema evolution (file might have old 23-col header but 27-col data)
+        // Explicit header to handle schema evolution
         const HEADERS = [
           'system_time', 'utc_time', 'minute_boundary_utc',
           'clock_offset_ms', 'station', 'frequency_mhz',
@@ -3651,84 +3620,54 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
 
         const records = csvParse(fileContent, {
           columns: HEADERS,
-          from_line: 2, // Skip the actual file header which might be outdated
+          from_line: 2,
           relax_column_count: true,
           skip_empty_lines: true,
           cast: true
         });
 
-        // 17 Broadcasts Definitions
-        // Shared: 2.5, 5, 10, 15 (WWV, WWVH, BPM)
-        // WWV-only: 20, 25
-        // CHU-only: 3.33, 7.85, 14.67
-
-        const isShared = [2.5, 5, 10, 15].includes(freq);
-        const isWWVOnly = [20, 25].includes(freq);
-        const isCHU = [3.33, 7.85, 14.67].includes(freq);
-
-        // Parse Doppler CSV if available (Ionospheric Channel Characterization)
-        const dopplerPath = join(
-          paths.getPhase2Dir(channelName),
-          'doppler',
-          `${safeChannel}_doppler_${dateStr}.csv`
-        );
-
+        // Parse Doppler CSV if available
+        const dopplerPath = join(paths.getDopplerDir(channelName), `${kHertzChannel}_doppler_${dateStr}.csv`);
         const dopplerMap = new Map();
         if (fs.existsSync(dopplerPath)) {
           try {
             const dopContent = fs.readFileSync(dopplerPath, 'utf8');
             const dopRecords = csvParse(dopContent, { columns: true, skip_empty_lines: true });
             for (const dr of dopRecords) {
-              // Convert ISO timestamp to minute boundary integer (fallback if missing)
-              // Usually CSV has timestamp_utc "2023-10-27 12:34:00+00:00"
-              // timestamps match the clock_offset file minutes.
               const ts = new Date(dr.timestamp_utc.replace(' ', 'T')).getTime() / 1000;
               if (!isNaN(ts)) {
                 dopplerMap.set(ts, {
                   wwv: parseFloat(dr.wwv_doppler_hz) || 0,
                   wwvh: parseFloat(dr.wwvh_doppler_hz) || 0,
+                  carrier: parseFloat(dr.carrier_doppler_hz) || 0,
                   std: parseFloat(dr.wwv_doppler_std_hz) || 0
                 });
               }
             }
-          } catch (e) {
-            // Ignore doppler load errors
-          }
+          } catch (e) { }
         }
 
         for (const row of records) {
-          const minute = parseInt(row.minute_boundary_utc); // ensure int
-
-          // Get Doppler values for this minute
+          const minute = parseInt(row.minute_boundary_utc);
+          let pushed = false;
           const dop = dopplerMap.get(minute);
 
-          // Strategy 1: Use specific tick SNR columns if available (newer files)
-          // Strategy 2: Fallback to `row.station` + `row.snr_db` (older files)
-          // The CSV contains one row per detected/solved station per minute.
-
-          let pushed = false;
-
           // Helper to add data point
-          const addPoint = (stationLabel, snr, conf, extra = {}) => {
+          const addPoint = (stationLabel, snr, conf) => {
             const pt = { t: minute, snr: parseFloat(snr), conf: conf };
-            // Attach Tone Doppler if available (convert Hz to m/s later or send raw)
             if (dop) {
-              if (stationLabel.includes('WWVH')) {
-                pt.doppler_hz = dop.wwvh;
-              } else {
-                // WWV, BPM, CHU all define 'wwv_doppler_hz' as the 1000 Hz tone path
-                pt.doppler_hz = dop.wwv;
-              }
+              pt.carrier_doppler_hz = dop.carrier;
+              pt.doppler_hz = stationLabel.includes('WWVH') ? dop.wwvh : dop.wwv;
             }
 
-            // Existing logic for offset/delay
             if (stationLabel === row.station) {
               if (row.clock_offset_ms) pt.offset = parseFloat(row.clock_offset_ms);
               if (row.propagation_delay_ms) pt.delay = parseFloat(row.propagation_delay_ms);
               if (row.propagation_mode) pt.mode = row.propagation_mode;
             }
-            getLane(stationLabel, freq).data.push(pt);
+            getLane(stationLabel, freqKHz).data.push(pt);
           };
+
 
           // Check for specific tick data (if column exists and has value)
           if (row.wwv_tick_snr_db && parseFloat(row.wwv_tick_snr_db) > 0) {
@@ -3761,7 +3700,7 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
           // Always attach solution data to the relevant lane for the waterfall
           const solStation = row.station;
           if (solStation && solStation !== 'UNKNOWN') {
-            const lane = getLane(solStation, freq);
+            const lane = getLane(solStation, freqKHz);
             // Verify we haven't already pushed this exact minute (deduplication not strictly needed but good)
             // Just push to the lane's data array? Or attach to last?
             // The Presence loop above might have pushed a point.

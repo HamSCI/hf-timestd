@@ -85,7 +85,8 @@ start)
     # Output: phase2/SHARED_X_MHz/    (D_clock, timing metrics)
     for freq_mhz in 2.5 5 10 15; do
         freq_hz=$(echo "$freq_mhz * 1000000" | bc | cut -d. -f1)
-        channel_dir="SHARED_${freq_mhz}_MHz"
+        freq_khz=$(echo "$freq_hz / 1000" | bc)
+        channel_dir="SHARED_${freq_khz}"
         
         nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
           --archive-dir "$DATA_ROOT/raw_buffer/$channel_dir" \
@@ -93,7 +94,7 @@ start)
           --channel-name "SHARED ${freq_mhz} MHz" \
           --frequency-hz "$freq_hz" \
           --state-file "$DATA_ROOT/state/phase2-shared${freq_mhz}.json" \
-          --poll-interval 10.0 --backfill-gaps --max-backfill 100 \
+          --poll-interval 10.0 --backfill-gaps --max-backfill 2000 \
           --log-level INFO \
           --callsign "$CALLSIGN" --grid-square "$GRID" \
           --receiver-name "HF-TimeStd" \
@@ -109,7 +110,8 @@ start)
     # Output: phase2/WWV_X_MHz/    (D_clock, timing metrics)
     for freq_mhz in 20 25; do
         freq_hz=$(echo "$freq_mhz * 1000000" | bc | cut -d. -f1)
-        channel_dir="WWV_${freq_mhz}_MHz"
+        freq_khz=$(echo "$freq_hz / 1000" | bc)
+        channel_dir="WWV_${freq_khz}"
         
         nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
           --archive-dir "$DATA_ROOT/raw_buffer/$channel_dir" \
@@ -117,7 +119,7 @@ start)
           --channel-name "WWV ${freq_mhz} MHz" \
           --frequency-hz "$freq_hz" \
           --state-file "$DATA_ROOT/state/phase2-wwv${freq_mhz}.json" \
-          --poll-interval 10.0 --backfill-gaps --max-backfill 100 \
+          --poll-interval 10.0 --backfill-gaps --max-backfill 2000 \
           --log-level INFO \
           --callsign "$CALLSIGN" --grid-square "$GRID" \
           --receiver-name "HF-TimeStd" \
@@ -133,7 +135,8 @@ start)
     
     for freq_mhz in 3.33 7.85 14.67; do
         freq_hz=${CHU_FREQS[$freq_mhz]}
-        channel_dir="CHU_${freq_mhz}_MHz"
+        freq_khz=$(echo "$freq_hz / 1000" | bc)
+        channel_dir="CHU_${freq_khz}"
         
         nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
           --archive-dir "$DATA_ROOT/raw_buffer/$channel_dir" \
@@ -141,7 +144,7 @@ start)
           --channel-name "CHU ${freq_mhz} MHz" \
           --frequency-hz "$freq_hz" \
           --state-file "$DATA_ROOT/state/phase2-chu${freq_mhz}.json" \
-          --poll-interval 10.0 --backfill-gaps --max-backfill 100 \
+          --poll-interval 10.0 --backfill-gaps --max-backfill 2000 \
           --log-level INFO \
           --callsign "$CALLSIGN" --grid-square "$GRID" \
           --receiver-name "HF-TimeStd" \

@@ -262,44 +262,23 @@
         // Data Adapter: Normalizes backend keys
         function normalizeHistory(rawHistory) {
             const clean = {};
-            const toKHz = (f) => Math.round(parseFloat(f) * 1000);
-
-            // DEBUG
-            let dbgText = "=== Normalization Debug ===\n";
-            dbgText += `Raw Keys: ${Object.keys(rawHistory).length}\n`;
-            dbgText += `Sample Raw Key: ${Object.keys(rawHistory)[0]}\n`;
-
             Object.keys(rawHistory).forEach(rawKey => {
                 const lane = rawHistory[rawKey];
-                if (!lane) return; // defensive
+                if (!lane) return;
 
-                // Default if missing
                 const station = (lane.station || "UNKNOWN").trim().toUpperCase();
-                const freq = lane.frequency || 0;
+                const khz = lane.freqKHz || 0;
 
-                if (station === "UNKNOWN" || freq === 0) {
-                    dbgText += `Skipping invalid lane: ${rawKey} (St: ${lane.station}, F: ${lane.frequency})\n`;
-                    return;
-                }
+                if (station === "UNKNOWN" || khz === 0) return;
 
-                const khz = toKHz(freq);
                 const canonicalKey = `${station}_${khz}`;
-
                 if (!clean[canonicalKey]) {
                     clean[canonicalKey] = { station, freqKHz: khz, data: lane.data || [] };
                 } else {
+                    // Merge data if multiple lanes map to same key (should be rare)
                     clean[canonicalKey].data = clean[canonicalKey].data.concat(lane.data || []);
                 }
             });
-
-            dbgText += `Normalized Keys: ${Object.keys(clean).join(', ')}\n`;
-
-            // Check specific CHU failure
-            if (clean['CHU_3330']) dbgText += "CHU_3330 FOUND with " + clean['CHU_3330'].data.length + " pts\n";
-            else dbgText += "CHU_3330 NOT FOUND\n";
-
-
-
             return clean;
         }
 
@@ -821,13 +800,16 @@
                     });
                 }
 
-                // Trace 2: Measured Tone Doppler (Phase)
+                // Trace 2: Measured Carrier Doppler (Phase)
                 const xTone = [];
                 const yTone = [];
                 laneData.data.forEach(pt => {
-                    if (pt.doppler_hz !== undefined && Math.abs(pt.doppler_hz) < 3.0) {
+                    // Use Carrier Doppler (Hz) if available. It is the true phase velocity.
+                    // Tone doppler (modulation) is orders of magnitude smaller.
+                    const val = pt.carrier_doppler_hz;
+                    if (val && Math.abs(val) < 5.0) {
                         xTone.push(new Date(pt.t * 1000).toISOString());
-                        yTone.push(pt.doppler_hz);
+                        yTone.push(val);
                     }
                 });
 
@@ -837,7 +819,7 @@
                         y: yTone,
                         mode: 'markers',
                         type: 'scatter',
-                        name: `${b.name} ${b.freqKHz / 1000} (Phase)`,
+                        name: `${b.name} ${b.freqKHz / 1000} (Carrier)`,
                         marker: { size: 3, opacity: 0.5, color: getStationColor(b.name, 0.4), symbol: 'circle' },
                         visible: 'legendonly',
                         hoverinfo: 'x+y+name'
@@ -868,11 +850,11 @@
                 },
                 legend: {
                     orientation: 'h',
-                    y: 1.1,
+                    y: -0.2, // Move to bottom to avoid overlap
                     x: 0.5,
                     xanchor: 'center'
                 },
-                margin: { t: 40, b: 40, l: 60, r: 20 },
+                margin: { t: 40, b: 60, l: 60, r: 20 },
                 hovermode: 'x unified'
             };
 

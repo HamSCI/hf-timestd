@@ -1858,8 +1858,10 @@ class WWVHDiscriminator:
         
         wwv_phases = []
         wwvh_phases = []
+        carrier_phases = []
         wwv_complex_amps = []
         wwvh_complex_amps = []
+        carrier_complex_amps = []
         noise_estimates = []
         
         # Process seconds 1-58 (skip second 0 with 800ms marker, and 59 for safety margin)
@@ -1902,20 +1904,31 @@ class WWVHDiscriminator:
             # Calculate SNR for each tone
             wwv_power = np.abs(wwv_complex)**2
             wwvh_power = np.abs(wwvh_complex)**2
+            # Carrier Power (DC bin 0)
+            carrier_complex = fft_result[0]
+            carrier_power = np.abs(carrier_complex)**2
             
             wwv_snr_db = 10 * np.log10(wwv_power / noise_power) if noise_power > 0 else -100
             wwvh_snr_db = 10 * np.log10(wwvh_power / noise_power) if noise_power > 0 else -100
+            carrier_snr_db = 10 * np.log10(carrier_power / noise_power) if noise_power > 0 else -100
             
             # Debug: Print first tick's SNR values to stderr
             if second == 1:
                 import sys
-                print(f"DEBUG {self.channel_name}: Phase SNR: WWV={wwv_snr_db:.1f}dB, WWVH={wwvh_snr_db:.1f}dB (threshold={snr_threshold_db}dB)", file=sys.stderr)
+                print(f"DEBUG {self.channel_name}: Phase SNR: Carrier={carrier_snr_db:.1f}dB, WWV={wwv_snr_db:.1f}dB, WWVH={wwvh_snr_db:.1f}dB (threshold={snr_threshold_db}dB)", file=sys.stderr)
             
             # Extract phase (only if SNR is sufficient for reliable measurement)
             wwv_phase = np.angle(wwv_complex)
             wwvh_phase = np.angle(wwvh_complex)
+            carrier_phase = np.angle(carrier_complex)
             
             # Store results with SNR qualification
+            # Always store carrier if SNR > threshold (same as tones)
+            # Note: Carrier SNR usually much higher than tone SNR.
+            if carrier_snr_db >= snr_threshold_db:
+                 carrier_phases.append((second, float(carrier_phase), float(carrier_snr_db)))
+                 carrier_complex_amps.append((second, complex(carrier_complex)))
+            
             if wwv_snr_db >= snr_threshold_db:
                 wwv_phases.append((second, float(wwv_phase), float(wwv_snr_db)))
                 wwv_complex_amps.append((second, complex(wwv_complex)))
@@ -1942,9 +1955,11 @@ class WWVHDiscriminator:
         return {
             'wwv_phases': wwv_phases,
             'wwvh_phases': wwvh_phases,
+            'carrier_phases': carrier_phases,
             'wwv_complex': wwv_complex_amps,
             'wwvh_complex': wwvh_complex_amps,
-            'valid_tick_count': max(len(wwv_phases), len(wwvh_phases)),
+            'carrier_complex': carrier_complex_amps,
+            'valid_tick_count': max(len(wwv_phases), len(wwvh_phases), len(carrier_phases)),
             'noise_floor_db': float(noise_floor_db)
         }
     
@@ -1988,10 +2003,11 @@ class WWVHDiscriminator:
         
         wwv_phases = tick_data['wwv_phases']
         wwvh_phases = tick_data['wwvh_phases']
+        carrier_phases = tick_data.get('carrier_phases', [])
         
-        if len(wwv_phases) < 10 and len(wwvh_phases) < 10:
+        if len(wwv_phases) < 10 and len(wwvh_phases) < 10 and len(carrier_phases) < 10:
             logger.debug(f"{self.channel_name}: Insufficient high-SNR ticks for Doppler estimation "
-                        f"(WWV: {len(wwv_phases)}, WWVH: {len(wwvh_phases)})")
+                        f"(WWV: {len(wwv_phases)}, WWVH: {len(wwvh_phases)}, Carrier: {len(carrier_phases)})")
             return None
         
         def compute_doppler_from_phases(phases_list):
@@ -2044,23 +2060,29 @@ class WWVHDiscriminator:
         
         # Compute for WWVH
         wwvh_doppler, wwvh_std, wwvh_var, wwvh_inst = compute_doppler_from_phases(wwvh_phases)
+
+        # Compute for Carrier
+        carrier_doppler, carrier_std, carrier_var, carrier_inst = compute_doppler_from_phases(carrier_phases)
         
         # Use whichever station has more valid measurements
-        if wwv_doppler is None and wwvh_doppler is None:
+        if wwv_doppler is None and wwvh_doppler is None and carrier_doppler is None:
             return None
         
-        # Default to 0 if one station missing
+        # Default to 0 if missing
         wwv_doppler = wwv_doppler or 0.0
         wwvh_doppler = wwvh_doppler or 0.0
+        carrier_doppler = carrier_doppler or 0.0
         wwv_std = wwv_std or 0.0
         wwvh_std = wwvh_std or 0.0
+        carrier_std = carrier_std or 0.0
         wwv_var = wwv_var or 0.0
         wwvh_var = wwvh_var or 0.0
+        carrier_var = carrier_var or 0.0
         
         # Calculate maximum coherent integration window
         # Limit phase error to π/4 (45°) for <3 dB coherent loss
         # T_max = π/4 / (2π × |Δf_D|) = 1 / (8 × |Δf_D|)
-        max_doppler = max(abs(wwv_doppler), abs(wwvh_doppler))
+        max_doppler = max(abs(wwv_doppler), abs(wwvh_doppler), abs(carrier_doppler))
         if max_doppler > 0.001:  # Avoid division by zero
             max_coherent_window = 1.0 / (8.0 * max_doppler)
         else:
@@ -2071,10 +2093,18 @@ class WWVHDiscriminator:
         
         # Quality metric from phase fit residuals
         # Quality: 1.0 = perfect fit, 0.0 = random phase (variance = π²/3)
-        phase_variance = max(wwv_var, wwvh_var)
+        phase_variance = max(wwv_var, wwvh_var) # Use modulation variance for generic quality? Or include carrier?
+        # Include carrier? Usually carrier is cleaner.
+        # But if carrier is messy (beats), we might not want to report high quality based on it?
+        # Let's keep quality based on Tones for now as legacy metric, or upgrade it.
+        # Upgrading it to include carrier helps single-station locking.
+        if carrier_doppler != 0.0:
+             phase_variance = min(phase_variance, carrier_var) if phase_variance > 0 else carrier_var
+        
         doppler_quality = max(0.0, min(1.0, 1.0 - (phase_variance / (np.pi**2 / 3))))
         
         logger.info(f"{self.channel_name}: Doppler estimate (per-tick): "
+                   f"Carrier={carrier_doppler:+.4f}±{carrier_std:.4f} Hz, "
                    f"WWV={wwv_doppler:+.4f}±{wwv_std:.4f} Hz, "
                    f"WWVH={wwvh_doppler:+.4f}±{wwvh_std:.4f} Hz, "
                    f"T_max={max_coherent_window:.1f}s, quality={doppler_quality:.2f}")
@@ -2082,7 +2112,9 @@ class WWVHDiscriminator:
         return {
             'wwv_doppler_hz': float(wwv_doppler),
             'wwvh_doppler_hz': float(wwvh_doppler),
+            'carrier_doppler_hz': float(carrier_doppler),
             'wwv_doppler_std_hz': float(wwv_std),
+            'wwvh_doppler_std_hz': float(wwvh_std),
             'wwvh_doppler_std_hz': float(wwvh_std),
             'max_coherent_window_sec': float(max_coherent_window),
             'doppler_quality': float(doppler_quality),

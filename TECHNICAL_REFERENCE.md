@@ -3,7 +3,7 @@
 **Quick reference for developers working on the GRAPE Signal Recorder.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** December 13, 2025
+**Last Updated:** December 19, 2025
 
 ---
 
@@ -27,7 +27,7 @@
 
 ## System Architecture
 
-### Three-Service Design (V3.11 - ka9q-python Integration)
+### Three-Service Design (V3.13 - Unified Naming & Backfill)
 
 ```
 Core Recorder (core_recorder_v2.py)

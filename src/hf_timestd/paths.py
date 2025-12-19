@@ -47,30 +47,53 @@ def channel_name_to_key(channel_name: str) -> str:
 
 
 def channel_name_to_dir(channel_name: str) -> str:
-    """Convert channel name to directory format.
-    
-    Args:
-        channel_name: Human-readable name (e.g., "WWV 10 MHz")
-    
-    Returns:
-        Directory format: "WWV_10_MHz", "CHU_3.33_MHz", etc.
+    """Convert channel name to directory format (Station_kHz).
     
     Examples:
-        >>> channel_name_to_dir("WWV 10 MHz")
-        'WWV_10_MHz'
+        "WWV 10 MHz"  -> "SHARED_10000"
+        "CHU 3.33 MHz" -> "CHU_3330"
     """
-    return channel_name.replace(' ', '_')
+    parts = channel_name.split()
+    if len(parts) < 2:
+        return channel_name.replace(' ', '_')
+    
+    station = parts[0].upper().replace('/', '')
+    try:
+        freq_mhz = float(parts[1])
+        khz = int(round(freq_mhz * 1000))
+    except (ValueError, IndexError):
+        return channel_name.replace(' ', '_')
+
+    # SHARED frequencies (WWV/WWVH/BPM)
+    if khz in {2500, 5000, 10000, 15000}:
+        return f"SHARED_{khz}"
+    
+    return f"{station}_{khz}"
 
 
 def dir_to_channel_name(dir_name: str) -> str:
     """Convert directory name back to human-readable format.
     
     Args:
-        dir_name: Directory name (e.g., "WWV_10_MHz")
+        dir_name: Directory name (e.g., "SHARED_10000")
     
     Returns:
-        Human-readable: "WWV 10 MHz"
+        Human-readable approximation (best effort)
     """
+    if dir_name.startswith('SHARED_'):
+        khz = dir_name.split('_')[1]
+        mhz = float(khz) / 1000
+        return f"SHARED {mhz:g} MHz"
+    
+    parts = dir_name.split('_')
+    if len(parts) == 2:
+        station, khz = parts
+        try:
+            mhz = float(khz) / 1000
+            return f"{station} {mhz:g} MHz"
+        except ValueError:
+            pass
+            
     return dir_name.replace('_', ' ')
 
 

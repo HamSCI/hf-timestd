@@ -27,10 +27,10 @@ function channelNameToKey(channelName) {
         // Fallback: underscored lowercase
         return channelName.replace(/ /g, '_').toLowerCase();
     }
-    
+
     const station = parts[0].toLowerCase();  // wwv, chu
     const freq = parts[1];                   // 10, 2.5, 3.33
-    
+
     return `${station}${freq}`;
 }
 
@@ -38,11 +38,23 @@ function channelNameToKey(channelName) {
  * Convert channel name to directory format.
  * 
  * Examples:
- *   WWV 10 MHz -> WWV_10_MHz
- *   CHU 3.33 MHz -> CHU_3.33_MHz
+ *   WWV 10 MHz -> WWV_10000
+ *   CHU 3.33 MHz -> CHU_3330
  */
 function channelNameToDir(channelName) {
-    return channelName.replace(/ /g, '_');
+    const parts = channelName.split(' ');
+    const station = parts[0].replace('/', ''); // SHARED/WWV -> SHARED
+
+    // Extract numeric frequency
+    const freqMatch = parts.length > 1 ? parts[1].match(/(\d+(\.\d+)?)/) : null;
+    if (freqMatch) {
+        const freq = parseFloat(freqMatch[1]);
+        const khz = Math.round(freq * 1000);
+        return `${station}_${khz}`;
+    }
+
+    // Fallback if no frequency match
+    return channelName.replace(/[ .]/g, '_');
 }
 
 /**
@@ -65,7 +77,14 @@ class TimeStdPaths {
     constructor(dataRoot) {
         this.dataRoot = dataRoot;
     }
-    
+
+    /**
+     * Convert channel name to directory format (Station_kHz).
+     */
+    channelNameToDir(channelName) {
+        return channelNameToDir(channelName);
+    }
+
     /**
      * Get the data root directory.
      * 
@@ -74,7 +93,7 @@ class TimeStdPaths {
     getDataRoot() {
         return this.dataRoot;
     }
-    
+
     /**
      * Get tick windows directory for BCD analysis.
      * 
@@ -84,7 +103,7 @@ class TimeStdPaths {
     getTickWindowsDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'tick_windows');
     }
-    
+
     /**
      * Get station ID 440Hz directory.
      * 
@@ -94,7 +113,7 @@ class TimeStdPaths {
     getStationId440HzDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'station_id_440hz');
     }
-    
+
     /**
      * Get test signal directory (minutes 8 and 44).
      * 
@@ -104,7 +123,7 @@ class TimeStdPaths {
     getTestSignalDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'test_signal');
     }
-    
+
     /**
      * Get BCD discrimination directory.
      * 
@@ -114,7 +133,7 @@ class TimeStdPaths {
     getBcdDiscriminationDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'bcd_discrimination');
     }
-    
+
     /**
      * Get Doppler analysis directory.
      * 
@@ -124,7 +143,7 @@ class TimeStdPaths {
     getDopplerDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'doppler');
     }
-    
+
     /**
      * Get audio tones directory (500/600 Hz + BCD intermodulation analysis).
      * 
@@ -134,12 +153,12 @@ class TimeStdPaths {
     getAudioTonesDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'audio_tones');
     }
-    
+
     // ========================================================================
     // Phase 2 Analytics Paths (Per-channel analytical results)
     // These methods provide convenient aliases to Phase 2 paths
     // ========================================================================
-    
+
     /**
      * Get discrimination directory (WWV/WWVH per-minute analysis).
      * 
@@ -149,7 +168,7 @@ class TimeStdPaths {
     getDiscriminationDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'discrimination');
     }
-    
+
     /**
      * Get tone detections directory (1000/1200 Hz timing tones).
      * 
@@ -159,7 +178,7 @@ class TimeStdPaths {
     getToneDetectionsDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'tone_detections');
     }
-    
+
     /**
      * Get carrier analysis directory (amplitude, phase, Doppler).
      * 
@@ -169,7 +188,7 @@ class TimeStdPaths {
     getCarrierAnalysisDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'carrier_analysis');
     }
-    
+
     /**
      * Get timing metrics directory (time_snap status, drift, transitions).
      * 
@@ -179,7 +198,7 @@ class TimeStdPaths {
     getTimingDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'timing');
     }
-    
+
     /**
      * Get Phase 2 state directory (per-channel state files).
      * 
@@ -189,7 +208,7 @@ class TimeStdPaths {
     getPhase2StateDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'state');
     }
-    
+
     /**
      * Get Phase 2 status directory (per-channel status files).
      * Note: The analytics service writes to 'status/' subdirectory.
@@ -200,7 +219,7 @@ class TimeStdPaths {
     getPhase2StatusDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'status');
     }
-    
+
     /**
      * Get analytics service status file (per-channel).
      * This is where the analytics_service writes its status.
@@ -211,7 +230,7 @@ class TimeStdPaths {
     getAnalyticsServiceStatusFileForChannel(channelName) {
         return join(this.getPhase2StatusDir(channelName), 'analytics-service-status.json');
     }
-    
+
     /**
      * Get channel status file (per-channel status in Phase 2).
      * 
@@ -221,11 +240,11 @@ class TimeStdPaths {
     getChannelStatusFile(channelName) {
         return join(this.getPhase2StateDir(channelName), 'channel-status.json');
     }
-    
+
     // ========================================================================
     // State Paths (Service persistence)
     // ========================================================================
-    
+
     /**
      * Get state directory.
      * 
@@ -234,7 +253,7 @@ class TimeStdPaths {
     getStateDir() {
         return join(this.dataRoot, 'state');
     }
-    
+
     /**
      * Get analytics state file for a channel.
      * 
@@ -247,7 +266,7 @@ class TimeStdPaths {
         const channelKey = channelNameToKey(channelName);
         return join(this.getStateDir(), `analytics-${channelKey}.json`);
     }
-    
+
     /**
      * Get core recorder status file.
      * 
@@ -256,11 +275,11 @@ class TimeStdPaths {
     getCoreStatusFile() {
         return join(this.getStatusDir(), 'core-recorder-status.json');
     }
-    
+
     // ========================================================================
     // System Status Paths
     // ========================================================================
-    
+
     /**
      * Get system status directory.
      * 
@@ -269,7 +288,7 @@ class TimeStdPaths {
     getStatusDir() {
         return join(this.dataRoot, 'status');
     }
-    
+
     /**
      * Get analytics service status file.
      * 
@@ -278,7 +297,7 @@ class TimeStdPaths {
     getAnalyticsServiceStatusFile() {
         return join(this.getStatusDir(), 'analytics-service-status.json');
     }
-    
+
     /**
      * Get GPSDO monitor status file.
      * Written by analytics service GPSDOMonitor, read by web-ui.
@@ -288,7 +307,7 @@ class TimeStdPaths {
     getGpsdoStatusFile() {
         return join(this.getStatusDir(), 'gpsdo_status.json');
     }
-    
+
     /**
      * Get timing status file (primary time reference).
      * Written by analytics service, read by web-ui.
@@ -298,11 +317,11 @@ class TimeStdPaths {
     getTimingStatusFile() {
         return join(this.getStatusDir(), 'timing_status.json');
     }
-    
+
     // ========================================================================
     // PHASE 1: RAW BUFFER (binary complex64 + JSON sidecars)
     // ========================================================================
-    
+
     /**
      * Get raw buffer root directory.
      * 
@@ -311,7 +330,7 @@ class TimeStdPaths {
     getRawBufferRoot() {
         return join(this.dataRoot, 'raw_buffer');
     }
-    
+
     /**
      * Get raw buffer directory for a channel.
      * 
@@ -322,11 +341,11 @@ class TimeStdPaths {
         const channelDir = channelNameToDir(channelName);
         return join(this.getRawBufferRoot(), channelDir);
     }
-    
+
     // ========================================================================
     // PHASE 2: ANALYTICAL ENGINE
     // ========================================================================
-    
+
     /**
      * Get Phase 2 root directory.
      * 
@@ -335,7 +354,7 @@ class TimeStdPaths {
     getPhase2Root() {
         return join(this.dataRoot, 'phase2');
     }
-    
+
     /**
      * Get Phase 2 directory for a channel.
      * 
@@ -346,7 +365,7 @@ class TimeStdPaths {
         const channelDir = channelNameToDir(channelName);
         return join(this.getPhase2Root(), channelDir);
     }
-    
+
     /**
      * Get clock offset series directory (D_clock time series).
      * 
@@ -356,7 +375,7 @@ class TimeStdPaths {
     getClockOffsetDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'clock_offset');
     }
-    
+
     /**
      * Get Phase 2 discrimination directory.
      * 
@@ -366,13 +385,13 @@ class TimeStdPaths {
     getPhase2DiscriminationDir(channelName) {
         return join(this.getPhase2Dir(channelName), 'discrimination');
     }
-    
+
     // Phase 3 products are handled externally.
-    
+
     // ========================================================================
     // Discovery Methods
     // ========================================================================
-    
+
     /**
      * Discover all channels from any available data source.
      * Checks raw_buffer/ (Phase 1) and phase2/ (Phase 2).
@@ -381,16 +400,16 @@ class TimeStdPaths {
      */
     discoverChannels() {
         const channelSet = new Set();
-        
+
         // Non-channel directories to exclude
         const excludeDirs = ['status', 'metadata', 'state', 'logs', 'fusion', 'upload'];
-        
+
         // Valid channel name pattern: must start with SHARED, WWV, or CHU
         // This filters out stray directories like "2", "8", "E", "M", "w"
         const isValidChannelDir = (name) => {
             return name.startsWith('SHARED') || name.startsWith('WWV') || name.startsWith('CHU');
         };
-        
+
         // Check raw_buffer/ (Phase 1)
         const rawBufferDir = this.getRawBufferRoot();
         if (existsSync(rawBufferDir)) {
@@ -401,7 +420,7 @@ class TimeStdPaths {
                 }
             }
         }
-        
+
         // Check phase2/ (Phase 2) - analytics data may exist without raw archive
         const phase2Dir = this.getPhase2Root();
         if (existsSync(phase2Dir)) {
@@ -412,10 +431,10 @@ class TimeStdPaths {
                 }
             }
         }
-        
+
         return Array.from(channelSet).sort();
     }
-    
+
     /**
      * Discover all channels with Phase 2 analytical data.
      * 
@@ -423,27 +442,27 @@ class TimeStdPaths {
      */
     discoverPhase2Channels() {
         const phase2Dir = this.getPhase2Root();
-        
+
         if (!existsSync(phase2Dir)) {
             return [];
         }
-        
+
         const excludeDirs = ['status', 'metadata', 'state', 'logs', 'fusion', 'upload'];
         const channels = [];
         const entries = readdirSync(phase2Dir, { withFileTypes: true });
-        
+
         for (const entry of entries) {
             // Valid channel names must start with SHARED, WWV, or CHU
-            if (entry.isDirectory() && 
+            if (entry.isDirectory() &&
                 !excludeDirs.includes(entry.name) &&
                 (entry.name.startsWith('SHARED') || entry.name.startsWith('WWV') || entry.name.startsWith('CHU'))) {
                 channels.push(dirToChannelName(entry.name));
             }
         }
-        
+
         return channels.sort();
     }
-    
+
     discoverProductChannels() {
         return [];
     }
@@ -464,29 +483,29 @@ async function loadPathsFromConfig(configPath = null) {
     } catch (err) {
         throw new Error('toml package required: npm install toml');
     }
-    
+
     if (!configPath) {
         // Default location
         configPath = join(__dirname, '..', 'config', 'timestd-config.toml');
     }
-    
+
     if (!existsSync(configPath)) {
         throw new Error(`Config file not found: ${configPath}`);
     }
-    
+
     const configContent = readFileSync(configPath, 'utf8');
     const config = toml.parse(configContent);
-    
+
     // Determine data root based on mode
     const mode = (config.recorder && config.recorder.mode) || 'test';
-    
+
     let dataRoot;
     if (mode === 'production') {
         dataRoot = (config.recorder && config.recorder.production_data_root) || '/var/lib/hf-timestd';
     } else {
         dataRoot = (config.recorder && config.recorder.test_data_root) || '/tmp/timestd-test';
     }
-    
+
     return new TimeStdPaths(dataRoot);
 }
 

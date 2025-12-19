@@ -385,6 +385,13 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 
 **Production Ready** - Core functionality complete and tested. Daily recording and PSWS upload operational at AC0G since November 2025.
 
+### v3.13.0 (Dec 19, 2025)
+- **Unified Naming Convention** - Transitioned to `Station_kHz` (e.g., `WWV_10000`) across backend, frontend, and storage.
+- **Carrier Doppler Visualization** - High-precision carrier doppler (0-1 Hz) replaces legacy tone doppler in Web UI.
+- **Analytics Backfill** - `Phase2AnalyticsService` now automatically recovers historical data from the raw archive on startup.
+- **Tiered Storage Refactor** - Updated `TieredStorageManager` to support unified naming for both hot (RAM) and cold (disk) tiers.
+- **Web UI Stability** - Fixed critical `TypeError` and `ReferenceError` bugs in the monitoring server.
+
 ### v3.12.0 (Dec 19, 2025)
 - **Active Probabilistic Discrimination** - Logistic Regression Model promoted to primary arbiter for WWV/WWVH/BPM.
 - **BPM Integration** - Full support for BPM (Xi'an, China) on 5/10/15 MHz, including UT1 tick filtering and geometric path weighting.

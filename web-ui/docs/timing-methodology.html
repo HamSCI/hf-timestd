@@ -618,14 +618,20 @@ tail -f $TIMESTD_DATA_ROOT/phase2/fusion/fused_d_clock.csv</code></pre>
             The Web UI now exposes two independent Doppler measurements for comparison:
         </p>
         <ul>
-            <li><strong>Group Velocity</strong> (Lines): Derivative of the timing offset ($d\tau_g/dt$). Measures
-                modulation envelope velocity.</li>
-            <li><strong>Phase Velocity</strong> (Dots): Measured frequency shift of the 1000/1200 Hz tones ($\Delta f$).
-                Measures carrier phase velocity.</li>
+            <li><strong>Group Velocity (D_clock):</strong> derived from the slope of the modulation envelope delay
+                ($d\tau_g/dt$). This represents the information velocity.</li>
+            <li><strong>Phase Velocity (Carrier):</strong> derived from the direct frequency shift of the RF carrier
+                ($\Delta f_c$). This represents the true phase path velocity.</li>
         </ul>
+        <div class="note-box">
+            <strong>Note on Shared Frequencies:</strong> On channels with multiple simultaneous transmitters (e.g., 10
+            MHz with WWV/WWVH), the Carrier Phase represents the vector sum of all signals. For single-station channels
+            (CHU, WWV 20/25), it provides a high-precision trace of the specific ionospheric path.
+        </div>
         <p>
-            In a dispersive medium, these differ. Coherent tracking of both confirms physical layer motion versus
-            measurement noise.
+            In a dispersive medium like the ionosphere, these velocities differ. Significant divergence (e.g., opposite
+            signs) often indicates multi-path interference or specific ionospheric conditions (e.g., near-MUF
+            operation).
         </p>
 
 

@@ -289,6 +289,7 @@ class ChannelCharacterization:
     bcd_bpm_toa_ms: Optional[float] = None    # BPM ToA (long path from China)
     
     # Doppler and Coherence (Step 2B)
+    doppler_carrier_hz: Optional[float] = None
     doppler_wwv_hz: Optional[float] = None
     doppler_wwvh_hz: Optional[float] = None
     doppler_wwv_std_hz: Optional[float] = None
@@ -1067,6 +1068,7 @@ class Phase2TemporalEngine:
                 result.max_coherent_window_sec = doppler_info.get('max_coherent_window_sec')
                 result.doppler_quality = doppler_info.get('doppler_quality')
                 result.phase_variance_rad = doppler_info.get('phase_variance_rad')
+                result.doppler_carrier_hz = doppler_info.get('carrier_doppler_hz')
             
             # Detect per-second tick SNR for discrimination voting (Vote 4)
             # Uses 60-second coherent integration for maximum sensitivity

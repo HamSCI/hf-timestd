@@ -113,6 +113,7 @@ class TestSignalRecord:
 class DopplerRecord:
     """Record from per-tick Doppler estimation (ionospheric channel characterization)"""
     timestamp_utc: str
+    carrier_doppler_hz: float  # <--- Added
     wwv_doppler_hz: float
     wwvh_doppler_hz: float
     wwv_doppler_std_hz: float
