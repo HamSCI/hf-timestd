@@ -16,7 +16,7 @@ data_destination = "239.103.26.231"
 auto_create_channels = true
 
 [recorder]
-mode = "test"
+mode = "production"
 test_data_root = "/tmp/timestd-test"
 production_data_root = "/var/lib/timestd"
 recording_interval = 60

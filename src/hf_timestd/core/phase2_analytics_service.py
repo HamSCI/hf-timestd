@@ -494,8 +494,8 @@ class Phase2AnalyticsService:
     # ========================================================================
     
     def _get_file_channel_name(self) -> str:
-        """Get filename-safe channel name (spaces and dots to underscores)."""
-        return self.channel_name.replace(' ', '_').replace('.', '_')
+        """Get filename-safe channel name (spaces to underscores, preserve dots)."""
+        return self.channel_name.replace(' ', '_')
     
     def _init_tone_detections_csv(self):
         """Initialize tone detections CSV for today."""

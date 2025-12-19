@@ -201,15 +201,16 @@ class TieredStorageManager:
     
     def get_hot_buffer_path(self, channel_name: str) -> Path:
         """Get hot buffer directory for a channel (for writers)."""
-        # Sanitize channel name for filesystem
-        safe_name = channel_name.replace(' ', '_').replace('.', '_')
+        # Sanitize channel name for filesystem - preserve dots for frequency notation
+        safe_name = channel_name.replace(' ', '_')
         path = self.hot_root / safe_name
         path.mkdir(parents=True, exist_ok=True)
         return path
     
     def get_cold_buffer_path(self, channel_name: str) -> Path:
         """Get cold buffer directory for a channel."""
-        safe_name = channel_name.replace(' ', '_').replace('.', '_')
+        # Sanitize channel name for filesystem - preserve dots for frequency notation
+        safe_name = channel_name.replace(' ', '_')
         path = self.cold_root / safe_name
         path.mkdir(parents=True, exist_ok=True)
         return path

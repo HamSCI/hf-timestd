@@ -196,8 +196,8 @@ class DiscriminationCSVWriters:
         self.doppler_dir = self.paths.get_doppler_dir(channel_name)
         self.disc_dir = self.paths.get_discrimination_dir(channel_name)
         
-        # Channel directory name for file naming
-        self.channel_dir = channel_name.replace(' ', '_').replace('.', '_')
+        # Channel directory name for file naming - preserve dots for frequency notation
+        self.channel_dir = channel_name.replace(' ', '_')
         
         # Ensure directories exist
         for directory in [self.tone_dir, self.tick_dir, self.id_440_dir, 

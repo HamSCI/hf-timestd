@@ -1279,8 +1279,8 @@ class Phase2TemporalEngine:
         except Exception as e:
             logger.warning(f"Station discrimination failed: {e}")
             
-        # === SHADOW MODE: Probabilistic Discriminator ===
-        # Run the new ML/probabilistic discriminator in parallel and log comparison
+        # === ACTIVE MODE: Probabilistic Discriminator ===
+        # Run the new ML/probabilistic discriminator and update the result
         try:
             if hasattr(self, 'prob_discriminator'):
                 # Extract features for the model
@@ -1301,23 +1301,37 @@ class Phase2TemporalEngine:
                 # Run classification
                 prob_result = self.prob_discriminator.classify(features)
                 
-                # Log shadow mode comparison
-                heuristic_station = result.dominant_station
-                prob_station = prob_result.station
+                # Update result with authoritative probabilistic decision
+                old_station = result.dominant_station
                 
-                if heuristic_station != prob_station and prob_result.confidence > 0.6:
-                    logger.warning(
-                        f"SHADOW MODE DISAGREEMENT: Heuristic={heuristic_station} vs "
-                        f"Probabilistic={prob_station} (conf={prob_result.confidence:.2f}, "
-                        f"P(WWV)={prob_result.p_wwv:.2f})"
+                # Map Probabilistic 'UNCERTAIN' to Legacy 'BALANCED'
+                if prob_result.station == 'UNCERTAIN':
+                    result.dominant_station = 'BALANCED'
+                else:
+                    result.dominant_station = prob_result.station
+                
+                # Map confidence score (0-1) to legacy string levels
+                if prob_result.confidence > 0.8:
+                    result.confidence = 'high'
+                elif prob_result.confidence > 0.5:
+                    result.confidence = 'medium'
+                else:
+                    result.confidence = 'low'
+                
+                # Log modification
+                if old_station != result.dominant_station:
+                    logger.info(
+                        f"Probabilistic Correction: {old_station} -> {result.dominant_station} "
+                        f"(P(WWV)={prob_result.p_wwv:.2f}, conf={prob_result.confidence:.2f})"
                     )
                 else:
                     logger.debug(
-                        f"Shadow Mode Agreement: {prob_station} (conf={prob_result.confidence:.2f})"
+                        f"Probabilistic Confirmation: {result.dominant_station} "
+                        f"(conf={prob_result.confidence:.2f})"
                     )
                     
         except Exception as e:
-            logger.debug(f"Shadow mode discriminator failed: {e}")
+            logger.warning(f"Probabilistic discriminator failed: {e}")
         
         # Calculate spreading factor L = τ_D × f_D
         if result.delay_spread_ms is not None and result.coherence_time_sec is not None:

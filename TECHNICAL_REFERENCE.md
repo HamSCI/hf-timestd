@@ -424,7 +424,49 @@ likelihood = exp(-0.5 * z_score²)
 | 3-10 ms | Moderate |
 | **< 3 ms** | **Sharp peaks** ✓ |
 
+
+### The Core Metric: `d_clock`
+
+**Definition:** `d_clock` is the difference between the **Local System Clock** (GPS-disciplined) and the **True UTC(NIST)** time at the point of emission, after correcting for all known propagation delays.
+
+$$ d\_{clock} = T_{system} - T_{UTC(NIST)} $$
+
+In a perfectly synchronized system with a perfect propagation model, `d_clock` would be exactly **0.0 ms**. In practice, it acts as the "residual" that captures:
+1.  **Clock Error**: Small deviations in the local oscillator (typically < 0.001 ms for GPSDO).
+2.  **Propagation Anomalies**: Unmodeled changes in the ionosphere path length.
+
+#### How It Is Calculated
+
+We effectively measure the "Total Time of Flight" and subtract the "Expected Physics":
+
+$$ d\_{clock} = T_{arrival} - T_{emission} - ( \tau_{geo} + \tau_{iono} + \tau_{mode} ) $$
+
+*   **$T_{arrival}$:** Measured using `rtp_timestamp` (GPS-quality precision).
+*   **$T_{emission}$:** Known schedule (e.g., top of minute).
+*   **$\tau_{geo}$:** Speed-of-light delay over the Great Circle path.
+*   **$\tau_{iono}$:** Expected group delay through the ionosphere.
+*   **$\tau_{mode}$:** Extra path length from multi-hop reflections (e.g., 2-hop F-layer).
+
+#### interpreting `d_clock` Variations
+
+Once the system is **LOCKED**, `d_clock` becomes a powerful scientific sensor. Since the GPS clock is stable, any variation in `d_clock` represents a change in the **Ionosphere**:
+
+*   **Stable ~0.0 ms:** Propagation matches the physics model (Quiet Ionosphere).
+*   **Positive (+) Deviation:** The signal arrived **later** than expected.
+    *   **Cause:** Higher electron density (signal slows down), Higher reflection layer (longer path), or Storm conditions.
+*   **Negative (-) Deviation:** The signal arrived **earlier** than expected.
+    *   **Cause:** Lower reflection layer (e.g., E-layer sporadic event, shorter path).
+
+#### Contribution to UTC(NIST) Limit
+
+To estimate true **UTC(NIST)** from the received signal, we invert the equation:
+
+$$ T_{UTC(NIST)} = T_{system} - d\_{clock} $$
+
+This calculated time is used to timestamp scientific data products, ensuring they are aligned with the international standard regardless of propagation conditions.
+
 ### Timing Calibrator (v3.13.0)
+
 
 The `TimingCalibrator` manages the progression from initial bootstrap to verified timing:
 
@@ -573,98 +615,89 @@ fused_d_clock = Σ(weight × calibrated_d_clock) / Σ(weight)
 
 ---
 
-## WWV/WWVH Discrimination
+--------------------------------------------------------------------------------
 
-### The 4 Shared Frequencies
+## Multi-Station Discrimination (WWV/WWVH/BPM)
 
-On 2.5, 5, 10, and 15 MHz, both WWV (Fort Collins, CO) and WWVH (Kauai, HI) transmit simultaneously. Discrimination is required to separate these signals for ionospheric research.
+### The Shared Frequencies
 
-### WWV/WWVH Tone Schedule
+On **2.5, 5, 10, and 15 MHz**, three major stations transmit simultaneously:
+1.  **WWV** (Fort Collins, CO)
+2.  **WWVH** (Kauai, HI)
+3.  **BPM** (Xi'an, China)
 
-**440/500/600 Hz tones** provide ground truth discrimination during specific minutes:
+Separating these signals is critical for accurate timing. The system uses a **Probabilistic Discriminator** backed by a specialized **BPM Discriminator** to decompose the received signal.
 
-| Minute | WWV Tone | WWVH Tone | Ground Truth |
-|--------|----------|-----------|--------------|
-| 1 | 600 Hz | **440 Hz** | WWVH 440 Hz ID |
-| 2 | **440 Hz** | 600 Hz | WWV 440 Hz ID |
-| 3-15 | 500/600 Hz | 500/600 Hz | (alternating) |
-| 16, 17, 19 | 500/600 Hz | **silent** | WWV-only |
-| 43-51 | **silent** | 500/600 Hz | WWVH-only |
+### Probabilistic Discrimination (Active Mode)
 
-**Ground truth minutes (14 per hour):**
-- **WWV-only**: Minutes 1, 16, 17, 19 (WWVH silent or different tone)
-- **WWVH-only**: Minutes 2, 43-51 (WWV silent or different tone)
+The legacy "Voting Method" has been replaced by a **Logistic Regression Model** that calculates the probability of each station being dominant:
 
-**Timing tones (constant):**
-- **1000 Hz**: WWV/CHU marker tone (first 0.8 sec of each minute)
-- **1200 Hz**: WWVH marker tone (first 0.8 sec of each minute)
+$$ P(WWV|x) = \sigma(w \cdot x + b) $$
 
-### 12 Voting Methods + 12 Cross-Validation Checks
+Where $x$ is a vector of extracted signal features. This approach handles correlated features (like power ratio and BCD ratio) correctly, unlike simple voting which over-counts them.
 
-Each method writes to its own daily CSV for independent reprocessing:
+#### Information Flow
 
-#### Voting Methods
-
-| Vote | Method | Weight | Description |
-|------|--------|--------|-------------|
-| 0 | Test Signal | 15 | Minutes :08/:44 scientific modulation |
-| 1 | 440 Hz Station ID | 10 | WWVH min 1, WWV min 2 |
-| 2 | BCD Amplitude Ratio | 2-10 | 100 Hz time code dual-peak |
-| 3 | 1000/1200 Hz Power | 1-10 | Timing tone ratio |
-| 4 | Tick SNR Average | 5 | 59-tick coherent integration |
-| 5 | 500/600 Hz Ground Truth | **10-15** | 12 exclusive min/hour |
-| 6 | Doppler Stability | 2 | std ratio (independent of power) |
-| 7 | Timing Coherence | 3 | Test + BCD ToA agreement |
-| 8 | Harmonic Ratio | 1.5 | 500→1000 Hz, 600→1200 Hz ratios |
-| 9 | FSS Path Signature | 2 | Frequency Selectivity Score |
-| 10 | Noise Coherence | flag | Transient interference detection |
-| 11 | Burst ToA | validation | High-precision timing cross-check |
-| 12 | Spreading Factor | flag | Channel physics L = τ_D × f_D |
-
-**Vote 9 (FSS Geographic Validator):**
-```python
-# FSS = 10*log10((P_2kHz + P_3kHz) / (P_4kHz + P_5kHz))
-w_fss = 2.0
-if scheduled_station == 'WWV' and fss < 3.0:  # Continental path
-    wwv_score += w_fss
-elif scheduled_station == 'WWVH' and fss > 5.0:  # Trans-oceanic path
-    wwvh_score += w_fss
+```
+Raw IQ Samples
+   │
+   ├─► Tone Detector ───────► SNR, Timing, Tick Durations
+   ├─► WWVH Discriminator ──► Power Ratios, BCD Correlation, Doppler
+   └─► BPM Discriminator ───► BPM-specific Ticks (10ms/100ms)
+            │
+            ▼
+   Feature Vector (x)
+   [PowerRatio, BCDRatio, DopplerDiff, 440Hz, GroundTruth...]
+            │
+            ▼
+   Probabilistic Model (Logistic Regression)
+            │
+            ▼
+   P(WWV), P(WWVH), P(BPM)
 ```
 
-**Vote 12 (Spreading Factor):**
-```python
-# L = τ_D × f_D where f_D = 1/(π × τ_c)
-if L > 1.0:  # Overspread channel
-    disagreements.append('channel_overspread')
-elif L < 0.05:  # Clean channel
-    agreements.append('channel_underspread_clean')
-```
+### Feature Vectors
 
-#### Cross-Validation Checks (Phase 6)
+The model uses the following normalized features to make its decision:
 
-| # | Check | Agreement Token | Effect |
-|---|-------|-----------------|--------|
-| 1 | Power vs Timing | `power_timing_agree` | +agreement |
-| 2 | Per-tick voting | `tick_power_agree` | +agreement |
-| 3 | Geographic delay | `geographic_timing_agree` | +agreement |
-| 4 | 440 Hz ground truth | `440hz_ground_truth_agree` | +agreement |
-| 5 | BCD correlation | `bcd_minute_validated` | +agreement |
-| 6 | 500/600 Hz ground truth | `500_600hz_ground_truth_agree` | +agreement |
-| 7 | Doppler-Power | `doppler_power_agree` | +agreement |
-| 8 | Coherence quality | `high_coherence_boost` / `low_coherence_downgrade` | ± |
-| 9 | Harmonic signature | `harmonic_signature_wwv/wwvh` | +agreement |
-| 10 | FSS geographic | `TS_FSS_WWV` / `TS_FSS_WWVH` | +agreement |
-| 11 | Noise transient | `transient_noise_event` | +disagreement |
-| 12 | Spreading factor | `channel_overspread` / `channel_underspread_clean` | ± |
+1.  **Power Ratio ($P_{WWV} - P_{WWVH}$):** The difference in signal strength at 1000 Hz and 1200 Hz.
+2.  **Audio BCD Correlation:** Does the received BCD waveform match the propagation delay for WWV or WWVH?
+3.  **Doppler Stability:** WWV (continental) usually has different Doppler characteristics than WWVH (trans-oceanic).
+4.  **440 Hz Presence:** Strong indicator during Minutes 1 (WWVH) and 2 (WWV).
+5.  **Ground Truth Schedule:** Explicit knowledge of silent minutes (e.g., WWV silent min 43-51) forces the probability to 0 or 1.
 
-**Confidence Adjustment:**
-- ≥2 agreements + 0 disagreements → HIGH
-- ≥2 disagreements → MEDIUM
-- More disagreements than agreements → LOW
-- Low coherence (<0.3) → LOW (forced)
-- Channel overspread → timing unreliable
+### Dealing with BPM
 
-### Timing Purpose
+BPM is handled as a third party in the discrimination logic:
+1.  **Tick Duration Filter:** BPM uses 10ms ticks (UTC) or 100ms ticks (UT1). WWV/WWVH use 5ms ticks. The `BPMDiscriminator` isolates BPM energy based on this pulse width.
+2.  **Schedule Awareness:** The system knows BPM's active hours (e.g., 2.5 MHz 07:30-01:00 UTC) and suppresses false positives outside these times.
+3.  **UT1 Exclusion:** During BPM's UT1 minutes (25-29, 55-59), BPM is excluded from the UTC fusion pool to prevent timing contamination.
+
+### "Detect Both" Capability
+
+The system acknowledges that often **both** stations are present.
+*   **Dominant Station:** The station with $P > 0.8$.
+*   **Balanced:** If $0.2 < P(WWV) < 0.8$, the system flags `BALANCED` or `UNCERTAIN`, indicating useful energy from both sources. This triggers **Component Decomposition** to measure and log both signals separately.
+
+### Scientific Rationale: Why Identify "Dominance"?
+
+One might ask: *If we measure both stations, why force a choice of "Dominant Station"?*
+
+**1. Operational Necessity (The Timing Prerequisite)**
+We calculate the system time offset (`d_clock`) by subtracting the propagation delay.
+*   **"Bootstrap" (Finding Time):** When the system starts, it has no idea what time it is (within ±500ms). Dominance is **critical** here. If we mistake WWVH for WWV, we introduce a massive **16ms error**, preventing the lock.
+*   **"Steady State" (Locked):** Once detailed time is known (`d_clock` ≈ 0), the system uses *station-specific templates* to hunt for signals exactly where they should be (e.g., WWV at +4ms, WWVH at +20ms). However, Dominance remains the **Primary Switch** to decide which signal drives the high-precision `d_clock` output to the NTP server. We can't discipline the clock to two different times simultaneously.
+*   **Path Difference:** The path from Hawaii (WWVH) is ~15-20ms longer than from Colorado (WWV).
+
+**2. Scientific Value of the Ratio (Emergent Physics)**
+While "Dominance" is an operational switch, the continuous **Power Ratio** ($P_{WWV} / P_{WWVH}$) reveals atmospheric dynamics that single-station observation misses:
+
+*   **The Terminator "Crossover":** The moment when dominance flips (0 dB ratio) precisely marks the passage of the **Day/Night Terminator** between the two paths. The steepness of this transition measures ionization rates during sunrise/sunset.
+*   **Destructive Interference Zones:** When the ratio is near 0 dB ("Balanced"), carrier waves often destructively interfere. Identifying this state explains why decoding might fail despite high signal strength.
+*   **Antenna Characterization:** Persistent bias in the ratio (e.g., never hearing WWVH) calibrates the receiving station's westward nulls.
+
+---
+
 
 ```
 WWV (1000 Hz)  → time_snap (timing reference)
@@ -673,6 +706,109 @@ WWVH (1200 Hz) → Propagation study (science data)
 ```
 
 **Differential delay** = WWVH - WWV arrival time difference (ionospheric path)
+
+
+---
+
+## International Stations: BPM (China)
+
+BPM (National Time Service Center, Xi'an) uses a system distinct from WWV/WWVH/CHU. It actively switches between **UTC** and **UT1** standards within the same hour, and its signals are emitted **20 milliseconds in advance** of UTC.
+
+### Signal Characteristics
+
+*   **Tone Frequency:** 1000 Hz (same as WWV/CHU)
+*   **Modulation:** AM
+*   **Timing Advance:** -20 ms (Signal emitted at $T_{UTC} - 20ms$)
+    *   This advance partially compensates for propagation delay to users in China.
+    *   For US receivers, this results in a net arrival time that often overlaps with WWV (~8ms delay) or WWVH (~15ms delay).
+
+### Marker Formats & Schedule
+
+BPM alternates between two formats based on the minute of the hour:
+
+| Minutes | Content | Tick Duration | Standard |
+|---------|---------|---------------|----------|
+| **00-10** | UTC Time | **10 ms** | UTC |
+| **10-15** | Carrier Only | *None* | - |
+| **15-25** | UTC Time | **10 ms** | UTC |
+| **25-29** | **UT1 Time** | **100 ms** | **UT1** |
+| **29-30** | Station ID | *None* | - |
+| **30-40** | UTC Time | **10 ms** | UTC |
+| **40-45** | Carrier Only | *None* | - |
+| **45-55** | UTC Time | **10 ms** | UTC |
+| **55-59** | **UT1 Time** | **100 ms** | **UT1** |
+| **59-60** | Station ID | *None* | - |
+
+> [!NOTE]
+> **Detection Impact**:
+> *   **UT1 Minutes (25-29, 55-59):** The 100ms ticks are unique and easy to distinguish from WWV's 5ms ticks. However, they encode UT1, which drifts relative to UTC.
+> *   **"Flam" Effect:** During UT1 minutes, you may hear a double-tick (click-beep) because the BPM UT1 tick (100ms) drifts against the WWV UTC tick (5ms).
+> *   **UTC Minutes:** Use 10ms ticks (vs WWV 5ms). This duration difference helps discrimination.
+
+---
+
+
+--------------------------------------------------------------------------------
+
+## International Stations: CHU (Canada)
+
+The CHU digital time code is transmitted from **second 31 to second 39** of every minute. It allows systems to automatically decode the precise time, separate from the primary 1000Hz ticks.
+
+### Transmission Format
+
+The digital code uses the **Bell 103 Audio Frequency-Shift Keying (AFSK)** standard.
+
+*   **Data Rate:** 300 baud
+*   **Modulation:** Frequency-Shift Keying (FSK)
+*   **Frequencies:**
+    *   **Mark (bit 1):** 2225 Hz
+    *   **Space (bit 0):** 2025 Hz
+*   **Serial Coding:** 8N2 (1 Start, 8 Data, 2 Stop)
+
+During seconds 31-39, the standard pulses are reduced to very short ticks to accommodate the data. The entire 110-bit packet (10 \text{ chars} \times 11 \text{ bits/char}) takes about **0.367 seconds** and ends precisely at **0.500 seconds** past the second marker.
+
+### Time Code Content (Formats)
+
+The 10-byte packet alternates between **Format A** and **Format B**. Each format repeats its data for redundancy (except for the ancillary data distinction).
+
+#### 1. Format A (Seconds 32-39)
+
+Sent 8 times per minute. Contains **UTC Time and Day of Year**. Bytes 1-5 are repeated in Bytes 6-10.
+
+| Field | Content |
+|-------|---------|
+| **6** | Framing constant (6) |
+| **ddd** | Day of Year (001-366) |
+| **hh** | UTC Hour |
+| **mm** | UTC Minute |
+| **ss** | UTC Second |
+
+#### 2. Format B (Second 31 Only)
+
+Sent once per minute. Contains **DUT1, Year, and TAI offset**. Bytes 6-10 are the bitwise inversion (one's complement) of Bytes 1-5.
+
+| Field | Content |
+|-------|---------|
+| **x** | Leap Second Warning & DUT1 Sign |
+| **z** | DUT1 (tenths of a second) |
+| **yyyy** | Year (e.g., 2025) |
+| **tt** | TAI-UTC Difference (currently 37s) |
+| **aa** | Canadian Daylight Time Indicator |
+
+### Time Standards & Corrections
+
+CHU broadcasts key corrections needed for scientific timing:
+
+#### TAI-UTC (Leap Second Offset)
+*   **TAI (Atomic):** Continuous atomic time scale (never skips).
+*   **UTC (Civil):** Adjusted with **Leap Seconds** to track Earth's rotation.
+*   **Difference:** TAI is currently **37 seconds ahead** of UTC.
+*   **Usage:** Format B allows automatic conversion from UTC to linear TAI.
+
+#### DUT1 (Rotation Correction)
+*   **UT1 (Astronomical):** True solar time based on Earth's varying rotation.
+*   **DUT1:** The fine difference $DUT1 = UT1 - UTC$.
+*   **Values:** Broadcast in **0.1s increments**. International standards keep $|UTC - UT1| < 0.9s$.
 
 ---
 

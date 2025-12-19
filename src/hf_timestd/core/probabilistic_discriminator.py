@@ -128,8 +128,8 @@ WWV_SILENT_MINUTES = {29, 59}      # Only WWVH transmits → label = 0
 WWVH_SILENT_MINUTES = {0, 30}      # Only WWV transmits → label = 1
 
 # Exclusive broadcast minutes
-WWV_ONLY_MINUTES = {1, 8, 16, 17, 19}  # WWV broadcasts special tone, WWVH silent
-WWVH_ONLY_MINUTES = {2, 43, 44, 45, 46, 47, 48, 49, 50, 51}  # WWVH broadcasts, WWV silent
+WWV_ONLY_MINUTES = {2, 8, 16, 17, 19}  # WWV broadcasts special tone, WWVH silent
+WWVH_ONLY_MINUTES = {1, 43, 44, 45, 46, 47, 48, 49, 50, 51}  # WWVH broadcasts, WWV silent
 
 # Combined ground truth: {minute: label} where 1=WWV, 0=WWVH
 GROUND_TRUTH_MINUTES = {}
