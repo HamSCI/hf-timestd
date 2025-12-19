@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,13 +12,30 @@
       margin: 0 auto;
       padding: 40px 20px;
     }
-    
-    h1 { color: var(--accent-light); margin-bottom: 10px; }
-    h2 { color: var(--accent); margin-top: 40px; border-bottom: 1px solid var(--surface-border); padding-bottom: 10px; }
-    h3 { color: var(--text-primary); margin-top: 25px; }
-    
-    p, li { line-height: 1.7; color: var(--text-secondary); }
-    
+
+    h1 {
+      color: var(--accent-light);
+      margin-bottom: 10px;
+    }
+
+    h2 {
+      color: var(--accent);
+      margin-top: 40px;
+      border-bottom: 1px solid var(--surface-border);
+      padding-bottom: 10px;
+    }
+
+    h3 {
+      color: var(--text-primary);
+      margin-top: 25px;
+    }
+
+    p,
+    li {
+      line-height: 1.7;
+      color: var(--text-secondary);
+    }
+
     .method-section {
       background: var(--surface);
       border: 1px solid var(--surface-border);
@@ -25,32 +43,43 @@
       padding: 20px;
       margin: 20px 0;
     }
-    
+
     .method-section h3 {
       margin-top: 0;
       display: flex;
       align-items: center;
       gap: 10px;
     }
-    
+
     .weight-badge {
       font-size: 11px;
       padding: 2px 8px;
       border-radius: 4px;
       font-weight: 600;
     }
-    
-    .weight-high { background: #10b98133; color: #10b981; }
-    .weight-medium { background: #3b82f633; color: #3b82f6; }
-    .weight-low { background: #64748b33; color: #94a3b8; }
-    
+
+    .weight-high {
+      background: #10b98133;
+      color: #10b981;
+    }
+
+    .weight-medium {
+      background: #3b82f633;
+      color: #3b82f6;
+    }
+
+    .weight-low {
+      background: #64748b33;
+      color: #94a3b8;
+    }
+
     code {
       background: var(--surface-alt);
       padding: 2px 6px;
       border-radius: 4px;
       font-size: 13px;
     }
-    
+
     .formula {
       background: var(--surface-alt);
       padding: 15px;
@@ -59,109 +88,172 @@
       margin: 15px 0;
       overflow-x: auto;
     }
-    
+
     table {
       width: 100%;
       border-collapse: collapse;
       margin: 15px 0;
     }
-    
-    th, td {
+
+    th,
+    td {
       padding: 10px;
       text-align: left;
       border-bottom: 1px solid var(--surface-border);
     }
-    
-    th { color: var(--accent-light); font-weight: 600; }
-    
+
+    th {
+      color: var(--accent-light);
+      font-weight: 600;
+    }
+
     .back-link {
       display: inline-block;
       margin-bottom: 20px;
       color: var(--accent);
       text-decoration: none;
     }
-    
-    .back-link:hover { text-decoration: underline; }
+
+    .back-link:hover {
+      text-decoration: underline;
+    }
   </style>
 </head>
+
 <body>
   <div class="doc-container">
     <a href="/discrimination.html" class="back-link">← Back to Discrimination Analysis</a>
-    
+
     <h1>Station Discrimination Methodology</h1>
-    <p>This document explains how hf-timestd distinguishes between WWV (Fort Collins, CO) and WWVH (Kekaha, HI) broadcasts on shared frequencies.</p>
-    
-    <h2>Overview</h2>
-    <p>WWV and WWVH broadcast simultaneously on the same frequencies (2.5, 5, 10, 15 MHz). Distinguishing which station is being received requires analyzing multiple signal characteristics. hf-timestd uses a <strong>weighted voting system</strong> with 8 independent methods.</p>
-    
+    <p>This document explains how hf-timestd distinguishes between WWV (Fort Collins, CO) and WWVH (Kekaha, HI)
+      broadcasts on shared frequencies.</p>
+
+    <h2>Overview (v3.0 Architecture)</h2>
+    <p>Distinguishing which station is being received on shared frequencies (2.5, 5, 10, 15 MHz) is critical for
+      accurate timing. hf-timestd v3.0 employs a <strong>Hybrid Discrimination Engine</strong> combining:</p>
+    <ol>
+      <li><strong>Probabilistic Classifier (Primary):</strong> A machine learning model (Logistic Regression) trained on
+        ground truth data.</li>
+      <li><strong>Heuristic Voting (Legacy/Backup):</strong> A weighted voting system with 8 independent methods.</li>
+    </ol>
+
     <div class="info-box" style="background: rgba(59, 130, 246, 0.1); border-color: #3b82f6;">
       <h4 style="color: #3b82f6;">Note: Non-Shared Frequencies</h4>
-      <p>WWV 20 MHz and 25 MHz are <strong>WWV-only</strong> (WWVH doesn't broadcast). CHU frequencies (3.33, 7.85, 14.67 MHz) are <strong>CHU-only</strong>. Discrimination is only needed for shared frequencies.</p>
+      <p>WWV 20 MHz and 25 MHz are <strong>WWV-only</strong> (WWVH doesn't broadcast). CHU frequencies (3.33, 7.85,
+        14.67 MHz) are <strong>CHU-only</strong>. Discrimination is only needed for shared frequencies.</p>
     </div>
-    
-    <h2 id="voting">Weighted Voting System</h2>
-    <p>Each method casts a vote for WWV, WWVH, or abstains. Votes are weighted by reliability:</p>
-    
+
+    <h2>Probabilistic Discrimination</h2>
+    <div class="method-section" id="probabilistic">
+      <h3>Active Model (Logistic Regression) <span class="weight-badge weight-high">Primary</span></h3>
+      <p><strong>Input Features:</strong> Power Ratio (dB), BCD Amplitude Correlation (WWV vs WWVH), Doppler Stability,
+        Ground Truth Flags.</p>
+      <p><strong>Output:</strong> Probability $P(WWV)$.</p>
+      <ul>
+        <li><strong>$P(WWV) > 0.8$:</strong> WWV Dominant</li>
+        <li><strong>$P(WWV) < 0.2$:</strong> WWVH Dominant</li>
+        <li><strong>Intermediate:</strong> BALANCED / UNCERTAIN</li>
+      </ul>
+      <p><strong>Balanced State:</strong> When probability is ambiguous, the system triggers <strong>Component
+          Decomposition</strong> to measure and log both signals separately without forcing a possibly incorrect choice.
+      </p>
+    </div>
+
+    <h2 id="voting">Heuristic Voting System (Features)</h2>
+    <p>The probabilistic model relies on features extracted by the legacy heuristic system. These individual methods
+      provide the raw data for the classifier:</p>
+
     <table>
-      <tr><th>Category</th><th>Methods</th><th>Weight</th></tr>
-      <tr><td>Ground Truth</td><td>440 Hz Tone, 500/600 Hz Tone, Test Signal</td><td>10-15 (highest)</td></tr>
-      <tr><td>Power Ratio</td><td>1000/1200 Hz Tone Power</td><td>10 (standard)</td></tr>
-      <tr><td>Correlation</td><td>BCD Time Code, Doppler Stability</td><td>2-10 (varies)</td></tr>
-      <tr><td>Supplementary</td><td>Harmonic Power Ratio</td><td>1.5 (confirmatory)</td></tr>
+      <tr>
+        <th>Category</th>
+        <th>Methods</th>
+        <th>Feature Role</th>
+      </tr>
+
+      <tr>
+        <td>Ground Truth</td>
+        <td>440 Hz Tone, 500/600 Hz Tone, Test Signal</td>
+        <td>10-15 (highest)</td>
+      </tr>
+      <tr>
+        <td>Power Ratio</td>
+        <td>1000/1200 Hz Tone Power</td>
+        <td>10 (standard)</td>
+      </tr>
+      <tr>
+        <td>Correlation</td>
+        <td>BCD Time Code, Doppler Stability</td>
+        <td>2-10 (varies)</td>
+      </tr>
+      <tr>
+        <td>Supplementary</td>
+        <td>Harmonic Power Ratio</td>
+        <td>1.5 (confirmatory)</td>
+      </tr>
     </table>
-    
-    <p><strong>Final Decision:</strong> Station with highest weighted vote sum wins. "BALANCED" if margin is below 0.15 threshold.</p>
-    
+
+    <p><strong>Final Decision:</strong> Station with highest weighted vote sum wins. "BALANCED" if margin is below 0.15
+      threshold.</p>
+
     <h2>Ground Truth Methods</h2>
-    
+
     <div class="method-section" id="test-signal">
       <h3>Method 6: Test Signal <span class="weight-badge weight-high">Ground Truth</span></h3>
       <p><strong>Schedule:</strong> WWV broadcasts at minute :08, WWVH at minute :44</p>
-      <p><strong>Signal:</strong> 100 Hz phase-modulated test signal designed for ionospheric research (HamSCI collaboration)</p>
-      <p><strong>How it works:</strong> Since only one station transmits during these minutes, detection is unambiguous. The signal's presence confirms which station is dominant.</p>
+      <p><strong>Signal:</strong> 100 Hz phase-modulated test signal designed for ionospheric research (HamSCI
+        collaboration)</p>
+      <p><strong>How it works:</strong> Since only one station transmits during these minutes, detection is unambiguous.
+        The signal's presence confirms which station is dominant.</p>
       <p><strong>Reliability:</strong> Highest - absolute ground truth when detected</p>
     </div>
-    
+
     <div class="method-section" id="station-id">
       <h3>Method 3: 440 Hz Station ID <span class="weight-badge weight-high">Ground Truth</span></h3>
       <p><strong>Schedule:</strong> WWVH at minute :01, WWV at minute :02</p>
       <p><strong>Signal:</strong> 440 Hz tone (musical note A above middle C)</p>
-      <p><strong>How it works:</strong> Detection of 440 Hz during minute :01 confirms WWVH; during minute :02 confirms WWV. Only occurs twice per hour.</p>
+      <p><strong>How it works:</strong> Detection of 440 Hz during minute :01 confirms WWVH; during minute :02 confirms
+        WWV. Only occurs twice per hour.</p>
       <p><strong>Reliability:</strong> Highest - schedule-based certainty</p>
     </div>
-    
+
     <div class="method-section" id="ground-truth-500">
       <h3>Method 4: 500/600 Hz Ground Truth <span class="weight-badge weight-high">Ground Truth</span></h3>
       <p><strong>Exclusive WWV minutes:</strong> 16, 17, 19</p>
       <p><strong>Exclusive WWVH minutes:</strong> 43, 44, 45, 46, 47, 48, 49, 50, 51</p>
-      <p><strong>How it works:</strong> During 14 minutes each hour, only one station broadcasts 500/600 Hz tones. Detection during these windows provides unambiguous identification.</p>
-      <p><strong>Note:</strong> WWV broadcasts 500 Hz on even minutes, 600 Hz on odd. WWVH is opposite. The schedule swaps which station has which tone.</p>
+      <p><strong>How it works:</strong> During 14 minutes each hour, only one station broadcasts 500/600 Hz tones.
+        Detection during these windows provides unambiguous identification.</p>
+      <p><strong>Note:</strong> WWV broadcasts 500 Hz on even minutes, 600 Hz on odd. WWVH is opposite. The schedule
+        swaps which station has which tone.</p>
     </div>
-    
+
     <h2>Power-Based Methods</h2>
-    
+
     <div class="method-section" id="timing-tones">
       <h3>Method 1: Timing Tones (1000/1200 Hz) <span class="weight-badge weight-medium">Power Ratio</span></h3>
       <p><strong>WWV:</strong> 1000 Hz second markers</p>
       <p><strong>WWVH:</strong> 1200 Hz second markers</p>
-      <p><strong>How it works:</strong> Measures power at both frequencies. The ratio indicates relative signal strength of each station.</p>
+      <p><strong>How it works:</strong> Measures power at both frequencies. The ratio indicates relative signal strength
+        of each station.</p>
       <div class="formula">ratio_dB = 10 × log₁₀(P_1000 / P_1200)</div>
       <p>Positive ratio favors WWV, negative favors WWVH.</p>
     </div>
-    
+
     <div class="method-section" id="tick-snr">
       <h3>Method 1b: Tick SNR (10-sec windows) <span class="weight-badge weight-medium">Power Ratio</span></h3>
       <p><strong>Analysis window:</strong> 10-second segments</p>
       <p><strong>Tick duration:</strong> 5 milliseconds</p>
-      <p><strong>How it works:</strong> Integrates tick energy separately at 1000 Hz (WWV) and 1200 Hz (WWVH). Provides fine-grained temporal resolution of which station is stronger.</p>
+      <p><strong>How it works:</strong> Integrates tick energy separately at 1000 Hz (WWV) and 1200 Hz (WWVH). Provides
+        fine-grained temporal resolution of which station is stronger.</p>
     </div>
-    
+
     <h2>Correlation-Based Methods</h2>
-    
+
     <div class="method-section" id="bcd">
       <h3>Method 5: BCD Amplitude Correlation <span class="weight-badge weight-medium">Correlation</span></h3>
       <p><strong>Subcarrier:</strong> 100 Hz amplitude modulation</p>
-      <p><strong>How it works:</strong> Both stations encode UTC time using Binary Coded Decimal (BCD). The patterns are identical but arrive at different times due to propagation delay. Cross-correlation with known BCD templates reveals arrival times.</p>
+      <p><strong>How it works:</strong> Both stations encode UTC time using Binary Coded Decimal (BCD). The patterns are
+        identical but arrive at different times due to propagation delay. Cross-correlation with known BCD templates
+        reveals arrival times.</p>
       <p><strong>Detection types:</strong></p>
       <ul>
         <li><strong>Dual Peak:</strong> Both stations received - can measure differential delay</li>
@@ -169,10 +261,11 @@
         <li><strong>Single WWVH:</strong> Only WWVH detected</li>
       </ul>
     </div>
-    
+
     <div class="method-section" id="doppler">
       <h3>Method 7: Doppler Stability <span class="weight-badge weight-medium">Correlation</span></h3>
-      <p><strong>Principle:</strong> Ionospheric propagation causes frequency shifts (Doppler). Different paths to WWV vs WWVH produce different Doppler signatures.</p>
+      <p><strong>Principle:</strong> Ionospheric propagation causes frequency shifts (Doppler). Different paths to WWV
+        vs WWVH produce different Doppler signatures.</p>
       <p><strong>Metrics:</strong></p>
       <ul>
         <li><strong>Doppler Shift (Hz):</strong> Instantaneous frequency offset from nominal</li>
@@ -181,16 +274,17 @@
       </ul>
       <p><strong>Advantage:</strong> Independent of signal power - useful when both signals have similar strength.</p>
     </div>
-    
+
     <h2>Supplementary Methods</h2>
-    
+
     <div class="method-section" id="harmonic">
       <h3>Method 8: Harmonic Power Ratio <span class="weight-badge weight-low">Supplementary</span></h3>
       <p><strong>Harmonics:</strong> 500 Hz → 1000 Hz, 600 Hz → 1200 Hz</p>
-      <p><strong>How it works:</strong> The 2nd harmonic of 500 Hz appears at 1000 Hz; 600 Hz appears at 1200 Hz. Since WWV/WWVH swap which station has 500 vs 600 Hz, the harmonic ratio helps distinguish them.</p>
+      <p><strong>How it works:</strong> The 2nd harmonic of 500 Hz appears at 1000 Hz; 600 Hz appears at 1200 Hz. Since
+        WWV/WWVH swap which station has 500 vs 600 Hz, the harmonic ratio helps distinguish them.</p>
       <p><strong>Limitation:</strong> Harmonic levels are typically low; supplementary indicator only.</p>
     </div>
-    
+
     <div class="method-section" id="channel-quality">
       <h3>Channel Quality Metrics <span class="weight-badge weight-low">Supplementary</span></h3>
       <p><strong>Source:</strong> Test signal at minutes :08 (WWV) and :44 (WWVH)</p>
@@ -203,11 +297,12 @@
       </ul>
       <p><strong>Purpose:</strong> Quality indicators rather than direct discrimination.</p>
     </div>
-    
+
     <div class="method-section" id="intermod">
       <h3>BCD Intermodulation Signature <span class="weight-badge weight-low">Supplementary</span></h3>
       <p><strong>Sidebands:</strong> 400 Hz = 500-100 Hz, 700 Hz = 600+100 Hz</p>
-      <p><strong>How it works:</strong> The 100 Hz BCD modulation creates sidebands around 500/600 Hz tones. Since WWV and WWVH swap 500/600 Hz by schedule:</p>
+      <p><strong>How it works:</strong> The 100 Hz BCD modulation creates sidebands around 500/600 Hz tones. Since WWV
+        and WWVH swap 500/600 Hz by schedule:</p>
       <ul>
         <li>When WWV has 500 Hz: 400 Hz sideband = WWV, 700 Hz = WWVH</li>
         <li>When WWV has 600 Hz: 400 Hz sideband = WWVH, 700 Hz = WWV</li>
@@ -215,15 +310,16 @@
       <p>The ratio (after schedule correction) directly indicates which station is dominant.</p>
       <p><strong>Limitation:</strong> Sidebands are weak (~10-20 dB above noise); detection rate ~30-40%.</p>
     </div>
-    
+
     <h2>Solar Elevation Overlay</h2>
-    <p>Charts include solar elevation at path midpoints (receiver to WWV, receiver to WWVH). Propagation quality often correlates with solar illumination of the ionosphere.</p>
+    <p>Charts include solar elevation at path midpoints (receiver to WWV, receiver to WWVH). Propagation quality often
+      correlates with solar illumination of the ionosphere.</p>
     <ul>
       <li><strong>Day:</strong> D-layer absorption, shorter skip distances</li>
       <li><strong>Night:</strong> F-layer reflection, longer skip distances</li>
       <li><strong>Terminator:</strong> Rapid changes as ionosphere transitions</li>
     </ul>
-    
+
     <hr style="margin: 40px 0; border-color: var(--surface-border);">
     <p style="color: var(--text-muted); font-size: 13px;">
       Reference: NIST Special Publication 250-67 (2009) - NIST Time and Frequency Radio Stations<br>
@@ -231,4 +327,5 @@
     </p>
   </div>
 </body>
+
 </html>
