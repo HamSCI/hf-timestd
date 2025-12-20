@@ -1,8 +1,8 @@
 # HF Time Standard Analysis (hf-timestd) - AI Context Document
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** 2025-12-17  
-**Version:** 5.3 (Unified Propagation Model + Calibration Persistence + Web UI Prep)
+**Last Updated:** 2025-12-19  
+**Version:** 5.4 (Web UI summary.html Issues Identified)
 
 ---
 
@@ -188,26 +188,42 @@ Rearranging:
 
 ---
 
-## Current Focus: Web UI Integration & Concordia
+## Current Focus: Web UI `summary.html` Fixes
 
-**NEXT SESSION GOAL:** Bring the Web UI into better concordance with the current time analysis state (Phase 2).
+**NEXT SESSION GOAL:** Fix identified issues in `web-ui/summary.html`.
 
-### Specific Objectives for Next Session:
-1.  **Visualize Multi-Station Detection:**
-    - Update `monitoring-server-v3.js` to serve the new multi-station detection data structure.
-    - Create/Update UI components to display detected stations (WWV/WWVH/BPM/CHU) concurrently.
-    - Show `StationModel` predicted windows vs actual arrivals.
+### Identified Issues in `summary.html`
 
-2.  **BPM Status Integration:**
-    - Expose BPM-specific fields (`bpm_timing_mode`, `bpm_detected`, `bpm_snr`) in the main dashboard.
-    - Visualize the "UT1 Mode" vs "UTC Mode" status.
+#### Issue 1: Storage Section Not Rendered
+**Location:** `@/home/mjh/git/hf-timestd/web-ui/summary.html:576-604`
 
-3.  **Mode Probability Visualization:**
-    - Ensure the per-broadcast mode probability (`1F`, `2F`, etc.) is correctly visualized for *each* detected station, not just the dominant one.
+**Problem:** The `renderStorage(storage)` function is defined but **never called** in `updateSummary()`. The storage data is fetched via `/api/v1/summary` (which includes `data.storage`) but the render function is not invoked.
 
-### Relevant API Endpoints (To Verify/Implement):
-- `GET /api/v1/phase2/multi-station/:channel` (The multi-station data source)
-- `GET /api/v1/phase2/status` (Global status)
+**Fix:** Add `html += renderStorage(data.storage);` in the `updateSummary()` function around line 779.
+
+#### Issue 2: Outdated Broadcast Count Comments
+**Location:** `@/home/mjh/git/hf-timestd/web-ui/summary.html:674` and `@/home/mjh/git/hf-timestd/web-ui/summary.html:785`
+
+**Problem:** Comments say "13 broadcasts" but the system now has **17 broadcasts** (6 WWV + 4 WWVH + 3 CHU + 4 BPM). The API endpoint `/api/v1/phase2/reception-matrix` correctly documents 17 broadcasts.
+
+**Fix:** Update comments from "13 broadcasts" to "17 broadcasts".
+
+#### Issue 3: Reception Matrix Already Shows BPM
+**Status:** ✅ Already implemented correctly.
+
+The `renderReceptionMatrix()` function (lines 676-758) already includes BPM column rendering:
+- Line 729: `const bpmCell = isShared ? snrBadge(ch.bpm_snr_db, ch.bpm_detected) : '—';`
+- Line 751: `stationHeader('BPM', '#ec4899')`
+
+### Files to Modify
+| File | Changes |
+|------|--------|
+| `web-ui/summary.html` | Add `renderStorage()` call, update "13 broadcasts" → "17 broadcasts" |
+
+### Relevant API Endpoints (Already Working)
+- `GET /api/v1/summary` - Returns station, processes, continuity, storage, channels
+- `GET /api/v1/phase2/reception-matrix` - Returns 17-broadcast matrix (WWV/WWVH/BPM/CHU)
+- `GET /api/v1/phase2/propagation-paths` - Returns station distances/bearings
 
 ---
 

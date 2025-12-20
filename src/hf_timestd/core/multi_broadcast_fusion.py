@@ -790,7 +790,7 @@ class MultiBroadcastFusion:
                     tec_input.append({
                         'frequency_hz': m.frequency_mhz * 1e6,
                         'toa_ms': toa_ms,
-                        'uncertainty_ms': 1.0 / m.confidence # Inverse confidence weighting
+                        'uncertainty_ms': 1.0 / max(0.001, m.confidence) # Inverse confidence weighting
                     })
                 
                 # Run Solver

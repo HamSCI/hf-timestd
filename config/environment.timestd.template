@@ -8,8 +8,7 @@
 #
 # The scripts (common.sh) source this file in order:
 #   1. /etc/hf-timestd/environment (production)
-#   2. /etc/hf-timestd/environment (legacy fallback)
-#   3. $PROJECT_DIR/config/environment (test override)
+#   2. $PROJECT_DIR/config/environment (test override)
 #
 # USAGE: Uncomment and set values for your installation.
 #        Lines starting with # are comments/defaults shown for reference.
@@ -66,14 +65,3 @@ TIMESTD_LOG_LEVEL=INFO
 # TIMESTD_STATION_ID=S000171
 
 # ===========================================================================
-# LEGACY COMPATIBILITY (for transition period)
-# ===========================================================================
-# These GRAPE_* variables are kept for backward compatibility
-# They will be removed in a future version
-GRAPE_MODE=${TIMESTD_MODE}
-GRAPE_DATA_ROOT=${TIMESTD_DATA_ROOT}
-GRAPE_LOG_DIR=${TIMESTD_LOG_DIR}
-GRAPE_CONFIG=${TIMESTD_CONFIG}
-GRAPE_VENV=${TIMESTD_VENV}
-GRAPE_PROJECT=${TIMESTD_PROJECT}
-GRAPE_WEBUI=${TIMESTD_WEBUI}

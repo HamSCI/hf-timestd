@@ -605,17 +605,36 @@
     
     // Render channel status - TRANSPOSED TABLE
     function renderChannels(channels) {
+      // Filter to only valid channel names in canonical STATION_KILOHERTZ format
+      // or display format with MHz suffix
+      const validChannels = channels.filter(ch => {
+        const name = ch.name || '';
+        // Accept canonical format (SHARED_10000) or display format (SHARED 10 MHz)
+        return /^(SHARED|WWV|CHU)[_ ]/.test(name);
+      });
+      
       // Build header row (channel names)
       let headerCells = '<th></th>'; // Empty corner cell
-      channels.forEach(ch => {
-        // Shorten channel names for header
-        const shortName = ch.name.replace(' MHz', '');
-        headerCells += `<th>${shortName}</th>`;
+      validChannels.forEach(ch => {
+        // Convert to display format and shorten for header
+        let displayName = ch.name;
+        // If canonical format, convert to display
+        const match = ch.name.match(/^(SHARED|WWV|CHU)_(\d+)$/);
+        if (match) {
+          const station = match[1];
+          const khz = parseInt(match[2], 10);
+          const mhz = khz / 1000;
+          const mhzStr = Number.isInteger(mhz) ? mhz.toString() : mhz.toFixed(2).replace(/\.?0+$/, '');
+          displayName = `${station} ${mhzStr}`;
+        } else {
+          displayName = ch.name.replace(' MHz', '');
+        }
+        headerCells += `<th>${displayName}</th>`;
       });
       
       // Build RTP row
       let rtpCells = '<th>RTP Stream</th>';
-      channels.forEach(ch => {
+      validChannels.forEach(ch => {
         const status = ch.rtp_streaming ? 
           '<span class="status-indicator status-running"></span>' : 
           '<span class="status-indicator status-stopped"></span>';
@@ -624,7 +643,7 @@
       
       // Build SNR row
       let snrCells = '<th>SNR (dB)</th>';
-      channels.forEach(ch => {
+      validChannels.forEach(ch => {
         const snr = ch.snr_db !== null ? ch.snr_db.toFixed(1) : 'N/A';
         snrCells += `<td>${snr}</td>`;
       });
@@ -633,7 +652,7 @@
       
       // Build Audio row
       let audioCells = '<th>Audio</th>';
-      channels.forEach(ch => {
+      validChannels.forEach(ch => {
         const channelKey = ch.name.replace(/ /g, '_');
         const isPlaying = timeStdAudio && timeStdAudio.currentChannel === ch.name;
         const buttonClass = isPlaying ? 'listen-button playing' : 'listen-button';
@@ -671,7 +690,7 @@
       `;
     }
     
-    // Render reception matrix (all 13 broadcasts from 3 stations)
+    // Render reception matrix (all 17 broadcasts from 4 stations)
     // Now includes station info (distance, bearing) in column headers
     function renderReceptionMatrix(data, propagation) {
       if (!data || !data.channels || data.channels.length === 0) {
@@ -716,6 +735,19 @@
         return name.startsWith('SHARED') || name.startsWith('WWV') || name.startsWith('CHU');
       });
       
+      // Helper to convert canonical format to display format
+      function toDisplayName(name) {
+        const match = name.match(/^(SHARED|WWV|CHU)_(\d+)$/);
+        if (match) {
+          const station = match[1];
+          const khz = parseInt(match[2], 10);
+          const mhz = khz / 1000;
+          const mhzStr = Number.isInteger(mhz) ? mhz.toString() : mhz.toFixed(2).replace(/\.?0+$/, '');
+          return `${station} ${mhzStr} MHz`;
+        }
+        return name;
+      }
+      
       const rows = validChannels.map(ch => {
         const isShared = ch.channel.startsWith('SHARED');  // 2.5, 5, 10, 15 MHz (WWV+WWVH+BPM)
         const isWWVOnly = ch.channel.startsWith('WWV');    // 20, 25 MHz (WWV only)
@@ -730,8 +762,11 @@
         // CHU column: Only CHU frequencies
         const chuCell = isCHU ? snrBadge(ch.chu_snr_db, ch.chu_detected) : '—';
         
+        // Display channel name in human-readable format
+        const displayName = toDisplayName(ch.channel);
+        
         return '<tr>' +
-          '<td style="font-weight: 600;">' + ch.channel + '</td>' +
+          '<td style="font-weight: 600;">' + displayName + '</td>' +
           '<td style="text-align: center;">' + wwvCell + '</td>' +
           '<td style="text-align: center;">' + wwvhCell + '</td>' +
           '<td style="text-align: center;">' + bpmCell + '</td>' +
@@ -760,14 +795,23 @@
     // Fetch and render summary
     async function updateSummary() {
       try {
-        const [summaryResponse, propagationResponse, matrixResponse] = await Promise.all([
-          fetch('/api/v1/summary'),
-          fetch('/api/v1/phase2/propagation-paths').catch(() => ({ paths: [] })),
-          fetch('/api/v1/phase2/reception-matrix').catch(() => ({ channels: [] }))
-        ]);
+        // Fetch all endpoints - use separate try/catch for optional endpoints
+        const summaryResponse = await fetch('/api/v1/summary');
         const data = await summaryResponse.json();
-        const propagation = await propagationResponse.json().catch(() => ({ paths: [] }));
-        const receptionMatrix = await matrixResponse.json().catch(() => ({ channels: [] }));
+        
+        // Optional endpoints - default to empty if they fail
+        let propagation = { paths: [] };
+        let receptionMatrix = { channels: [] };
+        
+        try {
+          const propagationResponse = await fetch('/api/v1/phase2/propagation-paths');
+          propagation = await propagationResponse.json();
+        } catch (e) { /* use default */ }
+        
+        try {
+          const matrixResponse = await fetch('/api/v1/phase2/reception-matrix');
+          receptionMatrix = await matrixResponse.json();
+        } catch (e) { /* use default */ }
         
         // Render station info
         document.getElementById('stationInfo').innerHTML = renderStationInfo(data.station);
@@ -776,13 +820,14 @@
         html += '<div class="section">';
         html += renderProcesses(data.processes);
         html += renderContinuity(data.continuity);
+        html += renderStorage(data.storage);
         html += '</div>';
         
         // Sort channels by frequency before rendering
         const sortedChannels = window.TIMESTD_UTILS.sortByChannelFrequency(data.channels || [], 'name');
         html += renderChannels(sortedChannels);
         
-        // Reception matrix (all 13 broadcasts) - now includes station info in headers
+        // Reception matrix (all 17 broadcasts) - now includes station info in headers
         html += renderReceptionMatrix(receptionMatrix, propagation);
         
         document.getElementById('content').innerHTML = html;

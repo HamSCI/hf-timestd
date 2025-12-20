@@ -17,54 +17,72 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Convert channel name to key format.
  * 
  * Examples:
- *   WWV 10 MHz -> wwv10
- *   WWV 2.5 MHz -> wwv2.5
- *   CHU 3.33 MHz -> chu3.33
+ *   SHARED_10000 -> shared10000
+ *   CHU_3330 -> chu3330
  */
 function channelNameToKey(channelName) {
-    const parts = channelName.split(' ');
-    if (parts.length < 2) {
-        // Fallback: underscored lowercase
-        return channelName.replace(/ /g, '_').toLowerCase();
+    // Handle canonical STATION_KILOHERTZ format
+    if (channelName.includes('_')) {
+        const parts = channelName.split('_');
+        if (['SHARED', 'WWV', 'CHU'].includes(parts[0])) {
+            return `${parts[0].toLowerCase()}${parts[1]}`;
+        }
     }
 
-    const station = parts[0].toLowerCase();  // wwv, chu
-    const freq = parts[1];                   // 10, 2.5, 3.33
-
-    return `${station}${freq}`;
+    // Fallback: underscored lowercase
+    return channelName.replace(/ /g, '_').replace(/_/g, '').toLowerCase();
 }
 
 /**
- * Convert channel name to directory format.
+ * Convert channel name to directory format (pass-through for canonical format).
+ * 
+ * The canonical format is STATION_KILOHERTZ (e.g., SHARED_10000, CHU_3330).
+ * This function passes through canonical format unchanged.
  * 
  * Examples:
- *   WWV 10 MHz -> WWV_10000
- *   CHU 3.33 MHz -> CHU_3330
+ *   SHARED_10000 -> SHARED_10000 (pass-through)
+ *   CHU_3330 -> CHU_3330 (pass-through)
  */
 function channelNameToDir(channelName) {
-    const parts = channelName.split(' ');
-    const station = parts[0].replace('/', ''); // SHARED/WWV -> SHARED
-
-    // Extract numeric frequency
-    const freqMatch = parts.length > 1 ? parts[1].match(/(\d+(\.\d+)?)/) : null;
-    if (freqMatch) {
-        const freq = parseFloat(freqMatch[1]);
-        const khz = Math.round(freq * 1000);
-        return `${station}_${khz}`;
+    // Already in canonical STATION_KILOHERTZ format - pass through
+    if (channelName.includes('_')) {
+        const parts = channelName.split('_');
+        if (parts.length === 2 && ['SHARED', 'WWV', 'CHU'].includes(parts[0]) && /^\d+$/.test(parts[1])) {
+            return channelName;
+        }
     }
 
-    // Fallback if no frequency match
-    return channelName.replace(/[ .]/g, '_');
+    // Fallback: replace spaces with underscores
+    return channelName.replace(/ /g, '_');
 }
 
 /**
- * Convert directory name back to human-readable format.
- * 
- * Examples:
- *   WWV_10_MHz -> WWV 10 MHz
+ * Return directory name unchanged (canonical format is STATION_KILOHERTZ).
+ * Matches Python dir_to_channel_name().
  */
 function dirToChannelName(dirName) {
-    return dirName.replace(/_/g, ' ');
+    return dirName;
+}
+
+/**
+ * Convert canonical channel name to human-readable display format.
+ * Matches Python channel_to_display_name().
+ * 
+ * @param {string} channelName - Canonical format (e.g., "SHARED_10000", "CHU_3330")
+ * @returns {string} Display format (e.g., "SHARED 10 MHz", "CHU 3.33 MHz")
+ */
+function channelToDisplayName(channelName) {
+    const parts = channelName.split('_');
+    if (parts.length === 2 && /^\d+$/.test(parts[1])) {
+        const station = parts[0];
+        const khz = parseInt(parts[1], 10);
+        const mhz = khz / 1000;
+        // Format MHz: use integer if whole number, otherwise show decimals
+        const mhzStr = Number.isInteger(mhz) ? mhz.toString() : mhz.toFixed(2).replace(/\.?0+$/, '');
+        return `${station} ${mhzStr} MHz`;
+    }
+
+    return channelName.replace(/_/g, ' ');
 }
 
 /**
@@ -404,10 +422,10 @@ class TimeStdPaths {
         // Non-channel directories to exclude
         const excludeDirs = ['status', 'metadata', 'state', 'logs', 'fusion', 'upload'];
 
-        // Valid channel name pattern: must start with SHARED, WWV, or CHU
-        // This filters out stray directories like "2", "8", "E", "M", "w"
+        // Valid channel directory pattern: station_kilohertz format (e.g., SHARED_10000, CHU_3330)
+        // This filters out old _MHz format directories and stray directories
         const isValidChannelDir = (name) => {
-            return name.startsWith('SHARED') || name.startsWith('WWV') || name.startsWith('CHU');
+            return /^(SHARED|WWV|CHU)_\d+$/.test(name);
         };
 
         // Check raw_buffer/ (Phase 1)
@@ -452,10 +470,10 @@ class TimeStdPaths {
         const entries = readdirSync(phase2Dir, { withFileTypes: true });
 
         for (const entry of entries) {
-            // Valid channel names must start with SHARED, WWV, or CHU
+            // Valid channel directory pattern: station_kilohertz format (e.g., SHARED_10000, CHU_3330)
             if (entry.isDirectory() &&
                 !excludeDirs.includes(entry.name) &&
-                (entry.name.startsWith('SHARED') || entry.name.startsWith('WWV') || entry.name.startsWith('CHU'))) {
+                /^(SHARED|WWV|CHU)_\d+$/.test(entry.name)) {
                 channels.push(dirToChannelName(entry.name));
             }
         }
@@ -514,5 +532,6 @@ export {
     loadPathsFromConfig,
     channelNameToKey,
     channelNameToDir,
-    dirToChannelName
+    dirToChannelName,
+    channelToDisplayName
 };

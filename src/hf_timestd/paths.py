@@ -22,79 +22,83 @@ def channel_name_to_key(channel_name: str) -> str:
     """Convert channel name to consistent key format.
     
     Args:
-        channel_name: Human-readable name (e.g., "WWV 10 MHz", "CHU 3.33 MHz")
+        channel_name: Canonical format "STATION_KILOHERTZ" (e.g., "SHARED_10000", "CHU_3330")
     
     Returns:
-        Key format: "wwv10", "chu3.33", etc.
+        Key format: "shared10000", "chu3330", etc.
     
     Examples:
-        >>> channel_name_to_key("WWV 10 MHz")
-        'wwv10'
-        >>> channel_name_to_key("WWV 2.5 MHz")
-        'wwv2.5'
-        >>> channel_name_to_key("CHU 3.33 MHz")
-        'chu3.33'
+        >>> channel_name_to_key("SHARED_10000")
+        'shared10000'
+        >>> channel_name_to_key("CHU_3330")
+        'chu3330'
     """
-    parts = channel_name.split()
-    if len(parts) < 2:
-        # Fallback: underscored lowercase
-        return channel_name.replace(' ', '_').lower()
+    # Handle canonical STATION_KILOHERTZ format
+    if '_' in channel_name and channel_name.split('_')[0] in ('SHARED', 'WWV', 'CHU'):
+        parts = channel_name.split('_')
+        return f"{parts[0].lower()}{parts[1]}"
     
-    station = parts[0].lower()  # wwv, chu
-    freq = parts[1]             # 10, 2.5, 3.33
-    
-    return f"{station}{freq}"
+    # Fallback: underscored lowercase
+    return channel_name.replace(' ', '_').replace('_', '').lower()
 
 
 def channel_name_to_dir(channel_name: str) -> str:
     """Convert channel name to directory format (Station_kHz).
     
+    The canonical format is STATION_KILOHERTZ (e.g., SHARED_10000, CHU_3330).
+    This function passes through canonical format unchanged.
+    
     Examples:
-        "WWV 10 MHz"  -> "SHARED_10000"
-        "CHU 3.33 MHz" -> "CHU_3330"
+        "SHARED_10000" -> "SHARED_10000" (pass-through)
+        "CHU_3330"     -> "CHU_3330" (pass-through)
     """
-    parts = channel_name.split()
-    if len(parts) < 2:
-        return channel_name.replace(' ', '_')
+    # Already in canonical STATION_KILOHERTZ format - pass through
+    if '_' in channel_name:
+        parts = channel_name.split('_')
+        if len(parts) == 2 and parts[0] in ('SHARED', 'WWV', 'CHU') and parts[1].isdigit():
+            return channel_name
     
-    station = parts[0].upper().replace('/', '')
-    try:
-        freq_mhz = float(parts[1])
-        khz = int(round(freq_mhz * 1000))
-    except (ValueError, IndexError):
-        return channel_name.replace(' ', '_')
-
-    # SHARED frequencies (WWV/WWVH/BPM)
-    if khz in {2500, 5000, 10000, 15000}:
-        return f"SHARED_{khz}"
-    
-    return f"{station}_{khz}"
+    # Fallback: replace spaces with underscores
+    return channel_name.replace(' ', '_')
 
 
 def dir_to_channel_name(dir_name: str) -> str:
-    """Convert directory name back to human-readable format.
+    """Return directory name unchanged (canonical format is STATION_KILOHERTZ).
     
     Args:
-        dir_name: Directory name (e.g., "SHARED_10000")
+        dir_name: Directory name (e.g., "SHARED_10000", "CHU_3330")
     
     Returns:
-        Human-readable approximation (best effort)
+        Same as input - canonical format is used throughout
     """
-    if dir_name.startswith('SHARED_'):
-        khz = dir_name.split('_')[1]
-        mhz = float(khz) / 1000
-        return f"SHARED {mhz:g} MHz"
+    return dir_name
+
+
+def channel_to_display_name(channel_name: str) -> str:
+    """Convert canonical channel name to human-readable display format.
     
-    parts = dir_name.split('_')
-    if len(parts) == 2:
-        station, khz = parts
-        try:
-            mhz = float(khz) / 1000
-            return f"{station} {mhz:g} MHz"
-        except ValueError:
-            pass
-            
-    return dir_name.replace('_', ' ')
+    This is ONLY for UI display purposes. All internal operations use
+    the canonical STATION_KILOHERTZ format.
+    
+    Args:
+        channel_name: Canonical format (e.g., "SHARED_10000", "CHU_3330")
+    
+    Returns:
+        Display format (e.g., "SHARED 10 MHz", "CHU 3.33 MHz")
+    """
+    parts = channel_name.split('_')
+    if len(parts) == 2 and parts[1].isdigit():
+        station = parts[0]
+        khz = int(parts[1])
+        mhz = khz / 1000
+        # Format: integer if whole number, otherwise show decimals
+        if mhz == int(mhz):
+            mhz_str = str(int(mhz))
+        else:
+            mhz_str = f"{mhz:.2f}".rstrip('0').rstrip('.')
+        return f"{station} {mhz_str} MHz"
+    
+    return channel_name.replace('_', ' ')
 
 
 class TimeStdPaths:

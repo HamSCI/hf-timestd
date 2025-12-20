@@ -1,4 +1,4 @@
-# GRAPEAgiglRl Recoecerfiguration
+# HF-TIMESTD Configuration
 # Station: AC0G-BEE1
 
 [station]
@@ -12,7 +12,6 @@ longitude = -92.127974
 
 [ka9q]
 status_address = "bee1-hf-status.local"
-data_destination = "239.103.26.231"
 auto_create_channels = true
 
 [recorder]
@@ -47,39 +46,39 @@ encoding = "F32"
 
 [[recorder.channels]]
 frequency_hz = 2500000
-description = "SHARED 2.5 MHz"
+description = "SHARED_2500"
 
 [[recorder.channels]]
 frequency_hz = 5000000
-description = "SHARED 5 MHz"
+description = "SHARED_5000"
 
 [[recorder.channels]]
 frequency_hz = 10000000
-description = "SHARED 10 MHz"
+description = "SHARED_10000"
 
 [[recorder.channels]]
 frequency_hz = 15000000
-description = "SHARED 15 MHz"
+description = "SHARED_15000"
 
 [[recorder.channels]]
 frequency_hz = 20000000
-description = "WWV 20 MHz"
+description = "WWV_20000"
 
 [[recorder.channels]]
 frequency_hz = 25000000
-description = "WWV 25 MHz"
+description = "WWV_25000"
 
 [[recorder.channels]]
 frequency_hz = 3330000
-description = "CHU 3.33 MHz"
+description = "CHU_3330"
 
 [[recorder.channels]]
 frequency_hz = 7850000
-description = "CHU 7.85 MHz"
+description = "CHU_7850"
 
 [[recorder.channels]]
 frequency_hz = 14670000
-description = "CHU 14.67 MHz"
+description = "CHU_14670"
 
 [uploader]
 enabled = false
