@@ -1547,6 +1547,25 @@ class Phase2TemporalEngine:
         # - system_time has NTP jitter (~1-10ms)
         # - RTP offset is GPSDO-locked (~100ns stability)
         #
+        # Get arrival RTP from time snap - USE STATION SPECIFIC TIMING
+        t_arrival_ms = None
+        if station == 'WWV':
+            t_arrival_ms = time_snap.wwv_timing_ms
+        elif station == 'WWVH':
+            t_arrival_ms = time_snap.wwvh_timing_ms
+        elif station == 'CHU':
+            t_arrival_ms = time_snap.chu_timing_ms
+        elif station == 'BPM':
+            # BPM timing: prefer bpm_timing_ms
+            t_arrival_ms = time_snap.bpm_timing_ms if time_snap.bpm_timing_ms else time_snap.wwv_timing_ms
+        
+        # Calculate arrival_rtp if signal was detected
+        arrival_rtp = None
+        if t_arrival_ms is not None:
+             timing_offset_samples = round(t_arrival_ms * self.sample_rate / 1000.0)
+             arrival_rtp = rtp_timestamp + timing_offset_samples
+
+        # GPSDO-FIRST TIMING: RTP timestamp is the gold standard ruler.
         samples_per_minute = self.sample_rate * 60  # 1,200,000 at 20 kHz
         
         # Get the calibrated RTP offset that corresponds to minute boundary
@@ -1569,36 +1588,31 @@ class Phase2TemporalEngine:
             expected_second_rtp = rtp_timestamp + offset_diff
             logger.debug(f"RTP ruler: calibrated_offset={calibrated_offset}, current={current_offset}, diff={offset_diff}")
         else:
-            # Bootstrap: No calibration yet, establish mapping from first detection
-            # Estimate arrival time in system clock frame
-            arrival_rtp_offset = arrival_rtp - rtp_timestamp
-            estimated_arrival_time = system_time + (arrival_rtp_offset / self.sample_rate)
-            
-            # Snap to nearest minute boundary (we assume we detected the Minute Tone)
-            nearest_minute = round(estimated_arrival_time / 60.0) * 60.0
-            
-            # Calculate expected RTP for that boundary
-            time_diff = nearest_minute - system_time
-            expected_second_rtp = rtp_timestamp + int(time_diff * self.sample_rate)
-            
-            logger.info(
-                f"Bootstrap: Snapped arrival {estimated_arrival_time:.3f} to minute {nearest_minute} "
-                f"(diff={estimated_arrival_time - nearest_minute:.3f}s)"
-            )
-        
-        # Get arrival RTP from time snap - USE STATION SPECIFIC TIMING
-        t_arrival_ms = None
-        if station == 'WWV':
-            t_arrival_ms = time_snap.wwv_timing_ms
-        elif station == 'WWVH':
-            t_arrival_ms = time_snap.wwvh_timing_ms
-        elif station == 'CHU':
-            t_arrival_ms = time_snap.chu_timing_ms
-        elif station == 'BPM':
-            # BPM timing: prefer bpm_timing_ms if available, otherwise use generic timing_error_ms
-            # The generic timing comes from the anchor station (WWV/WWVH) which shares the same
-            # second tick timing as BPM on shared frequencies
-            t_arrival_ms = time_snap.bpm_timing_ms if time_snap.bpm_timing_ms is not None else time_snap.timing_error_ms
+            # Bootstrap: No calibration yet
+            if arrival_rtp is not None:
+                # Establish mapping from first meaningful detection
+                # Estimate arrival time in system clock frame
+                arrival_rtp_offset = arrival_rtp - rtp_timestamp
+                estimated_arrival_time = system_time + (arrival_rtp_offset / self.sample_rate)
+                
+                # Snap to nearest minute boundary (we assume we detected the Minute Tone)
+                nearest_minute = round(estimated_arrival_time / 60.0) * 60.0
+                
+                # Calculate expected RTP for that boundary
+                time_diff = nearest_minute - system_time
+                expected_second_rtp = rtp_timestamp + int(time_diff * self.sample_rate)
+                
+                logger.info(
+                    f"Bootstrap: Snapped arrival {estimated_arrival_time:.3f} to minute {nearest_minute} "
+                    f"(diff={estimated_arrival_time - nearest_minute:.3f}s)"
+                )
+            else:
+                # Fallback to system time if no signal detected
+                # This ensures we don't crash, even if timing will be imprecise (WALL_CLOCK)
+                minute_boundary = (int(system_time) // 60) * 60
+                samples_to_boundary = int((minute_boundary - system_time) * self.sample_rate)
+                expected_second_rtp = rtp_timestamp + samples_to_boundary
+                logger.info(f"Bootstrap: No signal detected, defaulting to system time boundary")
             
         # Fallback to generic timing error if specific not available (e.g. single station anchor)
         if t_arrival_ms is None:
