@@ -1241,6 +1241,54 @@ class Phase2AnalyticsService:
         except Exception as e:
             logger.error(f"Failed to write status: {e}")
     
+    def _load_broadcast_calibration(self) -> Dict[str, float]:
+        """
+        Load learned calibration offsets for this channel.
+        
+        Reads from state/broadcast_calibration.json produced by MultiBroadcastFusion.
+        Returns a dictionary mapping Station Name -> Offset (ms).
+        """
+        # Assume data standard layout: output_dir is phase2/{CHANNEL}
+        # Fusion writes to {data_root}/state/broadcast_calibration.json
+        # So we look in output_dir/../../state/broadcast_calibration.json
+        try:
+            # self.output_dir = .../phase2/WWV_10_MHz
+            # desired = .../state/broadcast_calibration.json
+            cal_file = self.output_dir.parent.parent / 'state' / 'broadcast_calibration.json'
+            
+            if not cal_file.exists():
+                return {}
+            
+            with open(cal_file) as f:
+                data = json.load(f)
+            
+            offsets = {}
+            target_freq_mhz = self.frequency_hz / 1e6
+            
+            # Key format: "STATION_FREQ" (e.g. "WWV_10.00")
+            for key, cal_data in data.items():
+                parts = key.rsplit('_', 1)
+                if len(parts) != 2:
+                    continue
+                station, freq_str = parts[0], parts[1]
+                
+                try:
+                    cal_freq = float(freq_str)
+                    # Check if this calibration applies to our frequency
+                    if abs(cal_freq - target_freq_mhz) < 0.01:
+                        offsets[station] = cal_data['offset_ms']
+                except ValueError:
+                    continue
+            
+            if offsets:
+                logger.debug(f"Loaded calibration offsets: {offsets}")
+            
+            return offsets
+            
+        except Exception as e:
+            logger.debug(f"Failed to load calibration: {e}")
+            return {}
+
     def process_minute(self, minute_boundary: int) -> bool:
         """
         Process one minute of data.
@@ -1274,12 +1322,16 @@ class Phase2AnalyticsService:
         gap_samples = int(np.sum(zero_mask))
         
         try:
+            # Load latest calibration offsets (feedback from fusion)
+            calibration_offsets = self._load_broadcast_calibration()
+            
             # Process through Phase 2 engine
             # Returns LIST of results (one per detected station)
             results = self.engine.process_minute(
                 iq_samples=iq_samples,
                 system_time=system_time,
-                rtp_timestamp=rtp_timestamp
+                rtp_timestamp=rtp_timestamp,
+                calibration_offsets=calibration_offsets
             )
             
             self.minutes_processed += 1

@@ -279,6 +279,16 @@ class CorrelatorBank:
         expected_toa_ms = model.expected_delay_ms + model.timing_offset_ms + calibration_offset
         timing_error_ms = toa_refined_ms - expected_toa_ms
         
+        # Check Exclusion Zones (prevent cross-talk)
+        # timing_error_ms is the offset from expected arrival.
+        # exclusion_zones are defined as (start, end) ranges of this error.
+        in_exclusion_zone = False
+        for zone_start, zone_end in model.exclusion_zones:
+            if zone_start <= timing_error_ms <= zone_end:
+                in_exclusion_zone = True
+                logger.debug(f"{model.station.value} peak at {timing_error_ms:+.1f}ms masked by exclusion zone [{zone_start:+.1f}, {zone_end:+.1f}]")
+                break
+        
         # Noise estimation (from correlation values away from peak)
         noise_region = np.concatenate([envelope[:max(1, peak_idx-10)], 
                                        envelope[min(len(envelope)-1, peak_idx+10):]])
@@ -301,12 +311,19 @@ class CorrelatorBank:
         
         # Detection threshold
         detection_threshold = noise_floor + 3 * noise_std
-        detected = peak_value > detection_threshold and snr_db > 6.0
+        detected = (peak_value > detection_threshold and 
+                    snr_db > 6.0 and 
+                    not in_exclusion_zone)
         
         # Confidence based on SNR and timing plausibility
         snr_confidence = min(1.0, max(0.0, (snr_db - 6.0) / 20.0))
         timing_confidence = max(0.0, 1.0 - abs(timing_error_ms) / 20.0)
-        confidence = 0.7 * snr_confidence + 0.3 * timing_confidence
+        
+        # Zero confidence if in exclusion zone
+        if in_exclusion_zone:
+            confidence = 0.0
+        else:
+            confidence = 0.7 * snr_confidence + 0.3 * timing_confidence
         
         return CorrelatorResult(
             station=model.station.value,

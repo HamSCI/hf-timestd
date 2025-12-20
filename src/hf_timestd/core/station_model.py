@@ -132,6 +132,10 @@ class StationModel:
     # Propagation bounds (min, max delay in ms)
     delay_bounds_ms: Tuple[float, float] = (0.0, 100.0)
     
+    # Exclusion zones (list of (start_ms, end_ms) relative to search window center)
+    # Used to prevent cross-correlation with other known strong signals (e.g., WWV vs BPM)
+    exclusion_zones: List[Tuple[float, float]] = field(default_factory=list)
+    
     def get_search_window(self, minute: int, calibrated: bool = False) -> Tuple[float, float]:
         """
         Get correlator search window for this station.
@@ -390,35 +394,42 @@ class StationModelFactory:
         
         return EARTH_RADIUS_KM * c
     
+    
     def _estimate_propagation_delay(self, station: StationID) -> float:
         """
         Estimate propagation delay for a station.
         
-        Uses distance-dependent heuristic for ionospheric path overhead:
-        - Short paths (<3000km): High take-off angle => higher overhead (~1.15x)
-        - Long paths (>10000km): Low take-off angle => lower overhead (~1.05x)
-        - Intermediate: Linear interpolation
-        
-        See: Davies, "Ionospheric Radio", for path geometry factors.
+        Uses the shared PropagationEngine for consistent estimation across
+        the pipeline (unifies StationModel and TransmissionTimeSolver).
         """
-        ground_km = self.distances[station]
+        # Lazy import to avoid circular dependency
+        from .propagation_engine import PropagationEngine
         
-        # Distance-dependent path factor
-        # Short paths (high angle) have more overhead relative to ground distance
-        # Long paths (grazing incidence) approach the curvature of the earth
-        if ground_km < 3000.0:
-            factor = 1.15
-        elif ground_km > 10000.0:
-            factor = 1.05
+        # Use simple geometric model for station model initialization
+        # (fast, consistent, better than simple heuristic)
+        engine = PropagationEngine(enable_iri=False)
+        
+        # Get coordinates based on station ID
+        if station == StationID.WWV:
+            tx_lat, tx_lon, freq = WWV_LAT, WWV_LON, 10000000
+        elif station == StationID.WWVH:
+            tx_lat, tx_lon, freq = WWVH_LAT, WWVH_LON, 10000000
+        elif station == StationID.BPM:
+            tx_lat, tx_lon, freq = BPM_LAT, BPM_LON, 10000000
+        elif station == StationID.CHU:
+            tx_lat, tx_lon, freq = CHU_LAT, CHU_LON, 7850000
         else:
-            # Linear interpolation between 3000km and 10000km
-            # Slope = (1.05 - 1.15) / (10000 - 3000) = -0.1 / 7000
-            slope = -0.1 / 7000.0
-            factor = 1.15 + slope * (ground_km - 3000.0)
+            return 0.0
             
-        path_length_km = ground_km * factor
-        delay_ms = (path_length_km / SPEED_OF_LIGHT_KM_S) * 1000.0
-        return delay_ms
+        result = engine.estimate_delay(
+            station_lat=tx_lat, station_lon=tx_lon,
+            rx_lat=self.receiver_lat, rx_lon=self.receiver_lon,
+            frequency_hz=freq,
+            preferred_method='GEOMETRIC'
+        )
+        
+        logger.info(f"Station {station.value}: Expected delay {result.delay_ms:.2f} ms ({result.method}, {result.num_hops} hops)")
+        return result.delay_ms
     
     def create_wwv_model(self) -> StationModel:
         """Create WWV station model."""
@@ -483,8 +494,32 @@ class StationModelFactory:
             
         # 15 MHz: 01:00 - 09:00 UTC (Off 09:00 - 01:00)
         # ON for hours 01-08.
-        elif abs(frequency_mhz - 15.0) < 0.1:
+        if abs(frequency_mhz - 15.0) < 0.1:
             active = set(range(1, 9))
+
+        # Calculate Exclusion Zones (Prevent BPM/WWV aliasing)
+        # WWV arrives at: WWV_delay
+        # BPM arrives at: BPM_delay - 20ms
+        # Relative offset of WWV in BPM window:
+        #   WWV_arrival - BPM_arrival = WWV_delay - (BPM_delay - 20)
+        #                             = WWV_delay - BPM_delay + 20
+        # If this offset falls within the BPM search window (typically ±25-40ms),
+        # we must exclude it to avoid locking onto WWV while looking for BPM.
+        exclusion_zones = []
+        
+        # Only relevant on shared frequencies (2.5, 5, 10, 15 MHz)
+        if any(abs(frequency_mhz - f) < 0.1 for f in [2.5, 5.0, 10.0, 15.0]):
+            wwv_delay = self._estimate_propagation_delay(StationID.WWV)
+            bpm_delay = delay # Currently estimated BPM delay
+            
+            # Relative position of WWV peak relative to BPM center (0)
+            wwv_relative_ms = wwv_delay - (bpm_delay + BPM_TIMING_OFFSET_MS)
+            
+            # Mask ±3ms around WWV expected arrival
+            # (WWV tick is 5ms, so ±2.5ms is the pulse, we use ±3ms for safety)
+            exclusion_zones.append((wwv_relative_ms - 3.0, wwv_relative_ms + 3.0))
+            
+            logger.debug(f"BPM Exclusion Zone: Masking WWV at {wwv_relative_ms:+.1f} ms relative to BPM")
 
         return StationModel(
             station=StationID.BPM,
@@ -502,6 +537,7 @@ class StationModelFactory:
             pure_carrier_minutes=BPM_PURE_CARRIER_MINUTES,
             active_hours=active,
             delay_bounds_ms=bounds,
+            exclusion_zones=exclusion_zones
         )
     
     def create_chu_model(self) -> StationModel:
