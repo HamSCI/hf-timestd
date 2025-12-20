@@ -501,8 +501,11 @@ class Phase2AnalyticsService:
         """Get filename-safe channel name (Station_KHz e.g. WWV_10000)."""
         # User requested simplified "Station_Freq" format to avoid "MHz" and dots.
         khz = int(self.frequency_hz / 1000)
-        # Extract station from "WWV 10 MHz" -> "WWV"
-        station = self.channel_name.split(' ')[0].replace('/', '')
+        
+        # Extract station name (handle "WWV 10 MHz" or "CHU_3330" formats)
+        name_part = self.channel_name.split(' ')[0]
+        station = name_part.split('_')[0].replace('/', '')
+        
         return f"{station}_{khz}"
     
     def _init_tone_detections_csv(self):
