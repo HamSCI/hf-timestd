@@ -3072,8 +3072,18 @@ async function getTimingStatus(paths) {
           d_clock_ms: best.d_clock_ms,
           quality_grade: best.quality_grade,
           station: best.station,
-          snr_db: best.snr_db
+          snr_db: best.snr_db,
+          uncertainty_ms: best.uncertainty_ms
         };
+
+        // Enhanced Status Determination (Phase 2 Priority)
+        // If we have a decent Phase 2 lock, override the legacy status
+        if (['A', 'B', 'C'].includes(best.quality_grade)) {
+          overallStatus = 'LOCKED';
+          precisionEstimateMs = best.uncertainty_ms || 1.0;
+        } else if (best.quality_grade === 'D' || (phase2Data && phase2Data.active_channels > 0)) {
+          overallStatus = 'CALIBRATING';
+        }
       }
     }
   } catch (err) {
