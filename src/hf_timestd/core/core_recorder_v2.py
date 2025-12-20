@@ -37,7 +37,7 @@ from typing import Dict, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality
+from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding, generate_multicast_ip
 
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
@@ -45,19 +45,6 @@ from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 logger = logging.getLogger(__name__)
 
 
-def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
-    """
-    Generate deterministic multicast IP for hf-timestd channels.
-    
-    Uses station_id and instrument_id to create a unique, persistent
-    multicast address in the 239.x.x.x administratively scoped range.
-    """
-    key = f"TIMESTD:{station_id}:{instrument_id}"
-    hash_bytes = hashlib.sha256(key.encode()).digest()
-    octet2 = (hash_bytes[0] % 254) + 1
-    octet3 = hash_bytes[1]
-    octet4 = (hash_bytes[2] % 254) + 1
-    return f"239.{octet2}.{octet3}.{octet4}"
 
 
 class CoreRecorderV2:
@@ -98,7 +85,11 @@ class CoreRecorderV2:
         # Generate dedicated multicast IP from station/instrument ID
         station_id = self.station_config.get('id', 'S000000')
         instrument_id = self.station_config.get('instrument_id', '0')
-        self.data_destination = generate_timestd_multicast_ip(station_id, instrument_id)
+        # Use ka9q-python's deterministic multicast IP generation
+        unique_id = f"TIMESTD:{station_id}:{instrument_id}"
+        mcast_addr = generate_multicast_ip(unique_id)
+        # Use port 5004 for explicit matching with radiod defaults
+        self.data_destination = f"{mcast_addr}:5004"
         
         # Channel specs and defaults
         self.channel_specs = config.get('channels', [])
@@ -107,7 +98,7 @@ class CoreRecorderV2:
             'sample_rate': 20000,
             'agc': 0,
             'gain': 0.0,
-            'encoding': 'float'
+            'encoding': Encoding.F32
         })
         
         # Channel info from discovery (ssrc -> ChannelInfo)
@@ -137,6 +128,7 @@ class CoreRecorderV2:
     
     def run(self):
         """Main run loop."""
+        self.running = True
         logger.info("Starting hf-timestd core recorder v2 (using ka9q-python RadiodStream)")
         
         # Ensure channels exist and get ChannelInfo
@@ -147,9 +139,9 @@ class CoreRecorderV2:
         self.running = True
         
         # Start all recorders
-        for ssrc, recorder in self.recorders.items():
+        for freq, recorder in self.recorders.items():
             recorder.start()
-            logger.info(f"Started recorder for SSRC {ssrc:x} ({recorder.config.description})")
+            logger.info(f"Started recorder for {freq/1e6:.3f} MHz ({recorder.config.description})")
         
         logger.info("Core recorder running. Press Ctrl+C to stop.")
         
@@ -207,123 +199,59 @@ class CoreRecorderV2:
     
     def _initialize_channels(self) -> bool:
         """
-        Initialize channels: ensure they exist in radiod and create recorders.
-        Uses ka9q-python RadiodControl directly with anti-hijacking protection.
+        Initialize channels: delegate discovery and creation to ManagedStream.
         
         Returns:
-            True if at least one channel initialized successfully
+            True if recorders were created successfully
         """
         try:
             if not self.channel_specs:
                 logger.warning("No channels configured")
                 return False
             
-            logger.info(f"Ensuring {len(self.channel_specs)} channels exist in radiod...")
-            logger.info(f"  Our multicast destination: {self.data_destination}")
+            logger.info(f"Initializing {len(self.channel_specs)} channels via ManagedStream...")
             
-            # Discover existing channels
-            all_channels = discover_channels(self.status_address)
-            
-            # Build lookup: channels by frequency, separated by ownership
-            our_channels: Dict[int, tuple] = {}  # freq_hz -> (ssrc, ChannelInfo)
-            other_channels: Dict[int, list] = {}  # freq_hz -> [(ssrc, ChannelInfo), ...]
-            
-            for ssrc, ch in all_channels.items():
-                freq_hz = int(round(ch.frequency))
-                ch_dest = getattr(ch, 'multicast_address', None)
-                
-                if ch_dest == self.data_destination:
-                    our_channels[freq_hz] = (ssrc, ch)
-                else:
-                    if freq_hz not in other_channels:
-                        other_channels[freq_hz] = []
-                    other_channels[freq_hz].append((ssrc, ch))
-            
-            logger.info(f"  Found {len(our_channels)} channels with our destination")
-            logger.info(f"  Found {len(all_channels) - len(our_channels)} channels with other destinations")
-            
+            # Warm up discovery to prevent redundant channel creation
+            logger.info("Warming up radiod discovery...")
+            try:
+                discover_channels(self.status_address, listen_duration=2.0)
+            except Exception as e:
+                logger.warning(f"Discovery warm-up failed: {e}")
+
             # Get defaults
             sample_rate = self.channel_defaults.get('sample_rate', 20000)
-            preset = self.channel_defaults.get('preset', 'iq')
-            
-            # Process each required channel
-            freq_to_ssrc: Dict[int, int] = {}
-            
-            for ch_spec in self.channel_specs:
-                freq_hz = int(ch_spec['frequency_hz'])
-                description = ch_spec.get('description', f'{freq_hz/1e6:.3f} MHz')
-                
-                if freq_hz in our_channels:
-                    # Channel exists with our destination - reuse it
-                    ssrc, ch_info = our_channels[freq_hz]
-                    
-                    # Check if parameters match
-                    if ch_info.preset == preset and ch_info.sample_rate == sample_rate:
-                        logger.info(f"✓ {description} exists (SSRC {ssrc}, ours)")
-                        freq_to_ssrc[freq_hz] = ssrc
-                    else:
-                        # Reconfigure our channel
-                        logger.info(f"⚙️ Reconfiguring {description}: "
-                                   f"preset={ch_info.preset}->{preset}, "
-                                   f"rate={ch_info.sample_rate}->{sample_rate}")
-                        try:
-                            self.control.tune(
-                                ssrc=ssrc,
-                                preset=preset,
-                                sample_rate=sample_rate
-                            )
-                            freq_to_ssrc[freq_hz] = ssrc
-                        except Exception as e:
-                            logger.error(f"Failed to reconfigure {description}: {e}")
-                else:
-                    # No channel with our destination - create new
-                    # (Don't touch channels belonging to others)
-                    if freq_hz in other_channels:
-                        logger.info(f"ℹ️ {len(other_channels[freq_hz])} other client(s) at {freq_hz/1e6:.3f} MHz")
-                    
-                    logger.info(f"➕ Creating {description}")
-                    try:
-                        ssrc = self.control.create_channel(
-                            frequency_hz=freq_hz,
-                            preset=preset,
-                            sample_rate=sample_rate,
-                            destination=self.data_destination
-                        )
-                        if ssrc:
-                            freq_to_ssrc[freq_hz] = ssrc
-                            logger.info(f"✓ Created {description} (SSRC {ssrc})")
-                    except Exception as e:
-                        logger.error(f"Failed to create {description}: {e}")
-            
-            if not freq_to_ssrc:
-                logger.error("No channels could be created/found")
-                return False
-            
-            # Re-discover to get fresh ChannelInfo with timing data
-            time.sleep(0.5)
-            all_channels = discover_channels(self.status_address)
             
             # Create StreamRecorderV2 for each channel
             for ch_spec in self.channel_specs:
                 freq_hz = int(ch_spec['frequency_hz'])
-                if freq_hz not in freq_to_ssrc:
-                    continue
-                
-                ssrc = freq_to_ssrc[freq_hz]
                 description = ch_spec.get('description', f'{freq_hz/1e6:.3f} MHz')
                 
-                if ssrc not in all_channels:
-                    logger.warning(f"No ChannelInfo for SSRC {ssrc} - skipping")
-                    continue
+                # Defaults are merged with channel-specific config
+                preset = ch_spec.get('preset', self.channel_defaults.get('preset', 'iq'))
+                encoding_val = ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
                 
-                channel_info = all_channels[ssrc]
-                self.channel_infos[ssrc] = channel_info
+                # Map string encoding to integer constant if necessary
+                if isinstance(encoding_val, str):
+                    if encoding_val.upper() == 'F32':
+                        encoding = Encoding.F32
+                    elif encoding_val.upper() == 'S16LE':
+                        encoding = Encoding.S16LE
+                    elif encoding_val.upper() == 'OPUS':
+                        encoding = Encoding.OPUS
+                    else:
+                        logger.warning(f"Unknown encoding string '{encoding_val}', defaulting to NO_ENCODING")
+                        encoding = Encoding.NO_ENCODING
+                else:
+                    encoding = encoding_val
                 
                 recorder_config = StreamRecorderConfig(
-                    ssrc=ssrc,
+                    ssrc=0, 
                     frequency_hz=freq_hz,
+                    preset=preset,
+                    encoding=encoding,
                     sample_rate=sample_rate,
                     description=description,
+                    destination=self.data_destination,
                     output_dir=self.output_dir,
                     station_config=self.station_config,
                     receiver_grid=self.station_config.get('grid_square', ''),
@@ -331,16 +259,20 @@ class CoreRecorderV2:
                     compression_level=self.recorder_config.get('compression_level', 3),
                 )
                 
+                # Initialize recorder - we pass None for channel_info as ManagedStream 
+                # will discover/create it on start()
                 recorder = StreamRecorderV2(
                     config=recorder_config,
-                    channel_info=channel_info,
+                    channel_info=None, # Will be filled by ManagedStream
                     get_ntp_status=self.get_ntp_status,
-                    control=self.control,  # Enable auto-recovery via ManagedStream
+                    control=self.control,
                 )
-                self.recorders[ssrc] = recorder
+                
+                # Store by frequency since SSRC is not yet known
+                self.recorders[freq_hz] = recorder
             
-            logger.info(f"✓ Initialized {len(self.recorders)} channel recorders")
-            return len(self.recorders) > 0
+            logger.info(f"✓ Initialized {len(self.recorders)} channel recorders (managed)")
+            return True
             
         except Exception as e:
             logger.error(f"Channel initialization failed: {e}", exc_info=True)
@@ -364,9 +296,17 @@ class CoreRecorderV2:
                 }
             }
             
-            for ssrc, recorder in self.recorders.items():
+            for freq, recorder in self.recorders.items():
                 ch_stats = recorder.get_status()
-                status['channels'][hex(ssrc)] = ch_stats
+                # Use SSRC as key if known, otherwise use hex frequency
+                ssrc = recorder.config.ssrc
+                key = hex(ssrc) if ssrc and ssrc != 0 else f"freq_{freq}"
+                
+                # Add metadata to ch_stats for better UI/debugging
+                ch_stats['preset'] = recorder.config.preset
+                ch_stats['encoding'] = recorder.config.encoding
+                
+                status['channels'][key] = ch_stats
                 
                 if ch_stats.get('samples_received', 0) > 0:
                     status['overall']['channels_active'] += 1
@@ -438,7 +378,7 @@ class CoreRecorderV2:
     def _monitor_health(self):
         """Monitor stream health."""
         try:
-            for ssrc, recorder in self.recorders.items():
+            for freq, recorder in self.recorders.items():
                 if not recorder.is_healthy():
                     silence = recorder.get_silence_duration()
                     logger.warning(
@@ -447,9 +387,11 @@ class CoreRecorderV2:
                     
                     # Check if channel still exists
                     try:
-                        channels = discover_channels(self.status_address, listen_duration=1.0)
-                        if ssrc not in channels:
-                            logger.error(f"Channel {ssrc:x} missing from radiod")
+                        ssrc = recorder.config.ssrc
+                        if ssrc and ssrc != 0:
+                            channels = discover_channels(self.status_address, listen_duration=1.0)
+                            if ssrc not in channels:
+                                logger.error(f"Channel {ssrc:x} ({recorder.config.description}) missing from radiod")
                     except Exception:
                         pass
         except Exception as e:
@@ -472,16 +414,26 @@ class CoreRecorderV2:
         logger.info("Shutting down core recorder...")
         
         # Stop all recorders
-        for ssrc, recorder in self.recorders.items():
+        for freq, recorder in self.recorders.items():
             try:
+                ssrc = recorder.config.ssrc
                 final_quality = recorder.stop()
                 if final_quality:
                     logger.info(
                         f"{recorder.config.description}: Final completeness "
                         f"{final_quality.completeness_pct:.2f}%"
                     )
+                
+                # Explicitly remove channel from radiod to prevent proliferation
+                if ssrc and ssrc != 0:
+                    try:
+                        self.control.remove_channel(ssrc)
+                        logger.info(f"Released channel {ssrc:x} from radiod")
+                    except Exception as e:
+                        logger.debug(f"Failed to remove channel {ssrc:x}: {e}")
+                        
             except Exception as e:
-                logger.error(f"Error stopping recorder {ssrc:x}: {e}")
+                logger.error(f"Error stopping recorder for freq {freq}: {e}")
         
         # Close RadiodControl
         try:

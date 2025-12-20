@@ -247,14 +247,40 @@ async function getCoreRecorderStatus(paths) {
     const statusFile = paths.getCoreStatusFile();
     let uptime = 0;
     let totalPackets = 0;
+    let channelsActive = processCount;
+    let channelsTotal = processCount;
+    let lastUpdate = new Date().toISOString();
 
     if (fs.existsSync(statusFile)) {
       try {
         const content = fs.readFileSync(statusFile, 'utf8');
         const status = JSON.parse(content);
         uptime = status.recording_duration_sec || status.uptime_seconds || 0;
-        if (status.recorders) {
-          totalPackets = Object.values(status.recorders).reduce((sum, r) => sum + (r.packets_received || 0), 0);
+
+        // Handle V2 status format
+        if (status.overall) {
+          channelsActive = status.overall.channels_active || channelsActive;
+          channelsTotal = status.overall.channels_total || channelsTotal;
+          if (status.overall.total_samples_received) {
+            // Approximately map samples to packets if packets not explicitly tracked in overall
+            totalPackets = Math.floor(status.overall.total_samples_received / 1024);
+          }
+        }
+        // Handle legacy/intermediate format
+        else if (status.channels) {
+          channelsActive = Object.keys(status.channels).length;
+          channelsTotal = channelsActive;
+        }
+
+        if (status.timestamp) {
+          lastUpdate = status.timestamp;
+          // If the status file is recent (< 60s), trust its running state over pgrep
+          // This handles cases where python process name might differ slightly
+          const statusTime = new Date(status.timestamp).getTime();
+          const now = Date.now();
+          if (now - statusTime < 60000) {
+            running = true;
+          }
         }
       } catch (e) {
         // Ignore status file errors
@@ -264,10 +290,10 @@ async function getCoreRecorderStatus(paths) {
     return {
       running,
       uptime_seconds: uptime,
-      channels_active: processCount,
-      channels_total: processCount,
+      channels_active: channelsActive,
+      channels_total: channelsTotal,
       packets_received: totalPackets,
-      last_update: new Date().toISOString(),
+      last_update: lastUpdate,
       age_seconds: 0
     };
   } catch (err) {

@@ -49,6 +49,8 @@ class StreamRecorderConfig:
     ssrc: int
     frequency_hz: float
     sample_rate: int = 20000
+    preset: str = 'iq'
+    encoding: int = 0  # Encoding type (0=NO_ENCODING, 4=F32, etc.)
     description: str = ""
     
     # Output directories
@@ -65,6 +67,9 @@ class StreamRecorderConfig:
     raw_buffer_file_duration_sec: int = 3600
     compression: str = 'none'  # 'none', 'zstd', or 'lz4'
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
+    
+    # RTP Destination
+    destination: Optional[str] = None
     
     # Tiered storage: hot buffer in /dev/shm, cold storage on disk
     tiered_storage: bool = False
@@ -106,7 +111,7 @@ class StreamRecorderV2:
     def __init__(
         self,
         config: StreamRecorderConfig,
-        channel_info: ChannelInfo,
+        channel_info: Optional[ChannelInfo] = None,
         get_ntp_status: Optional[Callable[[], Dict[str, Any]]] = None,
         control: Optional[RadiodControl] = None,
         on_stream_dropped: Optional[Callable[[str], None]] = None,
@@ -117,7 +122,7 @@ class StreamRecorderV2:
         
         Args:
             config: StreamRecorderConfig
-            channel_info: ChannelInfo from ka9q.discover_channels()
+            channel_info: Optional ChannelInfo (can be None if control is provided)
             get_ntp_status: Optional callable for NTP status
             control: Optional RadiodControl for auto-recovery via ManagedStream.
                     If provided, uses ManagedStream which auto-restores on radiod restart.
@@ -201,8 +206,11 @@ class StreamRecorderV2:
                 self.stream = ManagedStream(
                     control=self._control,
                     frequency_hz=self.config.frequency_hz,
-                    preset='iq',
+                    preset=self.config.preset,
                     sample_rate=self.config.sample_rate,
+                    destination=self.config.destination,
+                    encoding=self.config.encoding,
+                    timeout=15.0,
                     on_samples=self._handle_samples,
                     on_stream_dropped=self._handle_stream_dropped,
                     on_stream_restored=self._handle_stream_restored,
@@ -213,6 +221,9 @@ class StreamRecorderV2:
                     deliver_interval_packets=20,
                 )
                 self.channel_info = self.stream.start()
+                if self.channel_info:
+                    self.config.ssrc = self.channel_info.ssrc
+                    logger.info(f"{self.config.description}: Latched to SSRC {self.channel_info.ssrc:x}")
             else:
                 # Use basic RadiodStream (no auto-recovery)
                 self.stream = RadiodStream(
@@ -252,9 +263,26 @@ class StreamRecorderV2:
         final_quality = None
         
         try:
-            # Stop RadiodStream (returns final quality)
+            # Stop ManagedStream/RadiodStream (returns final quality/stats)
             if self.stream:
-                final_quality = self.stream.stop()
+                if hasattr(self.stream, 'get_quality'):
+                    final_quality = self.stream.get_quality()
+                else:
+                    final_quality = self.stream.stop()
+                
+                if hasattr(self.stream, 'stop') and final_quality is not None:
+                    # If it's RadiodStream, stop() already returned final_quality
+                    # If it's ManagedStream, stop() returns stats, so we call it after get_quality()
+                    if not isinstance(final_quality, StreamQuality):
+                        # This shouldn't happen with RadiodStream, but just in case
+                        self.stream.stop()
+                    else:
+                        # RadiodStream already stopped if final_quality is StreamQuality
+                        pass
+                else:
+                    # Ensure it's stopped
+                    self.stream.stop()
+                
                 self.stream = None
             
             # Stop the orchestrator (flushes all phases)
@@ -348,6 +376,7 @@ class StreamRecorderV2:
         
         # Update channel info with new values
         self.channel_info = channel
+        self.config.ssrc = channel.ssrc
         
         # Forward to external callback if provided
         if self._on_stream_restored:
