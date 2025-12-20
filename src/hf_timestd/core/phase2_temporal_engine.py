@@ -887,7 +887,8 @@ class Phase2TemporalEngine:
         iq_samples: np.ndarray,
         time_snap: TimeSnapResult,
         system_time: float,
-        minute_number: int
+        minute_number: int,
+        calibration_offsets: Optional[Dict[str, float]] = None
     ) -> ChannelCharacterization:
         """
         Step 2: Ionospheric Channel Characterization.
@@ -905,6 +906,7 @@ class Phase2TemporalEngine:
             time_snap: Result from Step 1
             system_time: System time of first sample
             minute_number: Minute of hour (0-59)
+            calibration_offsets: Optional map of station name to calibration offset (ms)
             
         Returns:
             ChannelCharacterization with channel metrics
@@ -956,6 +958,19 @@ class Phase2TemporalEngine:
         channel_assignment = None
         if self.correlator_bank and self.frequency_mhz in (2.5, 5.0, 10.0, 15.0):
             try:
+                # Apply feedback loop calibration if available
+                if calibration_offsets:
+                    from .station_model import StationID
+                    for station_name, offset in calibration_offsets.items():
+                        try:
+                            # Map string name (e.g. "WWV") to StationID enum
+                            if hasattr(StationID, station_name):
+                                st_id = StationID[station_name]
+                                self.correlator_bank.update_calibration(st_id, offset)
+                        except KeyError:
+                            pass
+                    self.correlator_bank.set_calibrated(True)
+                    
                 channel_assignment = self.correlator_bank.process_minute(
                     iq_samples=iq_samples,
                     frequency_mhz=self.frequency_mhz,
@@ -1808,7 +1823,8 @@ class Phase2TemporalEngine:
         self,
         iq_samples: np.ndarray,
         system_time: float,
-        rtp_timestamp: int
+        rtp_timestamp: int,
+        calibration_offsets: Optional[Dict[str, float]] = None
     ) -> List[Phase2Result]:
         """
         Process one minute of IQ data through the complete Phase 2 pipeline.
@@ -1854,7 +1870,8 @@ class Phase2TemporalEngine:
                 iq_samples=iq_samples,
                 time_snap=time_snap,
                 system_time=system_time,
-                minute_number=minute_number
+                minute_number=minute_number,
+                calibration_offsets=calibration_offsets
             )
             
             # === STEP 3: Transmission Time Solution (MULTI-STATION LOOP) ===

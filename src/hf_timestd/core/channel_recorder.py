@@ -6,9 +6,9 @@ This module runs as a standalone process for ONE channel, allowing the OS
 to distribute multiple channel recorders across CPU cores.
 
 Usage:
-    python -m hf_timestd.core.channel_recorder \
-        --config /path/to/timestd-config.toml \
-        --channel "WWV 10 MHz" \
+    python -m hf_timestd.core.channel_recorder \\
+        --config /path/to/timestd-config.toml \\
+        --channel "WWV 10 MHz" \\
         --frequency 10000000
 
 The parent launcher (core_recorder_v3.py) spawns one of these per channel.
@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 
 from ka9q import discover_channels, RadiodControl, ChannelInfo, generate_multicast_ip, Encoding
 
+from hf_timestd.stream.stream_manager import StreamManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,14 @@ class ChannelRecorder:
         # ka9q connection
         ka9q_config = config.get('ka9q', {})
         self.status_address = ka9q_config.get('status_address', '239.192.152.141')
-        self.control = RadiodControl(self.status_address)
+        
+        # Stream Manager (handles discovery and reuse of channels)
+        # Note: We don't use raw RadiodControl here to avoid SSRC proliferation
+        self.stream_manager = StreamManager(
+            radiod_address=self.status_address,
+            default_destination=None, # Will be set per-channel if needed
+            auto_cleanup=True
+        )
         
         # Use configured data_destination, or generate from station/instrument IDs as fallback
         self.data_destination = ka9q_config.get('data_destination')
@@ -79,6 +87,7 @@ class ChannelRecorder:
         
         # Recorder instance
         self.recorder: Optional[StreamRecorderV2] = None
+        self.stream_handle = None
         self.channel_info: Optional[ChannelInfo] = None
         
         # State
@@ -88,33 +97,42 @@ class ChannelRecorder:
         logger.info(f"ChannelRecorder initialized: {channel_name} @ {frequency_hz/1e6:.3f} MHz")
     
     def _setup_channel(self) -> bool:
-        """Request channel from radiod via ka9q ensure_channel API."""
+        """Request channel using StreamManager (reusing existing if available)."""
         try:
             sample_rate = self.channel_defaults.get('sample_rate', 20000)
             preset = self.channel_defaults.get('preset', 'iq')
+            agc = bool(self.channel_defaults.get('agc', 0))
+            gain = float(self.channel_defaults.get('gain', 0))
             
-            # Use ka9q ensure_channel to get or create channel with our attributes
-            # This handles: join existing if matches, create new if needed
-            # Get encoding from config (default F32 for 32-bit float IQ data)
-            encoding_str = self.channel_defaults.get('encoding', 'F32').upper()
-            encoding = getattr(Encoding, encoding_str, Encoding.F32)
-            
-            self.channel_info = self.control.ensure_channel(
+            # Subscribe via StreamManager
+            # This handles: discovery, reuse, or creation with deterministic SSRC
+            self.stream_handle = self.stream_manager.subscribe(
                 frequency_hz=self.frequency_hz,
                 preset=preset,
                 sample_rate=sample_rate,
+                agc=agc,
+                gain=gain,
                 destination=self.data_destination,
-                agc_enable=self.channel_defaults.get('agc', 0),
-                gain=float(self.channel_defaults.get('gain', 0)),
-                encoding=encoding,
+                description=self.channel_name
             )
             
-            if self.channel_info is None:
-                logger.error(f"Failed to get channel for {self.channel_name}")
+            if not self.stream_handle:
+                logger.error(f"Failed to get stream handle for {self.channel_name}")
                 return False
+                
+            # Reconstruct ChannelInfo from handle for Recorder
+            # (StreamRecorderV2 needs this to initialize RadiodStream)
+            self.channel_info = ChannelInfo(
+                ssrc=self.stream_handle.ssrc,
+                frequency=self.frequency_hz,
+                sample_rate=sample_rate,
+                preset=preset,
+                multicast_address=self.stream_handle.multicast_address,
+                port=self.stream_handle.port
+            )
             
-            ssrc = self.channel_info.ssrc
-            logger.info(f"Channel ready {self.channel_name}: SSRC={ssrc} on {self.data_destination}")
+            ssrc = self.stream_handle.ssrc
+            logger.info(f"Channel ready {self.channel_name}: SSRC={ssrc} on {self.stream_handle.multicast_address}")
             
             # Tiered storage config
             tiered_storage = self.recorder_config.get('tiered_storage', False)
@@ -140,6 +158,8 @@ class ChannelRecorder:
             self.recorder = StreamRecorderV2(
                 config=recorder_config,
                 channel_info=self.channel_info,
+                # Note: We provide channel_info, so StreamRecorderV2 uses RadiodStream (passive)
+                # StreamManager handles the lifecycle/recovery.
             )
             
             return True
@@ -161,8 +181,20 @@ class ChannelRecorder:
     def stop(self):
         """Stop recording."""
         self.running = False
+        
+        # Stop recorder
         if self.recorder:
             self.recorder.stop()
+            
+        # Release stream handle (StreamManager will cleanup if refcount=0)
+        if self.stream_handle:
+            self.stream_handle.release()
+            self.stream_handle = None
+            
+        # Close manager
+        if hasattr(self, 'stream_manager'):
+            self.stream_manager.close()
+            
         logger.info(f"🛑 {self.channel_name}: Recording stopped")
     
     def run(self):

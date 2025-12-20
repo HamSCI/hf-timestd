@@ -109,9 +109,12 @@ class BinaryArchiveWriter:
         self.write_errors = 0
         
         # Time reference - RTP is primary after initialization
-        # We establish a one-time mapping from RTP timestamp to Unix time at startup,
-        # then derive all minute boundaries from RTP timestamps to avoid wall clock jitter
+        # We establish a robust mapping from RTP timestamp to Unix time at startup
+        # by averaging the offset over the first N chunks to reject jitter
         self.rtp_to_unix_offset: Optional[float] = None  # unix_time = rtp_timestamp / sample_rate + offset
+        self._initial_offsets: List[float] = []  # Accumulator for streaming mean
+        self._offset_params_locked: bool = False
+        
         self.last_rtp_timestamp: Optional[int] = None
         self.cumulative_samples: int = 0  # Total samples processed
         
@@ -429,14 +432,32 @@ class BinaryArchiveWriter:
             Number of samples written
         """
         with self._lock:
-            # Establish RTP-to-Unix reference on first call
-            # This is the ONLY time we use system_time - thereafter RTP is primary
-            if self.rtp_to_unix_offset is None:
+            # Establish RTP-to-Unix reference
+            # We average the offset over the first 50 chunks to reject NTP jitter
+            if not self._offset_params_locked:
                 if system_time is None:
                     system_time = time.time()
-                # offset = unix_time - (rtp_timestamp / sample_rate)
-                self.rtp_to_unix_offset = system_time - (rtp_timestamp / self.config.sample_rate)
-                logger.info(f"RTP-to-Unix reference established: offset={self.rtp_to_unix_offset:.3f}s")
+                
+                # Instantaneous offset: unix_time - (rtp_timestamp / sample_rate)
+                inst_offset = system_time - (rtp_timestamp / self.config.sample_rate)
+                
+                if self.rtp_to_unix_offset is None:
+                    # Initialize with first sample so we can write immediately
+                    self.rtp_to_unix_offset = inst_offset
+                    logger.info(f"RTP-to-Unix reference initialized: offset={inst_offset:.3f}s")
+                
+                # Accumulate for mean
+                self._initial_offsets.append(inst_offset)
+                
+                # Refine or lock
+                if len(self._initial_offsets) >= 50:
+                    # Calculate mean and lock
+                    mean_offset = sum(self._initial_offsets) / len(self._initial_offsets)
+                    diff = mean_offset - self.rtp_to_unix_offset
+                    self.rtp_to_unix_offset = mean_offset
+                    self._offset_params_locked = True
+                    self._initial_offsets = [] # free memory
+                    logger.info(f"RTP-to-Unix reference LOCKED: offset={mean_offset:.3f}s (adjusted by {diff*1000:+.1f}ms after 50 chunks)")
             
             # Ensure complex64
             if samples.dtype != np.complex64:
