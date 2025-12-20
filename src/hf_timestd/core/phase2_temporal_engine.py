@@ -1569,13 +1569,22 @@ class Phase2TemporalEngine:
             expected_second_rtp = rtp_timestamp + offset_diff
             logger.debug(f"RTP ruler: calibrated_offset={calibrated_offset}, current={current_offset}, diff={offset_diff}")
         else:
-            # Bootstrap: No calibration yet, use first tone detection to establish mapping
-            # This only happens on first detection - subsequent detections use calibration
-            # For now, estimate from system_time (will be refined by first detection)
-            minute_boundary = (int(system_time) // 60) * 60
-            samples_to_boundary = int((minute_boundary - system_time) * self.sample_rate)
-            expected_second_rtp = rtp_timestamp + samples_to_boundary
-            logger.info(f"Bootstrap: establishing RTP-to-minute mapping from first detection")
+            # Bootstrap: No calibration yet, establish mapping from first detection
+            # Estimate arrival time in system clock frame
+            arrival_rtp_offset = arrival_rtp - rtp_timestamp
+            estimated_arrival_time = system_time + (arrival_rtp_offset / self.sample_rate)
+            
+            # Snap to nearest minute boundary (we assume we detected the Minute Tone)
+            nearest_minute = round(estimated_arrival_time / 60.0) * 60.0
+            
+            # Calculate expected RTP for that boundary
+            time_diff = nearest_minute - system_time
+            expected_second_rtp = rtp_timestamp + int(time_diff * self.sample_rate)
+            
+            logger.info(
+                f"Bootstrap: Snapped arrival {estimated_arrival_time:.3f} to minute {nearest_minute} "
+                f"(diff={estimated_arrival_time - nearest_minute:.3f}s)"
+            )
         
         # Get arrival RTP from time snap - USE STATION SPECIFIC TIMING
         t_arrival_ms = None
