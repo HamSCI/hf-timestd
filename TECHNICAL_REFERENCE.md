@@ -27,7 +27,7 @@
 
 ## System Architecture
 
-### Three-Service Design (V3.13 - Unified Naming & Backfill)
+### Three-Service Design (V3.14 - Remediation & Feedback)
 
 ```
 Core Recorder (core_recorder_v2.py)
@@ -37,8 +37,11 @@ Core Recorder (core_recorder_v2.py)
 ├─ StreamRecorderV2 per channel → PipelineOrchestrator
 └─ Binary archive writing (1,200,000 samples/minute @ 20 kHz)
 
+
 Analytics Service (phase2_analytics_service.py) - per channel
+├─ Unified PropagationEngine (Physics-based delays)
 ├─ 12 voting methods (BCD, tones, ticks, 440Hz, test signals, FSS, etc.)
+├─ Feedback Loop: Calibrated offsets from Fusion -> Detection
 ├─ Doppler estimation
 ├─ Decimation (20 kHz → 10 Hz)
 └─ Timing metrics
@@ -60,6 +63,7 @@ DRF Batch Writer (drf_batch_writer.py)
 | `discover_channels()` | Enumerate existing channels from radiod status |
 | `StreamQuality` | Completeness %, packets lost/resequenced, gap count |
 | `ChannelInfo` | Channel metadata (frequency, preset, sample_rate, destination) |
+| `StreamManager` | Manages channel reuse and deterministic SSRC allocation to prevent proliferation |
 
 ---
 
@@ -76,6 +80,9 @@ utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
 
 **Source**: Phil Karn's ka9q-radio design (pcmrecord.c)
 
+**Ingestion Hardening (v3.13.0):**
+The `BinaryArchiveWriter` now uses a **Streaming Mean** over the first 50 data chunks to determine the initial `rtp_to_unix_offset`. This prevents transient NTP jitter at startup (±5-10ms) from locking in a permanent offset error for the duration of the file.
+
 ### 2. Sample Count Integrity
 
 **Invariant**: 20 kHz × 60 sec = 1,200,000 samples (exactly)
@@ -83,6 +90,9 @@ utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
 - Gaps filled with zeros
 - Sample count never adjusted
 - Discontinuities logged for provenance
+
+**SSRC Stability (v3.13.0):**
+`ChannelRecorder` delegates channel creation to `StreamManager`. This ensures that a channel (e.g., "WWV 10 MHz") is **reused** if it already exists in `radiod`, preventing the proliferation of duplicate SSRC streams that exhaust system resources on service restarts.
 
 ### 3. Channels Share GPS Clock, Not RTP Origin
 
@@ -292,6 +302,23 @@ Discrimination margin:    ~5×       (dispersion << separation)
 1. **Anchor Discovery** - Find high-confidence locks (SNR > 15 dB) across all channels
 2. **Guided Search** - Narrow search window from ±500 ms to ±3 ms using anchor (99.4% noise rejection)
 3. **Coherent Stacking** - Virtual channel with SNR improvement of 10·log₁₀(N) dB
+
+### Unified Propagation Engine (v3.13.0)
+
+**Purpose**: A single "source of truth" implementation for all physics-based delay calculations, shared by `StationModel` (Phase 2 discrimination) and `TransmissionTimeSolver` (Phase 3 timing).
+
+**Hierarchy**:
+1.  **Geometric**: Great-circle speed-of-light delay (baseline).
+2.  **Heuristic**: Empirical delays based on station distance (if IRI unavailable).
+3.  **IRI-2020**: Full ionospheric ray-tracing (highest precision).
+
+```python
+# Unifies delay calculation across the pipeline
+engine = PropagationEngine(enable_iri=True)
+delay = engine.estimate_delay(
+    tx_lat, tx_lon, rx_lat, rx_lon, frequency_hz, method='GEOMETRIC'
+)
+```
 
 ### Primary Time Standard (HF Time Transfer)
 
@@ -743,7 +770,16 @@ BPM alternates between two formats based on the minute of the hour:
 > **Detection Impact**:
 > *   **UT1 Minutes (25-29, 55-59):** The 100ms ticks are unique and easy to distinguish from WWV's 5ms ticks. However, they encode UT1, which drifts relative to UTC.
 > *   **"Flam" Effect:** During UT1 minutes, you may hear a double-tick (click-beep) because the BPM UT1 tick (100ms) drifts against the WWV UTC tick (5ms).
+
 > *   **UTC Minutes:** Use 10ms ticks (vs WWV 5ms). This duration difference helps discrimination.
+
+### Search Window Exclusion Zones (v3.14.0)
+
+To prevent the **BPM Discriminator** from incorrectly locking onto a strong **WWV** signal (aliasing), we employ **Exclusion Zones**.
+
+*   **Problem**: WWV (Colorado) often arrives ~25ms after the BPM window center (relative time). If BPM is weak, the detector might "find" WWV and claim it is BPM.
+*   **Solution**: Since we know `time_snap` is accurate (±1ms), we calculate exactly where WWV should appear in the BPM search window and **mask it out**.
+*   **Implementation**: `StationModel` defines `exclusion_zones` (e.g., `[(22.5, 27.5)]` ms). Any correlation peak within this zone is assigned 0.0 confidence.
 
 ---
 
