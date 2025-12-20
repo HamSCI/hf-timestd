@@ -6,36 +6,64 @@ Primary Instruction:  In this context you will perform a critical review of the 
 
 ---
 
-## 🔴 CURRENT FOCUS: TIMING ANALYSIS DEEP REVIEW
+## 🔴 CURRENT FOCUS: END-TO-END TIMING ANALYSIS (INGESTION → FUSION)
 
-**Purpose:** Critically examine the timing analysis pipeline for weaknesses, errors, incoherence, inconsistencies, and missed opportunities. Focus on the newly implemented MLE-based multi-station discrimination and its integration with the existing D_clock calculation.
+**Purpose:** Perform a comprehensive review of the timing analysis pipeline, tracing the data flow from the initial RTP payload ingestion (Phase 1) through the temporal analysis engine (Phase 2) to the final multi-broadcast fusion. The goal is to verify data integrity, timing accuracy preservation, and architectural coherence across the entire chain.
 
 **Author:** Michael James Hauan (AC0G)  
-**Date:** 2025-12-17  
-**Status:** 🟡 Ready for Critical Analysis
+**Date:** 2025-12-20  
+**Status:** 🟡 Ready for Deep Dive
 
 ---
 
-### SESSION 2025-12-17: MLE-BASED MULTI-STATION DISCRIMINATION
+### SESSION 2025-12-20: INGESTION TO FINAL ANALYSIS
 
-This session implemented a significant architectural change: replacing heuristic weighted voting with Maximum Likelihood Estimation (MLE) for station discrimination on shared frequencies.
+This session focuses on the complete lifecycle of a timing sample.
 
-#### New Files Created
+#### 1. Data Pipeline Overview
 
-| File | Purpose | Lines | Review Priority |
-|------|---------|-------|-----------------|
-| `station_model.py` | StationModel, ChannelAssignment, StationModelFactory | ~520 | **CRITICAL** |
-| `correlator_bank.py` | Parallel matched filtering with predicted ToA windows | ~450 | **CRITICAL** |
-| `docs/design/MULTI_STATION_MLE_DESIGN.md` | Architecture documentation | ~360 | HIGH |
+```
+[PHASE 1: INGESTION]
+RTP Payload (UDP)
+  ↓
+rtp_receiver.py          (Socket ingest, packet validation)
+  ↓
+packet_resequencer.py    (Jitter/Gap handling, ordering)
+  ↓
+binary_archive_writer.py (Writes raw_buffer/{CHANNEL}/{MIN}.bin)
+                         (Format: F32 IQ, non-decimated, system-time tagged)
 
-#### Files Modified
+      SPACE-TIME BOUNDARY (Disk/SHM)
 
-| File | Changes | Review Priority |
-|------|---------|-----------------|
-| `bpm_discriminator.py` | Added `detect_ut1_pulses()`, `calibrate_from_ut1()` | **CRITICAL** |
-| `wwvh_discrimination.py` | Added `bcd_correlation_with_doppler_compensation()` | HIGH |
-| `phase2_temporal_engine.py` | Integrated CorrelatorBank and BPM UT1 calibration | **CRITICAL** |
-| `wwv_constants.py` | Added `BPM_PURE_CARRIER_MINUTES` | LOW |
+[PHASE 2: ANALYTICS]
+phase2_analytics_service.py (Daemon, polls raw_buffer)
+  ↓
+phase2_temporal_engine.py   (The "Brain" - 3-step analysis)
+  ├─ Step 1: Tone Detection (Time Snap, Coarse Timing)
+  ├─ Step 2: Channel Characterization (Doppler, BCD, Station ID)
+  └─ Step 3: Transmission Time Solution (Solver -> D_clock)
+  ↓
+clock_offset/{CHANNEL}_clock_offset_{DATE}.csv (Time Series)
+  ↓
+multi_broadcast_fusion.py   (Reads all 17 channels, weighted fusion)
+  ↓
+fused_d_clock.csv           (Final UTC(NIST) offset)
+```
+
+#### 2. Key Files for Review
+
+| Stage | File | Focus Area |
+|-------|------|------------|
+| **Ingestion** | `rtp_receiver.py` | Packet timestamp extraction & validation |
+| **Storage** | `binary_archive_writer.py` | sample-count to timestamp mapping |
+| **Analysis** | `phase2_temporal_engine.py` | `process_minute` -> `_step3_transmission_time_solution` |
+| **Solver** | `transmission_time_solver.py` | `solve_transmission_time` (D_clock extraction) |
+| **Fusion** | `multi_broadcast_fusion.py` | Outlier rejection logic & weighting |
+
+#### 3. Recent Critical Fixes (Context)
+- **CSV Filenames**: Fixed bug where filenames were `CHU_3330_3330...`. Now `CHU_3330...`.
+- **Fusion Logic**: Fixed startup issue where fusion service wasn't reporting status correctly.
+- **Timing Model**: Unified propagation delay heuristic (Distance < 3000km ? 1.15 : 1.05).
 
 ---
 
