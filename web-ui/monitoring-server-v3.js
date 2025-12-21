@@ -3785,6 +3785,7 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
             if (dop) {
               pt.carrier_doppler_hz = dop.carrier;
               pt.doppler_hz = stationLabel.includes('WWVH') ? dop.wwvh : dop.wwv;
+              pt.doppler_std_hz = dop.std;
             }
             if (exclusionZone) pt.exclusion = true;
 
@@ -3792,6 +3793,9 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
               if (row.clock_offset_ms) pt.offset = parseFloat(row.clock_offset_ms);
               if (row.propagation_delay_ms) pt.delay = parseFloat(row.propagation_delay_ms);
               if (row.propagation_mode) pt.mode = row.propagation_mode;
+              // Add ionospheric/channel quality metrics
+              if (row.delay_spread_ms) pt.delay_spread_ms = parseFloat(row.delay_spread_ms);
+              if (row.fss_db) pt.fss_db = parseFloat(row.fss_db);
             }
 
             // Add D_clock to the point if available (for the main chart)

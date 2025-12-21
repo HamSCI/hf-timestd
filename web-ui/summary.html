@@ -505,7 +505,7 @@
       `;
     }
 
-    // Render process status
+    // Render process status - compact table format
     function renderProcesses(processes) {
       const radiod = processes.radiod || {};
       const core = processes.core_recorder || {};
@@ -513,51 +513,30 @@
 
       return `
         <div class="section-title">System Status</div>
-        
-        <h4 style="margin-bottom: 10px; color: #7f8c8d;">Processes</h4>
-        <div class="process-list">
-          <div class="process-item">
-            <div>
-              <div class="process-name">radiod (ka9q-radio)</div>
-              <div style="font-size: 12px; color: #7f8c8d;">RTP multicast source</div>
-            </div>
-            <div class="process-status">
-              <span class="status-indicator ${radiod.running ? 'status-running' : 'status-stopped'}"></span>
-              <span>${radiod.running ? 'RUNNING' : 'STOPPED'}</span>
-              <span>${radiod.running ? 'Uptime: ' + formatUptime(radiod.uptime_seconds) : ''}</span>
-            </div>
-          </div>
-          
-          <div class="process-item">
-            <div>
-              <div class="process-name">Core Recorder</div>
-              <div style="font-size: 12px; color: #7f8c8d;">RTP → raw_buffer</div>
-            </div>
-            <div class="process-status">
-              <span class="status-indicator ${core.running ? 'status-running' : 'status-stopped'}"></span>
-              <span>${core.running ? 'RUNNING' : 'STOPPED'}</span>
-              ${core.running ? `
-                <span>Uptime: ${formatUptime(core.uptime_seconds)}</span>
-                <span>Channels: ${core.channels_active}/${core.channels_total}</span>
-              ` : ''}
-            </div>
-          </div>
-          
-          <div class="process-item">
-            <div>
-              <div class="process-name">Analytics Service</div>
-              <div style="font-size: 12px; color: #7f8c8d;">raw_buffer → time precision, discrimination</div>
-            </div>
-            <div class="process-status">
-              <span class="status-indicator ${analytics.running ? 'status-running' : 'status-stopped'}"></span>
-              <span>${analytics.running ? 'RUNNING' : 'STOPPED'}</span>
-              ${analytics.running ? `
-                <span>Uptime: ${formatUptime(analytics.uptime_seconds)}</span>
-                <span>Processing: ${analytics.channels_processing}/${analytics.channels_total}</span>
-              ` : ''}
-            </div>
-          </div>
-        </div>
+        <table style="width: 100%; margin-top: 10px;">
+          <thead>
+            <tr>
+              <th style="text-align: left; width: 100px;"></th>
+              <th style="text-align: center;">radiod</th>
+              <th style="text-align: center;">Core Recorder</th>
+              <th style="text-align: center;">Analytics</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th style="text-align: left;">Status</th>
+              <td style="text-align: center;"><span class="status-indicator ${radiod.running ? 'status-running' : 'status-stopped'}"></span></td>
+              <td style="text-align: center;"><span class="status-indicator ${core.running ? 'status-running' : 'status-stopped'}"></span></td>
+              <td style="text-align: center;"><span class="status-indicator ${analytics.running ? 'status-running' : 'status-stopped'}"></span></td>
+            </tr>
+            <tr>
+              <th style="text-align: left;">Uptime</th>
+              <td style="text-align: center;">${radiod.running ? formatUptime(radiod.uptime_seconds) : '—'}</td>
+              <td style="text-align: center;">${core.running ? formatUptime(core.uptime_seconds) : '—'}</td>
+              <td style="text-align: center;">${analytics.running ? formatUptime(analytics.uptime_seconds) : '—'}</td>
+            </tr>
+          </tbody>
+        </table>
       `;
     }
 
@@ -720,107 +699,6 @@
       `;
     }
 
-    // Render reception matrix (all 17 broadcasts from 4 stations)
-    // Now includes station info (distance, bearing) in column headers
-    function renderReceptionMatrix(data, propagation) {
-      if (!data || !data.channels || data.channels.length === 0) {
-        return '';
-      }
-
-      // Build station info lookup from propagation paths
-      const stationInfo = {};
-      if (propagation && propagation.paths) {
-        propagation.paths.forEach(p => {
-          stationInfo[p.station] = {
-            distance: p.distance_km.toFixed(0) + ' km',
-            bearing: p.bearing.toFixed(0) + '°',
-            location: p.location
-          };
-        });
-      }
-
-      // Helper to build column header with station info
-      function stationHeader(station, color) {
-        const info = stationInfo[station];
-        if (info) {
-          return '<th style="text-align: center; min-width: 90px;">' +
-            '<div style="color: ' + color + '; font-weight: 700; font-size: 14px;">' + station + '</div>' +
-            '<div style="color: #94a3b8; font-size: 11px; font-weight: 400;">' + info.distance + '</div>' +
-            '<div style="color: #64748b; font-size: 10px; font-weight: 400;">' + info.bearing + '</div>' +
-            '</th>';
-        }
-        return '<th style="text-align: center; color: ' + color + ';">' + station + '</th>';
-      }
-
-      function snrBadge(snr, detected) {
-        if (snr === null || snr === undefined) return '<span style="color: #64748b;">—</span>';
-        const color = detected ? '#22c55e' : snr > 20 ? '#3b82f6' : snr > 10 ? '#eab308' : '#ef4444';
-        return '<span style="color: ' + color + '; font-weight: 600;">' + snr.toFixed(1) + '</span>';
-      }
-
-      // Filter to only valid channel names (SHARED, WWV, or CHU prefixed)
-      // This removes extraneous entries like "2", "8", "E", "M", "W"
-      const validChannels = data.channels.filter(ch => {
-        const name = ch.channel || '';
-        return name.startsWith('SHARED') || name.startsWith('WWV') || name.startsWith('CHU');
-      });
-
-      // Helper to convert canonical format to display format
-      function toDisplayName(name) {
-        const match = name.match(/^(SHARED|WWV|CHU)_(\d+)$/);
-        if (match) {
-          const station = match[1];
-          const khz = parseInt(match[2], 10);
-          const mhz = khz / 1000;
-          const mhzStr = Number.isInteger(mhz) ? mhz.toString() : mhz.toFixed(2).replace(/\.?0+$/, '');
-          return `${station} ${mhzStr} MHz`;
-        }
-        return name;
-      }
-
-      const rows = validChannels.map(ch => {
-        const isShared = ch.channel.startsWith('SHARED');  // 2.5, 5, 10, 15 MHz (WWV+WWVH+BPM)
-        const isWWVOnly = ch.channel.startsWith('WWV');    // 20, 25 MHz (WWV only)
-        const isCHU = ch.channel.startsWith('CHU');
-
-        // WWV column: SHARED frequencies + WWV-only frequencies
-        const wwvCell = (isShared || isWWVOnly) ? snrBadge(ch.wwv_snr_db, ch.wwv_detected) : '—';
-        // WWVH column: Only SHARED frequencies (2.5, 5, 10, 15 MHz)
-        const wwvhCell = isShared ? snrBadge(ch.wwvh_snr_db, ch.wwvh_detected) : '—';
-        // BPM column: Only SHARED frequencies (2.5, 5, 10, 15 MHz)
-        const bpmCell = isShared ? snrBadge(ch.bpm_snr_db, ch.bpm_detected) : '—';
-        // CHU column: Only CHU frequencies
-        const chuCell = isCHU ? snrBadge(ch.chu_snr_db, ch.chu_detected) : '—';
-
-        // Display channel name in human-readable format
-        const displayName = toDisplayName(ch.channel);
-
-        return '<tr>' +
-          '<td style="font-weight: 600;">' + displayName + '</td>' +
-          '<td style="text-align: center;">' + wwvCell + '</td>' +
-          '<td style="text-align: center;">' + wwvhCell + '</td>' +
-          '<td style="text-align: center;">' + bpmCell + '</td>' +
-          '<td style="text-align: center;">' + chuCell + '</td>' +
-          '</tr>';
-      }).join('');
-
-      return '<div class="section">' +
-        '<div class="section-title">📻 Station-Channel Reception Matrix</div>' +
-        '<div style="font-size: 13px; color: #94a3b8; margin-bottom: 15px;">Signal strength (dB) • Distance/bearing from receiver</div>' +
-        '<div style="overflow-x: auto;">' +
-        '<table class="channels-table" style="width: 100%;">' +
-        '<thead><tr>' +
-        '<th>Channel</th>' +
-        stationHeader('WWV', '#10b981') +
-        stationHeader('WWVH', '#3b82f6') +
-        stationHeader('BPM', '#ec4899') +
-        stationHeader('CHU', '#f59e0b') +
-        '</tr></thead>' +
-        '<tbody>' + rows + '</tbody>' +
-        '</table>' +
-        '</div>' +
-        '</div>';
-    }
 
     // Fetch and render summary
     async function updateSummary() {
@@ -833,15 +711,6 @@
         let propagation = { paths: [] };
         let receptionMatrix = { channels: [] };
 
-        try {
-          const propagationResponse = await fetch('/api/v1/phase2/propagation-paths');
-          propagation = await propagationResponse.json();
-        } catch (e) { /* use default */ }
-
-        try {
-          const matrixResponse = await fetch('/api/v1/phase2/reception-matrix');
-          receptionMatrix = await matrixResponse.json();
-        } catch (e) { /* use default */ }
 
         // Render station info
         document.getElementById('stationInfo').innerHTML = renderStationInfo(data.station);
@@ -857,8 +726,15 @@
         const sortedChannels = window.TIMESTD_UTILS.sortByChannelFrequency(data.channels || [], 'name');
         html += renderChannels(sortedChannels);
 
-        // Reception matrix (all 17 broadcasts) - now includes station info in headers
-        html += renderReceptionMatrix(receptionMatrix, propagation);
+        // Presence Matrix section
+        html += '<div class="section" id="presence-matrix-section">';
+        html += '<div class="section-title">🎹 Presence Matrix (24h)</div>';
+        html += '<p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">Signal presence across 17 broadcasts. Click to view details.</p>';
+        html += '<div class="controls-row" style="margin-bottom: 10px;"><label>Date: </label><input type="date" id="matrix-date-selector" onchange="loadPresenceMatrix()"></div>';
+        html += '<div id="matrix-wrapper" style="display: flex; height: 500px; overflow: hidden; background: #0f172a; border-radius: 8px;">';
+        html += '<div style="width: 50px; flex-shrink: 0; background: #0f172a; border-right: 1px solid #1e293b;"><canvas id="axis-canvas"></canvas></div>';
+        html += '<div style="flex-grow: 1; overflow-x: auto; overflow-y: scroll;"><canvas id="matrix-canvas"></canvas></div>';
+        html += '</div></div>';
 
         document.getElementById('content').innerHTML = html;
         document.getElementById('last-update').textContent = UTCTime.now() + ' UTC';
@@ -1153,9 +1029,162 @@
       }
     }
 
+    // ========================================================================
+    // Presence Matrix - Canvas-based 24h signal presence visualization
+    // ========================================================================
+
+    const BROADCASTS = [
+      { name: 'WWV', freqKHz: 2500 }, { name: 'WWVH', freqKHz: 2500 }, { name: 'BPM', freqKHz: 2500 },
+      { name: 'CHU', freqKHz: 3330 },
+      { name: 'WWV', freqKHz: 5000 }, { name: 'WWVH', freqKHz: 5000 }, { name: 'BPM', freqKHz: 5000 },
+      { name: 'CHU', freqKHz: 7850 },
+      { name: 'WWV', freqKHz: 10000 }, { name: 'WWVH', freqKHz: 10000 }, { name: 'BPM', freqKHz: 10000 },
+      { name: 'CHU', freqKHz: 14670 },
+      { name: 'WWV', freqKHz: 15000 }, { name: 'WWVH', freqKHz: 15000 }, { name: 'BPM', freqKHz: 15000 },
+      { name: 'WWV', freqKHz: 20000 },
+      { name: 'WWV', freqKHz: 25000 }
+    ];
+
+    function getStationColor(name, alpha = 1.0) {
+      if (name === 'WWV') return `rgba(56, 189, 248, ${alpha})`;
+      if (name === 'WWVH') return `rgba(168, 85, 247, ${alpha})`;
+      if (name === 'BPM') return `rgba(244, 63, 94, ${alpha})`;
+      if (name === 'CHU') return `rgba(252, 211, 77, ${alpha})`;
+      return `rgba(148, 163, 184, ${alpha})`;
+    }
+
+    function normalizeHistory(rawHistory) {
+      const clean = {};
+      Object.keys(rawHistory).forEach(rawKey => {
+        const lane = rawHistory[rawKey];
+        if (!lane) return;
+        const station = (lane.station || "UNKNOWN").trim().toUpperCase();
+        const khz = lane.freqKHz || 0;
+        if (station === "UNKNOWN" || khz === 0) return;
+        const canonicalKey = `${station}_${khz}`;
+        if (!clean[canonicalKey]) {
+          clean[canonicalKey] = { station, freqKHz: khz, data: lane.data || [] };
+        } else {
+          clean[canonicalKey].data = clean[canonicalKey].data.concat(lane.data || []);
+        }
+      });
+      return clean;
+    }
+
+    async function loadPresenceMatrix() {
+      const dateInput = document.getElementById('matrix-date-selector');
+      if (!dateInput) return;
+      
+      const dateStr = dateInput.value.replace(/-/g, '');
+      if (!dateStr) return;
+
+      try {
+        const res = await fetch(`/api/v1/broadcasts/history?date=${dateStr}`);
+        const rawData = await res.json();
+        const history = normalizeHistory(rawData.history);
+        renderPresenceMatrix(history);
+      } catch (e) {
+        console.error('Failed to load presence matrix:', e);
+      }
+    }
+
+    function renderPresenceMatrix(history) {
+      const canvas = document.getElementById('matrix-canvas');
+      const axisCanvas = document.getElementById('axis-canvas');
+      if (!canvas || !axisCanvas) return;
+
+      const ctx = canvas.getContext('2d');
+      const axisCtx = axisCanvas.getContext('2d');
+      const wrapper = document.getElementById('matrix-wrapper');
+
+      const width = wrapper.clientWidth - 50;
+      const height = 1440; // 1 pixel per minute
+
+      canvas.width = width;
+      canvas.height = height;
+      axisCanvas.width = 50;
+      axisCanvas.height = height;
+
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      axisCanvas.style.width = '50px';
+      axisCanvas.style.height = `${height}px`;
+
+      // Draw backgrounds
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, width, height);
+      axisCtx.fillStyle = '#0f172a';
+      axisCtx.fillRect(0, 0, 50, height);
+
+      // Draw time axis
+      axisCtx.fillStyle = '#94a3b8';
+      axisCtx.font = '10px monospace';
+      axisCtx.textAlign = 'right';
+      axisCtx.textBaseline = 'middle';
+
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1;
+
+      for (let h = 0; h < 24; h++) {
+        const y = h * 60;
+        axisCtx.fillText(`${h.toString().padStart(2, '0')}:00`, 42, y);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+      }
+
+      // Sync scroll
+      const axisContainer = wrapper.children[0];
+      const matrixContainer = wrapper.children[1];
+      axisContainer.style.overflow = 'hidden';
+      matrixContainer.onscroll = () => {
+        axisContainer.scrollTop = matrixContainer.scrollTop;
+      };
+
+      const gap = 2;
+      const numLanes = BROADCASTS.length;
+      const totalGapWidth = (numLanes - 1) * gap;
+      const laneWidth = (width - totalGapWidth) / numLanes;
+
+      BROADCASTS.forEach((b, i) => {
+        const key = `${b.name}_${b.freqKHz}`;
+        const laneData = history[key];
+        if (!laneData || !laneData.data) return;
+
+        const x = i * (laneWidth + gap);
+
+        laneData.data.forEach(pt => {
+          const date = new Date(pt.t * 1000);
+          const minuteOfDay = date.getUTCHours() * 60 + date.getUTCMinutes();
+          const snr = pt.snr;
+          let likelihood = 0;
+          if (snr <= 0) likelihood = 0;
+          else if (snr >= 12) likelihood = 1.0;
+          else likelihood = snr / 12.0;
+
+          if (likelihood > 0) {
+            ctx.fillStyle = getStationColor(b.name, 1.0);
+            const barWidth = laneWidth * likelihood;
+            const xOffset = (laneWidth - barWidth) / 2;
+            ctx.fillRect(x + xOffset, minuteOfDay, barWidth, 1);
+          }
+        });
+      });
+    }
+
     // Initial load
     updateSummary();
     startAutoRefresh();
+
+    // Initialize presence matrix date and load after DOM ready
+    setTimeout(() => {
+      const dateInput = document.getElementById('matrix-date-selector');
+      if (dateInput) {
+        dateInput.valueAsDate = new Date();
+        loadPresenceMatrix();
+      }
+    }, 500);
   </script>
 
   <!-- UTC time utilities (all displays in UTC) -->

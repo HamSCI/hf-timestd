@@ -25,10 +25,8 @@ class TimeStdNavigation {
 
     const pages = [
       { id: 'summary', label: 'Summary', url: 'summary.html', icon: '📊' },
-      { id: 'broadcasts', label: 'Broadcasts', url: 'broadcasts.html', icon: '📡' },
-      { id: 'timing', label: 'Timing Analysis', url: 'timing-dashboard-enhanced.html', icon: '⏱️' },
-      { id: 'timing-advanced', label: 'Advanced Timing', url: 'timing-advanced.html', icon: '🔬' },
-      { id: 'gaps', label: 'Gap Analysis', url: 'gaps.html', icon: '📈' },
+      { id: 'timing', label: 'Timing', url: 'timing.html', icon: '⏱️' },
+      { id: 'ionosphere', label: 'Ionosphere', url: 'ionosphere.html', icon: '🌐' },
       { id: 'logs', label: 'Logs', url: 'logs.html', icon: '📋' }
     ];
 

@@ -1108,8 +1108,8 @@ class Phase2TemporalEngine:
                     result.coherence_time_sec = 60.0  # Stable channel
                 
                 logger.debug(
-                    f"Step 2B Doppler: WWV={result.doppler_wwv_hz:+.4f}Hz, "
-                    f"T_max={result.max_coherent_window_sec:.1f}s"
+                    f"Step 2B Doppler: WWV={result.doppler_wwv_hz or 0:+.4f}Hz, "
+                    f"T_max={result.max_coherent_window_sec or 60:.1f}s"
                 )
         except Exception as e:
             logger.warning(f"Step 2B Doppler estimation failed: {e}")
