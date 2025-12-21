@@ -2496,6 +2496,18 @@ app.get('/api/v1/timing/fusion', async (req, res) => {
     const fusionCsv = join(paths.dataRoot, 'phase2', 'fusion', 'fused_d_clock.csv');
     const calibrationJson = join(paths.dataRoot, 'state', 'broadcast_calibration.json');
 
+    const parseFloatField = (value) => {
+      if (value === undefined || value === null || value === '') return null;
+      const num = parseFloat(value);
+      return Number.isFinite(num) ? num : null;
+    };
+
+    const parseIntField = (value) => {
+      if (value === undefined || value === null || value === '') return 0;
+      const num = parseInt(value, 10);
+      return Number.isNaN(num) ? 0 : num;
+    };
+
     let latestFusion = null;
     let history = [];
     let calibration = {};
@@ -2508,21 +2520,76 @@ app.get('/api/v1/timing/fusion', async (req, res) => {
         const headers = lines[0].split(',');
         // Get last 60 entries for chart
         const dataLines = lines.slice(Math.max(1, lines.length - 60));
+        const parsedRecords = [];
+
         for (const line of dataLines) {
           const values = line.split(',');
           const record = {};
           headers.forEach((h, i) => record[h] = values[i]);
+
+          const parsed = {
+            timestamp: parseFloatField(record.timestamp),
+            d_clock_fused_ms: parseFloatField(record.d_clock_fused_ms),
+            d_clock_raw_ms: parseFloatField(record.d_clock_raw_ms),
+            uncertainty_ms: parseFloatField(record.uncertainty_ms),
+            n_broadcasts: parseIntField(record.n_broadcasts),
+            n_stations: parseIntField(record.n_stations),
+            quality_grade: record.quality_grade || 'D',
+            outliers_rejected: parseIntField(record.outliers_rejected),
+            wwv_mean_ms: parseFloatField(record.wwv_mean_ms),
+            wwvh_mean_ms: parseFloatField(record.wwvh_mean_ms),
+            chu_mean_ms: parseFloatField(record.chu_mean_ms),
+            bpm_mean_ms: parseFloatField(record.bpm_mean_ms),
+            wwv_count: parseIntField(record.wwv_count),
+            wwvh_count: parseIntField(record.wwvh_count),
+            chu_count: parseIntField(record.chu_count),
+            bpm_count: parseIntField(record.bpm_count),
+            wwv_intra_std_ms: parseFloatField(record.wwv_intra_std_ms),
+            wwvh_intra_std_ms: parseFloatField(record.wwvh_intra_std_ms),
+            chu_intra_std_ms: parseFloatField(record.chu_intra_std_ms),
+            bpm_intra_std_ms: parseFloatField(record.bpm_intra_std_ms),
+            inter_station_spread_ms: parseFloatField(record.inter_station_spread_ms),
+            consistency_flag: record.consistency_flag || 'UNKNOWN'
+          };
+
+          parsedRecords.push(parsed);
           history.push({
-            timestamp: parseFloat(record.timestamp || 0),
-            d_clock_fused_ms: parseFloat(record.d_clock_fused_ms || 0),
-            d_clock_raw_ms: parseFloat(record.d_clock_raw_ms || 0),
-            uncertainty_ms: parseFloat(record.uncertainty_ms || 0),
-            n_broadcasts: parseInt(record.n_broadcasts || 0),
-            quality_grade: record.quality_grade || 'D'
+            timestamp: parsed.timestamp || 0,
+            d_clock_fused_ms: parsed.d_clock_fused_ms ?? 0,
+            d_clock_raw_ms: parsed.d_clock_raw_ms ?? 0,
+            uncertainty_ms: parsed.uncertainty_ms ?? 0,
+            n_broadcasts: parsed.n_broadcasts || 0,
+            quality_grade: parsed.quality_grade
           });
         }
-        if (history.length > 0) {
-          latestFusion = history[history.length - 1];
+
+        if (parsedRecords.length > 0) {
+          const latestRecord = parsedRecords[parsedRecords.length - 1];
+          latestFusion = {
+            ...latestRecord,
+            station_stats: {
+              WWV: {
+                mean_ms: latestRecord.wwv_mean_ms,
+                count: latestRecord.wwv_count,
+                intra_std_ms: latestRecord.wwv_intra_std_ms
+              },
+              WWVH: {
+                mean_ms: latestRecord.wwvh_mean_ms,
+                count: latestRecord.wwvh_count,
+                intra_std_ms: latestRecord.wwvh_intra_std_ms
+              },
+              CHU: {
+                mean_ms: latestRecord.chu_mean_ms,
+                count: latestRecord.chu_count,
+                intra_std_ms: latestRecord.chu_intra_std_ms
+              },
+              BPM: {
+                mean_ms: latestRecord.bpm_mean_ms,
+                count: latestRecord.bpm_count,
+                intra_std_ms: latestRecord.bpm_intra_std_ms
+              }
+            }
+          };
         }
       }
     }
@@ -2537,7 +2604,7 @@ app.get('/api/v1/timing/fusion', async (req, res) => {
       latest: latestFusion,
       history: history,
       calibration: calibration,
-      description: 'Multi-broadcast fusion aligns D_clock to UTC(NIST) using all available broadcasts'
+      description: 'Multi-broadcast fusion aligns D_clock to UTC(NIST) using all available broadcasts (WWV, WWVH, CHU, BPM)'
     });
   } catch (err) {
     console.error('Error getting fusion data:', err);

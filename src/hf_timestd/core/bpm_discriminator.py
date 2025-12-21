@@ -329,9 +329,19 @@ class BPMDiscriminator:
         # Measure tick duration from signal
         measured_tick_ms = self._measure_tick_duration(iq_samples, sample_rate)
         
-        # Measure SNR if not provided
+        # Measure minute marker arrival (primary timing reference)
+        marker_detection = self._detect_minute_marker(iq_samples, sample_rate)
+        marker_snr_db = None
+        measured_delay = measured_delay_ms
+        if marker_detection:
+            measured_delay = marker_detection.get('toa_ms')
+            marker_snr_db = marker_detection.get('snr_db')
+        
+        # Measure SNR if not provided (or enhance with marker SNR)
         if snr_db <= 0.0:
             snr_db = self._measure_snr(iq_samples, sample_rate)
+        if marker_snr_db is not None:
+            snr_db = max(snr_db, marker_snr_db)
         
         # Check if tick duration matches expected
         tick_tolerance_ms = 5.0  # Allow 5ms tolerance
@@ -349,12 +359,12 @@ class BPMDiscriminator:
         
         # Calculate delay residual
         delay_residual = None
-        if measured_delay_ms is not None:
-            delay_residual = measured_delay_ms - self.expected_delay_ms
+        if measured_delay is not None:
+            delay_residual = measured_delay - self.expected_delay_ms
         
         # Confidence Calculation (ROC-inspired)
         confidence = self._calculate_confidence(
-            tick_match, snr_db, measured_delay_ms
+            tick_match, snr_db, measured_delay
         )
         
         # Quality grade
@@ -373,7 +383,7 @@ class BPMDiscriminator:
             expected_tick_duration_ms=expected_tick_ms,
             tick_duration_match=tick_match,
             expected_delay_ms=self.expected_delay_ms,
-            measured_delay_ms=measured_delay_ms,
+            measured_delay_ms=measured_delay,
             delay_residual_ms=delay_residual,
             snr_db=snr_db,
             quality_grade=quality_grade,
@@ -452,6 +462,105 @@ class BPMDiscriminator:
         else:
             # CRITICAL FIX: Return 0.0 if no ticks found (noise/off-air)
             return 0.0 
+
+    def _detect_minute_marker(
+        self,
+        iq_samples: np.ndarray,
+        sample_rate: int
+    ) -> Optional[Dict[str, float]]:
+        """
+        Detect the BPM minute marker (≈300 ms tick at second 0) and measure its arrival time.
+        
+        Returns:
+            Dict with 'toa_ms', 'duration_ms', 'snr_db' if marker detected, else None.
+        """
+        if len(iq_samples) == 0:
+            return None
+        
+        # Only analyze first 0.6 seconds to focus on the minute marker
+        analysis_samples = min(len(iq_samples), int(sample_rate * 0.5))
+        if analysis_samples <= 0:
+            return None
+        
+        segment = iq_samples[:analysis_samples]
+        magnitude = np.abs(segment)
+        audio = magnitude - np.mean(magnitude)
+        
+        from scipy.signal import butter, filtfilt
+        
+        nyquist = sample_rate / 2
+        low = 900 / nyquist
+        high = 1100 / nyquist
+        if high >= 1.0:
+            high = 0.99
+        if low <= 0.0:
+            low = 0.01
+        
+        try:
+            b, a = butter(4, [low, high], btype='band')
+            filtered = filtfilt(b, a, audio)
+        except Exception:
+            return None
+        
+        envelope = np.abs(filtered)
+        smooth_len = max(3, int(0.003 * sample_rate))
+        if smooth_len > 1:
+            kernel = np.ones(smooth_len) / smooth_len
+            envelope = np.convolve(envelope, kernel, mode='same')
+        
+        # Correlate against ~200 ms window to emphasize the minute marker
+        marker_len_samples = max(int(0.18 * sample_rate), 1)
+        marker_window = np.ones(marker_len_samples)
+        energy = envelope ** 2
+        energy_avg = np.convolve(energy, marker_window, mode='same')
+        
+        # Use the lower quartile as noise floor estimate (more robust than median
+        # when the marker occupies a significant fraction of the window)
+        noise_floor = float(np.percentile(energy_avg, 25))
+        max_energy = float(np.max(energy_avg)) if len(energy_avg) else 0.0
+        peak_idx = int(np.argmax(energy_avg))
+        peak_value = energy_avg[peak_idx]
+        
+        # Require peak to be at least 2x the noise floor
+        if noise_floor <= 0:
+            noise_floor = 1e-12
+        if peak_value < noise_floor * 2.0:
+            return None
+        
+        min_len = int(0.15 * sample_rate)
+        max_len = int(0.45 * sample_rate)
+        
+        # Find marker onset by searching from the beginning of the envelope
+        # Use a threshold based on peak value to find where the marker starts
+        onset_threshold = 0.3 * np.max(envelope)
+        above_onset = envelope > onset_threshold
+        
+        if not np.any(above_onset):
+            return None
+        
+        # Find first and last samples above threshold
+        marker_start = int(np.argmax(above_onset))
+        marker_end = len(envelope) - int(np.argmax(above_onset[::-1]))
+        
+        duration_samples = marker_end - marker_start
+        if not (min_len <= duration_samples <= max_len):
+            return None
+        
+        duration_ms = duration_samples / sample_rate * 1000.0
+        toa_ms = marker_start / sample_rate * 1000.0
+        
+        signal_power = np.max(energy_avg[marker_start:marker_end]) if marker_end > marker_start else 0.0
+        noise_region = energy_avg[:max(marker_start, 1)]
+        noise_floor = np.median(noise_region) if len(noise_region) > 0 else 1e-12
+        if noise_floor <= 0:
+            noise_floor = 1e-12
+        snr_db = 10 * np.log10(max(signal_power, 1e-12) / noise_floor)
+        
+        return {
+            'toa_ms': float(toa_ms),
+            'duration_ms': float(duration_ms),
+            'snr_db': float(snr_db)
+        }
     
     def _measure_snr(
         self,
