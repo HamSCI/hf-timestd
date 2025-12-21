@@ -52,36 +52,7 @@ def resolve_mdns_to_ip(name: str) -> Optional[str]:
     return None
 
 
-def generate_timestd_multicast_ip(station_id: str, instrument_id: str) -> str:
-    """
-    Generate a deterministic multicast IP for hf-timestd channels.
-    
-    Uses station_id and instrument_id to create a unique, persistent
-    multicast address in the 239.x.x.x administratively scoped range.
-    
-    Args:
-        station_id: Station identifier (e.g., "S000171")
-        instrument_id: Instrument identifier (e.g., "172")
-        
-    Returns:
-        Multicast IP string like "239.71.82.65"
-    """
-    import hashlib
-    
-    # Create deterministic hash from station + instrument
-    key = f"TIMESTD:{station_id}:{instrument_id}"
-    hash_bytes = hashlib.sha256(key.encode()).digest()
-    
-    # Use first 3 bytes for octets 2-4
-    # Keep in 239.x.x.x range (administratively scoped)
-    # Avoid reserved ranges: 239.0.0.x, 239.255.x.x
-    octet2 = (hash_bytes[0] % 254) + 1   # 1-254
-    octet3 = hash_bytes[1]                # 0-255
-    octet4 = (hash_bytes[2] % 254) + 1   # 1-254
-    
-    ip = f"239.{octet2}.{octet3}.{octet4}"
-    logger.info(f"Generated hf-timestd multicast IP: {ip} (from {station_id}/{instrument_id})")
-    return ip
+
 
 
 class ChannelManager:
@@ -355,26 +326,17 @@ class ChannelManager:
         # Discover existing channels
         existing = self.discover_existing_channels()
         
-        # Build lookup by (frequency, destination) for ownership check
-        # Multiple channels can exist at same frequency with different destinations
-        our_channels_by_freq: Dict[int, tuple] = {}  # freq_hz -> (ssrc, channel_info)
-        other_channels_at_freq: Dict[int, List[tuple]] = {}  # freq_hz -> [(ssrc, channel_info), ...]
+        # Build lookup by frequency
+        # If multiple channels exist at same frequency, we pick the first one
+        # This effectively enables channel sharing
+        channels_by_freq: Dict[int, tuple] = {}  # freq_hz -> (ssrc, channel_info)
         
         for ssrc, ch in existing.items():
             freq_hz = int(round(ch.frequency))
-            ch_mcast = getattr(ch, 'multicast_address', None)
+            if freq_hz not in channels_by_freq:
+                channels_by_freq[freq_hz] = (ssrc, ch)
             
-            if ch_mcast == our_mcast_ip:
-                # This is OUR channel
-                our_channels_by_freq[freq_hz] = (ssrc, ch)
-            else:
-                # This belongs to someone else
-                if freq_hz not in other_channels_at_freq:
-                    other_channels_at_freq[freq_hz] = []
-                other_channels_at_freq[freq_hz].append((ssrc, ch))
-        
-        logger.info(f"  Found {len(our_channels_by_freq)} channels with our destination")
-        logger.info(f"  Found {sum(len(v) for v in other_channels_at_freq.values())} channels with other destinations")
+        logger.info(f"  Found {len(channels_by_freq)} existing frequencies")
         
         # Process each required channel
         freq_to_ssrc: Dict[int, int] = {}
@@ -391,9 +353,9 @@ class ChannelManager:
             gain = ch_spec.get('gain', defaults.get('gain', 0.0))
             encoding = ch_spec.get('encoding', defaults.get('encoding', 'float'))
             
-            # Check if WE already have a channel at this frequency
-            if freq_hz in our_channels_by_freq:
-                existing_ssrc, existing_ch = our_channels_by_freq[freq_hz]
+            # Check if ANY channel exists at this frequency
+            if freq_hz in channels_by_freq:
+                existing_ssrc, existing_ch = channels_by_freq[freq_hz]
                 
                 # Check if parameters match
                 params_match = (
@@ -402,12 +364,12 @@ class ChannelManager:
                 )
                 
                 if params_match:
-                    logger.info(f"✓ Channel {freq_hz/1e6:.3f} MHz exists (SSRC {existing_ssrc}, ours)")
+                    logger.info(f"✓ Channel {freq_hz/1e6:.3f} MHz exists (SSRC {existing_ssrc}) - reusing")
                     freq_to_ssrc[freq_hz] = existing_ssrc
                     success_count += 1
                 else:
-                    # Reconfigure OUR existing channel
-                    logger.info(f"⚙️ Reconfiguring OUR channel {freq_hz/1e6:.3f} MHz: "
+                    # Reconfigure existing channel
+                    logger.info(f"⚙️ Reconfiguring channel {freq_hz/1e6:.3f} MHz: "
                                f"preset={existing_ch.preset}->{preset}, "
                                f"rate={existing_ch.sample_rate}->{sample_rate}")
                     allocated = self._reconfigure_channel(
@@ -421,13 +383,8 @@ class ChannelManager:
                         freq_to_ssrc[freq_hz] = allocated
                         success_count += 1
             else:
-                # No channel with our destination at this frequency
-                # Check if others have channels here (for logging only - we don't touch them)
-                if freq_hz in other_channels_at_freq:
-                    others = other_channels_at_freq[freq_hz]
-                    logger.info(f"ℹ️ {len(others)} other client(s) at {freq_hz/1e6:.3f} MHz - creating separate channel")
-                
-                # Create new channel with our destination (SSRC auto-allocated)
+                # No channel at this frequency
+                # Create new channel (SSRC auto-allocated)
                 logger.info(f"➕ Creating {freq_hz/1e6:.3f} MHz ({description})")
                 allocated = self.create_channel(
                     frequency_hz=freq_hz,
@@ -435,7 +392,7 @@ class ChannelManager:
                     sample_rate=sample_rate,
                     agc=agc,
                     gain=gain,
-                    destination=destination,
+                    destination=destination, # Usually None (defaults)
                     ssrc=None,  # Auto-allocate
                     description=description
                 )

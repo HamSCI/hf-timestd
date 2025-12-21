@@ -90,12 +90,9 @@ class CoreRecorder:
         self.station_config = config.get('station', {})
         self.recorder_config = config.get('recorder', {})
         
-        # Generate dedicated multicast IP from station/instrument ID
-        # This ensures hf-timestd channels have their own exclusive RTP stream
-        from ..channel_manager import generate_timestd_multicast_ip
-        station_id = self.station_config.get('id', 'S000000')
-        instrument_id = self.station_config.get('instrument_id', '0')
-        self.data_destination = generate_timestd_multicast_ip(station_id, instrument_id)
+        # Use default destination (None) to let radiod decide
+        # This prevents redundant channels by allowing hf-timestd to share channels
+        self.data_destination = None
         
         # Store channel configs and defaults
         self.channel_specs = config.get('channels', [])  # Raw channel specs
@@ -395,8 +392,14 @@ class CoreRecorder:
                 return False
             
             # Get the multicast address for RTP receiver
-            # Uses deterministic IP generated from station/instrument ID
-            multicast_address = self._get_multicast_address()
+            # Since we let radiod decide, we should discover it from the created channels
+            # However, for the legacy RTPReceiver, we just bind to 0.0.0.0 (all interfaces)
+            # or rely on the fact that we'll join the multicast groups for the channels we found.
+            
+            # NOTE: Legacy RTPReceiver needs a specific address if we want to filter,
+            # but ideally we should be using StreamRecorderV2 which doesn't use this class.
+            # For now, we'll assume standard multicast behavior.
+            multicast_address = '0.0.0.0' 
             logger.info(f"RTP receiver will listen on {multicast_address}")
             
             # Initialize RTP receiver
@@ -464,8 +467,9 @@ class CoreRecorder:
         Returns:
             Multicast address string (e.g., "239.71.82.65")
         """
-        # data_destination is already set to our deterministic IP
-        return self.data_destination
+        # data_destination is None, so we return a default or empty string
+        # This method is largely obsolete with the removal of custom IPs
+        return self.data_destination or "0.0.0.0"
     
     def _monitor_stream_health(self):
         """
