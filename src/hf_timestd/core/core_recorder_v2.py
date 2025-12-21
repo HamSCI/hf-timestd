@@ -32,6 +32,7 @@ import time
 import json
 import threading
 import subprocess
+import socket
 from pathlib import Path
 from typing import Dict, Optional, List
 from dataclasses import dataclass
@@ -43,6 +44,40 @@ from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 
 logger = logging.getLogger(__name__)
+
+def get_host_ip() -> str:
+    """Detect main network interface IP."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
+
+def allocate_stable_ssrc(freq_hz: float, preset: str, sample_rate: int) -> int:
+    """
+    Allocate a stable, deterministic SSRC using SHA-256.
+    
+    This matches the specific parameters we care about for uniqueness:
+    Frequency, Preset, and Sample Rate.
+    """
+    # Create unique string key
+    key = f"{int(freq_hz)}:{preset.lower()}:{int(sample_rate)}"
+    
+    # Hash it using SHA-256 for stability across processes/machines
+    # (Python's hash() is randomized and changes per process)
+    sha = hashlib.sha256(key.encode('utf-8')).digest()
+    
+    # Take first 4 bytes as integer
+    val = int.from_bytes(sha[:4], byteorder='big')
+    
+    # Ensure it's a valid positive 31-bit SSRC (0 to 0x7FFFFFFF)
+    # This avoids signed/unsigned issues and reserved ranges
+    return val & 0x7FFFFFFF
+
 
 
 
@@ -75,7 +110,17 @@ class CoreRecorderV2:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Channel management via ka9q-python RadiodControl
-        self.status_address = config.get('status_address', '239.192.152.141')
+        self.status_address = config.get('status_address')
+        if not self.status_address:
+            # Fallback to ka9q defaults if installed? Or error?
+            # User requested "No Default fallback ip address".
+            # Try to get from [ka9q] section if not at top level (config structure varies)
+            ka9q_section = config.get('ka9q', {})
+            self.status_address = ka9q_section.get('status_address')
+            
+        if not self.status_address:
+            raise ValueError("Configuration missing 'status_address' in [ka9q] section")
+
         self.control = RadiodControl(self.status_address)
         
         # Station config
@@ -130,6 +175,7 @@ class CoreRecorderV2:
         """Main run loop."""
         self.running = True
         logger.info("Starting hf-timestd core recorder v2 (using ka9q-python RadiodStream)")
+        logger.info(">>> DEBUG VERSION: NETWORK FIX ACTIVE <<<")
         
         # Ensure channels exist and get ChannelInfo
         if not self._initialize_channels():
@@ -198,39 +244,26 @@ class CoreRecorderV2:
         self.running = False
     
     def _initialize_channels(self) -> bool:
-        """
-        Initialize channels: delegate discovery and creation to ManagedStream.
-        
-        Returns:
-            True if recorders were created successfully
-        """
+        """Initialize all configured channels."""
         try:
             if not self.channel_specs:
                 logger.warning("No channels configured")
                 return False
             
-            logger.info(f"Initializing {len(self.channel_specs)} channels via ManagedStream...")
+            logger.info(f"Initializing {len(self.channel_specs)} channels...")
             
-            # Warm up discovery to prevent redundant channel creation
-            logger.info("Warming up radiod discovery...")
-            try:
-                discover_channels(self.status_address, listen_duration=2.0)
-            except Exception as e:
-                logger.warning(f"Discovery warm-up failed: {e}")
-
-            # Get defaults
-            sample_rate = self.channel_defaults.get('sample_rate', 20000)
+            # Start recorders for each channel
+            # We rely on ManagedStream (inside StreamRecorderV2) to handle
+            # channel creation, discovery, and restoration via ensure_channel().
             
-            # Create StreamRecorderV2 for each channel
             for ch_spec in self.channel_specs:
-                freq_hz = int(ch_spec['frequency_hz'])
-                description = ch_spec.get('description', f'{freq_hz/1e6:.3f} MHz')
+                freq = int(ch_spec['frequency_hz'])
                 
                 # Defaults are merged with channel-specific config
                 preset = ch_spec.get('preset', self.channel_defaults.get('preset', 'iq'))
                 encoding_val = ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
                 
-                # Map string encoding to integer constant if necessary
+                # Map string encoding to integer constant
                 if isinstance(encoding_val, str):
                     if encoding_val.upper() == 'F32':
                         encoding = Encoding.F32
@@ -239,48 +272,57 @@ class CoreRecorderV2:
                     elif encoding_val.upper() == 'OPUS':
                         encoding = Encoding.OPUS
                     else:
-                        logger.warning(f"Unknown encoding string '{encoding_val}', defaulting to NO_ENCODING")
                         encoding = Encoding.NO_ENCODING
                 else:
                     encoding = encoding_val
+
+                logger.info(f"Initializing recorder for {freq/1e6:.3f} MHz")
                 
-                recorder_config = StreamRecorderConfig(
-                    ssrc=0, 
-                    frequency_hz=freq_hz,
-                    preset=preset,
+                # Create config
+                rec_config = StreamRecorderConfig(
+                    ssrc=None,  # Let ManagedStream/Radiod assign or find SSRC
+                    frequency_hz=freq,
                     encoding=encoding,
-                    sample_rate=sample_rate,
-                    description=description,
-                    destination=self.data_destination,
+                    description=ch_spec.get('description', f"{freq/1e6:.3f} MHz"),
+                    preset=preset,
+                    sample_rate=self.channel_defaults.get('sample_rate', 20000),
                     output_dir=self.output_dir,
-                    station_config=self.station_config,
+                    
+                    # Propagation
                     receiver_grid=self.station_config.get('grid_square', ''),
-                    compression=self.recorder_config.get('compression', 'none'),
-                    compression_level=self.recorder_config.get('compression_level', 3),
+                    station_config=self.station_config,
+                    
+                    # Storage settings
+                    raw_buffer_file_duration_sec=3600,
                     tiered_storage=self.recorder_config.get('tiered_storage', False),
                     hot_buffer_root=Path(self.recorder_config.get('hot_buffer_root')) if self.recorder_config.get('hot_buffer_root') else None,
+                    
+                    # Compression
+                    compression=self.recorder_config.get('compression', 'none'),
+                    compression_level=self.recorder_config.get('compression_level', 3),
+                    
+                    destination=self.data_destination
                 )
                 
-                # Initialize recorder - we pass None for channel_info as ManagedStream 
-                # will discover/create it on start()
+                # Create recorder
                 recorder = StreamRecorderV2(
-                    config=recorder_config,
-                    channel_info=None, # Will be filled by ManagedStream
-                    get_ntp_status=self.get_ntp_status,
-                    control=self.control,
+                    config=rec_config,
+                    control=self.control 
                 )
                 
-                # Store by frequency since SSRC is not yet known
-                self.recorders[freq_hz] = recorder
-            
-            logger.info(f"✓ Initialized {len(self.recorders)} channel recorders (managed)")
+                self.recorders[freq] = recorder
+                
+                # Start immediately
+                recorder.start()
+                
+            logger.info(f"✓ Initialized {len(self.recorders)} channel recorders")
             return True
-            
         except Exception as e:
-            logger.error(f"Channel initialization failed: {e}", exc_info=True)
+            logger.error(f"Failed to initialize channels: {e}", exc_info=True)
             return False
     
     def _write_status(self):
+
         """Write status to JSON file for web-ui monitoring."""
         try:
             status = {
@@ -391,7 +433,8 @@ class CoreRecorderV2:
                     try:
                         ssrc = recorder.config.ssrc
                         if ssrc and ssrc != 0:
-                            channels = discover_channels(self.status_address, listen_duration=1.0)
+                            # Use generous timeout for check
+                            channels = discover_channels(self.status_address, listen_duration=2.5)
                             if ssrc not in channels:
                                 logger.error(f"Channel {ssrc:x} ({recorder.config.description}) missing from radiod")
                     except Exception:
@@ -447,6 +490,8 @@ class CoreRecorderV2:
         self._write_status()
         
         logger.info("Core recorder stopped")
+
+
 
 
 def main():

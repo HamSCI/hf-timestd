@@ -132,8 +132,9 @@ class ManagedStream:
         max_restore_attempts: int = 0,  # 0 = unlimited
         samples_per_packet: int = 320,
         resequence_buffer_size: int = 64,
-        deliver_interval_packets: int = 10,
+        delivery_interval_packets: int = 10,
         timeout: float = 10.0,
+        ssrc: Optional[int] = None,
     ):
         """
         Initialize ManagedStream.
@@ -156,6 +157,7 @@ class ManagedStream:
             samples_per_packet: Expected samples per RTP packet
             resequence_buffer_size: Packets to buffer for resequencing
             deliver_interval_packets: Deliver to callback every N packets
+            ssrc: Explicit SSRC to use (optional, auto-allocated if None)
         """
         self._control = control
         self._frequency_hz = frequency_hz
@@ -165,6 +167,7 @@ class ManagedStream:
         self._gain = gain
         self._destination = destination
         self._encoding = encoding
+        self._ssrc = ssrc
         
         # Callbacks
         self._on_samples = on_samples
@@ -179,7 +182,7 @@ class ManagedStream:
         # RadiodStream config
         self._samples_per_packet = samples_per_packet
         self._resequence_buffer_size = resequence_buffer_size
-        self._deliver_interval_packets = deliver_interval_packets
+        self._deliver_interval_packets = delivery_interval_packets
         self._timeout = timeout
         
         # State
@@ -239,6 +242,7 @@ class ManagedStream:
                 destination=self._destination,
                 encoding=self._encoding,
                 timeout=self._timeout,
+                ssrc=self._ssrc
             )
         
         # Start the underlying stream

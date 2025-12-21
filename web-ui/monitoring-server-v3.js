@@ -62,24 +62,20 @@ const configPath = process.env.TIMESTD_CONFIG || join(installDir, 'config/timest
 
 // Load configuration
 let config = {};
-let dataRoot = join(process.env.HOME, 'timestd-data'); // Fallback
-let mode = 'test';
 let paths = null;
+let mode = 'test';
+let dataRoot = '/tmp/timestd-test';
 
 try {
+  // Use centralized path loading logic which handles config parsing and mode selection
+  paths = await import('./timestd-paths.js').then(m => m.loadPathsFromConfig(configPath));
+  dataRoot = paths.getDataRoot();
+
+  // Reload config to get station info (loadPathsFromConfig doesn't return the full config object, just paths)
+  // We can optimize this later but for now this ensures we have both valid paths and config metadata
   const configContent = fs.readFileSync(configPath, 'utf8');
   config = toml.parse(configContent);
-
-  // Determine data_root based on mode
   mode = config.recorder?.mode || 'test';
-  if (mode === 'production') {
-    dataRoot = config.recorder?.production_data_root || '/var/lib/hf-timestd';
-  } else {
-    dataRoot = config.recorder?.test_data_root || '/tmp/timestd-test';
-  }
-
-  // Initialize paths API
-  paths = new TimeStdPaths(dataRoot);
 
   console.log('📊 hf-timestd Monitoring Server V3');
   console.log('📁 Config file:', configPath);
@@ -88,9 +84,9 @@ try {
   console.log('📡 Station:', config.station?.callsign, config.station?.grid_square);
   console.log('🔧 Instrument ID:', config.station?.instrument_id || 'not configured');
 } catch (err) {
-  console.error('⚠️  Failed to load config, using defaults:', err.message);
+  console.error('⚠️  Failed to load config/paths:', err.message);
   console.log('📊 hf-timestd Monitoring Server V3 (fallback mode)');
-  console.log('📁 Data root:', dataRoot);
+  // Fallback to manual init if config load fails
   paths = new TimeStdPaths(dataRoot);
 }
 
@@ -101,7 +97,16 @@ const PYTHON_CMD = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : 'python3';
 
 // Middleware
 app.use(express.json());
-app.use(express.static(__dirname)); // Serve static files
+// Serve static files with NO CACHE to ensure UI updates are seen immediately
+app.use(express.static(__dirname, {
+  etag: false,
+  lastModified: false,
+  setHeaders: (res, path) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+}));
 
 // CORS for local development
 app.use((req, res, next) => {
@@ -1933,11 +1938,11 @@ app.get('/api/v1/channels/:channelName/discrimination/:date/dashboard', async (r
 app.get('/api/v1/channels/:channelName/discrimination/:date/metrics', async (req, res) => {
   try {
     const { channelName, date } = req.params;
-    const fileChannelName = channelName.replace(/ /g, '_');
-    const fileName = `${fileChannelName}_discrimination_${date}.csv`;
-    const filePath = join(paths.getDiscriminationDir(channelName), fileName);
 
-    if (!fs.existsSync(filePath)) {
+    // Use the robust loader instead of manual parsing
+    const parsed = loadDiscriminationRecords(channelName, date);
+
+    if (!parsed.records || parsed.records.length === 0) {
       return res.json({
         date: date,
         channel: channelName,
@@ -1945,14 +1950,11 @@ app.get('/api/v1/channels/:channelName/discrimination/:date/metrics', async (req
       });
     }
 
-    // Read and parse CSV
-    const csvContent = fs.readFileSync(filePath, 'utf8');
-    const lines = csvContent.trim().split('\n');
-
-    // Calculate metrics by parsing all rows
+    // Calculate metrics
     let totalMinutes = 0;
     let wwvDetections = 0;
     let wwvhDetections = 0;
+    let bpmDetections = 0;
     let bothDetected = 0;
     let hz440WwvDetections = 0;
     let hz440WwvhDetections = 0;
@@ -1966,101 +1968,66 @@ app.get('/api/v1/channels/:channelName/discrimination/:date/metrics', async (req
     let lowConfidence = 0;
     let wwvDominant = 0;
     let wwvhDominant = 0;
+    let bpmDominant = 0;
     let balanced = 0;
 
     const powerRatios = [];
     const differentialDelays = [];
     const bcdQuality = [];
 
-    // Parse each row
-    for (let i = 1; i < lines.length; i++) {
-      let line = lines[i];
-      const parts = [];
-      let inQuotes = false;
-      let current = '';
+    // Parse each record
+    parsed.records.forEach(record => {
+      totalMinutes++;
 
-      for (let j = 0; j < line.length; j++) {
-        const char = line[j];
-        const nextChar = j < line.length - 1 ? line[j + 1] : null;
+      // Method 3: Timing Tones
+      if (record.wwv_detected) wwvDetections++;
+      if (record.wwvh_detected) wwvhDetections++;
+      if (record.bpm_detected) bpmDetections++;
+      if (record.wwv_detected && record.wwvh_detected) bothDetected++;
 
-        if (char === '"' && nextChar === '"' && inQuotes) {
-          current += '"';
-          j++;
-        } else if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-          parts.push(current);
-          current = '';
-        } else {
-          current += char;
+      if (typeof record.power_ratio_db === 'number') powerRatios.push(record.power_ratio_db);
+      if (typeof record.differential_delay_ms === 'number') differentialDelays.push(record.differential_delay_ms);
+
+      // Method 1: 440 Hz
+      if (record.tone_440hz_wwv_detected) hz440WwvDetections++;
+      if (record.tone_440hz_wwvh_detected) hz440WwvhDetections++;
+
+      // Method 5: Weighted Voting
+      const confidence = record.confidence;
+      if (confidence === 'high') highConfidence++;
+      else if (confidence === 'medium') mediumConfidence++;
+      else if (confidence === 'low') lowConfidence++;
+
+      const dominant = record.dominant_station;
+      if (dominant === 'WWV') wwvDominant++;
+      else if (dominant === 'WWVH') wwvhDominant++;
+      else if (dominant === 'BPM') bpmDominant++;
+      else if (dominant === 'BALANCED') balanced++;
+
+      // Method 4: Tick Windows
+      try {
+        if (record.tick_windows_10sec && Array.isArray(record.tick_windows_10sec)) {
+          record.tick_windows_10sec.forEach(win => {
+            tickTotalWindows++;
+            if (win.integration_method === 'coherent') tickCoherentCount++;
+            else if (win.integration_method === 'incoherent') tickIncoherentCount++;
+          });
         }
-      }
-      parts.push(current);
+      } catch (e) { }
 
-      if (parts.length >= 15) {
-        totalMinutes++;
-
-        // Method 3: Timing Tones
-        if (parts[3] === '1') wwvDetections++;
-        if (parts[4] === '1') wwvhDetections++;
-        if (parts[3] === '1' && parts[4] === '1') bothDetected++;
-
-        const powerRatio = parseFloat(parts[7]);
-        if (!isNaN(powerRatio)) powerRatios.push(powerRatio);
-
-        const diffDelay = parts[8] !== '' ? parseFloat(parts[8]) : null;
-        if (diffDelay !== null && !isNaN(diffDelay)) differentialDelays.push(diffDelay);
-
-        // Method 1: 440 Hz
-        if (parts[9] === '1') hz440WwvDetections++;
-        if (parts[11] === '1') hz440WwvhDetections++;
-
-        // Method 5: Weighted Voting
-        const confidence = parts[14];
-        if (confidence === 'high') highConfidence++;
-        else if (confidence === 'medium') mediumConfidence++;
-        else if (confidence === 'low') lowConfidence++;
-
-        const dominant = parts[13];
-        if (dominant === 'WWV') wwvDominant++;
-        else if (dominant === 'WWVH') wwvhDominant++;
-        else if (dominant === 'BALANCED') balanced++;
-
-        // Method 4: Tick Windows
-        if (parts[15] && parts[15].trim() !== '') {
-          try {
-            const tickWindows = JSON.parse(parts[15].trim());
-            if (tickWindows && Array.isArray(tickWindows)) {
-              tickWindows.forEach(win => {
-                tickTotalWindows++;
-                if (win.integration_method === 'coherent') tickCoherentCount++;
-                else if (win.integration_method === 'incoherent') tickIncoherentCount++;
-              });
+      // Method 2: BCD
+      try {
+        if (record.bcd_windows && Array.isArray(record.bcd_windows)) {
+          bcdTotalWindows += record.bcd_windows.length;
+          bcdValidWindows += record.bcd_windows.filter(w => w.correlation_quality > 0).length;
+          record.bcd_windows.forEach(w => {
+            if (typeof w.correlation_quality === 'number') {
+              bcdQuality.push(w.correlation_quality);
             }
-          } catch (e) {
-            // Ignore parse errors
-          }
+          });
         }
-
-        // Method 2: BCD
-        if (parts.length >= 21 && parts[20] && parts[20].trim() !== '') {
-          try {
-            const bcdWindows = JSON.parse(parts[20].trim());
-            if (bcdWindows && Array.isArray(bcdWindows)) {
-              bcdTotalWindows += bcdWindows.length;
-              bcdValidWindows += bcdWindows.filter(w => w.correlation_quality > 0).length;
-              bcdWindows.forEach(w => {
-                if (w.correlation_quality && !isNaN(w.correlation_quality)) {
-                  bcdQuality.push(w.correlation_quality);
-                }
-              });
-            }
-          } catch (e) {
-            // Ignore parse errors
-          }
-        }
-      }
-    }
+      } catch (e) { }
+    });
 
     // Calculate statistics
     const meanPowerRatio = powerRatios.length > 0
@@ -2101,8 +2068,9 @@ app.get('/api/v1/channels/:channelName/discrimination/:date/metrics', async (req
         temporal_resolution: "1/minute",
         wwv_detections: wwvDetections,
         wwvh_detections: wwvhDetections,
+        bpm_detections: bpmDetections,
         both_detected: bothDetected,
-        detection_rate: bothDetected / totalMinutes,
+        detection_rate: (wwvDetections + wwvhDetections + bpmDetections) / totalMinutes,
         mean_power_ratio_db: meanPowerRatio.toFixed(1),
         std_power_ratio_db: stdPowerRatio.toFixed(1),
         mean_differential_delay_ms: meanDiffDelay.toFixed(1),
@@ -2121,6 +2089,7 @@ app.get('/api/v1/channels/:channelName/discrimination/:date/metrics', async (req
         temporal_resolution: "1/minute",
         wwv_dominant: wwvDominant,
         wwvh_dominant: wwvhDominant,
+        bpm_dominant: bpmDominant,
         balanced: balanced,
         high_confidence: highConfidence,
         medium_confidence: mediumConfidence,
@@ -3268,6 +3237,17 @@ async function loadAllDiscriminationMethods(channelName, date, paths) {
         snr_db: parseFloat(r.wwvh_snr_db),
         tone_power_db: parseFloat(r.wwvh_snr_db),
         timing_ms: r.wwvh_timing_ms ? parseFloat(r.wwvh_timing_ms) : null,
+      });
+    }
+    // Create BPM record if detected
+    if ((r.bpm_detected === '1' || r.bpm_detected === 'true') && r.bpm_snr_db) {
+      toneRecords.push({
+        timestamp_utc: r.timestamp_utc,
+        station: 'BPM',
+        frequency_hz: 1000, // BPM uses 1kHz seconds pulses usually, similar to WWV
+        snr_db: parseFloat(r.bpm_snr_db),
+        tone_power_db: parseFloat(r.bpm_snr_db),
+        timing_ms: r.bpm_timing_ms ? parseFloat(r.bpm_timing_ms) : null,
         anchor_station: r.anchor_station || null
       });
     }
@@ -3683,10 +3663,54 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
           } catch (e) { }
         }
 
+        // Parse Tone Detections CSV if available (for Exclusion Zones & BPM timing)
+        // tone_detections.csv has columns: ... bpm_detected, bpm_snr_db, bpm_timing_ms ...
+        const tonesPath = join(paths.getToneDetectionsDir(channelName), `${kHertzChannel}_tones_${dateStr}.csv`);
+        const tonesMap = new Map();
+        if (fs.existsSync(tonesPath)) {
+          try {
+            const tonesContent = fs.readFileSync(tonesPath, 'utf8');
+            // Use header inference as schema changed recently
+            const tonesRecords = csvParse(tonesContent, { columns: true, skip_empty_lines: true });
+            for (const tr of tonesRecords) {
+              const minBound = parseInt(tr.minute_boundary);
+              if (!isNaN(minBound)) {
+                tonesMap.set(minBound, {
+                  wwv_timing: parseFloat(tr.wwv_timing_ms) || null,
+                  wwvh_timing: parseFloat(tr.wwvh_timing_ms) || null,
+                  bpm_timing: parseFloat(tr.bpm_timing_ms) || null,
+                  bpm_detected: tr.bpm_detected === '1',
+                  wwv_detected: tr.wwv_detected === '1',
+                  wwvh_detected: tr.wwvh_detected === '1'
+                });
+              }
+            }
+          } catch (e) { }
+        }
+
         for (const row of records) {
           const minute = parseInt(row.minute_boundary_utc);
           let pushed = false;
           const dop = dopplerMap.get(minute);
+          const tones = tonesMap.get(minute);
+
+          // Check for Exclusion Zone (Overlap)
+          let exclusionZone = false;
+          if (tones) {
+            // Check WWV vs BPM
+            if (tones.wwv_detected && tones.bpm_detected && tones.wwv_timing !== null && tones.bpm_timing !== null) {
+              const delta = Math.abs(tones.wwv_timing - tones.bpm_timing);
+              // Wrap around 1000ms
+              const diff = Math.min(delta, 1000 - delta);
+              if (diff < 2.0) exclusionZone = true;
+            }
+            // Check WWV vs WWVH
+            if (tones.wwv_detected && tones.wwvh_detected && tones.wwv_timing !== null && tones.wwvh_timing !== null) {
+              const delta = Math.abs(tones.wwv_timing - tones.wwvh_timing);
+              const diff = Math.min(delta, 1000 - delta);
+              if (diff < 2.0) exclusionZone = true;
+            }
+          }
 
           // Helper to add data point
           const addPoint = (stationLabel, snr, conf) => {
@@ -3695,15 +3719,23 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
               pt.carrier_doppler_hz = dop.carrier;
               pt.doppler_hz = stationLabel.includes('WWVH') ? dop.wwvh : dop.wwv;
             }
+            if (exclusionZone) pt.exclusion = true;
 
             if (stationLabel === row.station) {
               if (row.clock_offset_ms) pt.offset = parseFloat(row.clock_offset_ms);
               if (row.propagation_delay_ms) pt.delay = parseFloat(row.propagation_delay_ms);
               if (row.propagation_mode) pt.mode = row.propagation_mode;
             }
+
+            // Add D_clock to the point if available (for the main chart)
+            // Currently D_clock is 'clock_offset_ms'
+            if (row.clock_offset_ms && stationLabel === row.station) {
+              pt.d_clock = parseFloat(row.clock_offset_ms);
+              pt.unc = parseFloat(row.uncertainty_ms);
+            }
+
             getLane(stationLabel, freqKHz).data.push(pt);
           };
-
 
           // Check for specific tick data (if column exists and has value)
           if (row.wwv_tick_snr_db && parseFloat(row.wwv_tick_snr_db) > 0) {
@@ -3725,31 +3757,26 @@ app.get('/api/v1/broadcasts/history', async (req, res) => {
 
           // Fallback: If no tick data populated, use the solution station
           if (!pushed && row.station && row.station !== 'UNKNOWN') {
-            // We have a solution for this station => High Confidence Presence
             const carrierSnr = parseFloat(row.snr_db || 0);
             addPoint(row.station, carrierSnr, 1);
             pushed = true;
           }
 
-
-          // Waterfall Data (Residuals)
-          // Always attach solution data to the relevant lane for the waterfall
+          // Waterfall Data
+          // Attach solution data to the relevant lane for waterfall visualization
           const solStation = row.station;
           if (solStation && solStation !== 'UNKNOWN') {
+            // Logic to update existing point or add one handled by getLane().data reference
+            // But we need to ensure the point in the lane has the d_clock/unc data
             const lane = getLane(solStation, freqKHz);
-            // Verify we haven't already pushed this exact minute (deduplication not strictly needed but good)
-            // Just push to the lane's data array? Or attach to last?
-            // The Presence loop above might have pushed a point.
-            // Let's find the point for this minute in the lane.
-
             let pt = lane.data.find(p => p.t == minute);
             if (!pt) {
-              // Should have been created by Fallback above, but if not:
+              // Point might not exist if tick SNR was 0 but solution was forced/found?
+              // Or if tick columns missing.
               pt = { t: minute, snr: parseFloat(row.snr_db || 0), conf: 1 };
+              if (exclusionZone) pt.exclusion = true;
               lane.data.push(pt);
             }
-
-            // Create 'waterfall' object inside the point
             pt.d_clock = parseFloat(row.clock_offset_ms);
             pt.unc = parseFloat(row.uncertainty_ms);
             pt.mode = row.propagation_mode;
@@ -3956,7 +3983,23 @@ app.get('/api/v1/timing/transmission', async (req, res) => {
         if (lines.length < 2) continue;
 
         const headers = lines[0].split(',');
-        const cutoffTime = Date.now() - (hours * 60 * 60 * 1000);
+
+        // Determine reference time for "last N hours" window
+        // If date is today, use Date.now()
+        // If date is historical, use end of that day (23:59:59)
+        let referenceTime = Date.now();
+        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+
+        if (targetDate !== todayStr) {
+          // Parse targetDate (YYYYMMDD)
+          const year = parseInt(targetDate.substring(0, 4));
+          const month = parseInt(targetDate.substring(4, 6)) - 1;
+          const day = parseInt(targetDate.substring(6, 8));
+          // Set to end of that day
+          referenceTime = new Date(Date.UTC(year, month, day, 23, 59, 59, 999)).getTime();
+        }
+
+        const cutoffTime = referenceTime - (hours * 60 * 60 * 1000);
 
         for (let i = 1; i < lines.length; i++) {
           const values = lines[i].split(',');

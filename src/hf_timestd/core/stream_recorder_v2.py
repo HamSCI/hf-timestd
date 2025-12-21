@@ -46,7 +46,7 @@ class StreamRecorderState(Enum):
 class StreamRecorderConfig:
     """Configuration for stream recorder."""
     # Channel identification (from ChannelInfo)
-    ssrc: int
+    ssrc: Optional[int]
     frequency_hz: float
     sample_rate: int = 20000
     preset: str = 'iq'
@@ -216,9 +216,7 @@ class StreamRecorderV2:
                     on_stream_restored=self._handle_stream_restored,
                     drop_timeout_sec=5.0,
                     restore_interval_sec=1.0,
-                    samples_per_packet=samples_per_packet,
-                    resequence_buffer_size=128,
-                    deliver_interval_packets=20,
+                    resequence_buffer_size=128
                 )
                 self.channel_info = self.stream.start()
                 if self.channel_info:

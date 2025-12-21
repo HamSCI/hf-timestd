@@ -1,243 +1,99 @@
 # HF Time Standard Analysis (hf-timestd) - AI Context Document
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** 2025-12-19  
-**Version:** 5.4 (Web UI summary.html Issues Identified)
+**Last Updated:** 2025-12-21  
+**Version:** 6.0 (ManagedStream Refactor & Network Fixes)
 
 ---
 
 ## Project Scope
 
-`hf-timestd` records and analyzes HF time standard stations:
+`hf-timestd` records and analyzes HF time standard stations (WWV, WWVH, CHU, BPM) to derive sub-millisecond timing products via ionospheric path analysis.
 
-- **WWV** (Ft. Collins, CO) - 2.5, 5, 10, 15, 20, 25 MHz
-- **WWVH** (Kauai, HI) - 2.5, 5, 10, 15 MHz (shared with WWV)
-- **CHU** (Ottawa, Canada) - 3.33, 7.85, 14.67 MHz
-- **BPM** (Pucheng, China) - 2.5, 5, 10, 15 MHz (shared with WWV/WWVH)
-
-The repository implements a **two-phase** pipeline for time-transfer analytics.
-
-**Primary Output:** `D_clock = T_system - T_UTC(NIST)` with sub-millisecond accuracy.
-
-**17 Broadcasts Total:**
-- WWV: 6 frequencies (2 unique: 20, 25 MHz; 4 shared: 2.5, 5, 10, 15 MHz)
-- WWVH: 4 frequencies (all shared: 2.5, 5, 10, 15 MHz)
-- CHU: 3 frequencies (unique: 3.33, 7.85, 14.67 MHz)
-- BPM: 4 frequencies (all shared: 2.5, 5, 10, 15 MHz)
-
-**Channel Naming Convention:**
-- `SHARED X MHz` - Frequencies where WWV, WWVH, and BPM all broadcast (2.5, 5, 10, 15 MHz)
-- `WWV X MHz` - WWV-only frequencies (20, 25 MHz)
-- `CHU X MHz` - CHU-only frequencies (3.33, 7.85, 14.67 MHz)
-
-**Explicit Non-Goals:**
-- DigitalRF format conversion
-- Decimation / 10 Hz products
-- PSWS/HamSCI uploads
-- Phase 3 derived-product generation
+**Core Pipeline:**
+1.  **Phase 1 (Ingest):** `core-recorder` (Python) -> `radiod` (Multicast RTP) -> `raw_buffer` (Binary IQ).
+2.  **Phase 2 (Analytics):** `timestd-analytics` (Python) -> Reads `raw_buffer` -> Produces `D_clock`.
+3.  **Phase 3 (Fusion):** `multi_broadcast_fusion` -> Fuses 17 broadcasts -> Feeds Chrony SHM.
+4.  **Web UI:** `monitoring-server-v3.js` (Node) -> `summary.html` / `timing-dashboard-enhanced.html`.
 
 ---
 
-## Architecture
+## Architecture: The "ManagedStream" Paradigm (v6.0)
 
-### Phase 1: Immutable raw_buffer (Binary IQ)
+**CRITICAL:** As of v6.0, `core-recorder` **strictly** relies on the `ka9q-python` library's `ManagedStream` for all channel lifecycle management. Do NOT re-implement manual discovery or channel creation logic.
 
-Phase 1 is the scientific record. It stores raw complex IQ with **system time only** (no UTC correction).
+### 1. Channel Management
+-   **Strategy:** "Frequency First" via `ManagedStream`.
+-   **Mechanism:** `core-recorder` instantiates `ManagedStream(..., ssrc=None)`.
+-   **Library Logic:** `ManagedStream` calls `ensure_channel(freq)`. If `radiod` has a channel on that frequency, it returns the existing SSRC. If not, it creates one.
+-   **Result:** Prevents channel proliferation (duplicate channels) and race conditions.
 
-**Directory layout:**
-```
-{data_root}/raw_buffer/{CHANNEL_DIR}/{YYYYMMDD}/
-    {minute_boundary}.bin[.zst|.lz4]
-    {minute_boundary}.json
-```
-
-**Key invariants:**
-- Path mapping uses `channel_name_to_dir()`
-- Files are minute-aligned
-- No decimation
-
-**Implementation:**
-- `src/hf_timestd/core/binary_archive_writer.py`
-- `src/hf_timestd/core/pipeline_orchestrator.py`
-
-### Phase 2: Analytics (D_clock Extraction)
-
-Phase 2 reads Phase 1 `raw_buffer` and produces timing products.
-
-**Output layout:**
-```
-{data_root}/phase2/{CHANNEL_DIR}/
-    clock_offset/       # D_clock time series (PRIMARY OUTPUT)
-    discrimination/     # WWV vs WWVH results
-    tone_detections/    # 1000/1200 Hz detection
-    bcd_correlation/    # BCD subcarrier analysis
-    status/             # Service state for web UI
-```
-
-**Key entry points:**
-- `src/hf_timestd/core/phase2_temporal_engine.py` - Central orchestrator
-- `src/hf_timestd/core/phase2_analytics_service.py` - Daemon wrapper
-- `src/hf_timestd/core/multi_broadcast_fusion.py` - 13-broadcast fusion
+### 2. Networking & Discovery
+-   **Status Group:** `bee1-hf-status.local` (mDNS FQDN). **Hardcoded fallbacks (e.g., 239.192...) are REMOVED.**
+-   **Discovery:** `discover_channels()` is used by both `core-recorder` (startup check) and `timestd-analytics` (SNR query).
+-   **Reliability:** Explicit retry logic (3 attempts, 1s backoff, 2.5s timeout) is enforced in application code to handle startup races with `radiod`.
 
 ---
 
-## The D_clock Equation
+## Data Flow
 
 ```
-T_arrival = T_emission + T_propagation + D_clock
-
-Where:
-  T_arrival     = Observed tone arrival time (matched filter detection)
-  T_emission    = 0 (tones transmitted at exact second boundary)
-  T_propagation = HF signal propagation delay (ionospheric path)
-  D_clock       = System clock offset (THE OUTPUT WE WANT)
-
-Rearranging:
-  D_clock = T_arrival - T_propagation
-```
-
-**Key Insight:** With a GPSDO (10⁻⁹ stability), the local clock doesn't drift measurably in hours. Minute-to-minute D_clock variations are therefore NOT clock error—they are **IONOSPHERIC PROPAGATION EFFECTS** that we want to measure!
-
----
-
-## Three-Step Refinement Pipeline
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 1: TIME SNAP + MULTI-STATION DETECTION                                 │
-│   Files: tone_detector.py, multi_station_detector.py                        │
-│   Method: Quadrature matched filter for 800ms timing tones                  │
-│   Output: ALL detected stations (WWV, WWVH, BPM, CHU) with ToA/SNR          │
-│   Key: GPSDO is timing reference, not loudest station                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ STEP 2: CHANNEL CHARACTERIZATION                                            │
-│   2A. BCD Correlation → differential_delay_ms (WWV vs WWVH vs BPM)          │
-│   2B. Doppler Estimation → ionospheric motion, channel stability            │
-│   2C. Station Discrimination → 8-vote weighted system                       │
-│   2D. Test Signal Analysis → FSS, delay spread (minutes 8/44)               │
-│   2E. BPM Detection → 10ms tick duration, UT1/UTC mode                      │
-│   Note: BCD disabled for BPM pure carrier minutes (10-15, 40-45)            │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ STEP 3: TRANSMISSION TIME SOLUTION (→ D_clock)                              │
-│   File: transmission_time_solver.py                                         │
-│   Method: Mode disambiguation (1E, 1F, 2F, 3F, ground wave)                 │
-│   Output: D_clock, propagation_mode, confidence, uncertainty                │
-│   All stations passed to fusion with uncertainty weighting                  │
-└─────────────────────────────────────────────────────────────────────────────┘
+[Antenna] -> [SDR] -> [radiod (C++)]
+                          |
+                          v (Multicast RTP: 239.116.198.49:5004)
+                          |
+[core-recorder (Python)] <+  <-- ManagedStream (Input)
+       |
+       +--> [raw_buffer (Phase 1)] --> {data_root}/raw_buffer/{YYYYMMDD}/{min}.bin
+       |                               (Immutable, System Time)
+       |
+[timestd-analytics (Python)] <-- Reads raw_buffer (Input)
+       |
+       +--> [Analysis Engine]
+       |         |
+       |         +--> [tone_detector] -> [multi_station_detector]
+       |         +--> [phase2 output] -> {data_root}/phase2/.../clock_offset/
+       |
+       +--> [Fusion Engine] -> [Chrony SHM] (System Clock Discipline)
 ```
 
 ---
 
-## Multi-Broadcast Fusion
+## Next Session Goal: Restore Channel Audio Playback
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 17 BROADCASTS → WEIGHTED FUSION → FUSED D_clock                             │
-│                                                                             │
-│   WWV:  2.5, 5, 10, 15, 20, 25 MHz (6 broadcasts)                          │
-│   WWVH: 2.5, 5, 10, 15 MHz (4 broadcasts, shared frequencies)              │
-│   CHU:  3.33, 7.85, 14.67 MHz (3 broadcasts, FSK timing reference)         │
-│   BPM:  2.5, 5, 10, 15 MHz (4 broadcasts, shared with WWV/WWVH)            │
-│                                                                             │
-│   Weight = confidence × uncertainty_weight × mode_weight × snr_factor       │
-│   Outlier rejection: Weighted MAD, 3σ threshold                             │
-│   Auto-calibration: Station-level offsets (not per-broadcast)               │
-│                                                                             │
-│   Output: phase2/fusion/fused_d_clock.csv → Chrony SHM (rate-limited 8s)   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+**Objective:** The user wants to listen to the live or recorded audio of the channels via `summary.html`.
 
----
+### Current State
+-   **Web UI:** `summary.html` likely has a placeholder or broken player.
+-   **Backend:** `monitoring-server-v3.js` serves API endpoints.
+-   **Missing Piece:** We need to verify how audio is delivered.
+    -   **Option A (Live):** WebSockets re-streaming RTP (via `core-recorder` or `radiod` direct?).
+    -   **Option B (Recorded):** Serving `.bin` files converted to `.wav`/`.mp3` on the fly?
+    -   **Legacy:** Previous versions might have had a simple "Listen" button.
 
-## Key Files
+### Strategy for Next Agent
+1.  **Inspect `summary.html`:** Look for the "Audio" or "Listen" elements.
+2.  **Inspect `monitoring-server-v3.js`:** Identify `/api/v1/audio` endpoints.
+3.  **Determine Source:**
+    -   If live: How do we bridge Multicast RTP to Web Browser (which doesn't support Multicast)? Likely need a WebSocket proxy in Node.js or Python.
+    -   If recorded: Check if `raw_buffer` files can be transcoded quickly.
 
-| File | Purpose |
-|------|---------|
-| `phase2_temporal_engine.py` | Central orchestrator - 3-step D_clock extraction |
-| `station_model.py` | **UPDATED** MLE-based StationModel + ChannelAssignment |
-| `multi_station_detector.py` | Physics-based multi-station detection |
-| `multi_broadcast_fusion.py` | Combines 17 broadcasts into fused D_clock |
-| `bpm_discriminator.py` | **UPDATED** BPM detection - 10ms ticks, UT1/UTC modes |
-| `correlator_bank.py` | Parallel matched filtering with predicted ToA windows |
-| `transmission_time_solver.py` | Propagation mode disambiguation |
-| `verification_script.py` | (Ephemeral) Used to verify calibration persistence |
-
----
-
-## Recent Session Gains (2025-12-17)
-
-### 1. Unified Propagation Delay Model
-- **Problem:** `StationModelFactory` used varying delay logic vs `BPMDiscriminator`, causing 5ms discrepancy.
-- **Fix:** Implemented unified **Distance-Dependent Heuristic** in both:
-  - Dist < 3000 km: **1.15×** overhead (High angle)
-  - Dist > 10000 km: **1.05×** overhead (Grazing incidence)
-- **Result:** 0.00 ms discrepancy. BPM search window centered correctly at ~40ms (expected) vs 44ms (old).
-
-### 2. Reliability Enhancements
-- **Calibration Persistence:** `Phase2TemporalEngine` now saves/loads BPM calibration (delay/gain) to `timing_calibration.json`. Prevents loss of accumulated data on restart.
-- **Pure Carrier Optimization:** Steps skipping BCD correlation (Step 2A) during BPM's pure carrier minutes (10-15, 40-45), reducing noise and CPU usage.
-
-### 3. Chrony SHM Integration Fixed
-- **Issue:** Padding error in struct packing.
-- **Fix:** Corrected struct format string.
-
-### 4. Documentation Cleanup (2025-12-17)
-- **Legacy Archive:** Moved obsolete design docs and migration notes to `docs/archive/`.
-- **Deprecations:** Marked `RTPReceiver` and `CoreRecorder` (v1) as deprecated in favor of `CoreRecorderV2`.
-- **Docstrings:** Verified Google-style docstrings in active core modules.
-
----
-
-## Current Focus: Web UI `summary.html` Fixes
-
-**NEXT SESSION GOAL:** Fix identified issues in `web-ui/summary.html`.
-
-### Identified Issues in `summary.html`
-
-#### Issue 1: Storage Section Not Rendered
-**Location:** `@/home/mjh/git/hf-timestd/web-ui/summary.html:576-604`
-
-**Problem:** The `renderStorage(storage)` function is defined but **never called** in `updateSummary()`. The storage data is fetched via `/api/v1/summary` (which includes `data.storage`) but the render function is not invoked.
-
-**Fix:** Add `html += renderStorage(data.storage);` in the `updateSummary()` function around line 779.
-
-#### Issue 2: Outdated Broadcast Count Comments
-**Location:** `@/home/mjh/git/hf-timestd/web-ui/summary.html:674` and `@/home/mjh/git/hf-timestd/web-ui/summary.html:785`
-
-**Problem:** Comments say "13 broadcasts" but the system now has **17 broadcasts** (6 WWV + 4 WWVH + 3 CHU + 4 BPM). The API endpoint `/api/v1/phase2/reception-matrix` correctly documents 17 broadcasts.
-
-**Fix:** Update comments from "13 broadcasts" to "17 broadcasts".
-
-#### Issue 3: Reception Matrix Already Shows BPM
-**Status:** ✅ Already implemented correctly.
-
-The `renderReceptionMatrix()` function (lines 676-758) already includes BPM column rendering:
-- Line 729: `const bpmCell = isShared ? snrBadge(ch.bpm_snr_db, ch.bpm_detected) : '—';`
-- Line 751: `stationHeader('BPM', '#ec4899')`
-
-### Files to Modify
-| File | Changes |
-|------|--------|
-| `web-ui/summary.html` | Add `renderStorage()` call, update "13 broadcasts" → "17 broadcasts" |
-
-### Relevant API Endpoints (Already Working)
-- `GET /api/v1/summary` - Returns station, processes, continuity, storage, channels
-- `GET /api/v1/phase2/reception-matrix` - Returns 17-broadcast matrix (WWV/WWVH/BPM/CHU)
-- `GET /api/v1/phase2/propagation-paths` - Returns station distances/bearings
+**Constraint:** Do NOT change the `core-recorder` channel management logic. It is fixed. Focus only on the plumbing to get audio bytes to the browser.
 
 ---
 
 ## Configuration & Environment
 
-**timestd-config.toml** is the single source of truth.
+**Config:** `/etc/hf-timestd/timestd-config.toml`
+-   **Status Address:** `bee1-hf-status.local` (Strict)
+-   **RTP Dest:** `239.116.198.49:5004` (Derived from status group)
 
-**Environment Variables:**
-```bash
-export TIMESTD_DATA_ROOT=/tmp/timestd-test          # or /var/lib/timestd
-export TIMESTD_CONFIG=/etc/hf-timestd/timestd-config.toml
-```
+**Services:**
+-   `timestd-core-recorder` (Phase 1)
+-   `timestd-analytics` (Phase 2)
+-   `timestd-web-ui` (Phase 3 UI)
 
-**Systemd Services:**
-- `timestd-core-recorder.service`
-- `timestd-analytics.service`
-- `timestd-web-ui.service`
+**Useful Scripts:**
+-   `scripts/list_radiod_channels.py`: Verifies `radiod` state.
+-   `scripts/check_version.py`: Verifies source code version.
+

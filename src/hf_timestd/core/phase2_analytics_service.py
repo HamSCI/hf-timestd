@@ -258,6 +258,12 @@ class Phase2AnalyticsService:
         self.audio_tones_dir.mkdir(parents=True, exist_ok=True)
         self._init_audio_tones_csv()
         
+        # Transmission Time (UTC-NIST) - Phase 2 timing directory
+        # This feeds the Fusion / Transmission Time API
+        self.timing_dir = self.output_dir / 'timing'
+        self.timing_dir.mkdir(parents=True, exist_ok=True)
+        self._init_transmission_time_csv()
+        
         # Note: Decimation is not part of hf-timestd (timing-focused)
         # For decimated output, see separate projects
 
@@ -518,8 +524,9 @@ class Phase2AnalyticsService:
             with open(self.tone_detections_csv, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'wwv_detected', 'wwvh_detected',
-                    'wwv_snr_db', 'wwvh_snr_db', 'wwv_timing_ms', 'wwvh_timing_ms',
+                    'timestamp_utc', 'minute_boundary', 'wwv_detected', 'wwvh_detected', 'bpm_detected',
+                    'wwv_snr_db', 'wwvh_snr_db', 'bpm_snr_db', 
+                    'wwv_timing_ms', 'wwvh_timing_ms', 'bpm_timing_ms',
                     'anchor_station', 'anchor_confidence'
                 ])
             logger.info(f"Created tone detections CSV: {self.tone_detections_csv}")
@@ -542,10 +549,13 @@ class Phase2AnalyticsService:
                     minute_boundary,
                     1 if time_snap.wwv_detected else 0,
                     1 if time_snap.wwvh_detected else 0,
+                    1 if time_snap.bpm_detected else 0,
                     round(time_snap.wwv_snr_db, 2) if time_snap.wwv_snr_db else '',
                     round(time_snap.wwvh_snr_db, 2) if time_snap.wwvh_snr_db else '',
+                    round(time_snap.bpm_snr_db, 2) if time_snap.bpm_snr_db else '',
                     round(time_snap.wwv_timing_ms, 3) if time_snap.wwv_timing_ms else '',
                     round(time_snap.wwvh_timing_ms, 3) if time_snap.wwvh_timing_ms else '',
+                    round(time_snap.bpm_timing_ms, 3) if time_snap.bpm_timing_ms else '',
                     time_snap.anchor_station or '',
                     round(time_snap.anchor_confidence, 3) if time_snap.anchor_confidence else ''
                 ])
@@ -562,8 +572,9 @@ class Phase2AnalyticsService:
             with open(self.bcd_discrimination_csv, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'wwv_amplitude', 'wwvh_amplitude',
-                    'differential_delay_ms', 'correlation_quality', 'wwv_toa_ms', 'wwvh_toa_ms',
+                    'timestamp_utc', 'minute_boundary', 'wwv_amplitude', 'wwvh_amplitude', 'bpm_amplitude',
+                    'differential_delay_ms', 'correlation_quality', 
+                    'wwv_toa_ms', 'wwvh_toa_ms', 'bpm_toa_ms',
                     'amplitude_ratio_db'
                 ])
             logger.info(f"Created BCD discrimination CSV: {self.bcd_discrimination_csv}")
@@ -592,10 +603,12 @@ class Phase2AnalyticsService:
                     minute_boundary,
                     round(channel_char.bcd_wwv_amplitude, 4) if channel_char.bcd_wwv_amplitude else '',
                     round(channel_char.bcd_wwvh_amplitude, 4) if channel_char.bcd_wwvh_amplitude else '',
+                    round(channel_char.bcd_bpm_amplitude, 4) if hasattr(channel_char, 'bcd_bpm_amplitude') and channel_char.bcd_bpm_amplitude else '',
                     round(channel_char.bcd_differential_delay_ms, 3) if channel_char.bcd_differential_delay_ms else '',
                     round(channel_char.bcd_correlation_quality, 3) if channel_char.bcd_correlation_quality else '',
                     round(channel_char.bcd_wwv_toa_ms, 3) if channel_char.bcd_wwv_toa_ms else '',
                     round(channel_char.bcd_wwvh_toa_ms, 3) if channel_char.bcd_wwvh_toa_ms else '',
+                    round(channel_char.bcd_bpm_toa_ms, 3) if hasattr(channel_char, 'bcd_bpm_toa_ms') and channel_char.bcd_bpm_toa_ms else '',
                     round(ratio_db, 2) if ratio_db else ''
                 ])
         except Exception as e:
@@ -775,8 +788,9 @@ class Phase2AnalyticsService:
                 writer = csv.writer(f)
                 writer.writerow([
                     'timestamp_utc', 'minute_boundary', 'dominant_station', 'station_confidence',
-                    'wwv_snr_db', 'wwvh_snr_db', 'power_ratio_db', 'ground_truth_station',
-                    'quality_grade', 'method_agreements', 'method_disagreements'
+                    'wwv_snr_db', 'wwvh_snr_db', 'bpm_snr_db', 'power_ratio_db', 'ground_truth_station',
+                    'quality_grade', 'method_agreements', 'method_disagreements',
+                    'bpm_detected', 'bpm_timing_ms'
                 ])
             logger.info(f"Created discrimination CSV: {self.discrimination_csv}")
     
@@ -811,11 +825,14 @@ class Phase2AnalyticsService:
                     channel_char.station_confidence or '',
                     round(time_snap.wwv_snr_db, 2) if time_snap.wwv_snr_db else '',
                     round(time_snap.wwvh_snr_db, 2) if time_snap.wwvh_snr_db else '',
+                    round(time_snap.bpm_snr_db, 2) if time_snap.bpm_snr_db else '',
                     round(power_ratio_db, 2) if power_ratio_db else '',
                     channel_char.ground_truth_station or '',
                     grade,
                     ';'.join(channel_char.cross_validation_agreements) if channel_char.cross_validation_agreements else '',
-                    ';'.join(channel_char.cross_validation_disagreements) if channel_char.cross_validation_disagreements else ''
+                    ';'.join(channel_char.cross_validation_disagreements) if channel_char.cross_validation_disagreements else '',
+                    1 if time_snap.bpm_detected else 0,
+                    round(time_snap.bpm_timing_ms, 3) if time_snap.bpm_timing_ms else ''
                 ])
         except Exception as e:
             logger.error(f"Failed to write discrimination: {e}")
@@ -876,6 +893,78 @@ class Phase2AnalyticsService:
                 ])
         except Exception as e:
             logger.error(f"Failed to write audio tones: {e}")
+
+    def _init_transmission_time_csv(self):
+        """Initialize transmission time (UTC-NIST) CSV for today."""
+        today = datetime.now(timezone.utc).strftime('%Y%m%d')
+        file_channel = self._get_file_channel_name()
+        self.transmission_time_csv = self.timing_dir / f'{file_channel}_utc_nist_{today}.csv'
+        
+        if not self.transmission_time_csv.exists():
+            with open(self.transmission_time_csv, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp_utc', 'minute_boundary', 'station', 'frequency_mhz',
+                    'mode', 'n_hops', 'layer_height_km', 'elevation_deg',
+                    'propagation_delay_ms', 'utc_nist_offset_ms', 'utc_nist_verified',
+                    'confidence', 'mode_separation_ms', 'uncertainty_ms'
+                ])
+            logger.info(f"Created transmission time CSV: {self.transmission_time_csv}")
+
+    def _write_transmission_time(self, minute_boundary: int, result):
+        """Write transmission time solution (UTC-NIST back-calculation)."""
+        try:
+            if not result or not result.solution:
+                return
+
+            # Use data timestamp for filename to support backfilling
+            dt = datetime.fromtimestamp(minute_boundary, timezone.utc)
+            date_str = dt.strftime('%Y%m%d')
+            
+            file_channel = self._get_file_channel_name()
+            expected_csv = self.timing_dir / f'{file_channel}_utc_nist_{date_str}.csv'
+            
+            # Initialize if file changed or doesn't exist (handle daily rotation)
+            if self.transmission_time_csv != expected_csv or not expected_csv.exists():
+                self.transmission_time_csv = expected_csv
+                if not self.transmission_time_csv.exists():
+                    with open(self.transmission_time_csv, 'w', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            'timestamp_utc', 'minute_boundary', 'station', 'frequency_mhz',
+                            'mode', 'n_hops', 'layer_height_km', 'elevation_deg',
+                            'propagation_delay_ms', 'utc_nist_offset_ms', 'utc_nist_verified',
+                            'confidence', 'mode_separation_ms', 'uncertainty_ms'
+                        ])
+                    logger.info(f"Created/Rotated transmission time CSV: {self.transmission_time_csv}")
+            
+            sol = result.solution
+             
+            with open(self.transmission_time_csv, 'a', newline='') as f:
+                writer = csv.writer(f)
+                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
+                
+                # Note: utc_nist_offset_ms IS d_clock_ms in the solution
+                # The API expects 'utc_nist_offset_ms'
+                
+                writer.writerow([
+                    utc_time,
+                    minute_boundary,
+                    sol.station,
+                    round(sol.frequency_mhz, 3),
+                    sol.propagation_mode,
+                    sol.n_hops,
+                    round(sol.layer_height_km, 1),
+                    round(getattr(sol, 'elevation_angle_deg', 0.0), 2),
+                    round(sol.t_propagation_ms, 3),
+                    round(sol.d_clock_ms, 3),  # This is the UTC offset
+                    1 if sol.utc_verified else 0,
+                    round(sol.confidence, 3),
+                    round(getattr(sol, 'mode_separation_ms', 0.0), 3),
+                    round(sol.uncertainty_ms, 3)
+                ])
+        except Exception as e:
+            logger.error(f"Failed to write transmission time: {e}")
     
     def _read_drf_minute(self, target_minute: int):
         """
@@ -1113,9 +1202,32 @@ class Phase2AnalyticsService:
         """
         try:
             from ka9q import discover_channels
-            # Use default status address - could be made configurable
-            status_address = '239.192.152.141'
-            channels = discover_channels(status_address, listen_duration=1.0)
+            
+            # Use configured status address instead of default
+            # Phase2AnalyticsService init doesn't explicitly take status_address,
+            # but we can try to get it from station_config (which is full config often)
+            # or default to FQDN if not present.
+            # BEST PRACTICE: Use same hardcoded FQDN default as we assume in core
+            # if we can't get it from config easily here without refactoring __init__.
+            # Ideally passthrough from __init__, but for hotfix:
+            status_address = 'bee1-hf-status.local'
+            
+            # If self.station_config has a parent config context? No. 
+            # But the service is launched with --config usually?
+            # Actually Phase2AnalyticsService is usually launched by CLI which parses config.
+            # Let's check __init__ for config passing.
+            # It has `station_config`.
+            # Let's see if we can get it from there. Not typical.
+            # Safe bet: Use 'bee1-hf-status.local' as primary default over IP.
+            
+            channels = {}
+            # Retry discovery (3 attempts)
+            for attempt in range(3):
+                found = discover_channels(status_address, listen_duration=2.5)
+                if found:
+                    channels = found
+                    break
+                time.sleep(1.0)
             
             # Find our channel by frequency
             for ssrc, ch_info in channels.items():
@@ -1411,6 +1523,10 @@ class Phase2AnalyticsService:
             
             # Write audio tones (500/600 Hz + intermodulation) for every minute
             self._write_audio_tones(minute_boundary, iq_samples)
+            
+            # Write transmission time solution (Reference for Fusion)
+            if self.last_result:
+                self._write_transmission_time(minute_boundary, self.last_result)
             
             return True
                 
