@@ -202,15 +202,15 @@ class StreamRecorderV2:
             
             if self._control:
                 # Use ManagedStream for auto-recovery on radiod restart
+                # Let ka9q-python handle SSRC allocation and channel management
+                # Do NOT pass destination - let radiod use its configured default
+                # This ensures consistent SSRC allocation across restarts
                 logger.info(f"{self.config.description}: Using ManagedStream (auto-recovery enabled)")
                 self.stream = ManagedStream(
                     control=self._control,
                     frequency_hz=self.config.frequency_hz,
                     preset=self.config.preset,
                     sample_rate=self.config.sample_rate,
-                    destination=self.config.destination,
-                    encoding=self.config.encoding,
-                    timeout=15.0,
                     on_samples=self._handle_samples,
                     on_stream_dropped=self._handle_stream_dropped,
                     on_stream_restored=self._handle_stream_restored,

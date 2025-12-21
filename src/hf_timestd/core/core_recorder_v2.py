@@ -38,7 +38,7 @@ from typing import Dict, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding, generate_multicast_ip
+from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding
 
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
@@ -127,14 +127,11 @@ class CoreRecorderV2:
         self.station_config = config.get('station', {})
         self.recorder_config = config.get('recorder', {})
         
-        # Generate dedicated multicast IP from station/instrument ID
-        station_id = self.station_config.get('id', 'S000000')
-        instrument_id = self.station_config.get('instrument_id', '0')
-        # Use ka9q-python's deterministic multicast IP generation
-        unique_id = f"TIMESTD:{station_id}:{instrument_id}"
-        mcast_addr = generate_multicast_ip(unique_id)
-        # Use port 5004 for explicit matching with radiod defaults
-        self.data_destination = f"{mcast_addr}:5004"
+        # Let radiod use its configured default destination
+        # Do NOT specify a custom destination - this causes SSRC hash mismatches
+        # and channel proliferation on restarts. ka9q-python's ensure_channel()
+        # handles SSRC allocation deterministically when destination=None.
+        self.data_destination = None
         
         # Channel specs and defaults
         self.channel_specs = config.get('channels', [])
@@ -153,7 +150,6 @@ class CoreRecorderV2:
         self.recorders: Dict[int, StreamRecorderV2] = {}
         
         logger.info(f"CoreRecorderV2: {len(self.channel_specs)} channels configured")
-        logger.info(f"  hf-timestd multicast: {self.data_destination}")
         logger.info(f"  Defaults: preset={self.channel_defaults.get('preset')}, "
                    f"sample_rate={self.channel_defaults.get('sample_rate')}")
         
