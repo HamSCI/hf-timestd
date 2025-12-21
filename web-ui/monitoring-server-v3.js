@@ -4884,7 +4884,8 @@ server.on('upgrade', (request, socket, head) => {
   // Simple audio WebSocket (IQ-derived)
   if (url.pathname.startsWith('/api/v1/audio/simple-ws/')) {
     const channelKey = url.pathname.split('/').pop();
-    const channelName = channelKey.replace(/_/g, ' ');  // Convert back to spaces
+    // Do NOT convert to spaces - filenames on disk use underscores (e.g. CHU_7850.pcm)
+    const channelName = channelKey;
 
     wss.handleUpgrade(request, socket, head, (ws) => {
       console.log(`🔊 Simple audio WebSocket connected: ${channelName}`);
@@ -4896,6 +4897,7 @@ server.on('upgrade', (request, socket, head) => {
       const sessionId = `${channelKey}-${Date.now()}`;
       let lastReadPos = 0;
       let isStreaming = true;
+      let initialized = false;
 
       // Read and stream audio at 100ms intervals
       const streamInterval = setInterval(() => {
@@ -4905,8 +4907,19 @@ server.on('upgrade', (request, socket, head) => {
           if (!fs.existsSync(metaFile)) return;
 
           const metaBuf = fs.readFileSync(metaFile);
+          if (metaBuf.length < 12) return; // Wait for full header
+
           const writePos = metaBuf.readUInt32LE(0);
           const bufferSamples = metaBuf.readUInt32LE(8);
+
+          if (!initialized) {
+            lastReadPos = writePos;
+            initialized = true;
+            console.log(`[Audio] Initialized ${channelName} at ${lastReadPos}`);
+            return;
+          }
+
+          if (!fs.existsSync(pcmFile)) return;
 
           const pcmBuf = fs.readFileSync(pcmFile);
 
@@ -4914,29 +4927,49 @@ server.on('upgrade', (request, socket, head) => {
             ? writePos - lastReadPos
             : (bufferSamples - lastReadPos) + writePos;
 
-          if (samplesToRead > 0 && samplesToRead < bufferSamples) {
-            const startByte = lastReadPos * 2;
-            const endByte = (lastReadPos + samplesToRead) * 2;
+          if (samplesToRead > 0) {
+            // Safety cap
+            if (samplesToRead >= bufferSamples) {
+              console.log(`[Audio] Overrun ${channelName}`);
+              lastReadPos = writePos;
+            } else {
+              const startByte = lastReadPos * 2;
+              const endByte = (lastReadPos + samplesToRead) * 2;
 
-            let audioData = endByte <= pcmBuf.length
-              ? pcmBuf.slice(startByte, endByte)
-              : Buffer.concat([pcmBuf.slice(startByte), pcmBuf.slice(0, endByte - pcmBuf.length)]);
+              let audioData;
+              if (endByte <= pcmBuf.length) {
+                audioData = pcmBuf.slice(startByte, endByte);
+              } else {
+                // Circular wrap
+                const part1 = pcmBuf.slice(startByte);
+                const part2 = pcmBuf.slice(0, endByte - pcmBuf.length);
+                audioData = Buffer.concat([part1, part2]);
+              }
 
-            if (ws.readyState === 1) ws.send(audioData);
-            lastReadPos = writePos;
+              if (ws.readyState === 1) {
+                ws.send(audioData);
+                lastReadPos = writePos;
+              } else {
+                isStreaming = false;
+              }
+            }
           }
-        } catch (err) { /* ignore */ }
-      }, 200); // 200ms chunks = 1600 samples at 8kHz (less CPU overhead)
+        } catch (err) {
+          console.error(`[Audio] Stream error ${channelName}: ${err.message}`);
+        }
+      }, 200);
 
       simpleAudioSessions.set(sessionId, { ws, interval: streamInterval });
 
       ws.on('close', () => {
+        console.log(`[Audio] Closed ${channelName}`);
         isStreaming = false;
         clearInterval(streamInterval);
         simpleAudioSessions.delete(sessionId);
       });
 
-      ws.on('error', () => {
+      ws.on('error', (err) => {
+        console.error(`[Audio] Error ${channelName}:`, err);
         isStreaming = false;
         clearInterval(streamInterval);
         simpleAudioSessions.delete(sessionId);

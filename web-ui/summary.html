@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,7 +12,7 @@
   </script>
   <style>
     /* Page-specific overrides for Summary page */
-    
+
     /* Sections */
     .section {
       background: var(--surface);
@@ -20,7 +21,7 @@
       padding: var(--spacing-lg);
       margin-bottom: var(--spacing-lg);
     }
-    
+
     .section-title {
       font-size: 16px;
       font-weight: 600;
@@ -31,19 +32,19 @@
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
-    
+
     /* Station Info */
     .info-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: var(--spacing-md);
     }
-    
+
     .info-item {
       display: flex;
       flex-direction: column;
     }
-    
+
     .info-label {
       font-size: 11px;
       color: var(--accent-light);
@@ -51,13 +52,13 @@
       letter-spacing: 0.5px;
       margin-bottom: var(--spacing-xs);
     }
-    
+
     .info-value {
       font-size: 16px;
       font-weight: 500;
       color: var(--text-primary);
     }
-    
+
     .mode-badge {
       display: inline-block;
       padding: 4px 12px;
@@ -65,24 +66,24 @@
       font-size: 14px;
       font-weight: 600;
     }
-    
+
     .mode-test {
       background: var(--warning);
       color: white;
     }
-    
+
     .mode-production {
       background: var(--success);
       color: white;
     }
-    
+
     /* Process Status */
     .process-list {
       display: flex;
       flex-direction: column;
       gap: var(--spacing-md);
     }
-    
+
     .process-item {
       display: flex;
       justify-content: space-between;
@@ -92,53 +93,62 @@
       border-radius: var(--radius-md);
       border: 1px solid var(--surface-border);
     }
-    
+
     .process-name {
       font-weight: 600;
       font-size: 15px;
       color: var(--text-primary);
     }
-    
+
     .process-status {
       display: flex;
       align-items: center;
       gap: 20px;
       color: var(--text-secondary);
     }
-    
+
     .status-indicator {
       width: 12px;
       height: 12px;
       border-radius: 50%;
       display: inline-block;
     }
-    
-    .status-running { background: var(--success); box-shadow: 0 0 8px var(--success); }
-    .status-stopped { background: var(--error); }
-    .status-stale { background: var(--warning); }
-    
+
+    .status-running {
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    .status-stopped {
+      background: var(--error);
+    }
+
+    .status-stale {
+      background: var(--warning);
+    }
+
     /* Continuity */
     .continuity-info {
       margin-bottom: var(--spacing-md);
     }
-    
+
     .continuity-stat {
       margin-bottom: var(--spacing-sm);
       font-size: 14px;
       color: var(--text-secondary);
     }
-    
+
     .continuity-label {
       font-weight: 600;
       color: var(--accent-light);
     }
-    
+
     .gap-list {
       margin-top: var(--spacing-md);
       max-height: 200px;
       overflow-y: auto;
     }
-    
+
     .gap-item {
       padding: var(--spacing-sm) var(--spacing-md);
       background: var(--warning-light);
@@ -148,7 +158,7 @@
       font-size: 13px;
       color: var(--text-primary);
     }
-    
+
     /* Storage */
     .storage-bar-container {
       width: 100%;
@@ -159,7 +169,7 @@
       margin: var(--spacing-md) 0;
       border: 1px solid var(--surface-border);
     }
-    
+
     .storage-bar {
       height: 100%;
       background: linear-gradient(90deg, var(--success), var(--warning));
@@ -171,17 +181,17 @@
       font-weight: 600;
       font-size: 13px;
     }
-    
+
     .storage-bar.critical {
       background: linear-gradient(90deg, var(--error), #c0392b);
     }
-    
+
     /* Channel Status Table - Transposed */
     table {
       width: 100%;
       border-collapse: collapse;
     }
-    
+
     thead th {
       background: rgba(139, 92, 246, 0.3);
       color: var(--text-primary);
@@ -192,7 +202,7 @@
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
-    
+
     tbody th {
       background: rgba(15, 23, 42, 0.4);
       color: var(--accent-light);
@@ -202,18 +212,18 @@
       font-size: 13px;
       white-space: nowrap;
     }
-    
+
     tbody tr {
       border-bottom: 1px solid var(--surface-border);
     }
-    
+
     td {
       padding: 10px 8px;
       font-size: 13px;
       text-align: center;
       color: var(--text-primary);
     }
-    
+
     .timing-badge {
       padding: 4px 8px;
       border-radius: 4px;
@@ -221,11 +231,22 @@
       font-weight: 600;
       white-space: nowrap;
     }
-    
-    .timing-tone { background: var(--success-light); color: var(--success); }
-    .timing-ntp { background: var(--warning-light); color: var(--warning); }
-    .timing-wall { background: var(--error); color: white; }
-    
+
+    .timing-tone {
+      background: var(--success-light);
+      color: var(--success);
+    }
+
+    .timing-ntp {
+      background: var(--warning-light);
+      color: var(--warning);
+    }
+
+    .timing-wall {
+      background: var(--error);
+      color: white;
+    }
+
     .listen-button {
       padding: 6px 12px;
       background: var(--accent);
@@ -236,37 +257,45 @@
       font-size: 12px;
       transition: all var(--transition-fast);
     }
-    
+
     .listen-button:hover {
       background: #6366f1;
       transform: translateY(-1px);
     }
-    
+
     .listen-button:active {
       transform: scale(0.95);
     }
-    
+
     .listen-button.playing {
       background: var(--success);
       animation: pulse 1.5s infinite;
       box-shadow: 0 0 12px var(--success);
     }
-    
+
     .listen-button.loading {
       background: var(--warning);
       cursor: wait;
     }
-    
+
     .listen-button.error {
       background: var(--error);
     }
-    
+
     @keyframes pulse {
-      0% { opacity: 1; }
-      50% { opacity: 0.7; }
-      100% { opacity: 1; }
+      0% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.7;
+      }
+
+      100% {
+        opacity: 1;
+      }
     }
-    
+
     /* Audio Player Panel */
     .audio-player-panel {
       position: fixed;
@@ -283,23 +312,23 @@
       min-width: 280px;
       backdrop-filter: blur(8px);
     }
-    
+
     .audio-player-panel.visible {
       display: block;
     }
-    
+
     .audio-player-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 10px;
     }
-    
+
     .audio-player-title {
       font-weight: 600;
       font-size: 14px;
     }
-    
+
     .audio-player-close {
       background: none;
       border: none;
@@ -308,23 +337,23 @@
       font-size: 18px;
       padding: 0 5px;
     }
-    
+
     .audio-player-close:hover {
       color: var(--text-primary);
     }
-    
+
     .audio-player-status {
       font-size: 12px;
       color: var(--text-secondary);
       margin-bottom: var(--spacing-sm);
     }
-    
+
     .audio-player-controls {
       display: flex;
       gap: 10px;
       align-items: center;
     }
-    
+
     .audio-player-controls button {
       padding: 8px 16px;
       border: none;
@@ -332,21 +361,21 @@
       cursor: pointer;
       font-size: 14px;
     }
-    
+
     .audio-stop-btn {
       background: var(--error);
       color: white;
     }
-    
+
     .audio-stop-btn:hover {
       background: #dc2626;
     }
-    
+
     .volume-slider {
       width: 100px;
       accent-color: var(--accent);
     }
-    
+
     /* Footer */
     .update-info {
       text-align: center;
@@ -354,7 +383,7 @@
       color: var(--text-muted);
       font-size: 13px;
     }
-    
+
     /* Loading & Error States - use shared styles */
     h4 {
       color: var(--accent-light);
@@ -364,24 +393,25 @@
     }
   </style>
 </head>
+
 <body>
   <div class="container">
     <!-- Unified Navigation -->
     <div id="timestd-navigation"></div>
-    
+
     <!-- Station Information -->
     <div id="stationInfo"></div>
-    
+
     <div id="content">
       <div class="loading">Loading...</div>
     </div>
-    
+
     <div class="update-info" id="update-info">
-      Last updated: <span id="last-update">Never</span> | 
+      Last updated: <span id="last-update">Never</span> |
       Auto-refresh: <span id="refresh-interval">5s</span>
     </div>
   </div>
-  
+
   <!-- Audio Player Panel -->
   <div id="audio-player" class="audio-player-panel">
     <div class="audio-player-header">
@@ -391,16 +421,16 @@
     <div class="audio-player-status" id="audio-status">Ready</div>
     <div class="audio-player-controls">
       <button class="audio-stop-btn" onclick="timeStdAudio.stop()">⏹ Stop</button>
-      <input type="range" class="volume-slider" id="audio-volume" min="0" max="100" value="80" 
-             onchange="timeStdAudio.setVolume(this.value / 100)">
+      <input type="range" class="volume-slider" id="audio-volume" min="0" max="100" value="80"
+        onchange="timeStdAudio.setVolume(this.value / 100)">
       <span id="audio-volume-label">80%</span>
     </div>
   </div>
-  
+
   <script>
     let refreshTimer = null;
     let refreshInterval = 5000; // 5 seconds
-    
+
     // Format bytes to human readable
     function formatBytes(bytes) {
       if (bytes === 0) return '0 B';
@@ -409,31 +439,31 @@
       const i = Math.floor(Math.log(bytes) / Math.log(k));
       return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
     }
-    
+
     // Format uptime
     function formatUptime(seconds) {
       const days = Math.floor(seconds / 86400);
       const hours = Math.floor((seconds % 86400) / 3600);
       const minutes = Math.floor((seconds % 3600) / 60);
-      
+
       const parts = [];
       if (days > 0) parts.push(`${days}d`);
       if (hours > 0) parts.push(`${hours}h`);
       if (minutes > 0) parts.push(`${minutes}m`);
-      
+
       return parts.join(' ') || '0m';
     }
-    
+
     // Format duration
     function formatDuration(seconds) {
       const hours = Math.floor(seconds / 3600);
       const minutes = Math.floor((seconds % 3600) / 60);
-      
+
       if (hours > 0) return `${hours}h ${minutes}m`;
       if (minutes > 0) return `${minutes}m`;
       return `${seconds}s`;
     }
-    
+
     // Render station info (GPSDO anchor removed - timing now via multi-broadcast fusion)
     function renderStationInfo(station) {
       return `
@@ -474,13 +504,13 @@
         </div>
       `;
     }
-    
+
     // Render process status
     function renderProcesses(processes) {
       const radiod = processes.radiod || {};
       const core = processes.core_recorder || {};
       const analytics = processes.analytics_service || {};
-      
+
       return `
         <div class="section-title">System Status</div>
         
@@ -530,16 +560,16 @@
         </div>
       `;
     }
-    
+
     // Render continuity
     function renderContinuity(continuity) {
       const span = continuity.data_span || {};
       const gaps = continuity.gaps || [];
-      
+
       const startDate = span.start ? UTCTime.formatDateTime(span.start) : 'Unknown';
       const endDate = span.end ? UTCTime.formatDateTime(span.end) : 'Unknown';
       const duration = span.duration_seconds ? formatDuration(span.duration_seconds) : 'Unknown';
-      
+
       let gapsHtml = '';
       if (gaps.length > 0) {
         gapsHtml = '<div class="gap-list">';
@@ -555,7 +585,7 @@
       } else {
         gapsHtml = '<div style="padding: 10px; color: #27ae60;">✓ No system downtime detected</div>';
       }
-      
+
       return `
         <h4 style="margin: 20px 0 10px 0; color: #7f8c8d;">Data Continuity</h4>
         <div class="continuity-info">
@@ -572,12 +602,12 @@
         ${gapsHtml}
       `;
     }
-    
+
     // Render storage
     function renderStorage(storage) {
       const percent = storage.used_percent || 0;
       const critical = percent > 80;
-      
+
       return `
         <h4 style="margin: 20px 0 10px 0; color: #7f8c8d;">Storage</h4>
         <div>
@@ -602,7 +632,7 @@
         </div>
       `;
     }
-    
+
     // Render channel status - TRANSPOSED TABLE
     function renderChannels(channels) {
       // Filter to only valid channel names in canonical STATION_KILOHERTZ format
@@ -612,7 +642,7 @@
         // Accept canonical format (SHARED_10000) or display format (SHARED 10 MHz)
         return /^(SHARED|WWV|CHU)[_ ]/.test(name);
       });
-      
+
       // Build header row (channel names)
       let headerCells = '<th></th>'; // Empty corner cell
       validChannels.forEach(ch => {
@@ -631,25 +661,25 @@
         }
         headerCells += `<th>${displayName}</th>`;
       });
-      
+
       // Build RTP row
       let rtpCells = '<th>RTP Stream</th>';
       validChannels.forEach(ch => {
-        const status = ch.rtp_streaming ? 
-          '<span class="status-indicator status-running"></span>' : 
+        const status = ch.rtp_streaming ?
+          '<span class="status-indicator status-running"></span>' :
           '<span class="status-indicator status-stopped"></span>';
         rtpCells += `<td>${status}</td>`;
       });
-      
+
       // Build SNR row
       let snrCells = '<th>SNR (dB)</th>';
       validChannels.forEach(ch => {
         const snr = ch.snr_db !== null ? ch.snr_db.toFixed(1) : 'N/A';
         snrCells += `<td>${snr}</td>`;
       });
-      
+
       // Time Basis row removed - unified timing from Timing Status panel
-      
+
       // Build Audio row
       let audioCells = '<th>Audio</th>';
       validChannels.forEach(ch => {
@@ -658,7 +688,7 @@
         const buttonClass = isPlaying ? 'listen-button playing' : 'listen-button';
         const buttonIcon = isPlaying ? '🔊' : '🔈';
         const buttonTitle = isPlaying ? 'Click to stop' : `Listen to ${ch.name}`;
-        
+
         audioCells += `
           <td>
             <button class="${buttonClass}" 
@@ -670,7 +700,7 @@
           </td>
         `;
       });
-      
+
       return `
         <div class="section">
           <div class="section-title">Channel Status (9 Channels)</div>
@@ -689,14 +719,14 @@
         </div>
       `;
     }
-    
+
     // Render reception matrix (all 17 broadcasts from 4 stations)
     // Now includes station info (distance, bearing) in column headers
     function renderReceptionMatrix(data, propagation) {
       if (!data || !data.channels || data.channels.length === 0) {
         return '';
       }
-      
+
       // Build station info lookup from propagation paths
       const stationInfo = {};
       if (propagation && propagation.paths) {
@@ -708,7 +738,7 @@
           };
         });
       }
-      
+
       // Helper to build column header with station info
       function stationHeader(station, color) {
         const info = stationInfo[station];
@@ -717,24 +747,24 @@
             '<div style="color: ' + color + '; font-weight: 700; font-size: 14px;">' + station + '</div>' +
             '<div style="color: #94a3b8; font-size: 11px; font-weight: 400;">' + info.distance + '</div>' +
             '<div style="color: #64748b; font-size: 10px; font-weight: 400;">' + info.bearing + '</div>' +
-          '</th>';
+            '</th>';
         }
         return '<th style="text-align: center; color: ' + color + ';">' + station + '</th>';
       }
-      
+
       function snrBadge(snr, detected) {
         if (snr === null || snr === undefined) return '<span style="color: #64748b;">—</span>';
         const color = detected ? '#22c55e' : snr > 20 ? '#3b82f6' : snr > 10 ? '#eab308' : '#ef4444';
         return '<span style="color: ' + color + '; font-weight: 600;">' + snr.toFixed(1) + '</span>';
       }
-      
+
       // Filter to only valid channel names (SHARED, WWV, or CHU prefixed)
       // This removes extraneous entries like "2", "8", "E", "M", "W"
       const validChannels = data.channels.filter(ch => {
         const name = ch.channel || '';
         return name.startsWith('SHARED') || name.startsWith('WWV') || name.startsWith('CHU');
       });
-      
+
       // Helper to convert canonical format to display format
       function toDisplayName(name) {
         const match = name.match(/^(SHARED|WWV|CHU)_(\d+)$/);
@@ -747,12 +777,12 @@
         }
         return name;
       }
-      
+
       const rows = validChannels.map(ch => {
         const isShared = ch.channel.startsWith('SHARED');  // 2.5, 5, 10, 15 MHz (WWV+WWVH+BPM)
         const isWWVOnly = ch.channel.startsWith('WWV');    // 20, 25 MHz (WWV only)
         const isCHU = ch.channel.startsWith('CHU');
-        
+
         // WWV column: SHARED frequencies + WWV-only frequencies
         const wwvCell = (isShared || isWWVOnly) ? snrBadge(ch.wwv_snr_db, ch.wwv_detected) : '—';
         // WWVH column: Only SHARED frequencies (2.5, 5, 10, 15 MHz)
@@ -761,75 +791,75 @@
         const bpmCell = isShared ? snrBadge(ch.bpm_snr_db, ch.bpm_detected) : '—';
         // CHU column: Only CHU frequencies
         const chuCell = isCHU ? snrBadge(ch.chu_snr_db, ch.chu_detected) : '—';
-        
+
         // Display channel name in human-readable format
         const displayName = toDisplayName(ch.channel);
-        
+
         return '<tr>' +
           '<td style="font-weight: 600;">' + displayName + '</td>' +
           '<td style="text-align: center;">' + wwvCell + '</td>' +
           '<td style="text-align: center;">' + wwvhCell + '</td>' +
           '<td style="text-align: center;">' + bpmCell + '</td>' +
           '<td style="text-align: center;">' + chuCell + '</td>' +
-        '</tr>';
+          '</tr>';
       }).join('');
-      
+
       return '<div class="section">' +
         '<div class="section-title">📻 Station-Channel Reception Matrix</div>' +
         '<div style="font-size: 13px; color: #94a3b8; margin-bottom: 15px;">Signal strength (dB) • Distance/bearing from receiver</div>' +
         '<div style="overflow-x: auto;">' +
-          '<table class="channels-table" style="width: 100%;">' +
-            '<thead><tr>' +
-              '<th>Channel</th>' +
-              stationHeader('WWV', '#10b981') +
-              stationHeader('WWVH', '#3b82f6') +
-              stationHeader('BPM', '#ec4899') +
-              stationHeader('CHU', '#f59e0b') +
-            '</tr></thead>' +
-            '<tbody>' + rows + '</tbody>' +
-          '</table>' +
+        '<table class="channels-table" style="width: 100%;">' +
+        '<thead><tr>' +
+        '<th>Channel</th>' +
+        stationHeader('WWV', '#10b981') +
+        stationHeader('WWVH', '#3b82f6') +
+        stationHeader('BPM', '#ec4899') +
+        stationHeader('CHU', '#f59e0b') +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
         '</div>' +
-      '</div>';
+        '</div>';
     }
-    
+
     // Fetch and render summary
     async function updateSummary() {
       try {
         // Fetch all endpoints - use separate try/catch for optional endpoints
         const summaryResponse = await fetch('/api/v1/summary');
         const data = await summaryResponse.json();
-        
+
         // Optional endpoints - default to empty if they fail
         let propagation = { paths: [] };
         let receptionMatrix = { channels: [] };
-        
+
         try {
           const propagationResponse = await fetch('/api/v1/phase2/propagation-paths');
           propagation = await propagationResponse.json();
         } catch (e) { /* use default */ }
-        
+
         try {
           const matrixResponse = await fetch('/api/v1/phase2/reception-matrix');
           receptionMatrix = await matrixResponse.json();
         } catch (e) { /* use default */ }
-        
+
         // Render station info
         document.getElementById('stationInfo').innerHTML = renderStationInfo(data.station);
-        
+
         let html = '';
         html += '<div class="section">';
         html += renderProcesses(data.processes);
         html += renderContinuity(data.continuity);
         html += renderStorage(data.storage);
         html += '</div>';
-        
+
         // Sort channels by frequency before rendering
         const sortedChannels = window.TIMESTD_UTILS.sortByChannelFrequency(data.channels || [], 'name');
         html += renderChannels(sortedChannels);
-        
+
         // Reception matrix (all 17 broadcasts) - now includes station info in headers
         html += renderReceptionMatrix(receptionMatrix, propagation);
-        
+
         document.getElementById('content').innerHTML = html;
         document.getElementById('last-update').textContent = UTCTime.now() + ' UTC';
       } catch (err) {
@@ -842,24 +872,24 @@
         `;
       }
     }
-    
+
     // Auto-refresh
     function startAutoRefresh() {
       stopAutoRefresh();
       refreshTimer = setInterval(updateSummary, refreshInterval);
     }
-    
+
     function stopAutoRefresh() {
       if (refreshTimer) {
         clearInterval(refreshTimer);
         refreshTimer = null;
       }
     }
-    
+
     // ========================================================================
     // Audio Player - WebSocket-based audio streaming
     // ========================================================================
-    
+
     class TimeStdAudioPlayer {
       constructor() {
         this.ws = null;
@@ -867,13 +897,13 @@
         this.currentChannel = null;
         this.volume = 0.8;
         this.isPlaying = false;
-        this.sampleRate = 8000;  // Simple audio buffer sample rate
+        this.sampleRate = 8000;  // Simple audio buffer sample rate (~8kHz)
         this.bufferQueue = [];
         this.nextPlayTime = 0;
-        this.bufferDelay = 2.0;  // 2 second buffer to absorb CPU spikes at minute boundaries
+        this.bufferDelay = 2.0;  // 2 second buffer to absorb CPU spikes
         this.isBuffering = true;
         this.bufferedSeconds = 0;
-        
+
         // UI elements
         this.panelEl = document.getElementById('audio-player');
         this.channelNameEl = document.getElementById('audio-channel-name');
@@ -881,71 +911,97 @@
         this.volumeEl = document.getElementById('audio-volume');
         this.volumeLabelEl = document.getElementById('audio-volume-label');
       }
-      
+
+      // Initialize context immediately on user click
+      initContext() {
+        if (!this.audioContext) {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          this.audioContext = new AudioContext();
+        }
+
+        // Always resume (handling strict autoplay policies)
+        if (this.audioContext.state === 'suspended') {
+          this.audioContext.resume();
+        }
+
+        return this.audioContext;
+      }
+
       async start(channelName) {
         // Stop any existing stream
         if (this.isPlaying) {
-          await this.stop();
+          await this.stop(true); // true = switching channels
         }
-        
+
+        // CRITICAL: Initialize context immediately while we have the user gesture
+        this.initContext();
+
         this.currentChannel = channelName;
         this.updateUI('loading', `Connecting to ${channelName}...`);
         this.showPanel();
         this.updateButton(channelName, 'loading');
-        
+
         try {
-          // Request simple audio stream (IQ-derived)
+          // Request simple audio stream metadata
           const channelKey = channelName.replace(/ /g, '_');
           const response = await fetch(`/api/v1/audio/simple/${channelKey}`);
+
+          if (!response.ok) {
+            throw new Error(`Server returned ${response.status}`);
+          }
+
           const data = await response.json();
-          
+
           if (!data.success) {
             throw new Error(data.error || 'No audio buffer available');
           }
-          
-          this.sampleRate = data.sample_rate || 8000;
-          
-          // Initialize Web Audio API
-          this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
-            sampleRate: this.sampleRate
-          });
-          
+
+          // Note: We ignore data.sample_rate and rely on browser resampling
+          // The backend sends ~8000Hz, browser AudioContext is usually 48000Hz.
+          // We'll let the browser handle resampling during playback or createBuffer.
+          // But strict AudioContext creation must process SAMPLE RATE at creation if desired.
+          // Since we already created it, we assume the browser handles the mismatch
+          // or we re-create if strictly necessary (but better to reuse for autoplay).
+          this.sourceSampleRate = data.sample_rate || 8000;
+
           // Connect WebSocket for audio data
           const wsUrl = data.websocket;
           this.ws = new WebSocket(wsUrl);
           this.ws.binaryType = 'arraybuffer';
-          
+
           this.ws.onopen = () => {
             console.log(`🔊 Simple audio connected for ${channelName}`);
             this.isPlaying = true;
             this.isBuffering = true;
             this.bufferedSeconds = 0;
             this.bufferQueue = [];
-            this.nextPlayTime = this.audioContext.currentTime + this.bufferDelay;
+            this.nextPlayTime = this.audioContext.currentTime + 0.5; // Short startup delay
             this.updateUI('playing', `Buffering ${channelName}...`);
             this.updateButton(channelName, 'playing');
           };
-          
+
           this.ws.onmessage = (event) => {
             if (event.data instanceof ArrayBuffer) {
               this.playAudioChunk(event.data);
             }
           };
-          
+
           this.ws.onclose = () => {
             console.log(`👋 Audio closed for ${channelName}`);
             if (this.isPlaying) {
+              // Only update UI if we didn't initiate the stop
               this.updateUI('stopped', 'Connection closed');
               this.isPlaying = false;
+              this.updateButton(channelName, 'idle');
             }
           };
-          
+
           this.ws.onerror = (error) => {
             console.error('❌ Audio error:', error);
             this.updateUI('error', 'Connection error');
             this.updateButton(channelName, 'error');
           };
-          
+
         } catch (error) {
           console.error('❌ Failed to start audio:', error);
           this.updateUI('error', error.message);
@@ -953,26 +1009,28 @@
           this.currentChannel = null;
         }
       }
-      
+
       playAudioChunk(arrayBuffer) {
         if (!this.audioContext || !this.isPlaying) return;
-        
+
         // Convert Int16 PCM to Float32
         const int16Data = new Int16Array(arrayBuffer);
         const float32Data = new Float32Array(int16Data.length);
-        
+
         for (let i = 0; i < int16Data.length; i++) {
           float32Data[i] = int16Data[i] / 32768.0 * this.volume;
         }
-        
+
         // Create audio buffer
-        const audioBuffer = this.audioContext.createBuffer(1, float32Data.length, this.sampleRate);
+        // Note: we create buffer at source sample rate, connect to destination (system rate)
+        // Web Audio API handles resampling automatically
+        const audioBuffer = this.audioContext.createBuffer(1, float32Data.length, this.sourceSampleRate);
         audioBuffer.getChannelData(0).set(float32Data);
-        
+
         // Queue buffer during initial buffering phase
         this.bufferQueue.push(audioBuffer);
         this.bufferedSeconds += audioBuffer.duration;
-        
+
         // Start playback once we have enough buffered
         if (this.isBuffering && this.bufferedSeconds >= this.bufferDelay) {
           this.isBuffering = false;
@@ -983,83 +1041,85 @@
           this.scheduleBuffer(this.bufferQueue.shift());
         }
       }
-      
+
       drainBufferQueue() {
         // Schedule all queued buffers
         while (this.bufferQueue.length > 0) {
           this.scheduleBuffer(this.bufferQueue.shift());
         }
       }
-      
+
       scheduleBuffer(audioBuffer) {
         if (!audioBuffer || !this.audioContext) return;
-        
+
         const source = this.audioContext.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(this.audioContext.destination);
-        
+
         // Ensure continuous playback with buffer margin
         const now = this.audioContext.currentTime;
         if (this.nextPlayTime < now) {
-          // Fell behind - reset with small delay
+          // Fell behind - reset to now + small margin
           this.nextPlayTime = now + 0.05;
         }
-        
+
         source.start(this.nextPlayTime);
         this.nextPlayTime += audioBuffer.duration;
       }
-      
-      async stop() {
-        // Close WebSocket (server will clean up automatically)
+
+      async stop(switching = false) {
         if (this.ws) {
           this.ws.close();
           this.ws = null;
         }
-        
-        if (this.audioContext) {
-          await this.audioContext.close();
-          this.audioContext = null;
-        }
-        
+
+        // Do NOT close AudioContext here if switching, we want to reuse it
+        // Only close if we are stopping completely to save resources?
+        // Actually, best practice is to keep one AudioContext alive for the app lifecycle
+        // so we don't hit strict browser limits or resume issues.
+
         const oldChannel = this.currentChannel;
         this.isPlaying = false;
         this.currentChannel = null;
-        
-        this.updateUI('stopped', 'Stopped');
-        this.hidePanel();
-        
+
+        if (!switching) {
+          this.updateUI('stopped', 'Stopped');
+          this.hidePanel();
+        }
+
         if (oldChannel) {
           this.updateButton(oldChannel, 'idle');
         }
-        
-        // Refresh to update button states
-        updateSummary();
       }
-      
+
       setVolume(value) {
         this.volume = Math.max(0, Math.min(1, value));
         this.volumeLabelEl.textContent = Math.round(this.volume * 100) + '%';
       }
-      
+
       updateUI(state, message) {
         this.channelNameEl.textContent = this.currentChannel || 'No channel';
         this.statusEl.textContent = message;
-        
+
         // Update status styling
-        this.statusEl.style.color = {
+        const colors = {
           'loading': '#f39c12',
           'playing': '#27ae60',
           'stopped': '#bdc3c7',
           'error': '#e74c3c'
-        }[state] || '#bdc3c7';
+        };
+        this.statusEl.style.color = colors[state] || '#bdc3c7';
       }
-      
+
       updateButton(channelName, state) {
         const channelKey = channelName.replace(/ /g, '_');
         const button = document.getElementById(`audio-btn-${channelKey}`);
         if (!button) return;
-        
+
+        // Reset classes
         button.className = 'listen-button';
+        button.textContent = '🔈';
+
         if (state === 'loading') {
           button.classList.add('loading');
           button.textContent = '⏳';
@@ -1069,27 +1129,21 @@
         } else if (state === 'error') {
           button.classList.add('error');
           button.textContent = '❌';
-          setTimeout(() => {
-            button.className = 'listen-button';
-            button.textContent = '🔈';
-          }, 3000);
-        } else {
-          button.textContent = '🔈';
         }
       }
-      
+
       showPanel() {
         this.panelEl.classList.add('visible');
       }
-      
+
       hidePanel() {
         this.panelEl.classList.remove('visible');
       }
     }
-    
+
     // Global audio player instance
     const timeStdAudio = new TimeStdAudioPlayer();
-    
+
     // Toggle audio for a channel
     function toggleAudio(channelName) {
       if (timeStdAudio.currentChannel === channelName && timeStdAudio.isPlaying) {
@@ -1098,17 +1152,18 @@
         timeStdAudio.start(channelName);
       }
     }
-    
+
     // Initial load
     updateSummary();
     startAutoRefresh();
   </script>
-  
+
   <!-- UTC time utilities (all displays in UTC) -->
   <script src="utils/utc-time.js"></script>
-  
+
   <!-- Load new analytics components -->
   <script src="components/theme-toggle.js"></script>
   <script src="components/navigation.js"></script>
 </body>
+
 </html>
