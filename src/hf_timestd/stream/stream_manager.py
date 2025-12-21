@@ -322,19 +322,14 @@ class StreamManager:
         """Create a new stream in radiod."""
         spec = request.spec
         
-        # Allocate SSRC
-        ssrc = self._allocate_ssrc(spec)
-        
         # Ensure control connection
         if not self._control:
             self._control = RadiodControl(self.radiod_address)
         
-        # Create channel in radiod
+        # Create or reuse channel via ka9q ensure_channel
         try:
-            logger.info(f"Creating stream: {spec} (SSRC {ssrc})")
-            
-            self._control.create_channel(
-                ssrc=ssrc,
+            logger.info(f"Ensuring stream: {spec} → {request.destination or 'radiod default'}")
+            channel_info = self._control.ensure_channel(
                 frequency_hz=spec.frequency_hz,
                 preset=spec.preset,
                 sample_rate=spec.sample_rate,
@@ -343,21 +338,10 @@ class StreamManager:
                 destination=request.destination
             )
             
-            # Wait for radiod to process
-            time.sleep(0.3)
-            
-            # Discover the created channel to get its multicast info
-            channels = discover_channels(self.radiod_address)
-            
-            if ssrc not in channels:
-                raise RuntimeError(f"Channel creation failed: SSRC {ssrc} not found")
-            
-            channel_info = channels[ssrc]
-            
             with self._lock:
                 managed = ManagedStream(
                     spec=spec,
-                    ssrc=ssrc,
+                    ssrc=channel_info.ssrc,
                     multicast_address=channel_info.multicast_address,
                     port=channel_info.port,
                     ref_count=1,
@@ -365,49 +349,25 @@ class StreamManager:
                 )
                 
                 self._streams[spec] = managed
-                self._ssrc_to_spec[ssrc] = spec
+                self._ssrc_to_spec[channel_info.ssrc] = spec
+                self._used_ssrcs.add(channel_info.ssrc)
                 
-                logger.info(f"Created stream: {spec} → {channel_info.multicast_address}:{channel_info.port}")
+                logger.info(
+                    f"Provisioned stream: {spec} "
+                    f"(SSRC {channel_info.ssrc}) → {channel_info.multicast_address}:{channel_info.port}"
+                )
                 
                 return StreamHandle(
                     spec=spec,
                     multicast_address=channel_info.multicast_address,
                     port=channel_info.port,
-                    _ssrc=ssrc,
+                    _ssrc=channel_info.ssrc,
                     _manager=self,
                     _ref_count=1
                 )
                 
         except Exception as e:
-            # Release the SSRC on failure
-            with self._lock:
-                self._used_ssrcs.discard(ssrc)
             raise RuntimeError(f"Failed to create stream: {e}") from e
-    
-    def _allocate_ssrc(self, spec: StreamSpec) -> int:
-        """
-        Allocate an SSRC for a new stream.
-        
-        Strategy: Use deterministic hash of spec, with collision handling.
-        This allows different managers to converge on the same SSRC for
-        identical specs.
-        """
-        with self._lock:
-            # Start with hash-based SSRC (deterministic for same spec)
-            base_ssrc = hash(spec) & 0x7FFFFFFF  # Keep positive, 31 bits
-            
-            # Find unused SSRC
-            ssrc = base_ssrc
-            attempts = 0
-            while ssrc in self._used_ssrcs and attempts < 1000:
-                ssrc = (base_ssrc + attempts) & 0x7FFFFFFF
-                attempts += 1
-            
-            if ssrc in self._used_ssrcs:
-                raise RuntimeError("Failed to allocate SSRC: all candidates in use")
-            
-            self._used_ssrcs.add(ssrc)
-            return ssrc
     
     def _release_handle(self, handle: StreamHandle):
         """Release a handle (called by StreamHandle.release())."""
