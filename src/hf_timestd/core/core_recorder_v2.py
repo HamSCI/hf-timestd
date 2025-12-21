@@ -258,6 +258,8 @@ class CoreRecorderV2:
                 # Defaults are merged with channel-specific config
                 preset = ch_spec.get('preset', self.channel_defaults.get('preset', 'iq'))
                 encoding_val = ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
+                agc_val = ch_spec.get('agc', self.channel_defaults.get('agc', 0))
+                gain_val = ch_spec.get('gain', self.channel_defaults.get('gain', 0.0))
                 
                 # Map string encoding to integer constant
                 if isinstance(encoding_val, str):
@@ -279,6 +281,8 @@ class CoreRecorderV2:
                     ssrc=None,  # Let ManagedStream/Radiod assign or find SSRC
                     frequency_hz=freq,
                     encoding=encoding,
+                    agc_enable=int(agc_val),
+                    gain=float(gain_val),
                     description=ch_spec.get('description', f"{freq/1e6:.3f} MHz"),
                     preset=preset,
                     sample_rate=self.channel_defaults.get('sample_rate', 20000),

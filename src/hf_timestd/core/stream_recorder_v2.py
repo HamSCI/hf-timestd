@@ -51,6 +51,8 @@ class StreamRecorderConfig:
     sample_rate: int = 20000
     preset: str = 'iq'
     encoding: int = 0  # Encoding type (0=NO_ENCODING, 4=F32, etc.)
+    agc_enable: int = 0
+    gain: float = 0.0
     description: str = ""
     
     # Output directories
@@ -211,6 +213,10 @@ class StreamRecorderV2:
                     frequency_hz=self.config.frequency_hz,
                     preset=self.config.preset,
                     sample_rate=self.config.sample_rate,
+                    agc_enable=self.config.agc_enable,
+                    gain=self.config.gain,
+                    encoding=self.config.encoding,
+                    destination=self.config.destination,
                     on_samples=self._handle_samples,
                     on_stream_dropped=self._handle_stream_dropped,
                     on_stream_restored=self._handle_stream_restored,
