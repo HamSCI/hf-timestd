@@ -475,12 +475,14 @@ class ChannelManager:
         # ka9q-radio encoding values (from misc.h):
         # S16 = 0, F32 = 1, OPUS = 2, etc.
         if encoding == 'float':
-            return 1  # F32
+            return 4  # F32 (Encoding.F32)
         elif encoding == 'int16':
-            return 0  # S16
+            return 1  # S16LE (Encoding.S16LE)
+        elif encoding == 'opus':
+            return 3  # OPUS (Encoding.OPUS)
         else:
-            logger.warning(f"Unknown encoding '{encoding}', defaulting to float")
-            return 1
+            logger.warning(f"Unknown encoding '{encoding}', defaulting to float (4)")
+            return 4
     
     def close(self):
         """Close the control connection"""

@@ -215,7 +215,7 @@ class StreamRecorderV2:
                     sample_rate=self.config.sample_rate,
                     agc_enable=self.config.agc_enable,
                     gain=self.config.gain,
-                    encoding=self.config.encoding,
+                    # encoding=self.config.encoding, # Not supported by ManagedStream
                     destination=self.config.destination,
                     on_samples=self._handle_samples,
                     on_stream_dropped=self._handle_stream_dropped,
@@ -381,6 +381,13 @@ class StreamRecorderV2:
         # Update channel info with new values
         self.channel_info = channel
         self.config.ssrc = channel.ssrc
+        
+        # Forward to external callback if provided
+        if self._on_stream_restored:
+            try:
+                self._on_stream_restored(channel)
+            except Exception as e:
+                logger.error(f"Error in stream_restored callback: {e}")
         
         # Forward to external callback if provided
         if self._on_stream_restored:
