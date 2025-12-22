@@ -375,22 +375,10 @@ class CoreRecorderV2:
                         logger.info(f"Created channel {matched_ssrc} with Encoding={encoding}")
                         
                         # Wait for creation to propagate
-                        time.sleep(1.0) # Increased wait time for radiod to register
+                        time.sleep(0.5)
                         
-                        # Resolve the destination of the created channel
-                        # usage: we created it with destination=None, so we need to know what radiod assigned.
-                        # We use discover_channels to find it.
-                        try:
-                             # Quick targeted discovery
-                            new_channels = discover_channels(self.status_address, listen_duration=1.0)
-                            channel_info = new_channels.get(matched_ssrc)
-                            if channel_info and getattr(channel_info, 'multicast_address', None):
-                                use_destination = channel_info.multicast_address
-                                logger.info(f"Resolved destination for new channel {matched_ssrc}: {use_destination}")
-                            else:
-                                logger.warning(f"Could not resolve destination for new channel {matched_ssrc} - using default/None")
-                        except Exception as e:
-                            logger.error(f"Failed to resolve destination for {matched_ssrc}: {e}")
+                        # With RobustManagedStream, we don't need to resolve destination explicitly
+                        # it will find this channel because parameters (freq + encoding=4) match.
                             
                     except Exception as e:
                         logger.error(f"Failed to create channel for {freq}: {e}", exc_info=True)
