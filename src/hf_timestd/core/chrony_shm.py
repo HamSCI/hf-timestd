@@ -199,17 +199,20 @@ class ChronySHM:
             self.count += 1
             
             # Split timestamps into seconds and microseconds
-            # NOTE: clockTimeStamp = system time, receiveTimeStamp = reference time
-            # This matches what chrony expects for offset calculation
-            clock_sec = int(system_time)
-            clock_usec = int((system_time - clock_sec) * 1_000_000)
+            # NOTE: Chrony SHM convention (opposite of NTP):
+            # clockTimeStamp = reference time (true UTC)
+            # receiveTimeStamp = system time (when measurement taken)
+            # Chrony calculates: offset = receiveTimeStamp - clockTimeStamp
+            # So: offset = system_time - reference_time = D_clock ✓
+            clock_sec = int(reference_time)
+            clock_usec = int((reference_time - clock_sec) * 1_000_000)
             
-            recv_sec = int(reference_time)
-            recv_usec = int((reference_time - recv_sec) * 1_000_000)
+            recv_sec = int(system_time)
+            recv_usec = int((system_time - recv_sec) * 1_000_000)
             
             # Nanoseconds for extended precision
-            clock_nsec = int((system_time - clock_sec) * 1_000_000_000) % 1_000_000_000
-            recv_nsec = int((reference_time - recv_sec) * 1_000_000_000) % 1_000_000_000
+            clock_nsec = int((reference_time - clock_sec) * 1_000_000_000) % 1_000_000_000
+            recv_nsec = int((system_time - recv_sec) * 1_000_000_000) % 1_000_000_000
             
             # Pack the SHM structure for 64-bit Linux (96 bytes total)
             # Format: @iiqiiqiiiiii8i with proper alignment

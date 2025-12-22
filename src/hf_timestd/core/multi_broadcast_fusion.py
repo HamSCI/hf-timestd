@@ -1109,6 +1109,9 @@ def run_fusion_service(
     # Only update chrony at this cadence to avoid unnecessary SHM writes
     chrony_poll_interval = 8.0  # seconds (matches "poll 3" in chrony.conf)
     last_chrony_update = 0.0
+    chrony_consecutive_failures = 0
+    chrony_total_writes = 0
+    chrony_failed_writes = 0
     
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
@@ -1166,7 +1169,34 @@ def run_fusion_service(
                         
                         if chrony_shm.update(reference_time, system_time, precision):
                             last_chrony_update = now
-                            logger.debug(f"Chrony SHM updated: ref={reference_time:.6f}, precision={precision}")
+                            chrony_consecutive_failures = 0
+                            chrony_total_writes += 1
+                            logger.info(
+                                f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
+                                f"ref={reference_time:.6f}, sys={system_time:.6f}, "
+                                f"offset={(system_time-reference_time)*1000:+.3f}ms, precision={precision}"
+                            )
+                        else:
+                            chrony_consecutive_failures += 1
+                            chrony_failed_writes += 1
+                            logger.error(
+                                f"Chrony SHM write failed (consecutive failures: {chrony_consecutive_failures}, "
+                                f"total: {chrony_failed_writes}/{chrony_total_writes + chrony_failed_writes})"
+                            )
+                            if chrony_consecutive_failures >= 5:
+                                logger.critical(
+                                    f"Chrony SHM unavailable after {chrony_consecutive_failures} consecutive failures! "
+                                    f"System clock discipline may be degraded."
+                                )
+                            # Try to reconnect on next iteration
+                            if chrony_consecutive_failures >= 3:
+                                try:
+                                    chrony_shm.disconnect()
+                                    if chrony_shm.connect():
+                                        logger.warning("Chrony SHM reconnected successfully")
+                                        chrony_consecutive_failures = 0
+                                except Exception as e:
+                                    logger.error(f"Failed to reconnect Chrony SHM: {e}")
             
             time.sleep(interval_sec)
             

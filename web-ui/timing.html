@@ -893,8 +893,31 @@
                 if (autoRefreshInterval) clearInterval(autoRefreshInterval);
 
                 autoRefreshInterval = setInterval(async () => {
-                    await loadDashboard();
+                    // Update data without destroying DOM
+                    await updateDashboardData();
                 }, 30000); // Refresh every 30 seconds
+            }
+
+            async function updateDashboardData() {
+                try {
+                    // Fetch latest data without re-rendering entire dashboard
+                    const [phase2Status, fusionData, chronyData] = await Promise.all([
+                        fetch('/api/v1/timing/phase2-status').then(r => r.json()).catch(() => ({ available: false })),
+                        fetch('/api/v1/timing/fusion').then(r => r.json()).catch(() => ({ status: 'no_data' })),
+                        fetch('/api/v1/system/chrony').then(r => r.json()).catch(() => ({ available: false }))
+                    ]);
+
+                    // Update global data
+                    window.phase2ChannelStatus = phase2Status;
+                    window.fusionData = fusionData;
+                    window.chronyData = chronyData;
+
+                    // Refresh charts with new data (without destroying DOM)
+                    loadCharts();
+                    startCountdown();
+                } catch (error) {
+                    console.error('Error updating dashboard data:', error);
+                }
             }
 
             async function loadDashboard() {
@@ -2365,6 +2388,7 @@
             // Track user's chart selections to preserve across refresh
             let userSelectedChannel = null;
             let userSelectedHours = null;
+            let userSelectedDate = null;
 
             function loadCharts() {
                 // Initialize date picker
@@ -2389,6 +2413,7 @@
                     loadDClockChart();
                 }
                 loadFusionChart();
+                loadAdvancedVisualizations();
             }
 
             function onDateChanged() {
@@ -3051,12 +3076,12 @@
             // ================================================================
             // Advanced Timing Visualization Functions
             // ================================================================
-            
+
             let kalmanChart = null;
             let constellationChart = null;
             let probabilityChart = null;
             let fusionCalibration = null;
-            
+
             async function loadAdvancedVisualizations() {
                 try {
                     await loadFusionCalibration();
@@ -3069,7 +3094,7 @@
                     console.error('Error loading advanced visualizations:', err);
                 }
             }
-            
+
             async function loadFusionCalibration() {
                 try {
                     const response = await fetch('/api/v1/timing/fusion');
@@ -3081,26 +3106,26 @@
                     console.error('Error loading fusion calibration:', err);
                 }
             }
-            
+
             async function loadKalmanFunnel() {
                 const container = document.getElementById('kalman-funnel-chart');
                 if (!container) return;
-                
+
                 const minutesSelect = document.getElementById('funnel-minutes');
-                const minutes = minutesSelect ? minutesSelect.value : 1440;
-                
+                const minutes = minutesSelect ? parseInt(minutesSelect.value) : 1440;
+
                 try {
-                    const response = await fetch('/api/v1/timing/fusion');
+                    const response = await fetch(`/api/v1/timing/kalman-funnel?minutes=${minutes}`);
                     const fusionData = await response.json();
-                    
+
                     if (!fusionData.history || fusionData.history.length === 0) {
                         container.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #64748b;">No fusion data available</div>';
                         return;
                     }
-                    
+
                     const cutoffTime = Date.now() / 1000 - (parseInt(minutes) * 60);
                     const filteredHistory = fusionData.history.filter(p => p.timestamp >= cutoffTime);
-                    
+
                     const points = filteredHistory.map(p => ({
                         timestamp: p.timestamp,
                         offset_ms: p.d_clock_fused_ms,
@@ -3109,44 +3134,44 @@
                         channel: 'Fusion',
                         station: 'FUSED'
                     }));
-                    
+
                     if (points.length === 0) {
                         container.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #64748b;">No data in selected time window</div>';
                         return;
                     }
-                    
+
                     if (!kalmanChart) {
                         kalmanChart = new KalmanFunnelChart('kalman-funnel-chart', {
                             timeWindowMinutes: parseInt(minutes),
                             yAxisRange: [-5, 5]
                         });
                     }
-                    
+
                     kalmanChart.update(points);
                 } catch (err) {
                     console.error('Error loading Kalman funnel:', err);
                     container.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #ef4444;">Error: ${err.message}</div>`;
                 }
             }
-            
+
             async function loadConstellation() {
                 const container = document.getElementById('constellation-chart');
                 if (!container) return;
-                
+
                 try {
                     if (!constellationChart) {
                         constellationChart = new ConstellationRadar('constellation-chart', {
                             maxRadius: 3
                         });
                     }
-                    
+
                     const fusionResponse = await fetch('/api/v1/timing/fusion');
                     const fusionData = await fusionResponse.json();
                     const calibration = fusionData.calibration || {};
-                    
+
                     const response = await fetch('/api/v1/timing/constellation');
                     const data = await response.json();
-                    
+
                     if (data && data.stations) {
                         data.stations = data.stations.map(st => {
                             const stationCal = calibration[st.base_station];
@@ -3157,7 +3182,7 @@
                             };
                         });
                     }
-                    
+
                     constellationChart.update(data || { stations: [] });
                 } catch (err) {
                     console.error('Error loading constellation:', err);
@@ -3166,16 +3191,16 @@
                     }
                 }
             }
-            
+
             async function loadProbabilityPeak() {
                 const container = document.getElementById('probability-peak-chart');
                 const stateIndicator = document.getElementById('consensus-state');
                 if (!container) return;
-                
+
                 try {
                     const response = await fetch('/api/v1/timing/fusion');
                     const fusionData = await response.json();
-                    
+
                     if (!fusionData.history || fusionData.history.length === 0) {
                         container.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #64748b;">No fusion data available</div>';
                         if (stateIndicator) {
@@ -3185,14 +3210,14 @@
                         }
                         return;
                     }
-                    
+
                     const cutoffTime = Date.now() / 1000 - 600;
                     const recentHistory = fusionData.history.filter(p => p.timestamp >= cutoffTime);
-                    
+
                     const uncertainties = recentHistory.map(p => p.uncertainty_ms || 3);
                     const avgUncertainty = uncertainties.reduce((a, b) => a + b, 0) / uncertainties.length;
                     const state = avgUncertainty < 2 ? 'LOCKED' : avgUncertainty < 4 ? 'CONVERGING' : 'DIVERGENT';
-                    
+
                     if (stateIndicator) {
                         const stateStyles = {
                             'LOCKED': { bg: 'rgba(34,197,94,0.2)', color: '#22c55e', text: '✓ Locked' },
@@ -3204,21 +3229,21 @@
                         stateIndicator.style.background = style.bg;
                         stateIndicator.style.color = style.color;
                     }
-                    
+
                     const estimates = recentHistory.map(p => ({
                         offset: p.d_clock_fused_ms,
                         uncertainty: p.uncertainty_ms || 1.0,
                         station: 'FUSED',
                         weight: 1.0
                     }));
-                    
+
                     if (!probabilityChart) {
                         probabilityChart = new ProbabilityPeak('probability-peak-chart', {
                             xRange: [-3, 3],
                             bandwidth: 0.3
                         });
                     }
-                    
+
                     probabilityChart.update(estimates);
                 } catch (err) {
                     console.error('Error loading probability peak:', err);
@@ -3236,7 +3261,7 @@
         // Initialize after all dependencies are loaded
         loadDashboard();
         startAutoRefresh();
-        
+
         // Load advanced visualizations after a short delay to ensure DOM is ready
         setTimeout(loadAdvancedVisualizations, 500);
     </script>

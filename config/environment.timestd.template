@@ -18,38 +18,38 @@
 # ===========================================================================
 # Values: "test" or "production"
 #   test:       /tmp/timestd-test, runs via scripts, development
-#   production: /var/lib/hf-timestd, runs via systemd, 24/7 operation
-TIMESTD_MODE=test
+#   production: /var/lib/timestd, runs via systemd, 24/7 operation
+TIMESTD_MODE=production
 
 # ===========================================================================
 # PATH CONFIGURATION
 # ===========================================================================
 # Data root directory (where all IQ data, analytics are stored)
 #   test:       /tmp/timestd-test
-#   production: /var/lib/hf-timestd
-TIMESTD_DATA_ROOT=/tmp/timestd-test
+#   production: /var/lib/timestd
+TIMESTD_DATA_ROOT=/var/lib/timestd
 
 # Log directory (FHS standard: /var/log/<app>/ for production)
 #   test:       /tmp/timestd-test/logs
 #   production: /var/log/hf-timestd
-TIMESTD_LOG_DIR=/tmp/timestd-test/logs
+TIMESTD_LOG_DIR=/var/log/hf-timestd
 
 # Configuration file path
 #   test:       $PROJECT_DIR/config/timestd-config.toml
 #   production: /etc/hf-timestd/timestd-config.toml
-TIMESTD_CONFIG=/home/wsprdaemon/grape-recorder/config/timestd-config.toml
+TIMESTD_CONFIG=/etc/hf-timestd/timestd-config.toml
 
 # ===========================================================================
 # INSTALLATION PATHS
 # ===========================================================================
 # Python virtual environment (created during installation)
-TIMESTD_VENV=/home/wsprdaemon/grape-recorder/venv
+TIMESTD_VENV=/opt/hf-timestd/venv
 
 # Project/source directory
-TIMESTD_PROJECT=/home/wsprdaemon/grape-recorder
+TIMESTD_PROJECT=/opt/hf-timestd
 
 # Web UI directory
-TIMESTD_WEBUI=/home/wsprdaemon/grape-recorder/web-ui
+TIMESTD_WEBUI=/opt/hf-timestd/web-ui
 
 # ===========================================================================
 # LOGGING
