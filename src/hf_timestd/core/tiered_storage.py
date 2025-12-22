@@ -56,7 +56,7 @@ class TieredStorageConfig:
     """Configuration for tiered storage."""
     # Paths
     hot_buffer_root: Path = Path('/dev/shm/timestd')
-    cold_buffer_root: Path = Path('/var/lib/timestd')
+    cold_buffer_root: Path  # No default - must be provided from config
     
     # Auto-configuration
     auto_configure: bool = True  # Auto-detect RAM and set hot_minutes
@@ -388,9 +388,9 @@ def get_tiered_storage_manager(
 
 
 def init_tiered_storage(
+    cold_buffer_root: str,  # Required - must be provided from config
     num_channels: int = 9,
     hot_buffer_root: str = '/dev/shm/timestd',
-    cold_buffer_root: str = '/var/lib/timestd',
     ram_percent: float = DEFAULT_RAM_PERCENT,
     auto_start: bool = True
 ) -> TieredStorageManager:

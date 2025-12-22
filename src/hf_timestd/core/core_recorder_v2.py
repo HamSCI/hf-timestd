@@ -130,7 +130,14 @@ class CoreRecorderV2:
         # Let radiod use its configured default destination, OR force one if missing.
         # Logic update: We default to the standard multicast group to ensuring functional channels
         # when radiod doesn't auto-assign one for F32.
-        self.data_destination = config.get('radiod_multicast_group', '239.103.26.231:5004')
+        self.data_destination = config.get('radiod_multicast_group')
+        if not self.data_destination:
+            # Try to get from individual channel configs if any (though usually global)
+            # or default to a configurable system-wide default if we must.
+            # For now, if None, ka9q-python's RadiodStream will let radiod decide or fail gracefully.
+            logger.info("No explicit radiod_multicast_group in config, letting radiod decide destination")
+        else:
+            logger.info(f"Using configured multicast destination: {self.data_destination}")
         
         # Channel specs and defaults
         self.channel_specs = config.get('channels', [])
@@ -539,12 +546,10 @@ def main():
         format='%(asctime)s %(levelname)s %(name)s: %(message)s'
     )
     
-    # Determine output directory based on mode
-    mode = config.get('recorder', {}).get('mode', 'test')
-    if mode == 'test':
-        output_dir = config.get('recorder', {}).get('test_data_root', '/tmp/timestd-test')
-    else:
-        output_dir = config.get('recorder', {}).get('production_data_root', '/var/lib/timestd')
+    # Use paths.py for consistent, mode-aware path resolution
+    from ..paths import load_paths_from_config
+    paths = load_paths_from_config(args.config)
+    output_dir = str(paths.data_root)
     
     # Build recorder config
     recorder_section = config.get('recorder', {})

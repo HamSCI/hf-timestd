@@ -2493,8 +2493,8 @@ app.get('/api/v1/timing/health-summary', async (req, res) => {
  */
 app.get('/api/v1/timing/fusion', async (req, res) => {
   try {
-    const fusionCsv = join(paths.dataRoot, 'phase2', 'fusion', 'fused_d_clock.csv');
-    const calibrationJson = join(paths.dataRoot, 'state', 'broadcast_calibration.json');
+    const fusionCsv = paths.getFusedClockFile();
+    const calibrationJson = paths.getBroadcastCalibrationFile();
 
     const parseFloatField = (value) => {
       if (value === undefined || value === null || value === '') return null;

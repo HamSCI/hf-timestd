@@ -11,19 +11,18 @@ Type=forking
 RemainAfterExit=yes
 
 # User/Group - same as core recorder
-User=hf-timestd
-Group=hf-timestd
+User=mjh
+Group=mjh
 
 # Environment from file (set by install.sh)
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Working directory
-WorkingDirectory=${TIMESTD_PROJECT}
+WorkingDirectory=/opt/hf-timestd
 
-# Analytics service launcher script
-# This starts all 9 channel analyzers + multi-broadcast fusion as background processes
-ExecStart=${TIMESTD_PROJECT}/scripts/timestd-analytics.sh start ${TIMESTD_CONFIG}
-ExecStop=${TIMESTD_PROJECT}/scripts/timestd-analytics.sh stop
+# Use the shell script that starts all 9 channel analyzers + fusion
+ExecStart=/opt/hf-timestd/scripts/timestd-analytics.sh start /etc/hf-timestd/timestd-config.toml
+ExecStop=/opt/hf-timestd/scripts/timestd-analytics.sh stop
 
 # Restart if the launcher fails
 Restart=on-failure
@@ -43,12 +42,12 @@ MemoryMax=4G
 
 # Security hardening
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
 
-# Paths we need access to
-ReadWritePaths=/var/lib/timestd /var/log/timestd /dev/shm/timestd
+# Paths we need write access to
+ReadWritePaths=/var/lib/timestd /var/log/hf-timestd /dev/shm/timestd
 ReadOnlyPaths=/etc/hf-timestd
 
 [Install]

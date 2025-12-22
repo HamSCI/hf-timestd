@@ -37,6 +37,7 @@ if [ -z "$ACTION" ]; then
 fi
 
 DATA_ROOT=$(get_data_root "$CONFIG")
+LOG_DIR=$(get_log_dir "$CONFIG")
 
 case $ACTION in
 start)
@@ -76,7 +77,7 @@ start)
     fi
     
     # Create directories
-    mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/state" "$DATA_ROOT/status"
+    mkdir -p "$LOG_DIR" "$DATA_ROOT/state" "$DATA_ROOT/status"
     mkdir -p "$DATA_ROOT/phase2"
     cd "$PROJECT_DIR"
     
@@ -100,7 +101,7 @@ start)
           --receiver-name "HF-TimeStd" \
           --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
           $COORD_ARGS $TIERED_ARGS \
-          > "$DATA_ROOT/logs/phase2-shared${freq_mhz}.log" 2>&1 &
+          > "$LOG_DIR/phase2-shared${freq_mhz}.log" 2>&1 &
         
         sleep 0.2
     done
@@ -125,7 +126,7 @@ start)
           --receiver-name "HF-TimeStd" \
           --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
           $COORD_ARGS $TIERED_ARGS \
-          > "$DATA_ROOT/logs/phase2-wwv${freq_mhz}.log" 2>&1 &
+          > "$LOG_DIR/phase2-wwv${freq_mhz}.log" 2>&1 &
         
         sleep 0.2
     done
@@ -150,7 +151,7 @@ start)
           --receiver-name "HF-TimeStd" \
           --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
           $COORD_ARGS $TIERED_ARGS \
-          > "$DATA_ROOT/logs/phase2-chu${freq_mhz}.log" 2>&1 &
+          > "$LOG_DIR/phase2-chu${freq_mhz}.log" 2>&1 &
         
         sleep 0.2
     done
@@ -168,10 +169,10 @@ start)
       --interval 60.0 \
       --log-level INFO \
       --enable-chrony \
-      > "$DATA_ROOT/logs/phase2-fusion.log" 2>&1 &
+      > "$LOG_DIR/phase2-fusion.log" 2>&1 &
     echo "   🔀 Started Multi-Broadcast Fusion (17 broadcasts → UTC(NIST) → Chrony SHM)"
     
-    echo "   📄 Logs: $DATA_ROOT/logs/phase2-*.log"
+    echo "   📄 Logs: $LOG_DIR/phase2-*.log"
     echo "   📊 Output: $DATA_ROOT/phase2/{CHANNEL}/clock_offset/"
     echo "   🎯 Fusion: $DATA_ROOT/phase2/fusion/fused_d_clock.csv"
     ;;

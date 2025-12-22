@@ -130,9 +130,9 @@ class CoreRecorder:
             num_channels = len(self.channel_specs)
             
             self._tiered_manager = init_tiered_storage(
+                cold_buffer_root=str(self.output_dir),
                 num_channels=num_channels,
                 hot_buffer_root=hot_buffer_root,
-                cold_buffer_root=str(self.output_dir),
                 ram_percent=ram_percent,
                 auto_start=True
             )

@@ -320,8 +320,11 @@ class TimeStdPaths:
         return self.get_analytics_dir(channel_name) / 'test_signal'
     
     def get_timing_dir(self, channel_name: str) -> Path:
-        """DEPRECATED: Use get_clock_offset_dir() instead."""
-        return self.get_analytics_dir(channel_name) / 'timing'
+        """Get Phase 2 timing results directory.
+        
+        Returns: {data_root}/phase2/{CHANNEL}/timing/
+        """
+        return self.get_phase2_dir(channel_name) / 'timing'
     
     def get_quality_dir(self, channel_name: str) -> Path:
         """DEPRECATED: Use get_channel_quality_dir() instead."""

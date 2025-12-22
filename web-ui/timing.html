@@ -3118,21 +3118,21 @@
                     const response = await fetch(`/api/v1/timing/kalman-funnel?minutes=${minutes}`);
                     const fusionData = await response.json();
 
-                    if (!fusionData.history || fusionData.history.length === 0) {
+                    if (!fusionData.points || fusionData.points.length === 0) {
                         container.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #64748b;">No fusion data available</div>';
                         return;
                     }
 
                     const cutoffTime = Date.now() / 1000 - (parseInt(minutes) * 60);
-                    const filteredHistory = fusionData.history.filter(p => p.timestamp >= cutoffTime);
+                    const filteredHistory = fusionData.points.filter(p => p.timestamp >= cutoffTime);
 
                     const points = filteredHistory.map(p => ({
                         timestamp: p.timestamp,
-                        offset_ms: p.d_clock_fused_ms,
+                        offset_ms: p.offset_ms,
                         uncertainty_ms: p.uncertainty_ms || 1.0,
-                        status: p.uncertainty_ms < 2.0 ? 'LOCKED' : 'HOLD',
-                        channel: 'Fusion',
-                        station: 'FUSED'
+                        status: p.status || (p.uncertainty_ms < 2.0 ? 'LOCKED' : 'HOLD'),
+                        channel: p.channel || 'Fusion',
+                        station: p.station || 'FUSED'
                     }));
 
                     if (points.length === 0) {

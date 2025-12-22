@@ -404,6 +404,33 @@ class TimeStdPaths {
         return join(this.getPhase2Dir(channelName), 'discrimination');
     }
 
+    /**
+     * Get multi-broadcast fusion directory.
+     * 
+     * @returns {string} Path: {data_root}/phase2/fusion/
+     */
+    getFusionDir() {
+        return join(this.getPhase2Root(), 'fusion');
+    }
+
+    /**
+     * Get fused clock CSV file path.
+     * 
+     * @returns {string} Path: {data_root}/phase2/fusion/fused_d_clock.csv
+     */
+    getFusedClockFile() {
+        return join(this.getFusionDir(), 'fused_d_clock.csv');
+    }
+
+    /**
+     * Get broadcast calibration JSON file path.
+     * 
+     * @returns {string} Path: {data_root}/state/broadcast_calibration.json
+     */
+    getBroadcastCalibrationFile() {
+        return join(this.getStateDir(), 'broadcast_calibration.json');
+    }
+
     // Phase 3 products are handled externally.
 
     // ========================================================================

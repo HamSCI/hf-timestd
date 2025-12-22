@@ -1,31 +1,23 @@
 [Unit]
-Description=HF Time Standard Web UI
+Description=TimeStd Recorder Web UI
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target timestd-core-recorder.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-
-# User/Group - same as other services
-User=hf-timestd
-Group=hf-timestd
-
-# Environment from file
-# Try new path first, fall back to legacy
+User=mjh
+Group=mjh
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Node.js production settings
 Environment="NODE_ENV=production"
 Environment="PORT=3000"
 
-# Working directory
-WorkingDirectory=${TIMESTD_WEBUI}
+WorkingDirectory=/opt/hf-timestd/web-ui
 
-# Start command - monitoring-server-v3.js reads config from TIMESTD_CONFIG
 ExecStart=/usr/bin/node monitoring-server-v3.js
 
-# Restart policy
 Restart=on-failure
 RestartSec=10
 StartLimitInterval=300
@@ -33,30 +25,24 @@ StartLimitBurst=5
 
 # Resource limits
 MemoryMax=512M
-CPUQuota=25%
 
 # Security hardening
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
 
-# Paths - read-only access to data, read-write for web-ui data dir
-ReadWritePaths=/var/lib/timestd /var/log/timestd ${TIMESTD_WEBUI}/data
+# Paths we need access to
+ReadWritePaths=/var/lib/timestd /var/log/hf-timestd /dev/shm/timestd
 ReadOnlyPaths=/etc/hf-timestd
 
-# Network - bind to port 3000
+# Network access
 PrivateNetwork=false
 
 # Logging
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/hf-timestd/web-ui.log
+StandardError=inherit
 SyslogIdentifier=timestd-web-ui
-
-# Process management
-KillMode=mixed
-KillSignal=SIGTERM
-TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
