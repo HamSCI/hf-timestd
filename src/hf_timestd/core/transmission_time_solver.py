@@ -1081,8 +1081,8 @@ class TransmissionTimeSolver:
         return SolverResult(
             arrival_rtp=arrival_rtp,
             emission_rtp=arrival_rtp,
-            emission_offset_ms=0.0,
-            propagation_delay_ms=0.0,
+            emission_offset_ms=None,     # Changed from 0.0
+            propagation_delay_ms=None,   # Changed from 0.0
             mode=PropagationMode.UNKNOWN,
             mode_name="Unknown",
             n_hops=0,

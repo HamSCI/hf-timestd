@@ -43,7 +43,7 @@ class KalmanFunnelChart {
      */
     update(points) {
         if (!points || points.length === 0) return;
-        
+
         this.data = points;
         this.render();
     }
@@ -56,22 +56,22 @@ class KalmanFunnelChart {
         const offsets = this.data.map(p => p.offset_ms);
         const upperBound = this.data.map(p => p.offset_ms + p.uncertainty_ms);
         const lowerBound = this.data.map(p => p.offset_ms - p.uncertainty_ms);
-        
+
         // Detect anomalies (points outside previous funnel)
         const anomalies = this.detectAnomalies();
-        
+
         // Build traces
         const traces = [];
-        
+
         // Confidence band (the "funnel")
         // We need to separate LOCKED and HOLD segments for different colors
         const segments = this.segmentByStatus();
-        
+
         segments.forEach((segment, idx) => {
             const segmentTimes = segment.points.map(p => new Date(p.timestamp * 1000).toISOString());
             const segmentUpper = segment.points.map(p => p.offset_ms + p.uncertainty_ms);
             const segmentLower = segment.points.map(p => p.offset_ms - p.uncertainty_ms);
-            
+
             // Upper bound line (invisible, for fill reference)
             traces.push({
                 x: segmentTimes,
@@ -82,7 +82,7 @@ class KalmanFunnelChart {
                 hoverinfo: 'skip',
                 name: `upper_${idx}`
             });
-            
+
             // Lower bound with fill to upper
             traces.push({
                 x: segmentTimes,
@@ -96,7 +96,7 @@ class KalmanFunnelChart {
                 hoverinfo: 'skip'
             });
         });
-        
+
         // The "truth" line (actual offset)
         traces.push({
             x: timestamps,
@@ -106,7 +106,7 @@ class KalmanFunnelChart {
             line: { color: this.options.lineColor, width: 2 },
             hovertemplate: '%{y:.3f} ms<br>%{x}<extra></extra>'
         });
-        
+
         // Anomaly markers
         if (anomalies.length > 0) {
             traces.push({
@@ -122,7 +122,7 @@ class KalmanFunnelChart {
                 hovertemplate: 'ANOMALY<br>%{y:.3f} ms<br>%{x}<extra></extra>'
             });
         }
-        
+
         // Zero reference line
         traces.push({
             x: [timestamps[0], timestamps[timestamps.length - 1]],
@@ -157,7 +157,8 @@ class KalmanFunnelChart {
             },
             yaxis: {
                 title: { text: 'Offset from UTC (ms)', font: { color: '#94a3b8' } },
-                range: this.options.yAxisRange,
+                // Auto-scale based on data range with 20% padding
+                autorange: true,
                 gridcolor: '#334155',
                 tickcolor: '#64748b',
                 tickfont: { color: '#94a3b8' },
@@ -198,7 +199,7 @@ class KalmanFunnelChart {
             const curr = this.data[i];
             const prevUpper = prev.offset_ms + prev.uncertainty_ms;
             const prevLower = prev.offset_ms - prev.uncertainty_ms;
-            
+
             if (curr.offset_ms > prevUpper || curr.offset_ms < prevLower) {
                 anomalies.push(curr);
             }
@@ -209,7 +210,7 @@ class KalmanFunnelChart {
     segmentByStatus() {
         const segments = [];
         let currentSegment = null;
-        
+
         this.data.forEach(point => {
             const status = point.status || 'HOLD';
             if (!currentSegment || currentSegment.status !== status) {
@@ -223,7 +224,7 @@ class KalmanFunnelChart {
             }
             currentSegment.points.push(point);
         });
-        
+
         return segments.filter(s => s.points.length > 0);
     }
 }
@@ -250,7 +251,7 @@ class ConstellationRadar {
             fairThreshold: options.fairThreshold || 5, // ms
             ...options
         };
-        
+
         // Fixed station azimuths from receiver at EM38ww (38.9°N, 92.2°W)
         // Calculated using great circle bearings to transmitter sites
         this.stationVectors = {
@@ -259,7 +260,7 @@ class ConstellationRadar {
             'CHU': { azimuth: 57, label: 'CHU', color: '#22c55e' },     // Ottawa, Canada (NE)
             'BPM': { azimuth: 342, label: 'BPM', color: '#f97316' }     // Pucheng, China (NNW)
         };
-        
+
         this.chart = null;
     }
 
@@ -277,7 +278,7 @@ class ConstellationRadar {
 
         const traces = [];
         const maxR = this.options.maxRadius;
-        
+
         // 1. Draw the three fixed station direction vectors (always visible)
         Object.entries(this.stationVectors).forEach(([key, vec]) => {
             // Direction line from center to edge
@@ -286,8 +287,8 @@ class ConstellationRadar {
                 mode: 'lines',
                 r: [0, maxR],
                 theta: [vec.azimuth, vec.azimuth],
-                line: { 
-                    color: vec.color, 
+                line: {
+                    color: vec.color,
                     width: 2,
                     dash: 'dot'
                 },
@@ -295,7 +296,7 @@ class ConstellationRadar {
                 showlegend: true,
                 hoverinfo: 'skip'
             });
-            
+
             // Station label at the edge
             traces.push({
                 type: 'scatterpolar',
@@ -308,13 +309,13 @@ class ConstellationRadar {
                 hoverinfo: 'skip'
             });
         });
-        
+
         // 2. Group measurements by base station and place pucks on each vector line
         const activeStations = stations.filter(s => s.active !== false);
-        
+
         // Group by base station (WWV, WWVH, CHU, BPM)
         const stationGroups = { 'WWV': [], 'WWVH': [], 'CHU': [], 'BPM': [] };
-        
+
         activeStations.forEach(station => {
             const stationUpper = (station.base_station || station.name || '').toUpperCase();
             if (stationUpper.includes('WWVH')) {
@@ -327,21 +328,21 @@ class ConstellationRadar {
                 stationGroups['BPM'].push(station);
             }
         });
-        
+
         // ALWAYS place a puck for each station (4 pucks total: WWV, WWVH, CHU, BPM)
         Object.entries(this.stationVectors).forEach(([baseStation, vec]) => {
             const measurements = stationGroups[baseStation] || [];
-            
+
             let r, errorColor, size, hoverText;
-            
+
             if (measurements.length > 0) {
                 // Use the best (lowest error) measurement for this station
                 measurements.sort((a, b) => Math.abs(a.error_ms) - Math.abs(b.error_ms));
                 const best = measurements[0];
-                
+
                 const error = Math.abs(best.error_ms);
                 r = Math.min(error, maxR);
-                
+
                 // Color by error magnitude
                 if (error < this.options.goodThreshold) {
                     errorColor = '#22c55e'; // Green - good
@@ -350,14 +351,14 @@ class ConstellationRadar {
                 } else {
                     errorColor = '#ef4444'; // Red - poor/multipath
                 }
-                
+
                 // Size based on SNR
                 size = Math.max(14, Math.min(28, best.snr || 15));
-                
+
                 hoverText = `<b>${baseStation}</b><br>` +
-                           `Channel: ${best.channel || best.name}<br>` +
-                           `Error: ${best.error_ms.toFixed(2)} ms<br>` +
-                           `SNR: ${(best.snr || 0).toFixed(1)} dB<extra></extra>`;
+                    `Channel: ${best.channel || best.name}<br>` +
+                    `Error: ${best.error_ms.toFixed(2)} ms<br>` +
+                    `SNR: ${(best.snr || 0).toFixed(1)} dB<extra></extra>`;
             } else {
                 // No data - show placeholder puck at edge (grayed out)
                 r = maxR * 0.95;
@@ -365,7 +366,7 @@ class ConstellationRadar {
                 size = 12;
                 hoverText = `<b>${baseStation}</b><br>No data<extra></extra>`;
             }
-            
+
             // Place puck ON the station's azimuth line
             traces.push({
                 type: 'scatterpolar',
@@ -383,7 +384,7 @@ class ConstellationRadar {
                 hovertemplate: hoverText
             });
         });
-        
+
         // 3. Center marker (Perfect UTC)
         traces.push({
             type: 'scatterpolar',
@@ -483,18 +484,18 @@ class ProbabilityPeak {
         if (!this.container) return;
 
         const offsets = estimates.map(e => e.offset);
-        
+
         // Calculate KDE
         const kde = this.calculateKDE(offsets);
-        
+
         // Find peaks for state detection
         const peaks = this.findPeaks(kde.y);
         const state = peaks.length > 1 ? 'SPLIT_BRAIN' : 'LOCKED';
         const stateColor = state === 'LOCKED' ? '#22c55e' : '#f97316';
-        
+
         // Build traces
         const traces = [];
-        
+
         // KDE curve with gradient fill
         traces.push({
             x: kde.x,
@@ -502,17 +503,17 @@ class ProbabilityPeak {
             mode: 'lines',
             name: 'Probability Density',
             fill: 'tozeroy',
-            fillcolor: state === 'LOCKED' 
-                ? 'rgba(34, 197, 94, 0.3)' 
+            fillcolor: state === 'LOCKED'
+                ? 'rgba(34, 197, 94, 0.3)'
                 : 'rgba(249, 115, 22, 0.3)',
-            line: { 
-                color: stateColor, 
+            line: {
+                color: stateColor,
                 width: 3,
                 shape: 'spline'
             },
             hovertemplate: 'Offset: %{x:.2f} ms<br>Density: %{y:.3f}<extra></extra>'
         });
-        
+
         // Individual measurement markers at bottom
         traces.push({
             x: offsets,
@@ -527,7 +528,7 @@ class ProbabilityPeak {
             },
             hovertemplate: '%{x:.3f} ms<extra></extra>'
         });
-        
+
         // UTC reference line
         traces.push({
             x: [0, 0],
@@ -537,7 +538,7 @@ class ProbabilityPeak {
             line: { color: '#94a3b8', width: 2, dash: 'dash' },
             hoverinfo: 'skip'
         });
-        
+
         // Peak markers
         peaks.forEach((peak, idx) => {
             traces.push({
@@ -610,14 +611,14 @@ class ProbabilityPeak {
         const [xMin, xMax] = this.options.xRange;
         const n = this.options.resolution;
         const h = this.options.bandwidth;
-        
+
         const x = [];
         const y = [];
-        
+
         for (let i = 0; i < n; i++) {
             const xi = xMin + (xMax - xMin) * (i / (n - 1));
             x.push(xi);
-            
+
             // Gaussian kernel
             let density = 0;
             for (const d of data) {
@@ -626,29 +627,29 @@ class ProbabilityPeak {
             }
             y.push(density / data.length);
         }
-        
+
         return { x, y };
     }
 
     findPeaks(y) {
         const peaks = [];
         const threshold = Math.max(...y) * 0.3; // 30% of max
-        
+
         for (let i = 1; i < y.length - 1; i++) {
-            if (y[i] > y[i-1] && y[i] > y[i+1] && y[i] > threshold) {
+            if (y[i] > y[i - 1] && y[i] > y[i + 1] && y[i] > threshold) {
                 peaks.push({ index: i, value: y[i] });
             }
         }
-        
+
         // Filter peaks that are too close together
         const filtered = [];
         for (const peak of peaks) {
-            if (filtered.length === 0 || 
-                Math.abs(peak.index - filtered[filtered.length-1].index) > this.options.resolution * 0.1) {
+            if (filtered.length === 0 ||
+                Math.abs(peak.index - filtered[filtered.length - 1].index) > this.options.resolution * 0.1) {
                 filtered.push(peak);
             }
         }
-        
+
         return filtered;
     }
 }
@@ -690,28 +691,28 @@ class ModeProbabilityRidge {
 
         const traces = [];
         const modes = this.options.modeOrder;
-        
+
         // Create x-axis points
         const xPoints = [];
         for (let x = this.options.xRange[0]; x <= this.options.xRange[1]; x += 0.1) {
             xPoints.push(x);
         }
-        
+
         // Build ridgeline for each mode
         modes.forEach((mode, modeIdx) => {
             const candidate = data.candidates.find(c => c.mode === mode);
-            
+
             if (candidate) {
                 // Calculate gaussian curve for this mode
                 const yValues = xPoints.map(x => {
                     const u = (x - candidate.delay_ms) / this.options.gaussianWidth;
                     return candidate.probability * Math.exp(-0.5 * u * u);
                 });
-                
+
                 // Color based on probability
                 const opacity = Math.max(0.3, candidate.probability);
                 const color = this.getProbabilityColor(candidate.probability);
-                
+
                 traces.push({
                     x: xPoints,
                     y: yValues.map(v => v + modeIdx), // Offset by mode index for ridgeline effect
@@ -735,7 +736,7 @@ class ModeProbabilityRidge {
                 });
             }
         });
-        
+
         // Measured delay vertical line
         if (data.measured_delay !== undefined) {
             traces.push({

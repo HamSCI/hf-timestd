@@ -347,6 +347,9 @@ class Phase2AnalyticsService:
     def _write_clock_offset(self, result, minute_boundary: int, rtp_timestamp: int):
         """Append D_clock measurement to CSV time series with convergence tracking."""
         try:
+            # Skip if no valid timing solution was found
+            if result.d_clock_ms is None:
+                return
             # Check for daily rotation
             today = datetime.now(timezone.utc).strftime('%Y%m%d')
             file_channel = self._get_file_channel_name()
@@ -914,7 +917,7 @@ class Phase2AnalyticsService:
     def _write_transmission_time(self, minute_boundary: int, result):
         """Write transmission time solution (UTC-NIST back-calculation)."""
         try:
-            if not result or not result.solution:
+            if not result or not result.solution or result.solution.d_clock_ms is None:
                 return
 
             # Use data timestamp for filename to support backfilling

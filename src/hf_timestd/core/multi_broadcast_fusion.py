@@ -447,45 +447,53 @@ class MultiBroadcastFusion:
             if legacy_path.exists():
                 csv_files.append(legacy_path)
             
-            for csv_path in csv_files:
-                try:
-                    with open(csv_path) as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            try:
-                                ts = float(row.get('system_time', 0))
-                                if ts < cutoff:
-                                    continue
-                                
-                                station = row.get('station', 'UNKNOWN')
-                                
-                                # BPM UT1 filtering: Skip minutes 25-29 and 55-59
-                                # These transmit UT1 time, not UTC
-                                if station == 'BPM':
-                                    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                                    if dt.minute in BPM_UT1_MINUTES:
-                                        logger.debug(
-                                            f"Skipping BPM measurement at minute {dt.minute} (UT1 mode)"
-                                        )
-                                        continue
-                                
-                                m = BroadcastMeasurement(
-                                    timestamp=ts,
-                                    station=station,
-                                    frequency_mhz=float(row.get('frequency_mhz', 0)),
-                                    d_clock_ms=float(row.get('clock_offset_ms', 0)),
-                                    propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
-                                    propagation_mode=row.get('propagation_mode', ''),
-                                    confidence=float(row.get('confidence', 0)),
-                                    snr_db=float(row.get('snr_db', 0)),
-                                    quality_grade=row.get('quality_grade', 'D'),
-                                    channel_name=channel
-                                )
-                                measurements.append(m)
-                            except (ValueError, KeyError):
+        for csv_path in csv_files:
+            try:
+                with open(csv_path) as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        try:
+                            ts_str = row.get('system_time')
+                            if not ts_str:
                                 continue
-                except Exception as e:
-                    logger.debug(f"Error reading {csv_path}: {e}")
+                            ts = float(ts_str)
+                            if ts < cutoff:
+                                continue
+                            
+                            station = row.get('station', 'UNKNOWN')
+                            conf_str = row.get('confidence')
+                            conf = float(conf_str) if conf_str else 0.0
+                            offset_str = row.get('clock_offset_ms', '')
+                            
+                            # Skip if no valid timing solution was found or confidence is ultra-low
+                            if not offset_str or offset_str == '' or conf < 0.01:
+                                continue
+                                
+                            offset_ms = float(offset_str)
+                            
+                            # BPM UT1 filtering: Skip minutes 25-29 and 55-59
+                            if station == 'BPM':
+                                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                                if dt.minute in BPM_UT1_MINUTES:
+                                    continue
+                            
+                            m = BroadcastMeasurement(
+                                timestamp=ts,
+                                station=station,
+                                frequency_mhz=float(row.get('frequency_mhz', 0)),
+                                d_clock_ms=offset_ms,
+                                propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
+                                propagation_mode=row.get('propagation_mode', ''),
+                                confidence=conf,
+                                snr_db=float(row.get('snr_db', 0)),
+                                quality_grade=row.get('quality_grade', 'D'),
+                                channel_name=channel
+                            )
+                            measurements.append(m)
+                        except (ValueError, KeyError):
+                            continue
+            except Exception as e:
+                logger.debug(f"Error reading {csv_path}: {e}")
         
         return measurements
     
@@ -857,7 +865,8 @@ class MultiBroadcastFusion:
         
         # Measurement uncertainty from weighted std
         weighted_var = np.sum(w * (d - fused_d_clock)**2) / np.sum(w)
-        measurement_uncertainty = np.sqrt(weighted_var)
+        # Add a floor to measurement uncertainty - physical limit of hf timing is ~0.2ms
+        measurement_uncertainty = max(0.2, np.sqrt(weighted_var))
         
         # Update Kalman filter for convergence
         kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)

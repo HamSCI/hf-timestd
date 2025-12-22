@@ -753,24 +753,29 @@ class ClockConvergenceModel:
         acc = self._get_or_create_accumulator(station, frequency_mhz)
         
         # Add measurement using Kalman filter (Issue 3.1 fix)
-        acc.update(d_clock_ms, timestamp=timestamp)
+        # Skip update if measurement is None (failed detection)
+        if d_clock_ms is not None:
+            acc.update(d_clock_ms, timestamp=timestamp)
         
         # Calculate residual from current estimate
         # Issue 3.1: For Kalman filter, use the innovation (predicted vs actual)
-        if acc.state == ConvergenceState.LOCKED and acc.locked_mean_ms is not None:
-            # When locked, residual is relative to locked value
-            reference = acc.locked_mean_ms
-            residual_ms = d_clock_ms - reference
+        if d_clock_ms is not None:
+            if acc.state == ConvergenceState.LOCKED and acc.locked_mean_ms is not None:
+                # When locked, residual is relative to locked value
+                reference = acc.locked_mean_ms
+                residual_ms = d_clock_ms - reference
+            else:
+                # During convergence, use Kalman innovation as residual
+                reference = acc.mean_ms
+                residual_ms = acc.last_innovation  # From Kalman filter
         else:
-            # During convergence, use Kalman innovation as residual
-            reference = acc.mean_ms
-            residual_ms = acc.last_innovation  # From Kalman filter
+            residual_ms = 0.0
         
         # Anomaly detection using Kalman filter's normalized innovation
         # Issue 3.1: This is statistically more robust than std_dev-based detection
         is_anomaly = False
         anomaly_sigma = None
-        if acc.count > 10:
+        if d_clock_ms is not None and acc.count > 10:
             # Use normalized innovation from Kalman filter
             anomaly_sigma = acc.last_normalized_innovation
             is_anomaly = anomaly_sigma > self.anomaly_sigma
@@ -814,23 +819,26 @@ class ClockConvergenceModel:
                 )
         
         elif acc.state == ConvergenceState.REACQUIRE:
-            # Reset and start over - INCLUDING the Kalman filter
-            acc.count = 1
-            acc.mean_ms = d_clock_ms
-            acc.m2 = 0.0
-            acc.consecutive_anomalies = 0
-            acc.locked_mean_ms = None
-            acc.locked_uncertainty_ms = None
-            # Reset Kalman filter to current measurement (critical fix!)
-            acc.kalman = KalmanClockTracker(
-                initial_offset_ms=d_clock_ms,
-                initial_uncertainty_ms=100.0,
-                process_noise_offset_ms=0.01,
-                process_noise_drift_ms_per_min=0.0001,  # Nearly zero - GPSDO has no drift
-                measurement_noise_ms=20.0              # Ionospheric variations ~10-30ms
-            )
-            logger.info(f"Reset Kalman filter for {station} @ {frequency_mhz} MHz to {d_clock_ms:.2f}ms")
-            acc.state = ConvergenceState.ACQUIRING
+            # Wait for valid data before re-initializing
+            if d_clock_ms is not None:
+                # Reset and start over - INCLUDING the Kalman filter
+                acc.count = 1
+                acc.mean_ms = d_clock_ms
+                acc.m2 = 0.0
+                acc.consecutive_anomalies = 0
+                acc.locked_mean_ms = None
+                acc.locked_uncertainty_ms = None
+                # Reset Kalman filter to current measurement (critical fix!)
+                acc.kalman = KalmanClockTracker(
+                    initial_offset_ms=d_clock_ms,
+                    initial_uncertainty_ms=100.0,
+                    process_noise_offset_ms=0.01,
+                    process_noise_drift_ms_per_min=0.0001,  # Nearly zero - GPSDO has no drift
+                    measurement_noise_ms=20.0              # Ionospheric variations ~10-30ms
+                )
+                acc.state = ConvergenceState.CONVERGING
+                logger.info(f"Reset Kalman filter for {station} @ {frequency_mhz} MHz to {d_clock_ms:.2f}ms")
+                acc.state = ConvergenceState.ACQUIRING
         
         # Log state transitions
         if acc.state != prev_state:

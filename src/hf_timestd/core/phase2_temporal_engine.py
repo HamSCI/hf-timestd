@@ -1652,7 +1652,10 @@ class Phase2TemporalEngine:
             )
             
             # Extract D_clock
-            d_clock_ms = solver_result.utc_nist_offset_ms or solver_result.emission_offset_ms
+            if solver_result.utc_nist_offset_ms is not None:
+                d_clock_ms = solver_result.utc_nist_offset_ms
+            else:
+                d_clock_ms = solver_result.emission_offset_ms
             
             # Convert mode candidates to dict format for serialization
             mode_candidates = [
