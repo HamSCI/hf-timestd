@@ -11,8 +11,14 @@
 
 ### Data Flow
 ```
-radiod → RTP/F32 → core-recorder → Digital RF → analytics → timing CSVs → web-ui
+SDR → radiod → RTP/F32 → core-recorder → Hot Buffer (/dev/shm/timestd/raw_buffer)
+                                              ↓ (background archiver)
+                                          Cold Buffer (/var/lib/timestd/raw_buffer)
+                                              ↑ (reads hot first, falls back to cold)
+                                          analytics → timing CSVs → web-ui
 ```
+
+**Tiered Storage:** Core recorder writes to RAM (`/dev/shm`), background thread archives old minutes to disk. Analytics reads from hot buffer first (zero-latency), falls back to cold if needed.
 
 ## Recent Changes (2025-12-22)
 
