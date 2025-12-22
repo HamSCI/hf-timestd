@@ -127,11 +127,10 @@ class CoreRecorderV2:
         self.station_config = config.get('station', {})
         self.recorder_config = config.get('recorder', {})
         
-        # Let radiod use its configured default destination
-        # Do NOT specify a custom destination - this causes SSRC hash mismatches
-        # and channel proliferation on restarts. ka9q-python's ensure_channel()
-        # handles SSRC allocation deterministically when destination=None.
-        self.data_destination = None
+        # Let radiod use its configured default destination, OR force one if missing.
+        # Logic update: We default to the standard multicast group to ensuring functional channels
+        # when radiod doesn't auto-assign one for F32.
+        self.data_destination = config.get('radiod_multicast_group', '239.103.26.231:5004')
         
         # Channel specs and defaults
         self.channel_specs = config.get('channels', [])
@@ -252,44 +251,10 @@ class CoreRecorderV2:
                 logger.warning("No channels configured")
                 return False
             
-            logger.info("Scanning existing channels...")
-            # Use longer duration (2.5s) to ensure we find ALL channels and duplicates
-            existing_channels = discover_channels(self.status_address, listen_duration=2.5)
-            logger.info(f"Found {len(existing_channels)} existing channels")
-            
-            # Group existing channels by unique key: (frequency, preset, sample_rate)
-            # This helps identify duplicates
-            by_params: Dict[tuple, List[int]] = {}
-            for ssrc, info in existing_channels.items():
-                # Key: (freq_hz, preset, sample_rate)
-                key = (int(round(info.frequency)), info.preset, info.sample_rate)
-                if key not in by_params:
-                    by_params[key] = []
-                by_params[key].append(ssrc)
-            
-            # Identify and cleanup duplicates
-            for key, ssrcs in by_params.items():
-                if len(ssrcs) > 1:
-                    freq, preset, rate = key
-                    logger.warning(f"Found {len(ssrcs)} duplicate channels for {freq}Hz (SSRCs: {ssrcs})")
-                    
-                    # Keep the first one, remove others
-                    keep_ssrc = ssrcs[0]
-                    for drop_ssrc in ssrcs[1:]:
-                        logger.info(f"Removing redundant channel {drop_ssrc} ({freq}Hz)")
-                        try:
-                            self.control.remove_channel(drop_ssrc)
-                            # Remove from our local list so we don't try to use it
-                            existing_channels.pop(drop_ssrc, None)
-                        except Exception as e:
-                            logger.error(f"Failed to remove channel {drop_ssrc}: {e}")
-            
-            # Re-index existing channels after cleanup
-            # Map frequency -> ChannelInfo (assuming one per freq now)
-            existing_by_freq = {}
-            for ssrc, info in existing_channels.items():
-                freq = int(round(info.frequency))
-                existing_by_freq[freq] = info
+            # SIMPLIFICATION: Removed aggressive discovery and deduplication.
+            # We rely on StreamRecorderV2 to find/create the single channel it needs.
+            # existing_channels = discover_channels(...) -> REMOVED
+            existing_by_freq = {} # Keep empty, let StreamRecorder handle it.
 
             logger.info(f"Initializing {len(self.channel_specs)} configured channels...")
             
@@ -315,73 +280,24 @@ class CoreRecorderV2:
                 else:
                     encoding = encoding_val
 
-                # Check if we have an existing channel for this frequency
-                existing_info = existing_by_freq.get(freq)
-                
-                # Determine destination:
-                # 1. If existing channel found, use its multicast_address
-                # 2. Else use self.data_destination (None/Default)
+                # Simplify: Rely entirely on StreamRecorderV2 / RobustManagedStream
+                # to find or create the channel. We do not explicitly create it here.
+                # However, we MUST latch onto the correct destination if the channel exists,
+                # otherwise ensure_channel(dest=None) will fight with radiod's assigned destination
+                # and create infinite duplicates.
                 use_destination = self.data_destination
                 matched_ssrc = None
                 
+                existing_info = existing_by_freq.get(freq)
                 if existing_info:
-                    # Found existing channel! Reuse its destination to ensure ManagedStream matches it.
-                    if hasattr(existing_info, 'multicast_address') and existing_info.multicast_address:
-                        use_destination = existing_info.multicast_address
-                        logger.info(f"Reusing existing channel {freq/1e6:.3f} MHz (SSRC={existing_info.ssrc}, Dest={use_destination})")
-                    else:
-                        logger.info(f"Reusing existing channel {freq/1e6:.3f} MHz (SSRC={existing_info.ssrc}) - No explicit address")
-                    
                     matched_ssrc = existing_info.ssrc
-                    
-                    # Check and update parameters if needed (Tune)
-                    # Specifically check Encoding (User wants 4/F32, might be 2/S16BE)
-                    # We also check sample rate, standardizing on what we want.
-                    current_enc = getattr(existing_info, 'encoding', 0)
-                    if hasattr(current_enc, 'value'): # Handle if it's an Enum in Info (unlikely)
-                        current_enc = current_enc.value
-                        
-                    # Also check sample rate
-                    current_sr = getattr(existing_info, 'sample_rate', 0)
-                    
-                    if current_enc != encoding or current_sr != self.channel_defaults.get('sample_rate', 20000):
-                        logger.info(f"Reconfiguring channel parameters: Enc {current_enc}->{encoding}, Rate {current_sr}->{self.channel_defaults.get('sample_rate', 20000)}")
-                        try:
-                            self.control.tune(
-                                ssrc=matched_ssrc,
-                                frequency_hz=freq,
-                                preset=preset,
-                                sample_rate=self.channel_defaults.get('sample_rate', 20000),
-                                encoding=encoding,
-                                agc_enable=int(agc_val),
-                                gain=float(gain_val)
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to tune channel {matched_ssrc}: {e}")
+                    if hasattr(existing_info, 'multicast_address') and existing_info.multicast_address:
+                         use_destination = existing_info.multicast_address
+                         logger.info(f"Matched existing channel {freq/1e6:.3f} MHz (SSRC={matched_ssrc}). Using Dest: {use_destination}")
+                    else:
+                         logger.info(f"Matched existing channel {freq/1e6:.3f} MHz (SSRC={matched_ssrc}). No explicit dest found, using default.")
                 else:
-                    logger.info(f"No existing channel for {freq/1e6:.3f} MHz - creating explicitly to ensure F32")
-                    # Explicitly create channel to ensure Encoding is F32 (4)
-                    # ManagedStream default creation likely uses S16 (1)
-                    try:
-                        matched_ssrc = self.control.create_channel(
-                            frequency_hz=freq,
-                            preset=preset,
-                            sample_rate=self.channel_defaults.get('sample_rate', 20000),
-                            encoding=encoding,
-                            agc_enable=int(agc_val),
-                            gain=float(gain_val),
-                            destination=None  # Use default destination
-                        )
-                        logger.info(f"Created channel {matched_ssrc} with Encoding={encoding}")
-                        
-                        # Wait for creation to propagate
-                        time.sleep(0.5)
-                        
-                        # With RobustManagedStream, we don't need to resolve destination explicitly
-                        # it will find this channel because parameters (freq + encoding=4) match.
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to create channel for {freq}: {e}", exc_info=True)
+                    logger.info(f"No existing channel for {freq/1e6:.3f} MHz. Will resolve/create.")
 
                 logger.info(f"Initializing recorder for {freq/1e6:.3f} MHz")
                 
@@ -421,10 +337,6 @@ class CoreRecorderV2:
                 )
                 
                 self.recorders[freq] = recorder
-                
-                # Start immediately, but with delay to allow discovery to stabilize
-                recorder.start()
-                time.sleep(1.0) # Grace period for ManagedStream discovery
                 
             logger.info(f"✓ Initialized {len(self.recorders)} channel recorders")
             return True
