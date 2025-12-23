@@ -12,6 +12,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts)
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST)
 - 🔗 **Multi-broadcast fusion** - Combines WWV/WWVH/CHU/BPM with per-station calibration
+- 🌍 **Cross-frequency global differential solve** - Physics-verified timing constraint across all channels (WWV/WWVH/BPM/CHU)
 - ⏱️ **HF time transfer** - D_clock measurement with ionospheric propagation mode estimation
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID
 - 🔬 **Shared Frequency Analysis** - Resolves WWV/WWVH/BPM on 2.5, 5, 10, 15 MHz
@@ -191,6 +192,19 @@ Processes 20 kHz archives to derived products:
 
 ### Global Station Lock
 Because radiod's RTP timestamps are **GPS-disciplined**, all 9 channels share a common timing reference. This enables treating multiple receivers as a **single coherent sensor array**.
+
+### Cross-Frequency Global Differential Fusion
+Fusion performs a cross-frequency physics solve inside `src/hf_timestd/core/multi_broadcast_fusion.py` using `GlobalDifferentialSolver`. When the solution is verified, it is injected as a trusted synthetic measurement (`GLOBAL_DIFF`) so the fusion/Kalman convergence can “snap” to the physics-based constraint.
+
+**Outputs:** `phase2/fusion/fused_d_clock.csv` includes:
+- `global_solve_verified`
+- `global_solve_consistency_ms`
+- `global_solve_n_obs`
+
+**Logs:** look for:
+- `Global solve context: target_minute=... mix=[...] dropped_channels=[...]`
+- `Global solve: cross-agency triangulation active (NIST+NRC) ...`
+- `Injecting GLOBAL_DIFF: ... force_weight=... kalman_floor_ms=...`
 
 **Implementation:**
 - **Shared Filesystem IPC:** Uses `/dev/shm` (RAM disk) to share "Anchor" detections between isolated channel processes in real-time.

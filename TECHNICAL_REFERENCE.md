@@ -1,6 +1,6 @@
-# GRAPE Signal Recorder - Technical Reference
+# HF Time Standard (hf-timestd) - Technical Reference
 
-**Quick reference for developers working on the GRAPE Signal Recorder.**
+**Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
 **Last Updated:** December 19, 2025
@@ -561,43 +561,57 @@ def predict_station(self, channel_name, rtp_timestamp, detected_station, confide
     return (detected_station, 0.0)
 ```
 
-### Multi-Broadcast Fusion (v3.13.0)
+### Multi-Broadcast Fusion (v3.14+)
 
-Combines 13 broadcasts (6 WWV + 4 WWVH + 3 CHU) to converge on UTC(NIST) alignment.
+Combines all available broadcasts (WWV/WWVH/CHU/BPM) to converge on UTC(NIST) alignment.
 
-**Station-Level Calibration (v3.13.0 Change):**
+**Implementation:** `src/hf_timestd/core/multi_broadcast_fusion.py`
 
-Previously, calibration was per-broadcast (station+frequency). Now it's per-STATION:
-
-```python
-# OLD (per-broadcast) - introduced artificial variance
-calibration["WWV_10MHz"] = -mean(d_clock[WWV_10MHz])
-calibration["WWV_15MHz"] = -mean(d_clock[WWV_15MHz])
-
-# NEW (per-station) - station mean is ground truth
-calibration["WWV"] = -mean(d_clock[all WWV frequencies])
-```
-
-**Rationale:** Each station (WWV, WWVH, CHU) transmits from a single location using a single atomic clock. All frequencies from that station are phase-locked. Frequency-to-frequency variations reveal ionospheric propagation effects, not timing errors.
-
-**Why Fusion?** Single-broadcast D_clock has systematic errors:
-- Ionospheric delay uncertainty (±0.5-2 ms)
-- Propagation mode ambiguity
-- Station-specific path biases
-
-**The Fusion Algorithm** (`src/grape_recorder/grape/multi_broadcast_fusion.py`):
+#### Per-broadcast calibration
+Calibration is maintained per **broadcast** (station + frequency) to account for frequency-dependent systematic offsets.
 
 ```python
-# 1. Learn per-station calibration offsets via EMA
-calibration_offset[station] = -mean(raw_d_clock[station])
-new_offset = α × ideal + (1-α) × old_offset   # α = 0.5 for fast tracking
+# Broadcast key used by fusion
+broadcast_key = f"{station}_{frequency_mhz:.2f}"
 
-# 2. Apply calibration to each measurement
-calibrated_d_clock = raw_d_clock + calibration_offset[station]
-
-# 3. Weighted fusion across all broadcasts
-fused_d_clock = Σ(weight × calibrated_d_clock) / Σ(weight)
+# Calibrated D_clock (if calibration exists)
+calibrated = d_clock_ms + calibration[broadcast_key].offset_ms
 ```
+
+#### Cross-frequency global differential fusion (physics-verified constraint)
+Fusion also performs a *cross-frequency* global physics solve using `GlobalDifferentialSolver`:
+
+- **Input:** per-channel `tone_detections/*_tones_YYYYMMDD.csv`
+- **Minute selection:** uses the **latest common minute** across channels with tone data in the lookback window (intersection). If no intersection exists, falls back to the latest available minute and logs the fallback.
+- **Timing representation:** the solver only needs minute-relative timing, so fusion reconstructs:
+
+```
+arrival_rtp := timing_ms * sample_rate
+minute_boundary_rtp := 0
+```
+
+When the global solve returns `verified=True`, fusion injects a trusted synthetic measurement:
+
+- `station = GLOBAL_DIFF`
+- Strong forced weighting (dominates the weighted mean)
+- Not subject to outlier rejection
+- Excluded from calibration updates and TEC estimation
+- Kalman measurement uncertainty floor is reduced (acts like a hard constraint)
+
+#### Observability (required for trusted-source behavior)
+Fusion logs the global solve decision context and results:
+
+- `Global solve context: target_minute=... obs=... mix=[...] dropped_channels=[...]`
+- `Global solve: cross-agency triangulation active (NIST+NRC) ...` (when both WWV/WWVH and CHU are present)
+- `Global solve result: target_minute=... offset_ms=... verified=... conf=... consistency_ms=...`
+- `Injecting GLOBAL_DIFF: ... force_weight=... kalman_floor_ms=...`
+
+#### Output columns
+`phase2/fusion/fused_d_clock.csv` includes:
+
+- `global_solve_verified`
+- `global_solve_consistency_ms`
+- `global_solve_n_obs`
 
 **Weighting Factors**:
 - SNR (higher = more reliable)

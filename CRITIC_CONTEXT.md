@@ -6,80 +6,124 @@ Primary Instruction:  In this context you will perform a critical review of the 
 
 ---
 
-## 🔴 CURRENT FOCUS: END-TO-END TIMING ANALYSIS (INGESTION → FUSION)
+## 🔴 CURRENT FOCUS (NEXT SESSION): RECEIVER / SSRC PROLIFERATION
 
-**Purpose:** Perform a comprehensive review of the timing analysis pipeline, tracing the data flow from the initial RTP payload ingestion (Phase 1) through the temporal analysis engine (Phase 2) to the final multi-broadcast fusion. The goal is to verify data integrity, timing accuracy preservation, and architectural coherence across the entire chain.
+**Purpose:** Diagnose why the application keeps creating duplicate radiod channels/streams (“receiver proliferation”). This typically manifests as:
+- Multiple radiod streams for the same frequency/preset/sample_rate
+- Increasing SSRC count after service restarts
+- Resource exhaustion (CPU/network/multicast subscriptions)
+
+**Key hypothesis:** `RadiodControl.ensure_channel(...)` is not idempotent under current inputs. The most common causes are mismatched or unstable parameters:
+- **Destination mismatch** (`destination=None` vs explicit multicast IP, or mDNS resolution changes)
+- **Encoding mismatch** (F32 vs S16) causing radiod to treat the request as a new unique channel
+- **Preset/sample_rate mismatch** across services/processes
+
+**Critical invariant:** For a given logical channel, every caller must use the *same* `(frequency_hz, preset, sample_rate, encoding, destination)` tuple (or intentionally reuse radiod defaults consistently).
 
 **Author:** Michael James Hauan (AC0G)
-**Date:** 2025-12-20
-**Status:** 🟢 Complete (2025-12-20)
+**Date:** 2025-12-23
+**Status:** 🟡 In Progress
 
 ---
 
-## Current Focus
-We have successfully **completed the end-to-end timing remediation**.
-- Ingestion is hardened (RTP-to-Unix locked).
-- Propagation models are unified (Physics-based).
-- Feedback loop is active (Phase 3 -> Phase 2).
-- SSRC proliferation is fixed (StreamManager).
-- **Fusion is converging to <1ms.**
+## Next Session Goal
+Identify the exact condition(s) that trigger new channel creation and make channel acquisition idempotent across:
+- service restarts
+- multiple processes
+- day boundaries
 
-## Next Session Goal: Observability & Web UI
-Now that the backend is robust, we need to **visualize** these new capabilities in the Web UI:
-1. **Exclusion Zones**: Show where we are "blinding" the detector.
-2. **BPM Status**: Show UTC vs UT1 mode and 100ms tick detection.
-3. **Fusion Health**: Graph `D_clock` convergence and Chrony offsets.
-tings. We must also verify that the monitoring dashboards correctly reflect the hardened ingestion stability.
+Success criteria:
+- Restarting core recorder does **not** increase radiod channel count
+- Re-running analytics/web-ui does **not** create new IQ channels
+- The system converges on a stable set of SSRCs
 
-### SESSION 2025-12-20: INGESTION TO FINAL ANALYSIS
+### SESSION GUIDE: RECEIVER PROLIFERATION DEBUGGING
 
 This session focuses on the complete lifecycle of a timing sample.
 
-#### 1. Data Pipeline Overview
+#### 1. Data Pipeline Overview (CURRENT IMPLEMENTATION)
 
 ```
-[PHASE 1: INGESTION]
-RTP Payload (UDP)
+ka9q-radio (radiod)
+  ↓ (RTP multicast)
+ka9q-python RadiodControl.ensure_channel(...)
+  ↓ (creates or reuses channel)
+ka9q-python RadiodStream
+  ↓ (decoded IQ callbacks)
+CoreRecorderV2 / StreamRecorderV2
   ↓
-rtp_receiver.py          (Socket ingest, packet validation)
+Phase 1 raw_buffer/*.bin + metadata.json
   ↓
-packet_resequencer.py    (Jitter/Gap handling, ordering)
+Phase2AnalyticsService (per-channel)
   ↓
-binary_archive_writer.py (Writes raw_buffer/{CHANNEL}/{MIN}.bin)
-                         (Format: F32 IQ, non-decimated, system-time tagged)
-
-      SPACE-TIME BOUNDARY (Disk/SHM)
-
-[PHASE 2: ANALYTICS]
-phase2_analytics_service.py (Daemon, polls raw_buffer)
+phase2/{CHANNEL}/clock_offset/*.csv + tone_detections/*.csv
   ↓
-phase2_temporal_engine.py   (The "Brain" - 3-step analysis)
-  ├─ Step 1: Tone Detection (Time Snap, Coarse Timing)
-  ├─ Step 2: Channel Characterization (Doppler, BCD, Station ID)
-  └─ Step 3: Transmission Time Solution (Solver -> D_clock)
+MultiBroadcastFusion (cross-channel)
   ↓
-clock_offset/{CHANNEL}_clock_offset_{DATE}.csv (Time Series)
-  ↓
-multi_broadcast_fusion.py   (Reads all 17 channels, weighted fusion)
-  ↓
-fused_d_clock.csv           (Final UTC(NIST) offset)
+phase2/fusion/fused_d_clock.csv
 ```
 
-#### 2. Key Files for Review
+#### 2. Key Files for Review (Receiver Proliferation)
 
 | Stage | File | Focus Area |
 |-------|------|------------|
-| **Ingestion** | `rtp_receiver.py` | Packet timestamp extraction & validation |
-| **Storage** | `binary_archive_writer.py` | sample-count to timestamp mapping |
-| **Analysis** | `phase2_temporal_engine.py` | `process_minute` -> `_step3_transmission_time_solution` |
-| **Solver** | `transmission_time_solver.py` | `solve_transmission_time` (D_clock extraction) |
-| **Fusion** | `multi_broadcast_fusion.py` | Outlier rejection logic & weighting |
+| **Channel acquisition** | `core/core_recorder_v2.py` | `_initialize_channels()` destination/encoding stability |
+| **Radiod ensure_channel wrapper** | `core/stream_recorder_v2.py` | `RobustManagedStream._ensure_stream()` args passed to `ensure_channel()` |
+| **Stream lifecycle** | `stream/stream_manager.py` | Discovery vs creation vs reuse semantics |
+| **Legacy control path** | `channel_manager.py` | `create_channel()` and destination resolution behavior |
+| **Symptoms** | `radiod_health.py` | Any reporting of channel counts / SSRC drift |
 
-#### 3. Recent Critical Fixes (Context)
-- **Propagation Model**: Unified `PropagationEngine` replacing disparate heuristic/geometric logic.
-- **Feedback Loop**: `Phase2AnalyticsService` now reads `broadcast_calibration.json` and updates `CorrelatorBank` offsets.
-- **Exclusion Zones**: Implemented to prevent BPM/WWV aliasing (cross-talk).
-- **Ingestion Hardening**: `BinaryArchiveWriter` uses streaming mean (first 50 chunks) to lock RTP-to-Unix reference, rejecting startup jitter.
+#### 3. Investigation Checklist (What to Prove)
+
+- [ ] **Are we calling `ensure_channel()` with stable parameters?**
+  - Compare the exact args across processes: `frequency_hz`, `preset`, `sample_rate`, `encoding`, `destination`.
+  - Pay special attention to `destination=None` vs an explicit multicast IP.
+
+- [ ] **Does destination selection vary across restarts?**
+  - `core_recorder_v2.py` currently sets `use_destination = self.data_destination` and attempts to “latch” onto existing destinations, but discovery/dedup is intentionally disabled.
+  - If discovery is disabled, verify whether `use_destination` is always stable.
+
+- [ ] **Is encoding the duplication trigger?**
+  - `stream_recorder_v2.py` explicitly passes `encoding=F32` to `ensure_channel()`.
+  - If *any* other client creates S16 channels at the same frequency, ensure_channel may create a parallel F32 channel.
+
+- [ ] **Is there more than one component managing channels?**
+  - Confirm whether any service besides the core recorder calls `RadiodControl` to create/ensure IQ channels.
+  - Identify legacy paths that might still be active (`channel_manager.py`, older recorder variants).
+
+- [ ] **Is there an infinite duplicate loop?**
+  - A classic failure mode is: request A uses destination X, request B uses destination None → radiod assigns Y, then A sees mismatch and creates again.
+  - The fix is to make destination and encoding deterministic and identical across all requesters.
+
+---
+
+## RECEIVER PROLIFERATION PLAYBOOK (NEXT SESSION)
+
+### What to capture first
+- The radiod channel list *before* starting services
+- The radiod channel list immediately after starting core recorder
+- The radiod channel list after restarting core recorder (should be identical)
+
+### What to compare
+For any duplicated frequency, compare:
+- encoding (S16 vs F32)
+- destination (multicast IP)
+- preset + sample_rate
+
+### High-signal code hotspots
+- `src/hf_timestd/core/core_recorder_v2.py` `_initialize_channels()` (destination selection and stability)
+- `src/hf_timestd/core/stream_recorder_v2.py` `RobustManagedStream._ensure_stream()` (exact `ensure_channel()` args)
+- `src/hf_timestd/stream/stream_manager.py` (reuse vs create policy)
+- `src/hf_timestd/channel_manager.py` (legacy channel creation; destination resolution)
+
+### Commands (manual)
+```bash
+# Show current channels (SSRC, freq, preset, sample_rate, destination)
+python -c "from ka9q import discover_channels; import json; ch=discover_channels('radiod.local'); print(json.dumps({k: {'freq': v.frequency, 'preset': v.preset, 'rate': v.sample_rate, 'dest': getattr(v,'multicast_address',None), 'encoding': getattr(v,'encoding',None)} for k,v in ch.items()}, indent=2))"
+
+# Find all call sites that can create/ensure channels
+grep -R "ensure_channel\|create_channel\|RadiodControl" -n src/hf_timestd/
+```
 
 #### 4. Verified Improvements (2025-12-20)
 - **Calibration Loading**: Logs confirm `CorrelatorBank: WWV calibration updated`.
@@ -546,9 +590,9 @@ The following significant changes were made to the backend that the Web UI must 
   - Search for: "voter", "voting", "anchor", "best station"
   - Replace with: Multi-station detection concepts
 
-- [ ] **13 Broadcasts**: Update to 17 broadcasts
-  - Search for: "13 broadcasts", "13-broadcast"
-  - Update to include BPM (4 additional)
+- [ ] **Legacy broadcast counts**: Remove hardcoded broadcast counts
+  - Search for: "13 broadcasts", "13-broadcast" (legacy text)
+  - Update to: "all available broadcasts" and ensure BPM is included
 
 #### 3. Missing Features
 
@@ -662,12 +706,15 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                        PHASE 1: RAW DATA CAPTURE                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  RTP Stream (ka9q-radio)                                                    │
+│  RTP Stream (ka9q-radio / radiod)                                           │
 │       ↓                                                                     │
-│  RTPReceiver → PacketResequencer → RecordingSession → BinaryArchiveWriter   │
-│       ↓              ↓                    ↓                  ↓              │
-│  UDP packets    Gap detection      Minute boundaries    raw_buffer/*.bin    │
-│                 Reordering         Session state        + metadata.json     │
+│  ka9q-python RadiodControl.ensure_channel(...)                               │
+│       ↓                                                                     │
+│  ka9q-python RadiodStream                                                    │
+│       ↓                                                                     │
+│  CoreRecorderV2 / StreamRecorderV2 → BinaryArchiveWriter                     │
+│       ↓                                                                     │
+│  raw_buffer/*.bin + metadata.json                                            │
 └─────────────────────────────────────────────────────────────────────────────┘
        ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -694,11 +741,10 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
 
 | File | Size | Purpose | Robustness Concerns |
 |------|------|---------|---------------------|
-| `rtp_receiver.py` | 15 KB | UDP socket, RTP parsing | Socket errors, buffer overflow |
-| `packet_resequencer.py` | 17 KB | Gap detection, reordering | Memory growth, sequence wrap |
-| `recording_session.py` | 22 KB | Session state, minute boundaries | State persistence, crash recovery |
+| `core_recorder_v2.py` | 28 KB | RadiodStream-based core recorder | ensure_channel idempotency, destination/encoding stability |
+| `stream_recorder_v2.py` | 16 KB | RadiodStream wrapper + resilience | ensure_channel args, recovery behavior |
 | `binary_archive_writer.py` | 18 KB | Binary IQ + JSON metadata | Disk full, partial writes |
-| `core_recorder.py` | 24 KB | Pipeline orchestration | Thread safety, shutdown |
+| `recording_session.py` | 22 KB | Minute segmentation | Boundary alignment, crash recovery |
 | `audio_buffer.py` | 5 KB | Ring buffer for samples | Overflow, underflow |
 
 #### Phase 2 - Analytical Engine
@@ -710,7 +756,7 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
 | `tone_detector.py` | 68 KB | Matched filter detection | FFT errors, edge cases |
 | `wwvh_discrimination.py` | 184 KB | 8-vote discrimination | Vote correlation, confidence |
 | `clock_offset_series.py` | 30 KB | D_clock calculation | RTP calibration, outliers |
-| `multi_broadcast_fusion.py` | 50 KB | 13-broadcast Kalman fusion | State poisoning, divergence |
+| `multi_broadcast_fusion.py` | 50 KB | Multi-broadcast fusion + global differential constraint | State poisoning, divergence |
 | `clock_convergence.py` | 42 KB | Convergence tracking | State persistence, reset |
 
 #### Supporting Modules
@@ -736,9 +782,9 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
 
 #### 1. Error Handling and Recovery
 
-- [ ] **RTP packet loss**: How does the system handle sustained packet loss (>5%)?
-  - Check: `packet_resequencer.py` gap handling
-  - Check: Does `recording_session.py` mark minutes as incomplete?
+- [ ] **Stream dropouts**: How does the system handle sustained packet loss (>5%) or radiod restarts?
+  - Check: `stream_recorder_v2.py` `RobustManagedStream` / `RadiodStream` handling
+  - Check: Does the writer mark minutes as incomplete or just low-completeness?
 
 - [ ] **Disk full conditions**: What happens when disk is full during write?
   - Check: `binary_archive_writer.py` exception handling
@@ -748,9 +794,8 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
   - Check: `phase2_analytics_service.py` state persistence
   - Check: Are incomplete analyses marked and retried?
 
-- [ ] **Network interruption**: How does RTP receiver handle network drops?
-  - Check: `rtp_receiver.py` socket timeout handling
-  - Check: Reconnection logic
+- [ ] **Network interruption**: How do RadiodStream callbacks behave on network drops?
+  - Check: whether `ensure_channel()` is re-invoked and whether it creates duplicates
 
 #### 2. State Management and Persistence
 
@@ -777,8 +822,7 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
   - Check: What happens with short/long minutes?
 
 - [ ] **RTP timestamp continuity**: Are timestamp jumps detected?
-  - Check: `packet_resequencer.py` sequence validation
-  - Check: `clock_offset_series.py` RTP calibration
+  - Check: `RadiodStream`/`StreamQuality` + downstream calibration in `clock_offset_series.py`
 
 - [ ] **Binary file integrity**: Are binary files validated on read?
   - Check: `binary_archive_writer.py` reader validation
@@ -791,7 +835,6 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
 #### 4. Resource Management
 
 - [ ] **Memory growth**: Are there unbounded data structures?
-  - Check: `packet_resequencer.py` buffer limits
   - Check: `phase2_temporal_engine.py` result accumulation
   - Check: `wwvh_discrimination.py` history buffers
 
@@ -800,7 +843,7 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
   - Check: Exception paths that might skip cleanup
 
 - [ ] **Thread safety**: Are shared resources protected?
-  - Check: `core_recorder.py` threading model
+  - Check: `core_recorder_v2.py` threading model
   - Check: `phase2_analytics_service.py` file watcher
 
 - [ ] **Graceful shutdown**: Does the system shut down cleanly?
@@ -844,15 +887,14 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
 
 #### Critical Path (Phase 1)
 
-1. **`rtp_receiver.py`** - Entry point for all data
-   - Socket error handling
-   - Buffer management
-   - Packet validation
+1. **`core_recorder_v2.py`** - Channel acquisition + stream start
+   - Destination stability and encoding consistency
+   - `RadiodControl.ensure_channel()` call patterns
+   - Behavior across restarts (idempotency)
 
-2. **`packet_resequencer.py`** - Data integrity gate
-   - Gap detection accuracy
-   - Memory bounds
-   - Sequence number wrap (32-bit)
+2. **`stream_recorder_v2.py`** - `RobustManagedStream` wrapper
+   - Exact `ensure_channel()` arguments
+   - Whether destination/encoding differ across channels or processes
 
 3. **`recording_session.py`** - Minute boundary logic
    - State machine correctness
@@ -971,7 +1013,7 @@ LAYER 3: Station-Level Calibration
 └─ Calibration offset brings station mean to UTC(NIST) = 0
 
 LAYER 4: Multi-Broadcast Fusion
-├─ Weighted average across 13 broadcasts (6 WWV + 4 WWVH + 3 CHU)
+├─ Weighted average across all available broadcasts (WWV/WWVH/CHU/BPM)
 ├─ Kalman filter for convergence and anomaly detection
 └─ Intra-station consistency checks for discrimination validation
 ```
@@ -1709,7 +1751,7 @@ Therefore:
 | `phase2_temporal_engine.py` | Pipeline orchestration |
 | `wwvh_discrimination.py` | Station discrimination |
 | `clock_convergence.py` | Kalman filter tracking |
-| `multi_broadcast_fusion.py` | 13-broadcast fusion |
+| `multi_broadcast_fusion.py` | Multi-broadcast fusion |
 
 ### 5. SUCCESS CRITERIA
 
