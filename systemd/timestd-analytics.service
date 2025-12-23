@@ -10,9 +10,10 @@ Requires=timestd-core-recorder.service
 Type=forking
 RemainAfterExit=yes
 
-# User/Group - same as core recorder
-User=mjh
-Group=mjh
+# User/Group - timestd service user with chrony group for SHM access
+User=timestd
+Group=timestd
+SupplementaryGroups=_chrony
 
 # Environment from file (set by install.sh)
 EnvironmentFile=-/etc/hf-timestd/environment

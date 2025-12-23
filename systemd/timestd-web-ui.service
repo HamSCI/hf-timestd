@@ -6,8 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=mjh
-Group=mjh
+# User/Group - timestd service user
+User=timestd
+Group=timestd
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Node.js production settings

@@ -959,10 +959,10 @@ class Phase2TemporalEngine:
                             )
                             self.correlator_bank.set_calibrated(True)
                         
-                        # Persist calibration
+                        # Persist calibration to disk
                         self._save_calibration()
                         
-                        logger.info(f"🎯 BPM UT1 calibration: delay_adj={calibration.get('adjustment_ms', 0):+.2f}ms, "
+                        logger.info(f"🎯 BPM UT1 calibration saved: delay_adj={calibration.get('adjustment_ms', 0):+.2f}ms, "
                                    f"gain={calibration.get('path_gain_db', 0):.1f}dB, "
                                    f"quality={calibration.get('quality', 'unknown')}")
             except Exception as e:

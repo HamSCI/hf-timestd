@@ -12,9 +12,9 @@ Type=simple
 
 # User/Group - set during installation
 # For production: create dedicated user or use existing user
-# User/Group - set to the account owning the data directories
-User=mjh
-Group=mjh
+# User/Group - timestd service user
+User=timestd
+Group=timestd
 
 # Environment from file (set by install.sh)
 # Try new path first, fall back to legacy

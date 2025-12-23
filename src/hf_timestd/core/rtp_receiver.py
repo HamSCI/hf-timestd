@@ -220,7 +220,7 @@ class RTPReceiver:
         
         # Join multicast group on all interfaces (INADDR_ANY)
         # Note: radiod may send via network interface, not loopback
-        mreq = struct.pack("4sl",
+        mreq = struct.pack("4sL",
                           socket.inet_aton(self.multicast_address),
                           socket.INADDR_ANY)
         self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)

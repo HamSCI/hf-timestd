@@ -130,6 +130,45 @@ if [[ "$PREREQ_OK" == "false" ]]; then
 fi
 
 # =============================================================================
+# Step 1.5: Check and Configure Chrony (Production Only)
+# =============================================================================
+if [[ "$MODE" == "production" ]]; then
+    log_step "Checking chrony installation..."
+    
+    if ! command -v chronyd &> /dev/null; then
+        log_warn "  ⚠️  chronyd not found"
+        read -p "Install chrony for system clock discipline? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log_info "  Installing chrony..."
+            sudo apt-get update && sudo apt-get install -y chrony
+        else
+            log_warn "  Skipping chrony installation. System clock discipline will not work."
+        fi
+    else
+        log_info "  ✅ chronyd found"
+    fi
+    
+    # Configure chrony for timestd SHM integration
+    if command -v chronyd &> /dev/null; then
+        CHRONY_CONF="/etc/chrony/chrony.conf"
+        if ! grep -q "refclock SHM 0 refid TMGR" "$CHRONY_CONF" 2>/dev/null; then
+            log_info "  Adding timestd SHM refclock to chrony.conf..."
+            sudo tee -a "$CHRONY_CONF" > /dev/null <<'EOF'
+
+# HF Time Standard - UTC(NIST) via SHM
+# timestd-analytics service writes fused UTC(NIST) estimates to SHM unit 0
+refclock SHM 0 refid TMGR poll 3 precision 1e-3 offset 0.0
+EOF
+            log_info "  ✅ Chrony configured for timestd SHM integration"
+            log_info "  📝 Note: timestd-analytics must start BEFORE chronyd to create SHM with correct permissions"
+        else
+            log_info "  ℹ️  Chrony already configured for timestd SHM"
+        fi
+    fi
+fi
+
+# =============================================================================
 # Step 2: Set Paths Based on Mode
 # =============================================================================
 log_step "Setting up paths for $MODE mode..."
@@ -153,6 +192,42 @@ log_info "  Config:    $CONFIG_DIR"
 log_info "  Venv:      $VENV_DIR"
 log_info "  Web UI:    $WEBUI_DIR"
 log_info "  Logs:      $LOG_DIR"
+
+# =============================================================================
+# Step 2.5: Create Service User (Production Only)
+# =============================================================================
+if [[ "$MODE" == "production" ]]; then
+    log_step "Creating timestd service user..."
+    
+    # Create timestd system user and group
+    if ! id -u timestd &>/dev/null; then
+        sudo useradd --system --no-create-home --shell /usr/sbin/nologin \
+            --comment "HF Time Standard Service" timestd
+        log_info "  ✅ Created system user: timestd"
+    else
+        log_info "  ℹ️  User timestd already exists"
+    fi
+    
+    # Detect chrony group (distribution-specific)
+    CHRONY_GROUP=""
+    if getent group _chrony &>/dev/null; then
+        CHRONY_GROUP="_chrony"  # Debian/Ubuntu
+    elif getent group chrony &>/dev/null; then
+        CHRONY_GROUP="chrony"   # RHEL/Fedora/Arch
+    fi
+    
+    if [[ -n "$CHRONY_GROUP" ]]; then
+        sudo usermod -a -G "$CHRONY_GROUP" timestd
+        log_info "  ✅ Added timestd to $CHRONY_GROUP group (for chrony SHM access)"
+    else
+        log_warn "  ⚠️  Chrony group not found - chrony SHM integration may not work"
+        log_warn "     Install chrony and run: sudo usermod -a -G <chrony-group> timestd"
+    fi
+    
+    # Override INSTALL_USER for production mode
+    INSTALL_USER="timestd"
+    log_info "  📝 Services will run as: $INSTALL_USER"
+fi
 
 # =============================================================================
 # Step 3: Create Directories
@@ -180,6 +255,13 @@ create_dir "$DATA_ROOT/products"      # Phase 3: Derived products (decimated, sp
 create_dir "$DATA_ROOT/state"         # Global state files
 create_dir "$DATA_ROOT/status"        # System status files
 create_dir "$LOG_DIR"
+
+# Shared memory directory for hot buffer (tiered storage)
+if [[ "$MODE" == "production" ]]; then
+    sudo mkdir -p /dev/shm/timestd
+    sudo chown "$INSTALL_USER:$INSTALL_USER" /dev/shm/timestd
+    log_info "  Created: /dev/shm/timestd (hot buffer)"
+fi
 
 # Config directory (production only)
 if [[ "$MODE" == "production" ]]; then

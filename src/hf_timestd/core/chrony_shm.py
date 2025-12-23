@@ -116,31 +116,36 @@ class ChronySHM:
     def _connect_sysv(self, sysv_ipc):
         """Connect using System V IPC shared memory."""
         try:
-            # Try to attach to existing segment first
+            # Try to CREATE segment first (for fresh installs)
+            # This ensures we create it with group-writable permissions
+            # If chronyd hasn't started yet, we create it and chronyd will attach
             self.shm = sysv_ipc.SharedMemory(
                 self.key,
-                flags=0,  # Attach to existing
-                size=SHM_SIZE
-            )
-            logger.info("Attached to existing Chrony SHM segment")
-        except sysv_ipc.ExistentialError:
-            # Create new segment
-            self.shm = sysv_ipc.SharedMemory(
-                self.key,
-                flags=sysv_ipc.IPC_CREAT,
+                flags=sysv_ipc.IPC_CREAT | sysv_ipc.IPC_EXCL,
                 size=SHM_SIZE,
-                mode=0o666  # World-readable for chronyd
+                mode=0o660  # Group-writable for chronyd (timestd user in _chrony group)
             )
-            logger.info("Created new Chrony SHM segment")
-        except PermissionError as e:
-            # SHM segment exists but we don't have permission
-            # This usually means chronyd created it with restricted permissions
-            logger.error(
-                f"Permission denied accessing Chrony SHM (key=0x{self.key:08x}). "
-                f"The segment exists but is owned by root with restricted permissions. "
-                f"Fix with: sudo ipcrm -M 0x{self.key:08x}  (chronyd will recreate it)"
-            )
-            raise
+            logger.info("Created new Chrony SHM segment with group-writable permissions (0660)")
+        except sysv_ipc.ExistentialError:
+            # Segment already exists, try to attach
+            try:
+                self.shm = sysv_ipc.SharedMemory(
+                    self.key,
+                    flags=0,  # Attach to existing
+                    size=SHM_SIZE
+                )
+                logger.info("Attached to existing Chrony SHM segment")
+            except PermissionError as e:
+                # SHM segment exists but we don't have permission
+                # This usually means chronyd created it with restricted permissions (0600)
+                logger.error(
+                    f"Permission denied accessing Chrony SHM (key=0x{self.key:08x}). "
+                    f"The segment exists but has restrictive permissions. "
+                    f"Solution: Stop chronyd, remove SHM, start timestd-analytics (creates SHM), then start chronyd. "
+                    f"Commands: sudo systemctl stop chronyd && sudo ipcrm -M 0x{self.key:08x} && "
+                    f"sudo systemctl restart timestd-analytics && sudo systemctl start chronyd"
+                )
+                raise
         
         self._use_sysv = True
     

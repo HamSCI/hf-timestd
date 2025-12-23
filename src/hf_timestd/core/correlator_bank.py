@@ -509,12 +509,32 @@ class CorrelatorBank:
             times = [t for _, t in emission_times]
             max_error = max(times) - min(times)
             
+            # Adaptive threshold based on time of day and frequency
+            # Ionospheric conditions are more variable at night and at lower frequencies
+            hour = int((assignment.minute_timestamp % 86400) / 3600)
+            is_nighttime = (hour >= 18 or hour < 6)
+            
+            # Base threshold
+            base_threshold_ms = 5.0
+            
+            # Adjust for nighttime (more ionospheric variability)
+            if is_nighttime:
+                threshold_ms = base_threshold_ms * 1.5  # 7.5 ms
+            else:
+                threshold_ms = base_threshold_ms
+            
+            # Adjust for frequency (lower frequencies more variable)
+            if assignment.frequency_mhz <= 5.0:
+                threshold_ms *= 1.2  # 6.0 ms (day) or 9.0 ms (night)
+            
             assignment.cross_validation_error_ms = float(max_error)
-            assignment.cross_validation_passed = max_error < 5.0  # 5ms threshold
+            assignment.cross_validation_passed = max_error < threshold_ms
+            assignment.cross_validation_threshold_ms = float(threshold_ms)  # Store for logging
             
             if not assignment.cross_validation_passed:
-                logger.warning(f"Cross-validation failed: max error {max_error:.2f}ms "
-                             f"between {[s for s, _ in emission_times]}")
+                logger.warning(f"Cross-validation failed: max error {max_error:.2f}ms > threshold {threshold_ms:.1f}ms "
+                             f"between {[s for s, _ in emission_times]} "
+                             f"(nighttime={is_nighttime}, freq={assignment.frequency_mhz:.1f}MHz)")
         
         return assignment
     
