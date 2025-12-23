@@ -131,6 +131,7 @@ import json
 import csv
 import os
 import time
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -199,6 +200,10 @@ class FusedResult:
     uncertainty_ms: float        # Estimated uncertainty
     n_broadcasts: int            # Number of broadcasts used
     n_stations: int              # Number of unique stations
+
+    global_solve_verified: bool = False
+    global_solve_consistency_ms: Optional[float] = None
+    global_solve_n_obs: int = 0
     
     # Per-station breakdown
     wwv_mean_ms: Optional[float] = None
@@ -252,7 +257,10 @@ class MultiBroadcastFusion:
         data_root: Path,
         calibration_file: Optional[Path] = None,
         auto_calibrate: bool = True,
-        reference_station: str = 'CHU'
+        reference_station: str = 'CHU',
+        receiver_lat: Optional[float] = None,
+        receiver_lon: Optional[float] = None,
+        sample_rate: Optional[int] = None
     ):
         """
         Initialize multi-broadcast fusion engine.
@@ -267,6 +275,18 @@ class MultiBroadcastFusion:
         self.phase2_dir = self.data_root / 'phase2'
         self.auto_calibrate = auto_calibrate
         self.reference_station = reference_station
+
+        from .wwv_constants import SAMPLE_RATE_FULL
+        self.sample_rate = int(sample_rate if sample_rate is not None else SAMPLE_RATE_FULL)
+
+        self.receiver_lat = receiver_lat if receiver_lat is not None else 39.0
+        self.receiver_lon = receiver_lon if receiver_lon is not None else -98.0
+
+        from .differential_time_solver import GlobalDifferentialSolver
+        self.global_solver = GlobalDifferentialSolver(
+            receiver_lat=self.receiver_lat,
+            receiver_lon=self.receiver_lon
+        )
         
         # Initialize TEC Estimator (Coherent Multi-Frequency Physics)
         from .tec_estimator import TECEstimator
@@ -385,19 +405,377 @@ class MultiBroadcastFusion:
     
     def _init_fusion_csv(self):
         """Initialize fused D_clock CSV."""
+        header = [
+            'timestamp', 'd_clock_fused_ms', 'd_clock_raw_ms',
+            'uncertainty_ms', 'n_broadcasts', 'n_stations',
+            'wwv_mean_ms', 'wwvh_mean_ms', 'chu_mean_ms', 'bpm_mean_ms',
+            'wwv_count', 'wwvh_count', 'chu_count', 'bpm_count',
+            'calibration_applied', 'quality_grade',
+            'outliers_rejected',
+            'wwv_intra_std_ms', 'wwvh_intra_std_ms', 'chu_intra_std_ms', 'bpm_intra_std_ms',
+            'inter_station_spread_ms', 'consistency_flag',
+            'global_solve_verified', 'global_solve_consistency_ms', 'global_solve_n_obs'
+        ]
+
         if not self.fusion_csv.exists():
             with open(self.fusion_csv, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp', 'd_clock_fused_ms', 'd_clock_raw_ms',
-                    'uncertainty_ms', 'n_broadcasts', 'n_stations',
-                    'wwv_mean_ms', 'wwvh_mean_ms', 'chu_mean_ms', 'bpm_mean_ms',
-                    'wwv_count', 'wwvh_count', 'chu_count', 'bpm_count',
-                    'calibration_applied', 'quality_grade',
-                    'outliers_rejected',
-                    'wwv_intra_std_ms', 'wwvh_intra_std_ms', 'chu_intra_std_ms', 'bpm_intra_std_ms',
-                    'inter_station_spread_ms', 'consistency_flag'
-                ])
+                writer.writerow(header)
+            return
+
+        try:
+            with open(self.fusion_csv, 'r', newline='') as f:
+                reader = csv.reader(f)
+                existing_header = next(reader, None)
+
+            if existing_header and all(col in existing_header for col in header):
+                return
+
+            if not existing_header:
+                with open(self.fusion_csv, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header)
+                return
+
+            temp_path = self.fusion_csv.with_suffix('.tmp')
+            with open(self.fusion_csv, 'r', newline='') as src, open(temp_path, 'w', newline='') as dst:
+                r = csv.reader(src)
+                w = csv.writer(dst)
+                old_header = next(r, [])
+                w.writerow(header)
+
+                old_len = len(old_header)
+                new_len = len(header)
+                for row in r:
+                    if len(row) < new_len:
+                        row = row + [''] * (new_len - len(row))
+                    w.writerow(row)
+
+                dst.flush()
+                os.fsync(dst.fileno())
+            temp_path.replace(self.fusion_csv)
+        except Exception as e:
+            logger.debug(f"Could not migrate fusion CSV header: {e}")
+
+    def _extract_frequency_mhz(self, channel: str) -> Optional[float]:
+        s = channel.replace('_', ' ')
+        m = re.search(r'(\d+(?:\.\d+)?)\s*mhz', s, flags=re.IGNORECASE)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return None
+        m = re.search(r'(\d+(?:\.\d+)?)', s)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return None
+        return None
+
+    def _read_latest_tone_observations(
+        self,
+        lookback_minutes: int = 10
+    ) -> Dict[int, List[Dict]]:
+        from datetime import datetime, timezone, timedelta
+        from .wwv_constants import BPM_UT1_MINUTES
+
+        now = time.time()
+        cutoff = now - (lookback_minutes * 60)
+
+        now_dt = datetime.now(timezone.utc)
+        today_str = now_dt.strftime('%Y%m%d')
+        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
+
+        by_minute: Dict[int, List[Dict]] = defaultdict(list)
+
+        for channel in self.channels:
+            tone_dir = self.phase2_dir / channel / 'tone_detections'
+            if not tone_dir.exists():
+                continue
+
+            freq_mhz = self._extract_frequency_mhz(channel)
+            if freq_mhz is None:
+                continue
+
+            csv_files = []
+            for date_str in [today_str, yesterday_str]:
+                for csv_path in tone_dir.glob(f'*_tones_{date_str}.csv'):
+                    csv_files.append(csv_path)
+
+            for csv_path in csv_files:
+                try:
+                    with open(csv_path) as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            mb_str = row.get('minute_boundary')
+                            if not mb_str:
+                                continue
+                            try:
+                                minute_boundary = int(float(mb_str))
+                            except ValueError:
+                                continue
+
+                            if minute_boundary < cutoff:
+                                continue
+
+                            wwv_ms = row.get('wwv_timing_ms')
+                            wwvh_ms = row.get('wwvh_timing_ms')
+                            chu_ms = row.get('chu_timing_ms')
+                            bpm_ms = row.get('bpm_timing_ms')
+
+                            if wwv_ms not in (None, ''):
+                                try:
+                                    by_minute[minute_boundary].append({
+                                        'station': 'WWV',
+                                        'frequency_mhz': freq_mhz,
+                                        'timing_ms': float(wwv_ms)
+                                    })
+                                except ValueError:
+                                    pass
+
+                            if wwvh_ms not in (None, ''):
+                                try:
+                                    by_minute[minute_boundary].append({
+                                        'station': 'WWVH',
+                                        'frequency_mhz': freq_mhz,
+                                        'timing_ms': float(wwvh_ms)
+                                    })
+                                except ValueError:
+                                    pass
+
+                            if chu_ms not in (None, ''):
+                                try:
+                                    by_minute[minute_boundary].append({
+                                        'station': 'CHU',
+                                        'frequency_mhz': freq_mhz,
+                                        'timing_ms': float(chu_ms)
+                                    })
+                                except ValueError:
+                                    pass
+
+                            if bpm_ms not in (None, ''):
+                                try:
+                                    dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
+                                    if dt.minute in BPM_UT1_MINUTES:
+                                        continue
+                                    by_minute[minute_boundary].append({
+                                        'station': 'BPM',
+                                        'frequency_mhz': freq_mhz,
+                                        'timing_ms': float(bpm_ms)
+                                    })
+                                except ValueError:
+                                    pass
+                except Exception:
+                    continue
+
+        return by_minute
+
+    def _read_latest_tone_observations_by_channel(
+        self,
+        lookback_minutes: int = 10
+    ) -> Dict[str, Dict[int, List[Dict]]]:
+        from datetime import datetime, timezone, timedelta
+        from .wwv_constants import BPM_UT1_MINUTES
+
+        now = time.time()
+        cutoff = now - (lookback_minutes * 60)
+
+        now_dt = datetime.now(timezone.utc)
+        today_str = now_dt.strftime('%Y%m%d')
+        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
+
+        by_channel: Dict[str, Dict[int, List[Dict]]] = {}
+
+        for channel in self.channels:
+            tone_dir = self.phase2_dir / channel / 'tone_detections'
+            if not tone_dir.exists():
+                continue
+
+            freq_mhz = self._extract_frequency_mhz(channel)
+            if freq_mhz is None:
+                continue
+
+            per_minute: Dict[int, List[Dict]] = defaultdict(list)
+
+            csv_files = []
+            for date_str in [today_str, yesterday_str]:
+                for csv_path in tone_dir.glob(f'*_tones_{date_str}.csv'):
+                    csv_files.append(csv_path)
+
+            for csv_path in csv_files:
+                try:
+                    with open(csv_path) as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            mb_str = row.get('minute_boundary')
+                            if not mb_str:
+                                continue
+                            try:
+                                minute_boundary = int(float(mb_str))
+                            except ValueError:
+                                continue
+
+                            if minute_boundary < cutoff:
+                                continue
+
+                            wwv_ms = row.get('wwv_timing_ms')
+                            wwvh_ms = row.get('wwvh_timing_ms')
+                            chu_ms = row.get('chu_timing_ms')
+                            bpm_ms = row.get('bpm_timing_ms')
+
+                            if wwv_ms not in (None, ''):
+                                try:
+                                    per_minute[minute_boundary].append({
+                                        'station': 'WWV',
+                                        'frequency_mhz': freq_mhz,
+                                        'timing_ms': float(wwv_ms)
+                                    })
+                                except ValueError:
+                                    pass
+
+                            if wwvh_ms not in (None, ''):
+                                try:
+                                    per_minute[minute_boundary].append({
+                                        'station': 'WWVH',
+                                        'frequency_mhz': freq_mhz,
+                                        'timing_ms': float(wwvh_ms)
+                                    })
+                                except ValueError:
+                                    pass
+
+                            if chu_ms not in (None, ''):
+                                try:
+                                    per_minute[minute_boundary].append({
+                                        'station': 'CHU',
+                                        'frequency_mhz': freq_mhz,
+                                        'timing_ms': float(chu_ms)
+                                    })
+                                except ValueError:
+                                    pass
+
+                            if bpm_ms not in (None, ''):
+                                try:
+                                    dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
+                                    if dt.minute in BPM_UT1_MINUTES:
+                                        continue
+                                    per_minute[minute_boundary].append({
+                                        'station': 'BPM',
+                                        'frequency_mhz': freq_mhz,
+                                        'timing_ms': float(bpm_ms)
+                                    })
+                                except ValueError:
+                                    pass
+                except Exception:
+                    continue
+
+            if per_minute:
+                by_channel[channel] = per_minute
+
+        return by_channel
+
+    def _run_global_differential_solve(
+        self,
+        lookback_minutes: int
+    ) -> Tuple[Optional[object], int]:
+        by_channel = self._read_latest_tone_observations_by_channel(lookback_minutes=lookback_minutes)
+        if not by_channel:
+            return None, 0
+
+        minute_sets = [set(m.keys()) for m in by_channel.values() if m]
+        if not minute_sets:
+            return None, 0
+
+        common_minutes = set.intersection(*minute_sets) if len(minute_sets) > 1 else minute_sets[0]
+        target_minute = max(common_minutes) if common_minutes else None
+
+        if logger.isEnabledFor(logging.DEBUG):
+            channel_ranges = {}
+            for ch, per_minute in by_channel.items():
+                mins = sorted(per_minute.keys())
+                if not mins:
+                    continue
+                channel_ranges[ch] = {
+                    'n_minutes': len(mins),
+                    'min_minute': mins[0],
+                    'max_minute': mins[-1]
+                }
+            logger.debug(
+                f"Global solve minute coverage: channels={len(channel_ranges)} "
+                f"common_minutes={len(common_minutes)} "
+                f"ranges={channel_ranges}"
+            )
+
+        if target_minute is None:
+            union_minutes = set()
+            for s in minute_sets:
+                union_minutes |= s
+            target_minute = max(union_minutes) if union_minutes else None
+
+            if target_minute is not None:
+                logger.info(
+                    f"Global solve: no common minute across channels in lookback={lookback_minutes}m; "
+                    f"falling back to latest available minute={target_minute}"
+                )
+
+        if target_minute is None:
+            return None, 0
+
+        best_obs = []
+        dropped_channels = []
+        for ch, m in by_channel.items():
+            if target_minute in m:
+                best_obs.extend(m.get(target_minute, []))
+            else:
+                dropped_channels.append(ch)
+
+        station_mix = sorted({f"{o['station']}-{o['frequency_mhz']:.2f}" for o in best_obs})
+        if dropped_channels:
+            logger.info(
+                f"Global solve context: target_minute={target_minute} obs={len(best_obs)} "
+                f"mix={station_mix} dropped_channels={sorted(dropped_channels)}"
+            )
+        else:
+            logger.info(
+                f"Global solve context: target_minute={target_minute} obs={len(best_obs)} mix={station_mix}"
+            )
+
+        has_nist = any(s.startswith('WWV-') or s.startswith('WWVH-') for s in station_mix)
+        has_chu = any(s.startswith('CHU-') for s in station_mix)
+        if has_nist and has_chu:
+            logger.info(
+                f"Global solve: cross-agency triangulation active (NIST+NRC) target_minute={target_minute} "
+                f"obs={len(best_obs)} mix={station_mix}"
+            )
+
+        if len(best_obs) < 2:
+            return None, len(best_obs)
+
+        observations = []
+        for o in best_obs:
+            arrival_rtp = int(round(o['timing_ms'] * self.sample_rate / 1000.0))
+            observations.append({
+                'station': o['station'],
+                'frequency_mhz': o['frequency_mhz'],
+                'arrival_rtp': arrival_rtp
+            })
+
+        result = self.global_solver.solve_global(
+            observations=observations,
+            minute_boundary_rtp=0,
+            sample_rate=self.sample_rate
+        )
+
+        try:
+            logger.info(
+                f"Global solve result: target_minute={target_minute} n_obs={getattr(result, 'n_observations', len(observations))} "
+                f"offset_ms={getattr(result, 'clock_error_ms', 0.0):+.3f} "
+                f"verified={getattr(result, 'verified', False)} conf={getattr(result, 'confidence', 0.0):.2f} "
+                f"consistency_ms={getattr(result, 'pair_consistency_ms', 0.0):.3f}"
+            )
+        except Exception:
+            pass
+        return result, len(observations)
     
     def _read_latest_measurements(
         self, 
@@ -520,6 +898,10 @@ class MultiBroadcastFusion:
         for m in measurements:
             # Base weight from confidence
             w = m.confidence
+
+            if m.station == 'GLOBAL_DIFF':
+                weights.append(max(10.0, 200.0 * w))
+                continue
             
             # Adjust for quality grade
             w *= grade_weights.get(m.quality_grade, 0.2)
@@ -573,6 +955,11 @@ class MultiBroadcastFusion:
         
         # Reject outliers
         keep_mask = deviations < (sigma_threshold * mad)
+
+        # Never drop the physics-verified synthetic measurement
+        for i, m in enumerate(measurements):
+            if m.station == 'GLOBAL_DIFF':
+                keep_mask[i] = True
         
         filtered_m = [m for m, keep in zip(measurements, keep_mask) if keep]
         filtered_w = [w for w, keep in zip(weights, keep_mask) if keep]
@@ -601,6 +988,9 @@ class MultiBroadcastFusion:
         """
         calibrated = []
         for m in measurements:
+            if m.station == 'GLOBAL_DIFF':
+                calibrated.append(m.d_clock_ms)
+                continue
             # Use per-broadcast calibration (station + frequency)
             broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
             broadcast_cal = self.calibration.get(broadcast_key)
@@ -631,6 +1021,8 @@ class MultiBroadcastFusion:
         
         # Add to history keyed by broadcast (station + frequency)
         for m in measurements:
+            if m.station == 'GLOBAL_DIFF':
+                continue
             broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
             history = self.measurement_history[broadcast_key]
             history.append(m)
@@ -753,12 +1145,42 @@ class MultiBroadcastFusion:
         Returns:
             FusedResult with fused D_clock and statistics
         """
+        global_result = None
+        global_n_obs = 0
+        try:
+            global_result, global_n_obs = self._run_global_differential_solve(lookback_minutes=lookback_minutes)
+        except Exception as e:
+            logger.debug(f"Global differential solve failed: {e}")
+
         # Read latest measurements
         measurements = self._read_latest_measurements(lookback_minutes)
         
         if not measurements:
             logger.debug("No measurements available for fusion")
             return None
+
+        if global_result is not None and getattr(global_result, 'verified', False):
+            forced_conf = float(getattr(global_result, 'confidence', 0.0)) or 1.0
+            forced_weight = max(10.0, 200.0 * forced_conf)
+            forced_floor_ms = 0.1
+            logger.info(
+                f"Injecting GLOBAL_DIFF: offset_ms={float(getattr(global_result, 'clock_error_ms', 0.0)):+.3f} "
+                f"conf={forced_conf:.2f} force_weight={forced_weight:.1f} kalman_floor_ms={forced_floor_ms:.1f}"
+            )
+            measurements.append(
+                BroadcastMeasurement(
+                    timestamp=time.time(),
+                    station='GLOBAL_DIFF',
+                    frequency_mhz=0.0,
+                    d_clock_ms=float(getattr(global_result, 'clock_error_ms', 0.0)),
+                    propagation_delay_ms=0.0,
+                    propagation_mode='GW',
+                    confidence=forced_conf,
+                    snr_db=20.0,
+                    quality_grade=str(getattr(global_result, 'quality_grade', 'A')),
+                    channel_name='FUSION'
+                )
+            )
         
         # Calculate weights
         weights = self._calculate_weights(measurements)
@@ -772,6 +1194,8 @@ class MultiBroadcastFusion:
         # Group by station
         by_station = defaultdict(list)
         for m in measurements:
+            if m.station == 'GLOBAL_DIFF':
+                continue
             by_station[m.station].append(m)
             
         for station, station_meas in by_station.items():
@@ -865,8 +1289,10 @@ class MultiBroadcastFusion:
         
         # Measurement uncertainty from weighted std
         weighted_var = np.sum(w * (d - fused_d_clock)**2) / np.sum(w)
-        # Add a floor to measurement uncertainty - physical limit of hf timing is ~0.2ms
-        measurement_uncertainty = max(0.2, np.sqrt(weighted_var))
+
+        has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
+        uncertainty_floor = 0.1 if has_verified_global else 0.2
+        measurement_uncertainty = max(uncertainty_floor, np.sqrt(weighted_var))
         
         # Update Kalman filter for convergence
         kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
@@ -887,7 +1313,7 @@ class MultiBroadcastFusion:
         bpm_m = [m.d_clock_ms for m in measurements if m.station == 'BPM']
         
         # Unique stations
-        stations = set(m.station for m in measurements)
+        stations = set(m.station for m in measurements if m.station != 'GLOBAL_DIFF')
         
         # === CONSISTENCY CHECKS ===
         # Same-station broadcasts should have tight agreement (ionospheric variation only)
@@ -998,6 +1424,9 @@ class MultiBroadcastFusion:
             uncertainty_ms=uncertainty,
             n_broadcasts=len(measurements),
             n_stations=len(stations),
+            global_solve_verified=bool(getattr(global_result, 'verified', False)) if global_result is not None else False,
+            global_solve_consistency_ms=float(getattr(global_result, 'pair_consistency_ms', 0.0)) if global_result is not None else None,
+            global_solve_n_obs=int(getattr(global_result, 'n_observations', global_n_obs)) if global_result is not None else 0,
             wwv_mean_ms=np.mean(wwv_m) if wwv_m else None,
             wwvh_mean_ms=np.mean(wwvh_m) if wwvh_m else None,
             chu_mean_ms=np.mean(chu_m) if chu_m else None,
@@ -1050,7 +1479,10 @@ class MultiBroadcastFusion:
                 result.chu_intra_std_ms or '',
                 result.bpm_intra_std_ms or '',
                 result.inter_station_spread_ms or '',
-                result.consistency_flag
+                result.consistency_flag,
+                result.global_solve_verified,
+                result.global_solve_consistency_ms if result.global_solve_consistency_ms is not None else '',
+                result.global_solve_n_obs
             ])
     
     def get_current_calibration(self) -> Dict[str, float]:

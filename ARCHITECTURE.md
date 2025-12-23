@@ -324,6 +324,46 @@ JSON Response → Chart.js plots
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Cross-Frequency Global Differential Fusion (Physics-Verified Constraint)
+
+**Decision:** A cross-frequency physics solve is performed inside `core/multi_broadcast_fusion.py` using `GlobalDifferentialSolver`.
+
+**Why?** Phase 2 is inherently per-channel/per-frequency. The fusion layer is the first place where measurements from *all* channels coexist, so it is the natural point to run a global differential solve that can combine observations from:
+- Same frequency / different station (WWV vs WWVH)
+- Different frequency / same station (dispersion constraints)
+- Different frequency / different station (global consistency)
+
+**Input source:** The global solve is built from per-channel `tone_detections/*_tones_YYYYMMDD.csv` files. For each observation we reconstruct a minute-relative arrival sample count:
+
+```
+arrival_rtp := timing_ms * sample_rate
+minute_boundary_rtp := 0
+```
+
+This is sufficient for differential solving because the absolute anchor cancels in pairwise differences, assuming all channels reference the same system clock minute boundary.
+
+**Latest common minute selection:** To avoid mixing observations across changing ionosphere, the global solver uses the most recent `minute_boundary` that exists across all channels with tone data in the lookback window (intersection). If no intersection exists, it logs and falls back to the latest available minute.
+
+**CHU inclusion:** `phase2_analytics_service.py` writes CHU fields (`chu_detected`, `chu_snr_db`, `chu_timing_ms`) into new tone-detections CSVs. When present, CHU enables cross-agency triangulation (NIST + NRC) constraints.
+
+**Fusion integration (trusted synthetic measurement):** When the global solve returns `verified=True`, fusion injects a synthetic measurement:
+- `station = GLOBAL_DIFF`
+- Large forced weight during fusion (dominates the weighted mean)
+- Kalman measurement uncertainty floor reduced (acts like a trusted constraint)
+
+This provides a physics-verified override path without rewriting Phase 2 per-channel outputs.
+
+**Observability:** The fusion layer logs global solve decision context:
+- Selected target minute, station/frequency mix, and any channels missing data at the target minute
+- Explicit log when NIST+NRC triangulation is active
+- Global solve result summary (offset/confidence/consistency)
+- Synthetic injection parameters
+
+**Fused output columns:** `phase2/fusion/fused_d_clock.csv` includes:
+- `global_solve_verified`
+- `global_solve_consistency_ms`
+- `global_solve_n_obs`
+
 ### The D_clock Equation
 
 ```

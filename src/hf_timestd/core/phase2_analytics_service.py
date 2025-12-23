@@ -445,7 +445,7 @@ class Phase2AnalyticsService:
                     '',                                                 # wwvh_power_db
                     '',                                                 # discrimination_confidence
                     convergence_result.is_locked,                       # utc_verified (locked = verified)
-                    False,                                              # multi_station_verified
+                    (solution.dual_station_verified if solution else False),  # multi_station_verified
                     rtp_timestamp,                                      # rtp_timestamp
                     datetime.now(timezone.utc).timestamp(),             # processed_at
                     wwv_tick_snr,                                       # wwv_tick_snr_db
@@ -527,9 +527,10 @@ class Phase2AnalyticsService:
             with open(self.tone_detections_csv, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'wwv_detected', 'wwvh_detected', 'bpm_detected',
-                    'wwv_snr_db', 'wwvh_snr_db', 'bpm_snr_db', 
-                    'wwv_timing_ms', 'wwvh_timing_ms', 'bpm_timing_ms',
+                    'timestamp_utc', 'minute_boundary',
+                    'wwv_detected', 'wwvh_detected', 'chu_detected', 'bpm_detected',
+                    'wwv_snr_db', 'wwvh_snr_db', 'chu_snr_db', 'bpm_snr_db', 
+                    'wwv_timing_ms', 'wwvh_timing_ms', 'chu_timing_ms', 'bpm_timing_ms',
                     'anchor_station', 'anchor_confidence'
                 ])
             logger.info(f"Created tone detections CSV: {self.tone_detections_csv}")
@@ -543,25 +544,54 @@ class Phase2AnalyticsService:
             if self.tone_detections_csv != expected_csv:
                 self.tone_detections_csv = expected_csv
                 self._init_tone_detections_csv()
+
+            include_chu = False
+            try:
+                with open(self.tone_detections_csv, 'r', newline='') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, [])
+                include_chu = 'chu_timing_ms' in header
+            except Exception:
+                include_chu = False
             
             with open(self.tone_detections_csv, 'a', newline='') as f:
                 writer = csv.writer(f)
                 utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    1 if time_snap.wwv_detected else 0,
-                    1 if time_snap.wwvh_detected else 0,
-                    1 if time_snap.bpm_detected else 0,
-                    round(time_snap.wwv_snr_db, 2) if time_snap.wwv_snr_db else '',
-                    round(time_snap.wwvh_snr_db, 2) if time_snap.wwvh_snr_db else '',
-                    round(time_snap.bpm_snr_db, 2) if time_snap.bpm_snr_db else '',
-                    round(time_snap.wwv_timing_ms, 3) if time_snap.wwv_timing_ms else '',
-                    round(time_snap.wwvh_timing_ms, 3) if time_snap.wwvh_timing_ms else '',
-                    round(time_snap.bpm_timing_ms, 3) if time_snap.bpm_timing_ms else '',
-                    time_snap.anchor_station or '',
-                    round(time_snap.anchor_confidence, 3) if time_snap.anchor_confidence else ''
-                ])
+                if include_chu:
+                    writer.writerow([
+                        utc_time,
+                        minute_boundary,
+                        1 if time_snap.wwv_detected else 0,
+                        1 if time_snap.wwvh_detected else 0,
+                        1 if getattr(time_snap, 'chu_detected', False) else 0,
+                        1 if time_snap.bpm_detected else 0,
+                        round(time_snap.wwv_snr_db, 2) if time_snap.wwv_snr_db else '',
+                        round(time_snap.wwvh_snr_db, 2) if time_snap.wwvh_snr_db else '',
+                        round(getattr(time_snap, 'chu_snr_db', None), 2) if getattr(time_snap, 'chu_snr_db', None) else '',
+                        round(time_snap.bpm_snr_db, 2) if time_snap.bpm_snr_db else '',
+                        round(time_snap.wwv_timing_ms, 3) if time_snap.wwv_timing_ms else '',
+                        round(time_snap.wwvh_timing_ms, 3) if time_snap.wwvh_timing_ms else '',
+                        round(getattr(time_snap, 'chu_timing_ms', None), 3) if getattr(time_snap, 'chu_timing_ms', None) else '',
+                        round(time_snap.bpm_timing_ms, 3) if time_snap.bpm_timing_ms else '',
+                        time_snap.anchor_station or '',
+                        round(time_snap.anchor_confidence, 3) if time_snap.anchor_confidence else ''
+                    ])
+                else:
+                    writer.writerow([
+                        utc_time,
+                        minute_boundary,
+                        1 if time_snap.wwv_detected else 0,
+                        1 if time_snap.wwvh_detected else 0,
+                        1 if time_snap.bpm_detected else 0,
+                        round(time_snap.wwv_snr_db, 2) if time_snap.wwv_snr_db else '',
+                        round(time_snap.wwvh_snr_db, 2) if time_snap.wwvh_snr_db else '',
+                        round(time_snap.bpm_snr_db, 2) if time_snap.bpm_snr_db else '',
+                        round(time_snap.wwv_timing_ms, 3) if time_snap.wwv_timing_ms else '',
+                        round(time_snap.wwvh_timing_ms, 3) if time_snap.wwvh_timing_ms else '',
+                        round(time_snap.bpm_timing_ms, 3) if time_snap.bpm_timing_ms else '',
+                        time_snap.anchor_station or '',
+                        round(time_snap.anchor_confidence, 3) if time_snap.anchor_confidence else ''
+                    ])
         except Exception as e:
             logger.error(f"Failed to write tone detections: {e}")
     

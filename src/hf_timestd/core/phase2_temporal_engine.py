@@ -629,6 +629,21 @@ class Phase2TemporalEngine:
                 receiver_lon=self.precise_lon,
                 sample_rate=self.sample_rate
             )
+
+            from .differential_time_solver import DifferentialTimeSolver
+            from .differential_time_solver import GlobalDifferentialSolver
+
+            receiver_lat = self.precise_lat if self.precise_lat is not None else 39.0
+            receiver_lon = self.precise_lon if self.precise_lon is not None else -98.0
+            self.differential_solver = DifferentialTimeSolver(
+                receiver_lat=receiver_lat,
+                receiver_lon=receiver_lon
+            )
+
+            self.global_differential_solver = GlobalDifferentialSolver(
+                receiver_lat=receiver_lat,
+                receiver_lon=receiver_lon
+            )
             
             # Step 5: Correlator Bank (MLE-based component decomposition)
             # Parallel matched filtering with station-specific templates
@@ -1686,11 +1701,105 @@ class Phase2TemporalEngine:
             )
             
             # Check for dual-station cross-validation
-            if channel.bcd_wwv_toa_ms is not None and channel.bcd_wwvh_toa_ms is not None:
-                # Both stations detected - can cross-validate
-                # Back-calculate emission time from each
-                # (This would require expected delays from geo_predictor)
-                pass  # TODO: Implement dual-station cross-validation
+            try:
+                if (
+                    getattr(self, 'differential_solver', None) is not None and
+                    self._is_shared_frequency() and
+                    time_snap.wwv_timing_ms is not None and
+                    time_snap.wwvh_timing_ms is not None and
+                    expected_second_rtp is not None
+                ):
+                    wwv_arrival_rtp = rtp_timestamp + round(time_snap.wwv_timing_ms * self.sample_rate / 1000.0)
+                    wwvh_arrival_rtp = rtp_timestamp + round(time_snap.wwvh_timing_ms * self.sample_rate / 1000.0)
+
+                    diff_result = self.differential_solver.solve_with_anchor(
+                        wwv_arrival_rtp=wwv_arrival_rtp,
+                        wwvh_arrival_rtp=wwvh_arrival_rtp,
+                        minute_boundary_rtp=expected_second_rtp,
+                        sample_rate=self.sample_rate,
+                        frequency_mhz=self.frequency_mhz,
+                        delay_spread_ms=delay_spread_ms,
+                        doppler_std_hz=max(
+                            channel.doppler_wwv_std_hz or 0.0,
+                            channel.doppler_wwvh_std_hz or 0.0,
+                            0.1
+                        )
+                    )
+
+                    if (
+                        diff_result is not None and
+                        getattr(diff_result.wwv_mode, 'value', 'UNK') != 'UNK' and
+                        getattr(diff_result.wwvh_mode, 'value', 'UNK') != 'UNK'
+                    ):
+                        solution.dual_station_agreement_ms = diff_result.wwv_wwvh_agreement_ms
+                        solution.dual_station_verified = diff_result.clock_error_verified
+
+                        dclock_delta_ms = abs(solution.d_clock_ms - diff_result.clock_error_ms)
+                        if diff_result.clock_error_verified and diff_result.confidence >= 0.3 and dclock_delta_ms <= 2.0:
+                            solution.confidence = min(1.0, solution.confidence + 0.15)
+                        elif diff_result.confidence >= 0.3 and dclock_delta_ms >= 5.0:
+                            solution.confidence = max(0.05, solution.confidence - 0.2)
+                            logger.warning(
+                                f"Differential validator disagrees with D_clock: "
+                                f"single={solution.d_clock_ms:+.2f}ms vs diff={diff_result.clock_error_ms:+.2f}ms "
+                                f"(Δ={dclock_delta_ms:.2f}ms, verified={diff_result.clock_error_verified})"
+                            )
+
+                        logger.info(
+                            f"Differential validation: WWV={diff_result.wwv_mode.value}, "
+                            f"WWVH={diff_result.wwvh_mode.value}, "
+                            f"agreement={diff_result.wwv_wwvh_agreement_ms:.2f}ms, "
+                            f"ΔD_clock={dclock_delta_ms:.2f}ms, conf={diff_result.confidence:.2f}"
+                        )
+
+                if (
+                    getattr(self, 'global_differential_solver', None) is not None and
+                    self._is_shared_frequency() and
+                    getattr(time_snap, 'multi_station_result', None) is not None and
+                    expected_second_rtp is not None
+                ):
+                    observations = []
+                    for det in time_snap.multi_station_result.get_all_usable_detections():
+                        if det.station not in ('WWV', 'WWVH', 'CHU', 'BPM'):
+                            continue
+                        arrival_rtp_i = rtp_timestamp + round(det.measured_toa_ms * self.sample_rate / 1000.0)
+                        observations.append({
+                            'station': det.station,
+                            'frequency_mhz': self.frequency_mhz,
+                            'arrival_rtp': arrival_rtp_i
+                        })
+
+                    if len(observations) >= 2:
+                        global_result = self.global_differential_solver.solve_global(
+                            observations=observations,
+                            minute_boundary_rtp=expected_second_rtp,
+                            sample_rate=self.sample_rate
+                        )
+
+                        if global_result.verified:
+                            solution.dual_station_verified = True
+                        if solution.dual_station_agreement_ms is None:
+                            solution.dual_station_agreement_ms = global_result.pair_consistency_ms
+
+                        global_delta_ms = abs(solution.d_clock_ms - global_result.clock_error_ms)
+                        if global_result.verified and global_result.confidence >= 0.3 and global_delta_ms <= 2.0:
+                            solution.confidence = min(1.0, solution.confidence + 0.10)
+                        elif global_result.confidence >= 0.3 and global_delta_ms >= 5.0:
+                            solution.confidence = max(0.05, solution.confidence - 0.15)
+                            logger.warning(
+                                f"Global differential validator disagrees with D_clock: "
+                                f"single={solution.d_clock_ms:+.2f}ms vs global={global_result.clock_error_ms:+.2f}ms "
+                                f"(Δ={global_delta_ms:.2f}ms, verified={global_result.verified})"
+                            )
+
+                        logger.info(
+                            f"Global differential validation: n_obs={global_result.n_observations}, "
+                            f"pairs={global_result.n_pairs}, rms={global_result.pair_consistency_ms:.2f}ms, "
+                            f"ΔD_clock={global_delta_ms:.2f}ms, conf={global_result.confidence:.2f}, "
+                            f"verified={global_result.verified}"
+                        )
+            except Exception as e:
+                logger.debug(f"Differential validation failed: {e}")
             
             # CHU FSK timing confirmation
             # The FSK decoder provides independent timing from seconds 31-39
