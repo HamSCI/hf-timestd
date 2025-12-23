@@ -54,9 +54,11 @@ DEFAULT_RAM_PERCENT = 20  # Use 20% of available RAM for hot buffer
 @dataclass
 class TieredStorageConfig:
     """Configuration for tiered storage."""
-    # Paths
+    # Required path - must be provided from config (default to /var/lib/timestd for backwards compatibility)
+    cold_buffer_root: Path = Path('/var/lib/timestd')
+    
+    # Optional paths
     hot_buffer_root: Path = Path('/dev/shm/timestd')
-    cold_buffer_root: Path  # No default - must be provided from config
     
     # Auto-configuration
     auto_configure: bool = True  # Auto-detect RAM and set hot_minutes

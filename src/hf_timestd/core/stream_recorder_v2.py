@@ -228,6 +228,7 @@ class StreamRecorderV2:
     - Automatic gap detection and filling
     - Built-in quality metrics
     - Simpler, more maintainable code
+    - Automatic recovery from radiod restarts
     """
     
     def __init__(
@@ -246,10 +247,9 @@ class StreamRecorderV2:
             config: StreamRecorderConfig
             channel_info: Optional ChannelInfo (can be None if control is provided)
             get_ntp_status: Optional callable for NTP status
-            control: Optional RadiodControl for auto-recovery via ManagedStream.
-                    If provided, uses ManagedStream which auto-restores on radiod restart.
-            on_stream_dropped: Optional callback when stream drops (ManagedStream only)
-            on_stream_restored: Optional callback when stream restores (ManagedStream only)
+            control: Optional RadiodControl for channel creation and recovery
+            on_stream_dropped: Optional callback when stream drops
+            on_stream_restored: Optional callback when stream restores
         """
         self.config = config
         self.channel_info = channel_info
@@ -264,6 +264,13 @@ class StreamRecorderV2:
         
         # RadiodStream instance (created on start)
         self.stream: Optional[RadiodStream] = None
+        
+        # Health monitoring
+        self._health_monitor_thread: Optional[threading.Thread] = None
+        self._running = False
+        self._last_sample_time = 0.0
+        self._health_check_interval = 5.0  # Check every 5 seconds (fast detection)
+        self._silence_threshold = 10.0  # Recreate if silent for 10 seconds
         
         # Initialize pipeline orchestrator for Phase 1/2/3
         from .pipeline_orchestrator import PipelineOrchestrator, PipelineConfig
@@ -308,60 +315,157 @@ class StreamRecorderV2:
                 return
             
             self.state = StreamRecorderState.STARTING
+            self._running = True
         
         try:
             # Start the pipeline orchestrator
             self.orchestrator.start()
             
-            # Create and start stream
-            # radiod splits 20ms blocks (400 samples at 20kHz) into 2 packets:
-            #   - Small packet: 20 samples (160 bytes), ts_delta=360  
-            #   - Large packet: 180 samples (1440 bytes), ts_delta=40
-            # The resequencer uses samples_per_packet to predict next_expected_ts,
-            # but with variable packet sizes this causes false gap detection.
-            # Set to 200 (average of 360+40)/2 to minimize false gaps.
-            samples_per_packet = 200  # Average timestamp delta per packet
+            # Create channel and start stream
+            self._create_channel()
             
-            # Use ManagedStream which handles ensure_channel() and RadiodStream internally
-            # It also provides automatic restoration on radiod restart
-            from ka9q import ManagedStream
-            
-            logger.info(f"{self.config.description}: Requesting channel for {self.config.frequency_hz/1e6:.3f} MHz (preset={self.config.preset}, rate={self.config.sample_rate}, agc={self.config.agc_enable}, gain={self.config.gain}, enc={self.config.encoding})")
-            
-            self.stream = ManagedStream(
-                control=self._control,
-                frequency_hz=self.config.frequency_hz,
-                preset=self.config.preset,
-                sample_rate=self.config.sample_rate,
-                agc_enable=self.config.agc_enable,
-                gain=self.config.gain,
-                encoding=self.config.encoding,
-                on_samples=self._handle_samples,
-                samples_per_packet=samples_per_packet,
-                resequence_buffer_size=128,
-                max_restore_attempts=0  # Unlimited restore attempts
+            # Start health monitoring thread
+            self._health_monitor_thread = threading.Thread(
+                target=self._health_monitor_loop,
+                name=f"HealthMonitor-{self.config.description}",
+                daemon=True
             )
-            
-            # Start the managed stream (this calls ensure_channel internally)
-            channel_info = self.stream.start()
-            self.channel_info = channel_info
-            self.config.ssrc = channel_info.ssrc
-            
-            logger.info(f"{self.config.description}: Started ManagedStream on SSRC {channel_info.ssrc:x}")
-            logger.info(f"{self.config.description}: Channel Dest: {getattr(channel_info, 'multicast_address', 'N/A')}, Enc: {getattr(channel_info, 'encoding', 'N/A')}")
-
+            self._health_monitor_thread.start()
+            logger.info(f"{self.config.description}: Health monitoring started")
             
             self.session_start_time = time.time()
             
             with self._lock:
                 self.state = StreamRecorderState.RECORDING
             
-            logger.info(f"{self.config.description}: Stream recorder started (using RadiodStream)")
+            logger.info(f"{self.config.description}: Stream recorder started successfully")
             
         except Exception as e:
             logger.error(f"{self.config.description}: Failed to start: {e}", exc_info=True)
             with self._lock:
                 self.state = StreamRecorderState.ERROR
+                self._running = False
+            raise
+    
+    def _create_channel(self):
+        """Create channel and start RadiodStream (extracted for retry logic)."""
+        # WSPR-RECORDER PATTERN: Use create_channel() instead of ensure_channel()
+        # But FIRST check if a matching channel already exists to avoid duplicates
+        
+        logger.info(f"{self.config.description}: Checking for existing channel at {self.config.frequency_hz/1e6:.3f} MHz")
+        
+        # Step 1: Discover existing channels
+        from ka9q import discover_channels
+        
+        existing_channels = discover_channels(
+            self._control.status_address,
+            listen_duration=3.0
+        )
+        
+        # Step 2: Look for matching channel (same freq, preset, sample_rate)
+        ssrc = None
+        for existing_ssrc, channel_info in existing_channels.items():
+            if (abs(channel_info.frequency - self.config.frequency_hz) < 1.0 and
+                channel_info.preset.lower() == self.config.preset.lower() and
+                channel_info.sample_rate == self.config.sample_rate):
+                # Found matching channel - reuse it
+                ssrc = existing_ssrc
+                self.channel_info = channel_info
+                logger.info(f"{self.config.description}: Found existing channel SSRC {ssrc:08x}")
+                break
+        
+        # Step 3: Create channel only if it doesn't exist
+        if ssrc is None:
+            logger.info(f"{self.config.description}: Creating new channel")
+            logger.info(f"  Parameters: preset={self.config.preset}, rate={self.config.sample_rate}, "
+                       f"agc={self.config.agc_enable}, gain={self.config.gain}, enc={self.config.encoding}")
+            
+            ssrc = self._control.create_channel(
+                frequency_hz=float(self.config.frequency_hz),
+                preset=self.config.preset,
+                sample_rate=self.config.sample_rate,
+                agc_enable=self.config.agc_enable,
+                gain=self.config.gain,
+                ssrc=None,  # Let radiod assign SSRC
+                encoding=self.config.encoding,
+                destination=self.config.destination  # None = use radiod default
+            )
+            
+            if ssrc is None:
+                raise RuntimeError("Failed to create channel - radiod returned None")
+            
+            logger.info(f"{self.config.description}: Channel created with SSRC {ssrc:08x}")
+            
+            # Discover again to get multicast address
+            logger.info(f"{self.config.description}: Discovering channel details...")
+            channels = discover_channels(
+                self._control.status_address,
+                listen_duration=3.0
+            )
+            
+            if ssrc not in channels:
+                raise RuntimeError(f"Channel SSRC {ssrc:08x} not found in discovery")
+            
+            self.channel_info = channels[ssrc]
+        
+        self.config.ssrc = ssrc
+        logger.info(f"{self.config.description}: Using channel - "
+                   f"Dest: {self.channel_info.multicast_address}, "
+                   f"Enc: {getattr(self.channel_info, 'encoding', 'N/A')}")
+        
+        # Step 4: Create RadiodStream to receive data
+        # Stop existing stream if any
+        if self.stream:
+            try:
+                self.stream.stop()
+            except Exception:
+                pass
+        
+        samples_per_packet = 200  # Average timestamp delta per packet
+        
+        self.stream = RadiodStream(
+            channel=self.channel_info,
+            on_samples=self._handle_samples,
+            samples_per_packet=samples_per_packet,
+            resequence_buffer_size=128
+        )
+        
+        self.stream.start()
+        self._last_sample_time = time.time()  # Reset silence timer
+        logger.info(f"{self.config.description}: RadiodStream started")
+    
+    def _health_monitor_loop(self):
+        """Monitor stream health and recreate channel if needed (e.g., after radiod restart)."""
+        while self._running:
+            try:
+                time.sleep(self._health_check_interval)
+                
+                if not self._running:
+                    break
+                
+                # Check if we're receiving data
+                silence_duration = time.time() - self._last_sample_time
+                
+                if silence_duration > self._silence_threshold:
+                    logger.warning(
+                        f"{self.config.description}: No data for {silence_duration:.0f}s - "
+                        f"attempting channel recreation (radiod may have restarted)"
+                    )
+                    
+                    try:
+                        # Recreate channel
+                        self._create_channel()
+                        logger.info(f"{self.config.description}: Channel recreated successfully")
+                        
+                        if self._on_stream_restored and self.channel_info:
+                            self._on_stream_restored(self.channel_info)
+                            
+                    except Exception as e:
+                        logger.error(f"{self.config.description}: Failed to recreate channel: {e}")
+                        # Will retry on next health check
+                        
+            except Exception as e:
+                logger.error(f"{self.config.description}: Health monitor error: {e}")
 
     def stop(self) -> Optional[StreamQuality]:
         """
@@ -375,10 +479,16 @@ class StreamRecorderV2:
                 return None
             
             self.state = StreamRecorderState.STOPPING
+            self._running = False  # Stop health monitor
         
         final_quality = None
         
         try:
+            # Stop health monitor
+            if self._health_monitor_thread:
+                self._health_monitor_thread.join(timeout=2.0)
+                self._health_monitor_thread = None
+            
             # Stop ManagedStream/RadiodStream (returns final quality/stats)
             if self.stream:
                 if hasattr(self.stream, 'get_quality'):
@@ -438,6 +548,7 @@ class StreamRecorderV2:
                 self.batches_received += 1
                 self.samples_received += len(samples)
                 self.last_sample_time = time.time()
+                self._last_sample_time = self.last_sample_time  # For health monitor
                 self.last_quality = quality
             
             # Get system time from quality metrics (GPS-derived from ka9q-python)

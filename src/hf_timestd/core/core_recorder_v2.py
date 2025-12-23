@@ -249,19 +249,18 @@ class CoreRecorderV2:
         """
         Initialize all channels.
         
-        1. Discover existing channels
-        2. Clean up duplicates (same frequency, same settings)
-        3. Start recorders using existing channel settings if available
+        Delegates entirely to ka9q-python's ensure_channel() which handles:
+        - Computing deterministic SSRC from parameters
+        - Discovering existing channels
+        - Reusing or creating channels as needed
+        - Verifying channel configuration
+        
+        The client just needs to call ensure_channel() with consistent parameters.
         """
         try:
             if not self.channel_specs:
                 logger.warning("No channels configured")
                 return False
-            
-            # SIMPLIFICATION: Removed aggressive discovery and deduplication.
-            # We rely on StreamRecorderV2 to find/create the single channel it needs.
-            # existing_channels = discover_channels(...) -> REMOVED
-            existing_by_freq = {} # Keep empty, let StreamRecorder handle it.
 
             logger.info(f"Initializing {len(self.channel_specs)} configured channels...")
             
@@ -270,6 +269,7 @@ class CoreRecorderV2:
                 
                 # Defaults are merged with channel-specific config
                 preset = ch_spec.get('preset', self.channel_defaults.get('preset', 'iq'))
+                sample_rate = self.channel_defaults.get('sample_rate', 20000)
                 encoding_val = ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
                 agc_val = ch_spec.get('agc', self.channel_defaults.get('agc', 0))
                 gain_val = ch_spec.get('gain', self.channel_defaults.get('gain', 0.0))
@@ -287,37 +287,19 @@ class CoreRecorderV2:
                 else:
                     encoding = encoding_val
 
-                # Simplify: Rely entirely on StreamRecorderV2 / RobustManagedStream
-                # to find or create the channel. We do not explicitly create it here.
-                # However, we MUST latch onto the correct destination if the channel exists,
-                # otherwise ensure_channel(dest=None) will fight with radiod's assigned destination
-                # and create infinite duplicates.
-                use_destination = self.data_destination
-                matched_ssrc = None
+                logger.info(f"Requesting channel for {freq/1e6:.3f} MHz (ka9q-python will reuse if exists)")
                 
-                existing_info = existing_by_freq.get(freq)
-                if existing_info:
-                    matched_ssrc = existing_info.ssrc
-                    if hasattr(existing_info, 'multicast_address') and existing_info.multicast_address:
-                         use_destination = existing_info.multicast_address
-                         logger.info(f"Matched existing channel {freq/1e6:.3f} MHz (SSRC={matched_ssrc}). Using Dest: {use_destination}")
-                    else:
-                         logger.info(f"Matched existing channel {freq/1e6:.3f} MHz (SSRC={matched_ssrc}). No explicit dest found, using default.")
-                else:
-                    logger.info(f"No existing channel for {freq/1e6:.3f} MHz. Will resolve/create.")
-
-                logger.info(f"Initializing recorder for {freq/1e6:.3f} MHz")
-                
-                # Create config
+                # Create config - let StreamRecorderV2/RobustManagedStream call ensure_channel()
+                # with these parameters. The library will handle discovery and reuse.
                 rec_config = StreamRecorderConfig(
-                    ssrc=matched_ssrc,  # Pass SSRC if known
+                    ssrc=None,  # Let ka9q-python compute the SSRC
                     frequency_hz=freq,
                     encoding=encoding,
                     agc_enable=int(agc_val),
                     gain=float(gain_val),
                     description=ch_spec.get('description', f"{freq/1e6:.3f} MHz"),
                     preset=preset,
-                    sample_rate=self.channel_defaults.get('sample_rate', 20000),
+                    sample_rate=sample_rate,
                     output_dir=self.output_dir,
                     
                     # Propagation
@@ -333,11 +315,12 @@ class CoreRecorderV2:
                     compression=self.recorder_config.get('compression', 'none'),
                     compression_level=self.recorder_config.get('compression_level', 3),
                     
-                    # CRITICAL: Use the matched destination if available!
-                    destination=use_destination
+                    # CRITICAL: Use None to let radiod assign destination consistently
+                    # This ensures the same SSRC is computed every time
+                    destination=None
                 )
                 
-                # Create recorder
+                # Create recorder - it will call ensure_channel() which handles everything
                 recorder = StreamRecorderV2(
                     config=rec_config,
                     control=self.control 
