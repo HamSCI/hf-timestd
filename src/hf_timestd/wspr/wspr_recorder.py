@@ -34,7 +34,7 @@ from enum import Enum
 from ka9q import ChannelInfo
 
 from ..core.recording_session import RecordingSession, SessionConfig, SegmentInfo
-from ..core.rtp_receiver import RTPReceiver
+from ..core.rtp_receiver_DEPRECATED import RTPReceiver
 from .wspr_wav_writer import WsprWAVWriter
 
 logger = logging.getLogger(__name__)

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import subprocess
 
-from ..core.rtp_receiver import RTPReceiver
+from ..core.rtp_receiver_DEPRECATED import RTPReceiver
 from ..channel_manager import ChannelManager
 from ..radiod_health import RadiodHealthChecker
 from ..quota_manager import QuotaManager

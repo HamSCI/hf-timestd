@@ -37,7 +37,7 @@ from enum import Enum
 
 from ka9q import ChannelInfo, RTPHeader
 
-from ..core.rtp_receiver import RTPReceiver
+from ..core.rtp_receiver_DEPRECATED import RTPReceiver
 from ..core.packet_resequencer import PacketResequencer, RTPPacket, GapInfo
 
 logger = logging.getLogger(__name__)
