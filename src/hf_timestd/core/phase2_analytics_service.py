@@ -264,9 +264,20 @@ class Phase2AnalyticsService:
         self.timing_dir.mkdir(parents=True, exist_ok=True)
         self._init_transmission_time_csv()
         
+        # TEC Estimation - Ionospheric Total Electron Content
+        # Calculated from multi-frequency measurements when available
+        self.tec_dir = self.output_dir / 'tec'
+        self.tec_dir.mkdir(parents=True, exist_ok=True)
+        self._init_tec_csv()
+        
         # Note: Decimation is not part of hf-timestd (timing-focused)
         # For decimated output, see separate projects
 
+        # Initialize TEC Estimator for ionospheric analysis
+        from .tec_estimator import TECEstimator
+        self.tec_estimator = TECEstimator(high_precision_mode=True)
+        logger.info("Initialized TEC estimator for ionospheric analysis")
+        
         # Initialize Phase 2 engine
         from .phase2_temporal_engine import Phase2TemporalEngine
         
@@ -999,6 +1010,107 @@ class Phase2AnalyticsService:
         except Exception as e:
             logger.error(f"Failed to write transmission time: {e}")
     
+
+    def _init_tec_csv(self):
+        """Initialize TEC estimation CSV for today."""
+        today = datetime.now(timezone.utc).strftime('%Y%m%d')
+        # TEC is station-based, not channel-based (aggregates across frequencies)
+        # Use simplified naming: tec_YYYYMMDD.csv
+        self.tec_csv = self.tec_dir / f'tec_{today}.csv'
+        
+        if not self.tec_csv.exists():
+            with open(self.tec_csv, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp_utc', 'minute_boundary', 'station',
+                    'tec_tecu', 't_vacuum_error_ms', 'confidence', 'residuals_ms',
+                    'n_frequencies', 'frequencies_mhz',
+                    'group_delay_2_5_mhz', 'group_delay_5_mhz', 'group_delay_10_mhz',
+                    'group_delay_15_mhz', 'group_delay_20_mhz', 'group_delay_25_mhz'
+                ])
+            logger.info(f"Created TEC CSV: {self.tec_csv}")
+    
+    def _write_tec(self, minute_boundary: int, station: str, measurements: List[Dict]):
+        """Write TEC estimation from multi-frequency measurements.
+        
+        Args:
+            minute_boundary: Unix timestamp of minute boundary
+            station: Station name (WWV, WWVH, CHU, BPM)
+            measurements: List of dicts with 'frequency_hz', 'toa_ms', 'uncertainty_ms'
+        """
+        try:
+            # Need at least 2 frequencies for TEC estimation
+            if len(measurements) < 2:
+                return
+            
+            # Use data timestamp for filename to support backfilling
+            dt = datetime.fromtimestamp(minute_boundary, timezone.utc)
+            date_str = dt.strftime('%Y%m%d')
+            
+            expected_csv = self.tec_dir / f'tec_{date_str}.csv'
+            
+            # Initialize if file changed or doesn't exist (handle daily rotation)
+            if self.tec_csv != expected_csv or not expected_csv.exists():
+                self.tec_csv = expected_csv
+                if not self.tec_csv.exists():
+                    with open(self.tec_csv, 'w', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            'timestamp_utc', 'minute_boundary', 'station',
+                            'tec_tecu', 't_vacuum_error_ms', 'confidence', 'residuals_ms',
+                            'n_frequencies', 'frequencies_mhz',
+                            'group_delay_2_5_mhz', 'group_delay_5_mhz', 'group_delay_10_mhz',
+                            'group_delay_15_mhz', 'group_delay_20_mhz', 'group_delay_25_mhz'
+                        ])
+                    logger.info(f"Created/Rotated TEC CSV: {self.tec_csv}")
+            
+            # Estimate TEC using multi-frequency least squares
+            tec_result = self.tec_estimator.estimate_tec(
+                measurements=measurements,
+                station=station,
+                timestamp=float(minute_boundary)
+            )
+            
+            if not tec_result:
+                return  # Estimation failed
+            
+            # Extract per-frequency group delays (for visualization)
+            freq_list = sorted([m['frequency_hz'] / 1e6 for m in measurements])
+            freq_str = ';'.join([f"{f:.2f}" for f in freq_list])
+            
+            # Map group delays to standard frequencies (fill with empty if not present)
+            delay_map = tec_result.group_delay_ms  # Dict[float, float] keyed by MHz
+            
+            with open(self.tec_csv, 'a', newline='') as f:
+                writer = csv.writer(f)
+                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
+                
+                writer.writerow([
+                    utc_time,
+                    minute_boundary,
+                    station,
+                    round(tec_result.tec_u, 3),  # TEC in TECU
+                    round(tec_result.t_vacuum_error_ms, 3),
+                    round(tec_result.confidence, 4),
+                    round(tec_result.residuals_ms, 3),
+                    tec_result.n_frequencies,
+                    freq_str,
+                    round(delay_map.get(2.5, 0), 3) if 2.5 in delay_map else '',
+                    round(delay_map.get(5.0, 0), 3) if 5.0 in delay_map else '',
+                    round(delay_map.get(10.0, 0), 3) if 10.0 in delay_map else '',
+                    round(delay_map.get(15.0, 0), 3) if 15.0 in delay_map else '',
+                    round(delay_map.get(20.0, 0), 3) if 20.0 in delay_map else '',
+                    round(delay_map.get(25.0, 0), 3) if 25.0 in delay_map else ''
+                ])
+                
+            logger.info(
+                f"TEC estimated for {station}: {tec_result.tec_u:.2f} TECU "
+                f"(confidence={tec_result.confidence:.2f}, n_freq={tec_result.n_frequencies})"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to write TEC: {e}")
+
     def _read_drf_minute(self, target_minute: int):
         """
         Read one minute of data from the binary archive.

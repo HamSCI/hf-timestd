@@ -1,0 +1,33 @@
+[Unit]
+Description=hf-timestd Science Aggregator Service
+Documentation=https://github.com/rascol/hf-timestd
+After=network.target timestd-analytics@.service
+
+[Service]
+Type=simple
+User=timestd
+Group=timestd
+WorkingDirectory=/opt/hf-timestd
+
+# Run science aggregator
+ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.core.science_aggregator \
+    --data-root /var/lib/timestd \
+    --poll-interval 300 \
+    --lookback 10 \
+    --log-level INFO
+
+# Restart on failure
+Restart=on-failure
+RestartSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-science
+
+# Resource limits (low priority - science is background)
+Nice=10
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

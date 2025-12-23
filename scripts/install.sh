@@ -389,7 +389,7 @@ if [[ "$MODE" == "production" ]]; then
     # Core Recorder Service (Phase 1: RTP → Digital RF)
     sudo tee "$SYSTEMD_DIR/timestd-core-recorder.service" > /dev/null << EOF
 [Unit]
-Description=TimeStd Core Recorder - Phase 1 RTP to Digital RF Archive
+Description=HF Time Standard Core Recorder - Phase 1 RTP to Raw Buffer Archive
 Documentation=https://github.com/mijahauan/grape-recorder
 After=network-online.target
 Wants=network-online.target
@@ -428,7 +428,7 @@ EOF
     # Uses timestd-analytics.sh which starts all channel analyzers
     sudo tee "$SYSTEMD_DIR/timestd-analytics.service" > /dev/null << EOF
 [Unit]
-Description=GRAPE Analytics Service - Phase 2 Timing Analysis
+Description=HF Time Standard Analytics Service - Phase 2 Timing Analysis
 Documentation=https://github.com/mijahauan/grape-recorder
 After=timestd-core-recorder.service
 Wants=timestd-core-recorder.service

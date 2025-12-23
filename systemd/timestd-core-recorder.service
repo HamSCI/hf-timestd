@@ -1,5 +1,5 @@
 [Unit]
-Description=HF Time Standard Core Recorder - Phase 1 RTP to Digital RF Archive
+Description=HF Time Standard Core Recorder - Phase 1 RTP to Raw Buffer Archive
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target
 Wants=network-online.target
