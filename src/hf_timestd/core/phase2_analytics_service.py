@@ -278,6 +278,61 @@ class Phase2AnalyticsService:
         self.tec_estimator = TECEstimator(high_precision_mode=True)
         logger.info("Initialized TEC estimator for ionospheric analysis")
         
+        # ====================================================================
+        # HDF5 Data Product Writers (Parallel with CSV)
+        # ====================================================================
+        # Initialize HDF5 writers for schema-validated data products
+        # These write in parallel with CSV files during transition period
+        try:
+            from hf_timestd.io import DataProductWriter
+            
+            # Get channel name for HDF5 files (e.g., "WWV_10000")
+            file_channel = self._get_file_channel_name()
+            
+            # L1A: Channel Observables (carrier power, SNR, Doppler, tones)
+            self.hdf5_l1a_writer = DataProductWriter(
+                output_dir=self.carrier_power_dir,
+                product_level='L1',
+                product_name='channel_observables',
+                channel=file_channel,
+                processing_version='3.2.0',
+                station_metadata=station_config or {}
+            )
+            logger.info(f"Initialized HDF5 L1A channel observables writer for {file_channel}")
+            
+            # L1B: BCD Timecode (BCD discrimination results)
+            self.hdf5_l1b_writer = DataProductWriter(
+                output_dir=self.bcd_discrimination_dir,
+                product_level='L1',
+                product_name='bcd_timecode',
+                channel=file_channel,
+                processing_version='3.2.0',
+                station_metadata=station_config or {}
+            )
+            logger.info(f"Initialized HDF5 L1B BCD timecode writer for {file_channel}")
+            
+            # L2: Timing Measurements (clock offset with ISO GUM uncertainty)
+            self.hdf5_l2_writer = DataProductWriter(
+                output_dir=self.clock_offset_dir,
+                product_level='L2',
+                product_name='timing_measurements',
+                channel=file_channel,
+                processing_version='3.2.0',
+                station_metadata=station_config or {}
+            )
+            logger.info(f"Initialized HDF5 L2 timing measurements writer for {file_channel}")
+            
+            # Flag to enable/disable HDF5 writes (for testing)
+            self.enable_hdf5_writes = True
+            
+        except Exception as e:
+            logger.warning(f"Failed to initialize HDF5 writers: {e}")
+            logger.warning("Continuing with CSV-only writes")
+            self.hdf5_l1a_writer = None
+            self.hdf5_l1b_writer = None
+            self.hdf5_l2_writer = None
+            self.enable_hdf5_writes = False
+        
         # Initialize Phase 2 engine
         from .phase2_temporal_engine import Phase2TemporalEngine
         
@@ -432,6 +487,7 @@ class Phase2AnalyticsService:
             chu_tick_snr = ts.chu_snr_db if ts and ts.chu_snr_db is not None else 0.0
             bpm_tick_snr = ts.bpm_snr_db if ts and ts.bpm_snr_db is not None else 0.0
             
+            
             with open(self.clock_offset_csv, 'a', newline='') as f:
                 writer = csv.writer(f)
                 
@@ -464,6 +520,81 @@ class Phase2AnalyticsService:
                     chu_tick_snr,                                       # chu_tick_snr_db
                     bpm_tick_snr                                        # bpm_tick_snr_db
                 ])
+            
+            # ================================================================
+            # Write to HDF5 (L2 Timing Measurements) - Parallel with CSV
+            # ================================================================
+            if self.enable_hdf5_writes and self.hdf5_l2_writer:
+                try:
+                    from hf_timestd.io.uncertainty import ISOGUMCalculator, UncertaintyBudget
+                    
+                    # Create ISO GUM uncertainty budget
+                    # Use default values scaled by SNR and convergence state
+                    snr_db = self.last_carrier_snr_db or 10.0
+                    gpsdo_locked = convergence_result.is_locked
+                    discrimination_conf = solution.confidence if solution else 0.5
+                    
+                    budget = ISOGUMCalculator.create_default_budget(
+                        snr_db=snr_db,
+                        gpsdo_locked=gpsdo_locked,
+                        discrimination_confidence=discrimination_conf
+                    )
+                    
+                    # Calculate combined uncertainty
+                    unc_result = ISOGUMCalculator.calculate_combined_uncertainty(budget)
+                    
+                    # Determine quality flag
+                    quality_flag = ISOGUMCalculator.assign_quality_flag(
+                        quality_grade=quality_grade,
+                        discrimination_confidence=discrimination_conf,
+                        gpsdo_locked=gpsdo_locked
+                    )
+                    
+                    # Build L2 measurement dict
+                    timestamp_utc = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
+                    
+                    l2_measurement = {
+                        'timestamp_utc': timestamp_utc,
+                        'minute_boundary_utc': minute_boundary,
+                        'rtp_timestamp': rtp_timestamp,
+                        'station': station,
+                        'frequency_mhz': frequency_mhz,
+                        'discrimination_method': 'TONE',  # Primary method
+                        'discrimination_confidence': discrimination_conf,
+                        'clock_offset_ms': effective_d_clock,
+                        'uncertainty_ms': effective_uncertainty,
+                        'expanded_uncertainty_ms': unc_result['u_expanded_ms'],
+                        'coverage_factor': budget.coverage_factor,
+                        'confidence_level': budget.confidence_level,
+                        'u_rtp_timestamp_ms': budget.u_rtp_timestamp_ms,
+                        'u_ionospheric_ms': budget.u_ionospheric_ms,
+                        'u_multipath_ms': budget.u_multipath_ms,
+                        'u_discrimination_ms': budget.u_discrimination_ms,
+                        'u_gpsdo_ms': budget.u_gpsdo_ms,
+                        'u_propagation_model_ms': budget.u_propagation_model_ms,
+                        'degrees_of_freedom': unc_result['degrees_of_freedom'],
+                        'quality_grade': quality_grade,
+                        'confidence': solution.confidence if solution else 0.0,
+                        'quality_flag': quality_flag,
+                        'propagation_delay_ms': solution.t_propagation_ms if solution else None,
+                        'propagation_mode': solution.propagation_mode if solution else None,
+                        'n_hops': solution.n_hops if solution else None,
+                        'snr_db': snr_db,
+                        'utc_verified': convergence_result.is_locked,
+                        'multi_station_verified': solution.dual_station_verified if solution else False,
+                        'traceability_chain': 'GPSDO → UTC(GPS) → UTC(NIST)',
+                        'processing_version': '3.2.0',
+                        'processed_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                        'calibration_date': '2025-12-01T00:00:00Z',  # TODO: Get from config
+                        'gpsdo_locked': gpsdo_locked,
+                    }
+                    
+                    # Write to HDF5
+                    self.hdf5_l2_writer.write_measurement(l2_measurement)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to write HDF5 L2 measurement: {e}", exc_info=True)
+                
                 
             # Store convergence result for status reporting
             self.last_convergence_result = convergence_result
@@ -510,6 +641,36 @@ class Phase2AnalyticsService:
                     station or '',
                     quality_grade or ''
                 ])
+            
+            # ================================================================
+            # Write to HDF5 (L1A Channel Observables) - Parallel with CSV
+            # ================================================================
+            if self.enable_hdf5_writes and self.hdf5_l1a_writer:
+                try:
+                    timestamp_utc = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
+                    
+                    # Determine quality flag based on data completeness
+                    quality_flag = 'GOOD' if snr_db and snr_db > 10 else 'MARGINAL' if snr_db and snr_db > 0 else 'BAD'
+                    data_completeness = 1.0  # Assume full minute of data
+                    
+                    l1a_measurement = {
+                        'timestamp_utc': timestamp_utc,
+                        'minute_boundary': minute_boundary,
+                        'rtp_timestamp': 0,  # Not available in this context
+                        'carrier_power_db': power_db if power_db is not None and not np.isnan(power_db) and not np.isinf(power_db) else None,
+                        'carrier_snr_db': snr_db if snr_db is not None and not np.isnan(snr_db) and not np.isinf(snr_db) else None,
+                        'wwv_tone_500hz_db': wwv_tone_db if wwv_tone_db is not None and not np.isnan(wwv_tone_db) and not np.isinf(wwv_tone_db) else None,
+                        'wwvh_tone_1200hz_db': wwvh_tone_db if wwvh_tone_db is not None and not np.isnan(wwvh_tone_db) and not np.isinf(wwvh_tone_db) else None,
+                        'quality_flag': quality_flag,
+                        'data_completeness': data_completeness,
+                        'processing_version': '3.2.0',
+                    }
+                    
+                    self.hdf5_l1a_writer.write_measurement(l1a_measurement)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to write HDF5 L1A measurement: {e}", exc_info=True)
+                    
         except Exception as e:
             logger.error(f"Failed to write carrier power: {e}")
     
@@ -655,6 +816,55 @@ class Phase2AnalyticsService:
                     round(channel_char.bcd_bpm_toa_ms, 3) if hasattr(channel_char, 'bcd_bpm_toa_ms') and channel_char.bcd_bpm_toa_ms else '',
                     round(ratio_db, 2) if ratio_db else ''
                 ])
+            
+            # ================================================================
+            # Write to HDF5 (L1B BCD Timecode) - Parallel with CSV
+            # ================================================================
+            if self.enable_hdf5_writes and self.hdf5_l1b_writer:
+                try:
+                    timestamp_utc = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
+                    
+                    # Determine BCD station from amplitudes
+                    bcd_station = 'UNKNOWN'
+                    bcd_confidence = 0.0
+                    
+                    if channel_char.bcd_wwv_amplitude and channel_char.bcd_wwvh_amplitude:
+                        if channel_char.bcd_wwv_amplitude > channel_char.bcd_wwvh_amplitude:
+                            bcd_station = 'WWV'
+                            bcd_confidence = min(channel_char.bcd_correlation_quality or 0.0, 1.0)
+                        else:
+                            bcd_station = 'WWVH'
+                            bcd_confidence = min(channel_char.bcd_correlation_quality or 0.0, 1.0)
+                    elif channel_char.bcd_wwv_amplitude:
+                        bcd_station = 'WWV'
+                        bcd_confidence = min(channel_char.bcd_correlation_quality or 0.0, 1.0)
+                    elif channel_char.bcd_wwvh_amplitude:
+                        bcd_station = 'WWVH'
+                        bcd_confidence = min(channel_char.bcd_correlation_quality or 0.0, 1.0)
+                    
+                    # Determine quality flag
+                    if bcd_confidence > 0.8:
+                        quality_flag = 'GOOD'
+                    elif bcd_confidence > 0.5:
+                        quality_flag = 'MARGINAL'
+                    elif bcd_confidence > 0:
+                        quality_flag = 'BAD'
+                    else:
+                        quality_flag = 'MISSING'
+                    
+                    l1b_measurement = {
+                        'timestamp_utc': timestamp_utc,
+                        'minute_boundary': minute_boundary,
+                        'bcd_station': bcd_station,
+                        'bcd_confidence': bcd_confidence,
+                        'quality_flag': quality_flag,
+                    }
+                    
+                    self.hdf5_l1b_writer.write_measurement(l1b_measurement)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to write HDF5 L1B measurement: {e}", exc_info=True)
+                    
         except Exception as e:
             logger.error(f"Failed to write BCD discrimination: {e}")
     

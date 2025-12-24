@@ -40,7 +40,7 @@ Example:
 """
 
 # RTP infrastructure
-from .rtp_receiver import RTPReceiver
+# from .rtp_receiver import RTPReceiver  # DEPRECATED - using ka9q-python instead
 from .packet_resequencer import PacketResequencer, RTPPacket, GapInfo
 from .recording_session import (
     RecordingSession,
@@ -222,7 +222,7 @@ from .signal_templates import (
 
 __all__ = [
     # RTP infrastructure
-    "RTPReceiver",
+    # "RTPReceiver",  # DEPRECATED
     "RTPHeader",
     "PacketResequencer",
     "RTPPacket",

@@ -25,7 +25,7 @@ from enum import Enum
 
 from ka9q import ChannelInfo, RTPHeader
 
-from .rtp_receiver import RTPReceiver
+# from .rtp_receiver import RTPReceiver  # DEPRECATED - using ka9q-python instead
 from .packet_resequencer import PacketResequencer, RTPPacket, GapInfo
 from .leap_second import LeapSecondDetector
 
@@ -162,7 +162,7 @@ class RecordingSession:
     def __init__(
         self,
         config: SessionConfig,
-        rtp_receiver: RTPReceiver,
+        rtp_receiver: 'RTPReceiver',  # Forward reference - deprecated module
         writer: SegmentWriter,
         channel_info: Optional[ChannelInfo] = None,
         on_segment_complete: Optional[Callable[[SegmentInfo, Any], None]] = None,
