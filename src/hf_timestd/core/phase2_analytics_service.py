@@ -503,10 +503,10 @@ class Phase2AnalyticsService:
                 writer.writerow([
                     minute_boundary,
                     utc_time,
-                    round(power_db, 2) if power_db else '',
-                    round(snr_db, 2) if snr_db else '',
-                    round(wwv_tone_db, 2) if wwv_tone_db else '',
-                    round(wwvh_tone_db, 2) if wwvh_tone_db else '',
+                    round(power_db, 2) if power_db is not None and not (isinstance(power_db, float) and (np.isnan(power_db) or np.isinf(power_db))) else '',
+                    round(snr_db, 2) if snr_db is not None and not (isinstance(snr_db, float) and (np.isnan(snr_db) or np.isinf(snr_db))) else '',
+                    round(wwv_tone_db, 2) if wwv_tone_db is not None and not (isinstance(wwv_tone_db, float) and (np.isnan(wwv_tone_db) or np.isinf(wwv_tone_db))) else '',
+                    round(wwvh_tone_db, 2) if wwvh_tone_db is not None and not (isinstance(wwvh_tone_db, float) and (np.isnan(wwvh_tone_db) or np.isinf(wwvh_tone_db))) else '',
                     station or '',
                     quality_grade or ''
                 ])
@@ -1571,8 +1571,18 @@ class Phase2AnalyticsService:
         self.last_carrier_snr_db = self._calculate_carrier_snr(iq_samples)
         
         # Calculate carrier power in dB (for power graphs)
-        power_linear = np.mean(np.abs(iq_samples) ** 2)
-        self.last_carrier_power_db = 10 * np.log10(power_linear + 1e-12)
+        # Validate IQ samples to prevent NaN propagation
+        if len(iq_samples) > 0 and not np.any(np.isnan(iq_samples)):
+            power_linear = np.mean(np.abs(iq_samples) ** 2)
+            # Check for valid power before log
+            if power_linear > 0 and not np.isnan(power_linear) and not np.isinf(power_linear):
+                self.last_carrier_power_db = 10 * np.log10(power_linear)
+            else:
+                self.last_carrier_power_db = None
+                logger.debug(f"Invalid power_linear: {power_linear}, setting carrier_power_db to None")
+        else:
+            self.last_carrier_power_db = None
+            logger.debug("IQ samples contain NaN or are empty, setting carrier_power_db to None")
         
         # Detect gaps in source data (zeros indicate gaps from Phase 1)
         zero_mask = (iq_samples.real == 0) & (iq_samples.imag == 0)
