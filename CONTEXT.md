@@ -3,6 +3,169 @@
 **Last Updated:** 2025-12-24  
 **Current Version:** v3.1.0
 
+---
+
+## CRITICAL: Data Model Management Crisis
+
+### The Problem
+
+**Perennial Issue:** Choosing where to write measurements, where to find written data, and how to coordinate producers/consumers has gotten out of hand.
+
+**Symptoms:**
+
+- Data scattered across 11+ CSV types per channel
+- No single source of truth for schemas
+- Producers and consumers don't share contracts
+- Silent failures (NaN → 0 conversion)
+- Schema fragmentation causes brittleness
+- `DATA_API_DESIGN.md` exists but not enforced
+
+**Recent Example (2025-12-24):**
+
+- carrier_power CSV contained "nan" strings
+- ionosphere.html showed zeros/flatlines
+- Root cause: No validation, no schema enforcement
+- Quick fix applied, but systemic problem remains
+
+### What We Need
+
+**A comprehensive data model and management plan that provides:**
+
+1. **Single Source of Truth**
+   - Canonical schema definitions (machine-readable)
+   - Clear producer/consumer contracts
+   - Versioning strategy
+
+2. **Scalable Organization**
+   - Consolidated CSV schemas (reduce 11 types → 3-4)
+   - Clear data lifecycle (write → validate → read)
+   - Automated enforcement
+
+3. **Validation at Every Layer**
+   - Producers validate before writing
+   - Consumers validate after reading
+   - Monitoring alerts for violations
+
+4. **Clear Documentation**
+   - Where each measurement lives
+   - How to access each data type
+   - Migration guides for schema changes
+
+---
+
+## Focus for Next Session: Data Model & Management Plan
+
+### Goals
+
+1. **Design unified data model**
+   - Consolidate fragmented CSVs
+   - Define canonical schemas
+   - Create schema registry
+
+2. **Implement validation infrastructure**
+   - Schema enforcement in producers
+   - Validation in consumers
+   - Monitoring and alerts
+
+3. **Create migration strategy**
+   - Parallel writes during transition
+   - Backward compatibility
+   - Deprecation timeline
+
+4. **Update documentation**
+   - Comprehensive schema docs
+   - Producer/consumer guides
+   - API contracts
+
+### Current State
+
+**CSV Types Per Channel (11 total):**
+
+```
+audio_tones/          - Audio tone analysis
+bcd_discrimination/   - BCD time code discrimination  
+carrier_power/        - Carrier power (BROKEN - had NaN)
+clock_offset/         - Clock offset (WORKING)
+discrimination/       - WWV/WWVH discrimination
+doppler/              - Doppler measurements
+station_id_440hz/     - Station ID from 440Hz
+status/               - Status files
+tec/                  - TEC calculations (WORKING)
+test_signal/          - Test signal detection
+timing/               - UTC(NIST) timing
+tone_detections/      - Tone detection results
+```
+
+**Problems:**
+
+- Monitoring server must join 3 CSVs (carrier_power, doppler, clock_offset) to build complete picture
+- No validation before writing
+- No schema versioning
+- Silent failures hide problems
+
+**What Works:**
+
+- `TimeStdPaths` API for path management
+- TEC data generation (v3.1.0)
+- Clock offset measurements
+- Basic CSV structure
+
+**Recent Fixes (2025-12-24):**
+
+- ✅ Fixed NaN in carrier_power calculation
+- ✅ Created `scripts/validate_csv_schemas.py`
+- ✅ Documented schema gaps in `DATA_API_DESIGN.md`
+
+### Key Files to Review
+
+**Schema Documentation:**
+
+- `docs/DATA_API_DESIGN.md` - Ideal API design (created long ago, not enforced)
+- `scripts/validate_csv_schemas.py` - NEW validator (detects NaN, schema violations)
+
+**Producers:**
+
+- `src/hf_timestd/core/phase2_analytics_service.py` - Writes 11 CSV types
+- `src/hf_timestd/core/science_aggregator.py` - Writes TEC CSVs
+
+**Consumers:**
+
+- `web-ui/monitoring-server-v3.js` - Reads CSVs, serves API
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - Reads clock_offset
+
+**Path Management:**
+
+- `src/hf_timestd/paths.py` - TimeStdPaths API (good pattern to follow)
+
+### Investigation Steps for Next Session
+
+1. **Audit Current Data Model**
+   - Map all CSV types to their purpose
+   - Identify redundancy and overlap
+   - Document dependencies
+
+2. **Design Unified Schema**
+   - Consolidate carrier_power + doppler + clock_offset
+   - Define core vs optional fields
+   - Create schema versioning plan
+
+3. **Create Schema Registry**
+   - Machine-readable schemas (JSON Schema)
+   - Validation functions
+   - Migration tools
+
+4. **Implement Enforcement**
+   - Add validation to producers
+   - Add validation to consumers
+   - Add monitoring alerts
+
+5. **Document Everything**
+   - Update DATA_API_DESIGN.md
+   - Create producer guide
+   - Create consumer guide
+
+---
+
 ## System Architecture
 
 ### Core Services
@@ -19,7 +182,7 @@ SDR → radiod → RTP/F32 → core-recorder → Hot Buffer (/dev/shm/timestd/ra
                                                ↓ (background archiver)
                                            Cold Buffer (/var/lib/timestd/raw_buffer)
                                                ↑ (reads hot first, falls back to cold)
-                                           analytics → timing CSVs → chrony SHM
+                                           analytics → 11 CSV types per channel
                                                     ↓
                                            clock_offset CSVs → science-aggregator → TEC CSVs
                                                                                    → web-ui
@@ -37,18 +200,13 @@ SDR → radiod → RTP/F32 → core-recorder → Hot Buffer (/dev/shm/timestd/ra
 
 **Key Changes:**
 
-- **`science_aggregator.py`**: Refactored to use `TimeStdPaths` API (proper architecture)
+- **`science_aggregator.py`**: Refactored to use `TimeStdPaths` API
   - Uses `discover_phase2_channels()` for automatic channel discovery
   - Uses `get_clock_offset_dir(channel_name)` for consistent path resolution
   - Fixed field name bug: `'minute_boundary'` → `'minute_boundary_utc'`
   - Generates TEC every 5 minutes from multi-frequency clock offset data
 
-- **`tec_geometry.py`**: Obliquity factor and geometric corrections for slant-to-vertical TEC
-
-- **GPS Integration** (Optional, not required):
-  - ZED-F9P configured on port 2001 (33 satellites, UBX-NAV-SAT streaming)
-  - IONEX validation tools ready (NASA OAuth pending)
-  - See `docs/GPS_TEC_OPTIONAL.md` for details
+- **`tec_geometry.py`**: Obliquity factor and geometric corrections
 
 **Production Status:**
 
@@ -57,130 +215,29 @@ SDR → radiod → RTP/F32 → core-recorder → Hot Buffer (/dev/shm/timestd/ra
 - ✅ 121+ measurements per day (CHU, WWV, WWVH)
 - ✅ 3-6 frequencies per station, 1-minute cadence
 
-**Documentation:**
+### Data Quality Fixes ✅
 
-- `docs/GPS_TEC_OPTIONAL.md` - Comprehensive guide (HF TEC works standalone, GPS optional)
-- `docs/TEC_VALIDATION_METHODOLOGY.md` - Scientific methodology
-- `docs/ZED_F9P_TEC_CONFIGURATION.md` - GPS receiver setup
+**Problem:** NaN values in carrier_power CSV causing zeros in ionosphere.html
 
----
+**Root Cause:**
 
-## Focus for Next Session: Web UI Integration with TEC Data
+- No validation of IQ samples before power calculation
+- NaN is truthy in Python → `round(NaN, 2)` → "nan" string in CSV
+- Monitoring server converts "nan" → 0 → UI shows flatlines
 
-### Current Issue
+**Fixes Applied:**
 
-**Problem:** Web UI needs integration with new TEC data for ionospheric visualization
+- Added NaN validation before calculation (`phase2_analytics_service.py` lines 1570-1585)
+- Added NaN/inf checks before CSV writing (lines 503-510)
+- Created CSV schema validator (`scripts/validate_csv_schemas.py`)
 
-### TEC Data Available
+**Result:**
 
-**Location:** `/var/lib/timestd/phase2/science/tec/tec_YYYYMMDD.csv`
+- ✅ No more "nan" in new CSV rows
+- ✅ Empty fields instead when data invalid
+- ✅ Validator detects schema violations
 
-**Format:**
-
-```csv
-timestamp_utc,minute_boundary,station,tec_tecu,t_vacuum_error_ms,confidence,residuals_ms,n_frequencies,frequencies_mhz,group_delay_2_5_mhz,...
-2025-12-24T16:30:00+00:00,1766593800,WWV,-0.0,-4.472,0.0999,0.116,6,2.50;5.00;10.00;15.00;20.00;25.00,-12.518,-3.13,-0.782,...
-```
-
-**Fields:**
-
-- `timestamp_utc`: ISO 8601 timestamp
-- `station`: WWV, WWVH, CHU, BPM
-- `tec_tecu`: Total Electron Content (TECU units, 10^16 electrons/m²)
-- `confidence`: 0.0-1.0 (quality metric)
-- `n_frequencies`: Number of frequencies used (3-6)
-- `frequencies_mhz`: Semicolon-separated list
-- `group_delay_*_mhz`: Per-frequency group delays (ms)
-
-### Web UI Integration Tasks
-
-1. **Add TEC API Endpoint**
-   - File: `web-ui/monitoring-server-v3.js`
-   - Endpoint: `/api/v1/science/tec`
-   - Read TEC CSV, return JSON for date range
-   - Filter by station, time range
-
-2. **Create TEC Visualization Page**
-   - File: `web-ui/public/ionosphere.html` (or new page)
-   - Time series plot: TEC vs time for each station
-   - Multi-frequency display: Show contributing frequencies
-   - Confidence indicators: Color-code by quality
-   - Station comparison: Overlay WWV/WWVH/CHU
-
-3. **Add Real-time TEC Widget**
-   - File: `web-ui/public/summary.html`
-   - Current TEC value per station
-   - Trend indicator (increasing/decreasing)
-   - Link to full ionosphere page
-
-4. **Handle Missing Data Gracefully**
-   - TEC data only available if Science Aggregator running
-   - Show "TEC data unavailable" if service stopped
-   - Degrade gracefully if CSV missing or empty
-
-### Web UI Current State
-
-**Known Issues:**
-
-- Audio playback problems (WebSocket streaming)
-- Need to verify which pages are working
-- May need to update API endpoints
-
-**Files to Review:**
-
-- `web-ui/monitoring-server-v3.js` - Main server, API endpoints
-- `web-ui/public/summary.html` - Main dashboard
-- `web-ui/public/ionosphere.html` - Ionospheric data page (if exists)
-- `web-ui/science-api-endpoints.js` - Science data APIs (created but may need integration)
-
-**Service Status:**
-
-```bash
-sudo systemctl status timestd-web-ui
-journalctl -u timestd-web-ui -n 50
-```
-
-### Investigation Steps for Next Session
-
-1. **Verify Web UI Service**
-   - Check if `timestd-web-ui` is running
-   - Review logs for errors
-   - Test basic page access
-
-2. **Review Existing API Structure**
-   - Check `monitoring-server-v3.js` for existing patterns
-   - Identify where to add TEC endpoint
-   - Review how other science data is served
-
-3. **Test TEC Data Access**
-   - Verify CSV files exist and are readable
-   - Test parsing TEC CSV in Node.js
-   - Ensure TimeStdPaths pattern is followed
-
-4. **Create TEC Visualization**
-   - Use existing chart libraries (likely Plotly or Chart.js)
-   - Follow existing page patterns
-   - Add to navigation menu
-
-### Relevant Commands
-
-```bash
-# Check web UI service
-sudo systemctl status timestd-web-ui
-journalctl -u timestd-web-ui -f
-
-# Check TEC data
-ls -lh /var/lib/timestd/phase2/science/tec/
-tail /var/lib/timestd/phase2/science/tec/tec_$(date +%Y%m%d).csv
-
-# Check Science Aggregator
-sudo systemctl status timestd-science-aggregator
-journalctl -u timestd-science-aggregator -n 20
-
-# Test web UI access
-curl http://localhost:3000/
-curl http://localhost:3000/api/v1/channels
-```
+**Committed:** 2025-12-24 18:37 UTC (commit 7966fbf)
 
 ---
 
@@ -189,6 +246,7 @@ curl http://localhost:3000/api/v1/channels
 - **Config**: `/etc/hf-timestd/timestd-config.toml`
 - **Data Root**: `/var/lib/timestd/`
 - **Hot Buffer**: `/dev/shm/timestd/raw_buffer/`
+- **Phase 2 CSVs**: `/var/lib/timestd/phase2/{CHANNEL}/`
 - **TEC Data**: `/var/lib/timestd/phase2/science/tec/`
 - **Logs**: `journalctl -u timestd-core-recorder` / `timestd-analytics` / `timestd-science-aggregator` / `timestd-web-ui`
 
@@ -196,6 +254,8 @@ curl http://localhost:3000/api/v1/channels
 
 9 channels: 2.5, 5, 10, 15, 20, 25 MHz (WWV/WWVH) + 3.33, 7.85, 14.67 MHz (CHU)  
 All use: `preset=iq`, `sample_rate=20000`, `agc=0`, `gain=0`, `encoding=F32`
+
+---
 
 ## Important Patterns
 
@@ -213,10 +273,53 @@ All use: `preset=iq`, `sample_rate=20000`, `agc=0`, `gain=0`, `encoding=F32`
 - ✅ **Health monitoring enabled** - Auto-recovery from radiod restarts
 - ❌ **Never** manually manage channels - let discovery handle it
 
-### TEC Data (v3.1.0+)
+### Data Validation (NEW - v3.1.0+)
 
-- **Generation**: Science Aggregator runs every 5 minutes
-- **Storage**: `/var/lib/timestd/phase2/science/tec/tec_YYYYMMDD.csv`
-- **Stations**: WWV, WWVH, CHU (BPM when available)
-- **Cadence**: 1-minute measurements, 3-6 frequencies per station
-- **Optional**: GPS validation (not required for operation)
+- ✅ **Validate before calculation** - Check for NaN/inf in input data
+- ✅ **Validate before writing** - Check for NaN/inf before CSV write
+- ✅ **Use validator script** - `scripts/validate_csv_schemas.py`
+- ❌ **Don't write invalid data** - Better to skip row than write NaN
+
+---
+
+## Relevant Commands
+
+```bash
+# Check services
+sudo systemctl status timestd-core-recorder
+sudo systemctl status timestd-analytics
+sudo systemctl status timestd-science-aggregator
+sudo systemctl status timestd-web-ui
+
+# Check TEC data
+ls -lh /var/lib/timestd/phase2/science/tec/
+tail /var/lib/timestd/phase2/science/tec/tec_$(date +%Y%m%d).csv
+
+# Validate CSVs
+python3 scripts/validate_csv_schemas.py --csv-file /path/to/file.csv
+python3 scripts/validate_csv_schemas.py --directory /var/lib/timestd/phase2/SHARED_10000
+
+# Check logs
+journalctl -u timestd-analytics -n 50
+journalctl -u timestd-science-aggregator -n 20
+```
+
+---
+
+## Documentation
+
+**Data Model:**
+
+- `docs/DATA_API_DESIGN.md` - Ideal API design (needs enforcement)
+- `scripts/validate_csv_schemas.py` - Schema validator
+
+**TEC:**
+
+- `docs/GPS_TEC_OPTIONAL.md` - Comprehensive guide
+- `docs/TEC_VALIDATION_METHODOLOGY.md` - Scientific methodology
+- `docs/ZED_F9P_TEC_CONFIGURATION.md` - GPS receiver setup
+
+**System:**
+
+- `docs/DEPLOYMENT_CHECKLIST.md` - Deployment guide
+- `docs/QUALITY_METRICS_KA9Q.md` - Quality metrics
