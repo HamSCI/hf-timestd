@@ -4,11 +4,104 @@
 
 The `hf-timestd` TEC measurement capability is **fully functional without any GPS hardware**. The system calculates ionospheric Total Electron Content (TEC) from multi-frequency HF timing measurements alone.
 
-GPS validation is **entirely optional** and only needed if you want to:
+GPS validation is **entirely optional** and only needed if you want to validate or enhance your HF TEC measurements.
 
-- Validate HF TEC against GPS TEC maps
-- Apply local GPS bias corrections
-- Compare HF and GPS ionospheric measurements
+---
+
+## What You Get
+
+### Default (No GPS Hardware Required) ✅
+
+**Ionospheric Measurements**:
+
+- ✅ **Multi-frequency TEC**: 3-6 frequencies per station (2.5-25 MHz)
+- ✅ **1-minute cadence**: Real-time ionospheric monitoring
+- ✅ **Multi-station coverage**: WWV, WWVH, CHU, BPM
+- ✅ **Automatic processing**: No manual intervention required
+- ✅ **Obliquity corrections**: Geometric adjustments for slant-to-vertical TEC
+
+**Scientific Capabilities**:
+
+- ✅ **Diurnal TEC analysis**: Track sunrise/sunset ionospheric changes
+- ✅ **Station comparisons**: Compare TEC across different propagation paths
+- ✅ **Event detection**: Identify Traveling Ionospheric Disturbances (TIDs), solar flares
+- ✅ **Propagation monitoring**: Real-time HF propagation conditions
+- ✅ **Historical analysis**: CSV data for long-term studies
+
+**Data Output**:
+
+```
+/var/lib/timestd/phase2/science/tec/tec_YYYYMMDD.csv
+- Timestamp, station, TEC (TECU), confidence, frequencies used
+- Multi-frequency group delays
+- Quality metrics (residuals, uncertainty)
+```
+
+**Example Use Cases** (No GPS needed):
+
+- Monitor ionospheric conditions for HF communications
+- Detect space weather events (solar flares, geomagnetic storms)
+- Analyze propagation patterns for amateur radio
+- Research ionospheric dynamics
+- Compare TEC across different geographic paths
+
+### With GPS Validation (Optional Enhancement) 🚀
+
+**What GPS Adds**:
+
+- ✅ **Accuracy validation**: Compare HF TEC against GPS reference (±2-5 TECU)
+- ✅ **Bias correction**: Remove systematic offsets in HF measurements
+- ✅ **Confidence metrics**: Quantify HF TEC accuracy (R², RMS error)
+- ✅ **Slab thickness**: Derive ionospheric equivalent slab thickness
+- ✅ **Scientific credibility**: Peer-reviewed validation methodology
+
+**Two GPS Options**:
+
+**Option 1: IONEX Maps** (Internet, no hardware)
+
+- Global GPS TEC from NASA/IGS
+- 2.5° × 5° spatial resolution
+- 2-hour temporal resolution
+- Historical validation of HF TEC
+- **Cost**: Free (internet only)
+
+**Option 2: Local GPS Receiver** (Hardware required)
+
+- Real-time local GPS TEC
+- Sub-minute cadence
+- Local bias correction
+- Independent ionospheric monitoring
+- **Cost**: ~$200-300 (ZED-F9P receiver)
+
+**Enhanced Capabilities with GPS**:
+
+- Publish scientifically validated TEC measurements
+- Calibrate HF TEC to GPS reference
+- Detect local vs global ionospheric anomalies
+- Contribute to ionospheric research networks
+- Validate novel HF TEC methodology
+
+---
+
+## Decision Guide
+
+**Use HF TEC alone if you want**:
+
+- Real-time ionospheric monitoring
+- Propagation condition assessment
+- Event detection (TIDs, solar flares)
+- Amateur radio applications
+- Quick deployment (no extra hardware)
+
+**Add GPS validation if you want**:
+
+- Scientific publication quality
+- Quantified accuracy metrics
+- Bias-corrected measurements
+- Research-grade data
+- Contribute to ionospheric science
+
+**Bottom line**: HF TEC is scientifically valid and useful on its own. GPS validation enhances credibility and accuracy but isn't required for operational use.
 
 ---
 
