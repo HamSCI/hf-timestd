@@ -13,6 +13,7 @@ Design Philosophy:
 - NO IQ PROCESSING: Reads only CSV files from Phase 2
 - LOW CPU PRIORITY: Background processing, doesn't block metrology
 - COMPLETE DATA: Phase 2 already extracted everything, this just aggregates
+- USES TimeStdPaths: Proper path management via coordinated paths system
 """
 
 import argparse
@@ -26,6 +27,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+
+# Import TimeStdPaths for proper path management
+from hf_timestd.paths import TimeStdPaths
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,8 @@ class ScienceAggregator:
     
     Runs every 5 minutes, reading clock_offset CSVs from all channels
     to calculate TEC and detect ionospheric events.
+    
+    Uses TimeStdPaths for all path operations to ensure consistency.
     """
     
     def __init__(
@@ -65,8 +71,11 @@ class ScienceAggregator:
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
         
-        # Science output directory
-        self.science_dir = self.data_root / 'phase2' / 'science'
+        # Initialize TimeStdPaths for proper path management
+        self.paths = TimeStdPaths(data_root)
+        
+        # Science output directory (not managed by TimeStdPaths yet, but follows convention)
+        self.science_dir = self.paths.get_phase2_root() / 'science'
         self.science_dir.mkdir(parents=True, exist_ok=True)
         
         # TEC output
@@ -91,43 +100,51 @@ class ScienceAggregator:
         logger.info(f"  Data root: {data_root}")
         logger.info(f"  Science dir: {self.science_dir}")
         logger.info(f"  Poll interval: {poll_interval}s")
+        logger.info(f"  Using TimeStdPaths for path management")
     
-    def _find_channel_dirs(self) -> List[Path]:
-        """Find all Phase 2 channel directories."""
-        phase2_dir = self.data_root / 'phase2'
-        if not phase2_dir.exists():
-            logger.warning(f"Phase 2 directory not found: {phase2_dir}")
-            return []
+    def _find_channel_dirs(self) -> List[str]:
+        """
+        Find all Phase 2 channel names using TimeStdPaths discovery.
         
-        # Find directories matching pattern: WWV_10000, WWVH_5000, etc.
-        channels = []
-        for item in phase2_dir.iterdir():
-            if item.is_dir() and item.name != 'science':
-                # Check if it has clock_offset subdirectory
-                if (item / 'clock_offset').exists():
-                    channels.append(item)
-        
-        logger.debug(f"Found {len(channels)} channel directories")
+        Returns:
+            List of channel names (e.g., ['CHU_3330', 'WWV_10000'])
+        """
+        channels = self.paths.discover_phase2_channels()
+        logger.debug(f"Discovered {len(channels)} Phase 2 channels: {channels}")
         return channels
     
     def _read_clock_offset_csv(
         self,
-        channel_dir: Path,
+        channel_name: str,
         date_str: str,
         start_timestamp: float,
         end_timestamp: float
     ) -> List[Dict]:
         """
-        Read clock offset CSV for given date and time range.
+        Read clock offset CSV for given date and time range using TimeStdPaths.
         
-        Returns list of dicts with keys: minute_boundary, station, frequency_mhz,
-        clock_offset_ms, uncertainty_ms, etc.
+        Args:
+            channel_name: Channel name (e.g., 'CHU_3330', 'WWV_10000')
+            date_str: Date string in YYYYMMDD format
+            start_timestamp: Start timestamp (Unix epoch)
+            end_timestamp: End timestamp (Unix epoch)
+        
+        Returns:
+            List of dicts with keys: minute_boundary_utc, station, frequency_mhz,
+            clock_offset_ms, uncertainty_ms, etc.
         """
-        # Find CSV file
-        clock_offset_dir = channel_dir / 'clock_offset'
+        # Use TimeStdPaths to get clock_offset directory
+        clock_offset_dir = self.paths.get_clock_offset_dir(channel_name)
+        
+        if not clock_offset_dir.exists():
+            logger.debug(f"Clock offset directory not found: {clock_offset_dir}")
+            return []
+        
+        # Find CSV file for this date
         csv_files = list(clock_offset_dir.glob(f'*_clock_offset_{date_str}.csv'))
         
         if not csv_files:
+            logger.debug(f"No clock offset CSV found for {channel_name} on {date_str}")
             return []
         
         csv_file = csv_files[0]
@@ -154,6 +171,8 @@ class ScienceAggregator:
         
         For each station (WWV, WWVH, CHU, BPM), collect ToA measurements
         across all frequencies for each minute, then estimate TEC.
+        
+        Uses TimeStdPaths to discover channels and locate data.
         """
         # Determine time range to process
         now = datetime.now(timezone.utc)
@@ -167,29 +186,29 @@ class ScienceAggregator:
         
         logger.info(f"Aggregating TEC for {start_time} to {end_time}")
         
-        # Find all channel directories
-        channels = self._find_channel_dirs()
+        # Find all channel names using TimeStdPaths
+        channel_names = self._find_channel_dirs()
         
-        if not channels:
-            logger.warning("No channel directories found")
+        if not channel_names:
+            logger.warning("No Phase 2 channels found")
             return
         
         # Collect measurements from all channels
         all_measurements = []
-        for channel_dir in channels:
+        for channel_name in channel_names:
             measurements = self._read_clock_offset_csv(
-                channel_dir, date_str, start_timestamp, end_timestamp
+                channel_name, date_str, start_timestamp, end_timestamp
             )
             all_measurements.extend(measurements)
         
-        logger.debug(f"Collected {len(all_measurements)} measurements from {len(channels)} channels")
+        logger.debug(f"Collected {len(all_measurements)} measurements from {len(channel_names)} channels")
         
         # Group by (station, minute_boundary)
         grouped = {}
         for m in all_measurements:
             try:
                 station = m['station']
-                minute_boundary = int(float(m['minute_boundary']))
+                minute_boundary = int(float(m['minute_boundary_utc']))  # Fixed: was 'minute_boundary'
                 freq_mhz = float(m['frequency_mhz'])
                 clock_offset_ms = float(m['clock_offset_ms'])
                 uncertainty_ms = float(m.get('uncertainty_ms', 1.0))
