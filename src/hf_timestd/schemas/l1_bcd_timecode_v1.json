@@ -1,0 +1,79 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L1B_bcd_timecode",
+    "description": "BCD time code discrimination results",
+    "cadence_seconds": 60,
+    "processing_level": "L1B",
+    "standards": [
+        "NetCDF CF conventions"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "bcd_station",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "UNKNOWN"
+            ],
+            "description": "Station identified via BCD time code"
+        },
+        {
+            "name": "bcd_confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "BCD discrimination confidence score"
+        },
+        {
+            "name": "bcd_decoded_time",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "description": "Decoded UTC time from BCD (ISO 8601)"
+        },
+        {
+            "name": "bcd_match",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "BCD time matches system time (within tolerance)"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD",
+                "MISSING"
+            ],
+            "description": "Overall data quality flag"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "BCD decoded successfully, confidence > 0.8",
+        "MARGINAL": "BCD decoded, 0.5 < confidence <= 0.8",
+        "BAD": "BCD decode failed or confidence <= 0.5",
+        "MISSING": "No BCD data available"
+    }
+}

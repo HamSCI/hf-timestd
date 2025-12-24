@@ -59,6 +59,7 @@ test-data/
 !package-lock.json
 !web-ui/package.json
 !tsconfig.json
+!src/hf_timestd/schemas/*.json
 
 # Recording outputs
 *.wav

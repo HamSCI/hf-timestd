@@ -1,0 +1,332 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L2_timing_measurements",
+    "description": "Station-assigned timing measurements with ISO GUM-compliant uncertainty budget",
+    "cadence_seconds": 60,
+    "processing_level": "L2",
+    "standards": [
+        "NIST/BIPM metrology",
+        "ISO GUM uncertainty budget",
+        "NetCDF CF conventions"
+    ],
+    "reference": "UTC(NIST) via broadcast time signals",
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "rtp_timestamp",
+            "type": "integer",
+            "required": true,
+            "description": "RTP timestamp from raw_buffer"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "BPM"
+            ],
+            "description": "Broadcast station assignment"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Carrier frequency",
+            "units": "MHz"
+        },
+        {
+            "name": "discrimination_method",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "TONE",
+                "BCD",
+                "440HZ",
+                "FUSION"
+            ],
+            "description": "Station discrimination method used"
+        },
+        {
+            "name": "discrimination_confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "Station ID confidence score"
+        },
+        {
+            "name": "clock_offset_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "D_clock: observed - expected arrival time",
+            "units": "milliseconds",
+            "reference": "UTC(NIST) via broadcast time signal"
+        },
+        {
+            "name": "uncertainty_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Combined standard uncertainty u_c (ISO GUM)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "expanded_uncertainty_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Expanded uncertainty U = k × u_c",
+            "units": "milliseconds"
+        },
+        {
+            "name": "coverage_factor",
+            "type": "float",
+            "required": true,
+            "description": "Coverage factor k (typically 2 for 95% confidence)",
+            "typical_value": 2.0
+        },
+        {
+            "name": "confidence_level",
+            "type": "float",
+            "required": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "Confidence level (typically 0.95 for k=2)",
+            "typical_value": 0.95
+        },
+        {
+            "name": "u_rtp_timestamp_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Type A: RTP timestamp resolution uncertainty",
+            "units": "milliseconds",
+            "uncertainty_type": "A"
+        },
+        {
+            "name": "u_ionospheric_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Type A: Ionospheric propagation variability",
+            "units": "milliseconds",
+            "uncertainty_type": "A"
+        },
+        {
+            "name": "u_multipath_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Type A: Multipath/delay spread uncertainty",
+            "units": "milliseconds",
+            "uncertainty_type": "A"
+        },
+        {
+            "name": "u_discrimination_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Type B: Station discrimination uncertainty",
+            "units": "milliseconds",
+            "uncertainty_type": "B"
+        },
+        {
+            "name": "u_gpsdo_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Type B: GPSDO stability uncertainty",
+            "units": "milliseconds",
+            "uncertainty_type": "B"
+        },
+        {
+            "name": "u_propagation_model_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Type B: Propagation model uncertainty",
+            "units": "milliseconds",
+            "uncertainty_type": "B"
+        },
+        {
+            "name": "degrees_of_freedom",
+            "type": "integer",
+            "required": true,
+            "description": "Effective degrees of freedom (Welch-Satterthwaite formula)"
+        },
+        {
+            "name": "quality_grade",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "A",
+                "B",
+                "C",
+                "D"
+            ],
+            "description": "Quality grade based on expanded uncertainty"
+        },
+        {
+            "name": "confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "Overall measurement confidence"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD",
+                "MISSING"
+            ],
+            "description": "Overall data quality flag"
+        },
+        {
+            "name": "propagation_delay_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Estimated propagation delay",
+            "units": "milliseconds"
+        },
+        {
+            "name": "propagation_mode",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "description": "Ray-tracing classification (1E, 2F, etc.)"
+        },
+        {
+            "name": "n_hops",
+            "type": "integer",
+            "required": false,
+            "allow_empty": true,
+            "description": "Number of ionospheric hops"
+        },
+        {
+            "name": "delay_spread_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Multipath delay spread",
+            "units": "milliseconds"
+        },
+        {
+            "name": "fss_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Frequency selective spread",
+            "units": "dB"
+        },
+        {
+            "name": "snr_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Source SNR from L1",
+            "units": "dB"
+        },
+        {
+            "name": "doppler_hz",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Source Doppler from L1",
+            "units": "Hz"
+        },
+        {
+            "name": "utc_verified",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "UTC verified via BCD"
+        },
+        {
+            "name": "multi_station_verified",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "Cross-station verification performed"
+        },
+        {
+            "name": "traceability_chain",
+            "type": "string",
+            "required": true,
+            "description": "Metrological traceability chain",
+            "example": "GPSDO → UTC(GPS) → UTC(NIST)"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Analytics version"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Processing timestamp"
+        },
+        {
+            "name": "calibration_date",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Last GPSDO calibration date"
+        },
+        {
+            "name": "gpsdo_locked",
+            "type": "boolean",
+            "required": true,
+            "description": "GPSDO lock status at measurement time"
+        }
+    ],
+    "quality_grades": {
+        "A": "Expanded uncertainty U < 1.0 ms",
+        "B": "Expanded uncertainty 1.0 ms <= U < 2.0 ms",
+        "C": "Expanded uncertainty 2.0 ms <= U < 3.0 ms",
+        "D": "Expanded uncertainty U >= 3.0 ms"
+    },
+    "quality_flags": {
+        "GOOD": "Grade A or B, GPSDO locked, station discrimination confidence > 0.7",
+        "MARGINAL": "Grade C, or discrimination confidence 0.5-0.7",
+        "BAD": "Grade D, or discrimination confidence < 0.5, or GPSDO unlocked",
+        "MISSING": "No valid timing measurement"
+    },
+    "uncertainty_calculation": {
+        "description": "ISO GUM uncertainty propagation",
+        "formula_type_a": "u_A = sqrt(u_rtp² + u_ionospheric² + u_multipath²)",
+        "formula_type_b": "u_B = sqrt(u_discrimination² + u_gpsdo² + u_propagation_model²)",
+        "formula_combined": "u_c = sqrt(u_A² + u_B²)",
+        "formula_expanded": "U = k × u_c (k=2 for 95% confidence)"
+    }
+}

@@ -1,0 +1,110 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3A_tec",
+    "description": "Total Electron Content estimates from multi-frequency propagation delay",
+    "cadence_seconds": 60,
+    "processing_level": "L3A",
+    "standards": [
+        "CEDAR Madrigal patterns",
+        "NetCDF CF conventions"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "BPM"
+            ],
+            "description": "Broadcast station"
+        },
+        {
+            "name": "tec_tecu",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Total Electron Content",
+            "units": "TECU (10^16 electrons/m²)"
+        },
+        {
+            "name": "t_vacuum_error_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Vacuum propagation time (intercept of 1/f² fit)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "TEC estimate confidence (based on fit quality)"
+        },
+        {
+            "name": "n_frequencies",
+            "type": "integer",
+            "required": true,
+            "description": "Number of frequencies used in TEC calculation"
+        },
+        {
+            "name": "residuals_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "RMS residuals of linear fit",
+            "units": "milliseconds"
+        },
+        {
+            "name": "frequencies_mhz",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "description": "Comma-separated list of frequencies used",
+            "example": "2.5,5.0,10.0,15.0,20.0,25.0"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD",
+                "MISSING"
+            ],
+            "description": "Overall data quality flag"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Science aggregator version"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "n_frequencies >= 4, confidence > 0.8, residuals < 1 ms",
+        "MARGINAL": "n_frequencies >= 3, 0.5 < confidence <= 0.8, residuals < 2 ms",
+        "BAD": "n_frequencies < 3, confidence <= 0.5, or residuals >= 2 ms",
+        "MISSING": "No TEC estimate available"
+    }
+}

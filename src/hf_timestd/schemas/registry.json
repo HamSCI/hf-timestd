@@ -1,0 +1,57 @@
+{
+    "registry_version": "1.0.0",
+    "description": "Schema registry mapping data products to schema versions",
+    "last_updated": "2025-12-24T20:47:00Z",
+    "data_products": {
+        "L1A_channel_observables": {
+            "current_version": "v1",
+            "schema_file": "l1_channel_observables_v1.json",
+            "description": "Calibrated channel measurements",
+            "replaces": [
+                "carrier_power",
+                "doppler",
+                "tone_detections",
+                "test_signal",
+                "audio_tones"
+            ]
+        },
+        "L1B_bcd_timecode": {
+            "current_version": "v1",
+            "schema_file": "l1_bcd_timecode_v1.json",
+            "description": "BCD time code discrimination",
+            "replaces": [
+                "bcd_discrimination"
+            ]
+        },
+        "L2_timing_measurements": {
+            "current_version": "v1",
+            "schema_file": "l2_timing_measurements_v1.json",
+            "description": "Station-assigned timing measurements with ISO GUM uncertainty budget",
+            "replaces": [
+                "clock_offset",
+                "discrimination",
+                "station_id_440hz"
+            ]
+        },
+        "L3A_tec": {
+            "current_version": "v1",
+            "schema_file": "l3_tec_v1.json",
+            "description": "Total Electron Content estimates",
+            "replaces": [
+                "tec"
+            ]
+        },
+        "L3B_fusion_timing": {
+            "current_version": "v1",
+            "schema_file": "l3_fusion_timing_v1.json",
+            "description": "Multi-station UTC(NIST) fusion estimate",
+            "replaces": []
+        }
+    },
+    "version_history": {
+        "1.0.0": {
+            "date": "2025-12-24",
+            "changes": "Initial schema registry creation"
+        }
+    }
+}

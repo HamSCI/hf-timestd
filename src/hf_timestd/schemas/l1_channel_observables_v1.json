@@ -1,0 +1,237 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L1A_channel_observables",
+    "description": "Calibrated channel measurements from Phase 2 analytics - raw observables from IQ samples",
+    "cadence_seconds": 60,
+    "processing_level": "L1A",
+    "standards": [
+        "NetCDF CF conventions",
+        "Self-describing metadata"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC (ISO 8601 format)",
+            "example": "2025-12-24T12:00:00Z"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary",
+            "units": "seconds since 1970-01-01T00:00:00Z"
+        },
+        {
+            "name": "rtp_timestamp",
+            "type": "integer",
+            "required": true,
+            "description": "RTP timestamp from raw_buffer",
+            "units": "RTP time units"
+        },
+        {
+            "name": "carrier_power_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -120,
+                0
+            ],
+            "description": "Carrier power measurement",
+            "units": "dBm"
+        },
+        {
+            "name": "carrier_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -20,
+                60
+            ],
+            "description": "Carrier signal-to-noise ratio",
+            "units": "dB"
+        },
+        {
+            "name": "carrier_doppler_hz",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -10,
+                10
+            ],
+            "description": "Carrier Doppler shift",
+            "units": "Hz"
+        },
+        {
+            "name": "doppler_std_hz",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                0,
+                5
+            ],
+            "description": "Doppler standard deviation (spread)",
+            "units": "Hz"
+        },
+        {
+            "name": "coherence_time_sec",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                0,
+                60
+            ],
+            "description": "Maximum coherent integration window",
+            "units": "seconds"
+        },
+        {
+            "name": "phase_variance_rad",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                0,
+                6.28
+            ],
+            "description": "Phase variance (coherence quality indicator)",
+            "units": "radians"
+        },
+        {
+            "name": "wwv_tone_500hz_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "WWV 500 Hz tone power",
+            "units": "dB"
+        },
+        {
+            "name": "wwv_tone_600hz_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "WWV 600 Hz tone power",
+            "units": "dB"
+        },
+        {
+            "name": "wwvh_tone_1200hz_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "WWVH 1200 Hz tone power",
+            "units": "dB"
+        },
+        {
+            "name": "wwvh_tone_1500hz_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "WWVH 1500 Hz tone power",
+            "units": "dB"
+        },
+        {
+            "name": "wwv_tick_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "WWV second tick SNR",
+            "units": "dB"
+        },
+        {
+            "name": "wwvh_tick_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "WWVH second tick SNR",
+            "units": "dB"
+        },
+        {
+            "name": "chu_tone_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "CHU tone power",
+            "units": "dB"
+        },
+        {
+            "name": "chu_tick_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "CHU second tick SNR",
+            "units": "dB"
+        },
+        {
+            "name": "test_signal_detected",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "Test signal present (WWV/WWVH minutes 8/44)"
+        },
+        {
+            "name": "test_signal_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "description": "Test signal SNR",
+            "units": "dB"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD",
+                "MISSING"
+            ],
+            "description": "Overall data quality flag"
+        },
+        {
+            "name": "data_completeness",
+            "type": "float",
+            "required": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "Fraction of minute with valid IQ data",
+            "units": "dimensionless (0-1)"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Phase 2 analytics version",
+            "example": "3.1.0"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "All measurements valid, data_completeness > 0.95",
+        "MARGINAL": "Some measurements missing, 0.7 < data_completeness <= 0.95",
+        "BAD": "Significant data loss, data_completeness <= 0.7",
+        "MISSING": "No valid data for this minute"
+    }
+}

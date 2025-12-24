@@ -1,0 +1,96 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3B_fusion_timing",
+    "description": "Multi-station, multi-frequency UTC(NIST) estimate from Kalman fusion",
+    "cadence_seconds": 60,
+    "processing_level": "L3B",
+    "standards": [
+        "NIST traceability",
+        "Kalman filtering"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "utc_nist_offset_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Fused UTC(NIST) offset estimate",
+            "units": "milliseconds"
+        },
+        {
+            "name": "uncertainty_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Fusion uncertainty (1-sigma)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "n_stations",
+            "type": "integer",
+            "required": true,
+            "description": "Number of stations in fusion"
+        },
+        {
+            "name": "n_measurements",
+            "type": "integer",
+            "required": true,
+            "description": "Number of measurements in fusion"
+        },
+        {
+            "name": "stations_used",
+            "type": "string",
+            "required": true,
+            "description": "Comma-separated list of stations",
+            "example": "WWV,WWVH,CHU"
+        },
+        {
+            "name": "kalman_state",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "ACQUIRING",
+                "LOCKED",
+                "REACQUIRING"
+            ],
+            "description": "Kalman filter state"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD",
+                "MISSING"
+            ],
+            "description": "Overall data quality flag"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Fusion engine version"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "LOCKED state, n_stations >= 2, uncertainty < 1 ms",
+        "MARGINAL": "LOCKED state, n_stations >= 1, 1 ms <= uncertainty < 2 ms",
+        "BAD": "ACQUIRING or REACQUIRING state, or uncertainty >= 2 ms",
+        "MISSING": "No fusion estimate available"
+    }
+}
