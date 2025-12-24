@@ -1,90 +1,115 @@
 # HF Time Standard - System Context
 
 **Last Updated:** 2025-12-24  
-**Current Version:** v3.1.0
+**Current Version:** v3.2.0-dev (Schema Registry)
 
 ---
 
-## CRITICAL: Data Model Management Crisis
+## RECENT: Schema Registry Implementation (2025-12-24)
 
-### The Problem
+### What Was Accomplished
 
-**Perennial Issue:** Choosing where to write measurements, where to find written data, and how to coordinate producers/consumers has gotten out of hand.
+✅ **Schema Registry Infrastructure Complete**
 
-**Symptoms:**
+**Created**:
 
-- Data scattered across 11+ CSV types per channel
-- No single source of truth for schemas
-- Producers and consumers don't share contracts
-- Silent failures (NaN → 0 conversion)
-- Schema fragmentation causes brittleness
-- `DATA_API_DESIGN.md` exists but not enforced
+- 5 JSON Schema definitions (L1A, L1B, L2, L3A, L3B) following NASA/NIST/CEDAR standards
+- Schema loader module (`src/hf_timestd/schemas/__init__.py`)
+- Registry mapping file documenting consolidation (11 CSVs → 4 HDF5 products)
+- Unit tests for schema validation (`tests/unit/test_schemas.py`)
+- HDF5 implementation guide with code examples
 
-**Recent Example (2025-12-24):**
+**Key Decisions**:
 
-- carrier_power CSV contained "nan" strings
-- ionosphere.html showed zeros/flatlines
-- Root cause: No validation, no schema enforcement
-- Quick fix applied, but systemic problem remains
+- ✅ Use HDF5 format (self-describing, CEDAR Madrigal compatible, extensible)
+- ✅ Follow NASA data product levels (L0→L1→L2→L3)
+- ✅ ISO GUM-compliant uncertainty budgets for L2 timing measurements
+- ✅ NIST traceability requirements embedded in schemas
 
-### What We Need
+**Benefits**:
 
-**A comprehensive data model and management plan that provides:**
+- 63% reduction in data products (11 → 4)
+- Schema enforcement prevents NaN silent failures
+- Embedded metadata (units, provenance, traceability)
+- Extensible for new measurements without breaking readers
 
-1. **Single Source of Truth**
-   - Canonical schema definitions (machine-readable)
-   - Clear producer/consumer contracts
-   - Versioning strategy
-
-2. **Scalable Organization**
-   - Consolidated CSV schemas (reduce 11 types → 3-4)
-   - Clear data lifecycle (write → validate → read)
-   - Automated enforcement
-
-3. **Validation at Every Layer**
-   - Producers validate before writing
-   - Consumers validate after reading
-   - Monitoring alerts for violations
-
-4. **Clear Documentation**
-   - Where each measurement lives
-   - How to access each data type
-   - Migration guides for schema changes
+**Committed**: 2025-12-24 21:28 UTC (commit 38e4b62)
 
 ---
 
-## Focus for Next Session: Data Model & Management Plan
+## Focus for Next Session: Validation Infrastructure
 
 ### Goals
 
-1. **Design unified data model**
-   - Consolidate fragmented CSVs
-   - Define canonical schemas
-   - Create schema registry
+1. **Implement HDF5 I/O module** (`src/hf_timestd/io/`)
+   - DataProductWriter class with schema validation
+   - DataProductReader class with quality filtering
+   - NaN/inf rejection at write time
+   - ISO GUM uncertainty calculator
 
-2. **Implement validation infrastructure**
-   - Schema enforcement in producers
-   - Validation in consumers
-   - Monitoring and alerts
+2. **Update Phase 2 Analytics**
+   - Parallel writes (old CSV + new HDF5)
+   - Validate equivalence between formats
+   - Test for 24-48 hours
 
-3. **Create migration strategy**
-   - Parallel writes during transition
-   - Backward compatibility
-   - Deprecation timeline
+3. **Prepare for consumer migration**
+   - Update monitoring server to read HDF5
+   - Update science aggregator to read L2 HDF5
+   - Verify UI displays correctly
 
-4. **Update documentation**
-   - Comprehensive schema docs
-   - Producer/consumer guides
-   - API contracts
+### Key Files to Implement
 
-### Current State
+**I/O Module**:
 
-**CSV Types Per Channel (11 total):**
+- `src/hf_timestd/io/__init__.py` - DataProductWriter, DataProductReader
+- `src/hf_timestd/io/hdf5_writer.py` - HDF5 writing with schema validation
+- `src/hf_timestd/io/hdf5_reader.py` - HDF5 reading with quality filtering
+- `src/hf_timestd/io/uncertainty.py` - ISO GUM uncertainty calculator
+
+**Tests**:
+
+- `tests/unit/test_hdf5_io.py` - Unit tests for HDF5 I/O
+- `tests/integration/test_data_flow.py` - End-to-end data flow tests
+
+---
+
+## Current State: Data Model
+
+### Schema Registry (NEW - v3.2.0-dev)
+
+**Location**: `src/hf_timestd/schemas/`
+
+**Schemas Available**:
+
+- L1A: `channel_observables_v1.json` - Consolidates carrier_power, doppler, tones, test_signal
+- L1B: `bcd_timecode_v1.json` - BCD time code discrimination
+- L2: `timing_measurements_v1.json` - Station-assigned timing with ISO GUM uncertainty
+- L3A: `tec_v1.json` - Total Electron Content estimates
+- L3B: `fusion_timing_v1.json` - Multi-station UTC(NIST) fusion
+
+**Usage**:
+
+```python
+from hf_timestd.schemas import get_schema
+
+# Load L2 timing measurements schema
+schema = get_schema('L2', 'timing_measurements')
+print(schema['schema_version'])  # '1.0.0'
+```
+
+### Data Product Levels (NASA EOSDIS)
+
+- **L0**: Raw RTP/Digital RF (unchanged)
+- **L1**: Calibrated measurements (channel observables + BCD)
+- **L2**: Derived geophysical variables (timing measurements with uncertainty)
+- **L3**: Science products (TEC + fusion timing)
+
+### Current CSV Types (Legacy - to be replaced)
 
 ```
 audio_tones/          - Audio tone analysis
 bcd_discrimination/   - BCD time code discrimination  
-carrier_power/        - Carrier power (BROKEN - had NaN)
+carrier_power/        - Carrier power (FIXED - NaN issue resolved)
 clock_offset/         - Clock offset (WORKING)
 discrimination/       - WWV/WWVH discrimination
 doppler/              - Doppler measurements
@@ -96,148 +121,7 @@ timing/               - UTC(NIST) timing
 tone_detections/      - Tone detection results
 ```
 
-**Problems:**
-
-- Monitoring server must join 3 CSVs (carrier_power, doppler, clock_offset) to build complete picture
-- No validation before writing
-- No schema versioning
-- Silent failures hide problems
-
-**What Works:**
-
-- `TimeStdPaths` API for path management
-- TEC data generation (v3.1.0)
-- Clock offset measurements
-- Basic CSV structure
-
-**Recent Fixes (2025-12-24):**
-
-- ✅ Fixed NaN in carrier_power calculation
-- ✅ Created `scripts/validate_csv_schemas.py`
-- ✅ Documented schema gaps in `DATA_API_DESIGN.md`
-
-### Key Files to Review
-
-**Schema Documentation:**
-
-- `docs/DATA_API_DESIGN.md` - Ideal API design (created long ago, not enforced)
-- `scripts/validate_csv_schemas.py` - NEW validator (detects NaN, schema violations)
-
-**Producers:**
-
-- `src/hf_timestd/core/phase2_analytics_service.py` - Writes 11 CSV types
-- `src/hf_timestd/core/science_aggregator.py` - Writes TEC CSVs
-
-**Consumers:**
-
-- `web-ui/monitoring-server-v3.js` - Reads CSVs, serves API
-- `src/hf_timestd/core/multi_broadcast_fusion.py` - Reads clock_offset
-
-**Path Management:**
-
-- `src/hf_timestd/paths.py` - TimeStdPaths API (good pattern to follow)
-
-### Investigation Steps for Next Session
-
-1. **Audit Current Data Model**
-   - Map all CSV types to their purpose
-   - Identify redundancy and overlap
-   - Document dependencies
-
-2. **Design Unified Schema**
-   - Consolidate carrier_power + doppler + clock_offset
-   - Define core vs optional fields
-   - Create schema versioning plan
-
-3. **Create Schema Registry**
-   - Machine-readable schemas (JSON Schema)
-   - Validation functions
-   - Migration tools
-
-4. **Implement Enforcement**
-   - Add validation to producers
-   - Add validation to consumers
-   - Add monitoring alerts
-
-5. **Document Everything**
-   - Update DATA_API_DESIGN.md
-   - Create producer guide
-   - Create consumer guide
-
----
-
-## System Architecture
-
-### Core Services
-
-- **`timestd-core-recorder`**: Receives RTP streams from `radiod`, writes Digital RF archives (Phase 1)
-- **`timestd-analytics`**: 9 Phase 2 processes + fusion engine for timing analysis
-- **`timestd-science-aggregator`**: Multi-frequency TEC calculation (NEW in v3.1.0)
-- **`timestd-web-ui`**: Node.js monitoring server serving real-time dashboards
-
-### Data Flow
-
-```
-SDR → radiod → RTP/F32 → core-recorder → Hot Buffer (/dev/shm/timestd/raw_buffer)
-                                               ↓ (background archiver)
-                                           Cold Buffer (/var/lib/timestd/raw_buffer)
-                                               ↑ (reads hot first, falls back to cold)
-                                           analytics → 11 CSV types per channel
-                                                    ↓
-                                           clock_offset CSVs → science-aggregator → TEC CSVs
-                                                                                   → web-ui
-```
-
-**Tiered Storage:** Core recorder writes to RAM (`/dev/shm`), background thread archives old minutes to disk. Analytics reads from hot buffer first (zero-latency), falls back to cold if needed.
-
----
-
-## Recent Changes (v3.1.0 - 2025-12-24)
-
-### TEC Implementation ✅
-
-**Achievement:** Multi-frequency ionospheric TEC measurement from HF timing data
-
-**Key Changes:**
-
-- **`science_aggregator.py`**: Refactored to use `TimeStdPaths` API
-  - Uses `discover_phase2_channels()` for automatic channel discovery
-  - Uses `get_clock_offset_dir(channel_name)` for consistent path resolution
-  - Fixed field name bug: `'minute_boundary'` → `'minute_boundary_utc'`
-  - Generates TEC every 5 minutes from multi-frequency clock offset data
-
-- **`tec_geometry.py`**: Obliquity factor and geometric corrections
-
-**Production Status:**
-
-- ✅ Service running: `timestd-science-aggregator`
-- ✅ Data generating: `/var/lib/timestd/phase2/science/tec/tec_YYYYMMDD.csv`
-- ✅ 121+ measurements per day (CHU, WWV, WWVH)
-- ✅ 3-6 frequencies per station, 1-minute cadence
-
-### Data Quality Fixes ✅
-
-**Problem:** NaN values in carrier_power CSV causing zeros in ionosphere.html
-
-**Root Cause:**
-
-- No validation of IQ samples before power calculation
-- NaN is truthy in Python → `round(NaN, 2)` → "nan" string in CSV
-- Monitoring server converts "nan" → 0 → UI shows flatlines
-
-**Fixes Applied:**
-
-- Added NaN validation before calculation (`phase2_analytics_service.py` lines 1570-1585)
-- Added NaN/inf checks before CSV writing (lines 503-510)
-- Created CSV schema validator (`scripts/validate_csv_schemas.py`)
-
-**Result:**
-
-- ✅ No more "nan" in new CSV rows
-- ✅ Empty fields instead when data invalid
-- ✅ Validator detects schema violations
-
-**Committed:** 2025-12-24 18:37 UTC (commit 7966fbf)
+**Migration Plan**: Parallel writes (CSV + HDF5) → Switch consumers → Deprecate CSVs
 
 ---
 
@@ -246,7 +130,8 @@ SDR → radiod → RTP/F32 → core-recorder → Hot Buffer (/dev/shm/timestd/ra
 - **Config**: `/etc/hf-timestd/timestd-config.toml`
 - **Data Root**: `/var/lib/timestd/`
 - **Hot Buffer**: `/dev/shm/timestd/raw_buffer/`
-- **Phase 2 CSVs**: `/var/lib/timestd/phase2/{CHANNEL}/`
+- **Phase 2 CSVs**: `/var/lib/timestd/phase2/{CHANNEL}/` (legacy)
+- **Phase 2 HDF5**: `/var/lib/timestd/phase2/{CHANNEL}/` (new, to be implemented)
 - **TEC Data**: `/var/lib/timestd/phase2/science/tec/`
 - **Logs**: `journalctl -u timestd-core-recorder` / `timestd-analytics` / `timestd-science-aggregator` / `timestd-web-ui`
 
@@ -258,6 +143,13 @@ All use: `preset=iq`, `sample_rate=20000`, `agc=0`, `gain=0`, `encoding=F32`
 ---
 
 ## Important Patterns
+
+### Schema Usage (NEW - v3.2.0+)
+
+- ✅ **Always use schema registry** - Import from `hf_timestd.schemas`
+- ✅ **Validate before writing** - Use DataProductWriter (to be implemented)
+- ✅ **Include uncertainty budgets** - L2 requires ISO GUM components
+- ❌ **Don't write without validation** - Prevents NaN silent failures
 
 ### Path Management (v3.1.0+)
 
@@ -273,7 +165,7 @@ All use: `preset=iq`, `sample_rate=20000`, `agc=0`, `gain=0`, `encoding=F32`
 - ✅ **Health monitoring enabled** - Auto-recovery from radiod restarts
 - ❌ **Never** manually manage channels - let discovery handle it
 
-### Data Validation (NEW - v3.1.0+)
+### Data Validation (v3.1.0+)
 
 - ✅ **Validate before calculation** - Check for NaN/inf in input data
 - ✅ **Validate before writing** - Check for NaN/inf before CSV write
@@ -295,9 +187,12 @@ sudo systemctl status timestd-web-ui
 ls -lh /var/lib/timestd/phase2/science/tec/
 tail /var/lib/timestd/phase2/science/tec/tec_$(date +%Y%m%d).csv
 
-# Validate CSVs
+# Validate CSVs (legacy)
 python3 scripts/validate_csv_schemas.py --csv-file /path/to/file.csv
 python3 scripts/validate_csv_schemas.py --directory /var/lib/timestd/phase2/SHARED_10000
+
+# Check schemas (NEW)
+python3 -c "from hf_timestd.schemas import list_schemas; print(list_schemas())"
 
 # Check logs
 journalctl -u timestd-analytics -n 50
@@ -308,18 +203,19 @@ journalctl -u timestd-science-aggregator -n 20
 
 ## Documentation
 
-**Data Model:**
+**Data Model**:
 
-- `docs/DATA_API_DESIGN.md` - Ideal API design (needs enforcement)
-- `scripts/validate_csv_schemas.py` - Schema validator
+- `docs/DATA_API_DESIGN.md` - Ideal API design (to be updated with HDF5)
+- `src/hf_timestd/schemas/` - Schema registry (NEW)
+- `scripts/validate_csv_schemas.py` - CSV schema validator (legacy)
 
-**TEC:**
+**TEC**:
 
 - `docs/GPS_TEC_OPTIONAL.md` - Comprehensive guide
 - `docs/TEC_VALIDATION_METHODOLOGY.md` - Scientific methodology
 - `docs/ZED_F9P_TEC_CONFIGURATION.md` - GPS receiver setup
 
-**System:**
+**System**:
 
 - `docs/DEPLOYMENT_CHECKLIST.md` - Deployment guide
 - `docs/QUALITY_METRICS_KA9Q.md` - Quality metrics
