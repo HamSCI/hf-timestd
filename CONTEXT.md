@@ -11,51 +11,76 @@
 
 ✅ **Schema Registry Infrastructure Complete**
 
-**Created**:
+# hf-timestd Project Context
 
-- 5 JSON Schema definitions (L1A, L1B, L2, L3A, L3B) following NASA/NIST/CEDAR standards
-- Schema loader module (`src/hf_timestd/schemas/__init__.py`)
-- Registry mapping file documenting consolidation (11 CSVs → 4 HDF5 products)
-- Unit tests for schema validation (`tests/unit/test_schemas.py`)
-- HDF5 implementation guide with code examples
+**Last Updated**: 2025-12-25 00:36 UTC
 
-**Key Decisions**:
+## Recent Accomplishments (This Session)
 
-- ✅ Use HDF5 format (self-describing, CEDAR Madrigal compatible, extensible)
-- ✅ Follow NASA data product levels (L0→L1→L2→L3)
-- ✅ ISO GUM-compliant uncertainty budgets for L2 timing measurements
-- ✅ NIST traceability requirements embedded in schemas
+### ✅ HDF5 I/O Module - DEPLOYED TO PRODUCTION
 
-**Benefits**:
+**Implemented:**
 
-- 63% reduction in data products (11 → 4)
-- Schema enforcement prevents NaN silent failures
-- Embedded metadata (units, provenance, traceability)
-- Extensible for new measurements without breaking readers
+- ISO GUM uncertainty calculator with Type A/B propagation
+- Schema-validated HDF5 writer with NaN/inf rejection
+- Quality-filtered HDF5 reader with time range queries
+- Comprehensive unit tests (all passing)
 
-**Committed**: 2025-12-24 21:28 UTC (commit 38e4b62)
+**Integrated into Phase 2 Analytics:**
 
----
+- L1A: Channel observables (carrier power, SNR, tones)
+- L1B: BCD timecode discrimination
+- L2: Timing measurements with ISO GUM uncertainty budgets
 
-## Focus for Next Session: Validation Infrastructure
+**Production Status:**
 
-### Goals
+- ✅ Deployed to `/opt/hf-timestd` on 2025-12-25
+- ✅ HDF5 files being created for all 9 channels
+- ✅ Parallel CSV+HDF5 writes active (backward compatible)
+- ✅ File locations: `/var/lib/timestd/phase2/{CHANNEL}/{clock_offset|carrier_power|bcd_discrimination}/*.h5`
+- ✅ Dependencies added to `setup.py` and `requirements.txt`
 
-1. **Implement HDF5 I/O module** (`src/hf_timestd/io/`)
-   - DataProductWriter class with schema validation
-   - DataProductReader class with quality filtering
-   - NaN/inf rejection at write time
-   - ISO GUM uncertainty calculator
+**Example Files:**
 
-2. **Update Phase 2 Analytics**
-   - Parallel writes (old CSV + new HDF5)
-   - Validate equivalence between formats
-   - Test for 24-48 hours
+- `SHARED_10000_timing_measurements_20251225.h5` (88 KB)
+- `SHARED_10000_channel_observables_20251225.h5` (33 KB)
+- `SHARED_10000_bcd_timecode_20251225.h5` (20 KB)
 
-3. **Prepare for consumer migration**
-   - Update monitoring server to read HDF5
-   - Update science aggregator to read L2 HDF5
-   - Verify UI displays correctly
+## Goals for Next Session
+
+### 🎯 PRIMARY: Migrate Data Consumers to HDF5
+
+**Consumer Migration Priority:**
+
+1. **Science Aggregator** (`multi_broadcast_fusion.py`)
+   - Currently reads CSV files for fusion
+   - Migrate to read L2 HDF5 timing measurements
+   - Benefit: Quality filtering, uncertainty propagation
+
+2. **Monitoring Server** (`monitoring-server-v3.js`)
+   - Currently serves CSV data to Web UI
+   - Add HDF5 endpoints for real-time data
+   - Benefit: Structured data with metadata
+
+3. **Web UI** (`summary.html`, `ionosphere.html`)
+   - Update charts to consume HDF5 data
+   - Display quality grades and uncertainty bounds
+   - Benefit: Better visualization of data quality
+
+**Migration Strategy:**
+
+- Keep CSV reads as fallback during transition
+- Add HDF5 readers alongside CSV
+- Test equivalence between CSV and HDF5 data
+- Gradually switch to HDF5-only after validation
+- Deprecate CSV writes once all consumers migrated
+
+**Success Criteria:**
+
+- All consumers reading HDF5 successfully
+- No degradation in functionality
+- Quality metadata visible in UI
+- CSV writes can be safely disabled
 
 ### Key Files to Implement
 
