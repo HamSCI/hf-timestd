@@ -1,86 +1,69 @@
 # HF Time Standard - System Context
 
-**Last Updated:** 2025-12-24  
-**Current Version:** v3.2.0-dev (Schema Registry)
+**Last Updated:** 2025-12-25  
+**Current Version:** v3.2.0-dev (HDF5 Consumer Migration)
 
 ---
 
-## RECENT: Schema Registry Implementation (2025-12-24)
+## Recent Accomplishments (2025-12-25)
 
-### What Was Accomplished
+### ✅ HDF5 Data Consumer Migration - PHASE 1 COMPLETE
 
-✅ **Schema Registry Infrastructure Complete**
+**Science Aggregator HDF5 Integration:**
 
-# hf-timestd Project Context
+- ✅ Implemented HDF5 reader for L2 timing measurements in `multi_broadcast_fusion.py`
+- ✅ Quality filtering: Grades A/B/C, flags GOOD/MARGINAL, min confidence 0.01
+- ✅ Per-channel CSV fallback for resilience
+- ✅ **HDF5 SWMR mode enabled** - resolves file locking for concurrent read/write
+- ✅ Deployed to production and verified working
 
-**Last Updated**: 2025-12-25 00:36 UTC
+**HDF5 SWMR (Single Writer Multiple Reader) Mode:**
 
-## Recent Accomplishments (This Session)
-
-### ✅ HDF5 I/O Module - DEPLOYED TO PRODUCTION
-
-**Implemented:**
-
-- ISO GUM uncertainty calculator with Type A/B propagation
-- Schema-validated HDF5 writer with NaN/inf rejection
-- Quality-filtered HDF5 reader with time range queries
-- Comprehensive unit tests (all passing)
-
-**Integrated into Phase 2 Analytics:**
-
-- L1A: Channel observables (carrier power, SNR, tones)
-- L1B: BCD timecode discrimination
-- L2: Timing measurements with ISO GUM uncertainty budgets
+- Writer: Opens with `libver='latest'`, enables `swmr_mode=True`
+- Reader: Opens with `swmr=True, libver='latest'`
+- **Result:** All 9 channels reading successfully without file locking errors
 
 **Production Status:**
 
-- ✅ Deployed to `/opt/hf-timestd` on 2025-12-25
-- ✅ HDF5 files being created for all 9 channels
-- ✅ Parallel CSV+HDF5 writes active (backward compatible)
-- ✅ File locations: `/var/lib/timestd/phase2/{CHANNEL}/{clock_offset|carrier_power|bcd_discrimination}/*.h5`
-- ✅ Dependencies added to `setup.py` and `requirements.txt`
+- ✅ Analytics service writing HDF5 with SWMR mode
+- ✅ Fusion service reading HDF5 with SWMR mode
+- ✅ Concurrent access working perfectly
+- ✅ Fusion producing UTC(NIST) timing data from HDF5
 
-**Example Files:**
+**Files Modified:**
 
-- `SHARED_10000_timing_measurements_20251225.h5` (88 KB)
-- `SHARED_10000_channel_observables_20251225.h5` (33 KB)
-- `SHARED_10000_bcd_timecode_20251225.h5` (20 KB)
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - HDF5 readers with CSV fallback
+- `src/hf_timestd/io/hdf5_writer.py` - SWMR mode enabled
+- `src/hf_timestd/io/hdf5_reader.py` - SWMR mode enabled
+- `tests/test_fusion_hdf5_reader.py` - Test script
 
 ## Goals for Next Session
 
-### 🎯 PRIMARY: Migrate Data Consumers to HDF5
+### 🎯 PRIMARY: Complete HDF5 Consumer Migration
 
-**Consumer Migration Priority:**
+**Remaining Work:**
 
-1. **Science Aggregator** (`multi_broadcast_fusion.py`)
-   - Currently reads CSV files for fusion
-   - Migrate to read L2 HDF5 timing measurements
-   - Benefit: Quality filtering, uncertainty propagation
+1. **Science Aggregator** - Finish L1A tone detections reader
+   - Implement HDF5 reader for `_read_latest_tone_observations()`
+   - Similar approach to L2 timing measurements
+   - Test equivalence with CSV data
 
-2. **Monitoring Server** (`monitoring-server-v3.js`)
-   - Currently serves CSV data to Web UI
-   - Add HDF5 endpoints for real-time data
-   - Benefit: Structured data with metadata
+2. **Monitoring Server** (`monitoring-server-v3.js`) - **MEDIUM PRIORITY**
+   - Add HDF5 reader utility for Node.js (h5wasm or similar)
+   - Update 12+ API endpoints to try HDF5 first
+   - Include quality metadata in responses
 
-3. **Web UI** (`summary.html`, `ionosphere.html`)
+3. **Web UI** (`summary.html`, `ionosphere.html`) - **LOW PRIORITY**
    - Update charts to consume HDF5 data
    - Display quality grades and uncertainty bounds
-   - Benefit: Better visualization of data quality
+   - Add quality filter controls
 
 **Migration Strategy:**
 
 - Keep CSV reads as fallback during transition
-- Add HDF5 readers alongside CSV
 - Test equivalence between CSV and HDF5 data
 - Gradually switch to HDF5-only after validation
 - Deprecate CSV writes once all consumers migrated
-
-**Success Criteria:**
-
-- All consumers reading HDF5 successfully
-- No degradation in functionality
-- Quality metadata visible in UI
-- CSV writes can be safely disabled
 
 ### Key Files to Implement
 
