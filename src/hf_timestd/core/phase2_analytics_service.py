@@ -807,7 +807,7 @@ class Phase2AnalyticsService:
                     else:
                         quality_flag = 'BAD'
                     
-                    utc_time_iso = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat() + 'Z'
+                    utc_time_iso = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
                     
                     l1a_tones_measurement = {
                         'timestamp_utc': utc_time_iso,

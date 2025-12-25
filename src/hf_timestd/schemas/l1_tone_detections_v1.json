@@ -176,6 +176,7 @@
                 "WWVH",
                 "CHU",
                 "BPM",
+                "UNKNOWN",
                 ""
             ],
             "description": "Primary station used for timing anchor"
