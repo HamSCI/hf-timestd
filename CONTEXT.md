@@ -19,7 +19,7 @@
 
 **Metrological Provenance Chain Established:**
 
-```
+```text
 L0 (RTP timestamps) → L1A (tone timing) → L2 (calibrated) → L3B (fused UTC)
          ↓ HDF5           ↓ HDF5            ↓ HDF5           ↓ Fusion
 ```

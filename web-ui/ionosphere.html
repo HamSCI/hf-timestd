@@ -242,13 +242,15 @@
             <select id="path-selector" onchange="loadAllData()">
                 <option value="">Select propagation path...</option>
                 <optgroup label="WWV (Fort Collins, CO)">
-                    <option value='{"station":"WWV","freqs":[2.5,5,10,15,20,25]}'>WWV → Receiver (all frequencies)</option>
+                    <option value='{"station":"WWV","freqs":[2.5,5,10,15,20,25]}'>WWV → Receiver (all frequencies)
+                    </option>
                 </optgroup>
                 <optgroup label="WWVH (Kekaha, HI)">
                     <option value='{"station":"WWVH","freqs":[2.5,5,10,15]}'>WWVH → Receiver (all frequencies)</option>
                 </optgroup>
                 <optgroup label="CHU (Ottawa, ON)">
-                    <option value='{"station":"CHU","freqs":[3.33,7.85,14.67]}'>CHU → Receiver (all frequencies)</option>
+                    <option value='{"station":"CHU","freqs":[3.33,7.85,14.67]}'>CHU → Receiver (all frequencies)
+                    </option>
                 </optgroup>
                 <optgroup label="BPM (Pucheng, China)">
                     <option value='{"station":"BPM","freqs":[2.5,5,10,15]}'>BPM → Receiver (all frequencies)</option>
@@ -256,14 +258,16 @@
             </select>
             <button onclick="loadAllData()">🔄 Reload</button>
         </div>
-        
+
         <!-- Path Info Banner -->
         <div id="path-info" class="section" style="padding: 15px; display: none;">
             <div style="display: flex; align-items: center; gap: 15px;">
                 <span style="font-size: 24px;">📍</span>
                 <div>
-                    <div id="path-station" style="font-size: 16px; font-weight: 600; color: #fff;">No path selected</div>
-                    <div id="path-details" style="font-size: 12px; color: #94a3b8;">Select a propagation path to view ionospheric data</div>
+                    <div id="path-station" style="font-size: 16px; font-weight: 600; color: #fff;">No path selected
+                    </div>
+                    <div id="path-details" style="font-size: 12px; color: #94a3b8;">Select a propagation path to view
+                        ionospheric data</div>
                 </div>
             </div>
         </div>
@@ -274,7 +278,8 @@
                 📊 Per-Frequency Summary
             </div>
             <div class="section-subtitle">
-                Current status for each frequency on the selected path. Lower frequencies penetrate deeper into ionosphere.
+                Current status for each frequency on the selected path. Lower frequencies penetrate deeper into
+                ionosphere.
             </div>
             <div id="freq-summary-table">
                 <!-- Populated by JavaScript -->
@@ -354,12 +359,8 @@
             <div class="section-subtitle">
                 Total Electron Content from multi-frequency delay analysis. τ(f) = 40.3 × TEC / f²
             </div>
-            <div id="tec-container">
-                <div class="data-unavailable">
-                    <div class="data-unavailable-icon">📡</div>
-                    <div>TEC estimation requires multi-frequency data</div>
-                    <div style="font-size: 11px; margin-top: 5px;">Available when same station detected on multiple frequencies</div>
-                </div>
+            <div id="tec-container" class="chart-container">
+                <div class="chart-loading">Loading TEC data...</div>
             </div>
         </section>
 
@@ -384,10 +385,12 @@
         <section class="section">
             <div class="section-title">
                 🌊 Propagation Mode Probability
-                <a href="/docs/timing-methodology.html#propagation" class="info-link" title="Understanding propagation modes">?</a>
+                <a href="/docs/timing-methodology.html#propagation" class="info-link"
+                    title="Understanding propagation modes">?</a>
             </div>
             <div class="section-subtitle">
-                Ionospheric hop identification. Shows probability of each propagation mode (1F, 2F, 1E, etc) for the selected path.
+                Ionospheric hop identification. Shows probability of each propagation mode (1F, 2F, 1E, etc) for the
+                selected path.
             </div>
             <div id="mode-ridge-chart" class="chart-container">
                 <div class="chart-loading">Loading propagation mode data...</div>
@@ -458,21 +461,21 @@
         function getMidpoint(lat1, lon1, lat2, lon2) {
             const toRad = d => d * Math.PI / 180;
             const toDeg = r => r * 180 / Math.PI;
-            
+
             const dLon = toRad(lon2 - lon1);
             const lat1Rad = toRad(lat1);
             const lat2Rad = toRad(lat2);
             const lon1Rad = toRad(lon1);
-            
+
             const Bx = Math.cos(lat2Rad) * Math.cos(dLon);
             const By = Math.cos(lat2Rad) * Math.sin(dLon);
-            
+
             const lat3 = Math.atan2(
                 Math.sin(lat1Rad) + Math.sin(lat2Rad),
                 Math.sqrt((Math.cos(lat1Rad) + Bx) ** 2 + By ** 2)
             );
             const lon3 = lon1Rad + Math.atan2(By, Math.cos(lat1Rad) + Bx);
-            
+
             return { lat: toDeg(lat3), lon: toDeg(lon3) };
         }
 
@@ -501,32 +504,32 @@
             const banner = document.getElementById('path-info');
             const stationEl = document.getElementById('path-station');
             const detailsEl = document.getElementById('path-details');
-            
+
             if (!path) {
                 banner.style.display = 'none';
                 return;
             }
-            
+
             banner.style.display = 'block';
             const info = STATION_INFO[path.station] || {};
             stationEl.textContent = `${path.station} → Your Receiver`;
             stationEl.style.color = getStationColor(path.station);
-            
+
             // Calculate midpoint for solar zenith reference
             const mid = getMidpoint(info.lat, info.lon, RECEIVER.lat, RECEIVER.lon);
             const midStr = `${Math.abs(mid.lat).toFixed(1)}°${mid.lat >= 0 ? 'N' : 'S'}, ${Math.abs(mid.lon).toFixed(1)}°${mid.lon >= 0 ? 'E' : 'W'}`;
-            
+
             detailsEl.textContent = `${info.location || 'Unknown'} • Frequencies: ${path.freqs.join(', ')} MHz • Solar zenith at midpoint: ${midStr}`;
         }
 
         async function loadAllData() {
             const dateStr = document.getElementById('date-selector').value.replace(/-/g, '');
             const path = getSelectedPath();
-            
+
             updatePathInfo(path);
-            
+
             const freqSection = document.getElementById('freq-summary-section');
-            
+
             if (!path) {
                 // Hide frequency summary and show prompts
                 freqSection.style.display = 'none';
@@ -534,33 +537,36 @@
                 document.getElementById('delay-spread-chart').innerHTML = '<div class="chart-loading">Select a path...</div>';
                 document.getElementById('coherence-chart').innerHTML = '<div class="chart-loading">Select a path...</div>';
                 document.getElementById('fss-chart').innerHTML = '<div class="chart-loading">Select a propagation path to view FSS data</div>';
+                document.getElementById('tec-container').innerHTML = '<div class="chart-loading">Select a propagation path to view TEC data</div>';
                 document.getElementById('residual-chart').innerHTML = '<div class="chart-loading">Select a propagation path to view residuals</div>';
                 document.getElementById('mode-ridge-chart').innerHTML = '<div class="chart-loading">Select a propagation path to view mode probability</div>';
                 return;
             }
-            
+
             // Show frequency summary section
             freqSection.style.display = 'block';
-            
+
             // Fetch data once and pass to all functions
             const res = await fetch(`/api/v1/broadcasts/history?date=${dateStr}`);
             const historyData = await res.json();
-            
+
             // Fetch solar zenith for path midpoint
             const solarRes = await fetch(`/api/v1/propagation/solar-zenith?station=${path.station}&date=${dateStr}`);
             const solarData = await solarRes.json();
-            
+
             // Build per-frequency summary
             renderFrequencySummary(historyData, path);
-            
+
             await Promise.all([
                 loadDopplerChart(dateStr, path, historyData, solarData),
                 loadChannelQuality(dateStr, path, historyData),
                 loadFSSChart(dateStr, path, historyData),
+                loadTECChart(dateStr, path),
                 loadResidualChart(dateStr, path, historyData, solarData),
                 loadModeProbability(path)
             ]);
-            
+
+
             document.getElementById('last-update').textContent = new Date().toLocaleTimeString() + ' UTC';
         }
 
@@ -582,7 +588,7 @@
 
         function renderFrequencySummary(historyData, path) {
             const container = document.getElementById('freq-summary-table');
-            
+
             if (!historyData.history) {
                 container.innerHTML = '<div style="color: #64748b; text-align: center; padding: 20px;">No data available</div>';
                 return;
@@ -593,22 +599,22 @@
                 const freqKHz = Math.round(freq * 1000);
                 const key = `${path.station}_${freqKHz}`;
                 const lane = historyData.history[key];
-                
+
                 // Debug: log if lane not found
                 if (!lane) {
                     console.log(`No data for key: ${key}, available keys:`, Object.keys(historyData.history).filter(k => k.startsWith(path.station)));
                 }
-                
+
                 let status = '⚫', statusText = 'No data';
                 let lastDoppler = '—', lastResidual = '—', lastSNR = '—', lastMode = '—';
                 let dataPoints = 0;
-                
+
                 if (lane && lane.data && lane.data.length > 0) {
                     dataPoints = lane.data.length;
                     const recent = lane.data[lane.data.length - 1];
-                    
+
                     // Status based on recency
-                    const age = Date.now()/1000 - recent.t;
+                    const age = Date.now() / 1000 - recent.t;
                     if (age < 120) {
                         status = '🟢'; statusText = 'Active';
                     } else if (age < 600) {
@@ -616,7 +622,7 @@
                     } else {
                         status = '🟠'; statusText = 'Stale';
                     }
-                    
+
                     // Find a recent point with actual Doppler data (not 0)
                     let displayPoint = recent;
                     for (let i = lane.data.length - 1; i >= Math.max(0, lane.data.length - 10); i--) {
@@ -625,7 +631,7 @@
                             break;
                         }
                     }
-                    
+
                     if (displayPoint.carrier_doppler_hz !== undefined) {
                         // Scale tone Doppler to carrier frequency (factor ~10000)
                         const carrierDoppler = displayPoint.carrier_doppler_hz * 10000;
@@ -641,7 +647,7 @@
                         lastMode = displayPoint.mode;
                     }
                 }
-                
+
                 return `
                     <div style="display: grid; grid-template-columns: 80px 70px 100px 100px 80px 80px 60px; 
                                 align-items: center; gap: 10px; padding: 10px 15px; 
@@ -676,30 +682,30 @@
 
         async function loadDopplerChart(dateStr, path, historyData, solarData) {
             const container = document.getElementById('doppler-chart');
-            
+
             try {
                 const data = historyData;
-                
+
                 if (!data.history || Object.keys(data.history).length === 0) {
                     container.innerHTML = '<div class="chart-loading">No Doppler data available for this date</div>';
                     return;
                 }
 
                 const traces = [];
-                
+
                 // Extract Doppler from each broadcast - filtered by path, colored by frequency
                 Object.entries(data.history).forEach(([key, lane]) => {
                     if (!lane || !lane.data) return;
-                    
+
                     const station = lane.station || 'UNKNOWN';
                     const freqMHz = (lane.freqKHz || 0) / 1000;
-                    
+
                     // Filter by selected path
                     if (path && station !== path.station) return;
-                    
+
                     const x = [];
                     const y = [];
-                    
+
                     lane.data.forEach(pt => {
                         if (pt.carrier_doppler_hz !== undefined && Math.abs(pt.carrier_doppler_hz) < 5) {
                             x.push(new Date(pt.t * 1000).toISOString());
@@ -710,7 +716,7 @@
                             y.push(carrierDoppler);
                         }
                     });
-                    
+
                     if (x.length > 5) {
                         traces.push({
                             x: x,
@@ -736,7 +742,7 @@
                     // Normalize: zenith 0° (sun overhead) -> +5 Hz, zenith 120° -> -5 Hz
                     // Linear mapping: y = 5 - (zenith * 5 / 60)
                     const solarY = solarData.series.map(s => 5 - (s.zenith * 5 / 60));
-                    
+
                     traces.push({
                         x: solarX,
                         y: solarY,
@@ -773,10 +779,10 @@
         function getSolarShapes(series) {
             const shapes = [];
             let nightStart = null;
-            
+
             for (let i = 0; i < series.length; i++) {
                 const isNight = series[i].zenith > 90;  // Sun below horizon
-                
+
                 if (isNight && nightStart === null) {
                     nightStart = series[i].time;
                 } else if (!isNight && nightStart !== null) {
@@ -795,7 +801,7 @@
                     nightStart = null;
                 }
             }
-            
+
             // Close any open night period
             if (nightStart !== null && series.length > 0) {
                 shapes.push({
@@ -811,17 +817,17 @@
                     layer: 'below'
                 });
             }
-            
+
             return shapes;
         }
 
         async function loadChannelQuality(dateStr, path, historyData) {
             const delayContainer = document.getElementById('delay-spread-chart');
             const coherenceContainer = document.getElementById('coherence-chart');
-            
+
             try {
                 const data = historyData;
-                
+
                 if (!data.history || Object.keys(data.history).length === 0) {
                     delayContainer.innerHTML = '<div class="chart-loading">No channel quality data available</div>';
                     coherenceContainer.innerHTML = '<div class="chart-loading">No channel quality data available</div>';
@@ -831,19 +837,19 @@
                 // Extract delay_spread and doppler_std from broadcast data - filtered by path
                 const delayTraces = [];
                 const dopplerStdTraces = [];
-                
+
                 Object.entries(data.history).forEach(([key, lane]) => {
                     if (!lane || !lane.data) return;
-                    
+
                     const station = lane.station || 'UNKNOWN';
                     const freqMHz = (lane.freqKHz || 0) / 1000;
-                    
+
                     // Filter by selected path
                     if (path && station !== path.station) return;
-                    
+
                     const delayX = [], delayY = [];
                     const stdX = [], stdY = [];
-                    
+
                     lane.data.forEach(pt => {
                         const time = new Date(pt.t * 1000).toISOString();
                         if (pt.delay_spread_ms !== undefined && pt.delay_spread_ms > 0) {
@@ -855,7 +861,7 @@
                             stdY.push(pt.doppler_std_hz);
                         }
                     });
-                    
+
                     if (delayX.length > 5) {
                         delayTraces.push({
                             x: delayX, y: delayY,
@@ -885,16 +891,16 @@
                 };
 
                 if (delayTraces.length > 0) {
-                    Plotly.newPlot('delay-spread-chart', delayTraces, 
-                        {...layout, yaxis: {...layout.yaxis, title: 'ms'}}, 
+                    Plotly.newPlot('delay-spread-chart', delayTraces,
+                        { ...layout, yaxis: { ...layout.yaxis, title: 'ms' } },
                         { responsive: true });
                 } else {
                     delayContainer.innerHTML = '<div class="chart-loading">No delay spread measurements in data</div>';
                 }
 
                 if (dopplerStdTraces.length > 0) {
-                    Plotly.newPlot('coherence-chart', dopplerStdTraces, 
-                        {...layout, yaxis: {...layout.yaxis, title: 'Hz'}}, 
+                    Plotly.newPlot('coherence-chart', dopplerStdTraces,
+                        { ...layout, yaxis: { ...layout.yaxis, title: 'Hz' } },
                         { responsive: true });
                 } else {
                     coherenceContainer.innerHTML = '<div class="chart-loading">No Doppler stability data available</div>';
@@ -908,35 +914,35 @@
 
         async function loadFSSChart(dateStr, path, historyData) {
             const container = document.getElementById('fss-chart');
-            
+
             try {
                 const data = historyData;
-                
+
                 if (!data.history || Object.keys(data.history).length === 0) {
                     container.innerHTML = '<div class="chart-loading">No FSS data available</div>';
                     return;
                 }
 
                 const traces = [];
-                
+
                 Object.entries(data.history).forEach(([key, lane]) => {
                     if (!lane || !lane.data) return;
-                    
+
                     const station = lane.station || 'UNKNOWN';
                     const freqMHz = (lane.freqKHz || 0) / 1000;
-                    
+
                     // Filter by selected path
                     if (path && station !== path.station) return;
-                    
+
                     const x = [], y = [];
-                    
+
                     lane.data.forEach(pt => {
                         if (pt.fss_db !== undefined && pt.fss_db !== 0) {
                             x.push(new Date(pt.t * 1000).toISOString());
                             y.push(pt.fss_db);
                         }
                     });
-                    
+
                     if (x.length > 5) {
                         traces.push({
                             x: x, y: y,
@@ -972,29 +978,29 @@
 
         async function loadResidualChart(dateStr, path, historyData, solarData) {
             const container = document.getElementById('residual-chart');
-            
+
             try {
                 const data = historyData;
-                
+
                 if (!data.history || Object.keys(data.history).length === 0) {
                     container.innerHTML = '<div class="chart-loading">No residual data available</div>';
                     return;
                 }
 
                 const traces = [];
-                
+
                 Object.entries(data.history).forEach(([key, lane]) => {
                     if (!lane || !lane.data) return;
-                    
+
                     const station = lane.station || 'UNKNOWN';
                     const freqMHz = (lane.freqKHz || 0) / 1000;
-                    
+
                     // Filter by selected path
                     if (path && station !== path.station) return;
-                    
+
                     const x = [];
                     const y = [];
-                    
+
                     lane.data.forEach(pt => {
                         // d_clock is essentially the residual (observed - expected)
                         if (pt.d_clock !== undefined && Math.abs(pt.d_clock) < 50) {
@@ -1002,7 +1008,7 @@
                             y.push(pt.d_clock);
                         }
                     });
-                    
+
                     if (x.length > 5) {
                         traces.push({
                             x: x,
@@ -1028,7 +1034,7 @@
                     // Normalize: zenith 0° (sun overhead) -> +20, zenith 120° -> -20
                     // Linear mapping: y = 20 - (zenith / 3)
                     const solarY = solarData.series.map(s => 20 - (s.zenith / 3));
-                    
+
                     traces.push({
                         x: solarX,
                         y: solarY,
@@ -1060,34 +1066,146 @@
             }
         }
 
+        async function loadTECChart(dateStr, path) {
+            const container = document.getElementById('tec-container');
+
+            if (!path) {
+                container.innerHTML = '<div class="chart-loading">Select a propagation path to view TEC data</div>';
+                return;
+            }
+
+            try {
+                // Calculate date range (24 hours)
+                const year = parseInt(dateStr.slice(0, 4));
+                const month = parseInt(dateStr.slice(4, 6)) - 1;
+                const day = parseInt(dateStr.slice(6, 8));
+                const date = new Date(Date.UTC(year, month, day));
+                const start = date.toISOString();
+                const end = new Date(date.getTime() + 24 * 3600 * 1000).toISOString();
+
+                // Fetch TEC data
+                const response = await fetch(
+                    `/api/v1/science/tec?station=${path.station}&start=${start}&end=${end}&min_confidence=0.0&min_frequencies=2`
+                );
+                const tecData = await response.json();
+
+                if (!tecData.data || tecData.data.length === 0) {
+                    container.innerHTML = `
+                        <div class="data-unavailable">
+                            <div class="data-unavailable-icon">📡</div>
+                            <div>No TEC data available for ${path.station} on this date</div>
+                            <div style="font-size: 11px; margin-top: 5px;">
+                                Science Aggregator may not be running or insufficient multi-frequency data
+                            </div>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // Build Plotly traces
+                const traces = [{
+                    x: tecData.data.map(d => d.timestamp),
+                    y: tecData.data.map(d => d.tec_tecu),
+                    mode: 'markers+lines',
+                    type: 'scatter',
+                    name: 'TEC',
+                    marker: {
+                        size: 6,
+                        color: tecData.data.map(d => {
+                            if (d.quality_flag === 'GOOD') return '#22c55e';
+                            if (d.quality_flag === 'MARGINAL') return '#eab308';
+                            return '#ef4444';
+                        }),
+                    },
+                    line: { color: getStationColor(path.station, 0.6), width: 1 },
+                    hovertemplate: 'TEC: %{y:.2f} TECU<br>Time: %{x}<br>Conf: %{customdata:.1%}<extra></extra>',
+                    customdata: tecData.data.map(d => d.confidence)
+                }];
+
+                const layout = {
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    font: { color: '#94a3b8' },
+                    xaxis: { title: 'Time (UTC)', gridcolor: '#334155', tickformat: '%H:%M' },
+                    yaxis: { title: 'TEC (TECU)', gridcolor: '#334155' },
+                    margin: { t: 30, b: 60, l: 60, r: 30 },
+                    hovermode: 'closest'
+                };
+
+                container.innerHTML = '<div id="tec-chart" style="min-height: 300px;"></div>';
+                Plotly.newPlot('tec-chart', traces, layout, { responsive: true });
+
+                // Add quality summary
+                const summary = `
+                    <div style="margin-top: 15px; padding: 15px; background: rgba(15,23,42,0.6); border-radius: 8px;">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px;">
+                            <div>
+                                <div class="metric-label">Total Measurements</div>
+                                <div class="metric-value" style="font-size: 18px;">${tecData.quality.total_measurements}</div>
+                            </div>
+                            <div>
+                                <div class="metric-label">Good Quality</div>
+                                <div class="metric-value" style="font-size: 18px; color: #22c55e;">${tecData.quality.good_measurements}</div>
+                            </div>
+                            <div>
+                                <div class="metric-label">Mean Confidence</div>
+                                <div class="metric-value" style="font-size: 18px;">${(tecData.quality.mean_confidence * 100).toFixed(1)}%</div>
+                            </div>
+                            <div>
+                                <div class="metric-label">Mean Frequencies</div>
+                                <div class="metric-value" style="font-size: 18px;">${tecData.quality.mean_n_frequencies.toFixed(1)}</div>
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; font-size: 11px; color: #64748b;">
+                            <strong>Note:</strong> TEC values near 0 indicate low ionospheric electron content or measurement uncertainty. 
+                            Quality flags: <span style="color: #22c55e;">●</span> Good (conf ≥0.7, freq ≥3), 
+                            <span style="color: #eab308;">●</span> Marginal (conf ≥0.5, freq ≥2), 
+                            <span style="color: #ef4444;">●</span> Bad (below thresholds)
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += summary;
+
+            } catch (err) {
+                console.error('Error loading TEC chart:', err);
+                container.innerHTML = `
+                    <div class="data-unavailable">
+                        <div class="data-unavailable-icon">⚠️</div>
+                        <div style="color: #ef4444;">Error loading TEC data: ${err.message}</div>
+                    </div>
+                `;
+            }
+        }
+
+
         async function loadModeProbability(path) {
             const container = document.getElementById('mode-ridge-chart');
-            
+
             if (!path) {
                 container.innerHTML = '<div class="chart-loading">Select a propagation path to view mode probability</div>';
                 return;
             }
-            
+
             try {
                 // Use the first frequency from the path as default
                 const freq = path.freqs[0];
                 const url = `/api/v1/timing/mode-probability?station=${encodeURIComponent(path.station)}&freq=${freq}`;
-                    
+
                 const response = await fetch(url);
                 const data = await response.json();
-                
+
                 if (!data.available) {
                     const msg = data.message || `No propagation mode data available for ${path.station}`;
                     container.innerHTML = `<div class="chart-loading">${msg}</div>`;
                     return;
                 }
-                
+
                 if (!modeChart) {
                     modeChart = new ModeProbabilityRidge('mode-ridge-chart', {
                         xRange: [0, 18]
                     });
                 }
-                
+
                 modeChart.update(data);
             } catch (err) {
                 console.error('Error loading mode probability:', err);
