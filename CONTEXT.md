@@ -47,21 +47,113 @@ L0 (RTP timestamps) → L1A (tone timing) → L2 (calibrated) → L3B (fused UTC
 
 ## Goals for Next Session
 
-### 🎯 OPTIONAL: Monitoring Server & Web UI Enhancements
+### 🎯 PRIMARY: Monitoring Server & Web UI HDF5 Integration
 
-**Monitoring Server** (`monitoring-server-v3.js`) - **OPTIONAL**
+**Objective:** Enable monitoring server and web UI to consume HDF5 data with quality metadata for enhanced visualization and user experience.
 
-- Add HDF5 reader for Node.js (h5wasm or similar)
-- Update API endpoints to include quality metadata
-- Enable uncertainty bounds in responses
+#### Phase 1: Monitoring Server (`monitoring-server-v3.js`)
 
-**Web UI** (`summary.html`, `ionosphere.html`) - **OPTIONAL**
+**Current State:**
 
-- Color-code data by quality grade
-- Show uncertainty bounds as error bars
-- Add quality filter controls
+- Serves CSV data to web UI via REST API
+- 12+ endpoints reading various CSV files
+- No quality metadata in responses
 
-**Note:** Core HDF5 migration is complete. These enhancements would improve visualization but are not required for metrological compliance.
+**Goals:**
+
+1. **Add HDF5 Reader for Node.js**
+   - Evaluate libraries: `h5wasm` (WebAssembly, no native deps) vs `hdf5.node` (native bindings)
+   - Recommended: `h5wasm` for easier deployment
+   - Create utility module: `web-ui/utils/hdf5-reader.js`
+
+2. **Update API Endpoints (Priority Order)**
+   - **HIGH:** `/api/channel/:channel/clock-offset` (L2 timing measurements)
+     - Add quality_grade, quality_flag, uncertainty_ms to response
+     - Try HDF5 first, fall back to CSV
+   - **MEDIUM:** `/api/channel/:channel/carrier-power` (L1A channel observables)
+     - Add SNR, Doppler, coherence time, phase variance
+     - Include quality metadata
+   - **LOW:** Other endpoints as needed
+
+3. **Response Format Enhancement**
+
+   ```json
+   {
+     "timestamp": "2025-12-25T12:00:00Z",
+     "value": -2.14,
+     "uncertainty": 1.2,
+     "quality_grade": "A",
+     "quality_flag": "GOOD",
+     "confidence": 0.95,
+     "station": "WWV",
+     "metadata": {
+       "processing_version": "3.2.0",
+       "traceability": "UTC(NIST) via WWVB"
+     }
+   }
+   ```
+
+#### Phase 2: Web UI (`summary.html`, `ionosphere.html`)
+
+**Current State:**
+
+- Displays timing data from monitoring server
+- No quality visualization
+- No uncertainty bounds
+
+**Goals:**
+
+1. **Quality Visualization**
+   - Color-code data points by quality grade:
+     - Grade A: Green
+     - Grade B: Yellow/Amber
+     - Grade C: Orange
+     - Grade D: Red
+   - Show quality flags in tooltips
+   - Add legend for quality grades
+
+2. **Uncertainty Bounds**
+   - Display uncertainty as error bars on charts
+   - Use Chart.js error bar plugin
+   - Show ±1σ, ±2σ, ±3σ options
+
+3. **Quality Filters**
+   - Checkbox controls to show/hide quality grades
+   - Slider for minimum quality threshold
+   - Toggle to show/hide uncertainty bounds
+   - Filter by quality flags (GOOD/MARGINAL/BAD)
+
+4. **Metadata Display**
+   - Processing version in footer
+   - Data completeness indicator
+   - Traceability information in info panel
+
+#### Implementation Strategy
+
+1. **Start with monitoring server** - Foundation for web UI
+2. **Implement one endpoint at a time** - Iterative approach
+3. **Test with existing web UI** - Verify backward compatibility
+4. **Enhance web UI incrementally** - Add features progressively
+5. **Maintain CSV fallback** - Ensure resilience
+
+#### Success Criteria
+
+- ✅ Monitoring server reads HDF5 successfully
+- ✅ Quality metadata included in API responses
+- ✅ Web UI displays quality-coded data points
+- ✅ Uncertainty bounds visible on charts
+- ✅ Quality filters functional
+- ✅ No degradation in performance
+- ✅ CSV fallback working
+
+#### Optional Enhancements
+
+- Real-time quality alerts (e.g., when quality drops below threshold)
+- Historical quality trends chart
+- Export data with quality metadata (CSV/JSON download)
+- Quality statistics dashboard
+
+**Note:** This work enhances user experience and visualization but is not required for metrological compliance (already achieved with HDF5 reader implementation).
 
 ### Key Files to Implement
 
