@@ -39,6 +39,7 @@ setup(
         "zeroconf>=0.132.0",  # For mDNS discovery
         "ka9q-python>=3.2.0",  # ka9q-radio control library (PyPI)
         "sysv_ipc>=1.1.0",    # For Chrony SHM shared memory
+        "h5py>=3.8.0",        # For HDF5 data product I/O
         "iri2020 @ git+https://github.com/space-physics/iri2020.git",  # IRI-2020 (requires gfortran)
     ],
     extras_require={

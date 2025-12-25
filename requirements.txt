@@ -44,3 +44,6 @@ zstandard>=0.22.0
 
 # Chrony SHM integration (for UTC(NIST) clock discipline)
 sysv_ipc>=1.1.0
+
+# HDF5 I/O for schema-validated data products
+h5py>=3.8.0
