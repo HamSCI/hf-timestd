@@ -583,6 +583,21 @@ class MultiBroadcastFusion:
         self,
         lookback_minutes: int = 10
     ) -> Dict[str, Dict[int, List[Dict]]]:
+        """
+        Read latest tone observations from all channels.
+        
+        Tries HDF5 first (L1A tone detections), falls back to CSV if needed.
+        
+        Returns observations from the last N minutes, grouped by channel and minute.
+        """
+        # Try HDF5 first if available
+        if HDF5_AVAILABLE:
+            try:
+                return self._read_latest_tone_observations_by_channel_hdf5(lookback_minutes)
+            except Exception as e:
+                logger.warning(f"HDF5 tone detections read failed, falling back to CSV: {e}")
+        
+        # CSV fallback (original implementation)
         from datetime import datetime, timezone, timedelta
         from .wwv_constants import BPM_UT1_MINUTES
 
@@ -681,6 +696,246 @@ class MultiBroadcastFusion:
                 by_channel[channel] = per_minute
 
         return by_channel
+    
+    def _read_latest_tone_observations_by_channel_hdf5(
+        self,
+        lookback_minutes: int = 10
+    ) -> Dict[str, Dict[int, List[Dict]]]:
+        """
+        Read latest tone observations from HDF5 files with CSV fallback.
+        
+        Reads L1A tone detections from HDF5 format, providing:
+        - Quality filtering from HDF5 metadata
+        - Complete metrological provenance chain
+        - Automatic CSV fallback if HDF5 not available
+        
+        Returns observations from the last N minutes, grouped by channel and minute.
+        """
+        from datetime import datetime, timezone, timedelta
+        from .wwv_constants import BPM_UT1_MINUTES
+        
+        # If HDF5 not available, fall back to CSV
+        if not HDF5_AVAILABLE:
+            logger.debug("HDF5 not available, falling back to CSV for tone detections")
+            return self._read_latest_tone_observations_by_channel(lookback_minutes)
+        
+        now = time.time()
+        cutoff = now - (lookback_minutes * 60)
+        
+        # Calculate time range for HDF5 query
+        start_dt = datetime.fromtimestamp(cutoff, timezone.utc)
+        end_dt = datetime.fromtimestamp(now, timezone.utc)
+        start_iso = start_dt.isoformat().replace('+00:00', 'Z')
+        end_iso = end_dt.isoformat().replace('+00:00', 'Z')
+        
+        by_channel: Dict[str, Dict[int, List[Dict]]] = {}
+        
+        # Read from each channel
+        for channel in self.channels:
+            tone_dir = self.phase2_dir / channel / 'tone_detections'
+            if not tone_dir.exists():
+                continue
+            
+            freq_mhz = self._extract_frequency_mhz(channel)
+            if freq_mhz is None:
+                continue
+            
+            try:
+                # Initialize HDF5 reader for L1A tone detections
+                reader = DataProductReader(
+                    data_dir=tone_dir,
+                    product_level='L1',
+                    product_name='tone_detections',
+                    channel=channel
+                )
+                
+                # Read measurements with quality filtering
+                # Accept GOOD and MARGINAL (exclude BAD and MISSING)
+                hdf5_measurements = reader.read_time_range(
+                    start=start_iso,
+                    end=end_iso,
+                    quality_flags=['GOOD', 'MARGINAL']
+                )
+                
+                logger.debug(
+                    f"Read {len(hdf5_measurements)} L1A tone detections from HDF5 for {channel}"
+                )
+                
+                # Convert HDF5 measurements to tone observations
+                per_minute: Dict[int, List[Dict]] = defaultdict(list)
+                
+                for hdf5_meas in hdf5_measurements:
+                    try:
+                        minute_boundary = hdf5_meas.get('minute_boundary', 0)
+                        if minute_boundary < cutoff:
+                            continue
+                        
+                        # Extract WWV timing
+                        if hdf5_meas.get('wwv_detected') and hdf5_meas.get('wwv_timing_ms') is not None:
+                            per_minute[minute_boundary].append({
+                                'station': 'WWV',
+                                'frequency_mhz': freq_mhz,
+                                'timing_ms': float(hdf5_meas['wwv_timing_ms'])
+                            })
+                        
+                        # Extract WWVH timing
+                        if hdf5_meas.get('wwvh_detected') and hdf5_meas.get('wwvh_timing_ms') is not None:
+                            per_minute[minute_boundary].append({
+                                'station': 'WWVH',
+                                'frequency_mhz': freq_mhz,
+                                'timing_ms': float(hdf5_meas['wwvh_timing_ms'])
+                            })
+                        
+                        # Extract CHU timing
+                        if hdf5_meas.get('chu_detected') and hdf5_meas.get('chu_timing_ms') is not None:
+                            per_minute[minute_boundary].append({
+                                'station': 'CHU',
+                                'frequency_mhz': freq_mhz,
+                                'timing_ms': float(hdf5_meas['chu_timing_ms'])
+                            })
+                        
+                        # Extract BPM timing (with UT1 filtering)
+                        if hdf5_meas.get('bpm_detected') and hdf5_meas.get('bpm_timing_ms') is not None:
+                            dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
+                            if dt.minute not in BPM_UT1_MINUTES:
+                                per_minute[minute_boundary].append({
+                                    'station': 'BPM',
+                                    'frequency_mhz': freq_mhz,
+                                    'timing_ms': float(hdf5_meas['bpm_timing_ms'])
+                                })
+                    
+                    except (ValueError, KeyError) as e:
+                        logger.debug(f"Error converting HDF5 tone measurement: {e}")
+                        continue
+                
+                if per_minute:
+                    by_channel[channel] = per_minute
+            
+            except FileNotFoundError:
+                # HDF5 file doesn't exist, try CSV fallback for this channel
+                logger.debug(f"No HDF5 tone detections found for {channel}, trying CSV fallback")
+                csv_data = self._read_tone_observations_for_channel_csv(channel, lookback_minutes)
+                if csv_data:
+                    by_channel[channel] = csv_data
+            
+            except Exception as e:
+                logger.warning(f"Error reading HDF5 tone detections for {channel}: {e}, falling back to CSV")
+                csv_data = self._read_tone_observations_for_channel_csv(channel, lookback_minutes)
+                if csv_data:
+                    by_channel[channel] = csv_data
+        
+        if by_channel:
+            total_obs = sum(len(per_min) for per_min in by_channel.values() for per_min in per_min.values())
+            logger.info(
+                f"Read {total_obs} tone observations from HDF5 across {len(by_channel)} channels "
+                f"(lookback={lookback_minutes}m)"
+            )
+        
+        return by_channel
+    
+    def _read_tone_observations_for_channel_csv(
+        self,
+        channel: str,
+        lookback_minutes: int = 10
+    ) -> Dict[int, List[Dict]]:
+        """
+        Read tone observations for a single channel from CSV.
+        
+        Helper method for fallback when HDF5 is not available for a specific channel.
+        """
+        from datetime import datetime, timezone, timedelta
+        from .wwv_constants import BPM_UT1_MINUTES
+        
+        now = time.time()
+        cutoff = now - (lookback_minutes * 60)
+        
+        now_dt = datetime.now(timezone.utc)
+        today_str = now_dt.strftime('%Y%m%d')
+        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
+        
+        tone_dir = self.phase2_dir / channel / 'tone_detections'
+        if not tone_dir.exists():
+            return {}
+        
+        freq_mhz = self._extract_frequency_mhz(channel)
+        if freq_mhz is None:
+            return {}
+        
+        per_minute: Dict[int, List[Dict]] = defaultdict(list)
+        
+        csv_files = []
+        for date_str in [today_str, yesterday_str]:
+            for csv_path in tone_dir.glob(f'*_tones_{date_str}.csv'):
+                csv_files.append(csv_path)
+        
+        for csv_path in csv_files:
+            try:
+                with open(csv_path) as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        mb_str = row.get('minute_boundary')
+                        if not mb_str:
+                            continue
+                        try:
+                            minute_boundary = int(float(mb_str))
+                        except ValueError:
+                            continue
+                        
+                        if minute_boundary < cutoff:
+                            continue
+                        
+                        wwv_ms = row.get('wwv_timing_ms')
+                        wwvh_ms = row.get('wwvh_timing_ms')
+                        chu_ms = row.get('chu_timing_ms')
+                        bpm_ms = row.get('bpm_timing_ms')
+                        
+                        if wwv_ms not in (None, ''):
+                            try:
+                                per_minute[minute_boundary].append({
+                                    'station': 'WWV',
+                                    'frequency_mhz': freq_mhz,
+                                    'timing_ms': float(wwv_ms)
+                                })
+                            except ValueError:
+                                pass
+                        
+                        if wwvh_ms not in (None, ''):
+                            try:
+                                per_minute[minute_boundary].append({
+                                    'station': 'WWVH',
+                                    'frequency_mhz': freq_mhz,
+                                    'timing_ms': float(wwvh_ms)
+                                })
+                            except ValueError:
+                                pass
+                        
+                        if chu_ms not in (None, ''):
+                            try:
+                                per_minute[minute_boundary].append({
+                                    'station': 'CHU',
+                                    'frequency_mhz': freq_mhz,
+                                    'timing_ms': float(chu_ms)
+                                })
+                            except ValueError:
+                                pass
+                        
+                        if bpm_ms not in (None, ''):
+                            try:
+                                dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
+                                if dt.minute in BPM_UT1_MINUTES:
+                                    continue
+                                per_minute[minute_boundary].append({
+                                    'station': 'BPM',
+                                    'frequency_mhz': freq_mhz,
+                                    'timing_ms': float(bpm_ms)
+                                })
+                            except ValueError:
+                                pass
+            except Exception:
+                continue
+        
+        return per_minute
+
 
     def _run_global_differential_solve(
         self,

@@ -1,0 +1,228 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L1A_tone_detections",
+    "description": "Station identification tone timing measurements - critical input for multi-broadcast fusion",
+    "cadence_seconds": 60,
+    "processing_level": "L1A",
+    "standards": [
+        "ISO/IEC Guide 98-3:2008 (GUM)",
+        "NIST SP 1297",
+        "Self-describing metadata"
+    ],
+    "provenance": {
+        "input_data": "L0_raw_iq_samples",
+        "processing": "Phase 2 temporal engine - tone detection and timing extraction",
+        "output_usage": "Input to L3B multi-broadcast fusion for UTC(NIST) timing"
+    },
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC (ISO 8601 format)",
+            "example": "2025-12-24T12:00:00Z"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary",
+            "units": "seconds since 1970-01-01T00:00:00Z"
+        },
+        {
+            "name": "wwv_detected",
+            "type": "boolean",
+            "required": true,
+            "description": "WWV station identification tone detected"
+        },
+        {
+            "name": "wwv_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -20,
+                60
+            ],
+            "description": "WWV tone signal-to-noise ratio",
+            "units": "dB"
+        },
+        {
+            "name": "wwv_timing_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -1000,
+                1000
+            ],
+            "description": "WWV timing offset from minute boundary (uncalibrated)",
+            "units": "milliseconds",
+            "uncertainty_type": "Type A",
+            "traceability": "Derived from IQ sample timing, requires propagation delay calibration"
+        },
+        {
+            "name": "wwvh_detected",
+            "type": "boolean",
+            "required": true,
+            "description": "WWVH station identification tone detected"
+        },
+        {
+            "name": "wwvh_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -20,
+                60
+            ],
+            "description": "WWVH tone signal-to-noise ratio",
+            "units": "dB"
+        },
+        {
+            "name": "wwvh_timing_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -1000,
+                1000
+            ],
+            "description": "WWVH timing offset from minute boundary (uncalibrated)",
+            "units": "milliseconds",
+            "uncertainty_type": "Type A",
+            "traceability": "Derived from IQ sample timing, requires propagation delay calibration"
+        },
+        {
+            "name": "chu_detected",
+            "type": "boolean",
+            "required": true,
+            "description": "CHU station identification tone detected"
+        },
+        {
+            "name": "chu_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -20,
+                60
+            ],
+            "description": "CHU tone signal-to-noise ratio",
+            "units": "dB"
+        },
+        {
+            "name": "chu_timing_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -1000,
+                1000
+            ],
+            "description": "CHU timing offset from minute boundary (uncalibrated)",
+            "units": "milliseconds",
+            "uncertainty_type": "Type A",
+            "traceability": "Derived from IQ sample timing, requires propagation delay calibration"
+        },
+        {
+            "name": "bpm_detected",
+            "type": "boolean",
+            "required": true,
+            "description": "BPM station identification tone detected"
+        },
+        {
+            "name": "bpm_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -20,
+                60
+            ],
+            "description": "BPM tone signal-to-noise ratio",
+            "units": "dB"
+        },
+        {
+            "name": "bpm_timing_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                -1000,
+                1000
+            ],
+            "description": "BPM timing offset from minute boundary (uncalibrated)",
+            "units": "milliseconds",
+            "uncertainty_type": "Type A",
+            "traceability": "Derived from IQ sample timing, requires propagation delay calibration"
+        },
+        {
+            "name": "anchor_station",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "BPM",
+                ""
+            ],
+            "description": "Primary station used for timing anchor"
+        },
+        {
+            "name": "anchor_confidence",
+            "type": "float",
+            "required": false,
+            "allow_nan": false,
+            "allow_empty": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "Confidence in anchor station timing",
+            "units": "dimensionless (0-1)"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD",
+                "MISSING"
+            ],
+            "description": "Overall tone detection quality"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Phase 2 analytics version",
+            "example": "3.2.0"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "Multiple stations detected with high SNR (>20 dB)",
+        "MARGINAL": "At least one station detected with moderate SNR (10-20 dB)",
+        "BAD": "Weak or ambiguous detections (SNR < 10 dB)",
+        "MISSING": "No station tones detected"
+    },
+    "metrological_notes": {
+        "timing_uncertainty": "Raw timing measurements have ~1-5 ms Type A uncertainty from tone detection",
+        "calibration_required": "Timing offsets must be corrected for propagation delay before use",
+        "traceability_chain": "L0 (RTP timestamps) → L1A (tone timing) → L2 (calibrated timing) → L3B (fused UTC)",
+        "critical_for_fusion": "These measurements are essential inputs to the multi-broadcast fusion algorithm"
+    }
+}

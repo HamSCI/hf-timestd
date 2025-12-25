@@ -300,6 +300,17 @@ class Phase2AnalyticsService:
             )
             logger.info(f"Initialized HDF5 L1A channel observables writer for {file_channel}")
             
+            # L1A: Tone Detections (station ID tone timing - critical for fusion provenance)
+            self.hdf5_l1a_tones_writer = DataProductWriter(
+                output_dir=self.tone_detections_dir,
+                product_level='L1',
+                product_name='tone_detections',
+                channel=file_channel,
+                processing_version='3.2.0',
+                station_metadata=station_config or {}
+            )
+            logger.info(f"Initialized HDF5 L1A tone detections writer for {file_channel}")
+            
             # L1B: BCD Timecode (BCD discrimination results)
             self.hdf5_l1b_writer = DataProductWriter(
                 output_dir=self.bcd_discrimination_dir,
@@ -329,6 +340,7 @@ class Phase2AnalyticsService:
             logger.warning(f"Failed to initialize HDF5 writers: {e}")
             logger.warning("Continuing with CSV-only writes")
             self.hdf5_l1a_writer = None
+            self.hdf5_l1a_tones_writer = None
             self.hdf5_l1b_writer = None
             self.hdf5_l2_writer = None
             self.enable_hdf5_writes = False
@@ -726,6 +738,7 @@ class Phase2AnalyticsService:
             except Exception:
                 include_chu = False
             
+            # Write to CSV
             with open(self.tone_detections_csv, 'a', newline='') as f:
                 writer = csv.writer(f)
                 utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
@@ -764,6 +777,64 @@ class Phase2AnalyticsService:
                         time_snap.anchor_station or '',
                         round(time_snap.anchor_confidence, 3) if time_snap.anchor_confidence else ''
                     ])
+            
+            # ===============================================================
+            # Write to HDF5 (L1A Tone Detections) - Parallel with CSV
+            # ===============================================================
+            if self.enable_hdf5_writes and self.hdf5_l1a_tones_writer:
+                try:
+                    # Determine quality flag based on detections and SNR
+                    detected_count = sum([
+                        time_snap.wwv_detected,
+                        time_snap.wwvh_detected,
+                        getattr(time_snap, 'chu_detected', False),
+                        time_snap.bpm_detected
+                    ])
+                    
+                    max_snr = max([
+                        time_snap.wwv_snr_db or -999,
+                        time_snap.wwvh_snr_db or -999,
+                        getattr(time_snap, 'chu_snr_db', None) or -999,
+                        time_snap.bpm_snr_db or -999
+                    ])
+                    
+                    if detected_count == 0:
+                        quality_flag = 'MISSING'
+                    elif max_snr > 20:
+                        quality_flag = 'GOOD'
+                    elif max_snr > 10:
+                        quality_flag = 'MARGINAL'
+                    else:
+                        quality_flag = 'BAD'
+                    
+                    utc_time_iso = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat() + 'Z'
+                    
+                    l1a_tones_measurement = {
+                        'timestamp_utc': utc_time_iso,
+                        'minute_boundary': minute_boundary,
+                        'wwv_detected': bool(time_snap.wwv_detected),
+                        'wwv_snr_db': time_snap.wwv_snr_db if time_snap.wwv_snr_db else None,
+                        'wwv_timing_ms': time_snap.wwv_timing_ms if time_snap.wwv_timing_ms else None,
+                        'wwvh_detected': bool(time_snap.wwvh_detected),
+                        'wwvh_snr_db': time_snap.wwvh_snr_db if time_snap.wwvh_snr_db else None,
+                        'wwvh_timing_ms': time_snap.wwvh_timing_ms if time_snap.wwvh_timing_ms else None,
+                        'chu_detected': bool(getattr(time_snap, 'chu_detected', False)),
+                        'chu_snr_db': getattr(time_snap, 'chu_snr_db', None),
+                        'chu_timing_ms': getattr(time_snap, 'chu_timing_ms', None),
+                        'bpm_detected': bool(time_snap.bpm_detected),
+                        'bpm_snr_db': time_snap.bpm_snr_db if time_snap.bpm_snr_db else None,
+                        'bpm_timing_ms': time_snap.bpm_timing_ms if time_snap.bpm_timing_ms else None,
+                        'anchor_station': time_snap.anchor_station or '',
+                        'anchor_confidence': time_snap.anchor_confidence if time_snap.anchor_confidence else None,
+                        'quality_flag': quality_flag,
+                        'processing_version': '3.2.0'
+                    }
+                    
+                    self.hdf5_l1a_tones_writer.write_measurement(l1a_tones_measurement)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to write tone detections to HDF5: {e}")
+                    
         except Exception as e:
             logger.error(f"Failed to write tone detections: {e}")
     
