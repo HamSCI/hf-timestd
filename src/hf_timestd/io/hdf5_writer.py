@@ -108,6 +108,9 @@ class DataProductWriter:
         """
         Ensure HDF5 file is open for the given timestamp (daily rotation).
         
+        Opens file in SWMR (Single Writer Multiple Reader) mode to enable
+        concurrent read access while writing.
+        
         Args:
             timestamp_utc: ISO 8601 timestamp
             
@@ -127,15 +130,31 @@ class DataProductWriter:
                     f"Closed {self._current_date} file with {self._measurement_count} measurements"
                 )
             
-            # Open new file
+            # Open new file with SWMR mode
             hdf5_path = self._get_hdf5_path(date_str)
-            self._current_file = h5py.File(hdf5_path, 'a')  # Append mode
+            
+            # Use libver='latest' for SWMR support
+            # Open in append mode, will enable SWMR after initialization
+            self._current_file = h5py.File(
+                hdf5_path, 
+                'a',
+                libver='latest'  # Required for SWMR
+            )
             self._current_date = date_str
             self._measurement_count = 0
             
             # Initialize file metadata if new file
             if 'metadata' not in self._current_file.attrs:
                 self._write_file_metadata()
+            
+            # Enable SWMR mode after file is initialized
+            # This allows concurrent readers to access the file
+            try:
+                if not self._current_file.swmr_mode:
+                    self._current_file.swmr_mode = True
+                    logger.info(f"Enabled SWMR mode for {hdf5_path}")
+            except Exception as e:
+                logger.warning(f"Could not enable SWMR mode: {e}")
             
             logger.info(f"Opened HDF5 file: {hdf5_path}")
         

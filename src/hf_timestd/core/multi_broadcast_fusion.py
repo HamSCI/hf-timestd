@@ -138,6 +138,14 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 import numpy as np
 
+# HDF5 I/O for reading L1A and L2 data products
+try:
+    from hf_timestd.io import DataProductReader
+    HDF5_AVAILABLE = True
+except ImportError:
+    HDF5_AVAILABLE = False
+    logger.warning("HDF5 I/O module not available, will use CSV fallback")
+
 logger = logging.getLogger(__name__)
 
 
@@ -784,6 +792,8 @@ class MultiBroadcastFusion:
         """
         Read latest D_clock measurements from all channels.
         
+        Tries HDF5 first (L2 timing measurements), falls back to CSV if needed.
+        
         Returns measurements from the last N minutes.
         
         BPM filtering: Automatically excludes BPM measurements from UT1 minutes
@@ -793,6 +803,14 @@ class MultiBroadcastFusion:
             {channel}_clock_offset_{YYYYMMDD}.csv
         We read today's and yesterday's files to handle day boundaries.
         """
+        # Try HDF5 first if available
+        if HDF5_AVAILABLE:
+            try:
+                return self._read_latest_measurements_hdf5(lookback_minutes)
+            except Exception as e:
+                logger.warning(f"HDF5 read failed, falling back to CSV: {e}")
+        
+        # CSV fallback (original implementation)
         from datetime import datetime, timezone, timedelta
         from .wwv_constants import BPM_UT1_MINUTES
         
@@ -874,6 +892,213 @@ class MultiBroadcastFusion:
                 logger.debug(f"Error reading {csv_path}: {e}")
         
         return measurements
+    
+    def _read_latest_measurements_hdf5(
+        self, 
+        lookback_minutes: int = 5
+    ) -> List[BroadcastMeasurement]:
+        """
+        Read latest D_clock measurements from HDF5 files with CSV fallback.
+        
+        Reads L2 timing measurements from HDF5 format, providing:
+        - Quality filtering from HDF5 metadata
+        - ISO GUM uncertainty propagation
+        - Automatic CSV fallback if HDF5 not available
+        
+        Returns measurements from the last N minutes.
+        """
+        from datetime import datetime, timezone, timedelta
+        from .wwv_constants import BPM_UT1_MINUTES
+        
+        measurements = []
+        
+        # If HDF5 not available, fall back to CSV
+        if not HDF5_AVAILABLE:
+            logger.debug("HDF5 not available, falling back to CSV")
+            return self._read_latest_measurements(lookback_minutes)
+        
+        now = time.time()
+        cutoff = now - (lookback_minutes * 60)
+        
+        # Calculate time range for HDF5 query
+        start_dt = datetime.fromtimestamp(cutoff, timezone.utc)
+        end_dt = datetime.fromtimestamp(now, timezone.utc)
+        start_iso = start_dt.isoformat().replace('+00:00', 'Z')
+        end_iso = end_dt.isoformat().replace('+00:00', 'Z')
+        
+        # Read from each channel
+        for channel in self.channels:
+            clock_offset_dir = self.phase2_dir / channel / 'clock_offset'
+            if not clock_offset_dir.exists():
+                continue
+            
+            try:
+                # Initialize HDF5 reader for L2 timing measurements
+                reader = DataProductReader(
+                    data_dir=clock_offset_dir,
+                    product_level='L2',
+                    product_name='timing_measurements',
+                    channel=channel
+                )
+                
+                # Read measurements with quality filtering
+                # Accept grades A, B, C (exclude D)
+                hdf5_measurements = reader.read_time_range(
+                    start=start_iso,
+                    end=end_iso,
+                    min_quality_grade='C',  # Accept C and better (A, B, C)
+                    quality_flags=['GOOD', 'MARGINAL'],  # Exclude BAD and MISSING
+                    min_confidence=0.01  # Minimum confidence threshold
+                )
+                
+                logger.debug(
+                    f"Read {len(hdf5_measurements)} L2 measurements from HDF5 for {channel}"
+                )
+                
+                # Convert HDF5 measurements to BroadcastMeasurement objects
+                for hdf5_meas in hdf5_measurements:
+                    try:
+                        # Extract timestamp
+                        ts = hdf5_meas.get('minute_boundary_utc', 0)
+                        if ts < cutoff:
+                            continue
+                        
+                        station = hdf5_meas.get('station', 'UNKNOWN')
+                        
+                        # BPM UT1 filtering
+                        if station == 'BPM':
+                            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                            if dt.minute in BPM_UT1_MINUTES:
+                                continue
+                        
+                        # Create BroadcastMeasurement
+                        m = BroadcastMeasurement(
+                            timestamp=ts,
+                            station=station,
+                            frequency_mhz=hdf5_meas.get('frequency_mhz', 0.0),
+                            d_clock_ms=hdf5_meas.get('clock_offset_ms', 0.0),
+                            propagation_delay_ms=hdf5_meas.get('propagation_delay_ms', 0.0),
+                            propagation_mode=hdf5_meas.get('propagation_mode', ''),
+                            confidence=hdf5_meas.get('confidence', 0.0),
+                            snr_db=hdf5_meas.get('snr_db', 0.0),
+                            quality_grade=hdf5_meas.get('quality_grade', 'D'),
+                            channel_name=channel
+                        )
+                        measurements.append(m)
+                    
+                    except (ValueError, KeyError) as e:
+                        logger.debug(f"Error converting HDF5 measurement: {e}")
+                        continue
+            
+            except FileNotFoundError:
+                # HDF5 file doesn't exist, try CSV fallback for this channel
+                logger.debug(f"No HDF5 files found for {channel}, trying CSV fallback")
+                # Fall back to CSV for this specific channel
+                csv_measurements = self._read_latest_measurements_for_channel(
+                    channel, lookback_minutes
+                )
+                measurements.extend(csv_measurements)
+            
+            except Exception as e:
+                logger.warning(f"Error reading HDF5 for {channel}: {e}, falling back to CSV")
+                # Fall back to CSV for this specific channel
+                csv_measurements = self._read_latest_measurements_for_channel(
+                    channel, lookback_minutes
+                )
+                measurements.extend(csv_measurements)
+        
+        if measurements:
+            logger.info(
+                f"Read {len(measurements)} L2 timing measurements from HDF5 "
+                f"(lookback={lookback_minutes}m)"
+            )
+        
+        return measurements
+    
+    def _read_latest_measurements_for_channel(
+        self,
+        channel: str,
+        lookback_minutes: int = 5
+    ) -> List[BroadcastMeasurement]:
+        """
+        Read latest measurements for a single channel from CSV.
+        
+        Helper method for fallback when HDF5 is not available for a specific channel.
+        """
+        from datetime import datetime, timezone, timedelta
+        from .wwv_constants import BPM_UT1_MINUTES
+        
+        measurements = []
+        now = time.time()
+        cutoff = now - (lookback_minutes * 60)
+        
+        now_dt = datetime.now(timezone.utc)
+        today_str = now_dt.strftime('%Y%m%d')
+        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
+        
+        clock_offset_dir = self.phase2_dir / channel / 'clock_offset'
+        if not clock_offset_dir.exists():
+            return measurements
+        
+        csv_files = []
+        for date_str in [today_str, yesterday_str]:
+            for csv_path in clock_offset_dir.glob(f'*_clock_offset_{date_str}.csv'):
+                csv_files.append(csv_path)
+        
+        # Also check for legacy file
+        legacy_path = clock_offset_dir / 'clock_offset_series.csv'
+        if legacy_path.exists():
+            csv_files.append(legacy_path)
+        
+        for csv_path in csv_files:
+            try:
+                with open(csv_path) as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        try:
+                            ts_str = row.get('system_time')
+                            if not ts_str:
+                                continue
+                            ts = float(ts_str)
+                            if ts < cutoff:
+                                continue
+                            
+                            station = row.get('station', 'UNKNOWN')
+                            conf_str = row.get('confidence')
+                            conf = float(conf_str) if conf_str else 0.0
+                            offset_str = row.get('clock_offset_ms', '')
+                            
+                            if not offset_str or offset_str == '' or conf < 0.01:
+                                continue
+                            
+                            offset_ms = float(offset_str)
+                            
+                            # BPM UT1 filtering
+                            if station == 'BPM':
+                                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                                if dt.minute in BPM_UT1_MINUTES:
+                                    continue
+                            
+                            m = BroadcastMeasurement(
+                                timestamp=ts,
+                                station=station,
+                                frequency_mhz=float(row.get('frequency_mhz', 0)),
+                                d_clock_ms=offset_ms,
+                                propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
+                                propagation_mode=row.get('propagation_mode', ''),
+                                confidence=conf,
+                                snr_db=float(row.get('snr_db', 0)),
+                                quality_grade=row.get('quality_grade', 'D'),
+                                channel_name=channel
+                            )
+                            measurements.append(m)
+                        except (ValueError, KeyError):
+                            continue
+            except Exception as e:
+                logger.debug(f"Error reading {csv_path}: {e}")
+        
+        return measurements
+
     
     def _calculate_weights(
         self, 
