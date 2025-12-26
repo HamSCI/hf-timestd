@@ -130,11 +130,27 @@ if [[ "$PREREQ_OK" == "false" ]]; then
 fi
 
 # =============================================================================
-# Step 1.5: Check and Configure Chrony (Production Only)
+# Step 1.5: Check System Dependencies (Production Only)
 # =============================================================================
 if [[ "$MODE" == "production" ]]; then
-    log_step "Checking chrony installation..."
+    log_step "Checking system dependencies..."
     
+    # Check for hdf5-tools (h5clear needed for robust recovery)
+    if ! command -v h5clear &> /dev/null; then
+        log_warn "  ⚠️  h5clear not found (required for HDF5 crash recovery)"
+        read -p "Install hdf5-tools? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log_info "  Installing hdf5-tools..."
+            sudo apt-get update && sudo apt-get install -y hdf5-tools
+        else
+            log_warn "  Skipping hdf5-tools. Automatic HDF5 lock clearing will not work."
+        fi
+    else
+        log_info "  ✅ h5clear found"
+    fi
+
+    # Check for chrony
     if ! command -v chronyd &> /dev/null; then
         log_warn "  ⚠️  chronyd not found"
         read -p "Install chrony for system clock discipline? (y/n) " -n 1 -r

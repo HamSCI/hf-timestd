@@ -81,6 +81,24 @@ start)
     mkdir -p "$DATA_ROOT/phase2"
     cd "$PROJECT_DIR"
     
+    # Check for stale HDF5 locks (Phase 3 Robustness)
+    # If the service crashed, HDF5 files might be marked as "open", preventing new writes.
+    # We use h5clear to reset these flags, BUT ONLY if the file is not actually open by a process.
+    if command -v h5clear &> /dev/null; then
+        echo "   🔍 Scanning for stale HDF5 file locks..."
+        find "$DATA_ROOT/phase2" -name "*.h5" -type f -mmin -60 2>/dev/null | while read -r h5file; do
+            # Check if file is open by any process (should return non-zero if NOT open)
+            if ! lsof "$h5file" >/dev/null 2>&1; then
+                # File is not open, safe to clear consistency flags
+                # This fixes "Unable to synchronously open file (file is already open for write)"
+                h5clear -s "$h5file" >/dev/null 2>&1 || true
+            fi
+        done
+        echo "   ✅ HDF5 consistency checks complete"
+    else
+        echo "   ⚠️  h5clear not found: skipping HDF5 lock recovery (install hdf5-tools)"
+    fi
+    
     # SHARED Channels (2.5, 5, 10, 15 MHz - WWV/WWVH/BPM all broadcast here)
     # Input: raw_buffer/SHARED_X_MHz/ (Phase 1 binary IQ)
     # Output: phase2/SHARED_X_MHz/    (D_clock, timing metrics)

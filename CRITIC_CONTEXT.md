@@ -1,19 +1,21 @@
-# NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION:
+# NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION
 
 Primary Instruction:  In this context you will perform a critical review of the HF Time Standard (hf-timestd) project, either in its entirety or in a specific component, as specified by the user.  This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation.  It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation.  It should also look for obsolete, deprecated, or "zombie" code that should be removed.  Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
 
-# The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session):
+# The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session)
 
 ---
 
 ## 🔴 CURRENT FOCUS (NEXT SESSION): RECEIVER / SSRC PROLIFERATION
 
 **Purpose:** Diagnose why the application keeps creating duplicate radiod channels/streams (“receiver proliferation”). This typically manifests as:
+
 - Multiple radiod streams for the same frequency/preset/sample_rate
 - Increasing SSRC count after service restarts
 - Resource exhaustion (CPU/network/multicast subscriptions)
 
 **Key hypothesis:** `RadiodControl.ensure_channel(...)` is not idempotent under current inputs. The most common causes are mismatched or unstable parameters:
+
 - **Destination mismatch** (`destination=None` vs explicit multicast IP, or mDNS resolution changes)
 - **Encoding mismatch** (F32 vs S16) causing radiod to treat the request as a new unique channel
 - **Preset/sample_rate mismatch** across services/processes
@@ -27,12 +29,15 @@ Primary Instruction:  In this context you will perform a critical review of the 
 ---
 
 ## Next Session Goal
+
 Identify the exact condition(s) that trigger new channel creation and make channel acquisition idempotent across:
+
 - service restarts
 - multiple processes
 - day boundaries
 
 Success criteria:
+
 - Restarting core recorder does **not** increase radiod channel count
 - Re-running analytics/web-ui does **not** create new IQ channels
 - The system converges on a stable set of SSRCs
@@ -100,23 +105,28 @@ phase2/fusion/fused_d_clock.csv
 ## RECEIVER PROLIFERATION PLAYBOOK (NEXT SESSION)
 
 ### What to capture first
+
 - The radiod channel list *before* starting services
 - The radiod channel list immediately after starting core recorder
 - The radiod channel list after restarting core recorder (should be identical)
 
 ### What to compare
+
 For any duplicated frequency, compare:
+
 - encoding (S16 vs F32)
 - destination (multicast IP)
 - preset + sample_rate
 
 ### High-signal code hotspots
+
 - `src/hf_timestd/core/core_recorder_v2.py` `_initialize_channels()` (destination selection and stability)
 - `src/hf_timestd/core/stream_recorder_v2.py` `RobustManagedStream._ensure_stream()` (exact `ensure_channel()` args)
 - `src/hf_timestd/stream/stream_manager.py` (reuse vs create policy)
 - `src/hf_timestd/channel_manager.py` (legacy channel creation; destination resolution)
 
 ### Commands (manual)
+
 ```bash
 # Show current channels (SSRC, freq, preset, sample_rate, destination)
 python -c "from ka9q import discover_channels; import json; ch=discover_channels('radiod.local'); print(json.dumps({k: {'freq': v.frequency, 'preset': v.preset, 'rate': v.sample_rate, 'dest': getattr(v,'multicast_address',None), 'encoding': getattr(v,'encoding',None)} for k,v in ch.items()}, indent=2))"
@@ -126,6 +136,7 @@ grep -R "ensure_channel\|create_channel\|RadiodControl" -n src/hf_timestd/
 ```
 
 #### 4. Verified Improvements (2025-12-20)
+
 - **Calibration Loading**: Logs confirm `CorrelatorBank: WWV calibration updated`.
 - **Fusion Logic**: Fusion service successfully generating `Fused D_clock` from 17 broadcasts.
 - **Geometric Fallback**: `PropagationEngine` correctly falls back to Geometric model when IRI is missing.
@@ -150,10 +161,12 @@ grep -R "ensure_channel\|create_channel\|RadiodControl" -n src/hf_timestd/
   - **VERIFY**: Check against actual BPM reception data
 
 - [ ] **Confidence windows**: Are calibration/ground-truth minutes correct?
+
   ```python
   BPM_UT1_MINUTES = {25, 26, 27, 28, 29, 55, 56, 57, 58, 59}
   BPM_PURE_CARRIER_MINUTES = {10, 11, 12, 13, 14, 15, 40, 41, 42, 43, 44, 45}
   ```
+
   - **VERIFY**: Cross-reference with BPM broadcast schedule
 
 - [ ] **Search window sizing**: Is `±10 ms` (calibrated) / `±50 ms` (bootstrap) appropriate?
@@ -166,32 +179,40 @@ grep -R "ensure_channel\|create_channel\|RadiodControl" -n src/hf_timestd/
 **Question:** Is the correlator bank correctly implementing MLE?
 
 - [ ] **Template generation**: Are quadrature templates correct?
+
   ```python
   template_sin = np.sin(2 * np.pi * model.tone_frequency_hz * t) * window
   template_cos = np.cos(2 * np.pi * model.tone_frequency_hz * t) * window
   ```
+
   - **VERIFY**: Template duration matches station tick duration
   - **VERIFY**: Tukey window α=0.1 is appropriate
 
 - [ ] **Search window centering**: Is the search centered correctly?
+
   ```python
   center_ms = model.expected_delay_ms + model.timing_offset_ms
   ```
+
   - For BPM: `44.1 ms + (-20 ms) = 24.1 ms`
   - For WWVH: `25.3 ms + 0 ms = 25.3 ms`
   - **POTENTIAL ISSUE**: BPM and WWVH windows overlap (~1.2 ms apart)
 
 - [ ] **Sub-sample refinement**: Is parabolic interpolation correct?
+
   ```python
   refined_offset = 0.5 * (y_m1 - y_p1) / (y_m1 - 2*y_0 + y_p1)
   ```
+
   - Standard parabolic interpolation formula
   - **VERIFY**: Clamping to ±0.5 samples is appropriate
 
 - [ ] **Cross-validation logic**: Is emission time back-calculation correct?
+
   ```python
   t_emission = result.toa_refined_ms - expected_delay
   ```
+
   - All stations transmit at same UTC instant
   - After correcting for propagation, emission times should agree
   - **THRESHOLD**: 5 ms cross-validation threshold - is this appropriate?
@@ -205,32 +226,40 @@ grep -R "ensure_channel\|create_channel\|RadiodControl" -n src/hf_timestd/
 **Question:** Is the 100 ms UT1 pulse detection robust?
 
 - [ ] **Pulse duration filter**: Is 70-150 ms range correct?
+
   ```python
   if 70.0 <= duration_ms <= 150.0:
   ```
+
   - BPM UT1 pulses are nominally 100 ms
   - **VERIFY**: Is ±30 ms tolerance appropriate for multipath spreading?
 
 - [ ] **Threshold calculation**: Is adaptive threshold robust?
+
   ```python
   threshold = median_env + 3 * mad * 1.4826
   ```
+
   - Uses median + 3×MAD (robust to outliers)
   - **POTENTIAL ISSUE**: May fail in high-noise conditions
 
 - [ ] **Minimum pulse count**: Is 5 pulses sufficient?
+
   ```python
   if len(pulses) < 5:
       return None
   ```
+
   - Expect ~59 pulses per minute
   - **QUESTION**: Why not require more pulses for calibration?
 
 - [ ] **ToA residual calculation**: Is expected arrival correct?
+
   ```python
   expected_arrival_offset_ms = self.expected_delay_ms + timing_offset_ms
   expected_toa = p['second'] * 1000.0 + expected_arrival_offset_ms
   ```
+
   - **VERIFY**: Does this correctly account for BPM's -20 ms offset?
 
 #### 4. Doppler-Compensated BCD (`wwvh_discrimination.py`)
@@ -238,31 +267,39 @@ grep -R "ensure_channel\|create_channel\|RadiodControl" -n src/hf_timestd/
 **Question:** Is Doppler de-rotation improving coherent integration?
 
 - [ ] **Doppler estimation source**: Where does Doppler come from?
+
   ```python
   doppler_info = self.estimate_doppler_shift_from_ticks(iq_samples, sample_rate)
   ```
+
   - Uses per-tick phase progression
   - **VERIFY**: Is this estimate accurate enough for de-rotation?
 
 - [ ] **De-rotation implementation**: Is the phasor correct?
+
   ```python
   derotation = np.exp(-2j * np.pi * avg_doppler_hz * t)
   derotated = analytic_bcd * derotation
   ```
+
   - Negative sign removes positive Doppler
   - **VERIFY**: Sign convention matches Doppler estimation
 
 - [ ] **Window overlap**: Is 50% overlap appropriate?
+
   ```python
   overlap_fraction: float = 0.5
   ```
+
   - 50% overlap is standard for Welch-style averaging
   - **QUESTION**: Does this provide sufficient time resolution?
 
 - [ ] **Averaging WWV/WWVH Doppler**: Is this valid?
+
   ```python
   avg_doppler_hz = (wwv_doppler_hz + wwvh_doppler_hz) / 2.0
   ```
+
   - **POTENTIAL ISSUE**: WWV and WWVH may have different Doppler if paths differ
 
 #### 5. Phase2TemporalEngine Integration
@@ -270,17 +307,21 @@ grep -R "ensure_channel\|create_channel\|RadiodControl" -n src/hf_timestd/
 **Question:** Is the integration correct and complete?
 
 - [ ] **BPM UT1 calibration timing**: When does calibration run?
+
   ```python
   if self.frequency_mhz in (2.5, 5.0, 10.0, 15.0) and minute_number in {25, 26, 27, 28, 29, 55, 56, 57, 58, 59}:
   ```
+
   - Only runs on shared frequencies during UT1 minutes
   - **VERIFY**: Does calibration persist across minutes?
 
 - [ ] **Correlator bank fallback**: What if correlator bank fails?
+
   ```python
   if result.bcd_wwv_amplitude is None or result.bcd_wwvh_amplitude is None:
       # Fall back to BCD correlation
   ```
+
   - Falls back to existing BCD correlation
   - **VERIFY**: Is this fallback tested?
 
@@ -303,6 +344,7 @@ delay_ms = distance_km / 299.792458  # Speed of light
 ```
 
 **Problem:** HF propagation is via ionospheric reflection, not direct path. The actual path length is:
+
 - 1F hop: ~1.1-1.2× great-circle distance
 - 2F hop: ~1.3-1.5× great-circle distance
 
@@ -371,6 +413,7 @@ avg_doppler_hz = (wwv_doppler_hz + wwvh_doppler_hz) / 2.0
 #### 1. **BPM Pure Carrier Minutes**
 
 BPM transmits pure carrier (no time code) during minutes 10-15 and 40-45. This could be used for:
+
 - High-precision carrier phase measurement
 - Path gain calibration without BCD interference
 - Doppler estimation from carrier frequency offset
@@ -392,6 +435,7 @@ WWV transmits on 2.5, 5, 10, 15, 20, 25 MHz simultaneously. All should show the 
 #### 4. **Ionospheric Model Integration**
 
 The system has `ionospheric_model.py` with IRI-2016 layer heights, but this isn't used for:
+
 - Predicted propagation delays
 - Search window sizing
 - Mode disambiguation
@@ -463,23 +507,27 @@ The following significant changes were made to the backend that the Web UI must 
 #### 1. MultiStationDetector (Replaces Voting)
 
 **Old Approach (DEPRECATED):**
+
 - `GlobalStationVoter` picked the "loudest" station
 - Single station used for timing
 - Other detected stations discarded
 
 **New Approach:**
+
 - `MultiStationDetector` detects ALL receivable stations
 - GPSDO is the timing reference, not the loudest station
 - Each station's ToA reveals propagation conditions
 - ALL measurements passed to fusion with uncertainty weighting
 
 **Files Changed:**
+
 - `phase2_temporal_engine.py` - Now uses `MultiStationDetector`
 - `multi_station_detector.py` - **NEW** Physics-based detection
 - `global_station_voter.py` - **DEPRECATED**
 - `station_lock_coordinator.py` - **DEPRECATED**
 
 **Web UI Impact:**
+
 - [ ] Does the UI still reference "voting" or "anchor" concepts?
 - [ ] Are there displays that only show one station per frequency?
 - [ ] Does the UI show multi-station detection results?
@@ -487,17 +535,20 @@ The following significant changes were made to the backend that the Web UI must 
 #### 2. BPM (China) Station Integration
 
 **New Capability:**
+
 - BPM broadcasts on 2.5, 5, 10, 15 MHz (shared with WWV/WWVH)
 - 10ms tick duration (vs 5ms WWV)
 - UT1 minutes (25-29, 55-59) not usable for UTC timing
 - Now detected and passed to fusion
 
 **Files Changed:**
+
 - `phase2_temporal_engine.py` - BPM detection in Step 1
 - `bpm_discriminator.py` - BPM-specific analysis
 - `phase2_analytics_service.py` - BPM fields in CSV outputs
 
 **Web UI Impact:**
+
 - [ ] Does the UI display BPM detections?
 - [ ] Are BPM timing modes (UTC/UT1) shown?
 - [ ] Is BPM included in station lists and charts?
@@ -505,51 +556,63 @@ The following significant changes were made to the backend that the Web UI must 
 #### 3. Tiered Storage (RAM Hot Buffer)
 
 **New Capability:**
+
 - `/dev/shm/timestd` for hot buffer (RAM)
 - Disk for cold buffer with background archival
 - Auto-configured based on available RAM
 
 **Files Changed:**
+
 - `tiered_storage.py` - **NEW** Storage manager
 - `binary_archive_writer.py` - Tiered storage integration
 
 **Web UI Impact:**
+
 - [ ] Does the UI show storage tier status?
 - [ ] Are file paths updated for tiered storage?
 
 #### 4. BCD Downsampling (CPU Optimization)
 
 **Change:**
+
 - BCD correlation now uses 4x downsampling (20 kHz → 5 kHz)
 - Reduces CPU by ~75% with negligible accuracy loss
 
 **Files Changed:**
+
 - `wwvh_discrimination.py` - `downsample_factor` parameter
 
 **Web UI Impact:**
+
 - [ ] None expected (internal optimization)
 
 #### 5. Chrony Update Rate Limiting
 
 **Change:**
+
 - Chrony SHM updates now rate-limited to 8 seconds
 - Matches chrony poll interval
 
 **Files Changed:**
+
 - `multi_broadcast_fusion.py` - Rate limiting logic
 
 **Web UI Impact:**
+
 - [ ] Does the UI show chrony update frequency?
 
 #### 6. CSV Schema Changes
 
 **Tone Detections CSV:**
+
 - Added: `bpm_detected`, `bpm_snr_db`, `bpm_timing_ms`, `bpm_timing_mode`, `bpm_usable_for_utc`
 
 **BCD Discrimination CSV:**
+
 - Added: `bpm_amplitude`, `bpm_toa_ms`
 
 **Web UI Impact:**
+
 - [ ] Does the UI parse the new CSV columns?
 - [ ] Are there hardcoded column indices that will break?
 
@@ -908,22 +971,22 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
 
 #### Critical Path (Phase 2)
 
-5. **`phase2_analytics_service.py`** - Service orchestration
+1. **`phase2_analytics_service.py`** - Service orchestration
    - File watcher reliability
    - State reload safety
    - Exception isolation
 
-6. **`clock_offset_series.py`** - D_clock calculation
+2. **`clock_offset_series.py`** - D_clock calculation
    - RTP calibration correctness
    - Outlier handling
    - Numerical stability
 
-7. **`multi_broadcast_fusion.py`** - Kalman fusion
+3. **`multi_broadcast_fusion.py`** - Kalman fusion
    - State persistence
    - Divergence detection
    - Measurement rejection
 
-8. **`timing_calibrator.py`** - Multi-process coordination
+4. **`timing_calibrator.py`** - Multi-process coordination
    - File locking
    - State consistency
    - Bootstrap exit conditions
@@ -933,16 +996,19 @@ The `hf_timestd.core` module implements a two-phase data pipeline for HF time st
 ### KNOWN ISSUES FROM PREVIOUS SESSIONS
 
 #### 1. Kalman State Poisoning (Fixed 2025-12-08)
+
 - **Issue**: Corrupted Kalman state persisted across restarts
 - **Fix**: Added state versioning and sanity checks
 - **Verify**: Check `clock_convergence.py` for validation
 
 #### 2. Multi-Process State Race (Partially Fixed)
+
 - **Issue**: 9 channel processes share state files
 - **Current**: Reload-before-update pattern
 - **Remaining**: No file locking - race conditions possible
 
 #### 3. Discrimination Flip-Flopping (Ongoing)
+
 - **Issue**: Station ID changes between minutes
 - **Impact**: ~50ms D_clock errors when wrong station
 - **Mitigation**: RTP-based station prediction
@@ -1071,6 +1137,38 @@ LAYER 4: Multi-Broadcast Fusion
   - FSK frames at seconds 31-39
   - Should provide independent timing confirmation
 
+#### Next Session Context: Critical Data Pipeline Review
+
+**Objective**: Critically examine the end-to-end data pipeline to identify and fix latent issues, ensuring the system is robust for 24/7 production.
+
+## Key Areas to Investigate
+
+1. **HDF5 vs CSV Integrity**:
+    - Verify that `phase2_analytics_service.py` is writing *identical* data to both formats.
+    - Check specifically for the "file lock" issue recurrence (search logs for "SWMR write").
+    - Confirm `scripts/timestd-analytics.sh`'s new `h5clear` logic is working (or at least not causing harm).
+
+2. **Calibration Stability**:
+    - We recently introduced "Two-Tier Calibration" (Bootstrap vs Provisional).
+    - **Critique**: Is the system successfully transitioning to `PROVISIONAL`? Or does it get stuck in `BOOTSTRAP`?
+    - **Check**: `/var/lib/timestd/state/timing_calibration.json` for `phase` and stability of `propagation_delay_ms`.
+
+3. **Fusion Service Reliability**:
+    - This is a new service (`timestd-fusion`).
+    - **Check**: Uptime, memory usage, and log errors (`/var/log/hf-timestd/fusion.log`).
+    - **Verify**: Is it actually feeding Chrony? (`chronyc sources`, `chronyc tracking`).
+
+4. **Data Gaps**:
+    - Look for gaps in the `phase2` data series (`/var/lib/timestd/phase2/...`).
+    - Determine if gaps align with service restarts or logic errors.
+
+## Recent Changes (v3.1.0)
+
+- **New Service**: `timestd-fusion.service`
+- **New Dependency**: `hdf5-tools` (for `h5clear`)
+- **Dual Write**: Writing both `.csv` and `.h5` files.
+- **Robustness**: Automated HDF5 lock clearing on startup.
+
 #### 3. Station-Level Calibration Logic
 
 **Question:** Is station-level calibration the right abstraction?
@@ -1184,7 +1282,8 @@ LAYER 4: Multi-Broadcast Fusion
 
 **Issue:** On shared frequencies, discrimination can flip between WWV and WWVH.
 
-**Current Fix:** 
+**Current Fix:**
+
 - Reject low-confidence discrimination
 - Use RTP-based station prediction
 - Store detected_station in RTP calibration
@@ -1266,6 +1365,7 @@ The discrimination system is the bottleneck. When WWVH signals are misidentified
 | 3.2 | LOW | ✅ FIXED | Standardized UTC timestamps |
 
 ### New Files Created
+
 - `src/grape_recorder/version.py` - Centralized version and timestamp utilities
 - `docs/STATE_FILES.md` - State file documentation and reset procedures
 - `scripts/reset-state.sh` - Safe state reset script
@@ -1277,6 +1377,7 @@ The discrimination system is the bottleneck. When WWVH signals are misidentified
 **Too often, the parts that WRITE important info to files (analytics services) and the parts that READ them (other analytics, web-ui) change the destination or expected source of information WITHOUT notifying the rest of the system.**
 
 This leads to:
+
 1. **Silent failures** - Readers find empty/missing data, return nulls, UI shows blanks
 2. **Stale data** - State files persist incorrect values across restarts
 3. **Hidden coupling** - No explicit contracts between producers and consumers
@@ -1291,6 +1392,7 @@ This leads to:
 **Bug**: D_clock showed linear drift of ~6.5 ms/minute despite GPSDO discipline.
 
 **Root Cause Chain**:
+
 1. `phase2_analytics_service.py` was synthesizing RTP timestamps from Unix time instead of reading `start_rtp_timestamp` from metadata JSON
 2. This produced incorrect D_clock values that were fed to the Kalman filter
 3. The Kalman filter in `clock_convergence.py` persisted state to `convergence_state.json`
@@ -1298,6 +1400,7 @@ This leads to:
 5. New correct measurements were rejected as "5-sigma outliers" because the filter's prediction was 900+ ms off
 
 **Hidden Data Contract**:
+
 ```
 PRODUCER: phase2_analytics_service.py writes convergence_state.json
 CONSUMER: phase2_analytics_service.py reads convergence_state.json on restart
@@ -1313,6 +1416,7 @@ CONTRACT: State must be valid when loaded - but NO VALIDATION exists
 **Root Cause**: The discovery function only checked `raw_archive/` but channels may only exist in `phase2/` or `products/`.
 
 **Hidden Data Contract**:
+
 ```
 PRODUCER: Phase 1 creates raw_archive/{CHANNEL}/
 PRODUCER: Phase 2 creates phase2/{CHANNEL}/
@@ -1327,6 +1431,7 @@ CONTRACT: UNDEFINED - no single source of truth for "what channels exist"
 **Root Cause**: `_read_binary_minute()` synthesized timestamps instead of reading them from the JSON metadata that sits alongside the binary data.
 
 **Hidden Data Contract**:
+
 ```
 PRODUCER: Binary writer creates {minute}.bin + {minute}.json
 CONSUMER: _read_binary_minute() should read BOTH files
@@ -1370,26 +1475,31 @@ CONTRACT: IMPLICIT - metadata fields like start_rtp_timestamp are optional
 For each data producer/consumer pair, verify:
 
 ### 1. Schema Documentation
+
 - [ ] Is the output format documented?
 - [ ] Are required vs optional fields explicit?
 - [ ] Is there a version number for the schema?
 
 ### 2. Validation on Read
+
 - [ ] Does the consumer validate data before using it?
 - [ ] Are there sanity checks for numeric ranges?
 - [ ] Does it fail gracefully if data is missing/corrupt?
 
 ### 3. State File Hygiene
+
 - [ ] Is persisted state versioned?
 - [ ] Can stale state poison fresh calculations?
 - [ ] Is there a mechanism to reset corrupted state?
 
 ### 4. Path Consistency
+
 - [ ] Are paths constructed the same way in producer and consumer?
 - [ ] Are there hardcoded paths that diverge from config?
 - [ ] Does channel name sanitization match (`WWV 10 MHz` vs `WWV_10_MHz`)?
 
 ### 5. Timestamp Consistency
+
 - [ ] Are timestamps Unix epoch, ISO string, or other?
 - [ ] Are timezones explicit?
 - [ ] Do column names match (`system_time` vs `timestamp` vs `utc_time`)?
@@ -1399,19 +1509,22 @@ For each data producer/consumer pair, verify:
 ## SPECIFIC FILES TO AUDIT
 
 ### High Priority (State Persistence)
+
 1. `clock_convergence.py` - Kalman state save/load
 2. `multi_broadcast_fusion.py` - Calibration state save/load
 3. `phase2_analytics_service.py` - All file writes
 
 ### Medium Priority (CSV Contracts)
+
 4. `clock_offset_series.py` - CSV column definitions
-5. `carrier_power_writer.py` - CSV format
-6. `monitoring-server-v3.js` - CSV parsing logic
+2. `carrier_power_writer.py` - CSV format
+3. `monitoring-server-v3.js` - CSV parsing logic
 
 ### Lower Priority (Path Management)
+
 7. `grape-paths.js` - Path construction functions
-8. `phase2_analytics_service.py` - Output directory creation
-9. Various HTML files - Hardcoded API endpoints
+2. `phase2_analytics_service.py` - Output directory creation
+3. Various HTML files - Hardcoded API endpoints
 
 ---
 
@@ -1506,18 +1619,22 @@ products/{CHANNEL}/
 **Goal:** Extract carrier amplitude and phase at 10 Hz for efficient storage and analysis.
 
 **Input:**
+
 - `raw_archive/{CHANNEL}/` - 20 kHz complex IQ from Phase 1
 
 **Output:**
+
 - `products/{CHANNEL}/decimated/YYYYMMDD.bin` - 10 Hz carrier data
 
 **Implementation Notes:**
+
 - Use scipy.signal.decimate or polyphase filter
 - Extract carrier: mix to baseband, lowpass filter, decimate
 - Output format: binary float32 (amplitude, phase) pairs
 - File size: ~7 MB/day/channel (10 Hz × 86400 sec × 8 bytes)
 
 **Existing Code to Review:**
+
 | File | Status | Notes |
 |------|--------|-------|
 | `archive/legacy-grape-modules/decimator.py` | ⚠️ Legacy | May have useful algorithms |
@@ -1530,18 +1647,22 @@ products/{CHANNEL}/
 **Goal:** Generate daily spectrogram showing carrier frequency/amplitude variations.
 
 **Input:**
+
 - `products/{CHANNEL}/decimated/YYYYMMDD.bin` - 10 Hz carrier data
 
 **Output:**
+
 - `products/{CHANNEL}/spectrograms/YYYYMMDD_spectrogram.png`
 
 **Implementation Notes:**
+
 - X-axis: UTC time (00:00 - 24:00)
 - Y-axis: Frequency offset from carrier (±0.5 Hz typical)
 - Color: Signal amplitude (dB)
 - Show ionospheric Doppler shifts, propagation mode changes
 
 **Existing Code to Review:**
+
 | File | Status | Notes |
 |------|--------|-------|
 | `scripts/generate_spectrograms.py` | ⚠️ Archive | Check for reuse |
@@ -1555,14 +1676,17 @@ products/{CHANNEL}/
 **Goal:** Visualize carrier power alongside solar zenith angle for ionospheric correlation.
 
 **Input:**
+
 - `products/{CHANNEL}/decimated/YYYYMMDD.bin` - 10 Hz carrier data
 - Station coordinates from `timestd-config.toml`
 - Transmitter coordinates (WWV: 40.68°N, 105.04°W)
 
 **Output:**
+
 - `products/{CHANNEL}/power/YYYYMMDD_power.png`
 
 **Implementation Notes:**
+
 - Primary Y-axis: Carrier power (dB)
 - Secondary Y-axis: Solar zenith angle (degrees)
 - Solar zenith calculation: Uses NOAA algorithms via `solar_zenith_calculator.py`
@@ -1570,6 +1694,7 @@ products/{CHANNEL}/
 - Show sunrise/sunset transitions, D-layer absorption effects
 
 **Solar Zenith Calculation (Already Implemented):**
+
 ```python
 from grape_recorder.grape.solar_zenith_calculator import (
     calculate_solar_zenith_for_day,
@@ -1591,18 +1716,22 @@ solar_data = calculate_solar_zenith_for_day(date_str, receiver_grid)
 **Goal:** Package 24-hour UTC day of data in Digital RF format for HamSCI PSWS compatibility.
 
 **Input:**
+
 - `raw_archive/{CHANNEL}/` - 20 kHz complex IQ
 
 **Output:**
+
 - `products/{CHANNEL}/drf/YYYYMMDD/` - Digital RF directory structure
 
 **Implementation Notes:**
+
 - Digital RF format: HDF5 files with specific structure
 - Time boundary: 00:00:00 UTC to 23:59:59 UTC
 - Metadata: Station info, receiver config, GPSDO status
 - Use existing `digital_rf` library
 
 **Existing Code to Review:**
+
 | File | Status | Notes |
 |------|--------|-------|
 | `src/grape_recorder/core/drf_writer.py` | ✅ Active | Real-time DRF writer |
@@ -1615,19 +1744,23 @@ solar_data = calculate_solar_zenith_for_day(date_str, receiver_grid)
 **Goal:** Upload completed daily products to the GRAPE data repository.
 
 **Input:**
+
 - `products/{CHANNEL}/drf/YYYYMMDD/` - Digital RF package
 - `products/{CHANNEL}/spectrograms/YYYYMMDD.png`
 
 **Destination:**
+
 - GRAPE/PSWS data repository (TBD - endpoint configuration)
 
 **Implementation Notes:**
+
 - Upload after 00:00 UTC (previous day complete)
 - Verify file integrity before upload (checksums)
 - Track upload state to prevent duplicates
 - Retry logic for network failures
 
 **Existing Code to Review:**
+
 | File | Status | Notes |
 |------|--------|-------|
 | `wsprdaemon/upload-client-utils.sh` | ✅ Active | Upload utilities |
@@ -1635,6 +1768,7 @@ solar_data = calculate_solar_zenith_for_day(date_str, receiver_grid)
 | `systemd/grape-daily-upload.timer` | ✅ Active | Daily trigger |
 
 **Configuration to Check:**
+
 | File | Setting | Purpose |
 |------|---------|---------|
 | `timestd-config.toml` | `[uploader]` section | Upload credentials/endpoint |
@@ -1658,26 +1792,31 @@ solar_data = calculate_solar_zenith_for_day(date_str, receiver_grid)
 ### CRITIQUE CHECKLIST FOR PHASE 3
 
 #### 1. Decimation Quality
+
 - [ ] Does the filter preserve carrier phase information?
 - [ ] Is anti-aliasing sufficient (stopband attenuation > 60 dB)?
 - [ ] Are edge effects handled at day boundaries?
 
 #### 2. Spectrogram Accuracy
+
 - [ ] Is time axis aligned to UTC?
 - [ ] Does frequency axis match actual carrier offset range?
 - [ ] Are colormaps appropriate for the data range?
 
 #### 3. Solar Zenith Calculation
+
 - [ ] Are coordinates correct for both receiver AND transmitter?
 - [ ] Is the calculation for the MIDPOINT of the propagation path?
 - [ ] Are time zones handled correctly (UTC throughout)?
 
 #### 4. Digital RF Compliance
+
 - [ ] Does output match HamSCI PSWS format specification?
 - [ ] Are all required metadata fields present?
 - [ ] Is the file structure compatible with existing tools?
 
 #### 5. Upload Robustness
+
 - [ ] Is there retry logic for transient failures?
 - [ ] Are credentials stored securely (not in code)?
 - [ ] Is upload state persisted across service restarts?
@@ -1687,6 +1826,7 @@ solar_data = calculate_solar_zenith_for_day(date_str, receiver_grid)
 ### FILES TO CREATE/MODIFY
 
 **New Files:**
+
 | File | Purpose |
 |------|---------|
 | `src/grape_recorder/grape/decimator.py` | 20 kHz → 10 Hz decimation |
@@ -1697,6 +1837,7 @@ solar_data = calculate_solar_zenith_for_day(date_str, receiver_grid)
 | `src/grape_recorder/grape/phase3_pipeline.py` | Pipeline orchestration |
 
 **Files to Update:**
+
 | File | Change |
 |------|--------|
 | `requirements.txt` | Add `astropy` for solar calculations |
@@ -1714,6 +1855,7 @@ The sections below document the original problem being solved and the theoretica
 **Objective**: Extract precise UTC(NIST) time from HF radio signals transmitted by WWV, WWVH, and CHU time signal stations, achieving sub-millisecond accuracy despite ionospheric propagation delays of 2-60 ms.
 
 **The Fundamental Equation**:
+
 ```
 T_arrival = T_emission + T_propagation + D_clock
 
