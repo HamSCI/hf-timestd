@@ -37,6 +37,7 @@ This document explains **WHY** the hf-timestd system is designed the way it is. 
 ### Core Mission
 
 Extract precise timing measurements from HF time standard broadcasts:
+
 1. **D_clock extraction** - System clock offset relative to UTC(NIST)
 2. **WWV/WWVH discrimination** on 4 shared frequencies (2.5, 5, 10, 15 MHz)
 3. **Propagation mode estimation** - Ionospheric hop identification
@@ -52,6 +53,7 @@ Extract precise timing measurements from HF time standard broadcasts:
 | **BPM** | Pucheng, China | 2.5, 5, 10, 15 MHz | 1000 Hz tone, UT1/UTC alternating |
 
 **BPM Special Handling:**
+
 - Minutes 0-24, 30-54: UTC timing (usable)
 - Minutes 25-29, 55-59: UT1 timing (filtered out automatically)
 - Tick duration: 10ms (UTC) vs 100ms (UT1)
@@ -70,6 +72,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)
 ```
 
 **Why?**
+
 - **Scientific Integrity:** Phase 1 never drops data during Phase 2 updates
 - **Reprocessability:** Improve algorithms without re-recording
 - **Independent Testing:** Test analytics on archived data
@@ -79,6 +82,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)
 **Decision:** Wall clock time is **DERIVED** from RTP timestamps, not vice versa.
 
 **Why?**
+
 - **Sample Count Integrity:** Gaps are unambiguous (RTP timestamp jumps)
 - **Precise Reconstruction:** `utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate`
 - **No Time Stretching:** Never adjust sample count to fit wall clock
@@ -89,6 +93,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)
 **Decision:** Archive raw 20 kHz IQ in binary format with JSON sidecars.
 
 **Why?**
+
 - **Simplicity:** No external library dependencies
 - **Efficiency:** Direct memory-mapped access possible
 - **Compression:** Optional zstd/lz4 compression (2-3x reduction)
@@ -99,6 +104,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)
 **Decision:** Eight voting methods + cross-validation for WWV/WWVH discrimination.
 
 **Why?**
+
 - **Robustness:** If one method fails, others still work
 - **Confidence:** Multiple confirmations increase reliability
 - **Provenance:** Clear data lineage for each result
@@ -154,6 +160,27 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)
 │  ✅ Processes backlog automatically                             │
 │  ✅ Chrony SHM integration for system clock discipline          │
 └─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                    PHASE 3: FUSION SERVICE                      │
+│                (Multi-Broadcast UTC Alignment)                  │
+│                                                                 │
+│  Input:  CSV files from Phase 2 (clock offsets)                 │
+│  Process:                                                       │
+│    1. Weighted Fusion (SNR, Quality, Mode)                      │
+│    2. Kalman Filtering (Convergence to UTC)                     │
+│    3. Global Differential Solve (Cross-frequency physics)       │
+│                                                                 │
+│  Outputs:                                                       │
+│  • Chrony SHM (System Clock Discipline)                         │
+│  • phase2/fusion/fused_d_clock.csv                              │
+│  • state/broadcast_calibration.json (Feedback to Phase 2)       │
+│                                                                 │
+│  Responsibilities:                                              │
+│  ✅ Single source of truth for system clock                      │
+│  ✅ Cross-channel consistency enforcement                       │
+│  ✅ Optional calibration feedback to analytics                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -200,6 +227,7 @@ The recording layer uses **ka9q-python** directly for all RTP reception and chan
 ### Decision 1: Why Binary Archives (not NPZ)?
 
 **Binary + JSON Advantages:**
+
 - **No Dependencies:** Pure Python, no numpy required for reading
 - **Memory Mapping:** Direct mmap access for large files
 - **Streaming:** Can write continuously without buffering
@@ -209,10 +237,12 @@ The recording layer uses **ka9q-python** directly for all RTP reception and chan
 ### Decision 2: Why Two Phases (not Three)?
 
 **Phase 1 + Phase 2 is sufficient for hf-timestd:**
+
 - Phase 1: Immutable scientific record (raw IQ)
 - Phase 2: All timing analysis and derived products
 
 **What's NOT in hf-timestd:**
+
 - Decimation to 10 Hz (not needed for timing)
 - Digital RF format conversion
 - PSWS/HamSCI uploads
@@ -223,11 +253,13 @@ These belong in separate projects if needed.
 ### Decision 3: Why Separate Services?
 
 **Phase 1 Isolation:**
+
 - ✅ **Stability:** Minimal code changes (rock-solid)
 - ✅ **No Data Loss:** Phase 2 can crash, Phase 1 keeps recording
 - ✅ **Simple:** ~300 lines, minimal dependencies
 
 **Phase 2 Independence:**
+
 - ✅ **Evolution:** Update algorithms without downtime
 - ✅ **Testing:** Replay archived data for validation
 - ✅ **Reprocessing:** Improve historical analysis
@@ -240,6 +272,7 @@ These belong in separate projects if needed.
 **Solution:** Multiple independent analyses with weighted voting.
 
 **Voting Methods:**
+
 1. Test Signal Detection (minutes :08, :44) - weight=15
 2. 440 Hz Station ID (minutes 1, 2) - weight=10
 3. BCD Amplitude Ratio (100 Hz subcarrier) - weight=2-10
@@ -271,7 +304,12 @@ Phase 2: Analytics Service (polls for new files)
 ├─→ phase2/{CHANNEL}/bcd_correlation/{date}.csv
 └─→ phase2/{CHANNEL}/status/analytics-status.json
      ↓
+├─→ phase2/{CHANNEL}/status/analytics-status.json
+           ↓
+Fusion Service (polls for new CSVs)
+           ↓
 ├─→ Chrony SHM (system clock discipline)
+└─→ phase2/fusion/fused_d_clock.csv
 └─→ Web UI (monitoring dashboard)
 ```
 
@@ -329,6 +367,7 @@ JSON Response → Chart.js plots
 **Decision:** A cross-frequency physics solve is performed inside `core/multi_broadcast_fusion.py` using `GlobalDifferentialSolver`.
 
 **Why?** Phase 2 is inherently per-channel/per-frequency. The fusion layer is the first place where measurements from *all* channels coexist, so it is the natural point to run a global differential solve that can combine observations from:
+
 - Same frequency / different station (WWV vs WWVH)
 - Different frequency / same station (dispersion constraints)
 - Different frequency / different station (global consistency)
@@ -347,6 +386,7 @@ This is sufficient for differential solving because the absolute anchor cancels 
 **CHU inclusion:** `phase2_analytics_service.py` writes CHU fields (`chu_detected`, `chu_snr_db`, `chu_timing_ms`) into new tone-detections CSVs. When present, CHU enables cross-agency triangulation (NIST + NRC) constraints.
 
 **Fusion integration (trusted synthetic measurement):** When the global solve returns `verified=True`, fusion injects a synthetic measurement:
+
 - `station = GLOBAL_DIFF`
 - Large forced weight during fusion (dominates the weighted mean)
 - Kalman measurement uncertainty floor reduced (acts like a trusted constraint)
@@ -354,12 +394,14 @@ This is sufficient for differential solving because the absolute anchor cancels 
 This provides a physics-verified override path without rewriting Phase 2 per-channel outputs.
 
 **Observability:** The fusion layer logs global solve decision context:
+
 - Selected target minute, station/frequency mix, and any channels missing data at the target minute
 - Explicit log when NIST+NRC triangulation is active
 - Global solve result summary (offset/confidence/consistency)
 - Synthetic injection parameters
 
 **Fused output columns:** `phase2/fusion/fused_d_clock.csv` includes:
+
 - `global_solve_verified`
 - `global_solve_consistency_ms`
 - `global_solve_n_obs`
@@ -384,6 +426,7 @@ Rearranging:
 By back-calculating emission time from GPS-locked arrival time and identified propagation mode, we transform from a **passive listener** into a **primary time standard** that verifies UTC(NIST).
 
 **The Equation:**
+
 ```
 T_emit = T_arrival - (τ_geo + τ_iono + τ_mode)
 ```
@@ -419,6 +462,7 @@ On 4 shared frequencies (2.5, 5, 10, 15 MHz), WWV and WWVH transmit simultaneous
 Cross-correlate 100 Hz BCD time code to find two peaks representing the two stations.
 
 **Outputs:**
+
 - WWV/WWVH amplitudes from dual-peak detection
 - Differential delay (ms) - propagation path difference
 - Geographic peak assignment using receiver location
@@ -430,6 +474,7 @@ Power ratio of WWV's 1000 Hz vs WWVH's 1200 Hz marker tones.
 #### Method 3: 440/500/600 Hz Ground Truth
 
 Detect station-identifying tones from the broadcast schedule:
+
 - Minute 1: WWVH broadcasts 440 Hz
 - Minute 2: WWV broadcasts 440 Hz
 - 500/600 Hz exclusive minutes provide 100% certain identification
@@ -449,11 +494,13 @@ Combine all methods with minute-specific weighting for final determination.
 See `DIRECTORY_STRUCTURE.md` for complete specification.
 
 **Key Principles:**
+
 - ✅ Use `TimeStdPaths` API for all path operations
 - ✅ Consistent naming: `{CHANNEL}_{METHOD}_YYYYMMDD.csv`
 - ✅ Mode-aware (test vs production)
 
 **Summary:**
+
 ```
 {data_root}/
 ├── raw_buffer/{CHANNEL}/{YYYYMMDD}/   # Phase 1: Binary IQ + JSON
@@ -479,6 +526,7 @@ See `DIRECTORY_STRUCTURE.md` for complete specification.
 |---------|---------|
 | `timestd-core-recorder.service` | Phase 1: RTP → raw_buffer |
 | `timestd-analytics.service` | Phase 2: Timing analysis (all channels) |
+| `timestd-fusion.service` | Phase 3: Multi-broadcast fusion & Chrony feed |
 | `timestd-web-ui.service` | Web monitoring UI |
 
 ### Start Order
@@ -496,6 +544,7 @@ All services are independent. Analytics processes backlog if started late.
 ### Disk Usage
 
 **Per Channel (24 hours):**
+
 - raw_buffer (20 kHz): ~2-3 GB/day (with compression)
 - Phase 2 CSVs: ~5 MB/day (all outputs combined)
 
@@ -504,11 +553,13 @@ All services are independent. Analytics processes backlog if started late.
 ### Reliability Design
 
 **Phase 1 (Core Recorder):**
+
 - ✅ Minimal dependencies
 - ✅ Conservative error handling
 - ✅ Systemd restart on failure
 
 **Phase 2 (Analytics):**
+
 - ✅ Aggressive retry logic
 - ✅ Processes backlog on restart
 - ✅ Can reprocess historical data
@@ -523,6 +574,7 @@ All services are independent. Analytics processes backlog if started late.
 **Impact:** Missing minutes in raw_buffer.
 
 **Recovery:**
+
 1. Systemd restarts service automatically
 2. Gap minutes lost (can't recreate RTP stream)
 3. Analytics continues with available data
@@ -532,6 +584,7 @@ All services are independent. Analytics processes backlog if started late.
 **Impact:** Backlog of unprocessed files.
 
 **Recovery:**
+
 1. Systemd restarts service
 2. Service detects backlog automatically
 3. Processes all unprocessed files
@@ -560,6 +613,7 @@ All services are independent. Analytics processes backlog if started late.
 ---
 
 **For detailed implementation, see:**
+
 - Path management: `src/hf_timestd/paths.py`
 - Discrimination: `src/hf_timestd/core/wwvh_discrimination.py`
 - Tone detection: `src/hf_timestd/core/tone_detector.py`

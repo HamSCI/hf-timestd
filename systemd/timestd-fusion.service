@@ -1,0 +1,19 @@
+[Unit]
+Description=HF-Timestd Multi-Broadcast Fusion (Chrony Feed)
+After=timestd-analytics.service
+Requires=timestd-analytics.service
+
+[Service]
+Type=simple
+User=timestd
+Group=timestd
+# Run as the installed module from the venv
+ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion --data-root /var/lib/timestd --interval 60.0 --enable-chrony --log-level INFO
+Restart=always
+RestartSec=10
+# Standard output logging
+StandardOutput=append:/var/log/hf-timestd/fusion.log
+StandardError=append:/var/log/hf-timestd/fusion.log
+
+[Install]
+WantedBy=multi-user.target

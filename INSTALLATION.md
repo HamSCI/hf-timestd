@@ -58,8 +58,8 @@ Test mode data root defaults to:
 sudo ./scripts/install.sh --mode production --user $USER
 sudo nano /etc/hf-timestd/timestd-config.toml
 
-sudo systemctl start timestd-core-recorder timestd-analytics timestd-web-ui
-sudo systemctl enable timestd-core-recorder timestd-analytics timestd-web-ui
+sudo systemctl start timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui
+sudo systemctl enable timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui
 ```
 
 Production mode paths:
@@ -90,6 +90,7 @@ At minimum configure:
 - Confirm `radiod` is running and discoverable on the network.
 - Confirm the Web UI loads at `http://localhost:3000`.
 - Confirm new data is being written under the configured data root.
+- Confirm fusion service is running: `systemctl status timestd-fusion`
 
 ---
 

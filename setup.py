@@ -11,7 +11,7 @@ long_description = readme_file.read_text() if readme_file.exists() else ""
 
 setup(
     name="hf-timestd",
-    version="3.0.0",
+    version="3.1.0",
     author="Michael James Hauan AC0G",
     author_email="ac0g@hauan.org",
     description="HF Time Standard Analysis - WWV/WWVH/CHU/BPM timing via ka9q-radio",

@@ -9,6 +9,7 @@
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
 **Key Capabilities:**
+
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts)
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST)
 - 🔗 **Multi-broadcast fusion** - Combines WWV/WWVH/CHU/BPM with per-station calibration
@@ -62,17 +63,21 @@ sudo systemctl enable timestd-core-recorder timestd-analytics timestd-web-ui
 ### Service Control
 
 **Test Mode (scripts):**
+
 ```bash
 ./scripts/timestd-all.sh -start|-stop|-status    # All services
 ./scripts/timestd-core.sh -start|-stop|-status   # Core recorder only
 ./scripts/timestd-analytics.sh -start|-stop|-status  # Analytics (9 channels)
+./scripts/timestd-fusion.sh -start|-stop|-status     # Fusion service
 ./scripts/timestd-ui.sh -start|-stop|-status     # Web UI only
 ```
 
 **Production Mode (systemd):**
+
 ```bash
 sudo systemctl start|stop|status timestd-core-recorder
 sudo systemctl start|stop|status timestd-analytics
+sudo systemctl start|stop|status timestd-fusion
 sudo systemctl start|stop|status timestd-web-ui
 journalctl -u timestd-core-recorder -f    # View logs
 ```
@@ -90,9 +95,9 @@ journalctl -u timestd-core-recorder -f    # View logs
 
 **Two-phase design** built on a **generic recording infrastructure**:
 
-ka9q-radio (RTP multicast) → Core Recorder → Analytics → Chrony SHM
-                              20kHz Binary   D_clock    System clock
-                              raw_buffer/    phase2/    discipline
+ka9q-radio (RTP multicast) → Core Recorder → Analytics → Fusion Service → Chrony SHM
+                              20kHz Binary   D_clock      Fused Time    System clock
+                              raw_buffer/    phase2/      Validation    discipline
 
 ### ka9q-python Integration (V3.11)
 
@@ -111,6 +116,7 @@ ka9q-radio (radiod) via multicast
 ```
 
 **ka9q-python provides:**
+
 - **RadiodStream** - RTP reception, packet resequencing, gap detection, sample decoding
 - **RadiodControl** - Channel creation, configuration, tune commands
 - **discover_channels()** - Enumerate existing channels from radiod status
@@ -131,6 +137,7 @@ Protocol Adapter (RadiodStream / RTPReceiver)
 ```
 
 **Key Abstractions:**
+
 - **SegmentWriter Protocol** - Apps implement storage format
 - **RecordingSession** - Generic packet flow, resequencing, segmentation
 - **Protocol Adapter** - Abstracts transport (ka9q-python RadiodStream or legacy RTP)
@@ -138,6 +145,7 @@ Protocol Adapter (RadiodStream / RTPReceiver)
 ### 1. Core Recorder (`src/hf_timestd/core/core_recorder_v2.py`)
 
 Rock-solid RTP capture using ka9q-python RadiodStream:
+
 - Uses `RadiodStream` for RTP reception, resequencing, and sample decoding
 - Uses `RadiodControl` for channel creation with anti-hijacking protection
 - Deterministic multicast IP from station_id + instrument_id
@@ -146,6 +154,7 @@ Rock-solid RTP capture using ka9q-python RadiodStream:
 **Anti-hijacking:** Only modifies channels with our multicast destination. Creates new channels at same frequency if others exist (radiod supports multiple clients).
 
 **20 kHz Archive Metadata** (self-contained scientific record):
+
 - **IQ Data:** Complex64 samples, gap-filled with zeros
 - **Timing Reference:** RTP timestamp of first sample, sample rate, SSRC
 - **Time_snap Anchor:** RTP/UTC calibration from WWV/CHU tone detection
@@ -159,6 +168,7 @@ Rock-solid RTP capture using ka9q-python RadiodStream:
 Processes 20 kHz archives to derived products:
 
 **Discrimination Methods** (each writes independent CSV):
+
 - **Timing Tones:** 1000/1200 Hz power ratio (1/min)
 - **Tick Windows:** 5ms coherent/incoherent SNR analysis (6/min)
 - **440 Hz Station ID:** Unambiguous WWV/WWVH identification (2/hour)
@@ -167,6 +177,7 @@ Processes 20 kHz archives to derived products:
 - **Weighted Voting:** Combines all methods for final determination
 
 **Additional Analytics:**
+
 - **Doppler Estimation:** Per-tick frequency shift measurement
 - **Timing Metrics:** Time_snap quality, NTP drift, timing accuracy
 
@@ -191,27 +202,33 @@ Processes 20 kHz archives to derived products:
 ## 🎯 Cross-Channel Coherent Timing
 
 ### Global Station Lock
+
 Because radiod's RTP timestamps are **GPS-disciplined**, all 9 channels share a common timing reference. This enables treating multiple receivers as a **single coherent sensor array**.
 
 ### Cross-Frequency Global Differential Fusion
+
 Fusion performs a cross-frequency physics solve inside `src/hf_timestd/core/multi_broadcast_fusion.py` using `GlobalDifferentialSolver`. When the solution is verified, it is injected as a trusted synthetic measurement (`GLOBAL_DIFF`) so the fusion/Kalman convergence can “snap” to the physics-based constraint.
 
 **Outputs:** `phase2/fusion/fused_d_clock.csv` includes:
+
 - `global_solve_verified`
 - `global_solve_consistency_ms`
 - `global_solve_n_obs`
 
 **Logs:** look for:
+
 - `Global solve context: target_minute=... mix=[...] dropped_channels=[...]`
 - `Global solve: cross-agency triangulation active (NIST+NRC) ...`
 - `Injecting GLOBAL_DIFF: ... force_weight=... kalman_floor_ms=...`
 
 **Implementation:**
+
 - **Shared Filesystem IPC:** Uses `/dev/shm` (RAM disk) to share "Anchor" detections between isolated channel processes in real-time.
 - **Unambiguous Anchors:** Strong stations (e.g., CHU, WWV 20 MHz) publish their precise timing.
 - **Ambiguity Resolution:** Ambiguous stations (e.g., WWV vs WWVH on 10 MHz) use the Anchor to resolve the 15ms station separation.
 
 **Three-Phase Detection:**
+
 1. **Anchor Discovery** - Find high-confidence locks (SNR > 15 dB) across all channels
 2. **Guided Search** - Use anchor timing to narrow weak-channel search from ±500 ms to **±6.5 ms** (Dispersion + Safety Margin)
    - *Result: 99.4% noise rejection and guaranteed station lock.*
@@ -241,6 +258,7 @@ T_emit = T_arrival - (τ_geo + τ_iono + τ_mode)
 | 2-hop F2 | ~5.5 ms | ±0.33 ms |
 
 **Accuracy Progression:**
+
 - Raw arrival time: ±10 ms
 - \+ Mode identification: ±2 ms
 - \+ Cross-channel consensus: ±1 ms
@@ -261,9 +279,9 @@ ADC clock drift compensation with **sub-sample precision**:
 
 Distinguishes WWV, WWVH, and BPM on shared frequencies (2.5, 5, 10, 15 MHz) using a **Hybrid Intelligence** approach:
 
-1.  **Probabilistic Classifier (Primary):** Logistic Regression model trained on ground truth features. Outputs $P(WWV)$ vs $P(WWVH)$.
-    -   Handles mixed/balanced signals ($P \approx 0.5$) by triggering component decomposition to measure BOTH signals.
-2.  **Heuristic Voting (Feature Extraction):** 12 independent signal analysis methods provide the feature vectors for the AI model:
+1. **Probabilistic Classifier (Primary):** Logistic Regression model trained on ground truth features. Outputs $P(WWV)$ vs $P(WWVH)$.
+    - Handles mixed/balanced signals ($P \approx 0.5$) by triggering component decomposition to measure BOTH signals.
+2. **Heuristic Voting (Feature Extraction):** 12 independent signal analysis methods provide the feature vectors for the AI model:
 
 ### Voting Methods
 
@@ -297,6 +315,7 @@ The WWV/WWVH scientific test signal is fully exploited as a **channel sounding i
 ### Inter-Method Cross-Validation (12 checks)
 
 Beyond voting, independent measurements validate each other:
+
 - **Power vs Timing** - BCD delay should match power ratio direction
 - **Geographic Delay** - Measured delay vs predicted from receiver location
 - **Doppler-Power Agreement** - Δf_D magnitude correlates with power
@@ -307,6 +326,7 @@ Beyond voting, independent measurements validate each other:
 - **Spreading Factor** - L = τ_D × f_D validates channel physics
 
 ### Why 12 Methods?
+
 - **Redundancy:** Multiple independent measurements validate each other
 - **Adaptability:** Different methods excel under different propagation conditions  
 - **Temporal Coverage:** From hourly calibration to sub-second dynamics
@@ -328,21 +348,23 @@ Beyond voting, independent measurements validate each other:
 ## Documentation
 
 **Essential:**
+
 - [INSTALLATION.md](INSTALLATION.md) - Detailed setup guide
 - [docs/PRODUCTION.md](docs/PRODUCTION.md) - Production deployment (systemd, 24/7, uploads)
 - [docs/THREE_PHASE_PIPELINE.md](docs/THREE_PHASE_PIPELINE.md) - System architecture
 - [DIRECTORY_STRUCTURE.md](DIRECTORY_STRUCTURE.md) - Data paths and file formats
 
 **Timing & Metrology:**
+
 - [docs/TIMING_METROLOGY.md](docs/TIMING_METROLOGY.md) - Technical reference for metrologists
 - [docs/TIMING_METHODOLOGY.md](docs/TIMING_METHODOLOGY.md) - D_clock measurement and fusion
 - [docs/DISCRIMINATION_SYSTEM.md](docs/DISCRIMINATION_SYSTEM.md) - WWV/WWVH discrimination
 
 **Reference:**
+
 - [docs/](docs/) - Feature documentation and guides
 - [docs/API_REFERENCE.md](docs/API_REFERENCE.md) - REST API documentation
 - [CANONICAL_CONTRACTS.md](CANONICAL_CONTRACTS.md) - API standards
-
 
 ## Requirements
 
@@ -375,6 +397,7 @@ enabled = false  # Set true after PSWS credentials configured
 ## Workflow
 
 **Setup:**
+
 1. Install ka9q-radio
 2. Run `./scripts/install.sh --mode test`
 3. Edit `config/timestd-config.toml` with station details
@@ -384,7 +407,6 @@ enabled = false  # Set true after PSWS credentials configured
 
 **Daily Operation:** systemd services run 24/7, monitor web UI for 🟢 status, daily 00:30 UTC upload  
 **Maintenance:** Check weekly via `journalctl -u hf-timestd`, verify uploads, review logs
-
 
 ## Troubleshooting
 
@@ -400,6 +422,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 **Production Ready** - Core functionality complete and tested. Daily recording and PSWS upload operational at AC0G since November 2025.
 
 ### v3.13.0 (Dec 19, 2025)
+
 - **Unified Naming Convention** - Transitioned to `Station_kHz` (e.g., `WWV_10000`) across backend, frontend, and storage.
 - **Carrier Doppler Visualization** - High-precision carrier doppler (0-1 Hz) replaces legacy tone doppler in Web UI.
 - **Analytics Backfill** - `Phase2AnalyticsService` now automatically recovers historical data from the raw archive on startup.
@@ -407,12 +430,14 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 - **Web UI Stability** - Fixed critical `TypeError` and `ReferenceError` bugs in the monitoring server.
 
 ### v3.12.0 (Dec 19, 2025)
+
 - **Active Probabilistic Discrimination** - Logistic Regression Model promoted to primary arbiter for WWV/WWVH/BPM.
 - **BPM Integration** - Full support for BPM (Xi'an, China) on 5/10/15 MHz, including UT1 tick filtering and geometric path weighting.
 - **Robust Visualization** - Web UI now uses Theil-Sen Estimator for Doppler plots (breakdown point 29% vs 0% for Least Squares).
 - **Hybrid Engine** - Heuristic methods now serve as feature extractors for the ML classification layer.
 
 ### v3.11.0 (Dec 13, 2025)
+
 - **ka9q-python RadiodStream Integration** - Complete refactoring of RTP handling
   - Replaced custom `RTPReceiver` and `PacketResequencer` with `RadiodStream`
   - Replaced custom `ChannelManager` wrapper with direct `RadiodControl` usage
@@ -424,6 +449,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 - **New Files:** `core_recorder_v2.py`, `stream_recorder_v2.py`
 
 ### v3.10.0 (Dec 6, 2025)
+
 - **Timing Metrology Documentation** - Comprehensive technical reference for metrologists
   - [docs/TIMING_METROLOGY.md](docs/TIMING_METROLOGY.md) - Full uncertainty analysis
   - Discrimination rationale, fusion math, validation approach
@@ -440,6 +466,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
   - Station Constellation applies calibration offsets
 
 ### v3.9.0 (Dec 5, 2025)
+
 - **Multi-Broadcast Fusion** - Combines 13 broadcasts (WWV/WWVH/CHU) to converge on UTC(NIST)
   - Auto-calibration learns per-station offsets via EMA
   - Fused D_clock achieves ±0.5 ms accuracy (vs ±5-10 ms single-broadcast)
@@ -460,6 +487,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
   - Station distances → summary.html
 
 ### v3.8.0 (Dec 5, 2025)
+
 - **Clock Convergence Model** - "Set, Monitor, Intervention" architecture for GPSDO timing
   - Converges to locked D_clock estimate, then monitors for anomalies
   - Welford's algorithm for running mean/variance
@@ -470,11 +498,13 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 - **Phase 2 Dashboard** - New visualization page for reception matrix, D_clock consensus
 
 ### v3.7.0 (Dec 4, 2025)
+
 - **Three-Phase Pipeline** - Raw archive → Analytics → Products architecture
 - **Advanced Timing Visualizations** - Kalman funnel, constellation radar, mode ridge
 - **Audio Streaming** - Browser-based WWV/CHU audio via ka9q-python
 
 ### v2.2.0 (Dec 2, 2025)
+
 - **Unified Installer** - `scripts/install.sh --mode test|production`
 - **Systemd Services** - Production-ready with auto-restart, daily uploads
 - **FHS-Compliant Paths** - `/var/lib/hf-timestd/`, `/var/log/hf-timestd/`, `/etc/hf-timestd/`
@@ -483,14 +513,15 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 - **Config-Driven Sample Rate** - 20 kHz default, fully configurable
 
 ### v2.0.0 (Dec 1, 2025)
+
 - **Package Restructure** - Clean separation into `core/`, `stream/`, `grape/`, `wspr/` packages
 - **ka9q-python 3.1.0** - SSRC-free API integration
 - **Stream API** - `subscribe_stream()` hides SSRC from applications
 - **Generic Recording Infrastructure** - Protocol-based design for multi-app support
 - **Standard Time Signal Generator** - High-fidelity synthesis of WWV/WWVH/CHU/BPM signals (ticks, BCD, AFSK, test modulations) for loopback verification.
 
-
 ### Previous (Nov 28-30, 2025)
+
 - **12 Voting Methods** - BCD, timing tones, ticks, 440/500/600 Hz, Doppler, test signal
 - **12 Cross-Validation Checks** - FSS geographic, noise transient, spreading factor
 - **Test Signal Channel Sounding** - FSS, delay spread, ToA from :08/:44 minutes

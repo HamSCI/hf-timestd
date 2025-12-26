@@ -160,44 +160,19 @@ start)
     COUNT=$(pgrep -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null | wc -l)
     echo "   ✅ Started $COUNT/9 Phase 2 analytics channels"
     
-    # Start Multi-Broadcast Fusion Service
-    # Combines all 17 broadcasts (6 WWV + 4 WWVH + 3 CHU + 4 BPM) for UTC(NIST) convergence
-    pkill -f "hf_timestd.core.multi_broadcast_fusion" 2>/dev/null
-    sleep 0.5
-    nohup $PYTHON -m hf_timestd.core.multi_broadcast_fusion \
-      --data-root "$DATA_ROOT" \
-      --interval 60.0 \
-      --log-level INFO \
-      --enable-chrony \
-      > "$LOG_DIR/phase2-fusion.log" 2>&1 &
-    echo "   🔀 Started Multi-Broadcast Fusion (17 broadcasts → UTC(NIST) → Chrony SHM)"
-    
     echo "   📄 Logs: $LOG_DIR/phase2-*.log"
     echo "   📊 Output: $DATA_ROOT/phase2/{CHANNEL}/clock_offset/"
-    echo "   🎯 Fusion: $DATA_ROOT/phase2/fusion/fused_d_clock.csv"
     ;;
 
 stop)
     echo "🛑 Stopping Phase 2 Analytics Services..."
-    
-    # Stop fusion service first
-    pkill -f "hf_timestd.core.multi_broadcast_fusion" 2>/dev/null
-    
-    COUNT=$(pgrep -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null | wc -l)
-    if [ "$COUNT" -eq 0 ]; then
-        echo "   ℹ️  Not running"
-        exit 0
-    fi
-    
-    pkill -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null
-    sleep 2
     
     REMAINING=$(pgrep -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null | wc -l)
     if [ "$REMAINING" -gt 0 ]; then
         pkill -9 -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null
     fi
     
-    echo "   ✅ Stopped $COUNT Phase 2 services + fusion"
+    echo "   ✅ Stopped $COUNT Phase 2 services"
     ;;
 
 restart)

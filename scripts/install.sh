@@ -460,6 +460,29 @@ SyslogIdentifier=timestd-analytics
 WantedBy=multi-user.target
 EOF
 
+    # Fusion Service (Phase 3: Multi-Broadcast Fusion)
+    sudo tee "$SYSTEMD_DIR/timestd-fusion.service" > /dev/null << EOF
+[Unit]
+Description=HF-Timestd Multi-Broadcast Fusion (Chrony Feed)
+After=timestd-analytics.service
+Requires=timestd-analytics.service
+
+[Service]
+Type=simple
+User=\$INSTALL_USER
+Group=\$INSTALL_USER
+# Run as the installed module from the venv
+ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.multi_broadcast_fusion --data-root $DATA_ROOT --interval 60.0 --enable-chrony --log-level INFO
+Restart=always
+RestartSec=10
+# Standard output logging
+StandardOutput=append:$LOG_DIR/fusion.log
+StandardError=append:$LOG_DIR/fusion.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     # Web UI Service
     sudo tee "$SYSTEMD_DIR/timestd-web-ui.service" > /dev/null << EOF
 [Unit]
@@ -506,6 +529,7 @@ EOF
     log_info "  Installed systemd services:"
     log_info "    - timestd-core-recorder.service  (Phase 1: RTP → DRF, continuous)"
     log_info "    - timestd-analytics.service      (Phase 2: Timing analysis, continuous)"
+    log_info "    - timestd-fusion.service         (Phase 3: Fusion & Chrony feed)"
     log_info "    - timestd-web-ui.service         (Web monitoring UI, continuous)"
     log_info "    - timestd-web-ui.service         (Web monitoring UI, continuous)"
     
@@ -513,6 +537,7 @@ EOF
     log_step "Enabling services for auto-start..."
     sudo systemctl enable timestd-core-recorder.service
     sudo systemctl enable timestd-analytics.service
+    sudo systemctl enable timestd-fusion.service
     sudo systemctl enable timestd-web-ui.service
 
     
@@ -553,13 +578,14 @@ if [[ "$MODE" == "production" ]]; then
     echo "3. Start continuous services:"
     echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → DRF"
     echo "   sudo systemctl start timestd-analytics       # Phase 2: Timing analysis"
+    echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion service"
     echo "   sudo systemctl start timestd-web-ui          # Web monitoring UI"
     echo ""
     echo "4. Start periodic timers:"
 
     echo ""
     echo "5. Check status:"
-    echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-web-ui"
+    echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui"
     echo "   sudo systemctl list-timers grape-*"
     echo "   journalctl -u timestd-core-recorder -f"
     echo ""

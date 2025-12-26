@@ -67,6 +67,9 @@ start)
     echo ""
     echo "🌐 Web-UI (monitoring dashboard)"
     "$SCRIPT_DIR/timestd-ui.sh" start "$CONFIG"
+    echo ""
+    echo "🔀 Phase 3: Fusion Service (UTC(NIST) convergence)"
+    "$SCRIPT_DIR/timestd-fusion.sh" start "$CONFIG"
     
     echo ""
     echo "================================================================"
@@ -79,6 +82,7 @@ stop)
     echo "================================================================"
     
     "$SCRIPT_DIR/timestd-ui.sh" stop
+    "$SCRIPT_DIR/timestd-fusion.sh" stop
     "$SCRIPT_DIR/timestd-analytics.sh" stop
     "$SCRIPT_DIR/timestd-core.sh" stop
     
@@ -113,6 +117,14 @@ status)
     else
         echo "⭕ Phase 2 (Analytics): STOPPED"
     fi
+
+    # Phase 3: Fusion
+    FUSION_COUNT=$(pgrep -f "hf_timestd.core.multi_broadcast_fusion" 2>/dev/null | wc -l)
+    if [ "$FUSION_COUNT" -gt 0 ]; then
+        echo "✅ Phase 3 (Fusion):    RUNNING"
+    else
+        echo "⭕ Phase 3 (Fusion):    STOPPED"
+    fi
     
     # Web-UI
     WEBUI_COUNT=$(pgrep -f "monitoring-server" 2>/dev/null | wc -l)
@@ -127,6 +139,7 @@ status)
     echo "   $DATA_ROOT/"
     echo "   ├── raw_buffer/      Phase 1: 20 kHz binary IQ"
     echo "   ├── phase2/          Phase 2: Timing analysis, D_clock"
+    echo "   │   └── fusion/      Phase 3: Fused UTC(NIST) estimate"
     echo "   └── logs/            Service logs"
     
     # Show disk usage if data exists
