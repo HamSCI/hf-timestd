@@ -750,11 +750,11 @@ class MultiBroadcastFusion:
                 )
                 
                 # Read measurements with quality filtering
-                # Accept GOOD and MARGINAL (exclude BAD and MISSING)
+                # Note: Not filtering by quality_flag to avoid excluding measurements
+                # where gpsdo_locked=False causes flag='BAD' despite valid detections
                 hdf5_measurements = reader.read_time_range(
                     start=start_iso,
-                    end=end_iso,
-                    quality_flags=['GOOD', 'MARGINAL']
+                    end=end_iso
                 )
                 
                 logger.debug(
@@ -1198,11 +1198,12 @@ class MultiBroadcastFusion:
                 
                 # Read measurements with quality filtering
                 # Accept grades A, B, C (exclude D)
+                # Note: Not filtering by quality_flag to avoid excluding measurements
+                # where gpsdo_locked=False causes flag='BAD' despite valid grade
                 hdf5_measurements = reader.read_time_range(
                     start=start_iso,
                     end=end_iso,
                     min_quality_grade='C',  # Accept C and better (A, B, C)
-                    quality_flags=['GOOD', 'MARGINAL'],  # Exclude BAD and MISSING
                     min_confidence=0.01  # Minimum confidence threshold
                 )
                 

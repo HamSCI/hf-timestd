@@ -20,6 +20,10 @@ setup(
     url="https://github.com/mijahauan/hf-timestd",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
+    package_data={
+        "hf_timestd.schemas": ["*.json"],
+    },
+    include_package_data=True,
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Science/Research",

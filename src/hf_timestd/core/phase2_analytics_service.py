@@ -345,6 +345,21 @@ class Phase2AnalyticsService:
             self.hdf5_l2_writer = None
             self.enable_hdf5_writes = False
         
+        # Initialize Timing Calibrator (shared across all channel instances)
+        # This manages the bootstrap→calibrated→measurement mode progression
+        from .timing_calibrator import TimingCalibrator
+        
+        timing_calibrator_state_file = self.archive_dir.parent.parent / 'state' / 'timing_calibration.json'
+        self.timing_calibrator = TimingCalibrator(
+            data_root=self.archive_dir.parent.parent,  # /var/lib/timestd
+            sample_rate=sample_rate,
+            state_file=timing_calibrator_state_file
+        )
+        logger.info(
+            f"Initialized timing calibrator (phase={self.timing_calibrator.phase.value}, "
+            f"state_file={timing_calibrator_state_file})"
+        )
+        
         # Initialize Phase 2 engine
         from .phase2_temporal_engine import Phase2TemporalEngine
         
@@ -366,6 +381,20 @@ class Phase2AnalyticsService:
             precise_lat=precise_lat,
             precise_lon=precise_lon
         )
+        
+        # Wire up timing calibrator callbacks to engine
+        # This enables bootstrap→calibrated→measurement mode progression
+        def get_rtp_offset(channel_name: str) -> Optional[int]:
+            """Get calibrated RTP offset for minute boundary."""
+            if channel_name in self.timing_calibrator.rtp_calibration:
+                return self.timing_calibrator.rtp_calibration[channel_name].rtp_offset_samples
+            # Check for global RTP offset (shared across all channels from same GPSDO)
+            return self.timing_calibrator.global_rtp_offset
+        
+        self.engine.rtp_calibration_callback = get_rtp_offset
+        self.engine.station_predictor = self.timing_calibrator.predict_station
+        
+        logger.info("Wired timing calibrator callbacks to Phase2TemporalEngine")
         
         # Initialize Clock Convergence Model
         # "Set, Monitor, Intervention" architecture for GPSDO-disciplined timing
@@ -543,7 +572,13 @@ class Phase2AnalyticsService:
                     # Create ISO GUM uncertainty budget
                     # Use default values scaled by SNR and convergence state
                     snr_db = self.last_carrier_snr_db or 10.0
-                    gpsdo_locked = convergence_result.is_locked
+                    
+                    # GPSDO lock status: Assume locked since we have hardware GPSDO
+                    # The convergence model's is_locked represents statistical convergence
+                    # (requires 30 samples), not actual GPSDO hardware lock.
+                    # A hardware GPSDO is GPS-disciplined and maintains lock to satellites.
+                    gpsdo_locked = True
+                    
                     discrimination_conf = solution.confidence if solution else 0.5
                     
                     budget = ISOGUMCalculator.create_default_budget(
@@ -1281,8 +1316,8 @@ class Phase2AnalyticsService:
                     sol.n_hops,
                     round(sol.layer_height_km, 1),
                     round(getattr(sol, 'elevation_angle_deg', 0.0), 2),
-                    round(sol.t_propagation_ms, 3),
-                    round(sol.d_clock_ms, 3),  # This is the UTC offset
+                    round(sol.t_propagation_ms if sol.t_propagation_ms is not None else 0.0, 3),
+                    round(sol.d_clock_ms if sol.d_clock_ms is not None else 0.0, 3),  # This is the UTC offset
                     1 if sol.utc_verified else 0,
                     round(sol.confidence, 3),
                     round(getattr(sol, 'mode_separation_ms', 0.0), 3),
@@ -1943,6 +1978,52 @@ class Phase2AnalyticsService:
                     f"D_clock={primary_result.d_clock_ms:+.2f}ms, "
                     f"uncertainty={primary_unc:.1f}ms"
                 )
+                
+                # Update timing calibrator from successful detections
+                # This enables bootstrap→calibrated→measurement mode progression
+                for res in results:
+                    solution = res.solution if hasattr(res, 'solution') else None
+                    time_snap = res.time_snap if hasattr(res, 'time_snap') else None
+                    
+                    if solution and time_snap and solution.confidence > 0.1:
+                        # Extract detection parameters
+                        station = solution.station
+                        propagation_delay_ms = solution.t_propagation_ms if solution.t_propagation_ms else 0.0
+                        d_clock_ms = res.d_clock_ms
+                        
+                        # Get SNR from time_snap (station-specific)
+                        snr_db = 0.0
+                        if station == 'WWV' and time_snap.wwv_snr_db is not None:
+                            snr_db = time_snap.wwv_snr_db
+                        elif station == 'WWVH' and time_snap.wwvh_snr_db is not None:
+                            snr_db = time_snap.wwvh_snr_db
+                        elif station == 'CHU' and time_snap.chu_snr_db is not None:
+                            snr_db = time_snap.chu_snr_db
+                        
+                        # Update calibrator
+                        try:
+                            self.timing_calibrator.update_from_detection(
+                                station=station,
+                                frequency_mhz=self.frequency_mhz,
+                                channel_name=self.channel_name,
+                                d_clock_ms=d_clock_ms,
+                                propagation_delay_ms=propagation_delay_ms,
+                                snr_db=snr_db,
+                                confidence=solution.confidence,
+                                rtp_timestamp=rtp_timestamp,
+                                minute_boundary=minute_boundary
+                            )
+                            # Format values, handling None during bootstrap
+                            prop_str = f"{propagation_delay_ms:.1f}ms" if propagation_delay_ms is not None else "N/A"
+                            snr_str = f"{snr_db:.1f}dB" if snr_db is not None else "N/A"
+                            
+                            logger.debug(
+                                f"Updated timing calibrator: {station} @ {self.frequency_mhz:.2f}MHz, "
+                                f"prop_delay={prop_str}, SNR={snr_str}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to update timing calibrator: {e}")
+
             else:
                 snr_str = f"{self.last_carrier_snr_db:.1f}" if self.last_carrier_snr_db is not None else "N/A"
                 logger.debug(

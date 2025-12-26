@@ -73,7 +73,7 @@ from .wwv_bcd_encoder import WWVBCDEncoder
 from .quality_metrics import QualityMetricsTracker, MinuteQualityMetrics
 from .timing_metrics_writer import TimingMetricsWriter
 from .solar_zenith_calculator import calculate_solar_zenith_for_day
-from .core_recorder import CoreRecorder
+# from .core_recorder import CoreRecorder  # DEPRECATED - file renamed to core_recorder_v2.py
 
 # Phase 1 raw_buffer (binary archive)
 from .binary_archive_writer import (

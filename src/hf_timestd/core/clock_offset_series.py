@@ -710,8 +710,9 @@ class ClockOffsetEngine:
         
         # Compute grade string for logging
         grade_str = 'A' if unc < 1.0 else 'B' if unc < 3.0 else 'C' if unc < 10.0 else 'D'
+        d_clock_str = f"{solution.d_clock_ms:+.2f}ms" if solution.d_clock_ms is not None else "N/A"
         logger.info(
-            f"D_clock: {solution.d_clock_ms:+.2f}ms (station={solution.station}, "
+            f"D_clock: {d_clock_str} (station={solution.station}, "
             f"mode={solution.propagation_mode}, confidence={solution.confidence:.2f}, "
             f"uncertainty={unc:.1f}ms, grade={grade_str})"
         )

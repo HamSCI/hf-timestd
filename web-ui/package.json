@@ -21,6 +21,7 @@
     "csv-parse": "^6.1.0",
     "express": "^4.21.2",
     "express-rate-limit": "^8.2.1",
+    "h5wasm": "^0.8.10",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "toml": "^3.0.0",

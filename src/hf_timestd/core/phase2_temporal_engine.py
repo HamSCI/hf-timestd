@@ -1637,12 +1637,31 @@ class Phase2TemporalEngine:
                     f"(diff={estimated_arrival_time - nearest_minute:.3f}s)"
                 )
             else:
-                # Fallback to system time if no signal detected
-                # This ensures we don't crash, even if timing will be imprecise (WALL_CLOCK)
-                minute_boundary = (int(system_time) // 60) * 60
-                samples_to_boundary = int((minute_boundary - system_time) * self.sample_rate)
+                # Fallback: No signal detected and no calibration
+                # CRITICAL: Use RTP timestamp modulo, NOT wall clock time
+                # The RTP timestamp is GPSDO-governed and is the source of truth
+                # 
+                # Estimate where the minute boundary is based on RTP offset
+                # Assume the minute boundary is near the start of the RTP minute cycle
+                samples_per_minute = self.sample_rate * 60  # 1,200,000 at 20 kHz
+                current_offset = rtp_timestamp % samples_per_minute
+                
+                # Estimate samples to next minute boundary
+                # If we're in the first half of the minute, boundary is ahead
+                # If we're in the second half, boundary is behind (use next one)
+                if current_offset < samples_per_minute // 2:
+                    # We're in first half - boundary is ahead
+                    samples_to_boundary = samples_per_minute - current_offset
+                else:
+                    # We're in second half - use next boundary
+                    samples_to_boundary = (samples_per_minute * 2) - current_offset
+                
                 expected_second_rtp = rtp_timestamp + samples_to_boundary
-                logger.info(f"Bootstrap: No signal detected, defaulting to system time boundary")
+                logger.warning(
+                    f"Bootstrap: No signal detected, estimating minute boundary from RTP modulo "
+                    f"(offset={current_offset}, samples_to_boundary={samples_to_boundary})"
+                )
+
             
         # Fallback to generic timing error if specific not available (e.g. single station anchor)
         if t_arrival_ms is None:
@@ -1666,11 +1685,13 @@ class Phase2TemporalEngine:
                 expected_second_rtp=expected_second_rtp
             )
             
-            # Extract D_clock
+            # Extract D_clock (handle None from _no_solution during bootstrap)
             if solver_result.utc_nist_offset_ms is not None:
                 d_clock_ms = solver_result.utc_nist_offset_ms
-            else:
+            elif solver_result.emission_offset_ms is not None:
                 d_clock_ms = solver_result.emission_offset_ms
+            else:
+                d_clock_ms = 0.0  # Fallback for bootstrap/_no_solution
             
             # Convert mode candidates to dict format for serialization
             mode_candidates = [
@@ -1739,9 +1760,10 @@ class Phase2TemporalEngine:
                             solution.confidence = min(1.0, solution.confidence + 0.15)
                         elif diff_result.confidence >= 0.3 and dclock_delta_ms >= 5.0:
                             solution.confidence = max(0.05, solution.confidence - 0.2)
+                            d_clock_str = f"{solution.d_clock_ms:+.2f}ms" if solution.d_clock_ms is not None else "N/A"
                             logger.warning(
                                 f"Differential validator disagrees with D_clock: "
-                                f"single={solution.d_clock_ms:+.2f}ms vs diff={diff_result.clock_error_ms:+.2f}ms "
+                                f"single={d_clock_str} vs diff={diff_result.clock_error_ms:+.2f}ms "
                                 f"(Δ={dclock_delta_ms:.2f}ms, verified={diff_result.clock_error_verified})"
                             )
 
@@ -1786,9 +1808,10 @@ class Phase2TemporalEngine:
                             solution.confidence = min(1.0, solution.confidence + 0.10)
                         elif global_result.confidence >= 0.3 and global_delta_ms >= 5.0:
                             solution.confidence = max(0.05, solution.confidence - 0.15)
+                            d_clock_str = f"{solution.d_clock_ms:+.2f}ms" if solution.d_clock_ms is not None else "N/A"
                             logger.warning(
                                 f"Global differential validator disagrees with D_clock: "
-                                f"single={solution.d_clock_ms:+.2f}ms vs global={global_result.clock_error_ms:+.2f}ms "
+                                f"single={d_clock_str} vs global={global_result.clock_error_ms:+.2f}ms "
                                 f"(Δ={global_delta_ms:.2f}ms, verified={global_result.verified})"
                             )
 
@@ -2025,8 +2048,9 @@ class Phase2TemporalEngine:
                         forced_station=station
                     )
                     
-                    # Calculate final UTC time
-                    utc_time = system_time - (solution.d_clock_ms / 1000.0)
+                    # Calculate final UTC time (handle None d_clock_ms during bootstrap)
+                    d_clock_ms = solution.d_clock_ms if solution.d_clock_ms is not None else 0.0
+                    utc_time = system_time - (d_clock_ms / 1000.0)
                     
                     # Estimate uncertainty (Issue 6.2 fix: replaced arbitrary grades)
                     uncertainty_ms, confidence = self._estimate_uncertainty(solution, channel)
@@ -2039,7 +2063,7 @@ class Phase2TemporalEngine:
                         time_snap=time_snap,
                         channel=channel,
                         solution=solution,
-                        d_clock_ms=solution.d_clock_ms,
+                        d_clock_ms=d_clock_ms,  # Use fallback value if original was None
                         utc_time=utc_time,
                         uncertainty_ms=uncertainty_ms,
                         confidence=confidence,
@@ -2053,8 +2077,11 @@ class Phase2TemporalEngine:
                     with self._lock:
                         self.last_result = result
 
+                    # Format d_clock_ms, handling None values during bootstrap
+                    d_clock_str = f"{solution.d_clock_ms:+.2f}ms" if solution.d_clock_ms is not None else "N/A"
+                    
                     logger.info(
-                        f"Phase 2 processing complete for {station}: D_clock={solution.d_clock_ms:+.2f}ms, "
+                        f"Phase 2 processing complete for {station}: D_clock={d_clock_str}, "
                         f"uncertainty={uncertainty_ms:.1f}ms"
                     )
                     
