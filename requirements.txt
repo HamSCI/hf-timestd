@@ -47,3 +47,9 @@ sysv_ipc>=1.1.0
 
 # HDF5 I/O for schema-validated data products
 h5py>=3.8.0
+
+# Web monitoring server (FastAPI)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+aiofiles>=23.2.0

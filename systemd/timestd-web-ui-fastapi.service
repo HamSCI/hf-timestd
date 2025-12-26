@@ -1,0 +1,23 @@
+[Unit]
+Description=HF-TimeStd Web UI (FastAPI Monitoring Server)
+After=network.target timestd-analytics.service
+
+[Service]
+Type=simple
+User=timestd
+Group=timestd
+WorkingDirectory=/opt/hf-timestd/web-ui
+ExecStart=/opt/hf-timestd/web-ui/start_server.sh
+Restart=always
+RestartSec=10
+
+# Environment
+Environment="PYTHONUNBUFFERED=1"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-web-ui
+
+[Install]
+WantedBy=multi-user.target
