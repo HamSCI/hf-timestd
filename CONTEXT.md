@@ -1,319 +1,167 @@
-# HF Time Standard - System Context
+# HF-TimeStd Project Context
 
-**Last Updated:** 2025-12-25  
-**Current Version:** v3.2.0 (HDF5 Complete)
+## Current Status (2025-12-26)
 
----
+### CRITICAL ISSUE: Chrony Fusion Not Updating
 
-## Recent Accomplishments (2025-12-25)
+**The multi-broadcast fusion product to Chrony SHM has not updated in over 23 hours.**
 
-### ✅ HDF5 Data Consumer Migration - COMPLETE
+This is the **primary objective** of the hf-timestd system - to provide UTC(NIST)-aligned time to the system clock via Chrony. This must be restored immediately.
 
-**Science Aggregator HDF5 Integration:**
+### What's Working
 
-- ✅ L2 timing measurements reader with quality filtering
-- ✅ L1A tone detections reader with quality filtering
-- ✅ HDF5 SWMR mode for concurrent read/write
-- ✅ Per-channel CSV fallback for resilience
-- ✅ Deployed to production and verified working
+- ✅ Core recorder: Running, receiving RTP streams from 9 channels
+- ✅ Analytics service: Running Phase 2 analytics
+- ✅ HDF5 data products: L1A, L1B, L2 files being written with quality metadata
+- ✅ Web UI: FastAPI monitoring server deployed with native HDF5 support
 
-**Metrological Provenance Chain Established:**
+### What's Broken
 
-```text
-L0 (RTP timestamps) → L1A (tone timing) → L2 (calibrated) → L3B (fused UTC)
-         ↓ HDF5           ↓ HDF5            ↓ HDF5           ↓ Fusion
+- ❌ **Chrony SHM integration**: Fusion product not updating (last update >23h ago)
+- ❌ System time discipline: Not receiving UTC(NIST) corrections
+
+## System Architecture
+
+### Data Flow
+
+```
+ka9q-radio (radiod) 
+  → RTP multicast streams
+  → core-recorder (9 channels: WWV, WWVH, CHU at multiple frequencies)
+  → Phase 1 analytics (tone detection, BCD timecode)
+  → Phase 2 analytics (timing measurements, multi-broadcast fusion)
+  → Chrony SHM (SHOULD update system clock)
 ```
 
-**Production Status:**
+### Key Services
 
-- ✅ Analytics service: Writing L1A, L1B, L2 to HDF5 with SWMR
-- ✅ Fusion service: Reading L1A and L2 from HDF5 with quality filtering
-- ✅ All 9 channels operational without file locking errors
-- ✅ UTC(NIST) timing data flowing from HDF5 sources
+1. **radiod**: ka9q-radio software-defined radio
+2. **timestd-core-recorder**: Receives RTP, writes raw data, runs Phase 1
+3. **timestd-analytics**: Phase 2 analytics including multi-broadcast fusion
+4. **timestd-web-ui**: FastAPI monitoring server (just migrated from Node.js)
 
-**Quality Filtering:**
+### Critical Files
 
-- L2: Grades A/B/C, flags GOOD/MARGINAL, min confidence 0.01
-- L1A: Flags GOOD/MARGINAL (excludes BAD/MISSING)
-- BPM UT1 minute filtering maintained
+- **Fusion output**: `/var/lib/timestd/phase2/science/timing/fused_clock.csv`
+- **Chrony SHM**: `/dev/shm/SHM2` (should be updated by fusion component)
+- **Config**: `/etc/hf-timestd/timestd-config.toml`
+- **Logs**: `journalctl -u timestd-analytics`
 
-**Files Modified:**
+## Recent Changes (This Session)
 
-- `src/hf_timestd/core/multi_broadcast_fusion.py` - HDF5 readers for L1A and L2
-- `src/hf_timestd/core/phase2_analytics_service.py` - HDF5 writer for L1A tones
-- `src/hf_timestd/io/hdf5_writer.py` - SWMR mode enabled
-- `src/hf_timestd/io/hdf5_reader.py` - SWMR mode enabled
-- `src/hf_timestd/schemas/l1_tone_detections_v1.json` - New schema with provenance
+### Completed: FastAPI Migration
 
-## Goals for Next Session
+- Migrated monitoring server from Node.js to Python/FastAPI
+- Native HDF5 support with h5py (SWMR mode)
+- Clean dashboard with Jinja2 templates
+- All API endpoints working
+- Deployed to production
 
-### 🎯 PRIMARY: Monitoring Server & Web UI HDF5 Integration
+**Files Created:**
 
-**Objective:** Enable monitoring server and web UI to consume HDF5 data with quality metadata for enhanced visualization and user experience.
+- `web-ui/monitoring_server.py` - FastAPI server
+- `web-ui/utils/hdf5_reader.py` - HDF5 reader with h5py
+- `web-ui/templates/dashboard.html` - Clean dashboard
+- `systemd/timestd-web-ui-fastapi.service` - Service file
 
-#### Phase 1: Monitoring Server (`monitoring-server-v3.js`)
+## Next Session Objectives
 
-**Current State:**
+### PRIMARY: Fix Chrony Fusion Integration
 
-- Serves CSV data to web UI via REST API
-- 12+ endpoints reading various CSV files
-- No quality metadata in responses
+**Investigation Steps:**
 
-**Goals:**
+1. Check if fusion CSV is being updated:
 
-1. **Add HDF5 Reader for Node.js**
-   - Evaluate libraries: `h5wasm` (WebAssembly, no native deps) vs `hdf5.node` (native bindings)
-   - Recommended: `h5wasm` for easier deployment
-   - Create utility module: `web-ui/utils/hdf5-reader.js`
-
-2. **Update API Endpoints (Priority Order)**
-   - **HIGH:** `/api/channel/:channel/clock-offset` (L2 timing measurements)
-     - Add quality_grade, quality_flag, uncertainty_ms to response
-     - Try HDF5 first, fall back to CSV
-   - **MEDIUM:** `/api/channel/:channel/carrier-power` (L1A channel observables)
-     - Add SNR, Doppler, coherence time, phase variance
-     - Include quality metadata
-   - **LOW:** Other endpoints as needed
-
-3. **Response Format Enhancement**
-
-   ```json
-   {
-     "timestamp": "2025-12-25T12:00:00Z",
-     "value": -2.14,
-     "uncertainty": 1.2,
-     "quality_grade": "A",
-     "quality_flag": "GOOD",
-     "confidence": 0.95,
-     "station": "WWV",
-     "metadata": {
-       "processing_version": "3.2.0",
-       "traceability": "UTC(NIST) via WWVB"
-     }
-   }
+   ```bash
+   ls -lh /var/lib/timestd/phase2/science/timing/fused_clock.csv
+   tail -20 /var/lib/timestd/phase2/science/timing/fused_clock.csv
    ```
 
-#### Phase 2: Web UI (`summary.html`, `ionosphere.html`)
+2. Check analytics service status:
 
-**Current State:**
+   ```bash
+   sudo systemctl status timestd-analytics
+   sudo journalctl -u timestd-analytics -n 100
+   ```
 
-- Displays timing data from monitoring server
-- No quality visualization
-- No uncertainty bounds
+3. Check Chrony SHM:
 
-**Goals:**
+   ```bash
+   ls -lh /dev/shm/SHM*
+   chronyc sources
+   chronyc tracking
+   ```
 
-1. **Quality Visualization**
-   - Color-code data points by quality grade:
-     - Grade A: Green
-     - Grade B: Yellow/Amber
-     - Grade C: Orange
-     - Grade D: Red
-   - Show quality flags in tooltips
-   - Add legend for quality grades
+4. Verify fusion component is running:
 
-2. **Uncertainty Bounds**
-   - Display uncertainty as error bars on charts
-   - Use Chart.js error bar plugin
-   - Show ±1σ, ±2σ, ±3σ options
+   ```bash
+   ps aux | grep fusion
+   ```
 
-3. **Quality Filters**
-   - Checkbox controls to show/hide quality grades
-   - Slider for minimum quality threshold
-   - Toggle to show/hide uncertainty bounds
-   - Filter by quality flags (GOOD/MARGINAL/BAD)
+**Likely Issues:**
 
-4. **Metadata Display**
-   - Processing version in footer
-   - Data completeness indicator
-   - Traceability information in info panel
+- Analytics service not running fusion component
+- Fusion component crashed/errored
+- SHM permissions issue
+- Configuration issue after recent changes
 
-#### Implementation Strategy
+**Key Code Locations:**
 
-1. **Start with monitoring server** - Foundation for web UI
-2. **Implement one endpoint at a time** - Iterative approach
-3. **Test with existing web UI** - Verify backward compatibility
-4. **Enhance web UI incrementally** - Add features progressively
-5. **Maintain CSV fallback** - Ensure resilience
+- Fusion logic: `src/hf_timestd/analytics/multi_broadcast_fusion.py`
+- SHM writer: Look for `sysv_ipc` or SHM-related code in fusion
+- Service startup: `systemd/timestd-analytics.service`
 
-#### Success Criteria
+## Important Context
 
-- ✅ Monitoring server reads HDF5 successfully
-- ✅ Quality metadata included in API responses
-- ✅ Web UI displays quality-coded data points
-- ✅ Uncertainty bounds visible on charts
-- ✅ Quality filters functional
-- ✅ No degradation in performance
-- ✅ CSV fallback working
+### Station Info
 
-#### Optional Enhancements
+- Callsign: AC0G
+- Grid Square: EM38ww40pk
+- Instrument ID: 172
+- Mode: production
+- Data Root: /var/lib/timestd
 
-- Real-time quality alerts (e.g., when quality drops below threshold)
-- Historical quality trends chart
-- Export data with quality metadata (CSV/JSON download)
-- Quality statistics dashboard
+### Channels (9 total)
 
-**Note:** This work enhances user experience and visualization but is not required for metrological compliance (already achieved with HDF5 reader implementation).
+- SHARED_2500, SHARED_5000, SHARED_10000, SHARED_15000
+- WWV_20000, WWV_25000
+- CHU_3330, CHU_7850, CHU_14670
 
-### Key Files to Implement
+### HDF5 Schema
 
-**I/O Module**:
+- L1A: Channel observables (carrier power, SNR, Doppler, tones)
+- L1B: BCD timecode detections
+- L2: Timing measurements with quality grades (A/B/C/D)
 
-- `src/hf_timestd/io/__init__.py` - DataProductWriter, DataProductReader
-- `src/hf_timestd/io/hdf5_writer.py` - HDF5 writing with schema validation
-- `src/hf_timestd/io/hdf5_reader.py` - HDF5 reading with quality filtering
-- `src/hf_timestd/io/uncertainty.py` - ISO GUM uncertainty calculator
+### Quality Metadata
 
-**Tests**:
+All HDF5 files include:
 
-- `tests/unit/test_hdf5_io.py` - Unit tests for HDF5 I/O
-- `tests/integration/test_data_flow.py` - End-to-end data flow tests
+- Quality grades: A (best) to D (worst)
+- Quality flags: GOOD, MARGINAL, BAD
+- Uncertainty estimates
+- Confidence scores
 
----
-
-## Current State: Data Model
-
-### Schema Registry (NEW - v3.2.0-dev)
-
-**Location**: `src/hf_timestd/schemas/`
-
-**Schemas Available**:
-
-- L1A: `channel_observables_v1.json` - Consolidates carrier_power, doppler, tones, test_signal
-- L1B: `bcd_timecode_v1.json` - BCD time code discrimination
-- L2: `timing_measurements_v1.json` - Station-assigned timing with ISO GUM uncertainty
-- L3A: `tec_v1.json` - Total Electron Content estimates
-- L3B: `fusion_timing_v1.json` - Multi-station UTC(NIST) fusion
-
-**Usage**:
-
-```python
-from hf_timestd.schemas import get_schema
-
-# Load L2 timing measurements schema
-schema = get_schema('L2', 'timing_measurements')
-print(schema['schema_version'])  # '1.0.0'
-```
-
-### Data Product Levels (NASA EOSDIS)
-
-- **L0**: Raw RTP/Digital RF (unchanged)
-- **L1**: Calibrated measurements (channel observables + BCD)
-- **L2**: Derived geophysical variables (timing measurements with uncertainty)
-- **L3**: Science products (TEC + fusion timing)
-
-### Current CSV Types (Legacy - to be replaced)
-
-```
-audio_tones/          - Audio tone analysis
-bcd_discrimination/   - BCD time code discrimination  
-carrier_power/        - Carrier power (FIXED - NaN issue resolved)
-clock_offset/         - Clock offset (WORKING)
-discrimination/       - WWV/WWVH discrimination
-doppler/              - Doppler measurements
-station_id_440hz/     - Station ID from 440Hz
-status/               - Status files
-tec/                  - TEC calculations (WORKING)
-test_signal/          - Test signal detection
-timing/               - UTC(NIST) timing
-tone_detections/      - Tone detection results
-```
-
-**Migration Plan**: Parallel writes (CSV + HDF5) → Switch consumers → Deprecate CSVs
-
----
-
-## Key Configuration
-
-- **Config**: `/etc/hf-timestd/timestd-config.toml`
-- **Data Root**: `/var/lib/timestd/`
-- **Hot Buffer**: `/dev/shm/timestd/raw_buffer/`
-- **Phase 2 CSVs**: `/var/lib/timestd/phase2/{CHANNEL}/` (legacy)
-- **Phase 2 HDF5**: `/var/lib/timestd/phase2/{CHANNEL}/` (new, to be implemented)
-- **TEC Data**: `/var/lib/timestd/phase2/science/tec/`
-- **Logs**: `journalctl -u timestd-core-recorder` / `timestd-analytics` / `timestd-science-aggregator` / `timestd-web-ui`
-
-## Channel Specifications (config.toml)
-
-9 channels: 2.5, 5, 10, 15, 20, 25 MHz (WWV/WWVH) + 3.33, 7.85, 14.67 MHz (CHU)  
-All use: `preset=iq`, `sample_rate=20000`, `agc=0`, `gain=0`, `encoding=F32`
-
----
-
-## Important Patterns
-
-### Schema Usage (NEW - v3.2.0+)
-
-- ✅ **Always use schema registry** - Import from `hf_timestd.schemas`
-- ✅ **Validate before writing** - Use DataProductWriter (to be implemented)
-- ✅ **Include uncertainty budgets** - L2 requires ISO GUM components
-- ❌ **Don't write without validation** - Prevents NaN silent failures
-
-### Path Management (v3.1.0+)
-
-- ✅ **Always use TimeStdPaths** - Import from `hf_timestd.paths`
-- ✅ **Use discovery methods** - `discover_phase2_channels()`, `get_clock_offset_dir()`
-- ✅ **Never hard-code paths** - Let TimeStdPaths handle all path construction
-- ❌ **Don't manually construct paths** - Leads to field name mismatches
-
-### Channel Management (v3.0.1+)
-
-- ✅ **Always discover before creating** - Check for existing channels
-- ✅ **Match by freq/preset/rate** - Reuse when possible
-- ✅ **Health monitoring enabled** - Auto-recovery from radiod restarts
-- ❌ **Never** manually manage channels - let discovery handle it
-
-### Data Validation (v3.1.0+)
-
-- ✅ **Validate before calculation** - Check for NaN/inf in input data
-- ✅ **Validate before writing** - Check for NaN/inf before CSV write
-- ✅ **Use validator script** - `scripts/validate_csv_schemas.py`
-- ❌ **Don't write invalid data** - Better to skip row than write NaN
-
----
-
-## Relevant Commands
+## Commands for Next Session
 
 ```bash
-# Check services
-sudo systemctl status timestd-core-recorder
-sudo systemctl status timestd-analytics
-sudo systemctl status timestd-science-aggregator
-sudo systemctl status timestd-web-ui
+# Check fusion status
+tail -f /var/lib/timestd/phase2/science/timing/fused_clock.csv
 
-# Check TEC data
-ls -lh /var/lib/timestd/phase2/science/tec/
-tail /var/lib/timestd/phase2/science/tec/tec_$(date +%Y%m%d).csv
+# Check analytics logs
+sudo journalctl -u timestd-analytics -f
 
-# Validate CSVs (legacy)
-python3 scripts/validate_csv_schemas.py --csv-file /path/to/file.csv
-python3 scripts/validate_csv_schemas.py --directory /var/lib/timestd/phase2/SHARED_10000
+# Check Chrony
+chronyc sources -v
+chronyc tracking
 
-# Check schemas (NEW)
-python3 -c "from hf_timestd.schemas import list_schemas; print(list_schemas())"
-
-# Check logs
-journalctl -u timestd-analytics -n 50
-journalctl -u timestd-science-aggregator -n 20
+# Restart analytics if needed
+sudo systemctl restart timestd-analytics
 ```
 
----
+## Success Criteria for Next Session
 
-## Documentation
-
-**Data Model**:
-
-- `docs/DATA_API_DESIGN.md` - Ideal API design (to be updated with HDF5)
-- `src/hf_timestd/schemas/` - Schema registry (NEW)
-- `scripts/validate_csv_schemas.py` - CSV schema validator (legacy)
-
-**TEC**:
-
-- `docs/GPS_TEC_OPTIONAL.md` - Comprehensive guide
-- `docs/TEC_VALIDATION_METHODOLOGY.md` - Scientific methodology
-- `docs/ZED_F9P_TEC_CONFIGURATION.md` - GPS receiver setup
-
-**System**:
-
-- `docs/DEPLOYMENT_CHECKLIST.md` - Deployment guide
-- `docs/QUALITY_METRICS_KA9Q.md` - Quality metrics
+- ✅ Fusion CSV updating regularly (every minute)
+- ✅ Chrony SHM receiving updates
+- ✅ `chronyc sources` shows TMGR (fusion) as active reference
+- ✅ System clock being disciplined by UTC(NIST) via fusion
