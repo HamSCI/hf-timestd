@@ -123,9 +123,9 @@ class ChronySHM:
                 self.key,
                 flags=sysv_ipc.IPC_CREAT | sysv_ipc.IPC_EXCL,
                 size=SHM_SIZE,
-                mode=0o660  # Group-writable for chronyd (timestd user in _chrony group)
+                mode=0o666  # World-readable for cross-platform chronyd compatibility
             )
-            logger.info("Created new Chrony SHM segment with group-writable permissions (0660)")
+            logger.info("Created new Chrony SHM segment with world-readable permissions (0666)")
         except sysv_ipc.ExistentialError:
             # Segment already exists, try to attach
             try:
@@ -240,7 +240,7 @@ class ChronySHM:
             #   64-95: int dummy[8]
             
             data = struct.pack(
-                '@ii q i 4x q i 4x iiii II 8i',
+                '@ii q i 4x q i 4x iiii II iiiiiiii',
                 1,              # mode = 1 (use count locking)
                 self.count,     # count (sequence number)
                 clock_sec,      # clockTimeStampSec (system time)

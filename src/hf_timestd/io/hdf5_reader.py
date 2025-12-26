@@ -209,8 +209,22 @@ class DataProductReader:
                             measurement[field_name] = value
                         
                         # Time range filter
+                        # Convert ISO timestamps to datetime for proper comparison
+                        # String comparison fails with fractional seconds
                         timestamp = measurement.get('timestamp_utc', '')
-                        if timestamp < start or timestamp > end:
+                        if timestamp:
+                            try:
+                                ts_dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                                start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
+                                end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
+                                
+                                if ts_dt < start_dt or ts_dt > end_dt:
+                                    continue
+                            except (ValueError, AttributeError):
+                                # Fall back to string comparison if parsing fails
+                                if timestamp < start or timestamp > end:
+                                    continue
+                        else:
                             continue
                         
                         # Quality grade filter
