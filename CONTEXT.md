@@ -1,370 +1,321 @@
-# HF-TimeStd Project Context
+# HF-TimeStd Development Context
 
-**Last Updated:** 2025-12-27  
-**Next Session Focus:** Web UI Redesign for Timing & Ionospheric Data Visualization
-
----
-
-## Current System Status (2025-12-27)
-
-### ✅ All Systems Operational
-
-- **Core Recorder**: Running, receiving RTP from 9 channels
-- **Analytics Service**: Processing all channels, writing HDF5 data products
-- **Fusion Service**: Calculating D_clock, feeding Chrony SHM (Grade A, ±0.13ms)
-- **Chrony Integration**: TMGR receiving updates, system clock disciplined
-- **Web UI**: FastAPI server running on port 3000
-
-### Recent Fixes (This Session)
-
-1. **Service Startup**: Fixed `/dev/shm/timestd` persistence via tmpfiles.d
-2. **Chrony SHM**: Resolved permission race condition with service ordering
-3. **Boot Order**: All services start correctly on reboot
-4. **Chrony Mandatory**: Required for production installations
+**Last Updated**: 2025-12-27  
+**Current Phase**: Analytics Validation & Web UI Enhancement  
+**Next Session Focus**: Validate analytics implementation against signal feature inventory
 
 ---
 
-## Next Session: Web UI Redesign
+## Recent Session Summary (2025-12-27)
 
-### Objective
+### Web UI Redesign - Completed
 
-**Completely re-think the web UI** to present timing and ionospheric data in a modern, intuitive, and scientifically meaningful way.
+Implemented new web UI architecture separating timing metrology from propagation science:
 
-### Current Web UI State
+**What Was Built**:
 
-**Active Pages:**
+1. **New Metrology Dashboard** (`web-ui/metrology.html`)
+   - Hero status display (D_clock, uncertainty, quality grade)
+   - Kalman funnel visualization (24h convergence)
+   - Per-station contribution cards (WWV, WWVH, CHU, BPM)
+   - Quality timeline (A/B/C/D distribution)
+   - Chrony integration status
+   - Auto-refresh every 30s
 
-- `summary.html` - System status dashboard
-- `timing.html` - Timing analysis (157KB, complex)
-- `ionosphere.html` - Ionospheric data (51KB)
-- `logs.html` - System logs viewer
-- `index.html` - Entry point
+2. **4 New API v2 Endpoints** (`web-ui/monitoring_server.py`)
+   - `/api/v2/timing/kalman-funnel` - Convergence data
+   - `/api/v2/timing/quality-timeline` - Grade distribution
+   - `/api/v2/timing/chrony-status` - SHM integration status
+   - `/api/v2/system/health-summary` - Aggregated health
 
-**Server:**
+3. **Enhanced Ionosphere Page** (`web-ui/ionosphere.html`)
+   - Quality gate warning (displays when timing grade is C or D)
+   - Links to metrology dashboard when timing is degraded
 
-- `monitoring-server-v3.js` - Express.js API server (194KB)
-- `monitoring_server.py` - FastAPI alternative (20KB, newer)
+4. **Updated Navigation** (`web-ui/components/navigation.js`)
+   - New page order: Summary → Metrology → Timing (Legacy) → Propagation → Logs
 
-**Issues:**
+**Key Fixes**:
 
-- Timing dashboard is overly complex and hard to understand
-- No clear narrative or user journey
-- Mixing too many concepts on single pages
-- Not mobile-responsive
-- Lacks modern UX patterns
+- Fixed route order bug (catch-all route was intercepting API calls)
+- Fixed fusion data path (`/var/lib/timestd/phase2/fusion/fused_d_clock.csv`)
+- Server running on <http://localhost:8080> with real data
 
----
+**Status**: ✅ Complete and functional with real production data
 
-## Data Products Available
+### Scientific Capabilities Documentation - Completed
 
-### L1A: Channel Observables (HDF5)
+Created comprehensive feature inventory and scientific questions documentation:
 
-**Location:** `/var/lib/timestd/phase2/{CHANNEL}/carrier_power/`
+**New Documentation**:
 
-**Schema:** `channel_observables_v1.json`
+- `docs/SCIENTIFIC_CAPABILITIES.md` - Complete rewrite with honest assessment
+  - Validated measurements (✅): SNR, Doppler, tones, ToA, modes
+  - Partially validated (⚠️): TEC, phase variance, delay spread
+  - Theoretical capabilities: Scintillation indices, TIDs, ionospheric tilt
+  - 6 scientific questions with data quality assessments
+  - Measurement uncertainties and limitations
+  - Recommendations for scientists
 
-**Data:**
-
-- Carrier power (dBm)
-- SNR (dB)
-- Doppler shift (Hz)
-- Tone detections (presence, amplitude, phase)
-- Quality grades (A/B/C/D)
-
-**Use Cases:**
-
-- Signal strength visualization
-- Propagation mode detection
-- Channel health monitoring
-
-### L1B: BCD Timecode (HDF5)
-
-**Location:** `/var/lib/timestd/phase2/{CHANNEL}/bcd_discrimination/`
-
-**Schema:** `bcd_timecode_v1.json`
-
-**Data:**
-
-- Decoded time (UTC)
-- Confidence scores
-- Bit-level quality
-- Station identification (WWV/WWVH/CHU discrimination)
-
-**Use Cases:**
-
-- Timecode decoding accuracy
-- Station discrimination visualization
-- Error analysis
-
-### L2: Timing Measurements (HDF5)
-
-**Location:** `/var/lib/timestd/phase2/{CHANNEL}/clock_offset/`
-
-**Schema:** `timing_measurements_v1.json`
-
-**Data:**
-
-- D_clock (system clock offset from UTC, ms)
-- Propagation delay (ms)
-- Propagation mode (1E, 1F, 2F, 3F, GW)
-- Uncertainty (ms)
-- Quality grade (A/B/C/D)
-- Confidence score (0-1)
-
-**Use Cases:**
-
-- Clock accuracy visualization
-- Propagation analysis
-- Quality trending
-
-### L3: Fused Timing (CSV)
-
-**Location:** `/var/lib/timestd/phase2/fusion/`
-
-**Data:**
-
-- Fused D_clock from all broadcasts
-- Kalman-filtered uncertainty
-- Per-station contributions
-- Quality flags
-
-**Use Cases:**
-
-- System clock accuracy
-- Multi-broadcast fusion visualization
-- Chrony feed status
-
-### Science Products
-
-**TEC Data:** `/var/lib/timestd/phase2/science/tec/`
-
-- Total Electron Content estimates
-- Ionospheric delay corrections
-- Multi-frequency analysis
-
-**Propagation:** Embedded in L2 timing measurements
-
-- Mode classification (E-layer, F-layer, multi-hop)
-- Solar zenith angle correlation
-- Day/night transitions
+**Philosophy Established**:
+"Provide only data we can justify given instrument capabilities. Scientists determine if quality meets their needs."
 
 ---
 
-## Web UI Design Considerations
+## Next Session Objective
 
-### User Personas
+### Analytics Validation Against Signal Features
 
-1. **Operator** - Wants to know: "Is the system working?"
-2. **Scientist** - Wants to analyze: "What's the propagation doing?"
-3. **Developer** - Wants to debug: "Why did this fail?"
+**Goal**: Ensure analytics service (`phase2_analytics_service.py`) correctly extracts all detectable signal features documented in `SCIENTIFIC_CAPABILITIES.md`.
 
-### Key Visualizations Needed
+**Approach**:
 
-#### 1. Timing Dashboard
+1. **Audit Current Implementation**
+   - Review what `phase2_analytics_service.py` actually computes
+   - Compare against feature inventory
+   - Identify gaps between "should measure" and "does measure"
 
-- **Kalman Funnel**: Convergence over time (uncertainty narrowing)
-- **Per-Station Offsets**: WWV, WWVH, CHU, BPM contributions
-- **Quality Timeline**: A/B/C/D grades over 24h
-- **Chrony Status**: Is system clock being disciplined?
+2. **Validate Measurement Methods**
+   - For each feature: How is it computed? (algorithm)
+   - What's the expected range? (physics)
+   - What are the limitations? (systematic errors)
 
-#### 2. Ionosphere Dashboard
+3. **Build Validation Dashboard**
+   - Minimal 4-panel dashboard to sanity-check measurements
+   - SNR heatmap (time × frequency)
+   - Doppler timeline (verify ±5 Hz range)
+   - Tone detection matrix (check geographic sense)
+   - ToA scatter (measured vs expected)
 
-- **TEC Map**: Spatial/temporal visualization
-- **Propagation Modes**: E/F layer transitions
-- **Solar Correlation**: Zenith angle vs signal quality
-- **Multi-Frequency Analysis**: Dispersion visualization
+4. **Document Findings**
+   - What's working correctly
+   - What needs calibration/tuning
+   - What's missing but should be added
+   - What's aspirational (requires more work)
 
-#### 3. Signal Quality Dashboard
+**Key Documents to Reference**:
 
-- **SNR Heatmap**: All channels, 24h
-- **Carrier Power**: Strength over time
-- **Tone Detection**: Success rates
-- **Data Completeness**: Gaps and coverage
+- `docs/SCIENTIFIC_CAPABILITIES.md` - Feature inventory and scientific questions
+- `src/hf_timestd/schemas/l1_channel_observables_v1.json` - L1A data schema
+- `src/hf_timestd/schemas/l2_timing_measurements_v1.json` - L2 data schema
+- `src/hf_timestd/core/phase2_analytics_service.py` - Analytics implementation
 
-#### 4. System Health Dashboard
+**Validation Priorities**:
 
-- **Service Status**: All timestd services
-- **Data Flow**: Pipeline visualization
-- **Error Rates**: Quality grade distribution
-- **Storage**: Disk usage, file counts
+1. **Tier 1** (Basic features - must validate first):
+   - Carrier SNR vs radiod's reported SNR
+   - Doppler shift (check ±5 Hz range, look for outliers)
+   - Tone detections (WWV/WWVH mutual exclusivity)
+   - ToA (physically reasonable < 100 ms)
 
-### Technical Requirements
+2. **Tier 2** (Ionospheric features - validate if Tier 1 passes):
+   - TEC estimation (compare to GPS TEC maps)
+   - Propagation mode classification (validate against ray-tracing)
+   - D-layer absorption (correlate with solar zenith angle)
+   - Phase variance (understand what it measures)
 
-**Must Have:**
-
-- HDF5 data reading (via FastAPI backend)
-- Real-time updates (WebSocket or polling)
-- Responsive design (mobile-friendly)
-- Fast load times (\u003c2s)
-- Accessible (WCAG 2.1 AA)
-
-**Nice to Have:**
-
-- Dark mode
-- Exportable charts (PNG/SVG)
-- Configurable time ranges
-- Bookmark/share specific views
-- Offline mode
-
-### Technology Stack Options
-
-**Current:**
-
-- Express.js (Node.js) backend
-- Vanilla JavaScript frontend
-- Chart.js for visualizations
-
-**Alternative (FastAPI):**
-
-- Python FastAPI backend (already deployed)
-- Modern frontend framework (React/Vue/Svelte)
-- Plotly/D3.js for advanced visualizations
-
-**Hybrid:**
-
-- Keep FastAPI backend for HDF5 reading
-- Modernize frontend with component framework
-- Progressive enhancement
+3. **Tier 3** (Advanced features - implement if needed):
+   - Scintillation indices (S4, σ_φ)
+   - TID detection
+   - Sporadic-E characterization
 
 ---
 
-## Data Access Patterns
+## Current System Status
 
-### HDF5 Reading (Python)
+### Production Environment
 
-```python
-from hf_timestd.io import DataProductReader
+- **Location**: `/opt/hf-timestd/`
+- **Services Running**:
+  - `timestd-core-recorder` - ✅ Active (9 channels)
+  - `timestd-analytics` - ✅ Active (writing HDF5 files)
+  - `timestd-fusion` - ✅ Active (Grade A timing, 2 stations)
+  - `timestd-web-ui-fastapi` - Status unknown (dev server on :8080)
 
-# Read L2 timing measurements
-reader = DataProductReader(
-    channel_name="WWV_20000",
-    data_root="/var/lib/timestd",
-    product_type="timing_measurements"
-)
+### Data Products
 
-data = reader.read_time_range(
-    start_time=datetime(...),
-    end_time=datetime(...),
-    quality_grade="C"  # Minimum quality
-)
+- **Fusion CSV**: `/var/lib/timestd/phase2/fusion/fused_d_clock.csv` (1.1MB)
+- **HDF5 Files**: Present for CHU_3330, CHU_7850, CHU_14670, SHARED channels
+- **Current Timing**: Grade A, D_clock = 12.32ms ± 0.62ms, 2 stations (WWV, CHU)
+- **24h Distribution**: 803 Grade A, 404 Grade B, 191 Grade C, 42 Grade D
+
+### HDF5 SWMR Status
+
+- ✅ Readers use `swmr=True` mode (`hdf5_reader.py`)
+- ✅ Writers enable SWMR after dataset creation (`hdf5_writer.py`)
+- Concurrent read/write supported
+
+---
+
+## Key Technical Decisions
+
+### Web UI Architecture
+
+**Decision**: Separate timing metrology from propagation science
+**Rationale**: Different user personas (Operators, Metrologists, Scientists)
+**Implementation**:
+
+- Metrology dashboard focuses on measurement quality
+- Propagation dashboard focuses on scientific insights
+- Quality gate prevents misinterpretation of low-quality data
+
+### API Versioning
+
+**Decision**: New `/api/v2/` endpoints, maintain `/api/v1/` backward compatibility
+**Rationale**: Allow UI evolution without breaking existing consumers
+
+### Data Validation Philosophy
+
+**Decision**: Build validation dashboard before scientific visualizations
+**Rationale**: Must verify measurements are accurate before using for science
+**Quote**: "I do not want to claim to deliver what measurably we cannot detect. But if we can confidently detect these features, then we should do so."
+
+---
+
+## Known Issues & Limitations
+
+### Web UI
+
+- ⚠️ Ionosphere page shows "No data" - existing `/api/v1/broadcasts/history` endpoint issue (predates redesign)
+- ⚠️ Mobile optimization needs work (basic responsive design implemented)
+- ⚠️ No real-time WebSocket updates (using 30s polling)
+
+### Analytics
+
+- ⚠️ TEC estimation implemented but not validated against GPS TEC
+- ⚠️ Propagation mode classification uses delay heuristics (may miss mode mixing)
+- ⚠️ BPM support experimental (needs full characterization)
+- ⚠️ Phase variance, Doppler spread, delay spread - physical interpretation unclear
+
+### Data Quality
+
+- Timing precision limited by ionospheric variability (±1-3 ms)
+- Cannot separate ionospheric layers without ionosonde
+- Single receiver (no spatial resolution for TIDs)
+
+---
+
+## File Locations Reference
+
+### Web UI (Development)
+
+- `/home/mjh/git/hf-timestd/web-ui/`
+  - `monitoring_server.py` - FastAPI backend with new API v2 endpoints
+  - `metrology.html` - New timing metrology dashboard
+  - `ionosphere.html` - Enhanced with quality gate
+  - `components/navigation.js` - Updated navigation
+
+### Analytics
+
+- `/home/mjh/git/hf-timestd/src/hf_timestd/core/`
+  - `phase2_analytics_service.py` - Main analytics service (2181 lines)
+  - `phase2_temporal_engine.py` - Processing engine
+  - `correlator_bank.py` - FFT-based signal processing
+  - `tec_estimator.py` - TEC calculation (needs validation)
+
+### Schemas
+
+- `/home/mjh/git/hf-timestd/src/hf_timestd/schemas/`
+  - `l1_channel_observables_v1.json` - Raw signal features
+  - `l2_timing_measurements_v1.json` - Timing with uncertainty
+  - `l3_fusion_timing_v1.json` - Multi-station fusion
+
+### Documentation
+
+- `docs/SCIENTIFIC_CAPABILITIES.md` - Feature inventory & scientific questions
+- `TECHNICAL_REFERENCE.md` - System architecture
+- `ARCHITECTURE.md` - Data flow and components
+
+---
+
+## Development Workflow
+
+### Testing Web UI Changes
+
+```bash
+# Start dev server
+cd /home/mjh/git/hf-timestd/web-ui
+source ../venv/bin/activate
+python monitoring_server.py
+
+# Access at http://localhost:8080/metrology.html
 ```
 
-### API Endpoints (Current)
+### Deploying to Production
 
-```
-GET /api/v1/summary              - System overview
-GET /api/v1/channels/status      - Channel health
-GET /api/v1/timing/measurements  - L2 timing data
-GET /api/v1/ionosphere/tec       - TEC estimates
-GET /api/v1/fusion/status        - Multi-broadcast fusion
+```bash
+# Copy updated files
+sudo cp /home/mjh/git/hf-timestd/web-ui/monitoring_server.py /opt/hf-timestd/web-ui/
+sudo cp /home/mjh/git/hf-timestd/web-ui/metrology.html /opt/hf-timestd/web-ui/
+sudo cp /home/mjh/git/hf-timestd/web-ui/ionosphere.html /opt/hf-timestd/web-ui/
+sudo cp /home/mjh/git/hf-timestd/web-ui/components/navigation.js /opt/hf-timestd/web-ui/components/
+
+# Restart service (if exists)
+sudo systemctl restart timestd-web-ui-fastapi
 ```
 
-### API Endpoints (Needed for New UI)
+### Examining HDF5 Data
 
-```
-GET /api/v2/timing/kalman-funnel?hours=24
-GET /api/v2/timing/station-offsets?date=YYYYMMDD
-GET /api/v2/ionosphere/tec-map?date=YYYYMMDD
-GET /api/v2/signal/snr-heatmap?hours=24
-GET /api/v2/system/health
+```bash
+# List available files
+ls -lh /var/lib/timestd/phase2/CHU_3330/carrier_power/*.h5
+
+# Read with Python (SWMR mode)
+python3 -c "
+import h5py
+f = h5py.File('/path/to/file.h5', 'r', swmr=True, libver='latest')
+print(list(f.keys()))
+print(f['measurements'].dtype)
+f.close()
+"
 ```
 
 ---
 
-## Design Inspiration
+## Questions for Next Session
 
-### Similar Systems
+1. **Analytics Audit**: Which features in `SCIENTIFIC_CAPABILITIES.md` are actually being computed by `phase2_analytics_service.py`?
 
-- **GPS Monitor**: Clean, real-time satellite tracking
-- **Grafana**: Time-series visualization excellence
-- **FlightAware**: Live tracking with clear status
-- **NOAA Space Weather**: Scientific data for public
+2. **Measurement Validation**: For each computed feature, how do we verify it's accurate?
 
-### Key Principles
+3. **Missing Features**: What should be added to analytics to support the scientific questions?
 
-1. **Progressive Disclosure**: Simple overview → detailed analysis
-2. **Visual Hierarchy**: Most important info first
-3. **Consistent Language**: Use domain terms correctly
-4. **Error States**: Clear feedback when data missing
-5. **Performance**: Fast, even with large datasets
+4. **Data Quality**: What validation tests should run automatically to flag bad data?
 
----
-
-## Files to Review
-
-### Current Web UI
-
-- `web-ui/summary.html` - Current main dashboard
-- `web-ui/timing.html` - Timing analysis (needs redesign)
-- `web-ui/ionosphere.html` - Ionospheric data
-- `web-ui/monitoring-server-v3.js` - API server
-- `web-ui/WEB_UI_ARCHITECTURE.md` - Architecture docs
-
-### Data Schemas
-
-- `schemas/l1_channel_observables_v1.json`
-- `schemas/l1_bcd_timecode_v1.json`
-- `schemas/l2_timing_measurements_v1.json`
-
-### Backend
-
-- `src/hf_timestd/io/hdf5_reader.py` - HDF5 data access
-- `web-ui/monitoring_server.py` - FastAPI server
+5. **Visualization Priority**: Which features should we visualize first in the validation dashboard?
 
 ---
 
 ## Success Criteria for Next Session
 
-### Must Achieve
-
-- ✅ Clear user journey (operator → scientist → developer)
-- ✅ Simplified timing dashboard with Kalman funnel
-- ✅ Ionospheric visualization with TEC map
-- ✅ Mobile-responsive design
-- ✅ Fast load times (\u003c2s for main dashboard)
-
-### Nice to Have
-
-- ✅ Dark mode toggle
-- ✅ Exportable charts
-- ✅ Real-time WebSocket updates
-- ✅ Configurable time ranges
+- [ ] Complete audit of analytics vs feature inventory
+- [ ] Document measurement methods for all computed features
+- [ ] Identify 3-5 features that need validation
+- [ ] Build minimal validation dashboard (4 panels)
+- [ ] Document findings: what works, what needs fixing, what's missing
+- [ ] Create prioritized list of analytics enhancements
 
 ---
 
-## Station Info (AC0G)
+## Agent Preparation Notes
 
-- **Callsign:** AC0G
-- **Grid Square:** EM38ww40pk
-- **Location:** 38.918461°N, 92.127974°W (Columbia, MO)
-- **Instrument ID:** 172
-- **Data Root:** /var/lib/timestd
+**Context Loading Priority**:
 
-### Channels (9 total)
+1. Read `docs/SCIENTIFIC_CAPABILITIES.md` - understand what should be measured
+2. Review `src/hf_timestd/core/phase2_analytics_service.py` - understand what is measured
+3. Check schemas in `src/hf_timestd/schemas/` - understand data structure
+4. Reference this CONTEXT.md for session history
 
-- SHARED_2500, SHARED_5000, SHARED_10000, SHARED_15000 (WWV+WWVH+BPM)
-- WWV_20000, WWV_25000 (WWV-only)
-- CHU_3330, CHU_7850, CHU_14670 (CHU-only)
+**Key Mindset**:
 
----
+- Focus on honest assessment of capabilities vs limitations
+- Validate before visualizing
+- Document uncertainties and systematic errors
+- Prioritize features with clear scientific value
 
-## Quick Start Commands
+**Tools Available**:
 
-```bash
-# Start FastAPI server
-cd /home/mjh/git/hf-timestd/web-ui
-python monitoring_server.py
-
-# View HDF5 data
-python -c "from hf_timestd.io import DataProductReader; ..."
-
-# Check current web UI
-firefox http://localhost:3000
-
-# View logs
-journalctl -u timestd-web-ui -f
-```
-
----
-
-**Key Takeaway:** The web UI should tell a clear story about system health, timing accuracy, and ionospheric conditions. Prioritize clarity over complexity.
+- HDF5 files with SWMR enabled (can read while analytics writes)
+- FastAPI server for quick API endpoint testing
+- Plotly.js for interactive visualizations
+- Production data flowing in real-time

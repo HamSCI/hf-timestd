@@ -136,37 +136,6 @@ async def serve_ionosphere():
     raise HTTPException(status_code=404, detail="ionosphere.html not found")
 
 
-# Generic file serving for CSS, JS, and other static files
-@app.get("/{filepath:path}")
-async def serve_static_file(filepath: str):
-    """Serve static files (CSS, JS, etc.)"""
-    # Security: prevent directory traversal
-    if ".." in filepath or filepath.startswith("/"):
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    file_path = SCRIPT_DIR / filepath
-    
-    # Check if file exists and is a file (not directory)
-    if file_path.exists() and file_path.is_file():
-        # Determine media type
-        media_type = None
-        if filepath.endswith('.css'):
-            media_type = 'text/css'
-        elif filepath.endswith('.js'):
-            media_type = 'application/javascript'
-        elif filepath.endswith('.json'):
-            media_type = 'application/json'
-        elif filepath.endswith('.png'):
-            media_type = 'image/png'
-        elif filepath.endswith('.jpg') or filepath.endswith('.jpeg'):
-            media_type = 'image/jpeg'
-        elif filepath.endswith('.svg'):
-            media_type = 'image/svg+xml'
-        
-        return FileResponse(file_path, media_type=media_type)
-    
-    raise HTTPException(status_code=404, detail=f"{filepath} not found")
-
 
 # ============================================================================
 # API ENDPOINTS - HIGH PRIORITY
@@ -379,7 +348,7 @@ async def get_timing_fusion():
         import json
         
         # Fusion CSV file path
-        fusion_csv = data_root / "phase2" / "science" / "timing" / "fused_clock.csv"
+        fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
         calibration_json = data_root / "phase2" / "science" / "timing" / "broadcast_calibration.json"
         
         latest_fusion = None
@@ -486,6 +455,408 @@ async def get_channels():
     except Exception as e:
         logger.error(f"Error in get_channels: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ============================================================================
+# API V2 ENDPOINTS - TIMING METROLOGY & PROPAGATION SCIENCE
+# ============================================================================
+
+@app.get("/api/v2/timing/kalman-funnel")
+async def get_kalman_funnel(
+    hours: int = Query(24, description="Number of hours to retrieve"),
+    date: Optional[str] = Query(None, description="Date in YYYYMMDD format (default: today)")
+):
+    """
+    Get Kalman convergence data showing uncertainty reduction over time.
+    Returns fused D_clock with uncertainty bounds, per-station contributions, and quality grades.
+    """
+    try:
+        import csv
+        from datetime import datetime, timedelta
+        
+        # Determine date range
+        if date:
+            end_time = datetime.strptime(date, "%Y%m%d")
+        else:
+            end_time = datetime.utcnow()
+        
+        start_time = end_time - timedelta(hours=hours)
+        
+        # Read fusion CSV file
+        fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
+        
+        if not fusion_csv.exists():
+            return {
+                "status": "no_data",
+                "message": "Fusion data not available",
+                "data": []
+            }
+        
+        # Parse fusion data
+        records = []
+        with open(fusion_csv, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                timestamp = float(row.get('timestamp', 0))
+                dt = datetime.fromtimestamp(timestamp)
+                
+                # Filter by time range
+                if start_time <= dt <= end_time:
+                    records.append({
+                        'timestamp': timestamp,
+                        'timestamp_utc': dt.isoformat() + 'Z',
+                        'd_clock_fused_ms': float(row.get('d_clock_fused_ms', 0)) if row.get('d_clock_fused_ms') else None,
+                        'uncertainty_ms': float(row.get('uncertainty_ms', 0)) if row.get('uncertainty_ms') else None,
+                        'quality_grade': row.get('quality_grade', 'D'),
+                        'n_stations': int(row.get('n_stations', 0)) if row.get('n_stations') else 0,
+                        'n_broadcasts': int(row.get('n_broadcasts', 0)) if row.get('n_broadcasts') else 0,
+                        # Per-station contributions
+                        'stations': {
+                            'WWV': {
+                                'mean_ms': float(row.get('wwv_mean_ms', 0)) if row.get('wwv_mean_ms') else None,
+                                'count': int(row.get('wwv_count', 0)) if row.get('wwv_count') else 0
+                            },
+                            'WWVH': {
+                                'mean_ms': float(row.get('wwvh_mean_ms', 0)) if row.get('wwvh_mean_ms') else None,
+                                'count': int(row.get('wwvh_count', 0)) if row.get('wwvh_count') else 0
+                            },
+                            'CHU': {
+                                'mean_ms': float(row.get('chu_mean_ms', 0)) if row.get('chu_mean_ms') else None,
+                                'count': int(row.get('chu_count', 0)) if row.get('chu_count') else 0
+                            },
+                            'BPM': {
+                                'mean_ms': float(row.get('bpm_mean_ms', 0)) if row.get('bpm_mean_ms') else None,
+                                'count': int(row.get('bpm_count', 0)) if row.get('bpm_count') else 0
+                            }
+                        }
+                    })
+        
+        # Calculate statistics
+        if records:
+            latest = records[-1]
+            grade_counts = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
+            for r in records:
+                grade = r.get('quality_grade', 'D')
+                if grade in grade_counts:
+                    grade_counts[grade] += 1
+        else:
+            latest = None
+            grade_counts = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
+        
+        return {
+            "status": "ok",
+            "data": records,
+            "latest": latest,
+            "statistics": {
+                "count": len(records),
+                "grade_distribution": grade_counts,
+                "time_range": {
+                    "start": start_time.isoformat() + 'Z',
+                    "end": end_time.isoformat() + 'Z',
+                    "hours": hours
+                }
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in get_kalman_funnel: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/timing/quality-timeline")
+async def get_quality_timeline(hours: int = Query(24, description="Number of hours")):
+    """
+    Get quality grade distribution over time.
+    Returns A/B/C/D grade counts per hour and data completeness metrics.
+    """
+    try:
+        import csv
+        from datetime import datetime, timedelta
+        from collections import defaultdict
+        
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(hours=hours)
+        
+        fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
+        
+        if not fusion_csv.exists():
+            return {"status": "no_data", "timeline": []}
+        
+        # Group by hour
+        hourly_grades = defaultdict(lambda: {'A': 0, 'B': 0, 'C': 0, 'D': 0, 'total': 0})
+        
+        with open(fusion_csv, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                timestamp = float(row.get('timestamp', 0))
+                dt = datetime.fromtimestamp(timestamp)
+                
+                if start_time <= dt <= end_time:
+                    hour_key = dt.replace(minute=0, second=0, microsecond=0)
+                    grade = row.get('quality_grade', 'D')
+                    
+                    if grade in hourly_grades[hour_key]:
+                        hourly_grades[hour_key][grade] += 1
+                        hourly_grades[hour_key]['total'] += 1
+        
+        # Convert to timeline format
+        timeline = []
+        for hour in sorted(hourly_grades.keys()):
+            data = hourly_grades[hour]
+            timeline.append({
+                'timestamp': hour.isoformat() + 'Z',
+                'grades': {
+                    'A': data['A'],
+                    'B': data['B'],
+                    'C': data['C'],
+                    'D': data['D']
+                },
+                'total': data['total'],
+                'completeness': min(1.0, data['total'] / 60.0)  # Expect ~60 measurements per hour
+            })
+        
+        return {
+            "status": "ok",
+            "timeline": timeline,
+            "hours": hours
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in get_quality_timeline: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/timing/chrony-status")
+async def get_chrony_status():
+    """
+    Get Chrony SHM integration status.
+    Returns current Chrony source status, TMGR feed health, system clock discipline state.
+    """
+    try:
+        import subprocess
+        
+        # Run chronyc sources to get TMGR status
+        result = subprocess.run(
+            ['chronyc', 'sources'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        tmgr_status = {
+            'active': False,
+            'state': 'unknown',
+            'offset_ms': None,
+            'stratum': None
+        }
+        
+        if result.returncode == 0:
+            for line in result.stdout.split('\n'):
+                if 'TMGR' in line or 'SHM' in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        tmgr_status['active'] = True
+                        # Parse state (* = current source, + = combined, - = not combined)
+                        if parts[0].startswith('*'):
+                            tmgr_status['state'] = 'current_source'
+                        elif parts[0].startswith('+'):
+                            tmgr_status['state'] = 'combined'
+                        elif parts[0].startswith('-'):
+                            tmgr_status['state'] = 'not_combined'
+                        
+                        # Try to parse offset (usually in column 6 or 7)
+                        try:
+                            for part in parts:
+                                if 'ms' in part or part.replace('.', '').replace('-', '').isdigit():
+                                    offset_str = part.replace('ms', '').strip()
+                                    tmgr_status['offset_ms'] = float(offset_str)
+                                    break
+                        except:
+                            pass
+        
+        # Get tracking status
+        tracking_result = subprocess.run(
+            ['chronyc', 'tracking'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        system_time = {
+            'synchronized': False,
+            'system_offset_ms': None,
+            'reference': None
+        }
+        
+        if tracking_result.returncode == 0:
+            for line in tracking_result.stdout.split('\n'):
+                if 'Reference ID' in line:
+                    system_time['reference'] = line.split(':')[-1].strip()
+                if 'System time' in line:
+                    # Parse system time offset
+                    try:
+                        parts = line.split(':')[-1].strip().split()
+                        if len(parts) >= 2:
+                            offset = float(parts[0])
+                            unit = parts[1]
+                            if 'seconds' in unit:
+                                system_time['system_offset_ms'] = offset * 1000
+                            system_time['synchronized'] = True
+                    except:
+                        pass
+        
+        return {
+            "status": "ok",
+            "tmgr": tmgr_status,
+            "system_time": system_time,
+            "timestamp": datetime.utcnow().isoformat() + 'Z'
+        }
+        
+    except subprocess.TimeoutExpired:
+        logger.error("Chrony command timeout")
+        return {
+            "status": "error",
+            "message": "Chrony command timeout",
+            "tmgr": {"active": False, "state": "timeout"},
+            "system_time": {"synchronized": False}
+        }
+    except FileNotFoundError:
+        logger.warning("chronyc not found")
+        return {
+            "status": "not_installed",
+            "message": "Chrony not installed or not in PATH",
+            "tmgr": {"active": False, "state": "not_installed"},
+            "system_time": {"synchronized": False}
+        }
+    except Exception as e:
+        logger.error(f"Error in get_chrony_status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/system/health-summary")
+async def get_health_summary():
+    """
+    Get aggregated system health summary.
+    Returns service status, data flow indicators, error rates, quality grade distribution.
+    """
+    try:
+        # Get latest fusion data for quality assessment
+        fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
+        
+        current_quality = {
+            'grade': 'D',
+            'd_clock_ms': None,
+            'uncertainty_ms': None,
+            'n_stations': 0
+        }
+        
+        grade_distribution = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
+        
+        if fusion_csv.exists():
+            import csv
+            with open(fusion_csv, 'r') as f:
+                reader = csv.DictReader(f)
+                records = list(reader)
+                
+                # Get latest
+                if records:
+                    latest = records[-1]
+                    current_quality = {
+                        'grade': latest.get('quality_grade', 'D'),
+                        'd_clock_ms': float(latest.get('d_clock_fused_ms', 0)) if latest.get('d_clock_fused_ms') else None,
+                        'uncertainty_ms': float(latest.get('uncertainty_ms', 0)) if latest.get('uncertainty_ms') else None,
+                        'n_stations': int(latest.get('n_stations', 0)) if latest.get('n_stations') else 0
+                    }
+                
+                # Calculate grade distribution (last 24h)
+                for row in records[-1440:]:  # ~24h at 1min cadence
+                    grade = row.get('quality_grade', 'D')
+                    if grade in grade_distribution:
+                        grade_distribution[grade] += 1
+        
+        # Check data flow (are HDF5 files being written?)
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y%m%d")
+        
+        data_flow = {
+            'core_recorder': False,
+            'analytics': False,
+            'fusion': False
+        }
+        
+        # Check for recent HDF5 files
+        phase2_dir = data_root / "phase2"
+        if phase2_dir.exists():
+            # Look for any channel with today's data
+            for channel_dir in phase2_dir.iterdir():
+                if channel_dir.is_dir() and not channel_dir.name.startswith('.'):
+                    # Check for L1A observables
+                    l1a_dir = channel_dir / "carrier_power"
+                    if l1a_dir.exists():
+                        for f in l1a_dir.glob(f"{today}*.h5"):
+                            data_flow['analytics'] = True
+                            break
+                    
+                    # Check for L2 timing
+                    l2_dir = channel_dir / "clock_offset"
+                    if l2_dir.exists():
+                        for f in l2_dir.glob(f"{today}*.h5"):
+                            data_flow['analytics'] = True
+                            break
+        
+        # Fusion is active if we have recent data
+        data_flow['fusion'] = fusion_csv.exists() and current_quality['d_clock_ms'] is not None
+        
+        return {
+            "status": "ok",
+            "timestamp": datetime.utcnow().isoformat() + 'Z',
+            "timing": current_quality,
+            "grade_distribution_24h": grade_distribution,
+            "data_flow": data_flow,
+            "overall_health": "good" if current_quality['grade'] in ['A', 'B'] else "degraded" if current_quality['grade'] == 'C' else "poor"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in get_health_summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ============================================================================
+# STATIC FILE SERVING (catch-all - must be last!)
+# ============================================================================
+
+# Generic file serving for CSS, JS, and other static files
+@app.get("/{filepath:path}")
+async def serve_static_file(filepath: str):
+    """Serve static files (CSS, JS, etc.)"""
+    # Security: prevent directory traversal
+    if ".." in filepath or filepath.startswith("/"):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    file_path = SCRIPT_DIR / filepath
+    
+    # Check if file exists and is a file (not directory)
+    if file_path.exists() and file_path.is_file():
+        # Determine media type
+        media_type = None
+        if filepath.endswith('.css'):
+            media_type = 'text/css'
+        elif filepath.endswith('.js'):
+            media_type = 'application/javascript'
+        elif filepath.endswith('.json'):
+            media_type = 'application/json'
+        elif filepath.endswith('.png'):
+            media_type = 'image/png'
+        elif filepath.endswith('.jpg') or filepath.endswith('.jpeg'):
+            media_type = 'image/jpeg'
+        elif filepath.endswith('.svg'):
+            media_type = 'image/svg+xml'
+        
+        return FileResponse(file_path, media_type=media_type)
+    
+    raise HTTPException(status_code=404, detail=f"{filepath} not found")
 
 
 # ============================================================================

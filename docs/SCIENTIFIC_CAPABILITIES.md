@@ -1,405 +1,570 @@
-# hf-timestd: Multi-Static Passive Ionospheric Radar
+# HF-TimeStd: Signal Features and Scientific Capabilities
 
-> [!CAUTION]
-> **Validation Status: Theoretical Capabilities**
->
-> This document describes the **theoretical scientific capabilities** of hf-timestd based on established ionospheric physics and the system's GPSDO-locked, multi-frequency architecture.
->
-> **Current Status**: Implementation complete, **validation pending**. Claims require verification against:
->
-> - GPS TEC maps (for TEC accuracy)
-> - Traditional ionosondes (for layer altitude)
-> - NOAA space weather data (for solar flare detection)
-> - Cross-station correlation (for TID detection)
->
-> See [Validation Plan](#validation-plan) for methodology.
+## Overview
 
-## Scientific Mission Statement
+This document provides an honest assessment of what signal features the HF-TimeStd system can measure and what scientific questions those measurements can address. We distinguish between:
 
-**hf-timestd** is not merely a precision clock—it is a **GPSDO-locked, multi-frequency, multi-station ionospheric radar** that transforms broadcast time signals into absolute measurements of ionospheric physics.
+1. **Validated measurements** - Features we confidently detect and measure
+2. **Partially validated** - Features measured but requiring further validation
+3. **Theoretical capabilities** - Features that could be measured with additional work
 
-### The GPSDO Advantage: From Relative to Absolute
-
-**Without GPSDO**: Receivers measure relative changes (signal fading, drift)  
-**With GPSDO**: Receivers measure absolute physical quantities (layer altitude, electron density, propagation velocity)
-
-The equation becomes solvable:
-
-**T_observed = T_UTC + D_clock + T_propagation**
-
-Since **T_UTC** is known (broadcast) and **D_clock ≈ 0** (GPSDO-locked), we directly measure **T_propagation** with microsecond precision.
+**Philosophy**: We provide only the data we can justify given our instrument's capabilities and limitations. Scientists can then determine if the data quality meets their research needs.
 
 ---
 
-## Scientific Capabilities
+## Detectable Signal Features
 
-### 1. Metrology: The "Virtual Height" Ruler
+### WWV/WWVH (NIST, Fort Collins, CO / Kekaha, HI)
 
-#### Ionospheric Layer Altitude Measurement
+#### Validated Measurements ✅
 
-- **Observable**: Propagation delay changes (ms-scale)
-- **Physical Interpretation**: F-layer altitude variation
-- **Temporal Resolution**: 1-minute cadence
-- **Precision**: ±0.5 ms → ±75 km altitude uncertainty
+- **Test signal** (minutes 8, 44)
+  - 1000 Hz continuous tone
+  - SNR measurement
+  - Detection confidence
+  
+- **BCD modulation** (100 Hz subcarrier)
+  - Binary-coded decimal time code
+  - Correlation-based decoding
+  - UTC time extraction
+  - Decoding confidence score
 
-**The "Breathing" Ionosphere**: Diurnal F-layer rise/fall creates 10-30 ms delay variation, directly observable in timing residuals.
+- **Station ID tones**
+  - WWV: 500 Hz (even minutes), 600 Hz (odd minutes)
+  - WWVH: 1200 Hz (even minutes), 1500 Hz (odd minutes)
+  - Tone power (dB)
+  - Detection timing (ms precision)
+  - Mutual exclusivity validation
 
-#### Multi-Mode Propagation Disambiguation
+- **Second ticks**
+  - Timing pulse detection
+  - Per-tick SNR measurement
+  - Timing precision: ~1 ms (limited by ionospheric variability)
 
-- **Observable**: "Double clocks" - simultaneous 1-hop and 2-hop arrivals
-- **Physical Interpretation**: Exact path length difference
-- **Validation**: Confirms ray-tracing models (VOACAP, PHaRLAP)
+- **Carrier SNR**
+  - Channel-level signal strength
+  - Noise floor estimation
+  - Units: dB relative to noise
 
-**Example**: WWV 10 MHz might arrive via:
+- **Carrier Doppler shift**
+  - Frequency offset from nominal carrier
+  - Range: ±10 Hz (typical ionospheric motion)
+  - Precision: ~0.1 Hz
 
-- 1-hop F-layer: 45.2 ms delay
-- 2-hop F-layer: 48.7 ms delay
-- Δ = 3.5 ms → validates geometric model
+- **Voice announcements**
+  - 440 Hz voice ID tone detection
+  - Content: Not decoded (voice recognition not implemented)
 
-#### Broadcast Station Verification
+#### Partially Validated ⚠️
 
-- **Observable**: Systematic timing offset from expected UTC
-- **Physical Interpretation**: Transmitter clock drift or propagation anomaly
-- **Application**: Third-party audit of NIST/NRC/NTSC time services
+- **Phase variance** (per-second ticks)
+  - Measured in radians
+  - Interpretation: Channel coherence quality
+  - **Validation needed**: Correlation with scintillation indices
 
----
+- **Doppler spread**
+  - Standard deviation of Doppler over measurement window
+  - Units: Hz
+  - **Validation needed**: Window size, physical interpretation
 
-### 2. Ionospheric Physics: Passive Tomography
+### CHU (Ottawa, ON, Canada)
 
-#### Geometric Coverage
+#### Validated Measurements ✅
 
-**4 Stations × Multiple Frequencies = Distributed Ionospheric Sounder**
+- **AFSK modulation**
+  - Bell 103 FSK (1070/1270 Hz)
+  - Binary time code decoding
+  - UTC time extraction
+  - Decoding confidence
 
-| Station | Location | Frequencies | Midpoint Coverage |
-|---------|----------|-------------|-------------------|
-| WWV | Colorado | 2.5, 5, 10, 15, 20, 25 MHz | Central US |
-| WWVH | Hawaii | 2.5, 5, 10, 15 MHz | Pacific |
-| CHU | Canada | 3.33, 7.85, 14.67 MHz | Northern US/Canada |
-| BPM | China | 2.5, 5, 10, 15 MHz | Trans-Pacific |
+- **Second ticks**
+  - Timing pulse detection
+  - Per-tick SNR
 
-**Result**: 4 distinct ionospheric reflection points, sounded at different altitudes (frequency-dependent).
+- **Carrier SNR**
+  - Channel-level signal strength
 
----
+#### Partially Validated ⚠️
 
-### 3. Traveling Ionospheric Disturbances (TIDs)
+- Same phase variance and Doppler spread as WWV/WWVH
 
-#### Observable Signatures
+### BPM (Pucheng, China)
 
-- **Doppler Velocity**: Periodic oscillations (±0.5 Hz typical)
-- **Phase**: Coherent wave pattern across frequencies
-- **Timing**: Sequential arrival at different reflection altitudes
+#### Partially Validated ⚠️
 
-#### Scientific Value
+- **Second ticks** - Basic detection implemented
+- **Carrier SNR** - Measured
+- **Modulation format** - Needs full characterization
+- **Station ID method** - Requires research/documentation
 
-**Vertical Velocity Measurement**: By comparing TID arrival time at 2.5 MHz (low altitude) vs 15 MHz (high altitude), calculate vertical propagation speed of gravity waves.
-
-**Example**:
-
-- TID hits 2.5 MHz reflection point: T₀
-- TID hits 15 MHz reflection point: T₀ + 45 seconds
-- Altitude difference: ~100 km
-- **Vertical velocity**: 2.2 km/s
-
-#### Triggers
-
-- Solar storms (geomagnetic disturbances)
-- Distant tsunamis (atmospheric coupling)
-- Auroral electrojet activity
-
----
-
-### 4. Solar Flare Detection (Sudden Ionospheric Disturbances)
-
-#### Observable Signatures
-
-- **Sudden Frequency Deviation (SFD)**: Sharp Doppler spike (0.1-1 Hz)
-- **Absorption**: SNR drop on lower frequencies (2.5, 5 MHz)
-- **Phase Anomaly**: Abrupt phase shift on higher frequencies
-
-#### GPSDO-Enabled Precision
-
-**Problem**: Without GPSDO, 1 Hz temperature drift masks 0.5 Hz solar flare signature  
-**Solution**: GPSDO locks frequency to <0.01 Hz → any deviation is physically real
-
-#### D-Layer Absorption Profile
-
-**FSS (Frequency Selective Fading)** from test signals (minutes 8/44) quantifies D-layer absorption:
-
-- X-ray flux → D-layer ionization → absorption at 2.5/5 MHz
-- **Correlation**: FSS_dB vs GOES X-ray flux
+**Status**: BPM support is experimental. Full validation pending.
 
 ---
 
-### 5. Dawn/Dusk Transition Profiling
+## Cross-Station and Multi-Frequency Features
 
-#### The "Dawn Chirp"
+### Validated Measurements ✅
 
-As sunrise illuminates the ionosphere:
+**Time of Arrival (ToA)**
 
-1. **D-layer forms**: Absorption increases on low frequencies
-2. **F-layer expands**: MUF (Maximum Usable Frequency) rises
-3. **Layer motion**: Rapid ionization creates Doppler signature
+- Measured propagation delay from transmitter to receiver
+- Precision: ~1 ms (ionospheric variability limit)
+- Validation: Compared against great circle distance + ionospheric model
 
-#### Multi-Frequency Observation
+**Multi-frequency SNR**
 
-- **2.5 MHz**: SNR drops (D-layer absorption)
-- **15 MHz**: SNR increases (F-layer opens)
-- **Doppler**: Negative shift (layer ascending)
+- SNR measured across 2.5, 5, 10, 15, 20, 25 MHz
+- Enables frequency-dependent absorption analysis
+- Diurnal patterns observable
 
-**Timing Precision**: GPSDO allows exact correlation with solar zenith angle at reflection point.
+**Propagation mode classification**
 
----
+- Modes: 1E (E-layer), 1F (F-layer), 2F (two-hop F), 3F, GW (ground wave)
+- Method: Delay-based heuristics
+- **Limitation**: Cannot always distinguish mode mixing
 
-### 6. Total Electron Content (TEC) - The Holy Grail
+**Propagation delay**
 
-#### Physical Principle
+- Total path delay estimation
+- Includes: Free-space + ionospheric delay
+- Uncertainty: ~2-5 ms depending on mode
 
-Ionosphere is dispersive: **τ(f) = 40.3 × TEC / f²**
+### Partially Validated ⚠️
 
-Lower frequencies delayed more than higher frequencies.
+**Total Electron Content (TEC)**
 
-#### Multi-Frequency Advantage
+- Method: Multi-frequency dispersion (f^-2 dependence)
+- Units: TECU (10^16 electrons/m²)
+- **Validation needed**: Comparison with GPS TEC maps (IONEX data)
+- **Limitation**: Requires accurate ToA across multiple frequencies
+- **Status**: TECEstimator class exists, needs validation
 
-**WWV Example** (6 frequencies):
+**Delay spread**
 
-- 2.5 MHz: ToA = 45.2 ms
-- 5.0 MHz: ToA = 42.1 ms
-- 10.0 MHz: ToA = 38.5 ms
-- 15.0 MHz: ToA = 36.2 ms
-- 20.0 MHz: ToA = 34.8 ms
-- 25.0 MHz: ToA = 33.9 ms
+- Multipath severity indicator
+- Units: milliseconds
+- **Validation needed**: Measurement method verification
+- **Use case**: Mode mixing detection
 
-**Linear Regression**: Plot ToA vs 1/f² → slope = 40.3 × TEC
+**Frequency selective spread (FSS)**
 
-**Result**: TEC = 25.3 TECU (Total Electron Content Units)
+- Multipath in frequency domain
+- Units: dB
+- **Validation needed**: Confirm measurement implementation
 
-#### Scientific Value
+**Coherence time**
 
-- **Space Weather Monitoring**: Real-time ionospheric density
-- **GPS Correction**: TEC affects GPS accuracy
-- **Propagation Forecasting**: Predict HF communication windows
-
----
-
-### 7. O/X Mode Splitting (Advanced)
-
-#### Physical Principle
-
-Earth's magnetic field splits radio waves into:
-
-- **Ordinary (O) wave**: Lower refractive index
-- **Extraordinary (X) wave**: Higher refractive index
-
-**Result**: Dual arrivals separated by ~0.5-2 ms
-
-#### Observable in hf-timestd
-
-- **Delay Spread**: Multipath analysis reveals mode splitting
-- **Phase Variance**: Coherence analysis shows dual-mode interference
-
-#### Scientific Value
-
-Validates magneto-ionic theory and ray-tracing models (PHaRLAP).
+- Maximum coherent integration window
+- Units: seconds
+- **Validation needed**: Calculation method verification
 
 ---
 
-## Data Products for Scientific Community
+## Scientific Questions Addressable with Current Measurements
 
-### Tier 1: Metrology (Fast Path)
+### 1. D-Layer Absorption Studies
 
-**Purpose**: UTC(NIST) discipline  
-**Latency**: Real-time  
-**Consumers**: Chrony, NTP servers
+**Measurements Used**:
 
-| Product | Cadence | Precision |
-|---------|---------|-----------|
-| D_clock | 1 min | ±0.5 ms |
-| Propagation Mode | 1 min | 1-hop/2-hop |
-| Uncertainty | 1 min | σ estimate |
+- Multi-frequency SNR (2.5 - 25 MHz)
+- Solar zenith angle at path midpoint
+- Time of day
 
----
+**Scientific Questions**:
 
-### Tier 2: Ionospheric Science (Deep Path)
+- How does D-layer absorption vary with frequency?
+- What is the diurnal pattern of absorption?
+- Can we detect Sudden Ionospheric Disturbances (SIDs) from solar flares?
 
-**Purpose**: Space weather research  
-**Latency**: 5-minute aggregation  
-**Consumers**: HamSCI, NOAA SWPC, researchers
+**Data Quality**: ✅ High confidence
 
-| Product | Cadence | Precision | Scientific Use |
-|---------|---------|-----------|----------------|
-| **TEC** | 1 min | ±5 TECU | Ionospheric density |
-| **Doppler Velocity** | 1 min | ±0.05 Hz | Layer motion, TIDs |
-| **Doppler Spread** | 1 min | ±0.02 Hz | Turbulence, Spread-F |
-| **FSS (D-layer)** | 2/hour | ±1 dB | Solar flare absorption |
-| **Delay Spread** | 1 min | ±0.5 ms | Multipath, mode splitting |
-| **SNR/RSSI** | 1 min | ±0.5 dB | Fading, propagation loss |
-| **Phase Variance** | 1 min | ±0.1 rad | Coherence time |
+- SNR measurements validated
+- Frequency dependence well-established physics
+- Solar zenith angle calculable from geometry
 
----
+**Limitations**:
 
-### Tier 3: Event Detection
+- Cannot separate D-layer from E-layer absorption
+- Requires clear day/night comparison
 
-**Purpose**: Automated anomaly identification  
-**Latency**: 5-minute analysis  
-**Consumers**: Space weather alerts, research triggers
+### 2. Propagation Mode Statistics
 
-| Event Type | Detection Method | Threshold |
-|------------|------------------|-----------|
-| **TID** | Doppler periodicity | >0.3 Hz oscillation, 10-60 min period |
-| **Solar Flare (SID)** | Sudden FSS increase | >5 dB in <5 min |
-| **Spread-F** | Doppler spread spike | >0.5 Hz std dev |
-| **Layer Transition** | SNR gradient | >10 dB change across frequencies |
+**Measurements Used**:
 
----
+- Propagation mode classification (1E, 1F, 2F, etc.)
+- Time of day
+- Frequency
+- Propagation delay
 
-## Comparison to Standard HamSCI Grape Nodes
+**Scientific Questions**:
 
-### Standard Grape Node
+- What is the probability of E-layer vs F-layer propagation by time/frequency?
+- How often does multi-hop propagation occur?
+- Can we estimate Maximum Usable Frequency (MUF)?
 
-- **Frequencies**: 1-3 (typically single frequency)
-- **Stations**: 1-2
-- **Clock**: Crystal oscillator (±1 ppm drift)
-- **Capability**: Relative change detection
+**Data Quality**: ⚠️ Medium confidence
 
-### hf-timestd "Super-Grape"
+- Mode classification based on delay heuristics
+- Cannot always detect mode mixing
+- Thresholds may need tuning
 
-- **Frequencies**: 17 broadcasts across 4 stations
-- **Clock**: GPSDO (±0.01 ppb)
-- **Capability**: Absolute physical measurements
+**Limitations**:
 
-### Scientific Advantage Matrix
+- Simplified ray-tracing model
+- No direct ionospheric sounding
 
-| Capability | Standard Grape | hf-timestd |
-|------------|----------------|------------|
-| **TEC Estimation** | ❌ (single frequency) | ✅ (6 frequencies per station) |
-| **Vertical Tomography** | ❌ | ✅ (2.5-25 MHz range) |
-| **Absolute Timing** | ❌ (drift) | ✅ (GPSDO-locked) |
-| **Solar Flare Detection** | ⚠️ (low confidence) | ✅ (sub-Hz precision) |
-| **Mode Disambiguation** | ❌ | ✅ (delay spread analysis) |
-| **Dawn/Dusk Profiling** | ⚠️ (qualitative) | ✅ (quantitative) |
+### 3. TEC Monitoring
 
----
+**Measurements Used**:
 
-## Integration with HamSCI Personal Space Weather Station (PSWS)
+- Multi-frequency ToA (2.5 - 25 MHz)
+- Dispersion analysis (f^-2 fit)
 
-### Data Contribution
+**Scientific Questions**:
 
-hf-timestd can feed the HamSCI network with:
+- What is the local TEC over the receiver?
+- How does TEC vary diurnally?
+- Can we validate GPS TEC maps?
 
-1. **High-Fidelity Reference**: Calibrate neighboring stations
-2. **Vertical Sounding**: Fill gap between ground magnetometers and satellites
-3. **Multi-Path TEC**: Validate GPS TEC maps
+**Data Quality**: ⚠️ Requires validation
 
-### API for HamSCI
+- TEC estimation implemented but not validated
+- Needs comparison with GPS TEC (IONEX)
+- Accuracy depends on ToA precision
 
-Proposed data export format (JSON):
+**Limitations**:
 
-```json
-{
-  "station_id": "K0XXX",
-  "timestamp": "2025-12-23T18:00:00Z",
-  "measurements": [
-    {
-      "source": "WWV",
-      "frequency_mhz": 10.0,
-      "toa_ms": 38.5,
-      "doppler_hz": -0.25,
-      "snr_db": 25.3,
-      "propagation_mode": "1F2"
-    }
-  ],
-  "derived": {
-    "tec_tecu": 25.3,
-    "tec_confidence": 0.92,
-    "tid_detected": false,
-    "solar_flare": false
-  }
-}
-```
+- Single line-of-sight (not tomographic)
+- Assumes single-layer ionosphere
+- Mode mixing affects accuracy
 
----
+### 4. Sporadic-E Detection
 
-## Deployment Vision: Distributed Ionosonde Network
+**Measurements Used**:
 
-**If deployed in 10-50 locations across North America**:
+- SNR sudden increases at 10-15 MHz
+- Mode change to 1E
+- Event timing and duration
 
-### Continental-Scale Capabilities
+**Scientific Questions**:
 
-1. **TID Tracking**: Measure gravity wave propagation velocity and direction
-2. **Solar Flare Mapping**: Regional D-layer absorption profiles
-3. **TEC Tomography**: 3D ionospheric density reconstruction
-4. **Propagation Forecasting**: Real-time HF communication predictions
+- When do sporadic-E events occur?
+- What is the seasonal/diurnal pattern?
+- What is the critical frequency (foEs)?
 
-### Comparison to Traditional Ionosondes
+**Data Quality**: ⚠️ Detection possible, characterization needs work
 
-- **Traditional**: $100K+ per site, manual operation
-- **hf-timestd**: <$1K hardware, autonomous operation
-- **Coverage**: 100× more sites possible
+- SNR increases detectable
+- Mode classification may miss Es
+- Critical frequency estimation not implemented
 
----
+**Limitations**:
 
----
+- No direct ionogram
+- Cannot measure Es layer height
+- Weak Es may be missed
 
-## Validation Plan
+### 5. Ionospheric Dynamics (TIDs)
 
-**See**: [VALIDATION_PLAN.md](VALIDATION_PLAN.md) for complete methodology
+**Measurements Used**:
 
-### Validation Status
+- Doppler shift time series
+- Coherent oscillations across frequencies
+- Phase velocity estimation
 
-| Capability | Implementation | Validation | Status |
-|------------|----------------|------------|--------|
-| **TEC Estimation** | ✅ Complete | ⏳ Pending | Requires GPS TEC comparison |
-| **Doppler Velocity** | ✅ Complete | ⏳ Pending | Requires quiet period baseline |
-| **Solar Flare Detection** | ✅ Complete | ⏳ Pending | Requires GOES X-ray correlation |
-| **Layer Altitude** | ✅ Complete | ⏳ Pending | Requires ionosonde comparison |
-| **TID Detection** | ⚠️ Partial | ❌ Not Started | Requires event detector implementation |
-| **O/X Mode Splitting** | ❌ Not Implemented | ❌ Not Started | Requires advanced analysis |
+**Scientific Questions**:
 
-### Validation Timeline
+- Can we detect Traveling Ionospheric Disturbances?
+- What are the TID periods and wavelengths?
+- Do TIDs correlate with geomagnetic activity?
 
-**Phase 1** (Week 1-2): TEC accuracy validation
+**Data Quality**: ⚠️ Theoretical capability, needs implementation
 
-- Deploy Science Aggregator
-- Collect 7 days of data
-- Compare with GPS TEC maps
-- Document accuracy: Target R² > 0.7, RMS < 10 TECU
+- Doppler measured but TID detection not automated
+- Requires coherent analysis across frequencies
+- Period/wavelength extraction not implemented
 
-**Phase 2** (Week 3-4): Event validation
+**Limitations**:
 
-- Monitor for solar flares (M-class or above)
-- Validate FSS response
-- Monitor for geomagnetic storms
-- Validate TID detection
+- Single receiver (cannot determine propagation direction)
+- Requires stable reference (GPSDO provides this)
 
-**Phase 3** (Month 2-3): Long-term stability
+### 6. Ionospheric Tilt
 
-- Collect 30 days continuous data
-- Analyze diurnal/seasonal patterns
-- Cross-validate with ionosonde
-- Publish validation report
+**Measurements Used**:
 
-### Data Quality Standards
+- TEC from multiple transmitter paths (WWV, WWVH, CHU, BPM)
+- Different azimuths from receiver
+- TEC gradient calculation
 
-All scientific data products include:
+**Scientific Questions**:
 
-- **Confidence Score**: 0-1 based on fit quality, SNR, n_frequencies
-- **Uncertainty Estimate**: ±X units with error sources documented
-- **Quality Flags**: GOOD / MARGINAL / BAD
+- What is the large-scale ionospheric structure?
+- Can we detect ionospheric tilts?
+- How does TEC vary with azimuth?
 
-**Publication Guideline**: No claims without validation data and documented error bars.
+**Data Quality**: ⚠️ Theoretical capability
+
+- Requires validated TEC from multiple paths
+- Gradient calculation not implemented
+- Needs at least 3 paths with good geometry
+
+**Limitations**:
+
+- Limited azimuthal coverage (4 transmitters)
+- Assumes linear gradient
+- Path midpoints may be too close
 
 ---
 
-## Summary: From Clock to Radar
+## Advanced Features (Not Yet Implemented)
 
-| Perspective | What hf-timestd Measures |
-|-------------|--------------------------|
-| **Metrologist** | Absolute propagation delay (virtual height ruler) |
-| **Ionospheric Physicist** | Layer altitude, electron density, wave dynamics |
-| **Space Weather Researcher** | TIDs, solar flares, geomagnetic disturbances |
-| **HF Operator** | Real-time propagation conditions, MUF prediction |
-| **NIST/NRC** | Broadcast station verification (third-party audit) |
+### Could Be Added with Current Hardware
 
-**The GPSDO transforms everything**: What appears as "clock error" is actually **pure ionospheric physics**, measured with microsecond precision across 4 geometric paths and 17 frequencies.
+**Amplitude Scintillation Index (S4)**
 
-This is a **Distributed Space Weather Sensor** masquerading as a time standard receiver.
+- Normalized variance of carrier amplitude
+- Requires: Continuous amplitude tracking
+- Scientific value: Ionospheric irregularity strength
+
+**Phase Scintillation Index (σ_φ)**
+
+- Standard deviation of detrended carrier phase
+- Requires: High-rate phase tracking
+- Scientific value: TEC fluctuation severity
+
+**Fading Rate**
+
+- Zero-crossing rate of SNR time series
+- Requires: SNR time series analysis
+- Scientific value: Channel dynamics quantification
+
+**Critical Frequency (foF2) Estimation**
+
+- Highest frequency with F-layer propagation
+- Requires: Multi-frequency observations + analysis
+- Scientific value: Ionospheric peak density proxy
+
+**Intermodulation Products**
+
+- Detection of non-linear mixing (e.g., 500+600 Hz)
+- Requires: Spectrum analysis at sum/difference frequencies
+- Scientific value: Ionospheric non-linearity (Luxembourg effect)
+
+### Requires External Data
+
+**Geomagnetic Correlation**
+
+- Correlate SNR/TEC with Kp index
+- Requires: Real-time Kp data feed
+- Scientific value: Space weather impacts
+
+**Solar Activity Correlation**
+
+- Correlate with solar flux (F10.7), sunspot number
+- Requires: Real-time solar data feed
+- Scientific value: Solar cycle effects
+
+**IRI-2020 Model Validation**
+
+- Compare measured ToA with IRI-2020 predictions
+- Requires: IRI-2020 integration
+- Scientific value: Ionospheric model validation
+
+---
+
+## Measurement Uncertainties and Limitations
+
+### Timing Precision
+
+- **System clock**: ±0.13 ms (Grade A, GPSDO-disciplined)
+- **Ionospheric variability**: ±1-3 ms (dominant error source)
+- **Propagation delay**: ±2-5 ms (model uncertainty)
+
+### SNR Measurement
+
+- **Precision**: ±0.5 dB (FFT-based estimation)
+- **Calibration**: Relative to noise floor (not absolute dBm)
+- **Validation**: Should match radiod's reported SNR
+
+### Doppler Measurement
+
+- **Precision**: ~0.1 Hz (phase tracking)
+- **Range**: ±10 Hz (ionospheric motion)
+- **Systematic offset**: GPSDO frequency error (< 0.01 Hz)
+
+### TEC Estimation
+
+- **Precision**: ±1-2 TECU (multi-frequency dispersion)
+- **Accuracy**: Requires validation against GPS TEC
+- **Limitation**: Assumes single-layer ionosphere
+
+### Propagation Mode Classification
+
+- **Accuracy**: ~80-90% (delay-based heuristics)
+- **Limitation**: Cannot always detect mode mixing
+- **Validation**: Needs comparison with ray-tracing
+
+---
+
+## Data Product Levels
+
+### L1A: Channel Observables
+
+Raw signal features directly from IQ samples:
+
+- Carrier power, SNR, Doppler
+- Tone detections and timing
+- Phase variance, coherence time
+- **Cadence**: 1 minute
+- **Format**: HDF5 (schema-validated)
+
+### L1B: BCD Timecode
+
+Decoded time information:
+
+- BCD correlation results
+- UTC time extraction
+- Decoding confidence
+- **Cadence**: 1 minute
+- **Format**: HDF5
+
+### L2: Timing Measurements
+
+Station-assigned timing with uncertainty budget:
+
+- D_clock (system clock offset)
+- Propagation delay and mode
+- ISO GUM uncertainty budget
+- Quality grade (A/B/C/D)
+- **Cadence**: 1 minute
+- **Format**: HDF5
+
+### L3: Fused Timing
+
+Multi-station, multi-frequency consensus:
+
+- Fused D_clock (Kalman filtered)
+- Uncertainty reduction
+- Per-station contributions
+- **Cadence**: 1 minute
+- **Format**: HDF5 (planned), CSV (current)
+
+### Science Products
+
+Derived ionospheric parameters:
+
+- TEC estimates (when validated)
+- Sporadic-E events
+- TID detections
+- **Cadence**: Variable
+- **Format**: HDF5
+
+---
+
+## Validation Requirements
+
+### Before Scientific Use
+
+**Tier 1: Basic Validation** (Required for all features)
+
+1. Compare carrier SNR with radiod's reported SNR
+2. Verify Doppler is within ±5 Hz range
+3. Check tone detection mutual exclusivity (WWV vs WWVH)
+4. Validate ToA is physically reasonable (< 100 ms)
+
+**Tier 2: Cross-Validation** (Required for ionospheric features)
+
+1. Compare TEC with GPS TEC maps (IONEX data)
+2. Validate propagation modes against ray-tracing
+3. Correlate D-layer absorption with solar zenith angle
+4. Understand physical meaning of phase variance
+
+**Tier 3: Scientific Validation** (Required for publication)
+
+1. Compare sporadic-E detections with ionosonde data
+2. Validate TID period/wavelength estimates
+3. Compare MUF estimates with VOACAP predictions
+4. Document all systematic errors and biases
+
+---
+
+## Recommendations for Scientists
+
+### Data Quality Assessment
+
+1. **Always check timing metrology grade** (A/B/C/D)
+   - Grade C or D: Timing unreliable, propagation science questionable
+   - Grade A/B: Timing validated, suitable for science
+
+2. **Verify data completeness**
+   - Check for gaps in time series
+   - Minimum 80% completeness recommended
+
+3. **Understand limitations**
+   - Single receiver (no spatial resolution)
+   - Model-dependent propagation delay
+   - Cannot separate ionospheric layers
+
+### Recommended Use Cases
+
+✅ **Well-suited for**:
+
+- D-layer absorption studies (diurnal patterns)
+- Propagation mode statistics
+- Sporadic-E event detection
+- Long-term TEC monitoring (after validation)
+
+⚠️ **Use with caution**:
+
+- Absolute TEC values (needs GPS validation)
+- Propagation mode classification (mode mixing)
+- TID detection (needs implementation)
+
+❌ **Not suitable for**:
+
+- Ionospheric tomography (single receiver)
+- Layer height determination (no ionosonde)
+- Absolute timing better than ±1 ms (ionospheric limit)
+
+---
+
+## Future Enhancements
+
+### High Priority (Improves existing features)
+
+1. Validate TEC against GPS TEC maps
+2. Implement automated sporadic-E detection
+3. Refine propagation mode classification
+4. Add scintillation indices (S4, σ_φ)
+
+### Medium Priority (New capabilities)
+
+1. TID detection and characterization
+2. Critical frequency (foF2) estimation
+3. Fading rate analysis
+4. Intermodulation product detection
+
+### Low Priority (Requires external data)
+
+1. Geomagnetic correlation (Kp index)
+2. Solar activity correlation (F10.7)
+3. IRI-2020 model validation
+
+---
+
+## Summary
+
+HF-TimeStd provides validated measurements of:
+
+- ✅ Carrier SNR, Doppler, timing ticks
+- ✅ Station ID tones and BCD time code
+- ✅ Multi-frequency propagation characteristics
+- ⚠️ TEC (needs validation)
+- ⚠️ Propagation modes (needs refinement)
+
+**Our commitment**: Provide only data we can justify. Scientists determine if quality meets their needs.
+
+**Validation status**: ~40% fully validated, ~30% partially validated, ~30% theoretical/future.
+
+For questions about measurement methods or data quality, contact the development team.

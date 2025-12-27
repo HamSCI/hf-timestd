@@ -259,6 +259,28 @@
             <button onclick="loadAllData()">🔄 Reload</button>
         </div>
 
+        <!-- Quality Gate Warning -->
+        <div id="quality-gate-warning" class="section"
+            style="display: none; background: rgba(245, 158, 11, 0.1); border-left: 4px solid #f59e0b; padding: 20px;">
+            <div style="display: flex; align-items: center; gap: 15px;">
+                <div style="font-size: 32px;">⚠️</div>
+                <div style="flex: 1;">
+                    <div style="font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 6px;">
+                        Timing Quality Below Grade C
+                    </div>
+                    <div style="font-size: 13px; color: #cbd5e1; margin-bottom: 8px;">
+                        Current timing grade: <span id="quality-gate-grade" style="font-weight: 600;"></span>
+                        (Uncertainty: <span id="quality-gate-uncertainty"></span>)
+                    </div>
+                    <div style="font-size: 13px; color: #cbd5e1;">
+                        Propagation and ionospheric science products may be unreliable when timing quality is degraded.
+                        <a href="metrology.html" style="color: #3b82f6; text-decoration: underline;">View Timing
+                            Metrology Dashboard →</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Path Info Banner -->
         <div id="path-info" class="section" style="padding: 15px; display: none;">
             <div style="display: flex; align-items: center; gap: 15px;">
@@ -443,6 +465,9 @@
         // Initialize date selector
         document.getElementById('date-selector').valueAsDate = new Date();
 
+        // Check timing quality on page load
+        checkTimingQuality();
+
         // Mode chart instance
         let modeChart = null;
 
@@ -520,6 +545,34 @@
             const midStr = `${Math.abs(mid.lat).toFixed(1)}°${mid.lat >= 0 ? 'N' : 'S'}, ${Math.abs(mid.lon).toFixed(1)}°${mid.lon >= 0 ? 'E' : 'W'}`;
 
             detailsEl.textContent = `${info.location || 'Unknown'} • Frequencies: ${path.freqs.join(', ')} MHz • Solar zenith at midpoint: ${midStr}`;
+        }
+
+        // Check timing quality and show warning if degraded
+        async function checkTimingQuality() {
+            try {
+                const response = await fetch('/api/v2/system/health-summary');
+                const data = await response.json();
+
+                const timing = data.timing || {};
+                const grade = (timing.grade || 'D').toUpperCase();
+                const uncertainty = timing.uncertainty_ms;
+
+                const warningBanner = document.getElementById('quality-gate-warning');
+
+                // Show warning if grade is C or D
+                if (grade === 'C' || grade === 'D') {
+                    warningBanner.style.display = 'block';
+                    document.getElementById('quality-gate-grade').textContent = `Grade ${grade}`;
+                    document.getElementById('quality-gate-uncertainty').textContent =
+                        uncertainty !== null ? `±${uncertainty.toFixed(3)} ms` : 'Unknown';
+                } else {
+                    warningBanner.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Error checking timing quality:', error);
+                // Don't show warning if we can't check quality
+                document.getElementById('quality-gate-warning').style.display = 'none';
+            }
         }
 
         async function loadAllData() {

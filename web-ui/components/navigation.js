@@ -25,8 +25,9 @@ class TimeStdNavigation {
 
     const pages = [
       { id: 'summary', label: 'Summary', url: 'summary.html', icon: '📊' },
-      { id: 'timing', label: 'Timing', url: 'timing.html', icon: '⏱️' },
-      { id: 'ionosphere', label: 'Ionosphere', url: 'ionosphere.html', icon: '🌐' },
+      { id: 'metrology', label: 'Metrology', url: 'metrology.html', icon: '⏱️' },
+      { id: 'timing', label: 'Timing (Legacy)', url: 'timing.html', icon: '🕐' },
+      { id: 'ionosphere', label: 'Propagation', url: 'ionosphere.html', icon: '🌐' },
       { id: 'logs', label: 'Logs', url: 'logs.html', icon: '📋' }
     ];
 
