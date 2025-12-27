@@ -8,7 +8,7 @@ Type=simple
 User=timestd
 Group=timestd
 # Run as the installed module from the venv
-ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion --data-root /var/lib/timestd --interval 60.0 --enable-chrony --log-level INFO
+ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion --data-root /var/lib/timestd --interval 15.0 --enable-chrony --log-level INFO
 Restart=always
 RestartSec=10
 # Standard output logging

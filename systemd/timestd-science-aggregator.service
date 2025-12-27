@@ -1,7 +1,8 @@
 [Unit]
 Description=hf-timestd Science Aggregator Service
 Documentation=https://github.com/rascol/hf-timestd
-After=network.target timestd-analytics@.service
+After=network.target timestd-analytics.service
+Wants=timestd-analytics.service
 
 [Service]
 Type=simple

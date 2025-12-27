@@ -150,17 +150,18 @@ if [[ "$MODE" == "production" ]]; then
         log_info "  ✅ h5clear found"
     fi
 
-    # Check for chrony
+    # Check for chrony - REQUIRED for production (system clock discipline is core functionality)
     if ! command -v chronyd &> /dev/null; then
         log_warn "  ⚠️  chronyd not found"
-        read -p "Install chrony for system clock discipline? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "  Installing chrony..."
-            sudo apt-get update && sudo apt-get install -y chrony
-        else
-            log_warn "  Skipping chrony installation. System clock discipline will not work."
+        log_info "  Chrony is REQUIRED for production mode (system clock discipline)"
+        log_info "  Installing chrony..."
+        sudo apt-get update && sudo apt-get install -y chrony
+        
+        if ! command -v chronyd &> /dev/null; then
+            log_error "Failed to install chrony. This is required for production mode."
+            exit 1
         fi
+        log_info "  ✅ chronyd installed successfully"
     else
         log_info "  ✅ chronyd found"
     fi
@@ -177,10 +178,16 @@ if [[ "$MODE" == "production" ]]; then
 refclock SHM 0 refid TMGR poll 3 precision 1e-3 offset 0.0
 EOF
             log_info "  ✅ Chrony configured for timestd SHM integration"
-            log_info "  📝 Note: timestd-analytics must start BEFORE chronyd to create SHM with correct permissions"
+            log_info "  📝 Note: timestd-fusion must start BEFORE chronyd to create SHM with correct permissions"
         else
             log_info "  ℹ️  Chrony already configured for timestd SHM"
         fi
+        
+        # Install chronyd service override to ensure correct startup order
+        log_info "  Installing chronyd service override for SHM ordering..."
+        sudo mkdir -p /etc/systemd/system/chronyd.service.d
+        sudo cp "$PROJECT_DIR/systemd/chronyd-timestd-shm.conf" /etc/systemd/system/chronyd.service.d/timestd-shm.conf
+        log_info "  ✅ Chronyd will start after timestd-fusion (ensures correct SHM permissions)"
     fi
 fi
 
@@ -277,6 +284,10 @@ if [[ "$MODE" == "production" ]]; then
     sudo mkdir -p /dev/shm/timestd
     sudo chown "$INSTALL_USER:$INSTALL_USER" /dev/shm/timestd
     log_info "  Created: /dev/shm/timestd (hot buffer)"
+    
+    # Install tmpfiles.d configuration to recreate on boot
+    sudo cp "$PROJECT_DIR/systemd/timestd-tmpfiles.conf" /etc/tmpfiles.d/timestd.conf
+    log_info "  Installed: /etc/tmpfiles.d/timestd.conf (ensures /dev/shm/timestd persists across reboots)"
 fi
 
 # Config directory (production only)
@@ -488,7 +499,7 @@ Type=simple
 User=\$INSTALL_USER
 Group=\$INSTALL_USER
 # Run as the installed module from the venv
-ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.multi_broadcast_fusion --data-root $DATA_ROOT --interval 60.0 --enable-chrony --log-level INFO
+ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.multi_broadcast_fusion --data-root $DATA_ROOT --interval 15.0 --enable-chrony --log-level INFO
 Restart=always
 RestartSec=10
 # Standard output logging
@@ -605,6 +616,16 @@ if [[ "$MODE" == "production" ]]; then
     echo "   sudo systemctl list-timers grape-*"
     echo "   journalctl -u timestd-core-recorder -f"
     echo ""
+    
+    # Add chrony note if it wasn't installed during setup
+    if ! command -v chronyd &> /dev/null; then
+        echo "📝 Note: If you install chrony later for system clock discipline:"
+        echo "   sudo mkdir -p /etc/systemd/system/chronyd.service.d"
+        echo "   sudo cp $PROJECT_DIR/systemd/chronyd-timestd-shm.conf /etc/systemd/system/chronyd.service.d/timestd-shm.conf"
+        echo "   sudo systemctl daemon-reload"
+        echo ""
+    fi
+    
     echo "Web UI: http://localhost:3000"
 else
     echo "Test mode installed. Next steps:"
