@@ -150,6 +150,12 @@ class RPTCalibration:
     # Must come after required fields since it has a default value
     detected_station: str = 'WWV'         # Station detected at calibration time
     
+    # SSRC tracking for hybrid calibration persistence (Issue #X)
+    # RTP calibration is SSRC-dependent - invalidate when radiod restarts
+    ssrc: Optional[int] = None            # SSRC of radiod channel
+    ssrc_first_seen: Optional[float] = None  # When this SSRC was first seen
+    ssrc_last_seen: Optional[float] = None   # Last time this SSRC was confirmed
+    
     def expected_tone_sample(
         self, 
         second_number: int, 
@@ -305,6 +311,10 @@ class TimingCalibrator:
             'discrimination_corrections': 0
         }
         
+        # SSRC tracking for hybrid calibration persistence
+        # Maps channel_name -> current SSRC
+        self.channel_ssrcs: Dict[str, int] = {}
+        
         # Load existing state
         self._load_state()
         
@@ -367,7 +377,11 @@ class TimingCalibrator:
                     calibration_snr_db=rtp_data['calibration_snr_db'],
                     calibration_confidence=rtp_data['calibration_confidence'],
                     n_confirmations=rtp_data['n_confirmations'],
-                    last_confirmed=rtp_data['last_confirmed']
+                    last_confirmed=rtp_data['last_confirmed'],
+                    detected_station=rtp_data.get('detected_station', 'WWV'),
+                    ssrc=rtp_data.get('ssrc'),
+                    ssrc_first_seen=rtp_data.get('ssrc_first_seen'),
+                    ssrc_last_seen=rtp_data.get('ssrc_last_seen')
                 )
             
             self.stats = state.get('stats', self.stats)
@@ -376,7 +390,13 @@ class TimingCalibrator:
             self.global_rtp_offset = state.get('global_rtp_offset')
             self.global_rtp_offset_source = state.get('global_rtp_offset_source')
             self.global_rtp_offset_confidence = state.get('global_rtp_offset_confidence', 0.0)
-            
+
+            # Validate SSRC stability (Hybrid Calibration)
+            # If SSRCs have changed (radiod restart), invalidate RTP calibration
+            # but preserve station calibration if fresh.
+            if self.rtp_calibration:
+                self._validate_hybrid_calibration_state()
+
             logger.info(f"Loaded timing calibration: phase={self.phase.value}, "
                        f"{len(self.station_calibration)} stations, "
                        f"{len(self.rtp_calibration)} channels, "
@@ -440,7 +460,11 @@ class TimingCalibrator:
                                     calibration_snr_db=rtp_data['calibration_snr_db'],
                                     calibration_confidence=rtp_data['calibration_confidence'],
                                     n_confirmations=rtp_data['n_confirmations'],
-                                    last_confirmed=rtp_data['last_confirmed']
+                                    last_confirmed=rtp_data['last_confirmed'],
+                                    detected_station=rtp_data.get('detected_station', 'WWV'),
+                                    ssrc=rtp_data.get('ssrc'),
+                                    ssrc_first_seen=rtp_data.get('ssrc_first_seen'),
+                                    ssrc_last_seen=rtp_data.get('ssrc_last_seen')
                                 )
                     
                     state = {
@@ -469,7 +493,11 @@ class TimingCalibrator:
                                 'calibration_snr_db': rtp.calibration_snr_db,
                                 'calibration_confidence': rtp.calibration_confidence,
                                 'n_confirmations': rtp.n_confirmations,
-                                'last_confirmed': rtp.last_confirmed
+                                'last_confirmed': rtp.last_confirmed,
+                                'detected_station': rtp.detected_station,
+                                'ssrc': rtp.ssrc,
+                                'ssrc_first_seen': rtp.ssrc_first_seen,
+                                'ssrc_last_seen': rtp.ssrc_last_seen
                             }
                             for channel, rtp in self.rtp_calibration.items()
                         },
@@ -489,6 +517,163 @@ class TimingCalibrator:
                 
         except Exception as e:
             logger.error(f"Failed to save timing calibration: {e}", exc_info=True)
+    
+    def register_channel_ssrc(self, channel_name: str, ssrc: int):
+        """
+        Register a channel's SSRC and validate calibration validity.
+        
+        This is called by channel recorders when they initialize. It's the primary mechanism
+        for detecting if radiod has restarted (which changes SSRCs).
+        
+        Args:
+            channel_name: Channel identifier (e.g. 'WWV_10MHz')
+            ssrc: The current SSRC from the RTP stream
+        """
+        # Store current SSRC
+        self.channel_ssrcs[channel_name] = ssrc
+        
+        # If we have RTP calibration for this channel, update/validate it
+        if channel_name in self.rtp_calibration:
+            rtp_cal = self.rtp_calibration[channel_name]
+            
+            # If calibration has no SSRC recorded (legacy), adopt this one
+            if rtp_cal.ssrc is None:
+                logger.info(f"Adopting initial SSRC {ssrc:x} for {channel_name} calibration")
+                rtp_cal.ssrc = ssrc
+                rtp_cal.ssrc_first_seen = time.time()
+                rtp_cal.ssrc_last_seen = time.time()
+                self._save_state()
+            
+            # If SSRC matches, update last seen
+            elif rtp_cal.ssrc == ssrc:
+                rtp_cal.ssrc_last_seen = time.time()
+                
+            # If SSRC mismatch, radiod has likely restarted!
+            else:
+                logger.warning(
+                    f"⚠️ SSRC mismatch for {channel_name}: "
+                    f"calibrated={rtp_cal.ssrc:x}, current={ssrc:x}. "
+                    f"Radiod likely restarted."
+                )
+                self._validate_hybrid_calibration_state()
+
+    def _validate_hybrid_calibration_state(self):
+        """
+        Validate calibration state using hybrid strategy (SSRC + Time).
+        
+        Logic:
+        1. Check SSRC stability (RTP calibration validity)
+        2. Check station calibration freshness (Propagation delay validity)
+        
+        Transitions:
+        - SSRCs Stable -> CALIBRATED (Full calibration)
+        - SSRCs Changed + Station Fresh -> BOOTSTRAP (Fast recovery using priors)
+        - SSRCs Changed + Station Stale -> BOOTSTRAP (Full re-bootstrap)
+        """
+        ssrc_stable = self._validate_ssrc_stability()
+        station_cal_fresh = self._validate_station_calibration_freshness()
+        
+        if ssrc_stable:
+             # Best case: SSRCs unchanged, use everything
+             if self.phase != CalibrationPhase.CALIBRATED:
+                 logger.info("✅ SSRCs unchanged - full calibration valid")
+                 self.phase = CalibrationPhase.CALIBRATED
+                 
+        elif station_cal_fresh:
+            # Hybrid case: SSRCs changed but station cal is fresh
+            logger.info("🔄 SSRCs changed but station calibration fresh - fast re-bootstrap")
+            self.phase = CalibrationPhase.BOOTSTRAP
+            self.global_rtp_offset = None  # Invalidate RTP offset
+            # Keep self.station_calibration - use as priors!
+            
+            # Reset RTP calibration but keep structure for stats? 
+            # Actually better to clear it to force re-learning RTP offset
+            self.rtp_calibration = {}
+            
+        else:
+            # Worst case: Everything stale
+            logger.warning("⚠️ Calibration stale - full re-bootstrap")
+            self.phase = CalibrationPhase.BOOTSTRAP
+            self.global_rtp_offset = None
+            self.station_calibration = {}  # Clear stale data
+            self.rtp_calibration = {}
+
+    def _validate_ssrc_stability(self) -> bool:
+        """
+        Check if current SSRCs match calibration SSRCs.
+        
+        Returns:
+            True if known SSRCs match calibration (or no current SSRCs to check yet)
+            False if any known SSRC disagrees with calibration
+        """
+        if not self.rtp_calibration:
+            return False
+            
+        # Get current SSRCs from active channels (populated via register_channel_ssrc)
+        if not self.channel_ssrcs:
+            # No channels connected yet - optimistic assumption until proven otherwise
+            return True
+        
+        mismatches = 0
+        matches = 0
+            
+        for channel, rtp_cal in self.rtp_calibration.items():
+            if rtp_cal.ssrc is None:
+                # Old active calibration without SSRC - treat as unstable to be safe
+                # OR adopt on first see? Let's treat as unstable to force re-verification
+                # unless we are very confident.
+                continue
+                
+            if channel in self.channel_ssrcs:
+                if self.channel_ssrcs[channel] != rtp_cal.ssrc:
+                    logger.warning(
+                        f"SSRC changed for {channel}: "
+                        f"{rtp_cal.ssrc:08x} -> {self.channel_ssrcs[channel]:08x}"
+                    )
+                    mismatches += 1
+                else:
+                    matches += 1
+        
+        if mismatches > 0:
+            return False
+            
+        # If we have matches and no mismatches, we are stable
+        return True
+
+    def _validate_station_calibration_freshness(self) -> bool:
+        """
+        Check if station propagation calibration is still valid.
+        
+        Station propagation delays change slowly (ionospheric seasonal variation).
+        Consider fresh if:
+        - Updated within last 7 days
+        - Has sufficient samples (n >= 50)
+        
+        Returns:
+            True if station calibration can be used as priors
+        """
+        if not self.station_calibration:
+            return False
+            
+        now = time.time()
+        max_age_seconds = 7 * 24 * 3600  # 7 days
+        
+        valid_stations = 0
+        
+        for station, cal in self.station_calibration.items():
+            age = now - cal.last_updated
+            if age > max_age_seconds:
+                logger.warning(f"Station {station} calibration stale: {age/3600:.1f}h old")
+                continue
+                
+            if cal.n_samples < 50:
+                logger.debug(f"Station {station} calibration insufficient: {cal.n_samples} samples")
+                continue
+            
+            valid_stations += 1
+                
+        # We need at least 2 valid anchor stations (CHU/WWV) to be useful
+        return valid_stations >= 2
     
     def predict_station(
         self,

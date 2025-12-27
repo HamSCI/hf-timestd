@@ -42,6 +42,7 @@ from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, E
 
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
+from .timing_calibrator import TimingCalibrator
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,20 @@ class CoreRecorderV2:
         # NTP status cache
         self.ntp_status = {'offset_ms': None, 'synced': False, 'last_update': 0}
         self.ntp_status_lock = threading.Lock()
+
+        # Timing Calibrator for SSRC registration
+        try:
+            # Shared state file with Analytics Service
+            state_file = self.output_dir / 'state' / 'timing_calibration.json'
+            self.calibrator = TimingCalibrator(
+                data_root=self.output_dir,
+                sample_rate=20000, # Default, will be updated if needed
+                state_file=state_file
+            )
+            logger.info(f"Initialized TimingCalibrator for SSRC tracking: {state_file}")
+        except Exception as e:
+            logger.error(f"Failed to initialize TimingCalibrator: {e}")
+            self.calibrator = None
         
         # Status tracking
         self.start_time = time.time()
@@ -190,6 +205,17 @@ class CoreRecorderV2:
         for freq, recorder in self.recorders.items():
             recorder.start()
             logger.info(f"Started recorder for {freq/1e6:.3f} MHz ({recorder.config.description})")
+
+            # Register SSRC now that recorder is started and SSRC is resolved
+            if self.calibrator:
+                try:
+                    if recorder.config.ssrc:
+                        self.calibrator.register_channel_ssrc(recorder.config.description, recorder.config.ssrc)
+                        logger.info(f"Registered SSRC {recorder.config.ssrc:x} for {recorder.config.description}")
+                    else:
+                        logger.warning(f"Recorder {recorder.config.description} started but has no SSRC")
+                except Exception as e:
+                    logger.warning(f"Failed to register SSRC for {freq}: {e}")
         
         logger.info("Core recorder running. Press Ctrl+C to stop.")
         

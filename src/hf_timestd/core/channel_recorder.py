@@ -28,7 +28,9 @@ from datetime import datetime, timezone
 from ka9q import discover_channels, RadiodControl, ChannelInfo, generate_multicast_ip, Encoding
 
 from hf_timestd.stream.stream_manager import StreamManager
+from hf_timestd.stream.stream_manager import StreamManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
+from .timing_calibrator import TimingCalibrator
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,20 @@ class ChannelRecorder:
         self.recorder: Optional[StreamRecorderV2] = None
         self.stream_handle = None
         self.channel_info: Optional[ChannelInfo] = None
+
+        # Timing Calibrator for SSRC registration
+        try:
+            # Shared state file with Analytics Service
+            state_file = self.output_dir / 'state' / 'timing_calibration.json'
+            self.calibrator = TimingCalibrator(
+                data_root=self.output_dir,
+                sample_rate=20000, # Default, will be updated if needed
+                state_file=state_file
+            )
+            logger.info(f"Initialized TimingCalibrator for SSRC tracking: {state_file}")
+        except Exception as e:
+            logger.error(f"Failed to initialize TimingCalibrator: {e}")
+            self.calibrator = None
         
         # State
         self.running = False
@@ -132,7 +148,16 @@ class ChannelRecorder:
             )
             
             ssrc = self.stream_handle.ssrc
+            ssrc = self.stream_handle.ssrc
             logger.info(f"Channel ready {self.channel_name}: SSRC={ssrc} on {self.stream_handle.multicast_address}")
+            
+            # Register SSRC with TimingCalibrator (Hybrid Calibration Persistence)
+            if self.calibrator:
+                try:
+                    self.calibrator.register_channel_ssrc(self.channel_name, ssrc)
+                    logger.info(f"Registered SSRC {ssrc:x} for {self.channel_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to register SSRC: {e}")
             
             # Tiered storage config
             tiered_storage = self.recorder_config.get('tiered_storage', False)

@@ -2004,7 +2004,7 @@ class Phase2AnalyticsService:
                         try:
                             self.timing_calibrator.update_from_detection(
                                 station=station,
-                                frequency_mhz=self.frequency_mhz,
+                                frequency_mhz=self.frequency_hz / 1e6,
                                 channel_name=self.channel_name,
                                 d_clock_ms=d_clock_ms,
                                 propagation_delay_ms=propagation_delay_ms,
@@ -2018,7 +2018,7 @@ class Phase2AnalyticsService:
                             snr_str = f"{snr_db:.1f}dB" if snr_db is not None else "N/A"
                             
                             logger.debug(
-                                f"Updated timing calibrator: {station} @ {self.frequency_mhz:.2f}MHz, "
+                                f"Updated timing calibrator: {station} @ {self.frequency_hz/1e6:.2f}MHz, "
                                 f"prop_delay={prop_str}, SNR={snr_str}"
                             )
                         except Exception as e:
