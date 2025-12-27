@@ -313,6 +313,10 @@ class MultiBroadcastFusion:
         self.fusion_csv = self.fusion_dir / 'fused_d_clock.csv'
         self._init_fusion_csv()
         
+        # TEC output
+        self.tec_csv = self.fusion_dir / 'tec_estimates.csv'
+        self._init_tec_csv()
+        
         # History for calibration learning
         self.measurement_history: Dict[str, List[BroadcastMeasurement]] = defaultdict(list)
         self.history_max_size = 100  # Keep last N measurements per station
@@ -464,6 +468,48 @@ class MultiBroadcastFusion:
             temp_path.replace(self.fusion_csv)
         except Exception as e:
             logger.debug(f"Could not migrate fusion CSV header: {e}")
+
+    def _init_tec_csv(self):
+        """Initialize TEC estimates CSV."""
+        header = [
+            'timestamp_utc', 'station', 'tec_tecu', 'tec_uncertainty_tecu', 
+            't_vacuum_error_ms', 'confidence', 'residuals_ms', 
+            'n_frequencies', 'frequencies_mhz', 'group_delays_calibrated_ms'
+        ]
+        
+        if not self.tec_csv.exists():
+            try:
+                with open(self.tec_csv, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header)
+            except Exception as e:
+                logger.error(f"Failed to initialize TEC CSV: {e}")
+
+    def _write_tec_result(self, result):
+        """Append TEC result to CSV."""
+        from datetime import datetime
+        
+        try:
+            # Map delays to simple string representation
+            delays_str = ';'.join([f"{f:.2f}={d:.3f}" for f, d in sorted(result.group_delay_ms.items())])
+            freqs_str = ';'.join([f"{f:.2f}" for f in sorted(result.group_delay_ms.keys())])
+            
+            with open(self.tec_csv, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    result.timestamp,
+                    result.station,
+                    f"{result.tec_u:.3f}",
+                    "", # Uncertainty not yet exported by estimator in simple form
+                    f"{result.t_vacuum_error_ms:.3f}",
+                    f"{result.confidence:.4f}",
+                    f"{result.residuals_ms:.3f}",
+                    result.n_frequencies,
+                    freqs_str,
+                    delays_str
+                ])
+        except Exception as e:
+            logger.debug(f"Failed to write TEC result: {e}")
 
     def _extract_frequency_mhz(self, channel: str) -> Optional[float]:
         s = channel.replace('_', ' ')
@@ -1712,6 +1758,9 @@ class MultiBroadcastFusion:
                 )
                 
                 if tec_result:
+                    # Persist TEC estimate to CSV
+                    self._write_tec_result(tec_result)
+                    
                     if tec_result.confidence > 0.9:
                         logger.info(f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f})")
                         

@@ -665,8 +665,9 @@ class Phase2AnalyticsService:
     
     def _write_carrier_power(self, minute_boundary: int, power_db: float, snr_db: float,
                               wwv_tone_db: float = None, wwvh_tone_db: float = None,
-                              station: str = None, quality_grade: str = None):
-        """Append carrier power measurement to daily CSV."""
+                              station: str = None, quality_grade: str = None,
+                              channel_char = None):
+        """Append carrier power measurement to daily CSV and HDF5 with channel characterization."""
         try:
             # Ensure we're writing to today's file
             today = datetime.now(timezone.utc).strftime('%Y%m%d')
@@ -700,17 +701,45 @@ class Phase2AnalyticsService:
                     quality_flag = 'GOOD' if snr_db and snr_db > 10 else 'MARGINAL' if snr_db and snr_db > 0 else 'BAD'
                     data_completeness = 1.0  # Assume full minute of data
                     
+                    # Extract channel characterization fields if available
+                    carrier_doppler = None
+                    doppler_std = None
+                    phase_variance = None
+                    coherence_time = None
+                    
+                    if channel_char:
+                        # Carrier Doppler shift (Hz)
+                        if hasattr(channel_char, 'doppler_carrier_hz') and channel_char.doppler_carrier_hz is not None:
+                            carrier_doppler = channel_char.doppler_carrier_hz
+                        
+                        # Doppler spread - use WWV std dev, or average if both available
+                        if hasattr(channel_char, 'doppler_wwv_std_hz') and channel_char.doppler_wwv_std_hz is not None:
+                            doppler_std = channel_char.doppler_wwv_std_hz
+                        elif hasattr(channel_char, 'doppler_wwvh_std_hz') and channel_char.doppler_wwvh_std_hz is not None:
+                            doppler_std = channel_char.doppler_wwvh_std_hz
+                        
+                        # Phase variance (radians)
+                        if hasattr(channel_char, 'phase_variance_rad') and channel_char.phase_variance_rad is not None:
+                            phase_variance = channel_char.phase_variance_rad
+                        
+                        # Coherence time (seconds)
+                        if hasattr(channel_char, 'max_coherent_window_sec') and channel_char.max_coherent_window_sec is not None:
+                            coherence_time = channel_char.max_coherent_window_sec
+                    
                     l1a_measurement = {
                         'timestamp_utc': timestamp_utc,
                         'minute_boundary': minute_boundary,
                         'rtp_timestamp': 0,  # Not available in this context
                         'carrier_power_db': power_db if power_db is not None and not np.isnan(power_db) and not np.isinf(power_db) else None,
                         'carrier_snr_db': snr_db if snr_db is not None and not np.isnan(snr_db) and not np.isinf(snr_db) else None,
+                        'carrier_doppler_hz': carrier_doppler if carrier_doppler is not None and not np.isnan(carrier_doppler) and not np.isinf(carrier_doppler) else None,
+                        'doppler_std_hz': doppler_std if doppler_std is not None and not np.isnan(doppler_std) and not np.isinf(doppler_std) else None,
+                        'phase_variance_rad': phase_variance if phase_variance is not None and not np.isnan(phase_variance) and not np.isinf(phase_variance) else None,
+                        'coherence_time_sec': coherence_time if coherence_time is not None and not np.isnan(coherence_time) and not np.isinf(coherence_time) else None,
                         'wwv_tone_500hz_db': wwv_tone_db if wwv_tone_db is not None and not np.isnan(wwv_tone_db) and not np.isinf(wwv_tone_db) else None,
                         'wwvh_tone_1200hz_db': wwvh_tone_db if wwvh_tone_db is not None and not np.isnan(wwvh_tone_db) and not np.isinf(wwvh_tone_db) else None,
                         'quality_flag': quality_flag,
                         'data_completeness': data_completeness,
-                        'processing_version': '3.2.0',
                     }
                     
                     self.hdf5_l1a_writer.write_measurement(l1a_measurement)
@@ -1952,7 +1981,8 @@ class Phase2AnalyticsService:
                         wwv_tone_db=time_snap.wwv_snr_db if time_snap else None,
                         wwvh_tone_db=time_snap.wwvh_snr_db if time_snap else None,
                         station=solution.station if solution else None,
-                        quality_grade=result_grade
+                        quality_grade=result_grade,
+                        channel_char=res.channel if hasattr(res, 'channel') else None
                     )
                 
                 # Write discrimination method CSVs

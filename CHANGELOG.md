@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.2.0] - 2025-12-27
+
+### Added
+
+- **TEC Estimation Persistence**: Modified `timestd-fusion` to persist real-time Total Electron Content (TEC) estimates to `phase2/fusion/tec_estimates.csv`.
+- **Enhanced L1A Observables**: Populated missing fields in HDF5 L1A data products: Doppler shift (`carrier_doppler_hz`), Doppler spread (`doppler_std_hz`), Phase variance (`phase_variance_rad`), and Coherence time (`coherence_time_sec`).
+
+### Changed
+
+- **Analytics Pipeline**: Updated `phase2_analytics_service.py` to extract and write full channel characterization metadata to HDF5.
+- **Fusion Engine**: Updated `multi_broadcast_fusion.py` to write TEC results immediately after estimation.
+
 ## [3.1.0] - 2025-12-26
 
 ### Added
