@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2025-12-29
+
+### Added - L3 Fusion HDF5 Storage
+
+#### Data Pipeline Migration Complete
+
+- **L3 Fusion HDF5 Schema** (`l3_fusion_timing_v1.json`): Enhanced from 9 to 35 fields
+  - Uncertainty budget components: `statistical_uncertainty_ms`, `systematic_uncertainty_ms`, `propagation_uncertainty_ms`
+  - Per-station breakdowns: mean D_clock, counts, and intra-station std devs for WWV, WWVH, CHU, BPM
+  - Consistency metrics: `inter_station_spread_ms`, `consistency_flag` (OK, INTRA_ANOMALY, INTER_ANOMALY, DISCRIMINATION_SUSPECT)
+  - Global solve verification: `global_solve_verified`, `global_solve_consistency_ms`, `global_solve_n_obs`
+  - Calibration metadata: `calibration_applied`, `reference_station`, `outliers_rejected`
+  - Quality metadata: `quality_grade` (A/B/C/D), enhanced `quality_flag`
+
+- **HDF5 Writer Implementation** (`multi_broadcast_fusion.py`):
+  - Parallel CSV+HDF5 writes with schema validation
+  - SWMR mode for concurrent read access
+  - Graceful fallback to CSV-only if HDF5 unavailable
+  - Error handling with non-fatal logging
+
+#### Production Deployment
+
+- **HDF5 Files Created**: `/var/lib/timestd/phase2/fusion/fusion_fusion_timing_YYYYMMDD.h5`
+- **Service Integration**: Fusion service successfully writing to HDF5
+- **Backward Compatibility**: CSV writes continue unchanged
+
+### Changed
+
+- **Fusion Service**: Added `DataProductWriter` initialization and `_write_fused_result_hdf5()` method
+- **CSV Writer**: Updated to call HDF5 writer in parallel
+
+### Data Pipeline Status
+
+All data products now use HDF5:
+
+- ✅ L0 (Raw): Digital RF HDF5
+- ✅ L1A (Observables): Channel observables HDF5
+- ✅ L1B (Timecode): BCD timecode HDF5
+- ✅ L2 (Timing): Timing measurements HDF5
+- ✅ **L3 (Fusion): Fusion results HDF5** ← NEW
+- ✅ L3 (Ionosphere): GNSS VTEC HDF5
+
+**Migration Complete**: All data products in the hf-timestd pipeline now use HDF5 storage with schema validation and metrological provenance.
+
 ## [3.5.0] - 2025-12-29
 
 ### Added - Enhanced Timing Performance Metrics

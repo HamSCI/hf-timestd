@@ -1,12 +1,13 @@
 {
     "schema_version": "1.0.0",
-    "data_product": "L3B_fusion_timing",
-    "description": "Multi-station, multi-frequency UTC(NIST) estimate from Kalman fusion",
+    "data_product": "L3_fusion_timing",
+    "description": "Multi-broadcast fusion timing estimate with comprehensive uncertainty budget and per-station breakdowns",
     "cadence_seconds": 60,
-    "processing_level": "L3B",
+    "processing_level": "L3",
     "standards": [
         "NIST traceability",
-        "Kalman filtering"
+        "ISO GUM uncertainty propagation",
+        "Multi-broadcast weighted fusion"
     ],
     "fields": [
         {
@@ -23,11 +24,20 @@
             "description": "Unix epoch timestamp of minute boundary"
         },
         {
-            "name": "utc_nist_offset_ms",
+            "name": "d_clock_fused_ms",
             "type": "float",
             "required": true,
             "allow_nan": false,
-            "description": "Fused UTC(NIST) offset estimate",
+            "description": "Fused D_clock estimate (calibrated, weighted mean)",
+            "units": "milliseconds",
+            "reference": "UTC(NIST) via broadcast time signals"
+        },
+        {
+            "name": "d_clock_raw_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Raw D_clock estimate (unweighted mean, before calibration)",
             "units": "milliseconds"
         },
         {
@@ -35,27 +45,215 @@
             "type": "float",
             "required": true,
             "allow_nan": false,
-            "description": "Fusion uncertainty (1-sigma)",
+            "description": "Combined uncertainty (RSS of statistical, systematic, propagation)",
             "units": "milliseconds"
+        },
+        {
+            "name": "statistical_uncertainty_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Statistical uncertainty (measurement scatter, weighted std dev)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "systematic_uncertainty_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Systematic uncertainty (calibration convergence error)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "propagation_uncertainty_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Propagation uncertainty (mode-dependent ionospheric variability)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "n_broadcasts",
+            "type": "integer",
+            "required": true,
+            "description": "Number of broadcast measurements in fusion"
         },
         {
             "name": "n_stations",
             "type": "integer",
             "required": true,
-            "description": "Number of stations in fusion"
-        },
-        {
-            "name": "n_measurements",
-            "type": "integer",
-            "required": true,
-            "description": "Number of measurements in fusion"
+            "description": "Number of unique stations in fusion"
         },
         {
             "name": "stations_used",
             "type": "string",
             "required": true,
-            "description": "Comma-separated list of stations",
+            "description": "Comma-separated list of stations contributing to fusion",
             "example": "WWV,WWVH,CHU"
+        },
+        {
+            "name": "wwv_mean_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Mean D_clock from WWV broadcasts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "wwvh_mean_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Mean D_clock from WWVH broadcasts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "chu_mean_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Mean D_clock from CHU broadcasts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "bpm_mean_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Mean D_clock from BPM broadcasts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "wwv_count",
+            "type": "integer",
+            "required": true,
+            "description": "Number of WWV broadcasts in fusion"
+        },
+        {
+            "name": "wwvh_count",
+            "type": "integer",
+            "required": true,
+            "description": "Number of WWVH broadcasts in fusion"
+        },
+        {
+            "name": "chu_count",
+            "type": "integer",
+            "required": true,
+            "description": "Number of CHU broadcasts in fusion"
+        },
+        {
+            "name": "bpm_count",
+            "type": "integer",
+            "required": true,
+            "description": "Number of BPM broadcasts in fusion"
+        },
+        {
+            "name": "wwv_intra_std_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Intra-station standard deviation for WWV broadcasts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "wwvh_intra_std_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Intra-station standard deviation for WWVH broadcasts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "chu_intra_std_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Intra-station standard deviation for CHU broadcasts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "bpm_intra_std_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Intra-station standard deviation for BPM broadcasts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "inter_station_spread_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Spread between station mean D_clock values",
+            "units": "milliseconds"
+        },
+        {
+            "name": "consistency_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "OK",
+                "INTRA_ANOMALY",
+                "INTER_ANOMALY",
+                "DISCRIMINATION_SUSPECT"
+            ],
+            "description": "Consistency check result"
+        },
+        {
+            "name": "global_solve_verified",
+            "type": "boolean",
+            "required": true,
+            "description": "Whether global differential solve was performed and verified"
+        },
+        {
+            "name": "global_solve_consistency_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Consistency metric from global solve",
+            "units": "milliseconds"
+        },
+        {
+            "name": "global_solve_n_obs",
+            "type": "integer",
+            "required": true,
+            "description": "Number of observations in global solve"
+        },
+        {
+            "name": "calibration_applied",
+            "type": "boolean",
+            "required": true,
+            "description": "Whether per-broadcast calibration was applied"
+        },
+        {
+            "name": "reference_station",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "BPM"
+            ],
+            "description": "Reference station for calibration"
+        },
+        {
+            "name": "outliers_rejected",
+            "type": "integer",
+            "required": true,
+            "description": "Number of outlier measurements rejected via MAD filter"
+        },
+        {
+            "name": "quality_grade",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "A",
+                "B",
+                "C",
+                "D"
+            ],
+            "description": "Quality grade based on uncertainty and broadcast count"
         },
         {
             "name": "kalman_state",
@@ -66,7 +264,7 @@
                 "LOCKED",
                 "REACQUIRING"
             ],
-            "description": "Kalman filter state"
+            "description": "Convergence state (mapped from broadcast count and uncertainty)"
         },
         {
             "name": "quality_flag",
@@ -87,10 +285,29 @@
             "description": "Fusion engine version"
         }
     ],
+    "quality_grades": {
+        "A": "Uncertainty < 0.5 ms, n_broadcasts >= 10",
+        "B": "Uncertainty < 1.0 ms, n_broadcasts >= 5",
+        "C": "Uncertainty < 2.0 ms, n_broadcasts >= 3",
+        "D": "Uncertainty >= 2.0 ms or n_broadcasts < 3"
+    },
     "quality_flags": {
-        "GOOD": "LOCKED state, n_stations >= 2, uncertainty < 1 ms",
-        "MARGINAL": "LOCKED state, n_stations >= 1, 1 ms <= uncertainty < 2 ms",
-        "BAD": "ACQUIRING or REACQUIRING state, or uncertainty >= 2 ms",
+        "GOOD": "Grade A or B, LOCKED state, n_stations >= 2",
+        "MARGINAL": "Grade C, or ACQUIRING state, n_stations >= 1",
+        "BAD": "Grade D, or REACQUIRING state, or uncertainty >= 2 ms",
         "MISSING": "No fusion estimate available"
+    },
+    "consistency_flags": {
+        "OK": "All consistency checks passed",
+        "INTRA_ANOMALY": "High intra-station variance detected (propagation anomaly)",
+        "INTER_ANOMALY": "Large inter-station spread (calibration or discrimination issue)",
+        "DISCRIMINATION_SUSPECT": "Station discrimination confidence low"
+    },
+    "uncertainty_calculation": {
+        "description": "Root sum of squares (RSS) of uncertainty components",
+        "formula": "u_combined = sqrt(u_statistical² + u_systematic² + u_propagation²)",
+        "statistical": "Weighted standard deviation of broadcast measurements",
+        "systematic": "Calibration convergence error (decreases over time)",
+        "propagation": "Mode-dependent ionospheric variability (GW: 0.1ms, 1F: 0.5ms, 2F: 2.0ms)"
     }
 }

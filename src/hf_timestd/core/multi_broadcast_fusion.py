@@ -445,6 +445,31 @@ class MultiBroadcastFusion:
         self.tec_csv = self.fusion_dir / 'tec_estimates.csv'
         self._init_tec_csv()
         
+        # ====================================================================
+        # HDF5 Data Product Writer (Parallel with CSV)
+        # ====================================================================
+        # Initialize HDF5 writer for schema-validated fusion results
+        # Writes in parallel with CSV during transition period
+        try:
+            from hf_timestd.io import DataProductWriter
+            
+            self.hdf5_fusion_writer = DataProductWriter(
+                output_dir=self.fusion_dir,
+                product_level='L3',
+                product_name='fusion_timing',
+                channel='fusion',  # Fusion is multi-channel aggregate
+                processing_version='3.2.0',
+                station_metadata={'description': 'Multi-broadcast fusion estimate'}
+            )
+            self.enable_hdf5_fusion_writes = True
+            logger.info("Initialized HDF5 L3 fusion writer")
+        except Exception as e:
+            logger.warning(f"Failed to initialize HDF5 fusion writer: {e}")
+            logger.warning("Continuing with CSV-only writes")
+            self.hdf5_fusion_writer = None
+            self.enable_hdf5_fusion_writes = False
+
+        
         # History for calibration learning
         self.measurement_history: Dict[str, List[BroadcastMeasurement]] = defaultdict(list)
         self.history_max_size = 100  # Keep last N measurements per station
@@ -2267,7 +2292,8 @@ class MultiBroadcastFusion:
         return self.adev_tracker.compute_all_adev(self.adev_tau_values)
     
     def _write_fused_result(self, result: FusedResult):
-        """Append fused result to CSV."""
+        """Append fused result to CSV and HDF5."""
+        # CSV write (existing code)
         with open(self.fusion_csv, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -2302,6 +2328,108 @@ class MultiBroadcastFusion:
                 result.systematic_uncertainty_ms,
                 result.propagation_uncertainty_ms
             ])
+        
+        # HDF5 write (parallel output)
+        self._write_fused_result_hdf5(result)
+    
+    def _write_fused_result_hdf5(self, result: FusedResult):
+        """Write fused result to HDF5 with schema validation."""
+        if not self.enable_hdf5_fusion_writes or not self.hdf5_fusion_writer:
+            return
+        
+        try:
+            from datetime import datetime, timezone
+            
+            # Convert timestamp to ISO 8601
+            timestamp_utc = datetime.fromtimestamp(
+                result.timestamp, 
+                timezone.utc
+            ).isoformat().replace('+00:00', 'Z')
+            
+            # Determine quality flag from quality grade
+            if result.quality_grade == 'A':
+                quality_flag = 'GOOD'
+            elif result.quality_grade == 'B':
+                quality_flag = 'MARGINAL'
+            else:
+                quality_flag = 'BAD'
+            
+            # Build stations_used string
+            stations = []
+            if result.wwv_count > 0:
+                stations.append('WWV')
+            if result.wwvh_count > 0:
+                stations.append('WWVH')
+            if result.chu_count > 0:
+                stations.append('CHU')
+            if result.bpm_count > 0:
+                stations.append('BPM')
+            stations_used = ','.join(stations) if stations else 'NONE'
+            
+            # Determine Kalman state (simplified - fusion uses weighted averaging, not Kalman)
+            # Map convergence state to Kalman-like states for schema compatibility
+            if result.n_broadcasts >= 10 and result.uncertainty_ms < 1.0:
+                kalman_state = 'LOCKED'
+            elif result.n_broadcasts >= 5:
+                kalman_state = 'ACQUIRING'
+            else:
+                kalman_state = 'REACQUIRING'
+            
+            # Build measurement dictionary
+            measurement = {
+                'timestamp_utc': timestamp_utc,
+                'minute_boundary': int(result.timestamp),
+                'd_clock_fused_ms': result.d_clock_fused_ms,
+                'd_clock_raw_ms': result.d_clock_raw_ms,
+                'uncertainty_ms': result.uncertainty_ms,
+                'n_broadcasts': result.n_broadcasts,
+                'n_stations': result.n_stations,
+                'stations_used': stations_used,
+                'kalman_state': kalman_state,
+                'quality_flag': quality_flag,
+                'processing_version': '3.2.0',
+                
+                # Uncertainty budget
+                'statistical_uncertainty_ms': result.statistical_uncertainty_ms,
+                'systematic_uncertainty_ms': result.systematic_uncertainty_ms,
+                'propagation_uncertainty_ms': result.propagation_uncertainty_ms,
+                
+                # Per-station breakdown
+                'wwv_mean_ms': result.wwv_mean_ms,
+                'wwvh_mean_ms': result.wwvh_mean_ms,
+                'chu_mean_ms': result.chu_mean_ms,
+                'bpm_mean_ms': result.bpm_mean_ms,
+                'wwv_count': result.wwv_count,
+                'wwvh_count': result.wwvh_count,
+                'chu_count': result.chu_count,
+                'bpm_count': result.bpm_count,
+                'wwv_intra_std_ms': result.wwv_intra_std_ms,
+                'wwvh_intra_std_ms': result.wwvh_intra_std_ms,
+                'chu_intra_std_ms': result.chu_intra_std_ms,
+                'bpm_intra_std_ms': result.bpm_intra_std_ms,
+                
+                # Consistency metrics
+                'inter_station_spread_ms': result.inter_station_spread_ms,
+                'consistency_flag': result.consistency_flag,
+                
+                # Global solve
+                'global_solve_verified': result.global_solve_verified,
+                'global_solve_consistency_ms': result.global_solve_consistency_ms,
+                'global_solve_n_obs': result.global_solve_n_obs,
+                
+                # Calibration metadata
+                'calibration_applied': result.calibration_applied,
+                'reference_station': result.reference_station,
+                'outliers_rejected': result.outliers_rejected,
+                'quality_grade': result.quality_grade,
+            }
+            
+            # Write to HDF5 with schema validation
+            self.hdf5_fusion_writer.write_measurement(measurement)
+            
+        except Exception as e:
+            logger.error(f"Failed to write HDF5 fusion result: {e}", exc_info=True)
+
     
     def _read_gnss_vtec(self) -> Optional[Tuple[float, float]]:
         """

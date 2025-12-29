@@ -55,59 +55,71 @@ Enhanced display sections:
 - **L1A (Observables)**: Channel observables HDF5 ✅
 - **L1B (Timecode)**: BCD timecode HDF5 ✅
 - **L2 (Timing)**: Timing measurements HDF5 ✅
-- **L3 (Fusion)**: **CSV only** ⚠️ (migration target for next session)
+- **L3 (Fusion)**: Fusion results HDF5 ✅ **← COMPLETE**
 - **L3 (Ionosphere)**: GNSS VTEC HDF5 ✅
 
-## Next Session Objective: L3 Fusion HDF5 Migration
+**HDF5 Migration**: ✅ **COMPLETE** - All data products now use HDF5 storage with schema validation and metrological provenance.
+
+## Session Summary (2025-12-29 Evening)
+
+### L3 Fusion HDF5 Migration - COMPLETE ✅
+
+Successfully completed the final data product migration to HDF5:
+
+1. **Schema Enhancement**: Updated `l3_fusion_timing_v1.json` from 9 to 35 fields
+   - Added uncertainty budget (statistical, systematic, propagation)
+   - Added per-station breakdowns (WWV, WWVH, CHU, BPM)
+   - Added consistency metrics and global solve verification
+   - Added calibration and quality metadata
+
+2. **HDF5 Writer Implementation**: Enhanced `multi_broadcast_fusion.py`
+   - Added `DataProductWriter` initialization with graceful fallback
+   - Implemented `_write_fused_result_hdf5()` method
+   - Parallel CSV+HDF5 writes with schema validation
+   - SWMR mode for concurrent read access
+
+3. **Production Deployment**: Successfully deployed and verified
+   - Package installed to production venv
+   - Service running and writing HDF5 files
+   - File created: `/var/lib/timestd/phase2/fusion/fusion_fusion_timing_20251229.h5`
+
+## Next Session Objective: Chrony SHM Feed Optimization
 
 ### Background
 
-The fusion service currently writes L3 results (fused D_clock, uncertainty budget, ADEV) to CSV (`fused_d_clock.csv`). This is the last remaining CSV-only data product in the pipeline.
+The Chrony SHM refclock (TMGR) shows degraded performance:
+
+- Reachability: 0 (no recent updates)
+- Last update: 561+ seconds ago
+- Status: Not being used as time source
+
+The fusion service is running and producing accurate timing estimates, but the Chrony SHM feed is not being updated reliably.
 
 ### Goals for Next Session
 
-1. **Create L3 Fusion HDF5 Schema** (`schemas/l3_fusion_results_v1.json`)
-   - Include all FusedResult fields (d_clock, uncertainty components, ADEV, quality metrics)
-   - Metrological provenance metadata
-   - Quality flags and consistency indicators
+1. **Diagnose Chrony SHM Feed Issue**
+   - Check fusion service logs for SHM write attempts
+   - Verify SHM permissions and connectivity
+   - Identify why updates stopped
 
-2. **Implement HDF5 Writer** in `MultiBroadcastFusion`
-   - Parallel CSV+HDF5 writes (CSV as fallback)
-   - Schema validation
-   - SWMR mode for live reading
+2. **Optimize SHM Update Strategy**
+   - Review update rate limiting (currently 8s poll interval)
+   - Ensure quality thresholds are appropriate
+   - Verify SHM write success/failure logging
 
-3. **Update API Endpoint** (`monitoring_server.py`)
-   - Read from HDF5 with CSV fallback
-   - Maintain backward compatibility
+3. **Restore Reliable Chrony Feed**
+   - Fix any bugs preventing SHM updates
+   - Ensure TMGR source becomes reachable
+   - Monitor for sustained operation
 
-4. **Benefits of Migration**:
-   - Consistent data format across all pipeline levels
-   - Better metadata and provenance tracking
-   - Efficient time-series queries
-   - SWMR for concurrent read/write
+### Technical Context
 
-### Key Implementation Notes
-
-**Current CSV Structure**:
-
-```
-timestamp, d_clock_fused_ms, uncertainty_ms, n_broadcasts, n_stations,
-statistical_uncertainty_ms, systematic_uncertainty_ms, propagation_uncertainty_ms,
-quality_grade, wwv_mean_ms, chu_mean_ms, ...
-```
-
-**Fusion Service Location**: `src/hf_timestd/core/multi_broadcast_fusion.py`
-
-- `_init_fusion_csv()`: Initialize output file
-- `_write_fused_result()`: Write fusion results
-- `FusedResult` dataclass: Complete result structure
-
-**API Endpoint**: `web-ui/monitoring_server.py`
-
-- `/api/v2/system/health-summary`: Reads fusion CSV for metrics
-- ADEV calculation: Currently done in API from CSV data
+- **Fusion Service**: `timestd-fusion.service` running successfully
+- **Chrony Config**: TMGR refclock configured (unit 0, poll 3 = 8s)
+- **Current Status**: Fusion producing good estimates (Grade A/B), but not feeding Chrony
+- **Impact**: System time discipline not benefiting from HF timing
 
 ---
 
 **Last Updated**: 2025-12-29  
-**Next Session Focus**: L3 Fusion HDF5 Migration
+**Current Focus**: HDF5 migration complete, next session will address Chrony SHM feed
