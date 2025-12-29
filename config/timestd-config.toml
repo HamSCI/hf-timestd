@@ -104,3 +104,10 @@ enable_metrics = true
 [web_ui]
 port = 3000
 refresh_interval = 60
+
+[gnss_vtec]
+enabled = true
+host = "192.168.0.202"
+port = 9000
+save_csv = true
+csv_path = "data/gnss_vtec.csv"

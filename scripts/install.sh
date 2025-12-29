@@ -548,6 +548,62 @@ SyslogIdentifier=timestd-web-ui
 WantedBy=multi-user.target
 EOF
 
+    # GNSS VTEC Service (Optional - only if enabled in config)
+    # Check if GNSS VTEC is enabled in the config
+    VTEC_ENABLED=$($VENV_DIR/bin/python3 -c "
+import tomllib
+try:
+    with open('$MAIN_CONFIG', 'rb') as f:
+        config = tomllib.load(f)
+    print('true' if config.get('gnss_vtec', {}).get('enabled', False) else 'false')
+except:
+    print('false')
+" 2>/dev/null)
+
+    if [[ "$VTEC_ENABLED" == "true" ]]; then
+        log_info "  GNSS VTEC enabled in config - installing timestd-vtec.service..."
+        
+        sudo tee "$SYSTEMD_DIR/timestd-vtec.service" > /dev/null <<'VTEC_EOF'
+[Unit]
+Description=HF-TimeStd GNSS VTEC Monitor
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=$INSTALL_USER
+Group=$INSTALL_USER
+EnvironmentFile=$CONFIG_DIR/environment
+WorkingDirectory=$PROJECT_DIR
+
+ExecStart=$VENV_DIR/bin/python -u scripts/live_vtec.py --config $CONFIG_DIR/timestd-config.toml
+
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-vtec
+
+[Install]
+WantedBy=multi-user.target
+VTEC_EOF
+        
+        # Substitute variables in the service file
+        sudo sed -i "s|\$INSTALL_USER|$INSTALL_USER|g" "$SYSTEMD_DIR/timestd-vtec.service"
+        sudo sed -i "s|\$CONFIG_DIR|$CONFIG_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
+        sudo sed -i "s|\$PROJECT_DIR|$PROJECT_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
+        sudo sed -i "s|\$VENV_DIR|$VENV_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
+        
+        log_info "    ✅ timestd-vtec.service installed"
+    else
+        log_info "  GNSS VTEC disabled in config - skipping timestd-vtec.service"
+    fi
+
 
 
     # Reload systemd
@@ -558,7 +614,9 @@ EOF
     log_info "    - timestd-analytics.service      (Phase 2: Timing analysis, continuous)"
     log_info "    - timestd-fusion.service         (Phase 3: Fusion & Chrony feed)"
     log_info "    - timestd-web-ui.service         (Web monitoring UI, continuous)"
-    log_info "    - timestd-web-ui.service         (Web monitoring UI, continuous)"
+    if [[ "$VTEC_ENABLED" == "true" ]]; then
+        log_info "    - timestd-vtec.service           (GNSS VTEC monitor, continuous)"
+    fi
     
     # Enable services
     log_step "Enabling services for auto-start..."
@@ -566,6 +624,11 @@ EOF
     sudo systemctl enable timestd-analytics.service
     sudo systemctl enable timestd-fusion.service
     sudo systemctl enable timestd-web-ui.service
+    
+    if [[ "$VTEC_ENABLED" == "true" ]]; then
+        sudo systemctl enable timestd-vtec.service
+        log_info "  ✅ timestd-vtec.service enabled"
+    fi
 
     
     log_info "  Services enabled (will start on boot)"
@@ -607,12 +670,19 @@ if [[ "$MODE" == "production" ]]; then
     echo "   sudo systemctl start timestd-analytics       # Phase 2: Timing analysis"
     echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion service"
     echo "   sudo systemctl start timestd-web-ui          # Web monitoring UI"
+    if [[ "$VTEC_ENABLED" == "true" ]]; then
+        echo "   sudo systemctl start timestd-vtec            # GNSS VTEC monitor"
+    fi
     echo ""
     echo "4. Start periodic timers:"
 
     echo ""
     echo "5. Check status:"
-    echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui"
+    if [[ "$VTEC_ENABLED" == "true" ]]; then
+        echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui timestd-vtec"
+    else
+        echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui"
+    fi
     echo "   sudo systemctl list-timers grape-*"
     echo "   journalctl -u timestd-core-recorder -f"
     echo ""

@@ -137,6 +137,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 import numpy as np
+from datetime import datetime, timezone
 
 # HDF5 I/O for reading L1A and L2 data products
 try:
@@ -145,6 +146,12 @@ try:
 except ImportError:
     HDF5_AVAILABLE = False
     logger.warning("HDF5 I/O module not available, will use CSV fallback")
+
+# Physics Propagation for GNSS Integration
+try:
+    from hf_timestd.core.physics_propagation import PhysicsPropagationModel
+except ImportError:
+    PhysicsPropagationModel = None
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +306,18 @@ class MultiBroadcastFusion:
         # Initialize TEC Estimator (Coherent Multi-Frequency Physics)
         from .tec_estimator import TECEstimator
         self.tec_estimator = TECEstimator()
+        
+        # Initialize Physics Propagation Model (for GNSS VTEC integration)
+        if PhysicsPropagationModel:
+            self.physics_model = PhysicsPropagationModel(
+                receiver_lat=self.receiver_lat,
+                receiver_lon=self.receiver_lon,
+                enable_pylap=False, # We just want Tier 2/3 for geometric/empirical baseline
+                enable_iri=False    # We just want the empirical baseline to correct against
+            )
+        else:
+            self.physics_model = None
+            logger.warning("PhysicsPropagationModel not available - GNSS VTEC integration disabled")
         
         # Calibration state
         self.calibration_file = calibration_file or (
@@ -1309,11 +1328,18 @@ class MultiBroadcastFusion:
                 )
                 measurements.extend(csv_measurements)
         
-        if measurements:
-            logger.info(
-                f"Read {len(measurements)} L2 timing measurements from HDF5 "
-                f"(lookback={lookback_minutes}m)"
-            )
+            if measurements:
+                logger.info(
+                    f"Read {len(measurements)} L2 timing measurements from HDF5 "
+                    f"(lookback={lookback_minutes}m)"
+                )
+            else:
+                 # If HDF5 returned nothing, try CSV as fallback (handling migration/missing files)
+                 logger.debug("HDF5 returned 0 measurements, checking CSV fallback")
+                 csv_measurements = self._read_latest_measurements(lookback_minutes)
+                 if csv_measurements:
+                     measurements = csv_measurements
+                     logger.info(f"Fallback: Read {len(measurements)} measurements from CSV")
         
         return measurements
     
@@ -1713,78 +1739,148 @@ class MultiBroadcastFusion:
         weights = self._calculate_weights(measurements)
         
         # ====================================================================
+        # GNSS VTEC INTEGRATION (Real-Time Physics Correction)
+        # ====================================================================
+        # If available, use local GNSS VTEC to refine ionospheric delays.
+        # This replaces the empirical/model delay with one derived from live data.
+        
+        logger.info(">>> VTEC INTEGRATION: Starting VTEC check <<<")
+        
+        gnss_vtec_data = self._read_gnss_vtec()
+        used_gnss_vtec = False
+        
+        logger.debug(f"VTEC check: data={gnss_vtec_data is not None}, physics_model={self.physics_model is not None}")
+        
+        if gnss_vtec_data and self.physics_model:
+            vtec_tecu, vtec_ts = gnss_vtec_data
+            
+            # Only use if fresh (< 5 minutes old)
+            age_seconds = time.time() - vtec_ts
+            logger.debug(f"VTEC data: {vtec_tecu:.2f} TECU, age={age_seconds:.1f}s")
+            
+            if age_seconds < 300:
+                logger.info(f"Applying GNSS VTEC correction: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
+                used_gnss_vtec = True
+                
+                for m in measurements:
+                    if m.station == 'GLOBAL_DIFF' or m.station == 'UNKNOWN':
+                        continue
+                        
+                    # 1. Compute baseline delay (what the system likely used)
+                    # We assume the measurement used Tier 2/3 (IRI or Empirical)
+                    baseline = self.physics_model.compute_delay(
+                        station=m.station,
+                        frequency_mhz=m.frequency_mhz,
+                        observed_arrival_ms=0, # Not needed for prediction
+                        timestamp=datetime.fromtimestamp(m.timestamp, tz=timezone.utc).replace(tzinfo=None)
+                    )
+                    
+                    if baseline and baseline.n_hops > 0:
+                        # 2. Extract Implicit TEC from baseline
+                        # baseline.tec_tecu is what the model thought TEC was (e.g. 20-50 TECU)
+                        model_tec = baseline.tec_tecu if baseline.tec_tecu else 20.0
+                        
+                        # 3. Calculate Ionospheric Delays
+                        # Delay_meters = 40.3 * TEC * 10^16 / f^2
+                        # Delay_sec = Delay_meters / c
+                        # Delay_ms = Delay_sec * 1000
+                        
+                        C_LIGHT = 299792458.0
+                        freq_hz = m.frequency_mhz * 1e6
+                        
+                        # Factor to convert TECU (1e16 el/m2) to Delay (ms)
+                        # factor = (40.3 * 1e16 * 1000) / (freq_hz^2 * c)
+                        factor = (40.3 * 1e16 * baseline.n_hops * 1000.0) / ((freq_hz**2) * C_LIGHT)
+                        
+                        old_iono_delay_ms = model_tec * factor
+                        new_iono_delay_ms = vtec_tecu * factor
+                        
+                        # 4. Apply Correction
+                        # We want to REMOVE old iono and ADD new iono
+                        # d_clock = (Arrival - vac - old_iono)
+                        # d_clock_new = (Arrival - vac - new_iono)
+                        #             = d_clock + old_iono - new_iono
+                        
+                        correction_ms = old_iono_delay_ms - new_iono_delay_ms
+                        
+                        logger.debug(
+                            f"  {m.station} {m.frequency_mhz}MHz: Model={model_tec:.1f}TECU Iono={old_iono_delay_ms:.3f}ms -> "
+                            f"GNSS={vtec_tecu:.1f}TECU Iono={new_iono_delay_ms:.3f}ms | "
+                            f"Corr={correction_ms:+.3f}ms"
+                        )
+                        
+                        m.d_clock_ms += correction_ms
+                        m.propagation_delay_ms += (new_iono_delay_ms - old_iono_delay_ms)
+                        m.propagation_mode = f"{baseline.propagation_mode}+GNSS"
+                        m.confidence = min(0.95, m.confidence * 1.5) # Boost confidence
+            else:
+                logger.debug(f"GNSS VTEC stale (age: {time.time()-vtec_ts:.1f}s), skipping")
+
+        # ====================================================================
         # TEC ESTIMATION (Physics-Based Propagation Correction)
         # ====================================================================
-        # Attempt to solve for TEC using multi-frequency data from same station
-        # This "removes the ionosphere" mathematically rather than modelling it
+        # Only run the HF TEC solver if we DIDN'T use GNSS VTEC.
+        # GNSS VTEC is generally superior to HF-derived TEC.
         
-        # Group by station
-        by_station = defaultdict(list)
-        for m in measurements:
-            if m.station == 'GLOBAL_DIFF':
-                continue
-            by_station[m.station].append(m)
-            
-        for station, station_meas in by_station.items():
-            if len(station_meas) >= 2:
-                # Prepare input for estimator
-                tec_input = []
-                for m in station_meas:
-                    # Input to TEC solver is Total Observed Time (not differential)
-                    # T_obs = T_measured + T_sys_offset (calibration)
-                    # We use uncalibrated d_clock + existing model delay to estimate ToA
-                    # Actually, d_clock = T_arrival - T_prop_model
-                    # So T_arrival = d_clock + T_prop_model
-                    #
-                    # But we want to solve: ToA = Vacuum + K*TEC/f^2
-                    # The "ToA" here is the measured arrival time relative to minute boundary
-                    
-                    # Approximating ToA as d_clock_ms (assuming model was roughly right)
-                    # Wait, d_clock is (Arrival - Model). 
-                    # If we feed (d_clock + Model) we get pure Arrival.
-                    # That is exactly what we want.
-                    
-                    toa_ms = m.d_clock_ms + m.propagation_delay_ms
-                    
-                    tec_input.append({
-                        'frequency_hz': m.frequency_mhz * 1e6,
-                        'toa_ms': toa_ms,
-                        'uncertainty_ms': 1.0 / max(0.001, m.confidence) # Inverse confidence weighting
-                    })
+        if not used_gnss_vtec:
+            # Group by station
+            by_station = defaultdict(list)
+            for m in measurements:
+                if m.station == 'GLOBAL_DIFF':
+                    continue
+                by_station[m.station].append(m)
                 
-                # Run Solver
-                tec_result = self.tec_estimator.estimate_tec(
-                    tec_input, station, measurements[0].timestamp
-                )
-                
-                if tec_result:
-                    # Persist TEC estimate to CSV
-                    self._write_tec_result(tec_result)
-                    
-                    if tec_result.confidence > 0.9:
-                        logger.info(f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f})")
+            for station, station_meas in by_station.items():
+                if len(station_meas) >= 2:
+                    # Prepare input for estimator
+                    tec_input = []
+                    for m in station_meas:
+                        # Input to TEC solver is Total Observed Time (not differential)
+                        # T_obs = T_measured + T_sys_offset (calibration)
+                        # We use uncalibrated d_clock + existing model delay to estimate ToA
                         
-                        # Update measurements with Physics-Derived delays
-                        for m in station_meas:
-                            if m.frequency_mhz in tec_result.group_delay_ms:
-                                new_delay = tec_result.group_delay_ms[m.frequency_mhz]
-                                
-                                # Update D_clock with NEW delay
-                                # D_clock_new = T_arrival - T_delay_new
-                                # T_arrival was (d_clock_old + T_delay_old)
-                                t_arrival = m.d_clock_ms + m.propagation_delay_ms
-                                m.d_clock_ms = t_arrival - new_delay
-                                
-                                # Update metadata
-                                m.propagation_delay_ms = new_delay
-                                m.propagation_mode = 'TEC_SOLVED' # Flag as physics-derived
-                                m.confidence = min(1.0, m.confidence * 1.2) # Boost confidence
+                        # Approximating ToA as d_clock_ms + prop_delay
+                        
+                        toa_ms = m.d_clock_ms + m.propagation_delay_ms
+                        
+                        tec_input.append({
+                            'frequency_hz': m.frequency_mhz * 1e6,
+                            'toa_ms': toa_ms,
+                            'uncertainty_ms': 1.0 / max(0.001, m.confidence) # Inverse confidence weighting
+                        })
+                    
+                    # Run Solver
+                    tec_result = self.tec_estimator.estimate_tec(
+                        tec_input, station, measurements[0].timestamp
+                    )
+                    
+                    if tec_result:
+                        # Persist TEC estimate to CSV
+                        self._write_tec_result(tec_result)
+                        
+                        if tec_result.confidence > 0.9:
+                            logger.info(f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f})")
+                            
+                            # Update measurements with Physics-Derived delays
+                            for m in station_meas:
+                                if m.frequency_mhz in tec_result.group_delay_ms:
+                                    new_delay = tec_result.group_delay_ms[m.frequency_mhz]
+                                    
+                                    # Update D_clock with NEW delay
+                                    # D_clock_new = T_arrival - T_delay_new
+                                    t_arrival = m.d_clock_ms + m.propagation_delay_ms
+                                    m.d_clock_ms = t_arrival - new_delay
+                                    
+                                    # Update metadata
+                                    m.propagation_delay_ms = new_delay
+                                    m.propagation_mode = 'TEC_SOLVED' # Flag as physics-derived
+                                    m.confidence = min(1.0, m.confidence * 1.2) # Boost confidence
+                        else:
+                            logger.warning(f"TEC poor fit for {station}: R2={tec_result.confidence:.2f} (Needs >0.9)")
                     else:
-                        logger.warning(f"TEC poor fit for {station}: R2={tec_result.confidence:.2f} (Needs >0.9)")
+                        logger.warning(f"TEC solver returned None for {station} (inputs: {len(tec_input)})")
                 else:
-                    logger.warning(f"TEC solver returned None for {station} (inputs: {len(tec_input)})")
-            else:
-                 logger.info(f"Skipping TEC for {station}: Only {len(station_meas)} measurements (Need >=2)")
+                     logger.info(f"Skipping TEC for {station}: Only {len(station_meas)} measurements (Need >=2)")
         
         # ====================================================================
         
@@ -2015,6 +2111,46 @@ class MultiBroadcastFusion:
                 result.global_solve_n_obs
             ])
     
+    def _read_gnss_vtec(self) -> Optional[Tuple[float, float]]:
+        """
+        Read the latest GNSS VTEC from data/gnss_vtec.csv.
+        Returns (vtec_tecu, timestamp) or None.
+        """
+        logger.info(">>> _read_gnss_vtec() called <<<")
+        vtec_path = self.data_root / 'gnss_vtec.csv'
+        if not vtec_path.exists():
+            logger.info(f"VTEC file does not exist: {vtec_path}")
+            return None
+            
+        try:
+            # Efficiently read last line using seek
+            with open(vtec_path, 'rb') as f:
+                try:
+                    f.seek(-1024, os.SEEK_END)
+                except OSError:
+                    # File too small, read from beginning
+                    pass
+                lines = f.readlines()
+                
+            if not lines:
+                return None
+                
+            last_line = lines[-1].decode('utf-8').strip()
+            # CSV Format: timestamp,vtec_tecu,nsats
+            parts = last_line.split(',')
+            if len(parts) >= 2:
+                # Handle potential header
+                if parts[0] == 'timestamp':
+                    return None
+                    
+                ts = float(parts[0])
+                vtec = float(parts[1])
+                return vtec, ts
+                
+        except Exception as e:
+            logger.debug(f"Error reading GNSS VTEC: {e}")
+            return None
+
     def get_current_calibration(self) -> Dict[str, float]:
         """Get current calibration offsets."""
         return {
@@ -2179,11 +2315,14 @@ def run_fusion_service(
             time.sleep(interval_sec)
 
 
+
+
 if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='Multi-Broadcast D_clock Fusion')
-    parser.add_argument('--data-root', type=Path, required=True)
+    parser.add_argument('--data-root', type=Path, default=Path('data'), required=False) # Configured default for simpler running
+    parser.add_argument('--config', type=Path, help='Configuration file') # Added config support
     parser.add_argument('--interval', type=float, default=60.0)
     parser.add_argument('--lookback', type=int, default=10, help='Lookback window in minutes')
     parser.add_argument('--log-level', default='INFO')
