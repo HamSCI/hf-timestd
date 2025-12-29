@@ -48,6 +48,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static images for metrology dashboard
+# Assumes docs/ is sibling to web-ui/
+try:
+    metrology_images_dir = Path(__file__).parent.parent / "docs" / "images" / "metrology"
+    if metrology_images_dir.exists():
+        app.mount("/metrology-images", StaticFiles(directory=str(metrology_images_dir)), name="metrology-images")
+        logger.info(f"Mounted metrology images from {metrology_images_dir}")
+    else:
+        logger.warning(f"Metrology images directory not found: {metrology_images_dir}")
+except Exception as e:
+    logger.error(f"Failed to mount metrology images: {e}")
+
 # Global configuration
 config = {}
 data_root = Path("/var/lib/timestd")
@@ -739,6 +751,7 @@ async def get_health_summary():
     """
     Get aggregated system health summary.
     Returns service status, data flow indicators, error rates, quality grade distribution.
+    Enhanced with uncertainty budget breakdown and real-time performance metrics.
     """
     try:
         # Get latest fusion data for quality assessment
@@ -748,13 +761,26 @@ async def get_health_summary():
             'grade': 'D',
             'd_clock_ms': None,
             'uncertainty_ms': None,
-            'n_stations': 0
+            'n_stations': 0,
+            # Uncertainty budget components
+            'statistical_uncertainty_ms': None,
+            'systematic_uncertainty_ms': None,
+            'propagation_uncertainty_ms': None
+        }
+        
+        # Real-time performance metrics
+        performance_metrics = {
+            'rms_accuracy_ms': None,
+            'peak_to_peak_ms': None,
+            'mean_offset_ms': None,
+            'std_dev_ms': None
         }
         
         grade_distribution = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
         
         if fusion_csv.exists():
             import csv
+            import numpy as np
             with open(fusion_csv, 'r') as f:
                 reader = csv.DictReader(f)
                 records = list(reader)
@@ -766,8 +792,33 @@ async def get_health_summary():
                         'grade': latest.get('quality_grade', 'D'),
                         'd_clock_ms': float(latest.get('d_clock_fused_ms', 0)) if latest.get('d_clock_fused_ms') else None,
                         'uncertainty_ms': float(latest.get('uncertainty_ms', 0)) if latest.get('uncertainty_ms') else None,
-                        'n_stations': int(latest.get('n_stations', 0)) if latest.get('n_stations') else 0
+                        'n_stations': int(latest.get('n_stations', 0)) if latest.get('n_stations') else 0,
+                        # Uncertainty budget components (new fields)
+                        'statistical_uncertainty_ms': float(latest.get('statistical_uncertainty_ms', 0)) if latest.get('statistical_uncertainty_ms') else None,
+                        'systematic_uncertainty_ms': float(latest.get('systematic_uncertainty_ms', 0)) if latest.get('systematic_uncertainty_ms') else None,
+                        'propagation_uncertainty_ms': float(latest.get('propagation_uncertainty_ms', 0)) if latest.get('propagation_uncertainty_ms') else None
                     }
+                
+                # Calculate real-time performance metrics (last hour ~60 samples)
+                recent_records = records[-60:] if len(records) >= 60 else records
+                if recent_records:
+                    d_clocks = []
+                    for r in recent_records:
+                        try:
+                            d_clock = float(r.get('d_clock_fused_ms', 0))
+                            if d_clock is not None:
+                                d_clocks.append(d_clock)
+                        except (ValueError, TypeError):
+                            continue
+                    
+                    if d_clocks:
+                        d_clocks_arr = np.array(d_clocks)
+                        performance_metrics = {
+                            'rms_accuracy_ms': float(np.sqrt(np.mean(d_clocks_arr**2))),
+                            'peak_to_peak_ms': float(np.max(d_clocks_arr) - np.min(d_clocks_arr)),
+                            'mean_offset_ms': float(np.mean(d_clocks_arr)),
+                            'std_dev_ms': float(np.std(d_clocks_arr))
+                        }
                 
                 # Calculate grade distribution (last 24h)
                 for row in records[-1440:]:  # ~24h at 1min cadence
@@ -808,10 +859,63 @@ async def get_health_summary():
         # Fusion is active if we have recent data
         data_flow['fusion'] = fusion_csv.exists() and current_quality['d_clock_ms'] is not None
         
+        # Calculate Allan deviation from recent fusion data
+        allan_deviation = {
+            'adev_10s': None,
+            'adev_100s': None,
+            'adev_1000s': None,
+            'adev_10000s': None,
+            'tau_values': [10, 100, 1000, 10000],
+            'last_updated': datetime.utcnow().isoformat() + 'Z'
+        }
+        
+        if fusion_csv.exists() and len(records) >= 20:  # Need minimum data for ADEV
+            try:
+                # Extract timestamps and d_clock values
+                timestamps = []
+                d_clocks = []
+                for r in records:
+                    try:
+                        ts = float(r.get('timestamp', 0))
+                        dc = float(r.get('d_clock_fused_ms', 0))
+                        if ts > 0:
+                            timestamps.append(ts)
+                            d_clocks.append(dc)
+                    except (ValueError, TypeError):
+                        continue
+                
+                if len(d_clocks) >= 20:
+                    # Simple ADEV calculation for each tau
+                    for tau_sec in [10, 100, 1000, 10000]:
+                        # Estimate sample interval
+                        if len(timestamps) >= 2:
+                            dt_avg = (timestamps[-1] - timestamps[0]) / (len(timestamps) - 1)
+                        else:
+                            dt_avg = 60.0
+                        
+                        n_tau = max(1, int(tau_sec / dt_avg))
+                        
+                        if len(d_clocks) >= 2 * n_tau:
+                            # Overlapping ADEV
+                            diffs = []
+                            for i in range(len(d_clocks) - n_tau):
+                                diffs.append(d_clocks[i + n_tau] - d_clocks[i])
+                            
+                            if len(diffs) >= 2:
+                                second_diffs = np.diff(diffs)
+                                allan_var = np.mean(second_diffs**2) / 2.0
+                                allan_dev = np.sqrt(allan_var)
+                                sigma_y = (allan_dev / 1000.0) / tau_sec
+                                allan_deviation[f'adev_{tau_sec}s'] = float(sigma_y)
+            except Exception as e:
+                logger.warning(f"Error calculating ADEV: {e}")
+        
         return {
             "status": "ok",
             "timestamp": datetime.utcnow().isoformat() + 'Z',
             "timing": current_quality,
+            "performance_metrics": performance_metrics,
+            "allan_deviation": allan_deviation,
             "grade_distribution_24h": grade_distribution,
             "data_flow": data_flow,
             "overall_health": "good" if current_quality['grade'] in ['A', 'B'] else "degraded" if current_quality['grade'] == 'C' else "poor"

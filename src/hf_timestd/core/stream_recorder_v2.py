@@ -201,9 +201,7 @@ class StreamRecorderConfig:
     enable_analysis: bool = True
     analysis_latency_sec: int = 120
     
-    # Phase 2 settings
-    enable_analysis: bool = True
-    analysis_latency_sec: int = 120
+
     
     # Phase 3 settings
     enable_products: bool = True
@@ -294,7 +292,7 @@ class StreamRecorderV2:
             analysis_latency_sec=config.analysis_latency_sec,
             output_sample_rate=config.output_sample_rate,
             streaming_latency_minutes=config.streaming_latency_minutes,
-            streaming_latency_minutes=config.streaming_latency_minutes,
+
             compression=config.compression,
             compression_level=config.compression_level,
             use_tiered_storage=config.tiered_storage,

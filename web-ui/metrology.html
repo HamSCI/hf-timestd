@@ -281,76 +281,143 @@
                         <div class="loading">Loading quality timeline...</div>
                     </div>
             </div>
+        </div>
 
-            <div class="update-info" style="text-align: center; padding: 15px; color: #64748b; font-size: 13px;">
-                Last updated: <span id="last-update">Never</span> | Auto-refresh: 30s
+        <!-- Deep Dive Analysis (Static Reports) -->
+        <div class="section">
+            <div class="section-title">🔬 Deep Dive Analysis (Daily Report)</div>
+            <div style="font-size: 13px; color: #94a3b8; margin-bottom: 25px;">
+                High-precision metrology visualizations generated daily. These reports provide deeper insight into
+                stability,
+                residuals, and ionospheric correlation.
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 20px;">
+                <!-- Plot 1: ADEV -->
+                <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">
+                    <h3
+                        style="color: #cbd5e1; font-size: 14px; margin-bottom: 10px; border-bottom: 1px solid #334155; padding-bottom: 5px;">
+                        1. Stability Analysis (ADEV)
+                    </h3>
+                    <img src="/metrology-images/1_adev_stability.png" style="width: 100%; border-radius: 4px;"
+                        alt="Allan Deviation Plot"
+                        onerror="this.style.display='none'; this.parentElement.innerHTML+='<div class=\'loading\'>Report not available</div>'">
+                </div>
+
+                <!-- Plot 2: Residuals -->
+                <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">
+                    <h3
+                        style="color: #cbd5e1; font-size: 14px; margin-bottom: 10px; border-bottom: 1px solid #334155; padding-bottom: 5px;">
+                        2. Cost Residuals vs Truth
+                    </h3>
+                    <img src="/metrology-images/2_residuals_timeseries.png" style="width: 100%; border-radius: 4px;"
+                        alt="Residuals Plot"
+                        onerror="this.style.display='none'; this.parentElement.innerHTML+='<div class=\'loading\'>Report not available</div>'">
+                </div>
+
+                <!-- Plot 3: Heatmap -->
+                <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">
+                    <h3
+                        style="color: #cbd5e1; font-size: 14px; margin-bottom: 10px; border-bottom: 1px solid #334155; padding-bottom: 5px;">
+                        3. Station Trust (Fusion Weights)
+                    </h3>
+                    <img src="/metrology-images/3_trust_heatmap.png" style="width: 100%; border-radius: 4px;"
+                        alt="Trust Heatmap"
+                        onerror="this.style.display='none'; this.parentElement.innerHTML+='<div class=\'loading\'>Report not available</div>'">
+                </div>
+
+                <!-- Plot 4: VTEC Correlation -->
+                <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">
+                    <h3
+                        style="color: #cbd5e1; font-size: 14px; margin-bottom: 10px; border-bottom: 1px solid #334155; padding-bottom: 5px;">
+                        4. Ionospheric Impact (VTEC vs Error)
+                    </h3>
+                    <img src="/metrology-images/4_vtec_correlation.png" style="width: 100%; border-radius: 4px;"
+                        alt="VTEC Correlation"
+                        onerror="this.style.display='none'; this.parentElement.innerHTML+='<div class=\'loading\'>Report not available</div>'">
+                </div>
             </div>
         </div>
 
-        <!-- Load utilities and components -->
-        <script src="/utils/utc-time.js"></script>
-        <script src="/components/navigation.js"></script>
+        <div class="update-info" style="text-align: center; padding: 15px; color: #64748b; font-size: 13px;">
+            Last updated: <span id="last-update">Never</span> | Auto-refresh: 30s
+        </div>
+    </div>
 
-        <script>
-            let refreshTimer = null;
+    <!-- Load utilities and components -->
+    <script src="/utils/utc-time.js"></script>
+    <script src="/components/navigation.js"></script>
 
-            // Fetch and render all metrology data
-            async function loadMetrologyData() {
-                try {
-                    // Fetch all data in parallel
-                    const [healthResp, kalmanResp, qualityResp, chronyResp] = await Promise.all([
-                        fetch('/api/v2/system/health-summary'),
-                        fetch('/api/v2/timing/kalman-funnel?hours=24'),
-                        fetch('/api/v2/timing/quality-timeline?hours=24'),
-                        fetch('/api/v2/timing/chrony-status')
-                    ]);
+    <script>
+        let refreshTimer = null;
 
-                    const healthData = await healthResp.json();
-                    const kalmanData = await kalmanResp.json();
-                    const qualityData = await qualityResp.json();
-                    const chronyData = await chronyResp.json();
+        // Fetch and render all metrology data
+        async function loadMetrologyData() {
+            try {
+                // Fetch all data in parallel
+                const [healthResp, kalmanResp, qualityResp, chronyResp] = await Promise.all([
+                    fetch('/api/v2/system/health-summary'),
+                    fetch('/api/v2/timing/kalman-funnel?hours=24'),
+                    fetch('/api/v2/timing/quality-timeline?hours=24'),
+                    fetch('/api/v2/timing/chrony-status')
+                ]);
 
-                    // Render hero status
-                    renderHeroStatus(healthData);
+                const healthData = await healthResp.json();
+                const kalmanData = await kalmanResp.json();
+                const qualityData = await qualityResp.json();
+                const chronyData = await chronyResp.json();
 
-                    // Render Chrony status
-                    renderChronyStatus(chronyData);
+                // Render hero status
+                renderHeroStatus(healthData);
 
-                    // Render Kalman funnel
-                    renderKalmanFunnel(kalmanData);
+                // Render Chrony status
+                renderChronyStatus(chronyData);
 
-                    // Render station contributions
-                    renderStationContributions(kalmanData);
+                // Render Kalman funnel
+                renderKalmanFunnel(kalmanData);
 
-                    // Render quality timeline
-                    renderQualityTimeline(qualityData);
+                // Render station contributions
+                renderStationContributions(kalmanData);
 
-                    // Update timestamp
-                    document.getElementById('last-update').textContent = new Date().toLocaleTimeString() + ' UTC';
+                // Render quality timeline
+                renderQualityTimeline(qualityData);
 
-                } catch (error) {
-                    console.error('Error loading metrology data:', error);
-                    document.getElementById('hero-status').innerHTML = `
+                // Update timestamp
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString() + ' UTC';
+
+            } catch (error) {
+                console.error('Error loading metrology data:', error);
+                document.getElementById('hero-status').innerHTML = `
                     <div style="color: #ef4444; text-align: center;">
                         Error loading data: ${error.message}
                     </div>
                 `;
-                }
             }
+        }
 
-            function renderHeroStatus(data) {
-                const timing = data.timing || {};
-                const grade = (timing.grade || 'D').toUpperCase();
-                const dClock = timing.d_clock_ms !== null ? timing.d_clock_ms.toFixed(3) : 'N/A';
-                const uncertainty = timing.uncertainty_ms !== null ? timing.uncertainty_ms.toFixed(3) : 'N/A';
-                const nStations = timing.n_stations || 0;
+        function renderHeroStatus(data) {
+            const timing = data.timing || {};
+            const perf = data.performance_metrics || {};
+            const grade = (timing.grade || 'D').toUpperCase();
+            const dClock = timing.d_clock_ms !== null ? timing.d_clock_ms.toFixed(3) : 'N/A';
+            const uncertainty = timing.uncertainty_ms !== null ? timing.uncertainty_ms.toFixed(3) : 'N/A';
+            const nStations = timing.n_stations || 0;
 
-                const gradeClass = `grade-${grade.toLowerCase()}`;
-                const healthStatus = data.overall_health || 'unknown';
-                const healthIcon = healthStatus === 'good' ? '✅' : healthStatus === 'degraded' ? '⚠️' : '❌';
+            // Uncertainty budget components
+            const statUnc = timing.statistical_uncertainty_ms !== null ? timing.statistical_uncertainty_ms.toFixed(3) : 'N/A';
+            const sysUnc = timing.systematic_uncertainty_ms !== null ? timing.systematic_uncertainty_ms.toFixed(3) : 'N/A';
+            const propUnc = timing.propagation_uncertainty_ms !== null ? timing.propagation_uncertainty_ms.toFixed(3) : 'N/A';
 
-                document.getElementById('hero-status').className = `hero-status ${gradeClass}`;
-                document.getElementById('hero-status').innerHTML = `
+            // Performance metrics
+            const rmsAcc = perf.rms_accuracy_ms !== null ? perf.rms_accuracy_ms.toFixed(3) : 'N/A';
+            const peakPeak = perf.peak_to_peak_ms !== null ? perf.peak_to_peak_ms.toFixed(3) : 'N/A';
+
+            const gradeClass = `grade-${grade.toLowerCase()}`;
+            const healthStatus = data.overall_health || 'unknown';
+            const healthIcon = healthStatus === 'good' ? '✅' : healthStatus === 'degraded' ? '⚠️' : '❌';
+
+            document.getElementById('hero-status').className = `hero-status ${gradeClass}`;
+            document.getElementById('hero-status').innerHTML = `
                 <div class="hero-grid">
                     <div class="hero-metric">
                         <div class="hero-value">${dClock}</div>
@@ -360,7 +427,7 @@
                     <div class="hero-metric">
                         <div class="hero-value">±${uncertainty}</div>
                         <div class="hero-label">Uncertainty</div>
-                        <div class="hero-sublabel">1σ combined (ms)</div>
+                        <div class="hero-sublabel">Combined (RSS)</div>
                     </div>
                     <div class="hero-metric">
                         <div class="quality-badge-large ${gradeClass}">Grade ${grade}</div>
@@ -373,56 +440,138 @@
                         <div class="hero-sublabel">${healthIcon} ${healthStatus}</div>
                     </div>
                 </div>
+                
+                <!-- Uncertainty Budget Breakdown -->
+                <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #334155;">
+                    <h3 style="color: #cbd5e1; font-size: 14px; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 1px;">
+                        📊 Uncertainty Budget (RSS)
+                    </h3>
+                    <div class="hero-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">±${statUnc}</div>
+                            <div class="hero-label">Statistical</div>
+                            <div class="hero-sublabel">Measurement scatter</div>
+                        </div>
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">±${sysUnc}</div>
+                            <div class="hero-label">Systematic</div>
+                            <div class="hero-sublabel">Calibration error</div>
+                        </div>
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">±${propUnc}</div>
+                            <div class="hero-label">Propagation</div>
+                            <div class="hero-sublabel">Ionospheric variability</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Real-Time Performance Metrics -->
+                <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #334155;">
+                    <h3 style="color: #cbd5e1; font-size: 14px; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 1px;">
+                        ⚡ Performance (Last Hour)
+                    </h3>
+                    <div class="hero-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">±${rmsAcc}</div>
+                            <div class="hero-label">RMS Accuracy</div>
+                            <div class="hero-sublabel">vs UTC(NIST)</div>
+                        </div>
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">${peakPeak}</div>
+                            <div class="hero-label">Peak-Peak</div>
+                            <div class="hero-sublabel">Excursion range</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Allan Deviation (Live Stability) -->
+                <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #334155;">
+                    <h3 style="color: #cbd5e1; font-size: 14px; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 1px;">
+                        📈 Allan Deviation (Stability)
+                    </h3>
+                    <div class="hero-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">${formatADEV(data.allan_deviation?.adev_10s)}</div>
+                            <div class="hero-label">τ = 10s</div>
+                            <div class="hero-sublabel">Short-term</div>
+                        </div>
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">${formatADEV(data.allan_deviation?.adev_100s)}</div>
+                            <div class="hero-label">τ = 100s</div>
+                            <div class="hero-sublabel">Medium-term</div>
+                        </div>
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">${formatADEV(data.allan_deviation?.adev_1000s)}</div>
+                            <div class="hero-label">τ = 1000s</div>
+                            <div class="hero-sublabel">Long-term</div>
+                        </div>
+                        <div class="hero-metric">
+                            <div class="hero-value" style="font-size: 28px;">${formatADEV(data.allan_deviation?.adev_10000s)}</div>
+                            <div class="hero-label">τ = 10000s</div>
+                            <div class="hero-sublabel">Very long-term</div>
+                        </div>
+                    </div>
+                </div>
             `;
+        }
+
+        function formatADEV(value) {
+            if (value === null || value === undefined) {
+                return 'N/A';
+            }
+            // Format in scientific notation
+            const exp = Math.floor(Math.log10(Math.abs(value)));
+            const mantissa = value / Math.pow(10, exp);
+            return `${mantissa.toFixed(1)}×10<sup>${exp}</sup>`;
+        }
+
+        function getGradeDescription(grade) {
+            const descriptions = {
+                'A': 'U < 1.0 ms (Excellent)',
+                'B': '1.0 ≤ U < 2.0 ms (Good)',
+                'C': '2.0 ≤ U < 3.0 ms (Fair)',
+                'D': 'U ≥ 3.0 ms (Poor)'
+            };
+            return descriptions[grade] || 'Unknown';
+        }
+
+        function renderChronyStatus(data) {
+            const tmgr = data.tmgr || {};
+            const sysTime = data.system_time || {};
+
+            let statusClass = 'chrony-status';
+            let icon = '🔗';
+            let title = 'Chrony Status';
+            let detail = '';
+
+            if (data.status === 'not_installed') {
+                statusClass += ' warning';
+                icon = '⚠️';
+                title = 'Chrony Not Installed';
+                detail = 'System clock not being disciplined by HF-TimeStd';
+            } else if (!tmgr.active) {
+                statusClass += ' error';
+                icon = '❌';
+                title = 'TMGR Not Active';
+                detail = 'Chrony is not receiving updates from fusion service';
+            } else if (tmgr.state === 'current_source') {
+                statusClass += '';
+                icon = '✅';
+                title = 'TMGR Active (Primary Source)';
+                detail = `System clock disciplined by HF-TimeStd${tmgr.offset_ms !== null ? ` • Offset: ${tmgr.offset_ms.toFixed(3)} ms` : ''}`;
+            } else if (tmgr.state === 'combined') {
+                statusClass += '';
+                icon = '✅';
+                title = 'TMGR Active (Combined)';
+                detail = 'Contributing to system time alongside other sources';
+            } else {
+                statusClass += ' warning';
+                icon = '⚠️';
+                title = 'TMGR Active (Not Combined)';
+                detail = 'Chrony sees TMGR but is not using it';
             }
 
-            function getGradeDescription(grade) {
-                const descriptions = {
-                    'A': 'U < 1.0 ms (Excellent)',
-                    'B': '1.0 ≤ U < 2.0 ms (Good)',
-                    'C': '2.0 ≤ U < 3.0 ms (Fair)',
-                    'D': 'U ≥ 3.0 ms (Poor)'
-                };
-                return descriptions[grade] || 'Unknown';
-            }
-
-            function renderChronyStatus(data) {
-                const tmgr = data.tmgr || {};
-                const sysTime = data.system_time || {};
-
-                let statusClass = 'chrony-status';
-                let icon = '🔗';
-                let title = 'Chrony Status';
-                let detail = '';
-
-                if (data.status === 'not_installed') {
-                    statusClass += ' warning';
-                    icon = '⚠️';
-                    title = 'Chrony Not Installed';
-                    detail = 'System clock not being disciplined by HF-TimeStd';
-                } else if (!tmgr.active) {
-                    statusClass += ' error';
-                    icon = '❌';
-                    title = 'TMGR Not Active';
-                    detail = 'Chrony is not receiving updates from fusion service';
-                } else if (tmgr.state === 'current_source') {
-                    statusClass += '';
-                    icon = '✅';
-                    title = 'TMGR Active (Primary Source)';
-                    detail = `System clock disciplined by HF-TimeStd${tmgr.offset_ms !== null ? ` • Offset: ${tmgr.offset_ms.toFixed(3)} ms` : ''}`;
-                } else if (tmgr.state === 'combined') {
-                    statusClass += '';
-                    icon = '✅';
-                    title = 'TMGR Active (Combined)';
-                    detail = 'Contributing to system time alongside other sources';
-                } else {
-                    statusClass += ' warning';
-                    icon = '⚠️';
-                    title = 'TMGR Active (Not Combined)';
-                    detail = 'Chrony sees TMGR but is not using it';
-                }
-
-                document.getElementById('chrony-status').innerHTML = `
+            document.getElementById('chrony-status').innerHTML = `
                 <div class="${statusClass}">
                     <div class="chrony-icon">${icon}</div>
                     <div class="chrony-text">
@@ -431,127 +580,127 @@
                     </div>
                 </div>
             `;
+        }
+
+        function renderKalmanFunnel(data) {
+            if (data.status !== 'ok' || !data.data || data.data.length === 0) {
+                document.getElementById('kalman-funnel-chart').innerHTML = '<div class="loading">No Kalman funnel data available</div>';
+                return;
             }
 
-            function renderKalmanFunnel(data) {
-                if (data.status !== 'ok' || !data.data || data.data.length === 0) {
-                    document.getElementById('kalman-funnel-chart').innerHTML = '<div class="loading">No Kalman funnel data available</div>';
-                    return;
-                }
+            const records = data.data;
 
-                const records = data.data;
+            // Prepare traces
+            const traces = [];
 
-                // Prepare traces
-                const traces = [];
+            // Fused D_clock centerline
+            const x = records.map(r => r.timestamp_utc);
+            const y = records.map(r => r.d_clock_fused_ms);
+            const uncertainty = records.map(r => r.uncertainty_ms);
 
-                // Fused D_clock centerline
-                const x = records.map(r => r.timestamp_utc);
-                const y = records.map(r => r.d_clock_fused_ms);
-                const uncertainty = records.map(r => r.uncertainty_ms);
+            // Upper and lower bounds
+            const yUpper = y.map((val, i) => val + uncertainty[i]);
+            const yLower = y.map((val, i) => val - uncertainty[i]);
 
-                // Upper and lower bounds
-                const yUpper = y.map((val, i) => val + uncertainty[i]);
-                const yLower = y.map((val, i) => val - uncertainty[i]);
+            // Uncertainty band (filled area)
+            traces.push({
+                x: [...x, ...x.reverse()],
+                y: [...yUpper, ...yLower.reverse()],
+                fill: 'toself',
+                fillcolor: 'rgba(59, 130, 246, 0.2)',
+                line: { color: 'transparent' },
+                showlegend: true,
+                name: '±1σ Uncertainty',
+                hoverinfo: 'skip'
+            });
 
-                // Uncertainty band (filled area)
-                traces.push({
-                    x: [...x, ...x.reverse()],
-                    y: [...yUpper, ...yLower.reverse()],
-                    fill: 'toself',
-                    fillcolor: 'rgba(59, 130, 246, 0.2)',
-                    line: { color: 'transparent' },
-                    showlegend: true,
-                    name: '±1σ Uncertainty',
-                    hoverinfo: 'skip'
-                });
+            // Fused D_clock line
+            traces.push({
+                x: x,
+                y: y,
+                mode: 'lines',
+                line: { color: '#3b82f6', width: 2 },
+                name: 'Fused D_clock',
+                hovertemplate: '%{y:.3f} ms<extra>Fused</extra>'
+            });
 
-                // Fused D_clock line
-                traces.push({
-                    x: x,
-                    y: y,
-                    mode: 'lines',
-                    line: { color: '#3b82f6', width: 2 },
-                    name: 'Fused D_clock',
-                    hovertemplate: '%{y:.3f} ms<extra>Fused</extra>'
-                });
+            // Per-station scatter points (sample every 10th point to avoid clutter)
+            const stationColors = {
+                'WWV': '#38bdf8',
+                'WWVH': '#a855f7',
+                'CHU': '#fcd34d',
+                'BPM': '#f43f5e'
+            };
 
-                // Per-station scatter points (sample every 10th point to avoid clutter)
-                const stationColors = {
-                    'WWV': '#38bdf8',
-                    'WWVH': '#a855f7',
-                    'CHU': '#fcd34d',
-                    'BPM': '#f43f5e'
-                };
+            const sampleInterval = Math.max(1, Math.floor(records.length / 100));
+            for (const [station, color] of Object.entries(stationColors)) {
+                const stationX = [];
+                const stationY = [];
 
-                const sampleInterval = Math.max(1, Math.floor(records.length / 100));
-                for (const [station, color] of Object.entries(stationColors)) {
-                    const stationX = [];
-                    const stationY = [];
-
-                    records.forEach((r, i) => {
-                        if (i % sampleInterval === 0 && r.stations && r.stations[station] && r.stations[station].mean_ms !== null) {
-                            stationX.push(r.timestamp_utc);
-                            stationY.push(r.stations[station].mean_ms);
-                        }
-                    });
-
-                    if (stationX.length > 0) {
-                        traces.push({
-                            x: stationX,
-                            y: stationY,
-                            mode: 'markers',
-                            marker: { size: 4, color: color, opacity: 0.6 },
-                            name: station,
-                            hovertemplate: '%{y:.3f} ms<extra>' + station + '</extra>'
-                        });
+                records.forEach((r, i) => {
+                    if (i % sampleInterval === 0 && r.stations && r.stations[station] && r.stations[station].mean_ms !== null) {
+                        stationX.push(r.timestamp_utc);
+                        stationY.push(r.stations[station].mean_ms);
                     }
+                });
+
+                if (stationX.length > 0) {
+                    traces.push({
+                        x: stationX,
+                        y: stationY,
+                        mode: 'markers',
+                        marker: { size: 4, color: color, opacity: 0.6 },
+                        name: station,
+                        hovertemplate: '%{y:.3f} ms<extra>' + station + '</extra>'
+                    });
                 }
-
-                const layout = {
-                    paper_bgcolor: 'rgba(0,0,0,0)',
-                    plot_bgcolor: 'rgba(0,0,0,0)',
-                    font: { color: '#94a3b8' },
-                    xaxis: {
-                        title: 'Time (UTC)',
-                        gridcolor: '#334155',
-                        tickformat: '%H:%M'
-                    },
-                    yaxis: {
-                        title: 'D_clock (ms)',
-                        gridcolor: '#334155'
-                    },
-                    legend: {
-                        orientation: 'h',
-                        y: -0.15,
-                        x: 0.5,
-                        xanchor: 'center'
-                    },
-                    margin: { t: 30, b: 60, l: 60, r: 30 },
-                    hovermode: 'x unified'
-                };
-
-                Plotly.newPlot('kalman-funnel-chart', traces, layout, { responsive: true });
             }
 
-            function renderStationContributions(data) {
-                if (!data.latest || !data.latest.stations) {
-                    document.getElementById('station-contributions').innerHTML = '<div class="loading">No station data available</div>';
-                    return;
-                }
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#94a3b8' },
+                xaxis: {
+                    title: 'Time (UTC)',
+                    gridcolor: '#334155',
+                    tickformat: '%H:%M'
+                },
+                yaxis: {
+                    title: 'D_clock (ms)',
+                    gridcolor: '#334155'
+                },
+                legend: {
+                    orientation: 'h',
+                    y: -0.15,
+                    x: 0.5,
+                    xanchor: 'center'
+                },
+                margin: { t: 30, b: 60, l: 60, r: 30 },
+                hovermode: 'x unified'
+            };
 
-                const stations = data.latest.stations;
-                const stationOrder = ['WWV', 'WWVH', 'CHU', 'BPM'];
+            Plotly.newPlot('kalman-funnel-chart', traces, layout, { responsive: true });
+        }
 
-                let html = '';
-                for (const station of stationOrder) {
-                    const stationData = stations[station];
-                    if (!stationData) continue;
+        function renderStationContributions(data) {
+            if (!data.latest || !data.latest.stations) {
+                document.getElementById('station-contributions').innerHTML = '<div class="loading">No station data available</div>';
+                return;
+            }
 
-                    const meanMs = stationData.mean_ms !== null ? stationData.mean_ms.toFixed(3) : 'N/A';
-                    const count = stationData.count || 0;
-                    const active = count > 0;
+            const stations = data.latest.stations;
+            const stationOrder = ['WWV', 'WWVH', 'CHU', 'BPM'];
 
-                    html += `
+            let html = '';
+            for (const station of stationOrder) {
+                const stationData = stations[station];
+                if (!stationData) continue;
+
+                const meanMs = stationData.mean_ms !== null ? stationData.mean_ms.toFixed(3) : 'N/A';
+                const count = stationData.count || 0;
+                const active = count > 0;
+
+                html += `
                     <div class="station-card ${station.toLowerCase()}">
                         <div class="station-name">${station}</div>
                         <div class="station-metric">
@@ -568,89 +717,89 @@
                         </div>
                     </div>
                 `;
+            }
+
+            document.getElementById('station-contributions').innerHTML = html;
+        }
+
+        function renderQualityTimeline(data) {
+            if (data.status !== 'ok' || !data.timeline || data.timeline.length === 0) {
+                document.getElementById('quality-timeline-chart').innerHTML = '<div class="loading">No quality timeline data available</div>';
+                return;
+            }
+
+            const timeline = data.timeline;
+
+            // Stacked bar chart
+            const x = timeline.map(t => t.timestamp);
+
+            const traces = [
+                {
+                    x: x,
+                    y: timeline.map(t => t.grades.A),
+                    name: 'Grade A',
+                    type: 'bar',
+                    marker: { color: '#10b981' }
+                },
+                {
+                    x: x,
+                    y: timeline.map(t => t.grades.B),
+                    name: 'Grade B',
+                    type: 'bar',
+                    marker: { color: '#3b82f6' }
+                },
+                {
+                    x: x,
+                    y: timeline.map(t => t.grades.C),
+                    name: 'Grade C',
+                    type: 'bar',
+                    marker: { color: '#f59e0b' }
+                },
+                {
+                    x: x,
+                    y: timeline.map(t => t.grades.D),
+                    name: 'Grade D',
+                    type: 'bar',
+                    marker: { color: '#ef4444' }
                 }
+            ];
 
-                document.getElementById('station-contributions').innerHTML = html;
-            }
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#94a3b8' },
+                barmode: 'stack',
+                xaxis: {
+                    title: 'Time (UTC)',
+                    gridcolor: '#334155',
+                    tickformat: '%H:%M'
+                },
+                yaxis: {
+                    title: 'Measurements per Hour',
+                    gridcolor: '#334155'
+                },
+                legend: {
+                    orientation: 'h',
+                    y: -0.15,
+                    x: 0.5,
+                    xanchor: 'center'
+                },
+                margin: { t: 30, b: 60, l: 60, r: 30 }
+            };
 
-            function renderQualityTimeline(data) {
-                if (data.status !== 'ok' || !data.timeline || data.timeline.length === 0) {
-                    document.getElementById('quality-timeline-chart').innerHTML = '<div class="loading">No quality timeline data available</div>';
-                    return;
-                }
+            Plotly.newPlot('quality-timeline-chart', traces, layout, { responsive: true });
+        }
 
-                const timeline = data.timeline;
+        // Auto-refresh
+        function startAutoRefresh() {
+            if (refreshTimer) clearInterval(refreshTimer);
+            refreshTimer = setInterval(loadMetrologyData, 30000); // 30 seconds
+        }
 
-                // Stacked bar chart
-                const x = timeline.map(t => t.timestamp);
-
-                const traces = [
-                    {
-                        x: x,
-                        y: timeline.map(t => t.grades.A),
-                        name: 'Grade A',
-                        type: 'bar',
-                        marker: { color: '#10b981' }
-                    },
-                    {
-                        x: x,
-                        y: timeline.map(t => t.grades.B),
-                        name: 'Grade B',
-                        type: 'bar',
-                        marker: { color: '#3b82f6' }
-                    },
-                    {
-                        x: x,
-                        y: timeline.map(t => t.grades.C),
-                        name: 'Grade C',
-                        type: 'bar',
-                        marker: { color: '#f59e0b' }
-                    },
-                    {
-                        x: x,
-                        y: timeline.map(t => t.grades.D),
-                        name: 'Grade D',
-                        type: 'bar',
-                        marker: { color: '#ef4444' }
-                    }
-                ];
-
-                const layout = {
-                    paper_bgcolor: 'rgba(0,0,0,0)',
-                    plot_bgcolor: 'rgba(0,0,0,0)',
-                    font: { color: '#94a3b8' },
-                    barmode: 'stack',
-                    xaxis: {
-                        title: 'Time (UTC)',
-                        gridcolor: '#334155',
-                        tickformat: '%H:%M'
-                    },
-                    yaxis: {
-                        title: 'Measurements per Hour',
-                        gridcolor: '#334155'
-                    },
-                    legend: {
-                        orientation: 'h',
-                        y: -0.15,
-                        x: 0.5,
-                        xanchor: 'center'
-                    },
-                    margin: { t: 30, b: 60, l: 60, r: 30 }
-                };
-
-                Plotly.newPlot('quality-timeline-chart', traces, layout, { responsive: true });
-            }
-
-            // Auto-refresh
-            function startAutoRefresh() {
-                if (refreshTimer) clearInterval(refreshTimer);
-                refreshTimer = setInterval(loadMetrologyData, 30000); // 30 seconds
-            }
-
-            // Initial load
-            loadMetrologyData();
-            startAutoRefresh();
-        </script>
+        // Initial load
+        loadMetrologyData();
+        startAutoRefresh();
+    </script>
 </body>
 
 </html>

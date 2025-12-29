@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2025-12-29
+
+### Added - Enhanced Timing Performance Metrics
+
+#### Uncertainty Budget (Root Sum of Squares)
+
+- **Three-Component Uncertainty Model**: Proper uncertainty budgeting with statistical, systematic, and propagation components
+  - Statistical: Measurement scatter from weighted standard deviation
+  - Systematic: Calibration convergence error (decreases over time)
+  - Propagation: Mode-dependent ionospheric variability (GW: 0.1ms, 1F: 0.5ms, 2F: 2.0ms, TEC-solved: 0.2ms)
+- **RSS Combination**: `σ_total = sqrt(σ_stat² + σ_sys² + σ_prop²)`
+- **FusedResult Enhancement**: Added `statistical_uncertainty_ms`, `systematic_uncertainty_ms`, `propagation_uncertainty_ms` fields
+- **CSV Output**: Updated fusion CSV to include uncertainty budget components
+
+#### Real-Time Performance Metrics
+
+- **API Enhancement**: `/api/v2/system/health-summary` now includes performance metrics
+  - RMS Accuracy: `sqrt(mean(d_clock²))` vs UTC(NIST)
+  - Peak-to-Peak: Excursion range over last hour
+  - Mean Offset: Average clock offset
+  - Standard Deviation: Short-term stability
+- **Web UI Display**: Metrology dashboard shows real-time performance indicators
+
+#### Live Allan Deviation Tracking
+
+- **AllanDeviationTracker Class**: Efficient overlapping ADEV calculator with 24h rolling window
+  - Maintains 86400 samples (1 per minute for 24 hours)
+  - Overlapping calculation for better statistics
+  - Standard tau values: 10s, 100s, 1000s, 10000s
+- **Fusion Integration**: ADEV tracking added to fusion service
+  - Measurements tracked after each fusion cycle
+  - `get_current_adev()` method for API exposure
+- **API Exposure**: ADEV values included in health summary response
+- **Web UI Display**: Scientific notation formatting (e.g., 1.2×10⁻⁶)
+
+#### Metrology Dashboard Enhancements
+
+- **Uncertainty Budget Section**: Visual breakdown of uncertainty components
+- **Performance Metrics Section**: Last hour RMS and peak-peak display
+- **Allan Deviation Section**: Live ADEV at 4 tau values with labels
+- **Scientific Notation**: Proper formatting for small values
+
+### Changed
+
+- **Fusion CSV Format**: Added 3 new columns for uncertainty budget components
+- **API Response**: Enhanced `/api/v2/system/health-summary` with performance and ADEV data
+- **Metrology Dashboard**: Expanded hero status with 4 new sections
+
 ## [3.4.0] - 2025-12-29
 
 ### Added - L0 Digital RF Storage

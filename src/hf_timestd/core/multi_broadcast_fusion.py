@@ -212,7 +212,7 @@ class FusedResult:
     timestamp: float
     d_clock_fused_ms: float      # Fused D_clock (should converge to 0)
     d_clock_raw_ms: float        # Unweighted mean before calibration
-    uncertainty_ms: float        # Estimated uncertainty
+    uncertainty_ms: float        # Combined uncertainty (RSS of components)
     n_broadcasts: int            # Number of broadcasts used
     n_stations: int              # Number of unique stations
 
@@ -245,6 +245,115 @@ class FusedResult:
     bpm_intra_std_ms: Optional[float] = None   # Std dev within BPM frequencies
     inter_station_spread_ms: Optional[float] = None  # Spread between station means
     consistency_flag: str = 'OK'  # OK, INTRA_ANOMALY, INTER_ANOMALY, DISCRIMINATION_SUSPECT
+    
+    # Uncertainty budget breakdown (for metrology display)
+    statistical_uncertainty_ms: float = 0.0      # Measurement scatter (weighted std)
+    systematic_uncertainty_ms: float = 0.0       # Calibration convergence error
+    propagation_uncertainty_ms: float = 0.0      # Mode-dependent ionospheric variability
+
+
+class AllanDeviationTracker:
+    """
+    Efficient overlapping Allan deviation calculator for real-time stability monitoring.
+    
+    Maintains a rolling window of timing measurements and computes Allan deviation
+    at multiple tau values to characterize oscillator stability.
+    
+    Allan deviation σ_y(τ) measures fractional frequency stability:
+        σ_y(τ) = sqrt(1/(2(M-1)) * Σ(y_{i+1} - y_i)²)
+    
+    For timing applications, we track clock offset and convert to frequency stability.
+    """
+    
+    def __init__(self, max_samples: int = 86400):
+        """
+        Initialize tracker with rolling window.
+        
+        Args:
+            max_samples: Maximum samples to retain (default 86400 = 24h at 1min cadence)
+        """
+        from collections import deque
+        self.timestamps = deque(maxlen=max_samples)
+        self.values = deque(maxlen=max_samples)
+        self.max_samples = max_samples
+    
+    def add_measurement(self, timestamp: float, value_ms: float):
+        """
+        Add new timing measurement to history.
+        
+        Args:
+            timestamp: Unix timestamp
+            value_ms: Clock offset in milliseconds
+        """
+        self.timestamps.append(timestamp)
+        self.values.append(value_ms)
+    
+    def compute_adev(self, tau_seconds: int) -> Optional[float]:
+        """
+        Compute overlapping Allan deviation for given tau.
+        
+        Args:
+            tau_seconds: Averaging time (tau) in seconds
+            
+        Returns:
+            Allan deviation σ_y(τ) or None if insufficient data
+        """
+        if len(self.values) < 2:
+            return None
+        
+        # Estimate sample interval (assume ~60s cadence)
+        if len(self.timestamps) >= 2:
+            dt_avg = (self.timestamps[-1] - self.timestamps[0]) / (len(self.timestamps) - 1)
+        else:
+            dt_avg = 60.0  # Default to 1 minute
+        
+        # Number of samples per tau
+        n_tau = max(1, int(tau_seconds / dt_avg))
+        
+        # Need at least 2*n_tau samples for overlapping ADEV
+        if len(self.values) < 2 * n_tau:
+            return None
+        
+        # Compute overlapping differences
+        diffs = []
+        values_arr = np.array(self.values)
+        for i in range(len(values_arr) - n_tau):
+            diff = values_arr[i + n_tau] - values_arr[i]
+            diffs.append(diff)
+        
+        if len(diffs) < 2:
+            return None
+        
+        # Allan variance (overlapping)
+        # σ²_y(τ) = 1/(2(M-1)) * Σ(y_{i+1} - y_i)²
+        diffs_arr = np.array(diffs)
+        second_diffs = np.diff(diffs_arr)
+        allan_var = np.mean(second_diffs**2) / 2.0
+        
+        # Allan deviation
+        allan_dev = np.sqrt(allan_var)
+        
+        # Convert from time deviation (ms) to fractional frequency
+        # σ_y ≈ σ_time / tau
+        # For ms units: σ_y = (allan_dev_ms / 1000) / tau_seconds
+        sigma_y = (allan_dev / 1000.0) / tau_seconds
+        
+        return sigma_y
+    
+    def compute_all_adev(self, tau_values: List[int]) -> Dict[str, Optional[float]]:
+        """
+        Compute ADEV for multiple tau values.
+        
+        Args:
+            tau_values: List of tau values in seconds
+            
+        Returns:
+            Dictionary mapping tau to ADEV value
+        """
+        results = {}
+        for tau in tau_values:
+            results[f'adev_{tau}s'] = self.compute_adev(tau)
+        return results
 
 
 class MultiBroadcastFusion:
@@ -347,6 +456,10 @@ class MultiBroadcastFusion:
         self.kalman_initialized = False
         self.kalman_n_updates = 0
         
+        # Allan deviation tracker for real-time stability monitoring
+        self.adev_tracker = AllanDeviationTracker(max_samples=86400)  # 24h history
+        self.adev_tau_values = [10, 100, 1000, 10000]  # Standard tau values (seconds)
+        
         # Channels to aggregate
         self.channels = self._discover_channels()
         
@@ -445,7 +558,9 @@ class MultiBroadcastFusion:
             'outliers_rejected',
             'wwv_intra_std_ms', 'wwvh_intra_std_ms', 'chu_intra_std_ms', 'bpm_intra_std_ms',
             'inter_station_spread_ms', 'consistency_flag',
-            'global_solve_verified', 'global_solve_consistency_ms', 'global_solve_n_obs'
+            'global_solve_verified', 'global_solve_consistency_ms', 'global_solve_n_obs',
+            # Uncertainty budget components
+            'statistical_uncertainty_ms', 'systematic_uncertainty_ms', 'propagation_uncertainty_ms'
         ]
 
         if not self.fusion_csv.exists():
@@ -1913,17 +2028,74 @@ class MultiBroadcastFusion:
         raw_d_clocks = np.array([m.d_clock_ms for m in measurements])
         raw_mean = np.mean(raw_d_clocks)
         
-        # Measurement uncertainty from weighted std
+        # ====================================================================
+        # ENHANCED UNCERTAINTY CALCULATION
+        # ====================================================================
+        # Proper uncertainty budget with three components:
+        # 1. Statistical: Measurement scatter (weighted std)
+        # 2. Systematic: Calibration convergence error
+        # 3. Propagation: Mode-dependent ionospheric variability
+        
+        # 1. Statistical uncertainty from weighted std
         weighted_var = np.sum(w * (d - fused_d_clock)**2) / np.sum(w)
-
+        statistical_uncertainty = np.sqrt(weighted_var)
+        
+        # 2. Systematic uncertainty from calibration convergence
+        # Estimate based on Kalman filter convergence state
+        # Early in convergence: higher systematic error
+        # After convergence: residual calibration uncertainty ~0.3-0.5ms
+        if self.kalman_n_updates < 50:
+            # Still converging
+            systematic_uncertainty = 1.0 * (1.0 - self.kalman_n_updates / 50.0)
+        elif self.kalman_n_updates < 200:
+            # Partially converged
+            systematic_uncertainty = 0.5 * (1.0 - (self.kalman_n_updates - 50) / 150.0)
+        else:
+            # Fully converged - residual systematic error
+            systematic_uncertainty = 0.3 if has_verified_global else 0.4
+        
+        # 3. Propagation uncertainty - mode-dependent ionospheric variability
+        # Different propagation modes have different inherent uncertainties
+        mode_uncertainties = {
+            'GW': 0.1,    # Ground wave (very stable)
+            '1E': 0.3,    # Single-hop E-layer (stable)
+            '1F': 0.5,    # Single-hop F-layer (moderate)
+            '2E': 1.0,    # Two-hop E-layer
+            '2F': 2.0,    # Two-hop F-layer (variable)
+            '3F': 3.0,    # Three-hop (highly variable)
+            'TEC_SOLVED': 0.2,  # Physics-derived (very good)
+        }
+        
+        # Weighted average of mode uncertainties
+        mode_unc_list = []
+        for m in measurements:
+            mode = getattr(m, 'propagation_mode', '1F')
+            mode_unc_list.append(mode_uncertainties.get(mode, 1.0))
+        
+        if mode_unc_list:
+            # Weight by measurement weights
+            propagation_uncertainty = np.sum(w * np.array(mode_unc_list)) / np.sum(w)
+        else:
+            propagation_uncertainty = 1.0  # Conservative default
+        
+        # Combined uncertainty (Root Sum of Squares)
+        # RSS is appropriate for independent uncertainty sources
+        combined_uncertainty = np.sqrt(
+            statistical_uncertainty**2 +
+            systematic_uncertainty**2 +
+            propagation_uncertainty**2
+        )
+        
+        # Apply uncertainty floor
         has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
         uncertainty_floor = 0.1 if has_verified_global else 0.2
-        measurement_uncertainty = max(uncertainty_floor, np.sqrt(weighted_var))
+        measurement_uncertainty = max(uncertainty_floor, combined_uncertainty)
         
-        # Update Kalman filter for convergence
+        # Update Kalman filter for convergence tracking
         kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
         
-        # Use Kalman uncertainty (converges over time) instead of instantaneous spread
+        # Final uncertainty is the Kalman-filtered combined uncertainty
+        # This provides temporal smoothing while preserving the uncertainty budget
         uncertainty = kalman_uncertainty
         
         # Per-station breakdown (using calibrated values for consistency)
@@ -2070,13 +2242,29 @@ class MultiBroadcastFusion:
             chu_intra_std_ms=chu_intra_std,
             bpm_intra_std_ms=bpm_intra_std,
             inter_station_spread_ms=inter_station_spread,
-            consistency_flag=consistency_flag
+            consistency_flag=consistency_flag,
+            # Uncertainty budget components
+            statistical_uncertainty_ms=statistical_uncertainty,
+            systematic_uncertainty_ms=systematic_uncertainty,
+            propagation_uncertainty_ms=propagation_uncertainty
         )
+        
+        # Track measurement for Allan deviation calculation
+        self.adev_tracker.add_measurement(result.timestamp, result.d_clock_fused_ms)
         
         # Write to CSV
         self._write_fused_result(result)
         
         return result
+    
+    def get_current_adev(self) -> Dict[str, Optional[float]]:
+        """
+        Get current Allan deviation values at standard tau values.
+        
+        Returns:
+            Dictionary with ADEV at 10s, 100s, 1000s, 10000s tau values
+        """
+        return self.adev_tracker.compute_all_adev(self.adev_tau_values)
     
     def _write_fused_result(self, result: FusedResult):
         """Append fused result to CSV."""
@@ -2108,7 +2296,11 @@ class MultiBroadcastFusion:
                 result.consistency_flag,
                 result.global_solve_verified,
                 result.global_solve_consistency_ms if result.global_solve_consistency_ms is not None else '',
-                result.global_solve_n_obs
+                result.global_solve_n_obs,
+                # Uncertainty budget components
+                result.statistical_uncertainty_ms,
+                result.systematic_uncertainty_ms,
+                result.propagation_uncertainty_ms
             ])
     
     def _read_gnss_vtec(self) -> Optional[Tuple[float, float]]:
