@@ -1,0 +1,93 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3A_gnss_vtec",
+    "description": "Real-time GNSS Vertical Total Electron Content from ZED-F9P receiver",
+    "cadence_seconds": 1,
+    "processing_level": "L3A",
+    "standards": [
+        "GNSS ionospheric delay modeling",
+        "Dual-frequency TEC estimation"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC (ISO 8601)"
+        },
+        {
+            "name": "unix_timestamp",
+            "type": "float",
+            "required": true,
+            "description": "Unix epoch timestamp for efficient lookups"
+        },
+        {
+            "name": "vtec_tecu",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Vertical Total Electron Content",
+            "units": "TECU (10^16 electrons/m²)",
+            "valid_range": [
+                0,
+                200
+            ]
+        },
+        {
+            "name": "n_satellites",
+            "type": "integer",
+            "required": true,
+            "description": "Number of GPS satellites used in VTEC calculation",
+            "valid_range": [
+                1,
+                32
+            ]
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD"
+            ],
+            "description": "Data quality flag based on satellite count"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "VTEC service version"
+        },
+        {
+            "name": "min_elevation_deg",
+            "type": "float",
+            "required": true,
+            "description": "Minimum satellite elevation angle used",
+            "units": "degrees",
+            "valid_range": [
+                0,
+                90
+            ]
+        },
+        {
+            "name": "dcb_corrected",
+            "type": "boolean",
+            "required": true,
+            "description": "Whether Differential Code Bias corrections were applied"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "n_satellites >= 6, high confidence",
+        "MARGINAL": "4 <= n_satellites < 6, moderate confidence",
+        "BAD": "n_satellites < 4, low confidence"
+    },
+    "notes": [
+        "VTEC calculated from dual-frequency GPS measurements (L1/L2)",
+        "Elevation mask at 20 degrees to reduce multipath",
+        "DCB corrections from CDDIS rapid products when available",
+        "1 Hz cadence from real-time GNSS receiver stream"
+    ]
+}

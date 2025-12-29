@@ -41,6 +41,14 @@
                 "tec"
             ]
         },
+        "L3A_gnss_vtec": {
+            "current_version": "v1",
+            "schema_file": "l3_gnss_vtec_v1.json",
+            "description": "Real-time GNSS VTEC from ZED-F9P receiver",
+            "replaces": [
+                "gnss_vtec.csv"
+            ]
+        },
         "L3B_fusion_timing": {
             "current_version": "v1",
             "schema_file": "l3_fusion_timing_v1.json",

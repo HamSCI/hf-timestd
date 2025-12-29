@@ -121,7 +121,7 @@ class ScienceAggregator:
         end_timestamp: float
     ) -> List[Dict]:
         """
-        Read clock offset CSV for given date and time range using TimeStdPaths.
+        Read clock offset data for given date and time range using HDF5 with CSV fallback.
         
         Args:
             channel_name: Channel name (e.g., 'CHU_3330', 'WWV_10000')
@@ -140,7 +140,46 @@ class ScienceAggregator:
             logger.debug(f"Clock offset directory not found: {clock_offset_dir}")
             return []
         
-        # Find CSV file for this date
+        # Try HDF5 first
+        try:
+            from hf_timestd.io import DataProductReader
+            from datetime import datetime, timezone
+            
+            reader = DataProductReader(
+                data_dir=clock_offset_dir,
+                product_level='L2',
+                product_name='timing_measurements',
+                channel=channel_name
+            )
+            
+            # Convert timestamps to ISO format
+            start_iso = datetime.fromtimestamp(start_timestamp, timezone.utc).isoformat().replace('+00:00', 'Z')
+            end_iso = datetime.fromtimestamp(end_timestamp, timezone.utc).isoformat().replace('+00:00', 'Z')
+            
+            # Read measurements from HDF5
+            measurements_hdf5 = reader.read_time_range(start=start_iso, end=end_iso)
+            
+            if measurements_hdf5:
+                # Convert HDF5 format to expected dict format
+                measurements = []
+                for m in measurements_hdf5:
+                    measurements.append({
+                        'minute_boundary_utc': str(m.get('minute_boundary', m.get('unix_timestamp', 0))),
+                        'station': m.get('station', 'UNKNOWN'),
+                        'frequency_mhz': str(m.get('frequency_mhz', 0)),
+                        'clock_offset_ms': str(m.get('clock_offset_ms', 0)),
+                        'uncertainty_ms': str(m.get('uncertainty_ms', 1.0))
+                    })
+                
+                logger.debug(f"Read {len(measurements)} measurements from HDF5 for {channel_name}")
+                return measurements
+            else:
+                logger.debug(f"No HDF5 measurements found for {channel_name}, trying CSV")
+        
+        except Exception as e:
+            logger.debug(f"HDF5 read failed for {channel_name}, trying CSV: {e}")
+        
+        # CSV fallback (original implementation)
         csv_files = list(clock_offset_dir.glob(f'*_clock_offset_{date_str}.csv'))
         
         if not csv_files:
@@ -159,6 +198,8 @@ class ScienceAggregator:
                     # Filter by time range
                     if start_timestamp <= minute_boundary <= end_timestamp:
                         measurements.append(row)
+            
+            logger.debug(f"Read {len(measurements)} measurements from CSV for {channel_name}")
         
         except Exception as e:
             logger.error(f"Failed to read {csv_file}: {e}")
@@ -263,7 +304,61 @@ class ScienceAggregator:
             self._write_tec_results(date_str, tec_results)
     
     def _write_tec_results(self, date_str: str, results: List[Tuple]):
-        """Write TEC results to daily CSV file."""
+        """Write TEC results to HDF5 with CSV fallback."""
+        
+        # Try HDF5 first
+        hdf5_success = False
+        try:
+            from hf_timestd.io import DataProductWriter
+            
+            writer = DataProductWriter(
+                output_dir=self.tec_dir,
+                product_level='L3',
+                product_name='tec',
+                channel='AGGREGATED',
+                processing_version='3.2.0'
+            )
+            
+            # Write each result to HDF5
+            for station, minute_boundary, tec_result, measurements in results:
+                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
+                
+                # Extract frequencies
+                freq_list = sorted([m['frequency_hz'] / 1e6 for m in measurements])
+                freq_str = ','.join([f"{f:.2f}" for f in freq_list])
+                
+                # Determine quality flag based on confidence and residuals
+                if tec_result.n_frequencies >= 4 and tec_result.confidence > 0.8 and tec_result.residuals_ms < 1.0:
+                    quality_flag = 'GOOD'
+                elif tec_result.n_frequencies >= 3 and tec_result.confidence > 0.5 and tec_result.residuals_ms < 2.0:
+                    quality_flag = 'MARGINAL'
+                else:
+                    quality_flag = 'BAD'
+                
+                measurement = {
+                    'timestamp_utc': utc_time,
+                    'minute_boundary': int(minute_boundary),
+                    'station': station,
+                    'tec_tecu': tec_result.tec_u,
+                    't_vacuum_error_ms': tec_result.t_vacuum_error_ms,
+                    'confidence': tec_result.confidence,
+                    'n_frequencies': tec_result.n_frequencies,
+                    'residuals_ms': tec_result.residuals_ms,
+                    'frequencies_mhz': freq_str,
+                    'quality_flag': quality_flag,
+                    'processing_version': '3.2.0'
+                }
+                
+                writer.write_measurement(measurement)
+            
+            writer.close()
+            hdf5_success = True
+            logger.info(f"Wrote {len(results)} TEC results to HDF5")
+        
+        except Exception as e:
+            logger.warning(f"HDF5 write failed, falling back to CSV: {e}")
+        
+        # CSV fallback (always write for now during transition)
         csv_file = self.tec_dir / f'tec_{date_str}.csv'
         
         # Check if file exists to determine if we need headers
@@ -312,10 +407,12 @@ class ScienceAggregator:
                         round(delay_map.get(25.0, 0), 3) if 25.0 in delay_map else ''
                     ])
             
-            logger.info(f"Wrote {len(results)} TEC results to {csv_file}")
+            logger.info(f"Wrote {len(results)} TEC results to CSV: {csv_file}")
         
         except Exception as e:
-            logger.error(f"Failed to write TEC results: {e}")
+            logger.error(f"Failed to write TEC CSV results: {e}")
+            if not hdf5_success:
+                raise  # Re-raise if both HDF5 and CSV failed
     
     def _detect_events(self):
         """

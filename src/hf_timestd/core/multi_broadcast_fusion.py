@@ -2113,10 +2113,52 @@ class MultiBroadcastFusion:
     
     def _read_gnss_vtec(self) -> Optional[Tuple[float, float]]:
         """
-        Read the latest GNSS VTEC from data/gnss_vtec.csv.
+        Read the latest GNSS VTEC from HDF5 or CSV fallback.
         Returns (vtec_tecu, timestamp) or None.
         """
         logger.info(">>> _read_gnss_vtec() called <<<")
+        
+        # Try HDF5 first
+        if HDF5_AVAILABLE:
+            try:
+                from datetime import datetime, timezone, timedelta
+                
+                vtec_dir = self.data_root / 'gnss_vtec'
+                if vtec_dir.exists():
+                    reader = DataProductReader(
+                        data_dir=vtec_dir,
+                        product_level='L3',
+                        product_name='gnss_vtec',
+                        channel='GNSS'
+                    )
+                    
+                    # Read last 5 minutes of data
+                    now = datetime.now(timezone.utc)
+                    start = now - timedelta(minutes=5)
+                    
+                    measurements = reader.read_time_range(
+                        start=start.isoformat().replace('+00:00', 'Z'),
+                        end=now.isoformat().replace('+00:00', 'Z'),
+                        quality_flags=['GOOD', 'MARGINAL']  # Accept GOOD and MARGINAL
+                    )
+                    
+                    if measurements:
+                        # Get most recent measurement
+                        latest = max(measurements, key=lambda m: m['unix_timestamp'])
+                        logger.info(
+                            f"Read VTEC from HDF5: {latest['vtec_tecu']:.2f} TECU, "
+                            f"{latest['n_satellites']} sats, quality={latest['quality_flag']}"
+                        )
+                        return latest['vtec_tecu'], latest['unix_timestamp']
+                    else:
+                        logger.debug("HDF5 VTEC query returned no measurements")
+            
+            except FileNotFoundError:
+                logger.debug("HDF5 VTEC directory not found, trying CSV fallback")
+            except Exception as e:
+                logger.debug(f"HDF5 VTEC read failed, trying CSV fallback: {e}")
+        
+        # CSV fallback (original implementation)
         vtec_path = self.data_root / 'gnss_vtec.csv'
         if not vtec_path.exists():
             logger.info(f"VTEC file does not exist: {vtec_path}")
@@ -2145,6 +2187,7 @@ class MultiBroadcastFusion:
                     
                 ts = float(parts[0])
                 vtec = float(parts[1])
+                logger.info(f"Read VTEC from CSV fallback: {vtec:.2f} TECU")
                 return vtec, ts
                 
         except Exception as e:

@@ -11,6 +11,7 @@ from datetime import datetime
 from hf_timestd.core.ubx_parser import UBXParser
 from hf_timestd.core.gnss_tec import GNSSTECAnalyzer
 from hf_timestd.cddis import CDDISDownloader
+from hf_timestd.io import DataProductWriter
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -95,6 +96,34 @@ def main():
             csv_file = open(csv_path, "a", buffering=1) # Line buffered
         except Exception as e:
             logger.error(f"Failed to open CSV {csv_path}: {e}")
+    
+    # Initialize HDF5 writer for GNSS VTEC
+    hdf5_writer = None
+    logger.info(f"Checking HDF5 configuration: save_hdf5={gnss_cfg.get('save_hdf5', True)}")
+    if gnss_cfg.get("save_hdf5", True):  # Default to True
+        logger.info("Attempting to initialize HDF5 writer...")
+        try:
+            from pathlib import Path
+            from datetime import datetime, timezone
+            
+            hdf5_path = gnss_cfg.get("hdf5_path", "data/gnss_vtec")
+            logger.info(f"HDF5 output path: {hdf5_path}")
+            output_dir = Path(hdf5_path)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created HDF5 output directory: {output_dir}")
+            
+            hdf5_writer = DataProductWriter(
+                output_dir=output_dir,
+                product_level='L3',
+                product_name='gnss_vtec',
+                channel='GNSS',
+                processing_version='1.0.0'
+            )
+            logger.info(f"✓ HDF5 writer initialized successfully: {output_dir}")
+        except ImportError as e:
+            logger.error(f"Failed to import HDF5 writer: {e}")
+        except Exception as e:
+            logger.error(f"Failed to initialize HDF5 writer: {e}", exc_info=True)
 
     try:
         bytes_received = 0
@@ -138,10 +167,29 @@ def main():
                             # Sanity check: 0-150 TECU is normal.
                             logger.info(f"VTEC: {avg_vtec:.2f} TECU (Sats: {len(valid_vtecs)})")
                             
+                            # Write to CSV
                             line = f"{timestamp},{avg_vtec:.2f},{len(valid_vtecs)}\n"
                             print(line, end='')
                             if csv_file:
                                 csv_file.write(line)
+                            
+                            # Write to HDF5
+                            if hdf5_writer:
+                                try:
+                                    from datetime import datetime as dt, timezone as tz
+                                    measurement = {
+                                        'timestamp_utc': dt.fromtimestamp(timestamp, tz.utc).isoformat().replace('+00:00', 'Z'),
+                                        'unix_timestamp': timestamp,
+                                        'vtec_tecu': avg_vtec,
+                                        'n_satellites': len(valid_vtecs),
+                                        'quality_flag': 'GOOD' if len(valid_vtecs) >= 6 else 'MARGINAL' if len(valid_vtecs) >= 4 else 'BAD',
+                                        'processing_version': '1.0.0',
+                                        'min_elevation_deg': 20.0,
+                                        'dcb_corrected': bool(dcb_data)
+                                    }
+                                    hdf5_writer.write_measurement(measurement)
+                                except Exception as e:
+                                    logger.error(f"Failed to write HDF5: {e}")
                         else:
                             logger.debug(f"No valid VTEC solutions (Low elevation or no lock). Total sats: {len(results)}")
                     else:
@@ -190,6 +238,7 @@ def main():
     finally:
         sock.close()
         if csv_file: csv_file.close()
+        if hdf5_writer: hdf5_writer.close()
 
 if __name__ == "__main__":
     main()
