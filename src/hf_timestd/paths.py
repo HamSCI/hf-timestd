@@ -293,13 +293,12 @@ class TimeStdPaths:
         return self.data_root / 'analytics' / channel_dir
     
     def get_digital_rf_dir(self, channel_name: str) -> Path:
-        """DEPRECATED: Get legacy Digital RF directory.
+        """Get Digital RF (L0) directory.
         
-        Use get_decimated_dir() for Phase 3 decimated DRF.
-        
-        Returns: {data_root}/analytics/{CHANNEL}/digital_rf/
+        Returns: {data_root}/drf/{CHANNEL}/
         """
-        return self.get_analytics_dir(channel_name) / 'digital_rf'
+        channel_dir = channel_name_to_dir(channel_name)
+        return self.data_root / 'drf' / channel_dir
     
     # Legacy analytics subdirectories (for backward compatibility)
     

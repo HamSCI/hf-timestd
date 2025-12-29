@@ -341,6 +341,9 @@ class CoreRecorderV2:
                     compression=self.recorder_config.get('compression', 'none'),
                     compression_level=self.recorder_config.get('compression_level', 3),
                     
+                    # L0 Storage
+                    use_digital_rf=self.recorder_config.get('save_digital_rf', False),
+                    
                     # CRITICAL: Use None to let radiod assign destination consistently
                     # This ensures the same SSRC is computed every time
                     destination=None

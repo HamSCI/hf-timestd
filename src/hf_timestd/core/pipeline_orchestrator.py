@@ -113,6 +113,7 @@ class PipelineConfig:
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
     storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
     use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
+    use_digital_rf: bool = False  # Enable Digital RF L0 storage
     
     # Phase 2 settings
     analysis_latency_sec: int = 120  # Wait for complete minute
@@ -177,6 +178,26 @@ class PipelineOrchestrator:
             use_tiered_storage=config.use_tiered_storage,
         )
         self.raw_buffer_writer = BinaryArchiveWriter(raw_config)
+        
+        # L0 Digital RF Writer (Optional)
+        self.digital_rf_writer = None
+        if config.use_digital_rf:
+            try:
+                from ..io.digital_rf_writer import DigitalRFWriter
+                from ..paths import channel_name_to_dir
+                
+                # Use standard DRF path
+                drf_dir = config.data_dir / 'drf' / channel_name_to_dir(config.channel_name)
+                
+                self.digital_rf_writer = DigitalRFWriter(
+                    output_dir=drf_dir,
+                    sample_rate=config.sample_rate,
+                    channel_name=channel_name_to_dir(config.channel_name),
+                    compression_level=1 # fast compression
+                )
+                logger.info(f"Digital RF writing enabled for {config.channel_name}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Digital RF writer: {e}")
         
         # GPSDO-calibrated timing system (must be initialized before ClockOffsetEngine)
         # Manages bootstrap (wide search) -> calibrated (narrow search) transition
@@ -288,6 +309,8 @@ class PipelineOrchestrator:
         # Flush all writers
         self._flush_current_minute()
         self.raw_buffer_writer.close()
+        if self.digital_rf_writer:
+            self.digital_rf_writer.close()
         self.clock_offset_engine.save_series()
         if self.product_generator:
             self.product_generator.close()
@@ -330,6 +353,23 @@ class PipelineOrchestrator:
             system_time=system_time
         )
         self.stats['samples_archived'] += samples_written
+        
+        # Write to Digital RF if enabled
+        if self.digital_rf_writer:
+            try:
+                # Digital RF uses global sample count as index relative to epoch (1970-01-01)
+                # or just an incrementing counter if continuous.
+                # However, DRF standard typically uses samples since epoch.
+                # Since system_time is unix timestamp:
+                global_index = int(system_time * self.config.sample_rate)
+                
+                self.digital_rf_writer.write_samples(
+                    samples=samples,
+                    timestamp_samples=global_index
+                )
+            except Exception as e:
+                # Don't fail pipeline on DRF error
+                logger.error(f"DRF write error: {e}")
         
         # Write to audio buffer for web UI playback
         try:

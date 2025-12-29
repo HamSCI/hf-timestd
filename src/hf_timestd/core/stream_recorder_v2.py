@@ -201,10 +201,17 @@ class StreamRecorderConfig:
     enable_analysis: bool = True
     analysis_latency_sec: int = 120
     
+    # Phase 2 settings
+    enable_analysis: bool = True
+    analysis_latency_sec: int = 120
+    
     # Phase 3 settings
     enable_products: bool = True
     output_sample_rate: int = 10
     streaming_latency_minutes: int = 2
+    
+    # L0 settings
+    use_digital_rf: bool = False
     
     def __post_init__(self):
         self.output_dir = Path(self.output_dir)
@@ -287,9 +294,11 @@ class StreamRecorderV2:
             analysis_latency_sec=config.analysis_latency_sec,
             output_sample_rate=config.output_sample_rate,
             streaming_latency_minutes=config.streaming_latency_minutes,
+            streaming_latency_minutes=config.streaming_latency_minutes,
             compression=config.compression,
             compression_level=config.compression_level,
             use_tiered_storage=config.tiered_storage,
+            use_digital_rf=config.use_digital_rf,
         )
         
         self.orchestrator = PipelineOrchestrator(pipeline_config)
