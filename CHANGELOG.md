@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.2.1] - 2025-12-30
+
+### Fixed - Analytics Pipeline & HDF5 SWMR Integration
+
+#### IRI-2020 Array Handling Incompatibility
+- **Problem:** `iri2020` package updated return types from scalars to `xarray.DataArray`/NumPy arrays, causing `ValueError: only 0-dimensional arrays can be converted to Python scalars`
+- **Impact:** IRI-2020 calculations failed, forcing fallback to geometric models with absurd D_clock values (-36 seconds)
+- **Fix:** Added `_extract_scalar()` helper in `ionospheric_model.py` to normalize all IRI output types to floats
+- **Files:** `src/hf_timestd/core/ionospheric_model.py`
+
+#### Bootstrap Second Boundary Calculation Error
+- **Problem:** Propagation solver calculated `expected_second_rtp` pointing to next minute boundary instead of current second
+- **Impact:** D_clock errors of -36 seconds (pointing 36 seconds ahead)
+- **Fix:** Modified bootstrap logic to round to nearest second boundary using RTP timestamp modulo
+- **Files:** `src/hf_timestd/core/phase2_temporal_engine.py`
+
+#### Missing HDF5 L1A Schema Field
+- **Problem:** L1A channel observables missing required `processing_version` field
+- **Impact:** HDF5 writes failing with schema validation error
+- **Fix:** Added `'processing_version': '3.2.0'` to L1A measurement dictionary
+- **Files:** `src/hf_timestd/core/phase2_analytics_service.py`
+
+#### HDF5 SWMR Visibility Issue
+- **Problem:** Analytics writing to HDF5 successfully but data not visible to SWMR readers
+- **Impact:** Fusion reading 0 measurements despite analytics producing valid data
+- **Fix:** Added explicit `refresh()` calls after `flush()` to update SWMR metadata for readers
+- **Files:** `src/hf_timestd/io/hdf5_writer.py`
+
+### Verified
+- ✅ Analytics producing valid D_clock: -2ms to +45ms range
+- ✅ IRI-2020 calculations working without fallback
+- ✅ HDF5 L1A and L2 writes working with SWMR visibility
+- ✅ Fusion reading 28 L2 measurements from HDF5
+- ✅ Chrony SHM updating every 8 seconds
+- ✅ Complete data pipeline operational end-to-end
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 

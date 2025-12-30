@@ -337,8 +337,20 @@ class DataProductWriter:
             dataset.resize((dataset.shape[0] + 1,))
             dataset[-1] = value
         
-        # Flush to disk
+        # Flush to disk and refresh SWMR metadata
+        # In SWMR mode, flush() alone isn't enough - we need to ensure
+        # the metadata is updated so readers can see the new data
         hdf5_file.flush()
+        
+        # Force metadata refresh for SWMR readers
+        # This is critical for real-time data visibility
+        if hdf5_file.swmr_mode:
+            # Refresh all datasets to make new data visible to SWMR readers
+            for field in self.schema['fields']:
+                field_name = field['name']
+                if field_name in hdf5_file:
+                    hdf5_file[field_name].refresh()
+        
         self._measurement_count += 1
         
         if self._measurement_count % 100 == 0:

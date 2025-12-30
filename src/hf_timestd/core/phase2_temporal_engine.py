@@ -1642,25 +1642,32 @@ class Phase2TemporalEngine:
                 # CRITICAL: Use RTP timestamp modulo, NOT wall clock time
                 # The RTP timestamp is GPSDO-governed and is the source of truth
                 # 
-                # Estimate where the minute boundary is based on RTP offset
-                # Assume the minute boundary is near the start of the RTP minute cycle
+                # Estimate where the SECOND boundary is based on RTP offset
+                # The transmission time solver expects expected_second_rtp to point to
+                # the second boundary where the signal was transmitted, not the minute boundary
+                samples_per_second = self.sample_rate  # 20,000 at 20 kHz
                 samples_per_minute = self.sample_rate * 60  # 1,200,000 at 20 kHz
                 current_offset = rtp_timestamp % samples_per_minute
                 
-                # Estimate samples to next minute boundary
-                # If we're in the first half of the minute, boundary is ahead
-                # If we're in the second half, boundary is behind (use next one)
-                if current_offset < samples_per_minute // 2:
-                    # We're in first half - boundary is ahead
-                    samples_to_boundary = samples_per_minute - current_offset
-                else:
-                    # We're in second half - use next boundary
-                    samples_to_boundary = (samples_per_minute * 2) - current_offset
+                # Find the NEAREST second boundary (not just the last one)
+                # Signals are transmitted at the top of the second, so if we're more than
+                # halfway through a second, the signal we're detecting is from the NEXT second
+                seconds_into_minute = current_offset // samples_per_second
+                samples_since_last_second = current_offset % samples_per_second
                 
-                expected_second_rtp = rtp_timestamp + samples_to_boundary
+                # Round to nearest second boundary
+                if samples_since_last_second < samples_per_second // 2:
+                    # Closer to the last second boundary
+                    expected_second_rtp = rtp_timestamp - samples_since_last_second
+                else:
+                    # Closer to the next second boundary
+                    samples_to_next_second = samples_per_second - samples_since_last_second
+                    expected_second_rtp = rtp_timestamp + samples_to_next_second
+                
                 logger.warning(
-                    f"Bootstrap: No signal detected, estimating minute boundary from RTP modulo "
-                    f"(offset={current_offset}, samples_to_boundary={samples_to_boundary})"
+                    f"Bootstrap: No signal detected, estimating second boundary from RTP modulo "
+                    f"(offset={current_offset}, second={seconds_into_minute}, "
+                    f"samples_since_second={samples_since_last_second}, expected_second_rtp={expected_second_rtp})"
                 )
 
             

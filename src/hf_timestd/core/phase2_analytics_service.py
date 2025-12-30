@@ -456,7 +456,10 @@ class Phase2AnalyticsService:
         try:
             # Skip if no valid timing solution was found
             if result.d_clock_ms is None:
+                logger.debug(f"Skipping clock offset write: d_clock_ms is None")
                 return
+            
+            logger.debug(f"Writing clock offset: d_clock_ms={result.d_clock_ms:.2f}ms, enable_hdf5={self.enable_hdf5_writes}, hdf5_l2_writer={self.hdf5_l2_writer is not None}")
             # Check for daily rotation
             today = datetime.now(timezone.utc).strftime('%Y%m%d')
             file_channel = self._get_file_channel_name()
@@ -637,7 +640,9 @@ class Phase2AnalyticsService:
                     }
                     
                     # Write to HDF5
+                    logger.info(f"Attempting HDF5 L2 write: D_clock={effective_d_clock:.2f}ms")
                     self.hdf5_l2_writer.write_measurement(l2_measurement)
+                    logger.info(f"Successfully wrote HDF5 L2 measurement")
                     
                 except Exception as e:
                     logger.error(f"Failed to write HDF5 L2 measurement: {e}", exc_info=True)
@@ -740,6 +745,7 @@ class Phase2AnalyticsService:
                         'wwvh_tone_1200hz_db': wwvh_tone_db if wwvh_tone_db is not None and not np.isnan(wwvh_tone_db) and not np.isinf(wwvh_tone_db) else None,
                         'quality_flag': quality_flag,
                         'data_completeness': data_completeness,
+                        'processing_version': '3.2.0'
                     }
                     
                     self.hdf5_l1a_writer.write_measurement(l1a_measurement)

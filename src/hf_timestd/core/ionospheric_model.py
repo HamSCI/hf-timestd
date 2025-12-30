@@ -110,6 +110,11 @@ from enum import Enum
 
 import numpy as np
 
+try:
+    import xarray as xr  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    xr = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -290,6 +295,43 @@ class IonosphericModel:
             logger.warning(f"IRI initialization failed: {e}. Using parametric fallback.")
         
         return self._iri_available
+
+    @staticmethod
+    def _extract_scalar(value, default: Optional[float]) -> float:
+        """
+        Normalize IRI outputs (which may be scalars, numpy arrays, or xarray DataArrays)
+        into plain floats so downstream code remains version agnostic.
+        """
+        if value is None:
+            return default if default is not None else float('nan')
+        
+        if xr is not None and isinstance(value, xr.DataArray):
+            if value.size == 0:
+                return default if default is not None else float('nan')
+            return float(value.values.ravel()[0])
+        
+        if isinstance(value, np.ndarray):
+            if value.size == 0:
+                return default if default is not None else float('nan')
+            return float(value.reshape(-1)[0])
+        
+        if hasattr(value, "item"):
+            try:
+                return float(value.item())
+            except Exception:
+                pass
+        
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return default if default is not None else float('nan')
+            return float(value[0])
+        
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            if default is not None:
+                return default
+            raise
     
     def _location_key(self, lat: float, lon: float, time: datetime) -> str:
         """Generate cache key for location/time combination."""
@@ -338,9 +380,9 @@ class IonosphericModel:
             
             # Extract peak heights from IRI output
             # IRI returns hmF2, hmF1, hmE as single values
-            hmF2 = float(result.get('hmF2', DEFAULT_F2_LAYER_HEIGHT_KM))
-            hmF1 = float(result.get('hmF1', DEFAULT_F1_LAYER_HEIGHT_KM))
-            hmE = float(result.get('hmE', DEFAULT_E_LAYER_HEIGHT_KM))
+            hmF2 = self._extract_scalar(result.get('hmF2'), DEFAULT_F2_LAYER_HEIGHT_KM)
+            hmF1 = self._extract_scalar(result.get('hmF1'), DEFAULT_F1_LAYER_HEIGHT_KM)
+            hmE = self._extract_scalar(result.get('hmE'), DEFAULT_E_LAYER_HEIGHT_KM)
             
             # Sanity check on values
             if not (150 < hmF2 < 500):
@@ -865,7 +907,7 @@ class IonosphericDelayCalculator:
                         glon=longitude or -105.0
                     )
                     # IRI returns TEC in TECU
-                    tec = result.get('TEC', None)
+                    tec = self._extract_scalar(result.get('TEC'), None)
                     if tec is not None and 1 < tec < 500:
                         tier = IonosphericModelTier.IRI_2020 if self.iono_model._iri_version == "2020" else IonosphericModelTier.IRI_2016
                         return float(tec), tier

@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** December 19, 2025
+**Last Updated:** December 30, 2025
 
 ---
 
@@ -72,6 +72,22 @@ DRF Batch Writer (drf_batch_writer.py)
 | `StreamQuality` | Completeness %, packets lost/resequenced, gap count |
 | `ChannelInfo` | Channel metadata (frequency, preset, sample_rate, destination) |
 | `StreamManager` | Manages channel reuse and deterministic SSRC allocation to prevent proliferation |
+
+---
+
+## Recent Fixes (v3.2.1 - 2025-12-30)
+
+### Analytics Pipeline & HDF5 SWMR Integration
+
+**IRI-2020 Array Handling:** Fixed incompatibility with updated `iri2020` package that returns `xarray.DataArray` instead of scalars. Added `_extract_scalar()` helper to normalize all IRI output types.
+
+**Bootstrap Second Boundary:** Fixed propagation solver calculating wrong second boundary (36 seconds ahead). Now correctly rounds to nearest second using RTP timestamp modulo.
+
+**HDF5 Schema Compliance:** Added missing `processing_version` field to L1A channel observables to satisfy schema requirements.
+
+**HDF5 SWMR Visibility:** Fixed data visibility issue where analytics was writing successfully but fusion couldn't read. Added explicit `refresh()` calls after `flush()` to update SWMR metadata for concurrent readers.
+
+**Pipeline Status:** Complete end-to-end operation verified - Recorder → Analytics → HDF5 (SWMR) → Fusion → Chrony SHM all working.
 
 ---
 
