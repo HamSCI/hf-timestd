@@ -83,43 +83,24 @@ Successfully completed the final data product migration to HDF5:
    - Service running and writing HDF5 files
    - File created: `/var/lib/timestd/phase2/fusion/fusion_fusion_timing_20251229.h5`
 
-## Next Session Objective: Chrony SHM Feed Optimization
+## Session Summary (2025-12-30)
 
-### Background
+### Chrony SHM Feed Stabilization - COMPLETE ✅
 
-The Chrony SHM refclock (TMGR) shows degraded performance:
+Successfully diagnosed and resolved the instability in the `timestd-fusion` service and its Chrony SHM feed:
 
-- Reachability: 0 (no recent updates)
-- Last update: 561+ seconds ago
-- Status: Not being used as time source
+1. **HDF5 Deadlock Resolution**: identified a critical conflict between HDF5 file locking and SWMR mode causing service crashes. Fixed by disabling file locking in the reader, enabling robust concurrent read/write operations.
+2. **Chrony Protocol Fix**: Corrected the `nsamples` field bug (0 -> 1) in the SHM struct which caused Chrony to reject all updates.
+3. **Mode Optimization**: Simplified SHM integration to Mode 0 (Index 0) for greater reliability.
+4. **Verification**: Confirmed fusion service is running stably, reading HDF5 L2 data, and writing valid updates to Chrony SHM.
 
-The fusion service is running and producing accurate timing estimates, but the Chrony SHM feed is not being updated reliably.
+### Next Session Objective: Final Integration Verification
 
-### Goals for Next Session
-
-1. **Diagnose Chrony SHM Feed Issue**
-   - Check fusion service logs for SHM write attempts
-   - Verify SHM permissions and connectivity
-   - Identify why updates stopped
-
-2. **Optimize SHM Update Strategy**
-   - Review update rate limiting (currently 8s poll interval)
-   - Ensure quality thresholds are appropriate
-   - Verify SHM write success/failure logging
-
-3. **Restore Reliable Chrony Feed**
-   - Fix any bugs preventing SHM updates
-   - Ensure TMGR source becomes reachable
-   - Monitor for sustained operation
-
-### Technical Context
-
-- **Fusion Service**: `timestd-fusion.service` running successfully
-- **Chrony Config**: TMGR refclock configured (unit 0, poll 3 = 8s)
-- **Current Status**: Fusion producing good estimates (Grade A/B), but not feeding Chrony
-- **Impact**: System time discipline not benefiting from HF timing
+1. **Monitor Chrony convergence**: Verify `chronyc sources` shows TMGR reachability increasing over a 1-hour period.
+2. **Verify Time Discipline**: Confirm system clock offset converges to the HF timing estimate.
+3. **Cleanup**: Remove temporary diagnostic logging once full stability is confirmed.
 
 ---
 
-**Last Updated**: 2025-12-29  
-**Current Focus**: HDF5 migration complete, next session will address Chrony SHM feed
+**Last Updated**: 2025-12-30
+**Current Focus**: Fusion service stable, monitoring Chrony acceptance.
