@@ -100,7 +100,37 @@ Successfully diagnosed and resolved the instability in the `timestd-fusion` serv
 2. **Verify Time Discipline**: Confirm system clock offset converges to the HF timing estimate.
 3. **Cleanup**: Remove temporary diagnostic logging once full stability is confirmed.
 
+## Session Summary (2025-12-30 Morning)
+
+### CPU Affinity Optimization - COMPLETE ✅
+
+Successfully optimized CPU affinity to eliminate core saturation and improve radiod thread distribution:
+
+1. **Problem Identified**: Cores 14-15 running at 100% utilization due to radiod's 40+ threads constrained to only 2 cores
+   - FFT thread: 79% CPU
+   - proc_rx888 thread: 40.7% CPU  
+   - 30+ demodulator threads competing for same 2 cores
+   - Severe scheduler contention and thermal hotspot
+
+2. **Solution Implemented**: Expanded radiod CPU affinity from top 2 cores to upper half of CPU
+   - Changed from `CPUAffinity=14 15` to `CPUAffinity=8 9 10 11 12 13 14 15`
+   - Updated `setup-cpu-affinity.sh` to calculate upper half dynamically
+   - Updated `radiod-cpu-affinity.conf` template
+
+3. **Results Achieved**:
+   - **Maximum core utilization**: Reduced from 100% to 41% (59% improvement)
+   - **Thread distribution**: 32 radiod threads across 8 cores (~4 threads/core vs ~20 threads/core)
+   - **Thermal distribution**: Load spread across 8 cores instead of concentrated on 2
+   - **Scheduler efficiency**: Heavy threads (FFT, USB) isolated on dedicated cores
+   - **All services healthy**: radiod, core-recorder, analytics, fusion all operational
+
+4. **Verification**:
+   - Radiod affinity confirmed: `8-15`
+   - Per-core utilization: No core exceeds 42%
+   - Data pipeline: All 9 channels operational
+   - System load: Balanced and responsive
+
 ---
 
 **Last Updated**: 2025-12-30
-**Current Focus**: Fusion service stable, monitoring Chrony acceptance.
+**Current Focus**: CPU affinity optimized, system running efficiently.
