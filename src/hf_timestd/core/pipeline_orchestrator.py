@@ -181,6 +181,7 @@ class PipelineOrchestrator:
         
         # L0 Digital RF Writer (Optional)
         self.digital_rf_writer = None
+        self._last_drf_index = None  # Track last written index for continuity
         if config.use_digital_rf:
             try:
                 from ..io.digital_rf_writer import DigitalRFWriter
@@ -357,16 +358,26 @@ class PipelineOrchestrator:
         # Write to Digital RF if enabled
         if self.digital_rf_writer:
             try:
-                # Digital RF uses global sample count as index relative to epoch (1970-01-01)
-                # or just an incrementing counter if continuous.
-                # However, DRF standard typically uses samples since epoch.
-                # Since system_time is unix timestamp:
-                global_index = int(system_time * self.config.sample_rate)
+                # Digital RF requires strictly continuous sample indices
+                # RTP timestamps can have gaps (from packet loss that ka9q-python fills with zeros)
+                # So we track our own continuous index
+                
+                if self._last_drf_index is None:
+                    # First write - use RTP timestamp as starting point
+                    write_index = rtp_timestamp
+                else:
+                    # Subsequent writes - continue from where we left off
+                    # This ensures monotonic, gap-free indexing
+                    write_index = self._last_drf_index + 1
                 
                 self.digital_rf_writer.write_samples(
                     samples=samples,
-                    timestamp_samples=global_index
+                    timestamp_samples=write_index
                 )
+                
+                # Update last index (end of this write)
+                self._last_drf_index = write_index + len(samples) - 1
+                
             except Exception as e:
                 # Don't fail pipeline on DRF error
                 logger.error(f"DRF write error: {e}")

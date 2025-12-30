@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.2] - 2025-12-30
+
+### Added - L0 Digital RF Storage
+
+#### Digital RF HDF5 Archive
+
+- **Feature**: Implemented L0 raw IQ data archival in Digital RF HDF5 format
+- **Storage**: Data written to `{data_root}/drf/{channel}/` alongside existing hot buffer
+- **Format**: Standardized Digital RF HDF5 with GZIP compression (level 1)
+- **Compatibility**: HamSCI PSWS-compatible format for data sharing and long-term archival
+- **Configuration**: Controlled by `save_digital_rf` toggle in `timestd-config.toml` (default: true)
+- **Storage Impact**: ~142 GB/day for 9 channels, managed by existing QuotaManager (priority 4)
+
+#### Architecture
+
+- **Hot Buffer** (`/dev/shm/timestd/raw_buffer/`): RAM-based, 16-minute retention for real-time analytics
+- **Digital RF** (`/var/lib/timestd/drf/`): Disk-based HDF5 for long-term archival and reprocessing
+- **Legacy Removed**: Deprecated binary cold storage (`/var/lib/timestd/raw_buffer/`) removed, saving 31 GB
+
+### Fixed
+
+#### WWVHDiscriminator Import Error
+
+- **Issue**: `NameError: name 'WWVHDiscriminator' is not defined` in `phase2_temporal_engine.py`
+- **Fix**: Added missing `from .wwvh_discrimination import WWVHDiscriminator` import
+- **Impact**: Service startup failure resolved
+
+#### Digital RF Timestamp Alignment
+
+- **Issue**: Timestamp errors ("Trying to write at sample X, but next available sample is Y") caused by system time jitter
+- **Root Cause**: Using `system_time * sample_rate` for sample indexing introduced 7ms gaps from NTP corrections and scheduling delays
+- **Fix**: Implemented continuous sample indexing using RTP timestamp as initial anchor, then tracking `last_index + 1` for monotonic writes
+- **Result**: Zero timestamp errors, perfect alignment with GPSDO-disciplined RTP "ruler"
+- **Technical**: RTP provides GPSDO-disciplined starting point, continuous indexing ensures Digital RF library requirements are met
+
 ## [3.6.1] - 2025-12-30
 
 ### Fixed - Fusion Service Stabilization & Chrony Integration

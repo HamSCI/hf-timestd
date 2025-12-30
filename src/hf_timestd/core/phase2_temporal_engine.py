@@ -203,6 +203,7 @@ from dataclasses import dataclass, field
 import threading
 import json
 from .wwv_constants import BPM_PURE_CARRIER_MINUTES
+from .wwvh_discrimination import WWVHDiscriminator
 
 logger = logging.getLogger(__name__)
 
