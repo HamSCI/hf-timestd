@@ -239,24 +239,46 @@ class ChronySHM:
             #   60-63: unsigned receiveTimeStampNSec
             #   64-95: int dummy[8]
             
+            # DIAGNOSTIC: Log values before packing
+            if self.count <= 5:
+                logger.info(
+                    f"ChronySHM pack #{self.count}: "
+                    f"mode=0, count={self.count}, leap={leap}, precision={precision}, "
+                    f"nsamples=1 (HARDCODED), valid=1"
+                )
+            
             data = struct.pack(
                 '@ii q i 4x q i 4x iiii II iiiiiiii',
-                1,              # mode = 1 (use count locking)
+                0,              # mode = 0 (no count locking)
                 self.count,     # count (sequence number)
-                clock_sec,      # clockTimeStampSec (system time)
+                clock_sec,      # clockTimeStampSec
                 clock_usec,     # clockTimeStampUSec
                 # 4x padding for 8-byte alignment
-                recv_sec,       # receiveTimeStampSec (reference/true time)
+                recv_sec,       # receiveTimeStampSec
                 recv_usec,      # receiveTimeStampUSec
                 # 4x padding for 4-byte alignment
                 leap,           # leap
                 precision,      # precision
-                1,              # nsamples
+                1,              # nsamples ← CRITICAL: Must be 1
                 1,              # valid
                 clock_nsec,     # clockTimeStampNSec
                 recv_nsec,      # receiveTimeStampNSec
                 0, 0, 0, 0, 0, 0, 0, 0  # dummy[8]
             )
+            
+            # DIAGNOSTIC: Verify packed data
+            if self.count <= 5:
+                # Show raw bytes around nsamples field (offset 48)
+                raw_bytes = ' '.join(f'{b:02x}' for b in data[44:56])
+                logger.info(f"ChronySHM packed bytes [44:56]: {raw_bytes}")
+                
+                # Unpack to verify
+                verify = struct.unpack('@ii q i 4x q i 4x iiii II iiiiiiii', data)
+                logger.info(
+                    f"ChronySHM verify unpack: precision={verify[7]}, "
+                    f"nsamples={verify[8]}, valid={verify[9]}"
+                )
+            
             
             # Write to SHM
             if self._use_sysv:
@@ -266,17 +288,46 @@ class ChronySHM:
                 self.shm_map.write(data)
                 self.shm_map.flush()
             
-            if self.count % 60 == 0:
-                logger.debug(
-                    f"ChronySHM update #{self.count}: "
-                    f"ref={reference_time:.6f}, sys={system_time:.6f}, "
-                    f"offset={(system_time - reference_time)*1000:+.2f}ms"
+            # DIAGNOSTIC: Read back immediately to verify write
+            if self.count <= 5:
+                if self._use_sysv:
+                    readback = self.shm.read(96, 0)
+                else:
+                    self.shm_map.seek(0)
+                    readback = self.shm_map.read(96)
+                
+                # Show raw bytes around nsamples
+                rb_bytes = ' '.join(f'{b:02x}' for b in readback[44:56])
+                logger.info(f"ChronySHM readback bytes [44:56]: {rb_bytes}")
+                
+                # Unpack readback
+                rb_verify = struct.unpack('@ii q i 4x q i 4x iiii II iiiiiiii', readback)
+                logger.info(
+                    f"ChronySHM readback verify: count={rb_verify[1]}, "
+                    f"precision={rb_verify[7]}, nsamples={rb_verify[8]}, valid={rb_verify[9]}"
+                )
+                
+                if rb_verify[8] != 1:
+                    logger.error(
+                        f"ChronySHM CRITICAL BUG: nsamples readback={rb_verify[8]} (expected 1)! "
+                        f"This will cause Chrony to reject updates."
+                    )
+            
+            # Enhanced debug logging (temporary for diagnosis)
+            if self.count <= 10 or self.count % 60 == 0:
+                logger.info(
+                    f"ChronySHM write #{self.count}: "
+                    f"mode=1, valid=1, nsamples=1, precision={precision}, "
+                    f"clock={reference_time:.6f}, recv={system_time:.6f}, "
+                    f"offset={(system_time - reference_time)*1000:+.3f}ms"
                 )
             
             return True
             
         except Exception as e:
             logger.error(f"Failed to update Chrony SHM: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
     
     def disconnect(self):

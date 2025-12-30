@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.1] - 2025-12-30
+
+### Fixed - Fusion Service Stabilization & Chrony Integration
+
+#### HDF5 Concurrency (SWMR) Fix
+
+- **Issue**: Fusion service crashed with `OSError: Unable to synchronously open file` due to HDF5 file locking conflicts between the writer (Analytics service) and reader (Fusion service).
+- **Fix**: Disabled HDF5 file locking in `multi_broadcast_fusion.py` (`HDF5_USE_FILE_LOCKING=FALSE`). This allows the reader to safely access files in SWMR mode concurrently.
+- **Result**: Fusion service now robustly reads L2 measurements while Analytics service writes new data.
+
+#### Chrony SHM Feed Repairs
+
+- **Protocol Repair**: Fixed `nsamples` field in SHM struct (was 0, now 1). Chrony rejects updates with `nsamples=0`.
+- **Mode Change**: Switched to SHM Mode 0 (no count locking) for simpler, more robust integration.
+- **Timestamp Logic**: Verified and corrected timestamp packing convention (reference time vs system time).
+- **Diagnostics**: Added detailed "breadcrumb" logging to trace fusion loop execution and SHM write attempts.
+
+### Added
+
+- **Diagnostic Scripts**:
+  - `scripts/verify_chrony_shm.py`: Tool to inspect SHM segment contents, validate fields, and monitor updates in real-time.
+
 ## [3.6.0] - 2025-12-29
 
 ### Added - L3 Fusion HDF5 Storage

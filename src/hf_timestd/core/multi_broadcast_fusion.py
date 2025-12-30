@@ -142,10 +142,20 @@ from datetime import datetime, timezone
 # HDF5 I/O for reading L1A and L2 data products
 try:
     from hf_timestd.io import DataProductReader
-    HDF5_AVAILABLE = True
 except ImportError:
     HDF5_AVAILABLE = False
-    logger.warning("HDF5 I/O module not available, will use CSV fallback")
+    logger.warning("h5py/xarray not available, using CSV fallback")
+
+# Disable HDF5 file locking to allow SWMR readers
+# This is required when the writer has the file locked for SWMR write
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
+logger = logging.getLogger(__name__)
+
+# HDF5 is now enabled with SWMR support
+HDF5_AVAILABLE = True
+if not HDF5_AVAILABLE:
+    logger.warning("HDF5 storage DISABLED (forced fallback to CSV)")
 
 # Physics Propagation for GNSS Integration
 try:
@@ -153,7 +163,6 @@ try:
 except ImportError:
     PhysicsPropagationModel = None
 
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -2590,12 +2599,48 @@ def run_fusion_service(
     if chrony_shm:
         logger.info(f"  Chrony update cadence: {chrony_poll_interval}s (matching poll interval)")
     
+
+    logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
+    logger.info(f"Fusion interval: {interval_sec}s")
+    
+    # Notify systemd watchdog
+    def notify_watchdog():
+        import os, socket
+        if os.environ.get('WATCHDOG_USEC'):
+            try:
+                addr = os.environ.get('NOTIFY_SOCKET')
+                if addr:
+                    if addr.startswith('@'): addr = '\0' + addr[1:]
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                    sock.sendto(b'WATCHDOG=1', addr)
+                    sock.close()
+            except Exception:
+                pass
+
     while True:
         try:
-            result = fusion.fuse(lookback_minutes=lookback_minutes)
+            # BREADCRUMB: Loop start
+            loop_start_time = time.time()
+            logger.debug(f"--- FUSION LOOP START (t={loop_start_time:.3f}) ---")
+            
+            # Notify watchdog we are alive
+            notify_watchdog()
+            
+            # BREADCRUMB: Calling fuse
+            logger.debug("Calling fusion.fuse()...")
+            
+            # Run fusion update
+            try:
+                result = fusion.fuse(lookback_minutes=lookback_minutes)
+            except Exception as e_fuse:
+                logger.error(f"Fusion calculation CRASHED: {e_fuse}", exc_info=True)
+                result = None
+            
+            # BREADCRUMB: Fusion returned
+            logger.debug(f"Fusion returned: {result is not None}")
             
             if result:
-                # Log main fusion result
+                # Log summary
                 logger.info(
                     f"Fused D_clock: {result.d_clock_fused_ms:+.3f} ms "
                     f"(raw: {result.d_clock_raw_ms:+.3f} ms) "
@@ -2622,51 +2667,74 @@ def run_fusion_service(
                 if result.consistency_flag != 'OK':
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
-                # Write to Chrony SHM if available and quality is acceptable
-                # Rate-limit updates to match chrony poll interval (avoid unnecessary writes)
-                # Allow grade D during initial calibration - Chrony will weight by precision
+                # Write to Chrony SHM
                 now = time.time()
+                
+                # BREADCRUMB: SHM check
+                logger.debug(f"SHM write check: chrony_shm={chrony_shm is not None}, grade={result.quality_grade}, time_since_last={now - last_chrony_update:.1f}s")
+                
                 if chrony_shm and result.quality_grade in ('A', 'B', 'C', 'D'):
                     if now - last_chrony_update >= chrony_poll_interval:
-                        # D_clock = T_system - T_UTC(NIST)
-                        # So T_UTC(NIST) = T_system - D_clock
                         system_time = now
                         reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
                         
                         # Precision based on uncertainty (log2 of seconds)
-                        # uncertainty_ms=1 -> precision=-10, uncertainty_ms=10 -> precision=-7
                         precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
                         
-                        if chrony_shm.update(reference_time, system_time, precision):
-                            last_chrony_update = now
-                            chrony_consecutive_failures = 0
-                            chrony_total_writes += 1
-                            logger.info(
-                                f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
-                                f"ref={reference_time:.6f}, sys={system_time:.6f}, "
-                                f"offset={(system_time-reference_time)*1000:+.3f}ms, precision={precision}"
-                            )
-                        else:
-                            chrony_consecutive_failures += 1
-                            chrony_failed_writes += 1
-                            logger.error(
-                                f"Chrony SHM write failed (consecutive failures: {chrony_consecutive_failures}, "
-                                f"total: {chrony_failed_writes}/{chrony_total_writes + chrony_failed_writes})"
-                            )
-                            if chrony_consecutive_failures >= 5:
-                                logger.critical(
-                                    f"Chrony SHM unavailable after {chrony_consecutive_failures} consecutive failures! "
-                                    f"System clock discipline may be degraded."
+                        # BREADCRUMB: Attempting Update
+                        logger.debug(f"Attempting Chrony SHM update (prec={precision})...")
+                        
+                        try:
+                            update_success = chrony_shm.update(reference_time, system_time, precision)
+                            
+                            # BREADCRUMB: Update returned
+                            logger.debug(f"Chrony SHM update returned: {update_success}")
+                            
+                            if update_success:
+                                last_chrony_update = now
+                                chrony_consecutive_failures = 0
+                                chrony_total_writes += 1
+                                logger.info(
+                                    f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
+                                    f"ref={reference_time:.6f}, sys={system_time:.6f}, "
+                                    f"offset={(system_time-reference_time)*1000:+.3f}ms, precision={precision}"
                                 )
-                            # Try to reconnect on next iteration
-                            if chrony_consecutive_failures >= 3:
-                                try:
-                                    chrony_shm.disconnect()
-                                    if chrony_shm.connect():
-                                        logger.warning("Chrony SHM reconnected successfully")
-                                        chrony_consecutive_failures = 0
-                                except Exception as e:
-                                    logger.error(f"Failed to reconnect Chrony SHM: {e}")
+                            else:
+                                chrony_consecutive_failures += 1
+                                chrony_failed_writes += 1
+                                logger.error(
+                                    f"Chrony SHM write failed (consecutive failures: {chrony_consecutive_failures}, "
+                                    f"total: {chrony_failed_writes}/{chrony_total_writes + chrony_failed_writes})"
+                                )
+                                if chrony_consecutive_failures >= 5:
+                                    logger.critical(
+                                        f"Chrony SHM unavailable after {chrony_consecutive_failures} consecutive failures! "
+                                        f"System clock discipline may be degraded."
+                                    )
+                                # Try to reconnect on next iteration
+                                if chrony_consecutive_failures >= 3:
+                                    try:
+                                        logger.debug("Attempting SHM reconnect...")
+                                        chrony_shm.disconnect()
+                                        if chrony_shm.connect():
+                                            logger.warning("Chrony SHM reconnected successfully")
+                                            chrony_consecutive_failures = 0
+                                    except Exception as e:
+                                        logger.error(f"Failed to reconnect Chrony SHM: {e}")
+                        except Exception as e_shm:
+                            logger.error(f"Chrony SHM update exception: {e_shm}", exc_info=True)
+                            
+                    else:
+                        logger.debug(f"Skipping SHM write: rate limit not met ({now - last_chrony_update:.1f}s < {chrony_poll_interval}s)")
+                else:
+                    if not chrony_shm:
+                        logger.debug("Skipping SHM write: chrony_shm is None")
+                    else:
+                        logger.debug(f"Skipping SHM write: quality grade {result.quality_grade} not acceptable")
+
+            # BREADCRUMB: Sleeping
+            loop_duration = time.time() - loop_start_time
+            logger.debug(f"Loop finished in {loop_duration:.3f}s. Sleeping {interval_sec}s...")
             
             time.sleep(interval_sec)
             
@@ -2674,7 +2742,7 @@ def run_fusion_service(
             logger.info("Fusion service stopped")
             break
         except Exception as e:
-            logger.error(f"Fusion error: {e}")
+            logger.error(f"Fusion error: {e}", exc_info=True)
             time.sleep(interval_sec)
 
 
