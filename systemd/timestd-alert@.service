@@ -1,0 +1,7 @@
+[Unit]
+Description=HF-TimeStd Service Failure Alert for %i
+After=%i.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hf-timestd/scripts/service-alert.sh %i

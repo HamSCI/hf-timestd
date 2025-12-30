@@ -1,23 +1,19 @@
 [Unit]
 Description=HF Time Standard Core Recorder - Phase 1 RTP to Raw Buffer Archive
 Documentation=https://github.com/mijahauan/hf-timestd
-After=network-online.target
-Wants=network-online.target
-# Wait for radiod if running on same machine
-After=ka9q-radio.service
-Wants=ka9q-radio.service
+After=network-online.target ka9q-radio.service
+Wants=network-online.target ka9q-radio.service
 
 [Service]
-Type=simple
-
-# User/Group - set during installation
-# For production: create dedicated user or use existing user
-# User/Group - timestd service user
+Type=notify
 User=timestd
 Group=timestd
 
+# Enable systemd watchdog
+WatchdogSec=60
+NotifyAccess=main
+
 # Environment from file (set by install.sh)
-# Try new path first, fall back to legacy
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Working directory (production installation path)
@@ -27,11 +23,17 @@ WorkingDirectory=/opt/hf-timestd
 ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.core.core_recorder_v2 \
     --config /etc/hf-timestd/timestd-config.toml
 
-# Restart policy - always restart in production
+# Health check: Verify data is being written
+ExecStartPost=/opt/hf-timestd/scripts/health-check-recorder.sh
+
+# AGGRESSIVE restart policy - data loss is unacceptable
 Restart=always
-RestartSec=10
-StartLimitInterval=300
-StartLimitBurst=5
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Email alert on failure
+OnFailure=timestd-alert@%n.service
 
 # Logging to file and journal
 StandardOutput=append:/var/log/hf-timestd/core-recorder.log
@@ -39,10 +41,7 @@ StandardError=inherit
 SyslogIdentifier=timestd-core-recorder
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
-# Use nice priority instead of real-time scheduling
 Nice=5
-
-# Memory limit (adjust based on channel count)
 MemoryMax=4G
 
 # Security hardening

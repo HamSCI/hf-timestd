@@ -38,6 +38,15 @@ from typing import Dict, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+# Systemd watchdog support
+try:
+    from systemd import daemon as systemd_daemon
+    SYSTEMD_AVAILABLE = True
+except ImportError:
+    SYSTEMD_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("systemd-python not available, watchdog disabled")
+
 from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding
 
 from ..quota_manager import QuotaManager
@@ -219,6 +228,11 @@ class CoreRecorderV2:
         
         logger.info("Core recorder running. Press Ctrl+C to stop.")
         
+        # Notify systemd we're ready
+        if SYSTEMD_AVAILABLE:
+            systemd_daemon.notify('READY=1')
+            logger.info("Notified systemd: READY")
+        
         # Write initial status
         self._write_status()
         
@@ -245,6 +259,10 @@ class CoreRecorderV2:
                     self._update_ntp_status()
                     self._write_status()
                     last_status_time = now
+                    
+                    # Notify systemd watchdog (service is alive)
+                    if SYSTEMD_AVAILABLE:
+                        systemd_daemon.notify('WATCHDOG=1')
                 
                 # Periodic status logging (every 60 seconds)
                 if int(now) % 60 == 0:

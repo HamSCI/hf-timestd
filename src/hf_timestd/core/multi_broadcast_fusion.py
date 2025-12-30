@@ -139,6 +139,13 @@ from collections import defaultdict
 import numpy as np
 from datetime import datetime, timezone
 
+# Systemd watchdog support
+try:
+    from systemd import daemon as systemd_daemon
+    SYSTEMD_AVAILABLE = True
+except ImportError:
+    SYSTEMD_AVAILABLE = False
+
 # HDF5 I/O for reading L1A and L2 data products
 try:
     from hf_timestd.io import DataProductReader
@@ -2603,20 +2610,11 @@ def run_fusion_service(
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s")
     
-    # Notify systemd watchdog
-    def notify_watchdog():
-        import os, socket
-        if os.environ.get('WATCHDOG_USEC'):
-            try:
-                addr = os.environ.get('NOTIFY_SOCKET')
-                if addr:
-                    if addr.startswith('@'): addr = '\0' + addr[1:]
-                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-                    sock.sendto(b'WATCHDOG=1', addr)
-                    sock.close()
-            except Exception:
-                pass
-
+    # Notify systemd we're ready
+    if SYSTEMD_AVAILABLE:
+        systemd_daemon.notify('READY=1')
+        logger.info("Notified systemd: READY")
+    
     while True:
         try:
             # BREADCRUMB: Loop start
@@ -2624,7 +2622,8 @@ def run_fusion_service(
             logger.debug(f"--- FUSION LOOP START (t={loop_start_time:.3f}) ---")
             
             # Notify watchdog we are alive
-            notify_watchdog()
+            if SYSTEMD_AVAILABLE:
+                systemd_daemon.notify('WATCHDOG=1')
             
             # BREADCRUMB: Calling fuse
             logger.debug("Calling fusion.fuse()...")

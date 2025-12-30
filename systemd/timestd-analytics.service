@@ -3,8 +3,10 @@ Description=HF Time Standard Analytics Service - Phase 2 Timing Analysis
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target timestd-core-recorder.service
 Wants=network-online.target
-# Analytics depends on core recorder for data
 Requires=timestd-core-recorder.service
+
+# Restart analytics when core-recorder restarts
+PartOf=timestd-core-recorder.service
 
 [Service]
 Type=forking
@@ -14,6 +16,9 @@ RemainAfterExit=yes
 User=timestd
 Group=timestd
 SupplementaryGroups=_chrony
+
+# Watchdog for the launcher script
+WatchdogSec=120
 
 # Environment from file (set by install.sh)
 EnvironmentFile=-/etc/hf-timestd/environment
@@ -25,11 +30,17 @@ WorkingDirectory=/opt/hf-timestd
 ExecStart=/opt/hf-timestd/scripts/timestd-analytics.sh start /etc/hf-timestd/timestd-config.toml
 ExecStop=/opt/hf-timestd/scripts/timestd-analytics.sh stop
 
-# Restart if the launcher fails
+# Health check: Verify HDF5 files are being updated
+ExecStartPost=/opt/hf-timestd/scripts/health-check-analytics.sh
+
+# Moderate restart policy - can process backlog
 Restart=on-failure
 RestartSec=30
-StartLimitInterval=300
-StartLimitBurst=3
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# Email alert on failure
+OnFailure=timestd-alert@%n.service
 
 # Logging
 StandardOutput=journal
@@ -37,7 +48,6 @@ StandardError=journal
 SyslogIdentifier=timestd-analytics
 
 # Resource limits (9 channels + fusion = ~10 processes)
-# Yield to radiod which handles real-time USB/FFT
 Nice=5
 MemoryMax=4G
 

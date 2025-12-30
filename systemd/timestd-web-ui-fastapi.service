@@ -1,23 +1,40 @@
 [Unit]
 Description=HF-TimeStd Web UI (FastAPI Monitoring Server)
-After=network.target timestd-analytics.service
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network.target timestd-fusion.service
+Wants=timestd-fusion.service
 
 [Service]
 Type=simple
 User=timestd
 Group=timestd
 WorkingDirectory=/opt/hf-timestd/web-ui
-ExecStart=/opt/hf-timestd/web-ui/start_server.sh
-Restart=always
-RestartSec=10
 
 # Environment
 Environment="PYTHONUNBUFFERED=1"
+Environment="DATA_ROOT=/var/lib/timestd"
+
+ExecStart=/opt/hf-timestd/web-ui/start_server.sh
+
+# Health check: Verify HTTP endpoint is responding
+ExecStartPost=/opt/hf-timestd/scripts/health-check-webui.sh
+
+# Restart on failure - user-facing service
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Email alert on failure
+OnFailure=timestd-alert@%n.service
 
 # Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=timestd-web-ui
+
+# Resource limits (low priority)
+Nice=10
 
 [Install]
 WantedBy=multi-user.target
