@@ -570,12 +570,12 @@ class Phase2TemporalEngine:
             
             # Step 2: WWV/WWVH Discriminator (includes BCD and Doppler)
             if self.discriminator is None:
-                from .wwvh_discrimination import WWVHDiscriminator
                 self.discriminator = WWVHDiscriminator(
                     channel_name=self.channel_name,
                     receiver_grid=self.receiver_grid,
                     sample_rate=self.sample_rate
                 )
+                self.discriminator.frequency_mhz = self.frequency_mhz
             
             # Step 2c: BPM Discriminator (China, shares 2.5/5/10/15 MHz)
             # BPM uses 10ms ticks (vs 5ms WWV) and has UT1 minutes (25-29, 55-59)

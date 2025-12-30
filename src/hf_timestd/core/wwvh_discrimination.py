@@ -1904,10 +1904,41 @@ class WWVHDiscriminator:
             # Calculate SNR for each tone
             wwv_power = np.abs(wwv_complex)**2
             wwvh_power = np.abs(wwvh_complex)**2
-            # Carrier Power (DC bin 0)
-            carrier_complex = fft_result[0]
-            carrier_power = np.abs(carrier_complex)**2
             
+            # Carrier Phase Extraction
+            # ------------------------
+            # Logic:
+            # 1. "Safe Bands": WWV 20/25 MHz and CHU (all). Use raw IQ for true RF Carrier Phase.
+            # 2. "Shared Bands": WWV/H 2.5, 5, 10, 15 MHz. Use AM Envelope DC (0 Hz).
+            
+            frequency_mhz = self.frequency_mhz if hasattr(self, 'frequency_mhz') and self.frequency_mhz else 0.0
+            is_safe_carrier_band = frequency_mhz in [3.33, 7.85, 14.67, 20.0, 25.0]
+            
+            if is_safe_carrier_band:
+                # Extract Carrier from raw IQ (RF Phase)
+                tick_start_idx = int(start_sample)
+                tick_end_idx = int(end_sample)
+                if tick_end_idx <= len(iq_samples):
+                    iq_slice = iq_samples[tick_start_idx:tick_end_idx]
+                    # Mean of complex samples = DC component = Carrier Phasor
+                    carrier_complex = np.mean(iq_slice)
+                    
+                    # Re-calculate Envelope Carrier for SNR consistency
+                    env_carrier_complex = fft_result[0]
+                    carrier_power = np.abs(env_carrier_complex)**2
+                    
+                    # Use RF Carrier Phase
+                    carrier_phase = np.angle(carrier_complex)
+                else:
+                    carrier_complex = fft_result[0]
+                    carrier_power = np.abs(carrier_complex)**2
+                    carrier_phase = np.angle(carrier_complex)
+            else:
+                # Use AM Envelope DC (Phase is meaningless/zero)
+                carrier_complex = fft_result[0]
+                carrier_power = np.abs(carrier_complex)**2
+                carrier_phase = np.angle(carrier_complex)
+
             wwv_snr_db = 10 * np.log10(wwv_power / noise_power) if noise_power > 0 else -100
             wwvh_snr_db = 10 * np.log10(wwvh_power / noise_power) if noise_power > 0 else -100
             carrier_snr_db = 10 * np.log10(carrier_power / noise_power) if noise_power > 0 else -100

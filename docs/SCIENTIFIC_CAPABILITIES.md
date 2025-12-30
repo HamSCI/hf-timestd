@@ -48,8 +48,9 @@ This document provides an honest assessment of what signal features the HF-TimeS
 
 - **Carrier Doppler shift**
   - Frequency offset from nominal carrier
+  - **Safe Bands (WWV 20/25, CHU)**: True RF carrier phase tracking (~0.01 Hz precision)
+  - **Shared Bands**: Audio modulation Doppler (~0.1 Hz precision)
   - Range: ±10 Hz (typical ionospheric motion)
-  - Precision: ~0.1 Hz
 
 - **Voice announcements**
   - 440 Hz voice ID tone detection

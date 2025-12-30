@@ -386,9 +386,15 @@ class AdvancedSignalAnalyzer:
         # Sub-sample refinement from phase
         # Phase at peak tells us fractional sample offset
         # φ = 2π × f × Δt → Δt = φ / (2π × f)
-        sub_sample_offset = -peak_phase / (2 * np.pi * tone_frequency / self.sample_rate)
-        # Wrap to [-0.5, 0.5] samples
-        sub_sample_offset = ((sub_sample_offset + 0.5) % 1.0) - 0.5
+        if abs(tone_frequency) > 1e-6:
+            sub_sample_offset = -peak_phase / (2 * np.pi * tone_frequency / self.sample_rate)
+            # Wrap to [-0.5, 0.5] samples
+            sub_sample_offset = ((sub_sample_offset + 0.5) % 1.0) - 0.5
+            refined_sample = peak_sample + sub_sample_offset
+        else:
+            # Cannot use phase for timing refinement at DC (period is infinite)
+            sub_sample_offset = 0.0
+            refined_sample = float(peak_sample)
         
         # Doppler estimation from phase slope around peak
         doppler_hz, doppler_confidence = self._estimate_doppler_from_phase(

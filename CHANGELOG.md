@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Timestamp Logic**: Verified and corrected timestamp packing convention (reference time vs system time).
 - **Diagnostics**: Added detailed "breadcrumb" logging to trace fusion loop execution and SHM write attempts.
 
+### Added - Carrier-Aided Timing
+
+#### True RF Carrier Phase Tracking
+
+- **Feature**: Implemented "Carrier-Aided Timing" for Safe Bands (WWV 20/25 MHz, CHU).
+- **Measurement**: System now extracts `carrier_phase` from raw IQ samples instead of the AM envelope on exclusive frequencies.
+- **Precision Improvement**: `carrier_doppler_hz` now tracks RF cycles (~10-30m wavelength) providing ~100x higher precision than audio Doppler (~300km wavelength).
+- **Safety**: Feature is automatically restricted to non-shared bands to avoid carrier beat interference from multi-station overlaps (2.5, 5, 10, 15 MHz continue to use Audio Doppler).
+
 ### Added
 
 - **Diagnostic Scripts**:
