@@ -8,10 +8,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Use the venv from parent directory
+# Default to production venv
 VENV_DIR="/opt/hf-timestd/venv"
 
+# If production venv doesn't exist, try local dev venv (relative to this script's parent)
 if [ ! -d "$VENV_DIR" ]; then
-    echo "ERROR: Virtual environment not found at $VENV_DIR"
+    PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+    if [ -d "$PROJECT_ROOT/venv" ]; then
+        VENV_DIR="$PROJECT_ROOT/venv"
+        echo "Using local development venv: $VENV_DIR"
+    elif [ -d "$PROJECT_ROOT/.venv" ]; then
+         VENV_DIR="$PROJECT_ROOT/.venv"
+         echo "Using local development venv: $VENV_DIR"
+    fi
+fi
+
+if [ ! -d "$VENV_DIR" ]; then
+    echo "ERROR: Virtual environment not found at default locations."
+    echo "  Checked: /opt/hf-timestd/venv"
+    echo "  Checked: $(dirname "$SCRIPT_DIR")/venv"
     exit 1
 fi
 

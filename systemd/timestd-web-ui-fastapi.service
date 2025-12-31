@@ -1,40 +1,34 @@
 [Unit]
 Description=HF-TimeStd Web UI (FastAPI Monitoring Server)
 Documentation=https://github.com/mijahauan/hf-timestd
-After=network.target timestd-fusion.service
-Wants=timestd-fusion.service
+After=network-online.target timestd-analytics.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=timestd
 Group=timestd
-WorkingDirectory=/opt/hf-timestd/web-ui
+EnvironmentFile=/etc/hf-timestd/environment
 
 # Environment
 Environment="PYTHONUNBUFFERED=1"
-Environment="DATA_ROOT=/var/lib/timestd"
 
+WorkingDirectory=/opt/hf-timestd/web-ui
+
+# Run the startup script which sets up environment and launches uvicorn
 ExecStart=/opt/hf-timestd/web-ui/start_server.sh
 
-# Health check: Verify HTTP endpoint is responding
-ExecStartPost=/opt/hf-timestd/scripts/health-check-webui.sh
-
-# Restart on failure - user-facing service
-Restart=on-failure
+Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
+StartLimitInterval=300
 StartLimitBurst=5
 
-# Email alert on failure
-OnFailure=timestd-alert@%n.service
+# Resource limits
+MemoryMax=512M
 
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=timestd-web-ui
-
-# Resource limits (low priority)
-Nice=10
 
 [Install]
 WantedBy=multi-user.target

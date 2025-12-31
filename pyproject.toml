@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hf-timestd"
+version = "3.2.0"
+description = "HF Time Standard Analysis - WWV/WWVH/CHU/BPM timing via ka9q-radio"
+readme = "README.md"
+authors = [
+  { name = "Michael James Hauan AC0G", email = "ac0g@hauan.org" },
+]
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "toml>=0.10.2",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "soundfile>=0.12.0",
+    "zeroconf>=0.132.0",
+    "ka9q-python>=3.2.7",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "iri2020 @ git+https://github.com/space-physics/iri2020.git",
+    "zstandard>=0.22.0",
+    "sysv_ipc>=1.1.0",
+    "h5py>=3.8.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",
+    "aiofiles>=23.2.0",
+    "systemd-python>=235",
+    "xarray>=2023.1.0",
+    "watchdog>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+hf-timestd = "hf_timestd.cli:main"
+timestd = "hf_timestd.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"hf_timestd.schemas" = ["*.json"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]

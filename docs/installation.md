@@ -12,7 +12,6 @@ This guide covers installing `hf-timestd` and its dependencies.
 
 - Linux host (Debian/Ubuntu class)
 - Python 3.10+
-- Node.js 18+ (Web UI)
 - `radiod` (ka9q-radio) installed and running
 
 ---
@@ -25,18 +24,18 @@ cd hf-timestd
 
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
+pip install .
 ```
 
 ---
 
 ## Web UI
 
+The Web UI is now Python-based (FastAPI).
+
 ```bash
 cd web-ui
-npm install
-npm start
+./start_server.sh
 ```
 
 Open:

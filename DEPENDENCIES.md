@@ -64,33 +64,20 @@ Install with:
 pip install pandas matplotlib
 ```
 
-## Node.js Dependencies
+## Web UI Dependencies
 
-### Web UI Server
+The Web UI is now a **FastAPI (Python)** application. It no longer requires Node.js.
 
-Located in `web-ui/` directory.
+Dependencies are included in `pyproject.toml` and installed via `pip install .`.
 
-Install with:
+- **fastapi**: High-performance web framework
+- **uvicorn**: ASGI server
+- **python-multipart**: File upload support
+- **aiofiles**: Async file I/O
 
-```bash
-cd web-ui
-npm install
-# or
-pnpm install
-```
+### Browser Dependencies (CDN)
 
-#### Production Dependencies
-
-- **express** (^4.21.2): Web server for configuration UI and monitoring dashboard
-- **toml** (^3.0.0): Parse TOML configuration files in Node.js
-
-#### Development Dependencies
-
-- **prettier** (^3.6.2): Code formatting
-
-## Browser Dependencies (CDN)
-
-### Monitoring Dashboard
+#### Monitoring Dashboard
 
 No installation needed - loaded from CDN:
 
@@ -113,7 +100,6 @@ sudo ./scripts/install.sh --mode production --user $USER
 The installer automatically:
 
 - Creates Python venv and installs all dependencies
-- Installs Web UI Node.js dependencies
 - Creates required directories
 - Installs systemd services (production mode)
 
@@ -126,14 +112,12 @@ sudo apt-get install avahi-utils libhdf5-dev
 # 2. Python environment
 python3 -m venv venv
 source venv/bin/activate
-pip install -e .
+pip install .
 
-# 3. Optional visualization tools
-pip install pandas matplotlib
-
-# 4. Web UI
+# 3. Web UI (Automated via systemd, or manual)
+# No extra install step needed - dependencies included in step 2.
 cd web-ui
-npm install  # or pnpm install
+./start_server.sh
 ```
 
 ### Verify Installation

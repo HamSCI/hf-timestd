@@ -39,13 +39,15 @@ start)
     echo "▶️  Starting Web-UI..."
     
     # Stop existing
-    pkill -f "monitoring-server" 2>/dev/null
+    pkill -f "monitoring_server" 2>/dev/null
     sleep 1
     
     mkdir -p "$DATA_ROOT/logs"
-    cd "$PROJECT_DIR/web-ui"
     
-    nohup env TIMESTD_CONFIG="$CONFIG" node monitoring-server-v3.js \
+    SERVER_SCRIPT="$PROJECT_DIR/web-ui/start_server.sh"
+    
+    echo "   Starting: $SERVER_SCRIPT"
+    nohup env TIMESTD_CONFIG="$CONFIG" "$SERVER_SCRIPT" \
         > "$DATA_ROOT/logs/webui.log" 2>&1 &
     
     PID=$!
@@ -53,7 +55,7 @@ start)
     
     if ps -p $PID > /dev/null 2>&1; then
         echo "   ✅ Started (PID: $PID)"
-        echo "   🌐 http://localhost:3000/"
+        echo "   🌐 http://localhost:8080/"
         echo "   📄 Log: $DATA_ROOT/logs/webui.log"
     else
         echo "   ❌ Failed to start"
@@ -65,12 +67,12 @@ start)
 stop)
     echo "🛑 Stopping Web-UI..."
     
-    if ! pgrep -f "monitoring-server" > /dev/null; then
+    if ! pgrep -f "monitoring_server" > /dev/null; then
         echo "   ℹ️  Not running"
         exit 0
     fi
     
-    pkill -f "monitoring-server" 2>/dev/null
+    pkill -f "monitoring_server" 2>/dev/null
     sleep 1
     echo "   ✅ Stopped"
     ;;
@@ -83,8 +85,8 @@ restart)
     ;;
 
 status)
-    if pgrep -f "monitoring-server" > /dev/null; then
-        echo "✅ Web-UI: RUNNING → http://localhost:3000/"
+    if pgrep -f "monitoring_server" > /dev/null; then
+        echo "✅ Web-UI: RUNNING → http://localhost:8080/"
         echo "   Dashboard pages:"
         echo "   - /            Overview and channel status"
         echo "   - /timing      Timing analysis and D_clock"

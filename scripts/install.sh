@@ -68,6 +68,7 @@ while [[ $# -gt 0 ]]; do
             echo "  - Data stored in /var/lib/timestd"
             echo "  - Configuration in /etc/hf-timestd"
             echo "  - Systemd services for auto-start and recovery"
+            echo "  - Web UI (FastAPI) on port 8080"
             echo "  - Daily upload timer enabled"
             exit 0
             ;;
@@ -313,8 +314,9 @@ fi
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
 
-log_info "Installing grape-recorder package..."
-pip install -e "$PROJECT_DIR"
+log_info "Installing hf-timestd package (and dependencies from pyproject.toml)..."
+# Use pip install . to install from current directory using pyproject.toml
+pip install .
 
 # Verify installation
 # Verify installation
@@ -510,12 +512,12 @@ StandardError=append:$LOG_DIR/fusion.log
 WantedBy=multi-user.target
 EOF
 
-    # Web UI Service
+    # Web UI Service (FastAPI)
     sudo tee "$SYSTEMD_DIR/timestd-web-ui.service" > /dev/null << EOF
 [Unit]
-Description=TimeStd Recorder Web UI
-Documentation=https://github.com/mijahauan/grape-recorder
-After=network-online.target timestd-core-recorder.service
+Description=HF-TimeStd Web UI (FastAPI Monitoring Server)
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network-online.target timestd-analytics.service
 Wants=network-online.target
 
 [Service]
@@ -524,15 +526,15 @@ User=$INSTALL_USER
 Group=$INSTALL_USER
 EnvironmentFile=$CONFIG_DIR/environment
 
-# Node.js production settings
-Environment="NODE_ENV=production"
-Environment="PORT=3000"
+# Environment
+Environment="PYTHONUNBUFFERED=1"
 
 WorkingDirectory=$WEBUI_DIR
 
-ExecStart=/usr/bin/node monitoring-server-v3.js
+# Run the startup script which sets up environment and launches uvicorn
+ExecStart=$WEBUI_DIR/start_server.sh
 
-Restart=on-failure
+Restart=always
 RestartSec=10
 StartLimitInterval=300
 StartLimitBurst=5
