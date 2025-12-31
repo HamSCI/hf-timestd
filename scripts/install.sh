@@ -501,8 +501,8 @@ Requires=timestd-analytics.service
 
 [Service]
 Type=simple
-User=\$INSTALL_USER
-Group=\$INSTALL_USER
+User=$INSTALL_USER
+Group=$INSTALL_USER
 # Run as the installed module from the venv
 ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.multi_broadcast_fusion --data-root $DATA_ROOT --interval 15.0 --enable-chrony --log-level INFO
 Restart=always
