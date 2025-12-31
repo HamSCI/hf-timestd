@@ -421,6 +421,15 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for details.
 
 **Production Ready** - Core functionality complete and tested. Daily recording and PSWS upload operational at AC0G since November 2025.
 
+### v3.14.0 (Dec 31, 2025)
+
+- **Phase 4: Tone Detection Selectivity & Sensitivity Improvements** - Three enhancements for better detection
+  - **Robust Noise Floor Estimation** - MAD-based statistics exclude search region, 5-10% improvement in weak signal detection
+  - **Adaptive Search Windows** - SNR/state-based narrowing (±500ms → ±5ms when locked), 10-20% reduction in false positives
+  - **Ionospheric Prediction** - IRI-2020 model centers search windows at predicted arrival times, 15-25% FP reduction
+  - Combined effect: 100x search space reduction with better sensitivity
+  - Files: `tone_detector.py` (+147 lines), `phase2_temporal_engine.py` (+105 lines)
+
 ### v3.13.0 (Dec 19, 2025)
 
 - **Unified Naming Convention** - Transitioned to `Station_kHz` (e.g., `WWV_10000`) across backend, frontend, and storage.

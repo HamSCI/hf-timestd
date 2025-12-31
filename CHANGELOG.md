@@ -2,35 +2,141 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.0] - 2025-12-31
+
+### Added - Phase 4: Tone Detection Selectivity & Sensitivity Improvements
+
+#### Robust Noise Floor Estimation
+
+- **Feature**: Implemented MAD-based (Median Absolute Deviation) noise floor estimation
+- **Method**: `MultiStationToneDetector._estimate_robust_noise_floor()` in `tone_detector.py`
+- **Improvement**: Uses samples OUTSIDE search region to avoid interference contamination
+- **Statistics**: MAD is more robust to outliers than standard deviation (factor 1.4826 conversion)
+- **Expected Impact**: 5-10% improvement in weak signal detection
+- **Files**: `src/hf_timestd/core/tone_detector.py` (+75 lines)
+
+#### Adaptive Search Windows
+
+- **Feature**: Dynamic search window sizing based on SNR and convergence state
+- **Method**: `MultiStationToneDetector._calculate_adaptive_search_window()` in `tone_detector.py`
+- **Strategy**:
+  - ACQUIRING: ±500ms (wide search, no prior knowledge)
+  - LOCKED + High SNR (>20dB): ±5ms (100x narrower)
+  - LOCKED + Good SNR (>15dB): ±15ms (33x narrower)
+  - LOCKED + Medium SNR (>10dB): ±50ms (10x narrower)
+- **Expected Impact**: 10-20% reduction in false positives, faster convergence
+- **Files**: `src/hf_timestd/core/tone_detector.py` (+72 lines)
+
+#### Ionospheric Propagation Prediction
+
+- **Feature**: IRI-2020 model integration for search window centering
+- **Method**: `Phase2TemporalEngine._predict_propagation_delay()` in `phase2_temporal_engine.py`
+- **Physics**: Predicts F2 layer height (hmF2) and calculates 1-hop propagation delay
+- **Geometry**: `path_length = 2 × sqrt(hmF2² + (distance/2)²)`
+- **Stations**: WWV (~1500km), WWVH (~6000km), CHU (~1200km)
+- **Expected Impact**: Search window centering within ±10ms, 15-25% reduction in false positives
+- **Files**: `src/hf_timestd/core/phase2_temporal_engine.py` (+105 lines)
+
+### Added - Testing Infrastructure
+
+- **Unit Tests**: Comprehensive test suite in `tests/test_tone_detector_improvements.py`
+  - TestRobustNoiseFloor: MAD calculation, outlier robustness, fallback behavior
+  - TestAdaptiveSearchWindow: All SNR/state combinations, boundary conditions
+  - TestIonosphericPrediction: All stations, day/night variation, uncertainty propagation
+  - TestIntegration: Method presence verification
+
+### Changed
+
+- **Noise Floor Calculation**: Updated `_correlate_with_template()` to use robust MAD-based method
+- **Detection Pipeline**: Enhanced with three-stage improvement (prediction → adaptive window → robust threshold)
+
+### Technical Details
+
+**Code Statistics**:
+
+- Files Modified: 2
+- Lines Added: +258 (production code)
+- Methods Added: 3
+- Backward Compatibility: ✅ All changes additive
+
+**Combined Effect**:
+
+- Initial acquisition: ±500ms window, standard noise floor
+- After lock with high SNR: ±5ms window centered at predicted delay, robust noise floor
+- **Total improvement**: Up to 100x reduction in search space with better sensitivity
+
+### References
+
+- Rousseeuw, P.J. & Croux, C. (1993). "Alternatives to the Median Absolute Deviation." JASA.
+- Kay, S.M. (1998). "Fundamentals of Statistical Signal Processing: Detection Theory."
+- Davies, K. (1990). "Ionospheric Radio." Chapter 6: HF Propagation Prediction.
+- Bilitza, D. et al. (2017). "International Reference Ionosphere 2016." Space Weather.
+
+### Deployment
+
+**Installation** (requires virtual environment):
+
+```bash
+cd /home/mjh/git/hf-timestd
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
+```
+
+**Testing**:
+
+```bash
+pytest tests/test_tone_detector_improvements.py -v
+```
+
+**Production Deployment**:
+
+```bash
+sudo systemctl restart timestd-analytics
+sudo journalctl -u timestd-analytics -f | grep -E "Robust noise floor|Adaptive window|Ionospheric prediction"
+```
+
+### Next Steps
+
+- [ ] Process 24 hours of historical data to measure improvements
+- [ ] Wire up convergence state from `clock_convergence.py` to detector
+- [ ] Monitor production for detection rate, false positive rate, timing accuracy
+- [ ] Validate expected improvements (≥20% FP reduction, ≥2ms timing improvement)
+
 ## [3.2.1] - 2025-12-30
 
 ### Fixed - Analytics Pipeline & HDF5 SWMR Integration
 
 #### IRI-2020 Array Handling Incompatibility
+
 - **Problem:** `iri2020` package updated return types from scalars to `xarray.DataArray`/NumPy arrays, causing `ValueError: only 0-dimensional arrays can be converted to Python scalars`
 - **Impact:** IRI-2020 calculations failed, forcing fallback to geometric models with absurd D_clock values (-36 seconds)
 - **Fix:** Added `_extract_scalar()` helper in `ionospheric_model.py` to normalize all IRI output types to floats
 - **Files:** `src/hf_timestd/core/ionospheric_model.py`
 
 #### Bootstrap Second Boundary Calculation Error
+
 - **Problem:** Propagation solver calculated `expected_second_rtp` pointing to next minute boundary instead of current second
 - **Impact:** D_clock errors of -36 seconds (pointing 36 seconds ahead)
 - **Fix:** Modified bootstrap logic to round to nearest second boundary using RTP timestamp modulo
 - **Files:** `src/hf_timestd/core/phase2_temporal_engine.py`
 
 #### Missing HDF5 L1A Schema Field
+
 - **Problem:** L1A channel observables missing required `processing_version` field
 - **Impact:** HDF5 writes failing with schema validation error
 - **Fix:** Added `'processing_version': '3.2.0'` to L1A measurement dictionary
 - **Files:** `src/hf_timestd/core/phase2_analytics_service.py`
 
 #### HDF5 SWMR Visibility Issue
+
 - **Problem:** Analytics writing to HDF5 successfully but data not visible to SWMR readers
 - **Impact:** Fusion reading 0 measurements despite analytics producing valid data
 - **Fix:** Added explicit `refresh()` calls after `flush()` to update SWMR metadata for readers
 - **Files:** `src/hf_timestd/io/hdf5_writer.py`
 
 ### Verified
+
 - ✅ Analytics producing valid D_clock: -2ms to +45ms range
 - ✅ IRI-2020 calculations working without fallback
 - ✅ HDF5 L1A and L2 writes working with SWMR visibility

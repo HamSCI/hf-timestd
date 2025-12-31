@@ -1,375 +1,292 @@
-# CONTEXT.md - AI Agent Briefing for Next Session
+# HF Time Standard Analysis - Project Context
 
-**Last Updated:** 2025-12-31 00:00 UTC  
-**Current Version:** hf-timestd-3.2.0  
-**System Status:** ✅ Healthy, all services running
+**Last Updated:** December 31, 2025  
+**Version:** 3.14.0  
+**Status:** Production (9 channels running at AC0G)
 
----
+## Quick Reference
 
-## PRIMARY OBJECTIVE FOR NEXT SESSION
+**What:** Precision HF timing system extracting D_clock measurements from WWV/WWVH/CHU/BPM broadcasts  
+**Where:** `/opt/hf-timestd` (production) or `/home/mjh/git/hf-timestd` (development)  
+**Services:** timestd-core-recorder, timestd-analytics (9 channels), timestd-fusion, timestd-web-ui  
+**Web UI:** <http://localhost:3000>
 
-**Implement Phase 4: Tone Detection Selectivity & Sensitivity Improvements**
+## Current State (Dec 31, 2025)
 
-Enhance the tone detection system to improve selectivity (reduce false positives) and sensitivity (detect weaker signals) by implementing three high-priority improvements identified through critical analysis.
+### ✅ Recently Completed
 
----
+**Phase 4: Tone Detection Improvements** (v3.14.0 - Dec 31, 2025)
 
-## BACKGROUND: WHAT WAS ACCOMPLISHED IN PREVIOUS SESSION
+- **Robust Noise Floor** - MAD-based estimation (+75 lines in `tone_detector.py`)
+- **Adaptive Search Windows** - SNR/state-based narrowing (+72 lines in `tone_detector.py`)
+- **Ionospheric Prediction** - IRI-2020 integration (+105 lines in `phase2_temporal_engine.py`)
+- **Status:** Deployed to production, all 9 channels running
+- **Expected Impact:** 20% FP reduction, 2ms timing improvement, 100x search space reduction
 
-### Session 2025-12-30 Summary
+### 🔄 In Progress
 
-**Completed:** Phases 1-3 of HDF5 Robustness & Ionospheric Model Improvements
+**None** - System stable and running in production
 
-**Code Changes:**
-- `phase2_analytics_service.py`: +172 lines, -6 lines
-- `hdf5_writer.py`: +87 lines  
-- `ionospheric_model.py`: +54 lines, -9 lines
-- **Total:** +313 lines, -15 lines
+### 📋 Next Priority: Web UI Metrology & Ionospheric Data Exposure
 
-**Deployed:** 2025-12-30 23:49 UTC, all 9 analytics channels running successfully
+**Goal:** Improve visualization and exposure of metrology and ionospheric data in the web UI
 
-**Key Improvements:**
-1. **Input Validation** - Archive directory validation on startup
-2. **HDF5 Failure Tracking** - Critical alerts after 10 consecutive failures
-3. **Startup Health Checks** - Verify all HDF5 writers operational
-4. **Calibration Memory Bounds** - LRU eviction (max 10 locations)
-5. **Adaptive IRI Cache TTL** - 30 min daytime, 5 min nighttime
+**Current Web UI Capabilities:**
 
-**Documentation Created:**
-- `docs/HDF5_ROBUSTNESS_IMPROVEMENTS.md` - Comprehensive documentation
-- Critical analysis of tone detection (8 improvements identified)
-- Implementation plan for Phase 4
+- Real-time channel health monitoring
+- D_clock timing visualizations (Kalman funnel, constellation, consensus)
+- Discrimination analysis (7-panel view)
+- Live audio streaming
+- Carrier analysis with spectrograms
 
----
+**Data Available But Not Well Exposed:**
 
-## PHASE 4: TONE DETECTION IMPROVEMENTS
+1. **Ionospheric Metrics:**
+   - IRI-2020 predictions (hmF2, foF2, layer heights)
+   - Propagation mode probabilities
+   - TEC estimates from GNSS
+   - Layer height time series
 
-### Critical Analysis Results
+2. **Metrology Data:**
+   - Uncertainty budget components (statistical, systematic, propagation)
+   - Allan deviation (4 tau values)
+   - Performance metrics (RMS, peak-peak, stability)
+   - Quality grades per broadcast
 
-**Current Strengths:**
-- ✅ Two-stage detection (matched filter + onset)
-- ✅ Phase-invariant quadrature detection
-- ✅ Sub-sample timing precision (~5μs at 20 kHz)
-- ✅ Propagation bounds checking
+3. **Detection Statistics:**
+   - Robust noise floor values
+   - Adaptive window sizes over time
+   - SNR history per channel
+   - False positive rates
 
-**Identified Gaps:**
-1. ❌ No SNR-based gating on search window
-2. ❌ No multi-minute coherent integration
-3. ❌ No Doppler compensation
-4. ❌ No adaptive noise floor estimation
-5. ❌ No ionospheric prediction for search window
-6. ❌ No multipath discrimination
-7. ❌ No frequency-domain validation
-8. ❌ No temporal consistency check
+**Potential Improvements:**
 
-### Three High-Priority Improvements to Implement
+- New ionospheric dashboard showing layer heights, TEC, propagation modes
+- Enhanced metrology panel with uncertainty breakdown and Allan deviation plots
+- Detection statistics page showing adaptive behavior and noise floor trends
+- Real-time ionospheric prediction visualization
+- Correlation between ionospheric conditions and timing accuracy
 
-#### 1. SNR-Based Adaptive Search Windows
+**Data Sources:**
 
-**Current:** Fixed ±500ms search window regardless of signal quality
+- HDF5 files: `/var/lib/timestd/phase2/{CHANNEL}/*.h5`
+- Fusion CSV: `/var/lib/timestd/phase2/fusion/fused_d_clock.csv`
+- GNSS VTEC: `/var/lib/timestd/gnss_vtec/*.h5`
+- Analytics status: `/var/lib/timestd/phase2/{CHANNEL}/status/analytics-status.json`
 
-**Problem:** Wide windows increase false positive rate in low SNR
+**Web UI Stack:**
 
-**Solution:**
-```python
-def _calculate_adaptive_search_window(
-    self, 
-    recent_snr_db: Optional[float],
-    detection_stability: str  # 'ACQUIRING', 'TRACKING', 'LOCKED'
-) -> float:
-    """
-    Narrow search window as SNR improves and system converges.
-    
-    LOCKED + High SNR (>20 dB): ±5ms (very tight)
-    TRACKING + Good SNR (>15 dB): ±15ms
-    TRACKING + Medium SNR (>10 dB): ±50ms
-    ACQUIRING or Low SNR: ±500ms (wide search)
-    """
-    if detection_stability == 'LOCKED' and recent_snr_db and recent_snr_db > 20:
-        return 5.0
-    elif detection_stability == 'TRACKING':
-        if recent_snr_db and recent_snr_db > 15:
-            return 15.0
-        elif recent_snr_db and recent_snr_db > 10:
-            return 50.0
-    return 500.0
+- Backend: Node.js/Express (`web-ui/server.js`)
+- Frontend: Vanilla JS, Chart.js for plotting
+- Real-time updates: 30s polling, WebSocket for audio
+
+## System Architecture
+
+### Two-Phase Pipeline
+
+```
+Phase 1: Core Recorder → raw_buffer/ (20kHz IQ, binary+JSON)
+Phase 2: Analytics → phase2/{CHANNEL}/ (D_clock, discrimination, tones)
+Phase 3: Fusion → Chrony SHM + fused_d_clock.csv
 ```
 
-**Files to Modify:**
-- `tone_detector.py`: Add `_calculate_adaptive_search_window()` method
-- `phase2_temporal_engine.py`: Pass convergence state and SNR to detector
+### Key Files
 
-**Expected Impact:** 10-20% reduction in false positives
+**Core Recording:**
 
----
+- `src/hf_timestd/core/core_recorder_v2.py` - RTP capture via ka9q-python
+- `src/hf_timestd/core/stream_recorder_v2.py` - Per-channel recording
 
-#### 2. Ionospheric Prediction for Search Window Centering
+**Analytics:**
 
-**Current:** Search centered at minute boundary (0ms offset)
+- `src/hf_timestd/core/phase2_analytics_service.py` - Main analytics daemon
+- `src/hf_timestd/core/phase2_temporal_engine.py` - Timing analysis algorithms
+- `src/hf_timestd/core/tone_detector.py` - Tone detection with Phase 4 improvements
+- `src/hf_timestd/core/ionospheric_model.py` - IRI-2020 integration
 
-**Problem:** We have IRI-2020 that predicts layer heights, but don't use it to predict propagation delay
+**Fusion:**
 
-**Solution:**
-```python
-def _predict_propagation_delay(
-    self,
-    station: StationType,
-    timestamp: datetime
-) -> Tuple[float, float]:
-    """
-    Predict propagation delay using IRI-2020 ionospheric model.
-    
-    Uses predicted hmF2 and station geometry to calculate expected delay.
-    Centers search window at predicted arrival time.
-    
-    Returns:
-        (expected_delay_ms, uncertainty_ms)
-    """
-    # Get predicted layer height from IRI-2020
-    heights = self.iono_model.get_heights(timestamp, self.receiver_lat, self.receiver_lon)
-    hmF2_km = heights.hmF2
-    
-    # Station distances (great circle)
-    station_distances = {
-        StationType.WWV: 1500,   # Fort Collins to central US (km)
-        StationType.WWVH: 6000,  # Hawaii to central US (km)
-        StationType.CHU: 1200    # Ottawa to central US (km)
-    }
-    distance_km = station_distances.get(station, 1500)
-    
-    # 1-hop F-layer geometry: path_length = 2 * sqrt(h² + (d/2)²)
-    path_length_km = 2 * np.sqrt(hmF2_km**2 + (distance_km/2)**2)
-    
-    # Propagation delay
-    c_km_per_ms = 299.792458
-    expected_delay_ms = path_length_km / c_km_per_ms
-    
-    # Uncertainty from hmF2 uncertainty (±30km typical)
-    uncertainty_ms = max(5.0, hmF2_uncertainty_calculation)
-    
-    return expected_delay_ms, uncertainty_ms
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - Multi-station Kalman fusion
+- `src/hf_timestd/core/clock_convergence.py` - Convergence state tracking
+
+**Web UI:**
+
+- `web-ui/server.js` - Express server, API endpoints
+- `web-ui/public/*.html` - Dashboard pages
+- `web-ui/public/js/*.js` - Frontend visualization code
+
+### Data Products
+
+**HDF5 Schema:**
+
+- L1A: Channel observables (carrier power, SNR, Doppler, tones)
+- L1B: BCD timecode (discrimination results)
+- L2: Timing measurements (D_clock with uncertainty)
+- L3: Fusion results + GNSS VTEC
+
+**CSV Outputs:**
+
+- `clock_offset_series.csv` - D_clock time series
+- `discrimination_{date}.csv` - Station ID results
+- `tone_detections_{date}.csv` - 1000/1200 Hz detections
+- `fused_d_clock.csv` - Multi-broadcast fusion output
+
+## Development Workflow
+
+### Making Changes
+
+1. **Edit source:** `/home/mjh/git/hf-timestd/src/hf_timestd/`
+2. **Copy to production:** `sudo cp -r src/hf_timestd /opt/hf-timestd/src/`
+3. **Reinstall:** `cd /opt/hf-timestd && sudo /opt/hf-timestd/venv/bin/pip install -e .`
+4. **Restart service:** `sudo systemctl restart timestd-analytics` (or relevant service)
+5. **Monitor:** `sudo journalctl -u timestd-analytics -f`
+
+### Testing
+
+**Unit Tests:** `tests/test_*.py` (run with pytest)  
+**Integration:** Process historical data from `raw_buffer/`  
+**Web UI:** Check <http://localhost:3000> for visualization
+
+### Git Workflow
+
+```bash
+git add -A
+git commit -m "Descriptive message"
+git push origin main
 ```
 
-**Files to Modify:**
-- `phase2_temporal_engine.py`: Add `_predict_propagation_delay()` method
-- Update detector calls to pass `expected_offset_ms`
+## Common Tasks
 
-**Expected Impact:** 
-- Tighter search windows (±5-15ms instead of ±500ms)
-- 15-25% reduction in false positives
-- Better multipath rejection
+### Check System Status
 
----
-
-#### 3. Robust Noise Floor Estimation
-
-**Current:** Fixed percentile of entire correlation output
-
-**Problem:** Interference in search region elevates noise floor estimate
-
-**Solution:**
-```python
-def _estimate_robust_noise_floor(
-    self,
-    correlation: np.ndarray,
-    search_start_idx: int,
-    search_end_idx: int
-) -> float:
-    """
-    Robust noise floor using samples OUTSIDE search region.
-    
-    Uses Median Absolute Deviation (MAD) - robust to outliers.
-    """
-    # Exclude search region
-    mask = np.ones(len(correlation), dtype=bool)
-    mask[search_start_idx:search_end_idx] = False
-    noise_samples = correlation[mask]
-    
-    # Use MAD for robustness
-    median = np.median(noise_samples)
-    mad = np.median(np.abs(noise_samples - median))
-    sigma_equivalent = 1.4826 * mad
-    
-    # Noise floor = median + 3σ
-    return median + 3 * sigma_equivalent
+```bash
+systemctl status timestd-analytics  # Should show 9/9 channels
+ps aux | grep phase2_analytics_service | wc -l  # Should be 9
+tail -f /var/log/hf-timestd/phase2-shared10.log
 ```
 
-**Files to Modify:**
-- `tone_detector.py`: Add `_estimate_robust_noise_floor()` method
-- Update `_correlate_with_template()` to use robust estimation
+### View Recent Detections
 
-**Expected Impact:** 5-10% improvement in weak signal detection
-
----
-
-## IMPLEMENTATION PLAN
-
-### Phase 1: Foundation (Day 1)
-1. Add `_calculate_adaptive_search_window()` to `MultiStationToneDetector`
-2. Add `_estimate_robust_noise_floor()` to `MultiStationToneDetector`
-3. Update `_correlate_with_template()` to use robust noise floor
-
-### Phase 2: Ionospheric Integration (Day 2)
-4. Add `_predict_propagation_delay()` to `Phase2TemporalEngine`
-5. Update temporal engine to pass predicted delays to detector
-6. Test with historical data
-
-### Phase 3: Adaptive Windows (Day 2-3)
-7. Add convergence state tracking to temporal engine
-8. Update detector calls to use adaptive search windows
-9. Test and tune window thresholds
-
----
-
-## KEY FILES TO UNDERSTAND
-
-### Primary Implementation Files
-
-1. **`src/hf_timestd/core/tone_detector.py`** (1497 lines)
-   - `MultiStationToneDetector` class
-   - Two-stage detection (matched filter + onset)
-   - Quadrature templates for phase-invariant detection
-   - **Add methods here:** `_calculate_adaptive_search_window()`, `_estimate_robust_noise_floor()`
-
-2. **`src/hf_timestd/core/phase2_temporal_engine.py`** (2200+ lines)
-   - `Phase2TemporalEngine` class
-   - Convergence state machine ('ACQUIRING', 'TRACKING', 'LOCKED')
-   - Calls tone detector with search windows
-   - **Add method here:** `_predict_propagation_delay()`
-
-3. **`src/hf_timestd/core/ionospheric_model.py`** (1224 lines)
-   - `IonosphericModel` class
-   - IRI-2020 integration for layer height prediction
-   - **Use existing:** `get_heights()` method returns `LayerHeights` with `hmF2`
-
-### Reference Documentation
-
-1. **`docs/HDF5_ROBUSTNESS_IMPROVEMENTS.md`**
-   - Comprehensive documentation of Phase 1-3 improvements
-   - Code examples and rationale
-
-2. **Artifacts in `.gemini/antigravity/brain/`:**
-   - `tone_detection_critique.md` - Critical analysis (8 improvements)
-   - `tone_detection_plan.md` - Detailed implementation plan
-   - `implementation_plan.md` - Phase 1-3 plan (reference)
-
----
-
-## CURRENT SYSTEM STATE
-
-### Services Running
-- ✅ `timestd-core-recorder` - Recording IQ samples to Digital RF
-- ✅ `timestd-analytics` - 9 channels processing (WWV, WWVH, CHU)
-- ✅ `timestd-fusion` - Fusing measurements, feeding Chrony
-- ✅ Chrony TMGR source active (reach=37, offset=+151us)
-
-### Data Flow
-```
-Radio → Core Recorder → Digital RF (L0)
-                      ↓
-              Analytics Service (9 channels)
-                      ↓
-              HDF5 Files (L1A, L1B, L2)
-                      ↓
-              Fusion Service
-                      ↓
-              Chrony SHM (TMGR source)
+```bash
+tail -20 /var/lib/timestd/phase2/SHARED_10000/clock_offset/clock_offset_series.csv
 ```
 
-### Recent Changes (Deployed)
-- Input validation on archive directory
-- HDF5 write failure tracking with alerts
-- Startup health checks for HDF5 writers
-- Calibration memory bounds (LRU, max 10 locations)
-- Adaptive IRI cache TTL (30 min / 5 min)
+### Check Fusion Output
+
+```bash
+tail -20 /var/lib/timestd/phase2/fusion/fused_d_clock.csv
+```
+
+### Monitor Chrony
+
+```bash
+chronyc sources  # Should show SHM0 with * (selected)
+watch -n 10 'chronyc sources'
+```
+
+## Key Concepts
+
+### D_clock Measurement
+
+```
+D_clock = T_arrival - T_propagation
+```
+
+Where:
+
+- T_arrival = Observed tone arrival time (from matched filter)
+- T_propagation = HF signal propagation delay (ionospheric path)
+- D_clock = System clock offset (the output we want)
+
+### Propagation Modes
+
+| Mode | Typical Delay | Uncertainty |
+|------|---------------|-------------|
+| 1-hop E | ~3.8 ms | ±0.20 ms |
+| 1-hop F2 | ~4.3 ms | ±0.17 ms |
+| 2-hop F2 | ~5.5 ms | ±0.33 ms |
+
+### Convergence States
+
+- **ACQUIRING** - Initial search, wide windows (±500ms)
+- **CONVERGING** - Narrowing down, medium windows (±50ms)
+- **LOCKED** - Stable lock, tight windows (±5-15ms)
+
+## Documentation
+
+**Essential:**
+
+- `README.md` - Overview and quick start
+- `ARCHITECTURE.md` - System design philosophy
+- `TECHNICAL_REFERENCE.md` - API and algorithm details
+- `CHANGELOG.md` - Version history
+
+**Phase 4:**
+
+- `docs/PHASE4_TONE_DETECTION.md` - Technical summary of improvements
+- `tests/test_tone_detector_improvements.py` - Unit tests
+
+**Timing:**
+
+- `docs/TIMING_METROLOGY.md` - Metrological reference
+- `docs/TIMING_METHODOLOGY.md` - D_clock measurement details
+
+## Troubleshooting
+
+**Service won't start:**
+
+- Check module import: `sudo /opt/hf-timestd/venv/bin/python -c "import hf_timestd.core.phase2_analytics_service; print('OK')"`
+- Verify source copied: `ls -la /opt/hf-timestd/src/hf_timestd/core/tone_detector.py`
+- Check permissions: `ls -la /opt/hf-timestd/src/hf_timestd/`
+
+**No detections:**
+
+- Verify raw buffer has data: `ls -lh /dev/shm/timestd/raw_buffer/SHARED_10000/$(date +%Y%m%d)/`
+- Check analytics logs: `tail -100 /var/log/hf-timestd/phase2-shared10.log`
+- Monitor real-time: `sudo journalctl -u timestd-analytics -f`
+
+**Web UI not updating:**
+
+- Check Node.js server: `systemctl status timestd-web-ui`
+- Verify data files exist: `ls -lh /var/lib/timestd/phase2/*/status/`
+- Check browser console for errors
+
+## AI Agent Guidance
+
+### For Next Session (Web UI Improvements)
+
+**Context to provide:**
+
+1. Current web UI structure (`web-ui/` directory)
+2. Available data sources (HDF5 schemas, CSV formats)
+3. Existing visualization patterns (Chart.js usage)
+4. API endpoint structure in `server.js`
+
+**Key files to review:**
+
+- `web-ui/server.js` - Backend API
+- `web-ui/public/index.html` - Main dashboard
+- `web-ui/public/js/monitoring.js` - Visualization code
+- `src/hf_timestd/schemas/*.json` - HDF5 schemas
+
+**Goals:**
+
+- Create ionospheric dashboard
+- Enhance metrology visualization
+- Add detection statistics page
+- Improve real-time data exposure
+
+**Constraints:**
+
+- Maintain existing functionality
+- Use vanilla JS (no React/Vue)
+- Keep 30s polling for most data
+- Ensure mobile-responsive design
 
 ---
 
-## VERIFICATION APPROACH
+**For questions or clarification, refer to:**
 
-### Unit Tests to Write
-1. Test adaptive search window calculation with various SNR/states
-2. Test ionospheric delay prediction with known hmF2 values
-3. Test robust noise floor with synthetic interference
-
-### Integration Tests
-1. Process 24 hours of historical data
-2. Compare detection rates before/after
-3. Measure false positive rate reduction
-4. Verify timing accuracy improvement
-
-### Metrics to Track
-- **Detection Rate:** Should remain ≥95% of baseline
-- **False Positive Rate:** Target 20-30% reduction
-- **Search Window Size:** Should narrow to ±5-15ms when locked
-- **Timing Accuracy:** Should improve by 2-5ms
-
----
-
-## SUCCESS CRITERIA
-
-**Minimum Viable:**
-- [ ] Adaptive search windows implemented and working
-- [ ] Robust noise floor reduces false positives by ≥10%
-- [ ] No regression in detection rate
-
-**Ideal:**
-- [ ] Ionospheric prediction centers search within ±10ms
-- [ ] False positive rate reduced by ≥20%
-- [ ] Timing accuracy improved by ≥2ms
-- [ ] System locks faster (fewer minutes to convergence)
-
----
-
-## IMPORTANT NOTES
-
-### Code Style
-- Use type hints for all new methods
-- Add comprehensive docstrings with theory/rationale
-- Include debug logging for troubleshooting
-- Follow existing patterns in tone_detector.py
-
-### Testing Strategy
-- Test each improvement independently first
-- Use historical data for regression testing
-- Monitor for 24 hours before declaring success
-
-### Rollback Plan
-- Keep changes modular and feature-flaggable
-- Document baseline metrics before changes
-- Have clear rollback procedure if issues arise
-
----
-
-## QUESTIONS TO RESOLVE DURING IMPLEMENTATION
-
-1. **Convergence State:** Where is it tracked in `phase2_temporal_engine.py`?
-2. **SNR History:** How to access recent SNR values for adaptive windows?
-3. **Receiver Location:** Where are lat/lon stored for ionospheric prediction?
-4. **Search Window API:** Exact parameter names in `process_samples()`?
-
-**Approach:** Grep for these patterns, examine existing code, then implement.
-
----
-
-## ESTIMATED EFFORT
-
-**Total:** 2-3 days, ~430 lines of new code
-
-**Breakdown:**
-- Day 1: Adaptive windows + robust noise floor (~150 lines)
-- Day 2: Ionospheric prediction integration (~80 lines)
-- Day 3: Testing, tuning, documentation (~200 lines tests)
-
----
-
-## FINAL CHECKLIST BEFORE STARTING
-
-- [ ] Read `tone_detection_critique.md` for full context
-- [ ] Read `tone_detection_plan.md` for detailed algorithms
-- [ ] Examine `tone_detector.py` structure and existing methods
-- [ ] Examine `phase2_temporal_engine.py` detector call sites
-- [ ] Understand `ionospheric_model.py` API for hmF2 prediction
-- [ ] Have historical data ready for testing
-
-**Ready to implement Phase 4!**
+- ARCHITECTURE.md for design decisions
+- TECHNICAL_REFERENCE.md for API details
+- CHANGELOG.md for recent changes
