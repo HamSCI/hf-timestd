@@ -923,13 +923,49 @@ class Phase2TemporalEngine:
         buffer_duration = len(iq_samples) / self.sample_rate
         buffer_mid_time = system_time + buffer_duration / 2
         
+        # ===== NEW: Ionospheric Prediction for Adaptive Search Window (Phase 2 - 2025-12-31) =====
+        # Use IRI-2020 to predict propagation delay and center search window
+        # This dramatically reduces search space and false positives
+        expected_offset_ms = None
+        adaptive_window_ms = search_window_ms
+        
+        # Try to predict for primary expected stations based on frequency
+        from ..interfaces.data_models import StationType
+        predicted_station = None
+        
+        if self.frequency_mhz in (2.5, 5.0, 10.0, 15.0, 20.0, 25.0):
+            # WWV/WWVH frequencies
+            predicted_station = StationType.WWV  # Use WWV as primary
+        elif self.frequency_mhz in (3.33, 7.85, 14.67):
+            # CHU frequencies
+            predicted_station = StationType.CHU
+        
+        if predicted_station:
+            try:
+                predicted_delay_ms, uncertainty_ms = self._predict_propagation_delay(
+                    station=predicted_station,
+                    timestamp=buffer_mid_time
+                )
+                
+                if predicted_delay_ms is not None:
+                    expected_offset_ms = predicted_delay_ms
+                    # Adaptive window: 3-sigma around prediction
+                    # This reduces search space by 90-99% while maintaining detection
+                    adaptive_window_ms = max(10.0, min(3.0 * uncertainty_ms, search_window_ms))
+                    
+                    logger.info(f"Ionospheric prediction: {predicted_station.value} delay={predicted_delay_ms:.1f}±{uncertainty_ms:.1f}ms, "
+                               f"window=±{adaptive_window_ms:.1f}ms (was ±{search_window_ms:.0f}ms)")
+            except Exception as e:
+                logger.warning(f"Ionospheric prediction failed: {e}, using wide search")
+        
         detections = self.tone_detector.process_samples(
             timestamp=buffer_mid_time, # Use buffer_mid_time for tone detector
             samples=iq_samples,
             rtp_timestamp=rtp_timestamp,
             original_sample_rate=self.sample_rate, # Added from original code
             buffer_rtp_start=rtp_timestamp, # Added from original code
-            search_window_ms=search_window_ms
+            search_window_ms=adaptive_window_ms,  # Use adaptive window
+            expected_offset_ms=expected_offset_ms  # Center at predicted delay
         )
         
         # B. Analyze detections
