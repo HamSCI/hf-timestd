@@ -463,7 +463,7 @@ Type=forking
 User=$INSTALL_USER
 Group=$INSTALL_USER
 EnvironmentFile=$CONFIG_DIR/environment
-WorkingDirectory=$PROJECT_DIR
+WorkingDirectory=$DATA_ROOT
 
 # Use the shell script that starts all 9 channel analyzers + fusion
 ExecStart=$PROJECT_DIR/scripts/timestd-analytics.sh -start $CONFIG_DIR/timestd-config.toml
@@ -525,7 +525,7 @@ EnvironmentFile=$CONFIG_DIR/environment
 # Environment
 Environment="PYTHONUNBUFFERED=1"
 
-WorkingDirectory=$WEBUI_DIR
+WorkingDirectory=$DATA_ROOT
 
 # Run the startup script which sets up environment and launches uvicorn
 ExecStart=$WEBUI_DIR/start_server.sh
@@ -573,7 +573,7 @@ Type=simple
 User=$INSTALL_USER
 Group=$INSTALL_USER
 EnvironmentFile=$CONFIG_DIR/environment
-WorkingDirectory=$PROJECT_DIR
+WorkingDirectory=$DATA_ROOT
 
 ExecStart=$VENV_DIR/bin/python -u scripts/live_vtec.py --config $CONFIG_DIR/timestd-config.toml
 
