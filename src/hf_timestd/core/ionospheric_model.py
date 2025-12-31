@@ -102,11 +102,13 @@ REVISION HISTORY
 """
 
 import logging
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Tuple
 from dataclasses import dataclass
 from enum import Enum
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 
@@ -140,6 +142,7 @@ class IonosphericModelTier(Enum):
     """Which model tier provided the current estimate"""
     IRI_2020 = "IRI-2020"           # Full physics-based model (upgraded from IRI-2016)
     IRI_2016 = "IRI-2016"           # Legacy - kept for backward compatibility
+    IONEX = "IONEX"                 # GPS-derived global TEC maps (2-hour cadence)
     PARAMETRIC = "Parametric"       # Simple diurnal/solar model
     STATIC = "Static"               # Fixed constants
     CALIBRATED = "Calibrated"       # Any tier + calibration applied
@@ -213,7 +216,8 @@ class IonosphericModel:
         enable_iri: bool = True,
         enable_calibration: bool = True,
         calibration_window_hours: float = 24.0,
-        max_calibration_entries: int = 100
+        max_calibration_entries: int = 100,
+        ionex_dir: Optional[Path] = None
     ):
         """
         Initialize the ionospheric model.
@@ -223,6 +227,7 @@ class IonosphericModel:
             enable_calibration: Apply learned calibration offsets
             calibration_window_hours: Time window for calibration averaging
             max_calibration_entries: Maximum stored calibration points
+            ionex_dir: Directory containing IONEX files (default: /var/lib/timestd/ionex)
         """
         self.enable_iri = enable_iri
         self.enable_calibration = enable_calibration
@@ -242,13 +247,20 @@ class IonosphericModel:
         self._iri_cache: Dict[str, LayerHeights] = {}
         self._cache_ttl_seconds = 300  # 5 minute cache
         
+        # IONEX support for global VTEC maps
+        self.ionex_dir = Path(ionex_dir) if ionex_dir else Path('/var/lib/timestd/ionex')
+        self._ionex_cache: Dict[str, 'IONEXParser'] = {}  # Cache parsed IONEX files
+        self._ionex_cache_max_age = 86400  # 24 hours
+        
         # Statistics
         self.stats = {
             'iri_calls': 0,
             'iri_cache_hits': 0,
             'parametric_fallbacks': 0,
             'static_fallbacks': 0,
-            'calibration_updates': 0
+            'calibration_updates': 0,
+            'ionex_calls': 0,
+            'ionex_cache_hits': 0
         }
         
         # Check IRI availability on init (lazy)
@@ -343,6 +355,159 @@ class IonosphericModel:
         # Round time to 5-minute intervals
         minute_slot = (time.hour * 60 + time.minute) // 5
         return f"{lat_round}_{lon_round}_{time.date()}_{minute_slot}"
+    
+    def calculate_hf_reflection_point(
+        self,
+        tx_lat: float,
+        tx_lon: float,
+        rx_lat: float,
+        rx_lon: float,
+        layer_height_km: float = 300.0
+    ) -> Tuple[float, float]:
+        """
+        Calculate ionospheric pierce point for HF propagation.
+        
+        Assumes single reflection at F2 layer. For HF skywave, the signal
+        reflects off the ionosphere at approximately the midpoint of the
+        great circle path between transmitter and receiver.
+        
+        Args:
+            tx_lat: Transmitter latitude (degrees)
+            tx_lon: Transmitter longitude (degrees)
+            rx_lat: Receiver latitude (degrees)
+            rx_lon: Receiver longitude (degrees)
+            layer_height_km: Ionospheric layer height (default: 300 km for F2)
+            
+        Returns:
+            (lat, lon) of reflection point in degrees
+        """
+        # Convert to radians
+        tx_lat_rad = math.radians(tx_lat)
+        tx_lon_rad = math.radians(tx_lon)
+        rx_lat_rad = math.radians(rx_lat)
+        rx_lon_rad = math.radians(rx_lon)
+        
+        # For single-hop HF, reflection point is approximately at the midpoint
+        # of the great circle path. This is a simplification but works well
+        # for typical HF distances (1000-3000 km).
+        
+        # Calculate midpoint using spherical geometry
+        Bx = math.cos(rx_lat_rad) * math.cos(rx_lon_rad - tx_lon_rad)
+        By = math.cos(rx_lat_rad) * math.sin(rx_lon_rad - tx_lon_rad)
+        
+        lat_mid_rad = math.atan2(
+            math.sin(tx_lat_rad) + math.sin(rx_lat_rad),
+            math.sqrt((math.cos(tx_lat_rad) + Bx)**2 + By**2)
+        )
+        lon_mid_rad = tx_lon_rad + math.atan2(By, math.cos(tx_lat_rad) + Bx)
+        
+        # Convert back to degrees
+        lat_mid = math.degrees(lat_mid_rad)
+        lon_mid = math.degrees(lon_mid_rad)
+        
+        # Normalize longitude to -180 to 180
+        if lon_mid > 180:
+            lon_mid -= 360
+        elif lon_mid < -180:
+            lon_mid += 360
+        
+        logger.debug(f"HF reflection point: ({lat_mid:.2f}°, {lon_mid:.2f}°) "
+                    f"for TX({tx_lat:.2f}°, {tx_lon:.2f}°) → RX({rx_lat:.2f}°, {rx_lon:.2f}°)")
+        
+        return lat_mid, lon_mid
+    
+    def get_ionex_vtec(
+        self,
+        lat: float,
+        lon: float,
+        timestamp: datetime
+    ) -> Optional[Tuple[float, str]]:
+        """
+        Get VTEC from IONEX files.
+        
+        Searches for IONEX file matching the timestamp, parses it if needed,
+        and interpolates VTEC at the specified location.
+        
+        Args:
+            lat: Latitude (degrees, -90 to 90)
+            lon: Longitude (degrees, -180 to 180)
+            timestamp: UTC timestamp
+            
+        Returns:
+            (vtec_tecu, source_file) or None if unavailable
+        """
+        if not self.ionex_dir.exists():
+            logger.debug(f"IONEX directory does not exist: {self.ionex_dir}")
+            return None
+        
+        # Find IONEX file for this date
+        date_str = timestamp.strftime('%Y%m%d')
+        
+        # Try to find matching IONEX file
+        # Modern format: IGS0OPSFIN_YYYYDDD0000_01D_02H_GIM.INX.gz
+        # Legacy format: igsgDDD0.YYi.Z
+        ionex_files = list(self.ionex_dir.glob(f"*{date_str[:4]}*"))
+        
+        if not ionex_files:
+            logger.debug(f"No IONEX files found for date {date_str}")
+            return None
+        
+        # Use the most recent file (in case multiple exist)
+        ionex_file = max(ionex_files, key=lambda p: p.stat().st_mtime)
+        
+        # Check cache
+        cache_key = str(ionex_file)
+        if cache_key in self._ionex_cache:
+            parser = self._ionex_cache[cache_key]
+            self.stats['ionex_cache_hits'] += 1
+        else:
+            # Parse IONEX file
+            try:
+                # Import IONEXParser from ionex_integration script
+                # Path: src/hf_timestd/core/ionospheric_model.py -> scripts/ionex_integration.py
+                import sys
+                import importlib.util
+                
+                # Get project root (3 levels up from this file)
+                project_root = Path(__file__).parent.parent.parent.parent
+                ionex_script_path = project_root / "scripts" / "ionex_integration.py"
+                
+                if not ionex_script_path.exists():
+                    logger.warning(f"IONEX integration script not found: {ionex_script_path}")
+                    return None
+                
+                spec = importlib.util.spec_from_file_location(
+                    "ionex_integration",
+                    ionex_script_path
+                )
+                ionex_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(ionex_module)
+                
+                parser = ionex_module.IONEXParser(ionex_file)
+                self._ionex_cache[cache_key] = parser
+                self.stats['ionex_calls'] += 1
+                
+                # Limit cache size
+                if len(self._ionex_cache) > 7:  # Keep last week
+                    oldest_key = next(iter(self._ionex_cache))
+                    del self._ionex_cache[oldest_key]
+                    
+            except Exception as e:
+                logger.warning(f"Failed to parse IONEX file {ionex_file}: {e}")
+                return None
+        
+        # Interpolate VTEC
+        try:
+            vtec = parser.interpolate(lat, lon, timestamp)
+            if vtec is not None:
+                logger.debug(f"IONEX VTEC: {vtec:.2f} TECU at ({lat:.2f}°, {lon:.2f}°)")
+                return vtec, ionex_file.name
+            else:
+                logger.debug(f"IONEX interpolation returned None")
+                return None
+        except Exception as e:
+            logger.warning(f"IONEX VTEC interpolation failed: {e}")
+            return None
     
     
     def _calculate_cache_ttl(self, timestamp: datetime, latitude: float) -> float:
@@ -938,6 +1103,7 @@ class IonosphericDelayCalculator:
         Returns TEC in TECU (10^16 electrons/m²) and the model tier used.
         
         TIER 1: IRI-2020/IRI-2016 TEC output (if available)
+        TIER 1.5: IONEX global TEC maps (GPS-derived, 2-hour cadence)
         TIER 2: Parametric model based on time/location/solar activity
         TIER 3: Static climatological average
         """
@@ -958,6 +1124,18 @@ class IonosphericDelayCalculator:
                         return float(tec), tier
             except Exception as e:
                 logger.debug(f"IRI TEC lookup failed: {e}")
+        
+        # TIER 1.5: Try IONEX (global GPS-derived TEC maps)
+        if self.iono_model is not None and latitude is not None and longitude is not None and timestamp is not None:
+            try:
+                ionex_result = self.iono_model.get_ionex_vtec(latitude, longitude, timestamp)
+                if ionex_result is not None:
+                    vtec, source_file = ionex_result
+                    if 1 < vtec < 500:  # Sanity check
+                        logger.debug(f"Using IONEX VTEC: {vtec:.2f} TECU from {source_file}")
+                        return float(vtec), IonosphericModelTier.IONEX
+            except Exception as e:
+                logger.debug(f"IONEX TEC lookup failed: {e}")
         
         # TIER 2: Parametric model
         if timestamp is not None and latitude is not None:

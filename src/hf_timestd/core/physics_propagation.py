@@ -173,7 +173,8 @@ class PhysicsPropagationModel:
         receiver_lon: float,
         enable_pylap: bool = True,
         enable_iri: bool = True,
-        pylap_cache_dir: Optional[Path] = None
+        pylap_cache_dir: Optional[Path] = None,
+        ionex_dir: Optional[Path] = None
     ):
         """
         Initialize physics propagation model.
@@ -184,6 +185,7 @@ class PhysicsPropagationModel:
             enable_pylap: Attempt to use PyLap ray tracing
             enable_iri: Use IRI-2020 for ionospheric parameters
             pylap_cache_dir: Directory to cache PyLap results
+            ionex_dir: Directory containing IONEX files (Tier 1.5)
         """
         self.receiver_lat = receiver_lat
         self.receiver_lon = receiver_lon
@@ -202,7 +204,7 @@ class PhysicsPropagationModel:
         if enable_iri:
             try:
                 from .ionospheric_model import IonosphericModel
-                self._iri_model = IonosphericModel(enable_iri=True)
+                self._iri_model = IonosphericModel(enable_iri=True, ionex_dir=ionex_dir)
                 logger.info("IRI ionospheric model initialized")
             except Exception as e:
                 logger.warning(f"IRI model initialization failed: {e}")

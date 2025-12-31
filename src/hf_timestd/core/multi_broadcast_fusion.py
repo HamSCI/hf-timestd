@@ -439,7 +439,8 @@ class MultiBroadcastFusion:
                 receiver_lat=self.receiver_lat,
                 receiver_lon=self.receiver_lon,
                 enable_pylap=False, # We just want Tier 2/3 for geometric/empirical baseline
-                enable_iri=False    # We just want the empirical baseline to correct against
+                enable_iri=False,   # We just want the empirical baseline to correct against
+                ionex_dir=Path('/var/lib/timestd/ionex')  # Enable IONEX VTEC
             )
         else:
             self.physics_model = None
@@ -2462,7 +2463,7 @@ class MultiBroadcastFusion:
                 
                 # Consistency metrics
                 'inter_station_spread_ms': result.inter_station_spread_ms,
-                'consistency_flag': result.consistency_flag,
+                'consistency_flag': 'INTER_ANOMALY' if result.consistency_flag == 'CROSS_STATION_DISAGREE' else result.consistency_flag,
                 
                 # Global solve
                 'global_solve_verified': result.global_solve_verified,

@@ -207,7 +207,15 @@ class DataProductReader:
                         # Build measurement dict
                         measurement = {}
                         for field_name, values in data.items():
-                            value = values[i]
+                            # Safe access with bounds check
+                            if i < len(values):
+                                value = values[i]
+                            else:
+                                logger.warning(
+                                    f"Index {i} out of bounds for field {field_name} (len={len(values)}) "
+                                    f"in {hdf5_path.name}. n_meas={n_measurements}"
+                                )
+                                continue
                             
                             # Decode strings
                             if isinstance(value, bytes):
