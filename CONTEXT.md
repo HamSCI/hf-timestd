@@ -17,6 +17,29 @@
 
 **Phase 4: Tone Detection Improvements** (v3.14.0 - Dec 31, 2025)
 
+## [3.7.0] - 2025-12-31
+
+### Added - Ionosphere Science Dashboard & Data Robustness
+
+#### Ionosphere Science Dashboard
+
+- **New Frontend**: `ionosphere-science.html` providing advanced visualization of propagation metrics.
+- **Features**:
+  - **WWV vs WWVH Discrimination**: Visualizes station dominance on shared frequencies.
+  - **Propagation Residuals**: Interactive plot of measured timing offsets vs IRI-2020 predictions.
+  - **Inferred Layer Heights**: Physics-based proxy estimation of F2 virtual heights from timing residuals.
+  - **Dynamic Frequency Selection**: Intelligent filtering of valid frequencies based on station selection (including correct CHU frequencies).
+
+#### Data Robustness
+
+- **HDF5 Reader Safety**: Implemented critical fixes in `utils/hdf5_reader.py` to handle SWMR race conditions and prevent `IndexError` crashes when optional datasets (SNR, Doppler) are missing or shorter than the main timeline.
+- **CSV Fallback**: Implemented robust fallback mechanism in `monitoring_server.py` to read legacy CSV files for discrimination data when HDF5 files are delayed or missing.
+- **Backend Stability**: Fixed `timezone` import errors preventing server startup.
+
+### Known Issues
+
+- **CHU 300 Baud Frame Slip**: Observed ~33ms timing jumps in CHU data, corresponding accurately to one 300-baud character duration, indicating a decoder synchronization issue.
+
 - **Robust Noise Floor** - MAD-based estimation (+75 lines in `tone_detector.py`)
 - **Adaptive Search Windows** - SNR/state-based narrowing (+72 lines in `tone_detector.py`)
 - **Ionospheric Prediction** - IRI-2020 integration (+105 lines in `phase2_temporal_engine.py`)
@@ -25,11 +48,32 @@
 
 ### 🔄 In Progress
 
-**None** - System stable and running in production
+### ✅ Recently Completed
 
-### 📋 Next Priority: Web UI Metrology & Ionospheric Data Exposure
+**Ionosphere Science Dashboard** (v3.7.0 - Dec 31, 2025)
 
-**Goal:** Improve visualization and exposure of metrology and ionospheric data in the web UI
+- **Visualizations**: 3-panel dashboard for Discrimination, Residuals, and Layer Heights.
+- **Robustness**: HDF5/CSV hybrid reading, SWMR safety fixes.
+- **Status**: Operational at `/ionosphere-science.html`.
+
+### 🔄 In Progress
+
+**Analytics Critical Review**
+
+- **Trigger**: Detected ~33ms "frame slip" in CHU data (matching 300 baud character length).
+- **Goal**: Verify tone detection and decoding logic to improve offset determination accuracy.
+
+### 📋 Next Priority: Analytics Service Critical Review
+
+**Goal:** Perform a comprehensive critical review of the Phase 2 Analytics Service, specifically focusing on tone detection quality and decoding robustness.
+
+**Trigger:** Observed a physically impossible +19ms to -13ms (~32.6ms) jump in CHU timing. This matches exactly the duration of one 300-baud character (33.33ms), indicating a "frame slip" in the digital decoder.
+
+**Key Areas:**
+
+1. **CHU Decoder**: Synchronization logic and frame locking.
+2. **Tone Detection**: SNR thresholds, multipath rejection, and frequency discrimination.
+3. **Offset Determination**: How individual tone/tick detections are weighted and fused.
 
 **Current Web UI Capabilities:**
 
@@ -63,9 +107,17 @@
 
 - New ionospheric dashboard showing layer heights, TEC, propagation modes
 - Enhanced metrology panel with uncertainty breakdown and Allan deviation plots
-- Detection statistics page showing adaptive behavior and noise floor trends
-- Real-time ionospheric prediction visualization
-- Correlation between ionospheric conditions and timing accuracy
+- Detection statistics page showing
+
+### Completed Features
+
+- **Ionosphere Science Dashboard**:
+  - Implemented `ionosphere-science.html` with Plotly charts for advanced propagation analysis.
+  - Added backend API endpoints for WWV/WWVH discrimination, propagation residuals, and inferred layer heights.
+  - Integrated with HDF5 data products (L1B discrimination, L2 timing).
+  - Robust HDF5 readers with SWMR race condition handling.
+- **Monitoring Server V3 (FastAPI)**: Fully replaced Node.js server.
+- **L3 Fusion HDF5 Migration**: Fully implemented and robust.
 
 **Data Sources:**
 

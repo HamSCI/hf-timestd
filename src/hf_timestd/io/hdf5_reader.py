@@ -186,14 +186,21 @@ class DataProductReader:
                         logger.warning(f"No timestamp_utc dataset in {hdf5_path}")
                         continue
                     
-                    n_measurements = f['timestamp_utc'].shape[0]
-                    
                     # Read all datasets
                     data = {}
                     for field in self.schema['fields']:
                         field_name = field['name']
                         if field_name in f:
                             data[field_name] = f[field_name][:]
+                    
+                    # SWMR race condition mitigation: Find minimum length across all datasets
+                    # In SWMR mode, datasets may be extended non-atomically, so we need to
+                    # iterate only up to the minimum length to avoid index errors
+                    if not data:
+                        logger.warning(f"No data fields found in {hdf5_path}")
+                        continue
+                    
+                    n_measurements = min(len(values) for values in data.values())
                     
                     # Filter measurements
                     for i in range(n_measurements):

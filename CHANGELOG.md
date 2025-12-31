@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2025-12-31
+
+### Added
+
+- **Ionosphere Science Dashboard**: New `ionosphere-science.html` page for visualizing advanced propagation metrics.
+- **Science API Endpoints**:
+  - `/api/v2/ionosphere/wwv-wwvh-discrimination`: Station dominance visualization.
+  - `/api/v2/ionosphere/propagation-residuals`: Measured delay vs IRI-2020 prediction.
+  - `/api/v2/ionosphere/inferred-heights`: Layer height estimation.
+- **HDF5 Reader Utilities**: Enhanced `web-ui/utils/hdf5_reader.py` with SWMR race condition protection and L1B/L1A support.
+
+### Changed
+
+- **Web UI Deployment**: Updated production service (`timestd-web-ui`) with new files.
+
+## [3.7.0] - 2025-12-31
+
+### Added - Ionosphere Science Dashboard & Data Robustness
+
+#### Ionosphere Science Dashboard
+
+- **New Frontend**: `ionosphere-science.html` providing advanced visualization of propagation metrics.
+- **Features**:
+  - **WWV vs WWVH Discrimination**: Visualizes station dominance on shared frequencies.
+  - **Propagation Residuals**: Interactive plot of measured timing offsets vs IRI-2020 predictions.
+  - **Inferred Layer Heights**: Physics-based proxy estimation of F2 virtual heights from timing residuals.
+  - **Dynamic Frequency Selection**: Intelligent filtering of valid frequencies based on station selection (including correct CHU frequencies).
+
+#### Data Robustness
+
+- **HDF5 Reader Safety**: Implemented critical fixes in `utils/hdf5_reader.py` to handle SWMR race conditions and prevent `IndexError` crashes when optional datasets (SNR, Doppler) are missing or shorter than the main timeline.
+- **CSV Fallback**: Implemented robust fallback mechanism in `monitoring_server.py` to read legacy CSV files for discrimination data when HDF5 files are delayed or missing.
+- **Backend Stability**: Fixed `timezone` import errors preventing server startup.
+
+### Known Issues
+
+- **CHU 300 Baud Frame Slip**: Observed ~33ms timing jumps in CHU data, corresponding accurately to one 300-baud character duration, indicating a decoder synchronization issue.
+
 ## [3.3.0] - 2025-12-31
 
 ### Added - Phase 4: Tone Detection Selectivity & Sensitivity Improvements

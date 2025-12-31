@@ -58,7 +58,25 @@ def read_l2_timing_measurements(
             
             # Build measurements list
             measurements = []
+            
+            # SWMR Safety: Determine minimum length across all datasets
             num_records = len(timestamps)
+            min_len = min(
+                len(timestamps),
+                len(clock_offsets),
+                len(uncertainties),
+                len(expanded_uncertainties),
+                len(quality_grades),
+                len(quality_flags),
+                len(confidences),
+                len(stations),
+                len(discrimination_methods),
+                len(discrimination_confidences)
+            )
+            
+            # Use safe minimum length
+            num_records = min_len
+
             
             grade_order = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
             
@@ -87,11 +105,12 @@ def read_l2_timing_measurements(
                 }
                 
                 # Add optional fields if available
-                if snr_db is not None:
+                # Add optional fields if available with bounds check
+                if snr_db is not None and i < len(snr_db):
                     measurement['snr_db'] = float(snr_db[i])
-                if doppler_hz is not None:
+                if doppler_hz is not None and i < len(doppler_hz):
                     measurement['doppler_hz'] = float(doppler_hz[i])
-                if propagation_mode is not None:
+                if propagation_mode is not None and i < len(propagation_mode):
                     measurement['propagation_mode'] = propagation_mode[i]
                 
                 measurements.append(measurement)
@@ -173,7 +192,18 @@ def read_l1a_channel_observables(
             
             # Build records list
             records = []
+            
+            # SWMR Safety: Determine minimum length
             num_records = len(timestamps)
+            record_lengths = [len(timestamps), len(quality_flags), len(data_completeness)]
+            
+            # Add lengths of successful optional reads
+            for ds in datasets.values():
+                if ds is not None:
+                    record_lengths.append(len(ds))
+            
+            num_records = min(record_lengths)
+
             
             for i in range(num_records):
                 flag = quality_flags[i]
@@ -212,6 +242,105 @@ def read_l1a_channel_observables(
     
     except Exception as e:
         logger.error(f"Error reading L1A HDF5 file {hdf5_path}: {e}")
+        raise
+
+def read_l1b_discrimination(
+    hdf5_path: Path,
+    max_records: Optional[int] = None,
+    quality_flag: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Read L1B discrimination results from HDF5 file
+    
+    Args:
+        hdf5_path: Path to HDF5 file
+        max_records: Maximum number of records to return
+        quality_flag: Filter by quality flag (GOOD/MARGINAL/BAD)
+    
+    Returns:
+        Dictionary with records and metadata
+    """
+    try:
+        if not hdf5_path.exists():
+            raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+        
+        # Open with SWMR mode for concurrent access
+        with h5py.File(hdf5_path, 'r', swmr=True) as f:
+            # Read required datasets
+            timestamps = decode_strings(f['timestamp_utc'][:])
+            quality_flags = decode_strings(f['quality_flag'][:])
+            data_completeness = f['data_completeness'][:]
+            
+            # Read discrimination fields
+            dominant_station = decode_strings(f['dominant_station'][:])
+            confidence = f['confidence'][:]
+            
+            # Optional fields
+            wwv_snr = safe_read_dataset(f, 'wwv_snr_db')
+            wwvh_snr = safe_read_dataset(f, 'wwvh_snr_db')
+            bpm_snr = safe_read_dataset(f, 'bpm_snr_db')
+            chu_snr = safe_read_dataset(f, 'chu_snr_db')
+            
+            # Build records list
+            records = []
+            
+            # SWMR Safety: Determine minimum length
+            num_records = len(timestamps)
+            record_lengths = [
+                len(timestamps), 
+                len(quality_flags), 
+                len(data_completeness),
+                len(dominant_station),
+                len(confidence)
+            ]
+            
+            # Add lengths of optional SNRs
+            optionals = [wwv_snr, wwvh_snr, bpm_snr, chu_snr]
+            for opt in optionals:
+                if opt is not None:
+                    record_lengths.append(len(opt))
+            
+            num_records = min(record_lengths)
+
+            
+            for i in range(num_records):
+                flag = quality_flags[i]
+                
+                # Apply quality filter
+                if quality_flag and flag != quality_flag:
+                    continue
+                
+                record = {
+                    'timestamp': timestamps[i],
+                    'quality_flag': flag,
+                    'data_completeness': float(data_completeness[i]),
+                    'dominant_station': dominant_station[i],
+                    'confidence': float(confidence[i])
+                }
+                
+                # Add SNRs if available
+                if wwv_snr is not None and i < len(wwv_snr) and np.isfinite(wwv_snr[i]): record['wwv_snr_db'] = float(wwv_snr[i])
+                if wwvh_snr is not None and i < len(wwvh_snr) and np.isfinite(wwvh_snr[i]): record['wwvh_snr_db'] = float(wwvh_snr[i])
+                if bpm_snr is not None and i < len(bpm_snr) and np.isfinite(bpm_snr[i]): record['bpm_snr_db'] = float(bpm_snr[i])
+                if chu_snr is not None and i < len(chu_snr) and np.isfinite(chu_snr[i]): record['chu_snr_db'] = float(chu_snr[i])
+                
+                records.append(record)
+                
+                # Limit records if specified
+                if max_records and len(records) >= max_records:
+                    break
+            
+            return {
+                'records': records,
+                'count': len(records),
+                'total_records': num_records,
+                'source': 'hdf5',
+                'file_path': str(hdf5_path),
+                'status': 'OK'
+            }
+    
+    except Exception as e:
+        logger.error(f"Error reading L1B HDF5 file {hdf5_path}: {e}")
         raise
 
 
@@ -265,6 +394,23 @@ def get_l1a_observables_path(channel_name: str, date: str, data_root: Path) -> P
     channel_key = channel_name_to_key(channel_name)
     observables_dir = data_root / 'phase2' / channel_key / 'carrier_power'
     return observables_dir / f"{channel_key}_channel_observables_{date}.h5"
+
+
+def get_l1b_discrimination_path(channel_name: str, date: str, data_root: Path) -> Path:
+    """
+    Get HDF5 file path for L1B discrimination results
+    
+    Args:
+        channel_name: Channel name (e.g., "WWV 10 MHz")
+        date: Date in YYYYMMDD format
+        data_root: Data root directory
+    
+    Returns:
+        Path to HDF5 file
+    """
+    channel_key = channel_name_to_key(channel_name)
+    discrim_dir = data_root / 'phase2' / channel_key / 'bcd_timecode'
+    return discrim_dir / f"{channel_key}_bcd_timecode_{date}.h5"
 
 
 def channel_name_to_key(channel_name: str) -> str:

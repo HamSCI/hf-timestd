@@ -4,11 +4,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ionosphere & Propagation - hf-timestd</title>
+    <title>Ionosphere Science - hf-timestd</title>
     <link rel="stylesheet" href="/styles.css">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script>
-        window.TIMESTD_CURRENT_PAGE = 'ionosphere';
+        window.TIMESTD_CURRENT_PAGE = 'ionosphere-science';
     </script>
     <style>
         body {
@@ -126,11 +126,10 @@
 <body>
 
     <div class="nav-bar">
-        <a href="/summary.html" class="nav-link">System</a>
+        <a href="/" class="nav-link">Dashboard</a>
         <a href="/timing.html" class="nav-link">Timing</a>
-        <a href="/ionosphere.html" class="nav-link active">Ionosphere</a>
-        <a href="/metrology.html" class="nav-link">Metrology</a>
-        <a href="/logs.html" class="nav-link">Logs</a>
+        <a href="/ionosphere-science.html" class="nav-link active">Ionosphere Science</a>
+        <a href="/summary.html" class="nav-link">System</a>
     </div>
 
     <div class="page-header">
@@ -164,11 +163,15 @@
         <div class="card">
             <div class="card-header">
                 <div class="card-title">Propagation Residuals</div>
-                <select id="resid-station" onchange="loadResiduals()"
+                <select id="resid-station" onchange="updateResidFreqs(); loadResiduals()"
                     style="background: #0f172a; color: white; border: 1px solid #475569; padding: 5px;">
                     <option value="WWV">WWV</option>
                     <option value="WWVH">WWVH</option>
                     <option value="CHU">CHU</option>
+                </select>
+                <select id="resid-freq" onchange="loadResiduals()"
+                    style="background: #0f172a; color: white; border: 1px solid #475569; padding: 5px;">
+                    <!-- Populated by JS -->
                 </select>
             </div>
             <div id="resid-chart" style="width: 100%; height: 350px;"></div>
@@ -262,7 +265,7 @@
                     yaxis: {
                         title: 'Dominance',
                         tickvals: [-100, 0, 100],
-                        ticktext: ['WWVH', 'Mixed', 'WWV'],
+                        ticktext: ['WWVH Only', 'Mixed', 'WWV Only'],
                         range: [-110, 110]
                     },
                     margin: { t: 30, b: 40, l: 60, r: 20 },
@@ -274,11 +277,37 @@
             }
         }
 
+        const STATIONS = {
+            'WWV': [2.5, 5, 10, 15, 20, 25],
+            'WWVH': [2.5, 5, 10, 15],
+            'CHU': [3.330, 7.850, 14.670]
+        };
+
+        function updateResidFreqs() {
+            const station = document.getElementById('resid-station').value;
+            const freqSelect = document.getElementById('resid-freq');
+            const currentFreq = parseFloat(freqSelect.value);
+
+            freqSelect.innerHTML = '';
+
+            const freqs = STATIONS[station] || [];
+            freqs.forEach(f => {
+                const opt = document.createElement('option');
+                opt.value = f;
+                opt.text = f + " MHz";
+                freqSelect.appendChild(opt);
+            });
+
+            // Try to keep current frequency if valid
+            if (freqs.includes(currentFreq)) {
+                freqSelect.value = currentFreq;
+            }
+        }
+
         // --- Propagation Residuals ---
         async function loadResiduals() {
             const station = document.getElementById('resid-station').value;
-            // Default 10MHz for now, or detect available
-            const freq = 10;
+            const freq = document.getElementById('resid-freq').value;
 
             try {
                 const response = await fetch(`/api/v2/ionosphere/propagation-residuals?station=${station}&freq_mhz=${freq}&hours=24`);
@@ -289,12 +318,10 @@
 
                 if (!timeline || timeline.length === 0) {
                     Plotly.newPlot('resid-chart', [], {
-                        title: 'No Data for ' + station + ' ' + freq + ' MHz',
+                        title: 'No Data',
                         font: { color: '#fff' },
                         paper_bgcolor: 'rgba(0,0,0,0)',
-                        plot_bgcolor: 'rgba(0,0,0,0)',
-                        xaxis: { showgrid: false },
-                        yaxis: { showgrid: false }
+                        plot_bgcolor: 'rgba(0,0,0,0)'
                     });
                     return;
                 }
@@ -323,6 +350,7 @@
         }
 
         // Init
+        updateResidFreqs();
         loadDiscrimination();
         loadResiduals();
 

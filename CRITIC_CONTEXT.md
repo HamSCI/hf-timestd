@@ -1,8 +1,8 @@
-# NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION:
+# NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION
 
 Primary Instruction:  In this context you will perform a critical review of the HF Time Standard (hf-timestd) project, either in its entirety or in a specific component, as specified by the user.  This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation.  It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation.  It should also look for obsolete, deprecated, or "zombie" code that should be removed.  Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
 
-# The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session):
+# The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session)
 
 ---
 
@@ -18,14 +18,17 @@ Primary Instruction:  In this context you will perform a critical review of the 
 #### 1. **IRI-2020 Array Handling Incompatibility**
 
 **Problem:** The `iri2020` Python package updated its return types from scalars to `xarray.DataArray` or NumPy arrays. Analytics was calling `float()` directly on these objects, causing:
+
 ```
 ValueError: only 0-dimensional arrays can be converted to Python scalars
 ```
+
 This caused IRI-2020 calculations to fail, forcing fallback to less accurate geometric models, producing "absurd D_clock values" (e.g., -36 seconds) and confidence=0 measurements that were rejected before HDF5 write.
 
 **Fix:** Added `_extract_scalar()` helper function in `ionospheric_model.py` to normalize IRI outputs (DataArray, NumPy array, scalar, list) to floats. Updated `_get_iri_heights()` and `_estimate_vertical_tec()` to use `_extract_scalar()` for all IRI result fields.
 
 **Files Modified:**
+
 - `src/hf_timestd/core/ionospheric_model.py` (lines 113-116, 299-344, 910-915)
 
 ---
@@ -33,14 +36,17 @@ This caused IRI-2020 calculations to fail, forcing fallback to less accurate geo
 #### 2. **Bootstrap Second Boundary Calculation Error**
 
 **Problem:** The propagation solver's bootstrap logic was incorrectly calculating `expected_second_rtp` by pointing to the **next minute boundary** instead of the **current second boundary**. This caused D_clock calculations like:
+
 ```
 D_clock -36006.8ms exceeds plausible bounds (±1000ms)
 ```
+
 The 36-second error came from pointing 36 seconds ahead to the next minute instead of the current second.
 
 **Fix:** Modified `phase2_temporal_engine.py` bootstrap logic to calculate the nearest second boundary using RTP timestamp modulo and round to the **nearest** second (not always down) based on which boundary is closer.
 
 **Files Modified:**
+
 - `src/hf_timestd/core/phase2_temporal_engine.py` (lines 1640-1671)
 
 ---
@@ -48,6 +54,7 @@ The 36-second error came from pointing 36 seconds ahead to the next minute inste
 #### 3. **Missing HDF5 L1A Schema Field**
 
 **Problem:** Analytics was failing to write L1A channel observables to HDF5 with error:
+
 ```
 Failed to write HDF5 L1A measurement: Required field 'processing_version' missing from measurement
 ```
@@ -55,6 +62,7 @@ Failed to write HDF5 L1A measurement: Required field 'processing_version' missin
 **Fix:** Added `'processing_version': '3.2.0'` to the `l1a_measurement` dictionary in `_write_carrier_power()`.
 
 **Files Modified:**
+
 - `src/hf_timestd/core/phase2_analytics_service.py` (lines 729-743)
 
 ---
@@ -64,6 +72,7 @@ Failed to write HDF5 L1A measurement: Required field 'processing_version' missin
 **Problem:** Analytics was successfully writing L2 timing measurements to HDF5 files (file size growing, modification time updating), but the data was **not visible to SWMR readers**. Fusion was reading 0 measurements despite analytics writing them. This was because in SWMR mode, calling `flush()` alone doesn't update the metadata that readers use to discover new data.
 
 **Fix:** Added explicit `refresh()` calls after `flush()` in the HDF5 writer to make new data visible to concurrent SWMR readers:
+
 ```python
 # Flush to disk and refresh SWMR metadata
 hdf5_file.flush()
@@ -77,6 +86,7 @@ if hdf5_file.swmr_mode:
 ```
 
 **Files Modified:**
+
 - `src/hf_timestd/io/hdf5_writer.py` (lines 340-353)
 
 ---
@@ -84,6 +94,7 @@ if hdf5_file.swmr_mode:
 ### Verification Results
 
 **Analytics Service:**
+
 - ✅ Producing valid D_clock values: -2ms to +45ms range (plausible)
 - ✅ IRI-2020 calculations working (no fallback to geometric model)
 - ✅ CSV writes working
@@ -91,18 +102,21 @@ if hdf5_file.swmr_mode:
 - ✅ HDF5 L2 writes working with SWMR visibility
 
 **Fusion Service:**
+
 - ✅ Reading 28 L2 timing measurements from HDF5 (10-minute lookback)
 - ✅ Reading 11 tone observations from HDF5 across 8 channels
 - ✅ Fused D_clock: +3.325 ms ± 4.721 ms (26 broadcasts, grade D)
 - ✅ Chrony SHM updated: D_clock=+3.325ms every 8 seconds
 
 **Chrony Integration:**
+
 - ✅ TMGR source configured and active
 - 🟡 Reachability: `21` (octal) = 2/8 successful polls (climbing, not yet 377)
 - ✅ Offset: +925us to +3318us (consistent with fusion D_clock)
 - ✅ Poll interval: 8 seconds (as configured)
 
 **Data Pipeline Status:**
+
 ```
 Recorder → Raw Buffer (SigMF) → Analytics → HDF5 (SWMR) → Fusion → Chrony SHM
    ✅           ✅                  ✅         ✅            ✅         ✅
@@ -110,31 +124,53 @@ Recorder → Raw Buffer (SigMF) → Analytics → HDF5 (SWMR) → Fusion → Chr
 
 ---
 
-## 🔴 NEXT SESSION FOCUS: ANALYTICS SERVICE CRITICAL REVIEW
+## 🔴 NEXT SESSION FOCUS: ANALYTICS & TONE DETECTION METHODOLOGY
 
-**Purpose:** Perform a comprehensive critical review of the Phase 2 Analytics Service to identify weak spots, inefficiencies, potential bugs, and missed optimization opportunities.
+**Purpose:** Perform a critical review of the analytics service methodology, focusing on the quality and provenance of tone detections and their contribution to the final offset determination.
 
-**Author:** Michael James Hauan (AC0G)  
-**Date:** 2025-12-30  
-**Status:** 🟡 Ready for Review
+**Trigger:** A ~33ms "frame slip" observed in CHU data indicates potential flaws in the decoding or synchronization logic.
 
----
+### Key Areas to Investigate
 
-### Analytics Service Review Scope
+#### 1. CHU Decoding Robustness (High Priority)
+
+- **Incident**: CHU offsets jumped from +19.45ms to -13.21ms (Delta: 32.66ms).
+- **Analysis**: This is physically impossible for ionospheric propagation but matches the 33.33ms duration of a 300-baud character (10 bits).
+- **Task**: Review `phase2_analytics_service.py` and `chu_decoder.py` (if split) to identify why the decoder lost sync and slipped by exactly one character. Implement stricter frame boundary checks.
+
+#### 2. Tone Detection Quality
+
+- Audit `tone_detector.py` algorithms for 1000/600/500 Hz tones.
+- Evaluate SNR estimation and false-positive rejection logic.
+- Verify how detections are weighted: is a noisy tone detection gaining too much influence in the final solution?
+
+#### 3. Offset Determination Logic
+
+- Trace the calculation path: `Raw Audio -> Detection -> L1 Measure -> L2 Timing`.
+- Ensure uncertainty estimates accurately reflect the signal quality. A "slipped" frame should ideally have high uncertainty or be rejected.
+
+### Success Criteria
+
+- [ ] Root cause of CHU frame slip identified and fixed.
+- [ ] Tone detection methodology verified or improved.
+- [ ] Confidence scoring logic updated to penalize ambiguous decodes.
 
 The analytics service is the core timing analysis engine. This review should examine:
 
 #### 1. **Data Ingestion & Processing Pipeline**
+
 - **File Discovery:** Is the tiered storage manager efficiently finding minute files?
 - **Data Completeness:** Are incomplete minutes being handled correctly?
 - **Processing Latency:** Is analytics keeping up with real-time data flow?
 - **Error Recovery:** Does it gracefully handle corrupted or missing data?
 
 **Key Files:**
+
 - `src/hf_timestd/core/phase2_analytics_service.py` (main service, 2212 lines)
 - `src/hf_timestd/core/tiered_storage.py` (hot/cold buffer management)
 
 #### 2. **Phase 2 Temporal Engine (The "Brain")**
+
 - **Step 1 - Tone Detection:** Is the matched filter detector optimal?
 - **Step 2 - Channel Characterization:** Are BCD, Doppler, and discrimination robust?
 - **Step 3 - Transmission Time Solver:** Is the propagation solver accurate?
@@ -142,39 +178,46 @@ The analytics service is the core timing analysis engine. This review should exa
 - **Calibration Convergence:** Does the timing calibrator converge reliably?
 
 **Key Files:**
+
 - `src/hf_timestd/core/phase2_temporal_engine.py` (2158 lines)
 - `src/hf_timestd/core/transmission_time_solver.py`
 - `src/hf_timestd/core/tone_detector.py`
 - `src/hf_timestd/core/wwvh_discrimination.py`
 
 #### 3. **Ionospheric Modeling**
+
 - **IRI-2020 Integration:** Is the recently fixed `_extract_scalar()` handling all edge cases?
 - **Fallback Logic:** Are geometric and heuristic models appropriate?
 - **TEC Estimation:** Is vertical TEC calculation accurate?
 - **Caching:** Is the location/time cache effective?
 
 **Key Files:**
+
 - `src/hf_timestd/core/ionospheric_model.py` (recently modified)
 - `src/hf_timestd/core/physics_propagation.py`
 
 #### 4. **HDF5 Data Product Writing**
+
 - **SWMR Mode:** Is the recently added `refresh()` call sufficient?
 - **Schema Compliance:** Are all required fields being populated?
 - **Error Handling:** Are write failures being logged and recovered?
 - **Performance:** Is the write rate keeping up with data generation?
 
 **Key Files:**
+
 - `src/hf_timestd/io/hdf5_writer.py` (recently modified)
 - `src/hf_timestd/io/data_product_writer.py`
 - `src/hf_timestd/schemas/*.json`
 
 #### 5. **Multi-Station Discrimination**
+
 - **WWV/WWVH Separation:** Is discrimination accurate on shared frequencies (5/10/15/20 MHz)?
 - **BPM Integration:** Is BPM UT1 pulse detection robust?
 - **CHU Handling:** Is CHU tick detection working correctly?
 - **Confidence Scoring:** Are confidence thresholds appropriate?
 
 **Key Files:**
+
 - `src/hf_timestd/core/wwvh_discrimination.py`
 - `src/hf_timestd/core/bpm_discriminator.py`
 - `src/hf_timestd/core/station_model.py`
@@ -184,6 +227,7 @@ The analytics service is the core timing analysis engine. This review should exa
 ### Critical Review Checklist
 
 #### Performance & Efficiency
+
 - [ ] Are there any unnecessary computations in the hot path?
 - [ ] Is memory usage reasonable for 24/7 operation?
 - [ ] Are there any potential memory leaks?
@@ -191,6 +235,7 @@ The analytics service is the core timing analysis engine. This review should exa
 - [ ] Are there opportunities for parallelization?
 
 #### Correctness & Robustness
+
 - [ ] Are edge cases handled (missing data, corrupted files, etc.)?
 - [ ] Is error handling comprehensive and appropriate?
 - [ ] Are there any race conditions in multi-threaded code?
@@ -198,6 +243,7 @@ The analytics service is the core timing analysis engine. This review should exa
 - [ ] Are there any off-by-one errors in timestamp calculations?
 
 #### Code Quality & Maintainability
+
 - [ ] Is the code well-structured and modular?
 - [ ] Are variable names clear and consistent?
 - [ ] Is there adequate logging for debugging?
@@ -205,12 +251,14 @@ The analytics service is the core timing analysis engine. This review should exa
 - [ ] Is documentation accurate and up-to-date?
 
 #### Data Integrity
+
 - [ ] Are timestamps being preserved correctly through the pipeline?
 - [ ] Is RTP timestamp handling correct (especially around wraparound)?
 - [ ] Are phase measurements being unwrapped correctly?
 - [ ] Is data provenance being tracked (processing_version, etc.)?
 
 #### Missed Opportunities
+
 - [ ] Could calibration converge faster with better initialization?
 - [ ] Could discrimination be improved with additional features?
 - [ ] Could uncertainty estimates be more accurate?
@@ -260,11 +308,13 @@ tail -100 /var/lib/timestd/phase2/WWV_10MHz/discrimination/*.csv | grep -E "WWV|
 ### Success Criteria for Analytics Review
 
 **Minimum Viable Outcome:**
+
 - [ ] Identify top 5 potential issues or inefficiencies
 - [ ] Document any correctness concerns with evidence
 - [ ] Highlight missed optimization opportunities
 
 **Ideal Outcome:**
+
 - [ ] Fix any critical bugs found
 - [ ] Implement performance optimizations
 - [ ] Improve error handling and logging
@@ -275,7 +325,8 @@ tail -100 /var/lib/timestd/phase2/WWV_10MHz/discrimination/*.csv | grep -E "WWV|
 
 ## Current System State
 
-### Services Running 
+### Services Running
+
 ### Services Running ✅
 
 All services are operational with new watchdog support:
