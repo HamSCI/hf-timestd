@@ -97,36 +97,45 @@ echo ""
 # =============================================================================
 # Step 1: Check Prerequisites
 # =============================================================================
-log_step "Checking prerequisites..."
+log_info "Checking prerequisites..."
 
-check_command() {
-    if command -v "$1" &> /dev/null; then
-        log_info "  ✅ $1 found"
-        return 0
-    else
-        log_warn "  ❌ $1 not found"
-        return 1
-    fi
-}
+# Check for required commands
+MISSING_PREREQS=false
 
-PREREQ_OK=true
-
-check_command python3 || PREREQ_OK=false
-check_command pip3 || PREREQ_OK=false
-check_command node || log_warn "  ⚠️  node not found (Web UI will not work)"
-check_command npm || log_warn "  ⚠️  npm not found (Web UI will not work)"
-
-# Check Python version
-PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-if [[ "$(echo "$PYTHON_VERSION >= 3.10" | bc)" -eq 1 ]]; then
-    log_info "  ✅ Python $PYTHON_VERSION (>= 3.10 required)"
+if command -v python3 > /dev/null; then
+    log_info "  ✅ python3 found"
 else
-    log_error "  ❌ Python $PYTHON_VERSION (>= 3.10 required)"
-    PREREQ_OK=false
+    log_warn "  ❌ python3 not found"
+    MISSING_PREREQS=true
 fi
 
-if [[ "$PREREQ_OK" == "false" ]]; then
+if command -v pip3 > /dev/null; then
+    log_info "  ✅ pip3 found"
+else
+    log_warn "  ❌ pip3 not found"
+    MISSING_PREREQS=true
+fi
+
+# Check Python version
+PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
+PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+
+if [ "$PYTHON_MAJOR" -ge 3 ] && [ "$PYTHON_MINOR" -ge 10 ]; then
+    log_info "  ✅ Python $PYTHON_VERSION (>= 3.10 required)"
+else
+    log_error "  ❌ Python $PYTHON_VERSION found, but 3.10+ required"
+    MISSING_PREREQS=true
+fi
+
+if [ "$MISSING_PREREQS" = true ]; then
     log_error "Prerequisites not met. Please install missing packages."
+    echo ""
+    echo "On Debian/Ubuntu, run:"
+    echo "  sudo apt-get update"
+    echo "  sudo apt-get install python3 python3-pip python3-venv python3-dev"
+    echo "  sudo apt-get install avahi-utils hdf5-tools libhdf5-dev"
+    echo ""
     exit 1
 fi
 
