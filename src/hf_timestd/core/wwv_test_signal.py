@@ -106,7 +106,7 @@ class WWVTestSignalGenerator:
         Initialize test signal generator
         
         Args:
-            sample_rate: Sample rate in Hz (20000 default, 16000 for legacy)
+            sample_rate: Sample rate in Hz (24000 default, 16000 for legacy)
         """
         self.sample_rate = sample_rate
         self.dt = 1.0 / sample_rate
@@ -429,7 +429,7 @@ class WWVTestSignalDetector:
         Detect test signal in received IQ samples with full signal exploitation
         
         Args:
-            iq_samples: Complex IQ samples (full minute, ~1200000 samples @ 20kHz)
+            iq_samples: Complex IQ samples (full minute, ~1440000 samples @ 24kHz)
             minute_number: Minute of hour (0-59)
             sample_rate: Sample rate in Hz
             

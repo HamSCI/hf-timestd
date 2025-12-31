@@ -518,7 +518,7 @@ class ClockOffsetEngine:
             channel_name: Channel identifier
             frequency_hz: Center frequency
             receiver_grid: Receiver grid square (for propagation calculation)
-            sample_rate: Sample rate (default 20000)
+            sample_rate: Sample rate (default 24000)
             timing_calibrator: Optional TimingCalibrator for RTP-first timing
         """
         self.raw_buffer_dir = Path(raw_buffer_dir)

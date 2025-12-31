@@ -4,7 +4,7 @@ import pytest
 from hf_timestd.core.bpm_discriminator import BPMDiscriminator
 
 
-def _synthetic_bpm_minute_marker(sample_rate: int = 20000) -> np.ndarray:
+def _synthetic_bpm_minute_marker(sample_rate: int = 24000) -> np.ndarray:
     """
     Build a synthetic IQ buffer that includes a 300 ms, 1000 Hz minute marker
     followed by low-level noise. This exercises the marker detector end-to-end.
@@ -40,7 +40,7 @@ def _synthetic_bpm_minute_marker(sample_rate: int = 20000) -> np.ndarray:
 
 def test_detect_minute_marker_returns_expected_window():
     """Ensure the new minute marker detector finds the long tick near second zero."""
-    sample_rate = 20000
+    sample_rate = 24000
     iq_samples = _synthetic_bpm_minute_marker(sample_rate)
     discriminator = BPMDiscriminator(expected_delay_ms=40.0)
 

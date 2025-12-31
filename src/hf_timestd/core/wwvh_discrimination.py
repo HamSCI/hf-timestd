@@ -386,7 +386,7 @@ class WWVHDiscriminator:
             channel_name: Channel name for logging
             receiver_grid: Maidenhead grid square (e.g., "EM38ww") for geographic ToA prediction
             history_dir: Directory for persisting ToA history (optional)
-            sample_rate: Sample rate in Hz (20000 default, 16000 for legacy)
+            sample_rate: Sample rate in Hz (24000 default, 16000 for legacy)
         """
         self.channel_name = channel_name
         self.sample_rate = sample_rate

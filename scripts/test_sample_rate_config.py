@@ -29,7 +29,7 @@ def test_grape_config():
     config_20k = GrapeConfig(
         ssrc=10000000,
         frequency_hz=10e6,
-        sample_rate=20000,
+        sample_rate=24000,
         description="Test 20 kHz",
         output_dir=Path("/tmp"),
         station_config={},
@@ -38,7 +38,7 @@ def test_grape_config():
     )
     
     assert config_20k.samples_per_packet == 400, f"Expected 400, got {config_20k.samples_per_packet}"
-    assert config_20k.max_gap_samples == 1_200_000, f"Expected 1200000, got {config_20k.max_gap_samples}"
+    assert config_24k.max_gap_samples == 1_440_000, f"Expected 1440000, got {config_24k.max_gap_samples}"
     print(f"✅ 20 kHz @ 20ms: samples_per_packet={config_20k.samples_per_packet}, max_gap_samples={config_20k.max_gap_samples}")
     
     # Test 16 kHz with 20ms blocktime
@@ -85,7 +85,7 @@ def test_session_config():
     # Test with explicit values
     config_explicit = SessionConfig(
         ssrc=10000000,
-        sample_rate=20000,
+        sample_rate=24000,
         samples_per_packet=400,
         max_gap_samples=1_200_000
     )
@@ -96,12 +96,12 @@ def test_session_config():
     # Test with auto-calculation (no explicit values)
     config_auto = SessionConfig(
         ssrc=10000000,
-        sample_rate=20000,
+        sample_rate=24000,
         blocktime_ms=20.0,
         max_gap_seconds=60.0
     )
     assert config_auto.samples_per_packet == 400, f"Expected 400, got {config_auto.samples_per_packet}"
-    assert config_auto.max_gap_samples == 1_200_000, f"Expected 1200000, got {config_auto.max_gap_samples}"
+    assert config_auto.max_gap_samples == 1_440_000, f"Expected 1440000, got {config_auto.max_gap_samples}"
     print(f"✅ Auto-calculated: samples_per_packet={config_auto.samples_per_packet}, max_gap_samples={config_auto.max_gap_samples}")
     
     # Test 16 kHz auto-calculation
@@ -132,7 +132,8 @@ def test_decimation():
     # Check supported rates
     print(f"Supported rates: {list(SUPPORTED_INPUT_RATES.keys())}")
     
-    assert is_rate_supported(20000), "20 kHz should be supported"
+    assert is_rate_supported(24000), "24 kHz should be supported"
+    assert is_rate_supported(20000), "20 kHz should still be supported (legacy)"
     assert is_rate_supported(16000), "16 kHz should be supported"
     assert not is_rate_supported(24000), "24 kHz should not be supported (yet)"
     print("✅ Rate support checks passed")
@@ -140,7 +141,7 @@ def test_decimation():
     # Test 20 kHz decimation
     print("\nTesting 20 kHz decimation...")
     samples_20k = np.random.randn(1_200_000) + 1j * np.random.randn(1_200_000)  # 60 seconds
-    result_20k = decimate_for_upload(samples_20k.astype(np.complex64), input_rate=20000, output_rate=10)
+    result_24k = decimate_for_upload(samples_24k.astype(np.complex64), input_rate=24000, output_rate=10)
     assert result_20k is not None, "Decimation failed"
     assert len(result_20k) == 600, f"Expected 600 samples, got {len(result_20k)}"
     print(f"✅ 20 kHz: {len(samples_20k)} samples → {len(result_20k)} samples (factor 2000)")
@@ -210,7 +211,7 @@ def test_packet_resequencer():
     
     # Test with default
     reseq_default = PacketResequencer(samples_per_packet=400)
-    assert reseq_default.max_gap_samples == 1_200_000, f"Expected default 1200000, got {reseq_default.max_gap_samples}"
+    assert reseq_default.max_gap_samples == 1_440_000, f"Expected default 1440000, got {reseq_default.max_gap_samples}"
     print(f"✅ Default max_gap_samples: {reseq_default.max_gap_samples}")
     
     # Test with explicit value

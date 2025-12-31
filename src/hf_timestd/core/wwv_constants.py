@@ -121,7 +121,7 @@ from typing import Dict, Set, Optional
 # SAMPLE RATE CONSTANTS
 # =============================================================================
 
-SAMPLE_RATE_FULL = 20000  # Hz - Full rate from radiod RTP stream
+SAMPLE_RATE_FULL = 24000  # Hz - Full rate from radiod RTP stream (24 kHz for integer WWVH cycles)
 SAMPLE_RATE_LEGACY = 16000  # Hz - Legacy 16 kHz mode (deprecated)
 
 # =============================================================================

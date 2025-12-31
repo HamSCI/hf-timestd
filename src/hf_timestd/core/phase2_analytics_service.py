@@ -182,7 +182,7 @@ class Phase2AnalyticsService:
             output_dir: Output directory for Phase 2 products
             channel_name: Channel identifier
             frequency_hz: Center frequency in Hz
-            sample_rate: Sample rate (default 20000)
+            sample_rate: Sample rate (default 24000)
             receiver_grid: Receiver grid square for propagation calculations
             station_config: Station metadata
             poll_interval: Seconds between polling for new data
