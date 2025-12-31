@@ -1749,6 +1749,113 @@ class MultiBroadcastFusion:
         
         return max(kalman_uncertainty, min_uncertainty)
     
+    def _cross_validate_stations(
+        self,
+        measurements: List[BroadcastMeasurement],
+        calibrated: List[float]
+    ) -> Tuple[bool, str, int]:
+        """
+        Cross-validate measurements from different stations.
+        
+        Detects systematic errors in any single station by requiring agreement
+        between multiple stations. If only one station is available, validation
+        passes (no cross-check possible). If multiple stations disagree by >200µs,
+        flags a potential systematic error.
+        
+        RATIONALE:
+        ----------
+        Different stations (WWV, WWVH, CHU, BPM) should agree on UTC time within
+        ±200µs after accounting for:
+        - Propagation delays (already corrected in D_clock)
+        - Calibration offsets (already applied)
+        - Ionospheric variations (~50-100µs typical)
+        
+        Large disagreements (>200µs) indicate:
+        - Systematic error in one station's propagation model
+        - Discrimination error (wrong station identified)
+        - Frame slip or decoder error
+        - Ionospheric storm (rare, but possible)
+        
+        STRATEGY:
+        ---------
+        1. Group measurements by station
+        2. Calculate mean D_clock for each station (using calibrated values)
+        3. Check if all station means agree within ±200µs
+        4. If disagreement >200µs, identify outlier station
+        5. Return validation status and outlier count
+        
+        Args:
+            measurements: List of broadcast measurements
+            calibrated: Calibrated D_clock values (same length as measurements)
+            
+        Returns:
+            Tuple of (is_valid, reason, n_outliers):
+                - is_valid: True if stations agree or only 1 station
+                - reason: Explanation of validation result
+                - n_outliers: Number of outlier stations detected
+        """
+        # Group by station (exclude GLOBAL_DIFF synthetic measurements)
+        station_groups = defaultdict(list)
+        for m, cal_val in zip(measurements, calibrated):
+            if m.station != 'GLOBAL_DIFF':
+                station_groups[m.station].append(cal_val)
+        
+        # Need at least 2 stations for cross-validation
+        if len(station_groups) < 2:
+            return True, f"Only {len(station_groups)} station (no cross-check possible)", 0
+        
+        # Calculate mean D_clock for each station
+        station_means = {}
+        for station, values in station_groups.items():
+            station_means[station] = np.mean(values)
+        
+        # Check agreement between all station pairs
+        stations = list(station_means.keys())
+        max_disagreement = 0.0
+        disagreeing_pair = None
+        
+        for i in range(len(stations)):
+            for j in range(i + 1, len(stations)):
+                station_a = stations[i]
+                station_b = stations[j]
+                disagreement = abs(station_means[station_a] - station_means[station_b])
+                
+                if disagreement > max_disagreement:
+                    max_disagreement = disagreement
+                    disagreeing_pair = (station_a, station_b)
+        
+        # Threshold: ±200µs = 0.2ms
+        CROSS_STATION_THRESHOLD_MS = 0.2
+        
+        if max_disagreement > CROSS_STATION_THRESHOLD_MS:
+            # Stations disagree - identify outlier
+            # The outlier is the station furthest from the median
+            all_means = list(station_means.values())
+            median_d_clock = np.median(all_means)
+            
+            # Find station(s) furthest from median
+            outliers = []
+            for station, mean_val in station_means.items():
+                if abs(mean_val - median_d_clock) > CROSS_STATION_THRESHOLD_MS:
+                    outliers.append(station)
+            
+            reason = (f"Cross-station disagreement: {max_disagreement:.3f}ms "
+                     f"(threshold: {CROSS_STATION_THRESHOLD_MS:.3f}ms). "
+                     f"Disagreeing pair: {disagreeing_pair[0]} vs {disagreeing_pair[1]}. "
+                     f"Outlier stations: {', '.join(outliers)}")
+            
+            logger.warning(f"Cross-station validation FAILED: {reason}")
+            logger.warning(f"  Station means: {', '.join([f'{s}={v:+.3f}ms' for s, v in station_means.items()])}")
+            
+            return False, reason, len(outliers)
+        
+        # All stations agree
+        reason = (f"{len(station_groups)} stations agree within ±{CROSS_STATION_THRESHOLD_MS:.3f}ms "
+                 f"(max disagreement: {max_disagreement:.3f}ms)")
+        logger.debug(f"Cross-station validation OK: {reason}")
+        
+        return True, reason, 0
+    
     def fuse(self, lookback_minutes: int = 10) -> Optional[FusedResult]:
         """
         Perform multi-broadcast fusion.
@@ -1969,6 +2076,21 @@ class MultiBroadcastFusion:
         # Apply calibration
         calibrated = self._apply_calibration(measurements)
         
+        # ====================================================================
+        # CROSS-STATION VALIDATION (Priority 1C - 2025-12-31)
+        # ====================================================================
+        # Validate that different stations agree on UTC time within ±200µs.
+        # This detects systematic errors in any single station.
+        
+        cross_valid, cross_reason, n_cross_outliers = self._cross_validate_stations(
+            measurements, calibrated
+        )
+        
+        if not cross_valid:
+            logger.warning(f"Cross-station validation failed: {cross_reason}")
+            # Note: We don't reject the fusion, but flag it in the result
+            # The consistency_flag will be set to reflect this issue
+        
         # Weighted mean of calibrated values
         w = np.array(weights)
         d = np.array(calibrated)
@@ -2089,8 +2211,14 @@ class MultiBroadcastFusion:
             station_means['BPM'] = np.mean(bpm_cal)
         inter_station_spread = (max(station_means.values()) - min(station_means.values())) if len(station_means) > 1 else None
         
+        
         # Consistency flag logic
-        consistency_flag = 'OK'
+        # Priority: Cross-station > Intra-station
+        if not cross_valid:
+            consistency_flag = 'CROSS_STATION_DISAGREE'
+        else:
+            consistency_flag = 'OK'
+        
         INTRA_THRESHOLD_MS = 5.0  # Same-station should agree within 5ms (ionospheric limit)
         
         # Check for intra-station anomalies (same station, different frequencies disagree)
