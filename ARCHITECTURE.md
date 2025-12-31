@@ -1,9 +1,9 @@
-# HF Time Standard Analysis - System Architecture
+# HF Time Standard - System Architecture
 
-**Last Updated:** December 16, 2025  
+**Last Updated:** December 31, 2025  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V4.0 (Two-Phase Pipeline)
+**Version:** V5.0 (HDF5-Native Pipeline)
 
 ---
 
@@ -17,10 +17,10 @@ This document explains **WHY** the hf-timestd system is designed the way it is. 
 
 1. [Executive Summary](#executive-summary)
 2. [Design Philosophy](#design-philosophy)
-3. [Two-Phase Architecture](#two-phase-architecture)
+3. [Three-Phase Architecture](#three-phase-architecture)
 4. [ka9q-python Integration](#ka9q-python-integration)
 5. [Key Design Decisions](#key-design-decisions)
-6. [Data Flow](#data-flow)
+6. [Data Flow (HDF5-Native)](#data-flow-hdf5-native)
 7. [Timing Architecture](#timing-architecture)
 8. [WWV/WWVH Discrimination](#wwvwwvh-discrimination)
 9. [Directory Structure](#directory-structure)
@@ -40,8 +40,8 @@ Extract precise timing measurements from HF time standard broadcasts:
 
 1. **D_clock extraction** - System clock offset relative to UTC(NIST)
 2. **WWV/WWVH discrimination** on 4 shared frequencies (2.5, 5, 10, 15 MHz)
-3. **Propagation mode estimation** - Ionospheric hop identification
-4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination
+3. **Propagation mode estimation** - Ionospheric hop identification (Physics-Informed)
+4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination (HDF5 SWMR)
 
 ### Channel Configuration (17 broadcasts)
 
@@ -65,10 +65,10 @@ Extract precise timing measurements from HF time standard broadcasts:
 ### 1. Separation of Concerns
 
 ```
-Phase 1 (Stable)     →     Phase 2 (Evolving)
-  Raw Recording              Timing Analysis
-  Changes <5/year            Can restart freely
-  Immutable archive          Derived products
+Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
+  Raw Recording              Timing Analysis              Global Synthesis
+  Immutable archive          Derived products             System discipline
+  Code changes <5/yr         Can restart freely           HDF5 SWMR consumer
 ```
 
 **Why?**
@@ -99,20 +99,20 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)
 - **Compression:** Optional zstd/lz4 compression (2-3x reduction)
 - **Metadata:** JSON sidecars preserve RTP timestamps and quality metrics
 
-### 4. Independent Discrimination Methods
+### 4. HDF5-Native Pipeline (v5.0)
 
-**Decision:** Eight voting methods + cross-validation for WWV/WWVH discrimination.
+**Decision:** Use HDF5 with Single Writer Multiple Reader (SWMR) for all inter-service data exchange (Phase 2 -> Phase 3).
 
 **Why?**
 
-- **Robustness:** If one method fails, others still work
-- **Confidence:** Multiple confirmations increase reliability
-- **Provenance:** Clear data lineage for each result
-- **Scientific Rigor:** Document how conclusions reached
+- **Performance:** Binary format is 10x-100x faster than CSV parsing
+- **Low Latency:** SWMR allows Fusion to read data milliseconds after Analytics writes it
+- **Consistency:** Atomic updates ensure no partial reads
+- **Structure:** Hierarchical data storage matches the signal complexity
 
 ---
 
-## Two-Phase Architecture
+## Three-Phase Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -144,42 +144,40 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)
 │    2. Time_snap Management (GPS-quality timestamp anchors)     │
 │    3. WWV/WWVH Discrimination (8 voting methods)               │
 │    4. D_clock Computation (propagation mode estimation)        │
-│    5. Multi-Broadcast Fusion (Kalman filter convergence)       │
 │                                                                 │
-│  Outputs:                                                       │
-│  • clock_offset/         D_clock time series (PRIMARY OUTPUT)  │
-│  • discrimination/       Station identification results        │
-│  • tone_detections/      1000/1200 Hz detection results        │
-│  • bcd_correlation/      100 Hz subcarrier analysis            │
-│  • carrier_analysis/     Amplitude, phase, Doppler             │
-│  • status/               Service state for web UI              │
+│  Outputs (HDF5 SWMR):                                           │
+│  • L1A: Tone Detections (feature extraction)                   │
+│  • L2:  Timing Measurements (fully solved D_clock)             │
+│  • Metadata: HDF5 attributes (processing version, etc.)        │
 │                                                                 │
 │  Responsibilities:                                              │
 │  ✅ All derived timing products                                 │
 │  ✅ Can restart/update independently                            │
 │  ✅ Processes backlog automatically                             │
-│  ✅ Chrony SHM integration for system clock discipline          │
+│  ✅ SWMR Writer for Fusion consumption                          │
 └─────────────────────────────────────────────────────────────────┘
-                              ↓
+                              ↓ (HDF5 SWMR)
 ┌─────────────────────────────────────────────────────────────────┐
 │                    PHASE 3: FUSION SERVICE                      │
 │                (Multi-Broadcast UTC Alignment)                  │
 │                                                                 │
-│  Input:  CSV files from Phase 2 (clock offsets)                 │
+│  Input:  L2 HDF5 Measurements from Phase 2 (all channels)       │
 │  Process:                                                       │
 │    1. Weighted Fusion (SNR, Quality, Mode)                      │
-│    2. Kalman Filtering (Convergence to UTC)                     │
+│    2. Physics Verification (IONEX VTEC + IRI-2020)              │
 │    3. Global Differential Solve (Cross-frequency physics)       │
+│    4. Kalman Filtering (Convergence to UTC)                     │
 │                                                                 │
 │  Outputs:                                                       │
 │  • Chrony SHM (System Clock Discipline)                         │
-│  • phase2/fusion/fused_d_clock.csv                              │
-│  • state/broadcast_calibration.json (Feedback to Phase 2)       │
+│  • L3: Fused Timing HDF5 (phase2/fusion/)                       │
+│  • calibration.json (System state learning)                     │
 │                                                                 │
 │  Responsibilities:                                              │
 │  ✅ Single source of truth for system clock                      │
 │  ✅ Cross-channel consistency enforcement                       │
-│  ✅ Optional calibration feedback to analytics                  │
+│  ✅ Real-time Allan Deviation tracking                          │
+│  ✅ Feeds Dashboard via FastAPI                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -209,84 +207,42 @@ The recording layer uses **ka9q-python** directly for all RTP reception and chan
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| `core_recorder.py` | Top-level orchestration using RadiodControl |
-| `stream_recorder_v2.py` | Per-channel recording using RadiodStream |
-| `pipeline_orchestrator.py` | Phase 1/2 coordination |
-| `binary_archive_writer.py` | Raw binary + JSON metadata output |
-| `phase2_analytics_service.py` | Continuous Phase 2 processing daemon |
-| `phase2_temporal_engine.py` | Core timing analysis algorithms |
-
 ---
 
 ## Key Design Decisions
 
-### Decision 1: Why Binary Archives (not NPZ)?
+### Decision 1: HDF5 vs CSV (v5.0 Update)
 
-**Binary + JSON Advantages:**
+**Decision:** Migrate entire Phase 2 → Phase 3 pipeline to HDF5.
 
-- **No Dependencies:** Pure Python, no numpy required for reading
-- **Memory Mapping:** Direct mmap access for large files
-- **Streaming:** Can write continuously without buffering
-- **Compression:** Optional zstd/lz4 at file level
-- **Metadata Separation:** JSON sidecars are human-readable
+**Advantages:**
 
-### Decision 2: Why Two Phases (not Three)?
+- **SWMR:** Allows Fusion to read data *while* Analytics is still writing it, enabling near-real-time updates.
+- **Precision:** Binary float64 storage eliminates ASCII truncation errors.
+- **Metadata:** Attributes store schema versions, processing flags, and processing time inside the file.
+- **Compression:** HDF5 internal compression reduces disk usage vs CSV.
 
-**Phase 1 + Phase 2 is sufficient for hf-timestd:**
+### Decision 2: Why Two Service Phases?
 
-- Phase 1: Immutable scientific record (raw IQ)
-- Phase 2: All timing analysis and derived products
+**Phase 1 isolation ensures raw data safety.**
 
-**What's NOT in hf-timestd:**
+- Phase 1 (Recording) is simple, stable, and almost never changes.
+- Phase 2 (Analytics) contains complex signal processing that evolves frequently.
+- By separating them, we can crash/restart/update Analytics without ever losing a raw RF sample.
 
-- Decimation to 10 Hz (not needed for timing)
-- Digital RF format conversion
-- PSWS/HamSCI uploads
-- Spectrogram generation
+### Decision 3: Global Differential Fusion
 
-These belong in separate projects if needed.
+**Problem:** Individual ionospheric hops are noisy (±1ms).
+**Solution:** A "Global Solve" fusion engine that sees all 9 channels simultaneously.
 
-### Decision 3: Why Separate Services?
-
-**Phase 1 Isolation:**
-
-- ✅ **Stability:** Minimal code changes (rock-solid)
-- ✅ **No Data Loss:** Phase 2 can crash, Phase 1 keeps recording
-- ✅ **Simple:** ~300 lines, minimal dependencies
-
-**Phase 2 Independence:**
-
-- ✅ **Evolution:** Update algorithms without downtime
-- ✅ **Testing:** Replay archived data for validation
-- ✅ **Reprocessing:** Improve historical analysis
-- ✅ **Restart Safe:** Processes backlog automatically
-
-### Decision 4: Why 8 Discrimination Methods?
-
-**Problem:** Single method can fail due to propagation conditions.
-
-**Solution:** Multiple independent analyses with weighted voting.
-
-**Voting Methods:**
-
-1. Test Signal Detection (minutes :08, :44) - weight=15
-2. 440 Hz Station ID (minutes 1, 2) - weight=10
-3. BCD Amplitude Ratio (100 Hz subcarrier) - weight=2-10
-4. 1000/1200 Hz Timing Tone Power Ratio - weight=1-10
-5. Tick SNR Average (59-tick coherent integration) - weight=5
-6. 500/600 Hz Ground Truth (12 exclusive min/hour) - weight=10-15
-7. Doppler Stability (std ratio, independent of power) - weight=2
-8. Timing Coherence (Test + BCD ToA agreement) - weight=3
+- It can recognize that if *all* 10 MHz signals shifted +2ms, it's likely a global ionospheric event, not a clock error.
+- It uses physics-based constraints (dispersion relation) to verify channel consistency.
 
 ---
 
-## Data Flow
+## Data Flow (HDF5-Native)
 
-### Real-Time Recording
+### Real-Time Pipeline
 
 ```
 ka9q-radio RTP
@@ -297,20 +253,15 @@ raw_buffer/{CHANNEL}/{YYYYMMDD}/{minute}.bin
 raw_buffer/{CHANNEL}/{YYYYMMDD}/{minute}.json
      ↓
 Phase 2: Analytics Service (polls for new files)
-     ↓ (processes)
-├─→ phase2/{CHANNEL}/clock_offset/clock_offset_series.csv
-├─→ phase2/{CHANNEL}/discrimination/{date}.csv
-├─→ phase2/{CHANNEL}/tone_detections/{date}.csv
-├─→ phase2/{CHANNEL}/bcd_correlation/{date}.csv
-└─→ phase2/{CHANNEL}/status/analytics-status.json
-     ↓
-├─→ phase2/{CHANNEL}/status/analytics-status.json
-           ↓
-Fusion Service (polls for new CSVs)
-           ↓
+     ↓ (HDF5 Writer in SWMR Mode)
+├─→ phase2/{CHANNEL}/tone_detections/{date}.h5 (L1A)
+└─→ phase2/{CHANNEL}/timing_measurements/{date}.h5 (L2)
+     ↓ (SWMR Read)
+Phase 3: Fusion Service
+     ↓ (Kalman Filter + Physics Model)
 ├─→ Chrony SHM (system clock discipline)
-└─→ phase2/fusion/fused_d_clock.csv
-└─→ Web UI (monitoring dashboard)
+├─→ phase2/fusion/fusion_timing_{date}.h5 (L3)
+└─→ phase2/fusion/fused_d_clock.csv (Legacy UI Support)
 ```
 
 ### Web UI Visualization
@@ -318,10 +269,10 @@ Fusion Service (polls for new CSVs)
 ```
 Web Browser
      ↓
-Node.js Monitoring Server
-     ↓ (reads CSVs + status)
-├─→ phase2/{CHANNEL}/clock_offset/*.csv
-├─→ phase2/{CHANNEL}/discrimination/*.csv
+FastAPI Monitoring Server (Python)
+     ↓ (reads HDF5 + Status JSON)
+├─→ phase2/{CHANNEL}/timing_measurements/*.h5
+├─→ phase2/fusion/fusion_timing_*.h5
 └─→ phase2/{CHANNEL}/status/*.json
      ↓
 JSON Response → Chart.js plots
@@ -331,101 +282,33 @@ JSON Response → Chart.js plots
 
 ## Timing Architecture
 
-### GPSDO-First Calibration Philosophy
+### Physics-Informed Propagation
 
-**Core Principle:** The GPSDO-disciplined RTP timestamps provide a stable, high-precision timing foundation.
+We don't just "guess" the path; we model it using a tiered hierarchy of physics models.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    GPSDO-FIRST TIMING CALIBRATION               │
-│                                                                 │
-│  LAYER 1: GPSDO Foundation (±0.1 PPM, ~100 ns/sec drift)       │
-│  ├─ RTP timestamps from GPS-disciplined ka9q-radio             │
-│  ├─ All 9 channels share the same master clock                 │
-│  └─ Sample count integrity: 1,200,000 samples = 60 seconds     │
-│                              ↓                                  │
-│  LAYER 2: Tone Detection (±1 ms initial, ±50 µs refined)       │
-│  ├─ WWV/WWVH 1000/1200 Hz tones at second 0                    │
-│  ├─ CHU 1000 Hz tone at second 0 (500ms duration)              │
-│  ├─ Per-second tick confirmations (59 per minute)              │
-│  └─ CHU FSK timing (seconds 31-39) for verification            │
-│                              ↓                                  │
-│  LAYER 3: Station-Level Calibration                            │
-│  ├─ Each station (WWV, WWVH, CHU) has ONE atomic clock         │
-│  ├─ Station mean is ground truth; frequency variance = prop.   │
-│  └─ Calibration offset brings station mean to UTC(NIST) = 0    │
-│                              ↓                                  │
-│  LAYER 4: Multi-Broadcast Fusion (±0.5 ms)                     │
-│  ├─ Weighted average across broadcasts                         │
-│  ├─ Kalman filter for convergence and anomaly detection        │
-│  └─ Output: Fused D_clock → Chrony SHM → System clock          │
-└─────────────────────────────────────────────────────────────────┘
-```
+#### Tier 1: PyLap Raytracing (Experimental)
 
-### Cross-Frequency Global Differential Fusion (Physics-Verified Constraint)
+- Full 3D raytracing using the PHaRLAP engine.
+- Most accurate, most computationally expensive.
 
-**Decision:** A cross-frequency physics solve is performed inside `core/multi_broadcast_fusion.py` using `GlobalDifferentialSolver`.
+#### Tier 1.5: IONEX VTEC (Production)
 
-**Why?** Phase 2 is inherently per-channel/per-frequency. The fusion layer is the first place where measurements from *all* channels coexist, so it is the natural point to run a global differential solve that can combine observations from:
+- **Source:** IGS Global Ionosphere Maps (NASA CDDIS).
+- **Process:** Calculates ionospheric pierce points along the great circle path.
+- **Integration:** Interpolates VTEC map to determine precise Total Electron Content.
+- **Result:** Provides the most accurate group delay estimation available without full reanalysis.
 
-- Same frequency / different station (WWV vs WWVH)
-- Different frequency / same station (dispersion constraints)
-- Different frequency / different station (global consistency)
+#### Tier 2: IRI-2020 + Geometric
 
-**Input source:** The global solve is built from per-channel `tone_detections/*_tones_YYYYMMDD.csv` files. For each observation we reconstruct a minute-relative arrival sample count:
+- Uses the International Reference Ionosphere (IRI-2020) model to estimate layer heights (hmF2, hmE) and monthly average parameters.
+- Used as a fallback or baseline for IONEX.
 
-```
-arrival_rtp := timing_ms * sample_rate
-minute_boundary_rtp := 0
-```
+#### Tier 3: Empirical/Geometric
 
-This is sufficient for differential solving because the absolute anchor cancels in pairwise differences, assuming all channels reference the same system clock minute boundary.
-
-**Latest common minute selection:** To avoid mixing observations across changing ionosphere, the global solver uses the most recent `minute_boundary` that exists across all channels with tone data in the lookback window (intersection). If no intersection exists, it logs and falls back to the latest available minute.
-
-**CHU inclusion:** `phase2_analytics_service.py` writes CHU fields (`chu_detected`, `chu_snr_db`, `chu_timing_ms`) into new tone-detections CSVs. When present, CHU enables cross-agency triangulation (NIST + NRC) constraints.
-
-**Fusion integration (trusted synthetic measurement):** When the global solve returns `verified=True`, fusion injects a synthetic measurement:
-
-- `station = GLOBAL_DIFF`
-- Large forced weight during fusion (dominates the weighted mean)
-- Kalman measurement uncertainty floor reduced (acts like a trusted constraint)
-
-This provides a physics-verified override path without rewriting Phase 2 per-channel outputs.
-
-**Observability:** The fusion layer logs global solve decision context:
-
-- Selected target minute, station/frequency mix, and any channels missing data at the target minute
-- Explicit log when NIST+NRC triangulation is active
-- Global solve result summary (offset/confidence/consistency)
-- Synthetic injection parameters
-
-**Fused output columns:** `phase2/fusion/fused_d_clock.csv` includes:
-
-- `global_solve_verified`
-- `global_solve_consistency_ms`
-- `global_solve_n_obs`
+- Simple geometric calculation based on virtual height assumptions.
+- Fallback of last resort.
 
 ### The D_clock Equation
-
-```
-T_arrival = T_emission + T_propagation + D_clock
-
-Where:
-  T_arrival     = Observed tone arrival time (from matched filter)
-  T_emission    = 0 (tones transmitted at exact second boundary)
-  T_propagation = HF signal propagation delay (ionospheric path)
-  D_clock       = System clock offset (THE OUTPUT WE WANT)
-
-Rearranging:
-  D_clock = T_arrival - T_propagation
-```
-
-### Primary Time Standard (HF Time Transfer)
-
-By back-calculating emission time from GPS-locked arrival time and identified propagation mode, we transform from a **passive listener** into a **primary time standard** that verifies UTC(NIST).
-
-**The Equation:**
 
 ```
 T_emit = T_arrival - (τ_geo + τ_iono + τ_mode)
@@ -435,17 +318,8 @@ T_emit = T_arrival - (τ_geo + τ_iono + τ_mode)
 |-----------|-------------|
 | T_arrival | GPS-disciplined RTP timestamp |
 | τ_geo | Great-circle speed-of-light delay |
-| τ_iono | Ionospheric group delay (frequency-dependent) |
+| τ_iono | Ionospheric group delay (derived from IONEX/IRI) |
 | τ_mode | Extra path from N ionospheric hops |
-
-**Mode Identification:**
-
-| Mode | Typical Delay | Uncertainty |
-|------|---------------|-------------|
-| 1-hop E | 3.82 ms | ±0.20 ms |
-| 1-hop F2 | 4.26 ms | ±0.17 ms |
-| 2-hop F2 | 5.51 ms | ±0.33 ms |
-| 3-hop F2 | ~7.0 ms | ±0.50 ms |
 
 ---
 
@@ -453,66 +327,38 @@ T_emit = T_arrival - (τ_geo + τ_iono + τ_mode)
 
 ### The Challenge
 
-On 4 shared frequencies (2.5, 5, 10, 15 MHz), WWV and WWVH transmit simultaneously. Their signals mix in the ionosphere, arriving at different times and strengths. Separating these signals is essential for accurate timing.
+On shared frequencies (2.5, 5, 10, 15 MHz), WWV and WWVH transmit simultaneously. Separation is critical for timing.
 
-### Discrimination Methods
+### Multi-Method Discriminator
 
-#### Method 1: BCD Correlation (PRIMARY)
+We use a **Weighted Voting** system combining:
 
-Cross-correlate 100 Hz BCD time code to find two peaks representing the two stations.
-
-**Outputs:**
-
-- WWV/WWVH amplitudes from dual-peak detection
-- Differential delay (ms) - propagation path difference
-- Geographic peak assignment using receiver location
-
-#### Method 2: Timing Tones (1000/1200 Hz)
-
-Power ratio of WWV's 1000 Hz vs WWVH's 1200 Hz marker tones.
-
-#### Method 3: 440/500/600 Hz Ground Truth
-
-Detect station-identifying tones from the broadcast schedule:
-
-- Minute 1: WWVH broadcasts 440 Hz
-- Minute 2: WWV broadcasts 440 Hz
-- 500/600 Hz exclusive minutes provide 100% certain identification
-
-#### Method 4: Test Signal Detection
-
-Detect WWV/WWVH test signals at minutes :08 and :44.
-
-#### Method 5: Weighted Voting
-
-Combine all methods with minute-specific weighting for final determination.
+1. **BCD Correlation (Primary):** Cross-correlate 100 Hz subcarrier to find distinct station peaks.
+2. **Timing Tones:** Power ratio of 1000 Hz (WWV) vs 1200 Hz (WWVH).
+3. **Station Identifiers:** Detection of 440 Hz tones (min 1/2) or 500/600 Hz tones (min 29/30/45).
+4. **Test Signals:** Detection of scheduled test tones (min 08/44).
 
 ---
 
 ## Directory Structure
 
-See `DIRECTORY_STRUCTURE.md` for complete specification.
-
-**Key Principles:**
-
-- ✅ Use `TimeStdPaths` API for all path operations
-- ✅ Consistent naming: `{CHANNEL}_{METHOD}_YYYYMMDD.csv`
-- ✅ Mode-aware (test vs production)
-
-**Summary:**
+**Key Changes in V5.0:** Usage of `phase2` HDF5 subdirectories.
 
 ```
 {data_root}/
 ├── raw_buffer/{CHANNEL}/{YYYYMMDD}/   # Phase 1: Binary IQ + JSON
 │   ├── {minute}.bin[.zst|.lz4]
 │   └── {minute}.json
-├── phase2/{CHANNEL}/                   # Phase 2: Analytics outputs
-│   ├── clock_offset/                   # D_clock time series
-│   ├── discrimination/                 # Station identification
-│   ├── tone_detections/                # 1000/1200 Hz results
-│   ├── bcd_correlation/                # BCD analysis
-│   ├── carrier_analysis/               # Amplitude/phase/Doppler
-│   └── status/                         # Service state
+├── phase2/{CHANNEL}/                   # Phase 2: Analytics HDF5
+│   ├── timing_measurements/            # L2 HDF5 files (Primary Output)
+│   ├── tone_detections/                # L1A HDF5 files
+│   ├── clock_offset/                   # Legacy CSV (Deprecated)
+│   ├── discrimination/                 # Legacy CSV (Deprecated)
+│   └── status/                         # Service state JSON
+├── phase2/fusion/                      # Phase 3: Fusion Output
+│   ├── fusion_timing_{date}.h5         # L3 HDF5
+│   ├── fused_d_clock.csv               # Quick-look CSV
+│   └── tec_estimates.csv               # Science product
 └── state/                              # Global state files
 ```
 
@@ -527,15 +373,13 @@ See `DIRECTORY_STRUCTURE.md` for complete specification.
 | `timestd-core-recorder.service` | Phase 1: RTP → raw_buffer |
 | `timestd-analytics.service` | Phase 2: Timing analysis (all channels) |
 | `timestd-fusion.service` | Phase 3: Multi-broadcast fusion & Chrony feed |
-| `timestd-web-ui.service` | Web monitoring UI |
+| `timestd-web-ui-fastapi.service` | Web monitoring UI (FastAPI) |
+| `timestd-science-aggregator.service` | Background science product generation |
 
-### Start Order
+### Resilience
 
-1. **Core Recorder** - Archive data immediately
-2. **Analytics Service** - Process archives with polling
-3. **Web UI** - Dashboard access (optional)
-
-All services are independent. Analytics processes backlog if started late.
+- **Watchdogs:** All Python services integrate `systemd-python` to send heartbeat `WATCHDOG=1` notifications. If a service hangs, systemd restarts it automatically.
+- **Alerting:** Failures trigger email alerts via `OnFailure` handlers.
 
 ---
 
@@ -543,52 +387,13 @@ All services are independent. Analytics processes backlog if started late.
 
 ### Disk Usage
 
-**Per Channel (24 hours):**
+- **Raw Buffer:** ~2-3 GB/day/channel
+- **HDF5:** ~50-100 MB/day (significantly larger than CSV, but much richer data)
 
-- raw_buffer (20 kHz): ~2-3 GB/day (with compression)
-- Phase 2 CSVs: ~5 MB/day (all outputs combined)
+### Failure Recovery
 
-**Total (9 channels):** ~20-30 GB/day
-
-### Reliability Design
-
-**Phase 1 (Core Recorder):**
-
-- ✅ Minimal dependencies
-- ✅ Conservative error handling
-- ✅ Systemd restart on failure
-
-**Phase 2 (Analytics):**
-
-- ✅ Aggressive retry logic
-- ✅ Processes backlog on restart
-- ✅ Can reprocess historical data
-- ✅ Independent per channel
-
----
-
-## Failure Recovery
-
-### Phase 1 Crash
-
-**Impact:** Missing minutes in raw_buffer.
-
-**Recovery:**
-
-1. Systemd restarts service automatically
-2. Gap minutes lost (can't recreate RTP stream)
-3. Analytics continues with available data
-
-### Phase 2 Crash
-
-**Impact:** Backlog of unprocessed files.
-
-**Recovery:**
-
-1. Systemd restarts service
-2. Service detects backlog automatically
-3. Processes all unprocessed files
-4. Catches up to real-time
+- **Crash Safety:** Phase 1 uses atomic writes. Phase 2/3 can restart and process backlog.
+- **Backfill:** If Analytics is down for an hour, it will process the raw buffer backlog upon restart until caught up.
 
 ---
 
@@ -601,21 +406,4 @@ All services are independent. Analytics processes backlog if started late.
 
 ---
 
-## Design Principles Summary
-
-1. **Separation of Concerns:** Phase 1 stable, Phase 2 evolving
-2. **RTP Primary:** Wall clock derived, never stretched
-3. **Binary Archives:** Enable reprocessability, no dependencies
-4. **Independent Methods:** Robust discrimination via weighted voting
-5. **Scientific Integrity:** Complete data capture, clear provenance
-6. **Reliability:** Independent services, automatic recovery
-
----
-
-**For detailed implementation, see:**
-
-- Path management: `src/hf_timestd/paths.py`
-- Discrimination: `src/hf_timestd/core/wwvh_discrimination.py`
-- Tone detection: `src/hf_timestd/core/tone_detector.py`
-- Analytics service: `src/hf_timestd/core/phase2_analytics_service.py`
-- Temporal engine: `src/hf_timestd/core/phase2_temporal_engine.py`
+**Last Updated:** December 31, 2025

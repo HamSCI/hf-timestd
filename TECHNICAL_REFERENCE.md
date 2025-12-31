@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** December 30, 2025
+**Last Updated:** December 31, 2025
 
 ---
 
@@ -17,77 +17,137 @@
 
 **Data products generated**:
 
-1. **20 kHz DRF archives** - Phase 1 immutable raw archive (`raw_archive/{CHANNEL}/`)
-2. **Phase 2 analytics** - D_clock, discrimination, carrier analysis (`phase2/{CHANNEL}/`)
-3. **10 Hz decimated data** - Phase 3 carrier time series (`products/{CHANNEL}/decimated/`)
-4. **Spectrograms** - Phase 3 visualization with solar zenith (`products/{CHANNEL}/spectrograms/`)
-5. **Timing metrics** - D_clock convergence, propagation mode identification
+1. **20 kHz Digital RF (HDF5)** - Phase 1 immutable raw archive (`raw_archive/{CHANNEL}/`)
+2. **Phase 2 Analytics (HDF5)** - L1 Tone Detections & L2 Timing Measurements (`phase2/{CHANNEL}/`)
+3. **Phase 3 Fusion (HDF5)** - L3 Fused Timing & Global Science Products (`phase2/fusion/`)
+4. **Spectrograms** - Visualizations with solar zenith (`products/{CHANNEL}/spectrograms/`)
 
 **Goal**: Archive raw 20 kHz IQ (Phase 1), perform timing analysis (Phase 2), generate derived products (Phase 3) for PSWS upload, provide WWV/WWVH discrimination on 4 shared frequencies.
 
 ---
 
-## System Architecture
+## System Architecture: The Six Services
 
-### Three-Service Design (V3.14 - Remediation & Feedback)
+The system is composed of six independent systemd services, each with a specific responsibility in the data pipeline.
 
-```
-Core Recorder (core_recorder_v2.py)
-├─ Uses ka9q-python RadiodStream for RTP reception
-├─ Uses ka9q-python RadiodControl for channel management
-├─ Anti-hijacking: only modifies channels with our multicast destination
-├─ StreamRecorderV2 per channel → PipelineOrchestrator
-└─ Binary archive writing (1,200,000 samples/minute @ 20 kHz)
+### 1. Core Recorder (`timestd-core-recorder`)
 
+**Responsibility:** Reliable Data Capture
 
-Analytics Service (phase2_analytics_service.py) - per channel
-├─ Unified PropagationEngine (Physics-based delays)
-├─ 12 voting methods (BCD, tones, ticks, 440Hz, test signals, FSS, etc.)
-├─ Feedback Loop: Calibrated offsets from Fusion -> Detection
-├─ Doppler estimation
-├─ Decimation (20 kHz → 10 Hz)
-└─ Timing metrics
+- Consumes RTP multicast streams from `ka9q-radio`.
+- Writes **Digital RF** formatted HDF5 files (`.h5`).
+- Maintains sample count integrity (gap filling).
+- **Output:** `/var/lib/timestd/raw_archive/`
 
-Fusion Service (multi_broadcast_fusion.py)
-├─ Aggregates clock offsets from all channels
-├─ Weighted Fusion + Kalman Filtering
-├─ Feeds Chrony SHM for system clock discipline
-└─ Updates calibration state (feedback loop)
+### 2. Analytics (`timestd-analytics`)
 
-DRF Batch Writer (drf_batch_writer.py)
-├─ 10 Hz NPZ → Digital RF HDF5
-├─ Multi-subchannel format (9 frequencies in ch0)
-└─ SFTP upload to PSWS with trigger directories
-```
+**Responsibility:** Signal Processing & Timing Extraction
 
-**Why split?** Core stability vs analytics experimentation. Analytics can restart without data loss.
+- Polls for new Digital RF files.
+- Performs tone detection (1000/1200 Hz), BCD decoding, and WWV/WWVH discrimination.
+- Calculates `D_clock` (System - UTC) using physics propagation models.
+- **Output:** `/var/lib/timestd/phase2/{CHANNEL}/` (HDF5 L1/L2)
 
-### ka9q-python Components Used
+### 3. Fusion (`timestd-fusion`)
 
-| Component | Purpose |
-|-----------|--------|
-| `RadiodStream` | RTP reception, packet resequencing, gap detection, sample decoding |
-| `RadiodControl` | Channel creation, configuration, tune commands |
-| `discover_channels()` | Enumerate existing channels from radiod status |
-| `StreamQuality` | Completeness %, packets lost/resequenced, gap count |
-| `ChannelInfo` | Channel metadata (frequency, preset, sample_rate, destination) |
-| `StreamManager` | Manages channel reuse and deterministic SSRC allocation to prevent proliferation |
+**Responsibility:** Multi-Broadcast Synthesis
+
+- Reads L2 HDF5 measurements from all 9 channels via **SWMR** (low latency).
+- Performs weighted fusion, Kalman filtering, and global consistency checks.
+- Feeds **Chrony SHM** to discipline the system clock.
+- **Output:** `/var/lib/timestd/phase2/fusion/` (HDF5 L3, Fused CSV)
+
+### 4. VTEC (`timestd-vtec`)
+
+**Responsibility:** Ionospheric Data Acquisition
+
+- Polls GNSS receiver (ZED-F9P) for dual-frequency observables.
+- Downloads global IONEX maps from NASA CDDIS.
+- **Output:** `/var/lib/timestd/gnss_vtec.h5`, `/var/lib/timestd/ionex/`
+
+### 5. Scientific Aggregator (`timestd-science-aggregator`)
+
+**Responsibility:** Higher-Level Science Products
+
+- Aggregates multi-channel data for Total Electron Content (TEC) estimation.
+- Generates spectrograms and summary plots.
+- **Output:** `/var/lib/timestd/products/`
+
+### 6. Web UI (`timestd-web-ui-fastapi`)
+
+**Responsibility:** User Visualization
+
+- FastAPI-based web server.
+- Serves real-time dashboard (`metrology.html`, `ionosphere.html`).
+- Reads status from all other services.
 
 ---
 
-## Recent Fixes (v3.2.1 - 2025-12-30)
+## Data Formats
 
-### Analytics Pipeline & HDF5 SWMR Integration
+### 1. Raw Archive: Digital RF (HDF5)
 
-**IRI-2020 Array Handling:** Fixed incompatibility with updated `iri2020` package that returns `xarray.DataArray` instead of scalars. Added `_extract_scalar()` helper to normalize all IRI output types.
+We use the **Digital RF** standard (MIT Haystack) for storing raw IQ data.
 
-**Bootstrap Second Boundary:** Fixed propagation solver calculating wrong second boundary (36 seconds ahead). Now correctly rounds to nearest second using RTP timestamp modulo.
+- **Format:** HDF5 with `drf_properties` attribute.
+- **Structure:**
+  - `/rf_data`: Dataset containing complex64 IQ samples.
+  - `/rf_data_index`: Index mapping sample ranges to timestamps.
+- **Metadata:** Global start time, sample rate (20 kHz), center frequency.
 
-**HDF5 Schema Compliance:** Added missing `processing_version` field to L1A channel observables to satisfy schema requirements.
+### 2. Analytics Output: HDF5 L1/L2
 
-**HDF5 SWMR Visibility:** Fixed data visibility issue where analytics was writing successfully but fusion couldn't read. Added explicit `refresh()` calls after `flush()` to update SWMR metadata for concurrent readers.
+Phase 2 produces hierarchical HDF5 files.
 
-**Pipeline Status:** Complete end-to-end operation verified - Recorder → Analytics → HDF5 (SWMR) → Fusion → Chrony SHM all working.
+- **L1A (Tone Detections):**
+  - `feature_extraction` group.
+  - Contains raw SNR, tone power, BCD correlation metrics.
+- **L2 (Timing Measurements):**
+  - `timing_solution` group.
+  - `d_clock`: The calculated clock offset.
+  - `uncertainty`: 1-sigma confidence.
+  - `propagation_model`: Which physics model was used (IONEX, IRI, etc.).
+
+### 3. Fusion Output: HDF5 L3
+
+Phase 3 fusion results.
+
+- **Structure:**
+  - `/fused_solution`: Time series of the weighted mean offset.
+  - `/residuals`: Per-station residuals from the mean.
+  - `/calibration`: Current calibration state for each station.
+
+---
+
+## Physics & Propagation Modeling (V5.0)
+
+To convert "Arrival Time" to "Emission Time", we must rigorously model the flight path.
+
+### 1. Integrated Ionospheric Model
+
+The `PhysicsPropagationModel` class integrates three tiers of data:
+
+- **Tier 1: IONEX (Global Ionosphere Maps):**
+  - Uses `.i` files from IGS/NASA.
+  - Calculates the **Ionospheric Pierce Point (IPP)** at 350km altitude.
+  - Interpolates VTEC from the grid (lat/lon/time).
+  - Converts VTEC to Group Delay: $\tau_{iono} \propto \frac{TEC}{f^2}$
+
+- **Tier 2: IRI-2020:**
+  - Uses the International Reference Ionosphere model when IONEX is unavailable.
+  - Estimates `hmF2` (layer height) and statistical monthly VTEC.
+
+- **Tier 3: Geometric/Empirical:**
+  - Fallback model based on path distance and solar zenith angle.
+
+### 2. Path Mid-Point Correction
+
+Ionospheric delay is determined by the electron density at the **reflection point**, not the transmitter or receiver.
+
+- **Algorithm:**
+    1. Calculate Great Circle path.
+    2. Determine path midpoint (for 1-hop) or reflection points (for N-hop).
+    3. Query IONEX/IRI at those specific coordinates.
 
 ---
 
@@ -95,711 +155,47 @@ DRF Batch Writer (drf_batch_writer.py)
 
 ### 1. RTP Timestamp is Primary Reference
 
-**Not wall clock.** System time is derived from RTP via time_snap.
+**Not wall clock.** System time is derived from RTP via `time_snap`.
 
 ```python
 # Precise time reconstruction:
 utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
 ```
 
-**Source**: Phil Karn's ka9q-radio design (pcmrecord.c)
-
-**Ingestion Hardening (v3.13.0):**
-The `BinaryArchiveWriter` now uses a **Streaming Mean** over the first 50 data chunks to determine the initial `rtp_to_unix_offset`. This prevents transient NTP jitter at startup (±5-10ms) from locking in a permanent offset error for the duration of the file.
-
 ### 2. Sample Count Integrity
 
-**Invariant**: 20 kHz × 60 sec = 1,200,000 samples (exactly)
+**Invariant**: 20 kHz × 60 sec = 1,200,000 samples (exactly).
 
-- Gaps filled with zeros
-- Sample count never adjusted
-- Discontinuities logged for provenance
+- Gaps filled with zeros.
+- Sample count never adjusted.
 
-**SSRC Stability (v3.13.0):**
-`ChannelRecorder` delegates channel creation to `StreamManager`. This ensures that a channel (e.g., "WWV 10 MHz") is **reused** if it already exists in `radiod`, preventing the proliferation of duplicate SSRC streams that exhaust system resources on service restarts.
+### 3. HDF5 SWMR (Single Writer, Multiple Reader)
 
-### 3. Channels Share GPS Clock, Not RTP Origin
+To achieve low latency while maintaining archival integrity, we use HDF5's SWMR feature.
 
-Each ka9q-radio stream has a **different RTP timestamp origin** (arbitrary starting value):
-
-```
-WWV 5 MHz:   RTP 304,122,240
-WWV 10 MHz:  RTP 302,700,560  ← Different origin, but same clock rate
-```
-
-**However**, all channels are driven by **the same GPS-disciplined master clock**. This means:
-
-- ❌ Cannot copy raw RTP timestamp values between channels
-- ✅ CAN share UTC anchor time across channels (the "master RTP ruler")
-- ✅ CAN use arrival time on one channel to predict arrival on another (within ionospheric dispersion)
-
-This is the foundation of **cross-channel coherent processing** - see [Timing Architecture](#timing-architecture).
-
-### 4. Timing Quality > Rejection
-
-**Always upload, annotate quality.** No binary accept/reject.
-
-- TONE_LOCKED (±1ms): time_snap from WWV/CHU with PPM correction
-- NTP_SYNCED (±10ms): NTP fallback
-- INTERPOLATED: Aged time_snap with drift compensation
-- WALL_CLOCK (±sec): Unsynchronized
-
-### 5. PPM-Corrected Timing
-
-**ADC clock drift compensation** for sub-sample precision:
-
-```python
-# Measure actual vs nominal sample rate
-ppm = ((rtp_elapsed / utc_elapsed) / nominal_rate - 1) * 1e6
-clock_ratio = 1 + ppm / 1e6
-
-# Apply correction
-elapsed_seconds = (rtp_ts - time_snap_rtp) / sample_rate * clock_ratio
-utc = time_snap_utc + elapsed_seconds
-```
-
-**Precision**: ±10-25 μs at 20 kHz with parabolic peak interpolation
+- **Analytics** creates the file and switches to SWMR mode.
+- **Fusion** opens the file in SWMR read mode.
+- Analytics periodically calls `.flush()` and `.refresh()` to make new rows visible to Fusion within milliseconds.
 
 ---
 
-## NPZ Archive Format
+## System Locations
 
-**20 kHz Archive Fields** (self-contained scientific record):
-
-```python
-{
-    # PRIMARY DATA
-    "iq": complex64[1200000],             # Gap-filled IQ samples (60 sec @ 20 kHz)
-    
-    # TIMING REFERENCE
-    "rtp_timestamp": uint32,              # RTP timestamp of iq[0]
-    "rtp_ssrc": uint32,                   # RTP stream identifier
-    "sample_rate": int,                   # 20000 Hz (config-driven)
-    
-    # TIME_SNAP ANCHOR (embedded for self-contained files)
-    "time_snap_rtp": uint32,              # RTP at timing anchor
-    "time_snap_utc": float,               # UTC at timing anchor
-    "time_snap_source": str,              # "wwv_startup", "ntp", etc.
-    "time_snap_confidence": float,        # Confidence 0-1
-    "time_snap_station": str,             # "WWV", "CHU", "NTP"
-    
-    # TONE POWERS (for discrimination - avoids re-detection)
-    "tone_power_1000_hz_db": float,       # WWV/CHU marker tone
-    "tone_power_1200_hz_db": float,       # WWVH marker tone
-    "wwvh_differential_delay_ms": float,  # WWVH-WWV propagation delay
-    
-    # METADATA
-    "frequency_hz": float,                # Center frequency
-    "channel_name": str,                  # "WWV 10 MHz"
-    "unix_timestamp": float,              # RTP-derived file timestamp
-    "ntp_wall_clock_time": float,         # Wall clock at minute boundary
-    "ntp_offset_ms": float,               # NTP offset from centralized cache
-    
-    # QUALITY INDICATORS
-    "gaps_filled": int,                   # Total zero-filled samples
-    "gaps_count": int,                    # Number of discontinuities
-    "packets_received": int,              # Actual packets
-    "packets_expected": int,              # Expected packets
-    
-    # GAP DETAILS (scientific provenance)
-    "gap_rtp_timestamps": uint32[],       # RTP where each gap started
-    "gap_sample_indices": uint32[],       # Sample index of each gap
-    "gap_samples_filled": uint32[],       # Samples filled per gap
-    "gap_packets_lost": uint32[]          # Packets lost per gap
-}
-```
-
-**Why embedded time_snap?** Each file is self-contained - can reconstruct UTC without external state.
+| Component | Path |
+|-----------|------|
+| **Code** | `/opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/` |
+| **Config** | `/etc/hf-timestd/` |
+| **Logs** | `/var/log/hf-timestd/` |
+| **Data Root** | `/var/lib/timestd/` |
+| **Raw Data** | `/var/lib/timestd/raw_archive/` |
+| **L2 Data** | `/var/lib/timestd/phase2/{CHANNEL}/timing_measurements/` |
+| **L3 Data** | `/var/lib/timestd/phase2/fusion/` |
+| **IONEX** | `/var/lib/timestd/ionex/` |
 
 ---
 
-## RTP Packet Parsing (CRITICAL)
-
-### Bug History (Oct 30, 2025)
-
-Three sequential bugs corrupted all data before Oct 30 20:46 UTC:
-
-#### Bug #1: Byte Order
-
-```python
-# WRONG:
-samples = np.frombuffer(payload, dtype=np.int16)  # Little-endian
-
-# CORRECT:
-samples = np.frombuffer(payload, dtype='>i2')     # Big-endian (network order)
-```
-
-#### Bug #2: I/Q Phase
-
-```python
-# WRONG: I + jQ (carrier offset -500 Hz)
-iq = samples[:, 0] + 1j * samples[:, 1]
-
-# CORRECT: Q + jI (carrier centered at 0 Hz)
-iq = samples[:, 1] + 1j * samples[:, 0]
-```
-
-#### Bug #3: Payload Offset
-
-```python
-# WRONG: Hardcoded
-payload = data[12:]
-
-# CORRECT: Calculate from header
-payload_offset = 12 + (header.csrc_count * 4)
-if header.extension:
-    ext_length_words = struct.unpack('>HH', data[payload_offset:payload_offset+4])[1]
-    payload_offset += 4 + (ext_length_words * 4)
-payload = data[payload_offset:]
-```
-
-**Lesson**: Always parse RTP headers fully. Never hardcode offsets.
-
----
-
-## Timing Architecture
-
-### Time Reference Hierarchy
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│ 1. RTP TIMESTAMP (Primary Reference)                        │
-│    • GPS-disciplined via radiod                            │
-│    • 20 kHz sample rate (config-driven)                     │
-│    • Common reference across ALL channels                   │
-└──────────────────────────────────────────────────────────────┘
-                         ↓
-┌──────────────────────────────────────────────────────────────┐
-│ 2. TIME_SNAP (GPS-Quality Anchor)                           │
-│    • WWV/CHU 1000 Hz tone at :00.000                       │
-│    • Sub-sample peak detection via parabolic interpolation │
-│    • PPM correction for ADC clock drift                    │
-│    • Precision: ±10-25 μs at 20 kHz                         │
-└──────────────────────────────────────────────────────────────┘
-                         ↓
-┌──────────────────────────────────────────────────────────────┐
-│ 3. CROSS-CHANNEL COHERENT PROCESSING                        │
-│    • Global Station Lock across 9-12 frequencies            │
-│    • Ensemble anchor selection (best SNR wins)              │
-│    • Guided search: ±500 ms → ±3 ms (99.4% noise rejection)  │
-└──────────────────────────────────────────────────────────────┘
-                         ↓
-┌──────────────────────────────────────────────────────────────┐
-│ 4. PRIMARY TIME STANDARD (HF Time Transfer)                 │
-│    • Back-calculate UTC(NIST) emission time                │
-│    • T_emit = T_arrival - (τ_geo + τ_iono + τ_mode)         │
-│    • Mode identification via quantized layer heights        │
-│    • Accuracy: ±10 ms → ±0.5 ms with full processing         │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### time_snap Mechanism
-
-**Purpose**: Anchor RTP to UTC via WWV/CHU tone detection with PPM correction.
-
-```python
-# Basic time reconstruction
-utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
-
-# With PPM correction for ADC clock drift
-clock_ratio = 1 + ppm / 1e6
-utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate * clock_ratio
-```
-
-**Accuracy Progression**:
-
-| Stage | Accuracy |
-|-------|----------|
-| Raw arrival time | ±10 ms |
-| + Tone detection | ±1 ms |
-| + PPM correction | ±25 μs |
-| + Mode identification | ±2 ms (emission) |
-| + Cross-channel consensus | ±0.5 ms (emission) |
-
-### Global Station Lock
-
-Because radiod's RTP timestamps are GPS-disciplined, all channels share a common "ruler". This enables treating 9-12 receivers as a **single coherent sensor array**.
-
-**The Physics**:
-
-```
-Frequency dispersion:     < 2-3 ms   (group delay between HF bands)
-Station separation:       15-20 ms  (WWV Colorado vs WWVH Hawaii)
-Discrimination margin:    ~5×       (dispersion << separation)
-```
-
-**Three-Phase Detection**:
-
-1. **Anchor Discovery** - Find high-confidence locks (SNR > 15 dB) across all channels
-2. **Guided Search** - Narrow search window from ±500 ms to ±3 ms using anchor (99.4% noise rejection)
-3. **Coherent Stacking** - Virtual channel with SNR improvement of 10·log₁₀(N) dB
-
-### Unified Propagation Engine (v3.13.0)
-
-**Purpose**: A single "source of truth" implementation for all physics-based delay calculations, shared by `StationModel` (Phase 2 discrimination) and `TransmissionTimeSolver` (Phase 3 timing).
-
-**Hierarchy**:
-
-1. **Geometric**: Great-circle speed-of-light delay (baseline).
-2. **Heuristic**: Empirical delays based on station distance (if IRI unavailable).
-3. **IRI-2020**: Full ionospheric ray-tracing (highest precision).
-
-```python
-# Unifies delay calculation across the pipeline
-engine = PropagationEngine(enable_iri=True)
-delay = engine.estimate_delay(
-    tx_lat, tx_lon, rx_lat, rx_lon, frequency_hz, method='GEOMETRIC'
-)
-```
-
-### Primary Time Standard (HF Time Transfer)
-
-Back-calculate emission time from GPS-locked arrival time:
-
-```
-T_emit = T_arrival - (τ_geo + τ_iono + τ_mode)
-```
-
-| Component | Description |
-|-----------|-------------|
-| T_arrival | GPS-disciplined RTP timestamp |
-| τ_geo | Great-circle speed-of-light delay |
-| τ_iono | Ionospheric group delay (frequency-dependent) |
-| τ_mode | Extra path from N ionospheric hops |
-
-**Propagation Mode Identification** (quantized by layer heights):
-
-| Mode | Typical Delay | Uncertainty |
-|------|---------------|-------------|
-| 1-hop E | 3.82 ms | ±0.20 ms |
-| 1-hop F2 | 4.26 ms | ±0.17 ms |
-| 2-hop F2 | 5.51 ms | ±0.33 ms |
-| 3-hop F2 | ~7.0 ms | ±0.50 ms |
-
-### PPM Correction Implementation
-
-```python
-class TimeSnapReference:
-    """Immutable timing anchor with PPM correction."""
-    rtp_timestamp: int       # RTP at anchor point
-    utc_timestamp: float     # UTC at anchor point  
-    sample_rate: int         # Nominal sample rate
-    ppm: float               # ADC clock drift in parts per million
-    ppm_confidence: float    # 0-1 confidence in PPM estimate
-    
-    @property
-    def clock_ratio(self) -> float:
-        return 1.0 + self.ppm / 1e6
-    
-    def calculate_sample_time(self, sample_rtp: int) -> float:
-        elapsed_samples = sample_rtp - self.rtp_timestamp
-        elapsed_seconds = elapsed_samples / self.sample_rate * self.clock_ratio
-        return self.utc_timestamp + elapsed_seconds
-    
-    def with_updated_ppm(self, new_ppm: float, confidence: float) -> 'TimeSnapReference':
-        # Exponential smoothing for stability
-        blended_ppm = self.ppm * (1 - confidence) + new_ppm * confidence
-        return TimeSnapReference(..., ppm=blended_ppm, ...)
-```
-
-**Tone-to-Tone PPM Measurement**:
-
-```python
-# Measure actual ADC clock vs nominal
-ppm = ((rtp_elapsed / utc_elapsed) / nominal_rate - 1) * 1e6
-# Typical values: ±50-200 ppm for consumer SDRs
-```
-
-### Clock Convergence Model (v3.8.0)
-
-**Philosophy: "Set, Monitor, Intervention"**
-
-With a GPSDO-disciplined receiver, the local clock is a secondary standard. Instead of constantly recalculating D_clock, we converge to a locked estimate and then monitor for anomalies.
-
-```
-State Machine:
-ACQUIRING (N<10) → CONVERGING (building stats) → LOCKED (monitoring)
-                                                       ↓
-                                              5 anomalies → REACQUIRE
-```
-
-**Implementation** (`src/grape_recorder/grape/clock_convergence.py`):
-
-```python
-class ClockConvergenceModel:
-    """Per-station convergence tracking with anomaly detection."""
-    
-    # Lock criteria
-    lock_uncertainty_ms = 1.0    # uncertainty < 1ms required
-    min_samples_for_lock = 30    # need 30 minutes of data
-    anomaly_sigma = 3.0          # 3σ for anomaly detection
-    
-    # Welford's online algorithm for running statistics
-    def update_accumulator(self, station_key, d_clock_ms):
-        acc = self.accumulators[station_key]
-        acc.count += 1
-        delta = d_clock_ms - acc.mean
-        acc.mean += delta / acc.count
-        delta2 = d_clock_ms - acc.mean
-        acc.M2 += delta * delta2
-        
-    @property
-    def uncertainty_ms(self) -> float:
-        """σ/√N - shrinks with each measurement."""
-        if self.count < 2:
-            return float('inf')
-        variance = self.M2 / (self.count - 1)
-        return math.sqrt(variance / self.count)
-```
-
-**Convergence Timeline**:
-
-| Time | State | Uncertainty | Quality Grade |
-|------|-------|-------------|---------------|
-| 0-10 min | ACQUIRING | ∞ | D |
-| 10-30 min | CONVERGING | ~10 ms | C |
-| **30+ min** | **LOCKED** | **< 1 ms** | **A/B** |
-
-**Key Insight**: Once locked, residuals = real ionospheric propagation effects!
-
-```python
-residual_ms = raw_measurement - converged_d_clock
-# |residual| > 3σ → anomaly → propagation event detected
-```
-
-### Propagation Mode Probability (v3.8.0)
-
-Mode probabilities use Gaussian likelihood based on converged uncertainty:
-
-```python
-# P(mode|measured) ∝ exp(-0.5 × ((measured - expected) / σ)²)
-sigma = sqrt(uncertainty² + mode_spread²)
-z_score = (measured_delay - expected_delay) / sigma
-likelihood = exp(-0.5 * z_score²)
-```
-
-| Uncertainty | Discrimination Quality |
-|-------------|----------------------|
-| > 30 ms | Flat (no information) |
-| 10-30 ms | Weak peaks |
-| 3-10 ms | Moderate |
-| **< 3 ms** | **Sharp peaks** ✓ |
-
-### The Core Metric: `d_clock`
-
-**Definition:** `d_clock` is the difference between the **Local System Clock** (GPS-disciplined) and the **True UTC(NIST)** time at the point of emission, after correcting for all known propagation delays.
-
-$$ d\_{clock} = T_{system} - T_{UTC(NIST)} $$
-
-In a perfectly synchronized system with a perfect propagation model, `d_clock` would be exactly **0.0 ms**. In practice, it acts as the "residual" that captures:
-
-1. **Clock Error**: Small deviations in the local oscillator (typically < 0.001 ms for GPSDO).
-2. **Propagation Anomalies**: Unmodeled changes in the ionosphere path length.
-
-#### How It Is Calculated
-
-We effectively measure the "Total Time of Flight" and subtract the "Expected Physics":
-
-$$ d\_{clock} = T_{arrival} - T_{emission} - ( \tau_{geo} + \tau_{iono} + \tau_{mode} ) $$
-
-- **$T_{arrival}$:** Measured using `rtp_timestamp` (GPS-quality precision).
-- **$T_{emission}$:** Known schedule (e.g., top of minute).
-- **$\tau_{geo}$:** Speed-of-light delay over the Great Circle path.
-- **$\tau_{iono}$:** Expected group delay through the ionosphere.
-- **$\tau_{mode}$:** Extra path length from multi-hop reflections (e.g., 2-hop F-layer).
-
-#### interpreting `d_clock` Variations
-
-Once the system is **LOCKED**, `d_clock` becomes a powerful scientific sensor. Since the GPS clock is stable, any variation in `d_clock` represents a change in the **Ionosphere**:
-
-- **Stable ~0.0 ms:** Propagation matches the physics model (Quiet Ionosphere).
-- **Positive (+) Deviation:** The signal arrived **later** than expected.
-  - **Cause:** Higher electron density (signal slows down), Higher reflection layer (longer path), or Storm conditions.
-- **Negative (-) Deviation:** The signal arrived **earlier** than expected.
-  - **Cause:** Lower reflection layer (e.g., E-layer sporadic event, shorter path).
-
-#### Contribution to UTC(NIST) Limit
-
-To estimate true **UTC(NIST)** from the received signal, we invert the equation:
-
-$$ T_{UTC(NIST)} = T_{system} - d\_{clock} $$
-
-This calculated time is used to timestamp scientific data products, ensuring they are aligned with the international standard regardless of propagation conditions.
-
-### Timing Calibrator (v3.13.0)
-
-The `TimingCalibrator` manages the progression from initial bootstrap to verified timing:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    TIMING CALIBRATOR STATE MACHINE                       │
-│                                                                          │
-│  BOOTSTRAP                    CALIBRATED                   VERIFIED      │
-│  ├─ Wide search (±500ms)      ├─ Narrow search (±50ms)     ├─ Locked    │
-│  ├─ Learning RTP offsets      ├─ Using RTP prediction      ├─ Monitoring│
-│  ├─ Collecting detections     ├─ Refining calibration      ├─ Anomaly   │
-│  └─ Exit: 5+ from 2+ stations └─ Exit: Kalman converged    │   detection│
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-**Key Features:**
-
-1. **RTP Calibration**: Stores `rtp_offset = rtp_timestamp % 1,200,000` for each channel
-2. **Station Prediction**: Uses RTP offset to predict which station should be detected
-3. **Multi-Process Coordination**: Reloads state before update, saves after each detection
-
-**State File**: `state/timing_calibration.json`
-
-```json
-{
-  "phase": "bootstrap",
-  "station_calibration": {
-    "WWV": {"propagation_delay_ms": 6.5, "n_samples": 50},
-    "CHU": {"propagation_delay_ms": 4.0, "n_samples": 30}
-  },
-  "rtp_calibration": {
-    "WWV 10 MHz": {
-      "rtp_offset_samples": 254382,
-      "detected_station": "WWV",
-      "n_confirmations": 10
-    }
-  },
-  "stats": {
-    "bootstrap_detections": 50,
-    "discrimination_corrections": 3
-  }
-}
-```
-
-**RTP-Based Station Prediction:**
-
-```python
-def predict_station(self, channel_name, rtp_timestamp, detected_station, confidence):
-    """Use RTP calibration history to predict expected station."""
-    rtp_cal = self.rtp_calibration.get(channel_name)
-    if not rtp_cal:
-        return (detected_station, 0.0)
-    
-    current_offset = rtp_timestamp % self.samples_per_minute
-    expected_offset = rtp_cal.rtp_offset_samples
-    offset_diff_ms = abs(current_offset - expected_offset) / self.sample_rate * 1000
-    
-    if offset_diff_ms < 5.0:
-        # Strong match - predict same station as calibration
-        predicted_station = rtp_cal.detected_station
-        if detected_station != predicted_station and confidence != 'high':
-            # Override low-confidence detection with RTP prediction
-            return (predicted_station, 0.9)
-    
-    return (detected_station, 0.0)
-```
-
-### Multi-Broadcast Fusion (v3.14+)
-
-Combines all available broadcasts (WWV/WWVH/CHU/BPM) to converge on UTC(NIST) alignment.
-
-**Implementation:** `src/hf_timestd/core/multi_broadcast_fusion.py`
-
-#### Per-broadcast calibration
-
-Calibration is maintained per **broadcast** (station + frequency) to account for frequency-dependent systematic offsets.
-
-```python
-# Broadcast key used by fusion
-broadcast_key = f"{station}_{frequency_mhz:.2f}"
-
-# Calibrated D_clock (if calibration exists)
-calibrated = d_clock_ms + calibration[broadcast_key].offset_ms
-```
-
-#### Cross-frequency global differential fusion (physics-verified constraint)
-
-Fusion also performs a *cross-frequency* global physics solve using `GlobalDifferentialSolver`:
-
-- **Input:** per-channel `tone_detections/*_tones_YYYYMMDD.csv`
-- **Minute selection:** uses the **latest common minute** across channels with tone data in the lookback window (intersection). If no intersection exists, falls back to the latest available minute and logs the fallback.
-- **Timing representation:** the solver only needs minute-relative timing, so fusion reconstructs:
-
-```
-arrival_rtp := timing_ms * sample_rate
-minute_boundary_rtp := 0
-```
-
-When the global solve returns `verified=True`, fusion injects a trusted synthetic measurement:
-
-- `station = GLOBAL_DIFF`
-- Strong forced weighting (dominates the weighted mean)
-- Not subject to outlier rejection
-- Excluded from calibration updates and TEC estimation
-- Kalman measurement uncertainty floor is reduced (acts like a hard constraint)
-
-#### Observability (required for trusted-source behavior)
-
-Fusion logs the global solve decision context and results:
-
-- `Global solve context: target_minute=... obs=... mix=[...] dropped_channels=[...]`
-- `Global solve: cross-agency triangulation active (NIST+NRC) ...` (when both WWV/WWVH and CHU are present)
-- `Global solve result: target_minute=... offset_ms=... verified=... conf=... consistency_ms=...`
-- `Injecting GLOBAL_DIFF: ... force_weight=... kalman_floor_ms=...`
-
-#### Output columns
-
-`phase2/fusion/fused_d_clock.csv` includes:
-
-- `global_solve_verified`
-- `global_solve_consistency_ms`
-- `global_solve_n_obs`
-
-**Weighting Factors**:
-
-- SNR (higher = more reliable)
-- Quality grade (A=1.0, B=0.8, C=0.5, D=0.2)
-- Propagation mode (1-hop > 2-hop > 3-hop)
-
-**Convergence Indicators** (displayed per-station):
-
-| Progress | Status | Meaning |
-|----------|--------|---------|
-| ≥95% | ✓ Locked | Calibration stable |
-| 50-95% | Converging | Learning in progress |
-| <50% | Learning | Initial phase |
-| 0% | No signal | Station not received |
-
-**Accuracy Achieved**:
-
-| Configuration | Accuracy |
-|--------------|----------|
-| Single broadcast, uncalibrated | ±5-10 ms |
-| Single broadcast, calibrated | ±1-2 ms |
-| **Multi-broadcast fusion** | **±0.5 ms** |
-
-**API Endpoint**: `/api/v1/timing/fusion`
-
-```json
-{
-  "status": "active",
-  "latest": {
-    "d_clock_fused_ms": -0.0017,
-    "d_clock_raw_ms": -3.78,
-    "n_broadcasts": 52,
-    "quality_grade": "B"
-  },
-  "calibration": {
-    "WWV": { "offset_ms": 3.53, "n_samples": 100 },
-    "WWVH": { "offset_ms": 13.74, "n_samples": 42 },
-    "CHU": { "offset_ms": 5.06, "n_samples": 84 }
-  }
-}
-```
-
----
-
---------------------------------------------------------------------------------
-
-## Multi-Station Discrimination (WWV/WWVH/BPM)
-
-### The Shared Frequencies
-
-On **2.5, 5, 10, and 15 MHz**, three major stations transmit simultaneously:
-
-1. **WWV** (Fort Collins, CO)
-2. **WWVH** (Kauai, HI)
-3. **BPM** (Xi'an, China)
-
-Separating these signals is critical for accurate timing. The system uses a **Probabilistic Discriminator** backed by a specialized **BPM Discriminator** to decompose the received signal.
-
-### Probabilistic Discrimination (Active Mode)
-
-The legacy "Voting Method" has been replaced by a **Logistic Regression Model** that calculates the probability of each station being dominant:
-
-$$ P(WWV|x) = \sigma(w \cdot x + b) $$
-
-Where $x$ is a vector of extracted signal features. This approach handles correlated features (like power ratio and BCD ratio) correctly, unlike simple voting which over-counts them.
-
-#### Information Flow
-
-```
-Raw IQ Samples
-   │
-   ├─► Tone Detector ───────► SNR, Timing, Tick Durations
-   ├─► WWVH Discriminator ──► Power Ratios, BCD Correlation, Doppler
-   └─► BPM Discriminator ───► BPM-specific Ticks (10ms/100ms)
-            │
-            ▼
-   Feature Vector (x)
-   [PowerRatio, BCDRatio, DopplerDiff, 440Hz, GroundTruth...]
-            │
-            ▼
-   Probabilistic Model (Logistic Regression)
-            │
-            ▼
-   P(WWV), P(WWVH), P(BPM)
-```
-
-### Feature Vectors
-
-The model uses the following normalized features to make its decision:
-
-1. **Power Ratio ($P_{WWV} - P_{WWVH}$):** The difference in signal strength at 1000 Hz and 1200 Hz.
-2. **Audio BCD Correlation:** Does the received BCD waveform match the propagation delay for WWV or WWVH?
-3. **Doppler Stability:** WWV (continental) usually has different Doppler characteristics than WWVH (trans-oceanic).
-4. **440 Hz Presence:** Strong indicator during Minutes 1 (WWVH) and 2 (WWV).
-5. **Ground Truth Schedule:** Explicit knowledge of silent minutes (e.g., WWV silent min 43-51) forces the probability to 0 or 1.
-
-### Dealing with BPM
-
-BPM is handled as a third party in the discrimination logic:
-
-1. **Tick Duration Filter:** BPM uses 10ms ticks (UTC) or 100ms ticks (UT1). WWV/WWVH use 5ms ticks. The `BPMDiscriminator` isolates BPM energy based on this pulse width.
-2. **Schedule Awareness:** The system knows BPM's active hours (e.g., 2.5 MHz 07:30-01:00 UTC) and suppresses false positives outside these times.
-3. **UT1 Exclusion:** During BPM's UT1 minutes (25-29, 55-59), BPM is excluded from the UTC fusion pool to prevent timing contamination.
-
-### "Detect Both" Capability
-
-The system acknowledges that often **both** stations are present.
-- **Dominant Station:** The station with $P > 0.8$.
-- **Balanced:** If $0.2 < P(WWV) < 0.8$, the system flags `BALANCED` or `UNCERTAIN`, indicating useful energy from both sources. This triggers **Component Decomposition** to measure and log both signals separately.
-
-### Scientific Rationale: Why Identify "Dominance"?
-
-One might ask: *If we measure both stations, why force a choice of "Dominant Station"?*
-
-**1. Operational Necessity (The Timing Prerequisite)**
-We calculate the system time offset (`d_clock`) by subtracting the propagation delay.
-- **"Bootstrap" (Finding Time):** When the system starts, it has no idea what time it is (within ±500ms). Dominance is **critical** here. If we mistake WWVH for WWV, we introduce a massive **16ms error**, preventing the lock.
-- **"Steady State" (Locked):** Once detailed time is known (`d_clock` ≈ 0), the system uses *station-specific templates* to hunt for signals exactly where they should be (e.g., WWV at +4ms, WWVH at +20ms). However, Dominance remains the **Primary Switch** to decide which signal drives the high-precision `d_clock` output to the NTP server. We can't discipline the clock to two different times simultaneously.
-- **Path Difference:** The path from Hawaii (WWVH) is ~15-20ms longer than from Colorado (WWV).
-
-**2. Scientific Value of the Ratio (Emergent Physics)**
-While "Dominance" is an operational switch, the continuous **Power Ratio** ($P_{WWV} / P_{WWVH}$) reveals atmospheric dynamics that single-station observation misses:
-
-- **The Terminator "Crossover":** The moment when dominance flips (0 dB ratio) precisely marks the passage of the **Day/Night Terminator** between the two paths. The steepness of this transition measures ionization rates during sunrise/sunset.
-- **Destructive Interference Zones:** When the ratio is near 0 dB ("Balanced"), carrier waves often destructively interfere. Identifying this state explains why decoding might fail despite high signal strength.
-- **Antenna Characterization:** Persistent bias in the ratio (e.g., never hearing WWVH) calibrates the receiving station's westward nulls.
-
----
-
-```
-WWV (1000 Hz)  → time_snap (timing reference)
-CHU (1000 Hz)  → time_snap (timing reference)
-WWVH (1200 Hz) → Propagation study (science data)
-```
-
-**Differential delay** = WWVH - WWV arrival time difference (ionospheric path)
-
----
-
-## International Stations: BPM (China)
-
-BPM (National Time Service Center, Xi'an) uses a system distinct from WWV/WWVH/CHU. It actively switches between **UTC** and **UT1** standards within the same hour, and its signals are emitted **20 milliseconds in advance** of UTC.
-
-### Signal Characteristics
-
-- **Tone Frequency:** 1000 Hz (same as WWV/CHU)
-- **Modulation:** AM
-- **Timing Advance:** -20 ms (Signal emitted at $T_{UTC} - 20ms$)
-  - This advance partially compensates for propagation delay to users in China.
-  - For US receivers, this results in a net arrival time that often overlaps with WWV (~8ms delay) or WWVH (~15ms delay).
+- This advance partially compensates for propagation delay to users in China.
+- For US receivers, this results in a net arrival time that often overlaps with WWV (~8ms delay) or WWVH (~15ms delay).
 
 ### Marker Formats & Schedule
 
@@ -889,14 +285,16 @@ CHU broadcasts key corrections needed for scientific timing:
 
 #### TAI-UTC (Leap Second Offset)
 
-* **TAI (Atomic):** Continuous atomic time scale (never skips).
+- **TAI (Atomic):** Continuous atomic time scale (never skips).
+
 - **UTC (Civil):** Adjusted with **Leap Seconds** to track Earth's rotation.
 - **Difference:** TAI is currently **37 seconds ahead** of UTC.
 - **Usage:** Format B allows automatic conversion from UTC to linear TAI.
 
 #### DUT1 (Rotation Correction)
 
-* **UT1 (Astronomical):** True solar time based on Earth's varying rotation.
+- **UT1 (Astronomical):** True solar time based on Earth's varying rotation.
+
 - **DUT1:** The fine difference $DUT1 = UT1 - UTC$.
 - **Values:** Broadcast in **0.1s increments**. International standards keep $|UTC - UT1| < 0.9s$.
 

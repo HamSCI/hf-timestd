@@ -1,11 +1,9 @@
 # HF Time Standard Analysis (hf-timestd) - Installation Guide
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** December 15, 2025
+**Last Updated:** December 31, 2025
 
 This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, CHU, WWV, WWVH).
-
-**Scope note:** Decimation/10 Hz products and any PSWS/GRAPE upload workflows are handled in the separate `grape-recorder` project.
 
 ---
 
@@ -14,86 +12,118 @@ This guide covers installing and configuring `hf-timestd` for recording and anal
 ### Hardware
 
 - SDR supported by ka9q-radio (e.g. RX888 MkII, Airspy HF+, SDRplay)
+- GNSS receiver for VTEC (Optional but recommended, e.g., ZED-F9P)
 - HF antenna covering 2.5-25 MHz
 - Linux host with multicast-capable LAN
 
 ### Software
 
 - Linux (Debian/Ubuntu class)
-- Python 3.10+
-- Node.js 18+ (for the Web UI)
-- ka9q-radio installed and running (`radiod`)
+- Python 3.11+
+- **ka9q-radio** installed and running (`radiod`)
+- **HDF5 Libraries** (`libhdf5-dev`)
 
 ---
 
-## Install (development/test mode)
+## Install (Production Mode)
+
+This is the recommended installation for 24/7 operation.
 
 ```bash
-# Clone repository
+# 1. Clone repository
 git clone https://github.com/mijahauan/hf-timestd.git
 cd hf-timestd
 
-# Run installer in test mode
+# 2. Run installer (installs all dependencies)
+sudo ./scripts/install.sh --mode production --user $USER
+
+# 3. Edit global configuration
+sudo nano /etc/hf-timestd/timestd-config.toml
+
+# 4. Enable and start services
+sudo systemctl enable --now timestd-core-recorder
+sudo systemctl enable --now timestd-analytics
+sudo systemctl enable --now timestd-fusion
+sudo systemctl enable --now timestd-web-ui-fastapi
+```
+
+### Production Paths
+
+- **Data:** `/var/lib/timestd/`
+- **Logs:** `/var/log/hf-timestd/`
+- **Config:** `/etc/hf-timestd/`
+
+---
+
+## Install (Test/Development Mode)
+
+For temporary capability testing or development.
+
+```bash
+# 1. Run installer in test mode
 ./scripts/install.sh --mode test
 
-# Edit configuration
+# 2. Edit local configuration
 nano config/timestd-config.toml
 
-# Start services (test scripts)
+# 3. Start services (interactive scripts)
 ./scripts/timestd-all.sh -start
 
-# Check status
+# 4. Check status
 ./scripts/timestd-all.sh -status
 ```
 
-Test mode data root defaults to:
+### Test Paths
 
-- `/tmp/timestd-test/`
+- **Data:** `/tmp/timestd-test/`
+- **Logs:** `/tmp/timestd-test/logs/`
+- **Config:** `config/timestd-config.toml`
 
 ---
 
-## Install (production mode)
+## Configuration Overview
 
-```bash
-sudo ./scripts/install.sh --mode production --user $USER
-sudo nano /etc/hf-timestd/timestd-config.toml
+The configuration file controls which stations are recorded.
 
-sudo systemctl start timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui
-sudo systemctl enable timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui
+### `[station]`
+
+Your geographic details (essential for physics propagation model).
+
+```toml
+[station]
+callsign = "AC0G"
+lat = 38.9
+lon = -94.6
 ```
 
-Production mode paths:
+### `[recorder.channels]`
 
-- Data: `/var/lib/hf-timestd/`
-- Logs: `/var/log/hf-timestd/`
-- Config: `/etc/hf-timestd/`
+Define each frequency you want to monitor.
 
----
+```toml
+[[recorder.channels]]
+description = "WWV 10 MHz"
+frequency_hz = 10000000
+enabled = true
+```
 
-## Configuration overview
+### `[vtec]` (Optional)
 
-The primary configuration file is:
+If you have a local GNSS receiver for local VTEC corrections.
 
-- test: `config/timestd-config.toml`
-- production: `/etc/hf-timestd/timestd-config.toml`
-
-At minimum configure:
-
-- `[station]` (callsign, grid square)
-- `[ka9q]` (radiod status/data addresses)
-- `[[recorder.channels]]` entries for the time standard stations/frequencies you want
-
----
-
-## Verifying operation
-
-- Confirm `radiod` is running and discoverable on the network.
-- Confirm the Web UI loads at `http://localhost:3000`.
-- Confirm new data is being written under the configured data root.
-- Confirm fusion service is running: `systemctl status timestd-fusion`
+```toml
+[vtec]
+enabled = true
+gnss_device = "/dev/ttyACM0"
+```
 
 ---
 
-## Phase 3 / GRAPE products
+## Verifying Operation
 
-If you need 10 Hz products or PSWS/GRAPE uploads, use the separate `grape-recorder` project. `hf-timestd` focuses on time-standard recording and time-transfer analytics.
+1. **Check Services:** `systemctl status timestd-fusion` (should be Active)
+2. **Check Web UI:** Open `http://localhost:3000` (or configured port)
+3. **Check Data:** Verify Digital RF files are appearing in `/var/lib/timestd/raw_archive/`
+4. **Check Chrony:** Run `chronyc sources` and look for the SHM reference.
+
+---
