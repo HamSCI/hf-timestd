@@ -134,7 +134,7 @@ if [ "$MISSING_PREREQS" = true ]; then
     echo "On Debian/Ubuntu, run:"
     echo "  sudo apt-get update"
     echo "  sudo apt-get install python3 python3-pip python3-venv python3-dev"
-    echo "  sudo apt-get install avahi-utils hdf5-tools libhdf5-dev"
+    echo "  sudo apt-get install avahi-utils hdf5-tools libhdf5-dev libsystemd-dev"
     echo ""
     exit 1
 fi
