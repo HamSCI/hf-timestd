@@ -575,7 +575,7 @@ Group=$INSTALL_USER
 EnvironmentFile=$CONFIG_DIR/environment
 WorkingDirectory=$DATA_ROOT
 
-ExecStart=$VENV_DIR/bin/python -u scripts/live_vtec.py --config $CONFIG_DIR/timestd-config.toml
+ExecStart=$VENV_DIR/bin/python -u $PROJECT_DIR/scripts/live_vtec.py --config $CONFIG_DIR/timestd-config.toml
 
 Restart=always
 RestartSec=10
