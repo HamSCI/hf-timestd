@@ -681,7 +681,7 @@ if [[ "$MODE" == "production" ]]; then
     else
         echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui"
     fi
-    echo "   sudo systemctl list-timers grape-*"
+    echo "   sudo systemctl list-timers timestd-*"
     echo "   journalctl -u timestd-core-recorder -f"
     echo ""
     
