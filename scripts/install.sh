@@ -337,30 +337,17 @@ python -c "import iri2020; print(f'  ✅ iri2020 installed')"
 deactivate
 
 # =============================================================================
-# Step 5: Install Web UI Dependencies
+# Step 5: Set up Web UI (Python FastAPI)
 # =============================================================================
-log_step "Setting up Web UI..."
-
-if command -v npm &> /dev/null; then
-    if [[ "$MODE" == "production" ]]; then
-        # Copy web-ui to /opt
-        sudo mkdir -p "$WEBUI_DIR"
-        sudo cp -r "$PROJECT_DIR/web-ui/"* "$WEBUI_DIR/"
-        sudo chown -R "$INSTALL_USER:$INSTALL_USER" "$WEBUI_DIR"
-        cd "$WEBUI_DIR"
-    else
-        cd "$PROJECT_DIR/web-ui"
-    fi
-    
-    # npm install is non-fatal - Web UI is optional
-    if npm install 2>&1; then
-        log_info "  ✅ Web UI dependencies installed"
-    else
-        log_warn "  ⚠️  npm install had issues (Web UI may still work)"
-    fi
-    cd "$PROJECT_DIR"
+# Web UI is now Python-based (FastAPI) - all dependencies installed via pip above
+# Copy web-ui directory to production location
+if [[ "$MODE" == "production" ]]; then
+    sudo mkdir -p "$WEBUI_DIR"
+    sudo cp -r "$PROJECT_DIR/web-ui/"* "$WEBUI_DIR/"
+    sudo chown -R "$INSTALL_USER:$INSTALL_USER" "$WEBUI_DIR"
+    log_info "Web UI installed at $WEBUI_DIR (Python FastAPI)"
 else
-    log_warn "  ⚠️  npm not found, skipping Web UI setup"
+    log_info "Web UI will run from $PROJECT_DIR/web-ui (Python FastAPI)"
 fi
 
 # =============================================================================
