@@ -140,6 +140,17 @@ from typing import Optional, Dict, Any, List, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# CONFIGURATION CONSTANTS
+# ============================================================================
+
+# HDF5 Write Failure Thresholds
+HDF5_FAILURE_ALERT_THRESHOLD = 10  # Critical alert after N consecutive failures
+HDF5_FAILURE_RESET_INTERVAL = 300  # Reset counter after N seconds of success
+
+# Input Validation
+REQUIRE_ARCHIVE_DIR_EXISTS = True  # Fail if archive_dir doesn't exist
+
 
 class Phase2AnalyticsService:
     """
@@ -188,16 +199,34 @@ class Phase2AnalyticsService:
         self.backfill_gaps = backfill_gaps
         self.max_backfill = max_backfill
         
+        # ====================================================================
+        # Input Validation (Issue 1.1 - Analytics Review 2025-12-30)
+        # ====================================================================
+        if REQUIRE_ARCHIVE_DIR_EXISTS:
+            if not self.archive_dir.exists():
+                raise FileNotFoundError(
+                    f"Archive directory does not exist: {self.archive_dir}. "
+                    f"Set REQUIRE_ARCHIVE_DIR_EXISTS=False to disable this check."
+                )
+            if not self.archive_dir.is_dir():
+                raise NotADirectoryError(
+                    f"Archive path is not a directory: {self.archive_dir}"
+                )
+            logger.info(f"✅ Archive directory validated: {self.archive_dir}")
+        
         # Initialize tiered storage manager if enabled
         # This allows reading from hot buffer (/dev/shm) first, then cold (disk)
         self._tiered_manager = None
+        self._tiered_storage_enabled = False
         if use_tiered_storage:
             try:
                 from .tiered_storage import get_tiered_storage_manager
                 self._tiered_manager = get_tiered_storage_manager()
-                logger.info(f"Tiered storage enabled: hot={self._tiered_manager.hot_root}, cold={self._tiered_manager.cold_root}")
+                self._tiered_storage_enabled = True
+                logger.info(f"✅ Tiered storage enabled: hot={self._tiered_manager.hot_root}, cold={self._tiered_manager.cold_root}")
             except Exception as e:
-                logger.warning(f"Failed to initialize tiered storage: {e}")
+                logger.warning(f"⚠️  Tiered storage initialization failed: {e}")
+                logger.info("Continuing with single-tier storage (cold only)")
         
         # Create output directories using coordinated path structure
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -336,6 +365,11 @@ class Phase2AnalyticsService:
             # Flag to enable/disable HDF5 writes (for testing)
             self.enable_hdf5_writes = True
             
+            # ================================================================
+            # HDF5 Startup Health Check (Analytics Review 2025-12-30)
+            # ================================================================
+            self._verify_hdf5_writers_healthy()
+            
         except Exception as e:
             logger.warning(f"Failed to initialize HDF5 writers: {e}")
             logger.warning("Continuing with CSV-only writes")
@@ -423,11 +457,20 @@ class Phase2AnalyticsService:
         # Track which minutes we've processed
         self.processed_minutes = set()
         
+        # ====================================================================
+        # HDF5 Write Failure Tracking (Issue 4.1 - Analytics Review 2025-12-30)
+        # ====================================================================
+        self.hdf5_write_failures = 0
+        self.hdf5_write_successes = 0
+        self.last_hdf5_success_time = time.time()
+        self.hdf5_failure_alerted = False  # Prevent spam
+        
         logger.info(f"Phase2AnalyticsService initialized for {channel_name}")
         logger.info(f"  Archive: {archive_dir}")
         logger.info(f"  Output: {output_dir}")
         logger.info(f"  Frequency: {frequency_hz/1e6:.3f} MHz")
         logger.info(f"  Grid: {receiver_grid}")
+        logger.info(f"  Tiered Storage: {'enabled' if self._tiered_storage_enabled else 'disabled'}")
     
     def _init_clock_offset_csv(self):
         """Initialize clock offset CSV file with headers if needed (daily rotation)."""
@@ -450,7 +493,115 @@ class Phase2AnalyticsService:
                     'wwv_tick_snr_db', 'wwvh_tick_snr_db', 'chu_tick_snr_db', 'bpm_tick_snr_db'
                 ])
             logger.info(f"Created clock offset CSV: {self.clock_offset_csv}")
+        
+    # ========================================================================
+    # HDF5 Write Tracking & Validation (Analytics Review 2025-12-30)
+    # ========================================================================
     
+    def _track_hdf5_write_success(self):
+        """Track successful HDF5 write and reset failure counter if needed."""
+        self.hdf5_write_successes += 1
+        self.last_hdf5_success_time = time.time()
+        
+        # Reset failure counter after sustained success
+        if self.hdf5_write_failures > 0:
+            self.hdf5_write_failures = 0
+            self.hdf5_failure_alerted = False
+            logger.info("✅ HDF5 write failure counter reset after sustained success")
+    
+    def _track_hdf5_write_failure(self, error: Exception, data_product: str):
+        """
+        Track HDF5 write failure and alert if threshold exceeded.
+        
+        Args:
+            error: The exception that occurred
+            data_product: Name of data product (L1A, L1B, L2, etc.)
+        """
+        self.hdf5_write_failures += 1
+        
+        logger.error(
+            f"HDF5 write failed for {data_product}: {error} "
+            f"(failure count: {self.hdf5_write_failures})",
+            exc_info=True
+        )
+        
+        # Critical alert if threshold exceeded
+        if self.hdf5_write_failures >= HDF5_FAILURE_ALERT_THRESHOLD and not self.hdf5_failure_alerted:
+            logger.critical(
+                f"🚨 HDF5 WRITE FAILURES CRITICAL: {self.hdf5_write_failures} consecutive failures! "
+                f"Fusion service may be starving. Check disk space, permissions, and HDF5 library. "
+                f"Channel: {self.channel_name}"
+            )
+            self.hdf5_failure_alerted = True
+            # TODO: Trigger email alert via service-alert.sh
+    
+    def _validate_required_fields(self, measurement: Dict[str, Any], required_fields: List[str], data_product: str) -> bool:
+        """
+        Validate that required fields are present and non-None in measurement dict.
+        
+        Args:
+            measurement: Measurement dictionary to validate
+            required_fields: List of required field names
+            data_product: Name of data product for error messages
+            
+        Returns:
+            True if all required fields present and non-None, False otherwise
+        """
+        missing_fields = []
+        for field in required_fields:
+            if field not in measurement or measurement[field] is None:
+                missing_fields.append(field)
+        
+        if missing_fields:
+            logger.error(
+                f"Cannot write {data_product}: missing required fields: {missing_fields}. "
+                f"Measurement: {measurement.keys()}"
+            )
+            return False
+        
+        return True
+    
+    def _verify_hdf5_writers_healthy(self):
+        """
+        Verify all HDF5 writers can write and read on startup.
+        
+        Performs a health check by writing a test measurement to each writer
+        and verifying it can be read back. Fails fast if any writer is not
+        operational.
+        
+        Raises:
+            RuntimeError: If any HDF5 writer fails health check
+        """
+        writers_to_test = []
+        
+        if self.hdf5_l1a_writer:
+            writers_to_test.append(('L1A Channel Observables', self.hdf5_l1a_writer))
+        if self.hdf5_l1a_tones_writer:
+            writers_to_test.append(('L1A Tone Detections', self.hdf5_l1a_tones_writer))
+        if self.hdf5_l1b_writer:
+            writers_to_test.append(('L1B BCD Timecode', self.hdf5_l1b_writer))
+        if self.hdf5_l2_writer:
+            writers_to_test.append(('L2 Timing Measurements', self.hdf5_l2_writer))
+        
+        if not writers_to_test:
+            logger.info("No HDF5 writers to test (HDF5 disabled)")
+            return
+        
+        logger.info(f"Running HDF5 startup health check for {len(writers_to_test)} writers...")
+        
+        for writer_name, writer in writers_to_test:
+            try:
+                if writer.write_test_measurement():
+                    logger.info(f"✅ {writer_name} HDF5 writer healthy")
+                else:
+                    raise RuntimeError(f"{writer_name} HDF5 writer test failed")
+            except Exception as e:
+                logger.error(f"❌ {writer_name} HDF5 writer FAILED startup test: {e}")
+                raise RuntimeError(f"HDF5 writer {writer_name} not operational: {e}")
+        
+        logger.info(f"✅ All {len(writers_to_test)} HDF5 writers passed startup health check")
+    
+
     def _write_clock_offset(self, result, minute_boundary: int, rtp_timestamp: int):
         """Append D_clock measurement to CSV time series with convergence tracking."""
         try:
@@ -572,6 +723,13 @@ class Phase2AnalyticsService:
                 try:
                     from hf_timestd.io.uncertainty import ISOGUMCalculator, UncertaintyBudget
                     
+                    # Early validation: Check required fields before building full dict
+                    required_l2_fields = ['timestamp_utc', 'station', 'clock_offset_ms']
+                    if station is None or effective_d_clock is None:
+                        logger.error(f"Cannot write L2: missing critical data (station={station}, d_clock={effective_d_clock})")
+                        self._track_hdf5_write_failure(ValueError("Missing critical L2 fields"), "L2")
+                        return  # Skip HDF5 write but continue with CSV
+                    
                     # Create ISO GUM uncertainty budget
                     # Use default values scaled by SNR and convergence state
                     snr_db = self.last_carrier_snr_db or 10.0
@@ -640,12 +798,13 @@ class Phase2AnalyticsService:
                     }
                     
                     # Write to HDF5
-                    logger.info(f"Attempting HDF5 L2 write: D_clock={effective_d_clock:.2f}ms")
+                    logger.debug(f"Attempting HDF5 L2 write: D_clock={effective_d_clock:.2f}ms")
                     self.hdf5_l2_writer.write_measurement(l2_measurement)
-                    logger.info(f"Successfully wrote HDF5 L2 measurement")
+                    self._track_hdf5_write_success()
+                    logger.debug(f"Successfully wrote HDF5 L2 measurement")
                     
                 except Exception as e:
-                    logger.error(f"Failed to write HDF5 L2 measurement: {e}", exc_info=True)
+                    self._track_hdf5_write_failure(e, "L2")
                 
                 
             # Store convergence result for status reporting
@@ -749,9 +908,10 @@ class Phase2AnalyticsService:
                     }
                     
                     self.hdf5_l1a_writer.write_measurement(l1a_measurement)
+                    self._track_hdf5_write_success()
                     
                 except Exception as e:
-                    logger.error(f"Failed to write HDF5 L1A measurement: {e}", exc_info=True)
+                    self._track_hdf5_write_failure(e, "L1A")
                     
         except Exception as e:
             logger.error(f"Failed to write carrier power: {e}")

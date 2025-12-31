@@ -367,6 +367,93 @@ class DataProductWriter:
             self._current_date = None
             self._measurement_count = 0
     
+    # ========================================================================
+    # Write Verification & Testing (Analytics Review 2025-12-30)
+    # ========================================================================
+    
+    def verify_last_write(self) -> bool:
+        """
+        Verify that the last write succeeded by reading back the last record.
+        
+        Returns:
+            True if last write can be verified, False otherwise
+        """
+        if self._current_file is None or self._measurement_count == 0:
+            return False
+        
+        try:
+            # Check that at least one dataset exists and has data
+            for field in self.schema['fields']:
+                field_name = field['name']
+                if field_name in self._current_file:
+                    dataset = self._current_file[field_name]
+                    if dataset.shape[0] > 0:
+                        # Successfully read last value
+                        _ = dataset[-1]
+                        return True
+            
+            # No datasets found with data
+            return False
+            
+        except Exception as e:
+            logger.error(f"Write verification failed: {e}")
+            return False
+    
+    def write_test_measurement(self) -> bool:
+        """
+        Write a minimal test measurement to verify writer is operational.
+        
+        Used for startup health checks. Creates a test measurement with
+        minimal required fields, writes it, verifies it, then continues
+        normal operation.
+        
+        Returns:
+            True if test write succeeded, False otherwise
+        """
+        try:
+            # Build minimal test measurement with required fields only
+            test_measurement = {}
+            
+            for field in self.schema['fields']:
+                if not field.get('required', False):
+                    continue
+                
+                field_name = field['name']
+                field_type = field.get('type')
+                
+                # Generate test values based on type
+                if field_type == 'string':
+                    if field_name == 'timestamp_utc':
+                        test_measurement[field_name] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+                    elif 'enum' in field:
+                        test_measurement[field_name] = field['enum'][0]
+                    else:
+                        test_measurement[field_name] = 'TEST'
+                
+                elif field_type == 'float':
+                    test_measurement[field_name] = 0.0
+                
+                elif field_type == 'integer':
+                    test_measurement[field_name] = 0
+                
+                elif field_type == 'boolean':
+                    test_measurement[field_name] = False
+            
+            # Write test measurement
+            self.write_measurement(test_measurement)
+            
+            # Verify it was written
+            if not self.verify_last_write():
+                logger.error("Test measurement write verification failed")
+                return False
+            
+            logger.info(f"✅ Test measurement written and verified for {self.channel}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Test measurement write failed: {e}", exc_info=True)
+            return False
+    
     def __enter__(self):
         """Context manager entry."""
         return self

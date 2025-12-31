@@ -132,6 +132,7 @@ import csv
 import os
 import time
 import re
+import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -821,10 +822,10 @@ class MultiBroadcastFusion:
         # CSV fallback (original implementation)
         from datetime import datetime, timezone, timedelta
         from .wwv_constants import BPM_UT1_MINUTES
-
+        
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
-
+        
         now_dt = datetime.now(timezone.utc)
         today_str = now_dt.strftime('%Y%m%d')
         yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
@@ -935,10 +936,10 @@ class MultiBroadcastFusion:
         from datetime import datetime, timezone, timedelta
         from .wwv_constants import BPM_UT1_MINUTES
         
-        # If HDF5 not available, fall back to CSV
+        # If HDF5 not available, return empty dict (CSV fallback handled at top level)
         if not HDF5_AVAILABLE:
-            logger.debug("HDF5 not available, falling back to CSV for tone detections")
-            return self._read_latest_tone_observations_by_channel(lookback_minutes)
+            logger.debug("HDF5 not available for tone detections")
+            return {}
         
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
@@ -1282,7 +1283,11 @@ class MultiBroadcastFusion:
         # Try HDF5 first if available
         if HDF5_AVAILABLE:
             try:
-                return self._read_latest_measurements_hdf5(lookback_minutes)
+                hdf5_measurements = self._read_latest_measurements_hdf5(lookback_minutes)
+                if hdf5_measurements:
+                    return hdf5_measurements
+                else:
+                    logger.info("HDF5 returned 0 measurements, falling back to CSV")
             except Exception as e:
                 logger.warning(f"HDF5 read failed, falling back to CSV: {e}")
         
@@ -1319,53 +1324,54 @@ class MultiBroadcastFusion:
             if legacy_path.exists():
                 csv_files.append(legacy_path)
             
-        for csv_path in csv_files:
-            try:
-                with open(csv_path) as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        try:
-                            ts_str = row.get('system_time')
-                            if not ts_str:
-                                continue
-                            ts = float(ts_str)
-                            if ts < cutoff:
-                                continue
-                            
-                            station = row.get('station', 'UNKNOWN')
-                            conf_str = row.get('confidence')
-                            conf = float(conf_str) if conf_str else 0.0
-                            offset_str = row.get('clock_offset_ms', '')
-                            
-                            # Skip if no valid timing solution was found or confidence is ultra-low
-                            if not offset_str or offset_str == '' or conf < 0.01:
-                                continue
-                                
-                            offset_ms = float(offset_str)
-                            
-                            # BPM UT1 filtering: Skip minutes 25-29 and 55-59
-                            if station == 'BPM':
-                                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                                if dt.minute in BPM_UT1_MINUTES:
+            # Read CSV files for this channel
+            for csv_path in csv_files:
+                try:
+                    with open(csv_path) as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            try:
+                                ts_str = row.get('system_time')
+                                if not ts_str:
                                     continue
-                            
-                            m = BroadcastMeasurement(
-                                timestamp=ts,
-                                station=station,
-                                frequency_mhz=float(row.get('frequency_mhz', 0)),
-                                d_clock_ms=offset_ms,
-                                propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
-                                propagation_mode=row.get('propagation_mode', ''),
-                                confidence=conf,
-                                snr_db=float(row.get('snr_db', 0)),
-                                quality_grade=row.get('quality_grade', 'D'),
-                                channel_name=channel
-                            )
-                            measurements.append(m)
-                        except (ValueError, KeyError):
-                            continue
-            except Exception as e:
-                logger.debug(f"Error reading {csv_path}: {e}")
+                                ts = float(ts_str)
+                                if ts < cutoff:
+                                    continue
+                                
+                                station = row.get('station', 'UNKNOWN')
+                                conf_str = row.get('confidence')
+                                conf = float(conf_str) if conf_str else 0.0
+                                offset_str = row.get('clock_offset_ms', '')
+                                
+                                # Skip if no valid timing solution was found or confidence is ultra-low
+                                if not offset_str or offset_str == '' or conf < 0.01:
+                                    continue
+                                    
+                                offset_ms = float(offset_str)
+                                
+                                # BPM UT1 filtering: Skip minutes 25-29 and 55-59
+                                if station == 'BPM':
+                                    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                                    if dt.minute in BPM_UT1_MINUTES:
+                                        continue
+                                
+                                m = BroadcastMeasurement(
+                                    timestamp=ts,
+                                    station=station,
+                                    frequency_mhz=float(row.get('frequency_mhz', 0)),
+                                    d_clock_ms=offset_ms,
+                                    propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
+                                    propagation_mode=row.get('propagation_mode', ''),
+                                    confidence=conf,
+                                    snr_db=float(row.get('snr_db', 0)),
+                                    quality_grade=row.get('quality_grade', 'D'),
+                                    channel_name=channel
+                                )
+                                measurements.append(m)
+                            except (ValueError, KeyError):
+                                continue
+                except Exception as e:
+                    logger.debug(f"Error reading {csv_path}: {e}")
         
         return measurements
     
@@ -1468,121 +1474,20 @@ class MultiBroadcastFusion:
                         continue
             
             except FileNotFoundError:
-                # HDF5 file doesn't exist, try CSV fallback for this channel
-                logger.debug(f"No HDF5 files found for {channel}, trying CSV fallback")
-                # Fall back to CSV for this specific channel
-                csv_measurements = self._read_latest_measurements_for_channel(
-                    channel, lookback_minutes
-                )
-                measurements.extend(csv_measurements)
+                # HDF5 file doesn't exist - skip this channel
+                logger.debug(f"No HDF5 files found for {channel}")
             
             except Exception as e:
-                logger.warning(f"Error reading HDF5 for {channel}: {e}, falling back to CSV")
-                # Fall back to CSV for this specific channel
-                csv_measurements = self._read_latest_measurements_for_channel(
-                    channel, lookback_minutes
-                )
-                measurements.extend(csv_measurements)
+                logger.warning(f"Error reading HDF5 for {channel}: {e}")
         
-            if measurements:
-                logger.info(
-                    f"Read {len(measurements)} L2 timing measurements from HDF5 "
-                    f"(lookback={lookback_minutes}m)"
-                )
-            else:
-                 # If HDF5 returned nothing, try CSV as fallback (handling migration/missing files)
-                 logger.debug("HDF5 returned 0 measurements, checking CSV fallback")
-                 csv_measurements = self._read_latest_measurements(lookback_minutes)
-                 if csv_measurements:
-                     measurements = csv_measurements
-                     logger.info(f"Fallback: Read {len(measurements)} measurements from CSV")
+        # After trying all channels, log results
+        if measurements:
+            logger.info(
+                f"Read {len(measurements)} L2 timing measurements from HDF5 "
+                f"(lookback={lookback_minutes}m)"
+            )
         
         return measurements
-    
-    def _read_latest_measurements_for_channel(
-        self,
-        channel: str,
-        lookback_minutes: int = 5
-    ) -> List[BroadcastMeasurement]:
-        """
-        Read latest measurements for a single channel from CSV.
-        
-        Helper method for fallback when HDF5 is not available for a specific channel.
-        """
-        from datetime import datetime, timezone, timedelta
-        from .wwv_constants import BPM_UT1_MINUTES
-        
-        measurements = []
-        now = time.time()
-        cutoff = now - (lookback_minutes * 60)
-        
-        now_dt = datetime.now(timezone.utc)
-        today_str = now_dt.strftime('%Y%m%d')
-        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
-        
-        clock_offset_dir = self.phase2_dir / channel / 'clock_offset'
-        if not clock_offset_dir.exists():
-            return measurements
-        
-        csv_files = []
-        for date_str in [today_str, yesterday_str]:
-            for csv_path in clock_offset_dir.glob(f'*_clock_offset_{date_str}.csv'):
-                csv_files.append(csv_path)
-        
-        # Also check for legacy file
-        legacy_path = clock_offset_dir / 'clock_offset_series.csv'
-        if legacy_path.exists():
-            csv_files.append(legacy_path)
-        
-        for csv_path in csv_files:
-            try:
-                with open(csv_path) as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        try:
-                            ts_str = row.get('system_time')
-                            if not ts_str:
-                                continue
-                            ts = float(ts_str)
-                            if ts < cutoff:
-                                continue
-                            
-                            station = row.get('station', 'UNKNOWN')
-                            conf_str = row.get('confidence')
-                            conf = float(conf_str) if conf_str else 0.0
-                            offset_str = row.get('clock_offset_ms', '')
-                            
-                            if not offset_str or offset_str == '' or conf < 0.01:
-                                continue
-                            
-                            offset_ms = float(offset_str)
-                            
-                            # BPM UT1 filtering
-                            if station == 'BPM':
-                                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                                if dt.minute in BPM_UT1_MINUTES:
-                                    continue
-                            
-                            m = BroadcastMeasurement(
-                                timestamp=ts,
-                                station=station,
-                                frequency_mhz=float(row.get('frequency_mhz', 0)),
-                                d_clock_ms=offset_ms,
-                                propagation_delay_ms=float(row.get('propagation_delay_ms', 0)),
-                                propagation_mode=row.get('propagation_mode', ''),
-                                confidence=conf,
-                                snr_db=float(row.get('snr_db', 0)),
-                                quality_grade=row.get('quality_grade', 'D'),
-                                channel_name=channel
-                            )
-                            measurements.append(m)
-                        except (ValueError, KeyError):
-                            continue
-            except Exception as e:
-                logger.debug(f"Error reading {csv_path}: {e}")
-        
-        return measurements
-
     
     def _calculate_weights(
         self, 
@@ -2040,6 +1945,10 @@ class MultiBroadcastFusion:
         
         # ====================================================================
         
+        # ====================================================================
+        
+        # ====================================================================
+        
         # Reject outliers
         measurements, weights, n_rejected = self._reject_outliers(
             measurements, weights
@@ -2422,7 +2331,6 @@ class MultiBroadcastFusion:
                 'wwv_intra_std_ms': result.wwv_intra_std_ms,
                 'wwvh_intra_std_ms': result.wwvh_intra_std_ms,
                 'chu_intra_std_ms': result.chu_intra_std_ms,
-                'bpm_intra_std_ms': result.bpm_intra_std_ms,
                 
                 # Consistency metrics
                 'inter_station_spread_ms': result.inter_station_spread_ms,
@@ -2555,6 +2463,116 @@ class MultiBroadcastFusion:
         }
 
 
+class ChronySHMUpdater:
+    """
+    Threaded Chrony SHM updater that runs independently of fusion loop.
+    
+    This ensures chrony receives updates at its poll interval (8s) even if
+    fusion runs at a different cadence (e.g., 60s).
+    """
+    
+    def __init__(self, chrony_shm, poll_interval: float = 8.0):
+        self.chrony_shm = chrony_shm
+        self.poll_interval = poll_interval
+        self.latest_result = None
+        self.result_lock = threading.Lock()
+        self.running = False
+        self.thread = None
+        self.consecutive_failures = 0
+        self.total_writes = 0
+        self.failed_writes = 0
+        
+    def update_result(self, result):
+        """Update the latest fusion result (called by main fusion loop)."""
+        with self.result_lock:
+            self.latest_result = result
+    
+    def _updater_thread(self):
+        """Background thread that writes to Chrony SHM at poll interval."""
+        logger.info(f"Chrony SHM updater thread started (poll interval: {self.poll_interval}s)")
+        
+        while self.running:
+            try:
+                with self.result_lock:
+                    result = self.latest_result
+                
+                if result and result.quality_grade in ('A', 'B', 'C', 'D'):
+                    now = time.time()
+                    system_time = now
+                    reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
+                    
+                    # Precision based on uncertainty (log2 of seconds)
+                    precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
+                    
+                    try:
+                        update_success = self.chrony_shm.update(reference_time, system_time, precision)
+                        
+                        if update_success:
+                            self.consecutive_failures = 0
+                            self.total_writes += 1
+                            if self.total_writes <= 5 or self.total_writes % 60 == 0:
+                                logger.info(
+                                    f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
+                                    f"offset={(system_time-reference_time)*1000:+.3f}ms, "
+                                    f"precision={precision} (write #{self.total_writes})"
+                                )
+                        else:
+                            self.consecutive_failures += 1
+                            self.failed_writes += 1
+                            logger.error(
+                                f"Chrony SHM write failed (consecutive: {self.consecutive_failures}, "
+                                f"total: {self.failed_writes}/{self.total_writes + self.failed_writes})"
+                            )
+                            
+                            # Try to reconnect after multiple failures
+                            if self.consecutive_failures >= 3:
+                                try:
+                                    logger.warning("Attempting Chrony SHM reconnect...")
+                                    self.chrony_shm.disconnect()
+                                    if self.chrony_shm.connect():
+                                        logger.info("Chrony SHM reconnected successfully")
+                                        self.consecutive_failures = 0
+                                except Exception as e:
+                                    logger.error(f"Failed to reconnect Chrony SHM: {e}")
+                    
+                    except Exception as e:
+                        logger.error(f"Chrony SHM update exception: {e}", exc_info=True)
+                        self.consecutive_failures += 1
+                        self.failed_writes += 1
+                else:
+                    if result:
+                        logger.debug(f"Skipping SHM write: quality grade {result.quality_grade} not acceptable")
+                    else:
+                        logger.debug("Skipping SHM write: no fusion result available yet")
+                
+            except Exception as e:
+                logger.error(f"Chrony SHM updater thread error: {e}", exc_info=True)
+            
+            # Sleep for poll interval
+            time.sleep(self.poll_interval)
+    
+    def start(self):
+        """Start the background updater thread."""
+        if self.running:
+            logger.warning("Chrony SHM updater already running")
+            return
+        
+        self.running = True
+        self.thread = threading.Thread(target=self._updater_thread, daemon=True, name="ChronySHMUpdater")
+        self.thread.start()
+        logger.info("Chrony SHM updater thread started")
+    
+    def stop(self):
+        """Stop the background updater thread."""
+        if not self.running:
+            return
+        
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=2.0)
+        logger.info("Chrony SHM updater thread stopped")
+
+
 def run_fusion_service(
     data_root: Path, 
     interval_sec: float = 60.0, 
@@ -2567,9 +2585,12 @@ def run_fusion_service(
     Produces fused D_clock estimate every interval_sec.
     Optionally writes to Chrony SHM refclock for system clock discipline.
     
+    The Chrony SHM updates run in a separate thread at 8-second intervals,
+    independent of the fusion loop interval. This ensures chrony receives
+    fresh updates at its poll rate even if fusion runs less frequently.
+    
     Args:
         data_root: Base data directory
-        interval_sec: Fusion interval in seconds
         interval_sec: Fusion interval in seconds
         enable_chrony: If True, write fused time to Chrony SHM refclock
         lookback_minutes: Number of minutes to look back for measurements
@@ -2578,12 +2599,16 @@ def run_fusion_service(
     
     # Initialize Chrony SHM if enabled
     chrony_shm = None
+    chrony_updater = None
     if enable_chrony:
         try:
             from hf_timestd.core.chrony_shm import ChronySHM
             chrony_shm = ChronySHM(unit=0)
             if chrony_shm.connect():
                 logger.info("Chrony SHM refclock enabled (unit=0, refid=TMGR)")
+                # Start threaded updater at 8-second intervals
+                chrony_updater = ChronySHMUpdater(chrony_shm, poll_interval=8.0)
+                chrony_updater.start()
             else:
                 logger.warning("Failed to connect to Chrony SHM - continuing without")
                 chrony_shm = None
@@ -2591,22 +2616,11 @@ def run_fusion_service(
             logger.warning(f"Chrony SHM not available: {e}")
             chrony_shm = None
     
-    # Chrony update rate limiting - match chrony poll interval (poll 3 = 8 seconds)
-    # Only update chrony at this cadence to avoid unnecessary SHM writes
-    chrony_poll_interval = 8.0  # seconds (matches "poll 3" in chrony.conf)
-    last_chrony_update = 0.0
-    chrony_consecutive_failures = 0
-    chrony_total_writes = 0
-    chrony_failed_writes = 0
-    
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_csv}")
-    logger.info(f"  Chrony SHM: {'enabled' if chrony_shm else 'disabled'}")
-    if chrony_shm:
-        logger.info(f"  Chrony update cadence: {chrony_poll_interval}s (matching poll interval)")
+    logger.info(f"  Chrony SHM: {'enabled (threaded updater at 8s)' if chrony_updater else 'disabled'}")
     
-
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s")
     
@@ -2666,70 +2680,10 @@ def run_fusion_service(
                 if result.consistency_flag != 'OK':
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
-                # Write to Chrony SHM
-                now = time.time()
-                
-                # BREADCRUMB: SHM check
-                logger.debug(f"SHM write check: chrony_shm={chrony_shm is not None}, grade={result.quality_grade}, time_since_last={now - last_chrony_update:.1f}s")
-                
-                if chrony_shm and result.quality_grade in ('A', 'B', 'C', 'D'):
-                    if now - last_chrony_update >= chrony_poll_interval:
-                        system_time = now
-                        reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
-                        
-                        # Precision based on uncertainty (log2 of seconds)
-                        precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
-                        
-                        # BREADCRUMB: Attempting Update
-                        logger.debug(f"Attempting Chrony SHM update (prec={precision})...")
-                        
-                        try:
-                            update_success = chrony_shm.update(reference_time, system_time, precision)
-                            
-                            # BREADCRUMB: Update returned
-                            logger.debug(f"Chrony SHM update returned: {update_success}")
-                            
-                            if update_success:
-                                last_chrony_update = now
-                                chrony_consecutive_failures = 0
-                                chrony_total_writes += 1
-                                logger.info(
-                                    f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
-                                    f"ref={reference_time:.6f}, sys={system_time:.6f}, "
-                                    f"offset={(system_time-reference_time)*1000:+.3f}ms, precision={precision}"
-                                )
-                            else:
-                                chrony_consecutive_failures += 1
-                                chrony_failed_writes += 1
-                                logger.error(
-                                    f"Chrony SHM write failed (consecutive failures: {chrony_consecutive_failures}, "
-                                    f"total: {chrony_failed_writes}/{chrony_total_writes + chrony_failed_writes})"
-                                )
-                                if chrony_consecutive_failures >= 5:
-                                    logger.critical(
-                                        f"Chrony SHM unavailable after {chrony_consecutive_failures} consecutive failures! "
-                                        f"System clock discipline may be degraded."
-                                    )
-                                # Try to reconnect on next iteration
-                                if chrony_consecutive_failures >= 3:
-                                    try:
-                                        logger.debug("Attempting SHM reconnect...")
-                                        chrony_shm.disconnect()
-                                        if chrony_shm.connect():
-                                            logger.warning("Chrony SHM reconnected successfully")
-                                            chrony_consecutive_failures = 0
-                                    except Exception as e:
-                                        logger.error(f"Failed to reconnect Chrony SHM: {e}")
-                        except Exception as e_shm:
-                            logger.error(f"Chrony SHM update exception: {e_shm}", exc_info=True)
-                            
-                    else:
-                        logger.debug(f"Skipping SHM write: rate limit not met ({now - last_chrony_update:.1f}s < {chrony_poll_interval}s)")
-                else:
-                    if not chrony_shm:
-                        logger.debug("Skipping SHM write: chrony_shm is None")
-                    else:
-                        logger.debug(f"Skipping SHM write: quality grade {result.quality_grade} not acceptable")
+                # Update Chrony SHM updater thread with latest result
+                if chrony_updater:
+                    chrony_updater.update_result(result)
+                    logger.debug(f"Updated Chrony SHM thread with latest fusion result (grade {result.quality_grade})")
 
             # BREADCRUMB: Sleeping
             loop_duration = time.time() - loop_start_time
@@ -2739,6 +2693,8 @@ def run_fusion_service(
             
         except KeyboardInterrupt:
             logger.info("Fusion service stopped")
+            if chrony_updater:
+                chrony_updater.stop()
             break
         except Exception as e:
             logger.error(f"Fusion error: {e}", exc_info=True)

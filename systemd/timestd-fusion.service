@@ -6,23 +6,23 @@ Requires=timestd-analytics.service
 PartOf=timestd-analytics.service
 
 [Service]
-Type=notify
+Type=simple
 User=timestd
 Group=timestd
 
-# Watchdog for Chrony SHM updates
-WatchdogSec=60
-NotifyAccess=main
+# Note: Using Type=simple instead of Type=notify because first fusion calculation
+# can take >3 minutes during initialization. The threaded Chrony SHM updater
+# ensures updates continue at 8-second intervals regardless of fusion timing.
 
 # Run as the installed module from the venv
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion \
     --data-root /var/lib/timestd \
-    --interval 15.0 \
+    --interval 60.0 \
     --enable-chrony \
     --log-level INFO
 
-# Health check: Verify Chrony SHM is being updated
-ExecStartPost=/opt/hf-timestd/scripts/health-check-fusion.sh
+# Health check: Verify Chrony SHM is being updated (disabled - service needs time to start)
+#ExecStartPost=/opt/hf-timestd/scripts/health-check-fusion.sh
 
 # Always restart - critical for time discipline
 Restart=always

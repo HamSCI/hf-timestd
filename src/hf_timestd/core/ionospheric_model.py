@@ -102,11 +102,11 @@ REVISION HISTORY
 """
 
 import logging
-import math
-from datetime import datetime, timezone
-from typing import Optional, Dict, Tuple, NamedTuple
-from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Tuple
+from dataclasses import dataclass
 from enum import Enum
+from collections import OrderedDict
 
 import numpy as np
 
@@ -234,8 +234,9 @@ class IonosphericModel:
         self._iri_module = None
         self._iri_version: str = "none"  # "2020", "2016", or "none"
         
-        # Calibration storage: keyed by location hash
-        self._calibration_data: Dict[str, list] = {}
+        # Calibration storage: keyed by location hash (LRU eviction)
+        self._calibration_data: OrderedDict[str, list] = OrderedDict()
+        self.max_locations = 10  # Maximum locations to track
         
         # Cache for IRI results (avoid repeated calculations)
         self._iri_cache: Dict[str, LayerHeights] = {}
@@ -318,7 +319,8 @@ class IonosphericModel:
         if hasattr(value, "item"):
             try:
                 return float(value.item())
-            except Exception:
+            except (AttributeError, TypeError, ValueError) as e:
+                logger.debug(f"Failed to extract scalar via .item(): {e}")
                 pass
         
         if isinstance(value, (list, tuple)):
@@ -342,6 +344,38 @@ class IonosphericModel:
         minute_slot = (time.hour * 60 + time.minute) // 5
         return f"{lat_round}_{lon_round}_{time.date()}_{minute_slot}"
     
+    
+    def _calculate_cache_ttl(self, timestamp: datetime, latitude: float) -> float:
+        """
+        Calculate adaptive cache TTL based on ionospheric conditions.
+        
+        Ionosphere is more stable during daytime quiet conditions (longer TTL acceptable),
+        but more variable at night and during disturbed conditions (shorter TTL needed).
+        
+        Args:
+            timestamp: UTC timestamp
+            latitude: Geographic latitude in degrees
+            
+        Returns:
+            Cache TTL in seconds
+        """
+        # Calculate local solar time (approximate)
+        # For more accuracy, could use longitude, but hour-level precision is sufficient
+        hour = timestamp.hour
+        
+        # Daytime (06:00-18:00 UTC, approximate): longer TTL (ionosphere more stable)
+        # Nighttime: shorter TTL (more variable, especially near sunrise/sunset)
+        if 6 <= hour < 18:
+            base_ttl = 1800  # 30 minutes daytime
+        else:
+            base_ttl = 300   # 5 minutes nighttime
+        
+        # Future enhancement: reduce TTL during disturbed conditions
+        # if hasattr(self, 'ap') and self.ap and self.ap > 30:  # Disturbed
+        #     base_ttl = min(base_ttl, 300)
+        
+        return base_ttl
+    
     def _get_iri_heights(
         self,
         timestamp: datetime,
@@ -361,9 +395,10 @@ class IonosphericModel:
         if cache_key in self._iri_cache:
             self.stats['iri_cache_hits'] += 1
             cached = self._iri_cache[cache_key]
-            # Verify cache not stale
+            # Verify cache not stale (using adaptive TTL)
             age_seconds = (datetime.now(timezone.utc) - cached.timestamp).total_seconds()
-            if age_seconds < self._cache_ttl_seconds:
+            cache_ttl = self._calculate_cache_ttl(timestamp, latitude)
+            if age_seconds < cache_ttl:
                 return cached
         
         try:
@@ -733,6 +768,13 @@ class IonosphericModel:
         # Store calibration entry
         loc_key = f"{round(latitude)}_{round(longitude)}"
         if loc_key not in self._calibration_data:
+            # Evict oldest location if at capacity
+            if len(self._calibration_data) >= self.max_locations:
+                oldest_key = next(iter(self._calibration_data))
+                evicted_count = len(self._calibration_data[oldest_key])
+                del self._calibration_data[oldest_key]
+                logger.debug(f"Evicted calibration data for oldest location ({evicted_count} entries)")
+            
             self._calibration_data[loc_key] = []
         
         entry = CalibrationEntry(
@@ -744,6 +786,9 @@ class IonosphericModel:
         )
         
         self._calibration_data[loc_key].append(entry)
+        
+        # Move to end (mark as recently used)
+        self._calibration_data.move_to_end(loc_key)
         
         # Trim to max entries (keep most recent)
         if len(self._calibration_data[loc_key]) > self.max_calibration_entries:
