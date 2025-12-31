@@ -427,7 +427,7 @@ Type=simple
 User=$INSTALL_USER
 Group=$INSTALL_USER
 EnvironmentFile=$CONFIG_DIR/environment
-WorkingDirectory=$PROJECT_DIR
+WorkingDirectory=$DATA_ROOT
 
 ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.core_recorder --config $CONFIG_DIR/timestd-config.toml
 
