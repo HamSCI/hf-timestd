@@ -337,17 +337,24 @@ python -c "import iri2020; print(f'  ✅ iri2020 installed')"
 deactivate
 
 # =============================================================================
-# Step 5: Set up Web UI (Python FastAPI)
+# Step 5: Set up Web UI and Scripts (Python FastAPI)
 # =============================================================================
 # Web UI is now Python-based (FastAPI) - all dependencies installed via pip above
-# Copy web-ui directory to production location
+# Copy web-ui and scripts directories to production location
 if [[ "$MODE" == "production" ]]; then
     sudo mkdir -p "$WEBUI_DIR"
     sudo cp -r "$PROJECT_DIR/web-ui/"* "$WEBUI_DIR/"
     sudo chown -R "$INSTALL_USER:$INSTALL_USER" "$WEBUI_DIR"
     log_info "Web UI installed at $WEBUI_DIR (Python FastAPI)"
+    
+    # Copy scripts directory for service startup scripts
+    sudo mkdir -p /opt/hf-timestd/scripts
+    sudo cp -r "$PROJECT_DIR/scripts/"* /opt/hf-timestd/scripts/
+    sudo chown -R "$INSTALL_USER:$INSTALL_USER" /opt/hf-timestd/scripts
+    log_info "Scripts installed at /opt/hf-timestd/scripts"
 else
     log_info "Web UI will run from $PROJECT_DIR/web-ui (Python FastAPI)"
+    log_info "Scripts will run from $PROJECT_DIR/scripts"
 fi
 
 # =============================================================================
@@ -466,8 +473,8 @@ EnvironmentFile=$CONFIG_DIR/environment
 WorkingDirectory=$DATA_ROOT
 
 # Use the shell script that starts all 9 channel analyzers + fusion
-ExecStart=$PROJECT_DIR/scripts/timestd-analytics.sh -start $CONFIG_DIR/timestd-config.toml
-ExecStop=$PROJECT_DIR/scripts/timestd-analytics.sh -stop
+ExecStart=/opt/hf-timestd/scripts/timestd-analytics.sh -start $CONFIG_DIR/timestd-config.toml
+ExecStop=/opt/hf-timestd/scripts/timestd-analytics.sh -stop
 
 # Type=forking since script backgrounds processes
 RemainAfterExit=yes
@@ -575,7 +582,7 @@ Group=$INSTALL_USER
 EnvironmentFile=$CONFIG_DIR/environment
 WorkingDirectory=$DATA_ROOT
 
-ExecStart=$VENV_DIR/bin/python -u $PROJECT_DIR/scripts/live_vtec.py --config $CONFIG_DIR/timestd-config.toml
+ExecStart=$VENV_DIR/bin/python -u /opt/hf-timestd/scripts/live_vtec.py --config $CONFIG_DIR/timestd-config.toml
 
 Restart=always
 RestartSec=10
