@@ -841,6 +841,64 @@ class Phase2TemporalEngine:
         
         return expected_delay_ms, uncertainty_ms
     
+    def _validate_d_clock_continuity(
+        self,
+        current_d_clock_ms: float,
+        previous_d_clock_ms: Optional[float],
+        dt_seconds: float,
+        channel_name: str
+    ) -> Tuple[bool, str]:
+        """
+        Validate that D_clock hasn't jumped unrealistically.
+        
+        Physical propagation delay cannot change faster than ~0.1ms/minute
+        due to ionospheric dynamics. Rapid jumps indicate:
+        - CHU frame slips (33ms jumps)
+        - Multipath mode hopping
+        - Decoder errors
+        
+        THEORY:
+        -------
+        Ionospheric layer heights change slowly:
+        - Diurnal variation: ~50 km over 12 hours = 0.07 km/min
+        - This translates to ~0.05 ms/min propagation delay change
+        
+        System clock drift (GPSDO):
+        - Typical: <0.01 ms/min
+        
+        Therefore, D_clock should change by <0.1 ms/min under normal conditions.
+        We allow 2ms baseline for measurement noise + 0.1ms per minute.
+        
+        Args:
+            current_d_clock_ms: Current D_clock measurement
+            previous_d_clock_ms: Previous D_clock measurement (or None)
+            dt_seconds: Time between measurements
+            channel_name: Channel for logging
+        
+        Returns:
+            (is_valid, reason)
+        """
+        if previous_d_clock_ms is None:
+            return True, "First measurement"
+        
+        delta_ms = abs(current_d_clock_ms - previous_d_clock_ms)
+        
+        # Maximum allowed change: 2ms baseline + 0.1ms per minute
+        # This accounts for:
+        # - Ionospheric variation: ~0.05ms/minute
+        # - Clock drift: ~0.01ms/minute (GPSDO)
+        # - Measurement noise: ~1-2ms
+        dt_minutes = dt_seconds / 60.0
+        max_allowed_ms = 2.0 + 0.1 * dt_minutes
+        
+        if delta_ms > max_allowed_ms:
+            reason = (f"D_clock jump: {delta_ms:.2f}ms in {dt_seconds:.0f}s "
+                     f"(max allowed: {max_allowed_ms:.2f}ms)")
+            logger.warning(f"{channel_name}: {reason}")
+            return False, reason
+        
+        return True, "Continuity OK"
+    
     def _step1_tone_detection(
         self,
         iq_samples: np.ndarray,

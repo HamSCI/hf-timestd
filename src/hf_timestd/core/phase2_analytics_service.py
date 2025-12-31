@@ -458,6 +458,16 @@ class Phase2AnalyticsService:
         self.processed_minutes = set()
         
         # ====================================================================
+        # D_clock Continuity Validation State (Critical Fix - 2025-12-31)
+        # ====================================================================
+        # Track previous D_clock for continuity validation
+        # Detects CHU frame slips and other timing jumps
+        self.last_d_clock_ms = None
+        self.last_minute_unix = None
+        
+        logger.debug("Initialized D_clock continuity validation state")
+        
+        # ====================================================================
         # HDF5 Write Failure Tracking (Issue 4.1 - Analytics Review 2025-12-30)
         # ====================================================================
         self.hdf5_write_failures = 0
@@ -2124,6 +2134,38 @@ class Phase2AnalyticsService:
                 primary_result = results[-1]
                 
                 self.last_result = primary_result
+                
+                # ===== NEW: D_clock Continuity Validation (Critical Fix - 2025-12-31) =====
+                # Validate that D_clock hasn't jumped unrealistically
+                # This catches CHU frame slips (33ms jumps) and other timing errors
+                if primary_result.d_clock_ms is not None:
+                    dt_seconds = (minute_boundary - self.last_minute_unix) if self.last_minute_unix else 60.0
+                    
+                    is_valid, reason = self.engine._validate_d_clock_continuity(
+                        current_d_clock_ms=primary_result.d_clock_ms,
+                        previous_d_clock_ms=self.last_d_clock_ms,
+                        dt_seconds=dt_seconds,
+                        channel_name=self.channel_name
+                    )
+                    
+                    if not is_valid:
+                        logger.error(f"{self.channel_name}: D_clock continuity check FAILED - {reason}")
+                        logger.error(f"  Current: {primary_result.d_clock_ms:.2f}ms, "
+                                    f"Previous: {self.last_d_clock_ms:.2f}ms, "
+                                    f"Delta: {abs(primary_result.d_clock_ms - self.last_d_clock_ms):.2f}ms")
+                        
+                        # Mark result as invalid
+                        primary_result.confidence = 0.0
+                        if hasattr(primary_result, 'solution') and primary_result.solution:
+                            primary_result.solution.confidence = 0.0
+                        
+                        # Don't update last_d_clock_ms - keep previous value
+                        logger.warning(f"{self.channel_name}: Rejecting measurement due to continuity failure")
+                    else:
+                        # Valid measurement - update state
+                        self.last_d_clock_ms = primary_result.d_clock_ms
+                        self.last_minute_unix = minute_boundary
+                        logger.debug(f"{self.channel_name}: Continuity OK - {reason}")
                 
                 # Write to CSV time series (coordinated path)
                 # Loop through ALL results to capture multi-station data

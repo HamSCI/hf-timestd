@@ -14,7 +14,8 @@ CHU FSK Signal Structure:
 -------------------------
 - Frequencies: 2225 Hz (mark), 2025 Hz (space)
 - Baud rate: 300 bps (3.333ms per bit)
-- Frame format: 1 start + 8 data + 2 stop = 11 bits per byte
+- Frame format: 1 start + 8 data + 1 parity + 1 stop = 11 bits per byte
+- Parity: EVEN parity on 8 data bits
 - 10 bytes per second (5 data + 5 redundancy)
 
 Timing per second (31-39):
@@ -247,9 +248,12 @@ class CHUFSKDecoder:
     
     def _bits_to_bytes(self, bits: List[int]) -> List[int]:
         """
-        Convert bit stream to bytes (1 start + 8 data + 2 stop = 11 bits per byte)
+        Convert bit stream to bytes (1 start + 8 data + 1 parity + 1 stop = 11 bits per byte)
         
-        Returns list of decoded bytes, or empty list if framing error
+        CHU uses EVEN PARITY on the 8 data bits. This is critical for detecting
+        frame slips and corrupted data that could cause timing errors.
+        
+        Returns list of decoded bytes, or empty list if framing/parity error
         """
         bytes_out = []
         
@@ -262,8 +266,8 @@ class CHUFSKDecoder:
             # Check start bit (should be 0/space)
             start_bit = bits[bit_offset]
             if start_bit != 0:
-                logger.debug(f"Framing error: start bit is 1 at byte {byte_num}. Bits: {bits[bit_offset:bit_offset+11]}")
-                continue
+                logger.debug(f"Framing error: start bit is 1 at byte {byte_num}")
+                return []  # Reject entire frame on start bit error
             
             # Extract 8 data bits (LSB first)
             data_byte = 0
@@ -271,11 +275,23 @@ class CHUFSKDecoder:
                 if bits[bit_offset + 1 + i]:
                     data_byte |= (1 << i)
             
-            # Check stop bits (should be 1/mark)
-            stop1 = bits[bit_offset + 9]
-            stop2 = bits[bit_offset + 10]
-            if stop1 != 1 or stop2 != 1:
-                logger.debug(f"Framing error: stop bits wrong at byte {byte_num}. Stop: {stop1}{stop2}. Bits: {bits[bit_offset:bit_offset+11]}")
+            # ===== NEW: Check even parity =====
+            parity_bit = bits[bit_offset + 9]  # Bit 9 is parity
+            data_parity = bin(data_byte).count('1') % 2  # Count 1s in data (0=even, 1=odd)
+            
+            # CHU uses EVEN parity: parity bit should be 1 if data has odd number of 1s
+            expected_parity = data_parity  # For even parity system
+            
+            if parity_bit != expected_parity:
+                logger.debug(f"Parity error at byte {byte_num}: data=0x{data_byte:02x}, "
+                            f"data_parity={data_parity}, received_parity={parity_bit}")
+                return []  # Reject entire frame on parity error
+            
+            # Check stop bit (should be 1/mark)
+            stop_bit = bits[bit_offset + 10]
+            if stop_bit != 1:
+                logger.debug(f"Framing error: stop bit wrong at byte {byte_num}")
+                return []  # Reject entire frame on stop bit error
             
             bytes_out.append(data_byte)
         
@@ -394,6 +410,90 @@ class CHUFSKDecoder:
             dst_pattern=dst_pattern,
             valid=True
         )
+    
+    def _find_consensus_time(self, frames: List[CHUFrameA]) -> Optional[Dict]:
+        """
+        Find consensus time from multiple Frame A decodes.
+        
+        CHU broadcasts Frame A in seconds 32-39 (8 repetitions). We require
+        majority agreement to reject frame slips and corrupted decodes.
+        
+        Args:
+            frames: List of decoded Frame A results
+        
+        Returns:
+            Dictionary with consensus time and confidence, or None if no consensus
+        """
+        from collections import Counter
+        
+        # Extract time tuples from valid frames
+        time_tuples = [(f.day_of_year, f.hour, f.minute) for f in frames if f.valid]
+        
+        if not time_tuples:
+            return None
+        
+        # Find most common time
+        counter = Counter(time_tuples)
+        most_common, count = counter.most_common(1)[0]
+        
+        # Require at least 50% agreement
+        confidence = count / len(time_tuples)
+        if confidence < 0.5:
+            logger.warning(f"CHU consensus failed: only {count}/{len(time_tuples)} frames agree")
+            return None
+        
+        day, hour, minute = most_common
+        
+        return {
+            'day': day,
+            'hour': hour,
+            'minute': minute,
+            'confidence': confidence,
+            'agreement': f"{count}/{len(time_tuples)}"
+        }
+    
+    def _validate_time_consistency(
+        self,
+        decoded_time: Dict,
+        expected_dt: 'datetime'
+    ) -> bool:
+        """
+        Validate decoded time against expected time.
+        
+        The decoded time should be within ±1 hour of the system time.
+        This catches frame slips and major decoding errors.
+        
+        Args:
+            decoded_time: Dictionary with day, hour, minute
+            expected_dt: Expected datetime from system
+        
+        Returns:
+            True if times are consistent (within ±1 hour)
+        """
+        from datetime import datetime, timedelta, timezone
+        
+        year = expected_dt.year
+        day_of_year = decoded_time['day']
+        hour = decoded_time['hour']
+        minute = decoded_time['minute']
+        
+        try:
+            # Create datetime from day of year
+            decoded_dt = datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=day_of_year - 1)
+            decoded_dt = decoded_dt.replace(hour=hour, minute=minute, second=0)
+        except ValueError as e:
+            logger.error(f"Invalid decoded time: day={day_of_year}, hour={hour}, minute={minute}: {e}")
+            return False
+        
+        # Check if within ±1 hour
+        delta_seconds = abs((decoded_dt - expected_dt).total_seconds())
+        
+        if delta_seconds > 3600:  # More than 1 hour off
+            logger.warning(f"CHU time inconsistency: decoded={decoded_dt.isoformat()}, "
+                          f"expected={expected_dt.isoformat()}, delta={delta_seconds:.0f}s")
+            return False
+        
+        return True
     
     def decode_second(
         self,
@@ -542,9 +642,40 @@ class CHUFSKDecoder:
             result.detected = True
             result.decode_confidence = result.frames_decoded / result.frames_total
             
-            # Use consensus from Frame A for time
-            if frame_a_results:
-                # Use most common values
+            # ===== NEW: Multi-second consensus with validation =====
+            if len(frame_a_results) >= 3:  # Need at least 3 valid decodes for consensus
+                from datetime import datetime, timezone
+                
+                consensus_time = self._find_consensus_time(frame_a_results)
+                
+                if consensus_time:
+                    # Validate against expected time
+                    expected_dt = datetime.fromtimestamp(minute_boundary_unix, tz=timezone.utc)
+                    
+                    if self._validate_time_consistency(consensus_time, expected_dt):
+                        result.decoded_day = consensus_time['day']
+                        result.decoded_hour = consensus_time['hour']
+                        result.decoded_minute = consensus_time['minute']
+                        # Update confidence based on consensus
+                        result.decode_confidence = consensus_time['confidence']
+                        
+                        logger.info(f"{self.channel_name} FSK: Consensus validated - "
+                                   f"{consensus_time['agreement']} frames agree, "
+                                   f"confidence={consensus_time['confidence']:.2f}")
+                    else:
+                        logger.warning(f"{self.channel_name} FSK: Time consistency check FAILED - "
+                                      f"rejecting decode")
+                        result.detected = False
+                        result.decode_confidence = 0.0
+                else:
+                    logger.warning(f"{self.channel_name} FSK: Consensus FAILED - "
+                                  f"{len(frame_a_results)} frames decoded but no agreement")
+                    result.detected = False
+                    result.decode_confidence = 0.0
+            elif frame_a_results:
+                # Fallback: use most common values (old behavior for <3 frames)
+                logger.warning(f"{self.channel_name} FSK: Only {len(frame_a_results)} frames - "
+                              f"using fallback consensus (not validated)")
                 days = [f.day_of_year for f in frame_a_results]
                 hours = [f.hour for f in frame_a_results]
                 minutes = [f.minute for f in frame_a_results]
@@ -580,3 +711,4 @@ class CHUFSKDecoder:
                 )
         
         return result
+
