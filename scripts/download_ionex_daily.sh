@@ -29,8 +29,9 @@ if [ ! -f "$IONEX_SCRIPT" ]; then
 fi
 
 # Run python script
-# The script now accepts 'yesterday' as a date argument
-"$VENV_PYTHON" "$IONEX_SCRIPT" yesterday --output-dir "$IONEX_DIR" >> "$LOG_FILE" 2>&1
+# Calculate yesterday's date
+YESTERDAY=$(date -d "yesterday" +%Y-%m-%d)
+"$VENV_PYTHON" "$IONEX_SCRIPT" "$YESTERDAY" --output-dir "$IONEX_DIR" >> "$LOG_FILE" 2>&1
 
 if [ $? -eq 0 ]; then
     log "✓ IONEX download successful"

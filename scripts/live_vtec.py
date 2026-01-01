@@ -56,18 +56,22 @@ def main():
             logger.info("GNSS VTEC monitoring is disabled in config. Exiting.")
             return
 
-    # 1. Prepare DCB Data
-    logger.info("Initializing CDDIS Downloader...")
-    downloader = CDDISDownloader()
-    dcb_file = downloader.download_latest_rapid_dcb()
-    
-    if not dcb_file:
-        logger.error("Failed to download DCB file. VTEC accuracy will be degraded (0 bias assumed).")
-        dcb_data = {}
+    # 1. Prepare DCB Data (only if GNSS VTEC is enabled)
+    dcb_data = {}
+    if enabled:
+        logger.info("GNSS VTEC enabled - initializing CDDIS Downloader for DCB corrections...")
+        downloader = CDDISDownloader()
+        dcb_file = downloader.download_latest_rapid_dcb()
+        
+        if not dcb_file:
+            logger.error("Failed to download DCB file. VTEC accuracy will be degraded (0 bias assumed).")
+        else:
+            logger.info(f"Parsing DCB file: {dcb_file}")
+            dcb_data = downloader.parse_biases(dcb_file)
+            logger.info(f"Loaded {len(dcb_data)} bias entries.")
     else:
-        logger.info(f"Parsing DCB file: {dcb_file}")
-        dcb_data = downloader.parse_biases(dcb_file)
-        logger.info(f"Loaded {len(dcb_data)} bias entries.")
+        logger.info("GNSS VTEC disabled - skipping DCB download")
+
 
     if args.download_only:
         return
