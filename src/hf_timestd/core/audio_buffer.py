@@ -77,6 +77,9 @@ class AudioBuffer:
         """
         if len(iq_samples) == 0:
             return
+            
+        # Clean inputs (handle NaNs/Infs from gaps)
+        iq_samples = np.nan_to_num(iq_samples, nan=0.0, posinf=0.0, neginf=0.0)
         
         # AM demodulation (envelope detection)
         audio = np.abs(iq_samples).astype(np.float32)
@@ -93,8 +96,8 @@ class AudioBuffer:
         # 20000 / 8000 = 2.5 = 5/2, so up by 2, down by 5
         audio_8k = signal.resample_poly(audio, 2, 5)
         
-        # Convert to int16
-        audio_int16 = np.clip(audio_8k, -32767, 32767).astype(np.int16)
+        # Safe cast to int16 (handle any residual overflows)
+        audio_int16 = np.clip(np.nan_to_num(audio_8k), -32767, 32767).astype(np.int16)
         
         # Write to circular buffer
         with self._lock:
