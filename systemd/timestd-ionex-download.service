@@ -1,0 +1,24 @@
+[Unit]
+Description=HF-TimeStd IONEX Download Service
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=timestd
+Group=timestd
+
+# Environment
+EnvironmentFile=-/etc/hf-timestd/environment
+
+# Run the download script
+ExecStart=/opt/hf-timestd/scripts/download_ionex_daily.sh
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-ionex
+
+[Install]
+WantedBy=multi-user.target

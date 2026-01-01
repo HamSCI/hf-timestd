@@ -322,16 +322,20 @@ def get_ionex_filename(target_date: date) -> str:
         return f"igsg{doy}0.{yy}i.Z"
 
 
-def download_ionex(date_str: str, output_dir: Path = Path('/tmp/ionex')) -> Optional[Path]:
+def download_ionex(date_str: str, output_dir: Path = Path('/tmp/ionex'), max_days_back: int = 14) -> Optional[Path]:
     """
     Download IGS Global Ionosphere Map (IONEX) file for a specific date.
     
     Uses NASA CDDIS archive with Earthdata Login authentication via ~/.netrc.
     Automatically selects correct filename format based on date.
     
+    If the requested date is not available, searches backwards up to max_days_back
+    to find the most recent available file.
+    
     Args:
         date_str: Date string (YYYY-MM-DD)
         output_dir: Directory to save IONEX files
+        max_days_back: Maximum days to search backwards if requested date unavailable (default: 14)
     
     Returns:
         Path to downloaded file, or None if failed
@@ -344,77 +348,93 @@ def download_ionex(date_str: str, output_dir: Path = Path('/tmp/ionex')) -> Opti
         logger.error(f"Invalid date format '{date_str}': {e}")
         return None
     
-    year = target_date.year
-    doy = target_date.strftime("%j")
-    
-    # Get correct filename for this date
-    filename = get_ionex_filename(target_date)
-    
-    # Construct URL: https://cddis.nasa.gov/archive/gnss/products/ionex/YYYY/DDD/filename
-    base_url = "https://cddis.nasa.gov/archive/gnss/products/ionex/"
-    file_url = f"{base_url}{year}/{doy}/{filename}"
-    
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / filename
     
-    # Check if already downloaded
-    if output_file.exists():
-        logger.info(f"IONEX file already exists: {output_file}")
-        return output_file
-    
-    logger.info(f"Downloading IONEX: {filename}")
-    logger.debug(f"URL: {file_url}")
-    
-    try:
-        # Use requests.Session for proper cookie/redirect handling
-        with requests.Session() as session:
-            # The .netrc file provides authentication automatically
-            response = session.get(file_url, allow_redirects=True, stream=True, timeout=60)
-            
-            if response.status_code == 200:
-                # Download file in chunks
-                with open(output_file, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                # Verify file was downloaded
-                if output_file.stat().st_size == 0:
-                    logger.error(f"Downloaded file is empty: {output_file}")
-                    output_file.unlink()
-                    return None
-                
-                logger.info(f"✓ Downloaded: {output_file} ({output_file.stat().st_size} bytes)")
-                return output_file
-                
-            elif response.status_code == 401:
-                logger.error("Authentication failed (401). Check ~/.netrc file:")
-                logger.error("  machine urs.earthdata.nasa.gov")
-                logger.error("      login YOUR_USERNAME")
-                logger.error("      password YOUR_PASSWORD")
-                return None
-                
-            elif response.status_code == 404:
-                logger.error(f"File not found (404): {file_url}")
-                logger.error("This may indicate:")
-                logger.error("  - Data not yet available for this date")
-                logger.error("  - Incorrect filename format for this date range")
-                return None
-                
+    # Try requested date first, then search backwards
+    for days_offset in range(max_days_back + 1):
+        attempt_date = target_date - timedelta(days=days_offset)
+        year = attempt_date.year
+        doy = attempt_date.strftime("%j")
+        
+        # Get correct filename for this date
+        filename = get_ionex_filename(attempt_date)
+        
+        # Construct URL
+        base_url = "https://cddis.nasa.gov/archive/gnss/products/ionex/"
+        file_url = f"{base_url}{year}/{doy}/{filename}"
+        
+        output_file = output_dir / filename
+        
+        # Check if already downloaded
+        if output_file.exists():
+            if days_offset > 0:
+                logger.info(f"Using existing IONEX file from {days_offset} days before requested date: {output_file}")
             else:
-                logger.error(f"Download failed with status code: {response.status_code}")
-                return None
+                logger.info(f"IONEX file already exists: {output_file}")
+            return output_file
+        
+        if days_offset == 0:
+            logger.info(f"Downloading IONEX: {filename}")
+        else:
+            logger.info(f"Trying {days_offset} days back: {filename}")
+        logger.debug(f"URL: {file_url}")
+        
+        try:
+            # Use requests.Session for proper cookie/redirect handling
+            with requests.Session() as session:
+                # The .netrc file provides authentication automatically
+                response = session.get(file_url, allow_redirects=True, stream=True, timeout=60)
+                
+                if response.status_code == 200:
+                    # Download file in chunks
+                    with open(output_file, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    # Verify file was downloaded
+                    if output_file.stat().st_size == 0:
+                        logger.error(f"Downloaded file is empty: {output_file}")
+                        output_file.unlink()
+                        continue  # Try next date
+                    
+                    if days_offset > 0:
+                        logger.info(f"✓ Downloaded IONEX from {days_offset} days ago: {output_file} ({output_file.stat().st_size} bytes)")
+                    else:
+                        logger.info(f"✓ Downloaded: {output_file} ({output_file.stat().st_size} bytes)")
+                    return output_file
+                    
+                elif response.status_code == 401:
+                    logger.error("Authentication failed (401). Check ~/.netrc file:")
+                    logger.error("  machine urs.earthdata.nasa.gov")
+                    logger.error("      login YOUR_USERNAME")
+                    logger.error("      password YOUR_PASSWORD")
+                    return None  # Don't retry on auth failure
+                    
+                elif response.status_code == 404:
+                    if days_offset == 0:
+                        logger.warning(f"File not found for requested date: {file_url}")
+                        logger.info(f"Searching backwards up to {max_days_back} days for latest available file...")
+                    # Continue to next date
+                    continue
+                    
+                else:
+                    logger.warning(f"Download failed with status code {response.status_code}, trying older date...")
+                    continue
+        
+        except requests.exceptions.Timeout:
+            logger.warning(f"Download timeout after 60s: {file_url}, trying older date...")
+            continue
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Download failed: {e}, trying older date...")
+            continue
+        except Exception as e:
+            logger.warning(f"Unexpected error: {e}, trying older date...")
+            continue
     
-    except requests.exceptions.Timeout:
-        logger.error(f"Download timeout after 60s: {file_url}")
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Download failed: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error during download: {e}")
-        return None
+    logger.error(f"Could not find any IONEX files within {max_days_back} days of {date_str}")
+    return None
 
 
 def interpolate_ionex_vtec(

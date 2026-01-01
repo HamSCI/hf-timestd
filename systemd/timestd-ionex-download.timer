@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily IONEX Download Timer
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Timer]
+# Run daily at 03:00 UTC (after IGS final products are published)
+OnCalendar=*-*-* 03:00:00
+# Run on boot if missed (e.g., system was off)
+Persistent=true
+# Randomize start by up to 30 minutes to avoid server load spikes
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target
