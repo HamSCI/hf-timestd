@@ -86,7 +86,7 @@ class AudioBuffer:
         
         # Normalize to use full 16-bit range
         max_val = np.max(np.abs(audio))
-        if max_val > 0:
+        if max_val > 1e-6:  # Prevent divide by zero on silence
             audio = audio / max_val * 32000
         
         # Downsample from 20 kHz to 8 kHz using polyphase filter
