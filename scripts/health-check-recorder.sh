@@ -12,12 +12,22 @@ MAX_RETRIES=15
 for i in $(seq 1 $MAX_RETRIES); do
     LATEST_FILE=$(find "$DATA_ROOT/raw_buffer" -name "*.bin" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
     
+    
     if [ -n "$LATEST_FILE" ]; then
-        break
+        # Check file age immediately
+        FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$LATEST_FILE") ))
+        
+        if [ "$FILE_AGE" -le "$MAX_AGE_SECONDS" ]; then
+            echo "Found recent file: $LATEST_FILE ($FILE_AGE sec old)"
+            break
+        else
+            echo "Found only old file: $LATEST_FILE ($FILE_AGE sec old). Waiting for new data... ($i/$MAX_RETRIES)"
+        fi
+    else
+        # If we are here, no files found. Wait and retry.
+        echo "Waiting for first file... ($i/$MAX_RETRIES)"
     fi
     
-    # If we are here, no files found. Wait and retry.
-    echo "Waiting for first file... ($i/$MAX_RETRIES)"
     sleep 5
 done
 
@@ -26,12 +36,14 @@ if [ -z "$LATEST_FILE" ]; then
     exit 1
 fi
 
-# Check file age
+# Re-verify age (redundant but safe)
 FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$LATEST_FILE") ))
 
 if [ "$FILE_AGE" -gt "$MAX_AGE_SECONDS" ]; then
     echo "WARNING: Latest raw buffer file is $FILE_AGE seconds old (max: $MAX_AGE_SECONDS)"
     echo "File: $LATEST_FILE"
+    # Even if stale, we found ONE. If we timed out waiting for *better*, maybe just warn?
+    # But for a health check, stale data = broken recorder.
     exit 1
 fi
 
