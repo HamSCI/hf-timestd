@@ -34,7 +34,8 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 # Constants
-SAMPLES_PER_MINUTE = 20000 * 60  # 1,200,000 samples at 20 kHz
+# Constants
+BYTES_PER_SAMPLE = 8  # complex64 = 2 x float32
 BYTES_PER_SAMPLE = 8  # complex64 = 2 x float32
 
 
@@ -66,11 +67,11 @@ class MinuteBuffer:
     
     @property
     def is_complete(self) -> bool:
-        return self.write_pos >= SAMPLES_PER_MINUTE
+        return self.write_pos >= len(self.samples)
     
     @property
     def samples_remaining(self) -> int:
-        return max(0, SAMPLES_PER_MINUTE - self.write_pos)
+        return max(0, len(self.samples) - self.write_pos)
 
 
 class BinaryArchiveWriter:
@@ -97,6 +98,9 @@ class BinaryArchiveWriter:
             self.archive_dir = config.output_dir / channel_name_to_dir(config.channel_name)
         
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Buffer sizing
+        self.samples_per_minute = int(config.sample_rate * 60)
         
         # Current minute buffer
         self.current_buffer: Optional[MinuteBuffer] = None
@@ -149,7 +153,7 @@ class BinaryArchiveWriter:
         
         buffer = MinuteBuffer(
             minute_boundary=minute_boundary,
-            samples=np.zeros(SAMPLES_PER_MINUTE, dtype=np.complex64),
+            samples=np.zeros(self.samples_per_minute, dtype=np.complex64),
             write_pos=0,
             start_rtp=rtp_timestamp
         )
@@ -302,7 +306,7 @@ class BinaryArchiveWriter:
             json_path = minute_dir / f"{buffer.minute_boundary}.json"
             
             # Write binary data (just the filled portion)
-            actual_samples = min(buffer.write_pos, SAMPLES_PER_MINUTE)
+            actual_samples = min(buffer.write_pos, self.samples_per_minute)
             raw_data = buffer.samples[:actual_samples].tobytes()
             
             # Check disk space before writing (raw size + some overhead)
@@ -349,8 +353,8 @@ class BinaryArchiveWriter:
                 'frequency_hz': self.config.frequency_hz,
                 'sample_rate': self.config.sample_rate,
                 'samples_written': actual_samples,
-                'samples_expected': SAMPLES_PER_MINUTE,
-                'completeness_pct': 100.0 * actual_samples / SAMPLES_PER_MINUTE,
+                'samples_expected': self.samples_per_minute,
+                'completeness_pct': 100.0 * actual_samples / self.samples_per_minute,
                 'gap_count': buffer.gap_count,
                 'gap_samples': buffer.gap_samples,
                 'start_rtp_timestamp': buffer.start_rtp,
@@ -373,7 +377,7 @@ class BinaryArchiveWriter:
             self.minutes_written += 1
             logger.info(
                 f"📁 Wrote minute {buffer.minute_boundary}: "
-                f"{actual_samples}/{SAMPLES_PER_MINUTE} samples "
+                f"{actual_samples}/{self.samples_per_minute} samples "
                 f"({metadata['completeness_pct']:.1f}%) "
                 f"[{bin_path.name}]"
             )
