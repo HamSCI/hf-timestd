@@ -94,6 +94,9 @@ if [[ "$MODE" == "production" ]]; then
             check_warn "timestd-vtec.service is NOT running (optional)"
         fi
     fi
+    
+    echo ""
+    echo "Note: Continuing to check data outputs even if services are starting..."
 fi
 
 # =============================================================================
