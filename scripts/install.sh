@@ -610,6 +610,8 @@ VTEC_EOF
         sudo sed -i "s|\$CONFIG_DIR|$CONFIG_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
         sudo sed -i "s|\$PROJECT_DIR|$PROJECT_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
         sudo sed -i "s|\$VENV_DIR|$VENV_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
+        sudo sed -i "s|\$DATA_ROOT|$DATA_ROOT|g" "$SYSTEMD_DIR/timestd-vtec.service"
+
         
         log_info "    ✅ timestd-vtec.service installed"
     else
