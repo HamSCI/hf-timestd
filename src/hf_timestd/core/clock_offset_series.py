@@ -157,6 +157,13 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import threading
 
+try:
+    from ..io.hdf5_writer import DataProductWriter
+    HDF5_AVAILABLE = True
+except ImportError:
+    HDF5_AVAILABLE = False
+    logger.warning("HDF5 writer not available, using CSV-only mode")
+
 logger = logging.getLogger(__name__)
 
 
@@ -374,7 +381,7 @@ class ClockOffsetSeriesWriter:
     - DRF metadata: Integration with Digital RF
     """
     
-    def __init__(self, output_dir: Path, channel_name: str):
+    def __init__(self, output_dir: Path, channel_name: str, enable_hdf5: bool = True):
         """
         Initialize writer.
         
@@ -382,17 +389,40 @@ class ClockOffsetSeriesWriter:
             output_dir: Clock offset directory from paths.get_clock_offset_dir()
                        Should be: {data_root}/phase2/{CHANNEL}/clock_offset/
             channel_name: Channel identifier
+            enable_hdf5: Enable HDF5 writing (default: True, CSV as fallback)
         """
         # Use output_dir directly - caller should provide paths.get_clock_offset_dir()
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.channel_name = channel_name
         
-        # CSV file for continuous logging
+        # HDF5 writer (primary output format)
+        self.hdf5_writer = None
+        if enable_hdf5 and HDF5_AVAILABLE:
+            try:
+                # Get parent directory for HDF5 files (phase2/{CHANNEL}/)
+                phase2_channel_dir = self.output_dir.parent
+                self.hdf5_writer = DataProductWriter(
+                    output_dir=phase2_channel_dir,
+                    product_level='L2',
+                    product_name='timing_measurements',
+                    channel=channel_name,
+                    version='v1',
+                    processing_version='3.2.0'
+                )
+                logger.info(f"✅ HDF5 writer enabled for {channel_name}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize HDF5 writer: {e}, using CSV fallback")
+                self.hdf5_writer = None
+        
+        # CSV file for continuous logging (fallback)
         self.csv_file = self.output_dir / 'clock_offset_series.csv'
         self._init_csv()
         
-        logger.info(f"ClockOffsetSeriesWriter initialized: {self.output_dir}")
+        if self.hdf5_writer:
+            logger.info(f"ClockOffsetSeriesWriter initialized (HDF5 + CSV backup): {self.output_dir}")
+        else:
+            logger.info(f"ClockOffsetSeriesWriter initialized (CSV only): {self.output_dir}")
     
     def _init_csv(self):
         """Initialize CSV file with headers if needed."""
@@ -412,11 +442,72 @@ class ClockOffsetSeriesWriter:
     
     def write_measurement(self, measurement: ClockOffsetMeasurement):
         """
-        Write a single measurement to CSV.
+        Write a single measurement to HDF5 (primary) and CSV (backup).
         
         Args:
             measurement: ClockOffsetMeasurement to write
         """
+        # Write to HDF5 (primary)
+        if self.hdf5_writer:
+            try:
+                # Calculate uncertainty components (simplified alignment with existing uncertainty_ms)
+                # Assign standard uncertainty primarily to measurement noise (Type A) for now
+                u_c = measurement.uncertainty_ms
+                k = 2.0
+                U = u_c * k
+                
+                # Convert measurement to HDF5 format (satisfying L2_timing_measurements_v1 schema)
+                hdf5_data = {
+                    'timestamp_utc': datetime.fromtimestamp(measurement.utc_time, tz=timezone.utc).isoformat(),
+                    'minute_boundary_utc': int(measurement.minute_boundary_utc),
+                    'rtp_timestamp': measurement.rtp_timestamp if measurement.rtp_timestamp else 0,
+                    'station': measurement.station,
+                    'frequency_mhz': measurement.frequency_mhz,
+                    'discrimination_method': 'BCD',  # Default to BCD
+                    'discrimination_confidence': 1.0 if measurement.discrimination_confidence == 'high' else (0.5 if measurement.discrimination_confidence == 'medium' else 0.1),
+                    'clock_offset_ms': measurement.clock_offset_ms,
+                    'uncertainty_ms': u_c,
+                    'expanded_uncertainty_ms': U,
+                    'coverage_factor': k,
+                    'confidence_level': 0.95,
+                    'degrees_of_freedom': 100,  # Nominal high DOF
+                    # Uncertainty budget breakdown (placeholder distribution)
+                    'u_rtp_timestamp_ms': 0.0,
+                    'u_ionospheric_ms': u_c,    # Attribute variable uncertainty to ionosphere
+                    'u_multipath_ms': 0.0,
+                    'u_discrimination_ms': 0.0,
+                    'u_gpsdo_ms': 0.001,        # Nominal GPSDO stability
+                    'u_propagation_model_ms': 0.0,
+                    'quality_grade': measurement.quality_grade.value,
+                    'confidence': measurement.confidence,
+                    'quality_flag': 'GOOD' if measurement.quality_grade.value in ['A', 'B'] else ('MARGINAL' if measurement.quality_grade.value == 'C' else 'BAD'),
+                    'traceability_chain': 'GPSDO -> UTC(GPS) -> UTC(NIST)',
+                    'processing_version': measurement.processing_version,
+                    'processed_at': datetime.fromtimestamp(measurement.processed_at, tz=timezone.utc).isoformat() if measurement.processed_at else datetime.now(timezone.utc).isoformat(),
+                    'calibration_date': '2025-01-01T00:00:00', # Placeholder
+                    'gpsdo_locked': True,  # Assumption for Phase 2 system
+                    
+                    # Optional fields
+                    'system_time': measurement.system_time,
+                    'propagation_delay_ms': measurement.propagation_delay_ms,
+                    'propagation_mode': measurement.propagation_mode,
+                    'n_hops': measurement.n_hops,
+                    'snr_db': measurement.snr_db,
+                    'delay_spread_ms': measurement.delay_spread_ms,
+                    'doppler_hz': 0.0, # Placeholder for required optional
+                    'utc_verified': measurement.utc_verified,
+                    'multi_station_verified': measurement.multi_station_verified
+                }
+                
+                # Add optional numeric fields if present
+                if measurement.fss_db is not None:
+                    hdf5_data['fss_db'] = measurement.fss_db
+                
+                self.hdf5_writer.write_measurement(hdf5_data)
+            except Exception as e:
+                logger.warning(f"HDF5 write failed: {e}, falling back to CSV only")
+        
+        # Write to CSV (backup/fallback)
         with open(self.csv_file, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
