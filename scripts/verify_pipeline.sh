@@ -102,26 +102,6 @@ fi
 # =============================================================================
 # Phase 1: Digital RF (L0 Raw IQ Data)
 # =============================================================================
-section "Phase 1: Digital RF (L0 Raw IQ)"
-
-DRF_DIR="$DATA_ROOT/drf"
-if [[ -d "$DRF_DIR" ]]; then
-    check_pass "Digital RF directory exists: $DRF_DIR"
-    
-    # Check for recent HDF5 files (within last 5 minutes)
-    RECENT_DRF=$(find "$DRF_DIR" -name "*.h5" -mmin -5 2>/dev/null | wc -l)
-    if [[ $RECENT_DRF -gt 0 ]]; then
-        check_pass "Found $RECENT_DRF recent DRF HDF5 files (last 5 min)"
-        
-        # Show sample
-        echo "  Sample files:"
-        find "$DRF_DIR" -name "*.h5" -mmin -5 2>/dev/null | head -3 | while read f; do
-            SIZE=$(du -h "$f" | cut -f1)
-            echo "    - $(basename $f) ($SIZE)"
-        done
-    else
-        check_warn "No recent DRF HDF5 files (last 5 min) - recorder may not be running"
-    fi
 else
     check_fail "Digital RF directory not found: $DRF_DIR"
 fi
