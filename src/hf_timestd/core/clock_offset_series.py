@@ -488,7 +488,6 @@ class ClockOffsetSeriesWriter:
                     'gpsdo_locked': True,  # Assumption for Phase 2 system
                     
                     # Optional fields
-                    'system_time': measurement.system_time,
                     'propagation_delay_ms': measurement.propagation_delay_ms,
                     'propagation_mode': measurement.propagation_mode,
                     'n_hops': measurement.n_hops,
