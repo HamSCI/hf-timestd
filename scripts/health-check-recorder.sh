@@ -7,8 +7,8 @@ DATA_ROOT="/var/lib/timestd"
 MAX_AGE_SECONDS=120  # Alert if no new files in 2 minutes
 
 # Find most recent .bin file across all channels
-# Retry loop for cold start (service takes ~60s to write first chunk)
-MAX_RETRIES=15
+# Retry loop for cold start (service takes up to 120s to write first chunk if starting just after minute boundary)
+MAX_RETRIES=40  # 40 * 5s = 200s wait
 for i in $(seq 1 $MAX_RETRIES); do
     LATEST_FILE=$(find "$DATA_ROOT/raw_buffer" -name "*.bin" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
     
