@@ -449,15 +449,15 @@ if __name__ == '__main__':
         print("Example: python ionex_integration.py 2025-12-23")
         sys.exit(1)
     
-    date = sys.argv[1]
+    date_str = sys.argv[1]
     
     # Download IONEX
-    ionex_file = download_ionex(date)
+    ionex_file = download_ionex(date_str)
     
     if ionex_file:
         # Example: Interpolate at WWV midpoint
         lat, lon = 40.5, -100.2
-        timestamp = f"{date}T12:00:00Z"
+        timestamp = f"{date_str}T12:00:00Z"
         
         vtec = interpolate_ionex_vtec(ionex_file, lat, lon, timestamp)
         
