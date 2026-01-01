@@ -348,12 +348,31 @@ class PipelineOrchestrator:
         
         # Phase 1: Write to raw_buffer (system time only)
         # CRITICAL: This writes raw data WITHOUT any UTC correction
-        samples_written = self.raw_buffer_writer.write_samples(
-            samples=samples,
-            rtp_timestamp=rtp_timestamp,
-            system_time=system_time
-        )
-        self.stats['samples_archived'] += samples_written
+        
+        # Handle partial writes (e.g. at minute boundaries) to ensure NO DATA LOSS
+        total_samples = len(samples)
+        samples_processed = 0
+        
+        while samples_processed < total_samples:
+            # Calculate current slice and timestamp
+            current_slice = samples[samples_processed:]
+            current_rtp = rtp_timestamp + samples_processed
+            
+            # Write chunk
+            written = self.raw_buffer_writer.write_samples(
+                samples=current_slice,
+                rtp_timestamp=current_rtp,
+                system_time=system_time
+            )
+            
+            if written == 0:
+                # Should not happen with BinaryArchiveWriter unless disk IS full or error
+                # But we must break to avoid infinite loop
+                logger.error(f"BinaryArchiveWriter wrote 0 samples (disk full?), data loss imminent: {total_samples - samples_processed} samples")
+                break
+                
+            samples_processed += written
+            self.stats['samples_archived'] += written
         
         # Write to Digital RF if enabled
         if self.digital_rf_writer:
