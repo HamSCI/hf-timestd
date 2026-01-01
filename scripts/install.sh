@@ -300,9 +300,10 @@ if [[ "$MODE" == "production" ]]; then
     log_info "  Installed: /etc/tmpfiles.d/timestd.conf (ensures /dev/shm/timestd persists across reboots)"
 fi
 
-# Config directory (production only)
+# Config directory
+create_dir "$CONFIG_DIR"
+
 if [[ "$MODE" == "production" ]]; then
-    create_dir "$CONFIG_DIR"
     create_dir "/opt/hf-timestd"
 fi
 
@@ -436,7 +437,13 @@ Group=$INSTALL_USER
 EnvironmentFile=$CONFIG_DIR/environment
 WorkingDirectory=$DATA_ROOT
 
-ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.core_recorder --config $CONFIG_DIR/timestd-config.toml
+ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.core_recorder_v2 --config $CONFIG_DIR/timestd-config.toml
+    
+# Wait up to 5 minutes for startup (health check waits for 1st minute of data)
+TimeoutStartSec=300
+
+# Health check: Verify data is being written
+ExecStartPost=/opt/hf-timestd/scripts/health-check-recorder.sh
 
 Restart=always
 RestartSec=10
