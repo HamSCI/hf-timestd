@@ -7,7 +7,7 @@ Type=simple
 User=mjh
 WorkingDirectory=/home/mjh/git/hf-timestd
 Environment=PYTHONPATH=src
-ExecStart=/home/mjh/git/hf-timestd/venv/bin/python -u scripts/live_vtec.py --config config/timestd-config.toml
+ExecStart=/opt/hf-timestd/venv/bin/python3 -u scripts/live_vtec.py --config config/timestd-config.toml
 Restart=always
 RestartSec=10
 
