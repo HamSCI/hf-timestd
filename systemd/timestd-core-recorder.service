@@ -22,6 +22,9 @@ WorkingDirectory=/opt/hf-timestd
 # Core recorder V2 uses RadiodStream for RTP handling (no manual multicast)
 ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.core.core_recorder_v2 \
     --config /etc/hf-timestd/timestd-config.toml
+    
+# Wait up to 5 minutes for startup (health check waits for 1st minute of data)
+TimeoutStartSec=300
 
 # Health check: Verify data is being written
 ExecStartPost=/opt/hf-timestd/scripts/health-check-recorder.sh

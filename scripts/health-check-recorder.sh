@@ -7,10 +7,22 @@ DATA_ROOT="/var/lib/timestd"
 MAX_AGE_SECONDS=120  # Alert if no new files in 2 minutes
 
 # Find most recent .bin file across all channels
-LATEST_FILE=$(find "$DATA_ROOT/raw_buffer" -name "*.bin" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+# Retry loop for cold start (service takes ~60s to write first chunk)
+MAX_RETRIES=15
+for i in $(seq 1 $MAX_RETRIES); do
+    LATEST_FILE=$(find "$DATA_ROOT/raw_buffer" -name "*.bin" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    
+    if [ -n "$LATEST_FILE" ]; then
+        break
+    fi
+    
+    # If we are here, no files found. Wait and retry.
+    echo "Waiting for first file... ($i/$MAX_RETRIES)"
+    sleep 5
+done
 
 if [ -z "$LATEST_FILE" ]; then
-    echo "ERROR: No raw buffer files found in $DATA_ROOT/raw_buffer"
+    echo "ERROR: No raw buffer files found in $DATA_ROOT/raw_buffer after $((MAX_RETRIES * 5)) seconds"
     exit 1
 fi
 
