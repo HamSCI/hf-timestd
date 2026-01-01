@@ -1,65 +1,37 @@
 [Unit]
 Description=HF Time Standard Analytics Service - Phase 2 Timing Analysis
 Documentation=https://github.com/mijahauan/hf-timestd
-After=network-online.target timestd-core-recorder.service
+After=network-online.target
 Wants=network-online.target
-Requires=timestd-core-recorder.service
-
-# Restart analytics when core-recorder restarts
-PartOf=timestd-core-recorder.service
 
 [Service]
 Type=forking
 RemainAfterExit=yes
 
-# User/Group - timestd service user with chrony group for SHM access
+# User/Group
 User=timestd
 Group=timestd
-SupplementaryGroups=_chrony
-
-# Watchdog for the launcher script
-WatchdogSec=120
 
 # Environment from file (set by install.sh)
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Working directory
-WorkingDirectory=/opt/hf-timestd
+WorkingDirectory=/var/lib/timestd
 
-# Use the shell script that starts all 9 channel analyzers + fusion
+# Use the shell script that starts all 9 channel analyzers
 ExecStart=/opt/hf-timestd/scripts/timestd-analytics.sh start /etc/hf-timestd/timestd-config.toml
 ExecStop=/opt/hf-timestd/scripts/timestd-analytics.sh stop
 
-# Health check: Verify HDF5 files are being updated
-ExecStartPost=/opt/hf-timestd/scripts/health-check-analytics.sh
-
-# Moderate restart policy - can process backlog
+# Restart policy
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=600
+StartLimitInterval=600
 StartLimitBurst=5
-
-# Email alert on failure
-OnFailure=timestd-alert@%n.service
 
 # Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=timestd-analytics
-
-# Resource limits (9 channels + fusion = ~10 processes)
-Nice=5
-MemoryMax=4G
-
-# Security hardening
-NoNewPrivileges=true
-PrivateTmp=false
-ProtectSystem=strict
-ProtectHome=read-only
-
-# Paths we need write access to
-ReadWritePaths=/var/lib/timestd /var/log/hf-timestd /dev/shm/timestd
-ReadOnlyPaths=/etc/hf-timestd
 
 [Install]
 WantedBy=multi-user.target
