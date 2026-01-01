@@ -211,7 +211,15 @@ EOF
         log_info "  Installing chronyd service override for SHM ordering..."
         sudo mkdir -p /etc/systemd/system/chronyd.service.d
         sudo cp "$PROJECT_DIR/systemd/chronyd-timestd-shm.conf" /etc/systemd/system/chronyd.service.d/timestd-shm.conf
+        sudo systemctl daemon-reload
         log_info "  ✅ Chronyd will start after timestd-fusion (ensures correct SHM permissions)"
+        
+        # Restart chronyd if it's running to apply configuration changes
+        if systemctl is-active --quiet chronyd; then
+            log_info "  Restarting chronyd to apply configuration changes..."
+            sudo systemctl restart chronyd
+            log_info "  ✅ Chronyd restarted"
+        fi
     fi
     
     # Configure UDP receive buffers (CRITICAL for preventing packet loss)
