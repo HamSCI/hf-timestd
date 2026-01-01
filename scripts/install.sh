@@ -178,8 +178,18 @@ if [[ "$MODE" == "production" ]]; then
     
     # Configure chrony for timestd SHM integration
     if command -v chronyd &> /dev/null; then
-        CHRONY_CONF="/etc/chrony/chrony.conf"
-        if ! grep -q "refclock SHM 0 refid TMGR" "$CHRONY_CONF" 2>/dev/null; then
+        # Detect chrony config file location
+        if [[ -f "/etc/chrony/chrony.conf" ]]; then
+            CHRONY_CONF="/etc/chrony/chrony.conf"
+        elif [[ -f "/etc/chrony.conf" ]]; then
+            CHRONY_CONF="/etc/chrony.conf"
+        else
+            CHRONY_CONF=""
+        fi
+
+        if [[ -n "$CHRONY_CONF" ]]; then
+            log_info "  Found chrony config: $CHRONY_CONF"
+            if ! grep -q "refclock SHM 0 refid TMGR" "$CHRONY_CONF" 2>/dev/null; then
             log_info "  Adding timestd SHM refclock to chrony.conf..."
             sudo tee -a "$CHRONY_CONF" > /dev/null <<'EOF'
 
@@ -191,6 +201,10 @@ EOF
             log_info "  📝 Note: timestd-fusion must start BEFORE chronyd to create SHM with correct permissions"
         else
             log_info "  ℹ️  Chrony already configured for timestd SHM"
+        fi
+        else
+            log_warn "  ⚠️  Could not find chrony.conf (checked /etc/chrony/chrony.conf and /etc/chrony.conf)"
+            log_warn "      Please manually add 'refclock SHM 0 refid TMGR ...' to your chrony configuration."
         fi
         
         # Install chronyd service override to ensure correct startup order
