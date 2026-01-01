@@ -100,11 +100,21 @@ if [[ "$MODE" == "production" ]]; then
 fi
 
 # =============================================================================
-# Phase 1: Digital RF (L0 Raw IQ Data)
+# Phase 1: Binary Archive (L0 Raw IQ Data)
 # =============================================================================
-else
-    check_fail "Digital RF directory not found: $DRF_DIR"
-fi
+section "Phase 1: Binary Archive (L0 Raw IQ)"
+
+RAW_BUFFER_DIR="$DATA_ROOT/raw_buffer"
+if [[ -d "$RAW_BUFFER_DIR" ]]; then
+    check_pass "Binary archive directory exists: $RAW_BUFFER_DIR"
+    
+    # Check for recent .bin.zst files (within last 5 minutes)
+    RECENT_BIN=$(find "$RAW_BUFFER_DIR" -name "*.bin.zst" -mmin -5 2>/dev/null | wc -l)
+    if [[ $RECENT_BIN -gt 0 ]]; then
+        check_pass "Found $RECENT_BIN recent binary archive files (last 5 min)"
+    else
+        check_warn "No recent binary archive files (last 5 min) - recorder may not be running"
+    fi
 
 # =============================================================================
 # Phase 2: Analytics (L2 Timing Measurements)
