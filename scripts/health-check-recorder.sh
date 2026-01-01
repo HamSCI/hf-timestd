@@ -6,11 +6,14 @@ set -e
 DATA_ROOT="/var/lib/timestd"
 MAX_AGE_SECONDS=120  # Alert if no new files in 2 minutes
 
-# Find most recent .bin file across all channels
+# Find most recent .bin file across all channels IN TODAY'S DIRECTORY ONLY
 # Retry loop for cold start (service takes up to 120s to write first chunk if starting just after minute boundary)
 MAX_RETRIES=40  # 40 * 5s = 200s wait
+TODAY=$(date +%Y%m%d)
+
 for i in $(seq 1 $MAX_RETRIES); do
-    LATEST_FILE=$(find "$DATA_ROOT/raw_buffer" -name "*.bin" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    # Search only in today's directories to avoid finding old files from previous days
+    LATEST_FILE=$(find "$DATA_ROOT/raw_buffer" -path "*/$TODAY/*.bin" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
     
     
     if [ -n "$LATEST_FILE" ]; then
@@ -25,7 +28,7 @@ for i in $(seq 1 $MAX_RETRIES); do
         fi
     else
         # If we are here, no files found. Wait and retry.
-        echo "Waiting for first file... ($i/$MAX_RETRIES)"
+        echo "Waiting for first file in $TODAY directory... ($i/$MAX_RETRIES)"
     fi
     
     sleep 5
