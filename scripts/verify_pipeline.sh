@@ -115,6 +115,9 @@ if [[ -d "$RAW_BUFFER_DIR" ]]; then
     else
         check_warn "No recent binary archive files (last 5 min) - recorder may not be running"
     fi
+else
+    check_fail "Binary archive directory not found: $RAW_BUFFER_DIR"
+fi
 
 # =============================================================================
 # Phase 2: Analytics (L2 Timing Measurements)
