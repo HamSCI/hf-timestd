@@ -97,23 +97,32 @@ RTP (UDP) -> Core (Digital RF .h5) -> Analytics (L2 .h5) -> Fusion (L3 .h5) -> C
 - Network access is available (LAN/Internet).
 
 ### 2026-01-01 Firebat Findings (Machine Transition)
+
 **Diagnostic Session on `firebat` (Receiver) pointing to `bee2` (Sender):**
 
-1.  **UDP Buffer Fix (Critical for Linux Receivers):**
+1. **UDP Buffer Fix (Critical for Linux Receivers):**
     - `netstat -su` showed >500k "packet receive errors" on `firebat`.
     - Fixed by increasing `net.core.rmem_max` to 16MB and `net.core.rmem_default` to 8MB in `/etc/sysctl.d/99-timestd.conf`.
     - **Result:** Zero OS-level packet drops.
 
-2.  **Sender-Side Data Loss (bee2):**
+2. **Sender-Side Data Loss (bee2):**
     - Even with proper buckets, `timestd-core-recorder` logged "Gap: 180 samples" warnings.
     - Code analysis confirmed this triggers when Sequence Numbers are contiguous but Timestamps jump forward.
     - **Conclusion:** `bee2` (Sender) is skipping/dropping data internally before transmission, likely due to buffer underrun/CPU load.
 
-3.  **24kHz Support Verification:**
+3. **24kHz Support Verification:**
     - `BinaryArchiveWriter` logic for buffer sizing works correctly (dynamic calc).
     - `ka9q-python` correctly reassembles fragmented packets regardless of sample rate.
 
-4.  **Service Fixes Verified:**
+4. **Service Fixes Verified:**
     - `timestd-vtec` requires absolute poduction venv path (`/opt/...`).
     - `timestd-core-recorder` requires `TimeoutStartSec=300` to handle 60s initial buffer fill + gaps.
     - `audio_buffer.py` patched to handle NaN/Inf values (prevents RuntimeWarnings).
+
+5. **Sample Rate & Network Packet Handling (Jan 1, 2026):**
+    - **Confirmed**: System properly handles sample rate changes and their effects on network packets.
+    - **Mechanism**: `samples_per_packet = sample_rate × blocktime_ms / 1000`
+    - **ka9q-python**: Automatically handles packet reassembly, fragmentation, and variable packet sizes.
+    - **Evidence**: 24kHz tested on production; UDP buffer tuning prevents OS-level drops.
+    - **Key Insight**: RTP timestamp deltas determine packet boundaries, not hardcoded sizes.
+    - **See**: `sample_rate_packet_analysis.md` for comprehensive technical analysis.
