@@ -213,6 +213,23 @@ EOF
         sudo cp "$PROJECT_DIR/systemd/chronyd-timestd-shm.conf" /etc/systemd/system/chronyd.service.d/timestd-shm.conf
         log_info "  ✅ Chronyd will start after timestd-fusion (ensures correct SHM permissions)"
     fi
+    
+    # Configure UDP receive buffers (CRITICAL for preventing packet loss)
+    log_step "Configuring UDP receive buffers..."
+    if [[ ! -f "/etc/sysctl.d/99-timestd.conf" ]]; then
+        log_info "  Creating /etc/sysctl.d/99-timestd.conf..."
+        sudo tee /etc/sysctl.d/99-timestd.conf > /dev/null <<'EOF'
+# HF-TimeStd: Increase UDP receive buffers to prevent packet loss
+# Radiod sends large RTP packets (up to 3.8KB at 24kHz sample rate)
+# which can be fragmented across multiple IP packets
+net.core.rmem_max = 16777216      # 16MB max
+net.core.rmem_default = 8388608   # 8MB default
+EOF
+        sudo sysctl -p /etc/sysctl.d/99-timestd.conf > /dev/null
+        log_info "  ✅ UDP buffers configured (16MB max, 8MB default)"
+    else
+        log_info "  ℹ️  UDP buffer config already exists"
+    fi
 fi
 
 # =============================================================================
@@ -339,17 +356,44 @@ source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
 
 log_info "Installing hf-timestd package (and dependencies from pyproject.toml)..."
-# Use pip install . to install from current directory using pyproject.toml
-pip install .
+
+# CRITICAL: In production mode, use regular install (NOT editable)
+# Editable installs create .pth files pointing to the source directory,
+# which breaks when systemd runs as a different user or the source is removed
+if [[ "$MODE" == "production" ]]; then
+    # Copy source to temp location to avoid any path dependencies
+    TEMP_INSTALL_DIR=$(mktemp -d)
+    cp -r "$PROJECT_DIR"/* "$TEMP_INSTALL_DIR/"
+    
+    # Install from temp location (ensures no references to $PROJECT_DIR)
+    pip install "$TEMP_INSTALL_DIR"
+    
+    # Clean up
+    rm -rf "$TEMP_INSTALL_DIR"
+    
+    log_info "  Installed hf-timestd in production mode (no source directory references)"
+else
+    # Test mode: use editable install for development convenience
+    pip install -e .
+    log_info "  Installed hf-timestd in editable mode (for development)"
+fi
 
 # Verify installation
-# Verify installation
-python -c "import hf_timestd; print(f'  ✅ hf_timestd installed')"
+python -c "import hf_timestd; print(f'  ✅ hf_timestd installed from: {hf_timestd.__file__}')"
 python -c "import sysv_ipc; print(f'  ✅ sysv_ipc installed')"
 python -c "import iri2020; print(f'  ✅ iri2020 installed')"
 
+# Verify no repo path references in production
+if [[ "$MODE" == "production" ]]; then
+    if python -c "import sys; exit(1 if '$PROJECT_DIR' in str(sys.path) else 0)"; then
+        log_info "  ✅ No source directory in Python path (production clean)"
+    else
+        log_warn "  ⚠️  Source directory still in Python path - may cause issues"
+    fi
+fi
 
 deactivate
+
 
 # =============================================================================
 # Step 5: Set up Web UI and Scripts (Python FastAPI)

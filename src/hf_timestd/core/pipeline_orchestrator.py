@@ -378,16 +378,53 @@ class PipelineOrchestrator:
         if self.digital_rf_writer:
             try:
                 # Digital RF requires strictly continuous sample indices
-                # RTP timestamps can have gaps (from packet loss that ka9q-python fills with zeros)
-                # So we track our own continuous index
+                # Detect gaps (from radiod restart, recorder restart, or large packet loss)
+                # and recreate writer to start a new continuous segment
+                
+                gap_threshold_samples = self.config.sample_rate * 5  # 5 seconds
                 
                 if self._last_drf_index is None:
                     # First write - use RTP timestamp as starting point
                     write_index = rtp_timestamp
+                    logger.info(f"Digital RF: Starting new segment at RTP {rtp_timestamp}")
                 else:
-                    # Subsequent writes - continue from where we left off
-                    # This ensures monotonic, gap-free indexing
-                    write_index = self._last_drf_index + 1
+                    # Check for gap
+                    expected_next_index = self._last_drf_index + 1
+                    gap_samples = rtp_timestamp - expected_next_index
+                    
+                    if abs(gap_samples) > gap_threshold_samples:
+                        # Large gap detected - close and recreate writer
+                        logger.warning(
+                            f"Digital RF: Gap detected ({gap_samples} samples = "
+                            f"{gap_samples/self.config.sample_rate:.1f}s). "
+                            f"Recreating writer for new segment."
+                        )
+                        
+                        # Close existing writer
+                        try:
+                            self.digital_rf_writer.close()
+                        except Exception:
+                            pass
+                        
+                        # Recreate writer
+                        from ..io.digital_rf_writer import DigitalRFWriter
+                        from ..paths import channel_name_to_dir
+                        
+                        drf_dir = self.config.data_dir / 'drf' / channel_name_to_dir(self.config.channel_name)
+                        
+                        self.digital_rf_writer = DigitalRFWriter(
+                            output_dir=drf_dir,
+                            sample_rate=self.config.sample_rate,
+                            channel_name=channel_name_to_dir(self.config.channel_name),
+                            compression_level=1
+                        )
+                        
+                        # Start new segment at current RTP timestamp
+                        write_index = rtp_timestamp
+                        logger.info(f"Digital RF: New segment started at RTP {rtp_timestamp}")
+                    else:
+                        # Normal continuous write
+                        write_index = expected_next_index
                 
                 self.digital_rf_writer.write_samples(
                     samples=samples,
