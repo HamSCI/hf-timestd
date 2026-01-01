@@ -17,7 +17,7 @@
 #   ./verify_pipeline.sh --quick      # Skip detailed file checks
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 # Parse arguments
 QUICK_MODE=false
