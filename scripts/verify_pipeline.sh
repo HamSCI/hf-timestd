@@ -72,8 +72,15 @@ if [[ "$MODE" == "production" ]]; then
     )
     
     for service in "${SERVICES[@]}"; do
-        if systemctl is-active --quiet "$service"; then
-            check_pass "$service is running"
+        # Check if service is active or activating (health check phase)
+        if systemctl is-active --quiet "$service" || systemctl show "$service" -p ActiveState | grep -q "activating"; then
+            STATE=$(systemctl show "$service" -p ActiveState -p SubState --value | head -1)
+            SUBSTATE=$(systemctl show "$service" -p SubState --value)
+            if [[ "$STATE" == "activating" ]]; then
+                check_warn "$service is starting ($SUBSTATE)"
+            else
+                check_pass "$service is running"
+            fi
         else
             check_fail "$service is NOT running"
         fi
