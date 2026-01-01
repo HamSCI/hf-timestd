@@ -6,7 +6,7 @@ Command Line Interface for hf-timestd
 import sys
 import logging
 import argparse
-from .core_recorder import CoreRecorder
+from .core.core_recorder_v2 import CoreRecorderV2
 
 def main():
     """Main entry point for hf-timestd command"""
@@ -153,7 +153,7 @@ def main():
         }
         
         # Start daemon mode
-        recorder = CoreRecorder(recorder_config)
+        recorder = CoreRecorderV2(recorder_config)
         recorder.run()
     elif args.command == 'discover':
         import toml
