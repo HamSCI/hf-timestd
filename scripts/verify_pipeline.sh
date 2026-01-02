@@ -352,7 +352,7 @@ fi
 VTEC_DIR="$DATA_ROOT/data/gnss_vtec"
 if [[ -d "$VTEC_DIR" ]]; then
     # HDF5
-    VTEC_HDF5=$(find "$VTEC_DIR" -name "gnss_vtec_*.h5" -mmin -15 2>/dev/null | wc -l)
+    VTEC_HDF5=$(find "$VTEC_DIR" -name "*gnss_vtec_*.h5" -mmin -15 2>/dev/null | wc -l)
     if [[ $VTEC_HDF5 -gt 0 ]]; then
         check_pass "GNSS VTEC: Found $VTEC_HDF5 recent HDF5 files (last 15 min)"
     else
