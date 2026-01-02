@@ -1,0 +1,145 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3B_iono_events",
+    "description": "Detected ionospheric events and disturbances",
+    "cadence_seconds": 300,
+    "processing_level": "L3B",
+    "standards": [
+        "CEDAR Madrigal patterns",
+        "Space Weather event formats"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Event detection timestamp in UTC"
+        },
+        {
+            "name": "event_start",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Event start time in UTC"
+        },
+        {
+            "name": "event_end",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Event end time in UTC (or current time if ongoing)"
+        },
+        {
+            "name": "event_type",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "TID",
+                "SPORADIC_E",
+                "SID",
+                "SPREAD_F",
+                "SCINTILLATION"
+            ],
+            "description": "Type of ionospheric event detected"
+        },
+        {
+            "name": "severity",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "allow_nan": false,
+            "description": "Event severity (0=minor, 1=extreme)",
+            "units": "normalized"
+        },
+        {
+            "name": "confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "allow_nan": false,
+            "description": "Detection confidence (0=low, 1=high)",
+            "units": "normalized"
+        },
+        {
+            "name": "affected_stations",
+            "type": "string",
+            "required": true,
+            "description": "Comma-separated list of affected stations",
+            "example": "WWV,WWVH,CHU"
+        },
+        {
+            "name": "affected_frequencies_mhz",
+            "type": "string",
+            "required": true,
+            "description": "Comma-separated list of affected frequencies",
+            "example": "5.0,10.0,15.0"
+        },
+        {
+            "name": "peak_value",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Peak measurement value (type-dependent)",
+            "units": "varies"
+        },
+        {
+            "name": "peak_time",
+            "type": "string",
+            "format": "iso8601",
+            "required": false,
+            "description": "Time of peak value"
+        },
+        {
+            "name": "duration_seconds",
+            "type": "float",
+            "required": false,
+            "description": "Event duration in seconds",
+            "units": "seconds"
+        },
+        {
+            "name": "description",
+            "type": "string",
+            "required": true,
+            "description": "Human-readable event description"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Science aggregator version"
+        }
+    ],
+    "event_types": {
+        "TID": {
+            "description": "Traveling Ionospheric Disturbance",
+            "peak_value_units": "Hz (Doppler amplitude)",
+            "typical_duration": "15-60 minutes",
+            "detection_method": "Coherent Doppler oscillations"
+        },
+        "SPORADIC_E": {
+            "description": "Sporadic-E layer event",
+            "peak_value_units": "MHz (foEs critical frequency)",
+            "typical_duration": "minutes to hours",
+            "detection_method": "SNR increase + 1E mode"
+        },
+        "SID": {
+            "description": "Sudden Ionospheric Disturbance (solar flare)",
+            "peak_value_units": "dB (absorption)",
+            "typical_duration": "30-60 minutes",
+            "detection_method": "Sudden SNR drop + recovery"
+        },
+        "SPREAD_F": {
+            "description": "Spread-F irregularities",
+            "peak_value_units": "Hz (Doppler spread)",
+            "typical_duration": "hours",
+            "detection_method": "High-frequency TEC fluctuations"
+        },
+        "SCINTILLATION": {
+            "description": "Ionospheric scintillation",
+            "peak_value_units": "S4 index",
+            "typical_duration": "minutes to hours",
+            "detection_method": "Amplitude/phase variance"
+        }
+    }
+}

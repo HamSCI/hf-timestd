@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 # Import TimeStdPaths for proper path management
 from hf_timestd.paths import TimeStdPaths
+from hf_timestd.core.propagation_stats import PropagationStatsCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,13 @@ class ScienceAggregator:
         from hf_timestd.core.tec_estimator import TECEstimator
         self.tec_estimator = TECEstimator(high_precision_mode=True)
         
+        # Initialize propagation statistics calculator
+        self.prop_stats_calculator = PropagationStatsCalculator(processing_version="3.3.0")
+        
+        # Propagation statistics output
+        self.prop_stats_dir = self.science_dir / 'propagation_stats'
+        self.prop_stats_dir.mkdir(parents=True, exist_ok=True)
+        
         # Track processed timestamps to avoid duplicates
         self.processed_timestamps = set()
         
@@ -133,11 +141,12 @@ class ScienceAggregator:
             List of dicts with keys: minute_boundary_utc, station, frequency_mhz,
             clock_offset_ms, uncertainty_ms, etc.
         """
-        # Use TimeStdPaths to get clock_offset directory
-        clock_offset_dir = self.paths.get_clock_offset_dir(channel_name)
+        # HDF5 timing measurements are in the channel root directory, not clock_offset subdirectory
+        # Use TimeStdPaths to get the Phase 2 channel directory
+        channel_dir = self.paths.get_phase2_dir(channel_name)
         
-        if not clock_offset_dir.exists():
-            logger.debug(f"Clock offset directory not found: {clock_offset_dir}")
+        if not channel_dir.exists():
+            logger.debug(f"Channel directory not found: {channel_dir}")
             return []
         
         # Try HDF5 first
@@ -146,7 +155,7 @@ class ScienceAggregator:
             from datetime import datetime, timezone
             
             reader = DataProductReader(
-                data_dir=clock_offset_dir,
+                data_dir=channel_dir,
                 product_level='L2',
                 product_name='timing_measurements',
                 channel=channel_name
@@ -164,7 +173,7 @@ class ScienceAggregator:
                 measurements = []
                 for m in measurements_hdf5:
                     measurements.append({
-                        'minute_boundary_utc': str(m.get('minute_boundary', m.get('unix_timestamp', 0))),
+                        'minute_boundary_utc': str(m.get('minute_boundary_utc', 0)),
                         'station': m.get('station', 'UNKNOWN'),
                         'frequency_mhz': str(m.get('frequency_mhz', 0)),
                         'clock_offset_ms': str(m.get('clock_offset_ms', 0)),
@@ -179,7 +188,8 @@ class ScienceAggregator:
         except Exception as e:
             logger.debug(f"HDF5 read failed for {channel_name}, trying CSV: {e}")
         
-        # CSV fallback (original implementation)
+        # CSV fallback (original implementation) - CSV files are in clock_offset subdirectory
+        clock_offset_dir = self.paths.get_clock_offset_dir(channel_name)
         csv_files = list(clock_offset_dir.glob(f'*_clock_offset_{date_str}.csv'))
         
         if not csv_files:
@@ -346,7 +356,8 @@ class ScienceAggregator:
                     'residuals_ms': tec_result.residuals_ms,
                     'frequencies_mhz': freq_str,
                     'quality_flag': quality_flag,
-                    'processing_version': '3.2.0'
+                    'validation_flag': 'UNVALIDATED',  # TODO: Implement VTEC validation in Phase 2
+                    'processing_version': '3.3.0'  # Bumped for schema update
                 }
                 
                 writer.write_measurement(measurement)
@@ -414,6 +425,132 @@ class ScienceAggregator:
             if not hdf5_success:
                 raise  # Re-raise if both HDF5 and CSV failed
     
+    def _aggregate_propagation_stats(self):
+        """
+        Aggregate propagation mode statistics from timing measurements.
+        
+        Calculates hourly statistics on propagation modes, MUF estimates,
+        and data quality from the timing measurements.
+        """
+        # Determine time range - aggregate the previous hour
+        now = datetime.now(timezone.utc)
+        period_end = now.replace(minute=0, second=0, microsecond=0)
+        period_start = period_end - timedelta(hours=1)
+        
+        # Skip if we've already processed this hour
+        hour_key = period_end.strftime('%Y%m%d_%H')
+        if hasattr(self, '_processed_prop_hours'):
+            if hour_key in self._processed_prop_hours:
+                return
+        else:
+            self._processed_prop_hours = set()
+        
+        date_str = period_end.strftime('%Y%m%d')
+        
+        logger.info(f"Aggregating propagation stats for {period_start} to {period_end}")
+        
+        # Find all channel names
+        channel_names = self._find_channel_dirs()
+        
+        if not channel_names:
+            logger.warning("No Phase 2 channels found for propagation stats")
+            return
+        
+        # Collect timing measurements with propagation mode info
+        all_measurements = []
+        for channel_name in channel_names:
+            measurements = self._read_timing_measurements_for_propagation(
+                channel_name, period_start, period_end
+            )
+            all_measurements.extend(measurements)
+        
+        if not all_measurements:
+            logger.info("No measurements found for propagation statistics")
+            return
+        
+        logger.info(f"Collected {len(all_measurements)} measurements for propagation stats")
+        
+        # Calculate hourly statistics
+        hourly_stats = self.prop_stats_calculator.calculate_hourly_stats(
+            measurements=all_measurements,
+            period_start=period_start,
+            period_end=period_end
+        )
+        
+        if hourly_stats:
+            self._write_propagation_stats(date_str, hourly_stats)
+            self._processed_prop_hours.add(hour_key)
+            logger.info(f"Wrote {len(hourly_stats)} propagation statistics records")
+    
+    def _read_timing_measurements_for_propagation(
+        self,
+        channel_name: str,
+        start_time: datetime,
+        end_time: datetime
+    ) -> List[Dict]:
+        """
+        Read timing measurements with propagation mode information.
+        
+        Args:
+            channel_name: Channel name
+            start_time: Start of time range
+            end_time: End of time range
+        
+        Returns:
+            List of measurement dictionaries with propagation_mode, snr_db, etc.
+        """
+        channel_dir = self.paths.get_phase2_dir(channel_name)
+        
+        if not channel_dir.exists():
+            return []
+        
+        try:
+            from hf_timestd.io import DataProductReader
+            
+            reader = DataProductReader(
+                data_dir=channel_dir,
+                product_level='L2',
+                product_name='timing_measurements',
+                channel=channel_name
+            )
+            
+            start_iso = start_time.isoformat().replace('+00:00', 'Z')
+            end_iso = end_time.isoformat().replace('+00:00', 'Z')
+            
+            measurements = reader.read_time_range(start=start_iso, end=end_iso)
+            
+            return measurements if measurements else []
+        
+        except Exception as e:
+            logger.debug(f"Failed to read timing measurements for {channel_name}: {e}")
+            return []
+    
+    def _write_propagation_stats(self, date_str: str, stats_list: List[Dict]):
+        """
+        Write propagation statistics to HDF5.
+        
+        Args:
+            date_str: Date string in YYYYMMDD format
+            stats_list: List of statistics dictionaries
+        """
+        try:
+            from hf_timestd.io import DataProductWriter
+            
+            writer = DataProductWriter(
+                output_dir=self.prop_stats_dir,
+                product_level='L3C',
+                product_name='propagation_stats',
+                channel='AGGREGATED'
+            )
+            
+            for stats in stats_list:
+                writer.write_measurement(stats)
+            
+            logger.info(f"Wrote {len(stats_list)} propagation statistics to HDF5")
+        
+        except Exception as e:
+            logger.error(f"Failed to write propagation statistics: {e}")
+    
     def _detect_events(self):
         """
         Detect ionospheric events from TEC and Doppler anomalies.
@@ -436,6 +573,9 @@ class ScienceAggregator:
             try:
                 # Aggregate TEC
                 self._aggregate_tec()
+                
+                # Aggregate propagation statistics (hourly)
+                self._aggregate_propagation_stats()
                 
                 # Detect events (future)
                 # self._detect_events()

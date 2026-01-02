@@ -1,0 +1,181 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3C_propagation_stats",
+    "description": "Aggregated propagation mode statistics and MUF estimates",
+    "cadence_seconds": 3600,
+    "processing_level": "L3C",
+    "standards": [
+        "ITU-R propagation prediction methods",
+        "VOACAP compatibility"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Aggregation period end time in UTC"
+        },
+        {
+            "name": "period_start",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Aggregation period start time"
+        },
+        {
+            "name": "aggregation_period",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "HOURLY",
+                "DAILY",
+                "MONTHLY"
+            ],
+            "description": "Time period for aggregation"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "BPM",
+                "ALL"
+            ],
+            "description": "Broadcast station (or ALL for combined)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Observation frequency (or 0 for all frequencies)",
+            "units": "MHz"
+        },
+        {
+            "name": "mode_1e_probability",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "allow_nan": false,
+            "description": "Probability of E-layer single-hop propagation",
+            "units": "probability"
+        },
+        {
+            "name": "mode_1f_probability",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "allow_nan": false,
+            "description": "Probability of F-layer single-hop propagation",
+            "units": "probability"
+        },
+        {
+            "name": "mode_2f_probability",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "allow_nan": false,
+            "description": "Probability of F-layer two-hop propagation",
+            "units": "probability"
+        },
+        {
+            "name": "mode_3f_probability",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "allow_nan": false,
+            "description": "Probability of F-layer three-hop propagation",
+            "units": "probability"
+        },
+        {
+            "name": "mode_gw_probability",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "allow_nan": false,
+            "description": "Probability of ground wave propagation",
+            "units": "probability"
+        },
+        {
+            "name": "mode_unknown_probability",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "allow_nan": false,
+            "description": "Probability of unknown/unclassified mode",
+            "units": "probability"
+        },
+        {
+            "name": "estimated_muf_mhz",
+            "type": "float",
+            "required": false,
+            "description": "Estimated Maximum Usable Frequency",
+            "units": "MHz",
+            "reference": "Highest frequency with F-layer propagation"
+        },
+        {
+            "name": "muf_confidence",
+            "type": "float",
+            "required": false,
+            "valid_range": [0.0, 1.0],
+            "description": "Confidence in MUF estimate",
+            "units": "normalized"
+        },
+        {
+            "name": "mean_snr_db",
+            "type": "float",
+            "required": false,
+            "description": "Mean SNR during period",
+            "units": "dB"
+        },
+        {
+            "name": "n_observations",
+            "type": "integer",
+            "required": true,
+            "description": "Number of observations in aggregation period"
+        },
+        {
+            "name": "data_completeness",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "description": "Fraction of expected observations present",
+            "units": "fraction"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD"
+            ],
+            "description": "Overall statistics quality"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Science aggregator version"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "n_observations >= 40, data_completeness >= 0.8",
+        "MARGINAL": "n_observations >= 20, data_completeness >= 0.5",
+        "BAD": "n_observations < 20 or data_completeness < 0.5"
+    },
+    "notes": {
+        "muf_estimation": "MUF estimated as highest frequency with F-layer propagation probability > 0.5",
+        "probability_sum": "Mode probabilities should sum to approximately 1.0",
+        "aggregation_periods": {
+            "HOURLY": "60 observations expected (1 per minute)",
+            "DAILY": "1440 observations expected (1 per minute)",
+            "MONTHLY": "~43200 observations expected (1 per minute)"
+        }
+    }
+}

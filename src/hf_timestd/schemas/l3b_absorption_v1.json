@@ -1,0 +1,146 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3B_absorption",
+    "description": "D-layer absorption measurements and anomaly detection",
+    "cadence_seconds": 60,
+    "processing_level": "L3B",
+    "standards": [
+        "ITU-R absorption models",
+        "Space weather standards"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "BPM"
+            ],
+            "description": "Broadcast station"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Observation frequency",
+            "units": "MHz"
+        },
+        {
+            "name": "snr_db",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Observed signal-to-noise ratio",
+            "units": "dB"
+        },
+        {
+            "name": "expected_snr_db",
+            "type": "float",
+            "required": false,
+            "description": "Expected SNR from baseline model",
+            "units": "dB"
+        },
+        {
+            "name": "absorption_db",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Calculated D-layer absorption (expected - observed)",
+            "units": "dB"
+        },
+        {
+            "name": "solar_zenith_angle_deg",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 180.0],
+            "allow_nan": false,
+            "description": "Solar zenith angle at path midpoint",
+            "units": "degrees"
+        },
+        {
+            "name": "path_midpoint_lat",
+            "type": "float",
+            "required": false,
+            "valid_range": [-90.0, 90.0],
+            "description": "Latitude of propagation path midpoint",
+            "units": "degrees"
+        },
+        {
+            "name": "path_midpoint_lon",
+            "type": "float",
+            "required": false,
+            "valid_range": [-180.0, 180.0],
+            "description": "Longitude of propagation path midpoint",
+            "units": "degrees"
+        },
+        {
+            "name": "anomaly_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "NORMAL",
+                "SID",
+                "ENHANCED",
+                "DEGRADED",
+                "UNKNOWN"
+            ],
+            "description": "Absorption anomaly classification"
+        },
+        {
+            "name": "anomaly_severity",
+            "type": "float",
+            "required": false,
+            "valid_range": [0.0, 1.0],
+            "description": "Anomaly severity (0=normal, 1=extreme)",
+            "units": "normalized"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD",
+                "MISSING"
+            ],
+            "description": "Overall data quality flag"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Science aggregator version"
+        }
+    ],
+    "anomaly_flags": {
+        "NORMAL": "Absorption within expected range for solar conditions",
+        "SID": "Sudden Ionospheric Disturbance detected (solar flare)",
+        "ENHANCED": "Absorption higher than expected (not SID)",
+        "DEGRADED": "Absorption lower than expected (unusual)",
+        "UNKNOWN": "Cannot classify (insufficient baseline data)"
+    },
+    "quality_flags": {
+        "GOOD": "SNR > 10 dB, solar zenith angle calculated, baseline available",
+        "MARGINAL": "SNR 0-10 dB, or baseline uncertain",
+        "BAD": "SNR < 0 dB, or solar zenith angle unavailable",
+        "MISSING": "No measurement available"
+    }
+}

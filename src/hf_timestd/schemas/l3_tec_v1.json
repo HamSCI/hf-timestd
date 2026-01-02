@@ -95,6 +95,32 @@
             "description": "Overall data quality flag"
         },
         {
+            "name": "vtec_tecu",
+            "type": "float",
+            "required": false,
+            "description": "GPS VTEC for comparison (from IONEX)",
+            "units": "TECU (10^16 electrons/m²)"
+        },
+        {
+            "name": "tec_bias_tecu",
+            "type": "float",
+            "required": false,
+            "description": "HF TEC - GPS VTEC bias",
+            "units": "TECU"
+        },
+        {
+            "name": "validation_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "VALIDATED",
+                "UNVALIDATED",
+                "VTEC_UNAVAILABLE",
+                "VALIDATION_FAILED"
+            ],
+            "description": "TEC validation status against GPS VTEC"
+        },
+        {
             "name": "processing_version",
             "type": "string",
             "required": true,
@@ -106,5 +132,11 @@
         "MARGINAL": "n_frequencies >= 3, 0.5 < confidence <= 0.8, residuals < 2 ms",
         "BAD": "n_frequencies < 3, confidence <= 0.5, or residuals >= 2 ms",
         "MISSING": "No TEC estimate available"
+    },
+    "validation_flags": {
+        "VALIDATED": "Compared with GPS VTEC, bias < 30%",
+        "UNVALIDATED": "Not yet compared with GPS VTEC",
+        "VTEC_UNAVAILABLE": "No GPS VTEC data available for comparison",
+        "VALIDATION_FAILED": "Compared with GPS VTEC, bias > 30%"
     }
 }
