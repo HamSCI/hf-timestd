@@ -147,6 +147,9 @@ try:
 except ImportError:
     SYSTEMD_AVAILABLE = False
 
+# Initialize logger FIRST (before any code that might use it)
+logger = logging.getLogger(__name__)
+
 # HDF5 I/O for reading L1A and L2 data products
 try:
     from hf_timestd.io import DataProductReader
@@ -157,8 +160,6 @@ except ImportError:
 # Disable HDF5 file locking to allow SWMR readers
 # This is required when the writer has the file locked for SWMR write
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-
-logger = logging.getLogger(__name__)
 
 # HDF5 is now enabled with SWMR support
 HDF5_AVAILABLE = True
@@ -2002,8 +2003,8 @@ class MultiBroadcastFusion:
                     )
                     
                     if tec_result:
-                        # Persist TEC estimate to CSV
-                        self._write_tec_result(tec_result)
+                        # TEC writing is handled by science_aggregator service
+                        # We use TEC here only to improve propagation delay estimates
                         
                         if tec_result.confidence > 0.9:
                             logger.info(f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f})")
