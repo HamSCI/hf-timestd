@@ -36,7 +36,7 @@ sudo ./scripts/install.sh --mode production --user $USER
 
 ```
 /tmp/timestd-test/                    # GRAPE_DATA_ROOT
-├── raw_archive/                    # Phase 1: Immutable DRF archive (20 kHz)
+├── raw_archive/                    # Phase 1: Immutable DRF archive (24 kHz)
 ├── raw_buffer/                     # Phase 1: Real-time minute buffers
 ├── phase2/                         # Phase 2: Analytical outputs
 ├── products/                       # Phase 3: Derived products (decimated, spectrograms)
@@ -52,7 +52,7 @@ config/environment                  # Environment variables
 
 ```
 /var/lib/timestd/            # GRAPE_DATA_ROOT - Application data
-├── raw_archive/                    # Phase 1: Immutable DRF archive (20 kHz)
+├── raw_archive/                    # Phase 1: Immutable DRF archive (24 kHz)
 ├── raw_buffer/                     # Phase 1: Real-time minute buffers
 ├── phase2/                         # Phase 2: Analytical outputs (D_clock, discrimination)
 ├── products/                       # Phase 3: Derived products (decimated, spectrograms)
@@ -106,13 +106,13 @@ ${data_root}/
 │   └── {CHANNEL}/                         # e.g., WWV_10_MHz, CHU_7.85_MHz
 │       └── {YYYYMMDD}/                    # Daily subdirectories
 │           ├── {YYYY-MM-DDTHH}/           # Hourly HDF5 files
-│           │   └── rf@{timestamp}.h5      # 20 kHz complex64 IQ
+│           │   └── rf@{timestamp}.h5      # 24 kHz complex64 IQ
 │           ├── drf_properties.h5          # Digital RF properties
 │           └── metadata/                  # Per-minute provenance
 │
 ├── raw_buffer/                            # PHASE 1: Real-time minute buffers
 │   └── {CHANNEL}/                         # Binary IQ + JSON metadata
-│       ├── {minute}.bin                   # 1,200,000 complex64 samples
+│       ├── {minute}.bin                   # 1,440,000 complex64 samples
 │       └── {minute}.json                  # RTP timestamp, gaps, timing
 │
 ├── phase2/                                # PHASE 2: Analytical Engine Outputs
@@ -210,8 +210,8 @@ wwvh15
 ### Archives
 ```
 YYYYMMDDTHHMMSSZ_{FREQUENCY}_iq.npz
-20251119T120000Z_5000000_iq.npz          # Correct
-20251119T120000Z_5MHz_iq.npz             # WRONG - use Hz
+20251119T124000Z_5000000_iq.npz          # Correct
+20251119T124000Z_5MHz_iq.npz             # WRONG - use Hz
 ```
 
 ### Analytics - Daily CSVs (NO time range suffixes!)
@@ -267,7 +267,7 @@ paths.get_archive_dir(channel_name: str) -> Path
 
 paths.get_archive_path(channel_name: str, timestamp: float, freq_hz: int) -> Path
     # Returns: {archive_dir}/{TIMESTAMP}_{FREQ}_iq.npz
-    # Example: /tmp/timestd-test/archives/WWV_5_MHz/20251119T120000Z_5000000_iq.npz
+    # Example: /tmp/timestd-test/archives/WWV_5_MHz/20251119T124000Z_5000000_iq.npz
 ```
 
 ### Analytics Methods - Directories

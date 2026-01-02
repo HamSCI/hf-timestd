@@ -90,7 +90,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 
 ### 3. Binary Archive for Raw Data
 
-**Decision:** Archive raw 20 kHz IQ in binary format with JSON sidecars.
+**Decision:** Archive raw 24 kHz IQ in binary format with JSON sidecars.
 
 **Why?**
 
@@ -119,7 +119,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 │                    PHASE 1: CORE RECORDER                       │
 │                   (Immutable Raw Buffer)                        │
 │                                                                 │
-│  Input:  ka9q-radio RTP multicast (20 kHz IQ)                  │
+│  Input:  ka9q-radio RTP multicast (24 kHz IQ)                  │
 │  Process: Resequencing + Gap Detection + Gap Fill              │
 │  Output:  {minute}.bin + {minute}.json (raw_buffer)            │
 │  Location: raw_buffer/{CHANNEL}/{YYYYMMDD}/                    │

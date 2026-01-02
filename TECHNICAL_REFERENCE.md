@@ -9,7 +9,7 @@
 
 ## Current Operational Configuration
 
-**9 channels** monitoring 9 frequencies at 20 kHz IQ (config-driven):
+**9 channels** monitoring 9 frequencies at 24 kHz IQ (config-driven):
 
 - **Shared frequencies (4):** 2.5, 5, 10, 15 MHz - WWV and WWVH both transmit
 - **WWV-only (2):** 20, 25 MHz
@@ -17,12 +17,12 @@
 
 **Data products generated**:
 
-1. **20 kHz Digital RF (HDF5)** - Phase 1 immutable raw archive (`raw_archive/{CHANNEL}/`)
+1. **24 kHz Digital RF (HDF5)** - Phase 1 immutable raw archive (`raw_archive/{CHANNEL}/`)
 2. **Phase 2 Analytics (HDF5)** - L1 Tone Detections & L2 Timing Measurements (`phase2/{CHANNEL}/`)
 3. **Phase 3 Fusion (HDF5)** - L3 Fused Timing & Global Science Products (`phase2/fusion/`)
 4. **Spectrograms** - Visualizations with solar zenith (`products/{CHANNEL}/spectrograms/`)
 
-**Goal**: Archive raw 20 kHz IQ (Phase 1), perform timing analysis (Phase 2), generate derived products (Phase 3) for PSWS upload, provide WWV/WWVH discrimination on 4 shared frequencies.
+**Goal**: Archive raw 24 kHz IQ (Phase 1), perform timing analysis (Phase 2), generate derived products (Phase 3) for PSWS upload, provide WWV/WWVH discrimination on 4 shared frequencies.
 
 ---
 
@@ -93,7 +93,7 @@ We use the **Digital RF** standard (MIT Haystack) for storing raw IQ data.
 - **Structure:**
   - `/rf_data`: Dataset containing complex64 IQ samples.
   - `/rf_data_index`: Index mapping sample ranges to timestamps.
-- **Metadata:** Global start time, sample rate (20 kHz), center frequency.
+- **Metadata:** Global start time, sample rate (24 kHz), center frequency.
 
 ### 2. Analytics Output: HDF5 L1/L2
 
@@ -164,7 +164,7 @@ utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
 
 ### 2. Sample Count Integrity
 
-**Invariant**: 20 kHz × 60 sec = 1,200,000 samples (exactly).
+**Invariant**: 24 kHz × 60 sec = 1,440,000 samples (exactly).
 
 - Gaps filled with zeros.
 - Sample count never adjusted.
@@ -364,7 +364,7 @@ status_address = "myhost-hf-status.local"  # mDNS name from radiod config
 mode = "test"                              # "test" or "production"
 test_data_root = "/tmp/timestd-test"
 production_data_root = "/var/lib/timestd"
-sample_rate = 20000                        # Config-driven (default 20 kHz)
+sample_rate = 24000                        # Config-driven (default 24 kHz)
 
 [[recorder.channels]]
 ssrc = 10000000
@@ -431,7 +431,7 @@ sudo systemctl enable --now grape-upload.timer
 ka9q-radio (radiod)
     ↓ RTP multicast (mDNS discovery via ka9q-python)
 PHASE 1: Core Recorder (core_recorder.py)
-    ↓ 20 kHz DRF archive
+    ↓ 24 kHz DRF archive
     ↓ {data_root}/raw_archive/{channel}/
     ↓ {data_root}/raw_buffer/{channel}/ (binary minute buffers)
 PHASE 2: Analytics Service (per channel)
@@ -493,7 +493,7 @@ PHASE 3: Derived Products
 
 **Processing:**
 
-- `decimation.py` - 20 kHz → 10 Hz (multi-stage CIC+FIR)
+- `decimation.py` - 24 kHz → 10 Hz (multi-stage CIC+FIR)
 - `doppler_estimator.py` - Per-tick frequency shift measurement
 
 ### WSPR Application (`src/grape_recorder/wspr/`)
@@ -755,7 +755,7 @@ sudo sysctl -w net.core.rmem_max=26214400
 - **Package Restructure** - `core/`, `stream/`, `grape/`, `wspr/` packages
 - **Stream API** - SSRC-free `subscribe_stream()` interface
 - **ka9q-python 3.1.0** - Compatible SSRC allocation algorithm
-- **Sample Rate** - 20 kHz (was 16 kHz)
+- **Sample Rate** - 24 kHz (was 16 kHz)
 
 **v2.0.0 (Nov 30, 2025):**
 
@@ -838,4 +838,26 @@ class BroadcastState:
 - Higher SNR (less noise in narrow window)
 - Better sensitivity (detect weaker signals)
 - Ionospheric measurements (ToA variations = propagation changes)
+
+
+## Sample Rate Evolution
+
+### Current: 24 kHz (24000 Hz)
+
+**Rationale for 24 kHz:**
+- **Test Signal Analysis**: Ensures adequate Nyquist margin for WWV/WWVH test signals (500 Hz, 600 Hz, and intermodulation products)
+- **Mathematical Compatibility**: Avoids bin mismatches in FFT analysis
+  - 24000 Hz is evenly divisible by common signal frequencies (1500 Hz, 500 Hz, 600 Hz)
+  - Prevents fractional bin assignments that could degrade spectral analysis
+- **Timing Precision**: ~42 μs per sample (1/24000 s)
+
+**Historical Evolution:**
+1. **16 kHz** (original): Adequate for 1 kHz tone detection, but marginal for test signals
+2. **20 kHz** (v3.x): Improved test signal analysis with better Nyquist margin
+3. **24 kHz** (v5.x): Optimal for mathematical compatibility and comprehensive signal analysis
+
+**Key Calculations:**
+- Samples per minute: 24000 × 60 = **1,440,000 samples**
+- RTP timestamp wraparound: 2³² / 24000 / 3600 ≈ **49.7 hours**
+- Timing resolution: 1 / 24000 ≈ **41.67 μs**
 
