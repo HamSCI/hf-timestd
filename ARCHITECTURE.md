@@ -407,3 +407,23 @@ We use a **Weighted Voting** system combining:
 ---
 
 **Last Updated:** December 31, 2025
+
+## Adaptive Search Window System (v3.9.0)
+
+### Design Philosophy
+
+The system implements intelligent Bootstrap → Orient → Focus progression, leveraging GPSDO stability as a "steel ruler" for rapid convergence while handling multi-station shared frequencies.
+
+**Key Principles:**
+1. **GPSDO is the Foundation** - Provides stable time reference; stations are periodic calibration checks
+2. **Per-Broadcast Tracking** - Each station+frequency has independent state (WWV@10MHz ≠ WWV@5MHz)
+3. **Graceful Degradation** - Automatic back-off when detections fail, re-convergence when signals return
+4. **Opportunistic Multi-Station** - Use whatever stations are available at any given time
+
+**Phase Progression:**
+- **Bootstrap** (±500ms): Wide search, no prior knowledge
+- **Provisional** (±5-15ms): Medium window after 10+ detections
+- **Calibrated** (±2-5ms): Narrow window after 30+ detections, 60min span
+
+**Theoretical Foundation:** Kalman filtering applied to multi-target tracking, where each propagation path is an independent observable with its own convergence state.
+

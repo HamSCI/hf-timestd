@@ -127,3 +127,9 @@ The system is composed of six independent services that form a pipeline:
 **Credits:** Phil Karn/KA9Q (ka9q-radio), MIT Haystack (Digital RF), Nathaniel Frissell/W2NAF (HamSCI GRAPE), Rob Robinett/AI6VN (wsprdaemon inspiration), Michael James Hauan/AC0G (this implementation).
 
 **License:** MIT - See [LICENSE](LICENSE)
+
+### Recent Updates (v3.8-3.9, January 2026)
+
+- **v3.9.0:** Adaptive search window system - Bootstrap → Orient → Focus progression using GPSDO stability
+- **v3.8.2:** Calibration sanity checks - Prevents loading corrupted state files
+- **v3.8.1:** Fixed calibration semantic bug - Removed incorrect use of offsets as search priors

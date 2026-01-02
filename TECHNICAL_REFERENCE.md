@@ -770,3 +770,72 @@ sudo sysctl -w net.core.rmem_max=26214400
 - 500/600 Hz weight boosted to 15 for exclusive minutes
 - Doppler vote changed to std ratio
 - Coherence quality check, harmonic signature validation
+
+## Adaptive Search Window System (v3.9.0)
+
+### Overview
+
+Implements intelligent tone search window narrowing using GPSDO stability for rapid convergence.
+
+### Algorithm
+
+**Phase Detection:**
+```python
+if calibrator.phase == CALIBRATED and expected_toa available:
+    window = ±2-5ms  # Learned ToA
+elif calibrator.phase == PROVISIONAL:
+    window = ±5-15ms  # Physics prediction
+else:  # BOOTSTRAP
+    window = ±500ms  # Wide search
+```
+
+**Convergence Criteria:**
+- **Provisional**: 10+ detections, 2+ stations, <10 minutes, D_clock σ < 1ms
+- **Calibrated**: 30+ detections, 60min span, RTP variance < 50²
+
+**Back-Off Logic:**
+- Trigger: 5+ consecutive detection failures
+- Action: Widen window by 1.5×, max 500ms
+- Recovery: Narrow again when detections resume
+
+### Per-Broadcast Tracking
+
+Each station+frequency combination maintains independent state:
+
+```python
+class BroadcastState:
+    mean_toa_ms: float          # Learned arrival time
+    std_toa_ms: float           # Observed variance
+    window_ms: float            # Current search window
+    phase: CalibrationPhase     # BOOTSTRAP/PROVISIONAL/CALIBRATED
+    consecutive_failures: int   # For back-off logic
+```
+
+**Example:**
+- WWV @ 10MHz: 12.4±0.8ms, ±2ms window (1-hop, converged)
+- WWV @ 5MHz: 24.7±1.2ms, ±5ms window (2-hop, converging)
+
+### Shared Frequency Handling
+
+**Anchor channels** (unique frequencies):
+- CHU: 3.33, 7.85, 14.67 MHz
+- WWV: 20, 25 MHz
+- Used to establish initial GPSDO lock
+
+**Contested channels** (shared frequencies):
+- 2.5, 5, 10, 15 MHz (WWV + WWVH + BPM)
+- Require discrimination (BCD, Doppler, timing)
+- Each station tracked independently
+
+### Performance
+
+**Convergence timeline:**
+- 0-10 min: Bootstrap (±500ms)
+- 10-30 min: Provisional (±15ms → ±5ms)
+- 30+ min: Calibrated (±2ms)
+
+**Benefits:**
+- Higher SNR (less noise in narrow window)
+- Better sensitivity (detect weaker signals)
+- Ionospheric measurements (ToA variations = propagation changes)
+
