@@ -1,43 +1,38 @@
 # Critic Context - HF-TimeStd Project Status
 
-**Last Updated**: 2026-01-02 17:32 UTC  
-**Session Focus**: Diagnose Fusion Service Failure After HDF5 Transition
-
-## Current Critical Issue
-
-**Fusion Service Not Writing HDF5 Files**
-
-The `timestd-fusion` service is running but silent - no log output and no HDF5 writes after restart.
-
-**Symptoms**:
-
-- Service started: 2026-01-02 17:22:25 UTC
-- Process running (PID 831451, consuming CPU)
-- **Zero log output** after systemd startup messages
-- Last HDF5 write: 17:11 (before restart)
-- No new HDF5 files after 10+ minutes
-
-**Context**: This occurred immediately after removing CSV writers from the fusion service as part of the HDF5 transition. The service was working correctly with HDF5-only output before the restart.
-
-**Files Modified in Last Session**:
-
-- `/opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/core/multi_broadcast_fusion.py`
-  - Removed `_init_fusion_csv()` and `_init_tec_csv()` methods (97 lines)
-  - Removed CSV write from `_write_fused_result()` (36 lines)
-  - Updated logging to reference HDF5 output
-
-**Likely Cause**: Python initialization error preventing main loop from starting. The complete absence of log output suggests the error occurred before logging was configured or in a critical initialization path.
-
-**Next Steps**:
-
-1. Check full logs: `sudo journalctl -u timestd-fusion -n 200`
-2. Look for Python tracebacks or import errors
-3. Verify the deployed code matches the git repository
-4. Check if there are any missing dependencies or broken imports
-
----
+**Last Updated**: 2026-01-02 17:43 UTC  
+**Session Focus**: ✅ RESOLVED - Fusion Service Failure After HDF5 Transition
 
 ## Recent Accomplishments (2026-01-02)
+
+### ✅ Fusion Service Failure RESOLVED
+
+**Issue**: Service running but silent - no log output and no HDF5 writes after HDF5 transition.
+
+**Root Causes Identified**:
+
+1. **Logger Initialization Order Bug** (Line 155 before 161)
+   - `logger.warning()` called before `logger = logging.getLogger(__name__)`
+   - Caused `NameError` during module import
+   - Error occurred before logging configured → complete silence
+
+2. **Orphaned Method Call** (Line 2007)
+   - Call to deleted `_write_tec_result()` method
+   - Method removed during CSV cleanup
+   - TEC writing is handled by `science_aggregator` service
+
+**Fixes Applied**:
+
+- Moved logger initialization before HDF5 import block
+- Removed orphaned `_write_tec_result()` call
+- Committed: `5dd74cf`
+
+**Verification**:
+
+- ✅ Service running and logging properly
+- ✅ HDF5 files being written (last write: 17:42:07)
+- ✅ Chrony SHM updates working (reach=3, offset=-2.4ms)
+- ✅ Fusion calculations completing (38 broadcasts, grade D)
 
 ### ✅ HDF5 Transition Complete for Core Services
 
@@ -130,24 +125,11 @@ Raw IQ (L0) → Analytics (L2) → Fusion (L3) → Chrony SHM
 
 ## Known Issues
 
-### Critical
-
-1. **Fusion Service Silent Failure** (NEW - 2026-01-02)
-   - Service running but not producing output
-   - No log entries after startup
-   - Likely Python initialization error
-   - **Priority**: CRITICAL - blocks Chrony integration
-
 ### Active
 
-1. **Chrony Integration Not Working**
-   - TMGR source configured but Reach=0
-   - Fusion service not updating Chrony SHM
-   - Related to issue #1 above
-
-2. **Calibration State Stale**
-   - Last updated 1+ hour ago
-   - May be related to analytics service restart
+1. **Calibration State May Be Stale**
+   - Check if calibration needs refresh after service restarts
+   - Monitor calibration age in logs
 
 ---
 
@@ -202,21 +184,17 @@ ps aux | grep <service>
 
 ## Next Session Priorities
 
-1. **CRITICAL**: Diagnose and fix fusion service silent failure
-   - Check for Python tracebacks in logs
-   - Verify code deployment
-   - Test fusion service initialization
-   - Restore HDF5 writing capability
-
-2. **HIGH**: Fix Chrony integration (depends on #1)
-   - Verify Chrony SHM updates after fusion fix
-   - Check reach value increases
-
-3. **MEDIUM**: Update CHANGELOG.md with HDF5 transition
-   - Document CSV removal
+1. **HIGH**: Update CHANGELOG.md with HDF5 transition and fusion fixes
+   - Document CSV removal from fusion and analytics services
+   - Document fusion service bug fixes (logger init, orphaned method call)
    - Note breaking changes (CSV no longer updated)
 
-4. **LOW**: Optional cleanup
+2. **MEDIUM**: Monitor Chrony integration stability
+   - Verify TMGR reach continues to increase
+   - Monitor fusion service logs for errors
+   - Check calibration state freshness
+
+3. **LOW**: Optional cleanup
    - Delete legacy CSV writer files if desired
    - Archive old CSV data
 
