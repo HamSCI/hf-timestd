@@ -728,6 +728,42 @@ VTEC_EOF
 
 
 
+    # Radiod Monitor Service (Phase 0.5: Hardware Health)
+    sudo tee "$SYSTEMD_DIR/timestd-radiod-monitor.service" > /dev/null << EOF
+[Unit]
+Description=HF Time Standard Radiod Health Monitor
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=$INSTALL_USER
+Group=$INSTALL_USER
+EnvironmentFile=$CONFIG_DIR/environment
+WorkingDirectory=$DATA_ROOT
+
+# Run the radiod health monitor
+ExecStart=$VENV_DIR/bin/python -u /opt/hf-timestd/scripts/monitor_radiod_health.py \\
+    /var/lib/timestd/state/radiod-status.json \\
+    10
+
+Restart=always
+RestartSec=10
+    
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-radiod-monitor
+
+# Process limits
+LimitNOFILE=65536
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     # Reload systemd
     sudo systemctl daemon-reload
     
@@ -737,6 +773,7 @@ VTEC_EOF
     log_info "    - timestd-fusion.service         (Phase 3: Fusion & Chrony feed)"
     log_info "    - timestd-web-ui.service         (Web monitoring UI, continuous)"
     log_info "    - timestd-science-aggregator.service (Phase 3+: Science products)"
+    log_info "    - timestd-radiod-monitor.service (Phase 0.5: Hardware monitor)"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         log_info "    - timestd-vtec.service           (GNSS VTEC monitor, continuous)"
     fi
@@ -748,6 +785,7 @@ VTEC_EOF
     sudo systemctl enable timestd-fusion.service
     sudo systemctl enable timestd-web-ui.service
     sudo systemctl enable timestd-science-aggregator.service
+    sudo systemctl enable timestd-radiod-monitor.service
     
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         sudo systemctl enable timestd-vtec.service

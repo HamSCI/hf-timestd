@@ -6,14 +6,17 @@ Wants=radiod@ac0g-bee1-rx888.service
 
 [Service]
 Type=simple
-User=mjh
-Group=mjh
-WorkingDirectory=/home/mjh/git/signal-recorder
+User=timestd
+Group=timestd
+WorkingDirectory=/opt/hf-timestd
+
+# Environment from file
+EnvironmentFile=-/etc/hf-timestd/environment
 
 # Run the radiod health monitor
-ExecStart=/home/mjh/git/signal-recorder/venv/bin/python3 \
-    /home/mjh/git/signal-recorder/scripts/monitor_radiod_health.py \
-    /tmp/timestd-test/state/radiod-status.json \
+ExecStart=/opt/hf-timestd/venv/bin/python3 \
+    /opt/hf-timestd/scripts/monitor_radiod_health.py \
+    /var/lib/timestd/state/radiod-status.json \
     10
 
 # Restart policy

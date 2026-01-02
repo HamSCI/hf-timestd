@@ -68,13 +68,18 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-core-recorder.service"
         "timestd-analytics.service"
         "timestd-fusion.service"
-        "timestd-fusion.service"
         "timestd-science-aggregator.service"
+        "timestd-vtec.service"
+        "timestd-radiod-monitor.service"
         "timestd-web-ui.service"
     )
     
+    # Threshold for "recently restarted" warning (5 minutes)
+    UPTIME_WARN_SEC=300
+    NOW=$(date +%s)
+    
     for service in "${SERVICES[@]}"; do
-        # Check if service is active or activating (health check phase)
+        # Check if service is active or activating
         if systemctl is-active --quiet "$service" || systemctl show "$service" -p ActiveState | grep -q "activating"; then
             STATE=$(systemctl show "$service" -p ActiveState -p SubState --value | head -1)
             SUBSTATE=$(systemctl show "$service" -p SubState --value)
@@ -82,26 +87,81 @@ if [[ "$MODE" == "production" ]]; then
             if [[ "$STATE" == "activating" ]]; then
                 check_warn "$service is starting ($SUBSTATE)"
             else
-                # Get start time
-                START_TIME=$(systemctl show "$service" -p ActiveEnterTimestamp --value)
-                check_pass "$service is running (since $START_TIME)"
+                # Get start time and calculate uptime
+                START_TIMESTAMP=$(systemctl show "$service" -p ActiveEnterTimestamp --value)
+                
+                # Handle potential empty timestamp
+                if [[ -n "$START_TIMESTAMP" ]]; then
+                    START_EPOCH=$(date -d "$START_TIMESTAMP" +%s 2>/dev/null || echo "0")
+                    UPTIME=$((NOW - START_EPOCH))
+                    
+                    # Format uptime for display
+                    if [[ $UPTIME -lt 60 ]]; then
+                        UPTIME_STR="${UPTIME}s"
+                    elif [[ $UPTIME -lt 3600 ]]; then
+                        UPTIME_STR="$((UPTIME/60))m"
+                    elif [[ $UPTIME -lt 86400 ]]; then
+                        UPTIME_STR="$((UPTIME/3600))h $(( (UPTIME%3600)/60 ))m"
+                    else
+                        DAYS=$((UPTIME/86400))
+                        UPTIME_STR="${DAYS}d $(( (UPTIME%86400)/3600 ))h"
+                    fi
+                    
+                    if [[ $UPTIME -lt $UPTIME_WARN_SEC ]]; then
+                        check_warn "$service is running (UPTIME: $UPTIME_STR < 5m) - Recent Restart!"
+                    else
+                        check_pass "$service is running (uptime: $UPTIME_STR)"
+                    fi
+                else
+                    check_pass "$service is running (unknown uptime)"
+                fi
             fi
         else
-            check_fail "$service is NOT running"
+            # Special case for VTEC which might be optional/disabled
+            if [[ "$service" == "timestd-vtec.service" ]]; then
+                ENABLE_STATE=$(systemctl show "$service" -p UnitFileState --value)
+                if [[ "$ENABLE_STATE" == "disabled" || "$ENABLE_STATE" == "masked" ]]; then
+                     check_warn "$service is NOT running (disabled/optional)"
+                else
+                     check_fail "$service is NOT running"
+                fi
+            else
+                check_fail "$service is NOT running"
+            fi
         fi
     done
     
-    # Check VTEC service (optional)
-    if systemctl list-unit-files | grep -q "timestd-vtec.service"; then
-        if systemctl is-active --quiet "timestd-vtec.service"; then
-            check_pass "timestd-vtec.service is running"
-        else
-            check_warn "timestd-vtec.service is NOT running (optional)"
-        fi
-    fi
-    
     echo ""
     echo "Note: Continuing to check data outputs even if services are starting..."
+fi
+
+# =============================================================================
+# Phase 0.5: Radio Hardware (Radiod)
+# =============================================================================
+section "Phase 0.5: Radio Hardware (Radiod)"
+
+RADIOD_STATUS_FILE="${DATA_ROOT}/state/radiod-status.json"
+
+if [[ -f "$RADIOD_STATUS_FILE" ]]; then
+    # Parse status using jq if available, otherwise grep
+    if command -v jq &>/dev/null; then
+        RADIOD_HEALTH=$(jq -r '.health' "$RADIOD_STATUS_FILE" 2>/dev/null)
+        RADIOD_UPTIME=$(jq -r '.uptime_seconds' "$RADIOD_STATUS_FILE" 2>/dev/null)
+        RX_COUNT=$(jq -r '.process.count' "$RADIOD_STATUS_FILE" 2>/dev/null)
+        
+        if [[ "$RADIOD_HEALTH" == "healthy" ]]; then
+            check_pass "Radiod is HEALTHY (pid $RX_COUNT, uptime ${RADIOD_UPTIME}s)"
+        elif [[ "$RADIOD_HEALTH" == "degraded" ]]; then
+            check_warn "Radiod is DEGRADED (running but issues detected)"
+        else
+            check_fail "Radiod is UNHEALTHY/CRITICAL"
+        fi
+    else
+        # Fallback if jq missing
+        check_pass "Radiod status file exists (install jq for details)"
+    fi
+else
+    check_warn "Radiod status file not found: $RADIOD_STATUS_FILE"
 fi
 
 # =============================================================================
@@ -310,6 +370,60 @@ else
     # Optional service
     check_warn "GNSS VTEC directory not found (service specific)"
 fi
+
+# =============================================================================
+# Phase 5: Adaptive Calibration (Phase 5)
+# =============================================================================
+section "Phase 5: Adaptive Calibration (System State)"
+
+CAL_STATE_FILE="${DATA_ROOT}/state/timing_calibration.json"
+
+if [[ -f "$CAL_STATE_FILE" ]]; then
+    check_pass "Calibration state file exists"
+    
+     if command -v jq &>/dev/null; then
+        CAL_PHASE=$(jq -r '.phase' "$CAL_STATE_FILE" 2>/dev/null)
+        CAL_UPDATED=$(jq -r '.saved_at' "$CAL_STATE_FILE" 2>/dev/null)
+        
+        # Check freshness
+        CAL_TS=$(date -d "$CAL_UPDATED" +%s 2>/dev/null || echo "0")
+        CAL_AGE=$((NOW - CAL_TS))
+        
+        if [[ "$CAL_PHASE" == "calibrated" ]]; then
+            check_pass "System is fully CALIBRATED (Adaptive Windows Active)"
+        elif [[ "$CAL_PHASE" == "provisional" ]]; then
+            check_pass "System is PROVISIONAL (GPSDO-locked)"
+        else
+            # Bootstrap is normal on startup, warn if system up for > 1 hour
+            SYS_UPTIME=$(cut -d. -f1 /proc/uptime)
+            if [[ $SYS_UPTIME -gt 3600 ]]; then
+                check_warn "System stuck in BOOTSTRAP phase (uptime > 1h)"
+            else
+                check_pass "System in BOOTSTRAP phase (normal for startup)"
+            fi
+        fi
+        
+        if [[ $CAL_AGE -lt 600 ]]; then
+             check_pass "Calibration state updated recently (${CAL_AGE}s ago)"
+        else
+             # Format age
+             if [[ $CAL_AGE -lt 3600 ]]; then
+                 AGE_STR="$((CAL_AGE/60))m"
+             elif [[ $CAL_AGE -lt 86400 ]]; then
+                 AGE_STR="$((CAL_AGE/3600))h"
+             else
+                 AGE_STR="$((CAL_AGE/86400))d $(( (CAL_AGE%86400)/3600 ))h"
+             fi
+             check_warn "Calibration state stale (last updated $AGE_STR ago)"
+        fi
+        
+     else
+        check_pass "Calibration state valid (install jq for details)"
+     fi
+else
+    check_warn "Calibration state file NOT FOUND (Adaptive logic inactive?)"
+fi
+
 
 # =============================================================================
 # Chrony Integration (Production Only)
