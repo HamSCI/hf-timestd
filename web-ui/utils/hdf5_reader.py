@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -442,3 +443,175 @@ def channel_name_to_key(channel_name: str) -> str:
     
     # Fallback: sanitize the name
     return channel_name.replace(' ', '_').replace('.', '').upper()
+
+
+def read_l3_fusion_result(
+    hdf5_path: Path,
+    max_records: Optional[int] = None,
+    min_quality_grade: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Read L3 Fusion timing results from HDF5 file
+    
+    Args:
+        hdf5_path: Path to HDF5 file (fusion_timing_YYYYMMDD.h5)
+        max_records: Maximum number of records to return
+        min_quality_grade: Minimum quality grade (A/B/C/D)
+    
+    Returns:
+        Dictionary with fusion results, statistics, and metadata
+    """
+    try:
+        if not hdf5_path.exists():
+            raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+        
+        # Open with SWMR mode for concurrent access
+        with h5py.File(hdf5_path, 'r', swmr=True) as f:
+            # Read required datasets
+            timestamps = f['timestamp'][:]
+            d_clock_fused = f['d_clock_fused_ms'][:]
+            d_clock_raw = f['d_clock_raw_ms'][:]
+            uncertainty = f['uncertainty_ms'][:]
+            n_broadcasts = f['n_broadcasts'][:]
+            n_stations = f['n_stations'][:]
+            quality_grades = decode_strings(f['quality_grade'][:])
+            
+            # Optional per-station breakdown
+            wwv_mean = safe_read_dataset(f, 'wwv_mean_ms')
+            wwvh_mean = safe_read_dataset(f, 'wwvh_mean_ms')
+            chu_mean = safe_read_dataset(f, 'chu_mean_ms')
+            bpm_mean = safe_read_dataset(f, 'bpm_mean_ms')
+            
+            wwv_count = safe_read_dataset(f, 'wwv_count')
+            wwvh_count = safe_read_dataset(f, 'wwvh_count')
+            chu_count = safe_read_dataset(f, 'chu_count')
+            bpm_count = safe_read_dataset(f, 'bpm_count')
+            
+            # Optional consistency metrics
+            wwv_intra_std = safe_read_dataset(f, 'wwv_intra_std_ms')
+            wwvh_intra_std = safe_read_dataset(f, 'wwvh_intra_std_ms')
+            chu_intra_std = safe_read_dataset(f, 'chu_intra_std_ms')
+            bpm_intra_std = safe_read_dataset(f, 'bpm_intra_std_ms')
+            
+            outliers_rejected = safe_read_dataset(f, 'outliers_rejected')
+            
+            # SWMR Safety: Determine minimum length
+            num_records = min(
+                len(timestamps),
+                len(d_clock_fused),
+                len(d_clock_raw),
+                len(uncertainty),
+                len(n_broadcasts),
+                len(n_stations),
+                len(quality_grades)
+            )
+            
+            # Build records list
+            records = []
+            grade_order = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
+            
+            for i in range(num_records):
+                grade = quality_grades[i]
+                
+                # Apply quality filter
+                if min_quality_grade and grade_order.get(grade, 99) > grade_order.get(min_quality_grade, 0):
+                    continue
+                
+                record = {
+                    'timestamp': float(timestamps[i]),
+                    'timestamp_utc': datetime.fromtimestamp(timestamps[i], timezone.utc).isoformat().replace('+00:00', 'Z'),
+                    'd_clock_fused_ms': float(d_clock_fused[i]),
+                    'd_clock_raw_ms': float(d_clock_raw[i]),
+                    'uncertainty_ms': float(uncertainty[i]),
+                    'n_broadcasts': int(n_broadcasts[i]),
+                    'n_stations': int(n_stations[i]),
+                    'quality_grade': grade
+                }
+                
+                # Add per-station breakdown if available
+                station_stats = {}
+                if wwv_mean is not None and i < len(wwv_mean):
+                    station_stats['WWV'] = {
+                        'mean_ms': float(wwv_mean[i]) if np.isfinite(wwv_mean[i]) else None,
+                        'count': int(wwv_count[i]) if wwv_count is not None and i < len(wwv_count) else 0,
+                        'intra_std_ms': float(wwv_intra_std[i]) if wwv_intra_std is not None and i < len(wwv_intra_std) and np.isfinite(wwv_intra_std[i]) else None
+                    }
+                if wwvh_mean is not None and i < len(wwvh_mean):
+                    station_stats['WWVH'] = {
+                        'mean_ms': float(wwvh_mean[i]) if np.isfinite(wwvh_mean[i]) else None,
+                        'count': int(wwvh_count[i]) if wwvh_count is not None and i < len(wwvh_count) else 0,
+                        'intra_std_ms': float(wwvh_intra_std[i]) if wwvh_intra_std is not None and i < len(wwvh_intra_std) and np.isfinite(wwvh_intra_std[i]) else None
+                    }
+                if chu_mean is not None and i < len(chu_mean):
+                    station_stats['CHU'] = {
+                        'mean_ms': float(chu_mean[i]) if np.isfinite(chu_mean[i]) else None,
+                        'count': int(chu_count[i]) if chu_count is not None and i < len(chu_count) else 0,
+                        'intra_std_ms': float(chu_intra_std[i]) if chu_intra_std is not None and i < len(chu_intra_std) and np.isfinite(chu_intra_std[i]) else None
+                    }
+                if bpm_mean is not None and i < len(bpm_mean):
+                    station_stats['BPM'] = {
+                        'mean_ms': float(bpm_mean[i]) if np.isfinite(bpm_mean[i]) else None,
+                        'count': int(bpm_count[i]) if bpm_count is not None and i < len(bpm_count) else 0,
+                        'intra_std_ms': float(bpm_intra_std[i]) if bpm_intra_std is not None and i < len(bpm_intra_std) and np.isfinite(bpm_intra_std[i]) else None
+                    }
+                
+                if station_stats:
+                    record['station_stats'] = station_stats
+                
+                # Add outliers if available
+                if outliers_rejected is not None and i < len(outliers_rejected):
+                    record['outliers_rejected'] = int(outliers_rejected[i])
+                
+                records.append(record)
+                
+                # Limit records if specified
+                if max_records and len(records) >= max_records:
+                    break
+            
+            # Calculate statistics
+            valid_fused = [r['d_clock_fused_ms'] for r in records if np.isfinite(r['d_clock_fused_ms'])]
+            
+            statistics = {
+                'count': len(records),
+                'total_records': num_records,
+                'min': float(np.min(valid_fused)) if valid_fused else None,
+                'max': float(np.max(valid_fused)) if valid_fused else None,
+                'mean': float(np.mean(valid_fused)) if valid_fused else None,
+                'std': float(np.std(valid_fused)) if len(valid_fused) > 1 else None
+            }
+            
+            # Calculate grade distribution
+            grade_distribution = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
+            for r in records:
+                if r['quality_grade'] in grade_distribution:
+                    grade_distribution[r['quality_grade']] += 1
+            
+            return {
+                'records': records,
+                'statistics': statistics,
+                'grade_distribution': grade_distribution,
+                'source': 'hdf5',
+                'file_path': str(hdf5_path),
+                'status': 'OK'
+            }
+    
+    except Exception as e:
+        logger.error(f"Error reading L3 Fusion HDF5 file {hdf5_path}: {e}")
+        raise
+
+
+def get_l3_fusion_path(date: str, data_root: Path) -> Path:
+    """
+    Get HDF5 file path for L3 Fusion results
+    
+    Args:
+        date: Date in YYYYMMDD format
+        data_root: Data root directory
+    
+    Returns:
+        Path to HDF5 file
+    """
+    fusion_dir = data_root / 'phase2' / 'fusion'
+    return fusion_dir / f"fusion_fusion_timing_{date}.h5"
+
+

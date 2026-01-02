@@ -22,9 +22,11 @@ from utils.hdf5_reader import (
     read_l2_timing_measurements,
     read_l1a_channel_observables,
     read_l1b_discrimination,
+    read_l3_fusion_result,
     get_l2_timing_path,
     get_l1a_observables_path,
-    get_l1b_discrimination_path
+    get_l1b_discrimination_path,
+    get_l3_fusion_path
 )
 
 # Configure logging
@@ -365,79 +367,117 @@ async def get_timing_fusion():
     Combines broadcasts from WWV, WWVH, CHU, BPM
     """
     try:
-        import csv
         import json
         
-        # Fusion CSV file path
-        fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
-        calibration_json = data_root / "phase2" / "science" / "timing" / "broadcast_calibration.json"
+        # Try HDF5 first (today's data)
+        today = datetime.utcnow().strftime('%Y%m%d')
+        hdf5_path = get_l3_fusion_path(today, data_root)
         
         latest_fusion = None
         history = []
-        calibration = {}
         
-        # Read fusion results from CSV
-        if fusion_csv.exists():
-            with open(fusion_csv, 'r') as f:
-                reader = csv.DictReader(f)
-                records = list(reader)
+        if hdf5_path.exists():
+            try:
+                result = read_l3_fusion_result(hdf5_path, max_records=60)
+                logger.info(f"Read {result['statistics']['count']} L3 fusion records from HDF5")
                 
-                # Get last 60 entries for chart
-                recent_records = records[-60:] if len(records) > 60 else records
-                
-                for record in recent_records:
-                    parsed = {
-                        'timestamp': float(record.get('timestamp', 0)) if record.get('timestamp') else None,
-                        'd_clock_fused_ms': float(record.get('d_clock_fused_ms', 0)) if record.get('d_clock_fused_ms') else None,
-                        'd_clock_raw_ms': float(record.get('d_clock_raw_ms', 0)) if record.get('d_clock_raw_ms') else None,
-                        'uncertainty_ms': float(record.get('uncertainty_ms', 0)) if record.get('uncertainty_ms') else None,
-                        'n_broadcasts': int(record.get('n_broadcasts', 0)) if record.get('n_broadcasts') else 0,
-                        'n_stations': int(record.get('n_stations', 0)) if record.get('n_stations') else 0,
-                        'quality_grade': record.get('quality_grade', 'D'),
-                        'outliers_rejected': int(record.get('outliers_rejected', 0)) if record.get('outliers_rejected') else 0,
-                        'consistency_flag': record.get('consistency_flag', 'UNKNOWN')
-                    }
-                    
+                # Convert to expected format
+                history = []
+                for record in result['records']:
                     history.append({
-                        'timestamp': parsed['timestamp'] or 0,
-                        'd_clock_fused_ms': parsed['d_clock_fused_ms'] or 0,
-                        'd_clock_raw_ms': parsed['d_clock_raw_ms'] or 0,
-                        'uncertainty_ms': parsed['uncertainty_ms'] or 0,
-                        'n_broadcasts': parsed['n_broadcasts'],
-                        'quality_grade': parsed['quality_grade']
+                        'timestamp': record['timestamp'],
+                        'd_clock_fused_ms': record['d_clock_fused_ms'],
+                        'd_clock_raw_ms': record['d_clock_raw_ms'],
+                        'uncertainty_ms': record['uncertainty_ms'],
+                        'n_broadcasts': record['n_broadcasts'],
+                        'quality_grade': record['quality_grade']
                     })
                 
                 # Get latest record with station stats
-                if records:
-                    latest_record = records[-1]
+                if result['records']:
+                    latest_record = result['records'][-1]
                     latest_fusion = {
-                        **{k: float(v) if v and k.endswith('_ms') else v 
-                           for k, v in latest_record.items()},
-                        'station_stats': {
-                            'WWV': {
-                                'mean_ms': float(latest_record.get('wwv_mean_ms', 0)) if latest_record.get('wwv_mean_ms') else None,
-                                'count': int(latest_record.get('wwv_count', 0)) if latest_record.get('wwv_count') else 0,
-                                'intra_std_ms': float(latest_record.get('wwv_intra_std_ms', 0)) if latest_record.get('wwv_intra_std_ms') else None
-                            },
-                            'WWVH': {
-                                'mean_ms': float(latest_record.get('wwvh_mean_ms', 0)) if latest_record.get('wwvh_mean_ms') else None,
-                                'count': int(latest_record.get('wwvh_count', 0)) if latest_record.get('wwvh_count') else 0,
-                                'intra_std_ms': float(latest_record.get('wwvh_intra_std_ms', 0)) if latest_record.get('wwvh_intra_std_ms') else None
-                            },
-                            'CHU': {
-                                'mean_ms': float(latest_record.get('chu_mean_ms', 0)) if latest_record.get('chu_mean_ms') else None,
-                                'count': int(latest_record.get('chu_count', 0)) if latest_record.get('chu_count') else 0,
-                                'intra_std_ms': float(latest_record.get('chu_intra_std_ms', 0)) if latest_record.get('chu_intra_std_ms') else None
-                            },
-                            'BPM': {
-                                'mean_ms': float(latest_record.get('bpm_mean_ms', 0)) if latest_record.get('bpm_mean_ms') else None,
-                                'count': int(latest_record.get('bpm_count', 0)) if latest_record.get('bpm_count') else 0,
-                                'intra_std_ms': float(latest_record.get('bpm_intra_std_ms', 0)) if latest_record.get('bpm_intra_std_ms') else None
+                        'timestamp': latest_record['timestamp'],
+                        'd_clock_fused_ms': latest_record['d_clock_fused_ms'],
+                        'd_clock_raw_ms': latest_record['d_clock_raw_ms'],
+                        'uncertainty_ms': latest_record['uncertainty_ms'],
+                        'n_broadcasts': latest_record['n_broadcasts'],
+                        'n_stations': latest_record['n_stations'],
+                        'quality_grade': latest_record['quality_grade'],
+                        'outliers_rejected': latest_record.get('outliers_rejected', 0),
+                        'station_stats': latest_record.get('station_stats', {})
+                    }
+            except Exception as e:
+                logger.error(f"Error reading HDF5, falling back to CSV: {e}")
+        
+        # CSV fallback if HDF5 not available
+        if not history:
+            import csv
+            fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
+            
+            if fusion_csv.exists():
+                with open(fusion_csv, 'r') as f:
+                    reader = csv.DictReader(f)
+                    records = list(reader)
+                    
+                    # Get last 60 entries for chart
+                    recent_records = records[-60:] if len(records) > 60 else records
+                    
+                    for record in recent_records:
+                        parsed = {
+                            'timestamp': float(record.get('timestamp', 0)) if record.get('timestamp') else None,
+                            'd_clock_fused_ms': float(record.get('d_clock_fused_ms', 0)) if record.get('d_clock_fused_ms') else None,
+                            'd_clock_raw_ms': float(record.get('d_clock_raw_ms', 0)) if record.get('d_clock_raw_ms') else None,
+                            'uncertainty_ms': float(record.get('uncertainty_ms', 0)) if record.get('uncertainty_ms') else None,
+                            'n_broadcasts': int(record.get('n_broadcasts', 0)) if record.get('n_broadcasts') else 0,
+                            'n_stations': int(record.get('n_stations', 0)) if record.get('n_stations') else 0,
+                            'quality_grade': record.get('quality_grade', 'D'),
+                            'outliers_rejected': int(record.get('outliers_rejected', 0)) if record.get('outliers_rejected') else 0,
+                            'consistency_flag': record.get('consistency_flag', 'UNKNOWN')
+                        }
+                        
+                        history.append({
+                            'timestamp': parsed['timestamp'] or 0,
+                            'd_clock_fused_ms': parsed['d_clock_fused_ms'] or 0,
+                            'd_clock_raw_ms': parsed['d_clock_raw_ms'] or 0,
+                            'uncertainty_ms': parsed['uncertainty_ms'] or 0,
+                            'n_broadcasts': parsed['n_broadcasts'],
+                            'quality_grade': parsed['quality_grade']
+                        })
+                    
+                    # Get latest record with station stats
+                    if records:
+                        latest_record = records[-1]
+                        latest_fusion = {
+                            **{k: float(v) if v and k.endswith('_ms') else v 
+                               for k, v in latest_record.items()},
+                            'station_stats': {
+                                'WWV': {
+                                    'mean_ms': float(latest_record.get('wwv_mean_ms', 0)) if latest_record.get('wwv_mean_ms') else None,
+                                    'count': int(latest_record.get('wwv_count', 0)) if latest_record.get('wwv_count') else 0,
+                                    'intra_std_ms': float(latest_record.get('wwv_intra_std_ms', 0)) if latest_record.get('wwv_intra_std_ms') else None
+                                },
+                                'WWVH': {
+                                    'mean_ms': float(latest_record.get('wwvh_mean_ms', 0)) if latest_record.get('wwvh_mean_ms') else None,
+                                    'count': int(latest_record.get('wwvh_count', 0)) if latest_record.get('wwvh_count') else 0,
+                                    'intra_std_ms': float(latest_record.get('wwvh_intra_std_ms', 0)) if latest_record.get('wwvh_intra_std_ms') else None
+                                },
+                                'CHU': {
+                                    'mean_ms': float(latest_record.get('chu_mean_ms', 0)) if latest_record.get('chu_mean_ms') else None,
+                                    'count': int(latest_record.get('chu_count', 0)) if latest_record.get('chu_count') else 0,
+                                    'intra_std_ms': float(latest_record.get('chu_intra_std_ms', 0)) if latest_record.get('chu_intra_std_ms') else None
+                                },
+                                'BPM': {
+                                    'mean_ms': float(latest_record.get('bpm_mean_ms', 0)) if latest_record.get('bpm_mean_ms') else None,
+                                    'count': int(latest_record.get('bpm_count', 0)) if latest_record.get('bpm_count') else 0,
+                                    'intra_std_ms': float(latest_record.get('bpm_intra_std_ms', 0)) if latest_record.get('bpm_intra_std_ms') else None
+                                }
                             }
                         }
-                    }
         
         # Read calibration state
+        calibration = {}
+        calibration_json = data_root / "state" / "broadcast_calibration.json"
         if calibration_json.exists():
             with open(calibration_json, 'r') as f:
                 calibration = json.load(f)
@@ -493,7 +533,6 @@ async def get_kalman_funnel(
     Returns fused D_clock with uncertainty bounds, per-station contributions, and quality grades.
     """
     try:
-        import csv
         from datetime import datetime, timedelta
         
         # Determine date range
@@ -504,54 +543,88 @@ async def get_kalman_funnel(
         
         start_time = end_time - timedelta(hours=hours)
         
-        # Read fusion CSV file
-        fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
+        # Try HDF5 first (today's data)
+        today = end_time.strftime('%Y%m%d')
+        hdf5_path = get_l3_fusion_path(today, data_root)
         
-        if not fusion_csv.exists():
-            return {
-                "status": "no_data",
-                "message": "Fusion data not available",
-                "data": []
-            }
-        
-        # Parse fusion data
         records = []
-        with open(fusion_csv, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                timestamp = float(row.get('timestamp', 0))
-                dt = datetime.fromtimestamp(timestamp)
+        
+        if hdf5_path.exists():
+            try:
+                result = read_l3_fusion_result(hdf5_path)
                 
-                # Filter by time range
-                if start_time <= dt <= end_time:
-                    records.append({
-                        'timestamp': timestamp,
-                        'timestamp_utc': dt.isoformat() + 'Z',
-                        'd_clock_fused_ms': float(row.get('d_clock_fused_ms', 0)) if row.get('d_clock_fused_ms') else None,
-                        'uncertainty_ms': float(row.get('uncertainty_ms', 0)) if row.get('uncertainty_ms') else None,
-                        'quality_grade': row.get('quality_grade', 'D'),
-                        'n_stations': int(row.get('n_stations', 0)) if row.get('n_stations') else 0,
-                        'n_broadcasts': int(row.get('n_broadcasts', 0)) if row.get('n_broadcasts') else 0,
-                        # Per-station contributions
-                        'stations': {
-                            'WWV': {
-                                'mean_ms': float(row.get('wwv_mean_ms', 0)) if row.get('wwv_mean_ms') else None,
-                                'count': int(row.get('wwv_count', 0)) if row.get('wwv_count') else 0
-                            },
-                            'WWVH': {
-                                'mean_ms': float(row.get('wwvh_mean_ms', 0)) if row.get('wwvh_mean_ms') else None,
-                                'count': int(row.get('wwvh_count', 0)) if row.get('wwvh_count') else 0
-                            },
-                            'CHU': {
-                                'mean_ms': float(row.get('chu_mean_ms', 0)) if row.get('chu_mean_ms') else None,
-                                'count': int(row.get('chu_count', 0)) if row.get('chu_count') else 0
-                            },
-                            'BPM': {
-                                'mean_ms': float(row.get('bpm_mean_ms', 0)) if row.get('bpm_mean_ms') else None,
-                                'count': int(row.get('bpm_count', 0)) if row.get('bpm_count') else 0
+                # Filter by time range and convert format
+                for record in result['records']:
+                    timestamp = record['timestamp']
+                    dt = datetime.fromtimestamp(timestamp)
+                    
+                    if start_time <= dt <= end_time:
+                        # Extract station stats
+                        station_stats = record.get('station_stats', {})
+                        records.append({
+                            'timestamp': timestamp,
+                            'timestamp_utc': record['timestamp_utc'],
+                            'd_clock_fused_ms': record['d_clock_fused_ms'],
+                            'uncertainty_ms': record['uncertainty_ms'],
+                            'quality_grade': record['quality_grade'],
+                            'n_stations': record['n_stations'],
+                            'n_broadcasts': record['n_broadcasts'],
+                            'stations': {
+                                'WWV': station_stats.get('WWV', {'mean_ms': None, 'count': 0}),
+                                'WWVH': station_stats.get('WWVH', {'mean_ms': None, 'count': 0}),
+                                'CHU': station_stats.get('CHU', {'mean_ms': None, 'count': 0}),
+                                'BPM': station_stats.get('BPM', {'mean_ms': None, 'count': 0})
                             }
-                        }
-                    })
+                        })
+            except Exception as e:
+                logger.error(f"Error reading HDF5, falling back to CSV: {e}")
+        
+        # CSV fallback
+        if not records:
+            import csv
+            fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
+            
+            if not fusion_csv.exists():
+                return {
+                    "status": "no_data",
+                    "message": "Fusion data not available",
+                    "data": []
+                }
+            
+            with open(fusion_csv, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    timestamp = float(row.get('timestamp', 0))
+                    dt = datetime.fromtimestamp(timestamp)
+                    
+                    if start_time <= dt <= end_time:
+                        records.append({
+                            'timestamp': timestamp,
+                            'timestamp_utc': dt.isoformat() + 'Z',
+                            'd_clock_fused_ms': float(row.get('d_clock_fused_ms', 0)) if row.get('d_clock_fused_ms') else None,
+                            'uncertainty_ms': float(row.get('uncertainty_ms', 0)) if row.get('uncertainty_ms') else None,
+                            'quality_grade': row.get('quality_grade', 'D'),
+                            'n_stations': int(row.get('n_stations', 0)) if row.get('n_stations') else 0,
+                            'n_broadcasts': int(row.get('n_broadcasts', 0)) if row.get('n_broadcasts') else 0,
+                            'stations': {
+                                'WWV': {
+                                    'mean_ms': float(row.get('wwv_mean_ms', 0)) if row.get('wwv_mean_ms') else None,
+                                    'count': int(row.get('wwv_count', 0)) if row.get('wwv_count') else 0
+                                },
+                                'WWVH': {
+                                    'mean_ms': float(row.get('wwvh_mean_ms', 0)) if row.get('wwvh_mean_ms') else None,
+                                    'count': int(row.get('wwvh_count', 0)) if row.get('wwvh_count') else 0
+                                },
+                                'CHU': {
+                                    'mean_ms': float(row.get('chu_mean_ms', 0)) if row.get('chu_mean_ms') else None,
+                                    'count': int(row.get('chu_count', 0)) if row.get('chu_count') else 0
+                                },
+                                'BPM': {
+                                    'mean_ms': float(row.get('bpm_mean_ms', 0)) if row.get('bpm_mean_ms') else None,
+                                    'count': int(row.get('bpm_count', 0)) if row.get('bpm_count') else 0
+                                }
+                            }
+                        })
         
         # Calculate statistics
         if records:
@@ -592,34 +665,57 @@ async def get_quality_timeline(hours: int = Query(24, description="Number of hou
     Returns A/B/C/D grade counts per hour and data completeness metrics.
     """
     try:
-        import csv
         from datetime import datetime, timedelta
         from collections import defaultdict
         
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=hours)
         
-        fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
+        # Try HDF5 first
+        today = end_time.strftime('%Y%m%d')
+        hdf5_path = get_l3_fusion_path(today, data_root)
         
-        if not fusion_csv.exists():
-            return {"status": "no_data", "timeline": []}
-        
-        # Group by hour
         hourly_grades = defaultdict(lambda: {'A': 0, 'B': 0, 'C': 0, 'D': 0, 'total': 0})
         
-        with open(fusion_csv, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                timestamp = float(row.get('timestamp', 0))
-                dt = datetime.fromtimestamp(timestamp)
+        if hdf5_path.exists():
+            try:
+                result = read_l3_fusion_result(hdf5_path)
                 
-                if start_time <= dt <= end_time:
-                    hour_key = dt.replace(minute=0, second=0, microsecond=0)
-                    grade = row.get('quality_grade', 'D')
+                for record in result['records']:
+                    timestamp = record['timestamp']
+                    dt = datetime.fromtimestamp(timestamp)
                     
-                    if grade in hourly_grades[hour_key]:
-                        hourly_grades[hour_key][grade] += 1
-                        hourly_grades[hour_key]['total'] += 1
+                    if start_time <= dt <= end_time:
+                        hour_key = dt.replace(minute=0, second=0, microsecond=0)
+                        grade = record['quality_grade']
+                        
+                        if grade in hourly_grades[hour_key]:
+                            hourly_grades[hour_key][grade] += 1
+                            hourly_grades[hour_key]['total'] += 1
+            except Exception as e:
+                logger.error(f"Error reading HDF5, falling back to CSV: {e}")
+        
+        # CSV fallback
+        if not hourly_grades:
+            import csv
+            fusion_csv = data_root / "phase2" / "fusion" / "fused_d_clock.csv"
+            
+            if not fusion_csv.exists():
+                return {"status": "no_data", "timeline": []}
+            
+            with open(fusion_csv, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    timestamp = float(row.get('timestamp', 0))
+                    dt = datetime.fromtimestamp(timestamp)
+                    
+                    if start_time <= dt <= end_time:
+                        hour_key = dt.replace(minute=0, second=0, microsecond=0)
+                        grade = row.get('quality_grade', 'D')
+                        
+                        if grade in hourly_grades[hour_key]:
+                            hourly_grades[hour_key][grade] += 1
+                            hourly_grades[hour_key]['total'] += 1
         
         # Convert to timeline format
         timeline = []
