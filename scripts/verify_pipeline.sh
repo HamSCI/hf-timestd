@@ -267,14 +267,56 @@ FUSION_DIR="$PHASE2_DIR/fusion"
 if [[ -d "$FUSION_DIR" ]]; then
     check_pass "Fusion directory exists: $FUSION_DIR"
     
-    # Check for fusion HDF5 output
-    FUSION_HDF5=$(find "$FUSION_DIR" -name "*fusion_timing_*.h5" -mmin -10 2>/dev/null)
+    # Check for fusion HDF5 output and verify it's being actively written
+    FUSION_HDF5=$(find "$FUSION_DIR" -name "*fusion_timing_*.h5" -type f 2>/dev/null | sort | tail -1)
     if [[ -n "$FUSION_HDF5" ]]; then
-        SIZE=$(du -h $FUSION_HDF5 2>/dev/null | head -1 | cut -f1)
-        RECORDS=$(h5dump -d timestamp_utc -y -w0 $FUSION_HDF5 2>/dev/null | grep -c ":" || echo "unknown")
-        check_pass "Fusion HDF5 found: $(basename $FUSION_HDF5) ($SIZE, ~$RECORDS records)"
+        SIZE=$(du -h "$FUSION_HDF5" 2>/dev/null | head -1 | cut -f1)
+        
+        # Check HDF5 file freshness (fusion writes every ~60s)
+        HDF5_MTIME=$(stat -c %Y "$FUSION_HDF5" 2>/dev/null || echo "0")
+        HDF5_AGE=$((NOW - HDF5_MTIME))
+        
+        if [[ $HDF5_AGE -gt 300 ]]; then
+            # >5 min is a critical failure
+            check_fail "Fusion HDF5 not updated in ${HDF5_AGE}s (expected ~60s)"
+            echo "  → Cause: Service crashed, silent failure, or no input data"
+            echo "  → Diagnose: tail -50 /var/log/hf-timestd/fusion.log"
+            echo "  → Check: Analytics service providing data to fusion"
+            echo "  → Fix: sudo systemctl restart timestd-fusion"
+        elif [[ $HDF5_AGE -gt 120 ]]; then
+            # >2 min is suspicious
+            check_warn "Fusion HDF5 last updated ${HDF5_AGE}s ago (expected ~60s)"
+            echo "  → Check fusion service logs for delays or errors"
+        else
+            check_pass "Fusion HDF5 actively being written (${HDF5_AGE}s ago, $SIZE)"
+        fi
+        
+        # Check fusion service log file for activity (production only)
+        if [[ "$MODE" == "production" ]] && [[ -f "/var/log/hf-timestd/fusion.log" ]]; then
+            LOG_MTIME=$(stat -c %Y "/var/log/hf-timestd/fusion.log" 2>/dev/null || echo "0")
+            LOG_AGE=$((NOW - LOG_MTIME))
+            
+            if [[ $LOG_AGE -gt 120 ]]; then
+                check_fail "Fusion service SILENT (log not updated in ${LOG_AGE}s)"
+                echo "  → Cause: Python crash during initialization, import error"
+                echo "  → Diagnose: sudo journalctl -u timestd-fusion -n 100"
+                echo "  → Check for: Python tracebacks, NameError, ImportError"
+                echo "  → Fix: Check /var/log/hf-timestd/fusion.log for errors"
+            else
+                # Check for recent errors in log
+                ERROR_COUNT=$(tail -50 "/var/log/hf-timestd/fusion.log" 2>/dev/null | grep -c -E "(ERROR|CRITICAL|Traceback|Exception|CRASHED)" 2>/dev/null || echo "0")
+                ERROR_COUNT=$(echo "$ERROR_COUNT" | tr -d '\n' | tr -d ' ')
+                if [[ "$ERROR_COUNT" -gt 0 ]] 2>/dev/null; then
+                    check_warn "Fusion service has $ERROR_COUNT recent errors in logs"
+                    echo "  → Check: tail -50 /var/log/hf-timestd/fusion.log | grep ERROR"
+                fi
+            fi
+        fi
     else
-        check_warn "No recent fusion HDF5 files (last 10 min)"
+        check_fail "No fusion HDF5 files found in $FUSION_DIR"
+        echo "  → Cause: Fusion service never ran or failed to initialize"
+        echo "  → Diagnose: sudo systemctl status timestd-fusion"
+        echo "  → Check: sudo journalctl -u timestd-fusion -n 100"
     fi
     
     # Note: Fusion CSV no longer updated (HDF5-only as of 2026-01-02)
@@ -315,10 +357,23 @@ if [[ -d "$SCIENCE_DIR" ]]; then
                  AGE_STR="$((AGE/86400))d $(( (AGE%86400)/3600 ))h"
              fi
              
+            # TEC freshness check (expected update every ~5 minutes)
             if [[ $AGE -lt 900 ]]; then
-                check_pass "Found recent TEC HDF5 file (updated $AGE_STR ago)"
+                # <15 min is good
+                check_pass "TEC HDF5 fresh (updated ${AGE_STR} ago)"
+            elif [[ $AGE -lt 1800 ]]; then
+                # 15-30 min is suspicious
+                check_warn "TEC HDF5 stale (${AGE_STR}, expected ~5min updates)"
+                echo "  → Possible cause: No multi-frequency detections available"
+                echo "  → Check: Analytics producing timing on multiple bands"
+                echo "  → Diagnose: sudo journalctl -u timestd-science-aggregator -n 50"
             else
-                check_warn "TEC HDF5 stale (last updated $AGE_STR ago) - Check timestd-science-aggregator"
+                # >30 min is a failure
+                check_fail "TEC HDF5 very stale (${AGE_STR})"
+                echo "  → Cause: science_aggregator service stuck or crashed"
+                echo "  → Diagnose: sudo systemctl status timestd-science-aggregator"
+                echo "  → Check logs: sudo journalctl -u timestd-science-aggregator -n 100"
+                echo "  → Fix: sudo systemctl restart timestd-science-aggregator"
             fi
         else
             check_warn "No TEC HDF5 files found - Check timestd-science-aggregator"
@@ -376,23 +431,41 @@ if [[ -f "$CAL_STATE_FILE" ]]; then
             SYS_UPTIME=$(cut -d. -f1 /proc/uptime)
             if [[ $SYS_UPTIME -gt 3600 ]]; then
                 check_warn "System stuck in BOOTSTRAP phase (uptime > 1h)"
-            else
                 check_pass "System in BOOTSTRAP phase (normal for startup)"
             fi
         fi
         
+        # Calibration freshness check (GPSDO-aware)
+        # With GPSDO: calibration updates only when tones detected (rare)
+        # Without GPSDO: more frequent updates expected
         if [[ $CAL_AGE -lt 600 ]]; then
-             check_pass "Calibration state updated recently (${CAL_AGE}s ago)"
-        else
+             check_pass "Calibration state fresh (${CAL_AGE}s ago)"
+        elif [[ $CAL_AGE -lt 86400 ]]; then
+             # <24h is normal with GPSDO
              # Format age
              if [[ $CAL_AGE -lt 3600 ]]; then
                  AGE_STR="$((CAL_AGE/60))m"
-             elif [[ $CAL_AGE -lt 86400 ]]; then
-                 AGE_STR="$((CAL_AGE/3600))h"
              else
-                 AGE_STR="$((CAL_AGE/86400))d $(( (CAL_AGE%86400)/3600 ))h"
+                 AGE_STR="$((CAL_AGE/3600))h"
              fi
-             check_warn "Calibration state stale (last updated $AGE_STR ago)"
+             echo -e "${BLUE}ℹ️  INFO${NC} Calibration age: ${AGE_STR} (normal with GPSDO-locked system)"
+        else
+             # >24h is unusual even with GPSDO
+             if [[ $CAL_AGE -lt 604800 ]]; then
+                 # <7 days
+                 AGE_STR="$((CAL_AGE/86400))d $(( (CAL_AGE%86400)/3600 ))h"
+                 check_warn "Calibration very stale (${AGE_STR})"
+                 echo "  → Cause: No tone detections in 24+ hours"
+                 echo "  → Normal if: Poor propagation, daytime on low bands"
+                 echo "  → Action: Monitor - check analytics logs for tone attempts"
+             else
+                 # >7 days is a problem
+                 AGE_STR="$((CAL_AGE/86400))d"
+                 check_fail "Calibration extremely stale (${AGE_STR})"
+                 echo "  → Cause: Analytics service not detecting tones"
+                 echo "  → Diagnose: sudo journalctl -u timestd-analytics -n 100"
+                 echo "  → Check: Verify signals present, radiod healthy"
+             fi
         fi
         
      else
@@ -414,12 +487,19 @@ if [[ "$MODE" == "production" ]]; then
         if chronyc sources 2>/dev/null | grep -q "TMGR"; then
             check_pass "Chrony TMGR source configured"
             
-            # Check reachability
+            # Check reachability and provide diagnostics
             REACH=$(chronyc sources 2>/dev/null | grep "TMGR" | awk '{print $4}')
-            if [[ "$REACH" != "0" ]]; then
-                check_pass "TMGR source reachable (reach: $REACH)"
+            if [[ "$REACH" == "0" ]]; then
+                check_fail "TMGR source not reachable (reach: 0)"
+                echo "  → Cause: Fusion service not writing to Chrony SHM"
+                echo "  → Diagnose: grep 'ChronySHM' /var/log/hf-timestd/fusion.log | tail -5"
+                echo "  → Check: Fusion service running and producing HDF5 output"
+                echo "  → Verify SHM: ipcs -m | grep 0x4e545030"
+                echo "  → Fix: sudo systemctl restart timestd-fusion"
+            elif [[ -n "$REACH" ]] && [[ "$REACH" -lt 7 ]]; then
+                check_warn "TMGR reach low ($REACH) - check fusion logs for SHM write errors"
             else
-                check_warn "TMGR source configured but not reachable (reach: 0)"
+                check_pass "TMGR source reachable (reach: $REACH)"
             fi
         else
             check_warn "Chrony TMGR source not configured"
