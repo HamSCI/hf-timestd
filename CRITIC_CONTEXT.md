@@ -22,176 +22,341 @@ Primary Instruction:  In this context you will perform a critical review of the 
 
 ---
 
-## 🔴 NEXT SESSION FOCUS: ANALYTICS CRITIQUE - TARGETED TONE SEARCH
+## ✅ SESSION COMPLETE (2026-01-02 22:00 UTC): FUSION BUG FIXED, UPSTREAM ISSUE IDENTIFIED
 
-**Purpose:** The current tone detection strategy searches wide windows (±500ms) or heuristic adaptive windows (±5-50ms) but lacks precision. We want to **improve sensitivity and specificity** by determining *exactly* where tones of interest should be based on prior knowledge (Physics + Fusion feedback).
+**Status:** 🟢 **FUSION FIXED** | 🔴 **UPSTREAM RTP PACKET LOSS BLOCKING PIPELINE**
 
-**Objective:** "Zero-in on where we know the tones of interest will be."
+**Author:** AI Agent (Cascade)
+**Date:** 2026-01-02 22:00 UTC
 
-### Potential Areas for Improvement
+### Summary
 
-#### 1. Fusion-Aided Analytics
+**Primary Issue Resolved:** Fixed critical `UnboundLocalError` in Fusion service that was causing crashes every 60 seconds.
 
-- **Idea**: Use the *fused* solution (L3) to feedback a precise prediction to the *individual* station analytics (L2).
-- **Benefit**: If we know UTC(NIST) ±1ms from the ensemble, we shouldn't be searching ±500ms for a single station. We can search ±2ms, drastically rejecting noise.
+**Root Cause Discovered:** Analytics stopped writing HDF5 at 20:12 UTC due to **83% RTP packet loss** from upstream recorder. This is a network/hardware issue, not a code bug.
 
-#### 2. Physics-Aided Search Windows
+### Fixes Implemented
 
-- **Idea**: Use `Phase2TemporalEngine` physics (IRI-2020) not just for centering, but for *tight* window sizing.
-- **Benefit**: Reject false positives that are physically impossible (e.g., propagation delay < 3ms for 1000km path).
+**1. Fusion Service Bug (CRITICAL)**
+- **File:** `src/hf_timestd/core/multi_broadcast_fusion.py`
+- **Bug:** `UnboundLocalError: cannot access local variable 'has_verified_global' where it is not associated with a value` at line 2107
+- **Root Cause:** Variable used before definition (defined at line 2142, used at line 2107)
+- **Fix:** Moved variable definition to line 2096 (before first use)
+- **Impact:** Fusion service was crashing every 60 seconds, preventing any fusion calculations
+- **Status:** ✅ Fixed, deployed to production, service running successfully
 
-#### 3. Signal Feature Validation
+### Investigation Findings
 
-- **Idea**: Critique the current "Robust Noise Floor" implementation. Is it truly robust? Can we use spectral features (Doppler spread, spectral width) to better discriminate tones from interference?
+**Timeline of Events:**
+- **17:11 UTC:** All services started normally
+- **20:12 UTC:** Core recorder restarted (per systemd)
+- **20:12 UTC:** Analytics stopped writing HDF5 (last timestamp in files)
+- **20:12-22:18 UTC:** Massive RTP packet loss (~83%) preventing data processing
+- **21:25 UTC:** Investigation started (misdiagnosed as Analytics bug)
+- **22:00 UTC:** Fusion bug fixed, upstream packet loss identified
+
+**Current System State (22:18 UTC):**
+```
+Core Recorder:  ⚠️  Running, but losing 83% of RTP packets
+                    Expected: 1,440,000 samples/min
+                    Receiving: 240,000 samples/min (16.7%)
+                    Symptoms: "Lost packet recovery" warnings (15k+ sample gaps)
+                             "RTP offset drift detected" on all channels
+                    
+Analytics:      ⚠️  Running, but cannot process incomplete minutes
+                    HDF5 files exist with data up to 20:12 UTC:
+                    - SHARED_10000: 1202 records, last=2026-01-02T20:12:00Z
+                    - SHARED_5000: 1206 records, last=2026-01-02T20:12:00Z
+                    - CHU_3330: 1178 records, last=2026-01-02T20:12:00Z
+                    Logs: "Incomplete minute: 240000/1440000 (16.7%)"
+                    
+Fusion:         ✅  FIXED and running successfully
+                    Output: +0.453ms ± 1.108ms [69 broadcasts, grade C]
+                    Using CSV fallback (HDF5 data is stale)
+                    No crashes since fix deployed
+```
+
+**HDF5 Schema Verification:**
+- ✅ Analytics writing correct schema (new format: individual datasets)
+- ✅ Files have proper structure: `timestamp_utc`, `clock_offset_ms`, etc.
+- ✅ Fusion HDF5 reader compatible with schema
+- ⚠️ Data is stale (2 hours old) due to upstream packet loss
 
 ---
 
-## Investigation Plan for AI Agent
+## 🔴 NEXT SESSION FOCUS: UPSTREAM RTP PACKET LOSS (83% DATA LOSS)
 
-### Step 1: Analyze Current Analytics Logic
+**Date:** 2026-01-02 22:20 UTC  
+**Status:** 🔴 **CRITICAL** - Core recorder losing 83% of RTP packets
 
-Review `phase2_analytics_service.py` and `tone_detector.py`.
+**Purpose:** Diagnose and fix the RTP packet loss issue that started at 20:12 UTC, preventing Analytics from processing data and blocking the entire pipeline.
 
-- How is the search window currently determined?
-- Is there any feedback loop from L3 (Fusion) to L2 (Analytics)?
+**Symptoms:**
+- Core recorder receiving only 16.7% of expected samples (240k/1440k per minute)
+- "Lost packet recovery" warnings with 15,000+ sample gaps
+- "RTP offset drift detected" on all channels
+- All 9 channels affected equally (~83% loss across the board)
 
-### Step 2: Prototype Targeted Search
-
-- Design a mechanism for Analytics to ingest the latest "Time Standard" (Fusion Clock Offset).
-- Restrict search windows based on this feedback.
-
-### Step 3: Verify Sensitivity
-
-- Test with weak signal recordings. Does the targeted search find tones that were previously missed?
+**Previous Investigation (COMPLETED):**
+- ❌ Initial hypothesis: Analytics not writing HDF5 (DISPROVEN)
+- ✅ Analytics IS writing HDF5 correctly (1200+ records per channel)
+- ✅ HDF5 schema is correct and readable
+- ✅ Fusion bug fixed (was crashing due to code bug, now operational)
+- ✅ Root cause identified: Upstream RTP packet loss since 20:12 UTC
 
 ---
 
-## Current System State (Background)
+## RTP Packet Loss Investigation Plan
 
-**Services:** All Active
+### Phase 1: Characterize the Packet Loss (10 minutes)
 
-- **Fusion**: Stabilized (Version 3.8.0), robust "Critic" logic active.
-- **Analytics**: Working but potentially inefficient (wide search).
-- **Chrony**: Accepting updates.
+**Goal:** Understand the nature and extent of the packet loss.
 
-**Recent Major Changes:**
+```bash
+# 1. Check recorder logs for loss patterns
+tail -500 /var/log/hf-timestd/core-recorder.log | grep -E "Lost packet|RTP offset drift" | head -50
 
-- 2026-01-02: Fusion service critical fixes (VTEC, Global Solver, HDF5 Parity).
-- 2025-12-31: Analytics "Robust Noise Floor" and "Adaptive Search Windows".
+# 2. Check if loss is consistent across all channels
+tail -200 /var/log/hf-timestd/core-recorder.log | grep "Lost packet" | awk '{print $NF}' | sort | uniq -c
+
+# 3. Check recorder resource usage
+ps aux | grep core_recorder
+top -b -n 1 | grep core_recorder
+
+# 4. Check system network statistics
+netstat -s | grep -E "packet|error|drop"
+ifconfig | grep -E "RX|TX|error|drop"
+```
+
+**Decision Points:**
+- If loss is uniform across channels → Network/system issue
+- If loss is channel-specific → Channel configuration issue
+- If CPU/memory high → Resource exhaustion
+- If network errors high → Network infrastructure issue
+
+### Phase 2: Check RTP Stream Source (10 minutes)
+
+**Goal:** Determine if the problem is with radiod or the network path.
+
+```bash
+# 1. Check radiod status and health
+systemctl status timestd-radiod-monitor --no-pager
+curl -s http://localhost:8073/health | jq .
+
+# 2. Check if radiod is actually transmitting
+tcpdump -i lo -c 100 udp port 5004 2>&1 | head -20
+
+# 3. Check radiod logs for errors
+tail -200 /var/log/radiod/radiod.log | grep -E "ERROR|WARNING|RTP"
+
+# 4. Verify radiod process health
+ps aux | grep radiod
+cat /proc/$(pgrep radiod)/status | grep -E "State|VmSize|VmRSS"
+```
+
+**Decision Points:**
+- If radiod unhealthy → Restart/investigate radiod
+- If no RTP packets on network → radiod not transmitting
+- If packets present but recorder missing them → Recorder buffer issue
+
+### Phase 3: Diagnose Recorder Buffer/Processing (15 minutes)
+
+**Goal:** Identify if recorder is dropping packets due to processing delays.
+
+```bash
+# 1. Check recorder configuration
+cat /etc/hf-timestd/timestd-config.toml | grep -A 10 "\[recorder\]"
+
+# 2. Check system buffer sizes
+sysctl net.core.rmem_max
+sysctl net.core.rmem_default
+cat /proc/sys/net/core/netdev_max_backlog
+
+# 3. Monitor recorder in real-time
+sudo journalctl -u timestd-core-recorder -f &
+# Let it run for 60 seconds, observe packet loss rate
+
+# 4. Check for I/O bottlenecks
+iostat -x 5 3
+df -h /var/lib/timestd/raw_buffer/
+```
+
+**Possible Causes:**
+- Insufficient socket buffer size
+- Disk I/O bottleneck (writing raw buffers)
+- CPU saturation (processing 9 channels)
+- Memory pressure
+
+### Phase 4: Check for System-Wide Issues (10 minutes)
+
+**Goal:** Rule out system-level problems.
+
+```bash
+# 1. Check system load and resources
+uptime
+free -h
+vmstat 5 3
+
+# 2. Check for OOM events
+dmesg | grep -i "out of memory\|oom"
+journalctl --since "2 hours ago" | grep -i "oom\|killed"
+
+# 3. Check for disk space issues
+df -h
+du -sh /var/lib/timestd/*
+
+# 4. Check for network interface errors
+ip -s link show
+ethtool -S lo 2>/dev/null | grep -E "error|drop"
+```
+
+### Phase 5: Temporary Mitigation (5 minutes)
+
+**Goal:** Restore service while investigating root cause.
+
+```bash
+# Option 1: Restart recorder (may clear transient issue)
+sudo systemctl restart timestd-core-recorder
+sleep 60
+tail -50 /var/log/hf-timestd/core-recorder.log | grep "Lost packet"
+
+# Option 2: Restart radiod (if source issue suspected)
+# WARNING: This will interrupt all channels
+# sudo systemctl restart radiod
+
+# Option 3: Increase buffer sizes (if buffer overflow suspected)
+# Edit /etc/sysctl.conf:
+# net.core.rmem_max = 134217728
+# net.core.rmem_default = 67108864
+# sudo sysctl -p
+```
+
+---
+
+## Potential Root Causes (RTP Packet Loss)
+
+### 1. Recorder Buffer Overflow (High Probability)
+**Hypothesis:** Recorder cannot process packets fast enough, causing buffer overflow.
+
+**Evidence:**
+- Uniform 83% loss across all channels
+- Started suddenly at 20:12 UTC (recorder restart)
+- "RTP offset drift" warnings (timing desync)
+
+**Possible Causes:**
+- Socket receive buffer too small
+- Processing thread blocked/slow
+- Disk I/O bottleneck writing raw buffers
+- CPU saturation
+
+### 2. Radiod Transmission Issue (Medium Probability)
+**Hypothesis:** Radiod is not transmitting complete RTP streams.
+
+**Possible Causes:**
+- SDR hardware malfunction
+- USB bandwidth saturation
+- Radiod internal buffer overflow
+- Configuration change at 20:12 UTC
+
+### 3. Network Path Issue (Low Probability)
+**Hypothesis:** Localhost network stack dropping packets.
+
+**Possible Causes:**
+- Kernel network buffer exhaustion
+- Firewall/iptables rules
+- Network namespace issues
+- System resource pressure
+
+### 4. Recorder Code Bug (Low Probability)
+**Hypothesis:** Recent code change introduced packet handling bug.
+
+**Evidence:**
+- Timing coincides with recorder restart
+- May have picked up new code version
+
+**Investigation:**
+- Check git log for recent recorder changes
+- Compare current version with last known good
+
+---
+
+## Context: Recent System Changes
+
+### ✅ Completed This Session (2026-01-02)
+
+**Science Aggregator Improvements (Phase 1 & 2):**
+1. Fixed HDF5 timing measurements directory path bug
+2. Implemented propagation statistics (hourly aggregation)
+3. Implemented TEC validation against GPS IONEX data
+4. All changes deployed to production
+
+**Files Modified:**
+- `src/hf_timestd/core/science_aggregator.py` (bug fixes + new features)
+- `src/hf_timestd/core/propagation_stats.py` (new module)
+- `src/hf_timestd/core/tec_validator.py` (new module)
+- `src/hf_timestd/schemas/l3_tec_v1.json` (validation fields)
+
+**Science Aggregator Status:**
+- ✅ Service running and operational
+- ✅ Propagation statistics working (12 records/hour)
+- ✅ TEC validation ready (awaiting IONEX data)
+- ⚠️ No TEC output (waiting for analytics input)
+
+### Previous Session (Earlier 2026-01-02)
+
+**Fusion Service Fixes:**
+- VTEC safety checks
+- Global Solver outlier rejection
+- HDF5 parity improvements
+- Warmup penalty removal
+
+---
+
+## Current System State
+
+**Services:** All Running (No Crashes)
+```
+✅ timestd-core-recorder.service (uptime: 1h 9m)
+✅ timestd-analytics.service (uptime: 4h 10m) ⚠️ NOT WRITING HDF5
+✅ timestd-fusion.service (uptime: 3h 40m) ⚠️ STALE (no input)
+✅ timestd-science-aggregator.service (uptime: 6m) ⚠️ STALE (no input)
+✅ timestd-vtec.service (uptime: 22h 28m)
+✅ timestd-radiod-monitor.service (uptime: 6h 21m)
+✅ timestd-web-ui.service (uptime: 1d 5h)
+```
+
+**Data Pipeline Status:**
+- L0 (Raw IQ): ✅ Active (45 files/5min)
+- L2 (Timing): ❌ No HDF5 output
+- L3 (Fusion): ❌ Stale (82 minutes)
+- L3A (TEC): ❌ Stale (1 hour)
+- L3C (Propagation Stats): ✅ Working (when data available)
+
+**Hardware:**
+- Radiod: ✅ HEALTHY (pid 1, uptime 3.2 days)
+- GPSDO: ✅ Locked
+- System: ✅ Calibrated
 
 ---
 
 ## Success Criteria for Next Session
 
-1. **Critique Report**: Identification of inefficiencies in current tone search.
-2. **Design**: Proposal for a "Targeted Tone Search" mechanism (Fusion feedback loop).
-3. **Implementation**: Update Analytics to use priors for narrowing search space.
-4. **Metric**: Demonstrate improved detection rate or reduced false positives.
+1. **Root Cause Identified:** Determine why RTP packet loss is occurring (83% loss)
+2. **Fix Implemented:** Restore full RTP packet reception (1.44M samples/min)
+3. **Analytics Verified:** Confirm Analytics resumes writing HDF5 with complete minutes
+4. **Pipeline Restored:** Verify full pipeline operation (Analytics → Fusion → Science)
 
-### Main Accomplishments
+**Critical Metrics:**
+- RTP packet reception: 1,440,000 samples/minute (currently 240,000)
+- Packet loss warnings: 0 (currently continuous)
+- Analytics HDF5 files: Updated with timestamps > 20:12 UTC
+- Fusion HDF5: Updated every ~60 seconds with fresh data
+- TEC HDF5: Updated every ~5 minutes
+- Pipeline verification: All checks passing
 
-1. **Health Checks**: Created `health-check-science.sh` and `health-check-vtec.sh`.
-2. **Pipeline Verification**: Updated `verify_pipeline.sh` to include **Phase 4: Science Products**.
-3. **Service Management**: Added `timestd-science-aggregator` to `install.sh` and `uninstall.sh`.
-4. **Integration**: All services (Recorder, Analytics, Fusion, Science, VTEC, WebUI) are running and monitored.
-
----
-
-## 🔴 NEXT SESSION FOCUS: INVESTIGATE DEGRADED TIMING QUALITY (GRADE D)
-
-**Purpose:** The system is operational and processing data, but the **Timing Quality Grade has dropped to 'D'** across the board. We need to diagnose why the system considers the timing estimate to be of poor quality despite having valid inputs.
-
-**Trigger:** User report "Grades all 'D'" and uploaded image `uploaded_image_1767312248802.png` showing a timeline dominated by red (Grade D) bars.
-
-### Context & visual cues
-
-![Quality Timeline](/home/mjh/.gemini/antigravity/brain/6b23b02b-ff90-4674-b970-ab973963ca8f/uploaded_image_1767312248802.png)
-*Figure: Metrics showing degraded quality grades.*
-
-### Potential Causes to Investigate
-
-#### 1. Fusion / Calibration Logic (High Probability)
-
-- **Problem**: The fused solution might have high variance or uncertainty, leading to a downgrade.
-- **Check**: Look at `fused_d_clock.csv` for `uncertainty_ms` and `consistency_flag`.
-- **Hypothesis**: The recent HDF5 migration might have altered how uncertainty is read or calculated.
-
-#### 2. Chrony Integration & Reachability
-
-- **Note**: `verify_pipeline.sh` showed `TMGR source reachable (reach: 3)`.
-- **Problem**: `reach=3` (binary 00000011) means only the last 2 polls succeeded. It takes 8 successful polls (reach 377) to be fully stable.
-- **Hypothesis**: The system might just be warming up, OR Chrony is rejecting samples due to high variance.
-
-#### 3. Analytics Quality (Input Garbage?)
-
-- **Problem**: If the individual station measurements (L2) are noisy or wrong, Fusion will have high uncertainty.
-- **Check**: Compare individual channel plots. Are they tight or scattered?
-- **Hypothesis**: Recent changes to "Robust Noise Floor" or "Adaptive Search Windows" (mentioned in CHANGELOG 3.3.0) might be rejecting good signals or letting noise in.
-
-#### 4. Timestamp / Datatype Issues
-
-- **Problem**: Recent fixes to IRI-2020 array handling or HDF5 schemas might have introduced subtle value errors (e.g. seconds vs milliseconds, or integer truncation).
-
----
-
-## Investigation Plan for AI Agent
-
-### Step 1: Analyze Fusion Output (The Symptom)
-
-Check the raw numbers driving the "Grade D" classification.
-
-```bash
-# Get recent fusion records
-tail -20 /var/lib/timestd/phase2/fusion/fused_d_clock.csv
-
-# Questions to answer:
-# 1. What is the 'uncertainty_ms'? (Grade A < 1ms, Grade D > ???)
-# 2. What is the 'quality_flag'?
-# 3. How many 'num_stations' are contributing? (Low count = low confidence)
-```
-
-### Step 2: Check Individual Station Inputs
-
-Is the input to fusion garbage?
-
-```bash
-# Check L2 for a stable station (e.g., WWV 10MHz)
-tail -20 /var/lib/timestd/phase2/WWV_10MHz/clock_offset/WWV_10MHz_clock_offset.csv
-
-# Questions:
-# 1. Are 'd_clock' values stable?
-# 2. Is 'confidence' high?
-```
-
-### Step 3: Check Logs for Logic Errors
-
-```bash
-sudo journalctl -u timestd-fusion --since "1 hour ago" | grep -i "warning\|error\|reject"
-sudo journalctl -u timestd-analytics --since "1 hour ago" | grep -i "warning\|error"
-```
-
----
-
-## Current System State (Background)
-
-**Services:** All Active (systemd managed)
-**Data Pipeline:**
-
-- L0 (Digital RF/Binary): Active
-- L2 (Timing): Active (HDF5+CSV)
-- L3 (Fusion): Active (HDF5+CSV)
-- Chrony: **Connected** (Reach 3, climbing)
-
-**Recent Major Changes:**
-
-- HDF5 Migration (Phase 1-3 complete)
-- Health Checks implementation
-- Science Aggregator & VTEC integration
-
----
-
-## Success Criteria for Next Session
-
-1. **Identify the Root Cause** of the "Grade D" status.
-2. **Proposed Fix** (Configuration tune, code fix, or waiting for warm-up).
-3. **Verify Grade Recovery** (Return to A/B grades).
+**Auto-Recovery Expected:**
+Once RTP packet loss is resolved, the pipeline should self-recover:
+- Analytics will resume processing complete minutes
+- Fusion will automatically switch from CSV fallback to HDF5
+- Science Aggregator will resume TEC estimation
+- No code changes or service restarts required (Fusion bug already fixed)

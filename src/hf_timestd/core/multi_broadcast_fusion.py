@@ -2092,6 +2092,9 @@ class MultiBroadcastFusion:
         weighted_var = np.sum(w * (d - fused_d_clock)**2) / np.sum(w)
         statistical_uncertainty = np.sqrt(weighted_var)
         
+        # Check if we have verified global solver result
+        has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
+        
         # 2. Systematic uncertainty from calibration convergence
         # Estimate based on Kalman filter convergence state
         # Early in convergence: higher systematic error
@@ -2138,8 +2141,7 @@ class MultiBroadcastFusion:
             propagation_uncertainty**2
         )
         
-        # Apply uncertainty floor
-        has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
+        # Apply uncertainty floor (has_verified_global already defined above)
         uncertainty_floor = 0.1 if has_verified_global else 0.2
         measurement_uncertainty = max(uncertainty_floor, combined_uncertainty)
         
