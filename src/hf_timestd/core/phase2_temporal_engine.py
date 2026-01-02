@@ -961,9 +961,13 @@ class Phase2TemporalEngine:
         # PRIORITY 2: Fall back to Physics prediction if no Fusion feedback
         elif predicted_station:
             try:
+                # Convert Unix timestamp to datetime for ionospheric model
+                from datetime import datetime, timezone
+                timestamp_dt = datetime.fromtimestamp(buffer_mid_time, tz=timezone.utc)
+                
                 predicted_delay_ms, uncertainty_ms = self._predict_propagation_delay(
                     station=predicted_station,
-                    timestamp=buffer_mid_time
+                    timestamp=timestamp_dt
                 )
                 
                 if predicted_delay_ms is not None:
