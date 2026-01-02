@@ -521,17 +521,75 @@ class MultiBroadcastFusion:
                     channels.append(subdir.name)
         return sorted(channels)
     
+    def _validate_calibration_data(self, data: dict) -> bool:
+        """
+        Validate loaded calibration data for sanity.
+        
+        Prevents loading corrupted or stale calibration files that could
+        trap the system in an unrecoverable state.
+        
+        Validation criteria:
+        - Offset magnitude must be < 100ms (realistic max ~60ms for multi-hop)
+        - Calibration age must be < 7 days (ionospheric conditions change)
+        
+        Returns:
+            True if calibration is safe to use, False otherwise.
+        """
+        MAX_OFFSET_MS = 100.0  # Maximum reasonable offset
+        MAX_AGE_DAYS = 7       # Maximum calibration age
+        
+        current_time = time.time()
+        max_age_seconds = MAX_AGE_DAYS * 86400
+        
+        for broadcast_key, cal_data in data.items():
+            offset_ms = cal_data.get('offset_ms', 0.0)
+            last_updated = cal_data.get('last_updated', 0)
+            
+            # Check offset magnitude
+            if abs(offset_ms) > MAX_OFFSET_MS:
+                logger.warning(
+                    f"Calibration sanity check FAILED: {broadcast_key} has "
+                    f"offset={offset_ms:+.1f}ms (exceeds ±{MAX_OFFSET_MS}ms limit)"
+                )
+                return False
+            
+            # Check age
+            age_seconds = current_time - last_updated
+            if age_seconds > max_age_seconds:
+                logger.warning(
+                    f"Calibration sanity check FAILED: {broadcast_key} is "
+                    f"{age_seconds/86400:.1f} days old (exceeds {MAX_AGE_DAYS} day limit)"
+                )
+                return False
+        
+        logger.info(f"Calibration sanity check PASSED for {len(data)} broadcasts")
+        return True
+    
     def _load_calibration(self):
         """
         Load per-broadcast calibration from file.
         
         Issue 3.2 Fix: Calibration is now keyed by broadcast (station_frequency)
         rather than just station, to account for frequency-dependent delays.
+        
+        Issue 3.8.2 Fix: Added sanity checks to prevent loading corrupted
+        calibration files with unreasonably large offsets.
         """
         if self.calibration_file.exists():
             try:
                 with open(self.calibration_file) as f:
                     data = json.load(f)
+                
+                # SANITY CHECK: Validate before loading
+                if not self._validate_calibration_data(data):
+                    logger.warning(
+                        f"Calibration file {self.calibration_file} failed sanity checks. "
+                        "Discarding and starting fresh with bootstrap mode."
+                    )
+                    self._init_default_calibration()
+                    return
+                
+                # Load validated calibration
                 for broadcast_key, cal_data in data.items():
                     # Parse station and frequency from key (e.g., "WWV_10.00")
                     parts = broadcast_key.rsplit('_', 1)

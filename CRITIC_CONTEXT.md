@@ -1,8 +1,23 @@
 # NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION
 
-Primary Instruction:  In this context you will perform a critical review of the HF Time Standard (hf-timestd) project, either in its entirety or in a specific component, as specified by the user.  This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation.  It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation.  It should also look for obsolete, deprecated, or "zombie" code that should be removed.  Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
+Primary Instruction: In this context you will perform a critical review of the HF Time Standard (hf-timestd) project, either in its entirety or in a specific component, as specified by the user. This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation. It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation. It should also look for obsolete, deprecated, or "zombie" code that should be removed. Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
 
 # The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session)
+
+---
+
+## ✅ SESSION COMPLETE (2026-01-02): ANALYTICS CRITIQUE - TARGETED TONE SEARCH
+
+**Status:** 🟢 **RESOLVED** - Critical bug in Fusion feedback semantics fixed.
+
+**Author:** AI Agent (Antigravity)
+**Date:** 2026-01-02
+
+### Main Accomplishments
+
+1. **Bug Discovery**: Identified that Analytics was using Fusion calibration offsets (`-mean(d_clock)`) as search window centers (`expected_arrival`), causing searches at the wrong time (e.g., -5ms instead of +5ms).
+2. **Fix Implemented**: Removed the incorrect Fusion feedback loop. The system now prioritizes **Physics Priors** (IRI-2020) for search window centering, which correctly predicts arrival times within ±15ms.
+3. **Verification**: Verified Analytics logs show `📡 Physics prior` and correct window sizing. D_clock values stabilized at reasonable levels (+7ms) after resolving a Fusion service crash loop.
 
 ---
 
@@ -19,81 +34,6 @@ Primary Instruction:  In this context you will perform a critical review of the 
 2. **Robustness**: Removed "God Mode" immunity for Global Solver; it is now subject to outlier rejection.
 3. **HDF5 Parity**: Harmonized HDF5 reader to accept Grade D measurements, preventing data starvation during fallback.
 4. **Availability**: Removed artificial 3-hour warmup penalty when calibration is loaded from disk.
-
----
-
-## 🔴 NEXT SESSION FOCUS: ANALYTICS CRITIQUE - TARGETED TONE SEARCH
-
-**Purpose:** The current tone detection strategy searches wide windows (±500ms) or heuristic adaptive windows (±5-50ms) but lacks precision. We want to **improve sensitivity and specificity** by determining *exactly* where tones of interest should be based on prior knowledge (Physics + Fusion feedback).
-
-**Objective:** "Zero-in on where we know the tones of interest will be."
-
-### Potential Areas for Improvement
-
-#### 1. Fusion-Aided Analytics
-
-- **Idea**: Use the *fused* solution (L3) to feedback a precise prediction to the *individual* station analytics (L2).
-- **Benefit**: If we know UTC(NIST) ±1ms from the ensemble, we shouldn't be searching ±500ms for a single station. We can search ±2ms, drastically rejecting noise.
-
-#### 2. Physics-Aided Search Windows
-
-- **Idea**: Use `Phase2TemporalEngine` physics (IRI-2020) not just for centering, but for *tight* window sizing.
-- **Benefit**: Reject false positives that are physically impossible (e.g., propagation delay < 3ms for 1000km path).
-
-#### 3. Signal Feature Validation
-
-- **Idea**: Critique the current "Robust Noise Floor" implementation. Is it truly robust? Can we use spectral features (Doppler spread, spectral width) to better discriminate tones from interference?
-
----
-
-## Investigation Plan for AI Agent
-
-### Step 1: Analyze Current Analytics Logic
-
-Review `phase2_analytics_service.py` and `tone_detector.py`.
-
-- How is the search window currently determined?
-- Is there any feedback loop from L3 (Fusion) to L2 (Analytics)?
-
-### Step 2: Prototype Targeted Search
-
-- Design a mechanism for Analytics to ingest the latest "Time Standard" (Fusion Clock Offset).
-- Restrict search windows based on this feedback.
-
-### Step 3: Verify Sensitivity
-
-- Test with weak signal recordings. Does the targeted search find tones that were previously missed?
-
----
-
-## Current System State (Background)
-
-**Services:** All Active
-
-- **Fusion**: Stabilized (Version 3.8.0), robust "Critic" logic active.
-- **Analytics**: Working but potentially inefficient (wide search).
-- **Chrony**: Accepting updates.
-
-**Recent Major Changes:**
-
-- 2026-01-02: Fusion service critical fixes (VTEC, Global Solver, HDF5 Parity).
-- 2025-12-31: Analytics "Robust Noise Floor" and "Adaptive Search Windows".
-
----
-
-## Success Criteria for Next Session
-
-1. **Critique Report**: Identification of inefficiencies in current tone search.
-2. **Design**: Proposal for a "Targeted Tone Search" mechanism (Fusion feedback loop).
-3. **Implementation**: Update Analytics to use priors for narrowing search space.
-4. **Metric**: Demonstrate improved detection rate or reduced false positives.
-
-### Main Accomplishments
-
-1. **Health Checks**: Created `health-check-science.sh` and `health-check-vtec.sh`.
-2. **Pipeline Verification**: Updated `verify_pipeline.sh` to include **Phase 4: Science Products**.
-3. **Service Management**: Added `timestd-science-aggregator` to `install.sh` and `uninstall.sh`.
-4. **Integration**: All services (Recorder, Analytics, Fusion, Science, VTEC, WebUI) are running and monitored.
 
 ---
 

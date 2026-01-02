@@ -17,6 +17,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added - Self-Healing Calibration Recovery
 
+- **Calibration Sanity Checks**: Added validation to prevent loading corrupted or stale calibration files:
+  - Rejects calibrations with offsets exceeding ±100ms (prevents "calibration trap")
+  - Rejects calibrations older than 7 days (prevents stale ionospheric assumptions)
+  - Falls back to bootstrap mode on validation failure
 - **Relaxed Continuity Checks**: Temporarily increased `D_clock` jump threshold from 2ms to 2000ms to allow system to "snap" back to UTC after a large calibration reset or service failure.
 - **Improved Physical Constraints**: Relaxed `D_clock` absolute bounds from ±50ms to ±500ms during calibrated phase to prevent safety checks from blocking corrective data.
 - **Diagnostic Logging**: Enhanced Fusion measurement ingestion logging to track cross-station agreement during recovery.
