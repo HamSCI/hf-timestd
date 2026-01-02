@@ -903,44 +903,63 @@ class Phase2TemporalEngine:
         self,
         iq_samples: np.ndarray,
         system_time: float,
-        rtp_timestamp: int
+        rtp_timestamp: int,
+        calibration_offsets: Optional[Dict[str, float]] = None
     ) -> TimeSnapResult:
         """
         Step 1: Detect 1000/1200 Hz tones to establish approximate timing.
         
         Uses matched filtering (via ToneDetector) to find signals.
         MultiStationDetector processes ALL detected stations for fusion.
-        """
-        # A. Initial Wide Search (or Calibration Window)
-        # The original code used self.config_search_window_ms or 500.0
-        # The instruction's new code uses self.calibration.get_search_window_ms()
-        # Assuming self.calibration is not explicitly defined, we'll use self.config_search_window_ms
-        search_window_ms = self.config_search_window_ms or 500.0
         
+        Args:
+            iq_samples: Complex IQ samples
+            system_time: System time of first sample
+            rtp_timestamp: RTP timestamp of first sample
+            calibration_offsets: Optional dict of station -> learned offset (ms) from Fusion
+        """
         # Calculate buffer mid-point timestamp
         # The tone detector expects timestamp at MIDDLE of buffer for
         # correct minute boundary calculation
         buffer_duration = len(iq_samples) / self.sample_rate
         buffer_mid_time = system_time + buffer_duration / 2
         
-        # ===== NEW: Ionospheric Prediction for Adaptive Search Window (Phase 2 - 2025-12-31) =====
-        # Use IRI-2020 to predict propagation delay and center search window
-        # This dramatically reduces search space and false positives
-        expected_offset_ms = None
-        adaptive_window_ms = search_window_ms
+        # ===== SEARCH WINDOW PRIORITY HIERARCHY =====
+        # 1. FUSION FEEDBACK (highest priority - learned from data)
+        # 2. PHYSICS PRIOR (IRI-2020 prediction)
+        # 3. BLIND SEARCH (bootstrap/fallback)
         
-        # Try to predict for primary expected stations based on frequency
+        expected_offset_ms = None
+        adaptive_window_ms = self.config_search_window_ms or 500.0
+        search_strategy = "BLIND"
+        
+        # Determine primary expected station based on frequency
         from ..interfaces.data_models import StationType
         predicted_station = None
+        predicted_station_name = None
         
         if self.frequency_mhz in (2.5, 5.0, 10.0, 15.0, 20.0, 25.0):
             # WWV/WWVH frequencies
-            predicted_station = StationType.WWV  # Use WWV as primary
+            predicted_station = StationType.WWV
+            predicted_station_name = 'WWV'
         elif self.frequency_mhz in (3.33, 7.85, 14.67):
             # CHU frequencies
             predicted_station = StationType.CHU
+            predicted_station_name = 'CHU'
         
-        if predicted_station:
+        # PRIORITY 1: Check for Fusion-learned calibration
+        if calibration_offsets and predicted_station_name in calibration_offsets:
+            fusion_offset_ms = calibration_offsets[predicted_station_name]
+            expected_offset_ms = fusion_offset_ms
+            adaptive_window_ms = 2.0  # TIGHT: ±2ms (Fusion uncertainty ~0.1ms)
+            search_strategy = "FUSION"
+            logger.info(
+                f"🎯 Fusion feedback: {predicted_station_name} offset={fusion_offset_ms:.3f}ms, "
+                f"window=±{adaptive_window_ms}ms (learned from L3)"
+            )
+        
+        # PRIORITY 2: Fall back to Physics prediction if no Fusion feedback
+        elif predicted_station:
             try:
                 predicted_delay_ms, uncertainty_ms = self._predict_propagation_delay(
                     station=predicted_station,
@@ -950,13 +969,19 @@ class Phase2TemporalEngine:
                 if predicted_delay_ms is not None:
                     expected_offset_ms = predicted_delay_ms
                     # Adaptive window: 3-sigma around prediction
-                    # This reduces search space by 90-99% while maintaining detection
-                    adaptive_window_ms = max(10.0, min(3.0 * uncertainty_ms, search_window_ms))
-                    
-                    logger.info(f"Ionospheric prediction: {predicted_station.value} delay={predicted_delay_ms:.1f}±{uncertainty_ms:.1f}ms, "
-                               f"window=±{adaptive_window_ms:.1f}ms (was ±{search_window_ms:.0f}ms)")
+                    adaptive_window_ms = max(10.0, min(3.0 * uncertainty_ms, adaptive_window_ms))
+                    search_strategy = "PHYSICS"
+                    logger.info(
+                        f"📡 Physics prior: {predicted_station.value} delay={predicted_delay_ms:.1f}±{uncertainty_ms:.1f}ms, "
+                        f"window=±{adaptive_window_ms:.1f}ms (IRI-2020)"
+                    )
             except Exception as e:
-                logger.warning(f"Ionospheric prediction failed: {e}, using wide search")
+                logger.warning(f"Ionospheric prediction failed: {e}, using blind search")
+        
+        # PRIORITY 3: Blind search (bootstrap or fallback)
+        if search_strategy == "BLIND":
+            expected_offset_ms = 0.0
+            logger.info(f"🔍 Bootstrap mode: wide search ±{adaptive_window_ms:.0f}ms")
         
         detections = self.tone_detector.process_samples(
             timestamp=buffer_mid_time, # Use buffer_mid_time for tone detector
@@ -2204,7 +2229,8 @@ class Phase2TemporalEngine:
             time_snap = self._step1_tone_detection(
                 iq_samples=iq_samples,
                 system_time=system_time,
-                rtp_timestamp=rtp_timestamp
+                rtp_timestamp=rtp_timestamp,
+                calibration_offsets=calibration_offsets
             )
             
             # === STEP 2: Ionospheric Channel Characterization ===
