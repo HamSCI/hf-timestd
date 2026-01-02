@@ -91,6 +91,11 @@ class ScienceAggregator:
         from hf_timestd.core.tec_estimator import TECEstimator
         self.tec_estimator = TECEstimator(high_precision_mode=True)
         
+        # Initialize TEC validator
+        from hf_timestd.core.tec_validator import TECValidator
+        ionex_dir = self.data_root / 'ionex'
+        self.tec_validator = TECValidator(ionex_dir=ionex_dir)
+        
         # Initialize propagation statistics calculator
         self.prop_stats_calculator = PropagationStatsCalculator(processing_version="3.3.0")
         
@@ -345,6 +350,7 @@ class ScienceAggregator:
                 else:
                     quality_flag = 'BAD'
                 
+                # Create base measurement
                 measurement = {
                     'timestamp_utc': utc_time,
                     'minute_boundary': int(minute_boundary),
@@ -356,9 +362,22 @@ class ScienceAggregator:
                     'residuals_ms': tec_result.residuals_ms,
                     'frequencies_mhz': freq_str,
                     'quality_flag': quality_flag,
-                    'validation_flag': 'UNVALIDATED',  # TODO: Implement VTEC validation in Phase 2
-                    'processing_version': '3.3.0'  # Bumped for schema update
+                    'processing_version': '3.3.0'
                 }
+                
+                # Validate against GPS VTEC
+                # Get receiver location (hardcoded for now - should come from config)
+                receiver_lat = 40.0  # TODO: Get from system config
+                receiver_lon = -105.0
+                
+                validation_fields = self.tec_validator.validate_tec_measurement(
+                    measurement,
+                    receiver_lat,
+                    receiver_lon
+                )
+                
+                # Add validation fields
+                measurement.update(validation_fields)
                 
                 writer.write_measurement(measurement)
             
