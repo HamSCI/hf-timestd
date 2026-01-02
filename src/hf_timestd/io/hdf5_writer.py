@@ -104,6 +104,47 @@ class DataProductWriter:
         filename = f"{self.channel}_{self.product_name}_{date_str}.h5"
         return self.output_dir / filename
     
+    def _try_recover_file_lock(self, filepath: Path) -> bool:
+        """
+        Attempt to recover a file stuck in SWMR write mode using h5clear.
+        
+        Args:
+            filepath: Path to the HDF5 file
+            
+        Returns:
+            True if recovery was attempted and succeeded, False otherwise
+        """
+        try:
+            import subprocess
+            import shutil
+            
+            # Check if h5clear tool is available
+            h5clear_path = shutil.which('h5clear')
+            if not h5clear_path:
+                logger.warning("h5clear tool not found - cannot recover stale SWMR lock")
+                return False
+                
+            logger.warning(f"Attempting to clear stale SWMR lock on {filepath}")
+            
+            # Run h5clear -s (clear status flags)
+            result = subprocess.run(
+                [h5clear_path, '-s', str(filepath)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                logger.info(f"Successfully cleared SWMR status flags on {filepath}")
+                return True
+            else:
+                logger.error(f"h5clear failed: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Exception during file lock recovery: {e}")
+            return False
+
     def _ensure_file_open(self, timestamp_utc: str) -> h5py.File:
         """
         Ensure HDF5 file is open for the given timestamp (daily rotation).
@@ -125,21 +166,45 @@ class DataProductWriter:
         if self._current_date != date_str:
             # Close previous file
             if self._current_file is not None:
-                self._current_file.close()
-                logger.info(
-                    f"Closed {self._current_date} file with {self._measurement_count} measurements"
-                )
+                try:
+                    self._current_file.close()
+                    logger.info(
+                        f"Closed {self._current_date} file with {self._measurement_count} measurements"
+                    )
+                except Exception as e:
+                    logger.warning(f"Error closing previous file: {e}")
             
             # Open new file with SWMR mode
             hdf5_path = self._get_hdf5_path(date_str)
             
-            # Use libver='latest' for SWMR support
-            # Open in append mode, will enable SWMR after initialization
-            self._current_file = h5py.File(
-                hdf5_path, 
-                'a',
-                libver='latest'  # Required for SWMR
-            )
+            try:
+                # Use libver='latest' for SWMR support
+                # Open in append mode, will enable SWMR after initialization
+                self._current_file = h5py.File(
+                    hdf5_path, 
+                    'a',
+                    libver='latest'  # Required for SWMR
+                )
+            except OSError as e:
+                # Check for "file is already open" error (HDF5 locking issue)
+                error_msg = str(e).lower()
+                if "already open" in error_msg or "swmr" in error_msg:
+                    logger.warning(f"Caught HDF5 locking error for {hdf5_path}: {e}")
+                    
+                    # Attempt recovery
+                    if self._try_recover_file_lock(hdf5_path):
+                        # Retry open
+                        logger.info("Retrying file open after recovery...")
+                        self._current_file = h5py.File(
+                            hdf5_path, 
+                            'a',
+                            libver='latest'
+                        )
+                    else:
+                        raise  # Re-raise if recovery failed
+                else:
+                    raise  # Re-raise other errors
+            
             self._current_date = date_str
             self._measurement_count = 0
             

@@ -235,7 +235,7 @@ class ChannelManager:
                 ssrc=ssrc,
                 frequency_hz=channel_spec['frequency_hz'],
                 preset=channel_spec.get('preset', 'iq'),
-                sample_rate=channel_spec.get('sample_rate', 16000),
+                sample_rate=channel_spec.get('sample_rate'),
                 agc=channel_spec.get('agc', 0),
                 gain=channel_spec.get('gain', 0.0),
                 description=channel_spec.get('description', '')
@@ -348,7 +348,10 @@ class ChannelManager:
             
             # Merge with defaults
             preset = ch_spec.get('preset', defaults.get('preset', 'iq'))
-            sample_rate = ch_spec.get('sample_rate', defaults.get('sample_rate', 20000))
+            sample_rate = ch_spec.get('sample_rate', defaults.get('sample_rate'))
+            if sample_rate is None:
+                logger.warning(f"No sample_rate for {freq_hz}, defaulting to 24000")
+                sample_rate = 24000
             agc = ch_spec.get('agc', defaults.get('agc', 0))
             gain = ch_spec.get('gain', defaults.get('gain', 0.0))
             encoding = ch_spec.get('encoding', defaults.get('encoding', 'float'))

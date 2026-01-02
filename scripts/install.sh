@@ -626,6 +626,45 @@ SyslogIdentifier=timestd-web-ui
 WantedBy=multi-user.target
 EOF
 
+    # Science Aggregator Service (Phase 3 Extension)
+    sudo tee "$SYSTEMD_DIR/timestd-science-aggregator.service" > /dev/null << EOF
+[Unit]
+Description=HF-TimeStd Science Aggregator (TEC & Events)
+Documentation=https://github.com/mijahauan/hf-timestd
+After=timestd-analytics.service
+Wants=timestd-analytics.service
+
+[Service]
+Type=simple
+User=$INSTALL_USER
+Group=$INSTALL_USER
+EnvironmentFile=$CONFIG_DIR/environment
+WorkingDirectory=$DATA_ROOT
+
+# Run science aggregator
+ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.science_aggregator \\
+    --data-root $DATA_ROOT \\
+    --poll-interval 300 \\
+    --lookback 10 \\
+    --log-level INFO
+
+# Restart on failure
+Restart=on-failure
+RestartSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-science
+
+# Resource limits (low priority - science is background)
+Nice=10
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     # GNSS VTEC Service (Optional - only if enabled in config)
     # Check if GNSS VTEC is enabled in the config
     VTEC_ENABLED=$($VENV_DIR/bin/python3 -c "
@@ -662,6 +701,9 @@ RestartSec=10
 StartLimitInterval=300
 StartLimitBurst=5
 
+# Health check (verify data production)
+ExecStartPost=/opt/hf-timestd/scripts/health-check-vtec.sh
+
 # Logging
 StandardOutput=journal
 StandardError=journal
@@ -694,6 +736,7 @@ VTEC_EOF
     log_info "    - timestd-analytics.service      (Phase 2: Timing analysis, continuous)"
     log_info "    - timestd-fusion.service         (Phase 3: Fusion & Chrony feed)"
     log_info "    - timestd-web-ui.service         (Web monitoring UI, continuous)"
+    log_info "    - timestd-science-aggregator.service (Phase 3+: Science products)"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         log_info "    - timestd-vtec.service           (GNSS VTEC monitor, continuous)"
     fi
@@ -704,6 +747,7 @@ VTEC_EOF
     sudo systemctl enable timestd-analytics.service
     sudo systemctl enable timestd-fusion.service
     sudo systemctl enable timestd-web-ui.service
+    sudo systemctl enable timestd-science-aggregator.service
     
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         sudo systemctl enable timestd-vtec.service
@@ -750,6 +794,7 @@ if [[ "$MODE" == "production" ]]; then
     echo "   sudo systemctl start timestd-analytics       # Phase 2: Timing analysis"
     echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion service"
     echo "   sudo systemctl start timestd-web-ui          # Web monitoring UI"
+    echo "   sudo systemctl start timestd-science-aggregator # Science aggregator"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         echo "   sudo systemctl start timestd-vtec            # GNSS VTEC monitor"
     fi

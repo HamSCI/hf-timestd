@@ -32,13 +32,13 @@ class AudioBuffer:
     that the web server can read and stream.
     """
     
-    def __init__(self, channel_name: str, data_root: str, input_sample_rate: int = 20000):
+    def __init__(self, channel_name: str, data_root: str, input_sample_rate: int):
         self.channel_name = channel_name
         self.input_sample_rate = input_sample_rate
         self.output_sample_rate = AUDIO_SAMPLE_RATE
         
         # Resampling ratio
-        self.downsample_ratio = input_sample_rate // AUDIO_SAMPLE_RATE  # 20000/8000 = 2.5, use poly
+        self.downsample_ratio = input_sample_rate // AUDIO_SAMPLE_RATE
         
         # Buffer file path
         self.buffer_dir = Path(data_root) / "audio_buffers"
@@ -54,7 +54,7 @@ class AudioBuffer:
         # Initialize files
         self._init_buffer_file()
         
-        logger.info(f"{channel_name}: AudioBuffer initialized @ {AUDIO_SAMPLE_RATE} Hz")
+        logger.info(f"{channel_name}: AudioBuffer initialized @ {AUDIO_SAMPLE_RATE} Hz (input: {input_sample_rate} Hz)")
     
     def _init_buffer_file(self):
         """Initialize the buffer file with zeros."""
@@ -92,9 +92,13 @@ class AudioBuffer:
         if max_val > 1e-6:  # Prevent divide by zero on silence
             audio = audio / max_val * 32000
         
-        # Downsample from 20 kHz to 8 kHz using polyphase filter
-        # 20000 / 8000 = 2.5 = 5/2, so up by 2, down by 5
-        audio_8k = signal.resample_poly(audio, 2, 5)
+        # Dynamic downsampling using polyphase filter
+        # Calculate rational resampling ratio: input_rate / output_rate = down / up
+        gcd_val = np.gcd(self.input_sample_rate, self.output_sample_rate)
+        up = int(self.output_sample_rate // gcd_val)
+        down = int(self.input_sample_rate // gcd_val)
+
+        audio_8k = signal.resample_poly(audio, up, down)
         
         # Safe cast to int16 (handle any residual overflows)
         audio_int16 = np.clip(np.nan_to_num(audio_8k), -32767, 32767).astype(np.int16)
@@ -125,7 +129,7 @@ class AudioBufferManager:
     Manages audio buffers for all channels.
     """
     
-    def __init__(self, data_root: str, sample_rate: int = 20000):
+    def __init__(self, data_root: str, sample_rate: int):
         self.data_root = data_root
         self.sample_rate = sample_rate
         self.buffers: dict[str, AudioBuffer] = {}

@@ -13,7 +13,13 @@ TODAY=$(date +%Y%m%d)
 
 for i in $(seq 1 $MAX_RETRIES); do
     # Search only in today's directories to avoid finding old files from previous days
-    LATEST_FILE=$(find "$DATA_ROOT/raw_buffer" -path "*/$TODAY/*.bin" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    # Check both cold storage and hot buffer (tiered storage)
+    SEARCH_PATHS="$DATA_ROOT/raw_buffer"
+    if [ -d "/dev/shm/timestd/raw_buffer" ]; then
+        SEARCH_PATHS="$SEARCH_PATHS /dev/shm/timestd/raw_buffer"
+    fi
+    
+    LATEST_FILE=$(find $SEARCH_PATHS -path "*/$TODAY/*.bin*" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
     
     
     if [ -n "$LATEST_FILE" ]; then

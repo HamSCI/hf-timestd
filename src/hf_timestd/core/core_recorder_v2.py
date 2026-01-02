@@ -153,7 +153,8 @@ class CoreRecorderV2:
         self.channel_specs = config.get('channels', [])
         self.channel_defaults = config.get('channel_defaults', {
             'preset': 'iq',
-            'sample_rate': 20000,
+            'sample_rate': 20000, # Keeping this one as a safe fallback for the dict itself if completely missing, but code below will enforce logic.
+
             'agc': 0,
             'gain': 0.0,
             'encoding': Encoding.F32
@@ -313,7 +314,9 @@ class CoreRecorderV2:
                 
                 # Defaults are merged with channel-specific config
                 preset = ch_spec.get('preset', self.channel_defaults.get('preset', 'iq'))
-                sample_rate = self.channel_defaults.get('sample_rate', 20000)
+                sample_rate = self.channel_defaults.get('sample_rate')
+                if sample_rate is None:
+                     raise ValueError(f"No sample_rate configured for {freq} and no default provided")
                 encoding_val = ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
                 agc_val = ch_spec.get('agc', self.channel_defaults.get('agc', 0))
                 gain_val = ch_spec.get('gain', self.channel_defaults.get('gain', 0.0))

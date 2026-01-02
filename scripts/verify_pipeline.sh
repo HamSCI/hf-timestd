@@ -68,6 +68,8 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-core-recorder.service"
         "timestd-analytics.service"
         "timestd-fusion.service"
+        "timestd-fusion.service"
+        "timestd-science-aggregator.service"
         "timestd-web-ui.service"
     )
     
@@ -76,10 +78,13 @@ if [[ "$MODE" == "production" ]]; then
         if systemctl is-active --quiet "$service" || systemctl show "$service" -p ActiveState | grep -q "activating"; then
             STATE=$(systemctl show "$service" -p ActiveState -p SubState --value | head -1)
             SUBSTATE=$(systemctl show "$service" -p SubState --value)
+            
             if [[ "$STATE" == "activating" ]]; then
                 check_warn "$service is starting ($SUBSTATE)"
             else
-                check_pass "$service is running"
+                # Get start time
+                START_TIME=$(systemctl show "$service" -p ActiveEnterTimestamp --value)
+                check_pass "$service is running (since $START_TIME)"
             fi
         else
             check_fail "$service is NOT running"
@@ -109,7 +114,15 @@ if [[ -d "$RAW_BUFFER_DIR" ]]; then
     check_pass "Binary archive directory exists: $RAW_BUFFER_DIR"
     
     # Check for recent .bin.zst files (within last 5 minutes)
-    RECENT_BIN=$(find "$RAW_BUFFER_DIR" -name "*.bin.zst" -mmin -5 2>/dev/null | wc -l)
+    # Check both cold storage and hot buffer (tiered storage)
+    SEARCH_PATHS="$RAW_BUFFER_DIR"
+    if [[ -d "/dev/shm/timestd/raw_buffer" ]]; then
+        SEARCH_PATHS="$SEARCH_PATHS /dev/shm/timestd/raw_buffer"
+        check_pass "Hot buffer (tiered storage) exists: /dev/shm/timestd/raw_buffer"
+    fi
+    
+    RECENT_BIN=$(find $SEARCH_PATHS -name "*.bin.zst" -mmin -5 2>/dev/null | wc -l)
+    
     if [[ $RECENT_BIN -gt 0 ]]; then
         check_pass "Found $RECENT_BIN recent binary archive files (last 5 min)"
     else
@@ -215,7 +228,7 @@ if [[ -d "$FUSION_DIR" ]]; then
     check_pass "Fusion directory exists: $FUSION_DIR"
     
     # Check for fusion HDF5 output
-    FUSION_HDF5=$(find "$FUSION_DIR" -name "fusion_timing_*.h5" -mmin -10 2>/dev/null)
+    FUSION_HDF5=$(find "$FUSION_DIR" -name "*fusion_timing_*.h5" -mmin -10 2>/dev/null)
     if [[ -n "$FUSION_HDF5" ]]; then
         SIZE=$(du -h $FUSION_HDF5 2>/dev/null | head -1 | cut -f1)
         RECORDS=$(h5dump -d timestamp_utc -y -w0 $FUSION_HDF5 2>/dev/null | grep -c ":" || echo "unknown")
@@ -225,7 +238,7 @@ if [[ -d "$FUSION_DIR" ]]; then
     fi
     
     # Check for fusion CSV (fallback)
-    FUSION_CSV="$FUSION_DIR/fusion_timing.csv"
+    FUSION_CSV="$FUSION_DIR/fused_d_clock.csv"
     if [[ -f "$FUSION_CSV" ]]; then
         if [[ $(find "$FUSION_CSV" -mmin -5 2>/dev/null) ]]; then
             LINES=$(wc -l < "$FUSION_CSV" 2>/dev/null || echo 0)
@@ -239,6 +252,63 @@ if [[ -d "$FUSION_DIR" ]]; then
     
 else
     check_warn "Fusion directory not found: $FUSION_DIR"
+fi
+
+# =============================================================================
+# Phase 4: Science Products (Ionosphere)
+# =============================================================================
+section "Phase 4: Science Products (Ionosphere)"
+
+SCIENCE_DIR="$PHASE2_DIR/science"
+if [[ -d "$SCIENCE_DIR" ]]; then
+    check_pass "Science directory exists: $SCIENCE_DIR"
+    
+    # Check for TEC Output
+    TEC_DIR="$SCIENCE_DIR/tec"
+    if [[ -d "$TEC_DIR" ]]; then
+        # HDF5
+        TEC_HDF5=$(find "$TEC_DIR" -name "tec_*.h5" -mmin -15 2>/dev/null | wc -l)
+        if [[ $TEC_HDF5 -gt 0 ]]; then
+            check_pass "Found $TEC_HDF5 recent TEC HDF5 files (last 15 min)"
+        else
+            check_warn "No recent TEC HDF5 files (aggregator runs every 5m)"
+        fi
+        
+        # CSV
+        TEC_CSV=$(find "$TEC_DIR" -name "tec_*.csv" -mmin -15 2>/dev/null | wc -l)
+        if [[ $TEC_CSV -gt 0 ]]; then
+            check_pass "Found $TEC_CSV recent TEC CSV files (last 15 min)"
+        else
+            check_warn "No recent TEC CSV files"
+        fi
+    else
+        check_warn "TEC directory not found: $TEC_DIR"
+    fi
+else
+    check_warn "Science directory not found: $SCIENCE_DIR (aggregator may not have run yet)"
+fi
+
+# Check for GNSS VTEC (L3A)
+VTEC_DIR="$DATA_ROOT/data/gnss_vtec"
+if [[ -d "$VTEC_DIR" ]]; then
+    # HDF5
+    VTEC_HDF5=$(find "$VTEC_DIR" -name "gnss_vtec_*.h5" -mmin -15 2>/dev/null | wc -l)
+    if [[ $VTEC_HDF5 -gt 0 ]]; then
+        check_pass "GNSS VTEC: Found $VTEC_HDF5 recent HDF5 files (last 15 min)"
+    else
+        check_warn "GNSS VTEC output directory exists but no recent HDF5 files"
+    fi
+    
+    # CSV (fallback)
+    VTEC_CSV=$(find "$VTEC_DIR/.." -name "gnss_vtec.csv" -mmin -15 2>/dev/null | wc -l)
+    if [[ $VTEC_CSV -gt 0 ]]; then
+        check_pass "GNSS VTEC: Found recent CSV file"
+    else
+        check_warn "GNSS VTEC: No recent CSV file"
+    fi
+else
+    # Optional service
+    check_warn "GNSS VTEC directory not found (service specific)"
 fi
 
 # =============================================================================

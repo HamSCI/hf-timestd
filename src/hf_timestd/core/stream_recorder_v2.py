@@ -168,7 +168,7 @@ class StreamRecorderConfig:
     # Channel identification (from ChannelInfo)
     ssrc: Optional[int]
     frequency_hz: float
-    sample_rate: int = 20000
+    sample_rate: int
     preset: str = 'iq'
     encoding: int = 0  # Encoding type (0=NO_ENCODING, 4=F32, etc.)
     agc_enable: int = 0

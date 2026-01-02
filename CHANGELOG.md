@@ -13,9 +13,19 @@ All notable changes to this project will be documented in this file.
   - `/api/v2/ionosphere/inferred-heights`: Layer height estimation.
 - **HDF5 Reader Utilities**: Enhanced `web-ui/utils/hdf5_reader.py` with SWMR race condition protection and L1B/L1A support.
 
-### Changed
+## [3.7.1] - 2026-01-01
 
-- **Web UI Deployment**: Updated production service (`timestd-web-ui`) with new files.
+### Added - Health Checks & Pipeline Verification
+
+- **Health Checks**: Implemented `health-check-science.sh` and `health-check-vtec.sh` to monitor service output freshness.
+- **Pipeline Verification**: Extended `verify_pipeline.sh` to include Phase 4 (Science Products) and GNSS VTEC checks.
+- **Service Integration**: Added `ExecStartPost` health checks to systemd service definitions.
+
+### Fixed
+
+- **Installation Scripts**: Added missing `timestd-science-aggregator.service` to `install.sh` and `uninstall.sh`.
+- **Service Recovery**: Restored and verified operation of `timestd-science-aggregator`.
+- **Uninstall Safety**: Added explicit warnings and data preservation options to `uninstall.sh`.
 
 ## [3.7.0] - 2025-12-31
 
