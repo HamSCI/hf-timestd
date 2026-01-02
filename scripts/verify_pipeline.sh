@@ -327,19 +327,47 @@ if [[ -d "$SCIENCE_DIR" ]]; then
     TEC_DIR="$SCIENCE_DIR/tec"
     if [[ -d "$TEC_DIR" ]]; then
         # HDF5
-        TEC_HDF5=$(find "$TEC_DIR" -name "tec_*.h5" -mmin -15 2>/dev/null | wc -l)
-        if [[ $TEC_HDF5 -gt 0 ]]; then
-            check_pass "Found $TEC_HDF5 recent TEC HDF5 files (last 15 min)"
+        # HDF5
+        LAST_TEC=$(find "$TEC_DIR" -name "*tec_*.h5" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -f2- -d" ")
+        
+        if [[ -n "$LAST_TEC" ]]; then
+            LAST_MOD=$(stat -c %Y "$LAST_TEC")
+            NOW=$(date +%s)
+            AGE=$((NOW - LAST_MOD))
+            
+            # Format age
+             if [[ $AGE -lt 60 ]]; then
+                 AGE_STR="${AGE}s"
+             elif [[ $AGE -lt 3600 ]]; then
+                 AGE_STR="$((AGE/60))m"
+             elif [[ $AGE -lt 86400 ]]; then
+                 AGE_STR="$((AGE/3600))h"
+             else
+                 AGE_STR="$((AGE/86400))d $(( (AGE%86400)/3600 ))h"
+             fi
+             
+            if [[ $AGE -lt 900 ]]; then
+                check_pass "Found recent TEC HDF5 file (updated $AGE_STR ago)"
+            else
+                check_warn "TEC HDF5 stale (last updated $AGE_STR ago) - Check timestd-science-aggregator"
+            fi
         else
-            check_warn "No recent TEC HDF5 files (aggregator runs every 5m)"
+            check_warn "No TEC HDF5 files found - Check timestd-science-aggregator"
         fi
         
         # CSV
-        TEC_CSV=$(find "$TEC_DIR" -name "tec_*.csv" -mmin -15 2>/dev/null | wc -l)
-        if [[ $TEC_CSV -gt 0 ]]; then
-            check_pass "Found $TEC_CSV recent TEC CSV files (last 15 min)"
+        LAST_CSV=$(find "$TEC_DIR" -name "tec_*.csv" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -f2- -d" ")
+        if [[ -n "$LAST_CSV" ]]; then
+             LAST_MOD=$(stat -c %Y "$LAST_CSV")
+             NOW=$(date +%s)
+             AGE=$((NOW - LAST_MOD))
+             if [[ $AGE -lt 900 ]]; then
+                check_pass "Found recent TEC CSV file (updated $((AGE/60))m ago)"
+             else
+                check_warn "TEC CSV stale (updated $((AGE/60))m ago)"
+             fi
         else
-            check_warn "No recent TEC CSV files"
+            check_warn "No TEC CSV files found"
         fi
     else
         check_warn "TEC directory not found: $TEC_DIR"
