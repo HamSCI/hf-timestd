@@ -548,6 +548,12 @@ class MultiBroadcastFusion:
                         reference_station=cal_data.get('reference_station', 'CHU')
                     )
                 logger.info(f"Loaded {len(self.calibration)} broadcast calibrations from {self.calibration_file}")
+                
+                # FIX 4: Skip warmup penalty if we have valid calibration data
+                if len(self.calibration) >= 2:
+                    self.kalman_n_updates = 200
+                    logger.info("Skipping warmup penalty (calibration loaded)")
+
             except Exception as e:
                 logger.warning(f"Could not load calibration: {e}")
                 self._init_default_calibration()
@@ -1431,7 +1437,7 @@ class MultiBroadcastFusion:
                 hdf5_measurements = reader.read_time_range(
                     start=start_iso,
                     end=end_iso,
-                    min_quality_grade='C',  # Accept C and better (A, B, C)
+                    min_quality_grade='D',  # FIX 3: Accept D to match CSV utility
                     min_confidence=0.01  # Minimum confidence threshold
                 )
                 
@@ -1571,10 +1577,8 @@ class MultiBroadcastFusion:
         # Reject outliers
         keep_mask = deviations < (sigma_threshold * mad)
 
-        # Never drop the physics-verified synthetic measurement
-        for i, m in enumerate(measurements):
-            if m.station == 'GLOBAL_DIFF':
-                keep_mask[i] = True
+        # FIX 2: Removed "God Mode" immunity for GLOBAL_DIFF
+        # It must survive the same statistical scrutiny as other measurements
         
         filtered_m = [m for m, keep in zip(measurements, keep_mask) if keep]
         filtered_w = [w for w, keep in zip(weights, keep_mask) if keep]
@@ -1972,16 +1976,35 @@ class MultiBroadcastFusion:
                         
                         correction_ms = old_iono_delay_ms - new_iono_delay_ms
                         
-                        logger.debug(
-                            f"  {m.station} {m.frequency_mhz}MHz: Model={model_tec:.1f}TECU Iono={old_iono_delay_ms:.3f}ms -> "
-                            f"GNSS={vtec_tecu:.1f}TECU Iono={new_iono_delay_ms:.3f}ms | "
-                            f"Corr={correction_ms:+.3f}ms"
-                        )
+                        # FIX 1: VTEC Safety Check
+                        # Only apply correction if it moves the measurement closer to the group median
+                        # (or 0 if we are the only one, but strict check is better)
                         
-                        m.d_clock_ms += correction_ms
-                        m.propagation_delay_ms += (new_iono_delay_ms - old_iono_delay_ms)
-                        m.propagation_mode = f"{baseline.propagation_mode}+GNSS"
-                        m.confidence = min(0.95, m.confidence * 1.5) # Boost confidence
+                        other_clocks = [om.d_clock_ms for om in measurements if om != m and om.station != 'GLOBAL_DIFF']
+                        if other_clocks:
+                            median_ref = np.median(other_clocks)
+                            dist_before = abs(m.d_clock_ms - median_ref)
+                            dist_after = abs((m.d_clock_ms + correction_ms) - median_ref)
+                            is_better = dist_after < dist_before
+                        else:
+                            # If no others, compare to UTC target (0)
+                            is_better = abs(m.d_clock_ms + correction_ms) < abs(m.d_clock_ms)
+                        
+                        if is_better:
+                            logger.debug(
+                                f"  {m.station} {m.frequency_mhz}MHz: Model={model_tec:.1f}TECU Iono={old_iono_delay_ms:.3f}ms -> "
+                                f"GNSS={vtec_tecu:.1f}TECU Iono={new_iono_delay_ms:.3f}ms | "
+                                f"Corr={correction_ms:+.3f}ms (Improved)"
+                            )
+                            
+                            m.d_clock_ms += correction_ms
+                            m.propagation_delay_ms += (new_iono_delay_ms - old_iono_delay_ms)
+                            m.propagation_mode = f"{baseline.propagation_mode}+GNSS"
+                            m.confidence = min(0.95, m.confidence * 1.5) # Boost confidence
+                        else:
+                            logger.debug(
+                                f"  {m.station} {m.frequency_mhz}MHz: VTEC correction rejected (worsened consistency)"
+                            )
             else:
                 logger.debug(f"GNSS VTEC stale (age: {time.time()-vtec_ts:.1f}s), skipping")
 

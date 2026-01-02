@@ -13,6 +13,20 @@ All notable changes to this project will be documented in this file.
   - `/api/v2/ionosphere/inferred-heights`: Layer height estimation.
 - **HDF5 Reader Utilities**: Enhanced `web-ui/utils/hdf5_reader.py` with SWMR race condition protection and L1B/L1A support.
 
+## [3.8.0] - 2026-01-02
+
+### Fixed - Critical Fusion "Critic" Fixes
+
+#### Data Integrity & "God Mode" Bypass
+
+- **VTEC Safety**: Added strict consistency checks before applying (and boosting confidence of) GNSS VTEC corrections. Corrections are now rejected if they do not improve agreement with the consensus median.
+- **Global Solver Immunity**: Removed "God Mode" immunity for `GLOBAL_DIFF` measurements. The global solution is now subject to the same robust outlier rejection logic as physical measurements.
+
+#### Data Consistency & Availability
+
+- **HDF5 Utility Parity**: Harmonized HDF5 filter logic to accept Grade D measurements (`min_quality_grade='D'`), matching the utility of the CSV reader. This prevents data starvation when HDF5 is active.
+- **Warmup Penalty**: Removed the artificial 3-hour uncertainty penalty on restart if valid calibration data is loaded from disk.
+
 ## [3.7.1] - 2026-01-01
 
 ### Added - Health Checks & Pipeline Verification

@@ -6,12 +6,87 @@ Primary Instruction:  In this context you will perform a critical review of the 
 
 ---
 
-## ✅ SESSION COMPLETE (2026-01-01): SCIENCE & VTEC HEALTH CHECKS
+## ✅ SESSION COMPLETE (2026-01-02): FUSION VULNERABILITY FIXES
 
-**Status:** 🟢 **RESOLVED** - Health checks implemented, verify_pipeline.sh updated, install/uninstall scripts fixed.
+**Status:** 🟢 **RESOLVED** - Critical vulnerabilities in Fusion service fixed (VTEC safety, Global Solver check, HDF5 parity, Warmup penalty removal).
 
-**Author:** Michael James Hauan (AC0G)
-**Date:** 2026-01-01
+**Author:** AI Agent (Antigravity)
+**Date:** 2026-01-02
+
+### Main Accomplishments
+
+1. **VTEC Safety**: Implemented consistency checks before boosting confidence in GNSS VTEC corrections.
+2. **Robustness**: Removed "God Mode" immunity for Global Solver; it is now subject to outlier rejection.
+3. **HDF5 Parity**: Harmonized HDF5 reader to accept Grade D measurements, preventing data starvation during fallback.
+4. **Availability**: Removed artificial 3-hour warmup penalty when calibration is loaded from disk.
+
+---
+
+## 🔴 NEXT SESSION FOCUS: ANALYTICS CRITIQUE - TARGETED TONE SEARCH
+
+**Purpose:** The current tone detection strategy searches wide windows (±500ms) or heuristic adaptive windows (±5-50ms) but lacks precision. We want to **improve sensitivity and specificity** by determining *exactly* where tones of interest should be based on prior knowledge (Physics + Fusion feedback).
+
+**Objective:** "Zero-in on where we know the tones of interest will be."
+
+### Potential Areas for Improvement
+
+#### 1. Fusion-Aided Analytics
+
+- **Idea**: Use the *fused* solution (L3) to feedback a precise prediction to the *individual* station analytics (L2).
+- **Benefit**: If we know UTC(NIST) ±1ms from the ensemble, we shouldn't be searching ±500ms for a single station. We can search ±2ms, drastically rejecting noise.
+
+#### 2. Physics-Aided Search Windows
+
+- **Idea**: Use `Phase2TemporalEngine` physics (IRI-2020) not just for centering, but for *tight* window sizing.
+- **Benefit**: Reject false positives that are physically impossible (e.g., propagation delay < 3ms for 1000km path).
+
+#### 3. Signal Feature Validation
+
+- **Idea**: Critique the current "Robust Noise Floor" implementation. Is it truly robust? Can we use spectral features (Doppler spread, spectral width) to better discriminate tones from interference?
+
+---
+
+## Investigation Plan for AI Agent
+
+### Step 1: Analyze Current Analytics Logic
+
+Review `phase2_analytics_service.py` and `tone_detector.py`.
+
+- How is the search window currently determined?
+- Is there any feedback loop from L3 (Fusion) to L2 (Analytics)?
+
+### Step 2: Prototype Targeted Search
+
+- Design a mechanism for Analytics to ingest the latest "Time Standard" (Fusion Clock Offset).
+- Restrict search windows based on this feedback.
+
+### Step 3: Verify Sensitivity
+
+- Test with weak signal recordings. Does the targeted search find tones that were previously missed?
+
+---
+
+## Current System State (Background)
+
+**Services:** All Active
+
+- **Fusion**: Stabilized (Version 3.8.0), robust "Critic" logic active.
+- **Analytics**: Working but potentially inefficient (wide search).
+- **Chrony**: Accepting updates.
+
+**Recent Major Changes:**
+
+- 2026-01-02: Fusion service critical fixes (VTEC, Global Solver, HDF5 Parity).
+- 2025-12-31: Analytics "Robust Noise Floor" and "Adaptive Search Windows".
+
+---
+
+## Success Criteria for Next Session
+
+1. **Critique Report**: Identification of inefficiencies in current tone search.
+2. **Design**: Proposal for a "Targeted Tone Search" mechanism (Fusion feedback loop).
+3. **Implementation**: Update Analytics to use priors for narrowing search space.
+4. **Metric**: Demonstrate improved detection rate or reduced false positives.
 
 ### Main Accomplishments
 
