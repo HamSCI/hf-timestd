@@ -32,7 +32,8 @@ compression_level = 3  # zstd: 1-22, lz4: 1-12
 
 # Save L0 raw IQ data using Digital RF HDF5 format
 # This uses significant storage (~1.5GB/day/channel), managed by storage_quota
-save_digital_rf = true
+# DISABLED: Causing OOM issues with 9 channels (2026-01-02)
+save_digital_rf = false
 
 # Tiered Storage: Use /dev/shm (RAM) for hot buffer, disk for cold storage
 # Eliminates disk round-trip for real-time pipeline
