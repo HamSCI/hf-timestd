@@ -315,6 +315,10 @@ class TimingCalibrator:
         # Maps channel_name -> current SSRC
         self.channel_ssrcs: Dict[str, int] = {}
         
+        # Consecutive failure tracking for adaptive window back-off
+        # Maps station+frequency+channel -> failure count
+        self.consecutive_failures: Dict[str, int] = {}
+        
         # Load existing state
         self._load_state()
         
@@ -870,6 +874,100 @@ class TimingCalibrator:
         )
         
         return (center_ms, window_half_ms, max_delay_ms)
+    
+    def get_expected_toa(
+        self,
+        station: str,
+        frequency_mhz: float,
+        channel_name: str
+    ) -> Optional[float]:
+        """
+        Get expected Time of Arrival for a station+frequency.
+        
+        Returns mean ToA in milliseconds (propagation delay), or None if not yet learned.
+        This is used for narrow search windows after convergence.
+        
+        Args:
+            station: Station name (e.g., 'WWV', 'WWVH', 'CHU')
+            frequency_mhz: Frequency in MHz
+            channel_name: Channel name for tracking
+            
+        Returns:
+            Expected ToA in ms, or None if insufficient data
+        """
+        # Only return expected ToA if we have sufficient confidence
+        if station not in self.station_calibration:
+            return None
+        
+        cal = self.station_calibration[station]
+        
+        # Require at least 5 detections before using learned ToA
+        if cal.n_samples < 5:
+            return None
+        
+        # Return mean propagation delay (ToA relative to second boundary)
+        return cal.propagation_delay_ms
+    
+    def record_detection(
+        self,
+        station: str,
+        frequency_mhz: float,
+        channel_name: str,
+        toa_ms: float
+    ):
+        """
+        Record successful detection for adaptive window tracking.
+        
+        Resets consecutive failure counter for this broadcast.
+        
+        Args:
+            station: Station name
+            frequency_mhz: Frequency in MHz
+            channel_name: Channel name
+            toa_ms: Time of arrival in ms (not used here, just for API consistency)
+        """
+        key = f"{station}_{frequency_mhz:.2f}_{channel_name}"
+        self.consecutive_failures[key] = 0  # Reset failure counter
+    
+    def record_failure(
+        self,
+        frequency_mhz: float,
+        channel_name: str
+    ):
+        """
+        Record detection failure for adaptive window tracking.
+        
+        Increments failure counter for all potential stations on this channel.
+        
+        Args:
+            frequency_mhz: Frequency in MHz
+            channel_name: Channel name
+        """
+        # Increment failure counter for all stations on this channel
+        for station in ['WWV', 'WWVH', 'CHU', 'BPM']:
+            key = f"{station}_{frequency_mhz:.2f}_{channel_name}"
+            if key not in self.consecutive_failures:
+                self.consecutive_failures[key] = 0
+            self.consecutive_failures[key] += 1
+    
+    def should_back_off(self, channel_name: str) -> bool:
+        """
+        Check if we should widen search windows due to consecutive failures.
+        
+        Args:
+            channel_name: Channel name to check
+            
+        Returns:
+            True if any broadcast on this channel has >5 consecutive failures
+        """
+        # Check if any broadcast on this channel has too many failures
+        for key, failures in self.consecutive_failures.items():
+            if channel_name in key and failures > 5:
+                logger.debug(
+                    f"Back-off triggered for {key}: {failures} consecutive failures"
+                )
+                return True
+        return False
     
     def get_calibrated_search_window_ms(self) -> float:
         """

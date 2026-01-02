@@ -13,6 +13,28 @@ All notable changes to this project will be documented in this file.
   - `/api/v2/ionosphere/inferred-heights`: Layer height estimation.
 - **HDF5 Reader Utilities**: Enhanced `web-ui/utils/hdf5_reader.py` with SWMR race condition protection and L1B/L1A support.
 
+## [3.9.0] - 2026-01-02
+
+### Added - Adaptive Search Window System
+
+- **Intelligent Window Narrowing**: Wired `TimingCalibrator` into tone detection for Bootstrap → Orient → Focus progression
+  - Bootstrap phase (±500ms): Wide search, no prior knowledge
+  - Provisional phase (±5-15ms): Medium window after 10+ detections
+  - Calibrated phase (±2-5ms): Narrow window after 30+ detections, 60min span
+  - Per-broadcast independent tracking (WWV@10MHz ≠ WWV@5MHz)
+- **Graceful Back-Off**: Automatic window widening when detections fail
+  - Detects lost lock after 5+ consecutive failures
+  - Widens search window to re-acquire signal
+  - Re-converges when signal returns
+- **Expected ToA Prediction**: Uses learned arrival times for narrow search
+  - `get_expected_toa()` method returns mean ToA per station+frequency
+  - Enables sub-2ms search windows after convergence
+  - Leverages GPSDO "steel ruler" for rapid convergence (10-30 minutes)
+- **Detection/Failure Tracking**: Records success/failure for adaptive behavior
+  - `record_detection()` resets failure counter on successful tone detection
+  - `record_failure()` increments counter when no tones found
+  - `should_back_off()` triggers window widening after threshold exceeded
+
 ## [3.8.2] - 2026-01-02
 
 ### Added - Self-Healing Calibration Recovery

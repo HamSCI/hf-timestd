@@ -975,6 +975,30 @@ class Phase2TemporalEngine:
             except Exception as e:
                 logger.warning(f"Ionospheric prediction failed: {e}, using blind search")
         
+        
+        # ADAPTIVE WINDOW OVERRIDE: Use calibrator if available and converged
+        # This overrides physics prediction with learned ToA after sufficient convergence
+        if self.timing_calibrator and predicted_station_name:
+            # Check if we have learned ToA for this station
+            expected_toa = self.timing_calibrator.get_expected_toa(
+                predicted_station_name,
+                self.frequency_mhz,
+                self.channel_name
+            )
+            
+            if expected_toa is not None:
+                # Use learned ToA with narrow window
+                expected_offset_ms = expected_toa
+                window_half, _ = self.timing_calibrator.get_search_window_ms(
+                    predicted_station_name,
+                    self.frequency_mhz
+                )
+                adaptive_window_ms = window_half
+                search_strategy = "LEARNED"
+                logger.info(
+                    f"🎯 Learned ToA: {predicted_station_name} @ {self.frequency_mhz}MHz, "
+                    f"expected={expected_offset_ms:.1f}ms, window=±{adaptive_window_ms:.1f}ms"
+                )
         # PRIORITY 2: Blind search (bootstrap or fallback)
         if search_strategy == "BLIND":
             expected_offset_ms = 0.0
@@ -1006,6 +1030,31 @@ class Phase2TemporalEngine:
                 elif det.station == StationType.CHU:
                     chu_det = det
         
+        
+        # Record detection results for adaptive window tracking
+        if self.timing_calibrator:
+            if detections:
+                # Successful detection - record for each detected station
+                for det in detections:
+                    self.timing_calibrator.record_detection(
+                        station=det.station.value,
+                        frequency_mhz=self.frequency_mhz,
+                        channel_name=self.channel_name,
+                        toa_ms=det.timing_ms
+                    )
+            else:
+                # No detection - record failure
+                self.timing_calibrator.record_failure(
+                    frequency_mhz=self.frequency_mhz,
+                    channel_name=self.channel_name
+                )
+                
+                # Check if we should back off (widen windows)
+                if self.timing_calibrator.should_back_off(self.channel_name):
+                    logger.warning(
+                        f"{self.channel_name}: Lost lock after consecutive failures - "
+                        "system will widen search windows on next iteration"
+                    )
         # B2. BPM Detection (separate discriminator - uses tick duration)
         # BPM shares 2.5/5/10/15 MHz with WWV/WWVH but has 10ms ticks (vs 5ms)
         # Only check on shared frequencies
