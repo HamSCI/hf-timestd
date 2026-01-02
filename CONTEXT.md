@@ -1,128 +1,190 @@
 # HF Time Standard Analysis - Project Context
 
-**Last Updated:** December 31, 2025  
-**Version:** 5.0.0 (HDF5-Native)  
-**Status:** Production (9 channels running at AC0G)
+**Last Updated:** January 2, 2026  
+**Version:** 3.8.1 (Post-HDF5 Transition & Verification Enhancement)  
+**Status:** Production (9 channels running at AC0G, 24kHz Sample Rate)
 
 ## Quick Reference
 
 **What:** Precision HF timing system extracting D_clock measurements from WWV/WWVH/CHU/BPM broadcasts  
 **Where:** `/opt/hf-timestd` (production) or `/home/mjh/git/hf-timestd` (development)  
-**Services:** `timestd-core-recorder`, `timestd-analytics`, `timestd-fusion`, `timestd-vtec`, `timestd-web-ui-fastapi`  
+**Services:** `timestd-core-recorder`, `timestd-analytics`, `timestd-fusion`, `timestd-vtec`, `timestd-web-ui`, `timestd-science-aggregator`, `timestd-radiod-monitor`  
 **Web UI:** <http://localhost:3000>
 
 ---
 
-## Current State (Dec 31, 2025)
+## Current State (Jan 2, 2026)
 
-### ✅ Recently Completed (V5.0 Documentation Overhaul)
+### ✅ Recently Completed (v3.8.1)
 
-1. **System Documentation Updated**
-    - Revised `ARCHITECTURE.md` to V5.0 (HDF5-Native Pipeline).
-    - Detailed the **6-Service Architecture**: Core, Analytics, Fusion, VTEC, Science, Web UI.
-    - Documented **Digital RF** adoption for L0 raw data.
-    - Documented **HDF5 L1/L2/L3** schema.
-    - Documented **Physics-Informed Propagation** (IONEX VTEC integration).
+1. **HDF5 Transition Complete**
+    * **Fusion Service:** HDF5-only output (CSV writers removed)
+    * **Analytics Service:** HDF5-only output (CSV writers removed)
+    * **Verification:** All core timing data confirmed in HDF5
+    * **Status:** CSV files remain on disk but are no longer updated
 
-2. **Installation & Usage Guides**
-    - Updated `README.md` and `INSTALLATION.md` to match the current codebase.
-    - Added dependencies: `libhdf5-dev`, `python3-tables`.
-    - Clarified 6 service names and roles.
+2. **Fusion Service Bug Fixes**
+    * **Issue:** Service running but silent after HDF5 transition
+    * **Root Causes:**
+        * Logger used before definition (NameError during import)
+        * Orphaned call to deleted `_write_tec_result()` method
+    * **Fix:** Moved logger initialization, removed orphaned method call
+    * **Status:** ✅ Service operational, writing HDF5, Chrony integration working (reach=3)
+    * **Commit:** `5dd74cf`
 
-3. **Linting & Cleanup**
-    - Resolved markdown lint errors in all documentation.
-    - Committed and pushed all changes to `main`.
+3. **Enhanced Pipeline Verification**
+    * **Problem:** Original `verify_pipeline.sh` failed to detect fusion service silent failure
+    * **Enhancements:**
+        * Fusion: Log analysis, HDF5 write verification, error scanning
+        * Calibration: GPSDO-aware context (2h age is normal)
+        * TEC: Actionable diagnostics with service-specific remediation
+        * Chrony: Reach=0 is now FAIL, low reach flagged
+    * **Impact:** All warnings now include root cause, diagnostic commands, and fix instructions
+    * **Commit:** `466c15c`
 
 ### 📊 Deployment Status
 
-- **Services:** All 6 services are installed and active on the current machine (AC0G).
-- **Pipeline:** Functioning HDF5-native flow (Wave 3).
-- **Data:** Digital RF archives appearing in `/var/lib/timestd/raw_archive/`.
+* **Services:** All 7 services active
+* **Pipeline:** HDF5-native flow functional from L0 to L3
+* **Verification:** Enhanced `verify_pipeline.sh` provides actionable diagnostics
+* **Known Issue:** TEC HDF5 stale (55m) - science_aggregator investigation needed
 
 ---
 
-## 🎯 Next Session Priority: Fresh Install Verification
+## 🎯 Next Session Priority: Science Aggregator Investigation
 
-**Goal:** Carefully review the project installation process and documentation, then attempt to install it on a brand new computer on the LAN.
+**Goal:** Verify science_aggregator is functioning properly, recording features of interest, and storing them in HDF5.
 
-**Objectives:**
+**Context:**  
+The `timestd-science-aggregator` service runs every 5 minutes to aggregate multi-frequency timing data and produce TEC estimates. The enhanced verification script detected that TEC HDF5 files are stale (>30 minutes), indicating a potential issue.
 
-1. **Documentation Audit:** Verify `INSTALLATION.md` instructions are 100% accurate against the `scripts/install.sh` reality.
-2. **Dependency Check:** Confirm all system (`apt`) and python (`pip`) dependencies are explicitly listed.
-3. **Dry Run / Simulation:** Inspect the installation scripts for hardcoded paths or user assumptions.
-4. **Actual Install:** Perform the install on the target new machine.
-5. **Validation:** Ensure all 6 services start, config generation works, and Web UI is accessible.
+### Objectives
+
+1. **Diagnose TEC Staleness**
+    * Check `timestd-science-aggregator` service status and logs
+    * Verify service is running and executing aggregation cycles
+    * Identify why TEC files aren't being updated
+
+2. **Verify Data Flow**
+    * Confirm analytics service is producing multi-frequency timing measurements
+    * Verify science_aggregator can read HDF5 timing data (or falls back to CSV)
+    * Check TEC estimation is working (multi-frequency analysis)
+
+3. **Validate HDF5 Output**
+    * Verify TEC HDF5 schema is correct and complete
+    * Check if CSV fallback is being used (and why)
+    * Ensure HDF5 writes are atomic and SWMR-compatible
+
+4. **Identify Features of Interest**
+    * Review what science products are being generated
+    * Verify ionospheric event detection (if implemented)
+    * Check if all relevant science data is captured in HDF5
+
+### Key Files to Investigate
+
+* **Service:** `src/hf_timestd/core/science_aggregator.py`
+  * Main aggregation logic
+  * TEC estimation integration
+  * HDF5 writer usage (with CSV fallback)
+  * Poll interval: 300s (5 minutes)
+
+* **HDF5 Schema:** `src/hf_timestd/io/schemas/L3_tec.yaml`
+  * TEC data product schema
+  * Fields: tec_tecu, confidence, n_frequencies, residuals_ms, etc.
+
+* **TEC Estimator:** `src/hf_timestd/core/tec_estimator.py`
+  * Multi-frequency analysis
+  * Group delay calculation
+
+* **Service Logs:**
+
+    ```bash
+    sudo journalctl -u timestd-science-aggregator -n 100
+    sudo systemctl status timestd-science-aggregator
+    ```
+
+* **Data Locations:**
+  * TEC HDF5: `/var/lib/timestd/phase2/science/tec/*.h5`
+  * TEC CSV: `/var/lib/timestd/phase2/science/tec/*.csv` (fallback)
+
+### Diagnostic Commands
+
+```bash
+# Check service status
+sudo systemctl status timestd-science-aggregator
+
+# View recent logs
+sudo journalctl -u timestd-science-aggregator -n 100
+
+# Check TEC file freshness
+ls -lht /var/lib/timestd/phase2/science/tec/*.h5 | head -5
+
+# Verify analytics is producing multi-frequency data
+find /var/lib/timestd/phase2 -name "*_timing_measurements_*.h5" -mmin -10
+
+# Run verification script
+./scripts/verify_pipeline.sh
+```
+
+### Expected Behavior
+
+* **TEC Update Frequency:** Every ~5 minutes (300s poll interval)
+* **Input Requirements:** Multi-frequency timing measurements from analytics
+* **Output:** HDF5 files with TEC estimates (CSV as fallback)
+* **Normal Conditions:** TEC files updated within 15 minutes
+
+### Potential Issues to Check
+
+1. **Service Not Running:** Check systemd status
+2. **No Multi-Frequency Data:** Verify analytics producing timing on multiple bands
+3. **HDF5 Write Failures:** Check for exceptions in logs
+4. **TEC Estimation Failures:** Check for poor fits or insufficient frequencies
+5. **CSV Fallback Active:** Verify HDF5 writer is being used
 
 ---
 
-## System Architecture (V5.0)
+## System Architecture
 
-### The Six Services
+### The Seven Services
 
 1. **Core Recorder:** Digital RF capture (`timestd-core-recorder`)
 2. **Analytics:** Signal processing (`timestd-analytics`)
 3. **Fusion:** Multi-broadcast timing solve (`timestd-fusion`)
 4. **VTEC:** GNSS/IONEX data manager (`timestd-vtec`)
-5. **Science Aggregator:** Spectrograms (`timestd-science-aggregator`)
-6. **Web UI:** Visualization dashboard (`timestd-web-ui-fastapi`)
+5. **Science Aggregator:** TEC estimation (`timestd-science-aggregator`) ← **NEXT FOCUS**
+6. **Web UI:** Visualization dashboard (`timestd-web-ui`)
+7. **Radiod Monitor:** Hardware watchdog (`timestd-radiod-monitor`)
 
-### Data Flow
+### Data Flow (HDF5-Native)
 
 ```
-RTP (UDP) -> Core (Digital RF .h5) -> Analytics (L2 .h5) -> Fusion (L3 .h5) -> Chrony (SHM)
-                                           ^
-                                           |
-                                      VTEC (IONEX)
+RTP (UDP) → Core (Digital RF .h5) → Analytics (L2 .h5) → Fusion (L3 .h5) → Chrony (SHM)
+                                           ↓
+                                    Science Aggregator (L3 TEC .h5)
+                                           ↑
+                                      VTEC (L3A .h5)
 ```
 
 ## AI Agent Guidance for Next Session
 
-**Context to provide:**
+**Preparation:**
 
-1. `scripts/install.sh` - The master installer script.
-2. `packages/python/pyproject.toml` - Python dependencies.
-3. `packages/debian/control` (if applicable) or `apt` requirements.
-4. `INSTALLATION.md` - The guide to be verified.
+* You are investigating why TEC HDF5 files are stale (>30 minutes)
+* The science_aggregator service should update TEC every 5 minutes
+* **Do not restart services** until you understand the root cause
+* Check logs first, then verify data flow, then examine code
 
-**Key questions to ask:**
+**Investigation Steps:**
 
-- Does `install.sh` blindly assume `sudo`?
-- Are there non-standard system dependencies (e.g., specific HDF5 versions)?
-- Does the default config file generation allow for immediate "Test Mode" start?
-- Are service files (`.service`) using absolute paths compatible with the target system?
+1. Check service status and logs for errors
+2. Verify analytics is producing multi-frequency timing data
+3. Check if HDF5 writer is working or falling back to CSV
+4. Examine TEC estimation logic for failures
+5. Validate HDF5 schema and output format
 
-**Constraints:**
+**Success Criteria:**
 
-- The target machine is "brand new" - assume minimal pre-installed software.
-- Network access is available (LAN/Internet).
-
-### 2026-01-01 Firebat Findings (Machine Transition)
-
-**Diagnostic Session on `firebat` (Receiver) pointing to `bee2` (Sender):**
-
-1. **UDP Buffer Fix (Critical for Linux Receivers):**
-    - `netstat -su` showed >500k "packet receive errors" on `firebat`.
-    - Fixed by increasing `net.core.rmem_max` to 16MB and `net.core.rmem_default` to 8MB in `/etc/sysctl.d/99-timestd.conf`.
-    - **Result:** Zero OS-level packet drops.
-
-2. **Sender-Side Data Loss (bee2):**
-    - Even with proper buckets, `timestd-core-recorder` logged "Gap: 180 samples" warnings.
-    - Code analysis confirmed this triggers when Sequence Numbers are contiguous but Timestamps jump forward.
-    - **Conclusion:** `bee2` (Sender) is skipping/dropping data internally before transmission, likely due to buffer underrun/CPU load.
-
-3. **24kHz Support Verification:**
-    - `BinaryArchiveWriter` logic for buffer sizing works correctly (dynamic calc).
-    - `ka9q-python` correctly reassembles fragmented packets regardless of sample rate.
-
-4. **Service Fixes Verified:**
-    - `timestd-vtec` requires absolute poduction venv path (`/opt/...`).
-    - `timestd-core-recorder` requires `TimeoutStartSec=300` to handle 60s initial buffer fill + gaps.
-    - `audio_buffer.py` patched to handle NaN/Inf values (prevents RuntimeWarnings).
-
-5. **Sample Rate & Network Packet Handling (Jan 1, 2026):**
-    - **Confirmed**: System properly handles sample rate changes and their effects on network packets.
-    - **Mechanism**: `samples_per_packet = sample_rate × blocktime_ms / 1000`
-    - **ka9q-python**: Automatically handles packet reassembly, fragmentation, and variable packet sizes.
-    - **Evidence**: 24kHz tested on production; UDP buffer tuning prevents OS-level drops.
-    - **Key Insight**: RTP timestamp deltas determine packet boundaries, not hardcoded sizes.
-    - **See**: `sample_rate_packet_analysis.md` for comprehensive technical analysis.
+* TEC HDF5 files updated within 15 minutes
+* Service logs show successful aggregation cycles
+* HDF5 writer being used (not CSV fallback)
+* Clear understanding of what science features are being captured
