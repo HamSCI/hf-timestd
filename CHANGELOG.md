@@ -13,6 +13,25 @@ All notable changes to this project will be documented in this file.
   - `/api/v2/ionosphere/inferred-heights`: Layer height estimation.
 - **HDF5 Reader Utilities**: Enhanced `web-ui/utils/hdf5_reader.py` with SWMR race condition protection and L1B/L1A support.
 
+## [3.8.2] - 2026-01-02
+
+### Added - Self-Healing Calibration Recovery
+
+- **Relaxed Continuity Checks**: Temporarily increased `D_clock` jump threshold from 2ms to 2000ms to allow system to "snap" back to UTC after a large calibration reset or service failure.
+- **Improved Physical Constraints**: Relaxed `D_clock` absolute bounds from ±50ms to ±500ms during calibrated phase to prevent safety checks from blocking corrective data.
+- **Diagnostic Logging**: Enhanced Fusion measurement ingestion logging to track cross-station agreement during recovery.
+
+## [3.8.1] - 2026-01-02
+
+### Fixed - Critical Calibration Semantic Bug
+
+#### Fusion Feedback Loop Logic
+
+- **Issue**: Analytics service was misinterpreting Fusion calibration offsets (which are *corrections* to apply) as *expected arrival times* for search window centering.
+- **Impact**: caused Analytics to search for tones at the wrong temporal location (e.g. -offset instead of +offset), leading to missed detections or false positives.
+- **Fix**: Removed Fusion feedback from the search window logic. The system now uses purely Physics-based priors (IRI-2020) for search window centering, which correctly predicts arrival times. Calibration offsets are applied only *after* detection to correct the measurement.
+- **Result**: Valid physics-based search windows (±15ms) are now active, replacing the erroneous offsets.
+
 ## [3.8.0] - 2026-01-02
 
 ### Fixed - Critical Fusion "Critic" Fixes

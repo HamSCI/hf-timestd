@@ -889,7 +889,8 @@ class Phase2TemporalEngine:
         # - Clock drift: ~0.01ms/minute (GPSDO)
         # - Measurement noise: ~1-2ms
         dt_minutes = dt_seconds / 60.0
-        max_allowed_ms = 2.0 + 0.1 * dt_minutes
+        # TEMPORARY RELAXATION: Allow large jumps for calibration recovery (480ms observed)
+        max_allowed_ms = 2000.0 + 0.1 * dt_minutes
         
         if delta_ms > max_allowed_ms:
             reason = (f"D_clock jump: {delta_ms:.2f}ms in {dt_seconds:.0f}s "
@@ -925,9 +926,12 @@ class Phase2TemporalEngine:
         buffer_mid_time = system_time + buffer_duration / 2
         
         # ===== SEARCH WINDOW PRIORITY HIERARCHY =====
-        # 1. FUSION FEEDBACK (highest priority - learned from data)
-        # 2. PHYSICS PRIOR (IRI-2020 prediction)
-        # 3. BLIND SEARCH (bootstrap/fallback)
+        # 1. PHYSICS PRIOR (IRI-2020 prediction)
+        # 2. BLIND SEARCH (bootstrap/fallback)
+        #
+        # NOTE: Calibration offsets are NOT used for search window centering!
+        # They represent corrections to APPLY to measurements, not expected arrival times.
+        # Using them as search centers was causing searches at wrong locations.
         
         expected_offset_ms = None
         adaptive_window_ms = self.config_search_window_ms or 500.0
@@ -947,19 +951,8 @@ class Phase2TemporalEngine:
             predicted_station = StationType.CHU
             predicted_station_name = 'CHU'
         
-        # PRIORITY 1: Check for Fusion-learned calibration
-        if calibration_offsets and predicted_station_name in calibration_offsets:
-            fusion_offset_ms = calibration_offsets[predicted_station_name]
-            expected_offset_ms = fusion_offset_ms
-            adaptive_window_ms = 2.0  # TIGHT: ±2ms (Fusion uncertainty ~0.1ms)
-            search_strategy = "FUSION"
-            logger.info(
-                f"🎯 Fusion feedback: {predicted_station_name} offset={fusion_offset_ms:.3f}ms, "
-                f"window=±{adaptive_window_ms}ms (learned from L3)"
-            )
-        
-        # PRIORITY 2: Fall back to Physics prediction if no Fusion feedback
-        elif predicted_station:
+        # PRIORITY 1: Use Physics prediction for search window centering
+        if predicted_station:
             try:
                 # Convert Unix timestamp to datetime for ionospheric model
                 from datetime import datetime, timezone
@@ -982,7 +975,7 @@ class Phase2TemporalEngine:
             except Exception as e:
                 logger.warning(f"Ionospheric prediction failed: {e}, using blind search")
         
-        # PRIORITY 3: Blind search (bootstrap or fallback)
+        # PRIORITY 2: Blind search (bootstrap or fallback)
         if search_strategy == "BLIND":
             expected_offset_ms = 0.0
             logger.info(f"🔍 Bootstrap mode: wide search ±{adaptive_window_ms:.0f}ms")

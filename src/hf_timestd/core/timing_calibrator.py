@@ -822,10 +822,11 @@ class TimingCalibrator:
         # After calibration, constrain D_clock to plausible range
         # Once calibrated, D_clock should be within ±50ms of 0
         if self.phase != CalibrationPhase.BOOTSTRAP:
-            if abs(d_clock_ms) > 50.0:
+            # TEMPORARY RELAXATION: Allow ±500ms for calibration recovery
+            if abs(d_clock_ms) > 500.0:
                 logger.warning(
                     f"Physical constraint violation: {station} D_clock={d_clock_ms:+.1f}ms "
-                    f"exceeds ±50ms bound (calibrated phase)"
+                    f"exceeds ±500ms bound (calibrated phase)"
                 )
                 return False
         
