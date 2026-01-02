@@ -166,7 +166,7 @@ class Phase2AnalyticsService:
         output_dir: Path,
         channel_name: str,
         frequency_hz: float,
-        sample_rate: int = 20000,
+        sample_rate: int = 24000,
         receiver_grid: str = '',
         station_config: Optional[Dict] = None,
         poll_interval: float = 10.0,
@@ -427,6 +427,7 @@ class Phase2AnalyticsService:
         
         self.engine.rtp_calibration_callback = get_rtp_offset
         self.engine.station_predictor = self.timing_calibrator.predict_station
+        self.engine.timing_calibrator = self.timing_calibrator
         
         logger.info("Wired timing calibrator callbacks to Phase2TemporalEngine")
         
@@ -2347,7 +2348,7 @@ def main():
     parser.add_argument('--output-dir', required=True, help='Output directory')
     parser.add_argument('--channel-name', required=True, help='Channel name')
     parser.add_argument('--frequency-hz', type=float, required=True, help='Center frequency')
-    parser.add_argument('--sample-rate', type=int, default=20000, help='Sample rate')
+    parser.add_argument('--sample-rate', type=int, default=24000, help='Sample rate')
     parser.add_argument('--grid-square', default='', help='Receiver grid square')
     parser.add_argument('--poll-interval', type=float, default=10.0, help='Poll interval')
     parser.add_argument('--log-level', default='INFO', help='Log level')

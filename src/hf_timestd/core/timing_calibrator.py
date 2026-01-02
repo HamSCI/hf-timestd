@@ -778,7 +778,123 @@ class TimingCalibrator:
             'CHU': 4.0     # Ottawa, Canada
         }
         return (50.0, default_delays.get(station, 10.0))
-    
+        
+    def get_search_window(
+        self,
+        station: str,
+        frequency_mhz: float,
+        channel_name: str
+    ) -> float:
+        """
+        Get adaptive search window with back-off support.
+        
+        Args:
+            station: Station identifier ('WWV', etc.)
+            frequency_mhz: Frequency in MHz
+            channel_name: Full channel name
+            
+        Returns:
+            Window half-width in milliseconds (e.g. 5.0 for ±5ms)
+        """
+        # Check for consecutive failures first
+        key = self._get_calibration_key(station, frequency_mhz, channel_name)
+        failures = self.consecutive_failures.get(key, 0)
+        
+        # If we've lost lock, widen the window significantly
+        if failures > 5:
+            # Back-off strategy: 50ms -> 100ms -> 250ms -> 500ms
+            if failures > 20: return 500.0
+            if failures > 10: return 250.0
+            return 100.0
+            
+        # If we are just starting back up after failures, use wider window
+        # (failures == 0 but was high recently? - handled by state reset on detection)
+        
+        if self.phase == CalibrationPhase.BOOTSTRAP:
+            return 500.0
+            
+        # In CALIBRATED mode, use tight windows
+        if self.phase == CalibrationPhase.CALIBRATED:
+            # Use station calibration uncertainty if available
+            if station in self.station_calibration:
+                cal = self.station_calibration[station]
+                # 3-sigma window + 1ms margin
+                window = (3.0 * cal.propagation_delay_std_ms) + 1.0
+                return max(2.0, min(window, 50.0))
+                
+        # PROVISIONAL or fallback
+        return 15.0
+
+    def get_expected_toa(
+        self,
+        station: str,
+        frequency_mhz: float,
+        channel_name: str
+    ) -> Optional[float]:
+        """
+        Get expected Time of Arrival for a station+frequency.
+        
+        Returns mean ToA in milliseconds, or None if not yet learned.
+        """
+        if station not in self.station_calibration:
+            return None
+        
+        cal = self.station_calibration[station]
+        
+        # Only return if we have sufficient confidence
+        if cal.n_samples < 5:
+            return None
+        
+        # Return mean propagation delay (ToA relative to second boundary)
+        return cal.propagation_delay_ms
+
+    def record_detection(
+        self,
+        station: str,
+        frequency_mhz: float,
+        channel_name: str,
+        toa_ms: float
+    ):
+        """Record successful detection and update failure counters."""
+        key = self._get_calibration_key(station, frequency_mhz, channel_name)
+        
+        # Reset failure counter for this specific broadcast
+        self.consecutive_failures[key] = 0
+        
+        # Also reset failures for the channel generally since we got *something*
+        # (Helps shared frequency recovery)
+        for k in list(self.consecutive_failures.keys()):
+            if channel_name in k:
+                self.consecutive_failures[k] = 0
+
+    def record_failure(
+        self,
+        frequency_mhz: float,
+        channel_name: str
+    ):
+        """
+        Record detection failure.
+        
+        We increment counters for ALL potential stations on this channel
+        since we don't know which one failed to appear.
+        """
+        for station in ['WWV', 'WWVH', 'CHU', 'BPM']:
+            key = self._get_calibration_key(station, frequency_mhz, channel_name)
+            self.consecutive_failures[key] = self.consecutive_failures.get(key, 0) + 1
+
+    def should_back_off(self, channel_name: str) -> bool:
+        """Check if we should widen search windows for this channel."""
+        # Check if any broadcast on this channel has too many failures
+        for key, failures in self.consecutive_failures.items():
+            if channel_name in key and failures > 5:
+                return True
+        return False
+        
+    def _get_calibration_key(self, station: str, frequency_mhz: float, channel_name: str) -> str:
+        """Create unique key for tracking specific broadcast performance."""
+        # Round frequency to 1 decimal place to group effectively (e.g. 9.999 -> 10.0)
+        freq_key = f"{frequency_mhz:.1f}"
+        return f"{channel_name}|{station}|{freq_key}"    
     def _validate_physical_constraints(
         self,
         station: str,

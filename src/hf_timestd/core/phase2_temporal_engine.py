@@ -663,6 +663,9 @@ class Phase2TemporalEngine:
                 self.correlator_bank = None
                 logger.warning("⚠️ CorrelatorBank not initialized (no precise coordinates)")
             
+            # Timing calibrator (injected by service)
+            self.timing_calibrator = None
+            
             # BPM calibration state (updated from UT1 pulse detection)
             self.bpm_calibration = {
                 'calibrated': False,
@@ -989,11 +992,11 @@ class Phase2TemporalEngine:
             if expected_toa is not None:
                 # Use learned ToA with narrow window
                 expected_offset_ms = expected_toa
-                window_half, _ = self.timing_calibrator.get_search_window_ms(
+                adaptive_window_ms = self.timing_calibrator.get_search_window(
                     predicted_station_name,
-                    self.frequency_mhz
+                    self.frequency_mhz,
+                    self.channel_name
                 )
-                adaptive_window_ms = window_half
                 search_strategy = "LEARNED"
                 logger.info(
                     f"🎯 Learned ToA: {predicted_station_name} @ {self.frequency_mhz}MHz, "
@@ -1040,7 +1043,7 @@ class Phase2TemporalEngine:
                         station=det.station.value,
                         frequency_mhz=self.frequency_mhz,
                         channel_name=self.channel_name,
-                        toa_ms=det.timing_ms
+                        toa_ms=det.timing_error_ms
                     )
             else:
                 # No detection - record failure

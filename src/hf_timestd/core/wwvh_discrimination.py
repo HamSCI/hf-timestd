@@ -377,7 +377,7 @@ class WWVHDiscriminator:
         channel_name: str,
         receiver_grid: Optional[str] = None,
         history_dir: Optional[str] = None,
-        sample_rate: int = 20000
+        sample_rate: int = 24000
     ):
         """
         Initialize discriminator

@@ -1496,7 +1496,7 @@ class MultiBroadcastFusion:
                     start=start_iso,
                     end=end_iso,
                     min_quality_grade='D',  # FIX 3: Accept D to match CSV utility
-                    min_confidence=0.01  # Minimum confidence threshold
+                    min_confidence=0.0  # Accept all (trust Flags/Grades)
                 )
                 
                 logger.debug(

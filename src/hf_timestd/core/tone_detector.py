@@ -212,7 +212,7 @@ USAGE
 ================================================================================
     detector = MultiStationToneDetector(
         channel_name='WWV_10_MHz',
-        sample_rate=20000
+        sample_rate=24000,
     )
     
     # Process 60-second IQ buffer
@@ -220,7 +220,7 @@ USAGE
         timestamp=buffer_mid_time,     # Unix timestamp at buffer midpoint
         samples=iq_samples,            # np.complex64 array
         rtp_timestamp=rtp_ts,          # For provenance tracking
-        original_sample_rate=20000
+        original_sample_rate=24000,
     )
     
     if detections:
@@ -274,7 +274,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
     in poor SNR conditions and with phase-shifted signals.
     """
     
-    def __init__(self, channel_name: str, sample_rate: int = 3000):
+    def __init__(self, channel_name: str, sample_rate: int = 24000):
         """
         Initialize multi-station tone detector
         

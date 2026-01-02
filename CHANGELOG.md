@@ -58,6 +58,23 @@ All notable changes to this project will be documented in this file.
 - **Fix**: Removed Fusion feedback from the search window logic. The system now uses purely Physics-based priors (IRI-2020) for search window centering, which correctly predicts arrival times. Calibration offsets are applied only *after* detection to correct the measurement.
 - **Result**: Valid physics-based search windows (±15ms) are now active, replacing the erroneous offsets.
 
+## [3.9.0] - 2026-01-02
+
+### Added - Adaptive Search Window System
+
+- **Intelligent Window Narrowing**: Wired `TimingCalibrator` into tone detection
+  - Bootstrap (±500ms) → Orient (±15ms) → Focus (±2ms) progression
+  - Per-broadcast independent tracking (WWV@10MHz ≠ WWV@5MHz)
+  - GPSDO stability monitoring
+- **Graceful Back-Off**: Automatic window widening when detections fail
+  - Detects lost lock (5+ consecutive failures)
+  - Widens search window to re-acquire signal
+  - Re-converges when signal returns
+- **Expected ToA Prediction**: Uses learned arrival times for narrow search
+  - Tracks mean ToA per station+frequency
+  - Provides sub-2ms search windows after convergence
+  - Enables high-sensitivity ionospheric measurements
+
 ## [3.8.0] - 2026-01-02
 
 ### Fixed - Critical Fusion "Critic" Fixes
