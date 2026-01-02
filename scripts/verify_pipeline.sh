@@ -232,27 +232,7 @@ if [[ -d "$PHASE2_DIR" ]]; then
         check_fail "No HDF5 timing measurements found across any channels"
     fi
     
-    # Check for CSV files (backup)
-    echo ""
-    echo "  Checking CSV outputs (backup)..."
-    CSV_COUNT=0
-    for channel_dir in "$PHASE2_DIR"/*_*/; do
-        if [[ -d "$channel_dir" ]]; then
-            CHANNEL=$(basename "$channel_dir")
-            CSV_FILE="$channel_dir/clock_offset/clock_offset_series.csv"
-            
-            if [[ -f "$CSV_FILE" ]]; then
-                # Check if updated recently (last 5 min)
-                if [[ $(find "$CSV_FILE" -mmin -5 2>/dev/null) ]]; then
-                    LINES=$(wc -l < "$CSV_FILE" 2>/dev/null || echo 0)
-                    check_pass "$CHANNEL: CSV updated recently ($LINES lines)"
-                    ((CSV_COUNT++))
-                else
-                    check_warn "$CHANNEL: CSV exists but not recently updated"
-                fi
-            fi
-        fi
-    done
+    # Note: CSV files no longer updated (HDF5-only as of 2026-01-02)
     
     # Check for other Phase 2 products
     echo ""
@@ -297,18 +277,7 @@ if [[ -d "$FUSION_DIR" ]]; then
         check_warn "No recent fusion HDF5 files (last 10 min)"
     fi
     
-    # Check for fusion CSV (fallback)
-    FUSION_CSV="$FUSION_DIR/fused_d_clock.csv"
-    if [[ -f "$FUSION_CSV" ]]; then
-        if [[ $(find "$FUSION_CSV" -mmin -5 2>/dev/null) ]]; then
-            LINES=$(wc -l < "$FUSION_CSV" 2>/dev/null || echo 0)
-            check_pass "Fusion CSV updated recently ($LINES lines)"
-        else
-            check_warn "Fusion CSV exists but not recently updated"
-        fi
-    else
-        check_warn "Fusion CSV not found: $FUSION_CSV"
-    fi
+    # Note: Fusion CSV no longer updated (HDF5-only as of 2026-01-02)
     
 else
     check_warn "Fusion directory not found: $FUSION_DIR"
@@ -355,20 +324,7 @@ if [[ -d "$SCIENCE_DIR" ]]; then
             check_warn "No TEC HDF5 files found - Check timestd-science-aggregator"
         fi
         
-        # CSV
-        LAST_CSV=$(find "$TEC_DIR" -name "tec_*.csv" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -f2- -d" ")
-        if [[ -n "$LAST_CSV" ]]; then
-             LAST_MOD=$(stat -c %Y "$LAST_CSV")
-             NOW=$(date +%s)
-             AGE=$((NOW - LAST_MOD))
-             if [[ $AGE -lt 900 ]]; then
-                check_pass "Found recent TEC CSV file (updated $((AGE/60))m ago)"
-             else
-                check_warn "TEC CSV stale (updated $((AGE/60))m ago)"
-             fi
-        else
-            check_warn "No TEC CSV files found"
-        fi
+        # Note: TEC CSV files no longer primary (HDF5-only as of 2026-01-02)
     else
         check_warn "TEC directory not found: $TEC_DIR"
     fi
@@ -387,13 +343,7 @@ if [[ -d "$VTEC_DIR" ]]; then
         check_warn "GNSS VTEC output directory exists but no recent HDF5 files"
     fi
     
-    # CSV (fallback)
-    VTEC_CSV=$(find "$VTEC_DIR/.." -name "gnss_vtec.csv" -mmin -15 2>/dev/null | wc -l)
-    if [[ $VTEC_CSV -gt 0 ]]; then
-        check_pass "GNSS VTEC: Found recent CSV file"
-    else
-        check_warn "GNSS VTEC: No recent CSV file"
-    fi
+    # Note: GNSS VTEC CSV no longer primary (HDF5-only)
 else
     # Optional service
     check_warn "GNSS VTEC directory not found (service specific)"

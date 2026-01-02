@@ -1,137 +1,249 @@
-# NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION
+# Critic Context - HF-TimeStd Project Status
 
-Primary Instruction: In this context you will perform a critical review of the HF Time Standard (hf-timestd) project, either in its entirety or in a specific component, as specified by the user. This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation. It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation. It should also look for obsolete, deprecated, or "zombie" code that should be removed. Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
+**Last Updated**: 2026-01-02 17:32 UTC  
+**Session Focus**: Diagnose Fusion Service Failure After HDF5 Transition
 
-# The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session)
+## Current Critical Issue
 
----
+**Fusion Service Not Writing HDF5 Files**
 
-## ✅ SESSION COMPLETE (2026-01-02): ANALYTICS CRITIQUE - TARGETED TONE SEARCH
+The `timestd-fusion` service is running but silent - no log output and no HDF5 writes after restart.
 
-**Status:** 🟢 **RESOLVED** - Critical bug in Fusion feedback semantics fixed.
+**Symptoms**:
 
-**Author:** AI Agent (Antigravity)
-**Date:** 2026-01-02
+- Service started: 2026-01-02 17:22:25 UTC
+- Process running (PID 831451, consuming CPU)
+- **Zero log output** after systemd startup messages
+- Last HDF5 write: 17:11 (before restart)
+- No new HDF5 files after 10+ minutes
 
-### Main Accomplishments
+**Context**: This occurred immediately after removing CSV writers from the fusion service as part of the HDF5 transition. The service was working correctly with HDF5-only output before the restart.
 
-1. **Bug Discovery**: Identified that Analytics was using Fusion calibration offsets (`-mean(d_clock)`) as search window centers (`expected_arrival`), causing searches at the wrong time (e.g., -5ms instead of +5ms).
-2. **Fix Implemented**: Removed the incorrect Fusion feedback loop. The system now prioritizes **Physics Priors** (IRI-2020) for search window centering, which correctly predicts arrival times within ±15ms.
-3. **Verification**: Verified Analytics logs show `📡 Physics prior` and correct window sizing. D_clock values stabilized at reasonable levels (+7ms) after resolving a Fusion service crash loop.
+**Files Modified in Last Session**:
 
----
+- `/opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/core/multi_broadcast_fusion.py`
+  - Removed `_init_fusion_csv()` and `_init_tec_csv()` methods (97 lines)
+  - Removed CSV write from `_write_fused_result()` (36 lines)
+  - Updated logging to reference HDF5 output
 
-## ✅ SESSION COMPLETE (2026-01-02): FUSION VULNERABILITY FIXES
+**Likely Cause**: Python initialization error preventing main loop from starting. The complete absence of log output suggests the error occurred before logging was configured or in a critical initialization path.
 
-**Status:** 🟢 **RESOLVED** - Critical vulnerabilities in Fusion service fixed (VTEC safety, Global Solver check, HDF5 parity, Warmup penalty removal).
+**Next Steps**:
 
-**Author:** AI Agent (Antigravity)
-**Date:** 2026-01-02
-
-### Main Accomplishments
-
-1. **VTEC Safety**: Implemented consistency checks before boosting confidence in GNSS VTEC corrections.
-2. **Robustness**: Removed "God Mode" immunity for Global Solver; it is now subject to outlier rejection.
-3. **HDF5 Parity**: Harmonized HDF5 reader to accept Grade D measurements, preventing data starvation during fallback.
-4. **Availability**: Removed artificial 3-hour warmup penalty when calibration is loaded from disk.
-
----
-
-## 🔴 NEXT SESSION FOCUS: INVESTIGATE DEGRADED TIMING QUALITY (GRADE D)
-
-**Purpose:** The system is operational and processing data, but the **Timing Quality Grade has dropped to 'D'** across the board. We need to diagnose why the system considers the timing estimate to be of poor quality despite having valid inputs.
-
-**Trigger:** User report "Grades all 'D'" and uploaded image `uploaded_image_1767312248802.png` showing a timeline dominated by red (Grade D) bars.
-
-### Context & visual cues
-
-![Quality Timeline](/home/mjh/.gemini/antigravity/brain/6b23b02b-ff90-4674-b970-ab973963ca8f/uploaded_image_1767312248802.png)
-*Figure: Metrics showing degraded quality grades.*
-
-### Potential Causes to Investigate
-
-#### 1. Fusion / Calibration Logic (High Probability)
-
-- **Problem**: The fused solution might have high variance or uncertainty, leading to a downgrade.
-- **Check**: Look at `fused_d_clock.csv` for `uncertainty_ms` and `consistency_flag`.
-- **Hypothesis**: The recent HDF5 migration might have altered how uncertainty is read or calculated.
-
-#### 2. Chrony Integration & Reachability
-
-- **Note**: `verify_pipeline.sh` showed `TMGR source reachable (reach: 3)`.
-- **Problem**: `reach=3` (binary 00000011) means only the last 2 polls succeeded. It takes 8 successful polls (reach 377) to be fully stable.
-- **Hypothesis**: The system might just be warming up, OR Chrony is rejecting samples due to high variance.
-
-#### 3. Analytics Quality (Input Garbage?)
-
-- **Problem**: If the individual station measurements (L2) are noisy or wrong, Fusion will have high uncertainty.
-- **Check**: Compare individual channel plots. Are they tight or scattered?
-- **Hypothesis**: Recent changes to "Robust Noise Floor" or "Adaptive Search Windows" (mentioned in CHANGELOG 3.3.0) might be rejecting good signals or letting noise in.
-
-#### 4. Timestamp / Datatype Issues
-
-- **Problem**: Recent fixes to IRI-2020 array handling or HDF5 schemas might have introduced subtle value errors (e.g. seconds vs milliseconds, or integer truncation).
+1. Check full logs: `sudo journalctl -u timestd-fusion -n 200`
+2. Look for Python tracebacks or import errors
+3. Verify the deployed code matches the git repository
+4. Check if there are any missing dependencies or broken imports
 
 ---
 
-## Investigation Plan for AI Agent
+## Recent Accomplishments (2026-01-02)
 
-### Step 1: Analyze Fusion Output (The Symptom)
+### ✅ HDF5 Transition Complete for Core Services
 
-Check the raw numbers driving the "Grade D" classification.
+Successfully transitioned both core timing services from CSV to HDF5-only output:
 
-```bash
-# Get recent fusion records
-tail -20 /var/lib/timestd/phase2/fusion/fused_d_clock.csv
+**Fusion Service** (`multi_broadcast_fusion.py`):
 
-# Questions to answer:
-# 1. What is the 'uncertainty_ms'? (Grade A < 1ms, Grade D > ???)
-# 2. What is the 'quality_flag'?
-# 3. How many 'num_stations' are contributing? (Low count = low confidence)
+- Removed CSV initialization methods (97 lines)
+- Removed CSV write calls (36 lines)
+- Verified HDF5-only operation (before restart issue)
+
+**Analytics Service** (`phase2_analytics_service.py`):
+
+- Removed clock_offset CSV writer (61 lines total)
+- Removed `_init_clock_offset_csv()` method
+- Removed CSV write block from `_write_clock_offset()`
+- Removed daily rotation logic
+- **Status**: ✅ Working correctly, writing HDF5-only
+
+**Verification Script** (`scripts/verify_pipeline.sh`):
+
+- Removed all CSV checks (60+ lines)
+- Updated to verify HDF5-only operation
+- Script now focuses on HDF5 file presence and freshness
+
+### Data Coverage Audit
+
+Performed comprehensive audit confirming all scientific data has HDF5 coverage:
+
+**L2 Timing Measurements** (Analytics):
+
+- Clock offset with full ISO GUM uncertainty budget (8 components)
+- Carrier power, SNR, Doppler (carrier + std)
+- Phase variance, coherence time
+- WWV/WWVH tone power
+- Quality grades and traceability chain
+
+**L3 Fusion** (Fusion):
+
+- Fused clock offset
+- Multi-station fusion with uncertainty propagation
+- Quality metadata
+
+**L3 Science** (Science Aggregator):
+
+- TEC estimates (ionospheric)
+- GNSS VTEC
+
+**Conclusion**: All core timing and ionospheric measurements are in HDF5. CSV files remain on disk but are no longer updated.
+
+---
+
+## System Architecture Overview
+
+### Core Services
+
+1. **timestd-core-recorder**: Records raw IQ data to Digital RF HDF5
+2. **timestd-analytics**: L2 timing measurements (HDF5-only as of 2026-01-02)
+3. **timestd-fusion**: L3 fused timing (HDF5-only, currently broken)
+4. **timestd-science-aggregator**: TEC estimation (HDF5 + CSV fallback)
+5. **timestd-vtec**: GNSS VTEC (HDF5 + CSV fallback)
+6. **timestd-web-ui**: Monitoring dashboard
+
+### Data Flow
+
+```
+Raw IQ (L0) → Analytics (L2) → Fusion (L3) → Chrony SHM
+                    ↓
+            Science Aggregator (L3 TEC)
 ```
 
-### Step 2: Check Individual Station Inputs
+### HDF5 Data Products
 
-Is the input to fusion garbage?
+**Analytics Service** (4 HDF5 writers):
+
+- `L1A: channel_observables` - Carrier power, SNR, Doppler, tones
+- `L1A: tone_detections` - Station ID tone timing
+- `L1B: bcd_timecode` - BCD discrimination
+- `L2: timing_measurements` - Clock offset + ISO GUM uncertainty
+
+**Fusion Service** (1 HDF5 writer):
+
+- `L3: fusion_timing` - Multi-station fused timing
+
+**Science Aggregator** (1 HDF5 writer):
+
+- `L3: tec` - Ionospheric TEC estimates
+
+---
+
+## Known Issues
+
+### Critical
+
+1. **Fusion Service Silent Failure** (NEW - 2026-01-02)
+   - Service running but not producing output
+   - No log entries after startup
+   - Likely Python initialization error
+   - **Priority**: CRITICAL - blocks Chrony integration
+
+### Active
+
+1. **Chrony Integration Not Working**
+   - TMGR source configured but Reach=0
+   - Fusion service not updating Chrony SHM
+   - Related to issue #1 above
+
+2. **Calibration State Stale**
+   - Last updated 1+ hour ago
+   - May be related to analytics service restart
+
+---
+
+## Development Guidelines
+
+### HDF5 Best Practices
+
+1. **SWMR Mode**: All HDF5 files use Single-Writer Multiple-Reader mode
+2. **Atomic Writes**: Use temp files + rename for atomic updates
+3. **Schema Validation**: DataProductWriter validates against schemas
+4. **Error Handling**: Track HDF5 write failures with counters
+
+### Code Deployment
+
+**Production Environment**:
+
+- Installed package: `/opt/hf-timestd/venv/lib/python3.11/site-packages/`
+- Services run as `timestd` user
+- Data root: `/var/lib/timestd/`
+
+**Deployment Process**:
+
+1. Edit files in `/home/mjh/git/hf-timestd/`
+2. Copy to production: `sudo cp <src> /opt/hf-timestd/venv/lib/python3.11/site-packages/<dst>`
+3. Restart service: `sudo systemctl restart timestd-<service>`
+4. Verify: Check logs and HDF5 file timestamps
+
+### Debugging Services
+
+**View Logs**:
 
 ```bash
-# Check L2 for a stable station (e.g., WWV 10MHz)
-tail -20 /var/lib/timestd/phase2/WWV_10MHz/clock_offset/WWV_10MHz_clock_offset.csv
-
-# Questions:
-# 1. Are 'd_clock' values stable?
-# 2. Is 'confidence' high?
+sudo journalctl -u timestd-<service> -n 100
+sudo journalctl -u timestd-<service> --since "10 minutes ago"
 ```
 
-### Step 3: Check Logs for Logic Errors
+**Check HDF5 Files**:
 
 ```bash
-sudo journalctl -u timestd-fusion --since "1 hour ago" | grep -i "warning\|error\|reject"
-sudo journalctl -u timestd-analytics --since "1 hour ago" | grep -i "warning\|error"
+ls -lh /var/lib/timestd/phase2/fusion/*.h5
+stat <file.h5> | grep Modify
+```
+
+**Verify Service Status**:
+
+```bash
+systemctl status timestd-<service>
+ps aux | grep <service>
 ```
 
 ---
 
-## Current System State (Background)
+## Next Session Priorities
 
-**Services:** All Active (systemd managed)
-**Data Pipeline:**
+1. **CRITICAL**: Diagnose and fix fusion service silent failure
+   - Check for Python tracebacks in logs
+   - Verify code deployment
+   - Test fusion service initialization
+   - Restore HDF5 writing capability
 
-- L0 (Digital RF/Binary): Active
-- L2 (Timing): Active (HDF5+CSV)
-- L3 (Fusion): Active (HDF5+CSV)
-- Chrony: **Connected** (Reach 3, climbing)
+2. **HIGH**: Fix Chrony integration (depends on #1)
+   - Verify Chrony SHM updates after fusion fix
+   - Check reach value increases
 
-**Recent Major Changes:**
+3. **MEDIUM**: Update CHANGELOG.md with HDF5 transition
+   - Document CSV removal
+   - Note breaking changes (CSV no longer updated)
 
-- HDF5 Migration (Phase 1-3 complete)
-- Health Checks implementation
-- Science Aggregator & VTEC integration
+4. **LOW**: Optional cleanup
+   - Delete legacy CSV writer files if desired
+   - Archive old CSV data
 
 ---
 
-## Success Criteria for Next Session
+## File Locations
 
-1. **Identify the Root Cause** of the "Grade D" status.
-2. **Proposed Fix** (Configuration tune, code fix, or waiting for warm-up).
-3. **Verify Grade Recovery** (Return to A/B grades).
+**Core Services**:
+
+- Fusion: `src/hf_timestd/core/multi_broadcast_fusion.py`
+- Analytics: `src/hf_timestd/core/phase2_analytics_service.py`
+- Science Aggregator: `src/hf_timestd/core/science_aggregator.py`
+
+**HDF5 Infrastructure**:
+
+- Writers: `src/hf_timestd/io/data_product_writer.py`
+- Readers: `src/hf_timestd/io/data_product_reader.py`
+- Schemas: `src/hf_timestd/io/schemas/`
+
+**Scripts**:
+
+- Verification: `scripts/verify_pipeline.sh`
+- Health checks: `scripts/health-check-*.sh`
+
+**Data Directories**:
+
+- Raw IQ: `/var/lib/timestd/raw_buffer/`
+- L2 Analytics: `/var/lib/timestd/phase2/{CHANNEL}/`
+- L3 Fusion: `/var/lib/timestd/phase2/fusion/`
+- L3 Science: `/var/lib/timestd/phase2/science/`

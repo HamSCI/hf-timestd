@@ -456,18 +456,11 @@ class MultiBroadcastFusion:
         # Fusion output
         self.fusion_dir = self.data_root / 'phase2' / 'fusion'
         self.fusion_dir.mkdir(parents=True, exist_ok=True)
-        self.fusion_csv = self.fusion_dir / 'fused_d_clock.csv'
-        self._init_fusion_csv()
-        
-        # TEC output
-        self.tec_csv = self.fusion_dir / 'tec_estimates.csv'
-        self._init_tec_csv()
         
         # ====================================================================
-        # HDF5 Data Product Writer (Parallel with CSV)
+        # HDF5 Data Product Writer (HDF5-Only Output)
         # ====================================================================
         # Initialize HDF5 writer for schema-validated fusion results
-        # Writes in parallel with CSV during transition period
         try:
             from hf_timestd.io import DataProductWriter
             
@@ -654,103 +647,7 @@ class MultiBroadcastFusion:
             os.fsync(f.fileno())
         temp_file.replace(self.calibration_file)
     
-    def _init_fusion_csv(self):
-        """Initialize fused D_clock CSV."""
-        header = [
-            'timestamp', 'd_clock_fused_ms', 'd_clock_raw_ms',
-            'uncertainty_ms', 'n_broadcasts', 'n_stations',
-            'wwv_mean_ms', 'wwvh_mean_ms', 'chu_mean_ms', 'bpm_mean_ms',
-            'wwv_count', 'wwvh_count', 'chu_count', 'bpm_count',
-            'calibration_applied', 'quality_grade',
-            'outliers_rejected',
-            'wwv_intra_std_ms', 'wwvh_intra_std_ms', 'chu_intra_std_ms', 'bpm_intra_std_ms',
-            'inter_station_spread_ms', 'consistency_flag',
-            'global_solve_verified', 'global_solve_consistency_ms', 'global_solve_n_obs',
-            # Uncertainty budget components
-            'statistical_uncertainty_ms', 'systematic_uncertainty_ms', 'propagation_uncertainty_ms'
-        ]
 
-        if not self.fusion_csv.exists():
-            with open(self.fusion_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(header)
-            return
-
-        try:
-            with open(self.fusion_csv, 'r', newline='') as f:
-                reader = csv.reader(f)
-                existing_header = next(reader, None)
-
-            if existing_header and all(col in existing_header for col in header):
-                return
-
-            if not existing_header:
-                with open(self.fusion_csv, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(header)
-                return
-
-            temp_path = self.fusion_csv.with_suffix('.tmp')
-            with open(self.fusion_csv, 'r', newline='') as src, open(temp_path, 'w', newline='') as dst:
-                r = csv.reader(src)
-                w = csv.writer(dst)
-                old_header = next(r, [])
-                w.writerow(header)
-
-                old_len = len(old_header)
-                new_len = len(header)
-                for row in r:
-                    if len(row) < new_len:
-                        row = row + [''] * (new_len - len(row))
-                    w.writerow(row)
-
-                dst.flush()
-                os.fsync(dst.fileno())
-            temp_path.replace(self.fusion_csv)
-        except Exception as e:
-            logger.debug(f"Could not migrate fusion CSV header: {e}")
-
-    def _init_tec_csv(self):
-        """Initialize TEC estimates CSV."""
-        header = [
-            'timestamp_utc', 'station', 'tec_tecu', 'tec_uncertainty_tecu', 
-            't_vacuum_error_ms', 'confidence', 'residuals_ms', 
-            'n_frequencies', 'frequencies_mhz', 'group_delays_calibrated_ms'
-        ]
-        
-        if not self.tec_csv.exists():
-            try:
-                with open(self.tec_csv, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(header)
-            except Exception as e:
-                logger.error(f"Failed to initialize TEC CSV: {e}")
-
-    def _write_tec_result(self, result):
-        """Append TEC result to CSV."""
-        from datetime import datetime
-        
-        try:
-            # Map delays to simple string representation
-            delays_str = ';'.join([f"{f:.2f}={d:.3f}" for f, d in sorted(result.group_delay_ms.items())])
-            freqs_str = ';'.join([f"{f:.2f}" for f in sorted(result.group_delay_ms.keys())])
-            
-            with open(self.tec_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    result.timestamp,
-                    result.station,
-                    f"{result.tec_u:.3f}",
-                    "", # Uncertainty not yet exported by estimator in simple form
-                    f"{result.t_vacuum_error_ms:.3f}",
-                    f"{result.confidence:.4f}",
-                    f"{result.residuals_ms:.3f}",
-                    result.n_frequencies,
-                    freqs_str,
-                    delays_str
-                ])
-        except Exception as e:
-            logger.debug(f"Failed to write TEC result: {e}")
 
     def _extract_frequency_mhz(self, channel: str) -> Optional[float]:
         s = channel.replace('_', ' ')
@@ -2427,44 +2324,8 @@ class MultiBroadcastFusion:
         return self.adev_tracker.compute_all_adev(self.adev_tau_values)
     
     def _write_fused_result(self, result: FusedResult):
-        """Append fused result to CSV and HDF5."""
-        # CSV write (existing code)
-        with open(self.fusion_csv, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                result.timestamp,
-                result.d_clock_fused_ms,
-                result.d_clock_raw_ms,
-                result.uncertainty_ms,
-                result.n_broadcasts,
-                result.n_stations,
-                result.wwv_mean_ms or '',
-                result.wwvh_mean_ms or '',
-                result.chu_mean_ms or '',
-                result.bpm_mean_ms or '',
-                result.wwv_count,
-                result.wwvh_count,
-                result.chu_count,
-                result.bpm_count,
-                result.calibration_applied,
-                result.quality_grade,
-                result.outliers_rejected,
-                result.wwv_intra_std_ms or '',
-                result.wwvh_intra_std_ms or '',
-                result.chu_intra_std_ms or '',
-                result.bpm_intra_std_ms or '',
-                result.inter_station_spread_ms or '',
-                result.consistency_flag,
-                result.global_solve_verified,
-                result.global_solve_consistency_ms if result.global_solve_consistency_ms is not None else '',
-                result.global_solve_n_obs,
-                # Uncertainty budget components
-                result.statistical_uncertainty_ms,
-                result.systematic_uncertainty_ms,
-                result.propagation_uncertainty_ms
-            ])
-        
-        # HDF5 write (parallel output)
+        """Write fused result to HDF5."""
+        # HDF5 write (HDF5-only output)
         self._write_fused_result_hdf5(result)
     
     def _write_fused_result_hdf5(self, result: FusedResult):
@@ -2828,7 +2689,7 @@ def run_fusion_service(
     
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
-    logger.info(f"  Output: {fusion.fusion_csv}")
+    logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
     logger.info(f"  Chrony SHM: {'enabled (threaded updater at 8s)' if chrony_updater else 'disabled'}")
     
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")

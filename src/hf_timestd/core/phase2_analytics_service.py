@@ -240,8 +240,6 @@ class Phase2AnalyticsService:
         # Status file for web-ui
         self.status_file = self.status_dir / 'analytics-service-status.json'
         
-        # CSV time series for D_clock (coordinated path) - daily rotation
-        self._init_clock_offset_csv()
         
         # CSV time series for carrier power (for power graphs)
         self.carrier_power_dir = self.output_dir / 'carrier_power'
@@ -483,28 +481,6 @@ class Phase2AnalyticsService:
         logger.info(f"  Grid: {receiver_grid}")
         logger.info(f"  Tiered Storage: {'enabled' if self._tiered_storage_enabled else 'disabled'}")
     
-    def _init_clock_offset_csv(self):
-        """Initialize clock offset CSV file with headers if needed (daily rotation)."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.clock_offset_csv = self.clock_offset_dir / f'{file_channel}_clock_offset_{today}.csv'
-        
-        if not self.clock_offset_csv.exists():
-            with open(self.clock_offset_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'system_time', 'utc_time', 'minute_boundary_utc',
-                    'clock_offset_ms', 'station', 'frequency_mhz',
-                    'propagation_delay_ms', 'propagation_mode', 'n_hops',
-                    'confidence', 'uncertainty_ms', 'quality_grade',
-                    'snr_db', 'delay_spread_ms', 'doppler_std_hz', 'fss_db',
-                    'wwv_power_db', 'wwvh_power_db', 'discrimination_confidence',
-                    'utc_verified', 'multi_station_verified',
-                    'rtp_timestamp', 'processed_at',
-                    'wwv_tick_snr_db', 'wwvh_tick_snr_db', 'chu_tick_snr_db', 'bpm_tick_snr_db'
-                ])
-            logger.info(f"Created clock offset CSV: {self.clock_offset_csv}")
-        
     # ========================================================================
     # HDF5 Write Tracking & Validation (Analytics Review 2025-12-30)
     # ========================================================================
@@ -622,13 +598,6 @@ class Phase2AnalyticsService:
                 return
             
             logger.debug(f"Writing clock offset: d_clock_ms={result.d_clock_ms:.2f}ms, enable_hdf5={self.enable_hdf5_writes}, hdf5_l2_writer={self.hdf5_l2_writer is not None}")
-            # Check for daily rotation
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.clock_offset_dir / f'{file_channel}_clock_offset_{today}.csv'
-            if self.clock_offset_csv != expected_csv:
-                self.clock_offset_csv = expected_csv
-                self._init_clock_offset_csv()
             
             # Extract values from Phase2Result
             solution = result.solution if hasattr(result, 'solution') else None
@@ -693,42 +662,8 @@ class Phase2AnalyticsService:
             chu_tick_snr = ts.chu_snr_db if ts and ts.chu_snr_db is not None else 0.0
             bpm_tick_snr = ts.bpm_snr_db if ts and ts.bpm_snr_db is not None else 0.0
             
-            
-            with open(self.clock_offset_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                
-                writer.writerow([
-                    minute_boundary,                                    # system_time
-                    minute_boundary + (effective_d_clock / 1000.0),     # utc_time
-                    minute_boundary,                                    # minute_boundary_utc
-                    effective_d_clock,                                  # clock_offset_ms (converged)
-                    station,                                            # station
-                    frequency_mhz,                                      # frequency_mhz
-                    solution.t_propagation_ms if solution else 0,       # propagation_delay_ms
-                    solution.propagation_mode if solution else '',      # propagation_mode
-                    solution.n_hops if solution else 0,                 # n_hops
-                    solution.confidence if solution else 0,             # confidence
-                    effective_uncertainty,                              # uncertainty_ms (from convergence)
-                    quality_grade,                                      # quality_grade (from convergence)
-                    self.last_carrier_snr_db or 0,                      # snr_db (channel SNR)
-                    '',                                                 # delay_spread_ms
-                    '',                                                 # doppler_std_hz
-                    '',                                                 # fss_db
-                    '',                                                 # wwv_power_db
-                    '',                                                 # wwvh_power_db
-                    '',                                                 # discrimination_confidence
-                    convergence_result.is_locked,                       # utc_verified (locked = verified)
-                    (solution.dual_station_verified if solution else False),  # multi_station_verified
-                    rtp_timestamp,                                      # rtp_timestamp
-                    datetime.now(timezone.utc).timestamp(),             # processed_at
-                    wwv_tick_snr,                                       # wwv_tick_snr_db
-                    wwvh_tick_snr,                                      # wwvh_tick_snr_db
-                    chu_tick_snr,                                       # chu_tick_snr_db
-                    bpm_tick_snr                                        # bpm_tick_snr_db
-                ])
-            
             # ================================================================
-            # Write to HDF5 (L2 Timing Measurements) - Parallel with CSV
+            # Write to HDF5 (L2 Timing Measurements) - HDF5-Only Output
             # ================================================================
             if self.enable_hdf5_writes and self.hdf5_l2_writer:
                 try:
