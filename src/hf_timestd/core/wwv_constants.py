@@ -128,6 +128,26 @@ SAMPLE_RATE_LEGACY = 16000  # Hz - Legacy 16 kHz mode (deprecated)
 # STATION BROADCAST SCHEDULES
 # =============================================================================
 
+# Valid station/frequency combinations (MHz)
+# These define which stations broadcast on which frequencies
+WWV_FREQUENCIES = [2.5, 5.0, 10.0, 15.0, 20.0, 25.0]
+WWVH_FREQUENCIES = [2.5, 5.0, 10.0, 15.0]  # NOT 20/25 MHz
+CHU_FREQUENCIES = [3.33, 7.85, 14.67]
+BPM_FREQUENCIES = [2.5, 5.0, 10.0, 15.0]
+
+# Shared frequencies requiring discrimination (WWV vs WWVH vs BPM)
+SHARED_FREQUENCIES = [2.5, 5.0, 10.0, 15.0]
+
+# Station-specific frequencies (no discrimination needed)
+# Maps frequency (MHz) to station name
+STATION_SPECIFIC_FREQ = {
+    20.0: 'WWV',
+    25.0: 'WWV',
+    3.33: 'CHU',
+    7.85: 'CHU',
+    14.67: 'CHU'
+}
+
 # Minutes where only one station broadcasts 500/600 Hz tones (ground truth)
 # These provide unambiguous station identification
 WWV_ONLY_TONE_MINUTES: Set[int] = {1, 16, 17, 19}

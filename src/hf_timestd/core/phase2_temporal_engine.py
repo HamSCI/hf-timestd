@@ -1307,7 +1307,27 @@ class Phase2TemporalEngine:
             minute_number in BPM_PURE_CARRIER_MINUTES
         )
         
-        if (not is_bpm_pure_carrier and 
+        # Skip BCD discrimination on station-specific frequencies
+        # These frequencies only have one station, so discrimination is unnecessary
+        from .wwv_constants import STATION_SPECIFIC_FREQ
+        is_station_specific = self.frequency_mhz in STATION_SPECIFIC_FREQ
+        
+        if is_station_specific:
+            # Direct station labeling for station-specific frequencies
+            station_name = STATION_SPECIFIC_FREQ[self.frequency_mhz]
+            logger.debug(
+                f"Skipping BCD discrimination for {station_name}-specific "
+                f"frequency {self.frequency_mhz} MHz"
+            )
+            # Set high-confidence single-station result
+            if station_name == 'WWV':
+                result.bcd_wwv_amplitude = 1.0
+                result.bcd_wwvh_amplitude = 0.0
+            elif station_name == 'CHU':
+                result.bcd_wwv_amplitude = 0.0
+                result.bcd_wwvh_amplitude = 0.0
+            result.bcd_correlation_quality = 1.0
+        elif (not is_bpm_pure_carrier and 
             (result.bcd_wwv_amplitude is None or result.bcd_wwvh_amplitude is None)):
             try:
                 bcd_result = self.discriminator.detect_bcd_discrimination(
@@ -1825,6 +1845,29 @@ class Phase2TemporalEngine:
             if not station or station in ['BALANCED', 'UNKNOWN', 'NONE', '']:
                 station = 'WWV'
                 logger.debug(f"Station fallback to WWV")
+        
+        # Validate station/frequency combination
+        # Reject physically impossible combinations (e.g., WWVH at 20/25 MHz)
+        from .wwv_constants import WWVH_FREQUENCIES, WWV_FREQUENCIES, CHU_FREQUENCIES
+        
+        if station == 'WWVH' and self.frequency_mhz not in WWVH_FREQUENCIES:
+            logger.warning(
+                f"INVALID: Station determination chose {station} at {self.frequency_mhz} MHz, "
+                f"but WWVH only broadcasts on {WWVH_FREQUENCIES}. Rejecting and using WWV."
+            )
+            station = 'WWV'
+        elif station == 'WWV' and self.frequency_mhz not in WWV_FREQUENCIES:
+            logger.warning(
+                f"INVALID: Station determination chose {station} at {self.frequency_mhz} MHz, "
+                f"but WWV only broadcasts on {WWV_FREQUENCIES}. Rejecting."
+            )
+            station = 'UNKNOWN'
+        elif station == 'CHU' and self.frequency_mhz not in CHU_FREQUENCIES:
+            logger.warning(
+                f"INVALID: Station determination chose {station} at {self.frequency_mhz} MHz, "
+                f"but CHU only broadcasts on {CHU_FREQUENCIES}. Rejecting."
+            )
+            station = 'UNKNOWN'
         
         # Prepare channel metrics for solver
         delay_spread_ms = channel.delay_spread_ms or 0.5

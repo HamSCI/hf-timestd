@@ -1031,9 +1031,73 @@ class Phase2AnalyticsService:
                 ])
             logger.info(f"Created BCD discrimination CSV: {self.bcd_discrimination_csv}")
     
+    def _get_frequency_mhz(self) -> float:
+        """Get channel frequency in MHz."""
+        return self.frequency_hz / 1_000_000
+    
+    def _should_discriminate(self) -> bool:
+        """Check if this frequency requires BCD discrimination.
+        
+        Returns:
+            True if frequency is shared (2.5, 5, 10, 15 MHz) and requires discrimination
+            False if frequency is station-specific (20, 25, 3.33, 7.85, 14.67 MHz)
+        """
+        from .wwv_constants import SHARED_FREQUENCIES
+        freq_mhz = self._get_frequency_mhz()
+        return freq_mhz in SHARED_FREQUENCIES
+    
+    def _get_station_from_frequency(self) -> Optional[str]:
+        """Get station name from frequency for station-specific frequencies.
+        
+        Returns:
+            Station name ('WWV', 'CHU') if frequency is station-specific
+            None if frequency is shared and requires discrimination
+        """
+        from .wwv_constants import STATION_SPECIFIC_FREQ
+        freq_mhz = self._get_frequency_mhz()
+        return STATION_SPECIFIC_FREQ.get(freq_mhz)
+    
     def _write_bcd_discrimination(self, minute_boundary: int, channel_char):
-        """Write BCD discrimination results from ChannelCharacterization."""
+        """Write BCD discrimination results from ChannelCharacterization.
+        
+        For station-specific frequencies (20, 25, 3.33, 7.85, 14.67 MHz),
+        skip BCD discrimination and directly label the station.
+        """
         try:
+            # Check if this frequency requires discrimination
+            station_from_freq = self._get_station_from_frequency()
+            
+            if station_from_freq:
+                # Station-specific frequency - skip BCD discrimination
+                # Log that we're skipping discrimination for this frequency
+                freq_mhz = self._get_frequency_mhz()
+                logger.debug(
+                    f"Skipping BCD discrimination for {station_from_freq}-specific "
+                    f"frequency {freq_mhz} MHz"
+                )
+                
+                # Write to HDF5 with direct station labeling (no discrimination needed)
+                if self.enable_hdf5_writes and self.hdf5_l1b_writer:
+                    try:
+                        timestamp_utc = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
+                        
+                        # Direct station labeling from frequency
+                        l1b_measurement = {
+                            'timestamp_utc': timestamp_utc,
+                            'minute_boundary': minute_boundary,
+                            'bcd_station': station_from_freq,
+                            'bcd_confidence': 1.0,  # High confidence - frequency is station-specific
+                            'quality_flag': 'GOOD',
+                        }
+                        
+                        self.hdf5_l1b_writer.write_measurement(l1b_measurement)
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to write HDF5 L1B measurement: {e}", exc_info=True)
+                
+                return  # Skip CSV writing for station-specific frequencies
+            
+            # Shared frequency - perform normal BCD discrimination
             today = datetime.now(timezone.utc).strftime('%Y%m%d')
             file_channel = self._get_file_channel_name()
             expected_csv = self.bcd_discrimination_dir / f'{file_channel}_bcd_{today}.csv'
@@ -1088,6 +1152,17 @@ class Phase2AnalyticsService:
                     elif channel_char.bcd_wwvh_amplitude:
                         bcd_station = 'WWVH'
                         bcd_confidence = min(channel_char.bcd_correlation_quality or 0.0, 1.0)
+                    
+                    # Validate station/frequency combination
+                    from .wwv_constants import WWVH_FREQUENCIES
+                    freq_mhz = self._get_frequency_mhz()
+                    if bcd_station == 'WWVH' and freq_mhz not in WWVH_FREQUENCIES:
+                        logger.warning(
+                            f"INVALID: BCD discrimination detected {bcd_station} at {freq_mhz} MHz "
+                            f"(WWVH only broadcasts on {WWVH_FREQUENCIES}). Rejecting measurement."
+                        )
+                        bcd_station = 'UNKNOWN'
+                        bcd_confidence = 0.0
                     
                     # Determine quality flag
                     if bcd_confidence > 0.8:
