@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Broadcast Characterization - hf-timestd</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <link rel="stylesheet" href="/styles.css">
+    <style>
+        /* Broadcasts Page Specific Styles */
+        .piano-roll-container {
+            display: block;
+            background: #0f172a;
+            padding: 0;
+            border-radius: var(--radius-md);
+            overflow-x: auto;
+            height: 600px;
+        }
+
+        .lane-group-label {
+            grid-column: span 1;
+            text-align: center;
+            background: #1e293b;
+            color: #fff;
+            font-size: 10px;
+            padding: 2px 0;
+            border-radius: 2px;
+            margin-bottom: 4px;
+        }
+
+        /* Override grid for headers */
+        .header-row {
+            display: grid;
+            grid-template-columns: repeat(17, 1fr);
+            gap: 2px;
+            margin-bottom: 5px;
+        }
+
+        /* Canvas for drawing the waterfall/piano roll */
+        #matrix-canvas {
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+        }
+
+        .waterfall-section {
+            margin-top: 20px;
+            height: 400px;
+        }
+
+        /* Info Link */
+        .info-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: rgba(59, 130, 246, 0.2);
+            color: #3b82f6;
+            font-size: 11px;
+            font-weight: 700;
+            text-decoration: none;
+            margin-left: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .info-link:hover {
+            background: #3b82f6;
+            color: #fff;
+        }
+
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-content {
+            background-color: #0f172a;
+            margin: 5% auto;
+            padding: 20px;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 1200px;
+            height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 10px;
+        }
+
+        .modal-close {
+            color: #94a3b8;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: #fff;
+        }
+
+        .header-clickable {
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .header-clickable:hover {
+            background: #334155 !important;
+            border: 1px solid #64748b;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div id="timestd-navigation"></div>
+
+        <div class="page-header">
+            <h1>📡 Broadcast Characterization</h1>
+            <div class="page-header-subtitle">
+                17 Broadcasts • Presence Matrix • Propagation Stability
+            </div>
+        </div>
+
+
+
+        <!-- Controls -->
+        <section class="section">
+            <div class="controls-grid">
+                <div>
+                    <label>Date (UTC)</label>
+                    <input type="date" id="date-selector">
+                </div>
+                <div>
+                    <label>&nbsp;</label>
+                    <button class="load-btn" onclick="loadData()">🔄 Reload</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Visual 1: Presence Matrix (Piano Roll) -->
+        <section class="section">
+            <div class="section-title">🎹 Presence Matrix (24h) <a href="/docs/timing-methodology.html#presence-matrix"
+                    class="info-link" title="Understanding the Presence Matrix">?</a></div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">
+                <span style="color:#38bdf8">ℹ️ Click column headers to view detailed Signal vs. Solar Zenith
+                    graph</span>
+            </p>
+
+            <!-- Headers -->
+            <div style="display: flex; margin-bottom: 5px;">
+                <div style="width: 50px; flex-shrink: 0;"></div> <!-- Spacer for Axis -->
+                <div class="header-row" id="matrix-headers" style="flex-grow: 1; margin-bottom: 0;">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <div id="matrix-wrapper" class="piano-roll-container"
+                style="display: flex; height: 500px; overflow: hidden;">
+                <!-- Time Axis -->
+                <div style="width: 50px; flex-shrink: 0; background: #0f172a; border-right: 1px solid #1e293b;">
+                    <canvas id="axis-canvas"></canvas>
+                </div>
+                <!-- Matrix -->
+                <div style="flex-grow: 1; overflow-x: auto; overflow-y: scroll;">
+                    <canvas id="matrix-canvas"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Visual 2: Historical Waterfall -->
+        <section class="section">
+            <div class="section-title">🌊 Historical ToA Waterfall (Residuals) <a
+                    href="/docs/timing-methodology.html#toa-waterfall" class="info-link"
+                    title="Understanding the ToA Waterfall">?</a></div>
+            <p style="font-size: 12px; color: var(--text-secondary);">
+                Vertical pillars indicate stable propagation. Deviation = D_clock + Prop Error.
+            </p>
+            <div id="waterfall-plot" class="waterfall-section"></div>
+        </section>
+
+        <!-- Visual 3: Phase Path Velocity (Synthetic Doppler) -->
+        <section class="section">
+            <div class="section-title">📉 Phase Path Velocity (Synthetic Doppler) <a
+                    href="/docs/timing-methodology.html#doppler" class="info-link" title="Understanding Doppler">?</a>
+            </div>
+            <p style="font-size: 12px; color: var(--text-secondary);">
+                Derived from D_clock derivative. Peaks indicate sunrise/sunset transitions.
+            </p>
+            <div id="doppler-plot" class="waterfall-section"></div>
+        </section>
+
+        <footer class="page-footer">
+            Last updated: <span id="last-update">Never</span>
+        </footer>
+    </div>
+
+    <!-- Modal for Detailed Graph -->
+    <div id="graph-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-title" style="margin: 0; font-size: 18px;">Detailed Analysis</h2>
+                <span class="modal-close" onclick="closeModal()">&times;</span>
+            </div>
+            <div id="modal-plot" style="width: 100%; flex-grow: 1;"></div>
+        </div>
+    </div>
+
+    <script src="/components/theme-toggle.js"></script>
+    <script src="/components/navigation.js"></script>
+    <script>
+        // Global Error Handler
+        window.onerror = function (msg, url, line, col, error) {
+            const p = document.getElementById('debug-panel');
+            if (p) {
+                p.style.display = 'block';
+                p.textContent += `\n[CRITICAL ERROR] ${msg}\nLine: ${line}:${col}\n${error?.stack || ''}`;
+            }
+            return false;
+        };
+
+        window.TIMESTD_CURRENT_PAGE = 'broadcasts';
+        let CURRENT_HISTORY_DATA = {}; // Store data globally for modal access
+
+        // Broadcast Defs (Standardized to kHz integers to avoid float key issues)
+        const BROADCASTS = [
+            { name: 'WWV', freqKHz: 2500 }, { name: 'WWVH', freqKHz: 2500 }, { name: 'BPM', freqKHz: 2500 },
+            { name: 'CHU', freqKHz: 3330 },
+            { name: 'WWV', freqKHz: 5000 }, { name: 'WWVH', freqKHz: 5000 }, { name: 'BPM', freqKHz: 5000 },
+            { name: 'CHU', freqKHz: 7850 },
+            { name: 'WWV', freqKHz: 10000 }, { name: 'WWVH', freqKHz: 10000 }, { name: 'BPM', freqKHz: 10000 },
+            { name: 'CHU', freqKHz: 14670 },
+            { name: 'WWV', freqKHz: 15000 }, { name: 'WWVH', freqKHz: 15000 }, { name: 'BPM', freqKHz: 15000 },
+            { name: 'WWV', freqKHz: 20000 },
+            { name: 'WWV', freqKHz: 25000 }
+        ];
+
+        // Init Date
+        document.getElementById('date-selector').valueAsDate = new Date();
+
+        // Data Adapter: Normalizes backend keys
+        function normalizeHistory(rawHistory) {
+            const clean = {};
+            Object.keys(rawHistory).forEach(rawKey => {
+                const lane = rawHistory[rawKey];
+                if (!lane) return;
+
+                const station = (lane.station || "UNKNOWN").trim().toUpperCase();
+                const khz = lane.freqKHz || 0;
+
+                if (station === "UNKNOWN" || khz === 0) return;
+
+                const canonicalKey = `${station}_${khz}`;
+                if (!clean[canonicalKey]) {
+                    clean[canonicalKey] = { station, freqKHz: khz, data: lane.data || [] };
+                } else {
+                    // Merge data if multiple lanes map to same key (should be rare)
+                    clean[canonicalKey].data = clean[canonicalKey].data.concat(lane.data || []);
+                }
+            });
+            return clean;
+        }
+
+        async function loadData() {
+            const dateStr = document.getElementById('date-selector').value.replace(/-/g, '');
+            try {
+                const res = await fetch(`/api/v1/broadcasts/history?date=${dateStr}`);
+                const rawData = await res.json();
+                const history = normalizeHistory(rawData.history);
+                CURRENT_HISTORY_DATA = history; // Store normalized data
+
+                renderMatrix(history);
+                renderWaterfall(history);
+                renderDoppler(history);
+
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+            } catch (e) {
+                console.error(e);
+                alert('Failed to load data');
+            }
+        }
+
+        function renderMatrix(history) {
+            const canvas = document.getElementById('matrix-canvas');
+            const ctx = canvas.getContext('2d');
+            const headers = document.getElementById('matrix-headers');
+
+            // Setup Headers
+            headers.innerHTML = '';
+            headers.style.gridTemplateColumns = `repeat(${BROADCASTS.length}, 1fr)`;
+
+            BROADCASTS.forEach(b => {
+                const div = document.createElement('div');
+                div.className = 'lane-group-label header-clickable';
+                div.textContent = `${b.name} ${b.freqKHz / 1000}`; // Display as MHz
+                div.title = `Click to view Signal vs Zenith graph for ${b.name} ${b.freqKHz / 1000}MHz`;
+                div.onclick = () => openStationGraph(b.name, b.freqKHz / 1000);
+                headers.appendChild(div);
+            });
+
+            // CSS Grid uses 'gap: 2px' on the headers
+            // We need to match that.
+
+            // Re-measure container to be safe
+            const wrapper = document.getElementById('matrix-wrapper');
+            const axisCanvas = document.getElementById('axis-canvas');
+
+            // Width available for the matrix canvas
+            const width = wrapper.clientWidth - 50; // 50px for axis
+            const height = 1440; // 1 pixel per minute
+
+            // Logical size
+            canvas.width = width;
+            canvas.height = height;
+            axisCanvas.width = 50;
+            axisCanvas.height = height;
+
+            // CSS sizes
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+            axisCanvas.style.width = '50px';
+            axisCanvas.style.height = `${height}px`;
+
+            // Draw Backgrounds
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, 0, width, height);
+
+            const axisCtx = axisCanvas.getContext('2d');
+            axisCtx.fillStyle = '#0f172a';
+            axisCtx.fillRect(0, 0, 50, height);
+
+            // Draw Time Axis Labels & Grid
+            axisCtx.fillStyle = '#94a3b8';
+            axisCtx.font = '10px monospace';
+            axisCtx.textAlign = 'right';
+            axisCtx.textBaseline = 'middle';
+
+            // Draw horizontal grid lines on matrix
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1;
+
+            // 24 hours * 60 minutes = 1440
+            for (let h = 0; h < 24; h++) {
+                const y = h * 60;
+                const label = `${h.toString().padStart(2, '0')}:00`;
+
+                // Axis Label
+                axisCtx.fillText(label, 42, y);
+
+                // Grid line on matrix
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // Sync Scroll
+            const axisContainer = wrapper.children[0];
+            const matrixContainer = wrapper.children[1];
+            axisContainer.style.overflow = 'hidden';
+            matrixContainer.onscroll = () => {
+                axisContainer.scrollTop = matrixContainer.scrollTop;
+            };
+
+            const gap = 2;
+            const numLanes = BROADCASTS.length;
+            const totalGapWidth = (numLanes - 1) * gap;
+            const laneWidth = (width - totalGapWidth) / numLanes;
+
+            BROADCASTS.forEach((b, i) => {
+                const key = `${b.name}_${b.freqKHz}`;
+                const laneData = history[key];
+
+                if (!laneData || !laneData.data) return;
+
+                const x = i * (laneWidth + gap);
+
+                laneData.data.forEach(pt => {
+                    const date = new Date(pt.t * 1000);
+                    const minuteOfDay = date.getUTCHours() * 60 + date.getUTCMinutes();
+                    const snr = pt.snr;
+                    let likelihood = 0;
+                    if (snr <= 0) likelihood = 0;
+                    else if (snr >= 12) likelihood = 1.0;
+                    else likelihood = snr / 12.0;
+
+                    if (likelihood > 0) {
+                        ctx.fillStyle = getStationColor(b.name, 1.0);
+                        const barWidth = laneWidth * likelihood;
+                        const xOffset = (laneWidth - barWidth) / 2;
+                        ctx.fillRect(x + xOffset, minuteOfDay, barWidth, 1);
+                    }
+                });
+            });
+        }
+
+        async function openStationGraph(stationName, frequency) {
+            const modal = document.getElementById('graph-modal');
+            const title = document.getElementById('modal-title');
+            title.textContent = `${stationName} ${frequency} MHz - Signal Likelihood & Solar Zenith`;
+            modal.style.display = 'block';
+
+            // Show loading placeholder
+            Plotly.newPlot('modal-plot', [], { title: 'Loading data...' });
+
+            const dateStr = document.getElementById('date-selector').value.replace(/-/g, '');
+
+            // 1. Get Signal Data (using normalized kHz key)
+            // frequency in args is still float MHz likely? 
+            // openStationGraph is called by click. We need to see how it's called.
+            // It's called from 'matrix-headers'. We need to update that generation loop?
+            // Wait, we generate headers from BROADCASTS. 
+            // We should update the header generation to pass MHz for display but use kHz internally?
+            // Or just calculate KHz here.
+
+            const freqKHz = Math.round(frequency * 1000);
+            const key = `${stationName}_${freqKHz}`;
+            const laneData = CURRENT_HISTORY_DATA[key];
+
+            const signalTrace = {
+                x: [],
+                y: [],
+                mode: 'markers', // DOTS as requested
+                type: 'scatter',
+                name: 'Signal Likelihood',
+                marker: { size: 4, color: getStationColor(stationName, 1.0) },
+                yaxis: 'y1'
+            };
+
+            if (laneData && laneData.data) {
+                laneData.data.forEach(pt => {
+                    if (pt.snr > 0) {
+                        const date = new Date(pt.t * 1000);
+                        let likelihood = Math.min(1.0, pt.snr / 12.0);
+                        signalTrace.x.push(date.toISOString());
+                        signalTrace.y.push(likelihood);
+                    }
+                });
+            }
+
+            // 2. Get Solar Zenith Data
+            const elevationTrace = {
+                x: [],
+                y: [],
+                mode: 'lines',
+                type: 'scatter',
+                name: 'Solar Elevation (Midpoint)',
+                line: { color: '#f59e0b', width: 2, dash: 'dot' },
+                yaxis: 'y2'
+            };
+
+            try {
+                const res = await fetch(`/api/v1/propagation/solar-zenith?station=${stationName}&date=${dateStr}`);
+                if (res.ok) {
+                    const solarData = await res.json();
+                    solarData.series.forEach(pt => {
+                        elevationTrace.x.push(pt.time);
+                        // Convert Zenith to Elevation: Elev = 90 - Zenith
+                        elevationTrace.y.push(90 - pt.zenith);
+                    });
+                } else {
+                    console.warn("Solar zenith fetch failed:", res.status);
+                }
+            } catch (e) {
+                console.error("Solar zenith fetch failed", e);
+            }
+
+            // 3. Render Graph (Robustly, even if solar data missing)
+            const layout = {
+                paper_bgcolor: '#0f172a',
+                plot_bgcolor: '#0f172a',
+                font: { color: '#94a3b8' },
+                xaxis: {
+                    title: 'Time (UTC)',
+                    gridcolor: '#1e293b'
+                },
+                yaxis: {
+                    title: 'Signal Likelihood (0-1)',
+                    range: [0, 1.1],
+                    gridcolor: '#1e293b'
+                },
+                yaxis2: {
+                    title: 'Solar Elevation (°)',
+                    overlaying: 'y',
+                    side: 'right',
+                    range: [-90, 90],
+                    gridcolor: '#1e293b',
+                    zeroline: true,
+                    zerolinecolor: '#475569'
+                },
+                margin: { t: 50, b: 50, l: 60, r: 60 },
+                legend: { x: 0.5, y: 1.1, orientation: 'h', xanchor: 'center' },
+                hovermode: 'x unified'
+            };
+
+            // 3. Calculate "Synthetic Doppler" from d_clock derivative
+            // Formula: Doppler (Hz) = -f (Hz) * (d_clock_rate (s/s))
+            // d_clock is in ms, so rate = (delta_ms / 1000) / delta_t_sec
+            const dopplerTrace = {
+                x: [],
+                y: [],
+                mode: 'lines',
+                type: 'scatter',
+                name: 'Synthetic Doppler (Hz)',
+                line: { color: '#ef4444', width: 1, shape: 'spline', smoothing: 0.5 }, // Red
+                yaxis: 'y3',
+                visible: 'legendonly' // Hidden by default to avoid clutter
+            };
+
+            const dataPoints = [];
+
+            // Extract valid d_clock points first
+            if (laneData && laneData.data) {
+                laneData.data.forEach(pt => {
+                    if (pt.d_clock !== undefined && pt.snr > 0) {
+                        dataPoints.push({
+                            t: pt.t, // Unix timestamp (s)
+                            d: pt.d_clock // ms
+                        });
+                    }
+                });
+            }
+
+            // Calculate derivative
+            const freqHz = frequency * 1e6;
+
+            for (let i = 1; i < dataPoints.length; i++) {
+                const p1 = dataPoints[i - 1];
+                const p2 = dataPoints[i];
+
+                const dt = p2.t - p1.t; // seconds
+                if (dt > 0 && dt < 300) { // Only connect if gap < 5 mins
+                    const dd = (p2.d - p1.d) / 1000.0; // seconds
+                    const velocity = dd / dt; // s/s (dimensionless)
+                    const doppler = -1 * freqHz * velocity; // Hz
+
+                    // Midpoint time
+                    const tMid = (p1.t + p2.t) / 2;
+                    const date = new Date(tMid * 1000);
+
+                    dopplerTrace.x.push(date.toISOString());
+                    dopplerTrace.y.push(doppler);
+                }
+            }
+
+            // Add yaxis3 for Doppler
+            layout.yaxis3 = {
+                title: 'Doppler (Hz)',
+                overlaying: 'y',
+                side: 'right',
+                position: 0.95, // Offset slightly from Elevation
+                range: [-2, 2], // Typical range ±2 Hz
+                gridcolor: 'rgba(239, 68, 68, 0.2)',
+                zeroline: true,
+                zerolinecolor: 'rgba(239, 68, 68, 0.5)',
+                showgrid: false
+            };
+
+            // Add domain to make room for 3rd axis if needed, or just overlay
+            // Plotly supports multiple right axes.
+
+            Plotly.newPlot('modal-plot', [signalTrace, elevationTrace, dopplerTrace], layout, { responsive: true });
+        }
+
+        function closeModal() {
+            document.getElementById('graph-modal').style.display = 'none';
+        }
+
+        // Close on outside click
+        window.onclick = function (event) {
+            const modal = document.getElementById('graph-modal');
+            if (event.target == modal) {
+                modal.style.display = 'none';
+            }
+        }
+
+
+
+        function getStationColor(name, alpha = 1.0) {
+            if (name === 'WWV') return `rgba(56, 189, 248, ${alpha})`; // Sky blue
+            if (name === 'WWVH') return `rgba(168, 85, 247, ${alpha})`; // Purple
+            if (name === 'BPM') return `rgba(244, 63, 94, ${alpha})`;   // Red
+            if (name === 'CHU') return `rgba(252, 211, 77, ${alpha})`;   // Amber
+            return `rgba(148, 163, 184, ${alpha})`; // Gray
+        }
+
+        function renderWaterfall(history) {
+            // Separate data containers for each station to enable legend filtering
+            const traces = {
+                'WWV': { x: [], y: [], text: [], color: '#38bdf8' },
+                'WWVH': { x: [], y: [], text: [], color: '#a855f7' },
+                'BPM': { x: [], y: [], text: [], color: '#f43f5e' },
+                'CHU': { x: [], y: [], text: [], color: '#fcd34d' }
+            };
+
+            BROADCASTS.forEach(b => {
+                const key = `${b.name}_${b.freqKHz}`;
+                const laneData = history[key];
+                if (!laneData) return;
+
+                laneData.data.forEach(pt => {
+                    if (pt.d_clock) {
+                        const date = new Date(pt.t * 1000);
+                        const group = traces[b.name];
+
+                        if (group) {
+                            group.x.push(date.toISOString());
+                            group.y.push(pt.d_clock);
+                            group.text.push(`${b.name} ${b.freqKHz / 1000}MHz<br>Unc: ${pt.unc?.toFixed(1)}ms`);
+                        }
+                    }
+                });
+            });
+
+
+
+            // Convert data containers to Plotly trace objects
+            const plotlyTraces = Object.keys(traces).map(name => {
+                const t = traces[name];
+                return {
+                    x: t.x,
+                    y: t.y,
+                    mode: 'markers',
+                    type: 'scatter',
+                    name: name,
+                    text: t.text,
+                    marker: { size: 3, color: t.color },
+                    hoverinfo: 'x+y+text',
+                    showlegend: true
+                };
+            });
+
+            // Calculate x-axis boundaries based on selected date
+            const dateStr = document.getElementById('date-selector').value;
+            const selectedDate = dateStr ? new Date(dateStr) : new Date();
+            const axisStart = new Date(Date.UTC(selectedDate.getUTCFullYear(), selectedDate.getUTCMonth(), selectedDate.getUTCDate(), 0, 0, 0));
+            const axisEnd = new Date(Date.UTC(selectedDate.getUTCFullYear(), selectedDate.getUTCMonth(), selectedDate.getUTCDate(), 23, 59, 59));
+
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#94a3b8' },
+                xaxis: {
+                    title: 'Time (UTC)',
+                    gridcolor: '#334155',
+                    range: [axisStart.toISOString(), axisEnd.toISOString()],
+                    tickformat: '%H:%M'
+                },
+                yaxis: {
+                    title: 'D_clock Residual (ms)',
+                    range: [-20, 20],
+                    gridcolor: '#334155'
+                },
+                legend: {
+                    orientation: 'h',
+                    y: 1.1,
+                    x: 0.5,
+                    xanchor: 'center'
+                },
+                margin: { t: 40, b: 40, l: 60, r: 20 }
+            };
+
+            Plotly.newPlot('waterfall-plot', plotlyTraces, layout, { responsive: true });
+        }
+
+        function renderDoppler(history) {
+            const traces = [];
+
+            // Helper: Linear Regression with Velocity Limit
+            function calculateRobustSlope(points) {
+                try {
+                    const n = points.length;
+                    if (n < 5) return 0;
+
+                    // Theil-Sen Estimator: Median of slopes
+                    const slopes = [];
+                    // Relaxed DT to handle small jitter, but avoid 0 division
+                    const MIN_DT = 1.0;
+
+                    for (let i = 0; i < n; i++) {
+                        // Optimization: Limit 'j' horizon to avoid checking pairs too far apart? 
+                        // Actually, far apart pairs are GOOD for slope.
+                        // But limit total pairs for performance if N is huge (N=30 is fine).
+                        for (let j = i + 1; j < n; j++) {
+                            const dt = points[j].t - points[i].t;
+                            if (Math.abs(dt) > MIN_DT) {
+                                const slope = (points[j].d - points[i].d) / dt;
+                                if (Number.isFinite(slope)) {
+                                    slopes.push(slope);
+                                }
+                            }
+                        }
+                    }
+
+                    if (slopes.length === 0) return 0;
+
+                    slopes.sort((a, b) => a - b);
+                    const mid = Math.floor(slopes.length / 2);
+
+                    if (slopes.length % 2 !== 0) {
+                        return slopes[mid];
+                    } else {
+                        return (slopes[mid - 1] + slopes[mid]) / 2.0;
+                    }
+                } catch (e) {
+                    console.error("Theil-Sen error:", e);
+                    return 0;
+                }
+            }
+
+            BROADCASTS.forEach(b => {
+                const key = `${b.name}_${b.freqKHz}`;
+                const laneData = history[key];
+
+                if (!laneData || !laneData.data) return;
+
+                const freqHz = b.freqKHz * 1000;
+                const rawPoints = [];
+
+                // Filter valid points
+                laneData.data.forEach(pt => {
+                    if (pt.d_clock !== undefined && pt.snr > 0 && Math.abs(pt.d_clock) < 100) {
+                        rawPoints.push({ t: pt.t, d: pt.d_clock });
+                    }
+                });
+
+                if (rawPoints.length < 10) return;
+
+                const x = [];
+                const y = [];
+
+                // Sliding window
+                const WINDOW_SIZE_MINS = 30; // 30 min window
+                const windowSecs = WINDOW_SIZE_MINS * 60;
+
+                // Step size for graph (every 1 min)
+                const stepIdx = 1;
+
+                for (let i = 0; i < rawPoints.length; i += stepIdx) {
+                    const centerPt = rawPoints[i];
+
+                    // define window
+                    const tStart = centerPt.t - windowSecs / 2;
+                    const tEnd = centerPt.t + windowSecs / 2;
+
+                    const windowPts = [];
+                    for (let j = 0; j < rawPoints.length; j++) {
+                        // Optimization: search locally
+                        const p = rawPoints[j];
+                        if (p.t >= tStart && p.t <= tEnd) {
+                            windowPts.push(p);
+                        }
+                    }
+
+                    if (windowPts.length > 10) {
+                        const slope = calculateRobustSlope(windowPts);
+                        const doppler = -1 * freqHz * (slope * 1e-3); // slope in ms/s, convert to s/s
+
+                        // Hard clamp to +/- 2 Hz (typical range is < 1 Hz)
+                        if (Math.abs(doppler) < 2.0) {
+                            x.push(new Date(centerPt.t * 1000).toISOString());
+                            y.push(doppler);
+                        }
+                    }
+                }
+
+                if (x.length > 0) {
+                    traces.push({
+                        x: x,
+                        y: y,
+                        mode: 'lines',
+                        type: 'scatter',
+                        name: `${b.name} ${b.freqKHz / 1000} (Group)`,
+                        line: { width: 2, shape: 'spline', smoothing: 1.3, color: getStationColor(b.name, 0.9) },
+                        // visible: 'legendonly', // Show D_clock derivative by default if available? Or keep existing behavior?
+                        // If I change the name, I might reset user prefs slightly.
+                        visible: 'legendonly',
+                        hoverinfo: 'x+y+name'
+                    });
+                }
+
+                // Trace 2: Measured Carrier Doppler (Phase)
+                const xTone = [];
+                const yTone = [];
+                laneData.data.forEach(pt => {
+                    // Use Carrier Doppler (Hz) if available. It is the true phase velocity.
+                    // Tone doppler (modulation) is orders of magnitude smaller.
+                    const val = pt.carrier_doppler_hz;
+                    if (val && Math.abs(val) < 5.0) {
+                        xTone.push(new Date(pt.t * 1000).toISOString());
+                        yTone.push(val);
+                    }
+                });
+
+                if (xTone.length > 0) {
+                    traces.push({
+                        x: xTone,
+                        y: yTone,
+                        mode: 'markers',
+                        type: 'scatter',
+                        name: `${b.name} ${b.freqKHz / 1000} (Carrier)`,
+                        marker: { size: 3, opacity: 0.5, color: getStationColor(b.name, 0.4), symbol: 'circle' },
+                        visible: 'legendonly',
+                        hoverinfo: 'x+y+name'
+                    });
+                }
+            });
+
+            // Calculate x-axis boundaries based on selected date
+            const dateStr = document.getElementById('date-selector').value;
+            const selectedDate = dateStr ? new Date(dateStr) : new Date();
+            const axisStart = new Date(Date.UTC(selectedDate.getUTCFullYear(), selectedDate.getUTCMonth(), selectedDate.getUTCDate(), 0, 0, 0));
+            const axisEnd = new Date(Date.UTC(selectedDate.getUTCFullYear(), selectedDate.getUTCMonth(), selectedDate.getUTCDate(), 23, 59, 59));
+
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#94a3b8' },
+                xaxis: {
+                    title: 'Time (UTC)',
+                    gridcolor: '#334155',
+                    range: [axisStart.toISOString(), axisEnd.toISOString()],
+                    tickformat: '%H:%M'
+                },
+                yaxis: {
+                    title: 'Doppler Shift (Hz)',
+                    range: [-1.5, 1.5], // Zoom in to relevant range
+                    gridcolor: '#334155'
+                },
+                legend: {
+                    orientation: 'h',
+                    y: -0.2, // Move to bottom to avoid overlap
+                    x: 0.5,
+                    xanchor: 'center'
+                },
+                margin: { t: 40, b: 60, l: 60, r: 20 },
+                hovermode: 'x unified'
+            };
+
+            Plotly.newPlot('doppler-plot', traces, layout, { responsive: true });
+        }
+
+        loadData();
+    </script>
+</body>
+
+</html>

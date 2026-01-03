@@ -1,0 +1,8 @@
+# Ignore database files
+*.db
+*.sqlite
+*.sqlite3
+
+# But allow JSON files (our database)
+*.json
+

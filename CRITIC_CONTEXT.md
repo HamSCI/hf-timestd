@@ -496,14 +496,153 @@ tail -50 /var/log/hf-timestd/core-recorder.log | grep "Lost packet"
 
 ---
 
-## Objectives for Next Session: Data Model Inventory & Web UI Design
+## ✅ SESSION COMPLETE (2026-01-03 23:00 UTC): PROPAGATION PAGE ENHANCEMENTS & HDF5 PIPELINE FIX
+
+**Status:** 🟢 **RESOLVED** - Web-api propagation page enhanced, science aggregator HDF5 integration fixed
+
+**Author:** AI Agent (Cascade)
+**Date:** 2026-01-03 23:00 UTC
+
+### Summary
+
+Enhanced the ionospheric/propagation page with improved TEC display capabilities. Fixed critical issue where science aggregator service was running old code that couldn't read HDF5 timing measurement files, resulting in zero TEC calculations. Service restart resolved the issue, and TEC aggregation is now operational.
+
+### Changes Implemented
+
+**1. Enhanced TEC Display (web-api/static/propagation.html)**
+- Added 4 time range options (6h, 24h, 3d, 7d) with 7d as default
+- Enhanced quality summary with detailed per-path metrics
+- Added per-station breakdown cards showing:
+  - Total measurements, mean TEC with range
+  - Quality indicators (color-coded)
+  - Timing uncertainty metrics
+  - Frequency usage distribution
+- Improved explanatory text emphasizing pairwise TEC from multi-frequency dispersion
+
+**2. Fixed Import Error (src/hf_timestd/core/wwv_test_signal.py)**
+- Added missing `List` type import causing NameError on service startup
+
+**3. Fixed Science Aggregator HDF5 Integration**
+- **Root Cause:** Service running old code from before HDF5 support was added (started Jan 2 21:15 UTC, code updated Jan 3 11:58 UTC)
+- **Solution:** Restarted `timestd-science-aggregator.service`
+- **Result:** Now successfully reading HDF5 timing measurements, producing 24 TEC calculations per cycle
+
+**4. Removed Test Signal Section (Temporarily)**
+- Deferred until HDF5 storage implementation complete (currently using CSV)
+- Backend endpoints preserved for future use
+
+### Current System State (23:00 UTC)
+
+```
+Science Aggregator: ✅ Operational (reading HDF5, writing TEC)
+                       Collecting: 529 measurements/hour from all channels
+                       TEC Output: 24 calculations/cycle
+                       Propagation Stats: 14 records/hour
+                       
+TEC Values:         ⚠️  All ~0.00 TECU with BAD/MARGINAL quality
+                       Multi-frequency data: ✅ Available (78.7% have 2+ freqs)
+                       Grouping: ✅ Working (12 station/minute pairs)
+                       Calculation: ⚠️  Producing near-zero results
+                       
+Web UI:             ✅ Displaying fresh data from today
+                       Default view: 7 days (shows available historical data)
+                       TEC display: Enhanced with detailed breakdowns
+```
+
+### Known Issue: TEC Calculations Producing Zero Values
+
+**Observation:** All TEC calculations are ~0.00 TECU with BAD quality and low confidence (0.00-0.10).
+
+**Data Pipeline Status:**
+- ✅ HDF5 timing measurements exist (35MB/day)
+- ✅ Multi-frequency data available (2.5, 5, 10, 15, 20, 25 MHz)
+- ✅ 78.7% of measurements have 2+ frequencies (sufficient for TEC)
+- ✅ Science aggregator grouping correctly
+- ⚠️ TEC estimator producing zero/near-zero results
+
+**Possible Root Causes:**
+1. **Clock offset values lack ionospheric dispersion signal**
+   - After calibration convergence, `d_clock_ms` may be similar across frequencies
+   - If propagation delays are also similar, no frequency-dependent variation exists
+   - TEC solver requires differential delay to calculate dispersion
+
+2. **Nighttime ionosphere (low TEC period)**
+   - Session occurred 22:00-23:00 UTC
+   - Ionosphere may have genuinely low TEC during nighttime
+   - Expected TEC range: 2-50 TECU (daytime), 0-10 TECU (nighttime)
+
+3. **TEC estimator algorithm issues**
+   - Linear regression may be failing with near-identical ToA values
+   - Insufficient frequency separation (need wider spread?)
+   - Calibration removing the dispersion signal we need to measure
+
+4. **Propagation delay modeling**
+   - If propagation delays are calculated identically for all frequencies
+   - No frequency-dependent component in the delay model
+   - TEC calculation requires f⁻² dispersion to be present
+
+### Next Session Objectives: Debug TEC Calculation Algorithm
+
+**Primary Goal:** Determine why TEC calculations are producing zero values despite having valid multi-frequency data.
+
+**Investigation Plan:**
+
+1. **Examine Raw Clock Offset Data**
+   - Read timing measurements from HDF5 for a sample minute
+   - Check if `clock_offset_ms` values vary with frequency
+   - Calculate differential delays manually: Δt = t(2.5MHz) - t(10MHz)
+   - Expected: Lower frequencies should have higher delays (ionospheric dispersion)
+
+2. **Trace TEC Estimator Execution**
+   - Add debug logging to `tec_estimator.py`
+   - Examine input measurements to `estimate_tec()`
+   - Check frequency array and ToA array going into linear regression
+   - Verify if `ss_tot ≈ 0` (causing NaN) or if fit is genuinely flat
+
+3. **Review Propagation Delay Calculation**
+   - Check how `propagation_delay_ms` is calculated in timing measurements
+   - Verify if it includes frequency-dependent ionospheric component
+   - Confirm 1/f² dispersion physics is applied correctly
+   - Compare with transmission_time_solver.py implementation
+
+4. **Validate Against Expected Physics**
+   - Calculate expected TEC from propagation delays
+   - Formula: `TEC = (Δt × f₁² × f₂²) / (40.3 × (f₂² - f₁²))`
+   - Compare with TEC estimator output
+   - Check if calibration is removing the signal
+
+5. **Test with Synthetic Data**
+   - Create test measurements with known TEC (e.g., 20 TECU)
+   - Run through TEC estimator
+   - Verify algorithm produces correct result
+   - Identify where real data differs from synthetic
+
+**Key Files to Review:**
+- `src/hf_timestd/core/tec_estimator.py` - Core TEC calculation
+- `src/hf_timestd/core/science_aggregator.py` - Data grouping and aggregation
+- `src/hf_timestd/core/transmission_time_solver.py` - Propagation delay modeling
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - Clock offset measurements
+- `/var/lib/timestd/phase2/SHARED_*/SHARED_*_timing_measurements_20260103.h5` - Raw data
+
+**Success Criteria:**
+1. Identify root cause of zero TEC values
+2. Determine if issue is in data, algorithm, or physics implementation
+3. Implement fix or document expected behavior
+4. Verify TEC calculations produce reasonable values (2-50 TECU range)
+
+**Documentation:**
+- See `docs/changes/SESSION_2026_01_03_PROPAGATION_PAGE_ENHANCEMENTS.md` for detailed session notes
+
+---
+
+## Objectives for Next Session: TEC Calculation Debugging
 
 **Primary Goals:**
-1. **Station Information Inventory:** Catalog all time signal stations (WWV, WWVH, CHU, BPM) with complete metadata
-2. **Metrology Products Inventory:** Document all timing/frequency measurement products and their schemas
-3. **Space Weather Products Inventory:** Document ionospheric and propagation-related data products
-4. **Data Model Review:** Assess current data organization, storage, and access patterns
-5. **Web UI Design:** Plan intuitive interface to expose data products for scientific analysis
+1. **Diagnose Zero TEC Values:** Determine why TEC estimator produces ~0.00 TECU despite valid multi-frequency data
+2. **Validate Data Pipeline:** Confirm clock offset measurements contain ionospheric dispersion signal
+3. **Review Algorithm:** Verify TEC estimator correctly extracts frequency-dependent delays
+4. **Fix or Document:** Implement solution or document expected behavior if nighttime ionosphere
+5. **Test and Validate:** Confirm TEC calculations produce physically reasonable values
 
 ### Station Information to Inventory
 

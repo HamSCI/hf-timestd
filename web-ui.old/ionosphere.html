@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ionosphere & Propagation - hf-timestd</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script>
+        window.TIMESTD_CURRENT_PAGE = 'ionosphere';
+    </script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0a0e27;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        .page-header {
+            background: linear-gradient(135deg, #4338ca 0%, #312e81 100%);
+            padding: 20px 30px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .page-header h1 {
+            margin: 0 0 5px 0;
+            font-size: 28px;
+            color: #fff;
+        }
+
+        .page-header-subtitle {
+            color: #a5b4fc;
+            font-size: 14px;
+        }
+
+        .grid-container {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+        }
+
+        @media (min-width: 1000px) {
+            .grid-container {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 400px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-box {
+            background: #0f172a;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #3b82f6;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #94a3b8;
+            margin-top: 5px;
+        }
+
+        /* Navigation (Temporary until consolidated) */
+        .nav-bar {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            background: #1e293b;
+            padding: 10px 20px;
+            border-radius: 8px;
+        }
+
+        .nav-link {
+            color: #94a3b8;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .nav-link:hover {
+            color: #fff;
+        }
+
+        .nav-link.active {
+            color: #3b82f6;
+            border-bottom: 2px solid #3b82f6;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="nav-bar">
+        <a href="/summary.html" class="nav-link">System</a>
+        <a href="/timing.html" class="nav-link">Timing</a>
+        <a href="/ionosphere.html" class="nav-link active">Ionosphere</a>
+        <a href="/metrology.html" class="nav-link">Metrology</a>
+        <a href="/logs.html" class="nav-link">Logs</a>
+    </div>
+
+    <div class="page-header">
+        <h1>Ionosphere Science Dashboard</h1>
+        <div class="page-header-subtitle">
+            Advanced propagation analysis, WWV/WWVH discrimination, and layer height inference
+        </div>
+    </div>
+
+    <div class="grid-container">
+        <!-- Card 1: WWV/WWVH Discrimination -->
+        <div class="card" style="grid-column: 1 / -1; min-height: 500px;">
+            <div class="card-header">
+                <div class="card-title">WWV vs WWVH Discrimination</div>
+                <div>
+                    <select id="discrim-hours" onchange="loadDiscrimination()"
+                        style="background: #0f172a; color: white; border: 1px solid #475569; padding: 5px;">
+                        <option value="24">Last 24 Hours</option>
+                        <option value="48">Last 48 Hours</option>
+                        <option value="168">Last 7 Days</option>
+                    </select>
+                </div>
+            </div>
+            <div id="discrim-chart" style="width: 100%; height: 400px;"></div>
+            <div class="stat-grid" id="discrim-stats">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+
+        <!-- Card 2: Propagation Residuals -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Propagation Residuals</div>
+                <select id="resid-station" onchange="loadResiduals()"
+                    style="background: #0f172a; color: white; border: 1px solid #475569; padding: 5px;">
+                    <option value="WWV">WWV</option>
+                    <option value="WWVH">WWVH</option>
+                    <option value="CHU">CHU</option>
+                </select>
+            </div>
+            <div id="resid-chart" style="width: 100%; height: 350px;"></div>
+            <div style="font-size: 12px; color: #94a3b8; margin-top: 10px;">
+                Positive residual = Layer higher/slower than IRI model<br>
+                Negative residual = Layer lower/faster than IRI model
+            </div>
+        </div>
+
+        <!-- Card 3: Inferred Heights -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Inferred Layer Heights</div>
+            </div>
+            <div id="heights-chart" style="width: 100%; height: 350px;"></div>
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="stat-value" id="f2-height">-- km</div>
+                    <div class="stat-label">Inferred F2 Height</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="iri-dev">-- %</div>
+                    <div class="stat-label">Deviation from IRI</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- WWV/WWVH Discrimination ---
+        async function loadDiscrimination() {
+            const hours = document.getElementById('discrim-hours').value;
+            try {
+                const response = await fetch(`/api/v2/ionosphere/wwv-wwvh-discrimination?hours=${hours}`);
+                const data = await response.json();
+
+                const traces = [];
+                const freqs = [15, 10, 5, 2.5]; // Order for Y axis
+
+                // Color palette
+                const cWWV = '#3b82f6';
+                const cWWVH = '#f43f5e';
+                const cMixed = '#a855f7';
+
+                // Prepare stats
+                let statsHtml = '';
+
+                freqs.forEach(freq => {
+                    const fData = data.frequencies.find(f => f.frequency_mhz === freq);
+                    if (!fData) return;
+
+                    statsHtml += `
+                        <div class="stat-box">
+                            <div class="stat-label">${freq} MHz Dominance</div>
+                            <div style="font-size: 14px; margin-top:5px; color:${cWWV}">WWV: ${fData.wwv_pct}%</div>
+                            <div style="font-size: 14px; color:${cWWVH}">WWVH: ${fData.wwvh_pct}%</div>
+                        </div>
+                    `;
+
+                    // Create bar trace for this frequency
+                    // Since Plotly doesn't do "gantt" easily, we'll use a stacked bar chart time series per frequency?
+                    // Or simpler: Just percentages for now?
+                    // User wants "distinguish WWV from WWVH". 
+                    // Let's do a time series of "Dominance Score" (-1 for WWVH, +1 for WWV)
+
+                    if (fData.timeline && fData.timeline.length > 0) {
+                        const x = fData.timeline.map(t => t.timestamp.replace('Z', '').replace('T', ' '));
+                        const y = fData.timeline.map(t => {
+                            // Score: WWV% - WWVH% (Range -100 to +100)
+                            return t.wwv_pct - t.wwvh_pct;
+                        });
+
+                        traces.push({
+                            x: x,
+                            y: y,
+                            name: `${freq} MHz`,
+                            type: 'scatter',
+                            mode: 'lines',
+                            fill: 'tozeroy'
+                        });
+                    }
+                });
+
+                document.getElementById('discrim-stats').innerHTML = statsHtml;
+
+                Plotly.newPlot('discrim-chart', traces, {
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    font: { color: '#e0e0e0' },
+                    xaxis: { title: 'Time (UTC)' },
+                    yaxis: {
+                        title: 'Dominance',
+                        tickvals: [-100, 0, 100],
+                        ticktext: ['WWVH', 'Mixed', 'WWV'],
+                        range: [-110, 110]
+                    },
+                    margin: { t: 30, b: 40, l: 60, r: 20 },
+                    showlegend: true
+                });
+
+            } catch (err) {
+                console.error("Error loading discrimination:", err);
+            }
+        }
+
+        // --- Propagation Residuals ---
+        async function loadResiduals() {
+            const station = document.getElementById('resid-station').value;
+            // Default 10MHz for now, or detect available
+            const freq = 10;
+
+            try {
+                const response = await fetch(`/api/v2/ionosphere/propagation-residuals?station=${station}&freq_mhz=${freq}&hours=24`);
+                const data = await response.json();
+
+                const stats = data.stats;
+                const timeline = data.timeline;
+
+                if (!timeline || timeline.length === 0) {
+                    Plotly.newPlot('resid-chart', [], {
+                        title: 'No Data for ' + station + ' ' + freq + ' MHz',
+                        font: { color: '#fff' },
+                        paper_bgcolor: 'rgba(0,0,0,0)',
+                        plot_bgcolor: 'rgba(0,0,0,0)',
+                        xaxis: { showgrid: false },
+                        yaxis: { showgrid: false }
+                    });
+                    return;
+                }
+
+                const trace = {
+                    x: timeline.map(t => t.timestamp),
+                    y: timeline.map(t => t.clock_offset_ms), // Using raw offset as proxy for now
+                    mode: 'markers',
+                    type: 'scatter',
+                    marker: { size: 4, color: '#10b981' },
+                    name: 'Offset'
+                };
+
+                Plotly.newPlot('resid-chart', [trace], {
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    font: { color: '#e0e0e0' },
+                    xaxis: { title: 'Time (UTC)' },
+                    yaxis: { title: 'Virtual Height Proxy (ms)' },
+                    margin: { t: 30, b: 40, l: 60, r: 20 }
+                });
+
+            } catch (err) {
+                console.error("Error loading residuals:", err);
+            }
+        }
+
+        // Init
+        loadDiscrimination();
+        loadResiduals();
+
+        // Auto refresh
+        setInterval(() => {
+            loadDiscrimination();
+            loadResiduals();
+        }, 60000);
+
+    </script>
+</body>
+
+</html>

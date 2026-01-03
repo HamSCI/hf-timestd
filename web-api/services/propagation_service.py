@@ -49,6 +49,12 @@ class PropagationService:
         self.science_dir = self.phase2_dir / 'science'
         self.tec_dir = self.science_dir / 'tec'
         self.prop_stats_dir = self.science_dir / 'propagation_stats'
+        
+        # Channel directories for test signal data
+        self.channel_dirs = [
+            'SHARED_2500', 'SHARED_5000', 'SHARED_10000', 'SHARED_15000',
+            'WWV_20000', 'WWV_25000'
+        ]
     
     def _is_valid_broadcast(self, station: str, frequency_mhz: float) -> bool:
         """
@@ -371,4 +377,156 @@ class PropagationService:
             
         except Exception as e:
             logger.error(f"Error getting TEC summary: {e}")
+            return None
+    
+    def get_test_signal_summary(
+        self,
+        start: datetime,
+        end: datetime
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get WWV/WWVH test signal analysis data.
+        
+        Returns test signal detections and ionospheric metrics from minutes 8 (WWV)
+        and 44 (WWVH) with per-frequency field strength, scintillation, and anomalies.
+        
+        Args:
+            start: Start time
+            end: End time
+        
+        Returns:
+            Test signal measurements organized by channel/frequency
+        """
+        try:
+            import csv
+            from collections import defaultdict
+            
+            all_measurements = []
+            
+            # Read test signal CSV files from each channel directory
+            for channel_name in self.channel_dirs:
+                channel_dir = self.phase2_dir / channel_name / 'test_signal'
+                
+                if not channel_dir.exists():
+                    continue
+                
+                # Find CSV files in date range
+                csv_files = sorted(channel_dir.glob('*_test_signal_*.csv'))
+                
+                for csv_file in csv_files:
+                    try:
+                        with open(csv_file, 'r') as f:
+                            reader = csv.DictReader(f)
+                            for row in reader:
+                                # Parse timestamp
+                                timestamp_str = row.get('timestamp_utc', '')
+                                if not timestamp_str:
+                                    continue
+                                
+                                try:
+                                    ts = datetime.fromisoformat(timestamp_str.replace('Z', ''))
+                                except:
+                                    continue
+                                
+                                # Filter by time range
+                                if ts < start or ts > end:
+                                    continue
+                                
+                                # Parse fields
+                                detected = int(row.get('detected', 0)) == 1
+                                if not detected:
+                                    continue
+                                
+                                minute_num = int(row.get('minute_number', 0))
+                                station = row.get('station', '')
+                                
+                                # Extract frequency from channel name
+                                freq_mhz = None
+                                if 'SHARED' in channel_name:
+                                    freq_str = channel_name.replace('SHARED_', '')
+                                    freq_mhz = float(freq_str) / 1000.0
+                                elif 'WWV' in channel_name:
+                                    freq_str = channel_name.replace('WWV_', '')
+                                    freq_mhz = float(freq_str) / 1000.0
+                                
+                                measurement = {
+                                    'timestamp_utc': timestamp_str,
+                                    'minute_boundary': int(row.get('minute_boundary', 0)),
+                                    'minute_number': minute_num,
+                                    'station': station,
+                                    'frequency_mhz': freq_mhz,
+                                    'channel': channel_name,
+                                    'detected': detected,
+                                    'confidence': float(row.get('confidence', 0)) if row.get('confidence') else None,
+                                    'multitone_score': float(row.get('multitone_score', 0)) if row.get('multitone_score') else None,
+                                    'chirp_score': float(row.get('chirp_score', 0)) if row.get('chirp_score') else None,
+                                    'snr_db': float(row.get('snr_db', 0)) if row.get('snr_db') else None,
+                                    'frequency_selectivity_db': float(row.get('frequency_selectivity_db', 0)) if row.get('frequency_selectivity_db') else None,
+                                    'delay_spread_ms': float(row.get('delay_spread_ms', 0)) if row.get('delay_spread_ms') else None,
+                                    'toa_offset_ms': float(row.get('toa_offset_ms', 0)) if row.get('toa_offset_ms') else None,
+                                    'coherence_time_sec': float(row.get('coherence_time_sec', 0)) if row.get('coherence_time_sec') else None
+                                }
+                                
+                                all_measurements.append(measurement)
+                    
+                    except Exception as e:
+                        logger.debug(f"Could not read {csv_file}: {e}")
+                        continue
+            
+            if not all_measurements:
+                return None
+            
+            # Sort by timestamp
+            all_measurements.sort(key=lambda m: m['timestamp_utc'])
+            
+            # Organize by station and frequency
+            by_station = defaultdict(lambda: {
+                'timestamps': [],
+                'frequencies': [],
+                'snr_db': [],
+                'confidence': [],
+                'delay_spread_ms': [],
+                'coherence_time_sec': [],
+                'frequency_selectivity_db': [],
+                'count': 0
+            })
+            
+            for m in all_measurements:
+                station = m['station']
+                by_station[station]['timestamps'].append(m['timestamp_utc'])
+                by_station[station]['frequencies'].append(m['frequency_mhz'])
+                by_station[station]['snr_db'].append(m['snr_db'])
+                by_station[station]['confidence'].append(m['confidence'])
+                by_station[station]['delay_spread_ms'].append(m['delay_spread_ms'])
+                by_station[station]['coherence_time_sec'].append(m['coherence_time_sec'])
+                by_station[station]['frequency_selectivity_db'].append(m['frequency_selectivity_db'])
+                by_station[station]['count'] += 1
+            
+            # Calculate statistics per station
+            for station, data in by_station.items():
+                # Average SNR
+                valid_snr = [s for s in data['snr_db'] if s is not None]
+                data['mean_snr_db'] = sum(valid_snr) / len(valid_snr) if valid_snr else None
+                
+                # Average confidence
+                valid_conf = [c for c in data['confidence'] if c is not None]
+                data['mean_confidence'] = sum(valid_conf) / len(valid_conf) if valid_conf else None
+                
+                # Average delay spread
+                valid_delay = [d for d in data['delay_spread_ms'] if d is not None]
+                data['mean_delay_spread_ms'] = sum(valid_delay) / len(valid_delay) if valid_delay else None
+            
+            return {
+                'measurements': all_measurements,
+                'by_station': dict(by_station),
+                'total_detections': len(all_measurements),
+                'stations': list(by_station.keys()),
+                'time_range': {
+                    'start': start.isoformat() + 'Z',
+                    'end': end.isoformat() + 'Z'
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting test signal summary: {e}")
             return None

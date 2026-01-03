@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>hf-timestd - System Summary</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script>
+    // Set current page for navigation
+    window.TIMESTD_CURRENT_PAGE = 'summary';
+  </script>
+  <style>
+    /* Page-specific overrides for Summary page */
+
+    /* Sections */
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
+      border-radius: var(--radius-lg);
+      padding: var(--spacing-lg);
+      margin-bottom: var(--spacing-lg);
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: var(--spacing-md);
+      color: var(--accent-light);
+      border-bottom: 1px solid var(--surface-border);
+      padding-bottom: var(--spacing-sm);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    /* Station Info */
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: var(--spacing-md);
+    }
+
+    .info-item {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .info-label {
+      font-size: 11px;
+      color: var(--accent-light);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: var(--spacing-xs);
+    }
+
+    .info-value {
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .mode-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .mode-test {
+      background: var(--warning);
+      color: white;
+    }
+
+    .mode-production {
+      background: var(--success);
+      color: white;
+    }
+
+    /* Process Status */
+    .process-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-md);
+    }
+
+    .process-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: var(--spacing-md);
+      background: rgba(15, 23, 42, 0.4);
+      border-radius: var(--radius-md);
+      border: 1px solid var(--surface-border);
+    }
+
+    .process-name {
+      font-weight: 600;
+      font-size: 15px;
+      color: var(--text-primary);
+    }
+
+    .process-status {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      color: var(--text-secondary);
+    }
+
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .status-running {
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    .status-stopped {
+      background: var(--error);
+    }
+
+    .status-stale {
+      background: var(--warning);
+    }
+
+    /* Continuity */
+    .continuity-info {
+      margin-bottom: var(--spacing-md);
+    }
+
+    .continuity-stat {
+      margin-bottom: var(--spacing-sm);
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+
+    .continuity-label {
+      font-weight: 600;
+      color: var(--accent-light);
+    }
+
+    .gap-list {
+      margin-top: var(--spacing-md);
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .gap-item {
+      padding: var(--spacing-sm) var(--spacing-md);
+      background: var(--warning-light);
+      border-left: 3px solid var(--warning);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      margin-bottom: var(--spacing-sm);
+      font-size: 13px;
+      color: var(--text-primary);
+    }
+
+    /* Storage */
+    .storage-bar-container {
+      width: 100%;
+      height: 30px;
+      background: rgba(15, 23, 42, 0.6);
+      border-radius: 15px;
+      overflow: hidden;
+      margin: var(--spacing-md) 0;
+      border: 1px solid var(--surface-border);
+    }
+
+    .storage-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--success), var(--warning));
+      transition: width 0.5s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .storage-bar.critical {
+      background: linear-gradient(90deg, var(--error), #c0392b);
+    }
+
+    /* Channel Status Table - Transposed */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    thead th {
+      background: rgba(139, 92, 246, 0.3);
+      color: var(--text-primary);
+      padding: 12px 8px;
+      text-align: center;
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    tbody th {
+      background: rgba(15, 23, 42, 0.4);
+      color: var(--accent-light);
+      padding: 12px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid var(--surface-border);
+    }
+
+    td {
+      padding: 10px 8px;
+      font-size: 13px;
+      text-align: center;
+      color: var(--text-primary);
+    }
+
+    .timing-badge {
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .timing-tone {
+      background: var(--success-light);
+      color: var(--success);
+    }
+
+    .timing-ntp {
+      background: var(--warning-light);
+      color: var(--warning);
+    }
+
+    .timing-wall {
+      background: var(--error);
+      color: white;
+    }
+
+    .listen-button {
+      padding: 6px 12px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: all var(--transition-fast);
+    }
+
+    .listen-button:hover {
+      background: #6366f1;
+      transform: translateY(-1px);
+    }
+
+    .listen-button:active {
+      transform: scale(0.95);
+    }
+
+    .listen-button.playing {
+      background: var(--success);
+      animation: pulse 1.5s infinite;
+      box-shadow: 0 0 12px var(--success);
+    }
+
+    .listen-button.loading {
+      background: var(--warning);
+      cursor: wait;
+    }
+
+    .listen-button.error {
+      background: var(--error);
+    }
+
+    @keyframes pulse {
+      0% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.7;
+      }
+
+      100% {
+        opacity: 1;
+      }
+    }
+
+    /* Audio Player Panel */
+    .audio-player-panel {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: var(--surface);
+      border: 1px solid var(--accent);
+      color: var(--text-primary);
+      padding: var(--spacing-md) var(--spacing-lg);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-lg);
+      z-index: 1000;
+      display: none;
+      min-width: 280px;
+      backdrop-filter: blur(8px);
+    }
+
+    .audio-player-panel.visible {
+      display: block;
+    }
+
+    .audio-player-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .audio-player-title {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .audio-player-close {
+      background: none;
+      border: none;
+      color: #bdc3c7;
+      cursor: pointer;
+      font-size: 18px;
+      padding: 0 5px;
+    }
+
+    .audio-player-close:hover {
+      color: var(--text-primary);
+    }
+
+    .audio-player-status {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-bottom: var(--spacing-sm);
+    }
+
+    .audio-player-controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .audio-player-controls button {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .audio-stop-btn {
+      background: var(--error);
+      color: white;
+    }
+
+    .audio-stop-btn:hover {
+      background: #dc2626;
+    }
+
+    .volume-slider {
+      width: 100px;
+      accent-color: var(--accent);
+    }
+
+    /* Footer */
+    .update-info {
+      text-align: center;
+      padding: var(--spacing-md);
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    /* Loading & Error States - use shared styles */
+    h4 {
+      color: var(--accent-light);
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <!-- Unified Navigation -->
+    <div id="timestd-navigation"></div>
+
+    <!-- Station Information -->
+    <div id="stationInfo"></div>
+
+    <div id="content">
+      <div class="loading">Loading...</div>
+    </div>
+
+    <div class="update-info" id="update-info">
+      Last updated: <span id="last-update">Never</span> |
+      Auto-refresh: <span id="refresh-interval">5s</span>
+    </div>
+  </div>
+
+  <!-- Audio Player Panel -->
+  <div id="audio-player" class="audio-player-panel">
+    <div class="audio-player-header">
+      <span class="audio-player-title" id="audio-channel-name">No channel</span>
+      <button class="audio-player-close" onclick="timeStdAudio.stop()">✕</button>
+    </div>
+    <div class="audio-player-status" id="audio-status">Ready</div>
+    <div class="audio-player-controls">
+      <button class="audio-stop-btn" onclick="timeStdAudio.stop()">⏹ Stop</button>
+      <input type="range" class="volume-slider" id="audio-volume" min="0" max="100" value="80"
+        onchange="timeStdAudio.setVolume(this.value / 100)">
+      <span id="audio-volume-label">80%</span>
+    </div>
+  </div>
+
+  <script>
+    let refreshTimer = null;
+    let refreshInterval = 5000; // 5 seconds
+
+    // Format bytes to human readable
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+    }
+
+    // Format uptime
+    function formatUptime(seconds) {
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+
+      const parts = [];
+      if (days > 0) parts.push(`${days}d`);
+      if (hours > 0) parts.push(`${hours}h`);
+      if (minutes > 0) parts.push(`${minutes}m`);
+
+      return parts.join(' ') || '0m';
+    }
+
+    // Format duration
+    function formatDuration(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+
+      if (hours > 0) return `${hours}h ${minutes}m`;
+      if (minutes > 0) return `${minutes}m`;
+      return `${seconds}s`;
+    }
+
+    // Render station info (GPSDO anchor removed - timing now via multi-broadcast fusion)
+    function renderStationInfo(station) {
+      return `
+        <div class="section">
+          <div class="section-title">Station Information</div>
+          <div class="info-grid">
+            <div class="info-item">
+              <div class="info-label">Station ID</div>
+              <div class="info-value">${station.id || station.station_id || 'N/A'}</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Callsign</div>
+              <div class="info-value">${station.callsign}</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Grid Square</div>
+              <div class="info-value">${station.grid_square}</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Receiver</div>
+              <div class="info-value">${station.receiver}</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Instrument ID</div>
+              <div class="info-value">${station.instrument_id}</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Mode</div>
+              <div class="info-value">
+                <span class="mode-badge mode-${station.mode}">${station.mode.toUpperCase()}</span>
+              </div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Data Root</div>
+              <div class="info-value" style="font-size: 12px">${station.data_root}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // Render process status - compact table format
+    function renderProcesses(processes) {
+      const radiod = processes.radiod || {};
+      const core = processes.core_recorder || {};
+      const analytics = processes.analytics_service || {};
+
+      return `
+        <div class="section-title">System Status</div>
+        <table style="width: 100%; margin-top: 10px;">
+          <thead>
+            <tr>
+              <th style="text-align: left; width: 100px;"></th>
+              <th style="text-align: center;">radiod</th>
+              <th style="text-align: center;">Core Recorder</th>
+              <th style="text-align: center;">Analytics</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th style="text-align: left;">Status</th>
+              <td style="text-align: center;"><span class="status-indicator ${radiod.running ? 'status-running' : 'status-stopped'}"></span></td>
+              <td style="text-align: center;"><span class="status-indicator ${core.running ? 'status-running' : 'status-stopped'}"></span></td>
+              <td style="text-align: center;"><span class="status-indicator ${analytics.running ? 'status-running' : 'status-stopped'}"></span></td>
+            </tr>
+            <tr>
+              <th style="text-align: left;">Uptime</th>
+              <td style="text-align: center;">${radiod.running ? formatUptime(radiod.uptime_seconds) : '—'}</td>
+              <td style="text-align: center;">${core.running ? formatUptime(core.uptime_seconds) : '—'}</td>
+              <td style="text-align: center;">${analytics.running ? formatUptime(analytics.uptime_seconds) : '—'}</td>
+            </tr>
+          </tbody>
+        </table>
+      `;
+    }
+
+    // Render continuity
+    function renderContinuity(continuity) {
+      const span = continuity.data_span || {};
+      const gaps = continuity.gaps || [];
+
+      const startDate = span.start ? UTCTime.formatDateTime(span.start) : 'Unknown';
+      const endDate = span.end ? UTCTime.formatDateTime(span.end) : 'Unknown';
+      const duration = span.duration_seconds ? formatDuration(span.duration_seconds) : 'Unknown';
+
+      let gapsHtml = '';
+      if (gaps.length > 0) {
+        gapsHtml = '<div class="gap-list">';
+        gaps.forEach(gap => {
+          gapsHtml += `
+            <div class="gap-item">
+              ${UTCTime.formatDateTime(gap.start)} → ${UTCTime.formatDateTime(gap.end)} 
+              (${formatDuration(gap.duration_seconds)}) - ${gap.reason}
+            </div>
+          `;
+        });
+        gapsHtml += '</div>';
+      } else {
+        gapsHtml = '<div style="padding: 10px; color: #27ae60;">✓ No system downtime detected</div>';
+      }
+
+      return `
+        <h4 style="margin: 20px 0 10px 0; color: #7f8c8d;">Data Continuity</h4>
+        <div class="continuity-info">
+          <div class="continuity-stat">
+            <span class="continuity-label">Data Span:</span> 
+            ${startDate} → ${endDate} (${duration})
+          </div>
+          <div class="continuity-stat">
+            <span class="continuity-label">System Downtime:</span> 
+            ${gaps.length} gaps totaling ${formatDuration(continuity.total_downtime_seconds || 0)} 
+            (${(continuity.downtime_percentage || 0).toFixed(2)}%)
+          </div>
+        </div>
+        ${gapsHtml}
+      `;
+    }
+
+    // Render storage
+    function renderStorage(storage) {
+      const percent = storage.used_percent || 0;
+      const critical = percent > 80;
+
+      return `
+        <h4 style="margin: 20px 0 10px 0; color: #7f8c8d;">Storage</h4>
+        <div>
+          <div style="margin-bottom: 10px;">
+            <strong>Location:</strong> ${storage.location || 'Unknown'}
+          </div>
+          <div style="margin-bottom: 10px;">
+            <strong>Used:</strong> ${formatBytes(storage.used_bytes || 0)} / ${formatBytes(storage.total_bytes || 0)} 
+            (${percent.toFixed(1)}%)
+          </div>
+          <div class="storage-bar-container">
+            <div class="storage-bar ${critical ? 'critical' : ''}" style="width: ${percent}%">
+              ${percent.toFixed(1)}%
+            </div>
+          </div>
+          ${storage.estimated_days_until_full ? `
+            <div style="font-size: 13px; color: #7f8c8d;">
+              Estimated full in ~${storage.estimated_days_until_full} days 
+              (at ${formatBytes(storage.write_rate_bytes_per_day || 0)}/day)
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    // Render channel status - TRANSPOSED TABLE
+    function renderChannels(channels) {
+      // Filter to only valid channel names in canonical STATION_KILOHERTZ format
+      // or display format with MHz suffix
+      const validChannels = channels.filter(ch => {
+        const name = ch.name || '';
+        // Accept canonical format (SHARED_10000) or display format (SHARED 10 MHz)
+        return /^(SHARED|WWV|CHU)[_ ]/.test(name);
+      });
+
+      // Build header row (channel names)
+      let headerCells = '<th></th>'; // Empty corner cell
+      validChannels.forEach(ch => {
+        // Convert to display format and shorten for header
+        let displayName = ch.name;
+        // If canonical format, convert to display
+        const match = ch.name.match(/^(SHARED|WWV|CHU)_(\d+)$/);
+        if (match) {
+          const station = match[1];
+          const khz = parseInt(match[2], 10);
+          const mhz = khz / 1000;
+          const mhzStr = Number.isInteger(mhz) ? mhz.toString() : mhz.toFixed(2).replace(/\.?0+$/, '');
+          displayName = `${station} ${mhzStr}`;
+        } else {
+          displayName = ch.name.replace(' MHz', '');
+        }
+        headerCells += `<th>${displayName}</th>`;
+      });
+
+      // Build RTP row
+      let rtpCells = '<th>RTP Stream</th>';
+      validChannels.forEach(ch => {
+        const status = ch.rtp_streaming ?
+          '<span class="status-indicator status-running"></span>' :
+          '<span class="status-indicator status-stopped"></span>';
+        rtpCells += `<td>${status}</td>`;
+      });
+
+      // Build SNR row
+      let snrCells = '<th>SNR (dB)</th>';
+      validChannels.forEach(ch => {
+        const snr = ch.snr_db !== null ? ch.snr_db.toFixed(1) : 'N/A';
+        snrCells += `<td>${snr}</td>`;
+      });
+
+      // Time Basis row removed - unified timing from Timing Status panel
+
+      // Build Audio row
+      let audioCells = '<th>Audio</th>';
+      validChannels.forEach(ch => {
+        const channelKey = ch.name.replace(/ /g, '_');
+        const isPlaying = timeStdAudio && timeStdAudio.currentChannel === ch.name;
+        const buttonClass = isPlaying ? 'listen-button playing' : 'listen-button';
+        const buttonIcon = isPlaying ? '🔊' : '🔈';
+        const buttonTitle = isPlaying ? 'Click to stop' : `Listen to ${ch.name}`;
+
+        audioCells += `
+          <td>
+            <button class="${buttonClass}" 
+                    id="audio-btn-${channelKey}"
+                    onclick="toggleAudio('${ch.name}')" 
+                    title="${buttonTitle}">
+              ${buttonIcon}
+            </button>
+          </td>
+        `;
+      });
+
+      return `
+        <div class="section">
+          <div class="section-title">Channel Status (9 Channels)</div>
+          <div style="overflow-x: auto;">
+            <table>
+              <thead>
+                <tr>${headerCells}</tr>
+              </thead>
+              <tbody>
+                <tr>${rtpCells}</tr>
+                <tr>${snrCells}</tr>
+                <tr>${audioCells}</tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+
+    // Fetch and render summary
+    async function updateSummary() {
+      try {
+        // Fetch all endpoints - use separate try/catch for optional endpoints
+        const summaryResponse = await fetch('/api/v1/summary');
+        const data = await summaryResponse.json();
+
+        // Optional endpoints - default to empty if they fail
+        let propagation = { paths: [] };
+        let receptionMatrix = { channels: [] };
+
+
+        // Render station info
+        document.getElementById('stationInfo').innerHTML = renderStationInfo(data.station);
+
+        let html = '';
+        html += '<div class="section">';
+        html += renderProcesses(data.processes);
+        html += renderContinuity(data.continuity);
+        html += renderStorage(data.storage);
+        html += '</div>';
+
+        // Sort channels by frequency before rendering
+        const sortedChannels = window.TIMESTD_UTILS.sortByChannelFrequency(data.channels || [], 'name');
+        html += renderChannels(sortedChannels);
+
+        // Presence Matrix section
+        html += '<div class="section" id="presence-matrix-section">';
+        html += '<div class="section-title">🎹 Presence Matrix (24h)</div>';
+        html += '<p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">Signal presence across 17 broadcasts. Click to view details.</p>';
+        html += '<div class="controls-row" style="margin-bottom: 10px;"><label>Date: </label><input type="date" id="matrix-date-selector" onchange="loadPresenceMatrix()"></div>';
+        html += '<div id="matrix-wrapper" style="display: flex; height: 500px; overflow: hidden; background: #0f172a; border-radius: 8px;">';
+        html += '<div style="width: 50px; flex-shrink: 0; background: #0f172a; border-right: 1px solid #1e293b;"><canvas id="axis-canvas"></canvas></div>';
+        html += '<div style="flex-grow: 1; overflow-x: auto; overflow-y: scroll;"><canvas id="matrix-canvas"></canvas></div>';
+        html += '</div></div>';
+
+        document.getElementById('content').innerHTML = html;
+        document.getElementById('last-update').textContent = UTCTime.now() + ' UTC';
+      } catch (err) {
+        document.getElementById('content').innerHTML = `
+          <div class="section">
+            <div class="error">
+              <strong>Error loading data:</strong> ${err.message}
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    // Auto-refresh
+    function startAutoRefresh() {
+      stopAutoRefresh();
+      refreshTimer = setInterval(updateSummary, refreshInterval);
+    }
+
+    function stopAutoRefresh() {
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+    }
+
+    // ========================================================================
+    // Audio Player - WebSocket-based audio streaming
+    // ========================================================================
+
+    class TimeStdAudioPlayer {
+      constructor() {
+        this.ws = null;
+        this.audioContext = null;
+        this.currentChannel = null;
+        this.volume = 0.8;
+        this.isPlaying = false;
+        this.sampleRate = 8000;  // Simple audio buffer sample rate (~8kHz)
+        this.bufferQueue = [];
+        this.nextPlayTime = 0;
+        this.bufferDelay = 2.0;  // 2 second buffer to absorb CPU spikes
+        this.isBuffering = true;
+        this.bufferedSeconds = 0;
+
+        // UI elements
+        this.panelEl = document.getElementById('audio-player');
+        this.channelNameEl = document.getElementById('audio-channel-name');
+        this.statusEl = document.getElementById('audio-status');
+        this.volumeEl = document.getElementById('audio-volume');
+        this.volumeLabelEl = document.getElementById('audio-volume-label');
+      }
+
+      // Initialize context immediately on user click
+      initContext() {
+        if (!this.audioContext) {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          this.audioContext = new AudioContext();
+        }
+
+        // Always resume (handling strict autoplay policies)
+        if (this.audioContext.state === 'suspended') {
+          this.audioContext.resume();
+        }
+
+        return this.audioContext;
+      }
+
+      async start(channelName) {
+        // Stop any existing stream
+        if (this.isPlaying) {
+          await this.stop(true); // true = switching channels
+        }
+
+        // CRITICAL: Initialize context immediately while we have the user gesture
+        this.initContext();
+
+        this.currentChannel = channelName;
+        this.updateUI('loading', `Connecting to ${channelName}...`);
+        this.showPanel();
+        this.updateButton(channelName, 'loading');
+
+        try {
+          // Request simple audio stream metadata
+          const channelKey = channelName.replace(/ /g, '_');
+          const response = await fetch(`/api/v1/audio/simple/${channelKey}`);
+
+          if (!response.ok) {
+            throw new Error(`Server returned ${response.status}`);
+          }
+
+          const data = await response.json();
+
+          if (!data.success) {
+            throw new Error(data.error || 'No audio buffer available');
+          }
+
+          // Note: We ignore data.sample_rate and rely on browser resampling
+          // The backend sends ~8000Hz, browser AudioContext is usually 48000Hz.
+          // We'll let the browser handle resampling during playback or createBuffer.
+          // But strict AudioContext creation must process SAMPLE RATE at creation if desired.
+          // Since we already created it, we assume the browser handles the mismatch
+          // or we re-create if strictly necessary (but better to reuse for autoplay).
+          this.sourceSampleRate = data.sample_rate || 8000;
+
+          // Connect WebSocket for audio data
+          const wsUrl = data.websocket;
+          this.ws = new WebSocket(wsUrl);
+          this.ws.binaryType = 'arraybuffer';
+
+          this.ws.onopen = () => {
+            console.log(`🔊 Simple audio connected for ${channelName}`);
+            this.isPlaying = true;
+            this.isBuffering = true;
+            this.bufferedSeconds = 0;
+            this.bufferQueue = [];
+            this.nextPlayTime = this.audioContext.currentTime + 0.5; // Short startup delay
+            this.updateUI('playing', `Buffering ${channelName}...`);
+            this.updateButton(channelName, 'playing');
+          };
+
+          this.ws.onmessage = (event) => {
+            if (event.data instanceof ArrayBuffer) {
+              this.playAudioChunk(event.data);
+            }
+          };
+
+          this.ws.onclose = () => {
+            console.log(`👋 Audio closed for ${channelName}`);
+            if (this.isPlaying) {
+              // Only update UI if we didn't initiate the stop
+              this.updateUI('stopped', 'Connection closed');
+              this.isPlaying = false;
+              this.updateButton(channelName, 'idle');
+            }
+          };
+
+          this.ws.onerror = (error) => {
+            console.error('❌ Audio error:', error);
+            this.updateUI('error', 'Connection error');
+            this.updateButton(channelName, 'error');
+          };
+
+        } catch (error) {
+          console.error('❌ Failed to start audio:', error);
+          this.updateUI('error', error.message);
+          this.updateButton(channelName, 'error');
+          this.currentChannel = null;
+        }
+      }
+
+      playAudioChunk(arrayBuffer) {
+        if (!this.audioContext || !this.isPlaying) return;
+
+        // Convert Int16 PCM to Float32
+        const int16Data = new Int16Array(arrayBuffer);
+        const float32Data = new Float32Array(int16Data.length);
+
+        for (let i = 0; i < int16Data.length; i++) {
+          float32Data[i] = int16Data[i] / 32768.0 * this.volume;
+        }
+
+        // Create audio buffer
+        // Note: we create buffer at source sample rate, connect to destination (system rate)
+        // Web Audio API handles resampling automatically
+        const audioBuffer = this.audioContext.createBuffer(1, float32Data.length, this.sourceSampleRate);
+        audioBuffer.getChannelData(0).set(float32Data);
+
+        // Queue buffer during initial buffering phase
+        this.bufferQueue.push(audioBuffer);
+        this.bufferedSeconds += audioBuffer.duration;
+
+        // Start playback once we have enough buffered
+        if (this.isBuffering && this.bufferedSeconds >= this.bufferDelay) {
+          this.isBuffering = false;
+          this.updateUI('playing', `Playing ${this.currentChannel}`);
+          this.drainBufferQueue();
+        } else if (!this.isBuffering) {
+          // Direct playback once buffering is done
+          this.scheduleBuffer(this.bufferQueue.shift());
+        }
+      }
+
+      drainBufferQueue() {
+        // Schedule all queued buffers
+        while (this.bufferQueue.length > 0) {
+          this.scheduleBuffer(this.bufferQueue.shift());
+        }
+      }
+
+      scheduleBuffer(audioBuffer) {
+        if (!audioBuffer || !this.audioContext) return;
+
+        const source = this.audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(this.audioContext.destination);
+
+        // Ensure continuous playback with buffer margin
+        const now = this.audioContext.currentTime;
+        if (this.nextPlayTime < now) {
+          // Fell behind - reset to now + small margin
+          this.nextPlayTime = now + 0.05;
+        }
+
+        source.start(this.nextPlayTime);
+        this.nextPlayTime += audioBuffer.duration;
+      }
+
+      async stop(switching = false) {
+        if (this.ws) {
+          this.ws.close();
+          this.ws = null;
+        }
+
+        // Do NOT close AudioContext here if switching, we want to reuse it
+        // Only close if we are stopping completely to save resources?
+        // Actually, best practice is to keep one AudioContext alive for the app lifecycle
+        // so we don't hit strict browser limits or resume issues.
+
+        const oldChannel = this.currentChannel;
+        this.isPlaying = false;
+        this.currentChannel = null;
+
+        if (!switching) {
+          this.updateUI('stopped', 'Stopped');
+          this.hidePanel();
+        }
+
+        if (oldChannel) {
+          this.updateButton(oldChannel, 'idle');
+        }
+      }
+
+      setVolume(value) {
+        this.volume = Math.max(0, Math.min(1, value));
+        this.volumeLabelEl.textContent = Math.round(this.volume * 100) + '%';
+      }
+
+      updateUI(state, message) {
+        this.channelNameEl.textContent = this.currentChannel || 'No channel';
+        this.statusEl.textContent = message;
+
+        // Update status styling
+        const colors = {
+          'loading': '#f39c12',
+          'playing': '#27ae60',
+          'stopped': '#bdc3c7',
+          'error': '#e74c3c'
+        };
+        this.statusEl.style.color = colors[state] || '#bdc3c7';
+      }
+
+      updateButton(channelName, state) {
+        const channelKey = channelName.replace(/ /g, '_');
+        const button = document.getElementById(`audio-btn-${channelKey}`);
+        if (!button) return;
+
+        // Reset classes
+        button.className = 'listen-button';
+        button.textContent = '🔈';
+
+        if (state === 'loading') {
+          button.classList.add('loading');
+          button.textContent = '⏳';
+        } else if (state === 'playing') {
+          button.classList.add('playing');
+          button.textContent = '🔊';
+        } else if (state === 'error') {
+          button.classList.add('error');
+          button.textContent = '❌';
+        }
+      }
+
+      showPanel() {
+        this.panelEl.classList.add('visible');
+      }
+
+      hidePanel() {
+        this.panelEl.classList.remove('visible');
+      }
+    }
+
+    // Global audio player instance
+    const timeStdAudio = new TimeStdAudioPlayer();
+
+    // Toggle audio for a channel
+    function toggleAudio(channelName) {
+      if (timeStdAudio.currentChannel === channelName && timeStdAudio.isPlaying) {
+        timeStdAudio.stop();
+      } else {
+        timeStdAudio.start(channelName);
+      }
+    }
+
+    // ========================================================================
+    // Presence Matrix - Canvas-based 24h signal presence visualization
+    // ========================================================================
+
+    const BROADCASTS = [
+      { name: 'WWV', freqKHz: 2500 }, { name: 'WWVH', freqKHz: 2500 }, { name: 'BPM', freqKHz: 2500 },
+      { name: 'CHU', freqKHz: 3330 },
+      { name: 'WWV', freqKHz: 5000 }, { name: 'WWVH', freqKHz: 5000 }, { name: 'BPM', freqKHz: 5000 },
+      { name: 'CHU', freqKHz: 7850 },
+      { name: 'WWV', freqKHz: 10000 }, { name: 'WWVH', freqKHz: 10000 }, { name: 'BPM', freqKHz: 10000 },
+      { name: 'CHU', freqKHz: 14670 },
+      { name: 'WWV', freqKHz: 15000 }, { name: 'WWVH', freqKHz: 15000 }, { name: 'BPM', freqKHz: 15000 },
+      { name: 'WWV', freqKHz: 20000 },
+      { name: 'WWV', freqKHz: 25000 }
+    ];
+
+    function getStationColor(name, alpha = 1.0) {
+      if (name === 'WWV') return `rgba(56, 189, 248, ${alpha})`;
+      if (name === 'WWVH') return `rgba(168, 85, 247, ${alpha})`;
+      if (name === 'BPM') return `rgba(244, 63, 94, ${alpha})`;
+      if (name === 'CHU') return `rgba(252, 211, 77, ${alpha})`;
+      return `rgba(148, 163, 184, ${alpha})`;
+    }
+
+    function normalizeHistory(rawHistory) {
+      const clean = {};
+      Object.keys(rawHistory).forEach(rawKey => {
+        const lane = rawHistory[rawKey];
+        if (!lane) return;
+        const station = (lane.station || "UNKNOWN").trim().toUpperCase();
+        const khz = lane.freqKHz || 0;
+        if (station === "UNKNOWN" || khz === 0) return;
+        const canonicalKey = `${station}_${khz}`;
+        if (!clean[canonicalKey]) {
+          clean[canonicalKey] = { station, freqKHz: khz, data: lane.data || [] };
+        } else {
+          clean[canonicalKey].data = clean[canonicalKey].data.concat(lane.data || []);
+        }
+      });
+      return clean;
+    }
+
+    async function loadPresenceMatrix() {
+      const dateInput = document.getElementById('matrix-date-selector');
+      if (!dateInput) return;
+      
+      const dateStr = dateInput.value.replace(/-/g, '');
+      if (!dateStr) return;
+
+      try {
+        const res = await fetch(`/api/v1/broadcasts/history?date=${dateStr}`);
+        const rawData = await res.json();
+        const history = normalizeHistory(rawData.history);
+        renderPresenceMatrix(history);
+      } catch (e) {
+        console.error('Failed to load presence matrix:', e);
+      }
+    }
+
+    function renderPresenceMatrix(history) {
+      const canvas = document.getElementById('matrix-canvas');
+      const axisCanvas = document.getElementById('axis-canvas');
+      if (!canvas || !axisCanvas) return;
+
+      const ctx = canvas.getContext('2d');
+      const axisCtx = axisCanvas.getContext('2d');
+      const wrapper = document.getElementById('matrix-wrapper');
+
+      const width = wrapper.clientWidth - 50;
+      const height = 1440; // 1 pixel per minute
+
+      canvas.width = width;
+      canvas.height = height;
+      axisCanvas.width = 50;
+      axisCanvas.height = height;
+
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      axisCanvas.style.width = '50px';
+      axisCanvas.style.height = `${height}px`;
+
+      // Draw backgrounds
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, width, height);
+      axisCtx.fillStyle = '#0f172a';
+      axisCtx.fillRect(0, 0, 50, height);
+
+      // Draw time axis
+      axisCtx.fillStyle = '#94a3b8';
+      axisCtx.font = '10px monospace';
+      axisCtx.textAlign = 'right';
+      axisCtx.textBaseline = 'middle';
+
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1;
+
+      for (let h = 0; h < 24; h++) {
+        const y = h * 60;
+        axisCtx.fillText(`${h.toString().padStart(2, '0')}:00`, 42, y);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+      }
+
+      // Sync scroll
+      const axisContainer = wrapper.children[0];
+      const matrixContainer = wrapper.children[1];
+      axisContainer.style.overflow = 'hidden';
+      matrixContainer.onscroll = () => {
+        axisContainer.scrollTop = matrixContainer.scrollTop;
+      };
+
+      const gap = 2;
+      const numLanes = BROADCASTS.length;
+      const totalGapWidth = (numLanes - 1) * gap;
+      const laneWidth = (width - totalGapWidth) / numLanes;
+
+      BROADCASTS.forEach((b, i) => {
+        const key = `${b.name}_${b.freqKHz}`;
+        const laneData = history[key];
+        if (!laneData || !laneData.data) return;
+
+        const x = i * (laneWidth + gap);
+
+        laneData.data.forEach(pt => {
+          const date = new Date(pt.t * 1000);
+          const minuteOfDay = date.getUTCHours() * 60 + date.getUTCMinutes();
+          const snr = pt.snr;
+          let likelihood = 0;
+          if (snr <= 0) likelihood = 0;
+          else if (snr >= 12) likelihood = 1.0;
+          else likelihood = snr / 12.0;
+
+          if (likelihood > 0) {
+            ctx.fillStyle = getStationColor(b.name, 1.0);
+            const barWidth = laneWidth * likelihood;
+            const xOffset = (laneWidth - barWidth) / 2;
+            ctx.fillRect(x + xOffset, minuteOfDay, barWidth, 1);
+          }
+        });
+      });
+    }
+
+    // Initial load
+    updateSummary();
+    startAutoRefresh();
+
+    // Initialize presence matrix date and load after DOM ready
+    setTimeout(() => {
+      const dateInput = document.getElementById('matrix-date-selector');
+      if (dateInput) {
+        dateInput.valueAsDate = new Date();
+        loadPresenceMatrix();
+      }
+    }, 500);
+  </script>
+
+  <!-- UTC time utilities (all displays in UTC) -->
+  <script src="utils/utc-time.js"></script>
+
+  <!-- Load new analytics components -->
+  <script src="components/theme-toggle.js"></script>
+  <script src="components/navigation.js"></script>
+</body>
+
+</html>

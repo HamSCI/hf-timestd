@@ -98,10 +98,17 @@
                 Loading quality metrics...
             </div>
             <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; padding: 0 16px;">
-                <button class="time-range-btn tec-range-btn active" data-range="-6h">Last 6 Hours</button>
+                <button class="time-range-btn tec-range-btn" data-range="-6h">Last 6 Hours</button>
                 <button class="time-range-btn tec-range-btn" data-range="-24h">Last 24 Hours</button>
+                <button class="time-range-btn tec-range-btn" data-range="-3d">Last 3 Days</button>
+                <button class="time-range-btn tec-range-btn active" data-range="-7d">Last 7 Days</button>
             </div>
             <div id="tec-plot" style="width: 100%; height: 400px;"></div>
+            
+            <!-- Per-Station TEC Details -->
+            <div id="tec-station-details" style="padding: 16px;">
+                <div style="text-align: center; color: #94a3b8; padding: 20px;">Loading station details...</div>
+            </div>
         </div>
 
         <!-- Mode Timeline -->
@@ -125,7 +132,7 @@
         console.log('Propagation page script loading...');
         // API client is already initialized in common.js
         let currentTimelineRange = '-6h';
-        let currentTecRange = '-6h';
+        let currentTecRange = '-7d';  // Default to 7 days to show available data
         console.log('Using shared API client');
 
         // Error handling
@@ -467,15 +474,97 @@
                 
                 Plotly.newPlot('tec-plot', traces, layout, {responsive: true});
                 
-                // Display quality summary
+                // Display quality summary with more detail
                 const qualitySummary = Object.entries(data.paths).map(([station, pathData]) => {
                     const qualityPct = (pathData.quality_ratio * 100).toFixed(0);
                     const meanUnc = pathData.mean_uncertainty ? pathData.mean_uncertainty.toFixed(3) : 'N/A';
-                    return `<span style="color: ${pathColors[station]};">●</span> <b>${station}</b>: ${qualityPct}% good quality, mean unc: ${meanUnc} ms`;
-                }).join(' &nbsp;|&nbsp; ');
+                    const meanTec = pathData.mean_tec ? pathData.mean_tec.toFixed(2) : 'N/A';
+                    const minTec = pathData.min_tec !== undefined ? pathData.min_tec.toFixed(2) : 'N/A';
+                    const maxTec = pathData.max_tec !== undefined ? pathData.max_tec.toFixed(2) : 'N/A';
+                    const count = pathData.count || 0;
+                    
+                    return `
+                        <div style="display: inline-block; margin-right: 20px; margin-bottom: 8px;">
+                            <span style="color: ${pathColors[station]}; font-size: 16px;">●</span> 
+                            <b style="color: ${pathColors[station]};">${station}</b>: 
+                            ${count} measurements, 
+                            TEC: ${meanTec} TECU (${minTec}–${maxTec}), 
+                            ${qualityPct}% good quality, 
+                            unc: ±${meanUnc} ms
+                        </div>
+                    `;
+                }).join('');
                 
                 document.getElementById('tec-quality-summary').innerHTML = 
-                    `<b>Quality Metrics:</b> ${qualitySummary} &nbsp;|&nbsp; <i>Note: Red markers indicate BAD quality, error bars show timing uncertainty</i>`;
+                    `<div style="margin-bottom: 8px;"><b>Pairwise TEC by Propagation Path:</b></div>` +
+                    qualitySummary +
+                    `<div style="margin-top: 8px; font-size: 12px; font-style: italic; color: #94a3b8;">` +
+                    `TEC calculated from multi-frequency group delay measurements. Red markers indicate BAD quality. Error bars show timing uncertainty propagated to TEC uncertainty.` +
+                    `</div>`;
+                
+                // Display detailed per-station breakdown
+                const stationDetailsHtml = Object.entries(data.paths)
+                    .sort((a, b) => a[0].localeCompare(b[0]))
+                    .map(([station, pathData]) => {
+                        const meanTec = pathData.mean_tec ? pathData.mean_tec.toFixed(2) : 'N/A';
+                        const minTec = pathData.min_tec !== undefined ? pathData.min_tec.toFixed(2) : 'N/A';
+                        const maxTec = pathData.max_tec !== undefined ? pathData.max_tec.toFixed(2) : 'N/A';
+                        const meanUnc = pathData.mean_uncertainty ? pathData.mean_uncertainty.toFixed(3) : 'N/A';
+                        const qualityPct = (pathData.quality_ratio * 100).toFixed(0);
+                        const count = pathData.count || 0;
+                        
+                        // Get frequency distribution from n_frequencies array
+                        const freqCounts = {};
+                        if (pathData.n_frequencies) {
+                            pathData.n_frequencies.forEach(n => {
+                                freqCounts[n] = (freqCounts[n] || 0) + 1;
+                            });
+                        }
+                        const freqDist = Object.entries(freqCounts)
+                            .sort((a, b) => parseInt(b[0]) - parseInt(a[0]))
+                            .map(([n, count]) => `${n} freqs: ${count}×`)
+                            .join(', ') || 'N/A';
+                        
+                        return `
+                            <div style="background: rgba(30, 41, 59, 0.3); border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid ${pathColors[station]};">
+                                <div style="font-size: 18px; font-weight: 600; color: ${pathColors[station]}; margin-bottom: 12px;">
+                                    ${station} Propagation Path
+                                </div>
+                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; font-size: 14px;">
+                                    <div>
+                                        <div style="color: #94a3b8; margin-bottom: 4px;">Total Measurements</div>
+                                        <div style="font-weight: 600; color: #e0e0e0; font-size: 20px;">${count}</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #94a3b8; margin-bottom: 4px;">Mean TEC</div>
+                                        <div style="font-weight: 600; color: #e0e0e0; font-size: 20px;">${meanTec} <span style="font-size: 14px;">TECU</span></div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #94a3b8; margin-bottom: 4px;">TEC Range</div>
+                                        <div style="font-weight: 600; color: #e0e0e0; font-size: 16px;">${minTec} – ${maxTec} TECU</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #94a3b8; margin-bottom: 4px;">Mean Uncertainty</div>
+                                        <div style="font-weight: 600; color: #e0e0e0; font-size: 16px;">±${meanUnc} ms</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #94a3b8; margin-bottom: 4px;">Quality</div>
+                                        <div style="font-weight: 600; color: ${qualityPct >= 80 ? '#10b981' : qualityPct >= 50 ? '#f59e0b' : '#ef4444'}; font-size: 20px;">${qualityPct}%</div>
+                                        <div style="font-size: 12px; color: #94a3b8;">good quality</div>
+                                    </div>
+                                </div>
+                                <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.1); font-size: 13px; color: #94a3b8;">
+                                    <b>Frequency Usage:</b> ${freqDist}
+                                </div>
+                                <div style="margin-top: 8px; font-size: 12px; color: #94a3b8; font-style: italic;">
+                                    💡 TEC derived from ionospheric dispersion across multiple frequencies on this propagation path
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                
+                document.getElementById('tec-station-details').innerHTML = stationDetailsHtml || 
+                    '<div style="text-align: center; color: #94a3b8; padding: 20px;">No station details available</div>';
                 
             } catch (error) {
                 console.error('Failed to load TEC data:', error);

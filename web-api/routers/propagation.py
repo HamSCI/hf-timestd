@@ -143,3 +143,54 @@ async def get_tec_summary(
     except Exception as e:
         logger.error(f"Error getting TEC summary: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/test-signals")
+async def get_test_signals(
+    start: str = Query("-24h", description="Start time (ISO8601 or relative like '-24h')"),
+    end: str = Query("now", description="End time (ISO8601 or 'now')")
+):
+    """
+    Get WWV/WWVH test signal analysis data.
+    
+    Returns test signal detections from minutes 8 (WWV) and 44 (WWVH) with
+    ionospheric metrics including field strength, delay spread, and scintillation.
+    """
+    try:
+        # Parse time range
+        if end == "now":
+            end_time = datetime.utcnow()
+        else:
+            end_time = datetime.fromisoformat(end.replace('Z', ''))
+        
+        if start.startswith('-'):
+            # Relative time
+            duration_str = start[1:]
+            if duration_str.endswith('h'):
+                hours = int(duration_str[:-1])
+                start_time = end_time - timedelta(hours=hours)
+            elif duration_str.endswith('d'):
+                days = int(duration_str[:-1])
+                start_time = end_time - timedelta(days=days)
+            else:
+                raise ValueError(f"Invalid duration format: {start}")
+        else:
+            start_time = datetime.fromisoformat(start.replace('Z', ''))
+        
+        test_signal_data = propagation_service.get_test_signal_summary(start_time, end_time)
+        
+        if test_signal_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No test signal data available"
+            )
+        
+        return test_signal_data
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting test signal data: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")

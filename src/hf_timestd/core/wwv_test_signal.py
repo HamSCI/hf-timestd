@@ -30,7 +30,7 @@ This implementation focuses on the most distinctive features for discrimination:
 
 import numpy as np
 import logging
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
 from scipy import signal
 from dataclasses import dataclass
 
