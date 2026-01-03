@@ -104,6 +104,42 @@ def main():
                                   help='Skip confirmation prompts')
     clean_all_parser.add_argument('--dev', action='store_true', help='Use development paths')
     
+    # GRAPE command group
+    grape_parser = subparsers.add_parser('grape', help='GRAPE data products (decimation, spectrograms, packaging)')
+    grape_subparsers = grape_parser.add_subparsers(dest='grape_command', help='GRAPE command')
+    
+    # GRAPE decimate
+    grape_decimate_parser = grape_subparsers.add_parser('decimate', help='Decimate 24/20 kHz IQ to 10 Hz')
+    grape_decimate_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
+    grape_decimate_parser.add_argument('--channel', help='Channel name (e.g., "WWV 10 MHz")')
+    grape_decimate_parser.add_argument('--date', help='Date (YYYY-MM-DD or YYYYMMDD)')
+    grape_decimate_parser.add_argument('--all-channels', action='store_true', help='Process all channels')
+    grape_decimate_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
+    
+    # GRAPE spectrogram
+    grape_spec_parser = grape_subparsers.add_parser('spectrogram', help='Generate carrier spectrograms')
+    grape_spec_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
+    grape_spec_parser.add_argument('--channel', required=True, help='Channel name')
+    grape_spec_parser.add_argument('--date', help='Date (YYYY-MM-DD or YYYYMMDD)')
+    grape_spec_parser.add_argument('--rolling', type=int, choices=[6, 12, 24], help='Rolling spectrogram (hours)')
+    grape_spec_parser.add_argument('--grid', help='Receiver grid square for solar zenith overlay')
+    grape_spec_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
+    
+    # GRAPE package
+    grape_package_parser = grape_subparsers.add_parser('package', help='Package as Digital RF for upload')
+    grape_package_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
+    grape_package_parser.add_argument('--date', required=True, help='Date to package')
+    grape_package_parser.add_argument('--callsign', required=True, help='Station callsign')
+    grape_package_parser.add_argument('--grid', required=True, help='Grid square')
+    grape_package_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
+    
+    # GRAPE upload
+    grape_upload_parser = grape_subparsers.add_parser('upload', help='Upload to PSWS repository')
+    grape_upload_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
+    grape_upload_parser.add_argument('--date', help='Date to upload (default: yesterday)')
+    grape_upload_parser.add_argument('--dry-run', action='store_true', help='Show what would be uploaded')
+    grape_upload_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
+    
     args = parser.parse_args()
     
     # If no command specified, show help
@@ -261,6 +297,93 @@ def main():
             manager.clean_all(dry_run=args.dry_run, confirm=args.yes)
         else:
             data_parser.print_help()
+            sys.exit(1)
+    elif args.command == 'grape':
+        # GRAPE data products mode
+        from pathlib import Path
+        from datetime import datetime, timedelta
+        
+        if not args.grape_command:
+            grape_parser.print_help()
+            sys.exit(1)
+        
+        data_root = Path(args.data_root)
+        
+        if args.grape_command == 'decimate':
+            from .grape.decimation_pipeline import DecimationPipeline
+            
+            # Handle date format
+            if args.date:
+                date_str = args.date.replace('-', '')
+            else:
+                date_str = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+            
+            pipeline = DecimationPipeline(data_root)
+            
+            if args.all_channels:
+                # Get all channels from raw_archive
+                channels_dir = data_root / 'raw_archive'
+                if channels_dir.exists():
+                    for channel_dir in channels_dir.iterdir():
+                        if channel_dir.is_dir():
+                            channel_name = channel_dir.name.replace('_', ' ')
+                            print(f"Processing {channel_name}...")
+                            pipeline.process_day(channel_name, date_str)
+                else:
+                    print(f"❌ No raw_archive found at {channels_dir}")
+                    sys.exit(1)
+            elif args.channel:
+                pipeline.process_day(args.channel, date_str)
+            else:
+                print("❌ Specify --channel or --all-channels")
+                sys.exit(1)
+                
+        elif args.grape_command == 'spectrogram':
+            from .grape.spectrogram import CarrierSpectrogramGenerator
+            
+            gen = CarrierSpectrogramGenerator(
+                data_root=data_root,
+                channel_name=args.channel,
+                receiver_grid=args.grid
+            )
+            
+            if args.date:
+                date_str = args.date.replace('-', '')
+                gen.generate_daily(date_str)
+            elif args.rolling:
+                gen.generate_rolling(hours=args.rolling)
+            else:
+                # Default to yesterday
+                date_str = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+                gen.generate_daily(date_str)
+                
+        elif args.grape_command == 'package':
+            from .grape.packager import DailyDRFPackager
+            
+            date_str = args.date.replace('-', '')
+            packager = DailyDRFPackager(
+                data_root=data_root,
+                station_config={
+                    'callsign': args.callsign,
+                    'grid_square': args.grid
+                }
+            )
+            packager.package_day(date_str)
+            
+        elif args.grape_command == 'upload':
+            from .grape.uploader import UploadManager
+            
+            if args.date:
+                date_str = args.date
+            else:
+                date_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            
+            print(f"Upload for {date_str}")
+            if args.dry_run:
+                print("(Dry run - no actual upload)")
+            # TODO: Implement upload logic
+        else:
+            grape_parser.print_help()
             sys.exit(1)
 
 if __name__ == '__main__':

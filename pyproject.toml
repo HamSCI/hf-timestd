@@ -44,6 +44,8 @@ dependencies = [
     "xarray>=2023.1.0",
     "watchdog>=3.0.0",
     "requests>=2.28.0",
+    "digital_rf>=2.6.0",
+    "paramiko>=3.0.0",
 ]
 
 [project.optional-dependencies]
