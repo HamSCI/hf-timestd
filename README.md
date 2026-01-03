@@ -16,7 +16,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - 🌍 **Physics-Informed Propagation** - Uses GNSS-derived **IONEX VTEC** maps for precise path delay correction.
 - ⏱️ **HF time transfer** - D_clock measurement with ionospheric propagation mode estimation.
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
-- 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard.
+- 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path TEC visualization.
 - ⏰ **Chrony integration** - SHM refclock for system clock discipline.
 
 ---
@@ -64,7 +64,11 @@ sudo systemctl enable --now timestd-web-ui-fastapi
 | **L3 Fusion** | `/var/lib/timestd/phase2/fusion/` (HDF5) |
 | **IONEX** | `/var/lib/timestd/ionex/` |
 
-**Monitor:** Open `http://localhost:3000` for real-time channel health, quality metrics, and logs.
+**Monitor:** Open `http://localhost:8000` for real-time monitoring:
+- **Station Overview** - System metadata and recent activity
+- **System Health** - Process status, channel matrix, disk usage
+- **Metrology Dashboard** - Fusion timing, ISO GUM uncertainty, Allan Deviation analysis
+- **Propagation Analysis** - Per-broadcast modes, multi-frequency comparison, per-path TEC with error bars
 
 ---
 
@@ -128,7 +132,21 @@ The system is composed of six independent services that form a pipeline:
 
 **License:** MIT - See [LICENSE](LICENSE)
 
-### Recent Updates (v3.8-3.9, January 2026)
+### Recent Updates
+
+**v3.9.0 (January 3, 2026) - Phase 1 & Phase 2 Web UI Complete**
+- ✅ FastAPI web UI with 4 pages: Station Overview, System Health, Metrology Dashboard, Propagation Analysis
+- ✅ Allan Deviation analysis (τ=1s to 10,000s) with noise identification
+- ✅ Per-broadcast propagation modes (not misleading global aggregation)
+- ✅ Multi-frequency comparison by station for TEC validation
+- ✅ Per-path TEC visualization with error bars and quality indicators
+- ✅ Broadcast schedule validation (filters impossible station/frequency combinations)
+- ✅ Auto-refresh (60s), time range selection, responsive Plotly.js visualizations
+
+**v3.8.1 (January 2, 2026) - HDF5 Transition & Verification**
+- ✅ Fusion service bug fixes (logger initialization, orphaned method calls)
+- ✅ Enhanced pipeline verification with actionable diagnostics
+- ✅ HDF5-only output (CSV writers removed from fusion and analytics)
 
 - **v3.9.0:** Adaptive search window system - Bootstrap → Orient → Focus progression using GPSDO stability
 - **v3.8.2:** Calibration sanity checks - Prevents loading corrupted state files

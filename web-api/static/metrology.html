@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UTC Offset Dashboard - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⏱️ UTC Offset Dashboard</h1>
+            <div class="header-subtitle">Multi-station fusion timing estimate</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">System Health</a>
+                <a href="/static/metrology.html" class="nav-link active">Metrology</a>
+                <a href="/static/propagation.html" class="nav-link">Propagation</a>
+            </nav>
+        </div>
+
+        <div id="error-container" style="display: none;"></div>
+
+        <!-- Hero Display - Current UTC Offset -->
+        <div class="hero-metric" id="hero-metric">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+                <div style="font-size: 18px; font-weight: 600; color: #94a3b8;">Current UTC Offset</div>
+                <div class="live-indicator">
+                    <div class="live-dot"></div>
+                    <span>Live</span>
+                </div>
+            </div>
+            
+            <div class="hero-value" id="hero-dclock">
+                <div class="loading"></div>
+            </div>
+            
+            <div style="font-size: 18px; color: #94a3b8; margin-bottom: 16px;">
+                D_clock (milliseconds)
+            </div>
+            
+            <div style="display: flex; justify-content: center; gap: 24px; flex-wrap: wrap;">
+                <div style="text-align: center;">
+                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Uncertainty</div>
+                    <div style="font-size: 24px; font-weight: 600;" id="hero-uncertainty">-</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Quality Grade</div>
+                    <div id="hero-grade">-</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Broadcasts</div>
+                    <div style="font-size: 24px; font-weight: 600;" id="hero-broadcasts">-</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Timestamp</div>
+                    <div style="font-size: 16px; font-weight: 500; font-family: 'Courier New', monospace;" id="hero-timestamp">-</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Station Contributions -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">Station Contributions</div>
+                    <div class="card-subtitle">Per-station timing offsets and broadcast counts</div>
+                </div>
+            </div>
+            <div class="grid grid-4" id="station-contributions">
+                <div class="loading"></div>
+            </div>
+        </div>
+
+        <!-- Expert Metrics -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">Expert Metrics</div>
+                    <div class="card-subtitle">ISO GUM uncertainty budget and traceability</div>
+                </div>
+            </div>
+            <div id="expert-metrics" style="padding: 16px;">
+                <div class="loading"></div>
+            </div>
+        </div>
+
+        <!-- Time Range Selector -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Fusion History</div>
+            </div>
+            <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="time-range-btn" data-range="-1h">Last Hour</button>
+                <button class="time-range-btn active" data-range="-6h">Last 6 Hours</button>
+                <button class="time-range-btn" data-range="-1d">Last 24 Hours</button>
+                <button class="time-range-btn" data-range="-7d">Last 7 Days</button>
+            </div>
+            <div id="fusion-plot" style="width: 100%; height: 400px;"></div>
+        </div>
+
+        <!-- Allan Deviation Analysis -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">Allan Deviation (Stability Analysis)</div>
+                    <div class="card-subtitle">Oscillator stability characterization</div>
+                </div>
+            </div>
+            <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; padding: 0 16px;">
+                <button class="time-range-btn adev-range-btn active" data-range="-24h">Last 24 Hours</button>
+                <button class="time-range-btn adev-range-btn" data-range="-7d">Last 7 Days</button>
+            </div>
+            <div id="adev-plot" style="width: 100%; height: 400px;"></div>
+            <div id="adev-metrics" style="padding: 16px; display: none;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 16px;">
+                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                        <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">Dominant Noise</div>
+                        <div style="font-size: 16px; font-weight: 600;" id="adev-noise-type">-</div>
+                    </div>
+                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                        <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">ADEV @ τ=60s</div>
+                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;" id="adev-60s">-</div>
+                    </div>
+                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                        <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">ADEV @ τ=1000s</div>
+                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;" id="adev-1000s">-</div>
+                    </div>
+                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                        <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">ADEV @ τ=10000s</div>
+                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;" id="adev-10000s">-</div>
+                    </div>
+                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                        <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">Data Points</div>
+                        <div style="font-size: 16px; font-weight: 600;" id="adev-points">-</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Uncertainty Plot -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Uncertainty Evolution</div>
+            </div>
+            <div id="uncertainty-plot" style="width: 100%; height: 300px;"></div>
+        </div>
+    </div>
+
+    <style>
+        .time-range-btn {
+            padding: 8px 16px;
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 6px;
+            color: #3b82f6;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        .time-range-btn:hover {
+            background: rgba(59, 130, 246, 0.2);
+        }
+        
+        .time-range-btn.active {
+            background: #3b82f6;
+            color: #fff;
+        }
+    </style>
+
+    <script src="/static/js/common.js"></script>
+    <script>
+        let currentRange = '-6h';
+        
+        function updateExpertMetrics(data) {
+            const expertDiv = document.getElementById('expert-metrics');
+            
+            // Check if we have detailed uncertainty data
+            const hasDetailedData = data.statistical_uncertainty_ms !== undefined;
+            
+            if (!hasDetailedData) {
+                expertDiv.innerHTML = `
+                    <div style="padding: 24px; text-align: center; color: #94a3b8;">
+                        <div style="font-size: 48px; margin-bottom: 16px;">📊</div>
+                        <div style="font-size: 16px; margin-bottom: 8px;">Detailed metrics available in raw data</div>
+                        <div style="font-size: 14px;">
+                            The API returns simplified data. Full ISO GUM uncertainty budgets, 
+                            inter-station consistency metrics, and traceability metadata are available 
+                            in the HDF5 files at <code style="background: rgba(30, 41, 59, 0.5); padding: 2px 6px; border-radius: 3px;">/var/lib/timestd/phase2/fusion/</code>
+                        </div>
+                        <div style="margin-top: 16px; font-size: 13px; color: #64748b;">
+                            Phase 2 will expose these detailed metrics via the API
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+            
+            // Calculate percentages for uncertainty breakdown
+            const totalUncertainty = data.uncertainty_ms || 0;
+            const statPct = totalUncertainty > 0 ? ((data.statistical_uncertainty_ms || 0) / totalUncertainty * 100) : 0;
+            const sysPct = totalUncertainty > 0 ? ((data.systematic_uncertainty_ms || 0) / totalUncertainty * 100) : 0;
+            const propPct = totalUncertainty > 0 ? ((data.propagation_uncertainty_ms || 0) / totalUncertainty * 100) : 0;
+            
+            expertDiv.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
+                    <!-- ISO GUM Uncertainty Budget -->
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #e0e0e0;">
+                            📊 ISO GUM Uncertainty Budget
+                        </h3>
+                        <div style="display: flex; flex-direction: column; gap: 12px;">
+                            <div>
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                    <span style="color: #94a3b8;">Statistical (u<sub>A</sub>)</span>
+                                    <span style="font-family: 'Courier New', monospace; font-weight: 600;">
+                                        ${formatNumber((data.statistical_uncertainty_ms || 0) * 1000, 3)} µs
+                                    </span>
+                                </div>
+                                <div style="height: 6px; background: rgba(30, 41, 59, 0.5); border-radius: 3px; overflow: hidden;">
+                                    <div style="height: 100%; background: #3b82f6; width: ${statPct}%;"></div>
+                                </div>
+                            </div>
+                            <div>
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                    <span style="color: #94a3b8;">Systematic (u<sub>B</sub>)</span>
+                                    <span style="font-family: 'Courier New', monospace; font-weight: 600;">
+                                        ${formatNumber((data.systematic_uncertainty_ms || 0) * 1000, 3)} µs
+                                    </span>
+                                </div>
+                                <div style="height: 6px; background: rgba(30, 41, 59, 0.5); border-radius: 3px; overflow: hidden;">
+                                    <div style="height: 100%; background: #f59e0b; width: ${sysPct}%;"></div>
+                                </div>
+                            </div>
+                            <div>
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                    <span style="color: #94a3b8;">Propagation</span>
+                                    <span style="font-family: 'Courier New', monospace; font-weight: 600;">
+                                        ${formatNumber((data.propagation_uncertainty_ms || 0) * 1000, 3)} µs
+                                    </span>
+                                </div>
+                                <div style="height: 6px; background: rgba(30, 41, 59, 0.5); border-radius: 3px; overflow: hidden;">
+                                    <div style="height: 100%; background: #8b5cf6; width: ${propPct}%;"></div>
+                                </div>
+                            </div>
+                            <div style="margin-top: 8px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.2);">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span style="color: #e0e0e0; font-weight: 600;">Combined (k=1)</span>
+                                    <span style="font-family: 'Courier New', monospace; font-weight: 600; color: #10b981;">
+                                        ${formatNumber(totalUncertainty * 1000, 3)} µs
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Inter-Station Consistency -->
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #e0e0e0;">
+                            🎯 Inter-Station Consistency
+                        </h3>
+                        <div style="display: flex; flex-direction: column; gap: 12px;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Inter-station spread</span>
+                                <span style="font-family: 'Courier New', monospace; font-weight: 600;">
+                                    ${formatNumber((data.inter_station_spread_ms || 0) * 1000, 3)} µs
+                                </span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Consistency flag</span>
+                                <span class="badge ${data.consistency_flag === 'OK' ? 'status-healthy' : 'status-degraded'}">
+                                    ${data.consistency_flag || 'N/A'}
+                                </span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Outliers rejected</span>
+                                <span style="font-family: 'Courier New', monospace; font-weight: 600;">
+                                    ${data.outliers_rejected || 0}
+                                </span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Kalman state</span>
+                                <span class="badge ${data.kalman_state === 'LOCKED' ? 'status-healthy' : 'status-degraded'}">
+                                    ${data.kalman_state || 'N/A'}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Traceability & Metadata -->
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #e0e0e0;">
+                            🔗 Traceability & Metadata
+                        </h3>
+                        <div style="display: flex; flex-direction: column; gap: 12px;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Reference station</span>
+                                <span style="font-weight: 600;">${data.reference_station || 'N/A'}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Calibration applied</span>
+                                <span class="badge ${data.calibration_applied ? 'status-healthy' : 'status-error'}">
+                                    ${data.calibration_applied ? 'YES' : 'NO'}
+                                </span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Processing version</span>
+                                <span style="font-family: 'Courier New', monospace; font-size: 12px;">
+                                    ${data.processing_version || 'N/A'}
+                                </span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Quality flag</span>
+                                <span class="badge ${getQualityClass(data.quality_flag)}">
+                                    ${data.quality_flag || 'N/A'}
+                                </span>
+                            </div>
+                            ${data.global_solve_verified !== undefined ? `
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #94a3b8;">Global solve verified</span>
+                                <span class="badge ${data.global_solve_verified ? 'status-healthy' : 'status-degraded'}">
+                                    ${data.global_solve_verified ? 'YES' : 'NO'}
+                                </span>
+                            </div>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 24px; padding: 16px; background: rgba(59, 130, 246, 0.1); border-left: 4px solid #3b82f6; border-radius: 4px;">
+                    <div style="font-size: 14px; color: #94a3b8; margin-bottom: 8px;">
+                        <strong style="color: #3b82f6;">Metrological Note:</strong>
+                    </div>
+                    <div style="font-size: 13px; color: #cbd5e1; line-height: 1.6;">
+                        This system provides <strong>traceable time measurements</strong> referenced to NIST (WWV, WWVH) and NRC (CHU) 
+                        with <strong>ISO GUM-compliant uncertainty budgets</strong>. The multi-station fusion algorithm uses a Kalman filter 
+                        with outlier rejection and inter-station consistency checks. Propagation delays are corrected using ionospheric 
+                        TEC estimates validated against GPS VTEC data.
+                    </div>
+                </div>
+            `;
+        }
+        
+        async function loadLatestFusion() {
+            try {
+                clearError();
+                const data = await api.get('/metrology/fusion/latest');
+                
+                // Update hero display with adaptive precision
+                const dclock = data.d_clock_ms;
+                const precision = Math.abs(dclock) < 0.001 ? 6 : 3;
+                document.getElementById('hero-dclock').textContent = formatNumber(dclock, precision);
+                document.getElementById('hero-uncertainty').textContent = `± ${formatNumber(data.uncertainty_ms, 3)} ms`;
+                document.getElementById('hero-grade').innerHTML = 
+                    `<span class="badge badge-quality ${getQualityClass(data.quality_grade)}">${data.quality_grade}</span>`;
+                document.getElementById('hero-broadcasts').textContent = data.n_broadcasts;
+                document.getElementById('hero-timestamp').textContent = formatTime(data.timestamp);
+                
+                // Update hero metric border color based on grade
+                const heroMetric = document.getElementById('hero-metric');
+                heroMetric.className = `hero-metric ${getQualityClass(data.quality_grade)}`;
+                
+                // Update expert metrics
+                updateExpertMetrics(data);
+                
+                // Update station contributions
+                const stationsDiv = document.getElementById('station-contributions');
+                if (data.stations_used && data.stations_used.length > 0) {
+                    stationsDiv.innerHTML = data.stations_used.map(station => `
+                        <div style="padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; text-align: center;">
+                            <div style="font-size: 24px; margin-bottom: 8px;">📡</div>
+                            <div style="font-weight: 600; font-size: 18px;">${station}</div>
+                            <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Contributing</div>
+                        </div>
+                    `).join('');
+                } else {
+                    stationsDiv.innerHTML = '<div>No station information available</div>';
+                }
+                
+            } catch (error) {
+                showError(`Failed to load latest fusion: ${error.message}`);
+                document.getElementById('hero-dclock').textContent = 'N/A';
+            }
+        }
+        
+        async function loadFusionHistory(range = '-6h') {
+            try {
+                const data = await api.get('/metrology/fusion/history', {
+                    start: range,
+                    end: 'now'
+                });
+                
+                if (data.count === 0) {
+                    showError('No fusion data available for selected time range');
+                    return;
+                }
+                
+                // Plot D_clock with uncertainty
+                const trace = {
+                    x: data.timestamps,
+                    y: data.d_clock_ms,
+                    error_y: {
+                        type: 'data',
+                        array: data.uncertainty_ms,
+                        visible: true,
+                        color: 'rgba(59, 130, 246, 0.3)'
+                    },
+                    type: 'scatter',
+                    mode: 'markers',
+                    marker: {
+                        size: 6,
+                        color: data.quality_grade.map(g => getQualityColor(g))
+                    },
+                    name: 'D_clock',
+                    hovertemplate: '<b>%{x}</b><br>D_clock: %{y:.3f} ms<br>Grade: %{text}<extra></extra>',
+                    text: data.quality_grade
+                };
+                
+                const layout = {
+                    title: '',
+                    xaxis: {
+                        title: 'Time (UTC)',
+                        gridcolor: '#334155',
+                        color: '#94a3b8'
+                    },
+                    yaxis: {
+                        title: 'D_clock (ms)',
+                        gridcolor: '#334155',
+                        color: '#94a3b8',
+                        zeroline: true,
+                        zerolinecolor: '#ef4444',
+                        zerolinewidth: 2
+                    },
+                    plot_bgcolor: '#0f172a',
+                    paper_bgcolor: 'transparent',
+                    font: { color: '#e0e0e0' },
+                    margin: { t: 20, r: 20, b: 60, l: 60 },
+                    hovermode: 'closest'
+                };
+                
+                Plotly.newPlot('fusion-plot', [trace], layout, {responsive: true});
+                
+                // Plot uncertainty
+                const uncertaintyTrace = {
+                    x: data.timestamps,
+                    y: data.uncertainty_ms,
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#f59e0b', width: 2 },
+                    marker: { size: 4 },
+                    name: 'Uncertainty',
+                    hovertemplate: '<b>%{x}</b><br>Uncertainty: %{y:.3f} ms<extra></extra>'
+                };
+                
+                const uncertaintyLayout = {
+                    title: '',
+                    xaxis: {
+                        title: 'Time (UTC)',
+                        gridcolor: '#334155',
+                        color: '#94a3b8'
+                    },
+                    yaxis: {
+                        title: 'Uncertainty (ms)',
+                        gridcolor: '#334155',
+                        color: '#94a3b8'
+                    },
+                    plot_bgcolor: '#0f172a',
+                    paper_bgcolor: 'transparent',
+                    font: { color: '#e0e0e0' },
+                    margin: { t: 20, r: 20, b: 60, l: 60 }
+                };
+                
+                Plotly.newPlot('uncertainty-plot', [uncertaintyTrace], uncertaintyLayout, {responsive: true});
+                
+            } catch (error) {
+                showError(`Failed to load fusion history: ${error.message}`);
+            }
+        }
+        
+        // Time range button handlers
+        document.querySelectorAll('.time-range-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentRange = btn.dataset.range;
+                loadFusionHistory(currentRange);
+            });
+        });
+        
+        // Load Allan deviation
+        let currentAdevRange = '-24h';
+        
+        async function loadAllanDeviation(range) {
+            try {
+                clearError();
+                showLoading('adev-plot');
+                
+                const data = await api.get('/stability/adev', { start: range, end: 'now' });
+                
+                // Hide loading, show metrics
+                document.getElementById('adev-metrics').style.display = 'block';
+                
+                // Update metrics
+                document.getElementById('adev-noise-type').textContent = data.dominant_noise || 'Unknown';
+                document.getElementById('adev-60s').textContent = data.adev_60s ? data.adev_60s.toExponential(2) : 'N/A';
+                document.getElementById('adev-1000s').textContent = data.adev_1000s ? data.adev_1000s.toExponential(2) : 'N/A';
+                document.getElementById('adev-10000s').textContent = data.adev_10000s ? data.adev_10000s.toExponential(2) : 'N/A';
+                document.getElementById('adev-points').textContent = data.n_points || 0;
+                
+                // Plot Allan deviation (log-log plot)
+                const trace = {
+                    x: data.tau_seconds,
+                    y: data.adev,
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#8b5cf6', width: 2 },
+                    marker: { size: 6 },
+                    name: 'ADEV',
+                    hovertemplate: '<b>τ = %{x:.1f} s</b><br>ADEV: %{y:.2e}<extra></extra>'
+                };
+                
+                const layout = {
+                    title: '',
+                    xaxis: {
+                        title: 'Averaging Time τ (seconds)',
+                        type: 'log',
+                        gridcolor: '#334155',
+                        color: '#94a3b8'
+                    },
+                    yaxis: {
+                        title: 'Allan Deviation (dimensionless)',
+                        type: 'log',
+                        gridcolor: '#334155',
+                        color: '#94a3b8'
+                    },
+                    plot_bgcolor: '#0f172a',
+                    paper_bgcolor: 'transparent',
+                    font: { color: '#e0e0e0' },
+                    margin: { t: 20, r: 20, b: 60, l: 80 },
+                    hovermode: 'closest',
+                    annotations: [{
+                        text: `${data.dominant_noise}<br>${data.n_points} points, ${data.time_span_hours.toFixed(1)}h span`,
+                        xref: 'paper',
+                        yref: 'paper',
+                        x: 0.02,
+                        y: 0.98,
+                        xanchor: 'left',
+                        yanchor: 'top',
+                        showarrow: false,
+                        font: { size: 12, color: '#94a3b8' },
+                        bgcolor: 'rgba(30, 41, 59, 0.8)',
+                        borderpad: 8
+                    }]
+                };
+                
+                Plotly.newPlot('adev-plot', [trace], layout, {responsive: true});
+                
+            } catch (error) {
+                console.error('Failed to load Allan deviation:', error);
+                showError(`Failed to load Allan deviation: ${error.message}`);
+                document.getElementById('adev-plot').innerHTML = 
+                    '<div style="padding: 40px; text-align: center; color: #94a3b8;">Unable to load Allan deviation data. Need at least 100 data points.</div>';
+            }
+        }
+        
+        // ADEV range button handlers
+        document.querySelectorAll('.adev-range-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                document.querySelectorAll('.adev-range-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentAdevRange = btn.dataset.range;
+                await loadAllanDeviation(currentAdevRange);
+            });
+        });
+        
+        // Initialize
+        async function init() {
+            await loadLatestFusion();
+            await loadFusionHistory(currentRange);
+            await loadAllanDeviation(currentAdevRange);
+            
+            // Auto-refresh every 60 seconds
+            const refresh = new AutoRefresh(() => {
+                loadLatestFusion();
+                loadFusionHistory(currentRange);
+                // Don't auto-refresh ADEV - it's computationally expensive
+            }, 60000);
+            refresh.start();
+        }
+        
+        init();
+    </script>
+</body>
+</html>

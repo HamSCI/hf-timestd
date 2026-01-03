@@ -1,0 +1,10 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+tomli>=2.0.0
+h5py>=3.9.0
+numpy>=1.24.0
+python-multipart>=0.0.6
+
+# Install parent hf-timestd package in editable mode
+-e ..
