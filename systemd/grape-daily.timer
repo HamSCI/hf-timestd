@@ -1,0 +1,18 @@
+[Unit]
+Description=GRAPE Daily Processing Timer
+Documentation=https://github.com/mijahauan/hf-timestd
+Requires=grape-daily.service
+
+[Timer]
+# Run daily at 1:00 AM
+OnCalendar=daily
+OnCalendar=01:00
+
+# Add randomized delay to avoid load spikes
+RandomizedDelaySec=300
+
+# Run on boot if missed (e.g., system was off)
+Persistent=true
+
+[Install]
+WantedBy=timers.target

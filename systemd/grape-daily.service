@@ -1,0 +1,34 @@
+[Unit]
+Description=GRAPE Daily Processing
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network.target
+
+[Service]
+Type=oneshot
+User=timestd
+Group=timestd
+WorkingDirectory=/var/lib/timestd
+
+# Decimate all channels from yesterday
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape decimate --all-channels
+
+# Generate spectrograms for key channels
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWV 10 MHz"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWV 15 MHz"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWVH 10 MHz"
+
+# Optional: Package and upload (uncomment when ready)
+# ExecStart=/usr/bin/python3 -m hf_timestd.cli grape package --callsign AC0G --grid EM28
+# ExecStart=/usr/bin/python3 -m hf_timestd.cli grape upload
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grape-daily
+
+# Resource limits (optional)
+CPUQuota=50%
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target
