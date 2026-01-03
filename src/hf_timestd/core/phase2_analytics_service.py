@@ -1306,8 +1306,20 @@ class Phase2AnalyticsService:
                 ])
             logger.info(f"Created test signal CSV: {self.test_signal_csv}")
     
+    def _is_chu_channel(self) -> bool:
+        """Check if this is a CHU channel (3.33, 7.85, or 14.67 MHz)."""
+        chu_frequencies = [3.33, 7.85, 14.67]
+        return self.frequency_mhz in chu_frequencies
+    
     def _write_test_signal(self, minute_boundary: int, iq_samples, minute_number: int):
-        """Detect and write test signal for minutes 8 and 44."""
+        """
+        Detect and write test signal for minutes 8 and 44.
+        
+        Minute 8: WWV test signal (WWVH silent)
+        Minute 44: WWVH test signal (WWV silent)
+        
+        Note: This should only be called for WWV/WWVH channels, not CHU.
+        """
         try:
             today = datetime.now(timezone.utc).strftime('%Y%m%d')
             file_channel = self._get_file_channel_name()
@@ -2283,8 +2295,9 @@ class Phase2AnalyticsService:
             
             # Write test signal for minutes 8 and 44 (channel sounding minutes)
             # Run OUTSIDE of if result: block since test signal detection doesn't need timing lock
+            # Skip CHU channels - they don't broadcast WWV/WWVH test signals
             minute_number = (minute_boundary // 60) % 60
-            if minute_number in [8, 44]:
+            if minute_number in [8, 44] and not self._is_chu_channel():
                 self._write_test_signal(minute_boundary, iq_samples, minute_number)
             
             # Write audio tones (500/600 Hz + intermodulation) for every minute

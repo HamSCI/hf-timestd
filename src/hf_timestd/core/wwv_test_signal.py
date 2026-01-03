@@ -72,10 +72,12 @@ class TestSignalDetection:
     # Timing information - high-precision ToA from template correlation
     signal_start_time: Optional[float] = None  # Seconds into minute when signal detected
     toa_offset_ms: Optional[float] = None  # Time of arrival offset from expected (ms)
+    toa_source: Optional[str] = None  # Source of ToA: 'burst', 'chirp', 'multitone', 'noise'
     burst_toa_offset_ms: Optional[float] = None  # High-precision ToA from single-cycle bursts
     
     # SNR measurement - high processing gain from complex signal structure
     snr_db: Optional[float] = None
+    effective_snr_db: Optional[float] = None  # SNR with processing gain included
     
     # Channel characterization from test signal analysis
     delay_spread_ms: Optional[float] = None  # Multipath delay spread (from chirp analysis)
@@ -87,10 +89,29 @@ class TestSignalDetection:
     frequency_selectivity_db: Optional[float] = None
     tone_powers_db: Optional[Dict[int, float]] = None  # Individual tone powers {2000: dB, 3000: dB, ...}
     
+    # Per-frequency time-series data (10 seconds, 1-second windows)
+    tone_power_timeseries: Optional[Dict[int, List[float]]] = None  # {2000: [dB_t0, dB_t1, ...], ...}
+    
+    # Fading and scintillation metrics
+    fading_variance: Optional[float] = None  # Normalized variance of fading (detrended)
+    scintillation_index: Optional[float] = None  # S4 scintillation index
+    field_strength_db: Optional[float] = None  # Overall field strength
+    field_strength_stability: Optional[float] = None  # Stability metric (1/CV)
+    
     # Noise segment analysis for transient interference detection
     noise1_score: float = 0.0  # Noise segment at 10-12s
     noise2_score: float = 0.0  # Noise segment at 37-39s
     noise_coherence_diff: Optional[float] = None  # |noise1 - noise2|, high = transient event
+    transient_detected: bool = False  # Transient interference flag
+    
+    # Anomaly detection (solar flares, sporadic E, etc.)
+    anomaly_detected: bool = False
+    anomaly_type: Optional[str] = None  # 'sudden_amplitude_drop', 'sudden_amplitude_increase', etc.
+    anomaly_confidence: Optional[float] = None
+    
+    # Channel quality assessment
+    multipath_detected: bool = False
+    channel_quality: Optional[str] = None  # 'excellent', 'good', 'fair', 'poor'
 
 
 class WWVTestSignalGenerator:
@@ -527,6 +548,14 @@ class WWVTestSignalDetector:
         # Frequency Selectivity Score (FSS) - path signature
         fss_db, tone_powers = self._calculate_frequency_selectivity(audio_signal)
         
+        # Per-frequency time-series extraction (NEW - comprehensive analysis)
+        tone_power_timeseries = {}
+        fading_variance = None
+        scintillation_index = None
+        if detected:
+            tone_power_timeseries, fading_variance, scintillation_index = \
+                self._extract_per_frequency_timeseries(audio_signal)
+        
         # Coherence time from multi-tone fading pattern
         coherence_time_sec = None
         if detected:
@@ -536,8 +565,37 @@ class WWVTestSignalDetector:
         
         # SNR estimate with processing gain consideration
         snr_db = None
+        effective_snr_db = None
         if detected:
             snr_db = self._estimate_snr_with_gain(audio_signal, noise_score, chirp_score)
+            # Effective SNR includes processing gain
+            processing_gain_db = max(40.0 * noise_score, 37.0 * chirp_score) if noise_score > 0.1 or chirp_score > 0.1 else 0.0
+            effective_snr_db = snr_db + processing_gain_db if snr_db is not None else None
+        
+        # Field strength metrics (NEW)
+        field_strength_db, field_strength_stability = None, None
+        if detected and tone_power_timeseries:
+            field_strength_db, field_strength_stability = \
+                self._calculate_field_strength_metrics(tone_power_timeseries)
+        
+        # Anomaly detection (NEW - solar flares, sporadic E, etc.)
+        anomaly_detected = False
+        anomaly_type = None
+        anomaly_confidence = None
+        if detected and tone_power_timeseries:
+            anomaly_detected, anomaly_type, anomaly_confidence = \
+                self._detect_anomalies(tone_power_timeseries, noise_coherence_diff)
+        
+        # Transient detection from noise segments
+        transient_detected = (noise_coherence_diff is not None and noise_coherence_diff > 0.2)
+        
+        # Multipath detection
+        multipath_detected = (delay_spread_ms is not None and delay_spread_ms > 1.0)
+        
+        # Channel quality assessment (NEW)
+        channel_quality = None
+        if detected:
+            channel_quality = self._assess_channel_quality(snr_db, delay_spread_ms, coherence_time_sec)
         
         # === STAGE 4: Logging ===
         
@@ -556,6 +614,16 @@ class WWVTestSignalDetector:
         if noise_coherence_diff is not None and noise_coherence_diff > 0.1:
             logger.warning(f"  ⚠️ Noise segment diff: {noise_coherence_diff:.2f} (possible transient event)")
         
+        # Enhanced logging for new metrics
+        if anomaly_detected:
+            logger.warning(f"  ⚠️ Anomaly detected: {anomaly_type} (confidence={anomaly_confidence:.2f})")
+        if field_strength_db is not None:
+            logger.info(f"  Field strength: {field_strength_db:.1f}dB, stability={field_strength_stability:.2f}")
+        if scintillation_index is not None:
+            logger.info(f"  Scintillation index S4: {scintillation_index:.3f}")
+        if channel_quality is not None:
+            logger.info(f"  Channel quality: {channel_quality}")
+        
         return TestSignalDetection(
             detected=detected,
             confidence=confidence,
@@ -566,15 +634,28 @@ class WWVTestSignalDetector:
             noise_correlation=noise_score,
             signal_start_time=multitone_start,
             toa_offset_ms=toa_offset_ms,
+            toa_source=toa_source,
             burst_toa_offset_ms=burst_toa_offset_ms,
             snr_db=snr_db,
+            effective_snr_db=effective_snr_db,
             delay_spread_ms=delay_spread_ms,
             coherence_time_sec=coherence_time_sec,
             frequency_selectivity_db=fss_db,
             tone_powers_db=tone_powers if tone_powers else None,
+            tone_power_timeseries=tone_power_timeseries if tone_power_timeseries else None,
+            fading_variance=fading_variance,
+            scintillation_index=scintillation_index,
+            field_strength_db=field_strength_db,
+            field_strength_stability=field_strength_stability,
             noise1_score=noise1_score,
             noise2_score=noise2_score,
-            noise_coherence_diff=noise_coherence_diff
+            noise_coherence_diff=noise_coherence_diff,
+            transient_detected=transient_detected,
+            anomaly_detected=anomaly_detected,
+            anomaly_type=anomaly_type,
+            anomaly_confidence=anomaly_confidence,
+            multipath_detected=multipath_detected,
+            channel_quality=channel_quality
         )
     
     def _detect_multitone(self, audio_signal: np.ndarray) -> Tuple[float, Optional[float]]:
@@ -1275,6 +1356,239 @@ class WWVTestSignalDetector:
                     f"diff={coherence_diff:.3f}")
         
         return noise1_score, noise2_score, coherence_diff
+    
+    def _extract_per_frequency_timeseries(self, audio_signal: np.ndarray) -> Tuple[Dict[int, List[float]], float, float]:
+        """
+        Extract per-frequency power time-series from multi-tone segment
+        
+        This provides frequency-dependent field strength measurements over the
+        10-second multi-tone segment, enabling:
+        - Frequency-dependent absorption analysis (D-layer characterization)
+        - Fading pattern analysis (ionospheric scintillation)
+        - Anomaly detection (solar flares, sporadic E)
+        
+        Args:
+            audio_signal: Demodulated audio signal
+            
+        Returns:
+            Tuple of:
+            - tone_power_timeseries: {freq_hz: [dB_t0, dB_t1, ..., dB_t9]}
+            - fading_variance: Normalized variance of fading (detrended)
+            - scintillation_index: S4 scintillation index
+        """
+        from scipy.fft import rfft, rfftfreq
+        
+        # Extract multi-tone segment (13-23s)
+        start_idx = int(self.MULTITONE_START * self.sample_rate)
+        end_idx = int(self.MULTITONE_END * self.sample_rate)
+        
+        if end_idx > len(audio_signal):
+            return {}, None, None
+        
+        multitone_segment = audio_signal[start_idx:end_idx]
+        
+        # Analyze 1-second windows
+        tone_power_timeseries = {freq: [] for freq in self.TONE_FREQUENCIES}
+        
+        for sec in range(10):
+            window_start = sec * self.sample_rate
+            window_end = window_start + self.sample_rate
+            
+            if window_end > len(multitone_segment):
+                break
+            
+            window = multitone_segment[window_start:window_end]
+            
+            # FFT to get power at each tone frequency
+            fft_result = np.abs(rfft(window))
+            freqs = rfftfreq(len(window), 1/self.sample_rate)
+            
+            for target_freq in self.TONE_FREQUENCIES:
+                idx = np.argmin(np.abs(freqs - target_freq))
+                # Peak search within ±50 Hz
+                search_range = int(50 / (freqs[1] - freqs[0])) if len(freqs) > 1 else 5
+                start = max(0, idx - search_range)
+                end = min(len(fft_result), idx + search_range + 1)
+                
+                peak_power = np.max(fft_result[start:end]**2)
+                power_db = 10 * np.log10(peak_power + 1e-10)
+                tone_power_timeseries[target_freq].append(power_db)
+        
+        # Calculate fading variance (use 2 kHz as reference, most reliable)
+        fading_variance = None
+        scintillation_index = None
+        
+        if len(tone_power_timeseries[2000]) >= 5:
+            powers_2k = np.array(tone_power_timeseries[2000])
+            
+            # Expected attenuation pattern: -3dB per second
+            expected_atten_db = np.array([-3.0 * i for i in range(len(powers_2k))])
+            
+            # Detrend by expected pattern
+            detrended = powers_2k - (powers_2k[0] + expected_atten_db)
+            
+            # Fading variance (normalized)
+            fading_variance = float(np.var(detrended))
+            
+            # S4 scintillation index: std(I) / mean(I) where I is intensity
+            # Convert from dB to linear intensity
+            intensity = 10**(powers_2k / 10)
+            if np.mean(intensity) > 0:
+                scintillation_index = float(np.std(intensity) / np.mean(intensity))
+                scintillation_index = np.clip(scintillation_index, 0.0, 1.0)
+        
+        return tone_power_timeseries, fading_variance, scintillation_index
+    
+    def _detect_anomalies(
+        self, 
+        tone_power_timeseries: Dict[int, List[float]],
+        noise_coherence_diff: Optional[float]
+    ) -> Tuple[bool, Optional[str], Optional[float]]:
+        """
+        Detect ionospheric anomalies from test signal characteristics
+        
+        Anomaly types:
+        - sudden_amplitude_drop: Solar flare (sudden ionospheric disturbance)
+        - sudden_amplitude_increase: Sporadic E layer formation
+        - rapid_fading: Severe ionospheric scintillation
+        - frequency_selective_fade: Frequency-dependent absorption event
+        
+        Args:
+            tone_power_timeseries: Per-frequency power time-series
+            noise_coherence_diff: Difference between noise segments
+            
+        Returns:
+            Tuple of (anomaly_detected, anomaly_type, confidence)
+        """
+        if not tone_power_timeseries or 2000 not in tone_power_timeseries:
+            return False, None, None
+        
+        powers_2k = np.array(tone_power_timeseries[2000])
+        
+        if len(powers_2k) < 5:
+            return False, None, None
+        
+        # Check for sudden amplitude drop (solar flare signature)
+        # Look for >10 dB drop in <3 seconds
+        for i in range(len(powers_2k) - 2):
+            drop = powers_2k[i] - powers_2k[i+2]
+            if drop > 10.0:  # >10 dB drop in 2 seconds
+                return True, "sudden_amplitude_drop", 0.8
+        
+        # Check for sudden amplitude increase (sporadic E)
+        # Look for >8 dB increase in <3 seconds
+        for i in range(len(powers_2k) - 2):
+            increase = powers_2k[i+2] - powers_2k[i]
+            if increase > 8.0:  # >8 dB increase in 2 seconds
+                return True, "sudden_amplitude_increase", 0.7
+        
+        # Check for rapid fading (severe scintillation)
+        # High variance in detrended signal
+        expected_atten_db = np.array([-3.0 * i for i in range(len(powers_2k))])
+        detrended = powers_2k - (powers_2k[0] + expected_atten_db)
+        
+        if np.std(detrended) > 5.0:  # >5 dB RMS fluctuation
+            return True, "rapid_fading", 0.6
+        
+        # Check for frequency-selective fade
+        # Compare 2 kHz vs 5 kHz behavior
+        if 5000 in tone_power_timeseries and len(tone_power_timeseries[5000]) >= 5:
+            powers_5k = np.array(tone_power_timeseries[5000])
+            
+            # Calculate average difference (should be consistent with FSS)
+            avg_diff = np.mean(powers_2k - powers_5k)
+            std_diff = np.std(powers_2k - powers_5k)
+            
+            # Sudden change in frequency selectivity
+            if std_diff > 4.0:  # High variance in frequency-dependent behavior
+                return True, "frequency_selective_fade", 0.5
+        
+        # Check transient interference from noise segment analysis
+        if noise_coherence_diff is not None and noise_coherence_diff > 0.3:
+            return True, "transient_interference", 0.6
+        
+        return False, "none", 0.0
+    
+    def _calculate_field_strength_metrics(
+        self,
+        tone_power_timeseries: Dict[int, List[float]]
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Calculate overall field strength and stability metrics
+        
+        Args:
+            tone_power_timeseries: Per-frequency power time-series
+            
+        Returns:
+            Tuple of (field_strength_db, field_strength_stability)
+        """
+        if not tone_power_timeseries or 2000 not in tone_power_timeseries:
+            return None, None
+        
+        # Use 2 kHz as reference (most reliable)
+        powers_2k = np.array(tone_power_timeseries[2000])
+        
+        if len(powers_2k) < 3:
+            return None, None
+        
+        # Overall field strength (average of first 3 seconds before heavy attenuation)
+        field_strength_db = float(np.mean(powers_2k[:3]))
+        
+        # Stability: inverse of coefficient of variation
+        # High stability = low CV = stable channel
+        mean_power = np.mean(powers_2k)
+        std_power = np.std(powers_2k)
+        
+        if std_power > 0 and mean_power != 0:
+            cv = std_power / abs(mean_power)
+            field_strength_stability = float(1.0 / (cv + 0.1))  # Add small constant to avoid div by zero
+        else:
+            field_strength_stability = 10.0  # Very stable
+        
+        return field_strength_db, field_strength_stability
+    
+    def _assess_channel_quality(
+        self,
+        snr_db: Optional[float],
+        delay_spread_ms: Optional[float],
+        coherence_time_sec: Optional[float]
+    ) -> str:
+        """
+        Assess overall channel quality based on multiple metrics
+        
+        Quality grades (per L2 schema):
+        - excellent: SNR > 20 dB, delay_spread < 0.5 ms, coherence_time > 5 s
+        - good: SNR > 10 dB, delay_spread < 2 ms, coherence_time > 2 s
+        - fair: SNR > 5 dB, delay_spread < 5 ms, coherence_time > 1 s
+        - poor: Below fair thresholds
+        
+        Args:
+            snr_db: Signal-to-noise ratio
+            delay_spread_ms: Multipath delay spread
+            coherence_time_sec: Channel coherence time
+            
+        Returns:
+            Quality grade string
+        """
+        # Default values for missing metrics (neutral)
+        snr = snr_db if snr_db is not None else 10.0
+        delay = delay_spread_ms if delay_spread_ms is not None else 1.0
+        coherence = coherence_time_sec if coherence_time_sec is not None else 2.0
+        
+        # Excellent channel
+        if snr > 20 and delay < 0.5 and coherence > 5.0:
+            return "excellent"
+        
+        # Good channel
+        if snr > 10 and delay < 2.0 and coherence > 2.0:
+            return "good"
+        
+        # Fair channel
+        if snr > 5 and delay < 5.0 and coherence > 1.0:
+            return "fair"
+        
+        # Poor channel
+        return "poor"
 
 
 # Convenience function for integration

@@ -1,0 +1,392 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L2_test_signal",
+    "description": "WWV/WWVH scientific test signal analysis for ionospheric characterization",
+    "cadence_seconds": 3600,
+    "processing_level": "L2",
+    "standards": [
+        "HamSCI WWV/H Scientific Modulation Working Group",
+        "NetCDF CF conventions"
+    ],
+    "reference": "https://www.hamsci.org/wwv, https://zenodo.org/records/5182323",
+    "signal_timing": {
+        "wwv_minute": 8,
+        "wwvh_minute": 44,
+        "duration_seconds": 45,
+        "start_second": 10,
+        "end_second": 54,
+        "segments": {
+            "voice": "0-10s",
+            "noise1": "10-12s (white noise, seed-based)",
+            "multitone": "13-23s (2,3,4,5 kHz with 3dB steps)",
+            "chirp": "24-32s (up/down chirps, short/long)",
+            "burst": "34-36s (single-cycle 2.5kHz, 5kHz)",
+            "noise2": "37-39s (identical to noise1)"
+        }
+    },
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Test signal start timestamp (minute boundary)"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "minute_number",
+            "type": "integer",
+            "required": true,
+            "valid_range": [0, 59],
+            "description": "Minute of hour (8 for WWV, 44 for WWVH)"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "enum": ["WWV", "WWVH"],
+            "description": "Station broadcasting test signal (from schedule)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Carrier frequency",
+            "units": "MHz"
+        },
+        {
+            "name": "detected",
+            "type": "boolean",
+            "required": true,
+            "description": "Test signal successfully detected"
+        },
+        {
+            "name": "detection_confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [0, 1],
+            "description": "Overall detection confidence (0-1)"
+        },
+        {
+            "name": "snr_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Base signal-to-noise ratio (before processing gain)",
+            "units": "dB"
+        },
+        {
+            "name": "effective_snr_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Effective SNR including matched filter processing gain",
+            "units": "dB"
+        },
+        {
+            "name": "multitone_score",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "valid_range": [0, 1],
+            "description": "Multi-tone detection score"
+        },
+        {
+            "name": "chirp_score",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "valid_range": [0, 1],
+            "description": "Chirp sequence detection score"
+        },
+        {
+            "name": "burst_score",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "valid_range": [0, 1],
+            "description": "Single-cycle burst detection score"
+        },
+        {
+            "name": "noise_correlation",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "valid_range": [0, 1],
+            "description": "Average white noise segment correlation"
+        },
+        {
+            "name": "toa_offset_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Time of arrival offset from expected (best available source)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "toa_source",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "enum": ["burst", "chirp", "multitone", "noise"],
+            "description": "Source of ToA measurement (burst=highest precision)"
+        },
+        {
+            "name": "burst_toa_offset_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "High-precision ToA from single-cycle bursts",
+            "units": "milliseconds"
+        },
+        {
+            "name": "delay_spread_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Multipath delay spread from chirp matched filter",
+            "units": "milliseconds",
+            "interpretation": "Excess delay beyond ideal chirp response"
+        },
+        {
+            "name": "coherence_time_sec",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Channel coherence time from fading analysis",
+            "units": "seconds",
+            "valid_range": [0.1, 10.0]
+        },
+        {
+            "name": "frequency_selectivity_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "FSS = 10*log10((P_2kHz+P_3kHz)/(P_4kHz+P_5kHz))",
+            "units": "dB",
+            "interpretation": "Positive=high-freq attenuation (longer/dispersive path)"
+        },
+        {
+            "name": "tone_power_2khz_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Power at 2 kHz tone",
+            "units": "dB"
+        },
+        {
+            "name": "tone_power_3khz_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Power at 3 kHz tone",
+            "units": "dB"
+        },
+        {
+            "name": "tone_power_4khz_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Power at 4 kHz tone",
+            "units": "dB"
+        },
+        {
+            "name": "tone_power_5khz_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Power at 5 kHz tone",
+            "units": "dB"
+        },
+        {
+            "name": "tone_power_timeseries_2khz",
+            "type": "array",
+            "element_type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Per-second power at 2 kHz over 10-second multitone segment",
+            "units": "dB",
+            "length": 10
+        },
+        {
+            "name": "tone_power_timeseries_3khz",
+            "type": "array",
+            "element_type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Per-second power at 3 kHz over 10-second multitone segment",
+            "units": "dB",
+            "length": 10
+        },
+        {
+            "name": "tone_power_timeseries_4khz",
+            "type": "array",
+            "element_type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Per-second power at 4 kHz over 10-second multitone segment",
+            "units": "dB",
+            "length": 10
+        },
+        {
+            "name": "tone_power_timeseries_5khz",
+            "type": "array",
+            "element_type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Per-second power at 5 kHz over 10-second multitone segment",
+            "units": "dB",
+            "length": 10
+        },
+        {
+            "name": "fading_variance",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Normalized fading variance (detrended from expected 3dB steps)",
+            "units": "dimensionless"
+        },
+        {
+            "name": "scintillation_index",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "S4 scintillation index from amplitude fluctuations",
+            "units": "dimensionless",
+            "valid_range": [0, 1]
+        },
+        {
+            "name": "noise1_score",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "valid_range": [0, 1],
+            "description": "First noise segment score (10-12s)"
+        },
+        {
+            "name": "noise2_score",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "valid_range": [0, 1],
+            "description": "Second noise segment score (37-39s)"
+        },
+        {
+            "name": "noise_coherence_diff",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Absolute difference |noise1-noise2| for transient detection",
+            "units": "dimensionless",
+            "interpretation": "High value indicates transient interference between segments"
+        },
+        {
+            "name": "transient_detected",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "Transient interference detected (noise_coherence_diff > threshold)"
+        },
+        {
+            "name": "anomaly_detected",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "Ionospheric anomaly detected (solar flare, sporadic E, etc.)"
+        },
+        {
+            "name": "anomaly_type",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "enum": ["none", "sudden_amplitude_drop", "sudden_amplitude_increase", "rapid_fading", "frequency_selective_fade"],
+            "description": "Type of detected anomaly"
+        },
+        {
+            "name": "anomaly_confidence",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "valid_range": [0, 1],
+            "description": "Confidence in anomaly detection"
+        },
+        {
+            "name": "field_strength_db",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Overall field strength (average of multitone segment)",
+            "units": "dB"
+        },
+        {
+            "name": "field_strength_stability",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Field strength stability (1/coefficient_of_variation)",
+            "units": "dimensionless"
+        },
+        {
+            "name": "multipath_detected",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "Significant multipath detected (delay_spread > threshold)"
+        },
+        {
+            "name": "channel_quality",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "enum": ["excellent", "good", "fair", "poor"],
+            "description": "Overall channel quality assessment"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": ["GOOD", "MARGINAL", "BAD", "MISSING"],
+            "description": "Data quality flag"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Test signal analyzer version"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Processing timestamp"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "Test signal detected with high confidence, all metrics valid",
+        "MARGINAL": "Test signal detected but some metrics missing or low confidence",
+        "BAD": "Test signal not detected or very poor quality",
+        "MISSING": "Not a test signal minute (not minute 8 or 44)"
+    },
+    "channel_quality_criteria": {
+        "excellent": "SNR > 20 dB, delay_spread < 0.5 ms, coherence_time > 5 s",
+        "good": "SNR > 10 dB, delay_spread < 2 ms, coherence_time > 2 s",
+        "fair": "SNR > 5 dB, delay_spread < 5 ms, coherence_time > 1 s",
+        "poor": "SNR < 5 dB or delay_spread > 5 ms or coherence_time < 1 s"
+    },
+    "scientific_applications": [
+        "D-layer ionospheric absorption measurement",
+        "Propagation mode identification (E-layer vs F-layer)",
+        "Multipath and delay spread characterization",
+        "Ionospheric scintillation detection",
+        "Solar flare detection (sudden ionospheric disturbances)",
+        "Sporadic E detection",
+        "Frequency-dependent path loss analysis",
+        "Channel coherence time estimation for communication systems"
+    ]
+}
