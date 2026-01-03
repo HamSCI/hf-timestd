@@ -719,9 +719,37 @@ class TransmissionTimeSolver:
             )
             iono_delay_ms = delay_result.delay_ms
         else:
-            # Fallback to linear model if delay calculator not available
-            iono_factor = IONO_DELAY_FACTOR.get(frequency_mhz, 1.0)
-            iono_delay_ms = n_hops * 0.15 * iono_factor
+            # Fallback: Use proper 1/f² physics with parametric TEC estimate
+            # This ensures frequency-dependent delays even without IRI/IONEX
+            # 
+            # Ionospheric group delay: τ = 40.3 × TEC / f² (seconds)
+            # where TEC is in TECU (10^16 el/m²), f is in Hz
+            #
+            # Parametric TEC estimate (moderate conditions):
+            # - Day: ~30 TECU, Night: ~10 TECU
+            # - Simple model based on local solar time
+            
+            if timestamp is not None:
+                # Calculate local solar time for diurnal TEC variation
+                hour_utc = timestamp.hour + timestamp.minute / 60.0
+                if station_lon is not None:
+                    local_hour = (hour_utc + station_lon / 15.0) % 24.0
+                else:
+                    local_hour = hour_utc
+                
+                # Diurnal TEC model: peak around 14:00 local time
+                # TEC varies from ~10 TECU (night) to ~40 TECU (day)
+                import math
+                diurnal_phase = 2 * math.pi * (local_hour - 14.0) / 24.0
+                tec_tecu = 25.0 * (1.0 + 0.6 * math.cos(diurnal_phase))  # 10-40 TECU range
+            else:
+                # No timestamp: use moderate default
+                tec_tecu = 25.0
+            
+            # Calculate frequency-dependent ionospheric delay
+            # Formula: delay_ms = (40.3 × TEC × n_hops) / (f_Hz²) × 1000
+            frequency_hz = frequency_mhz * 1e6
+            iono_delay_ms = (40.3 * tec_tecu * n_hops * 1000.0) / (frequency_hz ** 2)
         
         total_delay_ms = geometric_delay_ms + iono_delay_ms
         

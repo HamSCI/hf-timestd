@@ -2006,13 +2006,23 @@ class MultiBroadcastFusion:
                         # TEC writing is handled by science_aggregator service
                         # We use TEC here only to improve propagation delay estimates
                         
-                        if tec_result.confidence > 0.9:
+                        # CRITICAL: Validate TEC result is not NaN before using it
+                        # NaN values can occur when measurements have insufficient frequency diversity
+                        # or identical ToA values, causing the least-squares fit to produce NaN
+                        if np.isnan(tec_result.tec_u) or np.isnan(tec_result.confidence):
+                            logger.warning(f"TEC solver produced NaN for {station} (tec={tec_result.tec_u}, conf={tec_result.confidence}) - skipping")
+                        elif tec_result.confidence > 0.9:
                             logger.info(f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f})")
                             
                             # Update measurements with Physics-Derived delays
                             for m in station_meas:
                                 if m.frequency_mhz in tec_result.group_delay_ms:
                                     new_delay = tec_result.group_delay_ms[m.frequency_mhz]
+                                    
+                                    # Validate new_delay is not NaN
+                                    if np.isnan(new_delay):
+                                        logger.warning(f"TEC solver produced NaN delay for {station} {m.frequency_mhz}MHz - skipping")
+                                        continue
                                     
                                     # Update D_clock with NEW delay
                                     # D_clock_new = T_arrival - T_delay_new
@@ -2044,6 +2054,24 @@ class MultiBroadcastFusion:
         if len(measurements) < 2:
             logger.debug("Too few measurements after outlier rejection")
             return None
+        
+        # CRITICAL: Filter out any measurements with NaN values before fusion
+        # This is a safety net to prevent NaN from propagating into the fusion calculation
+        valid_measurements = []
+        valid_weights = []
+        for m, w in zip(measurements, weights):
+            if np.isnan(m.d_clock_ms) or np.isnan(w):
+                logger.warning(f"Filtering out measurement with NaN: station={m.station}, d_clock={m.d_clock_ms}, weight={w}")
+            else:
+                valid_measurements.append(m)
+                valid_weights.append(w)
+        
+        if len(valid_measurements) < 2:
+            logger.error(f"Too few valid measurements after NaN filtering ({len(valid_measurements)}/{len(measurements)})")
+            return None
+        
+        measurements = valid_measurements
+        weights = valid_weights
         
         # ====================================================================
         
