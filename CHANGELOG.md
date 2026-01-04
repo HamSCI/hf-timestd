@@ -2,6 +2,110 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.0] - 2026-01-04
+
+### Added - Test Signal HDF5 Migration
+
+#### L2 Test Signal Analysis HDF5 Storage
+
+- **Feature**: Migrated WWV/WWVH scientific test signal analysis from CSV-only to parallel CSV+HDF5 writes
+- **Schema**: Using existing `l2_test_signal_v1.json` schema (38 comprehensive fields)
+- **Data Enrichment**: HDF5 captures 3x more data than CSV (38 vs 13 fields)
+  - Time-series data: Per-frequency power over 10 seconds (40 data points)
+  - Anomaly detection: Solar flares, sporadic E, rapid fading detection
+  - Noise analysis: Dual segment comparison for transient interference
+  - Field strength: Stability and scintillation metrics (S4 index)
+  - Quality assessment: Automated channel quality grading
+- **Files**: `src/hf_timestd/core/phase2_analytics_service.py`
+
+#### HDF5 Writer Integration
+
+- **Initialization**: Added `hdf5_l2_test_signal_writer` in analytics service
+- **Parallel Writes**: Test signal data written to both CSV and HDF5 simultaneously
+- **Error Handling**: HDF5 failures logged but don't crash service, CSV continues
+- **Backward Compatibility**: CSV writes maintained during validation period
+
+### Fixed - Test Signal HDF5 Implementation
+
+#### AttributeError in Frequency Reference
+
+- **Issue**: `_is_chu_channel()` and `_write_test_signal()` referenced non-existent `self.frequency_mhz` attribute
+- **Impact**: Test signal HDF5 writes failed with AttributeError, only CSV was written
+- **Fix**: Changed to use `self._get_frequency_mhz()` method call instead
+- **Files**: `src/hf_timestd/core/phase2_analytics_service.py` (lines 1334, 1406)
+
+### Data Pipeline Status
+
+**HDF5-Native for Critical Path:**
+
+- ✅ L0 (Raw): Digital RF HDF5
+- ✅ L1A (Observables): Channel observables HDF5
+- ✅ L1A (Tones): Tone detections HDF5
+- ✅ L1B (Timecode): BCD timecode HDF5
+- ✅ L2 (Timing): Timing measurements HDF5
+- ✅ **L2 (Test Signals): Test signal analysis HDF5** ← NEW
+- ✅ L3 (Fusion): Fusion results HDF5
+- ✅ L3 (TEC): Ionospheric TEC HDF5
+- ✅ L3 (VTEC): GNSS VTEC HDF5
+
+**CSV Status:**
+
+- Critical path data: HDF5 primary, CSV parallel (validation period)
+- Auxiliary monitoring: CSV only (operational convenience)
+
+### Technical Details
+
+**Test Signal Detection Schedule:**
+
+- Minute :08 - WWV test signal (WWVH silent)
+- Minute :44 - WWVH test signal (WWV silent)
+- 45-second structured signal with multiple segments for channel characterization
+
+**HDF5 Schema Fields (38 total):**
+
+- Basic metadata (5): timestamp, minute, station, frequency
+- Detection results (4): detected, confidence, SNR, effective SNR
+- Detection scores (4): multitone, chirp, burst, noise correlation
+- Timing (3): ToA offset, ToA source, burst ToA
+- Channel characterization (3): delay spread, coherence time, frequency selectivity
+- Tone powers (4): Individual 2/3/4/5 kHz powers
+- Time-series (4): Per-frequency power arrays (10 samples each)
+- Fading metrics (2): Variance, scintillation index
+- Noise analysis (4): Dual segment scores, coherence diff, transient flag
+- Anomaly detection (3): Detected flag, type, confidence
+- Field strength (2): Overall strength, stability
+- Quality (2): Multipath flag, channel quality grade
+- Metadata (3): Quality flag, processing version, processed timestamp
+
+### Deployment
+
+**Installation:**
+
+```bash
+cd /home/mjh/git/hf-timestd
+sudo /opt/hf-timestd/venv/bin/pip install . --no-deps
+sudo systemctl restart timestd-analytics
+```
+
+**Verification:**
+
+```bash
+# Check for HDF5 files (created at minutes :08 and :44)
+ls -lh /var/lib/timestd/phase2/*/test_signal/*.h5
+
+# Inspect HDF5 structure
+h5dump -H /var/lib/timestd/phase2/SHARED_10000/test_signal/SHARED_10000_test_signal_20260104.h5
+
+# Compare with CSV
+tail -5 /var/lib/timestd/phase2/SHARED_10000/test_signal/SHARED_10000_test_signal_20260104.csv
+```
+
+### Next Steps
+
+- Monitor test signal detections for 1 week to validate HDF5 data equivalence
+- After validation, consider deprecating CSV writes for test signals
+- Auxiliary CSV files (doppler, 440hz, discrimination) remain as-is for operational convenience
+
 ## [3.10.3] - 2026-01-04
 
 ### Fixed - Comprehensive Architectural Improvements
@@ -9,6 +113,7 @@ All notable changes to this project will be documented in this file.
 **Priority 1: Critical Fixes**
 
 #### Calibration Update Order Fixed
+
 - **Issue**: Calibration being updated BEFORE cross-validation, allowing outliers to contaminate calibration state
 - **Root Cause**: WWV tone misidentification was updating calibration, causing slow drift toward incorrect values
 - **Impact**: Calibration slowly diverged, requiring periodic manual resets
@@ -16,6 +121,7 @@ All notable changes to this project will be documented in this file.
 - **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py`
 
 #### Cross-Station Validation Threshold Increased
+
 - **Issue**: 0.2ms threshold too strict, causing false positives on legitimate propagation differences
 - **Root Cause**: Real physics - different ionospheric paths between stations (CHU vs WWV = 2000+ km)
 - **Impact**: Valid measurements flagged as suspects, reducing fusion quality
@@ -23,6 +129,7 @@ All notable changes to this project will be documented in this file.
 - **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py`
 
 #### GPSDO Lock Status Check Added
+
 - **Issue**: Fusion accepting measurements from unlocked GPSDOs
 - **Root Cause**: No validation of `gpsdo_locked` flag in fusion service
 - **Impact**: Unlocked GPSDO can drift by seconds, causing massive timing errors
@@ -32,6 +139,7 @@ All notable changes to this project will be documented in this file.
 **Priority 2: High Priority Fixes**
 
 #### Calibration Persistence Across Restarts
+
 - **Issue**: Calibration reset to zero on every service restart, requiring 10-20 minute bootstrap
 - **Root Cause**: No persistence mechanism for calibration state
 - **Impact**: Service restarts cause grade degradation and chrony instability
@@ -40,6 +148,7 @@ All notable changes to this project will be documented in this file.
 - **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py`
 
 #### Kalman Filter State Bounds
+
 - **Issue**: Kalman filter can diverge if fed bad data, no recovery mechanism
 - **Root Cause**: No bounds checking on filter state
 - **Impact**: Once diverged, takes hours to recover, causes multi-hour timing errors
@@ -49,6 +158,7 @@ All notable changes to this project will be documented in this file.
 **Priority 3: Medium Priority Fixes**
 
 #### Complete Uncertainty Budget (ISO GUM Compliant)
+
 - **Issue**: Uncertainty budget missing RTP jitter component
 - **Root Cause**: Incomplete uncertainty sources in RSS calculation
 - **Impact**: Underestimated uncertainty, not fully traceable to UTC(NIST)
@@ -56,6 +166,7 @@ All notable changes to this project will be documented in this file.
 - **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py`
 
 #### D_clock Monotonicity Check
+
 - **Issue**: No validation that D_clock changes are physically reasonable
 - **Root Cause**: Large jumps (>5ms) not detected or logged
 - **Impact**: Tone misidentification events go unnoticed
@@ -63,6 +174,7 @@ All notable changes to this project will be documented in this file.
 - **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py`
 
 **Technical Details:**
+
 - All fixes follow metrologist best practices and ISO GUM guidelines
 - Calibration now protected from outlier contamination
 - System recovers gracefully from filter divergence
@@ -83,8 +195,9 @@ All notable changes to this project will be documented in this file.
 - **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py`
 
 **Technical Details:**
+
 - System correctly detected cross-station disagreement (CHU vs WWV: 1-4ms)
-- Flagged measurements as `DISCRIMINATION_SUSPECT` 
+- Flagged measurements as `DISCRIMINATION_SUSPECT`
 - Previous code recalculated fused D_clock but still fed contaminated data to Kalman filter
 - Fix ensures Kalman filter receives only validated measurements
 - Result: Fusion converges smoothly to UTC without discontinuities
@@ -99,6 +212,7 @@ All notable changes to this project will be documented in this file.
 - **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py`
 
 **Technical Details:**
+
 - Previous implementation had both direct SHM write in main loop AND threaded updater
 - Timing inconsistencies between the two updates appeared as jitter to chrony
 - Removed `ChronySHMUpdater` thread completely
@@ -119,6 +233,7 @@ All notable changes to this project will be documented in this file.
 - **Files**: `systemd/timestd-fusion.service`, `src/hf_timestd/core/multi_broadcast_fusion.py`, `/etc/chrony/chrony.conf`
 
 **Technical Details:**
+
 - Fusion now calculates new D_clock every 8 seconds (was 60s)
 - Chrony polls every 16 seconds (was 8s), giving fusion 2 cycles to complete
 - Direct SHM write in main fusion loop ensures synchronization
@@ -136,6 +251,7 @@ All notable changes to this project will be documented in this file.
 - **Files**: `systemd/timestd-fusion.service`
 
 **Technical Details:**
+
 - First `fuse()` call legitimately takes >30s to read 10 minutes of HDF5 data from 9 channels
 - SWMR mode reads require metadata refresh and can experience lock contention
 - Watchdog ping occurs inside main loop, after fusion calculation completes
@@ -152,12 +268,14 @@ All notable changes to this project will be documented in this file.
 - **Documentation**: `DEGRADATION_ROOT_CAUSE_2026-01-04.md`
 
 **Technical Details:**
+
 - HDF5 writer now checks `hdf5_file.swmr_mode` before creating datasets
 - Schema version mismatch logged as warning instead of causing crash
 - Missing fields are skipped until daily file rotation creates new file with correct schema
 - Prevents cascading failures in analytics → fusion → chrony pipeline
 
 **Deployment Note:**
+
 - Future schema changes must be deployed after midnight UTC to align with file rotation
 - Or force file rotation before deployment
 - Or wait for natural daily rotation at 00:00 UTC

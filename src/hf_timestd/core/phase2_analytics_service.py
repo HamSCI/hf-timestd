@@ -360,8 +360,21 @@ class Phase2AnalyticsService:
             )
             logger.info(f"Initialized HDF5 L2 timing measurements writer for {file_channel}")
             
+            # L2: Test Signal Analysis (WWV/WWVH scientific test signals at minutes 8/44)
+            self.hdf5_l2_test_signal_writer = DataProductWriter(
+                output_dir=self.test_signal_dir,
+                product_level='L2',
+                product_name='test_signal',
+                channel=file_channel,
+                version='v1',
+                processing_version='3.9.0',
+                station_metadata=station_config or {}
+            )
+            logger.info(f"Initialized HDF5 L2 test signal writer for {file_channel}")
+            
             # Flag to enable/disable HDF5 writes (for testing)
             self.enable_hdf5_writes = True
+
             
             # ================================================================
             # HDF5 Startup Health Check (Analytics Review 2025-12-30)
@@ -375,7 +388,9 @@ class Phase2AnalyticsService:
             self.hdf5_l1a_tones_writer = None
             self.hdf5_l1b_writer = None
             self.hdf5_l2_writer = None
+            self.hdf5_l2_test_signal_writer = None
             self.enable_hdf5_writes = False
+
         
         # Initialize Timing Calibrator (shared across all channel instances)
         # This manages the bootstrap→calibrated→measurement mode progression
@@ -1316,7 +1331,7 @@ class Phase2AnalyticsService:
     def _is_chu_channel(self) -> bool:
         """Check if this is a CHU channel (3.33, 7.85, or 14.67 MHz)."""
         chu_frequencies = [3.33, 7.85, 14.67]
-        return self.frequency_mhz in chu_frequencies
+        return self._get_frequency_mhz() in chu_frequencies
     
     def _write_test_signal(self, minute_boundary: int, iq_samples, minute_number: int):
         """
@@ -1363,6 +1378,105 @@ class Phase2AnalyticsService:
                     round(detection.toa_offset_ms, 3) if detection.toa_offset_ms else '',
                     round(detection.coherence_time_sec, 3) if detection.coherence_time_sec else ''
                 ])
+            
+            # ================================================================
+            # Write to HDF5 (L2 Test Signal) - Parallel with CSV
+            # ================================================================
+            if self.enable_hdf5_writes and self.hdf5_l2_test_signal_writer:
+                try:
+                    timestamp_utc = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
+                    
+                    # Determine quality flag based on detection confidence
+                    if not detection.detected:
+                        quality_flag = 'MISSING'
+                    elif detection.confidence >= 0.8:
+                        quality_flag = 'GOOD'
+                    elif detection.confidence >= 0.5:
+                        quality_flag = 'MARGINAL'
+                    else:
+                        quality_flag = 'BAD'
+                    
+                    # Build comprehensive HDF5 measurement with all schema fields
+                    l2_test_signal_measurement = {
+                        # Basic metadata
+                        'timestamp_utc': timestamp_utc,
+                        'minute_boundary_utc': minute_boundary,
+                        'minute_number': minute_number,
+                        'station': station if detection.detected else '',
+                        'frequency_mhz': self._get_frequency_mhz(),
+                        
+                        # Detection results
+                        'detected': bool(detection.detected),
+                        'detection_confidence': detection.confidence if detection.confidence is not None else 0.0,
+                        
+                        # SNR measurements
+                        'snr_db': detection.snr_db,
+                        'effective_snr_db': detection.effective_snr_db,
+                        
+                        # Detection scores
+                        'multitone_score': detection.multitone_score if detection.multitone_score is not None else None,
+                        'chirp_score': detection.chirp_score if detection.chirp_score is not None else None,
+                        'burst_score': None,  # Not in current CSV, but in schema
+                        'noise_correlation': detection.noise_correlation if detection.noise_correlation is not None else None,
+                        
+                        # Timing measurements
+                        'toa_offset_ms': detection.toa_offset_ms,
+                        'toa_source': detection.toa_source or '',
+                        'burst_toa_offset_ms': detection.burst_toa_offset_ms,
+                        
+                        # Channel characterization
+                        'delay_spread_ms': detection.delay_spread_ms,
+                        'coherence_time_sec': detection.coherence_time_sec,
+                        'frequency_selectivity_db': detection.frequency_selectivity_db,
+                        
+                        # Individual tone powers
+                        'tone_power_2khz_db': detection.tone_powers_db.get(2000) if detection.tone_powers_db else None,
+                        'tone_power_3khz_db': detection.tone_powers_db.get(3000) if detection.tone_powers_db else None,
+                        'tone_power_4khz_db': detection.tone_powers_db.get(4000) if detection.tone_powers_db else None,
+                        'tone_power_5khz_db': detection.tone_powers_db.get(5000) if detection.tone_powers_db else None,
+                        
+                        # Time-series data (10-second windows)
+                        'tone_power_timeseries_2khz': detection.tone_power_timeseries.get(2000) if detection.tone_power_timeseries else None,
+                        'tone_power_timeseries_3khz': detection.tone_power_timeseries.get(3000) if detection.tone_power_timeseries else None,
+                        'tone_power_timeseries_4khz': detection.tone_power_timeseries.get(4000) if detection.tone_power_timeseries else None,
+                        'tone_power_timeseries_5khz': detection.tone_power_timeseries.get(5000) if detection.tone_power_timeseries else None,
+                        
+                        # Fading and scintillation
+                        'fading_variance': detection.fading_variance,
+                        'scintillation_index': detection.scintillation_index,
+                        
+                        # Noise segment analysis
+                        'noise1_score': detection.noise1_score if detection.noise1_score is not None else None,
+                        'noise2_score': detection.noise2_score if detection.noise2_score is not None else None,
+                        'noise_coherence_diff': detection.noise_coherence_diff,
+                        'transient_detected': bool(detection.transient_detected) if detection.transient_detected is not None else False,
+                        
+                        # Anomaly detection
+                        'anomaly_detected': bool(detection.anomaly_detected) if detection.anomaly_detected is not None else False,
+                        'anomaly_type': detection.anomaly_type or 'none',
+                        'anomaly_confidence': detection.anomaly_confidence,
+                        
+                        # Field strength metrics
+                        'field_strength_db': detection.field_strength_db,
+                        'field_strength_stability': detection.field_strength_stability,
+                        
+                        # Channel quality
+                        'multipath_detected': bool(detection.multipath_detected) if detection.multipath_detected is not None else False,
+                        'channel_quality': detection.channel_quality or '',
+                        
+                        # Quality flag and processing metadata
+                        'quality_flag': quality_flag,
+                        'processing_version': '3.9.0',
+                        'processed_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+                    }
+                    
+                    self.hdf5_l2_test_signal_writer.write_measurement(l2_test_signal_measurement)
+                    
+                    if detection.detected:
+                        logger.debug(f"Wrote test signal to HDF5: {station}, confidence={detection.confidence:.2f}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to write test signal to HDF5: {e}", exc_info=True)
             
             if detection.detected:
                 logger.info(
