@@ -1554,24 +1554,20 @@ class MultiBroadcastFusion:
         return filtered_m, filtered_w, n_rejected
     
     def _get_broadcast_key(self, station: str, frequency_mhz: float) -> str:
-        """Generate consistent broadcast key for calibration lookups."""
-        return f"{station}_{frequency_mhz:.2f}"
+        """
+        Generate broadcast key for calibration lookup.
+        
+        Keys by (station, frequency) for frequency-dependent calibration.
+        """
+        if frequency_mhz > 0:
+            return f"{station}_{frequency_mhz:.1f}"
+        return station
     
     def _apply_calibration(
         self,
         measurements: List[BroadcastMeasurement]
     ) -> List[float]:
-        """
-        Apply per-broadcast calibration offsets.
-        
-        Uses per-broadcast keys (station_frequency) to properly account for
-        frequency-dependent systematic offsets including:
-        - Ionospheric delays (1/f² dependence)
-        - Matched filter group delays
-        - Propagation mode differences
-        
-        Returns calibrated D_clock values.
-        """
+        """Apply per-broadcast calibration to measurements."""
         calibrated = []
         for m in measurements:
             if m.station == 'GLOBAL_DIFF':
@@ -2202,6 +2198,9 @@ class MultiBroadcastFusion:
         # 1. Statistical: Measurement scatter (weighted std)
         # 2. Systematic: Calibration convergence error
         # 3. Propagation: Mode-dependent ionospheric variability
+        
+        # Check if we have verified global solver result
+        has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
         
         # 1. Statistical uncertainty - measurement scatter
         # Standard deviation of calibrated measurements

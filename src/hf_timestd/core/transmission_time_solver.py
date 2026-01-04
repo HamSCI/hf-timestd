@@ -645,6 +645,23 @@ class TransmissionTimeSolver:
             layer_height = 0
             n_hops = 0
         elif mode == PropagationMode.ONE_HOP_E:
+            # CRITICAL FIX: E-layer plausibility check
+            # E-layer only exists during daytime (solar ionization required)
+            if timestamp is not None:
+                # Calculate local solar time at midpoint
+                from datetime import timezone
+                hour_utc = timestamp.hour + timestamp.minute / 60.0
+                if station_lon is not None:
+                    local_hour = (hour_utc + station_lon / 15.0) % 24.0
+                else:
+                    local_hour = hour_utc
+                
+                # E-layer exists roughly 06:00-18:00 local time
+                is_daytime = 6.0 <= local_hour <= 18.0
+                if not is_daytime:
+                    logger.debug(f"E-layer mode rejected: nighttime (local hour {local_hour:.1f})")
+                    return None  # E-layer doesn't exist at night
+            
             layer_height = hmE  # Dynamic E-layer height
             n_hops = 1
             # E-layer only works for shorter paths
@@ -674,13 +691,29 @@ class TransmissionTimeSolver:
             ground_distance_km, layer_height, n_hops
         )
         
+        # CRITICAL FIX: Enhanced plausibility checks
         # Check elevation angle plausibility (< 5° is very low, may not propagate)
-        if n_hops > 0 and elevation_deg < 3:
-            plausibility = 0.3  # Low but possible
-        elif n_hops > 0 and elevation_deg < 10:
-            plausibility = 0.7
-        else:
-            plausibility = 1.0
+        plausibility = 1.0
+        
+        if n_hops > 0:
+            if elevation_deg < 3:
+                plausibility *= 0.3  # Very low angle, unlikely
+            elif elevation_deg < 10:
+                plausibility *= 0.7  # Low angle, possible but not ideal
+        
+        # Ground wave beyond 500km is highly implausible
+        if mode == PropagationMode.GROUND_WAVE and ground_distance_km > 500:
+            logger.warning(f"Ground wave mode beyond realistic range: {ground_distance_km:.0f}km")
+            plausibility *= 0.1
+        
+        # Multi-hop modes at short distances are implausible
+        if n_hops >= 2 and ground_distance_km < 1000:
+            logger.debug(f"{n_hops}-hop mode implausible for short distance {ground_distance_km:.0f}km")
+            plausibility *= 0.3
+        
+        # 3+ hops are rare and only for very long distances
+        if n_hops >= 3 and ground_distance_km < 5000:
+            plausibility *= 0.5
         
         # Geometric delay (speed of light)
         geometric_delay_ms = (path_length_km / SPEED_OF_LIGHT_KM_S) * 1000
