@@ -570,6 +570,10 @@ class MultiBroadcastFusion:
         
         Issue 3.8.2 Fix: Added sanity checks to prevent loading corrupted
         calibration files with unreasonably large offsets.
+        
+        CRITICAL FIX (P2.1): Calibration persistence eliminates bootstrap delay.
+        System now loads previous calibration state on startup, allowing immediate
+        grade A performance instead of 10-20 minute convergence period.
         """
         if self.calibration_file.exists():
             try:
@@ -601,17 +605,19 @@ class MultiBroadcastFusion:
                         last_updated=cal_data['last_updated'],
                         reference_station=cal_data.get('reference_station', 'CHU')
                     )
-                logger.info(f"Loaded {len(self.calibration)} broadcast calibrations from {self.calibration_file}")
+                logger.info(f"✅ Loaded {len(self.calibration)} broadcast calibrations from {self.calibration_file}")
                 
-                # FIX 4: Skip warmup penalty if we have valid calibration data
+                # CRITICAL: Skip warmup penalty if we have valid calibration data
+                # This allows immediate grade A performance after service restart
                 if len(self.calibration) >= 2:
                     self.kalman_n_updates = 200
-                    logger.info("Skipping warmup penalty (calibration loaded)")
+                    logger.info("✅ Skipping warmup penalty (calibration loaded from disk)")
 
             except Exception as e:
                 logger.warning(f"Could not load calibration: {e}")
                 self._init_default_calibration()
         else:
+            logger.info("No calibration file found, starting fresh bootstrap")
             self._init_default_calibration()
     
     def _init_default_calibration(self):
@@ -1375,14 +1381,15 @@ class MultiBroadcastFusion:
         
         # Read from each channel
         for channel in self.channels:
-            clock_offset_dir = self.phase2_dir / channel / 'clock_offset'
-            if not clock_offset_dir.exists():
+            # SCHEMA FIX: HDF5 files are in channel root, not clock_offset subdirectory
+            channel_dir = self.phase2_dir / channel
+            if not channel_dir.exists():
                 continue
             
             try:
                 # Initialize HDF5 reader for L2 timing measurements
                 reader = DataProductReader(
-                    data_dir=clock_offset_dir,
+                    data_dir=channel_dir,
                     product_level='L2',
                     product_name='timing_measurements',
                     channel=channel
@@ -1420,6 +1427,7 @@ class MultiBroadcastFusion:
                                 continue
                         
                         # Create BroadcastMeasurement
+                        # SCHEMA FIX: HDF5 uses 'clock_offset_ms', fusion expects 'd_clock_ms'
                         m = BroadcastMeasurement(
                             timestamp=ts,
                             station=station,
@@ -1431,7 +1439,7 @@ class MultiBroadcastFusion:
                             snr_db=hdf5_meas.get('snr_db', 0.0),
                             quality_grade=hdf5_meas.get('quality_grade', 'D'),
                             channel_name=channel,
-                            raw_arrival_time_ms=hdf5_meas.get('raw_arrival_time_ms')  # Schema v1.1.0+
+                            raw_arrival_time_ms=hdf5_meas.get('raw_arrival_time_ms')
                         )
                         measurements.append(m)
                     
@@ -1640,11 +1648,18 @@ class MultiBroadcastFusion:
                 offset_ms=new_offset,
                 uncertainty_ms=broadcast_std / np.sqrt(len(d_clocks)),  # Standard error
                 n_samples=len(d_clocks),
-                last_updated=time.time(),
+                last_updated=datetime.now(timezone.utc).isoformat(),
                 reference_station=self.reference_station
             )
         
-        self._save_calibration()
+        # CRITICAL FIX (P2.1): Auto-save calibration every 50 updates
+        self.calibration_update_count += 1
+        if self.calibration_update_count % 50 == 0:
+            try:
+                self._save_calibration()
+                logger.debug(f"Auto-saved calibration (update #{self.calibration_update_count})")
+            except Exception as e:
+                logger.error(f"Failed to auto-save calibration: {e}")
     
     def _kalman_update(self, measurement: float, measurement_uncertainty: float) -> float:
         """
@@ -1654,6 +1669,12 @@ class MultiBroadcastFusion:
             State: [d_clock_offset, drift_rate]
             
         The uncertainty converges over time as more measurements are incorporated.
+        
+        This implements a 1D Kalman filter for tracking D_clock offset.
+        The process noise accounts for clock drift and environmental changes.
+        
+        CRITICAL FIX (P2.3): Added state bounds to prevent divergence.
+        If state exceeds ±10ms, filter is reset to prevent runaway.
         
         Args:
             measurement: Current fused D_clock measurement (ms)
@@ -1703,7 +1724,20 @@ class MultiBroadcastFusion:
         self.kalman_state = x_pred + K.flatten() * y
         self.kalman_P = (np.eye(2) - K @ H) @ P_pred
         
+        # Increment update counter
         self.kalman_n_updates += 1
+        
+        # CRITICAL FIX (P2.3): Kalman state bounds check
+        # If state has diverged beyond ±10ms, reset the filter
+        # Note: kalman_state is a numpy array [offset, drift], check offset (index 0)
+        if abs(self.kalman_state[0]) > 10.0:
+            logger.error(
+                f"Kalman filter diverged: state={self.kalman_state[0]:.3f}ms, "
+                f"resetting to prevent runaway"
+            )
+            self.kalman_state = np.array([0.0, 0.0])
+            self.kalman_P = np.eye(2)
+            self.kalman_n_updates = 0
         
         # Return uncertainty (sqrt of offset variance)
         kalman_uncertainty = np.sqrt(self.kalman_P[0, 0])
@@ -1788,8 +1822,12 @@ class MultiBroadcastFusion:
                     max_disagreement = disagreement
                     disagreeing_pair = (station_a, station_b)
         
-        # Threshold: ±200µs = 0.2ms
-        CROSS_STATION_THRESHOLD_MS = 0.2
+        # Threshold: ±1.0ms (increased from 0.2ms)
+        # Real propagation differences between stations can be 0.5-1.0ms due to:
+        # - Different ionospheric paths (CHU vs WWV = 2000+ km)
+        # - Different propagation modes (1E vs 1F)
+        # - Different TEC along path
+        CROSS_STATION_THRESHOLD_MS = 1.0
         
         if max_disagreement > CROSS_STATION_THRESHOLD_MS:
             # Stations disagree - identify outlier
@@ -2059,16 +2097,25 @@ class MultiBroadcastFusion:
             logger.debug("Too few measurements after outlier rejection")
             return None
         
-        # CRITICAL: Filter out any measurements with NaN values before fusion
-        # This is a safety net to prevent NaN from propagating into the fusion calculation
+        # CRITICAL: Filter out any measurements with NaN values or unlocked GPSDO before fusion
+        # This is a safety net to prevent NaN from propagating and to exclude unlocked measurements
         valid_measurements = []
         valid_weights = []
+        n_gpsdo_unlocked = 0
         for m, w in zip(measurements, weights):
             if np.isnan(m.d_clock_ms) or np.isnan(w):
                 logger.warning(f"Filtering out measurement with NaN: station={m.station}, d_clock={m.d_clock_ms}, weight={w}")
+            elif hasattr(m, 'gpsdo_locked') and not m.gpsdo_locked:
+                # CRITICAL FIX: Exclude measurements where GPSDO is not locked
+                # Unlocked GPSDO can drift by seconds, causing massive timing errors
+                n_gpsdo_unlocked += 1
+                logger.warning(f"Filtering out measurement with unlocked GPSDO: station={m.station}, freq={m.frequency_mhz}MHz")
             else:
                 valid_measurements.append(m)
                 valid_weights.append(w)
+        
+        if n_gpsdo_unlocked > 0:
+            logger.warning(f"Excluded {n_gpsdo_unlocked} measurements due to unlocked GPSDO")
         
         if len(valid_measurements) < 2:
             logger.error(f"Too few valid measurements after NaN filtering ({len(valid_measurements)}/{len(measurements)})")
@@ -2078,21 +2125,19 @@ class MultiBroadcastFusion:
         weights = valid_weights
         
         # ====================================================================
-        
-        
+        # APPLY CALIBRATION (before cross-validation)
         # ====================================================================
+        # Apply existing calibration to measurements for validation
+        # Note: We do NOT update calibration yet - that happens after validation
         
-        # Update calibration (before applying)
-        self._update_calibration(measurements)
-        
-        # Apply calibration
         calibrated = self._apply_calibration(measurements)
         
         # ====================================================================
         # CROSS-STATION VALIDATION (Priority 1C - 2025-12-31)
         # ====================================================================
-        # Validate that different stations agree on UTC time within ±200µs.
+        # Validate that different stations agree on UTC time within ±1.0ms.
         # This detects systematic errors in any single station.
+        # Threshold increased from 0.2ms to 1.0ms to account for real propagation differences.
         
         cross_valid, cross_reason, n_cross_outliers = self._cross_validate_stations(
             measurements, calibrated
@@ -2103,10 +2148,32 @@ class MultiBroadcastFusion:
             # Note: We don't reject the fusion, but flag it in the result
             # The consistency_flag will be set to reflect this issue
         
+        # ====================================================================
+        # UPDATE CALIBRATION (after cross-validation)
+        # ====================================================================
+        # CRITICAL FIX: Only update calibration with validated measurements
+        # This prevents outliers (e.g., tone misidentification) from contaminating calibration
+        if cross_valid:
+            self._update_calibration(measurements)
+        else:
+            logger.info("Skipping calibration update due to cross-validation failure")
+        
         # Weighted mean of calibrated values
         w = np.array(weights)
         d = np.array(calibrated)
         fused_d_clock = np.sum(w * d) / np.sum(w)
+        
+        # CRITICAL FIX (P3.2): D_clock monotonicity check
+        # Large jumps (>5ms) indicate tone misidentification or other errors
+        if hasattr(self, 'last_fused_d_clock'):
+            delta = abs(fused_d_clock - self.last_fused_d_clock)
+            if delta > 5.0:
+                logger.error(
+                    f"D_clock jumped {delta:.1f}ms (from {self.last_fused_d_clock:+.3f}ms "
+                    f"to {fused_d_clock:+.3f}ms) - possible tone misidentification or "
+                    f"calibration error"
+                )
+        self.last_fused_d_clock = fused_d_clock
         
         # Raw (uncalibrated) mean for comparison
         raw_d_clocks = np.array([m.d_clock_ms for m in measurements])
@@ -2143,6 +2210,9 @@ class MultiBroadcastFusion:
         
         # 3. Propagation uncertainty - mode-dependent ionospheric variability
         # Different propagation modes have different inherent uncertainties
+        # CRITICAL FIX (P3.1): Added RTP jitter component to uncertainty budget
+        rtp_jitter_ms = 0.1  # RTP timestamp jitter (~100µs typical)
+        
         mode_uncertainties = {
             'GW': 0.1,    # Ground wave (very stable)
             '1E': 0.3,    # Single-hop E-layer (stable)
@@ -2167,15 +2237,16 @@ class MultiBroadcastFusion:
         
         # Combined uncertainty (Root Sum of Squares)
         # RSS is appropriate for independent uncertainty sources
-        combined_uncertainty = np.sqrt(
-            statistical_uncertainty**2 +
-            systematic_uncertainty**2 +
-            propagation_uncertainty**2
+        measurement_uncertainty = np.sqrt(
+            statistical_uncertainty**2 +      # Measurement scatter
+            systematic_uncertainty**2 +       # Calibration convergence
+            propagation_uncertainty**2 +      # Mode-dependent ionospheric
+            rtp_jitter_ms**2                  # RTP timestamp jitter (P3.1 fix)
         )
         
         # Apply uncertainty floor (has_verified_global already defined above)
         uncertainty_floor = 0.1 if has_verified_global else 0.2
-        measurement_uncertainty = max(uncertainty_floor, combined_uncertainty)
+        measurement_uncertainty = max(uncertainty_floor, measurement_uncertainty)
         
         # Update Kalman filter for convergence tracking
         kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
@@ -2278,13 +2349,9 @@ class MultiBroadcastFusion:
                 weighted_var = np.sum(w_clean * (d_clean - fused_d_clock)**2) / np.sum(w_clean)
                 measurement_uncertainty = np.sqrt(weighted_var)
                 
-                # Update Kalman with cleaner measurement
-                kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
-                uncertainty = kalman_uncertainty
-                
                 logger.info(
-                    f"Excluded {suspect_count} suspect measurements, "
-                    f"recalculated D_clock: {fused_d_clock:+.3f}ms ± {uncertainty:.3f}ms"
+                    f"Excluded {suspect_count} suspect measurements (discrimination errors), "
+                    f"recalculated D_clock: {fused_d_clock:+.3f}ms ± {measurement_uncertainty:.3f}ms"
                 )
             
             wwv_str = f"{wwv_intra_std:.1f}" if wwv_intra_std is not None else "N/A"
@@ -2296,6 +2363,12 @@ class MultiBroadcastFusion:
                 f"WWVH σ={wwvh_str}ms, CHU σ={chu_str}ms, BPM σ={bpm_str}ms | "
                 f"{suspect_count} suspect measurements"
             )
+        
+        # Update Kalman filter for convergence tracking
+        kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
+        
+        # Final uncertainty is the Kalman-filtered combined uncertainty
+        uncertainty = kalman_uncertainty
         
         # Quality grade based on number of broadcasts and uncertainty
         if len(measurements) >= 8 and uncertainty < 0.5:
@@ -2705,16 +2778,13 @@ def run_fusion_service(
     
     # Initialize Chrony SHM if enabled
     chrony_shm = None
-    chrony_updater = None
     if enable_chrony:
         try:
             from hf_timestd.core.chrony_shm import ChronySHM
             chrony_shm = ChronySHM(unit=0)
             if chrony_shm.connect():
                 logger.info("Chrony SHM refclock enabled (unit=0, refid=TMGR)")
-                # Start threaded updater at 8-second intervals
-                chrony_updater = ChronySHMUpdater(chrony_shm, poll_interval=8.0)
-                chrony_updater.start()
+                logger.info("SHM updates will occur directly in fusion loop (no threaded updater)")
             else:
                 logger.warning("Failed to connect to Chrony SHM - continuing without")
                 chrony_shm = None
@@ -2725,7 +2795,7 @@ def run_fusion_service(
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
-    logger.info(f"  Chrony SHM: {'enabled (threaded updater at 8s)' if chrony_updater else 'disabled'}")
+    logger.info(f"  Chrony SHM: {'enabled (direct updates)' if chrony_shm else 'disabled'}")
     
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s")
@@ -2786,10 +2856,26 @@ def run_fusion_service(
                 if result.consistency_flag != 'OK':
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
-                # Update Chrony SHM updater thread with latest result
-                if chrony_updater:
-                    chrony_updater.update_result(result)
-                    logger.debug(f"Updated Chrony SHM thread with latest fusion result (grade {result.quality_grade})")
+                # Write directly to Chrony SHM (fusion runs at chrony poll rate)
+                if chrony_shm and result.quality_grade in ('A', 'B', 'C', 'D'):
+                    now = time.time()
+                    system_time = now
+                    reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
+                    
+                    # Precision based on uncertainty (log2 of seconds)
+                    precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
+                    
+                    try:
+                        update_success = chrony_shm.update(reference_time, system_time, precision)
+                        if update_success:
+                            logger.debug(
+                                f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
+                                f"offset={(system_time-reference_time)*1000:+.3f}ms, precision={precision}"
+                            )
+                        else:
+                            logger.warning("Chrony SHM write failed")
+                    except Exception as e:
+                        logger.error(f"Chrony SHM update exception: {e}")
 
             # BREADCRUMB: Sleeping
             loop_duration = time.time() - loop_start_time
@@ -2799,8 +2885,6 @@ def run_fusion_service(
             
         except KeyboardInterrupt:
             logger.info("Fusion service stopped")
-            if chrony_updater:
-                chrony_updater.stop()
             break
         except Exception as e:
             logger.error(f"Fusion error: {e}", exc_info=True)

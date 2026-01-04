@@ -384,6 +384,17 @@ class DataProductWriter:
             
             # Create dataset if it doesn't exist
             if field_name not in hdf5_file:
+                # CRITICAL: Cannot add datasets to SWMR files after initialization
+                # This prevents schema evolution issues that caused 2026-01-04 degradation
+                if hdf5_file.swmr_mode:
+                    logger.warning(
+                        f"Cannot add field '{field_name}' to SWMR file {hdf5_file.filename}. "
+                        f"Schema version mismatch detected. Field will be missing until next file rotation. "
+                        f"File schema: {hdf5_file.attrs.get('schema_version', 'unknown')}, "
+                        f"Writer schema: {self.schema['schema_version']}"
+                    )
+                    continue
+                
                 if field_name == 'raw_arrival_time_ms':
                     logger.info(f"DEBUG TEC FIX HDF5: Creating dataset for raw_arrival_time_ms")
                 
@@ -404,10 +415,14 @@ class DataProductWriter:
                 if 'reference' in field:
                     hdf5_file[field_name].attrs['reference'] = field['reference']
             
-            # Append value to dataset
-            dataset = hdf5_file[field_name]
-            dataset.resize((dataset.shape[0] + 1,))
-            dataset[-1] = value
+            # Append value to dataset (only if dataset exists)
+            if field_name in hdf5_file:
+                dataset = hdf5_file[field_name]
+                dataset.resize((dataset.shape[0] + 1,))
+                dataset[-1] = value
+            else:
+                # Field was skipped due to SWMR constraint
+                continue
             
             if field_name == 'raw_arrival_time_ms':
                 logger.info(f"DEBUG TEC FIX HDF5: Wrote value {value} to dataset, new size={dataset.shape[0]}")

@@ -10,9 +10,10 @@ Type=notify
 User=timestd
 Group=timestd
 
-# Systemd Watchdog - service must send WATCHDOG=1 every 30 seconds
+# Systemd Watchdog - service must send WATCHDOG=1 every 120 seconds
 # The fusion service sends watchdog notifications in its main loop
-WatchdogSec=30
+# Increased from 30s to 120s to allow for HDF5 read operations on first cycle
+WatchdogSec=120
 
 # Note: Using Type=notify (changed from simple) to support watchdog
 # The fusion service calls systemd_daemon.notify('READY=1') on startup
@@ -21,7 +22,7 @@ WatchdogSec=30
 # Run as the installed module from the venv
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion \
     --data-root /var/lib/timestd \
-    --interval 60.0 \
+    --interval 8.0 \
     --enable-chrony \
     --log-level INFO
 
