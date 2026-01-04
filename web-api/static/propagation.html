@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,6 +8,7 @@
     <link rel="stylesheet" href="/static/css/styles.css">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
@@ -70,7 +72,8 @@
             <div class="card-header">
                 <div>
                     <div class="card-title">Multi-Frequency Comparison by Station</div>
-                    <div class="card-subtitle">Compare propagation across frequencies from same station (useful for TEC analysis)</div>
+                    <div class="card-subtitle">Compare propagation across frequencies from same station (useful for TEC
+                        analysis)</div>
                 </div>
             </div>
             <div id="station-freq-comparison" style="padding: 16px;">
@@ -91,10 +94,12 @@
             <div class="card-header">
                 <div>
                     <div class="card-title">TEC (Total Electron Content) by Path</div>
-                    <div class="card-subtitle">HF-derived TEC from multi-frequency measurements with uncertainty estimates</div>
+                    <div class="card-subtitle">HF-derived TEC from multi-frequency measurements with uncertainty
+                        estimates</div>
                 </div>
             </div>
-            <div id="tec-quality-summary" style="padding: 12px 16px; background: rgba(30, 41, 59, 0.3); margin: 0 16px; border-radius: 4px; font-size: 13px; color: #94a3b8;">
+            <div id="tec-quality-summary"
+                style="padding: 12px 16px; background: rgba(30, 41, 59, 0.3); margin: 0 16px; border-radius: 4px; font-size: 13px; color: #94a3b8;">
                 Loading quality metrics...
             </div>
             <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; padding: 0 16px;">
@@ -104,7 +109,7 @@
                 <button class="time-range-btn tec-range-btn active" data-range="-7d">Last 7 Days</button>
             </div>
             <div id="tec-plot" style="width: 100%; height: 400px;"></div>
-            
+
             <!-- Per-Station TEC Details -->
             <div id="tec-station-details" style="padding: 16px;">
                 <div style="text-align: center; color: #94a3b8; padding: 20px;">Loading station details...</div>
@@ -147,7 +152,7 @@
         }
 
         function showLoading(elementId) {
-            document.getElementById(elementId).innerHTML = 
+            document.getElementById(elementId).innerHTML =
                 '<div style="padding: 40px; text-align: center; color: #94a3b8;">Loading...</div>';
         }
 
@@ -158,15 +163,19 @@
                 clearError();
                 const data = await api.get('/propagation/conditions');
                 console.log('Received data:', data);
-                
-                // Update summary metrics
-                document.getElementById('muf-estimate').textContent = data.muf_estimate_mhz 
-                    ? `${data.muf_estimate_mhz.toFixed(1)} MHz` 
-                    : 'N/A';
+
+                // Update summary metrics with better MUF handling
+                const mufDisplay = data.muf_estimate_mhz !== undefined && data.muf_estimate_mhz !== null
+                    ? `${data.muf_estimate_mhz.toFixed(1)} MHz`
+                    : 'Insufficient data';
+
+                console.log('MUF estimate:', data.muf_estimate_mhz, '-> display:', mufDisplay);
+
+                document.getElementById('muf-estimate').textContent = mufDisplay;
                 document.getElementById('n-broadcasts').textContent = data.n_broadcasts || 0;
                 document.getElementById('n-measurements').textContent = data.n_measurements || 0;
                 document.getElementById('time-span').textContent = `${data.time_span_hours.toFixed(1)} hours`;
-                
+
                 // Display per-broadcast cards
                 const broadcastContainer = document.getElementById('broadcast-cards');
                 if (!data.broadcasts || data.broadcasts.length === 0) {
@@ -182,9 +191,9 @@
                                     <span>${pct}% (${count})</span>
                                 </div>`;
                             }).join('');
-                        
+
                         const snrText = b.avg_snr_db ? `${b.avg_snr_db.toFixed(1)} dB` : 'N/A';
-                        
+
                         return `
                             <div style="background: rgba(30, 41, 59, 0.5); border-radius: 8px; padding: 16px; border-left: 4px solid #3b82f6;">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
@@ -202,14 +211,14 @@
                             </div>
                         `;
                     }).join('');
-                    
+
                     broadcastContainer.innerHTML = `<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">${cardsHtml}</div>`;
                 }
-                
+
                 // Plot frequency-mode heatmap
                 const frequencies = [...new Set(data.broadcasts.map(b => b.frequency_mhz))].sort((a, b) => a - b);
                 const allModes = [...new Set(data.broadcasts.flatMap(b => Object.keys(b.mode_distribution)))];
-                
+
                 // Create bar chart showing dominant mode by frequency
                 const barData = data.broadcasts.map(b => ({
                     x: [b.frequency_mhz],
@@ -220,16 +229,16 @@
                     textposition: 'inside',
                     hovertemplate: `<b>${b.station} ${b.frequency_mhz.toFixed(1)} MHz</b><br>Mode: ${b.dominant_mode}<br>Observations: %{y}<extra></extra>`
                 }));
-                
+
                 const freqLayout = {
                     title: '',
-                    xaxis: { 
-                        title: 'Frequency (MHz)', 
+                    xaxis: {
+                        title: 'Frequency (MHz)',
                         color: '#94a3b8',
                         gridcolor: '#334155'
                     },
-                    yaxis: { 
-                        title: 'Observations', 
+                    yaxis: {
+                        title: 'Observations',
                         color: '#94a3b8',
                         gridcolor: '#334155'
                     },
@@ -240,9 +249,9 @@
                     showlegend: false,
                     barmode: 'group'
                 };
-                
-                Plotly.newPlot('freq-mode-plot', barData, freqLayout, {responsive: true});
-                
+
+                Plotly.newPlot('freq-mode-plot', barData, freqLayout, { responsive: true });
+
                 // Per-station multi-frequency comparison
                 const stationGroups = {};
                 data.broadcasts.forEach(b => {
@@ -251,12 +260,12 @@
                     }
                     stationGroups[b.station].push(b);
                 });
-                
+
                 const stationComparisonHtml = Object.entries(stationGroups)
                     .filter(([station, broadcasts]) => broadcasts.length > 1)  // Only stations with multiple frequencies
                     .map(([station, broadcasts]) => {
                         broadcasts.sort((a, b) => a.frequency_mhz - b.frequency_mhz);
-                        
+
                         const freqRows = broadcasts.map(b => `
                             <tr style="border-bottom: 1px solid rgba(148, 163, 184, 0.1);">
                                 <td style="padding: 8px; font-weight: 600;">${b.frequency_mhz.toFixed(2)} MHz</td>
@@ -265,13 +274,13 @@
                                 <td style="padding: 8px; text-align: center;">${b.n_measurements}</td>
                                 <td style="padding: 8px; font-size: 12px;">
                                     ${Object.entries(b.mode_distribution)
-                                        .sort((a, b) => b[1] - a[1])
-                                        .map(([mode, count]) => `${mode}:${count}`)
-                                        .join(', ')}
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([mode, count]) => `${mode}:${count}`)
+                                .join(', ')}
                                 </td>
                             </tr>
                         `).join('');
-                        
+
                         return `
                             <div style="background: rgba(30, 41, 59, 0.3); border-radius: 8px; padding: 16px; margin-bottom: 16px;">
                                 <div style="font-size: 18px; font-weight: 600; color: #3b82f6; margin-bottom: 12px;">
@@ -297,14 +306,14 @@
                             </div>
                         `;
                     }).join('');
-                
+
                 const comparisonContainer = document.getElementById('station-freq-comparison');
                 if (stationComparisonHtml) {
                     comparisonContainer.innerHTML = stationComparisonHtml;
                 } else {
                     comparisonContainer.innerHTML = '<div style="text-align: center; color: #94a3b8; padding: 40px;">No multi-frequency stations available</div>';
                 }
-                
+
             } catch (error) {
                 console.error('Failed to load current conditions:', error);
                 showError(`Failed to load propagation conditions: ${error.message}`);
@@ -316,9 +325,9 @@
             try {
                 clearError();
                 showLoading('timeline-plot');
-                
+
                 const data = await api.get('/propagation/timeline', { start: range, end: 'now' });
-                
+
                 // Create scatter plot colored by mode
                 const modeColors = {
                     '1E': '#ef4444',
@@ -328,7 +337,7 @@
                     'GW': '#8b5cf6',
                     'UNKNOWN': '#6b7280'
                 };
-                
+
                 // Group by mode for separate traces
                 const modeGroups = {};
                 for (let i = 0; i < data.timestamps.length; i++) {
@@ -340,7 +349,7 @@
                     modeGroups[mode].frequencies.push(data.frequencies[i]);
                     modeGroups[mode].snrs.push(data.snr_db[i]);
                 }
-                
+
                 const traces = Object.entries(modeGroups).map(([mode, group]) => ({
                     x: group.timestamps,
                     y: group.frequencies,
@@ -354,7 +363,7 @@
                     },
                     hovertemplate: '<b>%{x}</b><br>Freq: %{y:.1f} MHz<br>Mode: ' + mode + '<extra></extra>'
                 }));
-                
+
                 const layout = {
                     title: '',
                     xaxis: {
@@ -374,12 +383,12 @@
                     showlegend: true,
                     legend: { orientation: 'h', y: -0.15 }
                 };
-                
-                Plotly.newPlot('timeline-plot', traces, layout, {responsive: true});
-                
+
+                Plotly.newPlot('timeline-plot', traces, layout, { responsive: true });
+
             } catch (error) {
                 console.error('Failed to load mode timeline:', error);
-                document.getElementById('timeline-plot').innerHTML = 
+                document.getElementById('timeline-plot').innerHTML =
                     '<div style="padding: 40px; text-align: center; color: #94a3b8;">Unable to load propagation timeline.</div>';
             }
         }
@@ -389,15 +398,15 @@
             try {
                 clearError();
                 showLoading('tec-plot');
-                
+
                 const data = await api.get('/propagation/tec', { start: range, end: 'now' });
-                
+
                 if (!data || !data.paths || Object.keys(data.paths).length === 0) {
-                    document.getElementById('tec-plot').innerHTML = 
+                    document.getElementById('tec-plot').innerHTML =
                         '<div style="padding: 40px; text-align: center; color: #94a3b8;">No TEC data available for this time range</div>';
                     return;
                 }
-                
+
                 // Color scheme for different paths
                 const pathColors = {
                     'WWV': '#3b82f6',    // Blue
@@ -405,7 +414,7 @@
                     'CHU': '#f59e0b',    // Orange
                     'BPM': '#8b5cf6'     // Purple
                 };
-                
+
                 // Create separate trace for each station/path with error bars
                 const traces = Object.entries(data.paths).map(([station, pathData]) => {
                     const trace = {
@@ -414,21 +423,21 @@
                         type: 'scatter',
                         mode: 'lines+markers',
                         name: `${station} path`,
-                        line: { 
-                            color: pathColors[station] || '#6b7280', 
-                            width: 2 
+                        line: {
+                            color: pathColors[station] || '#6b7280',
+                            width: 2
                         },
-                        marker: { 
+                        marker: {
                             size: 4,
                             // Color by quality
                             color: pathData.quality.map(q => q === 'GOOD' ? pathColors[station] : '#ef4444')
                         },
                         hovertemplate: `<b>${station} path</b><br>%{x}<br>TEC: %{y:.3f} TECU<br>Quality: %{text}<extra></extra>`,
-                        text: pathData.quality.map((q, i) => 
+                        text: pathData.quality.map((q, i) =>
                             `${q} (${pathData.n_frequencies[i]} freqs, conf: ${(pathData.confidence[i] * 100).toFixed(1)}%)`
                         )
                     };
-                    
+
                     // Add error bars if uncertainty data exists
                     if (pathData.uncertainty_tecu && pathData.uncertainty_tecu.length > 0) {
                         trace.error_y = {
@@ -440,10 +449,10 @@
                             width: 2
                         };
                     }
-                    
+
                     return trace;
                 });
-                
+
                 const layout = {
                     title: '',
                     xaxis: {
@@ -471,18 +480,39 @@
                         borderwidth: 1
                     }
                 };
-                
-                Plotly.newPlot('tec-plot', traces, layout, {responsive: true});
-                
+
+                Plotly.newPlot('tec-plot', traces, layout, { responsive: true });
+
                 // Display quality summary with more detail
                 const qualitySummary = Object.entries(data.paths).map(([station, pathData]) => {
-                    const qualityPct = (pathData.quality_ratio * 100).toFixed(0);
-                    const meanUnc = pathData.mean_uncertainty ? pathData.mean_uncertainty.toFixed(3) : 'N/A';
-                    const meanTec = pathData.mean_tec ? pathData.mean_tec.toFixed(2) : 'N/A';
-                    const minTec = pathData.min_tec !== undefined ? pathData.min_tec.toFixed(2) : 'N/A';
-                    const maxTec = pathData.max_tec !== undefined ? pathData.max_tec.toFixed(2) : 'N/A';
+                    // Defensive checks for all values
+                    const qualityPct = pathData.quality_ratio !== undefined && pathData.quality_ratio !== null
+                        ? (pathData.quality_ratio * 100).toFixed(0)
+                        : '0';
+                    const meanUnc = pathData.mean_uncertainty !== undefined && pathData.mean_uncertainty !== null
+                        ? pathData.mean_uncertainty.toFixed(3)
+                        : 'N/A';
+                    const meanTec = pathData.mean_tec !== undefined && pathData.mean_tec !== null
+                        ? pathData.mean_tec.toFixed(2)
+                        : 'N/A';
+                    const minTec = pathData.min_tec !== undefined && pathData.min_tec !== null
+                        ? pathData.min_tec.toFixed(2)
+                        : 'N/A';
+                    const maxTec = pathData.max_tec !== undefined && pathData.max_tec !== null
+                        ? pathData.max_tec.toFixed(2)
+                        : 'N/A';
                     const count = pathData.count || 0;
-                    
+
+                    // Debug logging
+                    console.log(`TEC stats for ${station}:`, {
+                        mean: pathData.mean_tec,
+                        min: pathData.min_tec,
+                        max: pathData.max_tec,
+                        count: pathData.count,
+                        quality_ratio: pathData.quality_ratio,
+                        mean_uncertainty: pathData.mean_uncertainty
+                    });
+
                     return `
                         <div style="display: inline-block; margin-right: 20px; margin-bottom: 8px;">
                             <span style="color: ${pathColors[station]}; font-size: 16px;">●</span> 
@@ -494,25 +524,36 @@
                         </div>
                     `;
                 }).join('');
-                
-                document.getElementById('tec-quality-summary').innerHTML = 
+
+                document.getElementById('tec-quality-summary').innerHTML =
                     `<div style="margin-bottom: 8px;"><b>Pairwise TEC by Propagation Path:</b></div>` +
                     qualitySummary +
                     `<div style="margin-top: 8px; font-size: 12px; font-style: italic; color: #94a3b8;">` +
                     `TEC calculated from multi-frequency group delay measurements. Red markers indicate BAD quality. Error bars show timing uncertainty propagated to TEC uncertainty.` +
                     `</div>`;
-                
+
                 // Display detailed per-station breakdown
                 const stationDetailsHtml = Object.entries(data.paths)
                     .sort((a, b) => a[0].localeCompare(b[0]))
                     .map(([station, pathData]) => {
-                        const meanTec = pathData.mean_tec ? pathData.mean_tec.toFixed(2) : 'N/A';
-                        const minTec = pathData.min_tec !== undefined ? pathData.min_tec.toFixed(2) : 'N/A';
-                        const maxTec = pathData.max_tec !== undefined ? pathData.max_tec.toFixed(2) : 'N/A';
-                        const meanUnc = pathData.mean_uncertainty ? pathData.mean_uncertainty.toFixed(3) : 'N/A';
-                        const qualityPct = (pathData.quality_ratio * 100).toFixed(0);
+                        // Defensive checks for all values
+                        const meanTec = pathData.mean_tec !== undefined && pathData.mean_tec !== null
+                            ? pathData.mean_tec.toFixed(2)
+                            : 'N/A';
+                        const minTec = pathData.min_tec !== undefined && pathData.min_tec !== null
+                            ? pathData.min_tec.toFixed(2)
+                            : 'N/A';
+                        const maxTec = pathData.max_tec !== undefined && pathData.max_tec !== null
+                            ? pathData.max_tec.toFixed(2)
+                            : 'N/A';
+                        const meanUnc = pathData.mean_uncertainty !== undefined && pathData.mean_uncertainty !== null
+                            ? pathData.mean_uncertainty.toFixed(3)
+                            : 'N/A';
+                        const qualityPct = pathData.quality_ratio !== undefined && pathData.quality_ratio !== null
+                            ? (pathData.quality_ratio * 100).toFixed(0)
+                            : '0';
                         const count = pathData.count || 0;
-                        
+
                         // Get frequency distribution from n_frequencies array
                         const freqCounts = {};
                         if (pathData.n_frequencies) {
@@ -524,7 +565,7 @@
                             .sort((a, b) => parseInt(b[0]) - parseInt(a[0]))
                             .map(([n, count]) => `${n} freqs: ${count}×`)
                             .join(', ') || 'N/A';
-                        
+
                         return `
                             <div style="background: rgba(30, 41, 59, 0.3); border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid ${pathColors[station]};">
                                 <div style="font-size: 18px; font-weight: 600; color: ${pathColors[station]}; margin-bottom: 12px;">
@@ -562,13 +603,13 @@
                             </div>
                         `;
                     }).join('');
-                
-                document.getElementById('tec-station-details').innerHTML = stationDetailsHtml || 
+
+                document.getElementById('tec-station-details').innerHTML = stationDetailsHtml ||
                     '<div style="text-align: center; color: #94a3b8; padding: 20px;">No station details available</div>';
-                
+
             } catch (error) {
                 console.error('Failed to load TEC data:', error);
-                document.getElementById('tec-plot').innerHTML = 
+                document.getElementById('tec-plot').innerHTML =
                     '<div style="padding: 40px; text-align: center; color: #94a3b8;">Unable to load TEC data.</div>';
             }
         }
@@ -600,7 +641,7 @@
                 await loadCurrentConditions();
                 await loadTecData(currentTecRange);
                 await loadModeTimeline(currentTimelineRange);
-                
+
                 // Auto-refresh every 60 seconds
                 const refresh = new AutoRefresh(() => {
                     loadCurrentConditions();
@@ -614,8 +655,9 @@
                 showError(`Initialization failed: ${error.message}`);
             }
         }
-        
+
         init();
     </script>
 </body>
+
 </html>

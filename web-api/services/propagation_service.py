@@ -89,10 +89,21 @@ class PropagationService:
             # Collect measurements from all channels
             all_measurements = []
             
+            # Debug logging
+            logger.info(f"Scanning phase2_dir: {self.phase2_dir}")
+            channel_count = 0
+            
             # Check each channel directory
             for channel_dir in self.phase2_dir.iterdir():
                 if not channel_dir.is_dir() or channel_dir.name in ['fusion', 'science']:
                     continue
+                
+                channel_count += 1
+                logger.info(f"Found channel directory: {channel_dir.name}")
+                
+                # Check for HDF5 files
+                h5_files = list(channel_dir.glob('*.h5'))
+                logger.info(f"  HDF5 files in {channel_dir.name}: {len(h5_files)}")
                 
                 # L2 timing measurements are directly in channel directory
                 try:
@@ -108,18 +119,30 @@ class PropagationService:
                         end=end_time.isoformat() + 'Z'
                     )
                     
+                    logger.info(f"  Read {len(measurements)} measurements from {channel_dir.name}")
+                    
+                    # Log first measurement structure for debugging
+                    if measurements:
+                        sample = measurements[0]
+                        logger.info(f"  Sample measurement keys: {list(sample.keys())}")
+                        logger.info(f"  Sample: station={sample.get('station')}, freq={sample.get('frequency_mhz')}, mode={sample.get('propagation_mode')}")
+                    
                     all_measurements.extend(measurements)
                     
                 except Exception as e:
-                    logger.debug(f"Could not read {channel_dir.name}: {e}")
+                    logger.error(f"  Error reading {channel_dir.name}: {e}", exc_info=True)
                     continue
             
+            logger.info(f"Total channels scanned: {channel_count}, total measurements: {len(all_measurements)}")
+            
             if not all_measurements:
+                logger.warning("No measurements found in any channel")
                 return None
             
             # Analyze per-broadcast (station + frequency)
             broadcast_stats = {}
-            muf_by_time = []
+            f_layer_freqs = []  # For MUF calculation
+            all_freqs = []  # For fallback MUF
             
             for m in all_measurements:
                 station = m.get('station', 'UNKNOWN')
@@ -127,6 +150,10 @@ class PropagationService:
                 mode = m.get('propagation_mode', 'UNKNOWN')
                 snr = m.get('snr_db')
                 timestamp = m.get('timestamp_utc')
+                
+                # Track all frequencies for MUF fallback
+                if freq > 0:
+                    all_freqs.append(freq)
                 
                 # Validate station/frequency combination
                 if not self._is_valid_broadcast(station, freq):
@@ -151,9 +178,15 @@ class PropagationService:
                 if snr is not None:
                     broadcast_stats[broadcast_key]['snr_values'].append(snr)
                 
-                # Track MUF over time
-                if 'F' in mode and freq > 0:
-                    muf_by_time.append({'timestamp': timestamp, 'frequency': freq})
+                # Track F-layer frequencies for MUF (more robust matching)
+                if mode and freq > 0:
+                    mode_upper = mode.upper()
+                    # Match any F-layer mode: 1F, 2F, 3F, etc.
+                    if 'F' in mode_upper and mode_upper != 'UNKNOWN':
+                        f_layer_freqs.append(freq)
+            
+            logger.info(f"Broadcast stats collected for {len(broadcast_stats)} broadcasts")
+            logger.info(f"F-layer frequencies found: {len(f_layer_freqs)}")
             
             # Calculate per-broadcast statistics
             broadcasts = []
@@ -177,12 +210,18 @@ class PropagationService:
             # Sort by frequency
             broadcasts.sort(key=lambda x: x['frequency_mhz'])
             
-            # Estimate current MUF (highest F-layer frequency)
+            # Estimate current MUF (Maximum Usable Frequency)
             muf_estimate = None
-            if muf_by_time:
-                recent_f_freqs = [item['frequency'] for item in muf_by_time[-20:]]  # Last 20 F-layer obs
-                if recent_f_freqs:
-                    muf_estimate = max(recent_f_freqs) * 1.15
+            if f_layer_freqs:
+                # MUF ≈ 1.15 × highest observed F-layer frequency
+                muf_estimate = max(f_layer_freqs) * 1.15
+                logger.info(f"MUF estimated from F-layer: {muf_estimate:.1f} MHz (max F-freq: {max(f_layer_freqs):.1f} MHz)")
+            elif all_freqs:
+                # Fallback: Use highest observed frequency × 1.3
+                muf_estimate = max(all_freqs) * 1.3
+                logger.info(f"MUF estimated from fallback: {muf_estimate:.1f} MHz (max freq: {max(all_freqs):.1f} MHz)")
+            else:
+                logger.warning("Could not estimate MUF - no frequency data")
             
             return {
                 'timestamp': end_time.isoformat() + 'Z',
@@ -194,7 +233,7 @@ class PropagationService:
             }
             
         except Exception as e:
-            logger.error(f"Error getting current conditions: {e}")
+            logger.error(f"Error getting current conditions: {e}", exc_info=True)
             return None
     
     def get_mode_timeline(

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,6 +8,7 @@
     <link rel="stylesheet" href="/static/css/styles.css">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
@@ -31,15 +33,15 @@
                     <span>Live</span>
                 </div>
             </div>
-            
+
             <div class="hero-value" id="hero-dclock">
                 <div class="loading"></div>
             </div>
-            
+
             <div style="font-size: 18px; color: #94a3b8; margin-bottom: 16px;">
                 D_clock (milliseconds)
             </div>
-            
+
             <div style="display: flex; justify-content: center; gap: 24px; flex-wrap: wrap;">
                 <div style="text-align: center;">
                     <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Uncertainty</div>
@@ -55,7 +57,8 @@
                 </div>
                 <div style="text-align: center;">
                     <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Timestamp</div>
-                    <div style="font-size: 16px; font-weight: 500; font-family: 'Courier New', monospace;" id="hero-timestamp">-</div>
+                    <div style="font-size: 16px; font-weight: 500; font-family: 'Courier New', monospace;"
+                        id="hero-timestamp">-</div>
                 </div>
             </div>
         </div>
@@ -114,24 +117,33 @@
             </div>
             <div id="adev-plot" style="width: 100%; height: 400px;"></div>
             <div id="adev-metrics" style="padding: 16px; display: none;">
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 16px;">
-                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                <div
+                    style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 16px;">
+                    <div
+                        style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
                         <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">Dominant Noise</div>
                         <div style="font-size: 16px; font-weight: 600;" id="adev-noise-type">-</div>
                     </div>
-                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                    <div
+                        style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
                         <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">ADEV @ τ=60s</div>
-                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;" id="adev-60s">-</div>
+                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;"
+                            id="adev-60s">-</div>
                     </div>
-                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                    <div
+                        style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
                         <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">ADEV @ τ=1000s</div>
-                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;" id="adev-1000s">-</div>
+                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;"
+                            id="adev-1000s">-</div>
                     </div>
-                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                    <div
+                        style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
                         <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">ADEV @ τ=10000s</div>
-                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;" id="adev-10000s">-</div>
+                        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;"
+                            id="adev-10000s">-</div>
                     </div>
-                    <div style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                    <div
+                        style="text-align: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
                         <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">Data Points</div>
                         <div style="font-size: 16px; font-weight: 600;" id="adev-points">-</div>
                     </div>
@@ -160,11 +172,11 @@
             font-weight: 500;
             transition: all 0.2s;
         }
-        
+
         .time-range-btn:hover {
             background: rgba(59, 130, 246, 0.2);
         }
-        
+
         .time-range-btn.active {
             background: #3b82f6;
             color: #fff;
@@ -174,13 +186,13 @@
     <script src="/static/js/common.js"></script>
     <script>
         let currentRange = '-6h';
-        
+
         function updateExpertMetrics(data) {
             const expertDiv = document.getElementById('expert-metrics');
-            
+
             // Check if we have detailed uncertainty data
             const hasDetailedData = data.statistical_uncertainty_ms !== undefined;
-            
+
             if (!hasDetailedData) {
                 expertDiv.innerHTML = `
                     <div style="padding: 24px; text-align: center; color: #94a3b8;">
@@ -198,13 +210,13 @@
                 `;
                 return;
             }
-            
+
             // Calculate percentages for uncertainty breakdown
             const totalUncertainty = data.uncertainty_ms || 0;
             const statPct = totalUncertainty > 0 ? ((data.statistical_uncertainty_ms || 0) / totalUncertainty * 100) : 0;
             const sysPct = totalUncertainty > 0 ? ((data.systematic_uncertainty_ms || 0) / totalUncertainty * 100) : 0;
             const propPct = totalUncertainty > 0 ? ((data.propagation_uncertainty_ms || 0) / totalUncertainty * 100) : 0;
-            
+
             expertDiv.innerHTML = `
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
                     <!-- ISO GUM Uncertainty Budget -->
@@ -254,6 +266,32 @@
                                     </span>
                                 </div>
                             </div>
+                            <div style="margin-top: 8px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.2);">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span style="color: #e0e0e0; font-weight: 600;">Expanded (k=2, 95%)</span>
+                                    <span style="font-family: 'Courier New', monospace; font-weight: 600; color: #ef4444;">
+                                        ${formatNumber(totalUncertainty * 2 * 1000, 3)} µs
+                                    </span>
+                                </div>
+                                <div style="margin-top: 4px; font-size: 11px; color: #64748b; font-style: italic;">
+                                    95% confidence interval (k=2 coverage factor)
+                                </div>
+                            </div>
+                            ${data.n_broadcasts ? `
+                            <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.1);">
+                                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px;">Type A Details:</div>
+                                <div style="margin-left: 12px; font-size: 11px; color: #cbd5e1;">
+                                    n = ${data.n_broadcasts} measurements
+                                    ${data.wwv_intra_std_ms || data.wwvh_intra_std_ms || data.chu_intra_std_ms ? `
+                                    <br>Intra-station σ: ${[
+                            data.wwv_intra_std_ms ? `WWV ${formatNumber(data.wwv_intra_std_ms * 1000, 2)}µs` : null,
+                            data.wwvh_intra_std_ms ? `WWVH ${formatNumber(data.wwvh_intra_std_ms * 1000, 2)}µs` : null,
+                            data.chu_intra_std_ms ? `CHU ${formatNumber(data.chu_intra_std_ms * 1000, 2)}µs` : null
+                        ].filter(Boolean).join(', ')}
+                                    ` : ''}
+                                </div>
+                            </div>
+                            ` : ''}
                         </div>
                     </div>
                     
@@ -287,6 +325,57 @@
                                     ${data.kalman_state || 'N/A'}
                                 </span>
                             </div>
+                            ${data.global_solve_verified !== undefined ? `
+                            <div style="margin-top: 8px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.1);">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span style="color: #94a3b8;">Global solve verified</span>
+                                    <span class="badge ${data.global_solve_verified ? 'status-healthy' : 'status-degraded'}">
+                                        ${data.global_solve_verified ? 'YES' : 'NO'}
+                                    </span>
+                                </div>
+                                ${data.global_solve_consistency_ms !== undefined && data.global_solve_consistency_ms !== null ? `
+                                <div style="display: flex; justify-content: space-between; margin-top: 8px;">
+                                    <span style="color: #94a3b8;">Global consistency</span>
+                                    <span style="font-family: 'Courier New', monospace; font-weight: 600;">
+                                        ${formatNumber(data.global_solve_consistency_ms * 1000, 3)} µs
+                                    </span>
+                                </div>
+                                ` : ''}
+                                ${data.global_solve_n_obs ? `
+                                <div style="display: flex; justify-content: space-between; margin-top: 4px;">
+                                    <span style="color: #94a3b8; font-size: 11px;">Global obs</span>
+                                    <span style="font-size: 11px;">${data.global_solve_n_obs}</span>
+                                </div>
+                                ` : ''}
+                            </div>
+                            ` : ''}
+                            ${data.wwv_count || data.wwvh_count || data.chu_count || data.bpm_count ? `
+                            <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.1);">
+                                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px;">Per-Station Contributions:</div>
+                                <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; font-size: 11px;">
+                                    ${data.wwv_count ? `
+                                    <span style="color: #3b82f6;">WWV:</span>
+                                    <span style="color: #cbd5e1;">${data.wwv_count} obs</span>
+                                    <span style="font-family: 'Courier New', monospace;">${data.wwv_mean_ms !== undefined && data.wwv_mean_ms !== null ? formatNumber(data.wwv_mean_ms, 3) + ' ms' : ''}</span>
+                                    ` : ''}
+                                    ${data.wwvh_count ? `
+                                    <span style="color: #10b981;">WWVH:</span>
+                                    <span style="color: #cbd5e1;">${data.wwvh_count} obs</span>
+                                    <span style="font-family: 'Courier New', monospace;">${data.wwvh_mean_ms !== undefined && data.wwvh_mean_ms !== null ? formatNumber(data.wwvh_mean_ms, 3) + ' ms' : ''}</span>
+                                    ` : ''}
+                                    ${data.chu_count ? `
+                                    <span style="color: #f59e0b;">CHU:</span>
+                                    <span style="color: #cbd5e1;">${data.chu_count} obs</span>
+                                    <span style="font-family: 'Courier New', monospace;">${data.chu_mean_ms !== undefined && data.chu_mean_ms !== null ? formatNumber(data.chu_mean_ms, 3) + ' ms' : ''}</span>
+                                    ` : ''}
+                                    ${data.bpm_count ? `
+                                    <span style="color: #8b5cf6;">BPM:</span>
+                                    <span style="color: #cbd5e1;">${data.bpm_count} obs</span>
+                                    <span style="font-family: 'Courier New', monospace;">${data.bpm_mean_ms !== undefined && data.bpm_mean_ms !== null ? formatNumber(data.bpm_mean_ms, 3) + ' ms' : ''}</span>
+                                    ` : ''}
+                                </div>
+                            </div>
+                            ` : ''}
                         </div>
                     </div>
                     
@@ -343,29 +432,29 @@
                 </div>
             `;
         }
-        
+
         async function loadLatestFusion() {
             try {
                 clearError();
                 const data = await api.get('/metrology/fusion/latest');
-                
+
                 // Update hero display with adaptive precision
                 const dclock = data.d_clock_ms;
                 const precision = Math.abs(dclock) < 0.001 ? 6 : 3;
                 document.getElementById('hero-dclock').textContent = formatNumber(dclock, precision);
                 document.getElementById('hero-uncertainty').textContent = `± ${formatNumber(data.uncertainty_ms, 3)} ms`;
-                document.getElementById('hero-grade').innerHTML = 
+                document.getElementById('hero-grade').innerHTML =
                     `<span class="badge badge-quality ${getQualityClass(data.quality_grade)}">${data.quality_grade}</span>`;
                 document.getElementById('hero-broadcasts').textContent = data.n_broadcasts;
                 document.getElementById('hero-timestamp').textContent = formatTime(data.timestamp);
-                
+
                 // Update hero metric border color based on grade
                 const heroMetric = document.getElementById('hero-metric');
                 heroMetric.className = `hero-metric ${getQualityClass(data.quality_grade)}`;
-                
+
                 // Update expert metrics
                 updateExpertMetrics(data);
-                
+
                 // Update station contributions
                 const stationsDiv = document.getElementById('station-contributions');
                 if (data.stations_used && data.stations_used.length > 0) {
@@ -379,25 +468,25 @@
                 } else {
                     stationsDiv.innerHTML = '<div>No station information available</div>';
                 }
-                
+
             } catch (error) {
                 showError(`Failed to load latest fusion: ${error.message}`);
                 document.getElementById('hero-dclock').textContent = 'N/A';
             }
         }
-        
+
         async function loadFusionHistory(range = '-6h') {
             try {
                 const data = await api.get('/metrology/fusion/history', {
                     start: range,
                     end: 'now'
                 });
-                
+
                 if (data.count === 0) {
                     showError('No fusion data available for selected time range');
                     return;
                 }
-                
+
                 // Plot D_clock with uncertainty
                 const trace = {
                     x: data.timestamps,
@@ -418,7 +507,7 @@
                     hovertemplate: '<b>%{x}</b><br>D_clock: %{y:.3f} ms<br>Grade: %{text}<extra></extra>',
                     text: data.quality_grade
                 };
-                
+
                 const layout = {
                     title: '',
                     xaxis: {
@@ -440,9 +529,9 @@
                     margin: { t: 20, r: 20, b: 60, l: 60 },
                     hovermode: 'closest'
                 };
-                
-                Plotly.newPlot('fusion-plot', [trace], layout, {responsive: true});
-                
+
+                Plotly.newPlot('fusion-plot', [trace], layout, { responsive: true });
+
                 // Plot uncertainty
                 const uncertaintyTrace = {
                     x: data.timestamps,
@@ -454,7 +543,7 @@
                     name: 'Uncertainty',
                     hovertemplate: '<b>%{x}</b><br>Uncertainty: %{y:.3f} ms<extra></extra>'
                 };
-                
+
                 const uncertaintyLayout = {
                     title: '',
                     xaxis: {
@@ -472,14 +561,14 @@
                     font: { color: '#e0e0e0' },
                     margin: { t: 20, r: 20, b: 60, l: 60 }
                 };
-                
-                Plotly.newPlot('uncertainty-plot', [uncertaintyTrace], uncertaintyLayout, {responsive: true});
-                
+
+                Plotly.newPlot('uncertainty-plot', [uncertaintyTrace], uncertaintyLayout, { responsive: true });
+
             } catch (error) {
                 showError(`Failed to load fusion history: ${error.message}`);
             }
         }
-        
+
         // Time range button handlers
         document.querySelectorAll('.time-range-btn').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -489,27 +578,27 @@
                 loadFusionHistory(currentRange);
             });
         });
-        
+
         // Load Allan deviation
         let currentAdevRange = '-24h';
-        
+
         async function loadAllanDeviation(range) {
             try {
                 clearError();
                 showLoading('adev-plot');
-                
+
                 const data = await api.get('/stability/adev', { start: range, end: 'now' });
-                
+
                 // Hide loading, show metrics
                 document.getElementById('adev-metrics').style.display = 'block';
-                
+
                 // Update metrics
                 document.getElementById('adev-noise-type').textContent = data.dominant_noise || 'Unknown';
                 document.getElementById('adev-60s').textContent = data.adev_60s ? data.adev_60s.toExponential(2) : 'N/A';
                 document.getElementById('adev-1000s').textContent = data.adev_1000s ? data.adev_1000s.toExponential(2) : 'N/A';
                 document.getElementById('adev-10000s').textContent = data.adev_10000s ? data.adev_10000s.toExponential(2) : 'N/A';
                 document.getElementById('adev-points').textContent = data.n_points || 0;
-                
+
                 // Plot Allan deviation (log-log plot)
                 const trace = {
                     x: data.tau_seconds,
@@ -521,7 +610,7 @@
                     name: 'ADEV',
                     hovertemplate: '<b>τ = %{x:.1f} s</b><br>ADEV: %{y:.2e}<extra></extra>'
                 };
-                
+
                 const layout = {
                     title: '',
                     xaxis: {
@@ -555,17 +644,17 @@
                         borderpad: 8
                     }]
                 };
-                
-                Plotly.newPlot('adev-plot', [trace], layout, {responsive: true});
-                
+
+                Plotly.newPlot('adev-plot', [trace], layout, { responsive: true });
+
             } catch (error) {
                 console.error('Failed to load Allan deviation:', error);
                 showError(`Failed to load Allan deviation: ${error.message}`);
-                document.getElementById('adev-plot').innerHTML = 
+                document.getElementById('adev-plot').innerHTML =
                     '<div style="padding: 40px; text-align: center; color: #94a3b8;">Unable to load Allan deviation data. Need at least 100 data points.</div>';
             }
         }
-        
+
         // ADEV range button handlers
         document.querySelectorAll('.adev-range-btn').forEach(btn => {
             btn.addEventListener('click', async () => {
@@ -575,13 +664,13 @@
                 await loadAllanDeviation(currentAdevRange);
             });
         });
-        
+
         // Initialize
         async function init() {
             await loadLatestFusion();
             await loadFusionHistory(currentRange);
             await loadAllanDeviation(currentAdevRange);
-            
+
             // Auto-refresh every 60 seconds
             const refresh = new AutoRefresh(() => {
                 loadLatestFusion();
@@ -590,8 +679,9 @@
             }, 60000);
             refresh.start();
         }
-        
+
         init();
     </script>
 </body>
+
 </html>
