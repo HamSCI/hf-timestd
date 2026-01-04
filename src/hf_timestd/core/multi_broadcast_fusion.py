@@ -2309,8 +2309,9 @@ class MultiBroadcastFusion:
         uncertainty_floor = 0.1 if has_verified_global else 0.2
         measurement_uncertainty = max(uncertainty_floor, measurement_uncertainty)
         
-        # Update Kalman filter for convergence tracking
-        kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
+        # Update Kalman filter with raw measurement (before any correction)
+        # This allows the filter to track the systematic offset that needs to be removed
+        kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
         
         # Final uncertainty is the Kalman-filtered combined uncertainty
         # This provides temporal smoothing while preserving the uncertainty budget
