@@ -187,6 +187,8 @@ class BroadcastMeasurement:
     snr_db: float            # Signal quality
     quality_grade: str        # A, B, C, D
     channel_name: str         # Source channel
+    raw_arrival_time_ms: Optional[float] = None  # Uncalibrated ToA for TEC (schema v1.1.0+)
+
 
 
 @dataclass
@@ -1428,7 +1430,8 @@ class MultiBroadcastFusion:
                             confidence=hdf5_meas.get('confidence', 0.0),
                             snr_db=hdf5_meas.get('snr_db', 0.0),
                             quality_grade=hdf5_meas.get('quality_grade', 'D'),
-                            channel_name=channel
+                            channel_name=channel,
+                            raw_arrival_time_ms=hdf5_meas.get('raw_arrival_time_ms')  # Schema v1.1.0+
                         )
                         measurements.append(m)
                     
@@ -1983,13 +1986,14 @@ class MultiBroadcastFusion:
                     # Prepare input for estimator
                     tec_input = []
                     for m in station_meas:
-                        # Input to TEC solver is Total Observed Time (not differential)
-                        # T_obs = T_measured + T_sys_offset (calibration)
-                        # We use uncalibrated d_clock + existing model delay to estimate ToA
-                        
-                        # Approximating ToA as d_clock_ms + prop_delay
-                        
-                        toa_ms = m.d_clock_ms + m.propagation_delay_ms
+                        # TEC FIX: Use raw_arrival_time_ms if available (schema v1.1.0+)
+                        # This is the uncalibrated ToA that includes ionospheric dispersion
+                        if m.raw_arrival_time_ms is not None:
+                            toa_ms = m.raw_arrival_time_ms
+                        else:
+                            # Fallback: reconstruct ToA from calibrated values (old schema)
+                            # This is less accurate but maintains backward compatibility
+                            toa_ms = m.d_clock_ms + m.propagation_delay_ms
                         
                         tec_input.append({
                             'frequency_hz': m.frequency_mhz * 1e6,

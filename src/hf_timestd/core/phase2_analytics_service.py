@@ -716,6 +716,7 @@ class Phase2AnalyticsService:
                         'discrimination_method': 'TONE',  # Primary method
                         'discrimination_confidence': discrimination_conf,
                         'clock_offset_ms': effective_d_clock,
+                        'raw_arrival_time_ms': effective_d_clock + (solution.t_propagation_ms if solution and solution.t_propagation_ms else 0.0),  # For TEC: uncalibrated ToA
                         'uncertainty_ms': effective_uncertainty,
                         'expanded_uncertainty_ms': unc_result['u_expanded_ms'],
                         'coverage_factor': budget.coverage_factor,
@@ -742,6 +743,12 @@ class Phase2AnalyticsService:
                         'calibration_date': '2025-12-01T00:00:00Z',  # TODO: Get from config
                         'gpsdo_locked': gpsdo_locked,
                     }
+                    
+                    # DEBUG: Verify raw_arrival_time_ms is in the measurement dict
+                    if 'raw_arrival_time_ms' in l2_measurement:
+                        logger.info(f"DEBUG TEC FIX: raw_arrival_time_ms={l2_measurement['raw_arrival_time_ms']:.3f} ms in measurement dict")
+                    else:
+                        logger.error("DEBUG TEC FIX: raw_arrival_time_ms MISSING from measurement dict!")
                     
                     # Write to HDF5
                     logger.debug(f"Attempting HDF5 L2 write: D_clock={effective_d_clock:.2f}ms")

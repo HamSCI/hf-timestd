@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "data_product": "L2_timing_measurements",
     "description": "Station-assigned timing measurements with ISO GUM-compliant uncertainty budget",
     "cadence_seconds": 60,
@@ -79,6 +79,16 @@
             "description": "D_clock: observed - expected arrival time",
             "units": "milliseconds",
             "reference": "UTC(NIST) via broadcast time signal"
+        },
+        {
+            "name": "raw_arrival_time_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "allow_nan": false,
+            "description": "Raw uncalibrated arrival time relative to minute boundary (for TEC estimation)",
+            "units": "milliseconds",
+            "note": "This is the observed tone arrival time BEFORE subtracting propagation delays or applying calibration. Required for ionospheric TEC estimation which needs the frequency-dependent dispersion signal intact."
         },
         {
             "name": "uncertainty_ms",

@@ -364,6 +364,10 @@ class DataProductWriter:
             
             value = measurement[field_name]
             
+            # DEBUG: Log raw_arrival_time_ms processing
+            if field_name == 'raw_arrival_time_ms':
+                logger.info(f"DEBUG TEC FIX HDF5: Processing raw_arrival_time_ms={value}, type={type(value)}")
+            
             # Determine HDF5 dtype
             field_type = field.get('type')
             if field_type == 'float':
@@ -380,6 +384,9 @@ class DataProductWriter:
             
             # Create dataset if it doesn't exist
             if field_name not in hdf5_file:
+                if field_name == 'raw_arrival_time_ms':
+                    logger.info(f"DEBUG TEC FIX HDF5: Creating dataset for raw_arrival_time_ms")
+                
                 hdf5_file.create_dataset(
                     field_name,
                     shape=(0,),
@@ -401,6 +408,9 @@ class DataProductWriter:
             dataset = hdf5_file[field_name]
             dataset.resize((dataset.shape[0] + 1,))
             dataset[-1] = value
+            
+            if field_name == 'raw_arrival_time_ms':
+                logger.info(f"DEBUG TEC FIX HDF5: Wrote value {value} to dataset, new size={dataset.shape[0]}")
         
         # Flush to disk and refresh SWMR metadata
         # In SWMR mode, flush() alone isn't enough - we need to ensure

@@ -273,9 +273,21 @@ class ScienceAggregator:
                 if key not in grouped:
                     grouped[key] = []
                 
+                # TEC FIX: Use raw_arrival_time_ms if available (schema v1.1.0+)
+                # This is the uncalibrated ToA that includes ionospheric dispersion
+                # Fallback to clock_offset_ms for backward compatibility with old data
+                if 'raw_arrival_time_ms' in m and m['raw_arrival_time_ms']:
+                    toa_ms = float(m['raw_arrival_time_ms'])
+                    logger.debug(f"Using raw_arrival_time_ms={toa_ms:.3f} for TEC (new schema v1.1.0+)")
+                else:
+                    # Fallback: old schema without raw_arrival_time_ms
+                    # This will produce poor TEC estimates but maintains backward compatibility
+                    toa_ms = clock_offset_ms
+                    logger.debug(f"Using clock_offset_ms={toa_ms:.3f} for TEC (old schema, less accurate)")
+                
                 grouped[key].append({
                     'frequency_hz': freq_mhz * 1e6,
-                    'toa_ms': clock_offset_ms,  # D_clock is effectively ToA
+                    'toa_ms': toa_ms,
                     'uncertainty_ms': uncertainty_ms
                 })
             except (KeyError, ValueError) as e:
