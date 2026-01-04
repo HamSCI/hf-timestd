@@ -417,6 +417,8 @@ class MultiBroadcastFusion:
         """
         self.data_root = Path(data_root)
         self.phase2_dir = self.data_root / 'phase2'
+        self.calibration: Dict[str, BroadcastCalibration] = {}
+        self.calibration_update_count = 0  # Track updates for auto-save
         self.auto_calibrate = auto_calibrate
         self.reference_station = reference_station
 
@@ -1585,10 +1587,15 @@ class MultiBroadcastFusion:
     
     def _update_calibration(
         self,
-        measurements: List[BroadcastMeasurement]
+        measurements: List[BroadcastMeasurement],
+        validated: bool = True
     ):
         """
         Update calibration offsets per-BROADCAST (station + frequency).
+        
+        Args:
+            measurements: List of broadcast measurements
+            validated: Whether cross-station validation passed (affects update rate)
         
         Each broadcast (e.g., WWV_10.00, CHU_7.85) has its own systematic offset due to:
         - Ionospheric delays (frequency-dependent, 1/f²)
@@ -1635,8 +1642,12 @@ class MultiBroadcastFusion:
             old_cal = self.calibration.get(broadcast_key)
             if old_cal and old_cal.n_samples > 0:
                 # Alpha range: 0.3 (fast) to 0.1 (slow)
-                alpha = max(0.1, min(0.3, 10.0 / old_cal.n_samples))
+                base_alpha = max(0.1, min(0.3, 10.0 / old_cal.n_samples))
+                # CRITICAL FIX: Reduce update rate if cross-validation failed
+                # This prevents contamination while still allowing convergence
+                alpha = base_alpha if validated else base_alpha * 0.3
                 new_offset = alpha * new_offset + (1 - alpha) * old_cal.offset_ms
+                logger.debug(f"Calibration {broadcast_key}: alpha={alpha:.3f} (validated={validated})")
             
             self.calibration[broadcast_key] = BroadcastCalibration(
                 station=station,
@@ -2163,12 +2174,10 @@ class MultiBroadcastFusion:
         # ====================================================================
         # UPDATE CALIBRATION (after cross-validation)
         # ====================================================================
-        # CRITICAL FIX: Only update calibration with validated measurements
-        # This prevents outliers (e.g., tone misidentification) from contaminating calibration
-        if cross_valid:
-            self._update_calibration(measurements)
-        else:
-            logger.info("Skipping calibration update due to cross-validation failure")
+        # CRITICAL FIX: Always update calibration, but use validation result to adjust rate
+        # If cross-validation fails, it may be because calibration hasn't converged yet
+        # Use a slower update rate during disagreement to prevent contamination while still converging
+        self._update_calibration(measurements, validated=cross_valid)
         
         # Weighted mean of calibrated values
         w = np.array(weights)
