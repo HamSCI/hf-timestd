@@ -160,6 +160,9 @@ class TimeSnapReference:
             
         Returns:
             UTC timestamp (seconds since epoch)
+            
+        Raises:
+            ValueError: If elapsed time is unreasonable (wrap-around error)
         """
         # Handle RTP timestamp wrap-around (32-bit unsigned)
         rtp_elapsed = (rtp_timestamp - self.rtp_timestamp) & 0xFFFFFFFF
@@ -169,6 +172,20 @@ class TimeSnapReference:
         
         # Apply PPM correction: actual elapsed time = nominal elapsed * clock_ratio
         elapsed_seconds = (rtp_elapsed / self.sample_rate) * self.clock_ratio
+        
+        # CRITICAL FIX: RTP wrap-around validation
+        # Elapsed time should be reasonable (typically ~60s per minute)
+        # If > 2 minutes, likely wrap-around error or packet reordering
+        if abs(elapsed_seconds) > 120:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(
+                f"CRITICAL: RTP elapsed time unreasonable: {elapsed_seconds:.1f}s "
+                f"(rtp_elapsed={rtp_elapsed}, sample_rate={self.sample_rate}). "
+                f"Possible wrap-around error or severe packet reordering."
+            )
+            raise ValueError(f"RTP elapsed time {elapsed_seconds:.1f}s exceeds bounds")
+        
         return self.utc_timestamp + elapsed_seconds
     
     def with_updated_ppm(self, measured_ppm: float, measurement_confidence: float) -> 'TimeSnapReference':

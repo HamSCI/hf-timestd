@@ -685,6 +685,17 @@ class TransmissionTimeSolver:
         # Geometric delay (speed of light)
         geometric_delay_ms = (path_length_km / SPEED_OF_LIGHT_KM_S) * 1000
         
+        # CRITICAL FIX: Propagation delay bounds check
+        # Prevent sign errors and physically impossible delays
+        if geometric_delay_ms < 0:
+            logger.error(f"CRITICAL: Negative geometric delay {geometric_delay_ms:.3f}ms - sign error in calculation!")
+            return None
+        if geometric_delay_ms < 3.0:
+            logger.warning(f"Suspiciously low geometric delay {geometric_delay_ms:.3f}ms for {ground_distance_km:.0f}km")
+        if geometric_delay_ms > 100.0:
+            logger.error(f"CRITICAL: Geometric delay {geometric_delay_ms:.3f}ms exceeds physical bounds (>100ms)")
+            return None
+        
         # =================================================================
         # IONOSPHERIC DELAY (Issue 1.3 Fix - 2025-12-07)
         # =================================================================
@@ -751,7 +762,19 @@ class TransmissionTimeSolver:
             frequency_hz = frequency_mhz * 1e6
             iono_delay_ms = (40.3 * tec_tecu * n_hops * 1000.0) / (frequency_hz ** 2)
         
+        # Total delay
         total_delay_ms = geometric_delay_ms + iono_delay_ms
+        
+        # CRITICAL FIX: Final propagation delay validation
+        # Total delay must be positive and within physical bounds
+        if total_delay_ms < 0:
+            logger.error(f"CRITICAL: Negative total delay {total_delay_ms:.3f}ms - sign error!")
+            return None
+        if total_delay_ms < 5.0:
+            logger.warning(f"Low total delay {total_delay_ms:.3f}ms for {ground_distance_km:.0f}km, mode={mode}")
+        if total_delay_ms > 120.0:
+            logger.error(f"CRITICAL: Total delay {total_delay_ms:.3f}ms exceeds physical bounds")
+            return None
         
         return ModeCandidate(
             mode=mode,

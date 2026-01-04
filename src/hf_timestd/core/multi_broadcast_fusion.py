@@ -1826,8 +1826,24 @@ class MultiBroadcastFusion:
         # Real propagation differences between stations can be 0.5-1.0ms due to:
         # - Different ionospheric paths (CHU vs WWV = 2000+ km)
         # - Different propagation modes (1E vs 1F)
-        # - Different TEC along path
-        CROSS_STATION_THRESHOLD_MS = 1.0
+        # CRITICAL FIX: Adaptive cross-station threshold based on conditions
+        # Base threshold for quiet daytime conditions
+        base_threshold = 0.5  # ms
+        
+        # Time of day factor (nighttime more variable)
+        from datetime import datetime, timezone
+        current_hour = datetime.now(timezone.utc).hour
+        is_nighttime = current_hour < 6 or current_hour > 18
+        time_factor = 1.5 if is_nighttime else 1.0
+        
+        # Ionospheric conditions factor (if available)
+        # High/low TEC indicates disturbed conditions
+        iono_factor = 1.0
+        if hasattr(self, 'last_vtec_tecu') and self.last_vtec_tecu is not None:
+            if self.last_vtec_tecu > 40 or self.last_vtec_tecu < 10:
+                iono_factor = 2.0  # Disturbed conditions
+        
+        CROSS_STATION_THRESHOLD_MS = base_threshold * time_factor * iono_factor
         
         if max_disagreement > CROSS_STATION_THRESHOLD_MS:
             # Stations disagree - identify outlier
@@ -2187,12 +2203,22 @@ class MultiBroadcastFusion:
         # 2. Systematic: Calibration convergence error
         # 3. Propagation: Mode-dependent ionospheric variability
         
-        # 1. Statistical uncertainty from weighted std
-        weighted_var = np.sum(w * (d - fused_d_clock)**2) / np.sum(w)
-        statistical_uncertainty = np.sqrt(weighted_var)
+        # 1. Statistical uncertainty - measurement scatter
+        # Standard deviation of calibrated measurements
+        if len(calibrated) > 1:
+            statistical_uncertainty = np.std(calibrated)
+        else:
+            statistical_uncertainty = 0.5  # Single measurement uncertainty
         
-        # Check if we have verified global solver result
-        has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
+        # CRITICAL FIX: Add tone detection uncertainty (SNR-dependent)
+        # Lower SNR → higher phase ambiguity → larger uncertainty
+        avg_snr = np.mean([m.snr_db for m in measurements if hasattr(m, 'snr_db') and m.snr_db > 0] or [20.0])
+        if avg_snr < 10:
+            tone_detection_uncertainty = 0.5  # Low SNR
+        elif avg_snr < 20:
+            tone_detection_uncertainty = 0.3  # Medium SNR
+        else:
+            tone_detection_uncertainty = 0.2  # High SNR
         
         # 2. Systematic uncertainty from calibration convergence
         # Estimate based on Kalman filter convergence state
@@ -2213,7 +2239,9 @@ class MultiBroadcastFusion:
         # CRITICAL FIX (P3.1): Added RTP jitter component to uncertainty budget
         rtp_jitter_ms = 0.1  # RTP timestamp jitter (~100µs typical)
         
-        mode_uncertainties = {
+        # CRITICAL FIX: Enhanced propagation uncertainty with ionospheric variability
+        # Base mode uncertainties (quiet conditions)
+        mode_uncertainties_base = {
             'GW': 0.1,    # Ground wave (very stable)
             '1E': 0.3,    # Single-hop E-layer (stable)
             '1F': 0.5,    # Single-hop F-layer (moderate)
@@ -2222,6 +2250,20 @@ class MultiBroadcastFusion:
             '3F': 3.0,    # Three-hop (highly variable)
             'TEC_SOLVED': 0.2,  # Physics-derived (very good)
         }
+        
+        # Scale by ionospheric conditions (if VTEC available)
+        # TEC variability increases uncertainty
+        iono_scale_factor = 1.0
+        if hasattr(self, 'last_vtec_tecu') and self.last_vtec_tecu is not None:
+            # High TEC (>40 TECU) or low TEC (<10 TECU) indicates disturbed conditions
+            if self.last_vtec_tecu > 40 or self.last_vtec_tecu < 10:
+                iono_scale_factor = 1.5
+        
+        mode_uncertainties = {k: v * iono_scale_factor for k, v in mode_uncertainties_base.items()}
+        
+        # CRITICAL FIX: Add multipath delay spread uncertainty
+        # HF signals have ~1-5ms delay spread depending on mode
+        multipath_uncertainty = 0.5  # Conservative estimate for multi-hop
         
         # Weighted average of mode uncertainties
         mode_unc_list = []
@@ -2235,13 +2277,15 @@ class MultiBroadcastFusion:
         else:
             propagation_uncertainty = 1.0  # Conservative default
         
-        # Combined uncertainty (Root Sum of Squares)
+        # Combined uncertainty (Root Sum of Squares per ISO GUM)
         # RSS is appropriate for independent uncertainty sources
         measurement_uncertainty = np.sqrt(
-            statistical_uncertainty**2 +      # Measurement scatter
-            systematic_uncertainty**2 +       # Calibration convergence
-            propagation_uncertainty**2 +      # Mode-dependent ionospheric
-            rtp_jitter_ms**2                  # RTP timestamp jitter (P3.1 fix)
+            statistical_uncertainty**2 +           # Measurement scatter
+            systematic_uncertainty**2 +            # Calibration convergence
+            propagation_uncertainty**2 +           # Mode-dependent ionospheric
+            rtp_jitter_ms**2 +                     # RTP timestamp jitter
+            tone_detection_uncertainty**2 +        # Phase ambiguity (SNR-dependent)
+            multipath_uncertainty**2               # Delay spread
         )
         
         # Apply uncertainty floor (has_verified_global already defined above)
