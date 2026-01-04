@@ -2312,25 +2312,20 @@ class MultiBroadcastFusion:
         # Update Kalman filter for convergence tracking
         kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
         
-# Check if we have verified global solver result
-has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
+        # Final uncertainty is the Kalman-filtered combined uncertainty
+        # This provides temporal smoothing while preserving the uncertainty budget
+        uncertainty = kalman_uncertainty
         
-# 1. Statistical uncertainty - measurement scatter
-# Standard deviation of raw measurements
-if len(raw_d_clocks) > 1:
-    statistical_uncertainty = np.std(raw_d_clocks)
-else:
-    statistical_uncertainty = 0.5  # Single measurement uncertainty
+        # Per-station breakdown (using raw values)
+        wwv_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'WWV']
+        wwvh_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'WWVH']
+        chu_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'CHU']
+        bpm_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'BPM']
         
-# CRITICAL FIX: Add tone detection uncertainty (SNR-dependent)
-# Lower SNR → higher phase ambiguity → larger uncertainty
-avg_snr = np.mean([m.snr_db for m in measurements if hasattr(m, 'snr_db') and m.snr_db > 0] or [20.0])
-if avg_snr < 10:
-    tone_detection_uncertainty = 0.5  # Low SNR
-elif avg_snr < 20:
-    tone_detection_uncertainty = 0.3  # Medium SNR
-else:
-    tone_detection_uncertainty = 0.2  # High SNR
+        # Raw values for reporting
+        wwv_m = [m.d_clock_ms for m in measurements if m.station == 'WWV']
+        wwvh_m = [m.d_clock_ms for m in measurements if m.station == 'WWVH']
+        chu_m = [m.d_clock_ms for m in measurements if m.station == 'CHU']
         bpm_m = [m.d_clock_ms for m in measurements if m.station == 'BPM']
         
         # Unique stations
@@ -2383,32 +2378,35 @@ else:
             # Identify which measurements are outliers within their station group
             # and EXCLUDE them from the Kalman update by zeroing their contribution
             suspect_indices = []
-            for i, (m, cal_val) in enumerate(zip(measurements, calibrated)):
+            for i, (m, raw_val) in enumerate(zip(measurements, raw_d_clocks)):
                 is_suspect = False
                 if m.station == 'WWV' and wwv_intra_std and wwv_intra_std > INTRA_THRESHOLD_MS:
                     wwv_mean = station_means.get('WWV', 0)
-                    if abs(cal_val - wwv_mean) > 1.5 * wwv_intra_std:
+                    if abs(raw_val - wwv_mean) > 2 * wwv_intra_std:
                         is_suspect = True
-                elif m.station == 'WWVH' and wwvh_intra_std and wwvh_intra_std > INTRA_THRESHOLD_MS:
+                if m.station == 'WWVH' and wwvh_intra_std and wwvh_intra_std > INTRA_THRESHOLD_MS:
                     wwvh_mean = station_means.get('WWVH', 0)
-                    if abs(cal_val - wwvh_mean) > 1.5 * wwvh_intra_std:
+                    if abs(raw_val - wwvh_mean) > 2 * wwvh_intra_std:
                         is_suspect = True
-                elif m.station == 'CHU' and chu_intra_std and chu_intra_std > INTRA_THRESHOLD_MS:
+                if m.station == 'CHU' and chu_intra_std and chu_intra_std > INTRA_THRESHOLD_MS:
                     chu_mean = station_means.get('CHU', 0)
-                    if abs(cal_val - chu_mean) > 1.5 * chu_intra_std:
+                    if abs(raw_val - chu_mean) > 2 * chu_intra_std:
+                        is_suspect = True
+                if m.station == 'BPM' and bpm_intra_std and bpm_intra_std > INTRA_THRESHOLD_MS:
+                    bpm_mean = station_means.get('BPM', 0)
+                    if abs(raw_val - bpm_mean) > 2 * bpm_intra_std:
                         is_suspect = True
                 
                 if is_suspect:
                     suspect_indices.append(i)
-                    suspect_count += 1
             
             # If we have suspects, recalculate fused_d_clock excluding them
             if suspect_indices and len(measurements) - len(suspect_indices) >= 3:
                 clean_weights = [w for i, w in enumerate(weights) if i not in suspect_indices]
-                clean_calibrated = [c for i, c in enumerate(calibrated) if i not in suspect_indices]
+                clean_raw = [d for i, d in enumerate(raw_d_clocks) if i not in suspect_indices]
                 
                 w_clean = np.array(clean_weights)
-                d_clean = np.array(clean_calibrated)
+                d_clean = np.array(clean_raw)
                 fused_d_clock = np.sum(w_clean * d_clean) / np.sum(w_clean)
                 
                 # Recalculate uncertainty with clean data
