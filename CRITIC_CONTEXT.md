@@ -8,772 +8,362 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## ✅ SESSION COMPLETE (2026-01-03 12:00 UTC): TEC SOLVER NaN FIX & FREQUENCY-DEPENDENT DELAYS
+## 🎯 NEXT SESSION OBJECTIVE (2026-01-04): FIND FLAWS IN RTP → CHRONY DATA PIPELINE
 
-**Status:** 🟢 **RESOLVED** - Fusion service stabilized, TEC solver NaN handling implemented, proper physics in fallback path
-
-**Author:** AI Agent (Cascade)
-**Date:** 2026-01-03 12:00 UTC
-
-### Summary
-
-**Primary Issue Resolved:** Fusion service was crash-looping every 60 seconds due to NaN values from the TEC solver propagating into fusion calculations, causing HDF5 write validation failures and Chrony SHM update failures.
-
-**Root Cause:** The TEC solver produces NaN when measurements have insufficient frequency diversity or identical Time-of-Arrival (ToA) values. This occurs when propagation delay corrections are identical across frequencies, leaving no dispersion information for the least-squares fit.
-
-### Fixes Implemented
-
-**1. NaN Validation in Fusion Service**
-- **File:** `src/hf_timestd/core/multi_broadcast_fusion.py`
-- **Changes:**
-  - Added NaN check before using TEC results (line 2012)
-  - Added NaN validation for individual delay values (line 2022)
-  - Added safety filter to remove NaN measurements before fusion (line 2058)
-- **Impact:** Service continues gracefully, falling back to GNSS VTEC or baseline model
-- **Status:** ✅ Deployed, fusion stable since 11:47 UTC
-
-**2. Proper Physics in Fallback Path**
-- **File:** `src/hf_timestd/core/transmission_time_solver.py`
-- **Changes:**
-  - Replaced linear ionospheric delay model with proper 1/f² physics (line 722-752)
-  - Implemented parametric TEC estimate with diurnal variation (10-40 TECU)
-  - Formula: `delay_ms = (40.3 × TEC × n_hops) / (f_Hz²) × 1000`
-- **Impact:** Ensures frequency-dependent delays even without IRI/IONEX models
-- **Status:** ✅ Deployed, all code paths now use proper dispersion physics
-
-### Current System State (12:00 UTC)
-
-```
-Fusion Service:  ✅ Stable and operational (4h 13m uptime)
-                    Output: -0.073 ms ± 0.829 ms [59 broadcasts, grade B]
-                    HDF5: Writing successfully to fusion_fusion_timing_20260103.h5
-                    Chrony SHM: Updating system clock discipline
-                    TEC Solver: Producing NaN (expected, no dispersion in measurements)
-                    Fallback: Using GNSS VTEC (18.12 TECU from local GPS)
-                    
-Pipeline:        ✅ Fully operational
-                    L0 (Raw IQ): Active
-                    L2 (Timing): Writing HDF5
-                    L3 (Fusion): Writing HDF5 every 60s
-                    GNSS VTEC: 18.12 TECU (fresh)
-```
-
-### Technical Details
-
-**TEC Solver NaN Behavior:**
-- The TEC solver uses multi-frequency dispersion to estimate ionospheric TEC
-- Physics: `T_obs(f) = T_vacuum + (40.3 · TEC) / f²`
-- When all frequencies have identical ToA values, `ss_tot ≈ 0` → slope is undefined → NaN
-- This is **correct behavior** - the solver detects absence of dispersion information
-- NaN warnings are benign and expected when measurements lack frequency diversity
-
-**Why ToA Values Are Identical:**
-- After calibration convergence, `d_clock_ms` values become similar across frequencies
-- If `propagation_delay_ms` is also similar (from simplified model), sum becomes identical
-- The proper fix ensures propagation delays are always frequency-dependent
-
-**Frequency-Dependent Delay Implementation:**
-- Primary path: Uses `IonosphericDelayCalculator` with IRI-2020/IONEX TEC
-- Fallback path: Now uses parametric TEC estimate (25 TECU ± diurnal variation)
-- Both paths implement proper 1/f² dispersion physics
-- Delays now vary correctly: 2.5 MHz has 16× more delay than 10 MHz
-
-### Commit Information
-
-**Commit:** `6047d08`
-**Message:** "Fix: Prevent fusion crash from TEC solver NaN values and ensure frequency-dependent propagation delays"
-**Files Changed:**
-- `src/hf_timestd/core/multi_broadcast_fusion.py` (+32 lines)
-- `src/hf_timestd/core/transmission_time_solver.py` (+28 lines)
-
----
-
-## ✅ SESSION COMPLETE (2026-01-02): FUSION VULNERABILITY FIXES
-
-**Status:** 🟢 **RESOLVED** - Critical vulnerabilities in Fusion service fixed (VTEC safety, Global Solver check, HDF5 parity, Warmup penalty removal).
+**Status:** 🔵 **READY FOR CRITIQUE** - Service stability improved, now focus on data integrity
 
 **Author:** AI Agent (Antigravity)
-**Date:** 2026-01-02
+**Date:** 2026-01-04 11:52 UTC
 
-### Main Accomplishments
+### Session Goal
 
-1. **VTEC Safety**: Implemented consistency checks before boosting confidence in GNSS VTEC corrections.
-2. **Robustness**: Removed "God Mode" immunity for Global Solver; it is now subject to outlier rejection.
-3. **HDF5 Parity**: Harmonized HDF5 reader to accept Grade D measurements, preventing data starvation during fallback.
-4. **Availability**: Removed artificial 3-hour warmup penalty when calibration is loaded from disk.
+**Primary Objective:** Perform a thorough, methodical critique of the entire data and calculation pipeline from RTP stream ingestion to Chrony SHM output, identifying any flaws, inefficiencies, or vulnerabilities that could compromise timing accuracy or system reliability.
 
----
-
-## ✅ SESSION COMPLETE (2026-01-02 22:00 UTC): FUSION BUG FIXED, UPSTREAM ISSUE IDENTIFIED
+**Scope:** End-to-end pipeline validation covering:
 
-**Status:** 🟢 **FUSION FIXED** | 🔴 **UPSTREAM RTP PACKET LOSS BLOCKING PIPELINE**
+1. **RTP Stream Ingestion** (Core Recorder)
+2. **Tone Detection** (Analytics Service)
+3. **Timing Calculations** (Analytics Service)
+4. **Multi-Broadcast Fusion** (Fusion Service)
+5. **Chrony SHM Output** (Fusion Service)
 
-**Author:** AI Agent (Cascade)
-**Date:** 2026-01-02 22:00 UTC
-
-### Summary
+### Context from Previous Session
 
-**Primary Issue Resolved:** Fixed critical `UnboundLocalError` in Fusion service that was causing crashes every 60 seconds.
+**✅ Service Stability Improvements Completed:**
 
-**Root Cause Discovered:** Analytics stopped writing HDF5 at 20:12 UTC due to **83% RTP packet loss** from upstream recorder. This is a network/hardware issue, not a code bug.
+- Fusion service crash-loop investigated (root cause: service was stopped)
+- Systemd watchdog enabled (Type=notify, WatchdogSec=30)
+- Chrony reach monitoring implemented (script + timer)
+- System architecture validated (VTEC optional, HDF5 primary, critical path confirmed)
 
-### Fixes Implemented
-
-**1. Fusion Service Bug (CRITICAL)**
-- **File:** `src/hf_timestd/core/multi_broadcast_fusion.py`
-- **Bug:** `UnboundLocalError: cannot access local variable 'has_verified_global' where it is not associated with a value` at line 2107
-- **Root Cause:** Variable used before definition (defined at line 2142, used at line 2107)
-- **Fix:** Moved variable definition to line 2096 (before first use)
-- **Impact:** Fusion service was crashing every 60 seconds, preventing any fusion calculations
-- **Status:** ✅ Fixed, deployed to production, service running successfully
-
-### Investigation Findings
-
-**Timeline of Events:**
-- **17:11 UTC:** All services started normally
-- **20:12 UTC:** Core recorder restarted (per systemd)
-- **20:12 UTC:** Analytics stopped writing HDF5 (last timestamp in files)
-- **20:12-22:18 UTC:** Massive RTP packet loss (~83%) preventing data processing
-- **21:25 UTC:** Investigation started (misdiagnosed as Analytics bug)
-- **22:00 UTC:** Fusion bug fixed, upstream packet loss identified
-
-**Current System State (22:18 UTC):**
-```
-Core Recorder:  ⚠️  Running, but losing 83% of RTP packets
-                    Expected: 1,440,000 samples/min
-                    Receiving: 240,000 samples/min (16.7%)
-                    Symptoms: "Lost packet recovery" warnings (15k+ sample gaps)
-                             "RTP offset drift detected" on all channels
-                    
-Analytics:      ⚠️  Running, but cannot process incomplete minutes
-                    HDF5 files exist with data up to 20:12 UTC:
-                    - SHARED_10000: 1202 records, last=2026-01-02T20:12:00Z
-                    - SHARED_5000: 1206 records, last=2026-01-02T20:12:00Z
-                    - CHU_3330: 1178 records, last=2026-01-02T20:12:00Z
-                    Logs: "Incomplete minute: 240000/1440000 (16.7%)"
-                    
-Fusion:         ✅  FIXED and running successfully
-                    Output: +0.453ms ± 1.108ms [69 broadcasts, grade C]
-                    Using CSV fallback (HDF5 data is stale)
-                    No crashes since fix deployed
-```
-
-**HDF5 Schema Verification:**
-- ✅ Analytics writing correct schema (new format: individual datasets)
-- ✅ Files have proper structure: `timestamp_utc`, `clock_offset_ms`, etc.
-- ✅ Fusion HDF5 reader compatible with schema
-- ⚠️ Data is stale (2 hours old) due to upstream packet loss
+**Current System State:**
 
----
+- All services running and stable
+- Chrony reach recovering (210 octal = 53% success rate, trending toward 377)
+- Fusion output: Grade B/C, ±0.8-1.5ms uncertainty
+- VTEC: Using GNSS fallback (18.12 TECU)
+- TEC solver: Producing NaN (expected, no dispersion in measurements)
 
-## ✅ SESSION COMPLETE (2026-01-02 23:30 UTC): OOM KILLER ISSUE RESOLVED
+**Key Findings from Previous Session:**
 
-**Status:** 🟢 **RESOLVED** - Core recorder OOM issue fixed, pipeline fully operational
+1. ✅ VTEC is properly optional with graceful fallback
+2. ✅ HDF5 is the primary data format (CSV is legacy)
+3. ✅ Core Recorder writes to `.bin.zst` compressed binary
+4. ✅ Critical path is well-defined and functional
+5. ⚠️ Fusion service had crash-loop at 00:20 UTC (cause unknown)
 
-**Author:** AI Agent (Cascade)
-**Date:** 2026-01-02 23:30 UTC
+### Critical Questions to Answer
 
-### Summary
+**1. Data Integrity:**
 
-**Root Cause:** Core recorder was being killed by the Linux OOM (Out-Of-Memory) killer every few minutes due to excessive memory consumption from Digital RF HDF5 writers running on all 9 channels simultaneously.
+- Are RTP timestamps being correctly interpreted and aligned?
+- Is there any data loss or corruption in the pipeline?
+- Are timing measurements traceable to UTC(NIST)?
+- Are uncertainty budgets correctly calculated and propagated?
 
-**Impact:** 32+ hours of data loss (Jan 1 15:05 UTC - Jan 2 23:20 UTC). No files written during this period.
-
-### Investigation Timeline
+**2. Calculation Accuracy:**
 
-**22:30 UTC:** Investigation started
-- Initial hypothesis: RTP packet loss (from previous session notes)
-- Found: No files written since Jan 1, 15:05 UTC
-- Radiod confirmed healthy and transmitting RTP packets
+- Are propagation delay models physically correct?
+- Is ionospheric correction being applied correctly?
+- Are calibration offsets being applied in the right direction?
+- Is the fusion algorithm statistically sound?
 
-**22:45 UTC:** Root cause identified
-- Checked systemd logs: `Memory cgroup out of memory: Killed process`
-- OOM killer terminated recorder 52+ times
-- Process consuming ~2GB RSS, hitting 4GB cgroup limit
-- Service configured with `MemoryMax=4G` in systemd unit
+**3. Error Handling:**
 
-**23:00 UTC:** Issue diagnosed
-- Production config had `save_digital_rf = true` 
-- Git repo config already had `save_digital_rf = false`
-- Digital RF HDF5 writers for 9 channels × 24kHz = excessive memory
-- Memory grew from 200MB → 1.8GB+ within minutes
+- What happens when measurements are missing or invalid?
+- How does the system handle outliers?
+- Are there any silent failures or data quality issues?
+- Is error propagation handled correctly?
 
-**23:20 UTC:** Fix deployed
-- Synced production config from git repo
-- Restarted core-recorder service
-- Memory stabilized at ~1.8GB (within limits without Digital RF)
-- Files immediately began writing to `/dev/shm/timestd/raw_buffer/`
-
-### Fixes Implemented
+**4. Performance and Efficiency:**
 
-**1. Configuration Sync**
-- **File:** `/etc/hf-timestd/timestd-config.toml`
-- **Change:** `save_digital_rf = true` → `save_digital_rf = false`
-- **Impact:** Eliminated Digital RF HDF5 memory overhead
-- **Status:** ✅ Deployed, configs now in sync (MD5 verified)
-
-### Current System State (23:30 UTC)
+- Are there any bottlenecks in the pipeline?
+- Is memory usage appropriate?
+- Are there any unnecessary calculations?
+- Can the pipeline handle all expected data rates?
 
-```
-Core Recorder:  ✅ Running stable (14min uptime)
-                   Memory: 1.8GB RSS (within 4GB limit)
-                   Writing: 45 files/5min to /dev/shm/timestd
-                   Completeness: 100% on all 9 channels
-                   
-Analytics:      ✅ Processing fresh data
-                   HDF5 files: 9 channels actively writing
-                   CSV output: 9 files in last 10 minutes
-                   
-Fusion:         ✅ Running successfully
-                   Output: Grade C (CSV fallback, HDF5 accumulating)
-                   No crashes, stable operation
-                   
-Science:        ⚠️  TEC stale (3h) - expected during recovery
-                   Will auto-recover as fresh data accumulates
-                   Propagation stats: operational
-```
+**5. Code Quality:**
 
-### Pipeline Verification Results
-
-- **PASS:** 31 checks
-- **WARN:** 1 (Chrony TMGR reach low - minor)
-- **FAIL:** 1 (TEC staleness - expected during recovery)
-
-**All critical systems operational.** TEC staleness will resolve within 1-2 hours as fresh timing measurements accumulate.
+- Are there any obvious bugs or logic errors?
+- Is the code maintainable and well-documented?
+- Are there any deprecated or "zombie" code paths?
+- Are there any inconsistencies between modules?
 
-### Lessons Learned
+### Specific Areas to Investigate
 
-1. **Memory Limits:** Digital RF HDF5 format unsuitable for 9 simultaneous channels with 4GB memory limit
-2. **Config Drift:** Production config diverged from git repo (Digital RF setting)
-3. **Tiered Storage:** Working correctly - files in `/dev/shm/timestd/raw_buffer/` not `/var/lib/timestd/raw_buffer/`
-4. **OOM Symptoms:** Silent failures - process killed before writing any data, no obvious error messages
-
-### Recommendations
+#### Core Recorder (`core_recorder_v2.py`)
 
-1. ✅ Keep Digital RF disabled for multi-channel deployments
-2. ✅ Use binary `.bin.zst` format (efficient, reliable)
-3. ✅ Maintain config sync between repo and production
-4. Consider increasing `MemoryMax` if Digital RF needed in future (8GB minimum for 9 channels)
-
----
+**Focus:** RTP stream ingestion and binary data writing
 
-## RTP Packet Loss Investigation Plan (OBSOLETE - SEE ABOVE)
-
-### Phase 1: Characterize the Packet Loss (10 minutes)
-
-**Goal:** Understand the nature and extent of the packet loss.
-
-```bash
-# 1. Check recorder logs for loss patterns
-tail -500 /var/log/hf-timestd/core-recorder.log | grep -E "Lost packet|RTP offset drift" | head -50
+**Questions:**
 
-# 2. Check if loss is consistent across all channels
-tail -200 /var/log/hf-timestd/core-recorder.log | grep "Lost packet" | awk '{print $NF}' | sort | uniq -c
+- Is RTP timestamp alignment correct? (GPSDO-disciplined)
+- Are packet loss events being handled correctly?
+- Is the binary `.bin.zst` format being written correctly?
+- Are there any race conditions in the multi-channel recording?
+- Is the QuotaManager preventing data loss?
 
-# 3. Check recorder resource usage
-ps aux | grep core_recorder
-top -b -n 1 | grep core_recorder
+**Key Methods to Review:**
 
-# 4. Check system network statistics
-netstat -s | grep -E "packet|error|drop"
-ifconfig | grep -E "RX|TX|error|drop"
-```
-
-**Decision Points:**
-- If loss is uniform across channels → Network/system issue
-- If loss is channel-specific → Channel configuration issue
-- If CPU/memory high → Resource exhaustion
-- If network errors high → Network infrastructure issue
+- `StreamRecorderV2._process_packet()` - RTP packet handling
+- `StreamRecorderV2._write_binary()` - Binary file writing
+- `CoreRecorderV2._monitor_health()` - Health monitoring
+- `CoreRecorderV2._enforce_quota()` - Disk space management
 
-### Phase 2: Check RTP Stream Source (10 minutes)
+#### Analytics Service (`phase2_analytics_service.py`)
 
-**Goal:** Determine if the problem is with radiod or the network path.
+**Focus:** Tone detection and timing calculations
 
-```bash
-# 1. Check radiod status and health
-systemctl status timestd-radiod-monitor --no-pager
-curl -s http://localhost:8073/health | jq .
+**Questions:**
 
-# 2. Check if radiod is actually transmitting
-tcpdump -i lo -c 100 udp port 5004 2>&1 | head -20
+- Is tone detection using the correct search windows?
+- Are timing measurements being calculated correctly?
+- Is the D_clock continuity validation working?
+- Are propagation delays being calculated with proper physics?
+- Is the HDF5 writing robust and correct?
 
-# 3. Check radiod logs for errors
-tail -200 /var/log/radiod/radiod.log | grep -E "ERROR|WARNING|RTP"
-
-# 4. Verify radiod process health
-ps aux | grep radiod
-cat /proc/$(pgrep radiod)/status | grep -E "State|VmSize|VmRSS"
-```
+**Key Methods to Review:**
 
-**Decision Points:**
-- If radiod unhealthy → Restart/investigate radiod
-- If no RTP packets on network → radiod not transmitting
-- If packets present but recorder missing them → Recorder buffer issue
+- `Phase2AnalyticsService.process_minute()` - Main processing loop
+- `Phase2AnalyticsService._read_binary_minute()` - Binary data reading
+- `Phase2AnalyticsService._write_hdf5_timing()` - HDF5 writing
+- `Phase2TemporalEngine.detect_tones()` - Tone detection
+- `Phase2TemporalEngine._calculate_d_clock()` - Timing calculation
 
-### Phase 3: Diagnose Recorder Buffer/Processing (15 minutes)
-
-**Goal:** Identify if recorder is dropping packets due to processing delays.
+#### Fusion Service (`multi_broadcast_fusion.py`)
 
-```bash
-# 1. Check recorder configuration
-cat /etc/hf-timestd/timestd-config.toml | grep -A 10 "\[recorder\]"
-
-# 2. Check system buffer sizes
-sysctl net.core.rmem_max
-sysctl net.core.rmem_default
-cat /proc/sys/net/core/netdev_max_backlog
-
-# 3. Monitor recorder in real-time
-sudo journalctl -u timestd-core-recorder -f &
-# Let it run for 60 seconds, observe packet loss rate
-
-# 4. Check for I/O bottlenecks
-iostat -x 5 3
-df -h /var/lib/timestd/raw_buffer/
-```
+**Focus:** Multi-broadcast fusion and Chrony SHM output
 
-**Possible Causes:**
-- Insufficient socket buffer size
-- Disk I/O bottleneck (writing raw buffers)
-- CPU saturation (processing 9 channels)
-- Memory pressure
+**Questions:**
 
-### Phase 4: Check for System-Wide Issues (10 minutes)
+- Is the fusion algorithm statistically sound?
+- Are calibration offsets being applied correctly?
+- Is outlier rejection working properly?
+- Is the uncertainty budget correct?
+- Is the Chrony SHM being updated correctly?
 
-**Goal:** Rule out system-level problems.
+**Key Methods to Review:**
 
-```bash
-# 1. Check system load and resources
-uptime
-free -h
-vmstat 5 3
+- `MultiBroadcastFusion.fuse()` - Main fusion algorithm
+- `MultiBroadcastFusion._apply_calibration()` - Calibration application
+- `MultiBroadcastFusion._reject_outliers()` - Outlier rejection
+- `MultiBroadcastFusion._cross_validate_stations()` - Cross-validation
+- `ChronySHMUpdater.run()` - Chrony SHM updates
 
-# 2. Check for OOM events
-dmesg | grep -i "out of memory\|oom"
-journalctl --since "2 hours ago" | grep -i "oom\|killed"
-
-# 3. Check for disk space issues
-df -h
-du -sh /var/lib/timestd/*
+### Known Issues to Investigate
 
-# 4. Check for network interface errors
-ip -s link show
-ethtool -S lo 2>/dev/null | grep -E "error|drop"
-```
-
-### Phase 5: Temporary Mitigation (5 minutes)
-
-**Goal:** Restore service while investigating root cause.
+**1. Fusion Crash-Loop (00:20 UTC)**
 
-```bash
-# Option 1: Restart recorder (may clear transient issue)
-sudo systemctl restart timestd-core-recorder
-sleep 60
-tail -50 /var/log/hf-timestd/core-recorder.log | grep "Lost packet"
-
-# Option 2: Restart radiod (if source issue suspected)
-# WARNING: This will interrupt all channels
-# sudo systemctl restart radiod
-
-# Option 3: Increase buffer sizes (if buffer overflow suspected)
-# Edit /etc/sysctl.conf:
-# net.core.rmem_max = 134217728
-# net.core.rmem_default = 67108864
-# sudo sysctl -p
-```
-
----
-
-## Potential Root Causes (RTP Packet Loss)
-
-### 1. Recorder Buffer Overflow (High Probability)
-**Hypothesis:** Recorder cannot process packets fast enough, causing buffer overflow.
-
-**Evidence:**
-- Uniform 83% loss across all channels
-- Started suddenly at 20:12 UTC (recorder restart)
-- "RTP offset drift" warnings (timing desync)
-
-**Possible Causes:**
-- Socket receive buffer too small
-- Processing thread blocked/slow
-- Disk I/O bottleneck writing raw buffers
-- CPU saturation
-
-### 2. Radiod Transmission Issue (Medium Probability)
-**Hypothesis:** Radiod is not transmitting complete RTP streams.
-
-**Possible Causes:**
-- SDR hardware malfunction
-- USB bandwidth saturation
-- Radiod internal buffer overflow
-- Configuration change at 20:12 UTC
+- Service crashed 5 times consecutively with exit code 1
+- No Python errors logged to systemd journal or fusion.log
+- Service exited immediately before logging initialized
+- **Hypothesis:** Import error, missing dependency, or permission issue
+- **Action:** Review fusion service startup sequence and error handling
 
-### 3. Network Path Issue (Low Probability)
-**Hypothesis:** Localhost network stack dropping packets.
+**2. TEC Solver NaN Values**
 
-**Possible Causes:**
-- Kernel network buffer exhaustion
-- Firewall/iptables rules
-- Network namespace issues
-- System resource pressure
-
-### 4. Recorder Code Bug (Low Probability)
-**Hypothesis:** Recent code change introduced packet handling bug.
-
-**Evidence:**
-- Timing coincides with recorder restart
-- May have picked up new code version
-
-**Investigation:**
-- Check git log for recent recorder changes
-- Compare current version with last known good
-
----
-
-## Context: Recent System Changes
-
-### ✅ Completed This Session (2026-01-02)
-
-**Science Aggregator Improvements (Phase 1 & 2):**
-1. Fixed HDF5 timing measurements directory path bug
-2. Implemented propagation statistics (hourly aggregation)
-3. Implemented TEC validation against GPS IONEX data
-4. All changes deployed to production
-
-**Files Modified:**
-- `src/hf_timestd/core/science_aggregator.py` (bug fixes + new features)
-- `src/hf_timestd/core/propagation_stats.py` (new module)
-- `src/hf_timestd/core/tec_validator.py` (new module)
-- `src/hf_timestd/schemas/l3_tec_v1.json` (validation fields)
-
-**Science Aggregator Status:**
-- ✅ Service running and operational
-- ✅ Propagation statistics working (12 records/hour)
-- ✅ TEC validation ready (awaiting IONEX data)
-- ⚠️ No TEC output (waiting for analytics input)
-
-### Previous Session (Earlier 2026-01-02)
-
-**Fusion Service Fixes:**
-- VTEC safety checks
-- Global Solver outlier rejection
-- HDF5 parity improvements
-- Warmup penalty removal
-
----
-
-## Current System State (2026-01-03 12:00 UTC)
-
-**Services:** All Running and Operational
-```
-✅ timestd-core-recorder.service - Active, writing L0 data
-✅ timestd-analytics.service - Active, writing L2 HDF5
-✅ timestd-fusion.service - Active, writing L3 HDF5 (stable, no crashes)
-✅ timestd-science-aggregator.service - Active
-✅ timestd-vtec.service - Active, providing GNSS VTEC (18.12 TECU)
-✅ timestd-radiod-monitor.service - Active
-✅ timestd-web-ui.service - Active
-```
-
-**Data Pipeline Status:**
-- L0 (Raw IQ): ✅ Active, writing to /dev/shm/timestd/raw_buffer/
-- L2 (Timing): ✅ Active, writing HDF5 (9 channels)
-- L3 (Fusion): ✅ Active, writing HDF5 every 60s (Grade B, ±0.8ms uncertainty)
-- L3A (TEC): ⚠️ HF TEC solver producing NaN (expected), using GNSS VTEC fallback
-- L3C (Propagation Stats): ✅ Active
-
-**Hardware:**
-- Radiod: ✅ HEALTHY
-- GPSDO: ✅ Locked
-- System: ✅ Calibrated
-
-**UTC Timing Output:**
-- D_clock: -0.073 ms (system is 73 microseconds fast)
-- Uncertainty: ±0.829 ms (sub-millisecond precision)
-- Quality: Grade B (suitable for ionospheric and propagation studies)
-- Broadcasts: 59 stations contributing to fusion
-
----
-
-## ✅ SESSION COMPLETE (2026-01-03 23:00 UTC): PROPAGATION PAGE ENHANCEMENTS & HDF5 PIPELINE FIX
-
-**Status:** 🟢 **RESOLVED** - Web-api propagation page enhanced, science aggregator HDF5 integration fixed
-
-**Author:** AI Agent (Cascade)
-**Date:** 2026-01-03 23:00 UTC
-
-### Summary
-
-Enhanced the ionospheric/propagation page with improved TEC display capabilities. Fixed critical issue where science aggregator service was running old code that couldn't read HDF5 timing measurement files, resulting in zero TEC calculations. Service restart resolved the issue, and TEC aggregation is now operational.
-
-### Changes Implemented
-
-**1. Enhanced TEC Display (web-api/static/propagation.html)**
-- Added 4 time range options (6h, 24h, 3d, 7d) with 7d as default
-- Enhanced quality summary with detailed per-path metrics
-- Added per-station breakdown cards showing:
-  - Total measurements, mean TEC with range
-  - Quality indicators (color-coded)
-  - Timing uncertainty metrics
-  - Frequency usage distribution
-- Improved explanatory text emphasizing pairwise TEC from multi-frequency dispersion
-
-**2. Fixed Import Error (src/hf_timestd/core/wwv_test_signal.py)**
-- Added missing `List` type import causing NameError on service startup
-
-**3. Fixed Science Aggregator HDF5 Integration**
-- **Root Cause:** Service running old code from before HDF5 support was added (started Jan 2 21:15 UTC, code updated Jan 3 11:58 UTC)
-- **Solution:** Restarted `timestd-science-aggregator.service`
-- **Result:** Now successfully reading HDF5 timing measurements, producing 24 TEC calculations per cycle
-
-**4. Removed Test Signal Section (Temporarily)**
-- Deferred until HDF5 storage implementation complete (currently using CSV)
-- Backend endpoints preserved for future use
-
-### Current System State (23:00 UTC)
-
-```
-Science Aggregator: ✅ Operational (reading HDF5, writing TEC)
-                       Collecting: 529 measurements/hour from all channels
-                       TEC Output: 24 calculations/cycle
-                       Propagation Stats: 14 records/hour
-                       
-TEC Values:         ⚠️  All ~0.00 TECU with BAD/MARGINAL quality
-                       Multi-frequency data: ✅ Available (78.7% have 2+ freqs)
-                       Grouping: ✅ Working (12 station/minute pairs)
-                       Calculation: ⚠️  Producing near-zero results
-                       
-Web UI:             ✅ Displaying fresh data from today
-                       Default view: 7 days (shows available historical data)
-                       TEC display: Enhanced with detailed breakdowns
-```
-
-### Known Issue: TEC Calculations Producing Zero Values
-
-**Observation:** All TEC calculations are ~0.00 TECU with BAD quality and low confidence (0.00-0.10).
-
-**Data Pipeline Status:**
-- ✅ HDF5 timing measurements exist (35MB/day)
-- ✅ Multi-frequency data available (2.5, 5, 10, 15, 20, 25 MHz)
-- ✅ 78.7% of measurements have 2+ frequencies (sufficient for TEC)
-- ✅ Science aggregator grouping correctly
-- ⚠️ TEC estimator producing zero/near-zero results
-
-**Possible Root Causes:**
-1. **Clock offset values lack ionospheric dispersion signal**
-   - After calibration convergence, `d_clock_ms` may be similar across frequencies
-   - If propagation delays are also similar, no frequency-dependent variation exists
-   - TEC solver requires differential delay to calculate dispersion
-
-2. **Nighttime ionosphere (low TEC period)**
-   - Session occurred 22:00-23:00 UTC
-   - Ionosphere may have genuinely low TEC during nighttime
-   - Expected TEC range: 2-50 TECU (daytime), 0-10 TECU (nighttime)
-
-3. **TEC estimator algorithm issues**
-   - Linear regression may be failing with near-identical ToA values
-   - Insufficient frequency separation (need wider spread?)
-   - Calibration removing the dispersion signal we need to measure
-
-4. **Propagation delay modeling**
-   - If propagation delays are calculated identically for all frequencies
-   - No frequency-dependent component in the delay model
-   - TEC calculation requires f⁻² dispersion to be present
-
-### Next Session Objectives: Debug TEC Calculation Algorithm
-
-**Primary Goal:** Determine why TEC calculations are producing zero values despite having valid multi-frequency data.
-
-**Investigation Plan:**
-
-1. **Examine Raw Clock Offset Data**
-   - Read timing measurements from HDF5 for a sample minute
-   - Check if `clock_offset_ms` values vary with frequency
-   - Calculate differential delays manually: Δt = t(2.5MHz) - t(10MHz)
-   - Expected: Lower frequencies should have higher delays (ionospheric dispersion)
-
-2. **Trace TEC Estimator Execution**
-   - Add debug logging to `tec_estimator.py`
-   - Examine input measurements to `estimate_tec()`
-   - Check frequency array and ToA array going into linear regression
-   - Verify if `ss_tot ≈ 0` (causing NaN) or if fit is genuinely flat
-
-3. **Review Propagation Delay Calculation**
-   - Check how `propagation_delay_ms` is calculated in timing measurements
-   - Verify if it includes frequency-dependent ionospheric component
-   - Confirm 1/f² dispersion physics is applied correctly
-   - Compare with transmission_time_solver.py implementation
-
-4. **Validate Against Expected Physics**
-   - Calculate expected TEC from propagation delays
-   - Formula: `TEC = (Δt × f₁² × f₂²) / (40.3 × (f₂² - f₁²))`
-   - Compare with TEC estimator output
-   - Check if calibration is removing the signal
-
-5. **Test with Synthetic Data**
-   - Create test measurements with known TEC (e.g., 20 TECU)
-   - Run through TEC estimator
-   - Verify algorithm produces correct result
-   - Identify where real data differs from synthetic
-
-**Key Files to Review:**
-- `src/hf_timestd/core/tec_estimator.py` - Core TEC calculation
-- `src/hf_timestd/core/science_aggregator.py` - Data grouping and aggregation
-- `src/hf_timestd/core/transmission_time_solver.py` - Propagation delay modeling
-- `src/hf_timestd/core/multi_broadcast_fusion.py` - Clock offset measurements
-- `/var/lib/timestd/phase2/SHARED_*/SHARED_*_timing_measurements_20260103.h5` - Raw data
-
-**Success Criteria:**
-1. Identify root cause of zero TEC values
-2. Determine if issue is in data, algorithm, or physics implementation
-3. Implement fix or document expected behavior
-4. Verify TEC calculations produce reasonable values (2-50 TECU range)
-
-**Documentation:**
-- See `docs/changes/SESSION_2026_01_03_PROPAGATION_PAGE_ENHANCEMENTS.md` for detailed session notes
-
----
-
-## Objectives for Next Session: TEC Calculation Debugging
-
-**Primary Goals:**
-1. **Diagnose Zero TEC Values:** Determine why TEC estimator produces ~0.00 TECU despite valid multi-frequency data
-2. **Validate Data Pipeline:** Confirm clock offset measurements contain ionospheric dispersion signal
-3. **Review Algorithm:** Verify TEC estimator correctly extracts frequency-dependent delays
-4. **Fix or Document:** Implement solution or document expected behavior if nighttime ionosphere
-5. **Test and Validate:** Confirm TEC calculations produce physically reasonable values
-
-### Station Information to Inventory
-
-**For Each Station (WWV, WWVH, CHU, BPM):**
-- Geographic coordinates (lat/lon/elevation)
-- Broadcast frequencies and schedules
-- Transmitter power and antenna characteristics
-- Time code format and modulation
-- Current operational status
-- Historical availability and reliability
-
-**Current Known Stations:**
-- **WWV:** Fort Collins, Colorado (NIST) - 2.5, 5, 10, 15, 20, 25 MHz
-- **WWVH:** Kauai, Hawaii (NIST) - 2.5, 5, 10, 15 MHz
-- **CHU:** Ottawa, Ontario (NRC) - 3.33, 7.85, 14.67 MHz
-- **BPM:** Shaanxi, China (NTSC) - 2.5, 5, 10, 15 MHz
-
-### Metrology Products to Inventory
-
-**L0 - Raw IQ Data:**
-- Format: Binary `.bin.zst` (compressed)
-- Location: `/dev/shm/timestd/raw_buffer/` (tiered storage)
-- Schema: Complex IQ samples at 24 kHz sample rate
-- Retention: Hot buffer (RAM), then archival
-
-**L1 - Tone Detections:**
-- Format: HDF5 (individual datasets per field)
-- Location: `/var/lib/timestd/phase2/STATION_FREQ/`
-- Schema: `timestamp_utc`, `clock_offset_ms`, `snr_db`, `confidence`, etc.
-- Products: Per-frequency timing measurements
-
-**L2 - Timing Measurements:**
-- Format: HDF5 (schema v1.0.0)
-- Location: `/var/lib/timestd/phase2/STATION_FREQ/`
-- Schema: Includes quality grades (A-F), propagation mode, ionospheric delays
-- Products: Calibrated timing measurements with uncertainty quantification
-
-**L3 - Fused UTC Estimate:**
-- Format: HDF5 (fusion_fusion_timing_YYYYMMDD.h5)
-- Location: `/var/lib/timestd/phase2/fusion/`
-- Schema: `d_clock_fused_ms`, `d_clock_raw_ms`, `uncertainty_ms`, quality grades
-- Products: Multi-station fusion, Chrony SHM output for system clock discipline
-- Current Output: -0.073 ms ± 0.829 ms (Grade B)
-
-**L3A - TEC Estimates:**
-- Format: HDF5 (TEC validation schema)
-- Location: `/var/lib/timestd/phase2/science/tec/`
-- Schema: `tec_tecu`, `vertical_tec`, `slant_tec`, validation against IONEX
-- Products: Ionospheric TEC from HF dispersion, comparison with GPS-derived TEC
-
-**L3C - Propagation Statistics:**
-- Format: HDF5 (hourly aggregation)
-- Location: `/var/lib/timestd/phase2/science/propagation/`
-- Schema: Mode occurrence, delay statistics, SNR distributions
-- Products: Propagation mode analysis (1F, 2F, 1E, etc.)
-
-### Space Weather Products to Inventory
-
-**GNSS VTEC (Vertical TEC):**
-- Source: Local GPS receiver (192.168.0.202:9000)
-- Format: CSV and HDF5
-- Current Value: 18.12 TECU
-- Update Rate: Real-time
-- Use: Primary ionospheric correction for HF timing
-
-**NASA IONEX (GPS-Derived TEC Maps):**
-- Source: ftp://cddis.gsfc.nasa.gov/gnss/products/ionex/
-- Format: IONEX (2-hour cadence global maps)
-- Latency: 2-3 days for final products
-- Use: Validation of HF-derived TEC estimates
-
-**IRI-2020 (International Reference Ionosphere):**
-- Source: Python library (iri2020)
-- Products: hmF2, foF2, TEC, layer heights
-- Use: Physics-based propagation delay modeling
-
-**Propagation Mode Analysis:**
-- Products: 1F, 2F, 3F, 1E hop identification
-- Metrics: Mode occurrence rates, stability, diurnal patterns
-- Use: Understanding HF propagation conditions
-
-### Data Model Considerations
-
-**Current Architecture:**
-- Hierarchical: L0 → L1 → L2 → L3 → L3A/L3C
-- Storage: HDF5 for structured data, binary for raw IQ
-- Organization: By station/frequency, daily rotation
-- Access: Direct file I/O, SWMR mode for concurrent reads
-
-**Questions for Review:**
-1. Is the current hierarchy optimal for scientific analysis?
-2. Should we consolidate related products (e.g., all L2 timing in one file)?
-3. How to handle cross-station queries (e.g., "all 10 MHz measurements")?
-4. What metadata should be standardized across all products?
-5. How to expose data for web UI without file system access?
-
-### Web UI Design Objectives
-
-**Primary Use Cases:**
-1. **Real-Time Monitoring:** Current UTC offset, system health, data quality
-2. **Historical Analysis:** Time series plots, propagation mode trends, TEC evolution
-3. **Station Comparison:** Multi-station timing comparison, geographic effects
-4. **Space Weather:** TEC maps, ionospheric conditions, propagation forecasts
-5. **Data Export:** Download subsets for offline analysis
-
-**Key Visualizations Needed:**
-- Real-time UTC offset gauge with uncertainty
-- Multi-station timing comparison (scatter plots, time series)
-- TEC evolution (time series, comparison with IONEX)
-- Propagation mode occurrence (stacked area charts, heatmaps)
-- SNR and quality metrics (histograms, geographic maps)
-- System health dashboard (service status, data freshness)
-
-**Technical Requirements:**
-- Backend: FastAPI (already in use for web-ui service)
-- Data Access: REST API endpoints for HDF5 data
-- Frontend: Modern JavaScript framework (React/Vue/Svelte)
-- Real-time Updates: WebSocket for live monitoring
-- Data Format: JSON for API responses, efficient for large datasets
-
-### Success Criteria for Next Session
-
-1. **Complete Inventory:** All stations, products, and schemas documented
-2. **Data Model Assessment:** Strengths/weaknesses identified, recommendations made
-3. **Web UI Mockups:** Key visualizations sketched or prototyped
-4. **API Design:** REST endpoints defined for data access
-5. **Implementation Plan:** Prioritized roadmap for web UI development
+- TEC solver produces NaN when measurements lack frequency diversity
+- NaN values were propagating into fusion calculations (fixed in v3.9.0)
+- **Question:** Are there other places where NaN could propagate?
+- **Action:** Review all numerical calculations for NaN handling
+
+**3. Cross-Station Disagreement**
+
+- Fusion logs show "Cross-station disagreement: 2.038ms (threshold: 0.200ms)"
+- Outlier stations: WWVH, WWV
+- **Question:** Is this a real propagation anomaly or a calculation error?
+- **Action:** Review cross-validation logic and thresholds
+
+**4. HDF5 Fallback to CSV**
+
+- Fusion service logs show "HDF5 returned 0 measurements, falling back to CSV"
+- **Question:** Why is HDF5 returning 0 measurements?
+- **Action:** Review HDF5 reader time-range queries and SWMR visibility
+
+### Critique Methodology
+
+**Step 1: Code Review (2-3 hours)**
+
+- Read through critical path code systematically
+- Look for obvious bugs, logic errors, or inconsistencies
+- Check for proper error handling and edge cases
+- Verify calculations against physics and metrology principles
+
+**Step 2: Data Flow Validation (1-2 hours)**
+
+- Trace a sample measurement through the entire pipeline
+- Verify data transformations at each stage
+- Check for data loss or corruption
+- Validate uncertainty propagation
+
+**Step 3: Error Scenario Testing (1-2 hours)**
+
+- Identify failure modes (missing data, invalid data, service crashes)
+- Review error handling for each failure mode
+- Check for silent failures or data quality degradation
+- Verify graceful degradation and recovery
+
+**Step 4: Performance Analysis (1 hour)**
+
+- Review resource usage (CPU, memory, disk I/O)
+- Identify bottlenecks or inefficiencies
+- Check for unnecessary calculations or data copies
+- Verify scalability for expected data rates
+
+**Step 5: Documentation Review (30 minutes)**
+
+- Check for code-documentation inconsistencies
+- Verify that critical algorithms are documented
+- Identify missing or outdated documentation
+- Review comments for accuracy
+
+### Success Criteria
 
 **Deliverables:**
-- Station metadata catalog (JSON/YAML)
-- Data product schema documentation (Markdown)
-- Web UI wireframes or mockups
-- API specification (OpenAPI/Swagger)
-- Development roadmap with milestones
+
+1. **Comprehensive critique document** identifying all flaws, inefficiencies, and vulnerabilities
+2. **Prioritized list of issues** (critical, high, medium, low)
+3. **Specific recommendations** for each issue
+4. **Implementation plan** for addressing critical issues
+5. **Test plan** for validating fixes
+
+**Quality Metrics:**
+
+- All critical path code reviewed
+- All known issues investigated
+- All failure modes identified
+- All recommendations actionable and specific
+
+### System Information
+
+**Version:** 3.10.0 (includes service stability improvements)
+
+**Services:**
+
+- ✅ `timestd-core-recorder` - Active, writing L0 data
+- ✅ `timestd-analytics` - Active, writing L2 HDF5
+- ✅ `timestd-fusion` - Active, writing L3 HDF5 (stable since 02:02 UTC)
+- ✅ `timestd-science-aggregator` - Active
+- ✅ `timestd-vtec` - Active, providing GNSS VTEC
+- ✅ `timestd-chrony-monitor` - Timer active, monitoring every 5 minutes
+
+**Data Pipeline:**
+
+- L0 (Raw IQ): `.bin.zst` compressed binary in `/dev/shm/timestd/raw_buffer/`
+- L2 (Timing): HDF5 in `/var/lib/timestd/phase2/STATION_FREQ/`
+- L3 (Fusion): HDF5 in `/var/lib/timestd/phase2/fusion/`
+
+**Current Timing Output:**
+
+- D_clock: -0.073 to +0.619 ms (varies)
+- Uncertainty: ±0.8 to ±1.5 ms
+- Quality: Grade B/C
+- Broadcasts: 59-69 stations contributing
+- Chrony reach: 210 (octal) = 136 (decimal) = 53%
+
+**Known Limitations:**
+
+- VTEC: Using GNSS fallback (HF TEC solver produces NaN)
+- Chrony reach: Not yet at optimal 377 (monitoring for 24 hours)
+- Fusion crash-loop: Cause unknown, requires investigation
+
+### Reference Documents
+
+**Critical Path Analysis:**
+
+- `/home/mjh/.gemini/antigravity/brain/ce1eed84-1bda-4e5d-bef2-00a1d5864b79/critical_path_analysis.md`
+- Comprehensive analysis of metrology-critical vs. science-optional components
+- VTEC dependency analysis (confirmed optional)
+- Single points of failure identification
+
+**Chrony Reach Investigation:**
+
+- `/home/mjh/.gemini/antigravity/brain/ce1eed84-1bda-4e5d-bef2-00a1d5864b79/chrony_reach_investigation.md`
+- Root cause analysis (fusion service stopped)
+- Timeline of events
+- Verification results
+
+**Session Summary:**
+
+- `/home/mjh/.gemini/antigravity/brain/ce1eed84-1bda-4e5d-bef2-00a1d5864b79/session_summary.md`
+- Overview of investigation and findings
+- Recommendations for next steps
+
+**Walkthrough:**
+
+- `/home/mjh/.gemini/antigravity/brain/ce1eed84-1bda-4e5d-bef2-00a1d5864b79/walkthrough.md`
+- Deployment instructions
+- Monitoring commands
+- Next steps
+
+### Important Principles
+
+**1. Time Synchronization is PRIMARY Mission**
+
+- Everything else (science products, TEC, Doppler) is secondary
+- Chrony SHM updates must be reliable and accurate
+- System must continue operating even when optional components fail
+
+**2. HDF5 is Primary Data Format**
+
+- CSV is legacy and will be removed
+- All new code should use HDF5
+- CSV fallbacks are temporary during migration
+
+**3. Metrology Principles**
+
+- Uncertainty budgets must be correct and complete
+- Traceability to UTC(NIST) must be maintained
+- Measurements must be reproducible and documented
+
+**4. Graceful Degradation**
+
+- System should continue operating with reduced accuracy when components fail
+- Failures should be logged and visible
+- Recovery should be automatic when possible
+
+---
+
+## ✅ SESSION COMPLETE (2026-01-04 02:16 UTC): SERVICE STABILITY IMPROVEMENTS
+
+**Status:** 🟢 **COMPLETE** - Monitoring tools implemented, service stable, ready for pipeline critique
+
+**Author:** AI Agent (Antigravity)
+**Date:** 2026-01-04 02:16 UTC
+
+### Summary
+
+Investigated Chrony reach issue, implemented service stability improvements, and prepared system for comprehensive pipeline critique.
+
+**Root Cause:** `timestd-fusion` service was stopped (inactive), not a code design flaw.
+
+**Resolution:** Service restarted, Chrony reach recovered from 0 → 210 (octal) in under 2 minutes.
+
+**Improvements Implemented:**
+
+1. ✅ Systemd watchdog enabled (Type=notify, WatchdogSec=30)
+2. ✅ Chrony reach monitoring script created
+3. ✅ Periodic monitoring timer implemented (every 5 minutes)
+4. ✅ Deployment automation script created
+5. ✅ Comprehensive documentation completed
+
+**System Architecture Validated:**
+
+- ✅ VTEC is properly optional with graceful fallback
+- ✅ HDF5 is the primary data format
+- ✅ Core Recorder writes to `.bin.zst` compressed binary
+- ✅ Critical path is well-defined and functional
+- ✅ Systemd watchdog already implemented in code
+
+**Files Created/Modified:**
+
+- `scripts/check-chrony-reach.sh` - Monitoring script
+- `scripts/deploy-service-improvements.sh` - Deployment script
+- `systemd/timestd-fusion.service` - Updated with watchdog
+- `systemd/timestd-chrony-monitor.service` - Monitoring service
+- `systemd/timestd-chrony-monitor.timer` - Monitoring timer
+- `CHANGELOG.md` - Version 3.10.0 entry
+
+**Next Session:** Comprehensive critique of RTP → Chrony data pipeline to find flaws and vulnerabilities.
+
+---

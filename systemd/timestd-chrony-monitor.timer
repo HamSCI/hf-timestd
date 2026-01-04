@@ -1,0 +1,14 @@
+[Unit]
+Description=HF-Timestd Chrony Reach Monitor Timer
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Timer]
+# Run every 5 minutes
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+# Ensure timer persists across reboots
+Persistent=true
+
+[Install]
+WantedBy=timers.target

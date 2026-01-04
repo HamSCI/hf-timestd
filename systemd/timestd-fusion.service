@@ -6,13 +6,17 @@ Requires=timestd-analytics.service
 PartOf=timestd-analytics.service
 
 [Service]
-Type=simple
+Type=notify
 User=timestd
 Group=timestd
 
-# Note: Using Type=simple instead of Type=notify because first fusion calculation
-# can take >3 minutes during initialization. The threaded Chrony SHM updater
-# ensures updates continue at 8-second intervals regardless of fusion timing.
+# Systemd Watchdog - service must send WATCHDOG=1 every 30 seconds
+# The fusion service sends watchdog notifications in its main loop
+WatchdogSec=30
+
+# Note: Using Type=notify (changed from simple) to support watchdog
+# The fusion service calls systemd_daemon.notify('READY=1') on startup
+# and systemd_daemon.notify('WATCHDOG=1') in the main loop
 
 # Run as the installed module from the venv
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion \

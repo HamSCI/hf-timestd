@@ -2,6 +2,132 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.10.0] - 2026-01-04
+
+### Added - Service Stability and Monitoring
+
+#### Systemd Watchdog Integration
+
+- **Feature**: Enabled systemd watchdog for fusion service with 30-second timeout
+- **Configuration**: Changed fusion service type from `simple` to `notify`
+- **Implementation**: Service already sends `WATCHDOG=1` notifications in main loop (line 2746)
+- **Impact**: Automatic detection and restart of hung fusion service
+- **Files**: `systemd/timestd-fusion.service`
+
+#### Chrony Reach Monitoring
+
+- **Script**: `scripts/check-chrony-reach.sh` - Monitor Chrony TMGR source reach value
+- **Features**:
+  - Configurable threshold (default: 64 decimal = 25% success rate)
+  - Optional alert command execution
+  - Exit codes for integration with monitoring systems
+  - Octal to decimal conversion with success percentage
+- **Usage**: Can be run manually or via systemd timer
+- **Files**: `scripts/check-chrony-reach.sh`
+
+#### Periodic Monitoring Timer
+
+- **Service**: `timestd-chrony-monitor.service` - Oneshot service to check Chrony reach
+- **Timer**: `timestd-chrony-monitor.timer` - Runs every 5 minutes
+- **Configuration**: Persistent across reboots, starts 2 minutes after boot
+- **Logging**: Output to systemd journal with `timestd-chrony-monitor` identifier
+- **Files**: `systemd/timestd-chrony-monitor.service`, `systemd/timestd-chrony-monitor.timer`
+
+#### Deployment Automation
+
+- **Script**: `scripts/deploy-service-improvements.sh` - One-command deployment
+- **Features**:
+  - Installs monitoring script to `/opt/hf-timestd/scripts/`
+  - Updates fusion service configuration
+  - Enables and starts monitoring timer
+  - Verifies deployment
+  - Interactive fusion service restart
+- **Files**: `scripts/deploy-service-improvements.sh`
+
+### Fixed - Chrony Pipeline Resilience
+
+#### Root Cause Investigation
+
+- **Issue**: Chrony TMGR reach = 0, indicating no time updates for 76 minutes
+- **Root Cause**: `timestd-fusion` service was stopped (inactive)
+- **Timeline**:
+  - 00:20 UTC: Service entered crash-loop (5 consecutive failures, exit code 1)
+  - 00:21 UTC: Systemd gave up after 5 restart attempts
+  - 00:45 UTC: Service manually stopped
+  - 00:45-02:02 UTC: Service remained inactive (77 minutes)
+  - 02:02 UTC: Service restarted during investigation
+  - 02:03 UTC: Chrony reach recovered (0 → 4 → 210 → continuing)
+
+#### System Architecture Validation
+
+- **Confirmed**: VTEC is properly optional with graceful fallback (IRI-2020 → empirical)
+- **Confirmed**: HDF5 is the primary data format (CSV is legacy)
+- **Confirmed**: Core Recorder writes to `.bin.zst` compressed binary (not Digital RF)
+- **Confirmed**: Critical path is well-defined: Recorder → Analytics → Fusion → Chrony SHM
+- **Confirmed**: Systemd watchdog already implemented in fusion service code
+
+### Documentation
+
+#### Analysis Documents
+
+- **Critical Path Analysis**: Comprehensive analysis of metrology-critical vs. science-optional components
+- **Chrony Reach Investigation**: Root cause analysis and resolution timeline
+- **Session Summary**: Overview of investigation, findings, and recommendations
+- **Walkthrough**: Detailed deployment instructions and monitoring commands
+
+### Deployment
+
+**Installation**:
+
+```bash
+cd /home/mjh/git/hf-timestd
+sudo ./scripts/deploy-service-improvements.sh
+```
+
+**Verification**:
+
+```bash
+# Check fusion service status
+systemctl status timestd-fusion
+
+# Monitor Chrony reach (should increase toward 377)
+watch -n 10 'chronyc sources -v | grep TMGR'
+
+# View monitoring timer status
+systemctl status timestd-chrony-monitor.timer
+
+# View monitoring logs
+journalctl -u timestd-chrony-monitor -n 20
+```
+
+### Technical Details
+
+**Chrony Reach Values**:
+
+- 377 (octal) = 11111111 (binary) = 8/8 successful polls (optimal)
+- 210 (octal) = 10001000 (binary) = 5/8 successful polls (acceptable)
+- 0 (octal) = 00000000 (binary) = 0/8 successful polls (critical)
+
+**Service Stability Improvements**:
+
+- Watchdog timeout: 30 seconds
+- Monitoring interval: 5 minutes
+- Alert threshold: 64 decimal (25% success rate)
+- Automatic restart on watchdog timeout
+
+### Known Issues
+
+- Fusion service crash-loop at 00:20 UTC (5 failures) - cause unknown, requires investigation
+- Service exited immediately with status=1 but no Python errors logged
+- Monitoring will help detect future occurrences
+
+### Next Steps
+
+1. Monitor fusion service for 24 hours to ensure stability
+2. Investigate crash-loop logs from 00:20 UTC to identify root cause
+3. Add email alerting to monitoring timer
+4. Consider implementing Chrony reach alerting webhook
+
 ## [Unreleased] - 2025-12-31
 
 ### Added

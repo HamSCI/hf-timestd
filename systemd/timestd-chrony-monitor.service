@@ -1,0 +1,17 @@
+[Unit]
+Description=HF-Timestd Chrony Reach Monitor
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Service]
+Type=oneshot
+User=timestd
+Group=timestd
+
+# Run the reach monitoring script
+# Alert if reach < 64 (decimal) = 25% success rate
+ExecStart=/opt/hf-timestd/scripts/check-chrony-reach.sh --threshold 64 --verbose
+
+# Log output to journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-chrony-monitor
