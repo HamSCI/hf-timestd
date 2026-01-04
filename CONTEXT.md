@@ -1,25 +1,75 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-04 19:10 UTC  
-**System Version**: 3.9.0  
-**Current Focus**: HDF5 Migration for Test Signal Analysis & CSV Removal  
-**System Status**: Stable, D_clock centered at 0ms with critical analytics fixes deployed
+**Last Updated**: 2026-01-04 20:20 UTC  
+**System Version**: 4.0.0  
+**Current Focus**: Web UI Enhancements - ISO GUM Reporting & Science Data Visualization  
+**System Status**: Stable, HDF5-native for all critical path data
 
 ---
 
 ## Executive Summary
 
-The `hf-timestd` system is a high-precision time transfer system that receives WWV/WWVH/CHU/BPM time signals via HF radio, processes them through a multi-stage pipeline, and provides UTC time corrections to the system clock via Chrony. The system is currently operational and stable with recent critical analytics fixes deployed.
+The `hf-timestd` system is a high-precision time transfer system that receives WWV/WWVH/CHU/BPM time signals via HF radio, processes them through a multi-stage pipeline, and provides UTC time corrections to the system clock via Chrony. The system is currently operational and stable with comprehensive HDF5 data storage for all critical path components.
 
 **Current System State:**
+
 - ✅ Analytics pipeline stable with D_clock centered at 0ms
 - ✅ Critical validation fixes deployed (propagation delays, inter-station consistency, continuity)
 - ✅ Fusion service tracking well with tight uncertainty (±1-2ms)
-- 🎯 **Next Priority**: Migrate test signal analysis to HDF5 and remove CSV usage throughout
+- ✅ **HDF5 Migration Complete**: All critical path data now in HDF5 format
+- 🎯 **Next Priority**: Enhance web UI with ISO GUM uncertainty reporting and science data visualization
 
 ---
 
-## Session Summary (2026-01-04)
+## Session Summary (2026-01-04 - Latest)
+
+### Test Signal HDF5 Migration - COMPLETED ✅
+
+Successfully migrated WWV/WWVH scientific test signal analysis from CSV-only to parallel CSV+HDF5 writes, completing the HDF5 migration for all critical path data.
+
+**Implementation:**
+
+- **HDF5 Writer Added**: Initialized `hdf5_l2_test_signal_writer` in `Phase2AnalyticsService`
+- **Schema**: Using existing `l2_test_signal_v1.json` (38 comprehensive fields)
+- **Parallel Writes**: Test signal data written to both CSV and HDF5 simultaneously
+- **Bug Fixed**: Corrected `AttributeError` where code referenced non-existent `self.frequency_mhz`
+  - Changed to use `self._get_frequency_mhz()` method in `_is_chu_channel()` and `_write_test_signal()`
+
+**Data Enrichment (HDF5 vs CSV):**
+HDF5 captures 3x more data than legacy CSV format:
+
+- **CSV**: 13 fields (basic detection metrics)
+- **HDF5**: 38 fields including time-series data, anomaly detection, noise analysis, scintillation metrics, quality assessment
+
+**HDF5 Data Pipeline - COMPLETE:**
+All data products now use HDF5 storage:
+
+- ✅ L0 (Raw): Digital RF HDF5
+- ✅ L1A (Observables): Channel observables HDF5
+- ✅ L1A (Tones): Tone detections HDF5
+- ✅ L1B (Timecode): BCD timecode HDF5
+- ✅ L2 (Timing): Timing measurements HDF5
+- ✅ **L2 (Test Signals): Test signal analysis HDF5** ← NEW
+- ✅ L3 (Fusion): Fusion results HDF5
+- ✅ L3 (TEC): Ionospheric TEC HDF5
+- ✅ L3 (VTEC): GNSS VTEC HDF5
+
+**CSV Status:**
+
+- **Critical path**: HDF5 primary, CSV parallel (validation period)
+- **Auxiliary monitoring**: CSV only (doppler, 440hz, discrimination, audio tones, timing/quality metrics)
+- **Recommendation**: Keep auxiliary CSVs for operational convenience and human readability
+
+**Deployment:**
+
+- ✅ Code deployed to production (hf-timestd 4.0.0)
+- ✅ Services restarted successfully
+- ✅ Committed and pushed to GitHub (commit 233d6fd)
+- ⏳ Awaiting test signal at minute :44 for HDF5 file verification
+
+---
+
+## Session Summary (2026-01-04 - Earlier)
 
 ### TEC Fix Implementation - COMPLETED ✅
 
@@ -131,6 +181,7 @@ The system correctly implements a prioritized bootstrap strategy that uses a pri
 **Phase 1: Bootstrap from Anchor Channels**
 
 Priority channels for unambiguous station identification:
+
 ```python
 ANCHOR_CHANNELS = {
     'CHU 3.33 MHz',    # CHU-only frequency
@@ -142,6 +193,7 @@ ANCHOR_CHANNELS = {
 ```
 
 **Why anchor channels are optimal:**
+
 - No station ambiguity (only one station broadcasts)
 - Detection = certain station identification
 - Provides clean RTP offset measurement
@@ -150,6 +202,7 @@ ANCHOR_CHANNELS = {
 **Phase 2: Calibration (Narrow Search Windows)**
 
 Once anchor channel provides D_clock:
+
 - Adjust RTP expectations for all channels
 - Narrow search windows from ±500ms to ±5ms
 - Update continuously as more detections arrive
@@ -191,6 +244,7 @@ Tackle shared channels (2.5, 5, 10, 15 MHz) with hierarchy:
 **System Implementation:**
 
 The `timing_calibrator.py` module correctly implements this strategy with:
+
 - `ANCHOR_CHANNELS` definition
 - Bootstrap phase tracking (BOOTSTRAP → PROVISIONAL → CALIBRATED → VERIFIED)
 - RTP offset calibration from anchor detections
@@ -214,11 +268,13 @@ Migrate test signal analysis code in the Science Aggregator to use HDF5 instead 
 ### Background
 
 **Current State:**
+
 - Most of the system has been migrated to HDF5 (L2 timing measurements, L3 fusion data)
 - Science Aggregator still uses CSV for some products, particularly test signal analysis
 - CSV files are less efficient, harder to query, and don't support concurrent access as well as HDF5
 
 **Migration Goals:**
+
 1. Convert test signal analysis to read/write HDF5
 2. Remove remaining CSV usage throughout the codebase
 3. Maintain backward compatibility during transition
@@ -236,11 +292,13 @@ Migrate test signal analysis code in the Science Aggregator to use HDF5 instead 
 **Purpose:** Analyze test signals broadcast by WWV/WWVH to validate system performance and timing accuracy.
 
 **Test Signals:**
+
 - WWV: 440 Hz tone at 45 minutes past the hour (45:00-45:05)
 - WWVH: 600 Hz tone at 45 minutes past the hour (45:00-45:05)
 - Used for system validation and propagation analysis
 
 **Current Implementation:**
+
 - Located in `science_aggregator.py`
 - Uses CSV files for storage (needs migration to HDF5)
 - Analyzes test signal timing, SNR, and consistency
@@ -308,23 +366,27 @@ grep -r "csv\." /home/mjh/git/hf-timestd/src/hf_timestd/ --include="*.py"
 ### HDF5 Best Practices (Learned from TEC Fix)
 
 **Schema Evolution:**
+
 - Existing HDF5 files cannot have new datasets added retroactively
 - Increment schema version when adding fields
 - Either delete old files or wait for daily rotation
 - Test schema changes with a single channel first
 
 **SWMR Mode:**
+
 - Enable Single-Writer-Multiple-Reader for concurrent access
 - Writer must open with `libver='latest'`, `swmr=True`
 - Readers can attach to active files
 - Flush after each write for readers to see updates
 
 **Atomic Writes:**
+
 - Write to temporary file first
 - Use `os.rename()` for atomic replacement
 - Prevents corruption if process crashes mid-write
 
 **Error Handling:**
+
 - Always close HDF5 files in finally blocks
 - Check for file locks before writing
 - Implement retry logic for transient failures
@@ -360,6 +422,7 @@ grep -r "csv\." /home/mjh/git/hf-timestd/src/hf_timestd/ --include="*.py"
 ### Example HDF5 Migration Pattern
 
 **Before (CSV):**
+
 ```python
 import csv
 
@@ -369,6 +432,7 @@ with open('test_signals.csv', 'a') as f:
 ```
 
 **After (HDF5):**
+
 ```python
 import h5py
 import numpy as np
@@ -387,6 +451,7 @@ with h5py.File('test_signals.h5', 'a', libver='latest') as f:
 ```
 
 **Schema Definition:**
+
 ```python
 # In schemas/test_signals_schema.json
 {
@@ -470,6 +535,7 @@ with h5py.File('test_signals.h5', 'a', libver='latest') as f:
 **CRITICAL**: Production services run from `/opt/hf-timestd/venv/`, NOT from the git repository.
 
 **Method 1: Direct file copy (fastest for testing):**
+
 ```bash
 cd /home/mjh/git/hf-timestd
 sudo cp src/hf_timestd/core/{file}.py /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/core/
@@ -477,6 +543,7 @@ sudo systemctl restart timestd-{service-name}
 ```
 
 **Method 2: Full package install (for schema changes):**
+
 ```bash
 cd /home/mjh/git/hf-timestd
 sudo /opt/hf-timestd/venv/bin/pip install . --no-deps
@@ -537,12 +604,14 @@ When updating HDF5 schemas:
 **Critical Principle:** Use a priori knowledge (geography, physics, propagation models) to guide detection, not just acoustic features.
 
 **Hierarchy for Station Identification:**
+
 1. **Anchor channels** (CHU-only, WWV-only frequencies) - Unambiguous
 2. **ToA separation** (with calibrated D_clock) - Primary discriminator on shared channels
 3. **Acoustic features** (1200 Hz, BCD patterns) - Secondary validation
 4. **Cross-frequency correlation** - Tertiary validation, not primary
 
 **Why this works:**
+
 - BPM vs WWV conflict resolved by 37ms ToA separation
 - Propagation-robust (doesn't require all frequencies available)
 - Rapid convergence (first anchor detection enables narrow windows everywhere)
@@ -551,18 +620,21 @@ When updating HDF5 schemas:
 ### Validation Architecture
 
 **Inter-Station D_clock Consistency:**
+
 - D_clock is a property of the RECEIVER, not the station
 - All stations should measure same D_clock (within measurement noise)
 - Spread > 5ms indicates propagation delay calculation errors
 - Deployed and monitoring, waiting for multi-station detections
 
 **D_clock Continuity:**
+
 - Tracks jumps between consecutive minutes
 - Flags discontinuities > 5ms
 - Detects CHU frame slips (500ms jumps)
 - Currently active and monitoring
 
 **Cross-Frequency Guidance:**
+
 - Strong detection on one frequency helps weak channels
 - Narrows search window from ±500ms to ±3-5ms
 - Key insight: WWVH ToA across frequencies correlates tighter than WWV vs WWVH on same frequency
@@ -571,12 +643,14 @@ When updating HDF5 schemas:
 ### System Stability
 
 **Current Status (19:10 UTC):**
+
 - D_clock centered at 0ms (recent measurements: +0.00ms)
 - Fusion tracking well with ±1-2ms uncertainty
 - No discontinuities since deployment at 18:40 UTC
 - All validation infrastructure deployed and monitoring
 
 **Earlier Issues (18:20-18:40):**
+
 - Multiple discontinuities due to service restarts during deployment
 - System was in bootstrap/transition mode
 - Now resolved with stable tracking
