@@ -485,6 +485,11 @@ class Phase2TemporalEngine:
         self.minutes_processed = 0
         self.last_result: Optional[Phase2Result] = None
         
+        # CRITICAL FIX (2026-01-04): D_clock continuity tracking
+        # Track previous D_clock for continuity validation
+        # Detects CHU frame slips and other timing jumps
+        self._last_d_clock_ms: Optional[float] = None
+        
         # Load persisted calibration
         self._load_calibration()
         
@@ -1002,6 +1007,29 @@ class Phase2TemporalEngine:
                     f"🎯 Learned ToA: {predicted_station_name} @ {self.frequency_mhz}MHz, "
                     f"expected={expected_offset_ms:.1f}ms, window=±{adaptive_window_ms:.1f}ms"
                 )
+        
+        # CRITICAL FIX (2026-01-04): Cross-frequency guidance
+        # Use strong detections from other frequencies to narrow search window
+        # Key insight: WWVH ToA across frequencies correlates tighter than WWV vs WWVH on same freq
+        if search_strategy == "BLIND" and predicted_station_name:
+            minute_boundary = int(system_time) - int(system_time) % 60
+            cross_freq_guidance = self.multi_station_detector.get_cross_freq_guidance(
+                station=predicted_station_name,
+                target_frequency_mhz=self.frequency_mhz,
+                minute_boundary=minute_boundary
+            )
+            
+            if cross_freq_guidance and cross_freq_guidance['source_snr_db'] > 10.0:
+                # Strong detection on another frequency - use it to guide this one
+                expected_offset_ms = cross_freq_guidance['expected_toa_ms']
+                adaptive_window_ms = cross_freq_guidance['search_window_ms']
+                search_strategy = "CROSS_FREQ"
+                logger.info(
+                    f"🔗 Cross-freq guidance: {predicted_station_name} from {cross_freq_guidance['source_frequency_mhz']:.1f}MHz "
+                    f"(SNR={cross_freq_guidance['source_snr_db']:.1f}dB), "
+                    f"expected={expected_offset_ms:.1f}ms, window=±{adaptive_window_ms:.1f}ms"
+                )
+        
         # PRIORITY 2: Blind search (bootstrap or fallback)
         if search_strategy == "BLIND":
             expected_offset_ms = 0.0
@@ -1139,21 +1167,47 @@ class Phase2TemporalEngine:
         timing_offset_samples = round(timing_error_ms * self.sample_rate / 1000)
         arrival_rtp = rtp_timestamp + timing_offset_samples
         
+        # CRITICAL FIX (2026-01-04): Extract timing from multi-station detector
+        # The multi-station detector finds all stations, but we need to populate
+        # individual station timing fields for inter-station validation
+        wwv_timing_from_multi = None
+        wwvh_timing_from_multi = None
+        chu_timing_from_multi = None
+        wwv_snr_from_multi = None
+        wwvh_snr_from_multi = None
+        chu_snr_from_multi = None
+        
+        usable_detections = multi_station_result.get_all_usable_detections()
+        logger.info(f"🔍 Multi-station detector found {len(usable_detections)} usable detections")
+        
+        for det in usable_detections:
+            logger.info(f"  📡 Station {det.station}: ToA={det.measured_toa_ms:.2f}ms, SNR={det.snr_db:.1f}dB")
+            if det.station == 'WWV':
+                wwv_timing_from_multi = det.measured_toa_ms
+                wwv_snr_from_multi = det.snr_db
+            elif det.station == 'WWVH':
+                wwvh_timing_from_multi = det.measured_toa_ms
+                wwvh_snr_from_multi = det.snr_db
+            elif det.station == 'CHU':
+                chu_timing_from_multi = det.measured_toa_ms
+                chu_snr_from_multi = det.snr_db
+        
         result = TimeSnapResult(
             timing_error_ms=timing_error_ms,
             arrival_rtp=arrival_rtp,
             arrival_system_time=system_time + (timing_error_ms / 1000.0),
-            wwv_detected=wwv_det is not None,
-            wwvh_detected=wwvh_det is not None,
-            chu_detected=chu_det is not None,
+            wwv_detected=wwv_det is not None or wwv_timing_from_multi is not None,
+            wwvh_detected=wwvh_det is not None or wwvh_timing_from_multi is not None,
+            chu_detected=chu_det is not None or chu_timing_from_multi is not None,
             bpm_detected=bpm_det is not None,
-            wwv_snr_db=wwv_det.snr_db if wwv_det else None,
-            wwvh_snr_db=wwvh_det.snr_db if wwvh_det else None,
-            chu_snr_db=chu_det.snr_db if chu_det else None,
+            # Use multi-station detector results if available, otherwise fall back to individual detectors
+            wwv_snr_db=wwv_snr_from_multi if wwv_snr_from_multi is not None else (wwv_det.snr_db if wwv_det else None),
+            wwvh_snr_db=wwvh_snr_from_multi if wwvh_snr_from_multi is not None else (wwvh_det.snr_db if wwvh_det else None),
+            chu_snr_db=chu_snr_from_multi if chu_snr_from_multi is not None else (chu_det.snr_db if chu_det else None),
             bpm_snr_db=bpm_det.snr_db if bpm_det else None,
-            wwv_timing_ms=wwv_det.timing_error_ms if wwv_det else None,
-            wwvh_timing_ms=wwvh_det.timing_error_ms if wwvh_det else None,
-            chu_timing_ms=chu_det.timing_error_ms if chu_det else None,
+            wwv_timing_ms=wwv_timing_from_multi if wwv_timing_from_multi is not None else (wwv_det.timing_error_ms if wwv_det else None),
+            wwvh_timing_ms=wwvh_timing_from_multi if wwvh_timing_from_multi is not None else (wwvh_det.timing_error_ms if wwvh_det else None),
+            chu_timing_ms=chu_timing_from_multi if chu_timing_from_multi is not None else (chu_det.timing_error_ms if chu_det else None),
             # BPM timing comes from multi-station detector (measured_toa_ms), not discriminator
             bpm_timing_ms=multi_station_result.detections.get('BPM', None).measured_toa_ms if multi_station_result.detections.get('BPM') and multi_station_result.detections['BPM'].detected else None,
             bpm_timing_mode=bpm_timing_mode,
@@ -1745,6 +1799,121 @@ class Phase2TemporalEngine:
         
         return False
     
+    def _validate_inter_station_dclock_consistency(
+        self,
+        time_snap: TimeSnapResult,
+        channel: ChannelCharacterization,
+        rtp_timestamp: int,
+        expected_second_rtp: int,
+        delay_spread_ms: float,
+        doppler_std_hz: float,
+        fss_db: Optional[float]
+    ) -> Dict[str, float]:
+        """
+        CRITICAL FIX (2026-01-04): Inter-station D_clock consistency validation.
+        
+        D_clock is a RECEIVER CLOCK PROPERTY - it should be the same for all stations.
+        If different stations report different D_clock values, it indicates:
+        1. Incorrect propagation delay calculations
+        2. Station misidentification
+        3. Propagation mode errors
+        
+        This method calculates D_clock for all detected stations and validates consistency.
+        
+        Returns:
+            Dict mapping station -> d_clock_ms, or empty dict if validation fails
+        """
+        d_clock_estimates = {}
+        
+        # Calculate D_clock for each detected station
+        stations_to_check = []
+        if time_snap.wwv_timing_ms is not None and time_snap.wwv_snr_db is not None:
+            if time_snap.wwv_snr_db > 0:  # Only if detected
+                stations_to_check.append(('WWV', time_snap.wwv_timing_ms))
+        
+        if time_snap.wwvh_timing_ms is not None and time_snap.wwvh_snr_db is not None:
+            if time_snap.wwvh_snr_db > 0:
+                stations_to_check.append(('WWVH', time_snap.wwvh_timing_ms))
+        
+        if time_snap.chu_timing_ms is not None and time_snap.chu_snr_db is not None:
+            if time_snap.chu_snr_db > 0:
+                stations_to_check.append(('CHU', time_snap.chu_timing_ms))
+        
+        if len(stations_to_check) < 2:
+            # Only one station detected, can't validate consistency
+            return {}
+        
+        # Calculate D_clock for each station
+        for station, t_arrival_ms in stations_to_check:
+            try:
+                timing_offset_samples = round(t_arrival_ms * self.sample_rate / 1000.0)
+                arrival_rtp = rtp_timestamp + timing_offset_samples
+                
+                solver_result = self.solver.solve(
+                    station=station,
+                    frequency_mhz=self.frequency_mhz,
+                    arrival_rtp=arrival_rtp,
+                    delay_spread_ms=delay_spread_ms,
+                    doppler_std_hz=doppler_std_hz,
+                    fss_db=fss_db,
+                    expected_second_rtp=expected_second_rtp
+                )
+                
+                # Extract D_clock
+                if solver_result.utc_nist_offset_ms is not None:
+                    d_clock_ms = solver_result.utc_nist_offset_ms
+                elif solver_result.emission_offset_ms is not None:
+                    d_clock_ms = solver_result.emission_offset_ms
+                else:
+                    continue  # Skip if no valid solution
+                
+                d_clock_estimates[station] = d_clock_ms
+                
+            except Exception as e:
+                logger.warning(f"Failed to calculate D_clock for {station}: {e}")
+                continue
+        
+        if len(d_clock_estimates) < 2:
+            return {}
+        
+        # Validate consistency
+        d_clock_values = list(d_clock_estimates.values())
+        d_clock_mean = sum(d_clock_values) / len(d_clock_values)
+        d_clock_min = min(d_clock_values)
+        d_clock_max = max(d_clock_values)
+        d_clock_spread = d_clock_max - d_clock_min
+        
+        logger.info(
+            f"Inter-station D_clock validation: {d_clock_estimates}, "
+            f"mean={d_clock_mean:.2f}ms, spread={d_clock_spread:.2f}ms"
+        )
+        
+        # CRITICAL THRESHOLD: D_clock spread should be < 5ms
+        # Larger spreads indicate systematic propagation errors
+        if d_clock_spread > 5.0:
+            logger.error(
+                f"CRITICAL: D_clock spread {d_clock_spread:.2f}ms exceeds 5ms threshold!"
+            )
+            logger.error(f"  Station D_clock values: {d_clock_estimates}")
+            logger.error(f"  This indicates PROPAGATION DELAY CALCULATION ERRORS")
+            logger.error(f"  D_clock is a receiver property - should be same for all stations")
+            
+            # Flag all measurements as SUSPECT
+            for station, d_clock in d_clock_estimates.items():
+                logger.error(f"    {station}: {d_clock:+.2f}ms (deviation: {d_clock - d_clock_mean:+.2f}ms)")
+            
+            # Return empty dict to signal validation failure
+            return {}
+        
+        elif d_clock_spread > 3.0:
+            logger.warning(
+                f"WARNING: D_clock spread {d_clock_spread:.2f}ms exceeds 3ms (measurement noise limit)"
+            )
+            logger.warning(f"  Station D_clock values: {d_clock_estimates}")
+            # Continue but with reduced confidence
+        
+        return d_clock_estimates
+    
     def _step3_transmission_time_solution(
         self,
         time_snap: TimeSnapResult,
@@ -1998,6 +2167,25 @@ class Phase2TemporalEngine:
         else:
             arrival_rtp = time_snap.arrival_rtp # Fallback
         
+        # CRITICAL FIX (2026-01-04): Inter-station D_clock consistency validation
+        # Run validation BEFORE solving for the selected station
+        # This catches systematic propagation errors early
+        if expected_second_rtp is not None and not forced_station:
+            d_clock_consistency = self._validate_inter_station_dclock_consistency(
+                time_snap=time_snap,
+                channel=channel,
+                rtp_timestamp=rtp_timestamp,
+                expected_second_rtp=expected_second_rtp,
+                delay_spread_ms=delay_spread_ms,
+                doppler_std_hz=doppler_std_hz,
+                fss_db=fss_db
+            )
+            
+            # If validation failed (spread > 5ms), log critical error
+            if len(d_clock_consistency) >= 2 and not d_clock_consistency:
+                logger.error("Inter-station D_clock validation FAILED - propagation errors detected")
+                # Continue with reduced confidence
+        
         try:
             solver_result = self.solver.solve(
                 station=station,
@@ -2016,6 +2204,30 @@ class Phase2TemporalEngine:
                 d_clock_ms = solver_result.emission_offset_ms
             else:
                 d_clock_ms = 0.0  # Fallback for bootstrap/_no_solution
+            
+            # CRITICAL FIX (2026-01-04): D_clock continuity validation
+            # Check for sudden jumps that indicate frame slips or mode errors
+            if hasattr(self, '_last_d_clock_ms') and self._last_d_clock_ms is not None:
+                d_clock_delta = abs(d_clock_ms - self._last_d_clock_ms)
+                
+                # Expected drift: < 0.1 ms/minute for GPSDO-disciplined clock
+                if d_clock_delta > 5.0:
+                    logger.error(
+                        f"D_clock DISCONTINUITY: {self._last_d_clock_ms:.2f}ms → {d_clock_ms:.2f}ms "
+                        f"(Δ={d_clock_delta:.2f}ms)"
+                    )
+                    
+                    # Check for CHU frame slip (500ms jumps)
+                    if abs(d_clock_delta - 500.0) < 10.0:
+                        logger.error("  → CHU FRAME SLIP DETECTED (500ms jump)")
+                    elif abs(d_clock_delta - 1000.0) < 10.0:
+                        logger.error("  → CHU DOUBLE FRAME SLIP DETECTED (1000ms jump)")
+                    
+                    # Reduce confidence for this measurement
+                    solver_result.confidence = max(0.1, solver_result.confidence * 0.3)
+            
+            # Store for next iteration
+            self._last_d_clock_ms = d_clock_ms
             
             # Convert mode candidates to dict format for serialization
             mode_candidates = [

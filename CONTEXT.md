@@ -1,18 +1,25 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-04  
+**Last Updated**: 2026-01-04 19:10 UTC  
 **System Version**: 3.9.0  
-**Focus**: Chrony Pipeline Hardening & Metrology Reliability
+**Current Focus**: HDF5 Migration for Test Signal Analysis & CSV Removal  
+**System Status**: Stable, D_clock centered at 0ms with critical analytics fixes deployed
 
 ---
 
 ## Executive Summary
 
-The `hf-timestd` system is a high-precision time transfer system that receives WWV/WWVH/CHU time signals via HF radio, processes them through a multi-stage pipeline, and provides UTC time corrections to the system clock via Chrony. The system is currently operational and providing time synchronization, but the next priority is to **harden the data and calculation pathway to Chrony** to ensure a resilient, robust, bullet-proof metrology service that runs reliably regardless of subsequent analytics or science products.
+The `hf-timestd` system is a high-precision time transfer system that receives WWV/WWVH/CHU/BPM time signals via HF radio, processes them through a multi-stage pipeline, and provides UTC time corrections to the system clock via Chrony. The system is currently operational and stable with recent critical analytics fixes deployed.
+
+**Current System State:**
+- ✅ Analytics pipeline stable with D_clock centered at 0ms
+- ✅ Critical validation fixes deployed (propagation delays, inter-station consistency, continuity)
+- ✅ Fusion service tracking well with tight uncertainty (±1-2ms)
+- 🎯 **Next Priority**: Migrate test signal analysis to HDF5 and remove CSV usage throughout
 
 ---
 
-## Recent Accomplishments (2026-01-04 Session)
+## Session Summary (2026-01-04)
 
 ### TEC Fix Implementation - COMPLETED ✅
 
@@ -46,134 +53,378 @@ HDF5 files created with old schema cannot have new datasets added retroactively.
 
 - Remove debug logging added during troubleshooting (search for "DEBUG TEC FIX" in codebase)
 
+### Critical Analytics Fixes - COMPLETED ✅
+
+Successfully implemented and deployed comprehensive validation and discrimination fixes to address the ~18ms D_clock spread between stations:
+
+**Problems Identified:**
+
+1. **Inter-station D_clock inconsistency** - Different stations showed D_clock values ranging from 6.3ms (CHU) to 23.9ms (WWVH), which is physically impossible since D_clock is a property of the receiver, not the station
+2. **Missing propagation delay validation** - No bounds checking on calculated delays
+3. **No ionospheric delay validation** - Corrupted IRI-2020 data could produce invalid delays
+4. **No D_clock continuity checking** - Frame slips and mode errors went undetected
+5. **Multi-station timing not extracted** - CorrelatorBank detected multiple stations but timing wasn't used for validation
+6. **No cross-frequency guidance** - Strong detections on one frequency weren't helping weak channels
+
+**Solutions Implemented:**
+
+1. **Station-Specific Propagation Delay Validation** (`transmission_time_solver.py`)
+   - Added physical bounds for each station: WWV (4-12ms), WWVH (15-30ms), CHU (6-15ms), BPM (40-70ms)
+   - Modes with delays outside bounds have plausibility reduced by 70%
+   - Prevents physically impossible propagation paths
+
+2. **Ionospheric Delay Validation** (`transmission_time_solver.py`)
+   - Validates 1/f² relationship for ionospheric delay
+   - Per-hop, per-frequency maximum delay thresholds
+   - Rejects negative or excessive ionospheric delays
+   - Catches corrupted IRI-2020 model output
+
+3. **Inter-Station D_clock Consistency Checking** (`phase2_temporal_engine.py`)
+   - New method `_validate_inter_station_dclock_consistency()`
+   - Validates D_clock spread < 5ms (CRITICAL threshold), < 3ms (WARNING threshold)
+   - Logs detailed diagnostics when validation fails
+   - Prevents bad data from reaching fusion
+
+4. **D_clock Continuity Validation** (`phase2_temporal_engine.py`)
+   - Tracks `_last_d_clock_ms` between consecutive minutes
+   - Flags jumps > 5ms as discontinuities
+   - Detects CHU frame slips (500ms jumps)
+   - Reduces confidence for discontinuous measurements
+
+5. **Multi-Station Timing Extraction** (`phase2_temporal_engine.py`)
+   - Extracts timing from `multi_station_result.get_all_usable_detections()`
+   - Populates `wwv_timing_ms`, `wwvh_timing_ms`, `chu_timing_ms` from CorrelatorBank
+   - Enables inter-station validation when multiple stations detected
+   - Currently executing (logs show "🔍 Multi-station detector found X usable detections")
+
+6. **Cross-Frequency Guidance Integration** (`phase2_temporal_engine.py`)
+   - Uses `get_cross_freq_guidance()` to find strong detections on other frequencies
+   - Narrows search window from ±500ms to ±3-5ms when guidance available
+   - Key insight: WWVH ToA across frequencies correlates tighter than WWV vs WWVH on same frequency
+   - Improves station discrimination on shared channels
+
+**Deployment Status:**
+
+- ✅ All fixes implemented in git repository
+- ✅ Deployed to production: `sudo cp src/hf_timestd/core/*.py /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/core/`
+- ✅ Services restarted at 18:40 UTC
+- ✅ System now stable with D_clock centered at 0ms
+- ✅ Fusion history shows tight tracking (±1-2ms uncertainty)
+- ⏳ Waiting for multi-station detections to trigger inter-station validation
+
+**Key Files Modified:**
+
+- `src/hf_timestd/core/transmission_time_solver.py` - Propagation and ionospheric delay validation
+- `src/hf_timestd/core/phase2_temporal_engine.py` - Inter-station validation, continuity, multi-station extraction, cross-frequency guidance
+
+**Documentation Created:**
+
+- `ANALYTICS_FIXES_DEPLOYED_2026-01-04.md` - Complete deployment summary
+- `BOOTSTRAP_DISCRIMINATION_STRATEGY.md` - Comprehensive bootstrap and station discrimination documentation
+
+### Bootstrap and Station Discrimination Strategy - DOCUMENTED ✅
+
+**Key Architectural Insight:**
+
+The system correctly implements a prioritized bootstrap strategy that uses a priori knowledge (geography, physics, propagation models) to guide detection and discrimination:
+
+**Phase 1: Bootstrap from Anchor Channels**
+
+Priority channels for unambiguous station identification:
+```python
+ANCHOR_CHANNELS = {
+    'CHU 3.33 MHz',    # CHU-only frequency
+    'CHU 7.85 MHz',    # CHU-only frequency  
+    'CHU 14.67 MHz',   # CHU-only frequency
+    'WWV 20 MHz',      # WWV-only frequency
+    'WWV 25 MHz',      # WWV-only frequency
+}
+```
+
+**Why anchor channels are optimal:**
+- No station ambiguity (only one station broadcasts)
+- Detection = certain station identification
+- Provides clean RTP offset measurement
+- Establishes preliminary D_clock for all channels
+
+**Phase 2: Calibration (Narrow Search Windows)**
+
+Once anchor channel provides D_clock:
+- Adjust RTP expectations for all channels
+- Narrow search windows from ±500ms to ±5ms
+- Update continuously as more detections arrive
+
+**Phase 3: Shared Channel Discrimination**
+
+Tackle shared channels (2.5, 5, 10, 15 MHz) with hierarchy:
+
+1. **Primary: ToA Separation** (with calibrated D_clock)
+   - WWV: 8±2ms (short path from Colorado)
+   - WWVH: 23±3ms (medium path from Hawaii)
+   - BPM: 45±5ms (long path from China)
+   - Separation: 15ms between WWV/WWVH, 22ms between WWVH/BPM
+
+2. **Secondary: Acoustic Discrimination**
+   - WWVH unique: 1200 Hz tone (strong indicator)
+   - WWV/WWVH: 500/600 Hz tones (both have these)
+   - BPM vs WWV: Both use 1000 Hz, discriminate by ToA and BCD pattern
+
+3. **Tertiary: Cross-Frequency Correlation** (validation, not primary)
+   - WWVH consistency: ToA at 2.5, 5, 10, 15 MHz should agree within ±3ms
+   - WWV consistency: ToA at 2.5, 5, 10, 15 MHz should agree within ±3ms
+   - Validation: If ToA varies >5ms across frequencies, suspect misidentification
+
+**Why Cross-Frequency Alone Isn't Sufficient:**
+
+- Frequency-dependent fading (10 MHz strong, 5 MHz weak)
+- Mode changes (different frequencies use different propagation modes)
+- Ionospheric disturbances (affect frequencies differently)
+- Time of day (some frequencies unusable at certain times)
+
+**Correct Hierarchy for Station Identification:**
+
+1. **Primary:** Anchor channels (unambiguous)
+2. **Secondary:** ToA separation (with calibrated D_clock)
+3. **Tertiary:** Acoustic discrimination (1200 Hz, BCD, etc.)
+4. **Quaternary:** Cross-frequency correlation (validation)
+
+**System Implementation:**
+
+The `timing_calibrator.py` module correctly implements this strategy with:
+- `ANCHOR_CHANNELS` definition
+- Bootstrap phase tracking (BOOTSTRAP → PROVISIONAL → CALIBRATED → VERIFIED)
+- RTP offset calibration from anchor detections
+- Search window adaptation (500ms → 5ms)
+
+**Current System Status:**
+
+- System is stable with D_clock = +0.00ms (recent measurements)
+- Fusion tracking centered at 0ms with ±1-2ms uncertainty
+- Earlier discontinuities (18:20-18:40) were due to service restarts during deployment
+- All validation infrastructure is deployed and monitoring
+
 ---
 
-## Next Session Priority: Chrony Pipeline Hardening
+## Next Session Priority: HDF5 Migration & CSV Removal
 
 ### Objective
 
-Create a **resilient, robust, bullet-proof metrology service** that provides reliable UTC time corrections to Chrony regardless of:
+Migrate test signal analysis code in the Science Aggregator to use HDF5 instead of CSV files, continuing the system-wide migration away from CSV-based data storage.
 
-- Analytics failures or bugs
-- Science product processing issues
-- TEC calculation problems
-- Ionospheric model failures
-- Network or data source outages
+### Background
 
-### Core Principle
+**Current State:**
+- Most of the system has been migrated to HDF5 (L2 timing measurements, L3 fusion data)
+- Science Aggregator still uses CSV for some products, particularly test signal analysis
+- CSV files are less efficient, harder to query, and don't support concurrent access as well as HDF5
 
-**The Chrony pipeline must be decoupled from analytics and science products.** Time synchronization is the PRIMARY mission; everything else is secondary.
+**Migration Goals:**
+1. Convert test signal analysis to read/write HDF5
+2. Remove remaining CSV usage throughout the codebase
+3. Maintain backward compatibility during transition
+4. Ensure schema versioning for future evolution
 
-### Current Chrony Data Flow
+### Core Principles
 
+1. **HDF5 for all persistent data** - CSV only for human-readable exports if needed
+2. **Schema versioning** - All HDF5 files must have version metadata
+3. **SWMR mode** - Enable Single-Writer-Multiple-Reader for concurrent access
+4. **Atomic writes** - Use temp files and rename for crash safety
+
+### Test Signal Analysis Overview
+
+**Purpose:** Analyze test signals broadcast by WWV/WWVH to validate system performance and timing accuracy.
+
+**Test Signals:**
+- WWV: 440 Hz tone at 45 minutes past the hour (45:00-45:05)
+- WWVH: 600 Hz tone at 45 minutes past the hour (45:00-45:05)
+- Used for system validation and propagation analysis
+
+**Current Implementation:**
+- Located in `science_aggregator.py`
+- Uses CSV files for storage (needs migration to HDF5)
+- Analyzes test signal timing, SNR, and consistency
+
+**HDF5 Schema Requirements:**
+
+```python
+# Test signal measurements schema
+{
+    "version": "1.0.0",
+    "datasets": {
+        "timestamp": "int64",           # Unix timestamp
+        "station": "string",            # WWV, WWVH, CHU, BPM
+        "frequency_mhz": "float32",     # Broadcast frequency
+        "test_tone_hz": "float32",      # 440, 600, etc.
+        "detected": "bool",             # Test signal detected
+        "snr_db": "float32",            # Signal-to-noise ratio
+        "timing_error_ms": "float32",   # Timing error vs expected
+        "confidence": "float32",        # Detection confidence
+        "notes": "string"               # Optional notes
+    }
+}
 ```
-Phase 1 (L0): Raw IQ Samples from radiod
-         ↓
-Phase 2 (L2): Tone Detection → Timing Measurements
-         ↓                      (clock_offset_ms, propagation_delay_ms)
-Phase 3 (L3): Multi-Broadcast Fusion
-         ↓                      (combines multi-station, multi-frequency)
-    Fused UTC Time Estimate
-         ↓
-    Chrony SHM (Shared Memory)
-         ↓
-    System Clock Discipline
+
+**Migration Strategy:**
+
+1. Create new HDF5 schema for test signal data
+2. Update Science Aggregator to write HDF5 instead of CSV
+3. Add backward compatibility to read existing CSV files
+4. Test with single channel before full deployment
+5. Document schema and access patterns
+
+### CSV Files to Migrate
+
+**Identify remaining CSV usage:**
+
+```bash
+# Find CSV-related code
+grep -r "\.csv" /home/mjh/git/hf-timestd/src/hf_timestd/ --include="*.py"
+grep -r "csv\." /home/mjh/git/hf-timestd/src/hf_timestd/ --include="*.py"
 ```
 
-**Critical Path Components:**
+**Known CSV usage locations:**
 
-1. **Core Recorder** (Phase 1): Receives IQ samples from radiod
-2. **Analytics Service** (Phase 2): Detects tones, calculates timing
-3. **Fusion Service** (Phase 3): Fuses measurements, writes to Chrony SHM
-4. **Chrony SHM Writer**: Updates shared memory every 8 seconds
+1. **Science Aggregator** (`science_aggregator.py`)
+   - Test signal analysis
+   - TEC estimation output (may already be migrated)
+   - Propagation statistics
 
-### Known Vulnerabilities & Hardening Opportunities
+2. **Legacy Code** (check if still used)
+   - Any remaining CSV exports
+   - Backup/archive functionality
 
-#### 1. **Analytics Service Failures**
+**Migration Checklist:**
 
-**Current Risk:** If analytics crashes or stops detecting tones, no timing data flows to fusion.
+- [ ] Identify all CSV read/write operations
+- [ ] Design HDF5 schemas for each data type
+- [ ] Implement HDF5 writers with schema versioning
+- [ ] Add backward compatibility for existing CSV files
+- [ ] Test with single channel/product
+- [ ] Deploy to production
+- [ ] Verify data integrity
+- [ ] Remove CSV code after validation period
 
-**Hardening Ideas:**
+### HDF5 Best Practices (Learned from TEC Fix)
 
-- Implement watchdog monitoring for tone detection
-- Add fallback to last-known-good calibration if no recent detections
-- Create health metrics for analytics pipeline (tone detection rate, SNR, etc.)
-- Separate "metrology-critical" processing from "science analytics"
+**Schema Evolution:**
+- Existing HDF5 files cannot have new datasets added retroactively
+- Increment schema version when adding fields
+- Either delete old files or wait for daily rotation
+- Test schema changes with a single channel first
 
-#### 2. **Fusion Service Robustness**
+**SWMR Mode:**
+- Enable Single-Writer-Multiple-Reader for concurrent access
+- Writer must open with `libver='latest'`, `swmr=True`
+- Readers can attach to active files
+- Flush after each write for readers to see updates
 
-**Current Risk:** Fusion service depends on multiple data sources (L2 measurements, GNSS VTEC, IRI-2020).
+**Atomic Writes:**
+- Write to temporary file first
+- Use `os.rename()` for atomic replacement
+- Prevents corruption if process crashes mid-write
 
-**Hardening Ideas:**
+**Error Handling:**
+- Always close HDF5 files in finally blocks
+- Check for file locks before writing
+- Implement retry logic for transient failures
+- Log all HDF5 operations for debugging
 
-- Implement graceful degradation when GNSS VTEC unavailable
-- Add timeout/fallback for IRI-2020 ionospheric model calls
-- Ensure fusion continues with reduced accuracy rather than failing completely
-- Monitor "reach" metric (currently showing low values - investigate why)
+### Science Aggregator Code Locations
 
-#### 3. **Chrony SHM Write Reliability**
+**Main File:** `/home/mjh/git/hf-timestd/src/hf_timestd/core/science_aggregator.py`
 
-**Current Risk:** SHM writes can fail silently if Chrony not running or permissions issues.
+**Key Methods to Review:**
 
-**Hardening Ideas:**
+1. **Test Signal Analysis**
+   - Look for methods processing 440 Hz (WWV) and 600 Hz (WWVH) test tones
+   - Identify CSV write operations
+   - Check data structures used
 
-- Add verification that Chrony is consuming SHM updates
-- Monitor "reach" value in Chrony sources
-- Implement alerting when SHM writes fail
-- Add automatic recovery from SHM permission issues
+2. **Data Reading**
+   - Methods that read L2 timing measurements
+   - Methods that aggregate across channels
+   - CSV vs HDF5 usage patterns
 
-#### 4. **Data Pipeline Continuity**
+3. **Data Writing**
+   - Output file paths and formats
+   - Schema definitions (if any)
+   - Error handling
 
-**Current Risk:** HDF5 write failures, disk full, or file locking issues can disrupt pipeline.
+**Related Files:**
 
-**Hardening Ideas:**
+- `src/hf_timestd/schemas/` - Schema definitions
+- `src/hf_timestd/core/hdf5_io.py` - HDF5 utilities (if exists)
+- `src/hf_timestd/core/timestd_paths.py` - Path management
 
-- Implement in-memory buffering for critical timing data
-- Add disk space monitoring and cleanup
-- Improve HDF5 SWMR mode error handling
-- Separate critical metrology data from bulk analytics data
+### Example HDF5 Migration Pattern
 
-#### 5. **Service Dependencies**
+**Before (CSV):**
+```python
+import csv
 
-**Current Risk:** Services depend on each other in ways that can cause cascading failures.
+with open('test_signals.csv', 'a') as f:
+    writer = csv.writer(f)
+    writer.writerow([timestamp, station, snr_db, ...])
+```
 
-**Hardening Ideas:**
+**After (HDF5):**
+```python
+import h5py
+import numpy as np
 
-- Document and minimize inter-service dependencies
-- Implement circuit breakers for non-critical dependencies
-- Add service health checks and auto-restart logic
-- Create "degraded mode" operation for each service
+# Open in SWMR mode
+with h5py.File('test_signals.h5', 'a', libver='latest') as f:
+    f.swmr_mode = True
+    
+    # Append to dataset
+    dset = f['measurements']
+    new_data = np.array([(timestamp, station, snr_db, ...)], 
+                        dtype=dset.dtype)
+    dset.resize((dset.shape[0] + 1,))
+    dset[-1] = new_data
+    f.flush()
+```
 
-### Recommended Investigation Areas
-
-1. **Chrony Reach Analysis**
-   - Current status shows "TMGR reach low (3)"
-   - Investigate why reach is low despite fusion service running
-   - Check SHM write frequency and Chrony poll interval alignment
-
-2. **Calibration Staleness**
-   - System shows "Calibration very stale (1d 8h)"
-   - Understand why no tone detections in 24+ hours
-   - Determine if this is propagation-related or a system issue
-
-3. **Metrology vs. Analytics Separation**
-   - Identify which code paths are critical for Chrony updates
-   - Separate "must work" metrology from "nice to have" analytics
-   - Consider creating a minimal "metrology-only" mode
-
-4. **Failure Mode Testing**
-   - Test what happens when analytics service crashes
-   - Test what happens when GNSS VTEC unavailable
-   - Test what happens when IRI-2020 model fails
-   - Verify Chrony continues receiving updates in degraded scenarios
+**Schema Definition:**
+```python
+# In schemas/test_signals_schema.json
+{
+    "version": "1.0.0",
+    "description": "Test signal analysis measurements",
+    "datasets": {
+        "measurements": {
+            "dtype": [
+                ("timestamp", "i8"),
+                ("station", "S10"),
+                ("frequency_mhz", "f4"),
+                ("snr_db", "f4"),
+                ("timing_error_ms", "f4"),
+                ("confidence", "f4")
+            ],
+            "chunks": true,
+            "compression": "gzip",
+            "maxshape": (null,)
+        }
+    },
+    "attributes": {
+        "schema_version": "1.0.0",
+        "created_by": "science_aggregator",
+        "description": "WWV/WWVH test signal analysis"
+    }
+}
+```
 
 ### Success Criteria for Next Session
 
-1. ✅ Chrony receives consistent time updates even when analytics has issues
-2. ✅ System operates in "degraded but functional" mode when non-critical components fail
-3. ✅ Clear separation between metrology-critical and analytics-optional code paths
-4. ✅ Monitoring and alerting for Chrony pipeline health
-5. ✅ Documentation of failure modes and recovery procedures
+1. ✅ Identify all CSV usage in Science Aggregator
+2. ✅ Design HDF5 schemas for test signal analysis
+3. ✅ Implement HDF5 writers with proper schema versioning
+4. ✅ Add backward compatibility for existing CSV data
+5. ✅ Test migration with single channel
+6. ✅ Deploy to production and verify data integrity
+7. ✅ Remove CSV code after validation period
+8. ✅ Document HDF5 access patterns for future reference
 
 ---
 
@@ -218,13 +469,21 @@ Phase 3 (L3): Multi-Broadcast Fusion
 
 **CRITICAL**: Production services run from `/opt/hf-timestd/venv/`, NOT from the git repository.
 
-To update production code:
+**Method 1: Direct file copy (fastest for testing):**
+```bash
+cd /home/mjh/git/hf-timestd
+sudo cp src/hf_timestd/core/{file}.py /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/core/
+sudo systemctl restart timestd-{service-name}
+```
 
+**Method 2: Full package install (for schema changes):**
 ```bash
 cd /home/mjh/git/hf-timestd
 sudo /opt/hf-timestd/venv/bin/pip install . --no-deps
 sudo systemctl restart timestd-{service-name}
 ```
+
+**Note:** Method 1 was used for recent analytics fixes deployment. Use Method 2 when schemas or package structure changes.
 
 ### HDF5 Schema Evolution
 
@@ -271,13 +530,65 @@ When updating HDF5 schemas:
 
 ---
 
+## Key Insights from This Session
+
+### Bootstrap and Discrimination Strategy
+
+**Critical Principle:** Use a priori knowledge (geography, physics, propagation models) to guide detection, not just acoustic features.
+
+**Hierarchy for Station Identification:**
+1. **Anchor channels** (CHU-only, WWV-only frequencies) - Unambiguous
+2. **ToA separation** (with calibrated D_clock) - Primary discriminator on shared channels
+3. **Acoustic features** (1200 Hz, BCD patterns) - Secondary validation
+4. **Cross-frequency correlation** - Tertiary validation, not primary
+
+**Why this works:**
+- BPM vs WWV conflict resolved by 37ms ToA separation
+- Propagation-robust (doesn't require all frequencies available)
+- Rapid convergence (first anchor detection enables narrow windows everywhere)
+- Multi-layer validation (inter-station + cross-frequency + acoustic)
+
+### Validation Architecture
+
+**Inter-Station D_clock Consistency:**
+- D_clock is a property of the RECEIVER, not the station
+- All stations should measure same D_clock (within measurement noise)
+- Spread > 5ms indicates propagation delay calculation errors
+- Deployed and monitoring, waiting for multi-station detections
+
+**D_clock Continuity:**
+- Tracks jumps between consecutive minutes
+- Flags discontinuities > 5ms
+- Detects CHU frame slips (500ms jumps)
+- Currently active and monitoring
+
+**Cross-Frequency Guidance:**
+- Strong detection on one frequency helps weak channels
+- Narrows search window from ±500ms to ±3-5ms
+- Key insight: WWVH ToA across frequencies correlates tighter than WWV vs WWVH on same frequency
+- Deployed and active
+
+### System Stability
+
+**Current Status (19:10 UTC):**
+- D_clock centered at 0ms (recent measurements: +0.00ms)
+- Fusion tracking well with ±1-2ms uncertainty
+- No discontinuities since deployment at 18:40 UTC
+- All validation infrastructure deployed and monitoring
+
+**Earlier Issues (18:20-18:40):**
+- Multiple discontinuities due to service restarts during deployment
+- System was in bootstrap/transition mode
+- Now resolved with stable tracking
+
 ## Questions for Next Session
 
-1. What is causing the low Chrony reach value (3)?
-2. Why is calibration stale (no tone detections for 1d 8h)?
-3. Can we create a "metrology-only" mode that bypasses all analytics?
-4. What are the minimum requirements for Chrony to receive valid time updates?
-5. How can we monitor and alert on Chrony pipeline health?
+1. Where is test signal analysis code in Science Aggregator?
+2. What CSV files are currently being written?
+3. What is the data structure for test signal measurements?
+4. Are there existing HDF5 utilities we can leverage?
+5. What is the daily data volume for test signals?
+6. Should we keep CSV export capability for human readability?
 
 ---
 

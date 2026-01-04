@@ -251,9 +251,30 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # PHYSICAL CONSTANTS
 # =============================================================================
-# Speed of light in vacuum (km/s)
+# Speed of light in km/s
 # Source: CODATA 2018 recommended value (exact by definition)
 SPEED_OF_LIGHT_KM_S = 299792.458
+
+# Station-specific expected propagation delay ranges (ms)
+# Based on great circle distance and typical ionospheric conditions
+# Format: station -> (min_delay_ms, max_delay_ms)
+EXPECTED_DELAY_RANGES = {
+    'WWV': (4.0, 12.0),     # Fort Collins, CO → typical receiver (~1500km, 1-2 hop F2)
+    'WWVH': (15.0, 30.0),   # Kauai, HI → typical receiver (~5500km, 2-3 hop F2)
+    'CHU': (6.0, 15.0),     # Ottawa, ON → typical receiver (~2000km, 1-2 hop F2)
+    'BPM': (40.0, 70.0),    # Shaanxi, China → typical receiver (~10000km, 3-4 hop F2)
+}
+
+# Maximum ionospheric delay per hop for different frequencies (ms)
+# Based on 1/f² relationship with typical TEC values (10-40 TECU)
+MAX_IONO_DELAY_PER_HOP = {
+    2.5: 0.8,   # 2.5 MHz
+    5.0: 0.3,   # 5 MHz
+    10.0: 0.1,  # 10 MHz
+    15.0: 0.05, # 15 MHz
+    20.0: 0.03, # 20 MHz
+    25.0: 0.02, # 25 MHz
+}
 
 # Mean Earth radius (km)
 # Source: WGS84 mean radius = (2a + b) / 3 where a=6378.137, b=6356.752
@@ -798,16 +819,43 @@ class TransmissionTimeSolver:
         # Total delay
         total_delay_ms = geometric_delay_ms + iono_delay_ms
         
-        # CRITICAL FIX: Final propagation delay validation
-        # Total delay must be positive and within physical bounds
+        # CRITICAL FIX: Enhanced propagation delay validation (2026-01-04)
+        # Issue: Previous validation was too weak, allowing physically impossible delays
+        # Fix: Add station-specific bounds and ionospheric delay validation
+        
+        # 1. Basic sanity checks
         if total_delay_ms < 0:
             logger.error(f"CRITICAL: Negative total delay {total_delay_ms:.3f}ms - sign error!")
             return None
-        if total_delay_ms < 5.0:
-            logger.warning(f"Low total delay {total_delay_ms:.3f}ms for {ground_distance_km:.0f}km, mode={mode}")
         if total_delay_ms > 120.0:
-            logger.error(f"CRITICAL: Total delay {total_delay_ms:.3f}ms exceeds physical bounds")
+            logger.error(f"CRITICAL: Total delay {total_delay_ms:.3f}ms exceeds physical bounds (>120ms)")
             return None
+        
+        # 2. Validate ionospheric delay component
+        if n_hops > 0:
+            # Get expected max ionospheric delay for this frequency
+            max_iono_expected = MAX_IONO_DELAY_PER_HOP.get(frequency_mhz, 0.1) * n_hops * 3.0  # 3x safety factor
+            if iono_delay_ms < 0:
+                logger.error(f"CRITICAL: Negative ionospheric delay {iono_delay_ms:.3f}ms")
+                return None
+            if iono_delay_ms > max_iono_expected:
+                logger.error(f"REJECT: Ionospheric delay {iono_delay_ms:.3f}ms exceeds expected max "
+                           f"{max_iono_expected:.3f}ms for {frequency_mhz}MHz, {n_hops} hops")
+                return None
+        
+        # 3. Station-specific validation (if station is known)
+        # This catches systematic errors in propagation mode selection
+        if hasattr(self, '_current_station') and self._current_station:
+            station = self._current_station
+            if station in EXPECTED_DELAY_RANGES:
+                min_delay, max_delay = EXPECTED_DELAY_RANGES[station]
+                if total_delay_ms < min_delay or total_delay_ms > max_delay:
+                    logger.warning(
+                        f"SUSPECT: {station} total delay {total_delay_ms:.1f}ms outside typical range "
+                        f"{min_delay:.1f}-{max_delay:.1f}ms for mode={mode.value}, distance={ground_distance_km:.0f}km"
+                    )
+                    # Reduce plausibility but don't reject outright (ionosphere can be unusual)
+                    plausibility *= 0.3
         
         return ModeCandidate(
             mode=mode,
@@ -1010,6 +1058,9 @@ class TransmissionTimeSolver:
         """
         if station not in self.station_distances:
             raise ValueError(f"Unknown station: {station}")
+        
+        # Store station for validation in _calculate_mode_delay (2026-01-04 fix)
+        self._current_station = station
         
         ground_distance = self.station_distances[station]
         
