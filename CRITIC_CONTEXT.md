@@ -8,7 +8,7 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🎯 NEXT SESSION OBJECTIVE (2026-01-04): FIND FLAWS IN RTP → CHRONY DATA PIPELINE
+## 🎯 NEXT SESSION OBJECTIVE (2026-01-04 → Next Session): CRITIQUE PHASE 2 ANALYTICS PROPAGATION DELAY CALCULATIONS
 
 **Status:** 🔵 **READY FOR CRITIQUE** - Service stability improved, now focus on data integrity
 
@@ -17,19 +17,37 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ### Session Goal
 
-**Primary Objective:** Perform a thorough, methodical critique of the entire data and calculation pipeline from RTP stream ingestion to Chrony SHM output, identifying any flaws, inefficiencies, or vulnerabilities that could compromise timing accuracy or system reliability.
+**Primary Objective:** Critique Phase 2 Analytics propagation delay calculations to identify systematic errors causing large D_clock disagreements between stations.
 
-**Scope:** End-to-end pipeline validation covering:
+**Critical Finding from 2026-01-04:**
+During fusion service debugging, discovered that stations report significantly different D_clock values:
+- CHU: 6.3ms
+- WWV: 11.0ms  
+- WWVH: 23.9ms
 
-1. **RTP Stream Ingestion** (Core Recorder)
-2. **Tone Detection** (Analytics Service)
-3. **Timing Calculations** (Analytics Service)
-4. **Multi-Broadcast Fusion** (Fusion Service)
-5. **Chrony SHM Output** (Fusion Service)
+**This is a ~18ms spread, which is physically impossible.**
+
+D_clock = T_arrival - T_propagation is the **system clock offset** - a property of the receiver's clock, NOT the station. All stations should report approximately the **same D_clock** (within ~2-3ms for measurement noise).
+
+Large disagreements indicate one or more of:
+1. **Propagation delay calculation errors in Phase 2**
+2. **Station misidentification**
+3. **Sign errors in the D_clock equation**
+4. **Incorrect propagation mode selection**
+
+**Status:** Fusion service fixes completed (Kalman protection, config integration). Now need to investigate Phase 2 analytics.
+
+**Previous Session Work (2026-01-04):**
+- Fixed Kalman filter contamination from tone misidentification
+- Added protection: skip Kalman updates when DISCRIMINATION_SUSPECT
+- Implemented gradual Kalman correction ramp-up
+- Fixed fusion service to read precise coordinates from config
+- Corrected misunderstanding about D_clock geographic ordering
+- Documented architectural separation between Phase 2 and Fusioner)
 
 ### Context from Previous Session
 
-**✅ Service Stability Improvements Completed:**
+**Service Stability Improvements Completed:**
 
 - Fusion service crash-loop investigated (root cause: service was stopped)
 - Systemd watchdog enabled (Type=notify, WatchdogSec=30)
@@ -46,11 +64,11 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 **Key Findings from Previous Session:**
 
-1. ✅ VTEC is properly optional with graceful fallback
-2. ✅ HDF5 is the primary data format (CSV is legacy)
-3. ✅ Core Recorder writes to `.bin.zst` compressed binary
-4. ✅ Critical path is well-defined and functional
-5. ⚠️ Fusion service had crash-loop at 00:20 UTC (cause unknown)
+1. VTEC is properly optional with graceful fallback
+2. HDF5 is the primary data format (CSV is legacy)
+3. Core Recorder writes to `.bin.zst` compressed binary
+4. Critical path is well-defined and functional
+5. Fusion service had crash-loop at 00:20 UTC (cause unknown)
 
 ### Critical Questions to Answer
 
