@@ -421,6 +421,7 @@ class MultiBroadcastFusion:
         self.calibration_update_count = 0  # Track updates for auto-save
         self.auto_calibrate = auto_calibrate
         self.reference_station = reference_station
+        self.correction_alpha = 0.0  # Gradual ramp-up for Kalman correction (0→1)
 
         from .wwv_constants import SAMPLE_RATE_FULL
         self.sample_rate = int(sample_rate if sample_rate is not None else SAMPLE_RATE_FULL)
@@ -1700,11 +1701,15 @@ class MultiBroadcastFusion:
             Kalman filter uncertainty (converges over time)
         """
         # Initialize on first measurement
+        # CRITICAL: Start from 0, not from first measurement
+        # This ensures the filter learns the offset gradually from scratch
+        # and the correction ramp-up matches the filter convergence
         if not self.kalman_initialized:
-            self.kalman_state[0] = measurement
-            self.kalman_P[0, 0] = measurement_uncertainty ** 2
+            self.kalman_state[0] = 0.0  # Start from zero offset
+            self.kalman_P[0, 0] = 100.0  # High initial uncertainty
             self.kalman_initialized = True
             self.kalman_n_updates = 1
+            logger.info("Kalman filter initialized from zero - will learn offset gradually")
             return measurement_uncertainty
         
         # State transition matrix (1 minute step)
@@ -2166,6 +2171,62 @@ class MultiBroadcastFusion:
         raw_d_clocks = [m.d_clock_ms for m in measurements]
         
         # ====================================================================
+        # GEOGRAPHIC SANITY CHECK (Priority 1D - 2026-01-04)
+        # ====================================================================
+        # Validate that relative arrival times respect physical geography.
+        # For a given receiver location, stations have fixed relative delays:
+        #   CHU (1200km) arrives BEFORE WWV (1500km) arrives BEFORE WWVH (6000km)
+        # If arrival order is wrong, it indicates tone misidentification.
+        
+        # Expected propagation delays (from Kansas, approximate)
+        EXPECTED_DELAYS = {
+            'CHU': 5.0,    # ~1200km → ~5ms
+            'WWV': 7.0,    # ~1500km → ~7ms
+            'WWVH': 25.0,  # ~6000km → ~25ms
+            'BPM': 30.0    # ~9000km → ~30ms (Brazil)
+        }
+        
+        # Check if station arrival order makes geographic sense
+        station_d_clocks = {}
+        for m, d in zip(measurements, raw_d_clocks):
+            if m.station in EXPECTED_DELAYS:
+                if m.station not in station_d_clocks:
+                    station_d_clocks[m.station] = []
+                station_d_clocks[m.station].append(d)
+        
+        # Calculate mean D_clock per station
+        station_means_geo = {s: np.mean(vals) for s, vals in station_d_clocks.items()}
+        
+        # Validate geographic ordering
+        geo_valid = True
+        geo_reason = "OK"
+        
+        if len(station_means_geo) >= 2:
+            # Check for physically impossible arrival order
+            # D_clock = T_arrival - T_propagation
+            # Larger D_clock → earlier arrival (less propagation delay subtracted)
+            # So: D_clock_CHU > D_clock_WWV > D_clock_WWVH (CHU arrives first)
+            
+            if 'CHU' in station_means_geo and 'WWVH' in station_means_geo:
+                # CHU should have LARGER D_clock than WWVH (arrives earlier)
+                if station_means_geo['CHU'] < station_means_geo['WWVH'] - 5.0:
+                    geo_valid = False
+                    geo_reason = f"Geographic violation: CHU D_clock ({station_means_geo['CHU']:.1f}ms) < WWVH ({station_means_geo['WWVH']:.1f}ms) - physically impossible"
+            
+            if 'WWV' in station_means_geo and 'WWVH' in station_means_geo:
+                # WWV should have LARGER D_clock than WWVH (arrives earlier)
+                if station_means_geo['WWV'] < station_means_geo['WWVH'] - 5.0:
+                    geo_valid = False
+                    geo_reason = f"Geographic violation: WWV D_clock ({station_means_geo['WWV']:.1f}ms) < WWVH ({station_means_geo['WWVH']:.1f}ms) - physically impossible"
+        
+        if not geo_valid:
+            logger.error(f"GEOGRAPHIC SANITY CHECK FAILED: {geo_reason}")
+            logger.error(f"  Station D_clocks: {station_means_geo}")
+            logger.error(f"  This indicates severe tone misidentification - rejecting all measurements")
+            # Return empty result to skip this fusion cycle
+            return None
+        
+        # ====================================================================
         # CROSS-STATION VALIDATION (Priority 1C - 2025-12-31)
         # ====================================================================
         # Validate that different stations agree on UTC time within ±1.0ms.
@@ -2192,7 +2253,25 @@ class MultiBroadcastFusion:
         # Weighted mean of raw D_clock values
         w = np.array(weights)
         d = np.array(raw_d_clocks)
-        fused_d_clock = np.sum(w * d) / np.sum(w)
+        fused_d_clock_raw = np.sum(w * d) / np.sum(w)
+        
+        # Apply Kalman filter correction with gradual ramp-up to prevent discontinuities
+        # Ramp alpha from 0 to 1 over ~50 updates (0.02 per update)
+        if self.kalman_initialized and self.kalman_n_updates > 10:
+            # Gradually increase correction strength
+            self.correction_alpha = min(1.0, self.correction_alpha + 0.02)
+            
+            kalman_correction = self.kalman_state[0] * self.correction_alpha
+            fused_d_clock = fused_d_clock_raw - kalman_correction
+            
+            if self.correction_alpha < 1.0:
+                logger.debug(f"Kalman correction ramp-up: alpha={self.correction_alpha:.3f}, "
+                           f"correction={kalman_correction:+.3f}ms (full: {self.kalman_state[0]:+.3f}ms)")
+            else:
+                logger.debug(f"Kalman correction: {kalman_correction:+.3f}ms "
+                           f"(raw: {fused_d_clock_raw:+.3f}ms → corrected: {fused_d_clock:+.3f}ms)")
+        else:
+            fused_d_clock = fused_d_clock_raw
         
         # CRITICAL FIX (P3.2): D_clock monotonicity check
         # Large jumps (>5ms) indicate tone misidentification or other errors
@@ -2309,9 +2388,27 @@ class MultiBroadcastFusion:
         uncertainty_floor = 0.1 if has_verified_global else 0.2
         measurement_uncertainty = max(uncertainty_floor, measurement_uncertainty)
         
+        # ====================================================================
+        # CONSISTENCY CHECK - Calculate BEFORE Kalman update
+        # ====================================================================
+        # Check for high intra-station spread (discrimination errors)
+        consistency_flag = 'OK'
+        INTRA_THRESHOLD_MS = 3.0  # If any station has >3ms spread, suspect discrimination
+        
+        intra_stds = [s for s in [wwv_intra_std, wwvh_intra_std, chu_intra_std, bpm_intra_std] if s is not None]
+        
+        if intra_stds and max(intra_stds) > INTRA_THRESHOLD_MS:
+            consistency_flag = 'DISCRIMINATION_SUSPECT'
+            logger.warning(f"High intra-station spread detected - SKIPPING Kalman update to prevent contamination")
+        
         # Update Kalman filter with raw measurement (before any correction)
-        # This allows the filter to track the systematic offset that needs to be removed
-        kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
+        # CRITICAL: Skip update if data quality is suspect (tone misidentification)
+        if consistency_flag == 'OK':
+            kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
+        else:
+            # Use previous Kalman uncertainty without updating state
+            kalman_uncertainty = measurement_uncertainty
+            logger.debug(f"Kalman update skipped due to {consistency_flag}")
         
         # Final uncertainty is the Kalman-filtered combined uncertainty
         # This provides temporal smoothing while preserving the uncertainty budget
@@ -2372,9 +2469,9 @@ class MultiBroadcastFusion:
         intra_stds = [s for s in [wwv_intra_std, wwvh_intra_std, chu_intra_std, bpm_intra_std] if s is not None]
         suspect_count = 0
         
-        if intra_stds and max(intra_stds) > INTRA_THRESHOLD_MS:
-            # High intra-station spread suggests discrimination errors
-            consistency_flag = 'DISCRIMINATION_SUSPECT'
+        # Consistency flag already calculated above (before Kalman update)
+        # This section kept for logging details
+        if consistency_flag == 'DISCRIMINATION_SUSPECT':
             
             # Identify which measurements are outliers within their station group
             # and EXCLUDE them from the Kalman update by zeroing their contribution
