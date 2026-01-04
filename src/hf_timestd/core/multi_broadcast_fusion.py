@@ -2171,60 +2171,21 @@ class MultiBroadcastFusion:
         raw_d_clocks = [m.d_clock_ms for m in measurements]
         
         # ====================================================================
-        # GEOGRAPHIC SANITY CHECK (Priority 1D - 2026-01-04)
+        # INTER-STATION AGREEMENT CHECK (Priority 1D - 2026-01-04)
         # ====================================================================
-        # Validate that relative arrival times respect physical geography.
-        # For a given receiver location, stations have fixed relative delays:
-        #   CHU (1200km) arrives BEFORE WWV (1500km) arrives BEFORE WWVH (6000km)
-        # If arrival order is wrong, it indicates tone misidentification.
-        
-        # Expected propagation delays (from Kansas, approximate)
-        EXPECTED_DELAYS = {
-            'CHU': 5.0,    # ~1200km → ~5ms
-            'WWV': 7.0,    # ~1500km → ~7ms
-            'WWVH': 25.0,  # ~6000km → ~25ms
-            'BPM': 30.0    # ~9000km → ~30ms (Brazil)
-        }
-        
-        # Check if station arrival order makes geographic sense
-        station_d_clocks = {}
-        for m, d in zip(measurements, raw_d_clocks):
-            if m.station in EXPECTED_DELAYS:
-                if m.station not in station_d_clocks:
-                    station_d_clocks[m.station] = []
-                station_d_clocks[m.station].append(d)
-        
-        # Calculate mean D_clock per station
-        station_means_geo = {s: np.mean(vals) for s, vals in station_d_clocks.items()}
-        
-        # Validate geographic ordering
-        geo_valid = True
-        geo_reason = "OK"
-        
-        if len(station_means_geo) >= 2:
-            # Check for physically impossible arrival order
-            # D_clock = T_arrival - T_propagation
-            # Larger D_clock → earlier arrival (less propagation delay subtracted)
-            # So: D_clock_CHU > D_clock_WWV > D_clock_WWVH (CHU arrives first)
-            
-            if 'CHU' in station_means_geo and 'WWVH' in station_means_geo:
-                # CHU should have LARGER D_clock than WWVH (arrives earlier)
-                if station_means_geo['CHU'] < station_means_geo['WWVH'] - 5.0:
-                    geo_valid = False
-                    geo_reason = f"Geographic violation: CHU D_clock ({station_means_geo['CHU']:.1f}ms) < WWVH ({station_means_geo['WWVH']:.1f}ms) - physically impossible"
-            
-            if 'WWV' in station_means_geo and 'WWVH' in station_means_geo:
-                # WWV should have LARGER D_clock than WWVH (arrives earlier)
-                if station_means_geo['WWV'] < station_means_geo['WWVH'] - 5.0:
-                    geo_valid = False
-                    geo_reason = f"Geographic violation: WWV D_clock ({station_means_geo['WWV']:.1f}ms) < WWVH ({station_means_geo['WWVH']:.1f}ms) - physically impossible"
-        
-        if not geo_valid:
-            logger.error(f"GEOGRAPHIC SANITY CHECK FAILED: {geo_reason}")
-            logger.error(f"  Station D_clocks: {station_means_geo}")
-            logger.error(f"  This indicates severe tone misidentification - rejecting all measurements")
-            # Return empty result to skip this fusion cycle
-            return None
+        # D_clock is the SYSTEM CLOCK OFFSET - it should be the same for all stations.
+        # D_clock = T_arrival - T_propagation
+        # 
+        # If Phase 2 calculated propagation delays correctly, all stations should
+        # report approximately the same D_clock (within ~2-3ms for measurement noise).
+        # 
+        # Large disagreements indicate:
+        # - Propagation delay calculation error
+        # - Station misidentification  
+        # - Tone misidentification
+        #
+        # This is handled by the existing cross-station validation below.
+        # No additional geographic check needed - D_clock is station-independent.
         
         # ====================================================================
         # CROSS-STATION VALIDATION (Priority 1C - 2025-12-31)
@@ -2918,25 +2879,33 @@ def run_fusion_service(
     data_root: Path, 
     interval_sec: float = 60.0, 
     enable_chrony: bool = True,
-    lookback_minutes: int = 10
+    lookback_minutes: int = 10,
+    receiver_lat: Optional[float] = None,
+    receiver_lon: Optional[float] = None
 ):
     """
-    Run continuous fusion service.
+    Run continuous fusion service that aggregates Phase 2 timing measurements.
     
-    Produces fused D_clock estimate every interval_sec.
-    Optionally writes to Chrony SHM refclock for system clock discipline.
-    
-    The Chrony SHM updates run in a separate thread at 8-second intervals,
-    independent of the fusion loop interval. This ensures chrony receives
-    fresh updates at its poll rate even if fusion runs less frequently.
+    This is the main entry point for the fusion service. It:
+    1. Reads Phase 2 HDF5 timing measurements from all channels
+    2. Applies cross-station validation and outlier rejection
+    3. Fuses measurements into a single high-confidence UTC estimate
+    4. Writes fused result to Chrony SHM for system clock discipline
+    5. Saves fusion history to HDF5 for analysis
     
     Args:
-        data_root: Base data directory
-        interval_sec: Fusion interval in seconds
+        data_root: Root data directory
+        interval_sec: Fusion interval in seconds (default: 60s)
         enable_chrony: If True, write fused time to Chrony SHM refclock
         lookback_minutes: Number of minutes to look back for measurements
+        receiver_lat: Receiver latitude (from config)
+        receiver_lon: Receiver longitude (from config)
     """
-    fusion = MultiBroadcastFusion(data_root)
+    fusion = MultiBroadcastFusion(
+        data_root,
+        receiver_lat=receiver_lat,
+        receiver_lon=receiver_lon
+    )
     
     # Initialize Chrony SHM if enabled
     chrony_shm = None
@@ -3077,10 +3046,27 @@ if __name__ == '__main__':
         force=True
     )
     
+    # Read receiver coordinates from config if provided
+    receiver_lat = None
+    receiver_lon = None
+    if args.config and args.config.exists():
+        try:
+            import toml
+            with open(args.config, 'r') as f:
+                config = toml.load(f)
+            receiver_lat = config.get('station', {}).get('latitude')
+            receiver_lon = config.get('station', {}).get('longitude')
+            if receiver_lat and receiver_lon:
+                logger.info(f"Using receiver coordinates from config: {receiver_lat:.6f}°N, {receiver_lon:.6f}°W")
+        except Exception as e:
+            logger.warning(f"Failed to read config file: {e}")
+    
     enable_chrony = args.enable_chrony and not args.disable_chrony
     run_fusion_service(
         args.data_root, 
         args.interval, 
         enable_chrony=enable_chrony,
-        lookback_minutes=args.lookback
+        lookback_minutes=args.lookback,
+        receiver_lat=receiver_lat,
+        receiver_lon=receiver_lon
     )
