@@ -2349,27 +2349,10 @@ class MultiBroadcastFusion:
         uncertainty_floor = 0.1 if has_verified_global else 0.2
         measurement_uncertainty = max(uncertainty_floor, measurement_uncertainty)
         
-        # ====================================================================
-        # CONSISTENCY CHECK - Calculate BEFORE Kalman update
-        # ====================================================================
-        # Check for high intra-station spread (discrimination errors)
-        consistency_flag = 'OK'
-        INTRA_THRESHOLD_MS = 3.0  # If any station has >3ms spread, suspect discrimination
-        
-        intra_stds = [s for s in [wwv_intra_std, wwvh_intra_std, chu_intra_std, bpm_intra_std] if s is not None]
-        
-        if intra_stds and max(intra_stds) > INTRA_THRESHOLD_MS:
-            consistency_flag = 'DISCRIMINATION_SUSPECT'
-            logger.warning(f"High intra-station spread detected - SKIPPING Kalman update to prevent contamination")
-        
         # Update Kalman filter with raw measurement (before any correction)
-        # CRITICAL: Skip update if data quality is suspect (tone misidentification)
-        if consistency_flag == 'OK':
-            kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
-        else:
-            # Use previous Kalman uncertainty without updating state
-            kalman_uncertainty = measurement_uncertainty
-            logger.debug(f"Kalman update skipped due to {consistency_flag}")
+        # Note: Consistency check for DISCRIMINATION_SUSPECT happens later after
+        # intra-station std devs are calculated. For now, always update Kalman.
+        kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
         
         # Final uncertainty is the Kalman-filtered combined uncertainty
         # This provides temporal smoothing while preserving the uncertainty budget
