@@ -1647,6 +1647,15 @@ class MultiBroadcastFusion:
                 # This prevents contamination while still allowing convergence
                 alpha = base_alpha if validated else base_alpha * 0.3
                 new_offset = alpha * new_offset + (1 - alpha) * old_cal.offset_ms
+                
+                # CRITICAL FIX: Rate limit calibration changes to prevent discontinuities
+                # Limit offset change to ±0.5ms per update to ensure smooth convergence
+                delta_offset = new_offset - old_cal.offset_ms
+                max_delta = 0.5  # ms per update
+                if abs(delta_offset) > max_delta:
+                    new_offset = old_cal.offset_ms + np.sign(delta_offset) * max_delta
+                    logger.debug(f"Calibration {broadcast_key}: rate-limited Δ={delta_offset:.3f}ms to ±{max_delta}ms")
+                
                 logger.debug(f"Calibration {broadcast_key}: alpha={alpha:.3f} (validated={validated})")
             
             self.calibration[broadcast_key] = BroadcastCalibration(
@@ -2148,12 +2157,13 @@ class MultiBroadcastFusion:
         weights = valid_weights
         
         # ====================================================================
-        # APPLY CALIBRATION (before cross-validation)
-        # ====================================================================
-        # Apply existing calibration to measurements for validation
-        # Note: We do NOT update calibration yet - that happens after validation
+        # CRITICAL FIX: Do NOT apply calibration during ongoing fusion
+        # Calibration is only for bootstrap/restart to help initial convergence
+        # During normal operation, use raw measurements and let Kalman filter converge naturally
+        # This prevents discontinuities from calibration updates
         
-        calibrated = self._apply_calibration(measurements)
+        # Extract raw D_clock values for fusion
+        raw_d_clocks = [m.d_clock_ms for m in measurements]
         
         # ====================================================================
         # CROSS-STATION VALIDATION (Priority 1C - 2025-12-31)
@@ -2163,7 +2173,7 @@ class MultiBroadcastFusion:
         # Threshold increased from 0.2ms to 1.0ms to account for real propagation differences.
         
         cross_valid, cross_reason, n_cross_outliers = self._cross_validate_stations(
-            measurements, calibrated
+            measurements, raw_d_clocks
         )
         
         if not cross_valid:
@@ -2179,9 +2189,9 @@ class MultiBroadcastFusion:
         # Use a slower update rate during disagreement to prevent contamination while still converging
         self._update_calibration(measurements, validated=cross_valid)
         
-        # Weighted mean of calibrated values
+        # Weighted mean of raw D_clock values
         w = np.array(weights)
-        d = np.array(calibrated)
+        d = np.array(raw_d_clocks)
         fused_d_clock = np.sum(w * d) / np.sum(w)
         
         # CRITICAL FIX (P3.2): D_clock monotonicity check
@@ -2196,8 +2206,7 @@ class MultiBroadcastFusion:
                 )
         self.last_fused_d_clock = fused_d_clock
         
-        # Raw (uncalibrated) mean for comparison
-        raw_d_clocks = np.array([m.d_clock_ms for m in measurements])
+        # Raw mean for comparison (raw_d_clocks already defined above)
         raw_mean = np.mean(raw_d_clocks)
         
         # ====================================================================
@@ -2212,9 +2221,9 @@ class MultiBroadcastFusion:
         has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
         
         # 1. Statistical uncertainty - measurement scatter
-        # Standard deviation of calibrated measurements
-        if len(calibrated) > 1:
-            statistical_uncertainty = np.std(calibrated)
+        # Standard deviation of raw measurements
+        if len(raw_d_clocks) > 1:
+            statistical_uncertainty = np.std(raw_d_clocks)
         else:
             statistical_uncertainty = 0.5  # Single measurement uncertainty
         
@@ -2303,20 +2312,25 @@ class MultiBroadcastFusion:
         # Update Kalman filter for convergence tracking
         kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
         
-        # Final uncertainty is the Kalman-filtered combined uncertainty
-        # This provides temporal smoothing while preserving the uncertainty budget
-        uncertainty = kalman_uncertainty
+# Check if we have verified global solver result
+has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
         
-        # Per-station breakdown (using calibrated values for consistency)
-        wwv_cal = [c for m, c in zip(measurements, calibrated) if m.station == 'WWV']
-        wwvh_cal = [c for m, c in zip(measurements, calibrated) if m.station == 'WWVH']
-        chu_cal = [c for m, c in zip(measurements, calibrated) if m.station == 'CHU']
-        bpm_cal = [c for m, c in zip(measurements, calibrated) if m.station == 'BPM']
+# 1. Statistical uncertainty - measurement scatter
+# Standard deviation of raw measurements
+if len(raw_d_clocks) > 1:
+    statistical_uncertainty = np.std(raw_d_clocks)
+else:
+    statistical_uncertainty = 0.5  # Single measurement uncertainty
         
-        # Raw values for reporting
-        wwv_m = [m.d_clock_ms for m in measurements if m.station == 'WWV']
-        wwvh_m = [m.d_clock_ms for m in measurements if m.station == 'WWVH']
-        chu_m = [m.d_clock_ms for m in measurements if m.station == 'CHU']
+# CRITICAL FIX: Add tone detection uncertainty (SNR-dependent)
+# Lower SNR → higher phase ambiguity → larger uncertainty
+avg_snr = np.mean([m.snr_db for m in measurements if hasattr(m, 'snr_db') and m.snr_db > 0] or [20.0])
+if avg_snr < 10:
+    tone_detection_uncertainty = 0.5  # Low SNR
+elif avg_snr < 20:
+    tone_detection_uncertainty = 0.3  # Medium SNR
+else:
+    tone_detection_uncertainty = 0.2  # High SNR
         bpm_m = [m.d_clock_ms for m in measurements if m.station == 'BPM']
         
         # Unique stations
