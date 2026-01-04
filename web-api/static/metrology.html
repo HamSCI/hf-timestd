@@ -112,7 +112,8 @@
                 </div>
             </div>
             <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; padding: 0 16px;">
-                <button class="time-range-btn adev-range-btn active" data-range="2026-01-01T19:00:00Z">Since Stable (Jan 1 1900Z)</button>
+                <button class="time-range-btn adev-range-btn active" data-range="2026-01-01T19:00:00Z">Since Stable (Jan
+                    1 1900Z)</button>
                 <button class="time-range-btn adev-range-btn" data-range="-7d">Last 7 Days</button>
                 <button class="time-range-btn adev-range-btn" data-range="-24h">Last 24 Hours</button>
             </div>
@@ -581,7 +582,7 @@
         });
 
         // Load Allan deviation
-        let currentAdevRange = '2026-01-01T19:00:00Z';  // Start from when system stabilized
+        let currentAdevRange = '2026-01-04T19:00:00Z';  // Start from when system stabilized today
 
         async function loadAllanDeviation(range) {
             try {

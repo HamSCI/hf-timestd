@@ -73,13 +73,17 @@ The system is composed of six independent systemd services, each with a specific
 - Generates spectrograms and summary plots.
 - **Output:** `/var/lib/timestd/products/`
 
-### 6. Web UI (`timestd-web-ui-fastapi`)
+### 6. Web UI & API (`timestd-web-api`)
 
-**Responsibility:** User Visualization
+**Responsibility:** User Visualization & System API
 
-- FastAPI-based web server.
-- Serves real-time dashboard (`metrology.html`, `ionosphere.html`).
-- Reads status from all other services.
+- **Service Type:** Python/FastAPI (`uvicorn`).
+- **Endpoint:** Port 8000.
+- **Capabilities:**
+  - Serves static dashboard (`metrology.html`, `logs.html`, `ionosphere.html`).
+  - Provides REST API for system status and HDF5 data access.
+  - Interactive API documentation at `/api/docs`.
+- **Logs Viewer:** Real-time access to systemd journals via `/api/logs` endpoint.
 
 ---
 
@@ -780,6 +784,7 @@ Implements intelligent tone search window narrowing using GPSDO stability for ra
 ### Algorithm
 
 **Phase Detection:**
+
 ```python
 if calibrator.phase == CALIBRATED and expected_toa available:
     window = ±2-5ms  # Learned ToA
@@ -790,10 +795,12 @@ else:  # BOOTSTRAP
 ```
 
 **Convergence Criteria:**
+
 - **Provisional**: 10+ detections, 2+ stations, <10 minutes, D_clock σ < 1ms
 - **Calibrated**: 30+ detections, 60min span, RTP variance < 50²
 
 **Back-Off Logic:**
+
 - Trigger: 5+ consecutive detection failures
 - Action: Widen window by 1.5×, max 500ms
 - Recovery: Narrow again when detections resume
@@ -812,17 +819,20 @@ class BroadcastState:
 ```
 
 **Example:**
+
 - WWV @ 10MHz: 12.4±0.8ms, ±2ms window (1-hop, converged)
 - WWV @ 5MHz: 24.7±1.2ms, ±5ms window (2-hop, converging)
 
 ### Shared Frequency Handling
 
 **Anchor channels** (unique frequencies):
+
 - CHU: 3.33, 7.85, 14.67 MHz
 - WWV: 20, 25 MHz
 - Used to establish initial GPSDO lock
 
 **Contested channels** (shared frequencies):
+
 - 2.5, 5, 10, 15 MHz (WWV + WWVH + BPM)
 - Require discrimination (BCD, Doppler, timing)
 - Each station tracked independently
@@ -830,21 +840,23 @@ class BroadcastState:
 ### Performance
 
 **Convergence timeline:**
+
 - 0-10 min: Bootstrap (±500ms)
 - 10-30 min: Provisional (±15ms → ±5ms)
 - 30+ min: Calibrated (±2ms)
 
 **Benefits:**
+
 - Higher SNR (less noise in narrow window)
 - Better sensitivity (detect weaker signals)
 - Ionospheric measurements (ToA variations = propagation changes)
-
 
 ## Sample Rate Evolution
 
 ### Current: 24 kHz (24000 Hz)
 
 **Rationale for 24 kHz:**
+
 - **Test Signal Analysis**: Ensures adequate Nyquist margin for WWV/WWVH test signals (500 Hz, 600 Hz, and intermodulation products)
 - **Mathematical Compatibility**: Avoids bin mismatches in FFT analysis
   - 24000 Hz is evenly divisible by common signal frequencies (1500 Hz, 500 Hz, 600 Hz)
@@ -852,12 +864,13 @@ class BroadcastState:
 - **Timing Precision**: ~42 μs per sample (1/24000 s)
 
 **Historical Evolution:**
+
 1. **16 kHz** (original): Adequate for 1 kHz tone detection, but marginal for test signals
 2. **20 kHz** (v3.x): Improved test signal analysis with better Nyquist margin
 3. **24 kHz** (v5.x): Optimal for mathematical compatibility and comprehensive signal analysis
 
 **Key Calculations:**
+
 - Samples per minute: 24000 × 60 = **1,440,000 samples**
 - RTP timestamp wraparound: 2³² / 24000 / 3600 ≈ **49.7 hours**
 - Timing resolution: 1 / 24000 ≈ **41.67 μs**
-

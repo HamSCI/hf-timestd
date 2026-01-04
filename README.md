@@ -52,7 +52,7 @@ sudo systemctl enable --now timestd-web-ui-fastapi
 | Core Recorder | `sudo systemctl status timestd-core-recorder` |
 | Analytics | `sudo systemctl status timestd-analytics` |
 | Fusion | `sudo systemctl status timestd-fusion` |
-| Web UI | `sudo systemctl status timestd-web-ui-fastapi` |
+| Web UI | `sudo systemctl status timestd-web-api` |
 | **All Logs** | `journalctl -u timestd-* -f` |
 
 ### Data Locations
@@ -65,8 +65,11 @@ sudo systemctl enable --now timestd-web-ui-fastapi
 | **IONEX** | `/var/lib/timestd/ionex/` |
 
 **Monitor:** Open `http://localhost:8000` for real-time monitoring:
+
 - **Station Overview** - System metadata and recent activity
-- **System Health** - Process status, channel matrix, disk usage
+- **System Health** - Process status and true uptime
+- **System Logs** - Real-time service logs viewer (`/static/logs.html`)
+- **API Docs** - Interactive API documentation (`/api/docs`)
 - **Metrology Dashboard** - Fusion timing, ISO GUM uncertainty, Allan Deviation analysis
 - **Propagation Analysis** - Per-broadcast modes, multi-frequency comparison, per-path TEC with error bars
 
@@ -135,6 +138,7 @@ The system is composed of six independent services that form a pipeline:
 ### Recent Updates
 
 **v3.9.0 (January 3, 2026) - Phase 1 & Phase 2 Web UI Complete**
+
 - ✅ FastAPI web UI with 4 pages: Station Overview, System Health, Metrology Dashboard, Propagation Analysis
 - ✅ Allan Deviation analysis (τ=1s to 10,000s) with noise identification
 - ✅ Per-broadcast propagation modes (not misleading global aggregation)
@@ -144,6 +148,7 @@ The system is composed of six independent services that form a pipeline:
 - ✅ Auto-refresh (60s), time range selection, responsive Plotly.js visualizations
 
 **v3.8.1 (January 2, 2026) - HDF5 Transition & Verification**
+
 - ✅ Fusion service bug fixes (logger initialization, orphaned method calls)
 - ✅ Enhanced pipeline verification with actionable diagnostics
 - ✅ HDF5-only output (CSV writers removed from fusion and analytics)

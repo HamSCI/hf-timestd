@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>System Health - hf-timestd</title>
     <link rel="stylesheet" href="/static/css/styles.css">
 </head>
+
 <body>
     <div class="container">
         <div class="header">
@@ -35,21 +37,21 @@
             </div>
             <div class="grid grid-4">
                 <div class="metric">
-                    <div class="metric-value" id="overall-status">
+                    <div class="info-value" id="overall-status">
                         <div class="loading"></div>
                     </div>
                     <div class="metric-label">System Status</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value" id="uptime">-</div>
+                    <div class="info-value" id="uptime">-</div>
                     <div class="metric-label">Uptime</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value" id="disk-usage">-</div>
+                    <div class="info-value" id="disk-usage">-</div>
                     <div class="metric-label">Disk Usage</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value" id="data-completeness">-</div>
+                    <div class="info-value" id="data-completeness">-</div>
                     <div class="metric-label">Data Completeness</div>
                 </div>
             </div>
@@ -112,15 +114,7 @@
             </table>
         </div>
 
-        <!-- Channel Status Grid (visual) -->
-        <div class="card">
-            <div class="card-header">
-                <div class="card-title">Channel Status Matrix</div>
-            </div>
-            <div class="grid grid-3" id="channel-grid">
-                <div class="loading"></div>
-            </div>
-        </div>
+
     </div>
 
     <script src="/static/js/common.js"></script>
@@ -129,15 +123,15 @@
             try {
                 clearError();
                 const data = await api.get('/health/system');
-                
+
                 // Update overall status
                 document.getElementById('last-update').textContent = formatTime(data.timestamp);
-                
+
                 const statusEl = document.getElementById('overall-status');
                 statusEl.innerHTML = `<span class="badge status-${data.status}">${data.status.toUpperCase()}</span>`;
-                
+
                 document.getElementById('uptime').textContent = data.uptime || 'unknown';
-                
+
                 if (data.disk_usage_percent !== null) {
                     const diskEl = document.getElementById('disk-usage');
                     diskEl.textContent = `${data.disk_usage_percent.toFixed(1)}%`;
@@ -149,14 +143,14 @@
                 } else {
                     document.getElementById('disk-usage').textContent = 'N/A';
                 }
-                
+
                 if (data.data_completeness !== null) {
-                    document.getElementById('data-completeness').textContent = 
+                    document.getElementById('data-completeness').textContent =
                         `${(data.data_completeness * 100).toFixed(1)}%`;
                 } else {
                     document.getElementById('data-completeness').textContent = 'N/A';
                 }
-                
+
                 // Update process table
                 const processTable = document.getElementById('process-table');
                 if (data.processes && data.processes.length > 0) {
@@ -174,7 +168,7 @@
                 } else {
                     processTable.innerHTML = '<tr><td colspan="4" style="text-align: center;">No process information available</td></tr>';
                 }
-                
+
                 // Update channel table
                 const channelTable = document.getElementById('channel-table');
                 if (data.channels && data.channels.length > 0) {
@@ -195,51 +189,30 @@
                 } else {
                     channelTable.innerHTML = '<tr><td colspan="7" style="text-align: center;">No channel information available</td></tr>';
                 }
-                
-                // Update channel grid
-                const channelGrid = document.getElementById('channel-grid');
-                if (data.channels && data.channels.length > 0) {
-                    channelGrid.innerHTML = data.channels.map(ch => {
-                        const statusColor = getStatusColor(ch.status);
-                        return `
-                            <div style="padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border-left: 4px solid ${statusColor};">
-                                <div style="font-weight: 600; margin-bottom: 8px;">${ch.channel_name}</div>
-                                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">${formatFrequency(ch.frequency_mhz * 1e6)}</div>
-                                <div style="margin-top: 8px;">
-                                    <span class="badge status-${ch.status}">${ch.status}</span>
-                                </div>
-                                ${ch.carrier_snr_db !== null ? `
-                                    <div style="font-size: 12px; color: #94a3b8; margin-top: 8px;">
-                                        SNR: ${formatNumber(ch.carrier_snr_db, 1)} dB
-                                    </div>
-                                ` : ''}
-                            </div>
-                        `;
-                    }).join('');
-                } else {
-                    channelGrid.innerHTML = '<div>No channel information available</div>';
-                }
-                
+
+
+
                 // Show errors if any
                 if (data.errors && data.errors.length > 0) {
                     showError(data.errors.join('; '));
                 }
-                
+
             } catch (error) {
                 showError(`Failed to load system health: ${error.message}`);
             }
         }
-        
+
         // Initialize
         async function init() {
             await loadSystemHealth();
-            
+
             // Auto-refresh every 10 seconds
             const refresh = new AutoRefresh(loadSystemHealth, 10000);
             refresh.start();
         }
-        
+
         init();
     </script>
 </body>
+
 </html>

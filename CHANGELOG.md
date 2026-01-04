@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.1.0] - 2026-01-04
+
+### Added - Web UI Modernization & Logs Viewer
+
+#### New `timestd-web-api` Service
+
+- **Architecture**: Replaced legacy `monitor-server.js` with Python/FastAPI `timestd-web-api` service.
+- **Port**: 8000 (unchanged, transparent migration).
+- **Service**: `systemd/timestd-web-api.service` replaced `timestd-web-ui.service`.
+- **Capabilities**: Full Python integration, direct access to HDF5/logs without subprocess overhead.
+
+#### Real-time Service Logs Viewer
+
+- **Endpoint**: `/api/logs` (Backend `routers/logs.py`).
+  - Supports filtering by service, level, lines, and time range.
+  - Maps short names (e.g., `core`, `fusion`) to full systemd units.
+- **Frontend**: `/static/logs.html`.
+  - Auto-refreshing, searchable log view.
+  - Accessible from "System Logs" card on dashboard.
+  - Solves the "void(0)" link issue in previous UI.
+
+#### Interactive API Documentation
+
+- **Swagger UI**: `/api/docs` auto-generated from FastAPI models.
+- **ReDoc**: `/api/redoc` alternative documentation.
+
+### Improved - System Health Page
+
+- **Process Uptime**: Added true uptime calculation using `ps -o etime` backend logic.
+- **Cleanup**: Removed redundant/broken "Channel Status Matrix".
+- **UX**: Standardized font sizes and layout in "Overall Status" card.
+
 ## [4.0.0] - 2026-01-04
 
 ### Added - Test Signal HDF5 Migration

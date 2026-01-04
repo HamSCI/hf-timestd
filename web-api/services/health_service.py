@@ -200,7 +200,7 @@ class HealthService:
                     processes.append({
                         'name': display,
                         'status': 'running',
-                        'uptime': None,
+                        'uptime': self._get_process_uptime(int(pids[0])) if pids and pids[0] else None,
                         'pid': int(pids[0]) if pids and pids[0] else None
                     })
                 else:
@@ -221,6 +221,23 @@ class HealthService:
                 })
         
         return processes
+    
+    def _get_process_uptime(self, pid: int) -> Optional[str]:
+        """Get uptime for a specific process ID."""
+        try:
+            # Use ps to get elapsed time
+            result = subprocess.run(
+                ['ps', '-p', str(pid), '-o', 'etime='],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception as e:
+            logger.debug(f"Error getting uptime for PID {pid}: {e}")
+        
+        return None
     
     def _determine_overall_status(
         self,

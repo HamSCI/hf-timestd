@@ -1,5 +1,129 @@
 # HF-TimeStd AI Agent Context
 
+**Last Updated**: 2026-01-04 23:00 UTC  
+**System Version**: 4.1.0  
+**Current Focus**: Web UI Enhancements - Individual Station Pages & Ionosphere Characterization  
+**System Status**: Stable, HDF5-native, Modernized Web API
+
+---
+
+## Executive Summary
+
+The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native and stable.
+
+**Recent Achievements (Web UI Modernization):**
+
+- ✅ **New Service**: `timestd-web-api` (FastAPI) replaced legacy `monitor-server.js`.
+- ✅ **Logs Viewer**: Real-time access to systemd journals via Web UI (`/static/logs.html`).
+- ✅ **System Health**: Refined dashboard with true process uptime and improved UX.
+- ✅ **API Docs**: Interactive Swagger UI at `/api/docs`.
+
+**Next Priority**: Develop specialized dashboard pages for each transmitting station (WWV, WWVH, CHU, BPM) to visualize their unique characteristics and ionospheric paths.
+
+---
+
+## Session Summary (Web UI Modernization)
+
+**Objective**: Replace the legacy Node.js monitoring server with a robust Python/FastAPI service and fix UI deficiencies.
+
+**Accomplishments:**
+
+1. **Service Migration**:
+    - Created `timestd-web-api` service (Python/FastAPI).
+    - Ported functionality from Node.js, eliminating subprocess overhead.
+    - Seamlessly migrated systemd service (`timestd-web-ui` → `timestd-web-api`) with migration script.
+
+2. **Logs Viewer Implementation**:
+    - **Backend**: Implemented `/api/logs` endpoint using `journalctl` with filtering (service, time, level).
+    - **Frontend**: Created `/static/logs.html` with search, auto-refresh, and filtering.
+    - **Integration**: Fixed broken "System Logs" link in main dashboard.
+
+3. **System Health Improvements**:
+    - Implemented true process uptime calculation using `ps -o etime`.
+    - Removed redundant "Channel Status Matrix".
+    - Standardized font sizes for better readability.
+
+4. **Deployment**:
+    - Verified proper operation on `bee1`.
+    - Confirmed correct service mapping (`web-api`, `grape`, etc.) in logs router.
+
+---
+
+## Next Session Priority: Individual Station Pages
+
+### Objective
+
+Create dedicated dashboard pages for each of the four monitored stations: **WWV**, **WWVH**, **CHU**, and **BPM**.
+
+### Motivation
+
+Currently, data is aggregated by channel (frequency). However, users think in terms of **Stations** and **Paths**. Each station has unique characteristics that need specialized visualization.
+
+### Requirements
+
+#### 1. Station-Specific Metrics
+
+- **WWV (Fort Collins, CO)**:
+  - Short path (stable).
+  - High SNR focus.
+  - Multi-frequency comparison (2.5, 5, 10, 15, 20, 25 MHz).
+
+- **WWVH (Kauai, HI)**:
+  - Long path (variable).
+  - Acoustic signature (1200 Hz tone) reliability.
+  - Interference analysis (WWV vs WWVH dominance).
+
+- **CHU (Ottawa, Canada)**:
+  - Unique Bell 103 digital code decoding stats.
+  - Reliable anchoring (3.33, 7.85, 14.67 MHz exclusive frequencies).
+  - Frame slip detection (500ms jumps).
+
+- **BPM (Pucheng, China)**:
+  - Very long path (sporadic).
+  - Exclusion zone visualization (rejection of WWV aliases).
+  - UT1 tick detection (100ms vs 10ms).
+
+#### 2. Ionospheric Characterization (Per-Path)
+
+- **TEC Analysis**: Display the specific Total Electron Content along the Great Circle Period (GCP) for that station.
+- **Ray Tracing**: Visualize predicted hop structure (1F2, 2F2, etc.) based on current IONEX maps.
+- **Delay Budget**: Breakdown of geometric delay vs. ionospheric group delay.
+
+### Implementation Plan
+
+1. **Backend**: Create `/api/stations/{station_id}` endpoints in FastAPI.
+2. **Frontend**: Create generic `station.html` template or individual pages.
+3. **Visualization**: Use Plotly.js for station-specific time series (SNR, Delay, TEC).
+
+---
+
+## System Architecture Overview
+
+### Key Services
+
+1. **timestd-core-recorder**: Receives IQ from radiod, writes Digital RF
+2. **timestd-analytics**: Processes IQ → timing measurements (9 channels)
+3. **timestd-fusion**: Fuses measurements → Chrony SHM updates
+4. **timestd-science-aggregator**: Generates science products (TEC, propagation stats)
+5. **timestd-vtec**: Downloads and processes GNSS VTEC data
+6. **timestd-web-api**: **[NEW]** FastAPI Dashboard & API (Port 8000)
+
+### Critical File Locations
+
+- **Production Code**: `/opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/`
+- **Web API**: `/opt/hf-timestd/web-api/` (Deployed from `git/hf-timestd/web-api/`)
+- **Data Root**: `/var/lib/timestd/`
+- **Logs**: `journalctl -u timestd-*`
+
+---
+
+## Important Notes for AI Agents
+
+- **Web UI**: backend is now **FastAPI** (`web-api/main.py`), not Express/Node.js.
+- **Logs**: Access via `/api/logs` instead of reading files directly if possible.
+- **Service Restart**: `sudo systemctl restart timestd-web-api` for UI changes.
+- **Deployment**: Use `scripts/migrate_web_service.sh` or manual copy to `/opt/hf-timestd/web-api/`.
+
 **Last Updated**: 2026-01-04 20:20 UTC  
 **System Version**: 4.0.0  
 **Current Focus**: Web UI Enhancements - ISO GUM Reporting & Science Data Visualization  

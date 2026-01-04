@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Station Overview - hf-timestd</title>
     <link rel="stylesheet" href="/static/css/styles.css">
 </head>
+
 <body>
     <div class="container">
         <div class="header">
@@ -94,35 +96,40 @@
             </div>
             <div class="grid grid-4">
                 <a href="/static/health.html" style="text-decoration: none;">
-                    <div style="padding: 16px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; text-align: center;">
+                    <div
+                        style="padding: 16px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; text-align: center;">
                         <div style="font-size: 24px; margin-bottom: 8px;">🏥</div>
                         <div style="font-weight: 600;">System Health</div>
                         <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Processes & channels</div>
                     </div>
                 </a>
                 <a href="/static/metrology.html" style="text-decoration: none;">
-                    <div style="padding: 16px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
+                    <div
+                        style="padding: 16px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
                         <div style="font-size: 24px; margin-bottom: 8px;">⏱️</div>
                         <div style="font-weight: 600;">UTC Offset</div>
                         <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Timing & metrology</div>
                     </div>
                 </a>
                 <a href="/static/propagation.html" style="text-decoration: none;">
-                    <div style="padding: 16px; background: rgba(139, 92, 246, 0.1); border-radius: 8px; text-align: center;">
+                    <div
+                        style="padding: 16px; background: rgba(139, 92, 246, 0.1); border-radius: 8px; text-align: center;">
                         <div style="font-size: 24px; margin-bottom: 8px;">🌐</div>
                         <div style="font-weight: 600;">Propagation</div>
                         <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Ionospheric analysis</div>
                     </div>
                 </a>
                 <a href="/api/docs" style="text-decoration: none;">
-                    <div style="padding: 16px; background: rgba(245, 158, 11, 0.1); border-radius: 8px; text-align: center;">
+                    <div
+                        style="padding: 16px; background: rgba(245, 158, 11, 0.1); border-radius: 8px; text-align: center;">
                         <div style="font-size: 24px; margin-bottom: 8px;">📚</div>
                         <div style="font-weight: 600;">API Docs</div>
                         <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Interactive API</div>
                     </div>
                 </a>
-                <a href="javascript:void(0)" onclick="viewLogs()" style="text-decoration: none;">
-                    <div style="padding: 16px; background: rgba(139, 92, 246, 0.1); border-radius: 8px; text-align: center;">
+                <a href="/static/logs.html" style="text-decoration: none;">
+                    <div
+                        style="padding: 16px; background: rgba(139, 92, 246, 0.1); border-radius: 8px; text-align: center;">
                         <div style="font-size: 24px; margin-bottom: 8px;">📋</div>
                         <div style="font-weight: 600;">System Logs</div>
                         <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">View logs</div>
@@ -138,11 +145,11 @@
         async function loadStationInfo() {
             try {
                 const data = await api.get('/station/metadata');
-                
+
                 // Update subtitle
-                document.getElementById('station-subtitle').textContent = 
+                document.getElementById('station-subtitle').textContent =
                     `${data.callsign} - ${data.grid_square} - ${data.mode.toUpperCase()} MODE`;
-                
+
                 // Update station info grid
                 const infoGrid = document.getElementById('station-info');
                 infoGrid.innerHTML = `
@@ -183,75 +190,75 @@
                         <div class="info-value">${data.channels.length}</div>
                     </div>
                 `;
-                
+
                 document.getElementById('total-channels').textContent = data.channels.length;
-                
+
             } catch (error) {
                 showError(`Failed to load station info: ${error.message}`);
             }
         }
-        
+
         // Load quick status
         async function loadQuickStatus() {
             try {
                 // Get system health
                 const health = await api.get('/health/system');
-                
+
                 // Update system status
                 const statusEl = document.getElementById('system-status');
                 statusEl.innerHTML = `<span class="badge status-${health.status}">${health.status.toUpperCase()}</span>`;
-                
+
                 // Update active channels
                 const activeCount = health.channels.filter(ch => ch.status === 'active').length;
                 document.getElementById('active-channels').textContent = activeCount;
-                
+
             } catch (error) {
                 console.error('Failed to load system status:', error);
                 document.getElementById('system-status').innerHTML = '<span class="badge status-error">ERROR</span>';
                 document.getElementById('active-channels').textContent = '?';
             }
-            
+
             try {
                 // Get latest fusion
                 const fusion = await api.get('/metrology/fusion/latest');
-                
+
                 // Use more precision for very small values
                 const dclock = fusion.d_clock_ms;
                 const precision = Math.abs(dclock) < 0.001 ? 6 : 3;
                 document.getElementById('latest-dclock').textContent = formatNumber(dclock, precision);
-                document.getElementById('latest-quality').innerHTML = 
+                document.getElementById('latest-quality').innerHTML =
                     `Grade <span class="badge ${getQualityClass(fusion.quality_grade)}">${fusion.quality_grade}</span> ± ${formatNumber(fusion.uncertainty_ms, 3)} ms`;
-                
+
             } catch (error) {
                 console.error('Failed to load fusion data:', error);
                 document.getElementById('latest-dclock').textContent = 'N/A';
                 document.getElementById('latest-quality').textContent = 'No data';
             }
         }
-        
+
         // Load recent activity
         async function loadRecentActivity() {
             try {
                 const fusion = await api.get('/metrology/fusion/history', { start: '-1h', end: 'now' });
-                
+
                 const activityDiv = document.getElementById('recent-activity');
-                
+
                 if (fusion.count === 0) {
                     activityDiv.innerHTML = '<p style="color: #94a3b8;">No recent measurements</p>';
                     return;
                 }
-                
+
                 // Show last 5 measurements
                 const recent = fusion.timestamps.slice(-5).reverse();
                 const recentDclock = fusion.d_clock_ms.slice(-5).reverse();
                 const recentGrades = fusion.quality_grade.slice(-5).reverse();
                 const recentBroadcasts = fusion.n_broadcasts.slice(-5).reverse();
-                
+
                 activityDiv.innerHTML = `
                     <div style="display: flex; flex-direction: column; gap: 12px;">
                         ${recent.map((ts, i) => {
-                            const precision = Math.abs(recentDclock[i]) < 0.001 ? 6 : 3;
-                            return `
+                    const precision = Math.abs(recentDclock[i]) < 0.001 ? 6 : 3;
+                    return `
                                 <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
                                     <div>
                                         <div style="font-size: 14px; color: #e0e0e0;">
@@ -271,7 +278,7 @@
                                     </div>
                                 </div>
                             `;
-                        }).join('')}
+                }).join('')}
                     </div>
                     <div style="margin-top: 16px; text-align: center;">
                         <a href="/static/metrology.html" style="color: #3b82f6; text-decoration: none; font-size: 14px;">
@@ -279,25 +286,22 @@
                         </a>
                     </div>
                 `;
-                
+
             } catch (error) {
                 console.error('Failed to load recent activity:', error);
-                document.getElementById('recent-activity').innerHTML = 
+                document.getElementById('recent-activity').innerHTML =
                     '<p style="color: #94a3b8;">Unable to load recent activity</p>';
             }
         }
-        
-        // View logs function
-        function viewLogs() {
-            alert('System logs viewer coming in Phase 2!\n\nFor now, check logs at:\n- /var/log/timestd/\n- journalctl -u timestd-*');
-        }
-        
+
+
+
         // Initialize
         async function init() {
             await loadStationInfo();
             await loadQuickStatus();
             await loadRecentActivity();
-            
+
             // Auto-refresh every 60 seconds
             const refresh = new AutoRefresh(() => {
                 loadQuickStatus();
@@ -305,9 +309,10 @@
             }, 60000);
             refresh.start();
         }
-        
+
         // Start when page loads
         init();
     </script>
 </body>
+
 </html>
