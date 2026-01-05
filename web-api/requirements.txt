@@ -5,6 +5,8 @@ tomli>=2.0.0
 h5py>=3.9.0
 numpy>=1.24.0
 python-multipart>=0.0.6
+requests>=2.31.0
+scipy>=1.11.0
 
 # Install parent hf-timestd package in editable mode
 -e ..

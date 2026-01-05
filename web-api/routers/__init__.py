@@ -7,8 +7,10 @@ from .metrology import router as metrology_router
 from .station import router as station_router
 from .stability import router as stability_router
 from .propagation import router as propagation_router
-from .stations import router as stations_router
 from .logs import router as logs_router
+from .stations import router as stations_router
+from .space_weather import router as space_weather_router
+from .correlations import router as correlations_router
 
 __all__ = [
     'health_router',
@@ -17,5 +19,7 @@ __all__ = [
     'stability_router',
     'propagation_router',
     'stations_router',
-    'logs_router'
+    'logs_router',
+    'space_weather_router',
+    'correlations_router'
 ]

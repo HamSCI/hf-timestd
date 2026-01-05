@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import logging
 
-from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router
+from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router
 from config import config
 
 # Configure logging
@@ -50,6 +50,8 @@ app.include_router(metrology_router, prefix="/api")
 app.include_router(stability_router, prefix="/api")
 app.include_router(propagation_router, prefix="/api")
 app.include_router(logs_router, prefix="/api")
+app.include_router(space_weather_router, prefix="/api")
+app.include_router(correlations_router, prefix="/api")
 
 # Static files directory
 static_dir = Path(__file__).parent / "static"

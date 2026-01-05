@@ -2,6 +2,91 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.0] - 2026-01-05
+
+### Added - Solar-Ionosphere Correlation System
+
+**Major Feature:** Complete integration of NOAA space weather data with HF propagation measurements for real-time correlation analysis.
+
+#### Backend Services
+- **Space Weather Service** (`web-api/services/space_weather_service.py`)
+  - NOAA SWPC data ingestion: X-ray flux (GOES), Kp index, proton flux
+  - 15-minute caching with graceful degradation on API failures
+  - Automatic SID (Sudden Ionospheric Disturbance) event detection
+  - Alert generation for M/X-class flares and geomagnetic storms (Kp > 5)
+  - Data sources: NOAA SWPC JSON API (xrays-6-hour, planetary_k_index, proton flux)
+
+- **Correlation Analysis Service** (`web-api/services/correlation_service.py`)
+  - SNR vs Solar Zenith Angle: Pearson correlation + linear regression analysis
+  - SID Detection: Correlates X-ray flares with SNR drops across frequencies
+  - Propagation Mode vs Kp: Analyzes geomagnetic storm effects on propagation
+  - TEC vs F10.7: Framework ready (F10.7 ingestion pending Phase 2)
+  - Statistical analysis using scipy (Pearson r, linear regression, p-values)
+
+#### API Endpoints
+- **Space Weather** (`/api/space-weather/`)
+  - `/current` - Real-time conditions with active alerts
+  - `/xray?hours=N` - X-ray flux time series with classification (A/B/C/M/X)
+  - `/kp?hours=N` - Planetary Kp index time series
+  - `/protons?hours=N` - Proton flux (≥10 MeV) for PCA monitoring
+  - `/events/sid?hours=N` - Detected SID events
+  - `/summary?hours=N` - Comprehensive dashboard data
+
+- **Correlations** (`/api/correlations/`)
+  - `/snr-solar` - SNR-solar zenith correlation with regression fit
+  - `/sid-detection` - SID events correlated with affected channels
+  - `/propagation-kp` - Geomagnetic effects binned by Kp level
+  - `/tec-f107` - TEC-solar flux correlation (framework)
+  - `/summary` - Multi-faceted correlation summary
+
+#### Frontend Visualization
+- **Solar Correlation Dashboard** (`static/solar-correlation.html`)
+  - Multi-tab interface: Overview, Correlation, SID Events, Geomagnetic Effects
+  - Real-time space weather dashboard with color-coded alerts
+  - Multi-panel time series: X-ray + Kp + SNR synchronized plots (Plotly.js)
+  - Scatter plot: SNR vs Solar Zenith Angle with regression fit
+  - Auto-refresh capability (1-minute interval)
+  - Alert banner for M/X-class flares and geomagnetic storms
+  - Dark mode optimized for 24/7 operations
+
+#### Physical Relationships Implemented
+- **X-ray Flares → SID**: M/X-class flares cause D-layer absorption (10-20 dB SNR drops)
+- **Solar Zenith Angle → SNR**: Expected r > 0.7 correlation for F-layer propagation
+- **Kp Index → High-Latitude Degradation**: CHU path affected during storms (Kp > 5)
+- **Frequency Dependence**: Lower frequencies more affected by absorption (∝ 1/f²)
+
+#### Documentation
+- `web-api/SOLAR_CORRELATION_README.md` - Comprehensive feature documentation
+- `web-api/DEPLOYMENT_GUIDE.md` - Step-by-step deployment instructions
+- `web-api/test_solar_api.py` - Automated API testing script
+- Updated `CONTEXT.md` with session summary and implementation details
+
+#### Infrastructure
+- Cache directory: `/var/lib/timestd/space_weather_cache/`
+- Dependencies added: `requests>=2.31.0`, `scipy>=1.11.0`
+- Navigation link added to main dashboard
+
+### Changed
+- Updated `web-api/main.py` to register space weather and correlation routers
+- Updated `web-api/routers/__init__.py` to export new routers
+- Updated `web-api/static/index.html` with navigation link
+- Updated `web-api/requirements.txt` with new dependencies
+
+### Technical Details
+- Data cadence: X-ray (5 min), Kp (3 hour), Protons (5 min)
+- Cache duration: 15 minutes with stale cache fallback
+- API timeout: 10 seconds
+- Expected correlation: SNR-solar r > 0.7, TEC-F10.7 r > 0.6
+- Alert thresholds: X-ray M-class, Kp ≥ 5, Proton flux ≥ 10 pfu
+
+### Future Enhancements (Phase 2)
+- F10.7 solar flux ingestion from Space Weather Canada
+- Dst index integration for storm monitoring
+- Solar wind parameters (ACE/DSCOVR)
+- Automated email/webhook notifications
+- Machine learning predictions for SNR and MUF
+- Historical analysis tools and climatology
+
 ## [4.2.0] - 2026-01-05
 
 ### Added - Individual Station Dashboards & Solar Zenith Overlay

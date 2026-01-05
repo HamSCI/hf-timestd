@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solar-Ionosphere Correlation - HF TimeStd</title>
+    <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0e27;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #1a1f3a 0%, #2d3561 100%);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+            color: #4fc3f7;
+        }
+
+        .subtitle {
+            color: #9e9e9e;
+            font-size: 14px;
+        }
+
+        .controls {
+            background: #1a1f3a;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .control-group label {
+            font-size: 12px;
+            color: #9e9e9e;
+            text-transform: uppercase;
+        }
+
+        select, input {
+            background: #0a0e27;
+            color: #e0e0e0;
+            border: 1px solid #3d4466;
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        button {
+            background: #4fc3f7;
+            color: #0a0e27;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #29b6f6;
+        }
+
+        .alert-banner {
+            background: #d32f2f;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .alert-banner.warning {
+            background: #f57c00;
+        }
+
+        .alert-banner.info {
+            background: #1976d2;
+        }
+
+        .alert-banner.show {
+            display: flex;
+        }
+
+        .alert-icon {
+            font-size: 20px;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: #1a1f3a;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .card-title {
+            font-size: 14px;
+            color: #9e9e9e;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+
+        .card-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: #4fc3f7;
+        }
+
+        .card-subtitle {
+            font-size: 12px;
+            color: #757575;
+            margin-top: 5px;
+        }
+
+        .xray-class {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 18px;
+        }
+
+        .xray-A { background: #4caf50; color: white; }
+        .xray-B { background: #8bc34a; color: white; }
+        .xray-C { background: #ffeb3b; color: #000; }
+        .xray-M { background: #ff9800; color: white; }
+        .xray-X { background: #f44336; color: white; }
+
+        .kp-indicator {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        .kp-quiet { background: #4caf50; color: white; }
+        .kp-unsettled { background: #ffeb3b; color: #000; }
+        .kp-storm { background: #f44336; color: white; }
+
+        .chart-container {
+            background: #1a1f3a;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .chart-title {
+            font-size: 18px;
+            margin-bottom: 15px;
+            color: #4fc3f7;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #9e9e9e;
+        }
+
+        .spinner {
+            border: 3px solid #3d4466;
+            border-top: 3px solid #4fc3f7;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .event-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .event-item {
+            background: #0a0e27;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            border-left: 3px solid #4fc3f7;
+        }
+
+        .event-time {
+            font-size: 12px;
+            color: #9e9e9e;
+        }
+
+        .event-description {
+            font-size: 14px;
+            margin-top: 5px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            background: #1a1f3a;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .tab.active {
+            background: #4fc3f7;
+            color: #0a0e27;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>☀️ Solar-Ionosphere Correlation Analysis</h1>
+        <div class="subtitle">Real-time correlation between space weather and HF propagation</div>
+    </div>
+
+    <div id="alertBanner" class="alert-banner">
+        <span class="alert-icon">⚠️</span>
+        <span id="alertMessage"></span>
+    </div>
+
+    <div class="controls">
+        <div class="control-group">
+            <label>Station</label>
+            <select id="stationSelect">
+                <option value="WWV">WWV (Colorado)</option>
+                <option value="WWVH">WWVH (Hawaii)</option>
+                <option value="CHU">CHU (Canada)</option>
+                <option value="BPM">BPM (China)</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label>Frequency</label>
+            <select id="frequencySelect">
+                <option value="2.5">2.5 MHz</option>
+                <option value="5">5 MHz</option>
+                <option value="10">10 MHz</option>
+                <option value="15">15 MHz</option>
+                <option value="20">20 MHz</option>
+                <option value="25">25 MHz</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label>Time Range</label>
+            <select id="timeRange">
+                <option value="6">6 Hours</option>
+                <option value="12">12 Hours</option>
+                <option value="24" selected>24 Hours</option>
+                <option value="48">48 Hours</option>
+                <option value="72">72 Hours</option>
+            </select>
+        </div>
+        <button onclick="refreshData()">🔄 Refresh</button>
+        <button onclick="toggleAutoRefresh()">⏱️ Auto-Refresh: <span id="autoRefreshStatus">OFF</span></button>
+    </div>
+
+    <div class="dashboard">
+        <div class="card">
+            <div class="card-title">Current X-ray Flux</div>
+            <div class="card-value" id="xrayValue">--</div>
+            <div class="card-subtitle" id="xrayTime">Loading...</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Kp Index</div>
+            <div class="card-value" id="kpValue">--</div>
+            <div class="card-subtitle" id="kpTime">Loading...</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Proton Flux</div>
+            <div class="card-value" id="protonValue">--</div>
+            <div class="card-subtitle">≥10 MeV</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Active Alerts</div>
+            <div class="card-value" id="alertCount">0</div>
+            <div class="card-subtitle" id="alertType">No alerts</div>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('overview')">Overview</div>
+        <div class="tab" onclick="switchTab('correlation')">SNR-Solar Correlation</div>
+        <div class="tab" onclick="switchTab('events')">SID Events</div>
+        <div class="tab" onclick="switchTab('geomag')">Geomagnetic Effects</div>
+    </div>
+
+    <div id="overviewTab" class="tab-content active">
+        <div class="chart-container">
+            <div class="chart-title">Multi-Panel Time Series: Space Weather + Propagation</div>
+            <div id="multiPanelChart"></div>
+        </div>
+    </div>
+
+    <div id="correlationTab" class="tab-content">
+        <div class="chart-container">
+            <div class="chart-title">SNR vs Solar Zenith Angle Correlation</div>
+            <div id="correlationChart"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">Correlation Statistics</div>
+            <div id="correlationStats">Select station and frequency, then refresh to analyze</div>
+        </div>
+    </div>
+
+    <div id="eventsTab" class="tab-content">
+        <div class="chart-container">
+            <div class="chart-title">Sudden Ionospheric Disturbance (SID) Events</div>
+            <div id="sidEventsChart"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">Recent SID Events</div>
+            <div id="sidEventsList" class="event-list">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    Loading SID events...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="geomagTab" class="tab-content">
+        <div class="chart-container">
+            <div class="chart-title">Propagation vs Kp Index</div>
+            <div id="geomagChart"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">Geomagnetic Effects Analysis</div>
+            <div id="geomagAnalysis">Loading...</div>
+        </div>
+    </div>
+
+    <script>
+        let autoRefreshInterval = null;
+        let currentTab = 'overview';
+
+        // Plotly theme for dark mode
+        const plotlyLayout = {
+            paper_bgcolor: '#1a1f3a',
+            plot_bgcolor: '#0a0e27',
+            font: { color: '#e0e0e0' },
+            xaxis: { gridcolor: '#3d4466' },
+            yaxis: { gridcolor: '#3d4466' },
+            margin: { t: 40, r: 20, b: 40, l: 60 }
+        };
+
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(tabName + 'Tab').classList.add('active');
+
+            currentTab = tabName;
+        }
+
+        function showAlert(message, type = 'warning') {
+            const banner = document.getElementById('alertBanner');
+            const messageEl = document.getElementById('alertMessage');
+            
+            banner.className = `alert-banner ${type} show`;
+            messageEl.textContent = message;
+        }
+
+        function hideAlert() {
+            document.getElementById('alertBanner').classList.remove('show');
+        }
+
+        async function fetchSpaceWeather() {
+            try {
+                const hours = document.getElementById('timeRange').value;
+                
+                // Fetch current conditions
+                const currentResp = await fetch('/api/space-weather/current');
+                const current = await currentResp.json();
+                
+                // Update dashboard cards
+                if (current.xray) {
+                    const xrayClass = current.xray.class;
+                    const classLetter = xrayClass.charAt(0);
+                    document.getElementById('xrayValue').innerHTML = 
+                        `<span class="xray-class xray-${classLetter}">${xrayClass}</span>`;
+                    document.getElementById('xrayTime').textContent = 
+                        new Date(current.xray.timestamp).toLocaleTimeString();
+                }
+                
+                if (current.kp) {
+                    const kp = current.kp.kp_index;
+                    let kpClass = 'quiet';
+                    if (kp >= 5) kpClass = 'storm';
+                    else if (kp >= 3) kpClass = 'unsettled';
+                    
+                    document.getElementById('kpValue').innerHTML = 
+                        `<span class="kp-indicator kp-${kpClass}">${kp}</span>`;
+                    document.getElementById('kpTime').textContent = 
+                        new Date(current.kp.timestamp).toLocaleString();
+                }
+                
+                if (current.proton_flux) {
+                    document.getElementById('protonValue').textContent = 
+                        current.proton_flux.flux.toFixed(1) + ' pfu';
+                }
+                
+                // Handle alerts
+                if (current.alerts && current.alerts.length > 0) {
+                    document.getElementById('alertCount').textContent = current.alerts.length;
+                    document.getElementById('alertType').textContent = 
+                        current.alerts.map(a => a.type).join(', ');
+                    
+                    const highSeverity = current.alerts.find(a => a.severity === 'HIGH');
+                    if (highSeverity) {
+                        showAlert(highSeverity.message, 'warning');
+                    }
+                } else {
+                    document.getElementById('alertCount').textContent = '0';
+                    document.getElementById('alertType').textContent = 'No alerts';
+                    hideAlert();
+                }
+                
+                return current;
+            } catch (error) {
+                console.error('Error fetching space weather:', error);
+                showAlert('Error fetching space weather data', 'warning');
+            }
+        }
+
+        async function fetchAndPlotMultiPanel() {
+            const hours = document.getElementById('timeRange').value;
+            const station = document.getElementById('stationSelect').value;
+            
+            try {
+                // Fetch X-ray data
+                const xrayResp = await fetch(`/api/space-weather/xray?hours=${hours}`);
+                const xrayData = await xrayResp.json();
+                
+                // Fetch Kp data
+                const kpResp = await fetch(`/api/space-weather/kp?hours=${hours}`);
+                const kpData = await kpResp.json();
+                
+                // Fetch station history
+                const stationResp = await fetch(`/api/stations/${station}/history?hours=${hours}`);
+                const stationData = await stationResp.json();
+                
+                // Create multi-panel plot
+                const traces = [];
+                
+                // Panel 1: X-ray flux (log scale)
+                traces.push({
+                    x: xrayData.timestamps,
+                    y: xrayData.flux,
+                    name: 'X-ray Flux',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#ff9800', width: 2 },
+                    yaxis: 'y1'
+                });
+                
+                // Panel 2: Kp index
+                traces.push({
+                    x: kpData.timestamps,
+                    y: kpData.kp_index,
+                    name: 'Kp Index',
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#4fc3f7', width: 2 },
+                    yaxis: 'y2'
+                });
+                
+                // Panel 3: SNR (if available)
+                if (stationData.timeline && stationData.timeline.channels) {
+                    const channel = stationData.timeline.channels[0];
+                    if (channel) {
+                        traces.push({
+                            x: channel.timestamps,
+                            y: channel.snr_db,
+                            name: `SNR (${channel.frequency_mhz} MHz)`,
+                            type: 'scatter',
+                            mode: 'lines',
+                            line: { color: '#4caf50', width: 2 },
+                            yaxis: 'y3'
+                        });
+                    }
+                }
+                
+                const layout = {
+                    ...plotlyLayout,
+                    height: 600,
+                    grid: { rows: 3, columns: 1, pattern: 'independent' },
+                    yaxis1: { 
+                        title: 'X-ray Flux (W/m²)',
+                        type: 'log',
+                        gridcolor: '#3d4466'
+                    },
+                    yaxis2: { 
+                        title: 'Kp Index',
+                        gridcolor: '#3d4466'
+                    },
+                    yaxis3: { 
+                        title: 'SNR (dB)',
+                        gridcolor: '#3d4466'
+                    },
+                    showlegend: true,
+                    legend: { x: 0, y: 1.1, orientation: 'h' }
+                };
+                
+                Plotly.newPlot('multiPanelChart', traces, layout, { responsive: true });
+            } catch (error) {
+                console.error('Error plotting multi-panel chart:', error);
+            }
+        }
+
+        async function fetchAndPlotCorrelation() {
+            const station = document.getElementById('stationSelect').value;
+            const frequency = document.getElementById('frequencySelect').value;
+            const hours = document.getElementById('timeRange').value;
+            
+            try {
+                const resp = await fetch(
+                    `/api/correlations/snr-solar?station=${station}&frequency=${frequency}&hours=${hours}`
+                );
+                const data = await resp.json();
+                
+                if (data.error) {
+                    document.getElementById('correlationStats').textContent = data.error;
+                    return;
+                }
+                
+                // Plot scatter
+                const trace = {
+                    x: data.data.solar_zenith_angle_deg,
+                    y: data.data.snr_db,
+                    mode: 'markers',
+                    type: 'scatter',
+                    marker: { 
+                        color: '#4fc3f7',
+                        size: 6,
+                        opacity: 0.6
+                    },
+                    name: 'Measurements'
+                };
+                
+                // Add regression line
+                const stats = data.statistics;
+                const xMin = Math.min(...data.data.solar_zenith_angle_deg.filter(x => x !== null));
+                const xMax = Math.max(...data.data.solar_zenith_angle_deg.filter(x => x !== null));
+                const yFit = [
+                    stats.slope * xMin + stats.intercept,
+                    stats.slope * xMax + stats.intercept
+                ];
+                
+                const fitTrace = {
+                    x: [xMin, xMax],
+                    y: yFit,
+                    mode: 'lines',
+                    type: 'scatter',
+                    line: { color: '#ff9800', width: 2, dash: 'dash' },
+                    name: 'Linear Fit'
+                };
+                
+                const layout = {
+                    ...plotlyLayout,
+                    xaxis: { title: 'Solar Zenith Angle (degrees)', gridcolor: '#3d4466' },
+                    yaxis: { title: 'SNR (dB)', gridcolor: '#3d4466' },
+                    title: `${station} ${frequency} MHz`,
+                    showlegend: true
+                };
+                
+                Plotly.newPlot('correlationChart', [trace, fitTrace], layout, { responsive: true });
+                
+                // Update statistics
+                document.getElementById('correlationStats').innerHTML = `
+                    <strong>Correlation:</strong> r = ${stats.correlation} (p = ${stats.p_value})<br>
+                    <strong>R²:</strong> ${stats.r_squared}<br>
+                    <strong>Regression:</strong> SNR = ${stats.slope.toFixed(3)} × SZA + ${stats.intercept.toFixed(1)}<br>
+                    <strong>Data Points:</strong> ${stats.n_points}<br>
+                    <br>
+                    <em>${data.interpretation}</em>
+                `;
+            } catch (error) {
+                console.error('Error plotting correlation:', error);
+                document.getElementById('correlationStats').textContent = 'Error loading correlation data';
+            }
+        }
+
+        async function fetchAndPlotSIDEvents() {
+            const hours = document.getElementById('timeRange').value;
+            
+            try {
+                const resp = await fetch(`/api/correlations/sid-detection?hours=${hours}`);
+                const data = await resp.json();
+                
+                // Display event list
+                const listEl = document.getElementById('sidEventsList');
+                if (data.events && data.events.length > 0) {
+                    listEl.innerHTML = data.events.map(event => `
+                        <div class="event-item">
+                            <div class="event-time">${new Date(event.sid_timestamp).toLocaleString()}</div>
+                            <div class="event-description">
+                                <strong>${event.xray_class} Flare</strong> - 
+                                ${event.affected_channels.length} channel(s) affected
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: #9e9e9e;">No SID events detected in this period</div>';
+                }
+            } catch (error) {
+                console.error('Error fetching SID events:', error);
+            }
+        }
+
+        async function fetchAndPlotGeomag() {
+            const hours = document.getElementById('timeRange').value;
+            
+            try {
+                const resp = await fetch(`/api/correlations/propagation-kp?hours=${hours}`);
+                const data = await resp.json();
+                
+                // Display analysis
+                document.getElementById('geomagAnalysis').innerHTML = `
+                    <p>${data.interpretation}</p>
+                    <br>
+                    <strong>Quiet Conditions (Kp 0-3):</strong> ${data.kp_bins.quiet.channels.length} observations<br>
+                    <strong>Unsettled (Kp 3-5):</strong> ${data.kp_bins.unsettled.channels.length} observations<br>
+                    <strong>Storm (Kp 5+):</strong> ${data.kp_bins.storm.channels.length} observations
+                `;
+            } catch (error) {
+                console.error('Error fetching geomag data:', error);
+            }
+        }
+
+        async function refreshData() {
+            await fetchSpaceWeather();
+            
+            if (currentTab === 'overview') {
+                await fetchAndPlotMultiPanel();
+            } else if (currentTab === 'correlation') {
+                await fetchAndPlotCorrelation();
+            } else if (currentTab === 'events') {
+                await fetchAndPlotSIDEvents();
+            } else if (currentTab === 'geomag') {
+                await fetchAndPlotGeomag();
+            }
+        }
+
+        function toggleAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+                document.getElementById('autoRefreshStatus').textContent = 'OFF';
+            } else {
+                autoRefreshInterval = setInterval(refreshData, 60000); // 1 minute
+                document.getElementById('autoRefreshStatus').textContent = 'ON';
+            }
+        }
+
+        // Initial load
+        refreshData();
+    </script>
+</body>
+</html>

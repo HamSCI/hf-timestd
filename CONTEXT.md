@@ -1,9 +1,9 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-05 00:10 UTC  
-**System Version**: 4.2.0  
-**Current Focus**: Science - Solar-Ionosphere Correlation Analysis  
-**System Status**: Stable, HDF5-native, Modernized Web API with Station Dashboards
+**Last Updated**: 2026-01-05 00:35 UTC  
+**System Version**: 4.3.0  
+**Current Focus**: Science - Solar-Ionosphere Correlation Analysis (IMPLEMENTED)  
+**System Status**: Stable, HDF5-native, Modernized Web API with Solar Correlation Features
 
 ---
 
@@ -18,11 +18,84 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 - ✅ **Logs Viewer**: Real-time access to systemd journals via Web UI.
 - ✅ **System Health**: Refined dashboard with true process uptime.
 
-**Next Priority**: Explore display correlations between per-broadcast measurements and incident solar radiation (X-ray flux, etc.) on the propagation path.
+**Latest Achievement**: ✅ **Solar-Ionosphere Correlation System** - Complete integration of NOAA space weather data with HF propagation measurements, including real-time X-ray flux, Kp index, SID detection, and multi-panel visualization.
 
 ---
 
-## Session Summary (Station Dashboards)
+## Session Summary (Solar-Ionosphere Correlation - 2026-01-05)
+
+**Objective**: Implement comprehensive solar-ionosphere correlation analysis system to display meaningful relationships between space weather and HF propagation.
+
+**Accomplishments:**
+
+1. **Space Weather Service** (`services/space_weather_service.py`)
+   - NOAA SWPC data ingestion: X-ray flux, Kp index, proton flux
+   - 15-minute caching with graceful degradation
+   - Automatic SID event detection from X-ray data
+   - Alert generation for M/X-class flares and geomagnetic storms
+
+2. **Correlation Analysis Service** (`services/correlation_service.py`)
+   - SNR vs Solar Zenith Angle: Pearson correlation + linear regression
+   - SID Detection: X-ray flares correlated with SNR drops
+   - TEC vs F10.7: Framework (F10.7 ingestion pending)
+   - Propagation Mode vs Kp: Geomagnetic storm effects analysis
+
+3. **API Endpoints**
+   - `/api/space-weather/*`: Current conditions, X-ray, Kp, protons, SID events, summary
+   - `/api/correlations/*`: SNR-solar, SID detection, TEC-F10.7, propagation-Kp, summary
+   - Comprehensive error handling and data validation
+
+4. **Frontend Visualization** (`static/solar-correlation.html`)
+   - Multi-tab interface: Overview, Correlation, SID Events, Geomagnetic Effects
+   - Real-time dashboard with X-ray class, Kp index, proton flux
+   - Multi-panel time series: X-ray + Kp + SNR synchronized plots
+   - Scatter plot: SNR vs Solar Zenith Angle with regression fit
+   - Auto-refresh capability (1-minute interval)
+   - Alert banner for active space weather events
+
+5. **Documentation**
+   - `SOLAR_CORRELATION_README.md`: Comprehensive feature documentation
+   - `DEPLOYMENT_GUIDE.md`: Step-by-step deployment instructions
+   - `test_solar_api.py`: Automated API testing script
+
+**Physical Relationships Implemented:**
+
+- **X-ray Flares → SID**: M/X-class flares cause D-layer absorption, 10-20 dB SNR drops
+- **Solar Zenith Angle → SNR**: Expected r > 0.7 correlation for F-layer propagation
+- **Kp Index → High-Latitude Paths**: CHU degradation during geomagnetic storms (Kp > 5)
+- **Frequency Dependence**: Lower frequencies more affected by absorption (∝ 1/f²)
+
+**Data Sources:**
+- `https://services.swpc.noaa.gov/json/goes/xray-fluxes-7-day.json`
+- `https://services.swpc.noaa.gov/json/planetary_k_index_1m.json`
+- `https://services.swpc.noaa.gov/json/goes/primary/integral-protons-plot-6-hour.json`
+
+**Deployment Status:**
+- ✅ Backend services implemented and tested
+- ✅ API endpoints functional
+- ✅ Frontend visualization complete
+- ✅ Documentation created
+- ⏳ Awaiting production deployment and testing
+
+**Key Files Added:**
+- `web-api/services/space_weather_service.py`
+- `web-api/services/correlation_service.py`
+- `web-api/routers/space_weather.py`
+- `web-api/routers/correlations.py`
+- `web-api/static/solar-correlation.html`
+- `web-api/SOLAR_CORRELATION_README.md`
+- `web-api/DEPLOYMENT_GUIDE.md`
+- `web-api/test_solar_api.py`
+
+**Key Files Modified:**
+- `web-api/routers/__init__.py` - Added space_weather and correlations routers
+- `web-api/main.py` - Registered new routers
+- `web-api/static/index.html` - Added navigation link
+- `web-api/requirements.txt` - Added requests and scipy dependencies
+
+---
+
+## Session Summary (Station Dashboards - 2026-01-04)
 
 **Objective**: Create dedicated dashboards for each monitored station to visualize unique characteristics and ionospheric dependencies.
 
@@ -49,28 +122,50 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 
 ---
 
-## Next Session Priority: Solar-Ionosphere Correlation
+## Next Session Priority: Phase 2 Enhancements
 
-### Objective
+### Completed Features (Phase 1)
 
-Explore and implement visualizations that correlate measured broadcast performance (SNR, Delay, Fading) with incident solar radiation (X-ray flux, Proton flux) and geomagnetic indices (Kp, Ap).
+✅ Space weather data ingestion (X-ray, Kp, protons)  
+✅ Correlation analysis (SNR-solar, SID detection, propagation-Kp)  
+✅ Multi-panel visualization with synchronized plots  
+✅ Real-time alerts for M/X-class flares and geomagnetic storms  
+✅ Automated SID event detection  
 
-### Motivation
+### Future Enhancements (Phase 2)
 
-Users want to see the direct effective of Space Weather on HF propagation. Does a solar flare (X-ray spike) cause a sudden fadeout (SWF)? Does a geomagnetic storm (high Kp) degrade high-latitude paths (CHU) more than mid-latitude ones?
+1. **F10.7 Solar Flux Ingestion**
+   - Source: Space Weather Canada
+   - Enable TEC vs F10.7 correlation analysis
+   - Long-term solar cycle tracking
 
-### Goals
+2. **Dst Index Integration**
+   - Storm-time disturbance index
+   - Ring current monitoring
+   - Enhanced geomagnetic storm analysis
 
-1. **Ingestion**: Ingest live Space Weather data (NOAA SWPC).
-2. **Correlation**: Align Space Weather time-series with Station SNR history.
-3. **Visualization**: Overlay X-ray flux on SNR charts.
-4. **Analysis**: Detect and flag correlation events.
+3. **Solar Wind Parameters**
+   - Speed, density, IMF Bz from ACE/DSCOVR
+   - Predictive indicators for geomagnetic storms
+   - Real-time space weather forecasting
 
-### Implementation Plan
+4. **Automated Notifications**
+   - Email/webhook alerts for M/X-class flares
+   - Kp > 5 storm warnings
+   - Predicted propagation impacts
+   - Integration with monitoring systems
 
-1. **Backend**: Create `/api/stations/{station_id}` endpoints in FastAPI.
-2. **Frontend**: Create generic `station.html` template or individual pages.
-3. **Visualization**: Use Plotly.js for station-specific time series (SNR, Delay, TEC).
+5. **Machine Learning Predictions**
+   - SNR prediction from space weather forecast
+   - MUF estimation using neural networks
+   - Optimal frequency recommendations
+   - Anomaly detection and classification
+
+6. **Historical Analysis Tools**
+   - Long-term correlation trends
+   - Solar cycle effects (11-year cycle)
+   - Seasonal variations
+   - Statistical climatology
 
 ---
 
