@@ -177,13 +177,20 @@ class ScienceAggregator:
                 # Convert HDF5 format to expected dict format
                 measurements = []
                 for m in measurements_hdf5:
-                    measurements.append({
+                    meas_dict = {
                         'minute_boundary_utc': str(m.get('minute_boundary_utc', 0)),
                         'station': m.get('station', 'UNKNOWN'),
                         'frequency_mhz': str(m.get('frequency_mhz', 0)),
                         'clock_offset_ms': str(m.get('clock_offset_ms', 0)),
                         'uncertainty_ms': str(m.get('uncertainty_ms', 1.0))
-                    })
+                    }
+                    
+                    # Include raw_arrival_time_ms if present (schema v1.1.0+)
+                    # This is critical for TEC estimation
+                    if 'raw_arrival_time_ms' in m and m['raw_arrival_time_ms'] is not None:
+                        meas_dict['raw_arrival_time_ms'] = str(m['raw_arrival_time_ms'])
+                    
+                    measurements.append(meas_dict)
                 
                 logger.debug(f"Read {len(measurements)} measurements from HDF5 for {channel_name}")
                 return measurements

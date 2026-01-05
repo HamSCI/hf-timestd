@@ -271,7 +271,7 @@ calibration_offset = -mean(D_clock_station)
 offset_new = α × (-mean_current) + (1-α) × offset_old
 ```
 
-**Critical Fix (v3.10.3):** Calibration updated **AFTER** cross-validation, not before. Prevents outliers from contaminating calibration state.
+- Prevents outliers from contaminating calibration state.
 
 **Persistence:** Auto-saved every 50 updates, loaded on startup. Enables immediate Grade A performance after service restart.
 
