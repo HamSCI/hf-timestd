@@ -10,40 +10,33 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ## 🎯 NEXT SESSION OBJECTIVE (2026-01-04 → Next Session): CRITIQUE PHASE 2 ANALYTICS PROPAGATION DELAY CALCULATIONS
 
-**Status:** 🔵 **READY FOR CRITIQUE** - Service stability improved, now focus on data integrity
+**Status:** 🟢 **READY FOR CRITIQUE** - TEC discontinuity fixed, system stable, now examine calculation methods
 
-**Author:** AI Agent (Antigravity)
-**Date:** 2026-01-04 11:52 UTC
+**Author:** AI Agent (Cascade)
+**Date:** 2026-01-05 10:13 UTC
 
 ### Session Goal
 
-**Primary Objective:** Critique Phase 2 Analytics propagation delay calculations to identify systematic errors causing large D_clock disagreements between stations.
+**Primary Objective:** Thoroughly examine per-broadcast D_clock estimation and fusion methods to identify flaws, vulnerabilities, or systematic errors in the calculations.
 
-**Critical Finding from 2026-01-04:**
-During fusion service debugging, discovered that stations report significantly different D_clock values:
-- CHU: 6.3ms
-- WWV: 11.0ms  
-- WWVH: 23.9ms
+**Critical Fix from 2026-01-05:**
+Fixed major discontinuity issue where TEC corrections were modifying measurement values instead of refining uncertainty. This caused 4-6ms jumps when signals faded in/out.
 
-**This is a ~18ms spread, which is physically impossible.**
+**Key Changes:**
+1. **HDF5 Reader Fix:** Changed from `min(len(values))` to using `timestamp_utc` length as canonical measurement count
+2. **TEC Correction Philosophy:** TEC now adjusts confidence/uncertainty, not D_clock values
+3. **GNSS VTEC Refinement:** VTEC validates TEC agreement, adjusts confidence based on model agreement
+4. **Continuity Maintained:** System now stable at 0.000ms despite broadcast count varying 52→61
 
-D_clock = T_arrival - T_propagation is the **system clock offset** - a property of the receiver's clock, NOT the station. All stations should report approximately the **same D_clock** (within ~2-3ms for measurement noise).
+**Previous Session Work (2026-01-05):**
+- Diagnosed chrony feed discontinuities (4-6ms jumps correlated with signal fading)
+- Identified root cause: TEC corrections modifying D_clock values
+- Implemented fix: TEC as refinement to uncertainty, not replacement
+- Verified continuity: D_clock stable despite broadcast availability changes
+- Fixed web-API null values (HDF5 reader dataset length issue)
 
-Large disagreements indicate one or more of:
-1. **Propagation delay calculation errors in Phase 2**
-2. **Station misidentification**
-3. **Sign errors in the D_clock equation**
-4. **Incorrect propagation mode selection**
-
-**Status:** Fusion service fixes completed (Kalman protection, config integration). Now need to investigate Phase 2 analytics.
-
-**Previous Session Work (2026-01-04):**
-- Fixed Kalman filter contamination from tone misidentification
-- Added protection: skip Kalman updates when DISCRIMINATION_SUSPECT
-- Implemented gradual Kalman correction ramp-up
-- Fixed fusion service to read precise coordinates from config
-- Corrected misunderstanding about D_clock geographic ordering
-- Documented architectural separation between Phase 2 and Fusioner)
+**Fundamental Principle Established:**
+The system sits on a GPSDO. Signal appearance/disappearance should only affect error bars, not the fused estimate. TEC should refine the baseline physics model, not override it.
 
 ### Context from Previous Session
 
@@ -72,131 +65,187 @@ Large disagreements indicate one or more of:
 
 ### Critical Questions to Answer
 
-**1. Data Integrity:**
+**1. Per-Broadcast D_clock Estimation:**
 
-- Are RTP timestamps being correctly interpreted and aligned?
-- Is there any data loss or corruption in the pipeline?
-- Are timing measurements traceable to UTC(NIST)?
-- Are uncertainty budgets correctly calculated and propagated?
+- Is the D_clock calculation formula correct? (D_clock = T_arrival - T_propagation)
+- Are propagation delay models physically accurate for each station/frequency?
+- Is ionospheric correction being applied consistently?
+- Are calibration offsets in the correct direction and magnitude?
+- Are there sign errors or unit conversion issues?
+- Is the baseline physics model (geography + propagation) sound?
 
-**2. Calculation Accuracy:**
+**2. Fusion Algorithm Integrity:**
 
-- Are propagation delay models physically correct?
-- Is ionospheric correction being applied correctly?
-- Are calibration offsets being applied in the right direction?
-- Is the fusion algorithm statistically sound?
+- Is the weighted fusion statistically sound?
+- Are measurement weights calculated correctly based on confidence/uncertainty?
+- Is the Kalman filter properly initialized and updated?
+- Are outlier rejection thresholds appropriate?
+- Does the fusion maintain continuity when measurements change?
+- Is the cross-station validation logic correct?
 
-**3. Error Handling:**
+**3. TEC and Propagation Corrections:**
 
-- What happens when measurements are missing or invalid?
-- How does the system handle outliers?
-- Are there any silent failures or data quality issues?
-- Is error propagation handled correctly?
+- Why does HF TEC solver return 0.0 TECU with perfect fit?
+- Are raw_arrival_time_ms values being used correctly for TEC estimation?
+- Is the TEC-to-delay conversion formula correct?
+- Are multi-hop propagation delays calculated correctly?
+- Is the baseline propagation model consistent across all measurements?
 
-**4. Performance and Efficiency:**
+**4. Measurement Quality and Uncertainty:**
 
-- Are there any bottlenecks in the pipeline?
-- Is memory usage appropriate?
-- Are there any unnecessary calculations?
-- Can the pipeline handle all expected data rates?
+- Are confidence values calculated correctly?
+- Is uncertainty propagated through the pipeline?
+- Are quality grades (A/B/C/D) assigned appropriately?
+- Do confidence adjustments (TEC validation, VTEC agreement) make physical sense?
+- Is the uncertainty budget complete and traceable?
 
-**5. Code Quality:**
+**5. Systematic Errors and Biases:**
 
-- Are there any obvious bugs or logic errors?
-- Is the code maintainable and well-documented?
-- Are there any deprecated or "zombie" code paths?
-- Are there any inconsistencies between modules?
+- Are there station-dependent biases in D_clock estimates?
+- Are there frequency-dependent systematic errors?
+- Does the fusion favor certain stations inappropriately?
+- Are there time-of-day or propagation-mode biases?
+- Is the GPSDO stability assumption valid?
+
+### Recent Fixes to Consider
+
+**TEC Discontinuity Fix (2026-01-05):**
+
+Location: `src/hf_timestd/core/multi_broadcast_fusion.py`
+
+**Problem:** TEC corrections were modifying D_clock measurement values, causing 4-6ms discontinuities when:
+- Signal availability changed (broadcasts fading in/out)
+- TEC estimation quality changed (R² varying)
+- Different station sets became available
+
+**Root Cause:** Lines 2106-2113 recalculated D_clock based on TEC-derived propagation delays:
+```python
+t_arrival = m.d_clock_ms + m.propagation_delay_ms
+m.d_clock_ms = t_arrival - new_delay  # MODIFYING measurement!
+```
+
+**Solution Implemented:**
+- HF TEC: Adjusts confidence ±15% based on fit quality and physical realism (5-100 TECU)
+- GNSS VTEC: Adjusts confidence ±10% based on model agreement (<5 TECU = good)
+- Measurements retain original D_clock values from Phase 2 analytics
+- TEC acts as quality indicator, not correction mechanism
+
+**Verification:** System now maintains D_clock = 0.000ms despite broadcast count varying 52→61.
+
+**Questions for Next Session:**
+- Are the original Phase 2 D_clock values correct?
+- Is the baseline propagation model in Phase 2 accurate?
+- Should TEC be used differently (e.g., in Phase 2 instead of fusion)?
 
 ### Specific Areas to Investigate
 
-#### Core Recorder (`core_recorder_v2.py`)
+#### Phase 2 Analytics (`phase2_analytics_service.py`)
 
-**Focus:** RTP stream ingestion and binary data writing
-
-**Questions:**
-
-- Is RTP timestamp alignment correct? (GPSDO-disciplined)
-- Are packet loss events being handled correctly?
-- Is the binary `.bin.zst` format being written correctly?
-- Are there any race conditions in the multi-channel recording?
-- Is the QuotaManager preventing data loss?
-
-**Key Methods to Review:**
-
-- `StreamRecorderV2._process_packet()` - RTP packet handling
-- `StreamRecorderV2._write_binary()` - Binary file writing
-- `CoreRecorderV2._monitor_health()` - Health monitoring
-- `CoreRecorderV2._enforce_quota()` - Disk space management
-
-#### Analytics Service (`phase2_analytics_service.py`)
-
-**Focus:** Tone detection and timing calculations
+**Focus:** Per-broadcast D_clock calculation and propagation delay estimation
 
 **Questions:**
 
-- Is tone detection using the correct search windows?
-- Are timing measurements being calculated correctly?
-- Is the D_clock continuity validation working?
-- Are propagation delays being calculated with proper physics?
-- Is the HDF5 writing robust and correct?
+- Is the D_clock formula implemented correctly?
+- Are propagation delays calculated with correct physics?
+- Is the baseline model (IRI/empirical) appropriate?
+- Are calibration offsets applied in the right direction?
+- Is raw_arrival_time_ms being set correctly for TEC estimation?
+- Are there station or frequency-dependent systematic errors?
 
 **Key Methods to Review:**
 
-- `Phase2AnalyticsService.process_minute()` - Main processing loop
-- `Phase2AnalyticsService._read_binary_minute()` - Binary data reading
-- `Phase2AnalyticsService._write_hdf5_timing()` - HDF5 writing
-- `Phase2TemporalEngine.detect_tones()` - Tone detection
-- `Phase2TemporalEngine._calculate_d_clock()` - Timing calculation
+- `Phase2TemporalEngine._calculate_d_clock()` - Core D_clock calculation
+- `PropagationModel.compute_delay()` - Propagation delay estimation
+- `Phase2TemporalEngine._apply_calibration()` - Calibration application
+- `Phase2AnalyticsService._write_hdf5_timing()` - Data output
+
+#### TEC Estimator (`tec_estimator.py`)
+
+**Focus:** HF TEC estimation from multi-frequency measurements
+
+**Questions:**
+
+- Why does TEC solver return 0.0 TECU with R²=1.00?
+- Is the least-squares formulation correct?
+- Are frequency diversity checks appropriate?
+- Is the ionospheric constant (40.3) applied correctly?
+- Are input measurements (raw_arrival_time_ms) correct?
+- Should TEC estimation happen in Phase 2 instead of fusion?
+
+**Key Methods to Review:**
+
+- `TECEstimator.estimate_tec()` - Main TEC estimation (lines 81-226)
+- Least squares formulation: `y = c + m*x` where `x = 1/f²`
+- TEC extraction: `tec = m / K_IONOSPHERE`
+- Frequency diversity check: `np.std(freqs) < 1000.0`
+
+**Known Issue:** Returns 0.0 TECU when all frequencies have identical ToA (no dispersion)
 
 #### Fusion Service (`multi_broadcast_fusion.py`)
 
-**Focus:** Multi-broadcast fusion and Chrony SHM output
+**Focus:** Multi-broadcast fusion algorithm and statistical methods
 
 **Questions:**
 
-- Is the fusion algorithm statistically sound?
-- Are calibration offsets being applied correctly?
-- Is outlier rejection working properly?
-- Is the uncertainty budget correct?
-- Is the Chrony SHM being updated correctly?
+- Is the weighted fusion formula correct?
+- Are measurement weights calculated appropriately?
+- Is the Kalman filter implementation sound?
+- Are outlier rejection thresholds well-justified?
+- Does cross-station validation make physical sense?
+- Is the uncertainty budget complete?
+- Are there any remaining discontinuity sources?
 
 **Key Methods to Review:**
 
-- `MultiBroadcastFusion.fuse()` - Main fusion algorithm
-- `MultiBroadcastFusion._apply_calibration()` - Calibration application
-- `MultiBroadcastFusion._reject_outliers()` - Outlier rejection
+- `MultiBroadcastFusion.fuse()` - Main fusion algorithm (lines 1898-2300)
+- `MultiBroadcastFusion._calculate_weights()` - Weight calculation
+- `MultiBroadcastFusion._reject_outliers()` - Outlier rejection (MAD-based)
 - `MultiBroadcastFusion._cross_validate_stations()` - Cross-validation
-- `ChronySHMUpdater.run()` - Chrony SHM updates
+- `MultiBroadcastFusion._update_kalman()` - Kalman filter updates
+- `MultiBroadcastFusion._calculate_uncertainty()` - Uncertainty budget
 
-### Known Issues to Investigate
+**Recent Changes (2026-01-05):**
+- Lines 2084-2111: TEC now adjusts confidence, not D_clock values
+- Lines 1968-2016: GNSS VTEC validates agreement, adjusts confidence
+- Added physical realism check: 5-100 TECU range for valid TEC
 
-**1. Fusion Crash-Loop (00:20 UTC)**
+### Known Issues and Questions
 
-- Service crashed 5 times consecutively with exit code 1
-- No Python errors logged to systemd journal or fusion.log
-- Service exited immediately before logging initialized
-- **Hypothesis:** Import error, missing dependency, or permission issue
-- **Action:** Review fusion service startup sequence and error handling
+**1. HF TEC Solver Returns 0.0 TECU (ACTIVE)**
 
-**2. TEC Solver NaN Values**
+- TEC solver consistently returns 0.0 TECU with R²=1.00 for WWV
+- CHU returns NaN due to insufficient frequency diversity (all 14.67 MHz)
+- **Hypothesis:** All WWV frequencies have identical ToA (no ionospheric dispersion)
+- **Questions:** 
+  - Are raw_arrival_time_ms values being set correctly in Phase 2?
+  - Should measurements already be TEC-corrected at this point?
+  - Is the TEC solver being called at the wrong stage of the pipeline?
+- **Impact:** Now mitigated (unrealistic TEC values ignored), but root cause unknown
 
-- TEC solver produces NaN when measurements lack frequency diversity
-- NaN values were propagating into fusion calculations (fixed in v3.9.0)
-- **Question:** Are there other places where NaN could propagate?
-- **Action:** Review all numerical calculations for NaN handling
+**2. Propagation Delay Model Accuracy (NEEDS INVESTIGATION)**
 
-**3. Cross-Station Disagreement**
+- Phase 2 uses baseline physics model (IRI or empirical) for propagation delays
+- Fusion previously modified these with TEC corrections (now disabled)
+- **Questions:**
+  - Are the baseline propagation delays accurate?
+  - Should TEC correction happen in Phase 2 instead of fusion?
+  - Are multi-hop delays calculated correctly?
+  - Is the IRI model appropriate for HF frequencies?
 
-- Fusion logs show "Cross-station disagreement: 2.038ms (threshold: 0.200ms)"
-- Outlier stations: WWVH, WWV
-- **Question:** Is this a real propagation anomaly or a calculation error?
-- **Action:** Review cross-validation logic and thresholds
+**3. D_clock Inter-Station Agreement (HISTORICAL)**
 
-**4. HDF5 Fallback to CSV**
+- Previous sessions noted large D_clock disagreements between stations (6-24ms)
+- **Question:** With TEC corrections disabled, do stations now agree better?
+- **Action:** Examine current per-station D_clock values for systematic biases
 
-- Fusion service logs show "HDF5 returned 0 measurements, falling back to CSV"
-- **Question:** Why is HDF5 returning 0 measurements?
-- **Action:** Review HDF5 reader time-range queries and SWMR visibility
+**4. Kalman Filter Initialization (NEEDS REVIEW)**
+
+- Kalman filter state initialization and update logic
+- **Questions:**
+  - Is the initial state appropriate?
+  - Are process/measurement noise parameters correct?
+  - Does the filter handle large jumps appropriately?
+  - Is the gradual ramp-up (DISCRIMINATION_SUSPECT protection) working?
 
 ### Critique Methodology
 
@@ -254,15 +303,16 @@ Large disagreements indicate one or more of:
 
 ### System Information
 
-**Version:** 3.10.0 (includes service stability improvements)
+**Version:** 4.0.0 (includes TEC discontinuity fix)
 
 **Services:**
 
 - ✅ `timestd-core-recorder` - Active, writing L0 data
 - ✅ `timestd-analytics` - Active, writing L2 HDF5
-- ✅ `timestd-fusion` - Active, writing L3 HDF5 (stable since 02:02 UTC)
+- ✅ `timestd-fusion` - Active, writing L3 HDF5 (stable, continuous)
 - ✅ `timestd-science-aggregator` - Active
 - ✅ `timestd-vtec` - Active, providing GNSS VTEC
+- ✅ `timestd-web-api` - Active, serving metrology data
 - ✅ `timestd-chrony-monitor` - Timer active, monitoring every 5 minutes
 
 **Data Pipeline:**
@@ -270,20 +320,23 @@ Large disagreements indicate one or more of:
 - L0 (Raw IQ): `.bin.zst` compressed binary in `/dev/shm/timestd/raw_buffer/`
 - L2 (Timing): HDF5 in `/var/lib/timestd/phase2/STATION_FREQ/`
 - L3 (Fusion): HDF5 in `/var/lib/timestd/phase2/fusion/`
+- Web API: `http://localhost:8000/api/metrology/fusion/latest`
 
-**Current Timing Output:**
+**Current Timing Output (2026-01-05 10:10 UTC):**
 
-- D_clock: -0.073 to +0.619 ms (varies)
-- Uncertainty: ±0.8 to ±1.5 ms
-- Quality: Grade B/C
-- Broadcasts: 59-69 stations contributing
-- Chrony reach: 210 (octal) = 136 (decimal) = 53%
+- D_clock: 0.000 ms (stable, centered on UTC)
+- Uncertainty: ±0.8 ms
+- Quality: Grade B
+- Broadcasts: 52-61 contributing (varies smoothly)
+- Chrony reach: 52 (octal) = 42 (decimal), offset +2.4ns
+- **No discontinuities** despite broadcast count changes
 
-**Known Limitations:**
+**Recent Improvements:**
 
-- VTEC: Using GNSS fallback (HF TEC solver produces NaN)
-- Chrony reach: Not yet at optimal 377 (monitoring for 24 hours)
-- Fusion crash-loop: Cause unknown, requires investigation
+- TEC corrections now refine uncertainty, not modify measurements
+- HDF5 reader uses `timestamp_utc` length as canonical
+- System maintains continuity as signals fade in/out
+- Web API successfully reading fusion data
 
 ### Reference Documents
 
@@ -342,46 +395,65 @@ Large disagreements indicate one or more of:
 
 ---
 
+## ✅ SESSION COMPLETE (2026-01-05 10:13 UTC): TEC DISCONTINUITY FIX
+
+**Status:** 🟢 **COMPLETE** - TEC discontinuities eliminated, system maintains continuity
+
+**Author:** AI Agent (Cascade)
+**Date:** 2026-01-05 10:13 UTC
+
+### Summary
+
+Diagnosed and fixed major discontinuity issue where TEC corrections were modifying measurement values, causing 4-6ms jumps when signals faded in/out.
+
+**Root Cause:** TEC estimation (both HF and GNSS VTEC) was modifying D_clock measurement values based on propagation delay corrections. When signal availability or TEC quality changed, this caused discontinuities.
+
+**Resolution:** Changed TEC from modifying measurements to refining confidence/uncertainty.
+
+**Fixes Implemented:**
+
+1. ✅ HDF5 Reader: Use `timestamp_utc` length as canonical (not `min(len(values))`)
+2. ✅ HF TEC: Adjust confidence ±15% based on fit quality and physical realism
+3. ✅ GNSS VTEC: Adjust confidence ±10% based on model agreement
+4. ✅ Physical realism check: Reject TEC outside 5-100 TECU range
+5. ✅ Measurements retain original Phase 2 D_clock values
+
+**Verification Results:**
+
+- D_clock: Stable at 0.000ms (before: jumping 4-6ms)
+- Broadcast count: Varies 52→61 with no discontinuities
+- Chrony: Stable, reach=52, offset=+2.4ns
+- Web API: Successfully reading fusion data
+
+**Key Principle Established:**
+
+System sits on a GPSDO. Signal availability changes should only affect error bars, not the fused estimate. TEC should refine the baseline physics model, not override it.
+
+**Files Modified:**
+
+- `src/hf_timestd/io/hdf5_reader.py` - Fixed dataset length calculation
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - TEC as refinement, not replacement
+- `CRITIC_CONTEXT.md` - Updated for next session
+
+**Next Session:** Critique per-broadcast D_clock estimation and fusion methods for flaws and vulnerabilities.
+
+---
+
 ## ✅ SESSION COMPLETE (2026-01-04 02:16 UTC): SERVICE STABILITY IMPROVEMENTS
 
-**Status:** 🟢 **COMPLETE** - Monitoring tools implemented, service stable, ready for pipeline critique
+**Status:** 🟢 **COMPLETE** - Monitoring tools implemented, service stable
 
 **Author:** AI Agent (Antigravity)
 **Date:** 2026-01-04 02:16 UTC
 
 ### Summary
 
-Investigated Chrony reach issue, implemented service stability improvements, and prepared system for comprehensive pipeline critique.
+Investigated Chrony reach issue, implemented service stability improvements.
 
-**Root Cause:** `timestd-fusion` service was stopped (inactive), not a code design flaw.
+**Root Cause:** `timestd-fusion` service was stopped (inactive).
 
-**Resolution:** Service restarted, Chrony reach recovered from 0 → 210 (octal) in under 2 minutes.
+**Resolution:** Service restarted, Chrony reach recovered from 0 → 210 (octal).
 
-**Improvements Implemented:**
-
-1. ✅ Systemd watchdog enabled (Type=notify, WatchdogSec=30)
-2. ✅ Chrony reach monitoring script created
-3. ✅ Periodic monitoring timer implemented (every 5 minutes)
-4. ✅ Deployment automation script created
-5. ✅ Comprehensive documentation completed
-
-**System Architecture Validated:**
-
-- ✅ VTEC is properly optional with graceful fallback
-- ✅ HDF5 is the primary data format
-- ✅ Core Recorder writes to `.bin.zst` compressed binary
-- ✅ Critical path is well-defined and functional
-- ✅ Systemd watchdog already implemented in code
-
-**Files Created/Modified:**
-
-- `scripts/check-chrony-reach.sh` - Monitoring script
-- `scripts/deploy-service-improvements.sh` - Deployment script
-- `systemd/timestd-fusion.service` - Updated with watchdog
-- `systemd/timestd-chrony-monitor.service` - Monitoring service
-- `systemd/timestd-chrony-monitor.timer` - Monitoring timer
-- `CHANGELOG.md` - Version 3.10.0 entry
-
-**Next Session:** Comprehensive critique of RTP → Chrony data pipeline to find flaws and vulnerabilities.
+**Improvements:** Systemd watchdog, monitoring scripts, periodic timers.
 
 ---

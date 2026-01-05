@@ -211,6 +211,9 @@ class DataProductWriter:
             # Initialize file metadata if new file
             if 'metadata' not in self._current_file.attrs:
                 self._write_file_metadata()
+                # CRITICAL: Initialize all schema fields before enabling SWMR
+                # This prevents "Cannot add field" errors when optional fields arrive later
+                self._initialize_all_datasets()
             
             # Enable SWMR mode after file is initialized
             # This allows concurrent readers to access the file
@@ -250,6 +253,58 @@ class DataProductWriter:
             self._current_file.attrs['standards'] = ', '.join(self.schema['standards'])
         
         logger.debug(f"Wrote file metadata for {self.channel}")
+    
+    def _initialize_all_datasets(self) -> None:
+        """
+        Initialize all datasets from schema before enabling SWMR mode.
+        
+        This is critical to prevent "Cannot add field" errors when optional
+        fields arrive after SWMR mode is enabled. SWMR mode does not allow
+        adding new datasets, so all must be created upfront.
+        """
+        if self._current_file is None:
+            return
+        
+        for field in self.schema['fields']:
+            field_name = field['name']
+            
+            # Skip if dataset already exists
+            if field_name in self._current_file:
+                continue
+            
+            # Determine HDF5 dtype
+            field_type = field.get('type')
+            if field_type == 'float':
+                dtype = np.float64
+            elif field_type == 'integer':
+                dtype = np.int64
+            elif field_type == 'string':
+                dtype = h5py.string_dtype(encoding='utf-8')
+            elif field_type == 'boolean':
+                dtype = np.bool_
+            else:
+                logger.warning(f"Unknown type '{field_type}' for field '{field_name}', skipping")
+                continue
+            
+            # Create empty dataset
+            self._current_file.create_dataset(
+                field_name,
+                shape=(0,),
+                maxshape=(None,),
+                dtype=dtype,
+                chunks=True,
+                compression='gzip',
+                compression_opts=4
+            )
+            
+            # Add field metadata
+            self._current_file[field_name].attrs['description'] = field.get('description', '')
+            if 'units' in field:
+                self._current_file[field_name].attrs['units'] = field['units']
+            if 'reference' in field:
+                self._current_file[field_name].attrs['reference'] = field['reference']
+        
+        logger.info(f"Initialized {len(self.schema['fields'])} datasets for {self.channel}")
     
     def _validate_field(self, field_schema: Dict[str, Any], value: Any, field_name: str) -> None:
         """

@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "data_product": "L2_test_signal",
     "description": "WWV/WWVH scientific test signal analysis for ionospheric characterization",
     "cadence_seconds": 3600,

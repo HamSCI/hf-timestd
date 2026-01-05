@@ -1966,78 +1966,53 @@ class MultiBroadcastFusion:
             logger.debug(f"VTEC data: {vtec_tecu:.2f} TECU, age={age_seconds:.1f}s")
             
             if age_seconds < 300:
-                logger.info(f"Applying GNSS VTEC correction: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
+                logger.info(f"GNSS VTEC available: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
                 used_gnss_vtec = True
+                
+                # CRITICAL FIX (2026-01-05): GNSS VTEC should refine confidence, not modify measurements
+                # Modifying D_clock based on VTEC causes discontinuities when VTEC quality changes
+                # Instead, use VTEC-model agreement to adjust measurement confidence
                 
                 for m in measurements:
                     if m.station == 'GLOBAL_DIFF' or m.station == 'UNKNOWN':
                         continue
                         
-                    # 1. Compute baseline delay (what the system likely used)
-                    # We assume the measurement used Tier 2/3 (IRI or Empirical)
+                    # Compute baseline delay (what the system used)
                     baseline = self.physics_model.compute_delay(
                         station=m.station,
                         frequency_mhz=m.frequency_mhz,
-                        observed_arrival_ms=0, # Not needed for prediction
+                        observed_arrival_ms=0,
                         timestamp=datetime.fromtimestamp(m.timestamp, tz=timezone.utc).replace(tzinfo=None)
                     )
                     
                     if baseline and baseline.n_hops > 0:
-                        # 2. Extract Implicit TEC from baseline
-                        # baseline.tec_tecu is what the model thought TEC was (e.g. 20-50 TECU)
+                        # Extract model TEC
                         model_tec = baseline.tec_tecu if baseline.tec_tecu else 20.0
                         
-                        # 3. Calculate Ionospheric Delays
-                        # Delay_meters = 40.3 * TEC * 10^16 / f^2
-                        # Delay_sec = Delay_meters / c
-                        # Delay_ms = Delay_sec * 1000
+                        # Calculate TEC agreement
+                        tec_diff = abs(vtec_tecu - model_tec)
+                        tec_agreement = 1.0 - min(1.0, tec_diff / 20.0)  # 0-1 scale
                         
-                        C_LIGHT = 299792458.0
-                        freq_hz = m.frequency_mhz * 1e6
-                        
-                        # Factor to convert TECU (1e16 el/m2) to Delay (ms)
-                        # factor = (40.3 * 1e16 * 1000) / (freq_hz^2 * c)
-                        factor = (40.3 * 1e16 * baseline.n_hops * 1000.0) / ((freq_hz**2) * C_LIGHT)
-                        
-                        old_iono_delay_ms = model_tec * factor
-                        new_iono_delay_ms = vtec_tecu * factor
-                        
-                        # 4. Apply Correction
-                        # We want to REMOVE old iono and ADD new iono
-                        # d_clock = (Arrival - vac - old_iono)
-                        # d_clock_new = (Arrival - vac - new_iono)
-                        #             = d_clock + old_iono - new_iono
-                        
-                        correction_ms = old_iono_delay_ms - new_iono_delay_ms
-                        
-                        # FIX 1: VTEC Safety Check
-                        # Only apply correction if it moves the measurement closer to the group median
-                        # (or 0 if we are the only one, but strict check is better)
-                        
-                        other_clocks = [om.d_clock_ms for om in measurements if om != m and om.station != 'GLOBAL_DIFF']
-                        if other_clocks:
-                            median_ref = np.median(other_clocks)
-                            dist_before = abs(m.d_clock_ms - median_ref)
-                            dist_after = abs((m.d_clock_ms + correction_ms) - median_ref)
-                            is_better = dist_after < dist_before
-                        else:
-                            # If no others, compare to UTC target (0)
-                            is_better = abs(m.d_clock_ms + correction_ms) < abs(m.d_clock_ms)
-                        
-                        if is_better:
+                        # Adjust confidence based on TEC agreement
+                        # Good agreement (< 5 TECU diff) -> boost confidence
+                        # Poor agreement (> 20 TECU diff) -> reduce confidence
+                        if tec_diff < 5.0:
+                            m.confidence = min(1.0, m.confidence * 1.1)
+                            m.propagation_mode = f"{baseline.propagation_mode}+GNSS_VALIDATED"
                             logger.debug(
-                                f"  {m.station} {m.frequency_mhz}MHz: Model={model_tec:.1f}TECU Iono={old_iono_delay_ms:.3f}ms -> "
-                                f"GNSS={vtec_tecu:.1f}TECU Iono={new_iono_delay_ms:.3f}ms | "
-                                f"Corr={correction_ms:+.3f}ms (Improved)"
+                                f"  {m.station} {m.frequency_mhz}MHz: GNSS={vtec_tecu:.1f} Model={model_tec:.1f} TECU "
+                                f"(diff={tec_diff:.1f}, agreement={tec_agreement:.2f}) -> confidence boost"
                             )
-                            
-                            m.d_clock_ms += correction_ms
-                            m.propagation_delay_ms += (new_iono_delay_ms - old_iono_delay_ms)
-                            m.propagation_mode = f"{baseline.propagation_mode}+GNSS"
-                            m.confidence = min(0.95, m.confidence * 1.5) # Boost confidence
+                        elif tec_diff > 20.0:
+                            m.confidence = max(0.5, m.confidence * 0.9)
+                            logger.debug(
+                                f"  {m.station} {m.frequency_mhz}MHz: GNSS={vtec_tecu:.1f} Model={model_tec:.1f} TECU "
+                                f"(diff={tec_diff:.1f}, poor agreement) -> confidence reduction"
+                            )
                         else:
                             logger.debug(
-                                f"  {m.station} {m.frequency_mhz}MHz: VTEC correction rejected (worsened consistency)"
+                                f"  {m.station} {m.frequency_mhz}MHz: GNSS={vtec_tecu:.1f} Model={model_tec:.1f} TECU "
+                                f"(diff={tec_diff:.1f}, moderate agreement)"
                             )
             else:
                 logger.debug(f"GNSS VTEC stale (age: {time.time()-vtec_ts:.1f}s), skipping")
@@ -2083,37 +2058,30 @@ class MultiBroadcastFusion:
                     
                     if tec_result:
                         # TEC writing is handled by science_aggregator service
-                        # We use TEC here only to improve propagation delay estimates
+                        # CRITICAL FIX (2026-01-05): TEC should be a REFINEMENT to uncertainty, not a replacement
+                        # Modifying D_clock values based on TEC causes discontinuities when signals fade in/out
+                        # Instead, use TEC quality to adjust measurement confidence/uncertainty
                         
-                        # CRITICAL: Validate TEC result is not NaN before using it
-                        # NaN values can occur when measurements have insufficient frequency diversity
-                        # or identical ToA values, causing the least-squares fit to produce NaN
+                        # Validate TEC result is not NaN
                         if np.isnan(tec_result.tec_u) or np.isnan(tec_result.confidence):
                             logger.warning(f"TEC solver produced NaN for {station} (tec={tec_result.tec_u}, conf={tec_result.confidence}) - skipping")
-                        elif tec_result.confidence > 0.9:
+                        elif tec_result.confidence > 0.9 and 5.0 <= tec_result.tec_u <= 100.0:
+                            # TEC is physically reasonable (5-100 TECU) and well-fit
                             logger.info(f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f})")
                             
-                            # Update measurements with Physics-Derived delays
+                            # REFINEMENT: Boost confidence for measurements with good TEC fit
+                            # This gives them more weight in fusion without modifying their values
                             for m in station_meas:
-                                if m.frequency_mhz in tec_result.group_delay_ms:
-                                    new_delay = tec_result.group_delay_ms[m.frequency_mhz]
-                                    
-                                    # Validate new_delay is not NaN
-                                    if np.isnan(new_delay):
-                                        logger.warning(f"TEC solver produced NaN delay for {station} {m.frequency_mhz}MHz - skipping")
-                                        continue
-                                    
-                                    # Update D_clock with NEW delay
-                                    # D_clock_new = T_arrival - T_delay_new
-                                    t_arrival = m.d_clock_ms + m.propagation_delay_ms
-                                    m.d_clock_ms = t_arrival - new_delay
-                                    
-                                    # Update metadata
-                                    m.propagation_delay_ms = new_delay
-                                    m.propagation_mode = 'TEC_SOLVED' # Flag as physics-derived
-                                    m.confidence = min(1.0, m.confidence * 1.2) # Boost confidence
+                                m.propagation_mode = 'TEC_VALIDATED' # Flag as TEC-validated
+                                m.confidence = min(1.0, m.confidence * 1.15) # Modest confidence boost
+                        elif tec_result.confidence > 0.9:
+                            # TEC fit is good but value is unrealistic (e.g., 0.0 TECU)
+                            logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}) - ignoring")
                         else:
+                            # TEC fit is poor - reduce confidence slightly
                             logger.warning(f"TEC poor fit for {station}: R2={tec_result.confidence:.2f} (Needs >0.9)")
+                            for m in station_meas:
+                                m.confidence = max(0.5, m.confidence * 0.95) # Slight confidence reduction
                     else:
                         logger.warning(f"TEC solver returned None for {station} (inputs: {len(tec_input)})")
                 else:

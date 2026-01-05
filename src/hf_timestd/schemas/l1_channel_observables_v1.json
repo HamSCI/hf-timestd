@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "data_product": "L1A_channel_observables",
     "description": "Calibrated channel measurements from Phase 2 analytics - raw observables from IQ samples",
     "cadence_seconds": 60,

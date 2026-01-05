@@ -193,14 +193,15 @@ class DataProductReader:
                         if field_name in f:
                             data[field_name] = f[field_name][:]
                     
-                    # SWMR race condition mitigation: Find minimum length across all datasets
-                    # In SWMR mode, datasets may be extended non-atomically, so we need to
-                    # iterate only up to the minimum length to avoid index errors
-                    if not data:
+                    # Use timestamp_utc length as the canonical measurement count
+                    # Other datasets may be empty if optional fields were never written
+                    if not data or 'timestamp_utc' not in data:
                         logger.warning(f"No data fields found in {hdf5_path}")
                         continue
                     
-                    n_measurements = min(len(values) for values in data.values())
+                    # Use timestamp_utc as the canonical length
+                    # Optional fields may have length 0 if never written
+                    n_measurements = len(data['timestamp_utc'])
                     
                     # Filter measurements
                     for i in range(n_measurements):

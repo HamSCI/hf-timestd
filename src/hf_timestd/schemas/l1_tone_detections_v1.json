@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "data_product": "L1A_tone_detections",
     "description": "Station identification tone timing measurements - critical input for multi-broadcast fusion",
     "cadence_seconds": 60,

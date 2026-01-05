@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "data_product": "L3A_gnss_vtec",
     "description": "Real-time GNSS Vertical Total Electron Content from ZED-F9P receiver",
     "cadence_seconds": 1,
