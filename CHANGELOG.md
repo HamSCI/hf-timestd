@@ -2,6 +2,145 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.5.1] - 2026-01-05
+
+### Fixed - Chrony Feed Restoration After v4.5.0 Deployment
+
+**Critical Issue:** After v4.5.0 typed model deployment, fusion service stopped feeding Chrony (reach=0, no updates for 40+ minutes).
+
+#### Bug #1: HDF5 SWMR Mode Initialization
+
+- **Issue**: HDF5 writer opened files in exclusive append mode before enabling SWMR, creating a lock window that prevented concurrent readers
+- **Root Cause**: Two-step SWMR enablement (open in append, then enable SWMR) left file locked during initialization
+- **Impact**: Fusion service couldn't read analytics HDF5 files, got `OSError: Unable to synchronously open file (file is already open for write)`
+- **Fix**: Refactored to create file structure first, then reopen in SWMR write mode (`r+` with `swmr=True` flag)
+- **Result**: Files now support true concurrent read/write access
+- **Files**: `src/hf_timestd/io/hdf5_writer.py` (lines 148-240)
+
+**Technical Details:**
+
+```python
+# Before (broken):
+self._current_file = h5py.File(path, 'a', libver='latest')
+# ... initialize datasets ...
+self._current_file.swmr_mode = True  # Too late, file already locked
+
+# After (fixed):
+# Step 1: Create and initialize
+with h5py.File(path, 'w', libver='latest') as f:
+    self._write_file_metadata_to_file(f)
+    self._initialize_all_datasets_in_file(f)
+
+# Step 2: Reopen in SWMR write mode
+self._current_file = h5py.File(path, 'r+', libver='latest', swmr=True)
+```
+
+#### Bug #2: Channel Discovery Logic
+
+- **Issue**: Fusion service looked for legacy `clock_offset` subdirectories instead of HDF5 timing measurement files
+- **Root Cause**: `_discover_channels()` method not updated for new HDF5 schema (files now in channel root, not subdirectories)
+- **Impact**: Fusion discovered 0 channels (should be 9), couldn't read any measurements
+- **Fix**: Updated discovery to look for `*_timing_measurements_*.h5` files with fallback to legacy directories
+- **Result**: Fusion now discovers all 9 channels (CHU_14670, CHU_3330, CHU_7850, SHARED_10000, SHARED_15000, WWV_20000, WWV_25000, SHARED_2500, SHARED_5000)
+- **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py` (lines 522-543)
+
+**Technical Details:**
+
+```python
+# Before (broken):
+if subdir.is_dir() and (subdir / 'clock_offset').exists():
+    channels.append(subdir.name)
+
+# After (fixed):
+if subdir.is_dir() and subdir.name != 'fusion':
+    has_hdf5 = any(subdir.glob('*_timing_measurements_*.h5'))
+    has_legacy = (subdir / 'clock_offset').exists()
+    if has_hdf5 or has_legacy:
+        channels.append(subdir.name)
+```
+
+#### Bug #3: Missing uncertainty_ms Field
+
+- **Issue**: `BroadcastMeasurement` dataclass missing `uncertainty_ms` field caused AttributeError in fusion weight calculation
+- **Root Cause**: Field added to HDF5 schema but not to Python dataclass
+- **Impact**: Fusion crashed with `AttributeError: 'BroadcastMeasurement' object has no attribute 'uncertainty_ms'` after successfully reading 245 measurements
+- **Fix**: Added `uncertainty_ms: Optional[float] = None` to dataclass and populated from HDF5 data
+- **Result**: Fusion successfully processes measurements and calculates weights
+- **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py` (lines 185-199, 1455-1470)
+
+### Deployment Challenges Resolved
+
+#### Wrong Virtual Environment
+
+- **Issue**: Initially installed to user venv (`/home/mjh/git/hf-timestd/venv`) instead of production (`/opt/hf-timestd/venv`)
+- **Solution**: Installed to correct venv with editable install pointing to source directory
+
+#### Permissions
+
+- **Issue**: `timestd` user couldn't access `/home/mjh/git/hf-timestd/src` (editable install source)
+- **Solution**: `chmod +rx` on `/home/mjh` and subdirectories to allow service account access
+
+#### Python Bytecode Cache
+
+- **Issue**: Old `.pyc` files preventing new code from loading
+- **Solution**: Cleared cache from both source and venv directories before reinstall
+
+### Verification Results
+
+**HDF5 Reader**: ✅ Successfully reads 245 measurements with 30-minute lookback
+
+**Channel Discovery**: ✅ Discovers 9 channels (was 0)
+
+**Fusion Service**: ✅ Processes measurements and feeds Chrony
+
+**Chrony Feed**: ✅ **RESTORED**
+
+```
+Before: #* TMGR    0   4     0   40m   -766ns[ -607ns] +/- 1000us
+After:  #* TMGR    0   4   225    16   +211us[ +180us] +/- 1000us
+```
+
+- reach=225 (was 0) - Successfully receiving updates
+- LastRx=16s (was 40+ minutes) - Fresh data flowing
+- Active measurement: +211us - Fusion providing time offset
+
+### Deployment
+
+**Installation:**
+
+```bash
+# Clear Python cache
+find /home/mjh/git/hf-timestd -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+sudo find /opt/hf-timestd/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# Fix permissions for editable install
+sudo chmod +rx /home/mjh /home/mjh/git /home/mjh/git/hf-timestd /home/mjh/git/hf-timestd/src
+
+# Install to production venv
+sudo /opt/hf-timestd/venv/bin/pip install -e /home/mjh/git/hf-timestd
+
+# Restart services
+sudo systemctl restart timestd-analytics
+sudo systemctl restart timestd-fusion
+```
+
+**Verification:**
+
+```bash
+# Check Chrony feed (should show reach > 200, LastRx < 60s)
+chronyc sources | grep TMGR
+
+# Monitor fusion service
+sudo journalctl -u timestd-fusion -f
+```
+
+### Technical Impact
+
+- **HDF5 SWMR Mode**: Now properly supports concurrent read/write as designed
+- **Data Pipeline**: Fusion successfully reads from HDF5 (no CSV fallback needed)
+- **Chrony Stability**: Time synchronization restored with fresh updates every 16 seconds
+- **System Status**: 🟢 Production ready
+
 ## [4.5.0] - 2026-01-05
 
 ### Added - Typed Pydantic Data Models (L1/L2/L3)

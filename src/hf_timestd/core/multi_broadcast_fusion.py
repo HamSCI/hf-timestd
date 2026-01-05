@@ -196,6 +196,7 @@ class BroadcastMeasurement:
     quality_grade: str        # A, B, C, D
     channel_name: str         # Source channel
     raw_arrival_time_ms: Optional[float] = None  # Uncalibrated ToA for TEC (schema v1.1.0+)
+    uncertainty_ms: Optional[float] = None  # ISO GUM combined uncertainty (schema v1.1.0+)
 
 
 
@@ -520,12 +521,26 @@ class MultiBroadcastFusion:
         logger.info(f"  Auto-calibrate: {auto_calibrate}")
     
     def _discover_channels(self) -> List[str]:
-        """Discover available Phase 2 channels."""
+        """
+        Discover available Phase 2 channels.
+        
+        CRITICAL FIX (2026-01-05): Updated to look for HDF5 timing measurement files
+        instead of legacy clock_offset subdirectory. The new HDF5 schema stores
+        timing_measurements files directly in the channel directory.
+        """
         channels = []
         if self.phase2_dir.exists():
             for subdir in self.phase2_dir.iterdir():
-                if subdir.is_dir() and (subdir / 'clock_offset').exists():
-                    channels.append(subdir.name)
+                if subdir.is_dir() and subdir.name != 'fusion':
+                    # Check for HDF5 timing measurement files (new schema)
+                    has_hdf5 = any(subdir.glob('*_timing_measurements_*.h5'))
+                    # Fallback: check for legacy clock_offset subdirectory
+                    has_legacy = (subdir / 'clock_offset').exists()
+                    
+                    if has_hdf5 or has_legacy:
+                        channels.append(subdir.name)
+        
+        logger.info(f"Discovered {len(channels)} channels: {sorted(channels)[:5]}...")
         return sorted(channels)
     
     def _validate_calibration_data(self, data: dict) -> bool:
@@ -1450,7 +1465,8 @@ class MultiBroadcastFusion:
                             snr_db=hdf5_meas.get('snr_db', 0.0),
                             quality_grade=hdf5_meas.get('quality_grade', 'D'),
                             channel_name=channel,
-                            raw_arrival_time_ms=hdf5_meas.get('raw_arrival_time_ms')
+                            raw_arrival_time_ms=hdf5_meas.get('raw_arrival_time_ms'),
+                            uncertainty_ms=hdf5_meas.get('uncertainty_ms', 1.0)
                         )
                         measurements.append(m)
                     

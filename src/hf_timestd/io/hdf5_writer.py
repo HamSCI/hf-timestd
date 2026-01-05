@@ -149,14 +149,18 @@ class DataProductWriter:
         """
         Ensure HDF5 file is open for the given timestamp (daily rotation).
         
-        Opens file in SWMR (Single Writer Multiple Reader) mode to enable
-        concurrent read access while writing.
+        Opens file in SWMR (Single Writer Multiple Reader) mode from the start
+        to enable concurrent read access while writing.
+        
+        CRITICAL FIX (2026-01-05): Files are now opened in SWMR write mode from
+        creation to prevent "file already open for write" errors when readers
+        try to access the file concurrently.
         
         Args:
             timestamp_utc: ISO 8601 timestamp
             
         Returns:
-            Open HDF5 file handle
+            Open HDF5 file handle in SWMR write mode
         """
         # Extract date from timestamp
         dt = datetime.fromisoformat(timestamp_utc.replace('Z', '+00:00'))
@@ -174,17 +178,38 @@ class DataProductWriter:
                 except Exception as e:
                     logger.warning(f"Error closing previous file: {e}")
             
-            # Open new file with SWMR mode
             hdf5_path = self._get_hdf5_path(date_str)
             
+            # CRITICAL FIX: Two-step process for SWMR mode
+            # Step 1: Create and initialize file structure if it doesn't exist
+            if not hdf5_path.exists():
+                logger.info(f"Creating new HDF5 file: {hdf5_path}")
+                try:
+                    # Create file with proper structure
+                    with h5py.File(hdf5_path, 'w', libver='latest') as f:
+                        # Write metadata
+                        self._write_file_metadata_to_file(f)
+                        # Initialize all datasets before SWMR mode
+                        self._initialize_all_datasets_in_file(f)
+                        # Mark as initialized
+                        f.attrs['metadata'] = 'initialized'
+                    logger.info(f"Initialized file structure for {hdf5_path}")
+                except Exception as e:
+                    logger.error(f"Failed to create HDF5 file: {e}")
+                    raise
+            
+            # Step 2: Open in SWMR write mode
             try:
-                # Use libver='latest' for SWMR support
-                # Open in append mode, will enable SWMR after initialization
+                # Open existing file in read-write mode with SWMR enabled
+                # This allows concurrent readers to access the file
                 self._current_file = h5py.File(
-                    hdf5_path, 
-                    'a',
-                    libver='latest'  # Required for SWMR
+                    hdf5_path,
+                    'r+',  # Read-write mode (file must exist)
+                    libver='latest',
+                    swmr=True  # Enable SWMR from the start
                 )
+                logger.info(f"Opened {hdf5_path} in SWMR write mode")
+                
             except OSError as e:
                 # Check for "file is already open" error (HDF5 locking issue)
                 error_msg = str(e).lower()
@@ -193,12 +218,13 @@ class DataProductWriter:
                     
                     # Attempt recovery
                     if self._try_recover_file_lock(hdf5_path):
-                        # Retry open
+                        # Retry open in SWMR mode
                         logger.info("Retrying file open after recovery...")
                         self._current_file = h5py.File(
-                            hdf5_path, 
-                            'a',
-                            libver='latest'
+                            hdf5_path,
+                            'r+',
+                            libver='latest',
+                            swmr=True
                         )
                     else:
                         raise  # Re-raise if recovery failed
@@ -208,68 +234,58 @@ class DataProductWriter:
             self._current_date = date_str
             self._measurement_count = 0
             
-            # Initialize file metadata if new file
-            if 'metadata' not in self._current_file.attrs:
-                self._write_file_metadata()
-                # CRITICAL: Initialize all schema fields before enabling SWMR
-                # This prevents "Cannot add field" errors when optional fields arrive later
-                self._initialize_all_datasets()
-            
-            # Enable SWMR mode after file is initialized
-            # This allows concurrent readers to access the file
-            try:
-                if not self._current_file.swmr_mode:
-                    self._current_file.swmr_mode = True
-                    logger.info(f"Enabled SWMR mode for {hdf5_path}")
-            except Exception as e:
-                logger.warning(f"Could not enable SWMR mode: {e}")
-            
-            logger.info(f"Opened HDF5 file: {hdf5_path}")
+            logger.info(f"File ready: {hdf5_path} (SWMR mode active)")
         
         return self._current_file
     
     def _write_file_metadata(self) -> None:
-        """Write file-level metadata attributes."""
+        """Write file-level metadata attributes to current file."""
         if self._current_file is None:
             return
-        
+        self._write_file_metadata_to_file(self._current_file)
+    
+    def _write_file_metadata_to_file(self, f: h5py.File) -> None:
+        """Write file-level metadata attributes to specified file handle."""
         # Schema metadata
-        self._current_file.attrs['schema_version'] = self.schema['schema_version']
-        self._current_file.attrs['data_product'] = self.schema['data_product']
-        self._current_file.attrs['processing_level'] = self.schema['processing_level']
-        self._current_file.attrs['description'] = self.schema['description']
+        f.attrs['schema_version'] = self.schema['schema_version']
+        f.attrs['data_product'] = self.schema['data_product']
+        f.attrs['processing_level'] = self.schema['processing_level']
+        f.attrs['description'] = self.schema['description']
         
         # Processing metadata
-        self._current_file.attrs['processing_version'] = self.processing_version
-        self._current_file.attrs['created_at'] = datetime.now(timezone.utc).isoformat()
-        self._current_file.attrs['channel'] = self.channel
+        f.attrs['processing_version'] = self.processing_version
+        f.attrs['created_at'] = datetime.now(timezone.utc).isoformat()
+        f.attrs['channel'] = self.channel
         
         # Station metadata
         for key, value in self.station_metadata.items():
-            self._current_file.attrs[f'station_{key}'] = value
+            f.attrs[f'station_{key}'] = value
         
         # Standards compliance
         if 'standards' in self.schema:
-            self._current_file.attrs['standards'] = ', '.join(self.schema['standards'])
+            f.attrs['standards'] = ', '.join(self.schema['standards'])
         
         logger.debug(f"Wrote file metadata for {self.channel}")
     
     def _initialize_all_datasets(self) -> None:
+        """Initialize all datasets from schema in current file."""
+        if self._current_file is None:
+            return
+        self._initialize_all_datasets_in_file(self._current_file)
+    
+    def _initialize_all_datasets_in_file(self, f: h5py.File) -> None:
         """
-        Initialize all datasets from schema before enabling SWMR mode.
+        Initialize all datasets from schema in specified file handle.
         
         This is critical to prevent "Cannot add field" errors when optional
         fields arrive after SWMR mode is enabled. SWMR mode does not allow
         adding new datasets, so all must be created upfront.
         """
-        if self._current_file is None:
-            return
-        
         for field in self.schema['fields']:
             field_name = field['name']
             
             # Skip if dataset already exists
-            if field_name in self._current_file:
+            if field_name in f:
                 continue
             
             # Determine HDF5 dtype
@@ -287,7 +303,7 @@ class DataProductWriter:
                 continue
             
             # Create empty dataset
-            self._current_file.create_dataset(
+            f.create_dataset(
                 field_name,
                 shape=(0,),
                 maxshape=(None,),
@@ -298,11 +314,11 @@ class DataProductWriter:
             )
             
             # Add field metadata
-            self._current_file[field_name].attrs['description'] = field.get('description', '')
+            f[field_name].attrs['description'] = field.get('description', '')
             if 'units' in field:
-                self._current_file[field_name].attrs['units'] = field['units']
+                f[field_name].attrs['units'] = field['units']
             if 'reference' in field:
-                self._current_file[field_name].attrs['reference'] = field['reference']
+                f[field_name].attrs['reference'] = field['reference']
         
         logger.info(f"Initialized {len(self.schema['fields'])} datasets for {self.channel}")
     
