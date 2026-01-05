@@ -22,9 +22,9 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 
 ---
 
-## Session Summary (Web UI Modernization)
+## Session Summary (Station Dashboards)
 
-**Objective**: Replace the legacy Node.js monitoring server with a robust Python/FastAPI service and fix UI deficiencies.
+**Objective**: Create dedicated dashboards for each monitored station to visualize unique characteristics and ionospheric dependencies.
 
 **Accomplishments:**
 
