@@ -137,6 +137,7 @@ import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
+from hf_timestd.models import L2TimingMeasurement
 
 logger = logging.getLogger(__name__)
 
@@ -722,52 +723,54 @@ class Phase2AnalyticsService:
                     # Build L2 measurement dict
                     timestamp_utc = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
                     
-                    l2_measurement = {
-                        'timestamp_utc': timestamp_utc,
-                        'minute_boundary_utc': minute_boundary,
-                        'rtp_timestamp': rtp_timestamp,
-                        'station': station,
-                        'frequency_mhz': frequency_mhz,
-                        'discrimination_method': 'TONE',  # Primary method
-                        'discrimination_confidence': discrimination_conf,
-                        'clock_offset_ms': effective_d_clock,
-                        'raw_arrival_time_ms': effective_d_clock,  # CRITICAL: Raw ToA with NO ionospheric corrections for TEC estimation
-                        'uncertainty_ms': effective_uncertainty,
-                        'expanded_uncertainty_ms': unc_result['u_expanded_ms'],
-                        'coverage_factor': budget.coverage_factor,
-                        'confidence_level': budget.confidence_level,
-                        'u_rtp_timestamp_ms': budget.u_rtp_timestamp_ms,
-                        'u_ionospheric_ms': budget.u_ionospheric_ms,
-                        'u_multipath_ms': budget.u_multipath_ms,
-                        'u_discrimination_ms': budget.u_discrimination_ms,
-                        'u_gpsdo_ms': budget.u_gpsdo_ms,
-                        'u_propagation_model_ms': budget.u_propagation_model_ms,
-                        'degrees_of_freedom': unc_result['degrees_of_freedom'],
-                        'quality_grade': quality_grade,
-                        'confidence': solution.confidence if solution else 0.0,
-                        'quality_flag': quality_flag,
-                        'propagation_delay_ms': solution.t_propagation_ms if solution else None,
-                        'propagation_mode': solution.propagation_mode if solution else None,
-                        'n_hops': solution.n_hops if solution else None,
-                        'snr_db': snr_db,
-                        'utc_verified': convergence_result.is_locked,
-                        'multi_station_verified': solution.dual_station_verified if solution else False,
-                        'traceability_chain': 'GPSDO → UTC(GPS) → UTC(NIST)',
-                        'processing_version': '3.2.0',
-                        'processed_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-                        'calibration_date': '2025-12-01T00:00:00Z',  # TODO: Get from config
-                        'gpsdo_locked': gpsdo_locked,
-                    }
                     
-                    # DEBUG: Verify raw_arrival_time_ms is in the measurement dict
-                    if 'raw_arrival_time_ms' in l2_measurement:
-                        logger.info(f"DEBUG TEC FIX: raw_arrival_time_ms={l2_measurement['raw_arrival_time_ms']:.3f} ms in measurement dict")
+                    # Create typed measurement object
+                    l2_measurement = L2TimingMeasurement(
+                        timestamp_utc=timestamp_utc,
+                        minute_boundary_utc=minute_boundary,
+                        rtp_timestamp=rtp_timestamp,
+                        station=StationID(station) if station else StationID.WWV, # Fallback or handle None
+                        frequency_mhz=float(frequency_mhz),
+                        discrimination_method=DiscriminationMethod.TONE,
+                        discrimination_confidence=float(discrimination_conf),
+                        clock_offset_ms=float(effective_d_clock),
+                        raw_arrival_time_ms=float(solution.t_arrival_ms) if solution else (effective_d_clock + (solution.t_propagation_ms if solution else 0.0)),
+                        uncertainty_ms=float(effective_uncertainty),
+                        expanded_uncertainty_ms=float(unc_result['u_expanded_ms']),
+                        coverage_factor=float(budget.coverage_factor),
+                        confidence_level=float(budget.confidence_level),
+                        u_rtp_timestamp_ms=float(budget.u_rtp_timestamp_ms),
+                        u_ionospheric_ms=float(budget.u_ionospheric_ms),
+                        u_multipath_ms=float(budget.u_multipath_ms),
+                        u_discrimination_ms=float(budget.u_discrimination_ms),
+                        u_gpsdo_ms=float(budget.u_gpsdo_ms),
+                        u_propagation_model_ms=float(budget.u_propagation_model_ms),
+                        degrees_of_freedom=int(unc_result['degrees_of_freedom']),
+                        quality_grade=QualityGrade(quality_grade),
+                        confidence=float(solution.confidence) if solution else 0.0,
+                        quality_flag=QualityFlag(quality_flag),
+                        propagation_delay_ms=float(solution.t_propagation_ms) if solution else None,
+                        propagation_mode=str(solution.propagation_mode) if solution else None,
+                        n_hops=int(solution.n_hops) if solution else None,
+                        snr_db=float(snr_db) if snr_db is not None else None,
+                        utc_verified=bool(convergence_result.is_locked),
+                        multi_station_verified=bool(solution.dual_station_verified) if solution else False,
+                        traceability_chain='GPSDO → UTC(GPS) → UTC(NIST)',
+                        processing_version='3.2.0',
+                        processed_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                        calibration_date='2025-12-01T00:00:00Z',
+                        gpsdo_locked=bool(gpsdo_locked)
+                    )
+                    
+                    # DEBUG: Verify raw_arrival_time_ms in model
+                    if l2_measurement.raw_arrival_time_ms is not None:
+                        logger.info(f"DEBUG TEC FIX: raw_arrival_time_ms={l2_measurement.raw_arrival_time_ms:.3f} ms in L2Model")
                     else:
-                        logger.error("DEBUG TEC FIX: raw_arrival_time_ms MISSING from measurement dict!")
+                        logger.error("DEBUG TEC FIX: raw_arrival_time_ms MISSING from L2Model!")
                     
                     # Write to HDF5
                     logger.debug(f"Attempting HDF5 L2 write: D_clock={effective_d_clock:.2f}ms")
-                    self.hdf5_l2_writer.write_measurement(l2_measurement)
+                    self.hdf5_l2_writer.write_measurement(l2_measurement.model_dump())
                     self._track_hdf5_write_success()
                     logger.debug(f"Successfully wrote HDF5 L2 measurement")
                     
@@ -1007,28 +1010,42 @@ class Phase2AnalyticsService:
                     
                     utc_time_iso = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
                     
-                    l1a_tones_measurement = {
-                        'timestamp_utc': utc_time_iso,
-                        'minute_boundary': minute_boundary,
-                        'wwv_detected': bool(time_snap.wwv_detected),
-                        'wwv_snr_db': time_snap.wwv_snr_db if time_snap.wwv_snr_db else None,
-                        'wwv_timing_ms': time_snap.wwv_timing_ms if time_snap.wwv_timing_ms else None,
-                        'wwvh_detected': bool(time_snap.wwvh_detected),
-                        'wwvh_snr_db': time_snap.wwvh_snr_db if time_snap.wwvh_snr_db else None,
-                        'wwvh_timing_ms': time_snap.wwvh_timing_ms if time_snap.wwvh_timing_ms else None,
-                        'chu_detected': bool(getattr(time_snap, 'chu_detected', False)),
-                        'chu_snr_db': getattr(time_snap, 'chu_snr_db', None),
-                        'chu_timing_ms': getattr(time_snap, 'chu_timing_ms', None),
-                        'bpm_detected': bool(time_snap.bpm_detected),
-                        'bpm_snr_db': time_snap.bpm_snr_db if time_snap.bpm_snr_db else None,
-                        'bpm_timing_ms': time_snap.bpm_timing_ms if time_snap.bpm_timing_ms else None,
-                        'anchor_station': time_snap.anchor_station or '',
-                        'anchor_confidence': time_snap.anchor_confidence if time_snap.anchor_confidence else None,
-                        'quality_flag': quality_flag,
-                        'processing_version': '3.2.0'
-                    }
                     
-                    self.hdf5_l1a_tones_writer.write_measurement(l1a_tones_measurement)
+                    # Create typed L1A measurement object
+                    l1a_tones_measurement = L1ToneDetection(
+                        timestamp_utc=utc_time_iso,
+                        minute_boundary=minute_boundary,
+                        
+                        # WWV
+                        wwv_detected=bool(time_snap.wwv_detected),
+                        wwv_snr_db=float(time_snap.wwv_snr_db) if time_snap.wwv_snr_db is not None else None,
+                        wwv_timing_ms=float(time_snap.wwv_timing_ms) if time_snap.wwv_timing_ms is not None else None,
+                        
+                        # WWVH
+                        wwvh_detected=bool(time_snap.wwvh_detected),
+                        wwvh_snr_db=float(time_snap.wwvh_snr_db) if time_snap.wwvh_snr_db is not None else None,
+                        wwvh_timing_ms=float(time_snap.wwvh_timing_ms) if time_snap.wwvh_timing_ms is not None else None,
+                        
+                        # CHU (handle potential missing attributes)
+                        chu_detected=bool(getattr(time_snap, 'chu_detected', False)),
+                        chu_snr_db=float(getattr(time_snap, 'chu_snr_db', None)) if getattr(time_snap, 'chu_snr_db', None) is not None else None,
+                        chu_timing_ms=float(getattr(time_snap, 'chu_timing_ms', None)) if getattr(time_snap, 'chu_timing_ms', None) is not None else None,
+                        
+                        # BPM
+                        bpm_detected=bool(time_snap.bpm_detected),
+                        bpm_snr_db=float(time_snap.bpm_snr_db) if time_snap.bpm_snr_db is not None else None,
+                        bpm_timing_ms=float(time_snap.bpm_timing_ms) if time_snap.bpm_timing_ms is not None else None,
+                        
+                        # Anchor
+                        anchor_station=AnchorStation(time_snap.anchor_station if time_snap.anchor_station else ""),
+                        anchor_confidence=float(time_snap.anchor_confidence) if time_snap.anchor_confidence is not None else None,
+                        
+                        # Metadata
+                        quality_flag=ToneQualityFlag(quality_flag),
+                        processing_version='3.2.0'
+                    )
+                    
+                    self.hdf5_l1a_tones_writer.write_measurement(l1a_tones_measurement.model_dump())
                     
                 except Exception as e:
                     logger.error(f"Failed to write tone detections to HDF5: {e}")

@@ -2404,7 +2404,7 @@ class Phase2TemporalEngine:
             
             # Return fallback solution with low confidence
             return TransmissionTimeSolution(
-                d_clock_ms=time_snap.timing_error_ms,  # Use timing error as fallback
+                d_clock_ms=time_snap.timing_error_ms - fallback_propagation_ms,  # Fix: Subtract estimated delay
                 t_emission_ms=0.0,
                 t_arrival_ms=time_snap.timing_error_ms,
                 t_propagation_ms=fallback_propagation_ms,

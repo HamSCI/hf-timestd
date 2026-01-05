@@ -1,30 +1,58 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-05 12:17 UTC  
-**System Version**: 4.4.0  
-**Current Focus**: GRAPE Module Deployment (COMPLETED)  
-**Next Session**: Monitor GRAPE Automated Run + Update install.sh  
-**System Status**: Stable, HDF5-native, GRAPE Deployed and Operational
+**Last Updated**: 2026-01-05 16:30 UTC  
+**System Version**: 4.5.0  
+**Current Focus**: System Hardening (Typed Models & Physics Verification)  
+**Next Session**: Monitor Production Stability  
+**System Status**: Stable, Fully Typed Data Pipeline (L1-L3), HDF5-Native
 
 ---
 
 ## Executive Summary
 
-The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native and stable. GRAPE module now deployed for daily decimation and PSWS upload.
+The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native and now enforces strict data schemas via Pydantic models.
 
-**Recent Major Additions (v4.4.0 - 2026-01-05):**
+**Recent Major Additions (v4.5.0 - 2026-01-05):**
 
-- ✅ **GRAPE Module Deployed**: Daily decimation, spectrogram generation, and PSWS upload operational
-- ✅ **Systemd Automation**: Timer configured for daily 01:00 UTC runs
-- ✅ **Bug Fixes**: Channel name mapping (MHz→kHz) and CLI argument order corrected
-- ✅ **Verification Complete**: Decimation and spectrogram generation tested successfully
+- ✅ **Full-Stack Data Typing**: Implemented Pydantic models for L1 (Tones), L2 (Timing), and L3 (Fusion), eliminating dictionary-based fragility.
+- ✅ **Physics Engine Fix**: Corrected fallback logic in `Phase2TemporalEngine` to ensure $D_{clock} = T_{arrival} - T_{prop}$ consistency during propagation model failures.
+- ✅ **GRAPE Module**: Deployed daily decimation and PSWS upload.
 
 **System Health:**
 
-- All services running and stable
-- GRAPE timer scheduled: Next run 2026-01-06 00:01:16 UTC
-- Critical path verified correct
-- ISO GUM compliant uncertainty budget
+- All services running and stable.
+- Data integrity guaranteed by runtime schema validation.
+- Critical path verified correct with physically consistent timestamping.
+
+---
+
+## Session Summary (Typed Models & Engine Fix - 2026-01-05 16:30 UTC)
+
+**Objective**: Harden the system by enforcing strict data models and correcting physical inconsistencies in legacy fallback logic.
+
+**Status**: ✅ **COMPLETED & DEPLOYED**
+
+### Accomplishments
+
+**1. Typed Data Models (Pydantic)**
+Replaced fragile dictionary passing with strict schema validation across the full stack:
+
+- **L1**: `L1ToneDetection` (Tone Detections)
+- **L2**: `L2TimingMeasurement` (Timing Measurements)
+- **L3**: `L3FusionTiming` (Fused Timing)
+- **Impact**: Code now fails fast on schema violations, ensuring HDF5 integrity.
+
+**2. Engine Fallback Logic Fix**
+
+- **Problem**: When propagation models failed, the engine implied 0ms propagation ($D_{clock} = T_{arrival}$).
+- **Fix**: Updated logic to $D_{clock} = T_{arrival} - T_{fallback\_prop}$, restoring physical consistency.
+
+### Files Modified
+
+- `src/hf_timestd/models/*.py`: New model definitions.
+- `src/hf_timestd/core/phase2_analytics_service.py`: Refactored to use models.
+- `src/hf_timestd/core/multi_broadcast_fusion.py`: Refactored to use models.
+- `src/hf_timestd/core/phase2_temporal_engine.py`: Fixed fallback math.
 
 ---
 

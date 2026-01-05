@@ -109,12 +109,48 @@ def read_file_data(filepath):
             else:
                  return [], [], [], []
             
-            if 'raw_arrival_time_ms' in grp:
-                toas = grp['raw_arrival_time_ms'][:]
-            elif 'd_clock_ms' in grp and 'propagation_delay_ms' in grp:
-                d_clocks = grp['d_clock_ms'][:]
+            # CRITICAL FIX: Prefer d_clock + propagation_delay for correct ToA reconstruction
+            # The 'raw_arrival_time_ms' field in older files incorrectly contained d_clock
+            
+            # Map localized names
+            d_clock_key = 'd_clock_ms'
+            if 'd_clock_ms' not in grp and 'clock_offset_ms' in grp:
+                d_clock_key = 'clock_offset_ms'
+                
+            if d_clock_key in grp and 'propagation_delay_ms' in grp:
+                d_clocks = grp[d_clock_key][:]
                 delays = grp['propagation_delay_ms'][:]
+                
+                # Handle possible shape mismatch or NaNs
+                min_len_local = min(len(d_clocks), len(delays))
+                d_clocks = d_clocks[:min_len_local]
+                delays = delays[:min_len_local]
+                
                 toas = d_clocks + delays
+                
+                # Filter NaNs from reconstruction immediately
+                valid_recon = ~np.isnan(toas)
+                if np.sum(valid_recon) < len(toas):
+                    print(f"DEBUG: filtered {len(toas) - np.sum(valid_recon)} NaN reconstructed ToAs")
+                    # Need to slice all arrays to maintain synchronization
+                    # Slice 'ts' if it matches length, otherwise it might be 1D per group?
+                    # The script earlier reads users 'ts', 'stations', 'freqs' which correspond to the data
+                    
+                    # NOTE: This function reads separate arrays. We must slice ALL of them.
+                    # But wait, stations/freqs/ts are read BEFORE this block.
+                    # Need to be careful. Arrays in this block are local 'd_clocks', 'delays'
+                    # The main arrays 'stations', 'freqs', 'ts' need slicing too.
+                    
+                    ts = ts[:min_len_local][valid_recon]
+                    stations = stations[:min_len_local][valid_recon]
+                    freqs = freqs[:min_len_local][valid_recon]
+                    toas = toas[valid_recon]
+                
+                print(f"DEBUG: Reconstructed {len(toas)} ToAs from {d_clock_key} + delay")
+
+            elif 'raw_arrival_time_ms' in grp:
+                toas = grp['raw_arrival_time_ms'][:]
+                print(f"DEBUG: Using raw_arrival_time_ms directly (Legacy Warning: may be d_clock)")
             else:
                 return [], [], [], []
 

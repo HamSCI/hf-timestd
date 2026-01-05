@@ -139,6 +139,14 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 import numpy as np
 from datetime import datetime, timezone
+from hf_timestd.models import (
+    L3FusionTiming,
+    FusionQualityGrade,
+    FusionQualityFlag,
+    FusionConsistencyFlag,
+    FusionKalmanState,
+    ReferenceStation
+)
 
 # Systemd watchdog support
 try:
@@ -2590,55 +2598,61 @@ class MultiBroadcastFusion:
                 kalman_state = 'REACQUIRING'
             
             # Build measurement dictionary
-            measurement = {
-                'timestamp_utc': timestamp_utc,
-                'minute_boundary': int(result.timestamp),
-                'd_clock_fused_ms': result.d_clock_fused_ms,
-                'd_clock_raw_ms': result.d_clock_raw_ms,
-                'uncertainty_ms': result.uncertainty_ms,
-                'n_broadcasts': result.n_broadcasts,
-                'n_stations': result.n_stations,
-                'stations_used': stations_used,
-                'kalman_state': kalman_state,
-                'quality_flag': quality_flag,
-                'processing_version': '3.2.0',
+            
+            # Create typed L3 measurement object
+            l3_measurement = L3FusionTiming(
+                timestamp_utc=timestamp_utc,
+                minute_boundary=int(result.timestamp),
+                d_clock_fused_ms=float(result.d_clock_fused_ms),
+                d_clock_raw_ms=float(result.d_clock_raw_ms),
+                uncertainty_ms=float(result.uncertainty_ms),
                 
+                # Composition
+                n_broadcasts=int(result.n_broadcasts),
+                n_stations=int(result.n_stations),
+                stations_used=stations_used,
+                
+                # Per-station statistics
+                wwv_mean_ms=float(result.wwv_mean_ms) if result.wwv_mean_ms is not None else None,
+                wwvh_mean_ms=float(result.wwvh_mean_ms) if result.wwvh_mean_ms is not None else None,
+                chu_mean_ms=float(result.chu_mean_ms) if result.chu_mean_ms is not None else None,
+                bpm_mean_ms=float(result.bpm_mean_ms) if result.bpm_mean_ms is not None else None,
+                
+                wwv_count=int(result.wwv_count),
+                wwvh_count=int(result.wwvh_count),
+                chu_count=int(result.chu_count),
+                bpm_count=int(result.bpm_count),
+                
+                wwv_intra_std_ms=float(result.wwv_intra_std_ms) if result.wwv_intra_std_ms is not None else None,
+                wwvh_intra_std_ms=float(result.wwvh_intra_std_ms) if result.wwvh_intra_std_ms is not None else None,
+                chu_intra_std_ms=float(result.chu_intra_std_ms) if result.chu_intra_std_ms is not None else None,
+                bpm_intra_std_ms=float(result.bpm_intra_std_ms) if result.bpm_intra_std_ms is not None else None,
+                
+                inter_station_spread_ms=float(result.inter_station_spread_ms) if result.inter_station_spread_ms is not None else None,
+                consistency_flag=FusionConsistencyFlag('INTER_ANOMALY') if result.consistency_flag == 'CROSS_STATION_DISAGREE' else FusionConsistencyFlag(result.consistency_flag),
+
                 # Uncertainty budget
-                'statistical_uncertainty_ms': result.statistical_uncertainty_ms,
-                'systematic_uncertainty_ms': result.systematic_uncertainty_ms,
-                'propagation_uncertainty_ms': result.propagation_uncertainty_ms,
-                
-                # Per-station breakdown
-                'wwv_mean_ms': result.wwv_mean_ms,
-                'wwvh_mean_ms': result.wwvh_mean_ms,
-                'chu_mean_ms': result.chu_mean_ms,
-                'bpm_mean_ms': result.bpm_mean_ms,
-                'wwv_count': result.wwv_count,
-                'wwvh_count': result.wwvh_count,
-                'chu_count': result.chu_count,
-                'bpm_count': result.bpm_count,
-                'wwv_intra_std_ms': result.wwv_intra_std_ms,
-                'wwvh_intra_std_ms': result.wwvh_intra_std_ms,
-                'chu_intra_std_ms': result.chu_intra_std_ms,
-                
-                # Consistency metrics
-                'inter_station_spread_ms': result.inter_station_spread_ms,
-                'consistency_flag': 'INTER_ANOMALY' if result.consistency_flag == 'CROSS_STATION_DISAGREE' else result.consistency_flag,
+                statistical_uncertainty_ms=float(result.statistical_uncertainty_ms),
+                systematic_uncertainty_ms=float(result.systematic_uncertainty_ms),
+                propagation_uncertainty_ms=float(result.propagation_uncertainty_ms),
                 
                 # Global solve
-                'global_solve_verified': result.global_solve_verified,
-                'global_solve_consistency_ms': result.global_solve_consistency_ms,
-                'global_solve_n_obs': result.global_solve_n_obs,
+                global_solve_verified=bool(result.global_solve_verified),
+                global_solve_consistency_ms=float(result.global_solve_consistency_ms) if result.global_solve_consistency_ms is not None else None,
+                global_solve_n_obs=int(result.global_solve_n_obs),
                 
-                # Calibration metadata
-                'calibration_applied': result.calibration_applied,
-                'reference_station': result.reference_station,
-                'outliers_rejected': result.outliers_rejected,
-                'quality_grade': result.quality_grade,
-            }
+                # Metadata
+                calibration_applied=bool(result.calibration_applied),
+                reference_station=ReferenceStation(result.reference_station),
+                outliers_rejected=int(result.outliers_rejected),
+                quality_grade=FusionQualityGrade(result.quality_grade),
+                kalman_state=FusionKalmanState(kalman_state),
+                quality_flag=FusionQualityFlag(quality_flag),
+                processing_version='3.2.0'
+            )
             
             # Write to HDF5 with schema validation
-            self.hdf5_fusion_writer.write_measurement(measurement)
+            self.hdf5_fusion_writer.write_measurement(l3_measurement.model_dump())
             
         except Exception as e:
             logger.error(f"Failed to write HDF5 fusion result: {e}", exc_info=True)

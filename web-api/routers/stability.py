@@ -45,6 +45,12 @@ async def get_allan_deviation(
             elif duration_str.endswith('d'):
                 days = int(duration_str[:-1])
                 start_time = end_time - timedelta(days=days)
+            elif duration_str.endswith('m'):
+                minutes = int(duration_str[:-1])
+                start_time = end_time - timedelta(minutes=minutes)
+            elif duration_str.endswith('s'):
+                seconds = int(duration_str[:-1])
+                start_time = end_time - timedelta(seconds=seconds)
             else:
                 raise ValueError(f"Invalid duration format: {start}")
         else:

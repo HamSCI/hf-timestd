@@ -37,6 +37,8 @@ def parse_time_param(time_str: str) -> datetime:
             return datetime.utcnow() - timedelta(days=value)
         elif unit == 'm':
             return datetime.utcnow() - timedelta(minutes=value)
+        elif unit == 's':
+            return datetime.utcnow() - timedelta(seconds=value)
         else:
             raise ValueError(f"Unknown time unit: {unit}")
     

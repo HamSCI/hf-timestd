@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.5.0] - 2026-01-05
+
+### Added - Typed Pydantic Data Models (L1/L2/L3)
+
+**Major Feature:** Replaced implicit dictionary-based data passing with strict Pydantic models for the entire data pipeline, ensuring data integrity and preventing schema violations.
+
+- **L1 Tone Detections**: `L1ToneDetection` model (`src/hf_timestd/models/tone_detection.py`)
+- **L2 Timing Measurements**: `L2TimingMeasurement` model (`src/hf_timestd/models/measurement.py`)
+- **L3 Fusion Timing**: `L3FusionTiming` model (`src/hf_timestd/models/fusion.py`)
+- **Refactoring**: Updated `phase2_analytics_service.py` and `multi_broadcast_fusion.py` to use these models.
+- **Impact**: Code fails fast on type errors or missing fields, ensuring HDF5 writes align with schemas.
+
+### Fixed - Temporal Engine Fallback Logic
+
+#### Physical Consistency in Fallback Mode
+
+- **Issue**: When propagation modeling failed, `Phase2TemporalEngine` asserted `d_clock` equal to the raw Time of Arrival, implicitly assuming 0ms propagation delay.
+- **Physics**: This violated the fundamental timing equation `$T_{arrival} = D_{clock} + T_{prop}$`, creating "INVERT" statuses in dispersion analysis.
+- **Fix**: Updated fallback logic to subtract the estimated delay (e.g., 15ms for WWV) from `d_clock`.
+- **Result**: Fallback data now preserves physical consistency, allowing valid (though low-confidence) downstream processing.
+- **Files**: `src/hf_timestd/core/phase2_temporal_engine.py` (lines 2400-2420)
+
 ## [4.4.0] - 2026-01-05
 
 ### Added - GRAPE Module Deployment

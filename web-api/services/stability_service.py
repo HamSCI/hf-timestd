@@ -89,7 +89,7 @@ class StabilityService:
         self,
         start: datetime,
         end: datetime,
-        min_points: int = 100
+        min_points: int = 60
     ) -> Optional[Dict]:
         """
         Compute stability metrics from fusion timing data.
@@ -118,15 +118,29 @@ class StabilityService:
             
             # Extract D_clock values (convert to fractional frequency)
             d_clock_ms = np.array([m['d_clock_fused_ms'] for m in measurements])
-            timestamps = np.array([m['timestamp_utc'] for m in measurements])
             
+            # Parse timestamps to seconds for interval calculation
+            # timestamp_utc is ISO format string
+            timestamps_dt = [datetime.fromisoformat(m['timestamp_utc'].replace('Z', '+00:00')) for m in measurements]
+            timestamps = np.array([dt.timestamp() for dt in timestamps_dt])
+            
+            # Calculate sample interval dynamically
+            intervals = np.diff(timestamps)
+            if len(intervals) > 0:
+                sample_interval = float(np.median(intervals))
+            else:
+                sample_interval = 8.0  # Fallback to nominal 8s
+                
+            if sample_interval <= 0:
+                logger.warning(f"Invalid sample interval calculated: {sample_interval}")
+                sample_interval = 8.0
+
             # Convert D_clock (time offset in ms) to fractional frequency
-            # Assuming 1-minute sampling: f_frac = Δt / τ where τ = 60s
+            # f_frac = Δt / τ
             # For small offsets: y ≈ Δt / τ
-            sample_interval = 60.0  # seconds
             fractional_freq = d_clock_ms * 1e-3 / sample_interval  # dimensionless
             
-            # Compute sample rate (should be ~1/60 Hz for 1-minute data)
+            # Compute sample rate
             rate = 1.0 / sample_interval
             
             # Compute overlapping Allan deviation
