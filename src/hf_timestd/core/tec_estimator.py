@@ -204,6 +204,15 @@ class TECEstimator:
                 logger.debug(f"Negative TEC detected for {station}: {tec:.2e}. Setting confidence low.")
                 confidence *= 0.1 # Penalize unphysical result
             
+            # DIAGNOSTIC: Log "flat" or suspiciously perfect data (0.0 TEC issue)
+            if tec < 1.0 or confidence > 0.99:
+                log_level = logging.WARNING if tec < 1.0 else logging.DEBUG
+                logger.log(log_level, 
+                    f"Suspicious TEC result for {station}: TEC={tec:.2f}, R2={confidence:.4f}\n"
+                    f"  Inputs (Freq MHz -> ToA ms): " + 
+                    ", ".join([f"{f/1e6:.1f}->{t*1000:.3f}" for f, t in zip(freqs, toas)])
+                )
+            
             # Calculate RMS residual in ms
             rms_residual_ms = np.sqrt(np.mean((y - y_pred)**2)) * 1000.0
 

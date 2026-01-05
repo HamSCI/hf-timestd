@@ -1471,44 +1471,75 @@ class MultiBroadcastFusion:
         measurements: List[BroadcastMeasurement]
     ) -> List[float]:
         """
-        Calculate quality-based weights for each measurement.
+        Calculate statistically optimal weights for each measurement.
         
-        Weights consider:
-        - Confidence score
-        - SNR
-        - Quality grade
-        - Propagation mode (lower hop = more reliable)
+        Uses inverse variance weighting (precision) as the base:
+            w_i = 1 / σ²_i
+        
+        This is the statistically optimal weighting for combining independent
+        measurements with different uncertainties (ISO GUM, GUM-S1).
+        
+        Weights are then scaled by confidence to account for non-statistical
+        quality factors:
+        - Discrimination quality (WWV vs WWVH separation)
+        - Propagation mode reliability (1E vs 3F)
+        - Signal quality (SNR, multipath)
         """
         weights = []
         
-        grade_weights = {'A': 1.0, 'B': 0.8, 'C': 0.5, 'D': 0.2}
-        mode_weights = {
-            '1E': 1.0, '1F': 0.9, '2F': 0.7, '3F': 0.5, 'GW': 1.0
+        # Quality scaling factors (applied to base inverse-variance weight)
+        grade_scale = {'A': 1.0, 'B': 0.9, 'C': 0.7, 'D': 0.5}
+        mode_scale = {
+            '1E': 1.0, '1F': 0.95, '2F': 0.85, '3F': 0.7, 'GW': 1.0
         }
         
         for m in measurements:
-            # Base weight from confidence
-            w = m.confidence
-
+            # Special handling for GLOBAL_DIFF (cross-station validation)
             if m.station == 'GLOBAL_DIFF':
-                weights.append(max(10.0, 200.0 * w))
+                # High weight for validated cross-station measurements
+                base_weight = 100.0
+                confidence_scale = m.confidence
+                weights.append(max(10.0, base_weight * confidence_scale))
                 continue
             
-            # Adjust for quality grade
-            w *= grade_weights.get(m.quality_grade, 0.2)
-            
-            # Adjust for propagation mode
-            w *= mode_weights.get(m.propagation_mode, 0.5)
-            
-            # Adjust for SNR (higher is better)
-            if m.snr_db > 10:
-                w *= 1.0
-            elif m.snr_db > 5:
-                w *= 0.8
+            # CRITICAL FIX: Use inverse variance (precision) as base weight
+            # This is the statistically optimal weighting formula
+            if m.uncertainty_ms is None or m.uncertainty_ms <= 0:
+                # Fallback for missing/invalid uncertainty
+                # Use inverse confidence as a rough proxy
+                base_weight = 1.0 / max(0.1, (1.0 / max(0.01, m.confidence)))
             else:
-                w *= 0.5
+                # Inverse variance: w = 1/σ²
+                base_weight = 1.0 / (m.uncertainty_ms ** 2)
             
-            weights.append(max(0.01, w))  # Minimum weight
+            # Scale by confidence to account for non-statistical factors
+            # (discrimination quality, propagation mode reliability, etc.)
+            confidence_scale = m.confidence if m.confidence > 0 else 0.5
+            
+            # Scale by quality grade (measurement process quality)
+            grade_scale_factor = grade_scale.get(m.quality_grade, 0.5)
+            
+            # Scale by propagation mode (physical reliability)
+            mode_scale_factor = mode_scale.get(m.propagation_mode, 0.7)
+            
+            # Scale by SNR (signal quality)
+            if m.snr_db is not None:
+                if m.snr_db > 15:
+                    snr_scale = 1.0
+                elif m.snr_db > 10:
+                    snr_scale = 0.95
+                elif m.snr_db > 5:
+                    snr_scale = 0.85
+                else:
+                    snr_scale = 0.7
+            else:
+                snr_scale = 0.9  # Default if SNR unknown
+            
+            # Combine: base precision × quality factors
+            w = base_weight * confidence_scale * grade_scale_factor * mode_scale_factor * snr_scale
+            
+            # Ensure minimum weight for numerical stability
+            weights.append(max(0.01, w))
         
         return weights
     
@@ -2050,6 +2081,11 @@ class MultiBroadcastFusion:
                             'toa_ms': toa_ms,
                             'uncertainty_ms': 1.0 / max(0.001, m.confidence) # Inverse confidence weighting
                         })
+                    
+                    # DIAGNOSTIC: Log the raw inputs to the TEC estimator to trace "0.0 TEC" issue
+                    if logger.isEnabledFor(logging.DEBUG):
+                        input_summary = ", ".join([f"{x['frequency_hz']/1e6:.1f}MHz={x['toa_ms']:.3f}ms" for x in tec_input])
+                        logger.debug(f"TEC Solver Inputs for {station}: {input_summary}")
                     
                     # Run Solver
                     tec_result = self.tec_estimator.estimate_tec(

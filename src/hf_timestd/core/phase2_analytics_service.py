@@ -731,7 +731,7 @@ class Phase2AnalyticsService:
                         'discrimination_method': 'TONE',  # Primary method
                         'discrimination_confidence': discrimination_conf,
                         'clock_offset_ms': effective_d_clock,
-                        'raw_arrival_time_ms': effective_d_clock + (solution.t_propagation_ms if solution and solution.t_propagation_ms else 0.0),  # For TEC: uncalibrated ToA
+                        'raw_arrival_time_ms': effective_d_clock,  # CRITICAL: Raw ToA with NO ionospheric corrections for TEC estimation
                         'uncertainty_ms': effective_uncertainty,
                         'expanded_uncertainty_ms': unc_result['u_expanded_ms'],
                         'coverage_factor': budget.coverage_factor,
