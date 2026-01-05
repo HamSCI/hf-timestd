@@ -1,28 +1,171 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-05 16:30 UTC  
-**System Version**: 4.5.0  
-**Current Focus**: System Hardening (Typed Models & Physics Verification)  
-**Next Session**: Monitor Production Stability  
-**System Status**: Stable, Fully Typed Data Pipeline (L1-L3), HDF5-Native
+**Last Updated**: 2026-01-05 17:20 UTC  
+**System Version**: 4.5.1  
+**Current Focus**: Web UI Data Access (metrology.html HDF5 integration)  
+**Next Session**: Fix metrology.html to read from HDF5 instead of CSV  
+**System Status**: ✅ Stable, Chrony Feed Restored, HDF5-Native Pipeline
 
 ---
 
 ## Executive Summary
 
-The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native and now enforces strict data schemas via Pydantic models.
+The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native with strict Pydantic schema validation.
 
-**Recent Major Additions (v4.5.0 - 2026-01-05):**
+**Recent Critical Fix (v4.5.1 - 2026-01-05 17:20 UTC):**
 
-- ✅ **Full-Stack Data Typing**: Implemented Pydantic models for L1 (Tones), L2 (Timing), and L3 (Fusion), eliminating dictionary-based fragility.
-- ✅ **Physics Engine Fix**: Corrected fallback logic in `Phase2TemporalEngine` to ensure $D_{clock} = T_{arrival} - T_{prop}$ consistency during propagation model failures.
-- ✅ **GRAPE Module**: Deployed daily decimation and PSWS upload.
+- ✅ **Chrony Feed Restored**: Fixed three critical bugs that broke Chrony feed after v4.5.0 deployment
+  - HDF5 SWMR mode initialization (concurrent read/write support)
+  - Channel discovery logic (9 channels now discovered)
+  - Missing uncertainty_ms field in BroadcastMeasurement dataclass
+- ✅ **Result**: Chrony reach=225 (was 0), LastRx=16s (was 40+ minutes), active time offset measurement
 
 **System Health:**
 
-- All services running and stable.
-- Data integrity guaranteed by runtime schema validation.
-- Critical path verified correct with physically consistent timestamping.
+- All services running and stable
+- Chrony feed operational with fresh updates every 16 seconds
+- HDF5 pipeline fully functional with SWMR mode
+- Data integrity guaranteed by runtime schema validation
+
+---
+
+## Session Summary (Chrony Feed Restoration - 2026-01-05 17:20 UTC)
+
+**Objective**: Restore Chrony feed after v4.5.0 typed model deployment broke HDF5 file access.
+
+**Status**: ✅ **COMPLETED & DEPLOYED**
+
+### Three Critical Bugs Fixed
+
+**Bug #1: HDF5 SWMR Mode Initialization**
+
+- **Problem**: Writer opened files in append mode before enabling SWMR, creating exclusive lock window
+- **Impact**: Fusion service couldn't read analytics HDF5 files concurrently
+- **Fix**: Two-step initialization - create file structure first, then reopen in SWMR write mode (`r+` with `swmr=True`)
+- **Files**: `src/hf_timestd/io/hdf5_writer.py` (lines 148-240)
+
+**Bug #2: Channel Discovery Logic**
+
+- **Problem**: Fusion looked for legacy `clock_offset` subdirectories instead of HDF5 files
+- **Impact**: Discovered 0 channels (should be 9), couldn't read any measurements
+- **Fix**: Updated to look for `*_timing_measurements_*.h5` files with legacy fallback
+- **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py` (lines 522-543)
+
+**Bug #3: Missing uncertainty_ms Field**
+
+- **Problem**: `BroadcastMeasurement` dataclass missing field that fusion weight calculation expected
+- **Impact**: Fusion crashed with AttributeError after successfully reading 245 measurements
+- **Fix**: Added `uncertainty_ms: Optional[float] = None` to dataclass and populated from HDF5
+- **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py` (lines 185-199, 1455-1470)
+
+### Deployment Challenges Resolved
+
+1. **Virtual Environment**: Installed to production venv (`/opt/hf-timestd/venv`) with editable install
+2. **Permissions**: Fixed access to source directory for `timestd` user (`chmod +rx` on `/home/mjh` path)
+3. **Python Cache**: Cleared `.pyc` files from both source and venv directories
+
+### Verification Results
+
+- ✅ HDF5 reader: Successfully reads 245 measurements (30-minute lookback)
+- ✅ Channel discovery: Finds all 9 channels
+- ✅ Fusion service: Processes measurements and feeds Chrony
+- ✅ **Chrony feed: RESTORED** (reach=225, LastRx=16s, active measurement +211us)
+
+### Files Modified
+
+- `src/hf_timestd/io/hdf5_writer.py` - SWMR mode initialization
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - Channel discovery + uncertainty_ms field
+- `CHANGELOG.md` - Added v4.5.1 release notes
+- Commit: 7a4ff5b (pushed to GitHub)
+
+---
+
+## Next Session Objective: Fix metrology.html Data Access
+
+**Goal**: Update metrology.html web page to read timing data from HDF5 files instead of legacy CSV files.
+
+**Background:**
+
+After the v4.5.0 typed model deployment and v4.5.1 HDF5 fixes, the entire data pipeline is now HDF5-native. However, the metrology.html web page still attempts to read from CSV files that may no longer be the primary data source or may have different schemas.
+
+**Problem Indicators:**
+
+- metrology.html may show "No data available" or stale data
+- Web UI may be looking for CSV files in old locations
+- CSV files may not be written anymore (HDF5 is primary)
+- Data schema may have changed (uncertainty_ms, raw_arrival_time_ms added)
+
+**Tasks for Next Session:**
+
+1. **Investigate Current State**
+   - Check what data metrology.html currently displays
+   - Identify which API endpoints it uses
+   - Determine if those endpoints read from CSV or HDF5
+   - Test if page loads and shows data
+
+2. **Update Backend API**
+   - Modify API endpoints to read from HDF5 instead of CSV
+   - Use `DataProductReader` class for HDF5 access
+   - Ensure SWMR mode for concurrent reads
+   - Handle schema evolution (new fields like uncertainty_ms)
+
+3. **Update Frontend**
+   - Adjust JavaScript to handle HDF5 data structure
+   - Update field names if schema changed
+   - Add error handling for missing data
+   - Test visualization with live HDF5 data
+
+4. **Verify Functionality**
+   - Confirm page loads without errors
+   - Verify data displays correctly
+   - Check that updates are real-time
+   - Test across different time ranges
+
+**Key Files to Review:**
+
+- `web-api/static/metrology.html` - Frontend page
+- `web-api/routers/*.py` - API endpoints (likely `measurements.py` or similar)
+- `src/hf_timestd/io/hdf5_reader.py` - HDF5 reading utilities
+- `/var/lib/timestd/phase2/{CHANNEL}/*_timing_measurements_*.h5` - Data files
+
+**HDF5 Schema Reference (L2 Timing Measurements):**
+
+Key fields in timing_measurements HDF5 files:
+
+- `timestamp_utc` - ISO 8601 timestamp
+- `minute_boundary_utc` - Unix timestamp
+- `station` - WWV, WWVH, CHU, BPM
+- `frequency_mhz` - Broadcast frequency
+- `clock_offset_ms` - Calibrated timing offset
+- `uncertainty_ms` - ISO GUM combined uncertainty (NEW in v1.1.0)
+- `confidence` - Detection confidence (0-1)
+- `quality_grade` - A, B, C, D
+- `propagation_delay_ms` - Estimated propagation delay
+- `propagation_mode` - 1E, 1F, 2F, etc.
+- `raw_arrival_time_ms` - Uncalibrated ToA (NEW in v1.1.0)
+
+**API Pattern for HDF5 Reading:**
+
+```python
+from hf_timestd.io.hdf5_reader import DataProductReader
+from pathlib import Path
+
+# Initialize reader
+reader = DataProductReader(
+    data_dir=Path(f"/var/lib/timestd/phase2/{channel}"),
+    product_level='L2',
+    product_name='timing_measurements',
+    channel=channel
+)
+
+# Read time range
+measurements = reader.read_time_range(
+    start=start_iso,
+    end=end_iso,
+    min_quality_grade='D',
+    min_confidence=0.0
+)
+```
 
 ---
 
@@ -30,9 +173,15 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 
 **Objective**: Harden the system by enforcing strict data models and correcting physical inconsistencies in legacy fallback logic.
 
-**Status**: ✅ **COMPLETED & DEPLOYED**
+**Status**: ✅ **COMPLETED & DEPLOYED** (Superseded by v4.5.1 fixes)
 
-### Accomplishments
+## Session Summary (GRAPE Module Deployment - 2026-01-05)
+
+**Objective**: Deploy and verify GRAPE module for daily decimation and PSWS upload.
+
+**Status**: ✅ **DEPLOYMENT COMPLETE**
+
+### Deployment Accomplished
 
 **1. Typed Data Models (Pydantic)**
 Replaced fragile dictionary passing with strict schema validation across the full stack:
