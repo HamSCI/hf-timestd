@@ -2,6 +2,90 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.2.1] - 2026-01-05
+
+### Fixed - Critical Pipeline Calculation Errors
+
+#### Raw Arrival Time Calculation (TEC Estimation)
+
+- **Issue**: `raw_arrival_time_ms` field incorrectly included ionospheric propagation delay corrections
+- **Root Cause**: Line 734 in `phase2_analytics_service.py` was adding `solution.t_propagation_ms` to the raw timing error
+- **Impact**: TEC estimator received "flat" data with inverted dispersion (negative slopes), causing systematic 0.0 TEC values with R²=1.0
+- **Physics**: The propagation delay already includes the 1/f² ionospheric correction, so adding it created an inverse dispersion pattern
+- **Fix**: Changed `raw_arrival_time_ms` to use only `effective_d_clock` (uncorrected timing error from tone detector)
+- **Result**: TEC estimator can now measure real ionospheric dispersion with positive slopes
+- **Files**: `src/hf_timestd/core/phase2_analytics_service.py` (line 734)
+
+#### Fusion Weight Calculation (Statistical Optimality)
+
+- **Issue**: Fusion used confidence-based weighting instead of inverse variance weighting
+- **Root Cause**: `_calculate_weights()` in `multi_broadcast_fusion.py` used `w = m.confidence` as base weight
+- **Impact**: Measurements with different uncertainties received improper weights, violating statistical optimality
+- **Metrological Impact**: Non-compliance with ISO GUM best practices for combining measurements
+- **Fix**: Implemented inverse variance weighting: `w = 1/(uncertainty_ms²)` with confidence as scaling factor
+- **Result**: Statistically optimal fusion, improved precision, proper utilization of ISO GUM uncertainty budget
+- **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py` (lines 1469-1545)
+
+### Added - Diagnostic Tools
+
+#### Dispersion Verification Script
+
+- **Feature**: `scripts/verify_dispersion.py` - Analyzes HDF5 timing files for frequency-dependent dispersion
+- **Capabilities**:
+  - Groups measurements by (timestamp, station) to find multi-frequency observations
+  - Calculates dispersion slope (m) and confidence (R²) using linear regression on τ vs 1/f²
+  - Identifies inverted dispersion patterns ("INVERT" status for negative slopes)
+  - Handles HDF5 file locking and schema variations robustly
+  - Converts ISO 8601 byte string timestamps to epoch floats
+  - Filters invalid data (zero timestamps, zero frequencies, NaN ToAs)
+- **Usage**: `scripts/verify_dispersion.py --latest` or `--date YYYY-MM-DD`
+- **Output**: Summary table with slope, R², TEC estimate, and status (OK/INVERT/FLAT)
+
+#### TEC Estimator Diagnostics
+
+- **Feature**: Instrumented `TECEstimator` to log input vectors when TEC is suspiciously low
+- **Triggers**: Logs when `TEC < 1.0` or `confidence > 0.99` (indicating flat data)
+- **Output**: Frequency and ToA arrays for debugging dispersion issues
+- **Files**: `src/hf_timestd/core/tec_estimator.py`
+
+#### Unit Tests
+
+- **Feature**: `tests/core/test_tec_estimator_diagnostics.py` - Test suite for TEC diagnostics
+- **Coverage**: Flat data detection, zero TEC handling, confidence calculation
+
+### Technical Details
+
+**TEC Physics**:
+
+- Ionospheric group delay: τ(f) = K · TEC / f²
+- Expected slope: positive (lower frequencies delayed more)
+- Inverted slope indicates data pathology, not physical phenomenon
+
+**Fusion Weighting**:
+
+- Inverse variance: w = 1/σ² (precision weighting)
+- Optimal for combining independent measurements with different uncertainties
+- Confidence scaling: accounts for non-statistical quality factors
+
+**Deployment**:
+
+```bash
+cd /home/mjh/git/hf-timestd
+git pull
+sudo systemctl restart timestd-analytics  # Apply raw_arrival_time_ms fix
+sudo systemctl restart timestd-fusion     # Apply fusion weight fix
+```
+
+**Verification**:
+
+```bash
+# Wait ~10 minutes for new data, then check for positive slopes
+scripts/verify_dispersion.py --latest
+
+# Monitor fusion precision improvements
+journalctl -u timestd-fusion -f | grep -E "(uncertainty|Grade)"
+```
+
 ## [4.3.0] - 2026-01-05
 
 ### Added - Solar-Ionosphere Correlation System
@@ -9,6 +93,7 @@ All notable changes to this project will be documented in this file.
 **Major Feature:** Complete integration of NOAA space weather data with HF propagation measurements for real-time correlation analysis.
 
 #### Backend Services
+
 - **Space Weather Service** (`web-api/services/space_weather_service.py`)
   - NOAA SWPC data ingestion: X-ray flux (GOES), Kp index, proton flux
   - 15-minute caching with graceful degradation on API failures
@@ -24,6 +109,7 @@ All notable changes to this project will be documented in this file.
   - Statistical analysis using scipy (Pearson r, linear regression, p-values)
 
 #### API Endpoints
+
 - **Space Weather** (`/api/space-weather/`)
   - `/current` - Real-time conditions with active alerts
   - `/xray?hours=N` - X-ray flux time series with classification (A/B/C/M/X)
@@ -40,6 +126,7 @@ All notable changes to this project will be documented in this file.
   - `/summary` - Multi-faceted correlation summary
 
 #### Frontend Visualization
+
 - **Solar Correlation Dashboard** (`static/solar-correlation.html`)
   - Multi-tab interface: Overview, Correlation, SID Events, Geomagnetic Effects
   - Real-time space weather dashboard with color-coded alerts
@@ -50,29 +137,34 @@ All notable changes to this project will be documented in this file.
   - Dark mode optimized for 24/7 operations
 
 #### Physical Relationships Implemented
+
 - **X-ray Flares → SID**: M/X-class flares cause D-layer absorption (10-20 dB SNR drops)
 - **Solar Zenith Angle → SNR**: Expected r > 0.7 correlation for F-layer propagation
 - **Kp Index → High-Latitude Degradation**: CHU path affected during storms (Kp > 5)
 - **Frequency Dependence**: Lower frequencies more affected by absorption (∝ 1/f²)
 
 #### Documentation
+
 - `web-api/SOLAR_CORRELATION_README.md` - Comprehensive feature documentation
 - `web-api/DEPLOYMENT_GUIDE.md` - Step-by-step deployment instructions
 - `web-api/test_solar_api.py` - Automated API testing script
 - Updated `CONTEXT.md` with session summary and implementation details
 
 #### Infrastructure
+
 - Cache directory: `/var/lib/timestd/space_weather_cache/`
 - Dependencies added: `requests>=2.31.0`, `scipy>=1.11.0`
 - Navigation link added to main dashboard
 
 ### Changed
+
 - Updated `web-api/main.py` to register space weather and correlation routers
 - Updated `web-api/routers/__init__.py` to export new routers
 - Updated `web-api/static/index.html` with navigation link
 - Updated `web-api/requirements.txt` with new dependencies
 
 ### Technical Details
+
 - Data cadence: X-ray (5 min), Kp (3 hour), Protons (5 min)
 - Cache duration: 15 minutes with stale cache fallback
 - API timeout: 10 seconds
@@ -80,6 +172,7 @@ All notable changes to this project will be documented in this file.
 - Alert thresholds: X-ray M-class, Kp ≥ 5, Proton flux ≥ 10 pfu
 
 ### Future Enhancements (Phase 2)
+
 - F10.7 solar flux ingestion from Space Weather Canada
 - Dst index integration for storm monitoring
 - Solar wind parameters (ACE/DSCOVR)

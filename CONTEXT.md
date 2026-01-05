@@ -1,9 +1,10 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-05 00:35 UTC  
-**System Version**: 4.3.0  
-**Current Focus**: Science - Solar-Ionosphere Correlation Analysis (IMPLEMENTED)  
-**System Status**: Stable, HDF5-native, Modernized Web API with Solar Correlation Features
+**Last Updated**: 2026-01-05 11:40 UTC  
+**System Version**: 3.2.1  
+**Current Focus**: Pipeline Integrity - Critical Calculation Fixes (COMPLETED)  
+**Next Session**: GRAPE Module Verification  
+**System Status**: Stable, HDF5-native, Critical Pipeline Fixes Deployed
 
 ---
 
@@ -11,18 +12,149 @@
 
 The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native and stable.
 
-**Recent Achievements (Web UI Enhancements):**
+**Recent Critical Fixes (v3.2.1 - 2026-01-05):**
 
-- ✅ **Station Dashboards**: dedicated pages (`station.html`) for WWV, WWVH, CHU, BPM.
-- ✅ **Solar Zenith Overlay**: Visual correlation of signal strength with solar position at path midpoints.
-- ✅ **Logs Viewer**: Real-time access to systemd journals via Web UI.
-- ✅ **System Health**: Refined dashboard with true process uptime.
+- ✅ **Raw Arrival Time Calculation**: Fixed inverted dispersion causing 0.0 TEC values
+- ✅ **Fusion Weight Calculation**: Implemented statistically optimal inverse variance weighting
+- ✅ **Comprehensive Pipeline Audit**: Verified D_clock calculation, uncertainty propagation, quality grading
 
-**Latest Achievement**: ✅ **Solar-Ionosphere Correlation System** - Complete integration of NOAA space weather data with HF propagation measurements, including real-time X-ray flux, Kp index, SID detection, and multi-panel visualization.
+**System Health:**
+
+- All services running and stable
+- Critical path verified correct (D_clock = T_arrival - T_propagation)
+- ISO GUM compliant uncertainty budget
+- Awaiting new data to verify TEC fix effectiveness
 
 ---
 
-## Session Summary (Solar-Ionosphere Correlation - 2026-01-05)
+## Session Summary (Critical Pipeline Fixes - 2026-01-05)
+
+**Objective**: Diagnose and fix root cause of "0.0 TEC" issue and conduct comprehensive pipeline audit per CRITIC_CONTEXT.md objectives.
+
+**Critical Issues Found and Fixed:**
+
+### 1. Raw Arrival Time Calculation (Inverted Dispersion)
+
+**Problem:**
+
+- `raw_arrival_time_ms` incorrectly included ionospheric propagation delay corrections
+- Created inverse dispersion pattern (higher frequencies arriving later)
+- TEC estimator saw "flat" data, returned 0.0 TEC with R²=1.0
+
+**Root Cause:**
+
+```python
+# BEFORE (WRONG):
+'raw_arrival_time_ms': effective_d_clock + solution.t_propagation_ms
+
+# AFTER (CORRECT):
+'raw_arrival_time_ms': effective_d_clock  # Raw ToA, NO corrections
+```
+
+**Impact**: TEC estimator can now measure real ionospheric dispersion (positive slopes)
+
+**File**: `src/hf_timestd/core/phase2_analytics_service.py` (line 734)
+
+### 2. Fusion Weight Calculation (Non-Optimal Weighting)
+
+**Problem:**
+
+- Fusion used confidence-based weighting instead of inverse variance
+- Violated statistical optimality and ISO GUM best practices
+- Measurements with different uncertainties received improper weights
+
+**Root Cause:**
+
+```python
+# BEFORE (WRONG):
+w = m.confidence  # Ignores uncertainty
+
+# AFTER (CORRECT):
+w = 1.0 / (m.uncertainty_ms ** 2)  # Inverse variance (precision)
+w *= confidence_scale  # Quality factors
+```
+
+**Impact**: Statistically optimal fusion, improved precision
+
+**File**: `src/hf_timestd/core/multi_broadcast_fusion.py` (lines 1469-1545)
+
+**Comprehensive Audit Completed:**
+
+✅ **Phase 1**: D_clock calculation - Verified correct  
+✅ **Phase 2**: Fusion algorithm - Fixed weights, verified outlier rejection  
+✅ **Phase 3**: Uncertainty propagation - Verified ISO GUM compliance  
+✅ **Phase 4**: Quality grading - Verified reasonable thresholds  
+
+**Diagnostic Tools Created:**
+
+1. `scripts/verify_dispersion.py` - Analyzes HDF5 for frequency-dependent dispersion
+2. TEC estimator instrumentation - Logs input vectors when TEC is suspicious
+3. Unit tests - `tests/core/test_tec_estimator_diagnostics.py`
+
+**Deployment:**
+
+- Changes committed: d0b3cd5
+- Services restarted: analytics (11:10 UTC), fusion (11:24 UTC)
+- Production synchronized with repository
+
+**Verification Status:**
+
+- ⏳ Awaiting new data accumulation (~10-15 minutes post-restart)
+- Expected: Positive TEC slopes, improved fusion precision
+- Monitor: `scripts/verify_dispersion.py --latest`
+
+---
+
+## Next Session Objective: GRAPE Module Verification
+
+**Goal**: Ensure the GRAPE (science aggregation) module is functioning as planned.
+
+**Context**: The GRAPE module was integrated from the `grape-recorder` project into `hf-timestd` as the `hf_timestd.grape` module. It handles:
+
+- Decimation (24 kHz → 10 Hz)
+- Spectrogram generation
+- Data packaging for PSWS upload
+- Daily batch processing via systemd timer
+
+**Areas to Verify:**
+
+1. **Module Integration**
+   - Verify `hf-timestd grape` CLI commands work
+   - Check imports and dependencies (zstandard, digital_rf, paramiko)
+   - Confirm data paths: `/var/lib/timestd/grape/`
+
+2. **Daily Processing**
+   - Review `grape-daily.timer` and `grape-daily.service` configuration
+   - Verify batch processing runs correctly
+   - Check output products (decimated files, spectrograms)
+
+3. **Data Pipeline**
+   - Confirm Digital RF input reading
+   - Verify decimation quality (CIC+FIR filters)
+   - Check spectrogram generation with solar zenith overlay
+
+4. **Upload Mechanism**
+   - Verify SFTP upload configuration
+   - Check packaging format compatibility with PSWS
+   - Confirm automated daily uploads
+
+**Key Files to Review:**
+
+- `src/hf_timestd/grape/` - Core GRAPE modules
+- `src/hf_timestd/cli.py` - CLI integration
+- `systemd/grape-daily.{timer,service}` - Batch processing
+- `pyproject.toml` - Dependencies
+
+**Expected Outcomes:**
+
+- GRAPE module fully functional
+- Daily processing running automatically
+- Data products being generated and uploaded
+- Any issues identified and documented
+
+---
+
+## Session Summary (Solar-Ionosphere Correlation - 2026-01-05 00:35 UTC)
 
 **Objective**: Implement comprehensive solar-ionosphere correlation analysis system to display meaningful relationships between space weather and HF propagation.
 
@@ -66,11 +198,13 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 - **Frequency Dependence**: Lower frequencies more affected by absorption (∝ 1/f²)
 
 **Data Sources:**
+
 - `https://services.swpc.noaa.gov/json/goes/xray-fluxes-7-day.json`
 - `https://services.swpc.noaa.gov/json/planetary_k_index_1m.json`
 - `https://services.swpc.noaa.gov/json/goes/primary/integral-protons-plot-6-hour.json`
 
 **Deployment Status:**
+
 - ✅ Backend services implemented and tested
 - ✅ API endpoints functional
 - ✅ Frontend visualization complete
@@ -78,6 +212,7 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 - ⏳ Awaiting production deployment and testing
 
 **Key Files Added:**
+
 - `web-api/services/space_weather_service.py`
 - `web-api/services/correlation_service.py`
 - `web-api/routers/space_weather.py`
@@ -88,6 +223,7 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 - `web-api/test_solar_api.py`
 
 **Key Files Modified:**
+
 - `web-api/routers/__init__.py` - Added space_weather and correlations routers
 - `web-api/main.py` - Registered new routers
 - `web-api/static/index.html` - Added navigation link
