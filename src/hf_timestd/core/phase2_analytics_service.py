@@ -137,7 +137,16 @@ import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
-from hf_timestd.models import L2TimingMeasurement
+from hf_timestd.models import (
+    L2TimingMeasurement,
+    L1ToneDetection,
+    StationID,
+    AnchorStation,
+    DiscriminationMethod,
+    QualityGrade,
+    QualityFlag,
+    ToneQualityFlag
+)
 
 logger = logging.getLogger(__name__)
 
@@ -725,6 +734,22 @@ class Phase2AnalyticsService:
                     
                     
                     # Create typed measurement object
+                    # SAFEGUARD: Ensure all float fields handle None correctly
+                    # effective_d_clock should not be None (checked above), but safeguard anyway
+                    ck_off = float(effective_d_clock) if effective_d_clock is not None else float(result.d_clock_ms)
+                    
+                    # Safe propagation delay calculation
+                    if solution and solution.t_propagation_ms is not None:
+                        prop_delay = float(solution.t_propagation_ms)
+                    else:
+                        prop_delay = 0.0
+                        
+                    # Safe raw arrival time
+                    if solution and solution.t_arrival_ms is not None:
+                        raw_arr = float(solution.t_arrival_ms)
+                    else:
+                        raw_arr = ck_off + prop_delay
+                        
                     l2_measurement = L2TimingMeasurement(
                         timestamp_utc=timestamp_utc,
                         minute_boundary_utc=minute_boundary,
@@ -732,13 +757,13 @@ class Phase2AnalyticsService:
                         station=StationID(station) if station else StationID.WWV, # Fallback or handle None
                         frequency_mhz=float(frequency_mhz),
                         discrimination_method=DiscriminationMethod.TONE,
-                        discrimination_confidence=float(discrimination_conf),
-                        clock_offset_ms=float(effective_d_clock),
-                        raw_arrival_time_ms=float(solution.t_arrival_ms) if solution else (effective_d_clock + (solution.t_propagation_ms if solution else 0.0)),
-                        uncertainty_ms=float(effective_uncertainty),
-                        expanded_uncertainty_ms=float(unc_result['u_expanded_ms']),
-                        coverage_factor=float(budget.coverage_factor),
-                        confidence_level=float(budget.confidence_level),
+                        discrimination_confidence=float(discrimination_conf) if discrimination_conf is not None else 0.0,
+                        clock_offset_ms=ck_off,
+                        raw_arrival_time_ms=raw_arr,
+                        uncertainty_ms=float(effective_uncertainty) if effective_uncertainty is not None else 1.0,
+                        expanded_uncertainty_ms=float(unc_result['u_expanded_ms']) if unc_result.get('u_expanded_ms') is not None else 2.0,
+                        coverage_factor=float(budget.coverage_factor) if budget.coverage_factor is not None else 2.0,
+                        confidence_level=float(budget.confidence_level) if budget.confidence_level is not None else 0.95,
                         u_rtp_timestamp_ms=float(budget.u_rtp_timestamp_ms),
                         u_ionospheric_ms=float(budget.u_ionospheric_ms),
                         u_multipath_ms=float(budget.u_multipath_ms),
@@ -747,11 +772,11 @@ class Phase2AnalyticsService:
                         u_propagation_model_ms=float(budget.u_propagation_model_ms),
                         degrees_of_freedom=int(unc_result['degrees_of_freedom']),
                         quality_grade=QualityGrade(quality_grade),
-                        confidence=float(solution.confidence) if solution else 0.0,
+                        confidence=float(solution.confidence) if solution and solution.confidence is not None else 0.0,
                         quality_flag=QualityFlag(quality_flag),
-                        propagation_delay_ms=float(solution.t_propagation_ms) if solution else None,
-                        propagation_mode=str(solution.propagation_mode) if solution else None,
-                        n_hops=int(solution.n_hops) if solution else None,
+                        propagation_delay_ms=float(solution.t_propagation_ms) if solution and solution.t_propagation_ms is not None else None,
+                        propagation_mode=str(solution.propagation_mode) if solution and solution.propagation_mode else None,
+                        n_hops=int(solution.n_hops) if solution and solution.n_hops is not None else None,
                         snr_db=float(snr_db) if snr_db is not None else None,
                         utc_verified=bool(convergence_result.is_locked),
                         multi_station_verified=bool(solution.dual_station_verified) if solution else False,

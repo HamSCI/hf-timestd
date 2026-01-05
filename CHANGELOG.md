@@ -68,6 +68,14 @@ if subdir.is_dir() and subdir.name != 'fusion':
 - **Result**: Fusion successfully processes measurements and calculates weights
 - **Files**: `src/hf_timestd/core/multi_broadcast_fusion.py` (lines 185-199, 1455-1470)
 
+#### Bug #4: Pydantic Model Import Errors
+
+- **Issue**: Analytics service crashed during HDF5 writes with `NameError: name 'StationID' is not defined` and `float() argument must be a string or a real number`
+- **Root Cause**: v4.5.0 refactoring omitted imports for new Pydantic models (`StationID`, `AnchorStation`, `ToneQualityFlag`) and didn't handle `None` values in strict float conversions
+- **Impact**: Fusion received 0 measurements because analytics failed to write HDF5 files
+- **Fix**: Added missing imports and robust `None` handling in L2 measurement creation
+- **Result**: HDF5 files written successfully, Chrony feed fully restored
+
 ### Deployment Challenges Resolved
 
 #### Wrong Virtual Environment
@@ -87,7 +95,7 @@ if subdir.is_dir() and subdir.name != 'fusion':
 
 ### Verification Results
 
-**HDF5 Reader**: ✅ Successfully reads 245 measurements with 30-minute lookback
+**HDF5 Reader**: ✅ Successfully reads measurements with SWMR support (no locking errors)
 
 **Channel Discovery**: ✅ Discovers 9 channels (was 0)
 
@@ -97,12 +105,12 @@ if subdir.is_dir() and subdir.name != 'fusion':
 
 ```
 Before: #* TMGR    0   4     0   40m   -766ns[ -607ns] +/- 1000us
-After:  #* TMGR    0   4   225    16   +211us[ +180us] +/- 1000us
+After:  #* TMGR    0   4   252    43s   -13us[  -10us] +/- 1000us
 ```
 
-- reach=225 (was 0) - Successfully receiving updates
-- LastRx=16s (was 40+ minutes) - Fresh data flowing
-- Active measurement: +211us - Fusion providing time offset
+- reach=252 (was 0) - Successfully receiving updates
+- LastRx=43s (was 40+ minutes) - Fresh data flowing
+- Active measurement: -13us - Fusion providing time offset
 
 ### Deployment
 

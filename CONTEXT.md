@@ -14,11 +14,12 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 
 **Recent Critical Fix (v4.5.1 - 2026-01-05 17:20 UTC):**
 
-- ✅ **Chrony Feed Restored**: Fixed three critical bugs that broke Chrony feed after v4.5.0 deployment
+- ✅ **Chrony Feed Restored**: Fixed four critical bugs that broke Chrony feed after v4.5.0 deployment
   - HDF5 SWMR mode initialization (concurrent read/write support)
   - Channel discovery logic (9 channels now discovered)
   - Missing uncertainty_ms field in BroadcastMeasurement dataclass
-- ✅ **Result**: Chrony reach=225 (was 0), LastRx=16s (was 40+ minutes), active time offset measurement
+  - **Pydantic Import Errors**: Fixed `NameError: StationID` and `float(None)` crashes in analytics service
+- ✅ **Result**: Chrony reach=252 (was 0), LastRx=43s (was 40+ minutes), active time offset measurement
 
 **System Health:**
 

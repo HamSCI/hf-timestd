@@ -200,14 +200,18 @@ class DataProductWriter:
             
             # Step 2: Open in SWMR write mode
             try:
-                # Open existing file in read-write mode with SWMR enabled
-                # This allows concurrent readers to access the file
+                # Open existing file in read-write mode
+                # CRITICAL: Must open first, THEN enable SWMR mode
                 self._current_file = h5py.File(
                     hdf5_path,
                     'r+',  # Read-write mode (file must exist)
-                    libver='latest',
-                    swmr=True  # Enable SWMR from the start
+                    libver='latest'
                 )
+                
+                # Enable SWMR mode AFTER opening
+                # This is the correct h5py API for SWMR write mode
+                self._current_file.swmr_mode = True
+                
                 logger.info(f"Opened {hdf5_path} in SWMR write mode")
                 
             except OSError as e:
@@ -223,9 +227,9 @@ class DataProductWriter:
                         self._current_file = h5py.File(
                             hdf5_path,
                             'r+',
-                            libver='latest',
-                            swmr=True
+                            libver='latest'
                         )
+                        self._current_file.swmr_mode = True
                     else:
                         raise  # Re-raise if recovery failed
                 else:
