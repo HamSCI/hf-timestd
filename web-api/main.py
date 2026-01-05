@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import logging
 
-from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router
+from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router
 from config import config
 
 # Configure logging
@@ -44,6 +44,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(station_router, prefix="/api")
+app.include_router(stations_router, prefix="/api")
 app.include_router(health_router, prefix="/api")
 app.include_router(metrology_router, prefix="/api")
 app.include_router(stability_router, prefix="/api")

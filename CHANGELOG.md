@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.2.0] - 2026-01-05
+
+### Added - Individual Station Dashboards & Solar Zenith Overlay
+
+#### Station Pages
+
+- **New Page**: `station.html` provides a dedicated dashboard for each station (WWV, WWVH, CHU, BPM).
+- **Visualizations**:
+  - **SNR History**: 24h scatter plot of signal strength per frequency.
+  - **Propagation Modes**: Timeline of detected modes (1F, 2F, etc.).
+  - **TEC**: Total Electron Content trend.
+  - **Solar Zenith Overlay**: Real-time correlation of signal strength with solar elevation at the path midpoint.
+- **Backend**: New `/api/stations/{station_id}` endpoints in generic `stations_router`.
+
+#### Solar Zenith Integration
+
+- **Feature**: Automatic calculation of solar elevation angles for the geographic midpoint between receiver and transmitter.
+- **Visualization**: Yellow shaded area on SNR charts indicating daylight (>0° elevation) vs night (<0°).
+- **Science Utility**: Immediate visual correlation of day/night propagation regimes and greyline transitions.
+
 ## [4.1.0] - 2026-01-04
 
 ### Added - Web UI Modernization & Logs Viewer

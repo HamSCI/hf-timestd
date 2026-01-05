@@ -1,9 +1,9 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-04 23:00 UTC  
-**System Version**: 4.1.0  
-**Current Focus**: Web UI Enhancements - Individual Station Pages & Ionosphere Characterization  
-**System Status**: Stable, HDF5-native, Modernized Web API
+**Last Updated**: 2026-01-05 00:10 UTC  
+**System Version**: 4.2.0  
+**Current Focus**: Science - Solar-Ionosphere Correlation Analysis  
+**System Status**: Stable, HDF5-native, Modernized Web API with Station Dashboards
 
 ---
 
@@ -11,14 +11,14 @@
 
 The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native and stable.
 
-**Recent Achievements (Web UI Modernization):**
+**Recent Achievements (Web UI Enhancements):**
 
-- ✅ **New Service**: `timestd-web-api` (FastAPI) replaced legacy `monitor-server.js`.
-- ✅ **Logs Viewer**: Real-time access to systemd journals via Web UI (`/static/logs.html`).
-- ✅ **System Health**: Refined dashboard with true process uptime and improved UX.
-- ✅ **API Docs**: Interactive Swagger UI at `/api/docs`.
+- ✅ **Station Dashboards**: dedicated pages (`station.html`) for WWV, WWVH, CHU, BPM.
+- ✅ **Solar Zenith Overlay**: Visual correlation of signal strength with solar position at path midpoints.
+- ✅ **Logs Viewer**: Real-time access to systemd journals via Web UI.
+- ✅ **System Health**: Refined dashboard with true process uptime.
 
-**Next Priority**: Develop specialized dashboard pages for each transmitting station (WWV, WWVH, CHU, BPM) to visualize their unique characteristics and ionospheric paths.
+**Next Priority**: Explore display correlations between per-broadcast measurements and incident solar radiation (X-ray flux, etc.) on the propagation path.
 
 ---
 

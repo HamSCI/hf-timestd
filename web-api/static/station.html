@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Station Dashboard - hf-timestd</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent: #3b82f6;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --border: #334155;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1rem;
+        }
+
+        .header-left h1 {
+            margin: 0;
+            font-size: 2rem;
+            color: var(--text-primary);
+        }
+
+        .header-meta {
+            color: var(--text-secondary);
+            display: flex;
+            gap: 1.5rem;
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin-left: 1rem;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover {
+            color: var(--accent);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+        }
+
+        .card h3 {
+            margin: 0 0 1rem 0;
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .metric-unit {
+            font-size: 1rem;
+            color: var(--text-secondary);
+            margin-left: 0.25rem;
+        }
+
+        .metric-sub {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-top: 0.5rem;
+        }
+
+        .chart-container {
+            height: 400px;
+            width: 100%;
+        }
+
+        .chart-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        @media (max-width: 1024px) {
+            .chart-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .status-active {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+        }
+
+        .status-inactive {
+            background: rgba(148, 163, 184, 0.2);
+            color: var(--text-secondary);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 4rem;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <div class="header-left">
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <h1 id="station-name">Loading...</h1>
+                    <span id="activity-badge" class="status-badge status-inactive">No Signal</span>
+                </div>
+                <div class="header-meta">
+                    <span id="station-location"></span>
+                    <span id="station-coords"></span>
+                    <span id="station-freqs"></span>
+                </div>
+            </div>
+            <nav class="nav-links">
+                <a href="/">Dashboard</a>
+                <a href="/static/logs.html">Logs</a>
+                <a href="/api/docs">API</a>
+            </nav>
+        </header>
+
+        <!-- Key Metrics -->
+        <div class="grid">
+            <div class="card">
+                <h3>Current Mode</h3>
+                <div id="mode-val" class="metric-value">--</div>
+                <div id="mode-sub" class="metric-sub">Propagation path</div>
+            </div>
+            <div class="card">
+                <h3>Signal Strength (SNR)</h3>
+                <div class="metric-value"><span id="snr-val">--</span><span class="metric-unit">dB</span></div>
+                <div id="snr-sub" class="metric-sub">Average across -- frequencies</div>
+            </div>
+            <div class="card">
+                <h3>Clock Offset</h3>
+                <div class="metric-value"><span id="offset-val">--</span><span class="metric-unit">ms</span></div>
+                <div class="metric-sub">±<span id="uncertainty-val">--</span> ms uncertainty</div>
+            </div>
+            <div class="card">
+                <h3>Ionosphere (TEC)</h3>
+                <div class="metric-value"><span id="tec-val">--</span><span class="metric-unit">TECU</span></div>
+                <div id="tec-sub" class="metric-sub">Path Total Electron Content</div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="chart-row">
+            <div class="card">
+                <h3>Signal Strength History (24h)</h3>
+                <div id="snr-chart" class="chart-container"></div>
+            </div>
+            <div class="card">
+                <h3>Propagation Modes</h3>
+                <div id="mode-chart" class="chart-container"></div>
+            </div>
+        </div>
+
+        <div class="chart-row">
+            <div class="card">
+                <h3>Total Electron Content (TEC)</h3>
+                <div id="tec-chart" class="chart-container"></div>
+            </div>
+            <div class="card">
+                <h3>Timing Stability</h3>
+                <div id="timing-chart" class="chart-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const stationId = urlParams.get('id') || 'WWV';
+
+        document.title = `${stationId} Dashboard - hf-timestd`;
+
+        // Plotly dark theme config
+        const plotLayout = {
+            paper_bgcolor: 'rgba(0,0,0,0)',
+            plot_bgcolor: 'rgba(0,0,0,0)',
+            font: { color: '#94a3b8' },
+            xaxis: { gridcolor: '#334155', zerolinecolor: '#334155' },
+            yaxis: { gridcolor: '#334155', zerolinecolor: '#334155' },
+            margin: { t: 20, r: 20, b: 40, l: 40 },
+            showlegend: true,
+            legend: { x: 0, y: 1.1, orientation: 'h' }
+        };
+
+        async function fetchData() {
+            try {
+                // Fetch Dashboard Data
+                const res = await fetch(`/api/stations/${stationId}`);
+                const data = await res.json();
+
+                // Fetch History Data
+                const histRes = await fetch(`/api/stations/${stationId}/history?hours=24`);
+                const history = await histRes.json();
+
+                updateUI(data);
+                updateCharts(history);
+            } catch (err) {
+                console.error("Error fetching data:", err);
+            }
+        }
+
+        function updateUI(data) {
+            // Header
+            document.getElementById('station-name').textContent = data.info.name || stationId;
+            document.getElementById('station-location').textContent = data.info.location;
+
+            const coords = data.info.coordinates;
+            if (coords) {
+                document.getElementById('station-coords').textContent = `${coords.lat.toFixed(2)}°N, ${coords.lon.toFixed(2)}°E`;
+            }
+
+            const freqs = data.info.frequencies;
+            if (freqs) {
+                document.getElementById('station-freqs').textContent = `${freqs.join(', ')} MHz`;
+            }
+
+            // Status Badge
+            const badge = document.getElementById('activity-badge');
+            if (data.status && data.status.avg_snr_db !== null) {
+                badge.className = 'status-badge status-active';
+                badge.textContent = 'Active Signal';
+            } else {
+                badge.className = 'status-badge status-inactive';
+                badge.textContent = 'No Signal';
+            }
+
+            // Metrics
+            if (data.status) {
+                document.getElementById('mode-val').textContent = data.status.dominant_mode || 'UNKNOWN';
+                document.getElementById('snr-val').textContent = data.status.avg_snr_db ? data.status.avg_snr_db.toFixed(1) : '--';
+                if (data.status.active_frequencies && data.status.active_frequencies.length > 0) {
+                    document.getElementById('snr-sub').textContent = `Active on: ${data.status.active_frequencies.join(', ')} MHz`;
+                }
+            }
+
+            if (data.fusion) {
+                const globalDClock = data.fusion.global_d_clock;
+                // If station specific timing exists (it might not be exposed directly in global endpoint yet)
+                // For now use global D_Clock as reference or specific offset if available
+                document.getElementById('offset-val').textContent = globalDClock != null ? globalDClock.toFixed(3) : '--';
+                document.getElementById('uncertainty-val').textContent = data.fusion.global_uncertainty != null ? data.fusion.global_uncertainty.toFixed(3) : '--';
+            }
+
+            if (data.ionosphere) {
+                document.getElementById('tec-val').textContent = data.ionosphere.current_tec ? data.ionosphere.current_tec.toFixed(1) : '--';
+                document.getElementById('tec-sub').textContent = `24h Avg: ${data.ionosphere.mean_24h ? data.ionosphere.mean_24h.toFixed(1) : '--'}`;
+            }
+        }
+
+        function updateCharts(history) {
+            if (!history.timeline) return;
+
+            const tl = history.timeline;
+
+            // 1. SNR Chart (Group by frequency)
+            // Need to reconstruct from flat arrays
+            const uniqueFreqs = [...new Set(tl.frequencies)].sort((a, b) => a - b);
+            const snrTraces = [];
+
+            // Solar Elevation Overlay (Secondary Y-axis)
+            if (history.solar) {
+                const s = history.solar;
+                snrTraces.push({
+                    x: s.timestamps,
+                    y: s.elevation_deg,
+                    name: 'Solar El.',
+                    type: 'scatter',
+                    mode: 'lines',
+                    fill: 'tozeroy',
+                    line: { color: 'rgba(255, 255, 0, 0)', width: 0 },
+                    fillcolor: 'rgba(255, 255, 0, 0.05)',
+                    yaxis: 'y2',
+                    hoverinfo: 'y+x',
+                    hovertemplate: 'Solar El.: %{y:.1f}°<extra>Path Midpoint</extra>'
+                });
+            }
+
+            uniqueFreqs.forEach(freq => {
+                if (freq === 0) return;
+
+                // Filter indices
+                const indices = tl.frequencies.map((f, i) => f === freq ? i : -1).filter(i => i !== -1);
+
+                snrTraces.push({
+                    x: indices.map(i => tl.timestamps[i]),
+                    y: indices.map(i => tl.snr_db[i]),
+                    name: `${freq} MHz`,
+                    mode: 'markers',
+                    type: 'scatter',
+                    marker: { size: 4, opacity: 0.7 }
+                });
+            });
+
+            Plotly.newPlot('snr-chart', snrTraces, {
+                ...plotLayout,
+                yaxis: {
+                    ...plotLayout.yaxis,
+                    title: 'SNR (dB)',
+                    domain: [0, 1]
+                },
+                yaxis2: {
+                    title: 'Solar Elevation (°)',
+                    titlefont: { color: '#f59e0b' },
+                    tickfont: { color: '#f59e0b' },
+                    overlaying: 'y',
+                    side: 'right',
+                    range: [-90, 90],
+                    gridcolor: 'rgba(255,255,255,0.05)'
+                }
+            });
+
+            // 2. Mode Chart (Heatmap or Scatter)
+            const modeTraces = [{
+                x: tl.timestamps,
+                y: tl.frequencies,
+                text: tl.modes,
+                mode: 'markers',
+                marker: {
+                    size: 8,
+                    color: tl.modes.map(m => mapModeToColor(m))
+                },
+                hovertemplate: '%{x}<br>%{y} MHz<br>%{text}<extra></extra>'
+            }];
+
+            Plotly.newPlot('mode-chart', modeTraces, {
+                ...plotLayout,
+                yaxis: { ...plotLayout.yaxis, title: 'Frequency (MHz)' }
+            });
+
+            // 3. TEC Chart
+            if (history.tec) {
+                const tecTrace = {
+                    x: history.tec.timestamps,
+                    y: history.tec.tec_tecu,
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#22c55e', width: 2 },
+                    name: 'TEC'
+                };
+                Plotly.newPlot('tec-chart', [tecTrace], {
+                    ...plotLayout,
+                    yaxis: { ...plotLayout.yaxis, title: 'TECU' }
+                });
+            }
+        }
+
+        function mapModeToColor(mode) {
+            // Simple hash or lookup
+            const colors = {
+                '1F1': '#3b82f6', '1F2': '#60a5fa', '2F1': '#a855f7', '2F2': '#d8b4fe',
+                '1E': '#22c55e', '2E': '#86efac',
+                'UNKNOWN': '#64748b'
+            };
+            return colors[mode] || '#94a3b8';
+        }
+
+        // Initial fetch
+        fetchData();
+
+        // Refresh every minute
+        setInterval(fetchData, 60000);
+    </script>
+</body>
+
+</html>
