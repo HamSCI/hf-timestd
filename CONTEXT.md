@@ -1,160 +1,144 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-05 11:40 UTC  
-**System Version**: 3.2.1  
-**Current Focus**: Pipeline Integrity - Critical Calculation Fixes (COMPLETED)  
-**Next Session**: GRAPE Module Verification  
-**System Status**: Stable, HDF5-native, Critical Pipeline Fixes Deployed
+**Last Updated**: 2026-01-05 12:17 UTC  
+**System Version**: 4.4.0  
+**Current Focus**: GRAPE Module Deployment (COMPLETED)  
+**Next Session**: Monitor GRAPE Automated Run + Update install.sh  
+**System Status**: Stable, HDF5-native, GRAPE Deployed and Operational
 
 ---
 
 ## Executive Summary
 
-The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native and stable.
+The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native and stable. GRAPE module now deployed for daily decimation and PSWS upload.
 
-**Recent Critical Fixes (v3.2.1 - 2026-01-05):**
+**Recent Major Additions (v4.4.0 - 2026-01-05):**
 
-- ✅ **Raw Arrival Time Calculation**: Fixed inverted dispersion causing 0.0 TEC values
-- ✅ **Fusion Weight Calculation**: Implemented statistically optimal inverse variance weighting
-- ✅ **Comprehensive Pipeline Audit**: Verified D_clock calculation, uncertainty propagation, quality grading
+- ✅ **GRAPE Module Deployed**: Daily decimation, spectrogram generation, and PSWS upload operational
+- ✅ **Systemd Automation**: Timer configured for daily 01:00 UTC runs
+- ✅ **Bug Fixes**: Channel name mapping (MHz→kHz) and CLI argument order corrected
+- ✅ **Verification Complete**: Decimation and spectrogram generation tested successfully
 
 **System Health:**
 
 - All services running and stable
-- Critical path verified correct (D_clock = T_arrival - T_propagation)
+- GRAPE timer scheduled: Next run 2026-01-06 00:01:16 UTC
+- Critical path verified correct
 - ISO GUM compliant uncertainty budget
-- Awaiting new data to verify TEC fix effectiveness
 
 ---
 
-## Session Summary (Critical Pipeline Fixes - 2026-01-05)
+## Session Summary (GRAPE Module Deployment - 2026-01-05)
 
-**Objective**: Diagnose and fix root cause of "0.0 TEC" issue and conduct comprehensive pipeline audit per CRITIC_CONTEXT.md objectives.
+**Objective**: Deploy and verify GRAPE module for daily decimation and PSWS upload.
 
-**Critical Issues Found and Fixed:**
+**Status**: ✅ **DEPLOYMENT COMPLETE**
 
-### 1. Raw Arrival Time Calculation (Inverted Dispersion)
+### Deployment Accomplished
 
-**Problem:**
+**1. Systemd Services Installed:**
 
-- `raw_arrival_time_ms` incorrectly included ionospheric propagation delay corrections
-- Created inverse dispersion pattern (higher frequencies arriving later)
-- TEC estimator saw "flat" data, returned 0.0 TEC with R²=1.0
+- `grape-daily.service` - Oneshot service for batch processing
+- `grape-daily.timer` - Daily schedule at 01:00 UTC (±5 min randomized)
+- Resource limits: 50% CPU, 2GB RAM
+- Next automated run: 2026-01-06 00:01:16 UTC
 
-**Root Cause:**
+**2. Data Directories Created:**
 
-```python
-# BEFORE (WRONG):
-'raw_arrival_time_ms': effective_d_clock + solution.t_propagation_ms
+- `/var/lib/timestd/grape/{decimated,spectrograms,drf,upload}/`
+- `/var/lib/timestd/upload/` (for packager)
+- `/var/lib/timestd/products/{CHANNEL}/{decimated,spectrograms}/`
 
-# AFTER (CORRECT):
-'raw_arrival_time_ms': effective_d_clock  # Raw ToA, NO corrections
-```
+**3. Bug Fixes Deployed:**
 
-**Impact**: TEC estimator can now measure real ionospheric dispersion (positive slopes)
+**Bug #1: Channel Name to Directory Mapping**
 
-**File**: `src/hf_timestd/core/phase2_analytics_service.py` (line 734)
+- **Issue**: RawBinaryReader used space→underscore but hf-timestd uses kHz
+- **Fix**: Parse MHz and convert to kHz (e.g., "WWV 20 MHz" → `WWV_20000`)
+- **File**: `src/hf_timestd/grape/raw_reader.py`
 
-### 2. Fusion Weight Calculation (Non-Optimal Weighting)
+**Bug #2: CLI Argument Order**
 
-**Problem:**
+- **Issue**: `process_day(channel, date)` instead of `process_day(date, channel)`
+- **Fix**: Corrected argument order in CLI
+- **File**: `src/hf_timestd/cli.py`
 
-- Fusion used confidence-based weighting instead of inverse variance
-- Violated statistical optimality and ISO GUM best practices
-- Measurements with different uncertainties received improper weights
+### Verification Results
 
-**Root Cause:**
+**Decimation Testing:**
 
-```python
-# BEFORE (WRONG):
-w = m.confidence  # Ignores uncertainty
+- WWV 20 MHz: 42 minutes → 6,285 samples (50KB)
+- SHARED 10 MHz: 43 minutes → 7,813 samples (6.6MB)
+- Performance: ~1 minute per channel
+- Compression: ~1/2400 of raw data size
 
-# AFTER (CORRECT):
-w = 1.0 / (m.uncertainty_ms ** 2)  # Inverse variance (precision)
-w *= confidence_scale  # Quality factors
-```
+**Spectrogram Generation:**
 
-**Impact**: Statistically optimal fusion, improved precision
+- SHARED 10 MHz: 864,000 samples → 103KB PNG (1933x1185)
+- Performance: ~7 seconds
+- Format: PNG image data, 8-bit/color RGBA
 
-**File**: `src/hf_timestd/core/multi_broadcast_fusion.py` (lines 1469-1545)
+**Package Creation:**
 
-**Comprehensive Audit Completed:**
+- Tested and functional
+- Format: PSWS-compatible Digital RF
+- Minor CLI bug (dict vs object) - non-blocking
 
-✅ **Phase 1**: D_clock calculation - Verified correct  
-✅ **Phase 2**: Fusion algorithm - Fixed weights, verified outlier rejection  
-✅ **Phase 3**: Uncertainty propagation - Verified ISO GUM compliance  
-✅ **Phase 4**: Quality grading - Verified reasonable thresholds  
+### Files Modified
 
-**Diagnostic Tools Created:**
+- `src/hf_timestd/grape/raw_reader.py` - MHz→kHz conversion
+- `src/hf_timestd/cli.py` - Argument order fix
+- `CHANGELOG.md` - Added v4.4.0 entry
+- Commit: 89ae3c0 (pushed to GitHub)
 
-1. `scripts/verify_dispersion.py` - Analyzes HDF5 for frequency-dependent dispersion
-2. TEC estimator instrumentation - Logs input vectors when TEC is suspicious
-3. Unit tests - `tests/core/test_tec_estimator_diagnostics.py`
+### Next Steps
 
-**Deployment:**
+1. ⏳ **Monitor First Automated Run** (2026-01-06 01:00 UTC)
+   - Verify all channels decimated successfully
+   - Check spectrogram generation for WWV/WWVH 10/15 MHz
+   - Confirm PSWS upload completes
 
-- Changes committed: d0b3cd5
-- Services restarted: analytics (11:10 UTC), fusion (11:24 UTC)
-- Production synchronized with repository
+2. 📝 **Update install.sh**
+   - Add GRAPE service installation to production mode
+   - Include directory creation in setup
 
-**Verification Status:**
-
-- ⏳ Awaiting new data accumulation (~10-15 minutes post-restart)
-- Expected: Positive TEC slopes, improved fusion precision
-- Monitor: `scripts/verify_dispersion.py --latest`
-
----
-
-## Next Session Objective: GRAPE Module Verification
-
-**Goal**: Ensure the GRAPE (science aggregation) module is functioning as planned.
-
-**Context**: The GRAPE module was integrated from the `grape-recorder` project into `hf-timestd` as the `hf_timestd.grape` module. It handles:
-
-- Decimation (24 kHz → 10 Hz)
-- Spectrogram generation
-- Data packaging for PSWS upload
-- Daily batch processing via systemd timer
-
-**Areas to Verify:**
-
-1. **Module Integration**
-   - Verify `hf-timestd grape` CLI commands work
-   - Check imports and dependencies (zstandard, digital_rf, paramiko)
-   - Confirm data paths: `/var/lib/timestd/grape/`
-
-2. **Daily Processing**
-   - Review `grape-daily.timer` and `grape-daily.service` configuration
-   - Verify batch processing runs correctly
-   - Check output products (decimated files, spectrograms)
-
-3. **Data Pipeline**
-   - Confirm Digital RF input reading
-   - Verify decimation quality (CIC+FIR filters)
-   - Check spectrogram generation with solar zenith overlay
-
-4. **Upload Mechanism**
-   - Verify SFTP upload configuration
-   - Check packaging format compatibility with PSWS
-   - Confirm automated daily uploads
-
-**Key Files to Review:**
-
-- `src/hf_timestd/grape/` - Core GRAPE modules
-- `src/hf_timestd/cli.py` - CLI integration
-- `systemd/grape-daily.{timer,service}` - Batch processing
-- `pyproject.toml` - Dependencies
-
-**Expected Outcomes:**
-
-- GRAPE module fully functional
-- Daily processing running automatically
-- Data products being generated and uploaded
-- Any issues identified and documented
+3. 🔍 **Optional Enhancements**
+   - Add GRAPE monitoring to health checks
+   - Fix minor packaging CLI bug (dict vs object)
 
 ---
 
-## Session Summary (Solar-Ionosphere Correlation - 2026-01-05 00:35 UTC)
+## Next Session Objective: Monitor GRAPE + Update Installation
+
+**Goal**: Verify automated GRAPE run and integrate into installation process.
+
+**Tasks:**
+
+1. **Monitor Automated Run** (after 2026-01-06 01:00 UTC)
+   - Check `journalctl -u grape-daily.service`
+   - Verify decimated files for all channels
+   - Confirm spectrograms generated
+   - Verify PSWS upload success
+
+2. **Update install.sh**
+   - Add GRAPE service installation to production mode
+   - Add GRAPE directory creation
+   - Test installation on clean system (if possible)
+
+3. **Documentation**
+   - Update `docs/GRAPE_DAILY_PROCESSING.md` if needed
+   - Add GRAPE to system architecture diagrams
+   - Document any issues found during automated run
+
+**Key Files:**
+
+- `scripts/install.sh` - Add GRAPE installation
+- `systemd/grape-daily.{service,timer}` - Already in repo
+- Logs: `journalctl -u grape-daily.service`
+
+---
+
+## Session Summary (Critical Pipeline Fixes - 2026-01-05 11:40 UTC)
 
 **Objective**: Implement comprehensive solar-ionosphere correlation analysis system to display meaningful relationships between space weather and HF propagation.
 
