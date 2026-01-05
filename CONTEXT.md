@@ -1,10 +1,10 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-05 17:20 UTC  
-**System Version**: 4.5.1  
-**Current Focus**: Web UI Data Access (metrology.html HDF5 integration)  
-**Next Session**: Fix metrology.html to read from HDF5 instead of CSV  
-**System Status**: ✅ Stable, Chrony Feed Restored, HDF5-Native Pipeline
+**Last Updated**: 2026-01-05 19:00 UTC  
+**System Version**: 4.5.2  
+**Current Focus**: Web UI Enhancements (ISO GUM & Science Data Visualization)  
+**Next Session**: Implement ISO GUM compatible uncertainty reporting in UI  
+**System Status**: ✅ Stable, Metrology Dashboard Functional, HDF5 Writer Fixed
 
 ---
 
@@ -27,6 +27,40 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 - Chrony feed operational with fresh updates every 16 seconds
 - HDF5 pipeline fully functional with SWMR mode
 - Data integrity guaranteed by runtime schema validation
+
+---
+
+## Session Summary (Web UI Data Access Fix - 2026-01-05 19:00 UTC)
+
+**Objective**: Fix `metrology.html` data access issues (showing "N/A") caused by backend data alignment bugs and service misconfiguration.
+
+**Status**: ✅ **COMPLETED & DEPLOYED**
+
+### Critical Fixes Implemented
+
+**1. HDF5 Writer Alignment Fix**
+
+- **Problem**: Optional fields were skipped by `DataProductWriter` when missing, causing mismatched dataset lengths ("Index out of bounds").
+- **Fix**: Writer now pads missing fields with defaults (`NaN`, `""`, `0`) to enforce alignment.
+- **Result**: `FusionService` reads data correctly without errors.
+
+**2. Web Service Restoration**
+
+- **Problem**: Dashboard relied on dead/deprecated `timestd-web-ui` (NodeJS).
+- **Fix**: Switched to `timestd-web-api` (FastAPI), stopped legacy service, updated verification scripts.
+- **Result**: Dashboard API endpoints are now serving live data.
+
+### Verification
+
+- **Pipeline**: `verify_pipeline.sh` confirms `timestd-web-api` runs.
+- **Data**: API returns valid JSON; HDF5 files verified to have aligned columns.
+- **UI**: Metrology page loads and displays data.
+
+### Files Modified
+
+- `src/hf_timestd/io/hdf5_writer.py`
+- `scripts/verify_pipeline.sh`
+- `CHANGELOG.md`
 
 ---
 
@@ -81,92 +115,24 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 
 ---
 
-## Next Session Objective: Fix metrology.html Data Access
+## Next Session Objective: ISO GUM Uncertainty Reporting
 
-**Goal**: Update metrology.html web page to read timing data from HDF5 files instead of legacy CSV files.
+**Goal**: Enhance `metrology.html` to fully visualize the detailed ISO GUM uncertainty budget components now available in the HDF5 data.
 
 **Background:**
+The backend now provides a rich uncertainty breakdown (`statistical`, `systematic`, `propagation`, `inter-station`, etc.) in the `uncertainty_ms` field structure. The current dashboard only shows the top-level combined uncertainty.
 
-After the v4.5.0 typed model deployment and v4.5.1 HDF5 fixes, the entire data pipeline is now HDF5-native. However, the metrology.html web page still attempts to read from CSV files that may no longer be the primary data source or may have different schemas.
+**Tasks:**
 
-**Problem Indicators:**
+1. **UI Update**: Modify `metrology.html` (and `expert-metrics` component) to parse and display the detailed uncertainty fields.
+2. **Visualization**: Create a "Uncertainty Budget" stacked bar chart or similar visualization.
+3. **Validation**: Ensure all components sum correctly to the total `uncertainty_ms`.
 
-- metrology.html may show "No data available" or stale data
-- Web UI may be looking for CSV files in old locations
-- CSV files may not be written anymore (HDF5 is primary)
-- Data schema may have changed (uncertainty_ms, raw_arrival_time_ms added)
+**Key Files:**
 
-**Tasks for Next Session:**
-
-1. **Investigate Current State**
-   - Check what data metrology.html currently displays
-   - Identify which API endpoints it uses
-   - Determine if those endpoints read from CSV or HDF5
-   - Test if page loads and shows data
-
-2. **Update Backend API**
-   - Modify API endpoints to read from HDF5 instead of CSV
-   - Use `DataProductReader` class for HDF5 access
-   - Ensure SWMR mode for concurrent reads
-   - Handle schema evolution (new fields like uncertainty_ms)
-
-3. **Update Frontend**
-   - Adjust JavaScript to handle HDF5 data structure
-   - Update field names if schema changed
-   - Add error handling for missing data
-   - Test visualization with live HDF5 data
-
-4. **Verify Functionality**
-   - Confirm page loads without errors
-   - Verify data displays correctly
-   - Check that updates are real-time
-   - Test across different time ranges
-
-**Key Files to Review:**
-
-- `web-api/static/metrology.html` - Frontend page
-- `web-api/routers/*.py` - API endpoints (likely `measurements.py` or similar)
-- `src/hf_timestd/io/hdf5_reader.py` - HDF5 reading utilities
-- `/var/lib/timestd/phase2/{CHANNEL}/*_timing_measurements_*.h5` - Data files
-
-**HDF5 Schema Reference (L2 Timing Measurements):**
-
-Key fields in timing_measurements HDF5 files:
-
-- `timestamp_utc` - ISO 8601 timestamp
-- `minute_boundary_utc` - Unix timestamp
-- `station` - WWV, WWVH, CHU, BPM
-- `frequency_mhz` - Broadcast frequency
-- `clock_offset_ms` - Calibrated timing offset
-- `uncertainty_ms` - ISO GUM combined uncertainty (NEW in v1.1.0)
-- `confidence` - Detection confidence (0-1)
-- `quality_grade` - A, B, C, D
-- `propagation_delay_ms` - Estimated propagation delay
-- `propagation_mode` - 1E, 1F, 2F, etc.
-- `raw_arrival_time_ms` - Uncalibrated ToA (NEW in v1.1.0)
-
-**API Pattern for HDF5 Reading:**
-
-```python
-from hf_timestd.io.hdf5_reader import DataProductReader
-from pathlib import Path
-
-# Initialize reader
-reader = DataProductReader(
-    data_dir=Path(f"/var/lib/timestd/phase2/{channel}"),
-    product_level='L2',
-    product_name='timing_measurements',
-    channel=channel
-)
-
-# Read time range
-measurements = reader.read_time_range(
-    start=start_iso,
-    end=end_iso,
-    min_quality_grade='D',
-    min_confidence=0.0
-)
-```
+- `web-api/static/metrology.html`
+- `web-api/static/js/common.js`
+- `l3_fusion_timing_v1.json` (Schema reference)
 
 ---
 

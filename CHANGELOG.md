@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.5.2] - 2026-01-05
+
+### Fixed - HDF5 Writer Alignment & Web Service Restoration
+
+**Critical Fixes:** Resolved data pipeline issues preventing `metrology.html` from displaying data.
+
+#### Bug #1: HDF5 Dataset Misalignment
+
+- **Issue**: `DataProductWriter` skipped optional fields when missing from input measurements, causing datasets to have different lengths (e.g., `uncertainty_ms` array shorter than `timestamp` array).
+- **Impact**: `FusionService` (and other readers) crashed with "Index out of bounds" errors when reading aligned datasets, or dropped data silently.
+- **Fix**: Modified `hdf5_writer.py` to fill missing optional fields with default values (`NaN` for floats, `0` for ints, `""` for strings).
+- **Result**: All HDF5 datasets remain perfectly aligned in length, preventing reader crashes.
+- **Files**: `src/hf_timestd/io/hdf5_writer.py`
+
+#### Bug #2: Web UI Service Deprecation
+
+- **Issue**: `metrology.html` displayed "N/A" because the legacy `timestd-web-ui` (NodeJS) service was dead/deprecated.
+- **Fix**: Replaced usage of `timestd-web-ui` with the correct `timestd-web-api` (FastAPI) service.
+  - Stopped/Disabled `timestd-web-ui`.
+  - Restarted `timestd-web-api`.
+  - Updated `verify_pipeline.sh` to check the correct service.
+- **Result**: Metrology dashboard restored and fully functional.
+- **Files**: `scripts/verify_pipeline.sh`
+
 ## [4.5.1] - 2026-01-05
 
 ### Fixed - Chrony Feed Restoration After v4.5.0 Deployment

@@ -433,15 +433,44 @@ class DataProductWriter:
         for field in self.schema['fields']:
             field_name = field['name']
             
-            # Skip if field not in measurement
+            # Determine value to write
             if field_name not in measurement:
-                continue
-            
-            value = measurement[field_name]
+                # Field is missing
+                if field.get('required', False):
+                    # Should be caught by validate_measurement, but safe fallback
+                    continue
+                else:
+                    # Optional field missing - use default fill value based on type
+                    field_type = field.get('type')
+                    if field_type == 'float':
+                        value = np.nan
+                    elif field_type == 'integer':
+                        value = 0  # Best effort default for missing optional int
+                    elif field_type == 'string':
+                        value = ""
+                    elif field_type == 'boolean':
+                        value = False
+                    else:
+                        continue
+            else:
+                value = measurement[field_name]
+                if value is None:
+                    # Explicit None value (treated same as missing)
+                    field_type = field.get('type')
+                    if field_type == 'float':
+                        value = np.nan
+                    elif field_type == 'integer':
+                        value = 0
+                    elif field_type == 'string':
+                        value = ""
+                    elif field_type == 'boolean':
+                        value = False
+                    else:
+                        continue
             
             # DEBUG: Log raw_arrival_time_ms processing
             if field_name == 'raw_arrival_time_ms':
-                logger.info(f"DEBUG TEC FIX HDF5: Processing raw_arrival_time_ms={value}, type={type(value)}")
+                logger.debug(f"DEBUG TEC FIX HDF5: Processing raw_arrival_time_ms={value}, type={type(value)}")
             
             # Determine HDF5 dtype
             field_type = field.get('type')
@@ -500,7 +529,7 @@ class DataProductWriter:
                 continue
             
             if field_name == 'raw_arrival_time_ms':
-                logger.info(f"DEBUG TEC FIX HDF5: Wrote value {value} to dataset, new size={dataset.shape[0]}")
+                logger.debug(f"DEBUG TEC FIX HDF5: Wrote value {value} to dataset, new size={dataset.shape[0]}")
         
         # Flush to disk and refresh SWMR metadata
         # In SWMR mode, flush() alone isn't enough - we need to ensure

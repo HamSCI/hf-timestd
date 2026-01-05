@@ -71,7 +71,7 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-science-aggregator.service"
         "timestd-vtec.service"
         "timestd-radiod-monitor.service"
-        "timestd-web-ui.service"
+        "timestd-web-api.service"
     )
     
     # Threshold for "recently restarted" warning (5 minutes)
