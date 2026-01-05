@@ -49,45 +49,22 @@ The `hf-timestd` system is a high-precision time transfer system receiving WWV/W
 
 ---
 
-## Next Session Priority: Individual Station Pages
+## Next Session Priority: Solar-Ionosphere Correlation
 
 ### Objective
 
-Create dedicated dashboard pages for each of the four monitored stations: **WWV**, **WWVH**, **CHU**, and **BPM**.
+Explore and implement visualizations that correlate measured broadcast performance (SNR, Delay, Fading) with incident solar radiation (X-ray flux, Proton flux) and geomagnetic indices (Kp, Ap).
 
 ### Motivation
 
-Currently, data is aggregated by channel (frequency). However, users think in terms of **Stations** and **Paths**. Each station has unique characteristics that need specialized visualization.
+Users want to see the direct effective of Space Weather on HF propagation. Does a solar flare (X-ray spike) cause a sudden fadeout (SWF)? Does a geomagnetic storm (high Kp) degrade high-latitude paths (CHU) more than mid-latitude ones?
 
-### Requirements
+### Goals
 
-#### 1. Station-Specific Metrics
-
-- **WWV (Fort Collins, CO)**:
-  - Short path (stable).
-  - High SNR focus.
-  - Multi-frequency comparison (2.5, 5, 10, 15, 20, 25 MHz).
-
-- **WWVH (Kauai, HI)**:
-  - Long path (variable).
-  - Acoustic signature (1200 Hz tone) reliability.
-  - Interference analysis (WWV vs WWVH dominance).
-
-- **CHU (Ottawa, Canada)**:
-  - Unique Bell 103 digital code decoding stats.
-  - Reliable anchoring (3.33, 7.85, 14.67 MHz exclusive frequencies).
-  - Frame slip detection (500ms jumps).
-
-- **BPM (Pucheng, China)**:
-  - Very long path (sporadic).
-  - Exclusion zone visualization (rejection of WWV aliases).
-  - UT1 tick detection (100ms vs 10ms).
-
-#### 2. Ionospheric Characterization (Per-Path)
-
-- **TEC Analysis**: Display the specific Total Electron Content along the Great Circle Period (GCP) for that station.
-- **Ray Tracing**: Visualize predicted hop structure (1F2, 2F2, etc.) based on current IONEX maps.
-- **Delay Budget**: Breakdown of geometric delay vs. ionospheric group delay.
+1. **Ingestion**: Ingest live Space Weather data (NOAA SWPC).
+2. **Correlation**: Align Space Weather time-series with Station SNR history.
+3. **Visualization**: Overlay X-ray flux on SNR charts.
+4. **Analysis**: Detect and flag correlation events.
 
 ### Implementation Plan
 
