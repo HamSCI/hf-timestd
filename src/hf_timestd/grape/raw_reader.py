@@ -31,8 +31,27 @@ class RawBinaryReader:
         self.channel_name = channel_name
         
         # Resolve channel directory
-        # hf-timestd converts "WWV 10 MHz" -> "WWV_10_MHz"
-        self.channel_dir_name = channel_name.replace(' ', '_')
+        # hf-timestd uses kHz in directory names: "WWV 10 MHz" -> "WWV_10000"
+        # Convert MHz to kHz: extract frequency and multiply by 1000
+        parts = channel_name.split()
+        if len(parts) >= 2 and parts[-1].upper() in ['MHZ', 'KHZ']:
+            station = parts[0]
+            freq_str = parts[1]
+            unit = parts[-1].upper()
+            
+            try:
+                freq = float(freq_str)
+                if unit == 'MHZ':
+                    freq_khz = int(freq * 1000)
+                else:  # KHZ
+                    freq_khz = int(freq)
+                self.channel_dir_name = f"{station}_{freq_khz}"
+            except ValueError:
+                # Fallback to simple replacement if parsing fails
+                self.channel_dir_name = channel_name.replace(' ', '_')
+        else:
+            # Fallback for non-standard names
+            self.channel_dir_name = channel_name.replace(' ', '_')
         
         # Check raw_archive first (Phase 1 storage)
         self.archive_dir = self.data_root / 'raw_archive' / self.channel_dir_name
@@ -43,6 +62,7 @@ class RawBinaryReader:
             self.archive_dir = self.data_root / 'raw_buffer' / self.channel_dir_name
             
         logger.debug(f"RawBinaryReader initialized for {channel_name} at {self.archive_dir}")
+
 
     def get_available_minutes(self, date_str: str) -> List[int]:
         """

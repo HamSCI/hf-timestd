@@ -328,15 +328,16 @@ def main():
                         if channel_dir.is_dir():
                             channel_name = channel_dir.name.replace('_', ' ')
                             print(f"Processing {channel_name}...")
-                            pipeline.process_day(channel_name, date_str)
+                            pipeline.process_day(date_str, channel_name)  # FIXED: date first, then channel
                 else:
                     print(f"❌ No raw_archive found at {channels_dir}")
                     sys.exit(1)
             elif args.channel:
-                pipeline.process_day(args.channel, date_str)
+                pipeline.process_day(date_str, args.channel)  # FIXED: date first, then channel
             else:
                 print("❌ Specify --channel or --all-channels")
                 sys.exit(1)
+
                 
         elif args.grape_command == 'spectrogram':
             from .grape.spectrogram import CarrierSpectrogramGenerator

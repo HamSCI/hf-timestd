@@ -88,6 +88,7 @@ class DecimationPipeline:
         # Determine sample rate
         input_rate = reader.get_sample_rate(date_str)
         logger.info(f"  Input rate: {input_rate} Hz")
+
         
         # Initialize decimator
         decimator = StatefulDecimator(input_rate=input_rate, output_rate=10)
