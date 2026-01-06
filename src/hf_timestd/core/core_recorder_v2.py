@@ -202,44 +202,87 @@ class CoreRecorderV2:
     def run(self):
         """Main run loop."""
         self.running = True
+        
+        # File-based debug logging for tiered storage
+        debug_log = self.output_dir / 'state' / 'tiered_storage_debug.log'
+        debug_log.parent.mkdir(parents=True, exist_ok=True)
+        
+        def debug_write(msg):
+            try:
+                with open(debug_log, 'a') as f:
+                    from datetime import datetime
+                    f.write(f"{datetime.now().isoformat()} {msg}\n")
+            except Exception as e:
+                logger.error(f"Debug write failed: {e}")
+        
+        debug_write("=== Core Recorder Starting ===")
         logger.info("Starting hf-timestd core recorder v2 (using ka9q-python RadiodStream)")
         logger.info(">>> DEBUG VERSION: NETWORK FIX ACTIVE <<<")
         
         # Ensure channels exist and get ChannelInfo
+        debug_write(f"Calling _initialize_channels()")
         if not self._initialize_channels():
             logger.error("Failed to initialize channels - exiting")
+            debug_write("ERROR: Failed to initialize channels")
             return
         
+        debug_write(f"Channels initialized: {len(self.channel_specs)} specs, {len(self.recorders)} recorders")
         self.running = True
         
         # Initialize tiered storage if enabled
         tiered_enabled = self.recorder_config.get('tiered_storage', False)
+        debug_write(f"Tiered storage check: enabled={tiered_enabled}, type={type(tiered_enabled)}")
         logger.info(f"Tiered storage config check: enabled={tiered_enabled}")
         
         if tiered_enabled:
+            debug_write(f"Tiered storage is enabled, starting initialization...")
             try:
+                debug_write(f"Importing init_tiered_storage...")
                 from .tiered_storage import init_tiered_storage
+                debug_write(f"Import successful")
+                
                 num_channels = len(self.channel_specs)
                 hot_buffer_root = self.recorder_config.get('hot_buffer_root', '/dev/shm/timestd')
                 ram_percent = self.recorder_config.get('ram_percent', 20)
                 
+                debug_write(f"Params: num_channels={num_channels}, hot_buffer_root={hot_buffer_root}, ram_percent={ram_percent}")
                 logger.info(f"Initializing tiered storage: {num_channels} channels, "
                            f"hot_buffer={hot_buffer_root}, ram_percent={ram_percent}%")
                 
-                tiered_manager = init_tiered_storage(
-                    cold_buffer_root=str(self.output_dir),
+                debug_write(f"Calling init_tiered_storage()...")
+                
+                # Override auto-configuration to use fixed 5-minute retention
+                # Auto-config uses available RAM which gives 32 minutes, but we only need
+                # 3-5 minutes for real-time analytics/fusion pipeline
+                from .tiered_storage import TieredStorageConfig, TieredStorageManager
+                
+                config = TieredStorageConfig(
+                    hot_buffer_root=Path(hot_buffer_root),
+                    cold_buffer_root=Path(self.output_dir) / 'raw_buffer',
+                    auto_configure=False,  # Disable auto-config
+                    hot_minutes=5,  # Fixed 5-minute retention for real-time pipeline
                     num_channels=num_channels,
-                    hot_buffer_root=hot_buffer_root,
-                    ram_percent=ram_percent,
-                    auto_start=True
                 )
+                
+                from .tiered_storage import _manager
+                global _manager
+                tiered_manager = TieredStorageManager(config)
+                _manager = tiered_manager
+                tiered_manager.start()
+                debug_write(f"init_tiered_storage() returned: {tiered_manager}")
+                debug_write(f"hot_minutes={tiered_manager.hot_minutes}, running={tiered_manager._running}")
                 
                 logger.info(f"✓ Tiered storage ACTIVE: hot_minutes={tiered_manager.hot_minutes}, "
                            f"archiver thread running, will move files older than {tiered_manager.hot_minutes} min to disk")
+                debug_write(f"SUCCESS: Tiered storage initialized and archiver started")
             except Exception as e:
+                debug_write(f"EXCEPTION: {type(e).__name__}: {e}")
+                import traceback
+                debug_write(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"Failed to initialize tiered storage: {e}", exc_info=True)
                 logger.warning("Continuing without tiered storage - files will accumulate in hot buffer!")
         else:
+            debug_write(f"Tiered storage is DISABLED in config")
             logger.warning("Tiered storage is DISABLED - all files will remain in hot buffer!")
         
         # Start all recorders
