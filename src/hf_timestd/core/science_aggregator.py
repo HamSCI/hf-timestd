@@ -146,12 +146,12 @@ class ScienceAggregator:
             List of dicts with keys: minute_boundary_utc, station, frequency_mhz,
             clock_offset_ms, uncertainty_ms, etc.
         """
-        # HDF5 timing measurements are in the channel root directory, not clock_offset subdirectory
-        # Use TimeStdPaths to get the Phase 2 channel directory
-        channel_dir = self.paths.get_phase2_dir(channel_name)
+        # HDF5 timing measurements are in the clock_offset subdirectory
+        # The main channel directory has placeholder data, real data is in clock_offset/
+        clock_offset_dir = self.paths.get_clock_offset_dir(channel_name)
         
-        if not channel_dir.exists():
-            logger.debug(f"Channel directory not found: {channel_dir}")
+        if not clock_offset_dir.exists():
+            logger.debug(f"Clock offset directory not found: {clock_offset_dir}")
             return []
         
         # Try HDF5 first
@@ -160,7 +160,7 @@ class ScienceAggregator:
             from datetime import datetime, timezone
             
             reader = DataProductReader(
-                data_dir=channel_dir,
+                data_dir=clock_offset_dir,
                 product_level='L2',
                 product_name='timing_measurements',
                 channel=channel_name
