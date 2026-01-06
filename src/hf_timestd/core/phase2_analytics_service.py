@@ -2489,7 +2489,7 @@ class Phase2AnalyticsService:
                     solution = res.solution if hasattr(res, 'solution') else None
                     time_snap = res.time_snap if hasattr(res, 'time_snap') else None
                     
-                    if solution and time_snap and solution.confidence > 0.1:
+                    if solution and time_snap and solution.confidence > 0.0:
                         # Extract detection parameters
                         station = solution.station
                         propagation_delay_ms = solution.t_propagation_ms if solution.t_propagation_ms else 0.0

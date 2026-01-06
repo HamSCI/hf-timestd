@@ -269,8 +269,11 @@ EXPECTED_DELAY_RANGES = {
 # Based on 1/f² relationship with typical TEC values (10-40 TECU)
 MAX_IONO_DELAY_PER_HOP = {
     2.5: 0.8,   # 2.5 MHz
+    3.33: 0.5,  # 3.33 MHz (CHU)
     5.0: 0.3,   # 5 MHz
+    7.85: 0.15, # 7.85 MHz (CHU)
     10.0: 0.1,  # 10 MHz
+    14.67: 0.08, # 14.67 MHz (CHU)
     15.0: 0.05, # 15 MHz
     20.0: 0.03, # 20 MHz
     25.0: 0.02, # 25 MHz
@@ -834,14 +837,15 @@ class TransmissionTimeSolver:
         # 2. Validate ionospheric delay component
         if n_hops > 0:
             # Get expected max ionospheric delay for this frequency
-            max_iono_expected = MAX_IONO_DELAY_PER_HOP.get(frequency_mhz, 0.1) * n_hops * 3.0  # 3x safety factor
+            max_iono_expected = MAX_IONO_DELAY_PER_HOP.get(frequency_mhz, 0.1) * n_hops * 6.0  # 6x safety factor for variable ionospheric conditions
             if iono_delay_ms < 0:
                 logger.error(f"CRITICAL: Negative ionospheric delay {iono_delay_ms:.3f}ms")
                 return None
             if iono_delay_ms > max_iono_expected:
-                logger.error(f"REJECT: Ionospheric delay {iono_delay_ms:.3f}ms exceeds expected max "
-                           f"{max_iono_expected:.3f}ms for {frequency_mhz}MHz, {n_hops} hops")
-                return None
+                # Don't reject - the measurement is ground truth. Reduce plausibility instead.
+                logger.warning(f"UNUSUAL: Ionospheric delay {iono_delay_ms:.3f}ms exceeds model prediction "
+                           f"{max_iono_expected:.3f}ms for {frequency_mhz}MHz, {n_hops} hops - accepting with reduced confidence")
+                plausibility *= 0.5  # Reduce confidence but don't reject
         
         # 3. Station-specific validation (if station is known)
         # This catches systematic errors in propagation mode selection

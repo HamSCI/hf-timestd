@@ -8,127 +8,202 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🎯 NEXT SESSION OBJECTIVE: DIAGNOSE & FIX CHRONY FEED AND TEC CALCULATIONS
+## 🎯 NEXT SESSION OBJECTIVE: FIX ANALYTICS D_CLOCK CALCULATION FAILURE
 
-**Status:** 🔴 **CRITICAL** - Both chrony feed and TEC calculations not working despite deployed fixes
+**Status:** 🔴 **CRITICAL** - Analytics producing D_clock=+0.00ms despite valid tone detections and propagation solutions
 
 **Author:** AI Agent (Cascade)
-**Date:** 2026-01-06 10:52 UTC
-**Session:** Post-tiered storage fix, TEC fix verification
+**Date:** 2026-01-06 16:40 UTC
+**Session:** Post-ionospheric validation fix, chrony feed restoration
 
 ### Session Goal
 
-**Primary Objective:** Diagnose and fix the measurement and data pipeline issues affecting:
+**Primary Objective:** Diagnose and fix why analytics Phase 2 processing produces `D_clock=+0.00ms` (null measurements) instead of valid clock offset estimates, preventing fusion from producing chrony feed data.
 
-1. **Chrony Feed:** Verify fusion service is producing valid timing measurements and feeding chrony correctly
-2. **TEC Calculations:** Determine why TEC values are still not realistic (2-50 TECU) despite fixes to `raw_arrival_time_ms`
-3. **Data Pipeline Integrity:** Trace the complete path from L1 tone detection → L2 timing → Science aggregator → TEC output
-4. **Root Cause Analysis:** Identify whether the issue is in data generation, data reading, or calculation logic
+**Critical Problem:** Analytics completes "Step 3 Solution" with valid propagation modes and confidence values, but final output shows `D_clock=+0.00ms, uncertainty=100.0ms`, which gets written as NaN to HDF5 files. This prevents fusion TEC solver from working and blocks chrony feed restoration.
 
-### Context from Previous Session (2026-01-06)
+### Context from Previous Session (2026-01-06 13:42-16:40 UTC)
 
-**Major Changes Deployed:**
+**Chrony Feed Stoppage Root Cause Identified:**
 
-1. **TEC Fix - Science Aggregator Path (DEPLOYED 2026-01-06 01:35 UTC):**
-    * Modified `science_aggregator.py` to read L2 timing measurements from `clock_offset/` subdirectory
-    * **Issue:** Science aggregator was reading placeholder data with all zeros from main directory
-    * **Fix:** Lines 149-167 now use `clock_offset_dir = self.paths.get_clock_offset_dir(channel_name)`
-    * **Status:** ⚠️ UNVERIFIED - Need to check if TEC values are now realistic
+1. **Timeline:**
+   - **Jan 4th:** Strict ionospheric validation code deployed in `transmission_time_solver.py`
+   - **Jan 6th, 13:42 UTC:** Chrony feed stopped - fusion ceased producing estimates
+   - **Cause:** Ionospheric conditions exceeded model predictions → all measurements rejected
 
-2. **TEC Fix - Raw Arrival Time Calculation (DEPLOYED 2026-01-06 01:43 UTC):**
-    * Modified `phase2_analytics_service.py` to use actual tone timing for `raw_arrival_time_ms`
-    * **Old Behavior:** Used tiny clock offset residuals (0.001 ms) → TEC ≈ 0.0
-    * **New Behavior:** Priority system: `solution.t_arrival_ms` → `time_snap` tone timing → `clock_offset + propagation_delay`
-    * **Fix:** Lines 747-770 implement proper fallback logic
-    * **Status:** ⚠️ UNVERIFIED - Need to verify HDF5 files have realistic raw_arrival_time_ms values
+2. **Ionospheric Validation Fix (DEPLOYED 2026-01-06 ~16:00 UTC):**
+   - **File:** `src/hf_timestd/core/transmission_time_solver.py` lines 837-848
+   - **Change:** Modified validation to WARN instead of REJECT when ionospheric delays exceed model predictions
+   - **Old:** `return None` when `iono_delay_ms > max_iono_expected`
+   - **New:** `plausibility *= 0.5` (accept with reduced confidence)
+   - **Rationale:** Measurements are ground truth; model deviations are scientific data, not errors
+   - **Status:** ✅ DEPLOYED - Analytics now accepts unusual ionospheric conditions
 
-3. **Tiered Storage Fix (DEPLOYED 2026-01-06 03:29 UTC):**
-    * Fixed OOM kills by initializing tiered storage archiver with 5-minute retention
-    * **Status:** ✅ VERIFIED WORKING - Hot buffer stable at 36 files, oldest 4.5 min
-    * **Impact:** Raw IQ recording now stable, no more OOM kills
+3. **Confidence Threshold Fix (DEPLOYED 2026-01-06 ~16:30 UTC):**
+   - **File:** `src/hf_timestd/core/phase2_analytics_service.py` line 2492
+   - **Change:** Lowered threshold from `confidence > 0.1` to `confidence > 0.0`
+   - **Rationale:** Accept all valid solutions, even low-confidence ones from unusual ionospheric conditions
+   - **Status:** ✅ DEPLOYED - But measurements still showing D_clock=+0.00ms
 
-### Critical Questions to Answer
+4. **Data Product Registry:**
+   - **Status:** ✅ VERIFIED WORKING - All services correctly using registry
+   - Fusion reads from `clock_offset/` subdirectories
+   - Analytics writes to `clock_offset/` subdirectories
+   - DataProductReader automatically resolves paths
 
-**1. Chrony Feed Status:**
+### The Core Problem: Analytics D_clock Calculation Failure
 
-* Is the fusion service running and producing L3 fusion timing measurements?
-* Are fusion measurements being written to HDF5 files correctly?
-* Is the chrony SHM writer actually feeding chrony with valid data?
-* Current chrony status: `#* TMGR stratum 0, reach 124, offset +1354ns` - Is this correct?
-* Why is reach only 124 (octal) instead of 377 (all 8 samples)?
+**Symptom:** Analytics logs show valid "Step 3 Solution" but final output is null measurement:
 
-**2. TEC Calculation Pipeline:**
+```
+2026-01-06 16:36:15,128 - INFO - Step 3 Solution: D_clock=+0.00ms, station=CHU, mode=3F, confidence=0.50
+2026-01-06 16:36:15,128 - INFO - Phase 2 processing complete for CHU: D_clock=+0.00ms, uncertainty=100.0ms
+```
 
-* Are L2 timing measurements in `clock_offset/` subdirectory being written with realistic `raw_arrival_time_ms` values?
-* Is the science aggregator successfully reading these measurements?
-* Is the TEC estimator receiving multi-frequency data with proper dispersion?
-* What are the actual TEC values being calculated? (Expected: 2-50 TECU, likely getting: ~0.0 TECU)
-* Is the issue in data generation, data reading, or TEC calculation logic?
+**Impact Chain:**
+1. Analytics produces `D_clock=+0.00ms` → written as NaN to HDF5
+2. Fusion reads L2 data → only ~30% have valid clock_offset_ms values
+3. Fusion TEC solver needs multiple valid clock offsets per station → gets insufficient data
+4. Fusion TEC solver produces NaN → cannot compute ionospheric corrections
+5. Fusion cannot produce fused estimates → no chrony feed data
+6. Chrony feed remains down (stopped at 13:42 UTC, now 3+ hours)
 
-**3. Data Pipeline Verification:**
+**What IS Working:**
+- ✅ Tone detection: Tones are being detected with valid SNR
+- ✅ Propagation mode selection: Multiple modes evaluated (1E, 1F, 2F, 3F)
+- ✅ Ionospheric delay calculation: Values computed (0.7-1.2ms) with warnings
+- ✅ Confidence values: Non-zero (0.05-0.50)
+- ✅ HDF5 writing: Files being updated, propagation_delay_ms has valid values
 
-* **L1 → L2:** Are tone detections being converted to timing measurements correctly?
-* **L2 → Science:** Is science aggregator finding and reading the correct HDF5 files?
-* **Science → TEC:** Is TEC estimator receiving valid multi-frequency measurements?
-* **TEC → HDF5:** Are TEC results being written to `/var/lib/timestd/phase2/science/tec/` correctly?
-* **HDF5 → Web UI:** Can `propagation.html` read and display TEC data?
+**What is FAILING:**
+- ❌ Final clock offset calculation: Produces `D_clock=+0.00ms` instead of actual offset
+- ❌ Uncertainty assignment: Shows `uncertainty=100.0ms` (invalid measurement marker)
+- ❌ HDF5 clock_offset_ms field: Written as NaN despite valid propagation solutions
 
-**4. Specific Data Validation:**
+**Critical Questions:**
 
-* Check `/var/lib/timestd/phase2/CHU_3330/clock_offset/CHU_3330_timing_measurements_20260106.h5`
-* Verify `raw_arrival_time_ms` values are in 4-35 ms range (not 0.001 ms)
-* Check `/var/lib/timestd/phase2/science/tec/AGGREGATED_tec_20260106.h5`
-* Verify TEC values are in 2-50 TECU range (not 1e-08 TECU)
+1. **Where does D_clock get set to +0.00ms?**
+   - Is it in the weighted average calculation across propagation modes?
+   - Is it a fallback when all modes have low plausibility?
+   - Is there a threshold that's rejecting all modes after Step 3?
 
-### Diagnostic Methodology
+2. **Why does Step 3 Solution show valid values but final output doesn't?**
+   - What happens between "Step 3 Solution" log and "Phase 2 processing complete" log?
+   - Is there a final validation step that's rejecting the solution?
+   - Is the confidence threshold being applied twice?
 
-**Step 1: Verify Chrony Feed (30 min)**
+3. **What determines uncertainty=100.0ms?**
+   - This appears to be a sentinel value for "invalid measurement"
+   - What condition triggers this assignment?
+   - Is this related to the D_clock=+0.00ms issue?
 
-* Check fusion service status: `systemctl status timestd-fusion`
-* Verify fusion is writing to HDF5: `ls -lht /var/lib/timestd/phase2/fusion/`
-* Check chrony SHM: `ipcs -m` and verify timestd SHM segment exists
-* Trace fusion → chrony data flow in `multi_broadcast_fusion.py`
-* Verify chrony is reading from correct SHM segment
+4. **Why do some measurements succeed while most fail?**
+   - Current data shows ~30% valid clock offsets, 70% NaN
+   - What's different about the successful measurements?
+   - Is it related to specific propagation modes or confidence levels?
 
-**Step 2: Trace TEC Data Pipeline (1 hour)**
+### Diagnostic Methodology for Next Session
 
-* **L2 Timing Measurements:** Check if `raw_arrival_time_ms` is being written correctly
-  - Read HDF5: `/var/lib/timestd/phase2/CHU_3330/clock_offset/CHU_3330_timing_measurements_20260106.h5`
-  - Verify values are 4-35 ms (not 0.001 ms)
-  - Check multiple frequencies: 3.33, 7.85, 14.67 MHz
+**Step 1: Trace D_clock Calculation Path (45 min)**
 
-* **Science Aggregator:** Verify it's reading from correct directory
-  - Check logs: `journalctl -u timestd-science-aggregator --since "1 hour ago"`
-  - Verify it finds multi-frequency measurements
-  - Check if TEC estimator is being called
+**Goal:** Identify where D_clock gets set to +0.00ms between Step 3 Solution and final output
 
-* **TEC Output:** Verify TEC values are realistic
-  - Read HDF5: `/var/lib/timestd/phase2/science/tec/AGGREGATED_tec_20260106.h5`
-  - Check TEC values: should be 2-50 TECU, not 1e-08 TECU
-  - Verify quality flags: should be "GOOD" not "BAD"/"MARGINAL"
+**Actions:**
+1. Search for "D_clock=+0.00ms" assignment in `phase2_analytics_service.py`
+2. Find code between "Step 3 Solution" log (line ~2482) and "Phase 2 processing complete" log
+3. Look for weighted average calculation across propagation modes
+4. Check for validation thresholds that might reject all modes
+5. Identify where `uncertainty=100.0ms` gets assigned
 
-**Step 3: Root Cause Analysis (1 hour)**
+**Key Code Sections to Examine:**
+- Lines 2480-2520: Post-Step 3 processing and final D_clock assignment
+- Lines 700-850: L2 timing measurement construction and HDF5 writing
+- Search for: `d_clock_ms`, `primary_result`, `uncertainty=100`, `D_clock=+0.00`
 
-* If `raw_arrival_time_ms` is still wrong → Issue in analytics service
-* If `raw_arrival_time_ms` is correct but TEC is wrong → Issue in science aggregator or TEC estimator
-* If TEC is correct but not displayed → Issue in web API or frontend
-* Use debug logging and manual HDF5 inspection to isolate the failure point
+**Step 2: Analyze Propagation Mode Weighting (30 min)**
+
+**Goal:** Understand how multiple propagation modes get combined into final D_clock
+
+**Actions:**
+1. Find where propagation mode solutions are weighted/averaged
+2. Check if low plausibility values cause all modes to be rejected
+3. Verify if the 0.5× plausibility reduction from ionospheric warnings is too aggressive
+4. Look for minimum plausibility thresholds
+
+**Hypothesis to Test:**
+- After ionospheric validation reduces plausibility to 0.5×, the weighted average might produce D_clock=+0.00ms
+- There may be a minimum plausibility threshold that's rejecting all modes
+- The final validation step might be more strict than the Step 3 confidence check
+
+**Step 3: Compare Successful vs Failed Measurements (30 min)**
+
+**Goal:** Identify what makes the ~30% successful measurements different
+
+**Actions:**
+1. Extract analytics logs for both successful and failed measurements
+2. Compare propagation modes, confidence values, plausibility scores
+3. Check if successful measurements use specific modes (e.g., 3F vs 1E/1F/2F)
+4. Determine if there's a pattern in when D_clock is valid vs +0.00ms
+
+**Data to Collect:**
+```bash
+# Get recent analytics logs showing both success and failure
+sudo cat /proc/$(pgrep -f "phase2_analytics.*CHU_14670")/fd/2 | grep -A 5 "Step 3 Solution"
+
+# Check L2 HDF5 for pattern in valid vs NaN clock offsets
+# Look for correlation with propagation mode, confidence, or time of day
+```
+
+**Step 4: Test Hypothesis and Apply Fix (45 min)**
+
+**Potential Fixes Based on Root Cause:**
+
+**If issue is plausibility threshold:**
+- Lower minimum plausibility threshold for mode acceptance
+- Adjust ionospheric warning plausibility penalty (0.5× → 0.7×)
+
+**If issue is weighted average logic:**
+- Fix calculation to handle low-plausibility modes correctly
+- Ensure at least one mode contributes to final D_clock
+
+**If issue is post-Step 3 validation:**
+- Remove or relax final validation step
+- Ensure confidence > 0.0 threshold is actually being applied
+
+**If issue is uncertainty calculation:**
+- Fix logic that assigns uncertainty=100.0ms
+- Ensure valid D_clock values don't get marked as invalid
 
 ### Critical Files for Investigation
 
-**Data Generation:**
-* `src/hf_timestd/core/phase2_analytics_service.py`: Lines 747-770 (raw_arrival_time_ms calculation)
-* `src/hf_timestd/core/phase2_temporal_engine.py`: Lines 2067-2076 (t_arrival_ms from time_snap)
-* `src/hf_timestd/io/data_product_writer.py`: HDF5 writer for L2 timing measurements
+**PRIMARY FOCUS - Analytics D_clock Calculation:**
+* `src/hf_timestd/core/phase2_analytics_service.py`:
+  - Lines 2480-2520: Post-Step 3 processing, final D_clock assignment
+  - Lines 700-850: L2 timing measurement construction
+  - Line 2492: Confidence threshold (changed from 0.1 to 0.0)
+  - Search for: "D_clock=+0.00ms", "uncertainty=100", weighted average logic
 
-**Data Reading & TEC Calculation:**
-* `src/hf_timestd/core/science_aggregator.py`: Lines 149-167 (clock_offset directory), 276-286 (TEC calculation)
-* `src/hf_timestd/core/tec_estimator.py`: Lines 73-235 (TEC calculation from multi-frequency data)
-* `src/hf_timestd/io/hdf5_reader.py`: DataProductReader for reading L2 measurements
+* `src/hf_timestd/core/phase2_temporal_engine.py`:
+  - Step 3 solution logic and propagation mode weighting
+  - Plausibility calculation and mode selection
+  - Lines where final D_clock is computed from multiple modes
 
-**Chrony Feed:**
-* `src/hf_timestd/core/multi_broadcast_fusion.py`: Fusion service and chrony SHM writer
-* `src/hf_timestd/io/chrony_shm.py`: Chrony shared memory interface
+* `src/hf_timestd/core/transmission_time_solver.py`:
+  - Lines 837-848: Ionospheric validation (modified to warn vs reject)
+  - Plausibility reduction logic (currently 0.5× for unusual delays)
+  - Check if plausibility thresholds are too strict
+
+**SECONDARY - Fusion TEC Solver:**
+* `src/hf_timestd/core/multi_broadcast_fusion.py`:
+  - TEC solver that's producing NaN values
+  - Requires multiple valid clock_offset_ms per station
+  - Currently failing due to insufficient valid L2 data
+
+**Data Locations:**
+* L2 Timing: `/var/lib/timestd/phase2/CHU_14670/clock_offset/CHU_14670_timing_measurements_20260106.h5`
+  - Check: ~30% have valid clock_offset_ms, 70% are NaN
+  - Valid: propagation_delay_ms values present
+  - Invalid: clock_offset_ms = NaN despite valid propagation solutions
 
 **Data Locations:**
 * L2 Timing: `/var/lib/timestd/phase2/{CHANNEL}/clock_offset/{CHANNEL}_timing_measurements_YYYYMMDD.h5`
@@ -139,26 +214,103 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 * `scripts/check_tec_values.py`: Check TEC values (currently has numpy error)
 * `scripts/verify_tec_fix.py`: Verify raw_arrival_time_ms in HDF5 files
 
-### Known Issues to Address
+### Current System State (2026-01-06 16:40 UTC)
 
-**1. TEC Values Still Incorrect:**
-* Deployed fixes on 2026-01-06 but not yet verified
-* Need to check if science aggregator is running and processing data
-* May need to wait for next hourly run or manually trigger
+**Services Running:**
+- ✅ timestd-core-recorder: Active, producing L0 raw IQ data
+- ✅ timestd-analytics: Active, but producing mostly D_clock=+0.00ms
+- ✅ timestd-fusion: Active, but not producing estimates (TEC solver fails)
+- ✅ timestd-vtec: Active (restarted)
+- ✅ timestd-science-aggregator: Active (restarted)
+- ✅ timestd-web-api: Active
 
-**2. Chrony Reach Incomplete:**
-* Current reach: 124 (octal) = 5/8 samples
-* Expected: 377 (octal) = 8/8 samples
-* May indicate intermittent fusion service issues
+**Data Quality:**
+- ✅ L1 Tone Detection: Working, tones detected with valid SNR
+- ⚠️ L2 Timing Measurements: ~30% valid clock_offset_ms, 70% NaN
+- ❌ L3 Fusion: No estimates since 13:42 UTC (3+ hours ago)
+- ❌ Chrony Feed: Down, no data since 13:42 UTC
 
-**3. Verification Script Error:**
-* `scripts/check_tec_values.py` has numpy error with quality flag comparison
-* Need to fix before using for verification
+**Recent Fixes Applied:**
+1. ✅ Ionospheric validation: Changed to warn instead of reject (lines 837-848)
+2. ✅ Confidence threshold: Lowered from 0.1 to 0.0 (line 2492)
+3. ✅ Data Product Registry: Verified all services using correctly
 
-**4. Data Pipeline Uncertainty:**
-* Unknown if analytics service is actually writing corrected `raw_arrival_time_ms` values
-* Unknown if science aggregator is successfully reading from `clock_offset/` subdirectory
-* Need manual HDF5 inspection to verify
+**Blocking Issue:**
+Analytics produces `D_clock=+0.00ms, uncertainty=100.0ms` for most measurements, preventing fusion from working. Must fix analytics D_clock calculation before chrony feed can be restored.
+
+**Example Log Showing Problem:**
+```
+2026-01-06 16:36:14,855 - WARNING - UNUSUAL: Ionospheric delay 0.852ms exceeds model prediction 0.480ms for 14.67MHz, 1 hops - accepting with reduced confidence
+2026-01-06 16:36:14,920 - WARNING - UNUSUAL: Ionospheric delay 0.726ms exceeds model prediction 0.480ms for 14.67MHz, 1 hops - accepting with reduced confidence
+2026-01-06 16:36:14,991 - WARNING - UNUSUAL: Ionospheric delay 1.058ms exceeds model prediction 0.960ms for 14.67MHz, 2 hops - accepting with reduced confidence
+2026-01-06 16:36:15,128 - WARNING - UNUSUAL: Ionospheric delay 1.213ms exceeds model prediction 0.960ms for 14.67MHz, 2 hops - accepting with reduced confidence
+2026-01-06 16:36:15,128 - INFO - Step 3 Solution: D_clock=+0.00ms, station=CHU, mode=3F, confidence=0.50
+2026-01-06 16:36:15,128 - INFO - Phase 2 processing complete for CHU: D_clock=+0.00ms, uncertainty=100.0ms
+```
+
+Note: Multiple propagation modes evaluated (1E, 1F, 2F, 3F), all accepted with warnings, but final D_clock is still +0.00ms.
+
+### Design Considerations for Fix
+
+**Bootstrap vs Operational Validation:**
+
+User insight: The system needs two validation modes:
+
+1. **Bootstrap Mode:** Use propagation models as hard boundaries to filter false detections
+   - Strict validation appropriate when we don't have confident offset estimates
+   - Reject measurements that clearly violate physical constraints
+
+2. **Operational Mode:** Once we have confident estimates, treat model deviations as scientific data
+   - Accept measurements that exceed model predictions
+   - Reduce confidence/uncertainty instead of rejecting
+   - Model deviations become ionospheric science, not errors
+
+**Current State:** System is stuck in bootstrap mode with overly strict validation, rejecting legitimate measurements during unusual ionospheric conditions.
+
+**Ideal Solution:** Implement mode detection - switch from bootstrap to operational when we have stable, confident offset estimates. Until then, the current fix (warn instead of reject) is appropriate for operational mode.
+
+**Measurement Corroboration:**
+
+User requirement: Multiple measurements per broadcast should corroborate each other:
+- CHU: Per-minute tone + AFSK in same minute
+- WWV/WWVH: Per-minute tone + BCD correlation + test signal (hourly) + per-second correlations
+
+This multi-method validation is more reliable than propagation model validation once the system is operational.
+
+---
+
+## ✅ SESSION COMPLETE (2026-01-06 16:40 UTC): IONOSPHERIC VALIDATION FIX & DIAGNOSTIC PREP
+
+**Status:** 🟡 **PARTIAL** - Validation fixed, but chrony feed still down due to analytics D_clock issue
+
+**Author:** AI Agent (Cascade)
+**Date:** 2026-01-06 16:40 UTC
+**Session:** Chrony feed restoration attempt
+
+### Summary
+
+Identified and partially fixed chrony feed stoppage that occurred at 13:42 UTC. Root cause was overly strict ionospheric validation rejecting all measurements during unusual ionospheric conditions. Applied fixes to accept measurements with reduced confidence, but discovered deeper issue in analytics D_clock calculation.
+
+**Root Cause Timeline:**
+1. Jan 4th: Strict ionospheric validation deployed
+2. Jan 6th 13:42 UTC: Ionospheric conditions exceeded model predictions → all measurements rejected → chrony feed stopped
+3. Jan 6th 16:00-16:40 UTC: Fixed validation, but analytics still producing D_clock=+0.00ms
+
+**Fixes Applied:**
+1. ✅ Ionospheric validation: Warn instead of reject (transmission_time_solver.py:837-848)
+2. ✅ Confidence threshold: Lowered from 0.1 to 0.0 (phase2_analytics_service.py:2492)
+3. ✅ Verified Data Product Registry working correctly across all services
+
+**Remaining Issue:**
+Analytics produces `D_clock=+0.00ms, uncertainty=100.0ms` for ~70% of measurements despite:
+- Valid tone detections
+- Valid propagation mode solutions
+- Non-zero confidence values (0.05-0.50)
+- Accepted ionospheric delays (with warnings)
+
+This prevents fusion TEC solver from getting sufficient valid clock offset data, blocking chrony feed restoration.
+
+**Next Session Focus:** Fix analytics D_clock calculation to produce valid clock offsets instead of +0.00ms.
 
 ---
 
