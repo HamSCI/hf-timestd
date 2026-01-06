@@ -6,6 +6,7 @@ Reads hf-timestd data products from HDF5 format with:
 - Time range queries
 - Station filtering
 - Metadata access
+- Automatic path resolution via DataProductRegistry
 """
 
 import h5py
@@ -16,6 +17,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import logging
 
 from hf_timestd.schemas import get_schema
+from hf_timestd.data_product_registry import DataProductRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -52,29 +54,59 @@ class DataProductReader:
         product_level: str,
         product_name: str,
         channel: str,
-        version: str = 'v1'
+        version: str = 'v1',
+        use_registry: bool = True
     ):
         """
         Initialize HDF5 data product reader.
         
         Args:
-            data_dir: Directory containing HDF5 files
+            data_dir: Directory containing HDF5 files (can be channel dir or specific subdir)
             product_level: Data product level (L1, L2, L3)
             product_name: Product name (e.g., 'timing_measurements')
             channel: Channel name (e.g., 'WWV_10000')
             version: Schema version (default: 'v1')
+            use_registry: If True, use DataProductRegistry to resolve subdirectory (default: True)
         """
-        self.data_dir = Path(data_dir)
         self.product_level = product_level
         self.product_name = product_name
         self.channel = channel
         self.version = version
         
+        # Resolve data directory using registry if enabled
+        if use_registry and DataProductRegistry.is_registered(product_level, product_name):
+            # Check if data_dir looks like a channel directory (has subdirectories)
+            # or if it's already pointing to a specific subdirectory
+            subdirectory = DataProductRegistry.get_subdirectory(product_level, product_name)
+            
+            if subdirectory:
+                # Check if data_dir already points to the subdirectory
+                if data_dir.name == subdirectory:
+                    # Already pointing to correct subdirectory
+                    self.data_dir = Path(data_dir)
+                else:
+                    # Assume data_dir is channel directory, resolve subdirectory
+                    resolved_dir = data_dir / subdirectory
+                    
+                    # Fallback to root if subdirectory doesn't exist (legacy data)
+                    if resolved_dir.exists():
+                        self.data_dir = resolved_dir
+                        logger.debug(f"Using registry-resolved path: {resolved_dir}")
+                    else:
+                        self.data_dir = Path(data_dir)
+                        logger.debug(f"Subdirectory {subdirectory} not found, using root: {data_dir}")
+            else:
+                # Product stored in root
+                self.data_dir = Path(data_dir)
+        else:
+            # Registry disabled or product not registered
+            self.data_dir = Path(data_dir)
+        
         # Load schema
         self.schema = get_schema(product_level, product_name, version)
         logger.info(
             f"Initialized {product_level} {product_name} reader for {channel} "
-            f"(schema v{self.schema['schema_version']})"
+            f"(schema v{self.schema['schema_version']}, data_dir={self.data_dir.name})"
         )
     
     def _get_hdf5_path(self, date_str: str) -> Path:

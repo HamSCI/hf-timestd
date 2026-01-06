@@ -101,11 +101,7 @@ class PropagationService:
                 channel_count += 1
                 logger.info(f"Found channel directory: {channel_dir.name}")
                 
-                # Check for HDF5 files
-                h5_files = list(channel_dir.glob('*.h5'))
-                logger.info(f"  HDF5 files in {channel_dir.name}: {len(h5_files)}")
-                
-                # L2 timing measurements are directly in channel directory
+                # DataProductReader automatically resolves subdirectory via registry
                 try:
                     reader = DataProductReader(
                         data_dir=channel_dir,
@@ -261,7 +257,7 @@ class PropagationService:
                 if not channel_dir.is_dir() or channel_dir.name in ['fusion', 'science']:
                     continue
                 
-                # L2 timing measurements are directly in channel directory
+                # DataProductReader automatically resolves subdirectory via registry
                 try:
                     reader = DataProductReader(
                         data_dir=channel_dir,

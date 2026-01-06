@@ -19,6 +19,7 @@ propagation_service = PropagationService(config.data_root)
 
 
 @router.get("/conditions")
+@router.get("/current")  # Alias for frontend compatibility
 async def get_current_conditions():
     """
     Get current propagation conditions.
