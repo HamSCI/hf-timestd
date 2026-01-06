@@ -1970,6 +1970,9 @@ class MultiBroadcastFusion:
         # Read latest measurements
         measurements = self._read_latest_measurements(lookback_minutes)
         
+        # Filter out NaN measurements immediately (tone not detected)
+        measurements = [m for m in measurements if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms)]
+        
         if not measurements:
             logger.debug("No measurements available for fusion")
             return None
@@ -2100,11 +2103,13 @@ class MultiBroadcastFusion:
                             # This is less accurate but maintains backward compatibility
                             toa_ms = m.d_clock_ms + m.propagation_delay_ms
                         
-                        tec_input.append({
-                            'frequency_hz': m.frequency_mhz * 1e6,
-                            'toa_ms': toa_ms,
-                            'uncertainty_ms': 1.0 / max(0.001, m.confidence) # Inverse confidence weighting
-                        })
+                        # Filter out NaN values (tone not detected) to prevent solver failure
+                        if toa_ms is not None and not np.isnan(toa_ms):
+                            tec_input.append({
+                                'frequency_hz': m.frequency_mhz * 1e6,
+                                'toa_ms': toa_ms,
+                                'uncertainty_ms': 1.0 / max(0.001, m.confidence) # Inverse confidence weighting
+                            })
                     
                     # DIAGNOSTIC: Log the raw inputs to the TEC estimator to trace "0.0 TEC" issue
                     if logger.isEnabledFor(logging.DEBUG):

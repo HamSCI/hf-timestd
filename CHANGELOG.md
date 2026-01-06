@@ -198,6 +198,15 @@ sudo journalctl -u timestd-fusion -f
 - **Chrony Stability**: Time synchronization restored with fresh updates every 16 seconds
 - **System Status**: 🟢 Production ready
 
+## [Unreleased]
+
+### Fixed
+
+- **Fusion Robustness:** Fixed a critical issue where `NaN` measurements (from non-detections) would crash the outlier rejection logic in `timestd-fusion`, causing the service to stop producing fused results. Added strict filtering to exclude invalid measurements early in the fusion pipeline.
+- **TEC Solver Stability:** Fixed TEC estimator failures by strictly filtering out `NaN` arrival times before passing them to the solver, ensuring fusion can proceed even when some input data is invalid.
+- **Analytics Calibration:** Fixed `AttributeError: 'TransmissionTimeSolution' object has no attribute 'arrival_rtp'` in `phase2_analytics_service.py` by adding the missing field to the `TransmissionTimeSolution` dataclass in `phase2_temporal_engine.py`. This restores the critical feedback loop between detections and timing calibration.
+- **HDF5 Data Quality:** Updated `phase2_analytics_service.py` to write `NaN` instead of `0.0` for missing `raw_arrival_time_ms` when no tone is detected, preventing "zero" values from being misinterpreted as valid data by downstream services.
+
 ## [4.5.0] - 2026-01-05
 
 ### Added - Typed Pydantic Data Models (L1/L2/L3)

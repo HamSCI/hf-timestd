@@ -359,6 +359,7 @@ class TransmissionTimeSolution:
     """
     # Tone Detection Provenance (NEW: v1.2.0)
     tone_detected: bool             # Was a validated tone actually detected?
+    arrival_rtp: Optional[int]       # Raw arrival time in RTP units (for calibration)
     raw_tone_arrival_ms: Optional[float]  # Raw timing from multi-station detector (None if no tone)
     
     # The Holy Grail: D_clock
@@ -2085,6 +2086,7 @@ class Phase2TemporalEngine:
              timing_offset_samples = round(t_arrival_ms * self.sample_rate / 1000.0)
              arrival_rtp = rtp_timestamp + timing_offset_samples
 
+
         # GPSDO-FIRST TIMING: RTP timestamp is the gold standard ruler.
         samples_per_minute = self.sample_rate * 60  # 1,200,000 at 20 kHz
         
@@ -2202,6 +2204,7 @@ class Phase2TemporalEngine:
             )
             
             # Extract D_clock (handle None from _no_solution during bootstrap)
+            # Extract D_clock (handle None from _no_solution during bootstrap)
             if solver_result.utc_nist_offset_ms is not None:
                 d_clock_ms = solver_result.utc_nist_offset_ms
             elif solver_result.emission_offset_ms is not None:
@@ -2278,7 +2281,8 @@ class Phase2TemporalEngine:
                 confidence=solver_result.confidence,
                 uncertainty_ms=self._calculate_physics_based_uncertainty(channel, solver_result.confidence)[0],
                 utc_verified=solver_result.utc_nist_verified,
-                mode_candidates=mode_candidates
+                mode_candidates=mode_candidates,
+                arrival_rtp=solver_result.arrival_rtp
             )
             
             # Check for dual-station cross-validation
@@ -2456,6 +2460,7 @@ class Phase2TemporalEngine:
                 layer_height_km=250.0,
                 station=station,
                 frequency_mhz=self.frequency_mhz,
+                arrival_rtp=None,
                 confidence=0.1,
                 uncertainty_ms=100.0,
                 utc_verified=False

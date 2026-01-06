@@ -1113,7 +1113,8 @@ class TimingCalibrator:
         snr_db: float,
         confidence: float,
         rtp_timestamp: int,
-        minute_boundary: int
+        minute_boundary: int,
+        arrival_rtp: int = None
     ):
         """
         Update calibration from a tone detection.
@@ -1167,7 +1168,7 @@ class TimingCalibrator:
         # Update RTP calibration with the detected station
         # Pass propagation_delay_ms to normalize the RTP offset across channels
         self._update_rtp_calibration(
-            channel_name, frequency_mhz, rtp_timestamp, minute_boundary, snr_db, confidence, station, propagation_delay_ms
+            channel_name, frequency_mhz, rtp_timestamp, minute_boundary, snr_db, confidence, station, propagation_delay_ms, d_clock_ms, arrival_rtp
         )
         
         # Save state after every detection during bootstrap (multi-process coordination)
@@ -1228,7 +1229,9 @@ class TimingCalibrator:
         snr_db: float,
         confidence: float,
         station: str = 'WWV',
-        propagation_delay_ms: float = 0.0
+        propagation_delay_ms: float = 0.0,
+        d_clock_ms: float = 0.0,
+        arrival_rtp: int = None
     ):
         """Update RTP-to-UTC calibration using anchor-based approach.
         
@@ -1236,7 +1239,7 @@ class TimingCalibrator:
         -------------------------
         1. Anchor channels (CHU, WWV 20/25 MHz) establish the global RTP offset
         2. All channels share the same GPSDO clock, so they MUST have the same
-           normalized RTP offset (after subtracting propagation delay)
+           normalized RTP offset (after subtracting propagation delay and clock error)
         3. Non-anchor channels use the global offset to validate their detections
         
         PHYSICAL CONSTRAINTS:
@@ -1244,10 +1247,20 @@ class TimingCalibrator:
         Signals must arrive in order: WWV < CHU < WWVH < BPM
         Any detection that violates this order is rejected or re-attributed.
         """
-        # Normalize RTP offset by subtracting propagation delay
-        # This gives us the RTP timestamp at the emission time (second boundary)
+        # Normalize RTP offset by subtracting propagation delay AND clock error
+        # This gives us the RTP timestamp at the true UTC second boundary
+        # normalized_rtp = arrival_rtp - propagation_delay - d_clock
+        if arrival_rtp is None:
+            # Fallback to rtp_timestamp (minute boundary) if arrival_rtp not provided
+            # This is technically incorrect but prevents crashes during transition
+            normalized_rtp_base = rtp_timestamp
+        else:
+            normalized_rtp_base = arrival_rtp
+
         propagation_samples = round(propagation_delay_ms * self.sample_rate / 1000.0)
-        normalized_rtp = rtp_timestamp - propagation_samples
+        d_clock_samples = round(d_clock_ms * self.sample_rate / 1000.0)
+        
+        normalized_rtp = normalized_rtp_base - propagation_samples - d_clock_samples
         rtp_offset = normalized_rtp % self.samples_per_minute
         
         # Check if this is an anchor channel

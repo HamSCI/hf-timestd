@@ -646,6 +646,8 @@ class Phase2AnalyticsService:
                 quality_grade=input_grade
             )
             
+            
+            
             # Use converged values when locked, raw values otherwise
             if convergence_result.is_locked:
                 effective_d_clock = convergence_result.d_clock_ms
@@ -2515,7 +2517,8 @@ class Phase2AnalyticsService:
                                 snr_db=snr_db,
                                 confidence=solution.confidence,
                                 rtp_timestamp=rtp_timestamp,
-                                minute_boundary=minute_boundary
+                                minute_boundary=minute_boundary,
+                                arrival_rtp=res.solution.arrival_rtp if res.solution else None
                             )
                             # Format values, handling None during bootstrap
                             prop_str = f"{propagation_delay_ms:.1f}ms" if propagation_delay_ms is not None else "N/A"
