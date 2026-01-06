@@ -745,10 +745,29 @@ class Phase2AnalyticsService:
                         prop_delay = 0.0
                         
                     # Safe raw arrival time
-                    if solution and solution.t_arrival_ms is not None:
+                    # Priority 1: Use solution.t_arrival_ms if available and non-zero
+                    # Priority 2: Use station-specific tone timing from time_snap
+                    # Priority 3: Calculate from clock_offset + propagation_delay
+                    if solution and solution.t_arrival_ms is not None and abs(solution.t_arrival_ms) > 0.001:
                         raw_arr = float(solution.t_arrival_ms)
                     else:
-                        raw_arr = ck_off + prop_delay
+                        # Try to get raw tone arrival time from time_snap
+                        time_snap = result.time_snap if hasattr(result, 'time_snap') else None
+                        tone_timing = None
+                        if time_snap and station:
+                            if station == 'CHU' and hasattr(time_snap, 'chu_timing_ms'):
+                                tone_timing = time_snap.chu_timing_ms
+                            elif station == 'WWV':
+                                tone_timing = time_snap.wwv_timing_ms
+                            elif station == 'WWVH':
+                                tone_timing = time_snap.wwvh_timing_ms
+                            elif station == 'BPM':
+                                tone_timing = time_snap.bpm_timing_ms
+                        
+                        if tone_timing is not None and abs(tone_timing) > 0.001:
+                            raw_arr = float(tone_timing)
+                        else:
+                            raw_arr = ck_off + prop_delay
                         
                     l2_measurement = L2TimingMeasurement(
                         timestamp_utc=timestamp_utc,
