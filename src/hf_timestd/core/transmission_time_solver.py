@@ -1211,7 +1211,7 @@ class TransmissionTimeSolver:
             doppler_penalty=doppler_penalty,
             fss_consistency=1.0,  # TODO: Implement
             candidates=[c for _, c in scored_candidates],
-            utc_nist_offset_ms=emission_offset_ms if expected_second_rtp else None,
+            utc_nist_offset_ms=emission_offset_ms if expected_second_rtp is not None else None,
             utc_nist_verified=utc_verified
         )
     
