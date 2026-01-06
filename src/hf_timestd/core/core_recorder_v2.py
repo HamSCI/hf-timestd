@@ -150,8 +150,9 @@ class CoreRecorderV2:
             logger.info(f"Using configured multicast destination: {self.data_destination}")
         
         # Channel specs and defaults
-        self.channel_specs = config.get('channels', [])
-        self.channel_defaults = config.get('channel_defaults', {
+        # Channels can be at top level or in recorder section
+        self.channel_specs = config.get('channels', []) or self.recorder_config.get('channels', [])
+        self.channel_defaults = config.get('channel_defaults', {}) or self.recorder_config.get('channel_defaults', {
             'preset': 'iq',
             'sample_rate': 20000, # Keeping this one as a safe fallback for the dict itself if completely missing, but code below will enforce logic.
 
@@ -210,6 +211,36 @@ class CoreRecorderV2:
             return
         
         self.running = True
+        
+        # Initialize tiered storage if enabled
+        tiered_enabled = self.recorder_config.get('tiered_storage', False)
+        logger.info(f"Tiered storage config check: enabled={tiered_enabled}")
+        
+        if tiered_enabled:
+            try:
+                from .tiered_storage import init_tiered_storage
+                num_channels = len(self.channel_specs)
+                hot_buffer_root = self.recorder_config.get('hot_buffer_root', '/dev/shm/timestd')
+                ram_percent = self.recorder_config.get('ram_percent', 20)
+                
+                logger.info(f"Initializing tiered storage: {num_channels} channels, "
+                           f"hot_buffer={hot_buffer_root}, ram_percent={ram_percent}%")
+                
+                tiered_manager = init_tiered_storage(
+                    cold_buffer_root=str(self.output_dir),
+                    num_channels=num_channels,
+                    hot_buffer_root=hot_buffer_root,
+                    ram_percent=ram_percent,
+                    auto_start=True
+                )
+                
+                logger.info(f"✓ Tiered storage ACTIVE: hot_minutes={tiered_manager.hot_minutes}, "
+                           f"archiver thread running, will move files older than {tiered_manager.hot_minutes} min to disk")
+            except Exception as e:
+                logger.error(f"Failed to initialize tiered storage: {e}", exc_info=True)
+                logger.warning("Continuing without tiered storage - files will accumulate in hot buffer!")
+        else:
+            logger.warning("Tiered storage is DISABLED - all files will remain in hot buffer!")
         
         # Start all recorders
         for freq, recorder in self.recorders.items():
