@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.5.3] - 2026-01-06
+
+### Fixed - Data Pipeline Recovery & Schema Update
+
+**Critical Deployment Fix:** Resolved incorrect package installation that prevented new code and schemas from being used by services.
+
+#### Stale Package Installation
+
+- **Issue**: Services continued using old code from `site-packages` despite `git pull` and apparent editable install.
+- **Root Cause**: `pip install -e .` failed to overwrite existing standard installation in `site-packages`.
+- **Impact**: New HDF5 features (schema v1.2.0 with `tone_detected` field) and bug fixes were not active.
+- **Fix**: Completely uninstalled `hf-timestd` package and reinstalled in strict editable mode.
+- **Result**: Services now correctly load code from the git repository.
+
+#### HDF5 Data Gap Resolved
+
+- **Issue**: Core recorder stopped writing data after previous restart.
+- **Fix**: Restarted `timestd-core-recorder` and verified initialization sequence.
+- **Result**: Data recording restored, files verified in `/dev/shm` and `/var/lib/timestd`.
+
+#### Schema Verification
+
+- **Measurement**: Validated that `tone_detected` field is present in new HDF5 files.
+- **Data Integrity**: confirmed `raw_arrival_time_ms` correctly stores `NaN` for missing detections (instead of 0.0 or failing).
+
 ## [4.5.2] - 2026-01-05
 
 ### Fixed - HDF5 Writer Alignment & Web Service Restoration

@@ -357,12 +357,16 @@ class TransmissionTimeSolution:
     
     The final D_clock output representing the clock offset.
     """
+    # Tone Detection Provenance (NEW: v1.2.0)
+    tone_detected: bool             # Was a validated tone actually detected?
+    raw_tone_arrival_ms: Optional[float]  # Raw timing from multi-station detector (None if no tone)
+    
     # The Holy Grail: D_clock
     d_clock_ms: float               # D_clock = T_system - T_UTC
     
     # UTC recovery
     t_emission_ms: float            # Back-calculated emission time offset
-    t_arrival_ms: float             # Measured arrival time
+    t_arrival_ms: float             # Measured arrival time (same as raw_tone_arrival_ms)
     t_propagation_ms: float         # Calculated propagation delay
     
     # Propagation mode identification
@@ -2241,7 +2245,27 @@ class Phase2TemporalEngine:
                 for c in solver_result.candidates
             ]
             
+            # Determine tone detection status for this station
+            # Extract from time_snap which contains validated detections
+            tone_detected_flag = False
+            raw_tone_timing = None
+            
+            if station == 'WWV' and time_snap.wwv_detected:
+                tone_detected_flag = True
+                raw_tone_timing = time_snap.wwv_timing_ms
+            elif station == 'WWVH' and time_snap.wwvh_detected:
+                tone_detected_flag = True
+                raw_tone_timing = time_snap.wwvh_timing_ms
+            elif station == 'CHU' and time_snap.chu_detected:
+                tone_detected_flag = True
+                raw_tone_timing = time_snap.chu_timing_ms
+            elif station == 'BPM' and time_snap.bpm_detected:
+                tone_detected_flag = True
+                raw_tone_timing = time_snap.bpm_timing_ms
+            
             solution = TransmissionTimeSolution(
+                tone_detected=tone_detected_flag,
+                raw_tone_arrival_ms=raw_tone_timing,
                 d_clock_ms=d_clock_ms,
                 t_emission_ms=solver_result.emission_offset_ms,
                 t_arrival_ms=t_arrival_ms,
@@ -2403,7 +2427,26 @@ class Phase2TemporalEngine:
             }.get(station, 15.0)
             
             # Return fallback solution with low confidence
+            # Check if we have validated tone timing for this station
+            fallback_tone_detected = False
+            fallback_raw_timing = None
+            
+            if station == 'WWV' and time_snap.wwv_detected:
+                fallback_tone_detected = True
+                fallback_raw_timing = time_snap.wwv_timing_ms
+            elif station == 'WWVH' and time_snap.wwvh_detected:
+                fallback_tone_detected = True
+                fallback_raw_timing = time_snap.wwvh_timing_ms
+            elif station == 'CHU' and time_snap.chu_detected:
+                fallback_tone_detected = True
+                fallback_raw_timing = time_snap.chu_timing_ms
+            elif station == 'BPM' and time_snap.bpm_detected:
+                fallback_tone_detected = True
+                fallback_raw_timing = time_snap.bpm_timing_ms
+            
             return TransmissionTimeSolution(
+                tone_detected=fallback_tone_detected,
+                raw_tone_arrival_ms=fallback_raw_timing,
                 d_clock_ms=time_snap.timing_error_ms - fallback_propagation_ms,  # Fix: Subtract estimated delay
                 t_emission_ms=0.0,
                 t_arrival_ms=time_snap.timing_error_ms,

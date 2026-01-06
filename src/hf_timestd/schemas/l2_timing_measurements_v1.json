@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.1.0",
+    "schema_version": "1.2.0",
     "data_product": "L2_timing_measurements",
     "description": "Station-assigned timing measurements with ISO GUM-compliant uncertainty budget",
     "cadence_seconds": 60,
@@ -72,23 +72,29 @@
             "description": "Station ID confidence score"
         },
         {
-            "name": "clock_offset_ms",
-            "type": "float",
+            "name": "tone_detected",
+            "type": "boolean",
             "required": true,
-            "allow_nan": false,
-            "description": "D_clock: observed - expected arrival time",
-            "units": "milliseconds",
-            "reference": "UTC(NIST) via broadcast time signal"
+            "description": "Explicit flag: was a validated tone actually detected? False means no tone passed validation, measurement is invalid for timing."
         },
         {
             "name": "raw_arrival_time_ms",
             "type": "float",
-            "required": false,
-            "allow_empty": true,
-            "allow_nan": false,
-            "description": "Raw uncalibrated arrival time relative to minute boundary (for TEC estimation)",
+            "required": true,
+            "allow_nan": true,
+            "description": "Raw uncalibrated arrival time from validated tone detection (NaN if no tone detected)",
             "units": "milliseconds",
-            "note": "This is the observed tone arrival time BEFORE subtracting propagation delays or applying calibration. Required for ionospheric TEC estimation which needs the frequency-dependent dispersion signal intact."
+            "note": "CORE DATUM from multi-station detector validation. This is the observed tone arrival time BEFORE subtracting propagation delays. NaN indicates no validated tone detection. Required for ionospheric TEC estimation."
+        },
+        {
+            "name": "clock_offset_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "D_clock: observed - expected arrival time (NaN if no tone detected)",
+            "units": "milliseconds",
+            "reference": "UTC(NIST) via broadcast time signal",
+            "note": "DERIVED VALUE: clock_offset_ms = raw_arrival_time_ms - propagation_delay_ms. NaN if either input is NaN."
         },
         {
             "name": "uncertainty_ms",

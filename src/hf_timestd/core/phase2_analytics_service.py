@@ -738,47 +738,102 @@ class Phase2AnalyticsService:
                     # effective_d_clock should not be None (checked above), but safeguard anyway
                     ck_off = float(effective_d_clock) if effective_d_clock is not None else float(result.d_clock_ms)
                     
-                    # Safe propagation delay calculation
+                    # ================================================================
+                    # CORE DATUM: Raw Tone Arrival Time (Source of Truth)
+                    # ================================================================
+                    # Extract from solution which contains validated tone detection.
+                    # Data Model Hierarchy:
+                    # 1. raw_tone_arrival_ms: from validated tone detection (source of truth)
+                    # 2. propagation_delay_ms: from ray tracing (derived)
+                    # 3. clock_offset_ms: calculated as (raw - propagation) (derived)
+                    #
+                    # Missing Value Semantics:
+                    # - If no tone detected: raw_tone_arrival_ms = NaN, quality_flag = MISSING
+                    # - If ray tracing failed: propagation_delay_ms = NaN
+                    # - If either is NaN: clock_offset_ms = NaN
+                    # ================================================================
+                    
+                    import math
+                    
+                    # Extract tone detection status and raw timing from solution
+                    if solution and hasattr(solution, 'tone_detected') and hasattr(solution, 'raw_tone_arrival_ms'):
+                        # New schema v1.2.0 with explicit tone_detected field
+                        tone_detected = solution.tone_detected
+                        raw_tone_timing = solution.raw_tone_arrival_ms
+                    elif solution and hasattr(solution, 't_arrival_ms'):
+                        # Backward compatibility: old solution format
+                        # Assume tone detected if t_arrival_ms is not None
+                        raw_tone_timing = solution.t_arrival_ms
+                        tone_detected = (raw_tone_timing is not None)
+                    else:
+                        # No solution - tone not detected
+                        tone_detected = False
+                        raw_tone_timing = None
+                    
+                    # Convert None to NaN for HDF5 (explicit missing value)
+                    if raw_tone_timing is None or not tone_detected:
+                        raw_arr = float('nan')
+                        tone_detected_flag = False
+                        logger.debug(
+                            f"No validated tone for {station} at {frequency_mhz:.2f} MHz - "
+                            f"setting raw_arrival_time_ms=NaN, quality_flag=MISSING"
+                        )
+                    else:
+                        raw_arr = float(raw_tone_timing)
+                        tone_detected_flag = True
+                        logger.debug(
+                            f"Validated tone for {station} at {frequency_mhz:.2f} MHz: "
+                            f"raw_arrival_time_ms={raw_arr:.3f} ms"
+                        )
+                    
+                    # Extract propagation delay (derived value)
                     if solution and solution.t_propagation_ms is not None:
                         prop_delay = float(solution.t_propagation_ms)
                     else:
-                        prop_delay = 0.0
-                        
-                    # Safe raw arrival time
-                    # Priority 1: Use solution.t_arrival_ms if available and non-zero
-                    # Priority 2: Use station-specific tone timing from time_snap
-                    # Priority 3: Calculate from clock_offset + propagation_delay
-                    if solution and solution.t_arrival_ms is not None and abs(solution.t_arrival_ms) > 0.001:
-                        raw_arr = float(solution.t_arrival_ms)
+                        prop_delay = float('nan')
+                        logger.debug(
+                            f"No propagation delay for {station} at {frequency_mhz:.2f} MHz - "
+                            f"setting propagation_delay_ms=NaN"
+                        )
+                    
+                    # Clock offset should already be correct from solution
+                    # But validate data model hierarchy: clock_offset = raw_arrival - propagation
+                    if not math.isnan(raw_arr) and not math.isnan(prop_delay):
+                        # Both inputs valid - verify clock_offset is consistent
+                        expected_clock_offset = raw_arr - prop_delay
+                        if abs(ck_off - expected_clock_offset) > 0.01:
+                            logger.warning(
+                                f"Data model inconsistency: clock_offset={ck_off:.3f} ms "
+                                f"but raw_arrival - propagation = {expected_clock_offset:.3f} ms "
+                                f"(diff={abs(ck_off - expected_clock_offset):.3f} ms)"
+                            )
+                    elif math.isnan(raw_arr) or math.isnan(prop_delay):
+                        # If either input is NaN, clock_offset should be NaN
+                        ck_off = float('nan')
+                    
+                    # Determine quality flag based on tone detection
+                    if not tone_detected_flag:
+                        quality_flag_final = 'MISSING'  # No validated tone detected
                     else:
-                        # Try to get raw tone arrival time from time_snap
-                        time_snap = result.time_snap if hasattr(result, 'time_snap') else None
-                        tone_timing = None
-                        if time_snap and station:
-                            if station == 'CHU' and hasattr(time_snap, 'chu_timing_ms'):
-                                tone_timing = time_snap.chu_timing_ms
-                            elif station == 'WWV':
-                                tone_timing = time_snap.wwv_timing_ms
-                            elif station == 'WWVH':
-                                tone_timing = time_snap.wwvh_timing_ms
-                            elif station == 'BPM':
-                                tone_timing = time_snap.bpm_timing_ms
-                        
-                        if tone_timing is not None and abs(tone_timing) > 0.001:
-                            raw_arr = float(tone_timing)
-                        else:
-                            raw_arr = ck_off + prop_delay
+                        # Use existing quality flag logic
+                        quality_flag_final = quality_flag
                         
                     l2_measurement = L2TimingMeasurement(
                         timestamp_utc=timestamp_utc,
                         minute_boundary_utc=minute_boundary,
                         rtp_timestamp=rtp_timestamp,
-                        station=StationID(station) if station else StationID.WWV, # Fallback or handle None
+                        station=StationID(station) if station else StationID.WWV,
                         frequency_mhz=float(frequency_mhz),
                         discrimination_method=DiscriminationMethod.TONE,
                         discrimination_confidence=float(discrimination_conf) if discrimination_conf is not None else 0.0,
-                        clock_offset_ms=ck_off,
-                        raw_arrival_time_ms=raw_arr,
+                        
+                        # === CORE DATUM ===
+                        tone_detected=tone_detected_flag,
+                        raw_arrival_time_ms=raw_arr,  # NaN if no tone detected
+                        
+                        # === DERIVED VALUES ===
+                        clock_offset_ms=ck_off,  # NaN if inputs are NaN
+                        
                         uncertainty_ms=float(effective_uncertainty) if effective_uncertainty is not None else 1.0,
                         expanded_uncertainty_ms=float(unc_result['u_expanded_ms']) if unc_result.get('u_expanded_ms') is not None else 2.0,
                         coverage_factor=float(budget.coverage_factor) if budget.coverage_factor is not None else 2.0,
@@ -792,8 +847,8 @@ class Phase2AnalyticsService:
                         degrees_of_freedom=int(unc_result['degrees_of_freedom']),
                         quality_grade=QualityGrade(quality_grade),
                         confidence=float(solution.confidence) if solution and solution.confidence is not None else 0.0,
-                        quality_flag=QualityFlag(quality_flag),
-                        propagation_delay_ms=float(solution.t_propagation_ms) if solution and solution.t_propagation_ms is not None else None,
+                        quality_flag=QualityFlag(quality_flag_final),
+                        propagation_delay_ms=prop_delay if not math.isnan(prop_delay) else None,
                         propagation_mode=str(solution.propagation_mode) if solution and solution.propagation_mode else None,
                         n_hops=int(solution.n_hops) if solution and solution.n_hops is not None else None,
                         snr_db=float(snr_db) if snr_db is not None else None,
@@ -806,11 +861,17 @@ class Phase2AnalyticsService:
                         gpsdo_locked=bool(gpsdo_locked)
                     )
                     
-                    # DEBUG: Verify raw_arrival_time_ms in model
-                    if l2_measurement.raw_arrival_time_ms is not None:
-                        logger.info(f"DEBUG TEC FIX: raw_arrival_time_ms={l2_measurement.raw_arrival_time_ms:.3f} ms in L2Model")
+                    # Log data model validation
+                    if tone_detected_flag:
+                        logger.info(
+                            f"✓ Validated tone: station={station}, freq={frequency_mhz:.2f} MHz, "
+                            f"raw_arrival={raw_arr:.3f} ms, quality={quality_flag_final}"
+                        )
                     else:
-                        logger.error("DEBUG TEC FIX: raw_arrival_time_ms MISSING from L2Model!")
+                        logger.debug(
+                            f"✗ No validated tone: station={station}, freq={frequency_mhz:.2f} MHz, "
+                            f"quality=MISSING"
+                        )
                     
                     # Write to HDF5
                     logger.debug(f"Attempting HDF5 L2 write: D_clock={effective_d_clock:.2f}ms")

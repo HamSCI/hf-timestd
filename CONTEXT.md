@@ -1,10 +1,10 @@
 # HF-TimeStd AI Agent Context
 
-**Last Updated**: 2026-01-05 19:00 UTC  
-**System Version**: 4.5.2  
-**Current Focus**: Web UI Enhancements (ISO GUM & Science Data Visualization)  
-**Next Session**: Implement ISO GUM compatible uncertainty reporting in UI  
-**System Status**: ✅ Stable, Metrology Dashboard Functional, HDF5 Writer Fixed
+**Last Updated**: 2026-01-06 12:40 UTC  
+**System Version**: 4.5.3
+**Current Focus**: Web UI Restoration & Visualization
+**Next Session**: Restore Web Interface Data Access & Visualization
+**System Status**: ✅ Data Pipeline Healthy (Core, Analytics, Fusion), HDF5 Schema v1.2.0 Active
 
 ---
 
@@ -12,21 +12,73 @@
 
 The `hf-timestd` system is a high-precision time transfer system receiving WWV/WWVH/CHU/BPM time signals. The critical path (Recorder → Analytics → Fusion → Chrony) is fully HDF5-native with strict Pydantic schema validation.
 
-**Recent Critical Fix (v4.5.1 - 2026-01-05 17:20 UTC):**
+**Recent Critical Fix (v4.5.3 - 2026-01-06 12:30 UTC):**
 
-- ✅ **Chrony Feed Restored**: Fixed four critical bugs that broke Chrony feed after v4.5.0 deployment
-  - HDF5 SWMR mode initialization (concurrent read/write support)
-  - Channel discovery logic (9 channels now discovered)
-  - Missing uncertainty_ms field in BroadcastMeasurement dataclass
-  - **Pydantic Import Errors**: Fixed `NameError: StationID` and `float(None)` crashes in analytics service
-- ✅ **Result**: Chrony reach=252 (was 0), LastRx=43s (was 40+ minutes), active time offset measurement
+- ✅ **Data Pipeline Restored**: Solved core recorder data gap and verified TEC schema update requiring package reinstallation.
+- ✅ **TEC Artifacts Eliminated**: Confirmed system now correctly handles missing detections as `NaN` (instead of 0.0), producing `None` for TEC when data is insufficient rather than false zeros.
+- ✅ **HDF5 Schema v1.2.0**: Active and verified, including `tone_detected` and `raw_arrival_time_ms` (allowing NaN).
 
 **System Health:**
 
-- All services running and stable
-- Chrony feed operational with fresh updates every 16 seconds
-- HDF5 pipeline fully functional with SWMR mode
-- Data integrity guaranteed by runtime schema validation
+- **Core Recorder**: Recording to `/dev/shm` and disk.
+- **Analytics**: Processing valid HDF5 files with new schema.
+- **Fusion**: Reading HDF5 files (currently grade F due to propagation, but pipeline is functional).
+- **Chrony**: Feed operational.
+
+---
+
+## Session Summary (TEC Fix Verification - 2026-01-06 12:30 UTC)
+
+**Objective**: Verify the fix for "unreasonable" (zero/flat) TEC values and resolve a data recording gap.
+
+**Status**: ✅ **COMPLETED & VERIFIED**
+
+### Critical Findings & Resolutions
+
+**1. Core Recorder Data Gap**
+
+- **Issue**: Recorder running but not writing.
+- **Fix**: Restarted `timestd-core-recorder` to re-initialize tiered storage writers.
+- **Result**: Data flow restored.
+
+**2. Stale Package Installation**
+
+- **Issue**: Services were loading old code from `site-packages` instead of the validation fixes in the git repo.
+- **Fix**: Uninstalled package and reinstalled in strict editable mode (`pip install -e .`).
+- **Result**: Services picked up Schema v1.2.0 updates.
+
+**3. TEC Calculation Verification**
+
+- **Issue**: Previous versions calculated "0.0 TEC" due to missing detections being treated as 0ms delay.
+- **Fix Verification**:
+  - Confirmed HDF5 files now contain `tone_detected` field.
+  - Confirmed missing detections are recorded as `NaN`.
+  - Confirmed system returns `None` (no solution) for single-frequency tracking instead of false values.
+  - Verified valid single-frequency detection (14.67 MHz) has realistic arrival time (~5.65ms).
+
+### Files Modified
+
+- `CHANGELOG.md`
+- `pyproject.toml`
+- (Re-installed package)
+
+---
+
+## Next Session Objective: Restore Web Interface
+
+**Goal**: Ensure the web interface (`metrology.html` / `timestd-web-api`) correctly reads and displays the data from the new HDF5 schema (v1.2.0), specifically handling the `tone_detected` field and `NaN` values to eliminate "N/A" or broken displays.
+
+**Critical Context:**
+
+- **Schema v1.2.0**: The web API must handle the new `tone_detected` boolean and potentially `NaN` in `raw_arrival_time_ms`.
+- **Data Availability**: Currently propagation is poor (only 1 frequency), so "N/A" for TEC is *correct*, but other metrics (SNR, etc.) should be visible.
+- **Validation**: User explicitly requested "restore functioning displays".
+
+**Key Files:**
+
+- `web-api/routers/metrology.py` (or similar)
+- `web-api/static/metrology.html`
+- `src/hf_timestd/schemas/l2_timing_measurements_v1.json`
 
 ---
 

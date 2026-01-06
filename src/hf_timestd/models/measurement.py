@@ -42,9 +42,13 @@ class L2TimingMeasurement(BaseModel):
     discrimination_method: DiscriminationMethod = Field(..., description="Station discrimination method used")
     discrimination_confidence: float = Field(..., ge=0.0, le=1.0, description="Station ID confidence score")
     
-    # Timing Logic
-    clock_offset_ms: float = Field(..., description="D_clock: observed - expected arrival time")
-    raw_arrival_time_ms: Optional[float] = Field(None, description="Raw uncalibrated arrival time relative to minute boundary")
+    # Timing Logic - Data Model Hierarchy
+    # 1. raw_arrival_time_ms: CORE DATUM from validated tone detection (source of truth)
+    # 2. propagation_delay_ms: DERIVED from ray tracing
+    # 3. clock_offset_ms: DERIVED as (raw_arrival_time_ms - propagation_delay_ms)
+    tone_detected: bool = Field(..., description="Explicit flag: was a validated tone actually detected?")
+    raw_arrival_time_ms: float = Field(..., description="Raw uncalibrated arrival time from validated tone detection (NaN if no tone)")
+    clock_offset_ms: float = Field(..., description="D_clock: observed - expected arrival time (NaN if no tone)")
     
     # Uncertainty (ISO GUM)
     uncertainty_ms: float = Field(..., description="Combined standard uncertainty u_c")
@@ -88,5 +92,56 @@ class L2TimingMeasurement(BaseModel):
     calibration_date: str
     gpsdo_locked: bool
 
+    
+    @classmethod
+    def model_validate_data_integrity(cls, values):
+        """
+        Enforce data model hierarchy and missing value semantics.
+        
+        Rules:
+        1. If tone_detected=False, raw_arrival_time_ms MUST be NaN
+        2. If tone_detected=True, raw_arrival_time_ms MUST be valid (not NaN)
+        3. If raw_arrival_time_ms is NaN, clock_offset_ms MUST be NaN
+        4. If tone_detected=False, quality_flag MUST be MISSING
+        """
+        import math
+        
+        tone_detected = values.get('tone_detected')
+        raw_arrival = values.get('raw_arrival_time_ms')
+        clock_offset = values.get('clock_offset_ms')
+        quality_flag = values.get('quality_flag')
+        
+        # Rule 1: tone_detected=False requires raw_arrival_time_ms=NaN
+        if not tone_detected and raw_arrival is not None and not math.isnan(raw_arrival):
+            raise ValueError(
+                f"Data model violation: tone_detected=False but "
+                f"raw_arrival_time_ms={raw_arrival} (should be NaN)"
+            )
+        
+        # Rule 2: tone_detected=True requires raw_arrival_time_ms is valid
+        if tone_detected and (raw_arrival is None or math.isnan(raw_arrival)):
+            raise ValueError(
+                f"Data model violation: tone_detected=True but "
+                f"raw_arrival_time_ms is NaN or None"
+            )
+        
+        # Rule 3: raw_arrival_time_ms=NaN requires clock_offset_ms=NaN
+        if raw_arrival is not None and math.isnan(raw_arrival):
+            if clock_offset is not None and not math.isnan(clock_offset):
+                raise ValueError(
+                    f"Data model violation: raw_arrival_time_ms is NaN but "
+                    f"clock_offset_ms={clock_offset} (should be NaN)"
+                )
+        
+        # Rule 4: tone_detected=False requires quality_flag=MISSING
+        if not tone_detected and quality_flag != QualityFlag.MISSING:
+            raise ValueError(
+                f"Data model violation: tone_detected=False but "
+                f"quality_flag={quality_flag} (should be MISSING)"
+            )
+        
+        return values
+
     class Config:
         use_enum_values = True
+
