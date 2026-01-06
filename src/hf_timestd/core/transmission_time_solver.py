@@ -1138,10 +1138,13 @@ class TransmissionTimeSolver:
         )
         emission_rtp = arrival_rtp - propagation_samples
         
+
         # Calculate offset from second boundary
         if expected_second_rtp is not None:
             emission_offset_samples = emission_rtp - expected_second_rtp
             emission_offset_ms = (emission_offset_samples / self.sample_rate) * 1000
+            
+            
             
             # STATION-BASED SANITY CHECK: D_clock must be within physical bounds
             # A properly synchronized system should have D_clock within ~100ms
@@ -1159,7 +1162,11 @@ class TransmissionTimeSolver:
             # WWV transmits at exact second boundaries, so offset should be ~0
             utc_verified = abs(emission_offset_ms) < 2.0  # Within 2ms of second
         else:
-            emission_offset_ms = 0.0
+            # CRITICAL FIX (2026-01-06): Set to None instead of 0.0 during bootstrap
+            # When we don't have expected_second_rtp, we can't calculate a meaningful
+            # D_clock value. Setting to 0.0 causes the temporal engine to write
+            # invalid 0.0 values to CSV/HDF5 files.
+            emission_offset_ms = None
             utc_verified = False
         
         # Build human-readable mode name
