@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ionospheric Physics Dashboard - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⚛️ Ionospheric Physics</h1>
+            <div class="header-subtitle">Physics-based Total Electron Content (TEC) & Model Validation</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">System Health</a>
+                <a href="/static/metrology.html" class="nav-link">Metrology</a>
+                <a href="/static/propagation.html" class="nav-link">Propagation</a>
+                <a href="/static/physics.html" class="nav-link active">Physics</a>
+            </nav>
+        </div>
+
+        <div id="error-container" style="display: none;"></div>
+
+        <!-- Hero: UTC Consistency -->
+        <div class="hero-metric" id="hero-metric">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+                <div style="font-size: 18px; font-weight: 600; color: #94a3b8;">UTC Model Consistency</div>
+                <div class="live-indicator">
+                    <div class="live-dot"></div>
+                    <span>Live</span>
+                </div>
+            </div>
+
+            <div class="hero-value" id="hero-consistency">
+                <div class="loading"></div>
+            </div>
+
+            <div style="font-size: 18px; color: #94a3b8; margin-bottom: 16px;">
+                Physics Model Validity
+            </div>
+
+            <div style="display: flex; justify-content: center; gap: 24px; flex-wrap: wrap;">
+                <div style="text-align: center;">
+                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Stations Used</div>
+                    <div style="font-size: 24px; font-weight: 600;" id="hero-stations">-</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Residuals</div>
+                    <div style="font-size: 24px; font-weight: 600;" id="hero-residuals">-</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Timestamp</div>
+                    <div style="font-size: 16px; font-weight: 500; font-family: 'Courier New', monospace;"
+                        id="hero-timestamp">-</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TEC Estimates -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">Real-time TEC Estimation</div>
+                    <div class="card-subtitle">Total Electron Content derived from differential Time-of-Flight</div>
+                </div>
+            </div>
+            <div class="grid grid-2" id="tec-cards">
+                <div class="loading"></div>
+            </div>
+        </div>
+
+        <!-- TEC History Plot -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">TEC History</div>
+                <div class="card-subtitle">Ionospheric electron content evolution over time</div>
+            </div>
+            <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="time-range-btn active" data-range="-6h">Last 6 Hours</button>
+                <button class="time-range-btn" data-range="-24h">Last 24 Hours</button>
+                <button class="time-range-btn" data-range="-7d">Last 7 Days</button>
+            </div>
+            <div id="tec-plot" style="width: 100%; height: 400px;"></div>
+        </div>
+    </div>
+
+    <style>
+        .time-range-btn {
+            padding: 8px 16px;
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 6px;
+            color: #3b82f6;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .time-range-btn:hover {
+            background: rgba(59, 130, 246, 0.2);
+        }
+
+        .time-range-btn.active {
+            background: #3b82f6;
+            color: #fff;
+        }
+
+        .tec-value {
+            font-size: 32px;
+            font-weight: 700;
+            font-family: 'Courier New', monospace;
+            color: #f59e0b;
+        }
+
+        .unit {
+            font-size: 16px;
+            color: #94a3b8;
+            font-weight: 400;
+        }
+    </style>
+
+    <script src="/static/js/common.js"></script>
+    <script>
+        let currentRange = '-6h';
+
+        async function loadLatestPhysics() {
+            try {
+                clearError();
+                const data = await api.get('/physics/latest');
+
+                if (!data) {
+                    document.getElementById('hero-consistency').textContent = 'NO DATA';
+                    return;
+                }
+
+                // Update Hero
+                const consistency = data.utc_consistency_flag ? 'CONSISTENT' : 'INCONSISTENT';
+                const heroEl = document.getElementById('hero-consistency');
+                heroEl.textContent = consistency;
+
+                // Color code consistency
+                const heroMetric = document.getElementById('hero-metric');
+                if (data.utc_consistency_flag) {
+                    heroEl.style.color = '#10b981'; // Green
+                    heroMetric.className = 'hero-metric status-healthy';
+                } else {
+                    heroEl.style.color = '#ef4444'; // Red
+                    heroMetric.className = 'hero-metric status-error';
+                }
+
+                document.getElementById('hero-stations').textContent = data.stations_used ? data.stations_used.length : 0;
+                document.getElementById('hero-residuals').textContent = formatNumber(data.utc_uncertainty_ms, 3) + ' ms'; // Using uncertainty as proxy for residuals for now
+                document.getElementById('hero-timestamp').textContent = formatTime(data.timestamp_utc);
+
+                // Update TEC Cards
+                const tecContainer = document.getElementById('tec-cards');
+                if (data.tec_estimates && Object.keys(data.tec_estimates).length > 0) {
+                    tecContainer.innerHTML = Object.entries(data.tec_estimates).map(([station, tec]) => `
+                        <div style="background: rgba(30, 41, 59, 0.5); padding: 20px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.1);">
+                            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
+                                <div style="font-size: 20px; font-weight: 600;">${station}</div>
+                                <div class="badge ${data.utc_consistency_flag ? 'status-healthy' : 'status-degraded'}">Active</div>
+                            </div>
+                            <div class="tec-value">
+                                ${formatNumber(tec, 2)} <span class="unit">TECU</span>
+                            </div>
+                            <div style="margin-top: 12px; font-size: 13px; color: #94a3b8;">
+                                Uncertainty: ±${formatNumber(data.tec_uncertainties ? data.tec_uncertainties[station] : 0, 2)} TECU
+                            </div>
+                        </div>
+                     `).join('');
+                } else {
+                    tecContainer.innerHTML = '<div style="grid-column: span 2; padding: 20px; text-align: center; color: #94a3b8;">No TEC estimates available</div>';
+                }
+
+            } catch (error) {
+                console.error("Latest load failed", error);
+                // Don't show global error for partial missing data, just logs
+            }
+        }
+
+        async function loadPhysicsHistory(range = '-6h') {
+            try {
+                const data = await api.get('/physics/history', {
+                    start: range,
+                    end: 'now'
+                });
+
+                if (!data.measurements || data.measurements.length === 0) {
+                    return;
+                }
+
+                // Parse data for plotting
+                // We need to group by station
+                const stations = {};
+
+                data.measurements.forEach(m => {
+                    const ts = m.timestamp_utc;
+                    if (m.tec_estimates) {
+                        for (const [station, tec] of Object.entries(m.tec_estimates)) {
+                            if (!stations[station]) {
+                                stations[station] = { x: [], y: [] };
+                            }
+                            stations[station].x.push(ts);
+                            stations[station].y.push(tec);
+                        }
+                    }
+                });
+
+                const traces = Object.entries(stations).map(([station, d]) => ({
+                    x: d.x,
+                    y: d.y,
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    name: station,
+                    marker: { size: 4 }
+                }));
+
+                const layout = {
+                    title: '',
+                    xaxis: {
+                        title: 'Time (UTC)',
+                        gridcolor: '#334155',
+                        color: '#94a3b8'
+                    },
+                    yaxis: {
+                        title: 'Vertical TEC (TECU)',
+                        gridcolor: '#334155',
+                        color: '#94a3b8'
+                    },
+                    plot_bgcolor: '#0f172a',
+                    paper_bgcolor: 'transparent',
+                    font: { color: '#e0e0e0' },
+                    margin: { t: 20, r: 20, b: 60, l: 60 },
+                    legend: { orientation: 'h', y: 1.1 }
+                };
+
+                Plotly.newPlot('tec-plot', traces, layout, { responsive: true });
+
+            } catch (error) {
+                console.error("History load failed", error);
+            }
+        }
+
+        // Time range button handlers
+        document.querySelectorAll('.time-range-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentRange = btn.dataset.range;
+                loadPhysicsHistory(currentRange);
+            });
+        });
+
+        async function init() {
+            await loadLatestPhysics();
+            await loadPhysicsHistory(currentRange);
+
+            const refresh = new AutoRefresh(() => {
+                loadLatestPhysics();
+                loadPhysicsHistory(currentRange);
+            }, 60000);
+            refresh.start();
+        }
+
+        init();
+    </script>
+</body>
+
+</html>

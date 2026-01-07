@@ -2180,13 +2180,27 @@ class Phase2AnalyticsService:
             return None
     
     def _get_latest_minute(self) -> int:
-        """Get the latest complete minute boundary from available data."""
-        latest = self._get_latest_binary_minute()
-        if latest is not None:
-            return latest
-
+        """Get the latest complete minute boundary from wall clock time.
+        
+        Uses system time as the authoritative source for continuous operation.
+        Maintains a 2-minute safety buffer to ensure data files are complete.
+        
+        This is the correct approach for a real-time system:
+        - Wall clock advances continuously
+        - Service processes each new minute as it becomes available
+        - Binary file discovery is used only for validation/backfill
+        """
         now = time.time()
-        return ((int(now) // 60) - 2) * 60
+        # Go back 2 minutes for safety (data completeness)
+        latest_minute = ((int(now) // 60) - 2) * 60
+        
+        # Optional: Verify data exists (but don't block on it)
+        binary_latest = self._get_latest_binary_minute()
+        if binary_latest is not None and binary_latest > latest_minute:
+            # Binary data is ahead of our safety buffer - use it
+            return binary_latest
+        
+        return latest_minute
     
     def _get_latest_binary_minute(self) -> Optional[int]:
         """Get latest minute from binary archive (checks hot and cold storage)."""
@@ -2557,33 +2571,43 @@ class Phase2AnalyticsService:
                 # Validate that D_clock hasn't jumped unrealistically
                 # This catches CHU frame slips (33ms jumps) and other timing errors
                 if primary_result.d_clock_ms is not None:
-                    dt_seconds = (minute_boundary - self.last_minute_unix) if self.last_minute_unix else 60.0
-                    
-                    is_valid, reason = self.engine._validate_d_clock_continuity(
-                        current_d_clock_ms=primary_result.d_clock_ms,
-                        previous_d_clock_ms=self.last_d_clock_ms,
-                        dt_seconds=dt_seconds,
-                        channel_name=self.channel_name
-                    )
-                    
-                    if not is_valid:
-                        logger.error(f"{self.channel_name}: D_clock continuity check FAILED - {reason}")
-                        logger.error(f"  Current: {primary_result.d_clock_ms:.2f}ms, "
-                                    f"Previous: {self.last_d_clock_ms:.2f}ms, "
-                                    f"Delta: {abs(primary_result.d_clock_ms - self.last_d_clock_ms):.2f}ms")
+                   # D_clock continuity validation (GPSDO temporal stability check)
+                # CRITICAL: Skip during bootstrap (no previous measurement)
+                    if self.last_d_clock_ms is not None:
+                        is_valid, reason = self.temporal_engine._validate_d_clock_continuity(
+                            current_d_clock_ms=primary_result.d_clock_ms,
+                            previous_d_clock_ms=self.last_d_clock_ms,
+                            dt_seconds=(minute_boundary - self.last_minute_unix) if self.last_minute_unix else 60,
+                            channel_name=self.channel_name
+                        )
                         
-                        # Mark result as invalid
-                        primary_result.confidence = 0.0
-                        if hasattr(primary_result, 'solution') and primary_result.solution:
-                            primary_result.solution.confidence = 0.0
-                        
-                        # Don't update last_d_clock_ms - keep previous value
-                        logger.warning(f"{self.channel_name}: Rejecting measurement due to continuity failure")
+                        if not is_valid:
+                            logger.error(f"{self.channel_name}: D_clock continuity check FAILED - {reason}")
+                            logger.error(f"  Current: {primary_result.d_clock_ms:.2f}ms, "
+                                        f"Previous: {self.last_d_clock_ms:.2f}ms, "
+                                        f"Delta: {abs(primary_result.d_clock_ms - self.last_d_clock_ms):.2f}ms")
+                            
+                            # Mark result as invalid
+                            primary_result.confidence = 0.0
+                            if hasattr(primary_result, 'solution') and primary_result.solution:
+                                primary_result.solution.confidence = 0.0
+                            
+                            # Don't update last_d_clock_ms - keep previous value
+                            logger.warning(f"{self.channel_name}: Rejecting measurement due to continuity failure")
+                        else:
+                            # Valid measurement - update state
+                            self.last_d_clock_ms = primary_result.d_clock_ms
+                            self.last_minute_unix = minute_boundary
+                            logger.debug(f"{self.channel_name}: Continuity OK - {reason}")
                     else:
-                        # Valid measurement - update state
+                        # BOOTSTRAP MODE: Accept first measurement regardless of confidence
+                        # This allows the Kalman filter to initialize
                         self.last_d_clock_ms = primary_result.d_clock_ms
                         self.last_minute_unix = minute_boundary
-                        logger.debug(f"{self.channel_name}: Continuity OK - {reason}")
+                        primary_solution = primary_result.solution # Ensure primary_solution is defined for logging
+                        logger.info(f"🔓 {self.channel_name}: BOOTSTRAP - accepting initial measurement "
+                                   f"(D_clock={primary_result.d_clock_ms:.2f}ms, "
+                                   f"confidence={primary_solution.confidence if primary_solution else 0:.2f})")
                 
                 # Write to CSV time series (coordinated path)
                 # Loop through ALL results to capture multi-station data
@@ -2718,10 +2742,13 @@ class Phase2AnalyticsService:
             try:
                 # Get latest complete minute
                 latest_minute = self._get_latest_minute()
+                logger.debug(f"Main loop: latest_minute={latest_minute}, running={self.running}")
                 
-                # Process any unprocessed minutes
-                if latest_minute not in self.processed_minutes:
-                    self.process_minute(latest_minute)
+                # Always attempt to process latest minute
+                # New data may have arrived since last poll
+                logger.info(f"Calling process_minute for {latest_minute}")
+                self.process_minute(latest_minute)
+                logger.info(f"Completed process_minute for {latest_minute}")
                 
                 # Backfill gaps if enabled
                 if self.backfill_gaps and latest_minute > 0:
@@ -2745,10 +2772,11 @@ class Phase2AnalyticsService:
                 self._write_status()
                 
                 # Sleep until next poll
+                logger.debug(f"Sleeping for {self.poll_interval}s")
                 time.sleep(self.poll_interval)
                 
             except Exception as e:
-                logger.error(f"Error in main loop: {e}")
+                logger.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(self.poll_interval)
         
         logger.info("Phase 2 analytics service stopped")

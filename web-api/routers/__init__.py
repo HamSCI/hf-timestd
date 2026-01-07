@@ -11,6 +11,7 @@ from .logs import router as logs_router
 from .stations import router as stations_router
 from .space_weather import router as space_weather_router
 from .correlations import router as correlations_router
+from .physics import router as physics_router
 
 __all__ = [
     'health_router',
@@ -21,5 +22,6 @@ __all__ = [
     'stations_router',
     'logs_router',
     'space_weather_router',
-    'correlations_router'
+    'correlations_router',
+    'physics_router'
 ]

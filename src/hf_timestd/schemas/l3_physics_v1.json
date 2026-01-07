@@ -1,0 +1,101 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3_physics_fusion",
+    "description": "Fusion of multi-broadcast L2 data into physical ionospheric parameters and UTC validation",
+    "cadence_seconds": 60,
+    "processing_level": "L3",
+    "standards": [
+        "ISO GUM uncertainty budget",
+        "NetCDF CF conventions"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "stations_used",
+            "type": "array<string>",
+            "required": true,
+            "description": "List of stations contributing to this solution"
+        },
+        {
+            "name": "tec_estimates",
+            "type": "map<string, float>",
+            "required": false,
+            "description": "Slant TEC estimates per station (TECU)",
+            "key_description": "Station name (e.g. 'WWV')",
+            "value_description": "TEC in TEC Units (10^16 el/m2)"
+        },
+        {
+            "name": "tec_uncertainties",
+            "type": "map<string, float>",
+            "required": false,
+            "description": "Uncertainty of TEC estimates",
+            "key_description": "Station name",
+            "value_description": "Uncertainty in TECU"
+        },
+        {
+            "name": "utc_offset_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Global clock offset estimate relative to UTC(NIST) after ionospheric correction"
+        },
+        {
+            "name": "utc_uncertainty_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Uncertainty of the global clock offset"
+        },
+        {
+            "name": "utc_consistency_flag",
+            "type": "boolean",
+            "required": true,
+            "description": "True if the internal 'steel ruler' model is consistent with UTC(NIST) within uncertainty"
+        },
+        {
+            "name": "geometric_solution",
+            "type": "composite",
+            "required": false,
+            "description": "Geometric triangulation solution (if multiple stations available)",
+            "fields": [
+                {
+                    "name": "latitude",
+                    "type": "float"
+                },
+                {
+                    "name": "longitude",
+                    "type": "float"
+                },
+                {
+                    "name": "error_radius_km",
+                    "type": "float"
+                }
+            ]
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Fusion service version"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Processing timestamp"
+        }
+    ]
+}
