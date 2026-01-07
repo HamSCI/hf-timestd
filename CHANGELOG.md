@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.0.0] - 2026-01-07
+
+### 🚀 Science-First Architecture Redesign
+
+**Major Release**: This version fundamentally redesigns the analytics and fusion architecture to prioritize ionospheric science over simple clock recovery. The system now treats the GPSDO as a "steel ruler" to measure the ionosphere.
+
+#### Per-Broadcast Kalman Filters
+
+- **New Core Module**: Implemented `BroadcastKalmanFilter` to track Time of Flight (ToF) and Doppler for each unique broadcast.
+- **17 Independent Filters**: Instantiated filters for all 17 known station/frequency combinations (e.g., WWV-5MHz, CHU-7.85MHz).
+- **Per-Probe Tuning**: Each filter is tuned based on specific broadcast characteristics (path length, modulation, expected ionospheric layer).
+- **Physics-Based Models**: Filters use Newtonian physics to track layer movement (Doppler) and handle signal fading by "coasting" (prediction only).
+
+#### Analytics Service Integration
+
+- **Integration**: Integrated the federated Kalman filters into `phase2_analytics_service.py`.
+- **State Persistence**: Filters automatically save/load state to survive service restarts.
+- **GPSDO Continuity**: Implemented strict temporal continuity checking against the GPSDO to validate measurements.
+
+#### Data Model & Schema Updates
+
+- **HDF5 Schema v1.3.0**: Updated L2 timing measurements schema to include:
+  - `tof_kalman_ms`: Filtered Time of Flight representing ionospheric path delay.
+  - `tof_uncertainty_ms`: Uncertainty of the ToF estimate.
+  - `doppler_ms_per_min`: Rate of change of ToF (tracking layer movement).
+  - `gpsdo_consistent`: Boolean flag for GPSDO temporal continuity.
+- **Removed**: Deleted the legacy `broadcast_calibration.json` system which caused feedback loops.
+
+#### Bug Fixes
+
+- **Feedback Loop**: Eliminated the critical feedback loop where the system "learned" wrong clock offsets.
+- **Solver Bug**: Fixed `NameError: name 'calibration_offsets' is not defined` in `transmission_time_solver.py`.
+- **HDF5 Write**: Fixed issue where HDF5 writer silently dropped fields due to schema mismatch.
+
 ## [4.5.3] - 2026-01-06
 
 ### Fixed - Data Pipeline Recovery & Schema Update

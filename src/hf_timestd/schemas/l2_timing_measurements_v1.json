@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.2.0",
+    "schema_version": "1.3.0",
     "data_product": "L2_timing_measurements",
     "description": "Station-assigned timing measurements with ISO GUM-compliant uncertainty budget",
     "cadence_seconds": 60,
@@ -109,7 +109,7 @@
             "type": "float",
             "required": true,
             "allow_nan": false,
-            "description": "Expanded uncertainty U = k × u_c",
+            "description": "Expanded uncertainty U = k \u00d7 u_c",
             "units": "milliseconds"
         },
         {
@@ -279,6 +279,42 @@
             "units": "Hz"
         },
         {
+            "name": "tof_kalman_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "allow_nan": true,
+            "description": "Kalman-filtered Time of Flight (ionospheric path delay)",
+            "units": "milliseconds",
+            "note": "Science-First Architecture v5.0: Per-broadcast Kalman filter state tracking ionospheric path dynamics"
+        },
+        {
+            "name": "tof_uncertainty_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "allow_nan": true,
+            "description": "Kalman filter uncertainty for ToF estimate",
+            "units": "milliseconds"
+        },
+        {
+            "name": "doppler_ms_per_min",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "allow_nan": true,
+            "description": "Rate of change of ToF (tracks ionospheric layer movement)",
+            "units": "milliseconds per minute",
+            "note": "Doppler in the ionospheric sense (layer movement), not carrier Doppler"
+        },
+        {
+            "name": "gpsdo_consistent",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "GPSDO temporal continuity check: measurement consistent with previous minute (residual < 1ms)"
+        },
+        {
             "name": "utc_verified",
             "type": "boolean",
             "required": false,
@@ -297,7 +333,7 @@
             "type": "string",
             "required": true,
             "description": "Metrological traceability chain",
-            "example": "GPSDO → UTC(GPS) → UTC(NIST)"
+            "example": "GPSDO \u2192 UTC(GPS) \u2192 UTC(NIST)"
         },
         {
             "name": "processing_version",
@@ -340,9 +376,9 @@
     },
     "uncertainty_calculation": {
         "description": "ISO GUM uncertainty propagation",
-        "formula_type_a": "u_A = sqrt(u_rtp² + u_ionospheric² + u_multipath²)",
-        "formula_type_b": "u_B = sqrt(u_discrimination² + u_gpsdo² + u_propagation_model²)",
-        "formula_combined": "u_c = sqrt(u_A² + u_B²)",
-        "formula_expanded": "U = k × u_c (k=2 for 95% confidence)"
+        "formula_type_a": "u_A = sqrt(u_rtp\u00b2 + u_ionospheric\u00b2 + u_multipath\u00b2)",
+        "formula_type_b": "u_B = sqrt(u_discrimination\u00b2 + u_gpsdo\u00b2 + u_propagation_model\u00b2)",
+        "formula_combined": "u_c = sqrt(u_A\u00b2 + u_B\u00b2)",
+        "formula_expanded": "U = k \u00d7 u_c (k=2 for 95% confidence)"
     }
 }

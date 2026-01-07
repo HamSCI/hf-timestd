@@ -147,6 +147,7 @@ from hf_timestd.models import (
     QualityFlag,
     ToneQualityFlag
 )
+from hf_timestd.core.broadcast_kalman_filter import BroadcastKalmanFilter
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +469,44 @@ class Phase2AnalyticsService:
         )
         logger.info(f"Initialized clock convergence model (state file: {convergence_state_file})")
         
+        # ====================================================================
+        # Per-Broadcast Kalman Filters (Science-First Architecture v5.0)
+        # ====================================================================
+        # Instantiate Kalman filters for ionospheric path tracking
+        # Each broadcast (station + frequency) gets its own independent filter
+        
+        # State directory for Kalman filter persistence
+        self.kalman_state_dir = self.archive_dir.parent.parent / 'state' / 'broadcast_kalman_states'
+        self.kalman_state_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize filters for all possible broadcasts on this channel
+        self.broadcast_filters = {}
+        
+        # Determine possible stations for this frequency
+        possible_stations = self._get_possible_stations_for_frequency(frequency_hz)
+        
+        for station in possible_stations:
+            broadcast_id = f"{station}_{int(frequency_hz/1000)}"
+            
+            filter = BroadcastKalmanFilter(
+                broadcast_id=broadcast_id,
+                station=station,
+                frequency_mhz=frequency_hz / 1e6
+            )
+            
+            # Try to load saved state
+            filter.load_state(self.kalman_state_dir)
+            
+            self.broadcast_filters[broadcast_id] = filter
+            
+            logger.info(
+                f"Initialized Kalman filter for {broadcast_id}: "
+                f"layer={filter.characteristics.typical_layer}, "
+                f"modulation={filter.characteristics.modulation}"
+            )
+        
+        logger.info(f"Initialized {len(self.broadcast_filters)} per-broadcast Kalman filters")
+        
         # State tracking
         self.running = False
         self.start_time = time.time()
@@ -505,6 +544,35 @@ class Phase2AnalyticsService:
         logger.info(f"  Frequency: {frequency_hz/1e6:.3f} MHz")
         logger.info(f"  Grid: {receiver_grid}")
         logger.info(f"  Tiered Storage: {'enabled' if self._tiered_storage_enabled else 'disabled'}")
+    
+    def _get_possible_stations_for_frequency(self, frequency_hz: float) -> List[str]:
+        """
+        Get list of possible stations for this frequency.
+        
+        Args:
+            frequency_hz: Frequency in Hz
+            
+        Returns:
+            List of station names that broadcast on this frequency
+        """
+        freq_mhz = frequency_hz / 1e6
+        
+        # Shared frequencies (WWV + WWVH + BPM)
+        if freq_mhz in [2.5, 5.0, 10.0, 15.0]:
+            return ['WWV', 'WWVH', 'BPM']
+        
+        # WWV-only frequencies
+        elif freq_mhz in [20.0, 25.0]:
+            return ['WWV']
+        
+        # CHU-only frequencies
+        elif freq_mhz in [3.33, 7.85, 14.67]:
+            return ['CHU']
+        
+        # Unknown frequency - try all stations
+        else:
+            logger.warning(f"Unknown frequency {freq_mhz} MHz - trying all stations")
+            return ['WWV', 'WWVH', 'CHU', 'BPM']
     
     # ========================================================================
     # HDF5 Write Tracking & Validation (Analytics Review 2025-12-30)
@@ -798,6 +866,81 @@ class Phase2AnalyticsService:
                             f"setting propagation_delay_ms=NaN"
                         )
                     
+                    # ================================================================
+                    # Per-Broadcast Kalman Filter Update (Science-First v5.0)
+                    # ================================================================
+                    # Update Kalman filter for this specific broadcast
+                    # This tracks ionospheric path dynamics [ToF, Doppler]
+                    
+                    tof_kalman_ms = None
+                    tof_uncertainty_ms = None
+                    doppler_ms_per_min = None
+                    gpsdo_consistent = None
+                    
+                    if tone_detected_flag and not math.isnan(raw_arr):
+                        # Get filter for this broadcast
+                        broadcast_id = f"{station}_{int(frequency_mhz)}"
+                        
+                        if broadcast_id in self.broadcast_filters:
+                            filter = self.broadcast_filters[broadcast_id]
+                            
+                            # Compute ToF from raw arrival time
+                            tof_measurement = raw_arr
+                            
+                            # Get SNR for dynamic measurement noise
+                            snr = snr_db if snr_db > 0 else 10.0
+                            
+                            # Check GPSDO temporal continuity
+                            is_consistent, residual = filter.check_gpsdo_continuity(tof_measurement)
+                            gpsdo_consistent = is_consistent
+                            
+                            if not is_consistent:
+                                logger.info(
+                                    f"GPSDO continuity check: {broadcast_id} residual = {residual:.3f} ms "
+                                    f"(propagation change or anomaly)"
+                                )
+                            
+                            # Update Kalman filter
+                            tof_kalman_ms, tof_uncertainty_ms = filter.update(
+                                measurement_ms=tof_measurement,
+                                snr_db=snr
+                            )
+                            
+                            # Get Doppler (rate of change)
+                            state = filter.get_state()
+                            doppler_ms_per_min = state['doppler_ms_per_min']
+                            
+                            logger.debug(
+                                f"Kalman update {broadcast_id}: "
+                                f"ToF={tof_kalman_ms:.3f}±{tof_uncertainty_ms:.3f} ms, "
+                                f"Doppler={doppler_ms_per_min:.4f} ms/min"
+                            )
+                            
+                            # Save state periodically (every 10 minutes)
+                            if self.minutes_processed % 10 == 0:
+                                filter.save_state(self.kalman_state_dir)
+                        else:
+                            logger.warning(f"No Kalman filter for broadcast {broadcast_id}")
+                    else:
+                        # No tone detected - predict only (coast)
+                        broadcast_id = f"{station}_{int(frequency_mhz)}"
+                        
+                        if broadcast_id in self.broadcast_filters:
+                            filter = self.broadcast_filters[broadcast_id]
+                            
+                            # Predict (coast during fading)
+                            tof_kalman_ms, tof_uncertainty_ms = filter.predict()
+                            
+                            state = filter.get_state()
+                            doppler_ms_per_min = state['doppler_ms_per_min']
+                            gpsdo_consistent = False  # No measurement to check
+                            
+                            logger.debug(
+                                f"Kalman predict {broadcast_id}: "
+                                f"ToF={tof_kalman_ms:.3f}±{tof_uncertainty_ms:.3f} ms (coasting)"
+                            )
+                    
+
                     # Clock offset should already be correct from solution
                     # But validate data model hierarchy: clock_offset = raw_arrival - propagation
                     if not math.isnan(raw_arr) and not math.isnan(prop_delay):
@@ -854,6 +997,13 @@ class Phase2AnalyticsService:
                         propagation_mode=str(solution.propagation_mode) if solution and solution.propagation_mode else None,
                         n_hops=int(solution.n_hops) if solution and solution.n_hops is not None else None,
                         snr_db=float(snr_db) if snr_db is not None else None,
+                        
+                        # Per-Broadcast Kalman Filter State (Science-First v5.0)
+                        tof_kalman_ms=tof_kalman_ms,
+                        tof_uncertainty_ms=tof_uncertainty_ms,
+                        doppler_ms_per_min=doppler_ms_per_min,
+                        gpsdo_consistent=gpsdo_consistent,
+                        
                         utc_verified=bool(convergence_result.is_locked),
                         multi_station_verified=bool(solution.dual_station_verified) if solution else False,
                         traceability_chain='GPSDO → UTC(GPS) → UTC(NIST)',

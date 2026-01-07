@@ -1925,7 +1925,8 @@ class Phase2TemporalEngine:
         channel: ChannelCharacterization,
         system_time: float,
         rtp_timestamp: int,
-        forced_station: Optional[str] = None
+        forced_station: Optional[str] = None,
+        calibration_offsets: Optional[Dict[str, float]] = None
     ) -> TransmissionTimeSolution:
         """
         Step 3: Transmission Time Solution.
@@ -2129,36 +2130,25 @@ class Phase2TemporalEngine:
                     f"(diff={estimated_arrival_time - nearest_minute:.3f}s)"
                 )
             else:
-                # Fallback: No signal detected and no calibration
-                # CRITICAL: Use RTP timestamp modulo, NOT wall clock time
-                # The RTP timestamp is GPSDO-governed and is the source of truth
+                # CRITICAL FIX: Bootstrap without expected_second_rtp
                 # 
-                # Estimate where the SECOND boundary is based on RTP offset
-                # The transmission time solver expects expected_second_rtp to point to
-                # the second boundary where the signal was transmitted, not the minute boundary
-                samples_per_second = self.sample_rate  # 20,000 at 20 kHz
-                samples_per_minute = self.sample_rate * 60  # 1,200,000 at 20 kHz
-                current_offset = rtp_timestamp % samples_per_minute
+                # PROBLEM: The previous code used RTP modulo to estimate expected_second_rtp,
+                # but this assumes the RTP clock is already aligned with UTC, which creates
+                # a circular dependency during bootstrap.
+                # 
+                # SOLUTION: Pass None to the solver and let it bootstrap using station-specific
+                # expected delays. Once we have a good detection, we'll establish the RTP→UTC
+                # mapping via the calibration callback.
+                # 
+                # The solver handles expected_second_rtp=None by using:
+                #   observed_delay_ms = min(c.total_delay_ms for c in candidates)
+                # This allows it to find the most plausible propagation mode without
+                # assuming we know the RTP→UTC mapping.
+                expected_second_rtp = None
                 
-                # Find the NEAREST second boundary (not just the last one)
-                # Signals are transmitted at the top of the second, so if we're more than
-                # halfway through a second, the signal we're detecting is from the NEXT second
-                seconds_into_minute = current_offset // samples_per_second
-                samples_since_last_second = current_offset % samples_per_second
-                
-                # Round to nearest second boundary
-                if samples_since_last_second < samples_per_second // 2:
-                    # Closer to the last second boundary
-                    expected_second_rtp = rtp_timestamp - samples_since_last_second
-                else:
-                    # Closer to the next second boundary
-                    samples_to_next_second = samples_per_second - samples_since_last_second
-                    expected_second_rtp = rtp_timestamp + samples_to_next_second
-                
-                logger.warning(
-                    f"Bootstrap: No signal detected, estimating second boundary from RTP modulo "
-                    f"(offset={current_offset}, second={seconds_into_minute}, "
-                    f"samples_since_second={samples_since_last_second}, expected_second_rtp={expected_second_rtp})"
+                logger.info(
+                    f"Bootstrap: No calibration established yet - solver will use station-specific "
+                    f"expected delays to establish RTP→UTC mapping from first good detection"
                 )
 
             
@@ -2284,6 +2274,28 @@ class Phase2TemporalEngine:
                 mode_candidates=mode_candidates,
                 arrival_rtp=solver_result.arrival_rtp
             )
+            
+            # CRITICAL FIX: Validate D_clock against expected range from calibration
+            # This prevents outliers from wrong mode selection from reaching fusion
+            if calibration_offsets and station in calibration_offsets:
+                expected_d_clock = calibration_offsets[station]
+                tolerance_ms = 5.0  # ±5ms tolerance for ionospheric variability
+                
+                d_clock_error = abs(d_clock_ms - expected_d_clock)
+                if d_clock_error > tolerance_ms:
+                    logger.warning(
+                        f"D_clock validation FAILED for {station}: "
+                        f"measured={d_clock_ms:+.2f}ms, expected={expected_d_clock:+.2f}ms, "
+                        f"error={d_clock_error:.2f}ms > tolerance={tolerance_ms:.2f}ms"
+                    )
+                    logger.warning(
+                        f"  Likely wrong propagation mode: {solver_result.mode.value} "
+                        f"(confidence={solver_result.confidence:.2f})"
+                    )
+                    # Reduce confidence to below rejection threshold
+                    solution.confidence = 0.05
+                    logger.warning(f"  Reducing confidence to {solution.confidence:.2f} to trigger rejection")
+
             
             # Check for dual-station cross-validation
             try:

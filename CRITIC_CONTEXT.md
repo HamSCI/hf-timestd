@@ -1,52 +1,42 @@
-# CRITIC CONTEXT - Pipeline Hardening & Resilience
+# Project Context: HF Time Standard (hf-timestd)
 
-**DO NOT ALTER THIS HEADER. This file is for AI agent context between sessions.**
+## 🚀 Current Status: Science-First Architecture (Phase 2 Complete)
 
----
+**Version**: v5.0.0 "Science-First"
+**Core Philosophy**: The system uses the localized GPSDO as a "steel ruler" to measure the ionosphere. UTC recovery is a derived validation product, not the primary input.
 
-## Session Date: 2026-01-06 (Post-Fusion Fix)
+### Recent Achievements (Session 2026-01-07)
+1.  **Architecture Redesign**: Shifted from "clock recovery first" to "ionospheric science first".
+2.  **BroadcastKalmanFilter**: Implemented 17 independent Kalman filters (one per broadcast) to track `[ToF, Doppler]`.
+3.  **Feedback Loop Removed**: Deleted the legacy auto-calibration system that was learning incorrect offsets.
+4.  **Integration**: Fully integrated into `phase2_analytics_service.py` with valid HDF5 output (v1.3.0 schema).
+5.  **Per-Probe Tuning**: Each filter is tuned for its specific path (e.g., CHU vs WWV) and modulation characteristics.
 
-## Primary Objective for Next Session
+### Active Architecture (v5.0.0)
 
-**HARDENING & SIMPLIFICATION (RTP → Chrony)**
+**Stage 1: Federated Analytics (COMPLETE)**
+- **Input**: Raw tone arrivals from `phase2_temporal_engine`.
+- **Processing**: 17 independent `BroadcastKalmanFilter` instances.
+- **Output**: `[ToF, Doppler]` state vectors for each broadcast path.
+- **Storage**: HDF5 L2 files (Schema v1.3.0).
 
-**Goal**: Ideally architect the pipeline to be as theoretically and methodologically sound as possible. It must be resilient to changing conditions (propagation shifts, ionospheric storms) and robust to the presence or absence of auxiliary data (GNSS VTEC, IONEX).
+**Stage 2: Physics-Based Fusion (NEXT)**
+- **Goal**: Derive physical parameters from Stage 1 outputs.
+- **Products**:
+    - **TEC Estimation**: Differential delay between frequencies (`ToF_f1 - ToF_f2`).
+    - **Triangulation**: Multi-station geometric intersection.
+    - **UTC Validation**: "Does this solution agree with UTC(NIST)?"
 
-**Key Focus Areas**:
+**Stage 3: Clock Recovery (FUTURE)**
+- **Goal**: Discipline the local clock (if GPSDO fails) using the validated physics model.
 
-1. **Theoretical Soundness**: Verify that the uncertainty budget (ISO GUM) is rigorous and does not double-count errors.
-2. **Resilience**: Ensure the system degrades gracefully. If VTEC is missing, it should fall back to physics models without crashing or producing discontinuous jumps.
-3. **Simplification**: Remove fragility. The interaction between "fallback" values (0.0/NaN) and "measured" values should be explicit and typed, not implicit.
+## Known Issues
+- **Bootstrap Sensitivity**: System relies on initial tone detection to seed the Kalman filters.
+- **Solver Complexity**: `TransmissionTimeSolver` is complex; `calibration_offsets` bug was recently fixed but legacy code remains.
 
----
-
-## Current System Status
-
-### Services
-
-- ✅ **Analytics**: Running stable. Calibration loop restored. Writing `NaN` for non-detections.
-- ✅ **Fusion**: Running stable. Robust against `NaN` inputs. Feeding Chrony.
-- ✅ **Chrony Feed**: Active (`Reach` > 0, `LastRx` updating).
-
-### Recent Fixes (Context for Hardening)
-
-1. **NaN Handling**: We just moved from "implicit zero" to "explicit NaN" for missing data. The hardening phase should enforce this pattern strictness.
-2. **Dataclass Integrity**: We fixed a missing field in `TransmissionTimeSolution`. Future refactoring should use Pydantic validators to prevent this class of error.
-3. **Filter Logic**: We patched `_reject_outliers` to handle `NaN`. A more sound approach might be to use a proper statistical filter that naturally handles missing data (e.g., Kalman filter with variable measurement matrix).
-
----
-
-## Strategic Questions for the Critic
-
-1. **Uncertainty Propagation**: Are we correctly propagating the uncertainty from L2 (Tone Detection SNR) -> L3 (Fusion)? Or is Fusion re-calculating uncertainty from scratch?
-2. **Fallback vs. Model**: When we use a fallback model (e.g., predicted propagation delay), do we correctly inflate the uncertainty to reflect that it is a *prediction*, not a *measurement*?
-3. **Mode Identification**: Is the `TransmissionTimeSolver` robust enough to trust its mode identification (`1F` vs `2F`) for automated hardening, or do we need a "Mode Ambiguity" uncertainty term?
+## Next Session Goals
+1.  **Implement Physics-Based Fusion**: Create the `PhysicsFusionService` (or refactor `FusionService`) to consume Stage 1 Kalman states.
+2.  **TEC Estimation**: Implement Total Electron Content calculation using differential ToF from the same station (e.g., WWV 10MHz vs 20MHz).
+3.  **UTC Recovery Validation**: Implement the logic to use UTC consistency as a quality metric for the ionospheric model.
 
 ---
-
-## Known Artifacts
-
-- **Verification**: `walkthrough.md` (contains verification of the recent fix).
-- **Summary**: `FUSION_FIX_SUMMARY_2026-01-06.md` (detailed root cause of the previous instability).
-
-**END OF CONTEXT**

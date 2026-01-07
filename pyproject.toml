@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hf-timestd"
-version = "4.5.3"
+version = "5.0.0"
 description = "HF Time Standard Analysis - WWV/WWVH/CHU/BPM timing via ka9q-radio"
 readme = "README.md"
 authors = [

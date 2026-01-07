@@ -81,6 +81,25 @@ class L2TimingMeasurement(BaseModel):
     snr_db: Optional[float] = None
     doppler_hz: Optional[float] = None
     
+    # Per-Broadcast Kalman Filter State (Science-First Architecture v5.0)
+    # These fields track ionospheric path dynamics for each broadcast independently
+    tof_kalman_ms: Optional[float] = Field(
+        None, 
+        description="Kalman-filtered Time of Flight (ionospheric path delay)"
+    )
+    tof_uncertainty_ms: Optional[float] = Field(
+        None,
+        description="Kalman filter uncertainty for ToF estimate"
+    )
+    doppler_ms_per_min: Optional[float] = Field(
+        None,
+        description="Rate of change of ToF (tracks ionospheric layer movement)"
+    )
+    gpsdo_consistent: Optional[bool] = Field(
+        None,
+        description="GPSDO temporal continuity check: consistent with previous minute"
+    )
+    
     # Verification Flags
     utc_verified: Optional[bool] = None
     multi_station_verified: Optional[bool] = None
