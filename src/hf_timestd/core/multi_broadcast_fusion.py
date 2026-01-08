@@ -960,11 +960,11 @@ class MultiBroadcastFusion:
                 continue
             
             try:
-                # Initialize HDF5 reader for L1A tone detections
+                # Initialize HDF5 reader for L2 timing measurements
                 reader = DataProductReader(
-                    data_dir=tone_dir,
-                    product_level='L1',
-                    product_name='tone_detections',
+                    data_dir=channel_dir,
+                    product_level='L2',  # CRITICAL FIX: Read L2 timing_measurements from analytics
+                    product_name='timing_measurements',  # Correct schema name
                     channel=channel
                 )
                 
@@ -1971,6 +1971,18 @@ class MultiBroadcastFusion:
         measurements = self._read_latest_measurements(lookback_minutes)
         
         # Filter out NaN measurements immediately (tone not detected)
+        # CRITICAL FIX (2026-01-08): Leverage GPSDO stability during detection gaps
+        #
+        # Current: Reject measurements where tone_detected=False (d_clock_ms=NaN)
+        # Future: Accept Kalman-coasted predictions with inflated uncertainty
+        #
+        # The GPSDO provides stable T_arrival timestamps. When tone detection fails,
+        # the per-broadcast Kalman filter can still predict ToF (coasting mode).
+        # This would allow continuous D_clock even during fades:
+        #   D_clock = T_arrival(GPSDO) - ToF(Kalman_predicted)
+        #
+        # For now, we filter out NaN to maintain current behavior while the
+        # stricter chrony feed criteria prevent discontinuities.
         measurements = [m for m in measurements if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms)]
         
         if not measurements:
@@ -3010,25 +3022,68 @@ def run_fusion_service(
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
                 # Write directly to Chrony SHM (fusion runs at chrony poll rate)
-                if chrony_shm and result.quality_grade in ('A', 'B', 'C', 'D'):
-                    now = time.time()
-                    system_time = now
-                    reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
+                # CRITICAL FIX (2026-01-08): Stricter feed criteria to eliminate discontinuities
+                # Only feed high-quality, multi-station, consistent measurements
+                if chrony_shm:
+                    # Check quality criteria
+                    quality_ok = result.quality_grade in ('A', 'B')  # Only A/B, not C/D
+                    multi_station = result.n_stations >= 2  # Require 2+ stations for cross-validation
                     
-                    # Precision based on uncertainty (log2 of seconds)
-                    precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
+                    # CRITICAL FIX (2026-01-08): Relax consistency check
+                    # INTER_ANOMALY means "stations disagree slightly due to ionospheric variations"
+                    # This is EXPECTED and VALID - it's the science we're studying!
+                    # Only reject if there's a fundamental problem (discrimination failure, etc.)
+                    consistent = result.consistency_flag in ('OK', 'INTER_ANOMALY')
                     
-                    try:
-                        update_success = chrony_shm.update(reference_time, system_time, precision)
-                        if update_success:
-                            logger.debug(
-                                f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
-                                f"offset={(system_time-reference_time)*1000:+.3f}ms, precision={precision}"
+                    # Discontinuity filter: reject large jumps (>3ms)
+                    global last_chrony_d_clock
+                    discontinuity_ok = True
+                    if 'last_chrony_d_clock' in globals() and last_chrony_d_clock is not None:
+                        delta = abs(result.d_clock_fused_ms - last_chrony_d_clock)
+                        if delta > 3.0:
+                            logger.warning(
+                                f"Chrony feed: Discontinuity detected ({delta:.1f}ms jump), "
+                                f"skipping update to prevent clock instability"
                             )
-                        else:
-                            logger.warning("Chrony SHM write failed")
-                    except Exception as e:
-                        logger.error(f"Chrony SHM update exception: {e}")
+                            discontinuity_ok = False
+                    # else: First measurement after restart, allow it
+                    
+                    if quality_ok and multi_station and consistent and discontinuity_ok:
+                        now = time.time()
+                        system_time = now
+                        reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
+                        
+                        # Precision based on uncertainty (log2 of seconds)
+                        precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
+                        
+                        try:
+                            update_success = chrony_shm.update(reference_time, system_time, precision)
+                            if update_success:
+                                # Update last value for discontinuity check
+                                last_chrony_d_clock = result.d_clock_fused_ms
+                                
+                                logger.debug(
+                                    f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
+                                    f"offset={(system_time-reference_time)*1000:+.3f}ms, precision={precision} "
+                                    f"[{result.n_stations}sta, {result.quality_grade}, {result.consistency_flag}]"
+                                )
+                            else:
+                                logger.warning("Chrony SHM write failed")
+                        except Exception as e:
+                            logger.error(f"Chrony SHM update exception: {e}")
+                    else:
+                        # Log why we're not feeding chrony
+                        reasons = []
+                        if not quality_ok:
+                            reasons.append(f"grade={result.quality_grade}")
+                        if not multi_station:
+                            reasons.append(f"n_stations={result.n_stations}")
+                        if not consistent:
+                            reasons.append(f"consistency={result.consistency_flag}")
+                        if not discontinuity_ok:
+                            reasons.append("discontinuity")
+                        
+                        logger.debug(f"Chrony feed skipped: {', '.join(reasons)}")
 
             # BREADCRUMB: Sleeping
             loop_duration = time.time() - loop_start_time

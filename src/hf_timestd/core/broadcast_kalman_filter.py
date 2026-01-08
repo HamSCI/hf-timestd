@@ -166,6 +166,12 @@ class BroadcastKalmanFilter:
         self.previous_tof = None
         self.previous_time = None
         
+        # ADAPTIVE KALMAN ENHANCEMENTS (2026-01-08)
+        # Track mode transitions for adaptive process noise
+        self.time_since_mode_change = 100.0  # minutes (assume stable initially)
+        self.last_mode_status = 'STABLE'
+        self.last_innovation = 0.0
+        
         logger.info(
             f"Initialized {self.broadcast_id} Kalman filter: "
             f"layer={self.characteristics.typical_layer}, "
@@ -327,8 +333,29 @@ class BroadcastKalmanFilter:
             )
             return measurement_ms, uncertainty
         
-        # Predict step
-        self.predict(dt=1.0)
+        # Predict step with adaptive process noise
+        # ADAPTIVE ENHANCEMENT: Adjust Q based on conditions
+        mode_status = self.detect_mode_transition(measurement_ms - self.state[0])
+        
+        if mode_status == 'MODE_CHANGE':
+            self.time_since_mode_change = 0.0
+            logger.info(f"{self.broadcast_id}: Mode transition detected")
+        elif mode_status == 'POSSIBLE_CHANGE':
+            # Don't reset counter, but don't increment either
+            pass
+        else:
+            self.time_since_mode_change += 1.0  # Increment by 1 minute
+        
+        # Calculate adaptive Q
+        Q_adaptive = self._adaptive_process_noise(
+            innovation_ms=measurement_ms - self.state[0],
+            snr_db=snr_db,
+            time_since_mode_change=self.time_since_mode_change
+        )
+        
+        # Predict with adaptive Q (dt=1.0 minute)
+        self.state = self.F @ self.state
+        self.P = self.F @ self.P @ self.F.T + Q_adaptive
         
         # Measurement noise (dynamic, based on SNR)
         R = self._get_measurement_noise(snr_db)
@@ -339,6 +366,7 @@ class BroadcastKalmanFilter:
         
         # Update step
         innovation = measurement_ms - (self.H @ self.state)[0]
+        self.last_innovation = innovation
         self.state = self.state + K.flatten() * innovation
         self.P = (np.eye(2) - K @ self.H) @ self.P
         
@@ -381,6 +409,131 @@ class BroadcastKalmanFilter:
         
         # Return variance
         return noise_ms ** 2
+    
+    def _adaptive_process_noise(
+        self, 
+        innovation_ms: float, 
+        snr_db: float,
+        time_since_mode_change: float
+    ) -> np.ndarray:
+        """
+        Calculate adaptive process noise based on current conditions.
+        
+        ADAPTIVE KALMAN ENHANCEMENT (2026-01-08):
+        Adjusts Q (process noise) based on:
+        - SNR: Low SNR → expect more jitter
+        - Innovation: Large residual → increase Q to track changes
+        - Mode stability: Recent transition → higher uncertainty
+        
+        Args:
+            innovation_ms: Current innovation (measurement - prediction)
+            snr_db: Signal-to-noise ratio
+            time_since_mode_change: Minutes since last mode transition
+            
+        Returns:
+            Adaptive Q matrix
+        """
+        Q_base = self.Q.copy()
+        
+        # SNR scaling (low SNR → more jitter expected)
+        snr_scale = max(1.0, 20.0 / max(snr_db, 5.0))
+        
+        # Innovation scaling (large residual → increase Q)
+        if abs(innovation_ms) > 2.0:
+            innovation_scale = abs(innovation_ms) / 2.0
+        else:
+            innovation_scale = 1.0
+        
+        # Mode change scaling (recent change → higher uncertainty)
+        if time_since_mode_change < 5.0:
+            mode_scale = 3.0
+        else:
+            mode_scale = 1.0
+        
+        # Combined scaling
+        Q_adaptive = Q_base * snr_scale * innovation_scale * mode_scale
+        
+        return Q_adaptive
+    
+    def detect_mode_transition(self, innovation_ms: float) -> str:
+        """
+        Detect sudden propagation changes via innovation analysis.
+        
+        ADAPTIVE KALMAN ENHANCEMENT (2026-01-08):
+        Uses Mahalanobis distance (normalized innovation) to detect:
+        - MODE_CHANGE: Very large innovation (>5σ) - likely propagation mode change
+        - POSSIBLE_CHANGE: Moderate innovation (>3σ) - possible change
+        - STABLE: Small innovation (<3σ) - tracking well
+        
+        Args:
+            innovation_ms: Innovation (measurement - prediction)
+            
+        Returns:
+            Mode status: 'MODE_CHANGE', 'POSSIBLE_CHANGE', or 'STABLE'
+        """
+        # Calculate innovation covariance (predicted measurement uncertainty)
+        S = self.H @ self.P @ self.H.T + self._get_measurement_noise(10.0)  # Use nominal SNR
+        sigma_innovation = np.sqrt(S[0, 0] if S.ndim > 1 else S)
+        
+        # Normalized innovation (Mahalanobis distance)
+        if sigma_innovation > 0:
+            normalized = abs(innovation_ms) / sigma_innovation
+        else:
+            normalized = 0.0
+        
+        if normalized > 5.0:
+            return 'MODE_CHANGE'
+        elif normalized > 3.0:
+            return 'POSSIBLE_CHANGE'
+        else:
+            return 'STABLE'
+    
+    def get_search_window(self, snr_db: float) -> float:
+        """
+        Calculate adaptive search window based on uncertainty and SNR.
+        
+        ADAPTIVE KALMAN ENHANCEMENT (2026-01-08):
+        Implements ROC tradeoff:
+        - Narrow window → high specificity (reject noise)
+        - Wide window → high sensitivity (find weak signals)
+        
+        Window adapts based on:
+        - Filter uncertainty (3σ confidence interval)
+        - SNR (low SNR → widen for sensitivity)
+        - Mode stability (recent transition → widen temporarily)
+        
+        Args:
+            snr_db: Current signal-to-noise ratio
+            
+        Returns:
+            Search window half-width in milliseconds
+        """
+        # Extract ToF uncertainty from covariance
+        sigma_tof = np.sqrt(self.P[0, 0])
+        
+        # Base: 3σ window (99.7% confidence)
+        window = 3.0 * sigma_tof
+        
+        # SNR adjustment (low SNR → widen for sensitivity)
+        if snr_db < 10:
+            snr_factor = 1.5
+        else:
+            snr_factor = 1.0
+        
+        # Mode stability (recent transition → widen)
+        if self.time_since_mode_change < 5.0:
+            mode_factor = 2.0
+        else:
+            mode_factor = 1.0
+        
+        # Calculate final window
+        window = window * snr_factor * mode_factor
+        
+        # Physical constraints
+        MIN_WINDOW = 3.0   # ms (ionospheric jitter minimum)
+        MAX_WINDOW = 50.0  # ms (mode transition maximum)
+        
+        return max(MIN_WINDOW, min(MAX_WINDOW, window))
     
     def check_gpsdo_continuity(self, current_tof: float) -> Tuple[bool, float]:
         """
