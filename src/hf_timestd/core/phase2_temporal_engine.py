@@ -1044,11 +1044,33 @@ class Phase2TemporalEngine:
             timestamp=buffer_mid_time, # Use buffer_mid_time for tone detector
             samples=iq_samples,
             rtp_timestamp=rtp_timestamp,
-            original_sample_rate=self.sample_rate, # Added from original code
-            buffer_rtp_start=rtp_timestamp, # Added from original code
+            original_sample_rate=self.sample_rate, 
+            buffer_rtp_start=rtp_timestamp, 
             search_window_ms=adaptive_window_ms,  # Use adaptive window
             expected_offset_ms=expected_offset_ms  # Center at predicted delay
         )
+        
+        # Fallback to wide search if physics/guided search fails
+        if not detections and search_strategy in ("PHYSICS", "LEARNED", "CROSS_FREQ"):
+            logger.warning(
+                f"❌ {search_strategy} search failed (window=±{adaptive_window_ms:.1f}ms). "
+                f"Falling back to WIDE search (±500ms)..."
+            )
+            # Retry with wide search window
+            detections = self.tone_detector.process_samples(
+                timestamp=buffer_mid_time,
+                samples=iq_samples,
+                rtp_timestamp=rtp_timestamp,
+                original_sample_rate=self.sample_rate,
+                buffer_rtp_start=rtp_timestamp,
+                search_window_ms=500.0,
+                expected_offset_ms=0.0
+            )
+            
+            if detections:
+                logger.info("✅ Wide search fallback SUCCESS! Found tones.")
+            else:
+                logger.warning("❌ Wide search fallback also FAILED.")
         
         # B. Analyze detections
         wwv_det = None

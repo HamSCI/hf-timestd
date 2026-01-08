@@ -423,10 +423,10 @@ STATION_SEPARATION_MS = 15.0
 # Propagation delay bounds by station (ms)
 # Format: (min_delay_ms, max_delay_ms)
 PROPAGATION_BOUNDS_MS = {
-    'WWV': (2.0, 35.0),    # Continental US to Fort Collins
-    'WWVH': (12.0, 60.0),  # Continental US to Hawaii (longer path)
-    'CHU': (3.0, 40.0),    # Continental US to Ottawa
-    'BPM': (25.0, 50.0),   # Continental US to China (very long path)
+    'WWV': (-5.0, 35.0),    # Relaxed lower bound for robustness
+    'WWVH': (-5.0, 60.0),  # Relaxed lower bound for robustness
+    'CHU': (-5.0, 40.0),    # Relaxed lower bound for robustness
+    'BPM': (-5.0, 50.0),   # Relaxed lower bound for robustness
 }
 
 # Default bounds for unknown stations

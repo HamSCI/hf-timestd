@@ -2574,7 +2574,7 @@ class Phase2AnalyticsService:
                    # D_clock continuity validation (GPSDO temporal stability check)
                 # CRITICAL: Skip during bootstrap (no previous measurement)
                     if self.last_d_clock_ms is not None:
-                        is_valid, reason = self.temporal_engine._validate_d_clock_continuity(
+                        is_valid, reason = self.engine._validate_d_clock_continuity(
                             current_d_clock_ms=primary_result.d_clock_ms,
                             previous_d_clock_ms=self.last_d_clock_ms,
                             dt_seconds=(minute_boundary - self.last_minute_unix) if self.last_minute_unix else 60,
