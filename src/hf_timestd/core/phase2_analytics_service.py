@@ -916,6 +916,17 @@ class Phase2AnalyticsService:
                                 f"Doppler={doppler_ms_per_min:.4f} ms/min"
                             )
                             
+                            # ADAPTIVE WINDOW ENHANCEMENT (2026-01-08)
+                            # Check convergence and log adaptive window
+                            if filter.is_converged():
+                                window_ms = filter.get_search_window(snr)
+                                if window_ms < 20:  # Only log when significantly narrowed
+                                    logger.info(
+                                        f"🎯 {broadcast_id} converged: "
+                                        f"window={window_ms:.1f}ms, unc={tof_uncertainty_ms:.2f}ms, "
+                                        f"innovation={filter.last_innovation:.2f}ms"
+                                    )
+                            
                             # Save state periodically (every 10 minutes)
                             if self.minutes_processed % 10 == 0:
                                 filter.save_state(self.kalman_state_dir)
@@ -939,6 +950,10 @@ class Phase2AnalyticsService:
                                 f"Kalman predict {broadcast_id}: "
                                 f"ToF={tof_kalman_ms:.3f}±{tof_uncertainty_ms:.3f} ms (coasting)"
                             )
+                            
+                            # Save state periodically (every 10 minutes) - Persistence during fading!
+                            if self.minutes_processed % 10 == 0:
+                                filter.save_state(self.kalman_state_dir)
                     
 
                     # Clock offset should already be correct from solution

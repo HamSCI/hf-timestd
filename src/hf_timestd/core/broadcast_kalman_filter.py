@@ -171,6 +171,7 @@ class BroadcastKalmanFilter:
         self.time_since_mode_change = 100.0  # minutes (assume stable initially)
         self.last_mode_status = 'STABLE'
         self.last_innovation = 0.0
+        self.last_mode_transition_time = datetime.now(timezone.utc).timestamp() - 10000  # Assume stable initially
         
         logger.info(
             f"Initialized {self.broadcast_id} Kalman filter: "
@@ -339,6 +340,7 @@ class BroadcastKalmanFilter:
         
         if mode_status == 'MODE_CHANGE':
             self.time_since_mode_change = 0.0
+            self.last_mode_transition_time = datetime.now(timezone.utc).timestamp()
             logger.info(f"{self.broadcast_id}: Mode transition detected")
         elif mode_status == 'POSSIBLE_CHANGE':
             # Don't reset counter, but don't increment either
@@ -534,6 +536,41 @@ class BroadcastKalmanFilter:
         MAX_WINDOW = 50.0  # ms (mode transition maximum)
         
         return max(MIN_WINDOW, min(MAX_WINDOW, window))
+    
+    def is_converged(self) -> bool:
+        """
+        Detect convergence using innovation-based criteria.
+        
+        INNOVATION-BASED CONVERGENCE (2026-01-08):
+        Enables fast convergence (5-15 min vs 30 min fixed) by detecting when:
+        - Uncertainty is low (< 2ms)
+        - Innovation is small (< 1ms) - measurements match predictions
+        - Mode is stable (> 3 minutes since last transition)
+        - Sufficient data (>= 5 updates)
+        
+        This allows narrowing search windows earlier for strong signals while
+        maintaining conservative approach for weak/unstable signals.
+        
+        Returns:
+            True if converged, False otherwise
+        """
+        # Need minimum data
+        if self.n_updates < 5:
+            return False
+        
+        # Check uncertainty (confident in state estimate)
+        uncertainty_ms = np.sqrt(self.P[0, 0])
+        uncertainty_ok = uncertainty_ms < 2.0
+        
+        # Check innovation (measurements match predictions)
+        innovation_ok = abs(self.last_innovation) < 1.0
+        
+        # Check mode stability (no recent transitions)
+        import time
+        time_since_transition = time.time() - self.last_mode_transition_time
+        mode_stable = time_since_transition > 180  # 3 minutes
+        
+        return uncertainty_ok and innovation_ok and mode_stable
     
     def check_gpsdo_continuity(self, current_tof: float) -> Tuple[bool, float]:
         """

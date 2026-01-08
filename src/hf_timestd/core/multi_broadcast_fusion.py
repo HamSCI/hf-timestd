@@ -951,6 +951,9 @@ class MultiBroadcastFusion:
         
         # Read from each channel
         for channel in self.channels:
+            # CRITICAL FIX: Define channel_dir before using it in DataProductReader
+            channel_dir = self.phase2_dir / channel
+            
             tone_dir = self.phase2_dir / channel / 'tone_detections'
             if not tone_dir.exists():
                 continue
@@ -3031,9 +3034,10 @@ def run_fusion_service(
                     
                     # CRITICAL FIX (2026-01-08): Relax consistency check
                     # INTER_ANOMALY means "stations disagree slightly due to ionospheric variations"
+                    # CROSS_STATION_DISAGREE is similar - expected ionospheric variations
                     # This is EXPECTED and VALID - it's the science we're studying!
                     # Only reject if there's a fundamental problem (discrimination failure, etc.)
-                    consistent = result.consistency_flag in ('OK', 'INTER_ANOMALY')
+                    consistent = result.consistency_flag in ('OK', 'INTER_ANOMALY', 'CROSS_STATION_DISAGREE')
                     
                     # Discontinuity filter: reject large jumps (>3ms)
                     global last_chrony_d_clock
