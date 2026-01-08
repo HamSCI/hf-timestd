@@ -1042,7 +1042,15 @@ class Phase2AnalyticsService:
                     
                     # Write to HDF5
                     logger.debug(f"Attempting HDF5 L2 write: D_clock={effective_d_clock:.2f}ms")
-                    self.hdf5_l2_writer.write_measurement(l2_measurement.model_dump())
+                    
+                    # DEBUG: Verify tone_detected field is present
+                    measurement_dict = l2_measurement.model_dump()
+                    if 'tone_detected' not in measurement_dict:
+                        logger.error(f"CRITICAL: tone_detected missing from model_dump()! Keys: {list(measurement_dict.keys())}")
+                    else:
+                        logger.debug(f"tone_detected={measurement_dict['tone_detected']}")
+                    
+                    self.hdf5_l2_writer.write_measurement(measurement_dict)
                     self._track_hdf5_write_success()
                     logger.debug(f"Successfully wrote HDF5 L2 measurement")
                     

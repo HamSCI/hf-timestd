@@ -136,14 +136,8 @@ from .pipeline_recorder import (
     PipelineRecorderState,
     create_pipeline_recorder
 )
-from .clock_offset_series import (
-    ClockOffsetEngine,
-    ClockOffsetSeries,
-    ClockOffsetMeasurement,
-    ClockOffsetQuality,
-    ClockOffsetSeriesWriter,
-    create_clock_offset_engine
-)
+# clock_offset_series.py removed - redundant legacy code
+# Analytics uses DataProductWriter directly
 from .pipeline_orchestrator import (
     PipelineOrchestrator,
     PipelineConfig,
@@ -298,12 +292,7 @@ __all__ = [
     "init_tiered_storage",
     "calculate_hot_minutes",
     "get_available_ram_bytes",
-    "ClockOffsetEngine",
-    "ClockOffsetSeries",
-    "ClockOffsetMeasurement",
-    "ClockOffsetQuality",
-    "ClockOffsetSeriesWriter",
-    "create_clock_offset_engine",
+    # ClockOffsetEngine removed - redundant legacy code
     "PipelineOrchestrator",
     "PipelineConfig",
     "PipelineState",

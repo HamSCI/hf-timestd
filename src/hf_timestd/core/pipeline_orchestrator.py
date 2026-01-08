@@ -209,17 +209,20 @@ class PipelineOrchestrator:
         )
         
         # Phase 2: Clock Offset Engine
-        from .clock_offset_series import ClockOffsetEngine
+        # REMOVED: ClockOffsetEngine is redundant legacy code
+        # Analytics service uses DataProductWriter directly
+        # from .clock_offset_series import ClockOffsetEngine
         
-        self.clock_offset_engine = ClockOffsetEngine(
-            raw_buffer_dir=config.raw_buffer_dir,
-            output_dir=config.clock_offset_dir,
-            channel_name=config.channel_name,
-            frequency_hz=config.frequency_hz,
-            receiver_grid=config.receiver_grid,
-            sample_rate=config.sample_rate,
-            timing_calibrator=self.timing_calibrator
-        )
+        # self.clock_offset_engine = ClockOffsetEngine(
+        #     raw_buffer_dir=config.raw_buffer_dir,
+        #     output_dir=config.clock_offset_dir,
+        #     channel_name=config.channel_name,
+        #     frequency_hz=config.frequency_hz,
+        #     receiver_grid=config.receiver_grid,
+        #     sample_rate=config.sample_rate,
+        #     timing_calibrator=self.timing_calibrator
+        # )
+        self.clock_offset_engine = None  # Disabled - use Phase2AnalyticsService instead
         
         # Phase 3 (decimation/DRF) is not part of hf-timestd
         self.product_generator = None
@@ -780,24 +783,13 @@ class BatchReprocessor:
         Returns:
             Processing results summary
         """
-        from .clock_offset_series import ClockOffsetEngine
+        # REMOVED: ClockOffsetEngine is redundant legacy code
+        # from .clock_offset_series import ClockOffsetEngine
         
-        # Create versioned output directory
-        versioned_output = self.clock_offset_dir / output_version
-        versioned_output.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize engine with versioned output
-        engine = ClockOffsetEngine(
-            raw_buffer_dir=self.raw_buffer_dir,
-            output_dir=versioned_output,
-            channel_name=self.channel_name,
-            frequency_hz=self.frequency_hz,
-            receiver_grid=self.receiver_grid
-        )
-        
-        # Batch reprocessing from binary raw_buffer is not yet implemented here.
-        # Use scripts that operate on raw_buffer minute files, or extend this class.
+        # Batch reprocessing not supported after ClockOffsetEngine removal
         raise NotImplementedError(
+            "Batch reprocessing requires ClockOffsetEngine which has been removed. "
+            "Use Phase2AnalyticsService for live processing."
             "BatchReprocessor.reprocess_phase2 is not implemented for binary raw_buffer storage."
         )
         
