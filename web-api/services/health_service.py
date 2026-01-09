@@ -174,7 +174,7 @@ class HealthService:
             ('Recorder', 'core_recorder_v2'),
             ('Analytics', 'phase2_analytics_service'),
             ('Fusion', 'multi_broadcast_fusion'),
-            ('Science Aggregator', 'science_aggregator'),
+            ('Physics', 'physics_fusion_service'),
             ('GNSS VTEC', 'live_vtec.py'),
         ]
         

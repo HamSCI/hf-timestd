@@ -769,7 +769,7 @@ EOF
     log_info "    - timestd-analytics.service      (Phase 2: Timing analysis, continuous)"
     log_info "    - timestd-fusion.service         (Phase 3: Fusion & Chrony feed)"
     log_info "    - timestd-web-ui.service         (Web monitoring UI, continuous)"
-    log_info "    - timestd-physics.service            (Phase 3: Physics fusion & Science)"
+    log_info "    - timestd-physics.service        (Phase 3: Physics fusion & Science)"
     log_info "    - timestd-radiod-monitor.service (Phase 0.5: Hardware monitor)"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         log_info "    - timestd-vtec.service           (GNSS VTEC monitor, continuous)"
@@ -829,7 +829,7 @@ if [[ "$MODE" == "production" ]]; then
     echo "   sudo systemctl start timestd-analytics       # Phase 2: Timing analysis"
     echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion service"
     echo "   sudo systemctl start timestd-web-ui          # Web monitoring UI"
-    echo "   sudo systemctl start timestd-science-aggregator # Science aggregator"
+    echo "   sudo systemctl start timestd-physics         # Physics fusion"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         echo "   sudo systemctl start timestd-vtec            # GNSS VTEC monitor"
     fi

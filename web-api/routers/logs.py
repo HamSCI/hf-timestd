@@ -21,7 +21,7 @@ SERVICE_MAP = {
     "fusion": "timestd-fusion",
     "vtec": "timestd-vtec",
     "ionex": "timestd-ionex-download",
-    "grape": "timestd-science-aggregator"
+    "physics": "timestd-physics"
 }
 
 @router.get("/")

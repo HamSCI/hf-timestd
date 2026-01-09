@@ -120,8 +120,8 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-core-recorder.service"
         "timestd-analytics.service"
         "timestd-fusion.service"
-        "timestd-web-ui.service"
-        "timestd-science-aggregator.service"
+        "timestd-web-ui.service",
+        "timestd-physics.service",
         "timestd-vtec.service"
     )
     
@@ -159,9 +159,9 @@ if [[ "$MODE" == "production" ]]; then
         "/etc/systemd/system/timestd-core-recorder.service"
         "/etc/systemd/system/timestd-analytics.service"
         "/etc/systemd/system/timestd-fusion.service"
-        "/etc/systemd/system/timestd-web-ui.service"
-        "/etc/systemd/system/timestd-science-aggregator.service"
-        "/etc/systemd/system/timestd-vtec.service"
+        "/etc/systemd/system/timestd-web-ui.service",
+        "/etc/systemd/system/timestd-physics.service",
+        "/etc/systemd/system/timestd-vtec.service",
         "/etc/systemd/system/timestd-upload-daily.service"
         "/etc/systemd/system/timestd-upload-daily.timer"
     )
