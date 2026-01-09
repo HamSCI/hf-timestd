@@ -37,6 +37,7 @@ The system operates as a **Federated Two-Stage Kalman Architecture**:
   * **Chrony Feed**: Restored by allowing Grade C (Uncertainty < 2.0ms) results.
   * **Self-Healing**: Added `timestd-chrony-monitor` service to auto-restart Chrony on SHM failure.
   * **Pipeline Check**: Updated `verify_pipeline.sh` (Added Web API, Fixed Chrony Reach Bug).
+  * **Architecture**: Replaced deprecated `timestd-science-aggregator` with active `timestd-physics` in startup scripts (`install.sh`).
 * **v5.1.0 (2026-01-08)**:
   * **Adaptive Windows**: Kalman filters drive tone detector search windows.
   * **Persistence Fix**: Added state saving during signal loss to prevent "amnesia" on restarts.
@@ -61,23 +62,21 @@ A hotfix was deployed to save Kalman states during signal loss ("predict mode").
 
 ### Next Session Goals
 
-#### PRIMARY OBJECTIVE: Science Product Verification
+### Next Session Goals
 
-**Goal**: Validate the scientific outputs now that the pipeline is stable.
+#### PRIMARY OBJECTIVE: Align Web API with Physics Service
 
-1. **TEC Estimation**:
-    * Verify `verify_dispersion.py` shows positive slopes (physics compliance).
-    * Confirm TEC plots in Web UI are populated.
-2. **Test Signals**:
-    * Inspect L2 Test Signal HDF5 files (`*_test_signal_*.h5`).
-    * Verify capturing of 400Hz/1000Hz modulation tones and field strength.
-3. **Doppler Analysis**:
-    * Analyze `doppler_ms_per_min` in L2 files.
-    * Correlate with sunrise/sunset transition.
+**Goal**: Bring `web-api` into accord with the new `timestd-physics` service (which replaced `timestd-science-aggregator`).
 
-#### SECONDARY OBJECTIVE: Web UI Science Dashboard
+1. **Verify Physics Integration**:
+    * Validate `web-api/services/physics_service.py` reads correctly from `timestd-physics` HDF5 outputs.
+    * Ensure path consistency (`phase2/fusion` vs legacy locations).
+    * Test `/api/physics/latest` and `/api/physics/history` endpoints.
 
-1. Create/Update dashboards to visualize:
-    * Real-time TEC (Total Electron Content)
-    * Doppler Shifts (Layer movement)
-    * Signal Multipath/Fading stats
+2. **Legacy Cleanup**:
+    * Remove any remaining code/config references to `timestd-science-aggregator`.
+    * Ensure `timestd-physics` is the single source of truth for L3 science data (TEC, Dispersion).
+
+3. **Science Product Verification**:
+    * Once API is aligned, use it to verify scientific outputs (TEC slopes, Doppler).
+    * Update frontend dashboards to consume the aligned API.
