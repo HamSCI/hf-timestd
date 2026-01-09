@@ -2,7 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
-## [5.1.0] - 2026-01-08
+## [5.1.1] - 2026-01-09
+
+### Fixed - Chrony Feed Stability & Integrity
+
+**Critical Fixes:** Restored the Chrony feed after diagnosing a quality-gate blockage and implemented automated self-healing for usage in unattended environments.
+
+#### Chrony Feed Restoration
+
+- **Issue**: Chrony feed was inactive despite fusion service running and producing data.
+- **Root Cause 1 (Code)**: Fusion service rejected "Grade C" (Uncertainty < 2.0ms) results, strictly requiring Grade A/B (< 1.0ms), but current propagation conditions yield ~1.9ms uncertainty.
+- **Fix**: Relaxed `multi_broadcast_fusion.py` to allow Grade C results (still < 2ms precision) to feed Chrony.
+- **Root Cause 2 (System)**: Chrony SHM segment (0x4e545030) became inaccessible to `chronyd` due to ownership changes after restart sequences.
+- **Fix**: Performed clean reset of SHM segment logic.
+- **Result**: `chronyc sources` now shows `TMGR` as selected source (`#*` or `#+`) with sub-millisecond offset stability.
+
+#### Automated Recovery Monitor
+
+- **New Feature**: Added self-healing capability for Chrony SHM connection.
+- **Mechanism**:
+  - `check-chrony-reach.sh` now supports `--restart-on-failure`.
+  - `timestd-chrony-monitor.service` runs as root and automatically restarts `chronyd` if Reach drops to 0 (indicating SHM connection loss).
+- **Benefit**: Prevents long-term silent failures of the time feed.
+
+#### Pipeline Verification Enhancements
+
+- **Updates**:
+  - Added checks for `timestd-web-api.service` to `verify_pipeline.sh`.
+  - Fixed a buf in `verify_pipeline.sh` where it read the `Poll` column (4) instead of `Reach` (5), causing false "Reach Low" warnings.
+  - Removed check for deprecated `timestd-web-ui-fastapi.service`.
+- **Result**: Verification script now accurately reflects system health without false positives.
 
 ### 🚀 Adaptive Search Windows & Physics-Based Convergence
 

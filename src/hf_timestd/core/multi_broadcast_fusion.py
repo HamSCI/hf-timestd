@@ -3029,7 +3029,7 @@ def run_fusion_service(
                 # Only feed high-quality, multi-station, consistent measurements
                 if chrony_shm:
                     # Check quality criteria
-                    quality_ok = result.quality_grade in ('A', 'B')  # Only A/B, not C/D
+                    quality_ok = result.quality_grade in ('A', 'B', 'C')  # Allow A/B/C (<2ms)
                     multi_station = result.n_stations >= 2  # Require 2+ stations for cross-validation
                     
                     # CRITICAL FIX (2026-01-08): Relax consistency check

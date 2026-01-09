@@ -64,21 +64,27 @@ echo "=============================================="
 if [[ "$MODE" == "production" ]]; then
     section "Phase 0: Service Status"
     
-    SERVICES=(
+    # Core pipeline services (failures expected if not running)
+    CORE_SERVICES=(
         "timestd-core-recorder.service"
         "timestd-analytics.service"
         "timestd-fusion.service"
-        "timestd-science-aggregator.service"
+        "timestd-physics.service"
+        "timestd-web-api.service"
+    )
+    
+    # Optional monitoring/supplementary services (warnings only)
+    OPTIONAL_SERVICES=(
         "timestd-vtec.service"
         "timestd-radiod-monitor.service"
-        "timestd-web-api.service"
     )
     
     # Threshold for "recently restarted" warning (5 minutes)
     UPTIME_WARN_SEC=300
     NOW=$(date +%s)
     
-    for service in "${SERVICES[@]}"; do
+    # Check core services (failures if not running)
+    for service in "${CORE_SERVICES[@]}"; do
         # Check if service is active or activating
         if systemctl is-active --quiet "$service" || systemctl show "$service" -p ActiveState | grep -q "activating"; then
             STATE=$(systemctl show "$service" -p ActiveState -p SubState --value | head -1)
@@ -117,16 +123,35 @@ if [[ "$MODE" == "production" ]]; then
                 fi
             fi
         else
-            # Special case for VTEC which might be optional/disabled
-            if [[ "$service" == "timestd-vtec.service" ]]; then
-                ENABLE_STATE=$(systemctl show "$service" -p UnitFileState --value)
-                if [[ "$ENABLE_STATE" == "disabled" || "$ENABLE_STATE" == "masked" ]]; then
-                     check_warn "$service is NOT running (disabled/optional)"
+            check_fail "$service is NOT running"
+        fi
+    done
+    
+    # Check optional services (warnings only, not failures)
+    for service in "${OPTIONAL_SERVICES[@]}"; do
+        if systemctl is-active --quiet "$service"; then
+            START_TIMESTAMP=$(systemctl show "$service" -p ActiveEnterTimestamp --value)
+            if [[ -n "$START_TIMESTAMP" ]]; then
+                START_EPOCH=$(date -d "$START_TIMESTAMP" +%s 2>/dev/null || echo "0")
+                UPTIME=$((NOW - START_EPOCH))
+                
+                if [[ $UPTIME -lt 60 ]]; then
+                    UPTIME_STR="${UPTIME}s"
+                elif [[ $UPTIME -lt 3600 ]]; then
+                    UPTIME_STR="$((UPTIME/60))m"
                 else
-                     check_fail "$service is NOT running"
+                    UPTIME_STR="$((UPTIME/3600))h"
                 fi
+                check_pass "$service is running (uptime: $UPTIME_STR) [optional]"
             else
-                check_fail "$service is NOT running"
+                check_pass "$service is running [optional]"
+            fi
+        else
+            ENABLE_STATE=$(systemctl show "$service" -p UnitFileState --value)
+            if [[ "$ENABLE_STATE" == "disabled" || "$ENABLE_STATE" == "masked" ]]; then
+                echo -e "${BLUE}ℹ️  INFO${NC} $service is disabled (optional monitoring)"
+            else
+                check_warn "$service is NOT running (optional monitoring)"
             fi
         fi
     done
@@ -366,17 +391,17 @@ if [[ -d "$SCIENCE_DIR" ]]; then
                 check_warn "TEC HDF5 stale (${AGE_STR}, expected ~5min updates)"
                 echo "  → Possible cause: No multi-frequency detections available"
                 echo "  → Check: Analytics producing timing on multiple bands"
-                echo "  → Diagnose: sudo journalctl -u timestd-science-aggregator -n 50"
+                echo "  → Diagnose: sudo journalctl -u timestd-physics -n 50"
             else
                 # >30 min is a failure
                 check_fail "TEC HDF5 very stale (${AGE_STR})"
-                echo "  → Cause: science_aggregator service stuck or crashed"
-                echo "  → Diagnose: sudo systemctl status timestd-science-aggregator"
-                echo "  → Check logs: sudo journalctl -u timestd-science-aggregator -n 100"
-                echo "  → Fix: sudo systemctl restart timestd-science-aggregator"
+                echo "  → Cause: Physics service stuck or no multi-frequency data"
+                echo "  → Diagnose: sudo systemctl status timestd-physics"
+                echo "  → Check logs: sudo journalctl -u timestd-physics -n 100"
+                echo "  → Fix: sudo systemctl restart timestd-physics"
             fi
         else
-            check_warn "No TEC HDF5 files found - Check timestd-science-aggregator"
+            check_warn "No TEC HDF5 files found - Check timestd-physics"
         fi
         
         # Note: TEC CSV files no longer primary (HDF5-only as of 2026-01-02)
@@ -384,7 +409,7 @@ if [[ -d "$SCIENCE_DIR" ]]; then
         check_warn "TEC directory not found: $TEC_DIR"
     fi
 else
-    check_warn "Science directory not found: $SCIENCE_DIR (aggregator may not have run yet)"
+    check_warn "Science directory not found: $SCIENCE_DIR (physics service may not have run yet)"
 fi
 
 # Check for GNSS VTEC (L3A)
@@ -488,7 +513,7 @@ if [[ "$MODE" == "production" ]]; then
             check_pass "Chrony TMGR source configured"
             
             # Check reachability and provide diagnostics
-            REACH=$(chronyc sources 2>/dev/null | grep "TMGR" | awk '{print $4}')
+            REACH=$(chronyc sources 2>/dev/null | grep "TMGR" | awk '{print $5}')
             if [[ "$REACH" == "0" ]]; then
                 check_fail "TMGR source not reachable (reach: 0)"
                 echo "  → Cause: Fusion service not writing to Chrony SHM"

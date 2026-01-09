@@ -4,12 +4,13 @@ Documentation=https://github.com/mijahauan/hf-timestd
 
 [Service]
 Type=oneshot
-User=timestd
-Group=timestd
+User=root
+Group=root
 
 # Run the reach monitoring script
 # Alert if reach < 64 (decimal) = 25% success rate
-ExecStart=/opt/hf-timestd/scripts/check-chrony-reach.sh --threshold 64 --verbose
+# Restart if reach is 0 (requires --restart-on-failure)
+ExecStart=/opt/hf-timestd/scripts/check-chrony-reach.sh --threshold 64 --verbose --restart-on-failure
 
 # Log output to journal
 StandardOutput=journal

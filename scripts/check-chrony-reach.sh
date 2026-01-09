@@ -24,6 +24,7 @@ set -euo pipefail
 THRESHOLD_DEC=64
 ALERT_COMMAND=""
 VERBOSE=false
+RESTART_ON_FAILURE=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -56,6 +57,10 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --threshold 128                    # Alert if reach < 128"
             echo "  $0 --alert-command 'mail -s Alert'    # Send email on alert"
             exit 0
+            ;;
+        --restart-on-failure)
+            RESTART_ON_FAILURE=true
+            shift
             ;;
         *)
             echo "Unknown option: $1" >&2
@@ -107,6 +112,14 @@ fi
 # Run alert command if provided and status is not OK
 if [[ -n "$ALERT_COMMAND" ]] && [[ $EXIT_CODE -ne 0 ]]; then
     eval "$ALERT_COMMAND"
+fi
+
+# Restart logic
+if [[ "$RESTART_ON_FAILURE" == "true" ]] && [[ "$REACH_DEC" -eq 0 ]]; then
+    echo "CRITICAL: Chrony reach is 0. Attempting to restart chronyd..."
+    # Should ideally also clear SHM or restart fusion, but start with chronyd
+    systemctl restart chronyd
+    echo "Restarted chronyd. Fusion service should auto-reconnect."
 fi
 
 exit $EXIT_CODE
