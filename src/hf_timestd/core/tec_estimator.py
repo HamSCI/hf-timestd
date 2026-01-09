@@ -29,7 +29,7 @@ Model: y = mx + c
     c = T_vacuum
 
 We use Least Squares Fitting to find 'm' and 'c' from N measurements.
-This is superior to pairwise comparison because it uses all available data (redundancy).
+# This is superior to pairwise comparison because it uses all available data.
 
 Units:
 ------
@@ -40,14 +40,17 @@ Units:
 
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict
+from typing import List, Optional, Dict
 import logging
 
 logger = logging.getLogger(__name__)
 
 # Physical constants
-K_IONOSPHERE = 40.3  # m³/s²
-TECU_SCALE = 1e16    # 1 TECU = 10^16 el/m²
+# K ≈ 40.3 m³/s² (standard ionospheric constant for group delay in meters)
+# For measurements in seconds, we divide by c
+C_LIGHT = 299792458.0
+K_IONOSPHERE = 40.3 / C_LIGHT  # seconds * Hz² * m² / electrons
+TECU_SCALE = 1e16              # 1 TECU = 10^16 el/m²
 
 
 @dataclass
@@ -55,12 +58,9 @@ class TECResult:
     """Result of TEC estimation."""
     station: str
     timestamp: float
-    
-    # Solved Parameters
-    tec_electrons_m2: float         # Total Electron Content
-    tec_u: float                    # TEC in TECU
-    t_vacuum_error_ms: float        # True timing error (vacuum path)
-    
+    tec_electrons_m2: float
+    tec_u: float
+    t_vacuum_error_ms: float
     # Corrections
     group_delay_ms: Dict[float, float]  # Calculated delay per frequency (MHz)
     
@@ -129,16 +129,11 @@ class TECEstimator:
             logger.warning(f"Insufficient frequency diversity for {station}: {freqs}")
             return None
             
-        # Formulate Least Squares
-        # y = T_obs
-        # x = 1 / f^2
-        # T_obs = T_vac + (40.3 · TEC) * (1/f^2)
-        # y = c + m * x
-        
         x = 1.0 / (freqs ** 2)
         y = toas
         
         # Weighted Least Squares
+        # y = T_obs, x = 1/f^2
         # V = [1, x]
         # Y = [y]
         # W = diag(weights)
@@ -159,61 +154,56 @@ class TECEstimator:
             # Use cov=True only if we have degrees of freedom (N > 2)
             # Otherwise we get a LinAlgError or undetermined covariance
             if len(x) > 2:
-                p, cov = np.polyfit(x, y, 1, w=poly_weights, cov=True)
+                p, _ = np.polyfit(x, y, 1, w=poly_weights, cov=True)
             else:
                 p = np.polyfit(x, y, 1, w=poly_weights, cov=False)
-                cov = None
-            
+            # Extract Physics
             m = p[0]
             c = p[1]
-            
-            # Extract Physics
+
+            # Sanity checks & Constraints
+            if m < 0:
+                logger.warning(
+                    f"Physical Inconsistency for {station}: Negative slope (m={m:.2e}) detected. "
+                    f"Possible mode mixing or extreme noise. Forcing TEC to 0. "
+                    f"Inputs: " + ", ".join([f"{f/1e6:.1f}MHz->{t*1000:.3f}ms" for f, t in zip(freqs, toas)])
+                )
+                m = 0.0
+                confidence = 0.0
+
             tec = m / K_IONOSPHERE
-            t_vacuum = c
-            
+
             # Calculate R^2 (Coefficient of Determination)
             y_pred = m * x + c
             ss_res = np.sum(weights * (y - y_pred) ** 2)
             ss_tot = np.sum(weights * (y - np.average(y, weights=weights)) ** 2)
-            
-            # Handle perfect fit (ss_tot = 0) or numerical noise
+
             if ss_tot < 1e-20:
-                confidence = 0.0 # Can't determine confidence on flat line (though unlikely)
+                confidence = 0.0
             else:
-                 r2 = 1.0 - (ss_res / ss_tot)
-                 confidence = max(0.0, min(1.0, r2))
-                 
-            # Calculate per-frequency group delays
+                r2 = 1.0 - (ss_res / ss_tot)
+                confidence = max(0.0, min(1.0, r2)) if m > 0 else 0.0
+
             group_delays_ms = {}
             for f_hz in freqs:
-                 # delay = T_obs - T_vac = K * TEC / f^2 = m / f^2
-                 delay_sec = m / (f_hz ** 2)
-                 f_mhz = f_hz / 1e6
-                 group_delays_ms[f_mhz] = delay_sec * 1000.0
-                 
-            # Convert units for output
+                delay_sec = m / (f_hz ** 2)
+                f_mhz = f_hz / 1e6
+                group_delays_ms[f_mhz] = delay_sec * 1000.0
+
             tec_u = tec / TECU_SCALE
-            t_vacuum_ms = t_vacuum * 1000.0
-            
-            # Sanity checks
-            # TEC should be positive (physically). 
-            # If slope is negative, it means high freq arrived SLOWER than low freq.
-            # This is unphysical for group delay (dispersion). 
-            # Could imply measurement error or extreme multipath.
-            if tec < 0:
-                logger.debug(f"Negative TEC detected for {station}: {tec:.2e}. Setting confidence low.")
-                confidence *= 0.1 # Penalize unphysical result
-            
-            # DIAGNOSTIC: Log "flat" or suspiciously perfect data (0.0 TEC issue)
-            if tec < 1.0 or confidence > 0.99:
-                log_level = logging.WARNING if tec < 1.0 else logging.DEBUG
-                logger.log(log_level, 
-                    f"Suspicious TEC result for {station}: TEC={tec:.2f}, R2={confidence:.4f}\n"
-                    f"  Inputs (Freq MHz -> ToA ms): " + 
-                    ", ".join([f"{f/1e6:.1f}->{t*1000:.3f}" for f, t in zip(freqs, toas)])
+            t_vacuum_ms = c * 1000.0
+
+            # DIAGNOSTIC: Log near-zero or suspiciously perfect results
+            if (abs(tec_u) < 0.1 and m > 0) or confidence > 0.999:
+                log_level = logging.DEBUG
+                if abs(tec_u) < 0.01:
+                    log_level = logging.WARNING
+                logger.log(
+                    log_level,
+                    f"Suspicious TEC for {station}: {tec_u:.2f} TECU (R2={confidence:.4f})\n"
+                    f"  Inputs: " + ", ".join([f"{f/1e6:.1f}MHz->{t*1000:.3f}ms" for f, t in zip(freqs, toas)])
                 )
-            
-            # Calculate RMS residual in ms
+
             rms_residual_ms = np.sqrt(np.mean((y - y_pred)**2)) * 1000.0
 
             return TECResult(

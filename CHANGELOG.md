@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.2.0] - 2026-01-09
+
+### Fixed - Mode-Aware TEC & Service Stability
+
+**Major Fix:** Resolved the "Negative TEC" issue by decoupling propagation modes and stabilized the physics service by correcting polling windows.
+
+#### Mode-Aware TEC Estimation
+
+- **Issue**: TEC values were frequently negative or zero due to "mode mixing" (combining 1E and 2F measurements in the same solver), creating inverted dispersion slopes.
+- **Fix**:
+  - Updated `PhysicsFusionService` to group measurements by **(Station, PropagationMode)** tuple.
+  - Independent TEC estimation for each mode (e.g., `WWV (1E)` vs `WWV (2F)`).
+  - Enforced `TEC >= 0` constraint in `TECEstimator` (clamps negative slopes to 0.0).
+- **Schema**: Updated L3A TEC schema to include `propagation_mode` field.
+- **Result**: Physically valid, non-negative TEC data now flowing to Web UI.
+
+#### Service Instability (Process Thrashing)
+
+- **Issue**: `timestd-physics` appeared to "start and stop" frequently.
+- **Root Cause**: Polling window (2m lag) was too aggressive for upstream analytics latency (~3m), causing race conditions where no data was found.
+- **Fix**: Increased polling lookback to **3-6 minutes** (`range(6, 2, -1)`).
+- **Result**: Consistent, gap-free data processing.
+
+#### Other Improvements
+
+- **Production Alignment**: Synchronized `src/` to `/opt/hf-timestd/src/` to eliminate stale code.
+- **Permissions**: Fixed ownership of `/var/lib/timestd/phase2/science/tec/` to allow service writes.
 ## [5.1.1] - 2026-01-09
 
 ### Fixed - Chrony Feed Stability & Integrity

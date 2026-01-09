@@ -31,17 +31,15 @@ import logging
 import time
 import argparse
 import signal
-import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any, Set, Tuple
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 import numpy as np
 
 from hf_timestd.core.tec_estimator import TECEstimator, TECResult
 from hf_timestd.io import DataProductReader, DataProductWriter
-from hf_timestd.data_product_registry import DataProductRegistry
 
 # Configure logging
 logging.basicConfig(
@@ -72,7 +70,7 @@ class PhysicsFusionService:
         # Initialize TEC Estimator
         self.tec_estimator = TECEstimator(high_precision_mode=True)
         
-        # Initialize L3 Writer
+        # Initialize L3 Writers
         self.l3_writer = DataProductWriter(
             output_dir=self.output_dir,
             product_level='L3',
@@ -80,6 +78,18 @@ class PhysicsFusionService:
             channel='global', # Global aggregate
             processing_version='5.0.0',
             station_metadata={'description': 'Physics-Based Fusion Service v5.0'}
+        )
+        
+        # Second writer for individual station TEC records (consumed by Web API)
+        # PropagationService looks in phase2/science/tec/AGGREGATED_tec_*.h5
+        self.tec_dir = self.data_root / 'phase2' / 'science' / 'tec'
+        self.tec_writer = DataProductWriter(
+            output_dir=self.tec_dir,
+            product_level='L3', # Schema says L3A but product_level is used for schema lookup L3
+            product_name='tec',
+            channel='AGGREGATED',
+            processing_version='5.0.0',
+            station_metadata={'description': 'Physics-Based Fusion TEC Output'}
         )
         
         # State tracking
@@ -101,18 +111,17 @@ class PhysicsFusionService:
                         channels.append(subdir.name)
         return sorted(channels)
         
-    def _read_l2_slice(self, minute_timestamp: int) -> Dict[str, List[Dict]]:
+    def _read_l2_slice(self, minute_timestamp: int) -> Dict[tuple, List[Dict]]:
         """
         Read L2 measurements for a specific minute across all channels.
         
         Returns:
-            Dict mapping Station Name -> List of measurements
+            Dict mapping (Station, Mode) -> List of measurements
         """
-        start_iso = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc).isoformat()
-        end_iso = datetime.fromtimestamp(minute_timestamp + 0.999, tz=timezone.utc).isoformat()
-        date_str = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc).strftime('%Y%m%d')
+        start_iso = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
+        end_iso = datetime.fromtimestamp(minute_timestamp + 59.999, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
         
-        measurements_by_station = defaultdict(list)
+        measurements_grouped = defaultdict(list)
         
         for channel in self.channels:
             try:
@@ -129,63 +138,60 @@ class PhysicsFusionService:
                     data_dir=reader_dir,
                     product_level='L2',
                     product_name='timing_measurements',
-                    channel=channel, 
-                    use_registry=False 
+                    channel=channel,
+                    use_registry=False
                 )
-                
-                # Check if file exists for this date to avoid costly read attempts
-                if not reader._get_hdf5_path(date_str).exists():
-                    continue
 
                 items = reader.read_time_range(
                     start=start_iso, 
-                    end=end_iso,
-                    min_quality_grade='C', # Only fuse reasonable quality data
-                    quality_flags=['GOOD', 'MARGINAL', 'MISSING']
+                    end=end_iso
                 )
                 
                 for item in items:
                     station = item.get('station')
-                    if station:
-                        # Ensure frequency is present (critical for TEC)
-                        # Reader should return all fields including 'frequency_mhz'
-                        # but L2 schema has 'frequency_mhz'.
-                        # Renaming or mapping might be needed if schema differs.
-                        # Schema v1.3.0 has 'frequency_mhz'.
-                        if 'frequency_mhz' in item:
-                             # Map to expected format for TECEstimator
-                             # TECEstimator expects: 'frequency_hz', 'toa_ms', 'uncertainty_ms'
-                             # L2 provides: 'frequency_mhz', 'tof_kalman_ms' (or 'raw_arrival_time_ms')
-                             
-                             # We use tof_kalman_ms (Science First) if available, else raw
-                             # Actually TECEstimator solves for T_vacuum using ToA.
-                             # But ToF involves distance. 
-                             # Wait, TECEstimator logic: T_obs = T_vac + K*TEC/f^2
-                             # T_obs here is the measured arrival time.
-                             # This includes propagation delay and clock error.
-                             # T_vac would be Distance/c + ClockError.
-                             
-                             # We can use raw_arrival_time_ms directly. 
-                             # The solver will find T_vac = (Dist/c + dt).
-                             # Distance is roughly constant for a minute.
-                             
-                             obs = {
-                                 'frequency_hz': item['frequency_mhz'] * 1e6,
-                                 'toa_ms': item.get('tof_kalman_ms', item.get('raw_arrival_time_ms')),
-                                 'uncertainty_ms': item.get('tof_uncertainty_ms', item.get('uncertainty_ms', 10.0))
-                             }
-                             
-                             # Filter invalid Kalman states
-                             if obs['toa_ms'] is None or np.isnan(obs['toa_ms']):
-                                 continue
-                                 
-                             measurements_by_station[station].append(obs)
+                    # The following 'if station:' block was incomplete and causing indentation issues.
+                    # The logic below should apply to all items with a station.
+                    if not station:
+                        continue
+                        
+                    # Ensure frequency is present (critical for TEC)
+                    # Reader should return all fields including 'frequency_mhz'
+                    # but L2 schema has 'frequency_mhz'.
+                    # Renaming or mapping might be needed if schema differs.
+                    if 'frequency_mhz' not in item:
+                        continue
+
+                    # Resolve TOA
+                    # Prefer Kalman if available and valid, fallback to raw
+                    toa = item.get('tof_kalman_ms')
+                    if toa is None or np.isnan(toa):
+                        toa = item.get('raw_arrival_time_ms')
+                        
+                    uncertainty = item.get('tof_uncertainty_ms')
+                    if uncertainty is None or np.isnan(uncertainty):
+                        uncertainty = item.get('uncertainty_ms', 10.0)
+
+                    # Resolve Mode
+                    mode = item.get('propagation_mode', 'UNKNOWN')
+
+                    obs = {
+                        'frequency_hz': item['frequency_mhz'] * 1e6,
+                        'toa_ms': toa,
+                        'uncertainty_ms': uncertainty,
+                        'mode': mode
+                    }
+                    
+                    # Filter invalid Kalman states
+                    if obs['toa_ms'] is None or np.isnan(obs['toa_ms']):
+                        continue
+                    
+                    measurements_grouped[(station, mode)].append(obs)
                              
             except Exception as e:
                 logger.debug(f"Failed to read channel {channel}: {e}")
                 continue
                 
-        return measurements_by_station
+        return measurements_grouped
 
     def process_minute(self, minute_timestamp: int):
         """Process a single minute of data."""
@@ -200,22 +206,22 @@ class PhysicsFusionService:
 
         # 2. Physics Estimation (TEC)
         tec_estimates = {}
-        tec_uncertainties = {}
         
-        for station, observations in station_data.items():
-            # Need at least 2 frequencies
+        for (station, mode), observations in station_data.items():
+            # Need at least 2 frequencies for this SPECIFIC mode
             if len(observations) < 2:
-                logger.debug(f"Station {station}: insufficient frequencies ({len(observations)}) for TEC")
+                logger.debug(f"Station {station} Mode {mode}: insufficient frequencies ({len(observations)})")
                 continue
                 
             result = self.tec_estimator.estimate_tec(observations, station, minute_timestamp)
             
             if result:
-                tec_estimates[station] = result.tec_u
-                tec_uncertainties[station] = (1.0 - result.confidence) * 10.0 # Heuristic map R2 to uncertainty
-                logger.info(f"TEC {station}: {result.tec_u:.2f} TECU (Conf: {result.confidence:.2f})")
+                # Attach mode to result for writing
+                result.propagation_mode = mode
+                tec_estimates[(station, mode)] = result
+                logger.info(f"TEC {station} ({mode}): {result.tec_u:.2f} TECU (Conf: {result.confidence:.2f})")
             else:
-                 logger.debug(f"TEC estimation failed for {station}")
+                 logger.debug(f"TEC estimation failed for {station} ({mode})")
 
         # 3. UTC Consistency Check
         # If we had T_vacuum from TEC solver, T_vac = Dist/c + dt
@@ -227,31 +233,30 @@ class PhysicsFusionService:
         utc_consistent = len(tec_estimates) > 0 # At least we got physics
         
         # 4. Write L3
-        self._write_l3_product(
+        self._write_physics_summary(
             minute_timestamp, 
             tec_estimates, 
-            tec_uncertainties, 
             utc_consistent
         )
+        
+        # 5. Write per-station TEC records
+        self._write_tec_records(
+            minute_timestamp,
+            tec_estimates
+        )
 
-    def _write_l3_product(
+    def _write_physics_summary(
         self, 
         timestamp: int, 
-        tec_estimates: Dict[str, float],
-        tec_uncertainties: Dict[str, float],
+        tec_estimates: Dict[str, TECResult],
         utc_consistent: bool
     ):
-        """Write L3 Physics Fusion product."""
-        # Clean keys for HDF5 (strings)
-        tec_map = {k: float(v) for k, v in tec_estimates.items()}
-        unc_map = {k: float(v) for k, v in tec_uncertainties.items()}
-        
+        """Write global L3 Physics Fusion product."""
+        # Simple summary records for now (flattened for HDF5 compatibility)
         record = {
-            'timestamp_utc': datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat(),
+            'timestamp_utc': datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace('+00:00', 'Z'),
             'minute_boundary_utc': timestamp,
-            'stations_used': list(tec_estimates.keys()),
-            # 'tec_estimates': tec_map, # DataProductWriter needs map support or we flatten? No, schema supports map
-            # 'tec_uncertainties': unc_map,
+            'stations_used': ", ".join(sorted(set(k[0] for k in tec_estimates.keys()))),
             'utc_offset_ms': float('nan'), # Placeholder
             'utc_uncertainty_ms': float('nan'),
             'utc_consistency_flag': utc_consistent,
@@ -259,19 +264,47 @@ class PhysicsFusionService:
             'processed_at': datetime.now(timezone.utc).isoformat()
         }
         
-        # NOTE: HDF5 writer currently flattens dictionaries or needs specific handling.
-        # For now, we rely on the schema definition.
-        # However, basic HDF5 writer might not support Map types well without flattening.
-        # We will write what we can.
-        
-        # Workaround: Flatten TEC for now if Writer doesn't support maps (CHECK THIS)
-        # Assuming schema v1.0.0 defines map.
-        
         try:
             self.l3_writer.write_measurement(record)
-            logger.info(f"Written L3 product for {timestamp}")
+            logger.info(f"Written L3 physics summary for {timestamp}")
         except Exception as e:
-            logger.error(f"Failed to write L3 product: {e}")
+            logger.error(f"Failed to write L3 physics summary: {e}")
+
+    def _write_tec_records(
+        self, 
+        timestamp: int, 
+        tec_estimates: Dict[str, TECResult]
+    ):
+        """Write individual station TEC records for L3A product."""
+        ts_iso = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+        
+        for (station, mode), result in tec_estimates.items():
+            # Follow l3_tec_v1.json schema
+            record = {
+                'timestamp_utc': ts_iso,
+                'minute_boundary': timestamp,
+                'station': station,
+                'propagation_mode': mode,
+                'tec_tecu': float(result.tec_u),
+                't_vacuum_error_ms': float(result.t_vacuum_error_ms),
+                'confidence': float(result.confidence),
+                'n_frequencies': int(result.n_frequencies),
+                'residuals_ms': float(result.residuals_ms),
+                # Format frequencies as comma-separated list
+                'frequencies_mhz': ",".join([f"{f/1e6:.2f}" for f in result.group_delay_ms.keys()]),
+                'quality_flag': 'GOOD' if result.confidence > 0.8 else 'MARGINAL',
+                'validation_flag': 'UNVALIDATED',
+                'processing_version': '5.0.0'
+            }
+            
+            try:
+                self.tec_writer.write_measurement(record)
+                logger.debug(f"Written TEC record for {station} at {timestamp}")
+            except Exception as e:
+                logger.error(f"Failed to write TEC record for {station}: {e}")
+        
+        if tec_estimates:
+            logger.info(f"Written {len(tec_estimates)} TEC station records for {timestamp}")
 
     def run(self):
         """Main service loop."""
@@ -287,16 +320,20 @@ class PhysicsFusionService:
             try:
                 # Align to next minute boundary processing
                 now = time.time()
-                # We process 'lookback' minutes ago to ensure data is settled
-                target_minute = int(now) - (int(now) % 60) - (60 * 2) # 2 mins ago
-                
-                if target_minute > self.last_processed_minute:
-                    self.process_minute(target_minute)
-                    self.last_processed_minute = target_minute
+                # Process last few minutes to find enough frequencies for verification
+                # Analytics has ~2-3 minute lag, so we look back further
+                # Process last few minutes to find enough frequencies for verification
+                # Analytics has ~2-3 minute lag, so we look back further (offsets 6, 5, 4, 3)
+                # This ensures we process T-3 minutes at the earliest, giving ample buffer.
+                for offset in range(6, 2, -1):
+                    target_minute = int(now) - (int(now) % 60) - (60 * offset)
+                    if target_minute > self.last_processed_minute:
+                        self.process_minute(target_minute)
+                        self.last_processed_minute = target_minute
                 
                 # Sleep until next poll or minute
-                sleep_time = max(1.0, 60.0 - (time.time() % 60) + 0.1)
-                time.sleep(1.0) # Check every second for shutdown, or sleep longer
+                # We process once per minute, check every second for shutdown
+                time.sleep(1.0)
                 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)

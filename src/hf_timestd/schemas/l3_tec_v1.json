@@ -121,6 +121,14 @@
             "description": "TEC validation status against GPS VTEC"
         },
         {
+            "name": "propagation_mode",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "description": "Propagation mode dominant for this TEC estimate",
+            "example": "1E, 2F, 3F"
+        },
+        {
             "name": "processing_version",
             "type": "string",
             "required": true,

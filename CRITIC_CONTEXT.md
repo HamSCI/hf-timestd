@@ -1,368 +1,125 @@
-# CRITIC_CONTEXT: Code Cleanup and Optimization
+# NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION
 
-**DO NOT ALTER THIS HEADER OR THESE INSTRUCTIONS**
+Primary Instruction:  In this context you will perform a critical review of the HF Time Standard (hf-timestd) project, either in its entirety or in a specific component, as specified by the user.  This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation.  It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation.  It should also look for obsolete, deprecated, or "zombie" code that should be removed.  Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
 
-This document prepares an AI agent for a comprehensive code cleanup session. The goal is to identify and eliminate legacy code, zombie code paths, redundant logic, and CPU-wasting operations to ensure only necessary, efficient code runs in production.
-
----
-
-## Session Objective (2026-01-08)
-
-**Primary Goal**: Review `core-recorder` and `analytics` services to identify and remove:
-
-- Legacy/unused code
-- Zombie code paths (unreachable or never-executed)
-- Redundant logic (duplicate functionality)
-- CPU-wasting operations (unnecessary processing)
-
-**Success Criteria**:
-
-- All running code serves a clear purpose
-- No dead code paths
-- No redundant data writers or processors
-- Optimized CPU usage
-- Clean, maintainable codebase
+# The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session)
 
 ---
 
-## Recent Context: HDF5 Error Cleanup (2026-01-08)
+## 🔴 CURRENT FOCUS: PIPELINE TRACING & VERIFICATION (RTP -> CHRONY)
 
-### What Was Discovered
+**Purpose:** Carefully trace the entire data and calculation pipeline from the raw RTP stream input through to the final Chrony feed output to verify data integrity, timestamp accuracy, and processing efficiency.
 
-**Problem**: Persistent HDF5 write errors despite code fixes
-
-```
-WARNING - HDF5 write failed: Required field 'tone_detected' missing from measurement, falling back to CSV only
-```
-
-**Root Cause**: Stale code in MULTIPLE locations:
-
-1. `/home/mjh/git/hf-timestd/build/` - Build artifacts not cleaned
-2. `/opt/hf-timestd/src/` - Production copy of source
-3. Python `__pycache__` directories - Bytecode cache
-
-**Resolution**:
-
-- Removed `clock_offset_series.py` (881 lines of redundant legacy code)
-- Cleaned `build/` directory
-- Removed production source copy
-- Cleared all `__pycache__` directories
-- Disabled `timestd-science-aggregator` service (legacy CSV-based)
-
-**Key Lesson**: Code can exist in multiple places and continue running even after "deletion"
-
-### Architecture Insights Discovered
-
-**Service → Log File Mapping**:
-
-- `timestd-core-recorder` → `/var/log/hf-timestd/core-recorder.log`
-- `timestd-analytics` → `/var/log/hf-timestd/core-recorder.log` (**SAME LOG!**)
-- Multiple services share log files, making debugging harder
-
-**Code Sharing**:
-
-- `phase2_temporal_engine.py` is used by BOTH core recorder AND analytics service
-- Inline processing (core recorder) vs batch processing (analytics)
-- Potential for redundant execution
-
-**Service Inventory** (see [`service_inventory.md`](file:///home/mjh/.gemini/antigravity/brain/7be87bf8-0936-4a59-96a5-eb2de15a716d/service_inventory.md)):
-
-- 4 core services (recorder, analytics, physics, fusion)
-- 2 support services (web-api, radiod-monitor)
-- 2 optional TEC features (vtec, ionex-download)
-- 1 disabled legacy service (science-aggregator)
+**Author:** Michael James Hauan (AC0G) / AI Assistant
+**Date:** 2026-01-09
+**Status:** 🟡 Ready for Pipeline Audit
 
 ---
 
-## Code Cleanup Targets
+### SESSION OBJECTIVES
 
-### Priority 1: Core Recorder (`core_recorder_v2.py`)
-
-**File**: `src/hf_timestd/core/core_recorder_v2.py` (681 lines)
-
-**Questions to Answer**:
-
-1. **Inline Phase 2 Processing**: Does core recorder do Phase 2 processing inline?
-   - If yes, is this redundant with analytics service?
-   - Should we disable inline processing and rely only on analytics?
-
-2. **StreamRecorderV2**: What does this class do?
-   - Does it duplicate analytics functionality?
-   - Is it necessary or legacy?
-
-3. **Tiered Storage**: Is this feature used?
-   - Lines 232-286 show complex tiered storage logic
-   - Is this active or can it be simplified/removed?
-
-4. **Channel Management**: Is the anti-hijacking logic necessary?
-   - Lines 367-459 show complex channel initialization
-   - Can this be simplified?
-
-### Priority 2: Analytics Service (`phase2_analytics_service.py`)
-
-**File**: `src/hf_timestd/core/phase2_analytics_service.py` (2890 lines!)
-
-**Questions to Answer**:
-
-1. **Size**: Why is this file 2890 lines?
-   - Should it be split into multiple modules?
-   - Is there redundant code?
-
-2. **Multiple Writers**: How many data writers exist?
-   - HDF5 L2 writer
-   - HDF5 L1A writer
-   - HDF5 L1B writer
-   - HDF5 L2 test signal writer
-   - CSV writers (should these exist?)
-
-3. **Kalman Filters**: Are all 17 filters necessary?
-   - One per station/frequency combination
-   - Is this the right granularity?
-
-4. **Debug Logging**: Lines 1048-1051 show debug logging added during troubleshooting
-   - Should this be removed or made conditional?
-
-### Priority 3: Phase 2 Temporal Engine (`phase2_temporal_engine.py`)
-
-**File**: `src/hf_timestd/core/phase2_temporal_engine.py` (2768 lines!)
-
-**Questions to Answer**:
-
-1. **Shared by Multiple Services**: Used by both core recorder and analytics
-   - Is this causing duplicate processing?
-   - Should we consolidate to one service?
-
-2. **Size**: Why is this file 2768 lines?
-   - Can it be modularized?
-   - Is there redundant logic?
-
-3. **Correlator Bank**: Is this feature used?
-   - Lines 674 show correlator bank initialization
-   - Is this active or legacy?
-
-### Priority 4: Pipeline Orchestrator (`pipeline_orchestrator.py`)
-
-**File**: `src/hf_timestd/core/pipeline_orchestrator.py`
-
-**Known Issues**:
-
-- Lines 211-225: Commented out `ClockOffsetEngine` usage
-- Lines 783-796: Commented out batch reprocessing
-- **Question**: Is this file still used? If not, can it be removed?
+1. **Trace Data Flow**: Follow the path of a signle second of data:
+    - `RTP Stream` -> `Audio Buffer` -> `L1 Tone Detection` -> `L2 Timing Measurement` -> `L3 Physics (TEC)` -> `Fusion` -> `Chrony SHM`.
+2. **Verify Timestamp Integrity**: Ensure UTC alignment is maintained at every serialization/deserialization step (especially HDF5).
+3. **Validate Mode-Aware Logic**: Confirm that the recent "Mode-Aware TEC" fix is correctly propagating `propagation_mode` metadata through to Fusion.
+4. **Audit Constraints**: Verify that `TEC >= 0` clamps and other physical constraints are active and logged correctly.
+5. **Check Latency Handling**: Validate that the new 3-minute polling lag in `timestd-physics` is sufficient and not excessive.
 
 ---
 
-## Specific Code Patterns to Look For
+### DATA PIPELINE ARCHITECTURE OVERVIEW
 
-### 1. CSV Fallback Logic
+The `hf_timestd.core` module implements a multi-phase data pipeline:
 
-**Pattern**:
-
-```python
-try:
-    # Write to HDF5
-    hdf5_writer.write_measurement(data)
-except Exception as e:
-    logger.warning(f"HDF5 write failed, falling back to CSV: {e}")
-    csv_writer.write(data)  # LEGACY - should be removed
 ```
-
-**Action**: Remove ALL CSV fallback logic (HDF5-only pipeline)
-
-### 2. Duplicate Data Writers
-
-**Pattern**:
-
-```python
-# Multiple writers for same data
-self.hdf5_l2_writer = DataProductWriter(...)
-self.csv_l2_writer = CSVWriter(...)  # REDUNDANT
-self.legacy_writer = LegacyWriter(...)  # ZOMBIE
-```
-
-**Action**: Identify and remove redundant writers
-
-### 3. Commented-Out Code
-
-**Pattern**:
-
-```python
-# if self.enable_legacy_mode:
-#     self.legacy_processor.process(data)
-```
-
-**Action**: Remove commented-out code (use git history if needed)
-
-### 4. Unused Imports
-
-**Pattern**:
-
-```python
-from .clock_offset_series import ClockOffsetEngine  # File deleted!
-```
-
-**Action**: Remove imports for deleted/unused modules
-
-### 5. Feature Flags for Removed Features
-
-**Pattern**:
-
-```python
-if self.enable_csv_writes:  # Always False now
-    self.csv_writer.write(data)
-```
-
-**Action**: Remove dead code paths controlled by obsolete flags
-
----
-
-## Investigation Methodology
-
-### Step 1: Map Service Dependencies
-
-```bash
-# Find all services that import a module
-grep -rn "from.*phase2_temporal_engine import" /opt/hf-timestd/src/
-
-# Find all services that call a function
-grep -rn "\.process_minute(" /opt/hf-timestd/src/
-```
-
-### Step 2: Check Active Services
-
-```bash
-# List running services
-systemctl list-units | grep timestd | grep running
-
-# Check which services are enabled
-systemctl list-unit-files | grep timestd | grep enabled
-```
-
-### Step 3: Analyze Code Paths
-
-For each large file:
-
-1. Count functions: `grep -c "^def " file.py`
-2. Find unused functions: Check if function is called anywhere
-3. Identify dead code: Look for unreachable branches
-4. Check feature flags: Find config-controlled code paths
-
-### Step 4: Profile CPU Usage
-
-```bash
-# Check CPU usage by service
-systemctl status timestd-core-recorder
-systemctl status timestd-analytics
-
-# Profile Python code (if needed)
-python -m cProfile -o output.prof script.py
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        PHASE 1: RAW DATA CAPTURE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  RTP Stream (ka9q-radio)                                                    │
+│       ↓                                                                     │
+│  RTPReceiver → PacketResequencer → RecordingSession → BinaryArchiveWriter   │
+│       ↓              ↓                    ↓                  ↓              │
+│  UDP packets    Gap detection      Minute boundaries    raw_buffer/*.bin    │
+│                 Reordering         Session state        + metadata.json     │
+└─────────────────────────────────────────────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        PHASE 2: ANALYTICAL ENGINE                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Phase2AnalyticsService (Latency: ~3 mins)                                  │
+│       ↓                                                                     │
+│  Phase2TemporalEngine (3-step analysis)                                     │
+│       ├─ Step 1: Time Snap (tone detection, minute boundary)                │
+│       ├─ Step 2: Channel Characterization (discrimination, SNR)             │
+│       └─ Step 3: Transmission Time Solution (D_clock calculation)           │
+│       ↓                                                                     │
+│  HDF5 L2 Writer (Schema v1.3.0)                                             │
+│       ↓                                                                     │
+│  /var/lib/timestd/phase2/{CHANNEL}/clock_offset/*_timing_measurements_*.h5  │
+└─────────────────────────────────────────────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        PHASE 3: PHYSICS & FUSION                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  PhysicsFusionService (Latency: ~3-6 mins)                                  │
+│       ↓                                                                     │
+│  TECEstimator (Mode-Aware)                                                  │
+│       ├─ Input: L2 data grouped by (Station, PropagationMode)               │
+│       ├─ Process: Linear regression on delay vs 1/f^2                       │
+│       └─ Output: valid TEC >= 0, or clamped to 0.0                          │
+│       ↓                                                                     │
+│  MultiBroadcastFusion                                                       │
+│       ├─ Input: L3 TEC data + L2 Timing                                     │
+│       ├─ Process: Inverse variance weighting, outlier rejection             │
+│       └─ Output: Final D_clock estimate                                     │
+│       ↓                                                                     │
+│  ChronySHM -> /dev/shm/chrony.shm (System Clock Discipline)                 │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Files to Review (Priority Order)
+### CRITICAL FILES FOR REVIEW
 
-### Immediate Review
+#### 1. Input & L1 Processing
 
-1. [`core_recorder_v2.py`](file:///opt/hf-timestd/src/hf_timestd/core/core_recorder_v2.py) (681 lines)
-2. [`phase2_analytics_service.py`](file:///opt/hf-timestd/src/hf_timestd/core/phase2_analytics_service.py) (2890 lines)
-3. [`phase2_temporal_engine.py`](file:///opt/hf-timestd/src/hf_timestd/core/phase2_temporal_engine.py) (2768 lines)
+- `src/hf_timestd/core/stream_recorder_v2.py`: RTP handling and audio buffering.
+- `src/hf_timestd/core/tone_detector.py`: Digital Down Conversion (DDC) and matched filtering.
 
-### Secondary Review
+#### 2. L2 Analysis & Timestamping
 
-4. [`pipeline_orchestrator.py`](file:///opt/hf-timestd/src/hf_timestd/core/pipeline_orchestrator.py) (commented-out code)
-2. [`stream_recorder_v2.py`](file:///opt/hf-timestd/src/hf_timestd/core/stream_recorder_v2.py) (unknown size)
-3. [`__init__.py`](file:///opt/hf-timestd/src/hf_timestd/core/__init__.py) (check for removed imports)
+- `src/hf_timestd/core/phase2_temporal_engine.py`: Core timing logic.
+- `src/hf_timestd/core/phase2_analytics_service.py`: Service orchestration and HDF5 writing.
 
-### Tertiary Review
+#### 3. L3 Physics & Fusion
 
-7. All CSV writers (should not exist in HDF5-only pipeline)
-2. All legacy `*_v1.py` files (check if deprecated)
-3. Test files that reference deleted code
+- `src/hf_timestd/core/physics_fusion_service.py`: **[RECENTLY MODIFIED]** Mode grouping and polling logic.
+- `src/hf_timestd/core/tec_estimator.py`: **[RECENTLY MODIFIED]** TEC calculation and zero-clamping.
+- `src/hf_timestd/core/multi_broadcast_fusion.py`: Final fusion and Chrony feed.
 
 ---
 
-## Expected Outcomes
+### RECENT CHANGES TO VERIFY (v5.2.0)
 
-### Code Removal Candidates
+1. **Mode-Aware Grouping**:
+    - `PhysicsFusionService.process_minute` now groups by `(station, mode)`.
+    - Check that this grouping preserves valid data and doesn't discard legitimate mixed-mode signals (though they shouldn't be mixed in calculation).
 
-- [ ] CSV writer classes and fallback logic
-- [ ] Commented-out `ClockOffsetEngine` code
-- [ ] Unused imports from deleted modules
-- [ ] Legacy `*_v1.py` files if superseded
-- [ ] Debug logging added during troubleshooting
-- [ ] Redundant data writers
+2. **Zero-TEC Clamping**:
+    - `TECEstimator.estimate_tec` forces `m = 0.0` if regression slope is negative.
+    - Verify this logic isn't masking actual system errors (e.g., inverted timestamps).
 
-### Code Consolidation Candidates
-
-- [ ] Merge inline and batch Phase 2 processing
-- [ ] Split large files (2000+ lines) into modules
-- [ ] Consolidate duplicate logic across services
-
-### Optimization Candidates
-
-- [ ] Remove redundant Kalman filter updates
-- [ ] Eliminate duplicate data reads
-- [ ] Optimize hot paths in temporal engine
+3. **Polling Lag**:
+    - `PhysicsFusionService` now looks back `range(6, 2, -1)` minutes.
+    - Confirm this window is optimal—too short = gaps, too long = latency.
 
 ---
 
-## Critical Reminders
+### KNOWN ISSUES / WATCHLIST
 
-### Code Locations to Check
-
-1. **Git Repo**: `/home/mjh/git/hf-timestd/src/`
-2. **Production**: `/opt/hf-timestd/src/`
-3. **Build Artifacts**: `/home/mjh/git/hf-timestd/build/` (should not exist)
-4. **Bytecode Cache**: `__pycache__` directories (should be cleared)
-
-### Cleanup Procedure
-
-After identifying code to remove:
-
-```bash
-# 1. Remove from git repo
-rm /home/mjh/git/hf-timestd/src/path/to/file.py
-
-# 2. Update imports in __init__.py
-# 3. Remove from production
-sudo rm /opt/hf-timestd/src/path/to/file.py
-
-# 4. Clear caches
-sudo rm -rf /home/mjh/git/hf-timestd/build/
-sudo find /home/mjh/git/hf-timestd -name "__pycache__" -exec rm -rf {} +
-sudo find /opt/hf-timestd -name "__pycache__" -exec rm -rf {} +
-
-# 5. Reinstall
-sudo /opt/hf-timestd/venv/bin/pip install -e /home/mjh/git/hf-timestd --no-deps
-
-# 6. Restart services
-sudo systemctl restart timestd-core-recorder timestd-analytics
-```
-
-### Verification
-
-After cleanup:
-
-```bash
-# Check for errors
-tail -f /var/log/hf-timestd/core-recorder.log
-
-# Verify services running
-systemctl status timestd-core-recorder timestd-analytics
-
-# Check CPU usage
-top -p $(pgrep -f "core_recorder|analytics")
-```
+- **Analytics Latency**: The 3-minute lag is a heuristic. If analytics slows down (CPU load), physics might miss data again.
+- **HDF5 Locking**: Ensure SWMR (Single Writer Multiple Reader) is working correctly during high-concurrency trace.
 
 ---
 
-## References
-
-- [Debugging HDF5 Errors](file:///home/mjh/.gemini/antigravity/brain/7be87bf8-0936-4a59-96a5-eb2de15a716d/debugging_hdf5_errors.md) - Lessons learned
-- [Service Inventory](file:///home/mjh/.gemini/antigravity/brain/7be87bf8-0936-4a59-96a5-eb2de15a716d/service_inventory.md) - Active services
-- [Walkthrough](file:///home/mjh/.gemini/antigravity/brain/7be87bf8-0936-4a59-96a5-eb2de15a716d/walkthrough.md) - Recent cleanup work
-
----
-
-**CRITICAL REMINDER**: Be aggressive in identifying dead code. If code isn't clearly necessary and actively used, it should be removed. Use git history to recover if needed. The goal is a lean, efficient, maintainable codebase.
+**Last Updated:** 2026-01-09 19:50 UTC
