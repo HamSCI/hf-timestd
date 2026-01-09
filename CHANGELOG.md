@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.2.1] - 2026-01-09
+
+### Fixed - Web API JSON Serialization
+
+**Critical Fix:** Prevented Web API 500 errors by sanitizing `NaN` and `Infinity` values in JSON responses.
+
+- **Issue**: Python `float('nan')` is not valid JSON, causing internal server errors when serving raw data (e.g., from `dump_tec.py` diagnostics).
+- **Fix**: Implemented `_deep_sanitize()` recursion in `PropagationService` to convert `NaN`/`Inf` to `null` before serialization.
+- **Diagnostics**: Added `scripts/dump_tec.py` to the repository for inspecting daily TEC files.
 ## [5.2.0] - 2026-01-09
 
 ### Fixed - Mode-Aware TEC & Service Stability
