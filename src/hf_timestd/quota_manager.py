@@ -43,10 +43,10 @@ class QuotaManager:
     
     # File removal priority (lowest priority removed first)
     CATEGORY_PRIORITY = {
-        'spectrogram': 1,  # Remove spectrograms first (can regenerate)
-        'npz': 2,          # Then NPZ files (processed data)
-        'csv': 3,          # Then CSV analysis results
-        'drf': 4,          # DRF raw data last (hardest to recover)
+        'raw_iq': 1,       # Remove raw IQ first (largest size, recoverable from stream)
+        'vtec': 2,         # Remove VTEC data next (can redownload or recompute)
+        'products': 3,     # Remove legacy products
+        'phase2': 4,       # Remove Phase 2 data last (high computation cost)
     }
     
     def __init__(
@@ -71,10 +71,11 @@ class QuotaManager:
         self.dry_run = dry_run
         
         # Directories to manage
-        self.analytics_dir = self.data_root / 'analytics'
-        self.spectrograms_dir = self.data_root / 'spectrograms'
-        self.drf_dir = self.data_root / 'drf'
-        
+        self.raw_buffer_dir = self.data_root / 'raw_buffer'
+        self.phase2_dir = self.data_root / 'phase2'
+        self.vtec_dir = self.data_root / 'data' / 'gnss_vtec'
+        self.products_dir = self.data_root / 'products'
+
     def get_disk_usage(self) -> Tuple[int, int, float]:
         """
         Get disk usage for the partition containing data_root.
@@ -94,56 +95,63 @@ class QuotaManager:
             List of FileInfo objects sorted by priority then age (oldest first)
         """
         files = []
-        cutoff_time = datetime.now().timestamp() - (self.min_days_to_keep * 86400)
+        # Allow cleaning files older than 1 hour if disk is full
+        # This ensures we can actually free space if recently created files are filling up the disk
+        min_age_seconds = min(self.min_days_to_keep * 86400, 3600)
+        cutoff_time = datetime.now().timestamp() - min_age_seconds
         
-        # Scan NPZ files in analytics directories
-        if self.analytics_dir.exists():
-            for channel_dir in self.analytics_dir.iterdir():
-                if channel_dir.is_dir():
-                    # NPZ files
-                    for npz_file in channel_dir.glob('**/*.npz'):
-                        stat = npz_file.stat()
-                        if stat.st_mtime < cutoff_time:
-                            files.append(FileInfo(
-                                path=npz_file,
-                                size_bytes=stat.st_size,
-                                mtime=stat.st_mtime,
-                                category='npz'
-                            ))
-                    
-                    # CSV files
-                    for csv_file in channel_dir.glob('**/*.csv'):
-                        stat = csv_file.stat()
-                        if stat.st_mtime < cutoff_time:
-                            files.append(FileInfo(
-                                path=csv_file,
-                                size_bytes=stat.st_size,
-                                mtime=stat.st_mtime,
-                                category='csv'
-                            ))
-        
-        # Scan spectrograms
-        if self.spectrograms_dir.exists():
-            for png_file in self.spectrograms_dir.glob('**/*.png'):
-                stat = png_file.stat()
+        # Scan raw_buffer (Binary IQ files) - Highest priority to delete (largest size)
+        if self.raw_buffer_dir.exists():
+            # Search recursively for .bin and .bin.zst
+            for ext in ['*.bin', '*.bin.zst']:
+                for f in self.raw_buffer_dir.rglob(ext):
+                    if not f.is_file(): continue
+                    stat = f.stat()
+                    if stat.st_mtime < cutoff_time:
+                        files.append(FileInfo(
+                            path=f,
+                            size_bytes=stat.st_size,
+                            mtime=stat.st_mtime,
+                            category='raw_iq'
+                        ))
+
+        # Scan GNSS VTEC data
+        if self.vtec_dir.exists():
+            for f in self.vtec_dir.glob('*.h5'):
+                if not f.is_file(): continue
+                stat = f.stat()
                 if stat.st_mtime < cutoff_time:
                     files.append(FileInfo(
-                        path=png_file,
+                        path=f,
                         size_bytes=stat.st_size,
                         mtime=stat.st_mtime,
-                        category='spectrogram'
+                        category='vtec'
                     ))
-        
-        # Scan DRF data (be careful - this is raw data)
-        if self.drf_dir.exists():
-            for h5_file in self.drf_dir.glob('**/*.h5'):
-                stat = h5_file.stat()
+
+        # Scan Phase 2 (HDF5 timing/tones) - Keep longer
+        if self.phase2_dir.exists():
+            for f in self.phase2_dir.rglob('*.h5'):
+                if not f.is_file(): continue
+                stat = f.stat()
                 if stat.st_mtime < cutoff_time:
                     files.append(FileInfo(
-                        path=h5_file,
+                        path=f,
                         size_bytes=stat.st_size,
                         mtime=stat.st_mtime,
-                        category='drf'
+                        category='phase2'
+                    ))
+
+        # Scan Products - Keep longest
+        if self.products_dir.exists():
+            for f in self.products_dir.rglob('*'):
+                if not f.is_file(): continue
+                stat = f.stat()
+                if stat.st_mtime < cutoff_time:
+                    files.append(FileInfo(
+                        path=f,
+                        size_bytes=stat.st_size,
+                        mtime=stat.st_mtime,
+                        category='products'
                     ))
         
         # Sort by priority (low first), then by age (oldest first)

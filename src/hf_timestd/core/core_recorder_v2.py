@@ -256,9 +256,11 @@ class CoreRecorderV2:
                 # 3-5 minutes for real-time analytics/fusion pipeline
                 from .tiered_storage import TieredStorageConfig, TieredStorageManager
                 
+                # CRITICAL: output_dir is /var/lib/timestd, not /var/lib/timestd/raw_buffer
+                # The BinaryArchiveWriter and tiered storage manager handle the raw_buffer subdirectory
                 config = TieredStorageConfig(
                     hot_buffer_root=Path(hot_buffer_root),
-                    cold_buffer_root=Path(self.output_dir) / 'raw_buffer',
+                    cold_buffer_root=Path(self.output_dir),  # NOT / 'raw_buffer'
                     auto_configure=False,  # Disable auto-config
                     hot_minutes=5,  # Fixed 5-minute retention for real-time pipeline
                     num_channels=num_channels,
@@ -312,9 +314,17 @@ class CoreRecorderV2:
         self._write_status()
         
         # Initialize quota manager
+        try:
+            quota_str = str(self.recorder_config.get('storage_quota', '75%'))
+            quota_percent = float(quota_str.rstrip('%'))
+            logger.info(f"Initializing QuotaManager with threshold {quota_percent}%")
+        except ValueError:
+            logger.warning("Invalid storage_quota format, using default 75%")
+            quota_percent = 75.0
+
         self.quota_manager = QuotaManager(
             data_root=self.output_dir,
-            threshold_percent=75.0,
+            threshold_percent=quota_percent,
             min_days_to_keep=7,
             dry_run=False
         )

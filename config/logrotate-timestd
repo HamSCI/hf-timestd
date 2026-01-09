@@ -1,0 +1,45 @@
+# Logrotate configuration for HF-TimeStd
+# Install to: /etc/logrotate.d/timestd
+
+/var/log/hf-timestd/*.log {
+    # Rotate daily
+    daily
+    
+    # Keep 14 days of logs
+    rotate 14
+    
+    # Compress old logs
+    compress
+    delaycompress
+    
+    # Don't error if log file is missing
+    missingok
+    notifempty
+    
+    # Create new log file with correct permissions
+    create 0644 timestd timestd
+    
+    # Use date extension instead of numbers
+    dateext
+    dateformat -%Y%m%d
+    
+    # Shared scripts for all logs
+    sharedscripts
+    
+    # Reload services after rotation (if needed)
+    postrotate
+        # Services write to logs continuously, no reload needed
+        # systemd handles log file reopening automatically
+    endscript
+}
+
+# Separate config for data retention log (less frequent rotation)
+/var/log/hf-timestd/data-retention.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 timestd timestd
+}

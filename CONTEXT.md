@@ -2,7 +2,7 @@
 
 ## 🚀 Current Status: Adaptive Physics-Based Timing (v5.1.0)
 
-**Version**: v5.1.0
+**Version**: v5.1.1
 **Core Philosophy**: **Ionospheric Science First**. The system uses the local GPSDO as a "steel ruler" to measure ionospheric path dynamics. UTC recovery is a derived validation product.
 
 ### Architecture Overview
@@ -22,7 +22,7 @@ The system operates as a **Federated Two-Stage Kalman Architecture**:
 
 * **Objective**: Derive physical parameters and feed Chrony.
 * **Products**:
-  * **Chrony Feed**: Real-time SHM updates based on statistically fused clock offset (NOW RESTORED).
+  * **Chrony Feed**: Real-time SHM updates based on statistically fused clock offset (NOW RESTORED & SELF-HEALING).
   * **TEC Estimation**: Differential ToF analysis ($ToF_{Low} - ToF_{High}$).
 * **Mechanism**: `timestd-fusion` service aggregating Stage 1 states.
 
@@ -33,12 +33,13 @@ The system operates as a **Federated Two-Stage Kalman Architecture**:
 
 ### Recent Changes
 
+* **v5.1.1 (2026-01-09)**:
+  * **Chrony Feed**: Restored by allowing Grade C (Uncertainty < 2.0ms) results.
+  * **Self-Healing**: Added `timestd-chrony-monitor` service to auto-restart Chrony on SHM failure.
+  * **Pipeline Check**: Updated `verify_pipeline.sh` (Added Web API, Fixed Chrony Reach Bug).
 * **v5.1.0 (2026-01-08)**:
   * **Adaptive Windows**: Kalman filters drive tone detector search windows.
-  * **Chrony Restored**: Fixed `CROSS_STATION_DISAGREE` bug; Chrony now syncing to TMGR.
   * **Persistence Fix**: Added state saving during signal loss to prevent "amnesia" on restarts.
-* **v5.0.1 (2026-01-08)**:
-  * **Tone Detection Fix**: Solved 24kHz template regression; restored 100% detection.
 
 ### Important Files
 
@@ -50,7 +51,8 @@ The system operates as a **Federated Two-Stage Kalman Architecture**:
 
 #### ✅ RESOLVED: Chrony Feed
 
-The fusion service is now correctly updating the Chrony SHM. `chronyc sources` shows `TMGR` as the selected source (`#*`).
+The fusion service is now correctly updating the Chrony SHM using Grade C measurements.
+**Self-Healing**: System will auto-restart `chronyd` if Reach drops to 0.
 
 #### ⚠️ VERIFY: Kalman Persistence
 

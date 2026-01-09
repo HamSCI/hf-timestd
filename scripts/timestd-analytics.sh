@@ -71,8 +71,10 @@ start)
     # Check if tiered storage is enabled in config
     TIERED_STORAGE=$(grep '^tiered_storage' "$CONFIG" | head -1 | awk '{print $3}')
     TIERED_ARGS=""
+    ARCHIVE_ROOT="$DATA_ROOT/raw_buffer"  # Default to cold buffer
     if [ "$TIERED_STORAGE" = "true" ]; then
         TIERED_ARGS="--use-tiered-storage"
+        ARCHIVE_ROOT="/dev/shm/timestd/raw_buffer"  # Use hot buffer for tiered storage
         echo "   💾 Tiered storage enabled: reading from /dev/shm hot buffer"
     fi
     
@@ -108,7 +110,7 @@ start)
         channel_dir="SHARED_${freq_khz}"
         
         nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
-          --archive-dir "$DATA_ROOT/raw_buffer/$channel_dir" \
+          --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \
           --frequency-hz "$freq_hz" \
@@ -133,7 +135,7 @@ start)
         channel_dir="WWV_${freq_khz}"
         
         nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
-          --archive-dir "$DATA_ROOT/raw_buffer/$channel_dir" \
+          --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \
           --frequency-hz "$freq_hz" \
@@ -158,7 +160,7 @@ start)
         channel_dir="CHU_${freq_khz}"
         
         nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
-          --archive-dir "$DATA_ROOT/raw_buffer/$channel_dir" \
+          --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \
           --frequency-hz "$freq_hz" \

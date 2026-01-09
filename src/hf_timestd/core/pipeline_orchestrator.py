@@ -166,8 +166,11 @@ class PipelineOrchestrator:
         # Uses raw binary files instead of HDF5/DRF for maximum reliability
         from .binary_archive_writer import BinaryArchiveWriter, BinaryArchiveConfig
         
+        # CRITICAL: data_dir is already the raw_buffer root (e.g., /var/lib/timestd)
+        # BinaryArchiveWriter will create the channel subdirectory structure
+        # DO NOT append 'raw_buffer' here - that causes double-nesting
         raw_config = BinaryArchiveConfig(
-            output_dir=config.data_dir / 'raw_buffer',
+            output_dir=config.data_dir,
             channel_name=config.channel_name,
             frequency_hz=config.frequency_hz,
             sample_rate=config.sample_rate,
@@ -208,20 +211,9 @@ class PipelineOrchestrator:
             sample_rate=config.sample_rate
         )
         
-        # Phase 2: Clock Offset Engine
-        # REMOVED: ClockOffsetEngine is redundant legacy code
+        # Phase 2: Clock Offset Engine - REMOVED
+        # ClockOffsetEngine is redundant legacy code
         # Analytics service uses DataProductWriter directly
-        # from .clock_offset_series import ClockOffsetEngine
-        
-        # self.clock_offset_engine = ClockOffsetEngine(
-        #     raw_buffer_dir=config.raw_buffer_dir,
-        #     output_dir=config.clock_offset_dir,
-        #     channel_name=config.channel_name,
-        #     frequency_hz=config.frequency_hz,
-        #     receiver_grid=config.receiver_grid,
-        #     sample_rate=config.sample_rate,
-        #     timing_calibrator=self.timing_calibrator
-        # )
         self.clock_offset_engine = None  # Disabled - use Phase2AnalyticsService instead
         
         # Phase 3 (decimation/DRF) is not part of hf-timestd
@@ -315,7 +307,7 @@ class PipelineOrchestrator:
         self.raw_buffer_writer.close()
         if self.digital_rf_writer:
             self.digital_rf_writer.close()
-        self.clock_offset_engine.save_series()
+        # clock_offset_engine removed - analytics service handles this
         if self.product_generator:
             self.product_generator.close()
         
@@ -681,7 +673,7 @@ class PipelineOrchestrator:
                 'products_generated': self.stats['products_generated'],
                 'queue_depth': self.analysis_queue.qsize(),
                 'phase1_stats': self.raw_buffer_writer.get_stats(),
-                'phase2_stats': self.clock_offset_engine.get_stats(),
+                'phase2_stats': {'status': 'disabled - use Phase2AnalyticsService'},
                 'phase3_stats': self.product_generator.get_stats() if self.product_generator else {'status': 'disabled'},
                 'timing_calibrator': self.timing_calibrator.get_status()
             }
