@@ -56,6 +56,43 @@ class PropagationService:
             'WWV_20000', 'WWV_25000'
         ]
     
+    def _sanitize_value(self, val: Any) -> Any:
+        """Sanitize values for JSON serialization (convert NaN/Inf to None, NumPy to Python types)."""
+        import math
+        import numpy as np
+        
+        if val is None:
+            return None
+        
+        # Handle NumPy types
+        if isinstance(val, (np.floating, np.integer)):
+            val = val.item()
+        elif isinstance(val, np.ndarray):
+            return [self._sanitize_value(x) for x in val.tolist()]
+            
+        # Handle NaN/Inf
+        if isinstance(val, (float, int)):
+            if not math.isfinite(val):
+                return None
+        else:
+            # Check if it's still some weird type that might convert to non-finite
+            try:
+                if hasattr(val, '__float__') and not math.isfinite(float(val)):
+                    return None
+            except:
+                pass
+                
+        return val
+
+    def _deep_sanitize(self, obj: Any) -> Any:
+        """Recursively sanitize dicts and lists for JSON serialization."""
+        if isinstance(obj, dict):
+            return {str(k): self._deep_sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._deep_sanitize(x) for x in obj]
+        else:
+            return self._sanitize_value(obj)
+    
     def _is_valid_broadcast(self, station: str, frequency_mhz: float) -> bool:
         """
         Check if station/frequency combination is valid.
@@ -89,8 +126,6 @@ class PropagationService:
             # Collect measurements from all channels
             all_measurements = []
             
-            # Debug logging
-            logger.info(f"Scanning phase2_dir: {self.phase2_dir}")
             channel_count = 0
             
             # Check each channel directory
@@ -99,7 +134,6 @@ class PropagationService:
                     continue
                 
                 channel_count += 1
-                logger.info(f"Found channel directory: {channel_dir.name}")
                 
                 # DataProductReader automatically resolves subdirectory via registry
                 try:
@@ -114,14 +148,6 @@ class PropagationService:
                         start=start_time.isoformat() + 'Z',
                         end=end_time.isoformat() + 'Z'
                     )
-                    
-                    logger.info(f"  Read {len(measurements)} measurements from {channel_dir.name}")
-                    
-                    # Log first measurement structure for debugging
-                    if measurements:
-                        sample = measurements[0]
-                        logger.info(f"  Sample measurement keys: {list(sample.keys())}")
-                        logger.info(f"  Sample: station={sample.get('station')}, freq={sample.get('frequency_mhz')}, mode={sample.get('propagation_mode')}")
                     
                     all_measurements.extend(measurements)
                     
@@ -181,9 +207,6 @@ class PropagationService:
                     if 'F' in mode_upper and mode_upper != 'UNKNOWN':
                         f_layer_freqs.append(freq)
             
-            logger.info(f"Broadcast stats collected for {len(broadcast_stats)} broadcasts")
-            logger.info(f"F-layer frequencies found: {len(f_layer_freqs)}")
-            
             # Calculate per-broadcast statistics
             broadcasts = []
             for key, stats in broadcast_stats.items():
@@ -191,14 +214,14 @@ class PropagationService:
                 mode_probs = {mode: count/total for mode, count in stats['mode_counts'].items()}
                 dominant_mode = stats['mode_counts'].most_common(1)[0][0] if stats['mode_counts'] else 'UNKNOWN'
                 
-                avg_snr = sum(stats['snr_values']) / len(stats['snr_values']) if stats['snr_values'] else None
+                avg_snr = self._sanitize_value(sum(stats['snr_values']) / len(stats['snr_values']) if stats['snr_values'] else None)
                 
                 broadcasts.append({
                     'station': stats['station'],
-                    'frequency_mhz': stats['frequency_mhz'],
+                    'frequency_mhz': self._sanitize_value(stats['frequency_mhz']),
                     'dominant_mode': dominant_mode,
                     'mode_distribution': dict(stats['mode_counts']),
-                    'mode_probabilities': mode_probs,
+                    'mode_probabilities': {m: self._sanitize_value(p) for m, p in mode_probs.items()},
                     'n_measurements': total,
                     'avg_snr_db': avg_snr
                 })
@@ -210,23 +233,21 @@ class PropagationService:
             muf_estimate = None
             if f_layer_freqs:
                 # MUF ≈ 1.15 × highest observed F-layer frequency
-                muf_estimate = max(f_layer_freqs) * 1.15
-                logger.info(f"MUF estimated from F-layer: {muf_estimate:.1f} MHz (max F-freq: {max(f_layer_freqs):.1f} MHz)")
+                muf_estimate = self._sanitize_value(max(f_layer_freqs) * 1.15)
             elif all_freqs:
                 # Fallback: Use highest observed frequency × 1.3
-                muf_estimate = max(all_freqs) * 1.3
-                logger.info(f"MUF estimated from fallback: {muf_estimate:.1f} MHz (max freq: {max(all_freqs):.1f} MHz)")
-            else:
-                logger.warning("Could not estimate MUF - no frequency data")
+                muf_estimate = self._sanitize_value(max(all_freqs) * 1.3)
             
-            return {
+            result = self._deep_sanitize({
                 'timestamp': end_time.isoformat() + 'Z',
                 'time_span_hours': 1.0,
                 'n_measurements': len(all_measurements),
                 'broadcasts': broadcasts,
                 'muf_estimate_mhz': muf_estimate,
                 'n_broadcasts': len(broadcasts)
-            }
+            })
+            
+            return result
             
         except Exception as e:
             logger.error(f"Error getting current conditions: {e}", exc_info=True)
@@ -292,16 +313,24 @@ class PropagationService:
             modes = [m.get('propagation_mode', 'UNKNOWN') for m in all_measurements]
             stations = [m.get('station', 'UNKNOWN') for m in all_measurements]
             frequencies = [m.get('frequency_mhz', 0) for m in all_measurements]
-            snrs = [m.get('snr_db') for m in all_measurements]
+            import math
+            snrs = []
+            for m in all_measurements:
+                s = m.get('snr_db')
+                if s is not None and (math.isnan(s) or math.isinf(s)):
+                    s = None
+                snrs.append(s)
             
-            return {
+            result = self._deep_sanitize({
                 'timestamps': timestamps,
                 'modes': modes,
                 'stations': stations,
                 'frequencies': frequencies,
                 'snr_db': snrs,
                 'count': len(all_measurements),
-            }
+            })
+            
+            return result
             
         except Exception as e:
             logger.error(f"Error getting mode timeline: {e}")
@@ -360,7 +389,7 @@ class PropagationService:
                 station = m.get('station', 'UNKNOWN')
                 tec = m.get('tec_tecu')
                 timestamp = m.get('timestamp_utc')
-                uncertainty = m.get('t_vacuum_error_ms')  # Timing uncertainty propagates to TEC
+                uncertainty = m.get('residuals_ms')  # RMS residual is the true timing uncertainty
                 confidence = m.get('confidence')
                 quality = m.get('quality_flag', 'UNKNOWN')
                 n_freqs = m.get('n_frequencies', 0)
@@ -379,9 +408,9 @@ class PropagationService:
                     }
                 
                 paths[station]['timestamps'].append(timestamp)
-                paths[station]['tec_tecu'].append(float(tec) if tec is not None else 0)
-                paths[station]['uncertainty_tecu'].append(float(uncertainty) if uncertainty else 0)
-                paths[station]['confidence'].append(float(confidence) if confidence else 0)
+                paths[station]['tec_tecu'].append(self._sanitize_value(tec))
+                paths[station]['uncertainty_tecu'].append(self._sanitize_value(uncertainty))
+                paths[station]['confidence'].append(self._sanitize_value(confidence))
                 paths[station]['quality'].append(quality)
                 paths[station]['n_frequencies'].append(int(n_freqs) if n_freqs else 0)
             
@@ -404,11 +433,13 @@ class PropagationService:
                     good_count = sum(1 for q in data['quality'] if q == 'GOOD')
                     data['quality_ratio'] = good_count / len(data['quality']) if data['quality'] else 0
             
-            return {
+            result = self._deep_sanitize({
                 'paths': paths,
                 'stations': list(paths.keys()),
                 'total_measurements': sum(len(p['tec_tecu']) for p in paths.values())
-            }
+            })
+            
+            return result
             
         except Exception as e:
             logger.error(f"Error getting TEC summary: {e}")
@@ -551,7 +582,7 @@ class PropagationService:
                 valid_delay = [d for d in data['delay_spread_ms'] if d is not None]
                 data['mean_delay_spread_ms'] = sum(valid_delay) / len(valid_delay) if valid_delay else None
             
-            return {
+            result = self._deep_sanitize({
                 'measurements': all_measurements,
                 'by_station': dict(by_station),
                 'total_detections': len(all_measurements),
@@ -560,7 +591,9 @@ class PropagationService:
                     'start': start.isoformat() + 'Z',
                     'end': end.isoformat() + 'Z'
                 }
-            }
+            })
+            
+            return result
             
         except Exception as e:
             logger.error(f"Error getting test signal summary: {e}")

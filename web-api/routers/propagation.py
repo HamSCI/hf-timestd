@@ -57,6 +57,7 @@ async def get_mode_timeline(
     Returns time series of propagation modes observed across all channels.
     """
     try:
+        logger.info(f"Timeline request: start={start}, end={end}, station={station}")
         # Parse time range
         if end == "now":
             end_time = datetime.utcnow()
@@ -77,7 +78,9 @@ async def get_mode_timeline(
         else:
             start_time = datetime.fromisoformat(start.replace('Z', ''))
         
+        logger.info(f"  Fetching timeline from {start_time} to {end_time}")
         timeline = propagation_service.get_mode_timeline(start_time, end_time, station)
+        logger.info(f"  Timeline fetch complete. Count: {timeline.get('count') if timeline else 'None'}")
         
         if timeline is None:
             raise HTTPException(

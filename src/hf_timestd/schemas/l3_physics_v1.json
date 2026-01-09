@@ -24,25 +24,9 @@
         },
         {
             "name": "stations_used",
-            "type": "array<string>",
+            "type": "string",
             "required": true,
-            "description": "List of stations contributing to this solution"
-        },
-        {
-            "name": "tec_estimates",
-            "type": "map<string, float>",
-            "required": false,
-            "description": "Slant TEC estimates per station (TECU)",
-            "key_description": "Station name (e.g. 'WWV')",
-            "value_description": "TEC in TEC Units (10^16 el/m2)"
-        },
-        {
-            "name": "tec_uncertainties",
-            "type": "map<string, float>",
-            "required": false,
-            "description": "Uncertainty of TEC estimates",
-            "key_description": "Station name",
-            "value_description": "Uncertainty in TECU"
+            "description": "Comma-separated list of stations contributing to this solution"
         },
         {
             "name": "utc_offset_ms",
