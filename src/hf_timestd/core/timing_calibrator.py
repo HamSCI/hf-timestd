@@ -1138,7 +1138,20 @@ class TimingCalibrator:
         
         # Reload state from disk to merge with other processes' updates
         # This is necessary because multiple channel recorder processes share the state file
+        # CRITICAL: Preserve global_rtp_offset if already set in memory (race condition fix)
+        saved_global_offset = self.global_rtp_offset
+        saved_global_source = self.global_rtp_offset_source
+        saved_global_confidence = self.global_rtp_offset_confidence
+        
         self._load_state()
+        
+        # Restore global offset if it was set in memory but not yet on disk
+        # This prevents race conditions where one process sets it but another overwrites with None
+        if saved_global_offset is not None and self.global_rtp_offset is None:
+            self.global_rtp_offset = saved_global_offset
+            self.global_rtp_offset_source = saved_global_source
+            self.global_rtp_offset_confidence = saved_global_confidence
+            logger.debug(f"Preserved in-memory global_rtp_offset={saved_global_offset} after reload")
         
         # Track for bootstrap
         if self.phase == CalibrationPhase.BOOTSTRAP:
