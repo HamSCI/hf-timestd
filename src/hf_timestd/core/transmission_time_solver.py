@@ -1144,7 +1144,15 @@ class TransmissionTimeSolver:
             emission_offset_samples = emission_rtp - expected_second_rtp
             emission_offset_ms = (emission_offset_samples / self.sample_rate) * 1000
             
-            
+            # DIAGNOSTIC LOGGING: Capture D_clock calculation details for debugging
+            logger.info(
+                f"D_clock calculation for {station} @ {frequency_mhz:.1f} MHz: "
+                f"arrival_rtp={arrival_rtp}, propagation_delay={best_candidate.total_delay_ms:.2f}ms, "
+                f"propagation_samples={propagation_samples}, emission_rtp={emission_rtp}, "
+                f"expected_second_rtp={expected_second_rtp}, "
+                f"emission_offset_samples={emission_offset_samples}, "
+                f"D_clock={emission_offset_ms:.2f}ms"
+            )
             
             # STATION-BASED SANITY CHECK: D_clock must be within physical bounds
             # A properly synchronized system should have D_clock within ~100ms

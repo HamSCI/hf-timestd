@@ -81,74 +81,90 @@ With the immediate critical issues addressed, future work should focus on:
 - **Services**: `timestd-core-recorder`, `timestd-analytics`, `timestd-fusion`, `timestd-physics` are all **active**.
 - **Time Source**: `198.71.50.75` (NTP) is the primary reference. `TMGR` (SHM 0) is the fusion feed.
 
-## Recent Session (2026-01-10 14:00-14:30 UTC): Timing Fix & SHARED_2500 Anomaly
+## Recent Session (2026-01-10 14:30-14:50 UTC): SHARED_2500 Anomaly Resolution
 
-### Fixes Deployed
-
-**1. Systematic 20-30ms Timing Offset (FIXED)**
-- **Problem**: Analytics services using minute boundary instead of actual RTP timestamps from raw buffer metadata
-- **Root Cause**: `system_time = float(target_minute)` instead of deriving from RTP timestamp
-- **Solution**: Implemented RTP-to-Unix offset learning from `start_rtp_timestamp` metadata field
-- **Impact**: Calibration values now physically plausible (0-16ms range vs previous 20-36ms)
-- **Commit**: Initial timing fix in `phase2_analytics_service.py`
-
-**2. Tone-Based Discrimination Protection (FIXED)**
-- **Problem**: Probabilistic discriminator overriding definitive 1000/1200 Hz tone frequency evidence
-- **Key Insight**: 1000 Hz tone = WWV ONLY (WWVH does not transmit 1000 Hz). Similarly 1200 Hz = WWVH ONLY.
-- **Solution**: 
-  - Prevent override when tone-based discrimination has medium/high confidence
-  - Added physical constraint validation: reject WWV↔WWVH overrides (physically impossible)
-- **Impact**: Correct WWV/WWVH identification on SHARED frequencies (2.5, 5, 10, 15 MHz)
-- **Commits**: 105c05f, 4f722af in `phase2_temporal_engine.py`
-
-**3. Stale RTP Offset Detection (FIXED)**
-- **Problem**: When recorder restarts, analytics services retained old learned RTP offset, causing massive timing errors (~2900ms observed)
-- **Root Cause**: Once `_rtp_to_unix_offset` was set, it was never validated against incoming data
-- **Solution**: Continuously validate learned offset against metadata. If drift >1 second, automatically reset and re-learn
-- **Impact**: Protects ALL channels from stale offset corruption after recorder restarts
-- **Commit**: 08736fe (with debug logging: 1677c22) in `phase2_analytics_service.py`
-
-### Outstanding Issue: SHARED_2500 -2906ms Anomaly
+### Issue: SHARED_2500 -2906ms Anomaly (RESOLVED)
 
 **Symptoms**:
-- SHARED_2500 consistently produces D_clock = -2906ms (rejected as implausible, ±1000ms bounds)
-- Falls back to D_clock = 0.00ms with mode=UNK, confidence=0.00
-- Raw timing values are reasonable (1-7ms range)
-- Tone detection working correctly (1000 Hz WWV detected with 30-45 dB SNR)
-- Error persists across service restarts with latest code
+- SHARED_2500 consistently produced D_clock = -2906ms to -3589ms (rejected as implausible)
+- Fell back to D_clock = 0.00ms with mode=UNK, confidence=0.00
+- 0% detection rate for all 2.5 MHz broadcasts (WWV, WWVH, BPM)
 
-**What's NOT the cause** (verified):
-- ❌ Not RTP offset issue (other channels work fine with identical code)
-- ❌ Not stale state files (none exist - `/var/lib/timestd/state/phase2-*.json` empty)
-- ❌ Not calibration offset (none applied to SHARED_2500 in `broadcast_calibration.json`)
-- ❌ Not discrimination error (WWV correctly identified via 1000 Hz tone)
-- ❌ Not code version (all channels use same code from `/home/mjh/git/hf-timestd/src/`, restarted 14:12 UTC)
-- ❌ Not minute boundary mismatch (all channels processing same minutes, e.g., 1768054380)
+**Root Cause**:
+Stale timing calibration file with **sample rate mismatch**:
+- Calibration file: `sample_rate: 20000` Hz, `rtp_offset_samples: 586210` (from old system configuration)
+- Current system: `sample_rate: 24000` Hz (all channels)
+- Mismatch caused `expected_second_rtp` to be calculated 86107 samples (3587ms) too large
 
-**Channel Status Comparison**:
-- CHU 7.85 MHz: D_clock = +12.88ms ✅ **Working** (valid measurements)
-- SHARED 5.0 MHz: D_clock = +0.00ms ✅ **Working** (bootstrap mode, no errors)
-- WWV 20.0 MHz: D_clock = +0.00ms ✅ **Working** (bootstrap mode, no errors)
-- SHARED 2.5 MHz: D_clock = -2906ms ❌ **ANOMALY** (rejected, fallback to 0.00ms)
+**Why Only SHARED_2500**:
+The stale calibration at `/dev/shm/timestd/state/timing_calibration.json` only had an entry for SHARED_2500 with the incorrect sample_rate. Other channels either had no calibration entry (bootstrapping fresh) or had correct 24 kHz calibration.
 
-**Anomaly Characteristics**:
-- Error magnitude: ~2906ms (~2.9 seconds)
-- Consistency: Error value stable across measurements (-2901 to -2908ms)
-- Isolation: **Only affects SHARED_2500**, not other channels
-- Timing: Raw arrival times reasonable (1.8-6.4ms), suggesting issue in D_clock calculation not tone detection
+**Fix Applied**:
+1. Deleted stale calibration files (`/dev/shm/timestd/state/timing_calibration.json`, `/var/lib/timestd/state/timing_calibration.json`)
+2. Restarted `timestd-analytics` service
+3. System re-learned calibration at correct 24 kHz sample rate
 
-**Hypothesis**:
-The -2906ms offset suggests a propagation delay calculation error specific to SHARED_2500's data processing. Given identical code across all channels, this points to **data-dependent behavior** - something about SHARED_2500's specific signal characteristics, metadata, or processing path triggers a different calculation result. The ~2.9 second magnitude is suspiciously close to timing offsets seen during recorder restart events, but the stale offset detection should have caught this.
+**Verification**:
+- Before: D_clock = -3583ms (rejected)
+- After: D_clock = -22.42ms, -2.17ms (valid, within ±100ms)
+- New calibration: `sample_rate: 24000`, `rtp_offset_samples: 500640` ✓
 
-**Next Steps for Investigation**:
-1. Add detailed logging to D_clock calculation path for SHARED_2500 specifically
-2. Compare propagation solver inputs/outputs between SHARED_2500 and working channels
-3. Verify metadata completeness and RTP timestamp values for SHARED_2500 raw buffers
-4. Check if SHARED_2500 is hitting a different code path in `phase2_temporal_engine.py`
-5. Examine if 2.5 MHz frequency-specific logic exists that could cause this
+**Diagnostic Improvements**:
+Added detailed D_clock calculation logging to `transmission_time_solver.py` and `phase2_temporal_engine.py` to aid future debugging.
 
-**Current Operational Impact**:
-- System operational with 3 working channels (CHU 7.85, SHARED 5.0, WWV 20.0)
-- Multi-station fusion possible with CHU + SHARED_5000
-- SHARED_2500 detecting tones but measurements rejected (0% detection rate for timing)
-- WWV 2.5 MHz, WWVH 2.5 MHz, and BPM 2.5 MHz unavailable for fusion (critical for multi-station validation)
+**Documentation**: See `SHARED_2500_FIX_2026-01-10.md` for complete analysis.
+
+## Next Session Objective (2026-01-10+): Chrony Feed Diagnosis
+
+### Current Issue: Chrony Not Being Updated
+
+**Observation**: Despite stricter Chrony feed criteria being implemented, Chrony SHM is not receiving updates from `timestd-fusion`.
+
+**Investigation Required**:
+1. **Verify Fusion Service Status**:
+   - Check if `timestd-fusion` is running and processing measurements
+   - Review fusion logs for Chrony feed decisions
+   - Confirm multi-station measurements are available (n_stations >= 2)
+
+2. **Check Chrony Feed Criteria**:
+   - Verify measurements meet consistency requirements (OK or low-uncertainty INTER_ANOMALY)
+   - Check if single-station mode is preventing feed
+   - Review uncertainty thresholds (<0.5ms for INTER_ANOMALY)
+
+3. **Validate SHM Communication**:
+   - Confirm SHM segment 0 exists and is writable
+   - Check Chrony configuration for SHM refclock
+   - Verify no permission issues
+
+4. **Review Recent Changes**:
+   - Stricter Chrony feed criteria (2026-01-04) may be too restrictive
+   - GPSDO lock protection may be blocking updates
+   - Single-station safeguards may be triggering incorrectly
+
+**Expected Behavior**:
+- Fusion should feed Chrony SHM when:
+  - n_stations >= 2 (multi-station validation)
+  - Consistency = OK OR (Consistency = INTER_ANOMALY AND uncertainty < 0.5ms)
+  - GPSDO locked for all contributing measurements
+
+**Diagnostic Commands**:
+```bash
+# Check fusion service
+systemctl status timestd-fusion
+journalctl -u timestd-fusion --since "10 minutes ago" | grep -i chrony
+
+# Check SHM status
+ipcs -m | grep timestd
+
+# Check Chrony sources
+chronyc sources -v
+chronyc sourcestats
+
+# Review fusion output
+tail -100 /var/lib/timestd/fusion/fusion_output.csv
+```
+
+**Success Criteria**:
+- Chrony SHM receiving regular updates (every minute when conditions met)
+- TMGR (SHM 0) showing as valid refclock in `chronyc sources`
+- System clock disciplined by HF-derived time when multi-station validation passes

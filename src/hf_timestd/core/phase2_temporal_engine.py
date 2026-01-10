@@ -2178,6 +2178,12 @@ class Phase2TemporalEngine:
                 expected_second_rtp = rtp_timestamp + int(time_diff * self.sample_rate)
                 
                 logger.info(
+                    f"Bootstrap: system_time={system_time:.6f}, rtp_timestamp={rtp_timestamp}, "
+                    f"arrival_rtp={arrival_rtp}, arrival_rtp_offset={arrival_rtp_offset}, "
+                    f"estimated_arrival_time={estimated_arrival_time:.6f}, nearest_minute={nearest_minute}, "
+                    f"time_diff={time_diff:.6f}, expected_second_rtp={expected_second_rtp}"
+                )
+                logger.info(
                     f"Bootstrap: Snapped arrival {estimated_arrival_time:.3f} to minute {nearest_minute} "
                     f"(diff={estimated_arrival_time - nearest_minute:.3f}s)"
                 )
