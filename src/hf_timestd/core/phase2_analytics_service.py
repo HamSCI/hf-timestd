@@ -1580,6 +1580,7 @@ class Phase2AnalyticsService:
             # CRITICAL FIX (2026-01-10): Calculate actual Unix time from RTP timestamp
             # Previous code used minute boundary (target_minute), which created 20-30ms systematic offset
             # because buffers don't start exactly at :00.000
+            logger.debug(f"RTP offset check: json_path.exists()={json_path.exists()}, has_rtp={'start_rtp_timestamp' in metadata}, metadata_keys={list(metadata.keys())[:5]}")
             if json_path.exists() and 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
                 logger.debug(f"RTP metadata found: rtp_timestamp={rtp_timestamp}, json_path={json_path}")
