@@ -1582,6 +1582,7 @@ class Phase2AnalyticsService:
             # because buffers don't start exactly at :00.000
             if json_path.exists() and 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
+                logger.debug(f"RTP metadata found: rtp_timestamp={rtp_timestamp}, json_path={json_path}")
                 
                 # Learn RTP-to-Unix offset from metadata if available
                 # CRITICAL FIX: Validate offset isn't stale (e.g., from before recorder restart)
