@@ -1268,6 +1268,9 @@ class TimingCalibrator:
         # Check if this is an anchor channel
         is_anchor = channel_name in ANCHOR_CHANNELS
         
+        # DEBUG: Always log to diagnose anchor channel recognition
+        logger.info(f"_update_rtp_calibration: channel={channel_name}, is_anchor={is_anchor}, snr={snr_db:.1f}dB, conf={confidence:.2f}, rtp_offset={rtp_offset}")
+        
         # Log anchor channel detections at INFO level for visibility
         if is_anchor:
             logger.info(f"⚓ Anchor channel {channel_name}: snr_db={snr_db:.1f}, confidence={confidence:.2f}, rtp_offset={rtp_offset}")

@@ -3270,8 +3270,9 @@ def run_fusion_service(
                     if calibration_converged:
                         quality_ok = result.quality_grade in ('A', 'B', 'C')
                     else:
-                        # Bootstrap: accept grade D (uncertainty <3ms is acceptable during learning)
-                        quality_ok = result.quality_grade in ('A', 'B', 'C', 'D') and result.uncertainty_ms < 3.0
+                        # Bootstrap: accept grade D (uncertainty <10ms is acceptable during learning)
+                        # High uncertainty during bootstrap is normal due to calibration convergence
+                        quality_ok = result.quality_grade in ('A', 'B', 'C', 'D') and result.uncertainty_ms < 10.0
                     
                     # CRITICAL FIX (2026-01-10): Require multi-station for validation
                     # Single-station mode has no cross-validation, cannot detect systematic errors
