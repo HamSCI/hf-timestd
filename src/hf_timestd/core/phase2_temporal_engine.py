@@ -1716,11 +1716,18 @@ class Phase2TemporalEngine:
                 
                 # CRITICAL FIX: Do NOT override tone-based discrimination
                 # The 1000/1200 Hz tone frequency is definitive evidence:
-                # - 1000 Hz = WWV (unambiguous)
-                # - 1200 Hz = WWVH (unambiguous)
+                # - 1000 Hz = WWV ONLY (WWVH does not transmit 1000 Hz)
+                # - 1200 Hz = WWVH ONLY (WWV does not transmit 1200 Hz)
                 # Probabilistic models should only be used when tone evidence is weak/uncertain
                 tone_based_discrimination = (old_station in ('WWV', 'WWVH') and 
                                             result.station_confidence in ('high', 'medium'))
+                
+                # Additional validation: Ensure probabilistic override is physically possible
+                # E.g., cannot override WWV (1000 Hz detected) to WWVH (which doesn't transmit 1000 Hz)
+                physically_impossible_override = (
+                    (old_station == 'WWV' and prob_result.station == 'WWVH') or
+                    (old_station == 'WWVH' and prob_result.station == 'WWV')
+                )
                 
                 if tone_based_discrimination:
                     # Trust the tone-based discrimination, don't override
@@ -1728,6 +1735,12 @@ class Phase2TemporalEngine:
                         f"Preserving tone-based discrimination: {old_station} "
                         f"(tone confidence: {result.station_confidence}, "
                         f"probabilistic would suggest: {prob_result.station})"
+                    )
+                elif physically_impossible_override:
+                    # Reject physically impossible overrides
+                    logger.warning(
+                        f"Rejecting physically impossible override: {old_station} -> {prob_result.station} "
+                        f"(tone frequency is definitive: 1000Hz=WWV only, 1200Hz=WWVH only)"
                     )
                 elif prob_result.station == 'UNCERTAIN':
                     result.dominant_station = 'BALANCED'
