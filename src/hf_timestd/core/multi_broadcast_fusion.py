@@ -3076,21 +3076,24 @@ def run_fusion_service(
                     # - Physical ionospheric variation (the signal we want to measure)
                     # - Measurement errors (the noise we want to reject)
                     #
-                    # Only feed measurements where stations agree (OK) or have low-uncertainty
-                    # disagreement that's clearly ionospheric (INTER_ANOMALY with <0.5ms uncertainty)
+                    # Accept measurements with:
+                    # - OK: Stations agree well
+                    # - INTER_ANOMALY or CROSS_STATION_DISAGREE with uncertainty <1.0ms
+                    #   (indicates well-characterized ionospheric variation, not measurement error)
                     if result.consistency_flag == 'OK':
                         consistent = True
-                    elif result.consistency_flag == 'INTER_ANOMALY' and result.uncertainty_ms < 0.5:
-                        # Allow INTER_ANOMALY only if uncertainty is very low
-                        # This indicates well-characterized ionospheric variation
+                    elif result.consistency_flag in ('INTER_ANOMALY', 'CROSS_STATION_DISAGREE') and result.uncertainty_ms < 1.0:
+                        # Allow disagreement if uncertainty is low (<1.0ms)
+                        # This indicates the disagreement is real ionospheric variation,
+                        # not measurement noise (which would inflate uncertainty)
                         consistent = True
                         logger.debug(
-                            f"Chrony feed: Accepting INTER_ANOMALY with low uncertainty "
-                            f"({result.uncertainty_ms:.3f}ms < 0.5ms threshold)"
+                            f"Chrony feed: Accepting {result.consistency_flag} with low uncertainty "
+                            f"({result.uncertainty_ms:.3f}ms < 1.0ms threshold)"
                         )
                     else:
-                        # Reject CROSS_STATION_DISAGREE and high-uncertainty INTER_ANOMALY
-                        # These indicate potential systematic errors
+                        # Reject high-uncertainty disagreements
+                        # These indicate potential systematic errors or poor measurement quality
                         consistent = False
                     
                     # Discontinuity filter: reject large jumps (>3ms)
