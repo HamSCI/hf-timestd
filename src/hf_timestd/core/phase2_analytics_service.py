@@ -412,10 +412,20 @@ class Phase2AnalyticsService:
         # This enables bootstrap→calibrated→measurement mode progression
         def get_rtp_offset(channel_name: str) -> Optional[int]:
             """Get calibrated RTP offset for minute boundary."""
+            # CRITICAL FIX (2026-01-10): Always use global RTP offset for all channels
+            # All channels share the same GPSDO-disciplined RTP stream, so they MUST
+            # use the same RTP-to-UTC mapping. Per-channel offsets create systematic
+            # cross-station disagreements (e.g., CHU vs WWV differ by 7.5ms).
+            # The global offset is established from anchor channels (CHU, WWV 20/25 MHz)
+            # and provides the single source of truth for RTP timestamp alignment.
+            if self.timing_calibrator.global_rtp_offset is not None:
+                return self.timing_calibrator.global_rtp_offset
+            
+            # Fallback during bootstrap: use per-channel offset if global not yet established
             if channel_name in self.timing_calibrator.rtp_calibration:
                 return self.timing_calibrator.rtp_calibration[channel_name].rtp_offset_samples
-            # Check for global RTP offset (shared across all channels from same GPSDO)
-            return self.timing_calibrator.global_rtp_offset
+            
+            return None
         
         self.engine.rtp_calibration_callback = get_rtp_offset
         self.engine.station_predictor = self.timing_calibrator.predict_station
