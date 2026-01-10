@@ -1584,10 +1584,24 @@ class Phase2AnalyticsService:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
                 
                 # Learn RTP-to-Unix offset from metadata if available
+                # CRITICAL FIX: Validate offset isn't stale (e.g., from before recorder restart)
+                inst_offset = target_minute - (rtp_timestamp / self.sample_rate)
+                
+                # Check if current offset is stale (differs by >1 second from expected)
+                if self._rtp_to_unix_offset is not None:
+                    offset_drift = abs(inst_offset - self._rtp_to_unix_offset)
+                    if offset_drift > 1.0:
+                        logger.warning(
+                            f"Stale RTP offset detected! Current: {self._rtp_to_unix_offset:.3f}s, "
+                            f"Expected: {inst_offset:.3f}s, Drift: {offset_drift:.3f}s. "
+                            f"Resetting offset learning (likely recorder restart)."
+                        )
+                        self._rtp_to_unix_offset = None
+                        self._offset_samples = []
+                
                 if self._rtp_to_unix_offset is None and len(self._offset_samples) < 10:
                     # Calculate offset: unix_time = rtp_timestamp / sample_rate + offset
                     # We know the buffer is for target_minute, so use that as reference
-                    inst_offset = target_minute - (rtp_timestamp / self.sample_rate)
                     self._offset_samples.append(inst_offset)
                     
                     if len(self._offset_samples) >= 10:
