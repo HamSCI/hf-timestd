@@ -74,12 +74,13 @@ TIMING_CALIBRATOR_STATE_VERSION = 2  # Incremented for anchor-based calibration
 # With ionospheric propagation (1-3 hops), actual delays are higher but ORDER is preserved.
 
 # Anchor channels: unambiguous stations with unique or WWV-only frequencies
+# Channel names follow format: STATION_FREQUENCY (e.g., CHU_7850, WWV_20000)
 ANCHOR_CHANNELS = {
-    'CHU 3.33 MHz',    # CHU-only frequency
-    'CHU 7.85 MHz',    # CHU-only frequency  
-    'CHU 14.67 MHz',   # CHU-only frequency
-    'WWV 20 MHz',      # WWV-only frequency
-    'WWV 25 MHz',      # WWV-only frequency
+    'CHU_3330',    # CHU-only frequency (3.33 MHz)
+    'CHU_7850',    # CHU-only frequency (7.85 MHz)
+    'CHU_14670',   # CHU-only frequency (14.67 MHz)
+    'WWV_20000',   # WWV-only frequency (20 MHz)
+    'WWV_25000',   # WWV-only frequency (25 MHz)
 }
 
 # Minimum light-speed propagation delays (ms) - signals CANNOT arrive before these
