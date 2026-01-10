@@ -1714,8 +1714,22 @@ class Phase2TemporalEngine:
                 # Update result with authoritative probabilistic decision
                 old_station = result.dominant_station
                 
-                # Map Probabilistic 'UNCERTAIN' to Legacy 'BALANCED'
-                if prob_result.station == 'UNCERTAIN':
+                # CRITICAL FIX: Do NOT override tone-based discrimination
+                # The 1000/1200 Hz tone frequency is definitive evidence:
+                # - 1000 Hz = WWV (unambiguous)
+                # - 1200 Hz = WWVH (unambiguous)
+                # Probabilistic models should only be used when tone evidence is weak/uncertain
+                tone_based_discrimination = (old_station in ('WWV', 'WWVH') and 
+                                            result.station_confidence in ('high', 'medium'))
+                
+                if tone_based_discrimination:
+                    # Trust the tone-based discrimination, don't override
+                    logger.debug(
+                        f"Preserving tone-based discrimination: {old_station} "
+                        f"(tone confidence: {result.station_confidence}, "
+                        f"probabilistic would suggest: {prob_result.station})"
+                    )
+                elif prob_result.station == 'UNCERTAIN':
                     result.dominant_station = 'BALANCED'
                 else:
                     result.dominant_station = prob_result.station
