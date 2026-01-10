@@ -2496,11 +2496,16 @@ class MultiBroadcastFusion:
         measurement_uncertainty = max(uncertainty_floor, measurement_uncertainty)
         
         # CRITICAL FIX (2026-01-10): Gate Kalman updates with measurement quality check
-        # Don't update Kalman with extremely noisy measurements (uncertainty >5ms)
-        # This prevents the filter from chasing propagation noise instead of tracking real offset
-        if measurement_uncertainty > 5.0:
+        # Two-tier gating: relaxed during bootstrap, strict during operational
+        # Bootstrap: Allow up to 10ms uncertainty to learn baseline with moderate signals
+        # Operational: Only 5ms to maintain stable baseline and resist chasing noise
+        uncertainty_threshold = 10.0 if not self.kalman_converged else 5.0
+        
+        if measurement_uncertainty > uncertainty_threshold:
+            phase = "bootstrap" if not self.kalman_converged else "operational"
             logger.warning(
-                f"Skipping Kalman update: measurement uncertainty too high ({measurement_uncertainty:.2f}ms > 5ms). "
+                f"Skipping Kalman update ({phase}): measurement uncertainty too high "
+                f"({measurement_uncertainty:.2f}ms > {uncertainty_threshold}ms threshold). "
                 f"Using previous Kalman state to maintain stable baseline offset."
             )
             # Use previous Kalman uncertainty instead of updating
