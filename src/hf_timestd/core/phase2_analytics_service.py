@@ -279,6 +279,11 @@ class Phase2AnalyticsService:
         self.tec_estimator = TECEstimator(high_precision_mode=True)
         logger.info("Initialized TEC estimator for ionospheric analysis")
         
+        # RTP-to-Unix time offset (learned from metadata)
+        # This is critical for accurate timing - converts RTP timestamps to actual UTC
+        self._rtp_to_unix_offset = None
+        self._offset_samples = []
+        
         # ====================================================================
         # HDF5 Data Product Writers (Parallel with CSV)
         # ====================================================================
@@ -1572,14 +1577,39 @@ class Phase2AnalyticsService:
                 padded[:len(iq_samples)] = iq_samples
                 iq_samples = padded
             
-            system_time = float(target_minute)
-            # Use actual RTP timestamp from metadata, not synthesized from Unix time
+            # CRITICAL FIX (2026-01-10): Calculate actual Unix time from RTP timestamp
+            # Previous code used minute boundary (target_minute), which created 20-30ms systematic offset
+            # because buffers don't start exactly at :00.000
             if json_path.exists() and 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
+                
+                # Learn RTP-to-Unix offset from metadata if available
+                if self._rtp_to_unix_offset is None and len(self._offset_samples) < 10:
+                    # Calculate offset: unix_time = rtp_timestamp / sample_rate + offset
+                    # We know the buffer is for target_minute, so use that as reference
+                    inst_offset = target_minute - (rtp_timestamp / self.sample_rate)
+                    self._offset_samples.append(inst_offset)
+                    
+                    if len(self._offset_samples) >= 10:
+                        # Average over 10 samples to reduce jitter
+                        self._rtp_to_unix_offset = sum(self._offset_samples) / len(self._offset_samples)
+                        logger.info(f"RTP-to-Unix offset established: {self._rtp_to_unix_offset:.6f}s")
+                    else:
+                        # Use first sample immediately for processing
+                        self._rtp_to_unix_offset = inst_offset
+                
+                # Convert RTP timestamp to Unix time using the established offset
+                # This gives us the ACTUAL time of the first sample, not the idealized minute boundary
+                if self._rtp_to_unix_offset is not None:
+                    system_time = rtp_timestamp / self.sample_rate + self._rtp_to_unix_offset
+                else:
+                    # Fallback during initialization
+                    system_time = float(target_minute)
             else:
-                # Fallback: synthesize from Unix time (less accurate)
+                # Fallback: use minute boundary (less accurate, but better than nothing)
+                system_time = float(target_minute)
                 rtp_timestamp = int(target_minute * self.sample_rate)
-                logger.warning(f"No RTP timestamp in metadata, using synthesized value")
+                logger.warning(f"No RTP timestamp in metadata, using minute boundary as fallback")
             
             logger.debug(f"Read {len(iq_samples)} samples from binary for minute {target_minute}")
             return iq_samples, system_time, rtp_timestamp
