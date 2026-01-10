@@ -510,6 +510,16 @@ class MultiBroadcastFusion:
         self.kalman_initialized = False
         self.kalman_n_updates = 0
         
+        # Two-tier Kalman approach (2026-01-10)
+        # Tier 1: Fast measurements (every 8s) - record variations, don't adjust baseline
+        # Tier 2: Slow adjustments (detect persistent drift) - only adjust if GPSDO drifting
+        self.kalman_converged = False  # True after ~50 updates (~7 minutes)
+        self.kalman_convergence_threshold = 50  # Updates needed for convergence
+        self.measurement_window = []  # Recent measurements for drift detection
+        self.measurement_window_size = 30  # 30 measurements = ~4 minutes
+        self.last_baseline_adjustment = 0.0  # Timestamp of last adjustment
+        self.baseline_adjustment_interval = 600.0  # Minimum 10 minutes between adjustments
+        
         # Allan deviation tracker for real-time stability monitoring
         self.adev_tracker = AllanDeviationTracker(max_samples=86400)  # 24h history
         self.adev_tau_values = [10, 100, 1000, 10000]  # Standard tau values (seconds)
@@ -1755,18 +1765,23 @@ class MultiBroadcastFusion:
     
     def _kalman_update(self, measurement: float, measurement_uncertainty: float) -> float:
         """
-        Update Kalman filter with new measurement and return converged uncertainty.
+        Two-tier Kalman filter for stable baseline maintenance.
         
-        Uses a simple offset+drift model:
-            State: [d_clock_offset, drift_rate]
-            
-        The uncertainty converges over time as more measurements are incorporated.
+        TIER 1 (Bootstrap): Learn the baseline offset from measurements
+        - Active for first ~50 updates (~7 minutes)
+        - Normal Kalman updates to converge to true offset
+        - High process noise to resist chasing individual variations
         
-        This implements a 1D Kalman filter for tracking D_clock offset.
-        The process noise accounts for clock drift and environmental changes.
+        TIER 2 (Operational): Maintain stable baseline, detect real drift
+        - Active after convergence
+        - Only adjust baseline if persistent drift detected
+        - Measurements recorded for science, not used to chase variations
+        - GPSDO is the "steel ruler" - it doesn't drift significantly
         
-        CRITICAL FIX (P2.3): Added state bounds to prevent divergence.
-        If state exceeds ±10ms, filter is reset to prevent runaway.
+        Philosophy: After bootstrap, the baseline offset should be rock solid.
+        Individual broadcast appearances/disappearances should not jerk the offset.
+        Measurement variations are ionospheric effects (the science signal), not
+        clock drift (which the GPSDO prevents).
         
         Args:
             measurement: Current fused D_clock measurement (ms)
@@ -1822,8 +1837,17 @@ class MultiBroadcastFusion:
         self.kalman_state = x_pred + K.flatten() * y
         self.kalman_P = (np.eye(2) - K @ H) @ P_pred
         
-        # Increment update counter
+        # Increment update counter and check convergence
         self.kalman_n_updates += 1
+        
+        # Check if we've converged (transitioned from bootstrap to operational)
+        if not self.kalman_converged and self.kalman_n_updates >= self.kalman_convergence_threshold:
+            self.kalman_converged = True
+            logger.info(
+                f"Kalman filter CONVERGED after {self.kalman_n_updates} updates. "
+                f"Baseline offset: {self.kalman_state[0]:.3f}ms. "
+                f"Transitioning to operational mode: baseline will only adjust on detected drift."
+            )
         
         # CRITICAL FIX (2026-01-10): Relaxed divergence bounds and better recovery
         # If state has diverged beyond ±20ms, reset the filter
@@ -1839,6 +1863,58 @@ class MultiBroadcastFusion:
             self.kalman_P = np.array([[10.0, 0.0], [0.0, 1.0]])  # Lower uncertainty for faster convergence
             self.kalman_n_updates = 1
             return measurement_uncertainty  # Return measurement uncertainty, not inf of offset variance)
+        
+        # TIER 2: Operational mode - maintain stable baseline
+        if self.kalman_converged:
+            # Add measurement to window for drift detection
+            self.measurement_window.append({
+                'timestamp': time.time(),
+                'measurement': measurement,
+                'uncertainty': measurement_uncertainty,
+                'kalman_state': self.kalman_state[0]
+            })
+            
+            # Keep window size limited
+            if len(self.measurement_window) > self.measurement_window_size:
+                self.measurement_window.pop(0)
+            
+            # Detect persistent drift (measurements consistently different from baseline)
+            if len(self.measurement_window) >= self.measurement_window_size:
+                recent_measurements = [m['measurement'] for m in self.measurement_window]
+                recent_mean = np.mean(recent_measurements)
+                recent_std = np.std(recent_measurements)
+                baseline = self.kalman_state[0]
+                
+                # Check if measurements persistently deviate from baseline
+                deviation = abs(recent_mean - baseline)
+                
+                # Only adjust if:
+                # 1. Deviation is significant (>1ms)
+                # 2. Deviation is consistent (std < 2ms indicates not just noise)
+                # 3. Enough time has passed since last adjustment (>10 minutes)
+                current_time = time.time()
+                time_since_adjustment = current_time - self.last_baseline_adjustment
+                
+                if (deviation > 1.0 and 
+                    recent_std < 2.0 and 
+                    time_since_adjustment > self.baseline_adjustment_interval):
+                    
+                    logger.warning(
+                        f"DRIFT DETECTED: Measurements persistently deviate from baseline by {deviation:.2f}ms. "
+                        f"Baseline: {baseline:.3f}ms, Recent mean: {recent_mean:.3f}ms (σ={recent_std:.2f}ms). "
+                        f"Adjusting baseline to track real GPSDO drift."
+                    )
+                    self.last_baseline_adjustment = current_time
+                    # Allow the Kalman update to proceed (already done above)
+                else:
+                    # No drift detected - maintain stable baseline
+                    # Don't log every cycle, only periodically
+                    if self.kalman_n_updates % 100 == 0:
+                        logger.debug(
+                            f"Baseline stable: {baseline:.3f}ms. "
+                            f"Recent measurements: {recent_mean:.3f}ms ± {recent_std:.2f}ms. "
+                            f"No adjustment needed (deviation={deviation:.2f}ms)."
+                        )
         
         # Return uncertainty (sqrt of offset variance)
         kalman_uncertainty = np.sqrt(self.kalman_P[0, 0])
