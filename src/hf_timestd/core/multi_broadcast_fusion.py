@@ -279,6 +279,9 @@ class FusedResult:
     statistical_uncertainty_ms: float = 0.0      # Measurement scatter (weighted std)
     systematic_uncertainty_ms: float = 0.0       # Calibration convergence error
     propagation_uncertainty_ms: float = 0.0      # Mode-dependent ionospheric variability
+    
+    # Validation flags (CRITICAL FIX 2026-01-10)
+    single_station_mode: bool = False            # True if only one station available (no cross-validation)
 
 
 class AllanDeviationTracker:
@@ -1663,8 +1666,22 @@ class MultiBroadcastFusion:
         
         Per-broadcast calibration learns these offsets to bring each broadcast's
         D_clock to 0 (UTC alignment).
+        
+        CRITICAL FIX (2026-01-10): Check GPSDO lock status before updating calibration.
+        If any measurement has unlocked GPSDO, skip calibration update to prevent
+        absorbing clock drift into systematic offset estimates.
         """
         if not self.auto_calibrate:
+            return
+        
+        # CRITICAL FIX: Check GPSDO lock status
+        # If any measurement has unlocked GPSDO, skip calibration update
+        n_unlocked = sum(1 for m in measurements if hasattr(m, 'gpsdo_locked') and not m.gpsdo_locked)
+        if n_unlocked > 0:
+            logger.warning(
+                f"Skipping calibration update: {n_unlocked}/{len(measurements)} measurements "
+                f"have unlocked GPSDO (risk of absorbing clock drift)"
+            )
             return
         
         # Add to history keyed by broadcast (station + frequency)
@@ -2524,6 +2541,22 @@ class MultiBroadcastFusion:
         # Final uncertainty is the Kalman-filtered combined uncertainty
         uncertainty = kalman_uncertainty
         
+        # ====================================================================
+        # SINGLE-STATION MODE SAFEGUARDS (CRITICAL FIX 2026-01-10)
+        # ====================================================================
+        # Single-station mode (n_stations == 1) has no cross-validation capability.
+        # Systematic errors cannot be detected. Inflate uncertainty to reflect this.
+        single_station_mode = len(stations) == 1
+        if single_station_mode:
+            # Inflate uncertainty by 5x to reflect lack of validation
+            # This is conservative but scientifically honest
+            uncertainty *= 5.0
+            logger.warning(
+                f"SINGLE-STATION MODE: Only {list(stations)[0]} available. "
+                f"Uncertainty inflated to {uncertainty:.2f}ms (no cross-validation possible). "
+                f"Scientific data quality is UNVALIDATED."
+            )
+        
         # Quality grade based on number of broadcasts and uncertainty
         if len(measurements) >= 8 and uncertainty < 0.5:
             grade = 'A'
@@ -2565,7 +2598,9 @@ class MultiBroadcastFusion:
             # Uncertainty budget components
             statistical_uncertainty_ms=statistical_uncertainty,
             systematic_uncertainty_ms=systematic_uncertainty,
-            propagation_uncertainty_ms=propagation_uncertainty
+            propagation_uncertainty_ms=propagation_uncertainty,
+            # Validation flags (CRITICAL FIX 2026-01-10)
+            single_station_mode=single_station_mode
         )
         
         # Track measurement for Allan deviation calculation
@@ -2684,7 +2719,8 @@ class MultiBroadcastFusion:
                 quality_grade=FusionQualityGrade(result.quality_grade),
                 kalman_state=FusionKalmanState(kalman_state),
                 quality_flag=FusionQualityFlag(quality_flag),
-                processing_version='3.2.0'
+                processing_version='3.2.0',
+                single_station_mode=bool(result.single_station_mode)
             )
             
             # Write to HDF5 with schema validation
@@ -3025,20 +3061,37 @@ def run_fusion_service(
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
                 # Write directly to Chrony SHM (fusion runs at chrony poll rate)
-                # CRITICAL FIX (2026-01-08): Stricter feed criteria to eliminate discontinuities
-                # Only feed high-quality, multi-station, consistent measurements
+                # CRITICAL FIX (2026-01-10): STRICTER feed criteria for scientific integrity
+                # Only feed validated, multi-station measurements to prevent contamination
                 if chrony_shm:
                     # Check quality criteria
-                    # Check quality criteria
-                    quality_ok = result.quality_grade in ('A', 'B', 'C', 'D')  # Allow all grades during bootstrap
-                    multi_station = result.n_stations >= 1  # Allow single station (e.g. only 10MHz visible)
+                    quality_ok = result.quality_grade in ('A', 'B', 'C')  # Exclude grade D
                     
-                    # CRITICAL FIX (2026-01-08): Relax consistency check
-                    # INTER_ANOMALY means "stations disagree slightly due to ionospheric variations"
-                    # CROSS_STATION_DISAGREE is similar - expected ionospheric variations
-                    # This is EXPECTED and VALID - it's the science we're studying!
-                    # Only reject if there's a fundamental problem (discrimination failure, etc.)
-                    consistent = result.consistency_flag in ('OK', 'INTER_ANOMALY', 'CROSS_STATION_DISAGREE')
+                    # CRITICAL FIX (2026-01-10): Require multi-station for validation
+                    # Single-station mode has no cross-validation, cannot detect systematic errors
+                    multi_station = result.n_stations >= 2  # Require at least 2 stations
+                    
+                    # CRITICAL FIX (2026-01-10): Stricter consistency criteria
+                    # For scientific temporal accuracy, we must distinguish:
+                    # - Physical ionospheric variation (the signal we want to measure)
+                    # - Measurement errors (the noise we want to reject)
+                    #
+                    # Only feed measurements where stations agree (OK) or have low-uncertainty
+                    # disagreement that's clearly ionospheric (INTER_ANOMALY with <0.5ms uncertainty)
+                    if result.consistency_flag == 'OK':
+                        consistent = True
+                    elif result.consistency_flag == 'INTER_ANOMALY' and result.uncertainty_ms < 0.5:
+                        # Allow INTER_ANOMALY only if uncertainty is very low
+                        # This indicates well-characterized ionospheric variation
+                        consistent = True
+                        logger.debug(
+                            f"Chrony feed: Accepting INTER_ANOMALY with low uncertainty "
+                            f"({result.uncertainty_ms:.3f}ms < 0.5ms threshold)"
+                        )
+                    else:
+                        # Reject CROSS_STATION_DISAGREE and high-uncertainty INTER_ANOMALY
+                        # These indicate potential systematic errors
+                        consistent = False
                     
                     # Discontinuity filter: reject large jumps (>3ms)
                     global last_chrony_d_clock
@@ -3084,13 +3137,23 @@ def run_fusion_service(
                         if not quality_ok:
                             reasons.append(f"grade={result.quality_grade}")
                         if not multi_station:
-                            reasons.append(f"n_stations={result.n_stations}")
+                            reasons.append(f"n_stations={result.n_stations} (need >=2)")
                         if not consistent:
-                            reasons.append(f"consistency={result.consistency_flag}")
+                            if result.consistency_flag == 'INTER_ANOMALY':
+                                reasons.append(f"consistency={result.consistency_flag} with uncertainty={result.uncertainty_ms:.3f}ms (>0.5ms)")
+                            else:
+                                reasons.append(f"consistency={result.consistency_flag}")
                         if not discontinuity_ok:
                             reasons.append("discontinuity")
                         
-                        logger.debug(f"Chrony feed skipped: {', '.join(reasons)}")
+                        if result.single_station_mode:
+                            logger.info(
+                                f"Chrony feed DISABLED in single-station mode: "
+                                f"No cross-validation possible, systematic errors undetectable. "
+                                f"Using NTP for clock discipline."
+                            )
+                        else:
+                            logger.debug(f"Chrony feed skipped: {', '.join(reasons)}")
 
             # BREADCRUMB: Sleeping
             loop_duration = time.time() - loop_start_time

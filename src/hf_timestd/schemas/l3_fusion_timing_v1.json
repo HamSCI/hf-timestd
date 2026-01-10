@@ -283,6 +283,12 @@
             "type": "string",
             "required": true,
             "description": "Fusion engine version"
+        },
+        {
+            "name": "single_station_mode",
+            "type": "boolean",
+            "required": true,
+            "description": "True if only one station available (no cross-validation possible, systematic errors undetectable)"
         }
     ],
     "quality_grades": {

@@ -85,6 +85,7 @@ class L3FusionTiming(BaseModel):
     kalman_state: FusionKalmanState
     quality_flag: FusionQualityFlag
     processing_version: str
+    single_station_mode: bool = Field(..., description="True if only one station available (no cross-validation)")
 
     class Config:
         use_enum_values = True
