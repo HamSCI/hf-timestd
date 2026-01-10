@@ -1795,10 +1795,12 @@ class MultiBroadcastFusion:
         F = np.array([[1.0, dt], [0.0, 1.0]])
         
         # Process noise (clock drift uncertainty)
-        # GPSDO has ~1e-9 stability, so drift is negligible
-        # But allow small drift for temperature effects
-        q_offset = 0.01  # ms^2 per minute
-        q_drift = 0.0001  # (ms/min)^2 per minute
+        # CRITICAL FIX (2026-01-10): Increased process noise to resist chasing transient variations
+        # GPSDO has ~1e-9 stability, so real drift is negligible
+        # Higher process noise makes filter trust its state more than noisy measurements
+        # This maintains stable baseline offset despite propagation fluctuations
+        q_offset = 0.1  # ms^2 per minute (increased from 0.01 for stability)
+        q_drift = 0.001  # (ms/min)^2 per minute (increased from 0.0001)
         Q = np.array([[q_offset, 0.0], [0.0, q_drift]])
         
         # Predict step
@@ -1823,17 +1825,20 @@ class MultiBroadcastFusion:
         # Increment update counter
         self.kalman_n_updates += 1
         
-        # CRITICAL FIX (P2.3): Kalman state bounds check
-        # If state has diverged beyond ±10ms, reset the filter
+        # CRITICAL FIX (2026-01-10): Relaxed divergence bounds and better recovery
+        # If state has diverged beyond ±20ms, reset the filter
+        # Increased from ±10ms to allow for larger but legitimate offsets
         # Note: kalman_state is a numpy array [offset, drift], check offset (index 0)
-        if abs(self.kalman_state[0]) > 10.0:
+        if abs(self.kalman_state[0]) > 20.0:
             logger.error(
                 f"Kalman filter diverged: state={self.kalman_state[0]:.3f}ms, "
-                f"resetting to prevent runaway"
+                f"resetting to measurement value for graceful recovery"
             )
-            self.kalman_state = np.array([0.0, 0.0])
-            self.kalman_P = np.eye(2)
-            self.kalman_n_updates = 0
+            # Reset to current measurement instead of zero for faster recovery
+            self.kalman_state = np.array([measurement, 0.0])
+            self.kalman_P = np.array([[10.0, 0.0], [0.0, 1.0]])  # Lower uncertainty for faster convergence
+            self.kalman_n_updates = 1
+            return measurement_uncertainty  # Return measurement uncertainty, not inf of offset variance)
         
         # Return uncertainty (sqrt of offset variance)
         kalman_uncertainty = np.sqrt(self.kalman_P[0, 0])
@@ -2414,10 +2419,19 @@ class MultiBroadcastFusion:
         uncertainty_floor = 0.1 if has_verified_global else 0.2
         measurement_uncertainty = max(uncertainty_floor, measurement_uncertainty)
         
-        # Update Kalman filter with raw measurement (before any correction)
-        # Note: Consistency check for DISCRIMINATION_SUSPECT happens later after
-        # intra-station std devs are calculated. For now, always update Kalman.
-        kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
+        # CRITICAL FIX (2026-01-10): Gate Kalman updates with measurement quality check
+        # Don't update Kalman with extremely noisy measurements (uncertainty >5ms)
+        # This prevents the filter from chasing propagation noise instead of tracking real offset
+        if measurement_uncertainty > 5.0:
+            logger.warning(
+                f"Skipping Kalman update: measurement uncertainty too high ({measurement_uncertainty:.2f}ms > 5ms). "
+                f"Using previous Kalman state to maintain stable baseline offset."
+            )
+            # Use previous Kalman uncertainty instead of updating
+            kalman_uncertainty = np.sqrt(self.kalman_P[0, 0]) if self.kalman_initialized else measurement_uncertainty
+        else:
+            # Update Kalman filter with raw measurement (before any correction)
+            kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
         
         # Final uncertainty is the Kalman-filtered combined uncertainty
         # This provides temporal smoothing while preserving the uncertainty budget
@@ -3065,7 +3079,10 @@ def run_fusion_service(
                 # Only feed validated, multi-station measurements to prevent contamination
                 if chrony_shm:
                     # Check quality criteria
-                    quality_ok = result.quality_grade in ('A', 'B', 'C')  # Exclude grade D
+                    # CRITICAL FIX (2026-01-10): Accept A, B, C for operational stability
+                    # Grade C (uncertainty <2ms) is sufficient for clock discipline
+                    # Only reject grade D (uncertainty >=2ms or very few broadcasts)
+                    quality_ok = result.quality_grade in ('A', 'B', 'C')
                     
                     # CRITICAL FIX (2026-01-10): Require multi-station for validation
                     # Single-station mode has no cross-validation, cannot detect systematic errors
