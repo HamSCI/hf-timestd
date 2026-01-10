@@ -1301,6 +1301,10 @@ class TimingCalibrator:
                     f"🎯 Global RTP offset established from anchor {channel_name}: "
                     f"{rtp_offset} samples (SNR={snr_db:.1f}dB)"
                 )
+                # CRITICAL: Save state immediately to persist global offset
+                # This prevents other processes from using stale per-channel offsets
+                self._save_state()
+                logger.info(f"Saved global RTP offset to state file")
             else:
                 # Verify consistency with existing global offset
                 offset_diff = abs(rtp_offset - self.global_rtp_offset)
