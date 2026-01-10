@@ -605,11 +605,13 @@ class PipelineOrchestrator:
                 
                 # Phase 2: Generate D_clock measurement
                 try:
-                    measurement = self.clock_offset_engine.process_minute(
-                        iq_samples=samples,
-                        system_time=system_time,
-                        rtp_timestamp=rtp_timestamp
-                    )
+                    measurement = None
+                    if self.clock_offset_engine:
+                        measurement = self.clock_offset_engine.process_minute(
+                            iq_samples=samples,
+                            system_time=system_time,
+                            rtp_timestamp=rtp_timestamp
+                        )
                     
                     if measurement:
                         self.stats['minutes_analyzed'] += 1

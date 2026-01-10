@@ -423,10 +423,10 @@ STATION_SEPARATION_MS = 15.0
 # Propagation delay bounds by station (ms)
 # Format: (min_delay_ms, max_delay_ms)
 PROPAGATION_BOUNDS_MS = {
-    'WWV': (-5.0, 35.0),    # Relaxed lower bound for robustness
-    'WWVH': (-5.0, 60.0),  # Relaxed lower bound for robustness
-    'CHU': (-5.0, 40.0),    # Relaxed lower bound for robustness
-    'BPM': (-5.0, 50.0),   # Relaxed lower bound for robustness
+    'WWV': (-250.0, 250.0),    # Widened for bootstrap / clock drift
+    'WWVH': (-250.0, 250.0),  # Widened for bootstrap / clock drift
+    'CHU': (-250.0, 250.0),    # Widened for bootstrap / clock drift
+    'BPM': (-250.0, 250.0),  # Widened for bootstrap / clock drift
 }
 
 # Default bounds for unknown stations

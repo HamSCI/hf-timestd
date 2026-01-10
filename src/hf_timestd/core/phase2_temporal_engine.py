@@ -1076,7 +1076,7 @@ class Phase2TemporalEngine:
         wwv_det = None
         wwvh_det = None
         chu_det = None
-        bpm_det = None
+        bpm_det_from_tone = None
         
         if detections:
             from ..interfaces.data_models import StationType
@@ -1087,6 +1087,8 @@ class Phase2TemporalEngine:
                     wwvh_det = det
                 elif det.station == StationType.CHU:
                     chu_det = det
+                elif det.station == StationType.BPM:
+                    bpm_det_from_tone = det
         
         
         # Record detection results for adaptive window tracking
@@ -1151,7 +1153,8 @@ class Phase2TemporalEngine:
         tone_detections = {
             'wwv': wwv_det,
             'wwvh': wwvh_det,
-            'chu': chu_det
+            'chu': chu_det,
+            'bpm': bpm_det_from_tone
         }
         
         multi_station_result = self.multi_station_detector.process_detections(
@@ -1226,12 +1229,12 @@ class Phase2TemporalEngine:
             wwv_detected=wwv_det is not None or wwv_timing_from_multi is not None,
             wwvh_detected=wwvh_det is not None or wwvh_timing_from_multi is not None,
             chu_detected=chu_det is not None or chu_timing_from_multi is not None,
-            bpm_detected=bpm_det is not None,
+            bpm_detected=bpm_det is not None or bpm_det_from_tone is not None,
             # Use multi-station detector results if available, otherwise fall back to individual detectors
             wwv_snr_db=wwv_snr_from_multi if wwv_snr_from_multi is not None else (wwv_det.snr_db if wwv_det else None),
             wwvh_snr_db=wwvh_snr_from_multi if wwvh_snr_from_multi is not None else (wwvh_det.snr_db if wwvh_det else None),
             chu_snr_db=chu_snr_from_multi if chu_snr_from_multi is not None else (chu_det.snr_db if chu_det else None),
-            bpm_snr_db=bpm_det.snr_db if bpm_det else None,
+            bpm_snr_db=multi_station_result.detections.get('BPM', None).snr_db if multi_station_result.detections.get('BPM') and multi_station_result.detections['BPM'].detected else (bpm_det.snr_db if bpm_det else None),
             wwv_timing_ms=wwv_timing_from_multi if wwv_timing_from_multi is not None else (wwv_det.timing_error_ms if wwv_det else None),
             wwvh_timing_ms=wwvh_timing_from_multi if wwvh_timing_from_multi is not None else (wwvh_det.timing_error_ms if wwvh_det else None),
             chu_timing_ms=chu_timing_from_multi if chu_timing_from_multi is not None else (chu_det.timing_error_ms if chu_det else None),

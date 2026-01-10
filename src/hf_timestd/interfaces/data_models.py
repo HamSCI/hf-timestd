@@ -394,10 +394,12 @@ class StationType(Enum):
     Critical distinction:
     - WWV (Fort Collins) and CHU (Ottawa): 1000 Hz tone, used for time_snap
     - WWVH (Hawaii): 1200 Hz tone, used ONLY for propagation analysis
+    - BPM (Pucheng, China): 1000 Hz tone, shared frequency with WWV
     """
     WWV = "WWV"      # NIST Fort Collins, CO (1000 Hz) - TIME_SNAP SOURCE
     WWVH = "WWVH"    # NIST Hawaii (1200 Hz) - PROPAGATION STUDY ONLY
     CHU = "CHU"      # NRC Ottawa, Canada (1000 Hz) - TIME_SNAP SOURCE
+    BPM = "BPM"      # NTSC Pucheng, China (1000 Hz) - PROPAGATION STUDY
 
 
 @dataclass(frozen=True)

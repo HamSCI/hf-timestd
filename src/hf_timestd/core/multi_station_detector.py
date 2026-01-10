@@ -434,14 +434,24 @@ class MultiStationDetector:
         
         station_key = station.lower()
         
-        if station == 'BPM' and bpm_detection is not None:
-            # BPM uses separate discriminator
-            detected = bpm_detection.is_bpm_detected
-            snr_db = bpm_detection.snr_db
-            confidence = bpm_detection.confidence
-            measured_toa_ms = bpm_detection.measured_delay_ms or expected_delay
-            tick_duration_ms = bpm_detection.tick_duration_ms
-            usable = bpm_detection.is_usable_for_utc
+        if station == 'BPM':
+            # Check both discriminator and tone detector
+            if bpm_detection is not None and bpm_detection.is_bpm_detected:
+                # Use discriminator result (usually higher confidence due to tick matching)
+                detected = True
+                snr_db = bpm_detection.snr_db
+                confidence = bpm_detection.confidence
+                measured_toa_ms = bpm_detection.measured_delay_ms or expected_delay
+                tick_duration_ms = bpm_detection.tick_duration_ms
+                usable = bpm_detection.is_usable_for_utc
+            elif 'bpm' in tone_detections and tone_detections['bpm'] is not None:
+                # Fall back to matched filter tone detection (Stage 1)
+                det = tone_detections['bpm']
+                detected = True
+                snr_db = getattr(det, 'snr_db', 0.0) or 0.0
+                confidence = getattr(det, 'confidence', 0.0) or 0.0
+                measured_toa_ms = getattr(det, 'timing_error_ms', 0.0) or 0.0
+                usable = True  # We consider it usable for now
         elif station_key in tone_detections and tone_detections[station_key] is not None:
             det = tone_detections[station_key]
             detected = True

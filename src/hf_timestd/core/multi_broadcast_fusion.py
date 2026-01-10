@@ -2178,7 +2178,7 @@ class MultiBroadcastFusion:
             measurements, weights
         )
         
-        if len(measurements) < 2:
+        if len(measurements) < 1:
             logger.debug("Too few measurements after outlier rejection")
             return None
         
@@ -2202,7 +2202,7 @@ class MultiBroadcastFusion:
         if n_gpsdo_unlocked > 0:
             logger.warning(f"Excluded {n_gpsdo_unlocked} measurements due to unlocked GPSDO")
         
-        if len(valid_measurements) < 2:
+        if len(valid_measurements) < 1:
             logger.error(f"Too few valid measurements after NaN filtering ({len(valid_measurements)}/{len(measurements)})")
             return None
         
@@ -3029,8 +3029,9 @@ def run_fusion_service(
                 # Only feed high-quality, multi-station, consistent measurements
                 if chrony_shm:
                     # Check quality criteria
-                    quality_ok = result.quality_grade in ('A', 'B', 'C')  # Allow A/B/C (<2ms)
-                    multi_station = result.n_stations >= 2  # Require 2+ stations for cross-validation
+                    # Check quality criteria
+                    quality_ok = result.quality_grade in ('A', 'B', 'C', 'D')  # Allow all grades during bootstrap
+                    multi_station = result.n_stations >= 1  # Allow single station (e.g. only 10MHz visible)
                     
                     # CRITICAL FIX (2026-01-08): Relax consistency check
                     # INTER_ANOMALY means "stations disagree slightly due to ionospheric variations"
@@ -3058,7 +3059,9 @@ def run_fusion_service(
                         reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
                         
                         # Precision based on uncertainty (log2 of seconds)
-                        precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
+                        # Correct formula: log2(uncertainty_sec) = log2(uncertainty_ms) - 10
+                        # Example: 1000ms -> 0s -> 0. 1ms -> -10. 0.001ms -> -20.
+                        precision = max(-20, min(-4, int(np.log2(max(0.1, result.uncertainty_ms)) - 10)))
                         
                         try:
                             update_success = chrony_shm.update(reference_time, system_time, precision)

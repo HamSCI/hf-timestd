@@ -301,16 +301,20 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             self.templates[StationType.CHU] = self._create_template(1000, 0.5)
         else:
             # WWV frequencies: 2.5, 5, 10, 15, 20, 25 MHz
+            # WWV frequencies: 2.5, 5, 10, 15, 20, 25 MHz
             # Always detect WWV 1000 Hz tone
+            # Revert to 0.8s template to detect the strong Minute Tone
             self.templates[StationType.WWV] = self._create_template(1000, 0.8)
             
-            # WWVH only broadcasts on 2.5, 5, 10, 15 MHz (NOT on 20 or 25 MHz)
-            wwvh_frequencies = [2.5, 5.0, 10.0, 15.0]
-            if self.channel_frequency_mhz in wwvh_frequencies:
+            # WWVH and BPM only broadcast on 2.5, 5, 10, 15 MHz (NOT on 20 or 25 MHz)
+            shared_frequencies = [2.5, 5.0, 10.0, 15.0]
+            if self.channel_frequency_mhz in shared_frequencies:
                 self.templates[StationType.WWVH] = self._create_template(1200, 0.8)
-                logger.info(f"{channel_name}: WWVH detection enabled (shared frequency)")
+                # BPM minute marker is 300ms at 1000Hz
+                self.templates[StationType.BPM] = self._create_template(1000, 0.3)
+                logger.info(f"{channel_name}: WWVH and BPM detection enabled (shared frequency)")
             else:
-                logger.info(f"{channel_name}: WWVH detection disabled (WWV-only frequency)")
+                logger.info(f"{channel_name}: WWVH/BPM detection disabled (WWV-only frequency)")
         
         # State tracking
         self.last_detections_by_minute: Dict[int, List[ToneDetectionResult]] = {}
@@ -321,7 +325,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         self.detection_stats: Dict[StationType, int] = {
             StationType.WWV: 0,
             StationType.WWVH: 0,
-            StationType.CHU: 0
+            StationType.CHU: 0,
+            StationType.BPM: 0
         }
         self.total_attempts = 0
         self.timing_errors: List[float] = []
@@ -333,6 +338,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         self.station_priorities: Dict[StationType, int] = {
             StationType.WWV: 100,   # Highest priority
             StationType.CHU: 50,    # Medium priority
+            StationType.BPM: 10,    # Low priority
             StationType.WWVH: 0     # Never used for time_snap
         }
         
@@ -392,20 +398,22 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         
         Args:
             frequency_hz: Tone frequency in Hz (1000 for WWV/CHU, 1200 for WWVH)
-            duration_sec: Tone duration in seconds (IGNORED - using optimal 100ms)
+            duration_sec: Tone duration in seconds (0.8s WWV, 0.5s CHU)
             
         Returns:
             dict containing:
                 'sin': In-phase template (unit energy)
                 'cos': Quadrature template (unit energy)
                 'frequency': Tone frequency (Hz)
-                'duration': Template duration (0.1s for edge detection)
+                'duration': Template duration
         """
-        # CRITICAL: Use 100ms template for optimal edge detection
-        # This is independent of the actual tone duration (500ms or 800ms)
-        optimal_duration_sec = 0.1  # 100ms = 100 cycles at 1000 Hz
+        # Restore full duration template for maximum detection sensitivity
+        # CRITICAL: Use provided duration (optimized by caller for Ticks vs Keys)
+        # WWV Ticks = 5ms, CHU Keys = 300ms+
+        optimal_duration_sec = duration_sec
         
         # Generate time vector
+
         n_samples = int(optimal_duration_sec * self.sample_rate)
         t = np.arange(n_samples) / self.sample_rate
         
@@ -993,10 +1001,41 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         frequency = template['frequency']
         duration = template['duration']
         
+        # PRE-FILTERING (Critical for detecting ticks in presence of audio)
+        # -------------------------------------------------------------
+        # The 600 Hz audio modulation (and 500 Hz) is much stronger than the
+        # 5ms tick pulses (1000/1200 Hz). The audio creates a high noise floor
+        # in the correlation output effectively burying the tick.
+        #
+        # Apply a bandpass filter centered on the tone frequency to reject
+        # the audio interference.
+        # Bandwidth: +/- 250 Hz (approx matched to 5ms pulse width spectrum)
+        # 1000 Hz -> [750, 1250] Hz (rejects 600 Hz)
+        
+        try:
+            bw = 250.0  # Hz
+            low = max(50, frequency - bw)
+            high = min(self.sample_rate / 2 - 50, frequency + bw)
+            
+            sos = scipy_signal.butter(
+                4, [low, high], btype='band', fs=self.sample_rate, output='sos'
+            )
+            # Use filtfilt for zero phase distortion (crucial for timing)
+            # Note: signal needs to be long enough, which it is (60s)
+            audio_signal_filtered = scipy_signal.sosfiltfilt(sos, audio_signal)
+            
+            # Use filtered signal for correlation
+            signal_to_correlate = audio_signal_filtered
+            logger.debug(f"Applied bandpass filter {low}-{high}Hz to signal")
+            
+        except Exception as e:
+            logger.warning(f"Pre-correlation filter failed: {e}, using raw signal")
+            signal_to_correlate = audio_signal
+
         # Perform quadrature correlation (phase-invariant)
         try:
-            corr_sin = correlate(audio_signal, template_sin, mode='valid')
-            corr_cos = correlate(audio_signal, template_cos, mode='valid')
+            corr_sin = scipy_signal.correlate(signal_to_correlate, template_sin, mode='valid')
+            corr_cos = scipy_signal.correlate(signal_to_correlate, template_cos, mode='valid')
         except ValueError as e:
             freq_str = f"{frequency}Hz" if frequency is not None else "??Hz"
             logger.warning(f"{station_type.value} @ {freq_str}: Correlation failed: {e}")

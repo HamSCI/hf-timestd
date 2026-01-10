@@ -127,16 +127,14 @@ REVISION HISTORY
 """
 
 import argparse
-import csv
 import json
 import logging
 import signal
-import sys
 import time
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from hf_timestd.models import (
     L2TimingMeasurement,
     L1ToneDetection,
@@ -253,60 +251,25 @@ class Phase2AnalyticsService:
         
         
         # CSV time series for carrier power (for power graphs)
+        # CSV time series for carrier power (for power graphs)
         self.carrier_power_dir = self.output_dir / 'carrier_power'
         self.carrier_power_dir.mkdir(parents=True, exist_ok=True)
-        self._init_carrier_power_csv()
         
         # ====================================================================
-        # Discrimination Method CSV Directories
+        # Discrimination Method Output Directories
         # ====================================================================
         
         # Tone detections (1000/1200 Hz timing tones)
         self.tone_detections_dir = self.output_dir / 'tone_detections'
         self.tone_detections_dir.mkdir(parents=True, exist_ok=True)
-        self._init_tone_detections_csv()
         
         # BCD discrimination (BCD correlation analysis)
         self.bcd_discrimination_dir = self.output_dir / 'bcd_discrimination'
         self.bcd_discrimination_dir.mkdir(parents=True, exist_ok=True)
-        self._init_bcd_discrimination_csv()
-        
-        # Doppler analysis
-        self.doppler_dir = self.output_dir / 'doppler'
-        self.doppler_dir.mkdir(parents=True, exist_ok=True)
-        self._init_doppler_csv()
-        
-        # Station ID (440 Hz voice ID + 500/600 Hz ground truth)
-        self.station_id_dir = self.output_dir / 'station_id_440hz'
-        self.station_id_dir.mkdir(parents=True, exist_ok=True)
-        self._init_station_id_csv()
         
         # Test signal (minutes 8 and 44)
         self.test_signal_dir = self.output_dir / 'test_signal'
         self.test_signal_dir.mkdir(parents=True, exist_ok=True)
-        self._init_test_signal_csv()
-        
-        # Discrimination summary (weighted voting result)
-        self.discrimination_dir = self.output_dir / 'discrimination'
-        self.discrimination_dir.mkdir(parents=True, exist_ok=True)
-        self._init_discrimination_csv()
-        
-        # Audio tone monitor (500/600 Hz + intermodulation)
-        self.audio_tones_dir = self.output_dir / 'audio_tones'
-        self.audio_tones_dir.mkdir(parents=True, exist_ok=True)
-        self._init_audio_tones_csv()
-        
-        # Transmission Time (UTC-NIST) - Phase 2 timing directory
-        # This feeds the Fusion / Transmission Time API
-        self.timing_dir = self.output_dir / 'timing'
-        self.timing_dir.mkdir(parents=True, exist_ok=True)
-        self._init_transmission_time_csv()
-        
-        # TEC Estimation - Ionospheric Total Electron Content
-        # Calculated from multi-frequency measurements when available
-        self.tec_dir = self.output_dir / 'tec'
-        self.tec_dir.mkdir(parents=True, exist_ok=True)
-        self._init_tec_csv()
         
         # Note: Decimation is not part of hf-timestd (timing-focused)
         # For decimated output, see separate projects
@@ -762,7 +725,7 @@ class Phase2AnalyticsService:
             # ================================================================
             if self.enable_hdf5_writes and self.hdf5_l2_writer:
                 try:
-                    from hf_timestd.io.uncertainty import ISOGUMCalculator, UncertaintyBudget
+                    from hf_timestd.io.uncertainty import ISOGUMCalculator
                     
                     # Early validation: Check required fields before building full dict
                     required_l2_fields = ['timestamp_utc', 'station', 'clock_offset_ms']
@@ -1064,19 +1027,7 @@ class Phase2AnalyticsService:
         except Exception as e:
             logger.error(f"Failed to write clock offset: {e}")
     
-    def _init_carrier_power_csv(self):
-        """Initialize carrier power CSV file for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        self.carrier_power_csv = self.carrier_power_dir / f'carrier_power_{today}.csv'
-        
-        if not self.carrier_power_csv.exists():
-            with open(self.carrier_power_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp', 'utc_time', 'power_db', 'snr_db',
-                    'wwv_tone_db', 'wwvh_tone_db', 'station', 'quality_grade'
-                ])
-            logger.info(f"Created carrier power CSV: {self.carrier_power_csv}")
+
     
     def _write_carrier_power(self, minute_boundary: int, power_db: float, snr_db: float,
                               wwv_tone_db: float = None, wwvh_tone_db: float = None,
@@ -1084,29 +1035,8 @@ class Phase2AnalyticsService:
                               channel_char = None):
         """Append carrier power measurement to daily CSV and HDF5 with channel characterization."""
         try:
-            # Ensure we're writing to today's file
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            expected_csv = self.carrier_power_dir / f'carrier_power_{today}.csv'
-            if self.carrier_power_csv != expected_csv:
-                self.carrier_power_csv = expected_csv
-                self._init_carrier_power_csv()
-            
-            with open(self.carrier_power_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                writer.writerow([
-                    minute_boundary,
-                    utc_time,
-                    round(power_db, 2) if power_db is not None and not (isinstance(power_db, float) and (np.isnan(power_db) or np.isinf(power_db))) else '',
-                    round(snr_db, 2) if snr_db is not None and not (isinstance(snr_db, float) and (np.isnan(snr_db) or np.isinf(snr_db))) else '',
-                    round(wwv_tone_db, 2) if wwv_tone_db is not None and not (isinstance(wwv_tone_db, float) and (np.isnan(wwv_tone_db) or np.isinf(wwv_tone_db))) else '',
-                    round(wwvh_tone_db, 2) if wwvh_tone_db is not None and not (isinstance(wwvh_tone_db, float) and (np.isnan(wwvh_tone_db) or np.isinf(wwvh_tone_db))) else '',
-                    station or '',
-                    quality_grade or ''
-                ])
-            
             # ================================================================
-            # Write to HDF5 (L1A Channel Observables) - Parallel with CSV
+            # Write to HDF5 (L1A Channel Observables) only
             # ================================================================
             if self.enable_hdf5_writes and self.hdf5_l1a_writer:
                 try:
@@ -1182,85 +1112,13 @@ class Phase2AnalyticsService:
         
         return f"{station}_{khz}"
     
-    def _init_tone_detections_csv(self):
-        """Initialize tone detections CSV for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.tone_detections_csv = self.tone_detections_dir / f'{file_channel}_tones_{today}.csv'
-        
-        if not self.tone_detections_csv.exists():
-            with open(self.tone_detections_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary',
-                    'wwv_detected', 'wwvh_detected', 'chu_detected', 'bpm_detected',
-                    'wwv_snr_db', 'wwvh_snr_db', 'chu_snr_db', 'bpm_snr_db', 
-                    'wwv_timing_ms', 'wwvh_timing_ms', 'chu_timing_ms', 'bpm_timing_ms',
-                    'anchor_station', 'anchor_confidence'
-                ])
-            logger.info(f"Created tone detections CSV: {self.tone_detections_csv}")
+
     
     def _write_tone_detections(self, minute_boundary: int, time_snap):
         """Write tone detection results from TimeSnapResult."""
         try:
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.tone_detections_dir / f'{file_channel}_tones_{today}.csv'
-            if self.tone_detections_csv != expected_csv:
-                self.tone_detections_csv = expected_csv
-                self._init_tone_detections_csv()
-
-            include_chu = False
-            try:
-                with open(self.tone_detections_csv, 'r', newline='') as f:
-                    reader = csv.reader(f)
-                    header = next(reader, [])
-                include_chu = 'chu_timing_ms' in header
-            except Exception:
-                include_chu = False
-            
-            # Write to CSV
-            with open(self.tone_detections_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                if include_chu:
-                    writer.writerow([
-                        utc_time,
-                        minute_boundary,
-                        1 if time_snap.wwv_detected else 0,
-                        1 if time_snap.wwvh_detected else 0,
-                        1 if getattr(time_snap, 'chu_detected', False) else 0,
-                        1 if time_snap.bpm_detected else 0,
-                        round(time_snap.wwv_snr_db, 2) if time_snap.wwv_snr_db else '',
-                        round(time_snap.wwvh_snr_db, 2) if time_snap.wwvh_snr_db else '',
-                        round(getattr(time_snap, 'chu_snr_db', None), 2) if getattr(time_snap, 'chu_snr_db', None) else '',
-                        round(time_snap.bpm_snr_db, 2) if time_snap.bpm_snr_db else '',
-                        round(time_snap.wwv_timing_ms, 3) if time_snap.wwv_timing_ms else '',
-                        round(time_snap.wwvh_timing_ms, 3) if time_snap.wwvh_timing_ms else '',
-                        round(getattr(time_snap, 'chu_timing_ms', None), 3) if getattr(time_snap, 'chu_timing_ms', None) else '',
-                        round(time_snap.bpm_timing_ms, 3) if time_snap.bpm_timing_ms else '',
-                        time_snap.anchor_station or '',
-                        round(time_snap.anchor_confidence, 3) if time_snap.anchor_confidence else ''
-                    ])
-                else:
-                    writer.writerow([
-                        utc_time,
-                        minute_boundary,
-                        1 if time_snap.wwv_detected else 0,
-                        1 if time_snap.wwvh_detected else 0,
-                        1 if time_snap.bpm_detected else 0,
-                        round(time_snap.wwv_snr_db, 2) if time_snap.wwv_snr_db else '',
-                        round(time_snap.wwvh_snr_db, 2) if time_snap.wwvh_snr_db else '',
-                        round(time_snap.bpm_snr_db, 2) if time_snap.bpm_snr_db else '',
-                        round(time_snap.wwv_timing_ms, 3) if time_snap.wwv_timing_ms else '',
-                        round(time_snap.wwvh_timing_ms, 3) if time_snap.wwvh_timing_ms else '',
-                        round(time_snap.bpm_timing_ms, 3) if time_snap.bpm_timing_ms else '',
-                        time_snap.anchor_station or '',
-                        round(time_snap.anchor_confidence, 3) if time_snap.anchor_confidence else ''
-                    ])
-            
             # ===============================================================
-            # Write to HDF5 (L1A Tone Detections) - Parallel with CSV
+            # Write to HDF5 (L1A Tone Detections) only
             # ===============================================================
             if self.enable_hdf5_writes and self.hdf5_l1a_tones_writer:
                 try:
@@ -1333,22 +1191,7 @@ class Phase2AnalyticsService:
         except Exception as e:
             logger.error(f"Failed to write tone detections: {e}")
     
-    def _init_bcd_discrimination_csv(self):
-        """Initialize BCD discrimination CSV for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.bcd_discrimination_csv = self.bcd_discrimination_dir / f'{file_channel}_bcd_{today}.csv'
-        
-        if not self.bcd_discrimination_csv.exists():
-            with open(self.bcd_discrimination_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'wwv_amplitude', 'wwvh_amplitude', 'bpm_amplitude',
-                    'differential_delay_ms', 'correlation_quality', 
-                    'wwv_toa_ms', 'wwvh_toa_ms', 'bpm_toa_ms',
-                    'amplitude_ratio_db'
-                ])
-            logger.info(f"Created BCD discrimination CSV: {self.bcd_discrimination_csv}")
+
     
     def _get_frequency_mhz(self) -> float:
         """Get channel frequency in MHz."""
@@ -1417,38 +1260,9 @@ class Phase2AnalyticsService:
                 return  # Skip CSV writing for station-specific frequencies
             
             # Shared frequency - perform normal BCD discrimination
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.bcd_discrimination_dir / f'{file_channel}_bcd_{today}.csv'
-            if self.bcd_discrimination_csv != expected_csv:
-                self.bcd_discrimination_csv = expected_csv
-                self._init_bcd_discrimination_csv()
-            
-            # Calculate amplitude ratio in dB
-            ratio_db = None
-            if channel_char.bcd_wwv_amplitude and channel_char.bcd_wwvh_amplitude:
-                if channel_char.bcd_wwvh_amplitude > 0:
-                    ratio_db = 20 * np.log10(channel_char.bcd_wwv_amplitude / channel_char.bcd_wwvh_amplitude)
-            
-            with open(self.bcd_discrimination_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    round(channel_char.bcd_wwv_amplitude, 4) if channel_char.bcd_wwv_amplitude else '',
-                    round(channel_char.bcd_wwvh_amplitude, 4) if channel_char.bcd_wwvh_amplitude else '',
-                    round(channel_char.bcd_bpm_amplitude, 4) if hasattr(channel_char, 'bcd_bpm_amplitude') and channel_char.bcd_bpm_amplitude else '',
-                    round(channel_char.bcd_differential_delay_ms, 3) if channel_char.bcd_differential_delay_ms else '',
-                    round(channel_char.bcd_correlation_quality, 3) if channel_char.bcd_correlation_quality else '',
-                    round(channel_char.bcd_wwv_toa_ms, 3) if channel_char.bcd_wwv_toa_ms else '',
-                    round(channel_char.bcd_wwvh_toa_ms, 3) if channel_char.bcd_wwvh_toa_ms else '',
-                    round(channel_char.bcd_bpm_toa_ms, 3) if hasattr(channel_char, 'bcd_bpm_toa_ms') and channel_char.bcd_bpm_toa_ms else '',
-                    round(ratio_db, 2) if ratio_db else ''
-                ])
             
             # ================================================================
-            # Write to HDF5 (L1B BCD Timecode) - Parallel with CSV
+            # Write to HDF5 (L1B BCD Timecode) only
             # ================================================================
             if self.enable_hdf5_writes and self.hdf5_l1b_writer:
                 try:
@@ -1509,128 +1323,14 @@ class Phase2AnalyticsService:
         except Exception as e:
             logger.error(f"Failed to write BCD discrimination: {e}")
     
-    def _init_doppler_csv(self):
-        """Initialize Doppler analysis CSV for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.doppler_csv = self.doppler_dir / f'{file_channel}_doppler_{today}.csv'
-        
-        if not self.doppler_csv.exists():
-            with open(self.doppler_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'wwv_doppler_hz', 'wwvh_doppler_hz',
-                    'wwv_doppler_std_hz', 'wwvh_doppler_std_hz', 'doppler_quality',
-                    'max_coherent_window_sec', 'phase_variance_rad', 'carrier_doppler_hz'
-                ])
-            logger.info(f"Created Doppler CSV: {self.doppler_csv}")
-    
-    def _write_doppler(self, minute_boundary: int, channel_char):
-        """Write Doppler analysis results from ChannelCharacterization."""
-        try:
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.doppler_dir / f'{file_channel}_doppler_{today}.csv'
-            if self.doppler_csv != expected_csv:
-                self.doppler_csv = expected_csv
-                self._init_doppler_csv()
-            
-            with open(self.doppler_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    round(channel_char.doppler_wwv_hz, 4) if channel_char.doppler_wwv_hz is not None else '',
-                    round(channel_char.doppler_wwvh_hz, 4) if channel_char.doppler_wwvh_hz is not None else '',
-                    round(channel_char.doppler_wwv_std_hz, 4) if channel_char.doppler_wwv_std_hz is not None else '',
-                    round(channel_char.doppler_wwvh_std_hz, 4) if channel_char.doppler_wwvh_std_hz is not None else '',
-                    round(channel_char.doppler_quality, 3) if channel_char.doppler_quality is not None else '',
-                    round(channel_char.max_coherent_window_sec, 3) if channel_char.max_coherent_window_sec is not None else '',
-                    round(channel_char.phase_variance_rad, 6) if channel_char.phase_variance_rad is not None else '',
-                    round(channel_char.doppler_carrier_hz, 4) if channel_char.doppler_carrier_hz is not None else ''
-                ])
-        except Exception as e:
-            logger.error(f"Failed to write Doppler: {e}")
-    
-    def _init_station_id_csv(self):
-        """Initialize station ID (440Hz/500Hz/600Hz) CSV for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.station_id_csv = self.station_id_dir / f'{file_channel}_440hz_{today}.csv'
-        
-        if not self.station_id_csv.exists():
-            with open(self.station_id_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'minute_number',
-                    'ground_truth_station', 'ground_truth_source', 'ground_truth_power_db',
-                    'station_confidence', 'dominant_station',
-                    'harmonic_ratio_500_1000', 'harmonic_ratio_600_1200'
-                ])
-            logger.info(f"Created station ID CSV: {self.station_id_csv}")
-    
-    def _write_station_id(self, minute_boundary: int, channel_char):
-        """Write station ID results from ChannelCharacterization.
-        
-        Only writes for minutes 1 (WWVH 440 Hz) and 2 (WWV 440 Hz).
-        This CSV is specifically for 440 Hz voice announcement detection.
-        """
-        try:
-            # Calculate minute number within hour (0-59)
-            minute_number = (minute_boundary // 60) % 60
-            
-            # Only write for 440 Hz minutes: 1 = WWVH, 2 = WWV
-            if minute_number not in [1, 2]:
-                return  # Skip - not a 440 Hz minute
-            
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.station_id_dir / f'{file_channel}_440hz_{today}.csv'
-            if self.station_id_csv != expected_csv:
-                self.station_id_csv = expected_csv
-                self._init_station_id_csv()
-            
-            with open(self.station_id_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    minute_number,
-                    channel_char.ground_truth_station or '',
-                    channel_char.ground_truth_source or '',
-                    round(channel_char.ground_truth_power_db, 2) if channel_char.ground_truth_power_db else '',
-                    channel_char.station_confidence or '',
-                    channel_char.dominant_station or '',
-                    round(channel_char.harmonic_ratio_500_1000, 2) if channel_char.harmonic_ratio_500_1000 else '',
-                    round(channel_char.harmonic_ratio_600_1200, 2) if channel_char.harmonic_ratio_600_1200 else ''
-                ])
-        except Exception as e:
-            logger.error(f"Failed to write station ID: {e}")
-    
-    def _init_test_signal_csv(self):
-        """Initialize test signal CSV for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.test_signal_csv = self.test_signal_dir / f'{file_channel}_test_signal_{today}.csv'
-        
-        if not self.test_signal_csv.exists():
-            with open(self.test_signal_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'minute_number', 'detected', 'station',
-                    'confidence', 'multitone_score', 'chirp_score', 'snr_db',
-                    'fss_db', 'delay_spread_ms', 'toa_offset_ms', 'coherence_time_sec'
-                ])
-            logger.info(f"Created test signal CSV: {self.test_signal_csv}")
+
     
     def _is_chu_channel(self) -> bool:
         """Check if this is a CHU channel (3.33, 7.85, or 14.67 MHz)."""
         chu_frequencies = [3.33, 7.85, 14.67]
         return self._get_frequency_mhz() in chu_frequencies
     
-    def _write_test_signal(self, minute_boundary: int, iq_samples, minute_number: int):
+    def _write_test_signal(self, minute_boundary: int, iq_samples: np.ndarray, minute_number: int):
         """
         Detect and write test signal for minutes 8 and 44.
         
@@ -1640,13 +1340,6 @@ class Phase2AnalyticsService:
         Note: This should only be called for WWV/WWVH channels, not CHU.
         """
         try:
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.test_signal_dir / f'{file_channel}_test_signal_{today}.csv'
-            if self.test_signal_csv != expected_csv:
-                self.test_signal_csv = expected_csv
-                self._init_test_signal_csv()
-            
             # Detect test signal using the engine's discriminator
             detection = self.engine.discriminator.test_signal_detector.detect(
                 iq_samples=iq_samples,
@@ -1657,27 +1350,8 @@ class Phase2AnalyticsService:
             # Determine station from schedule: minute 8 = WWV, minute 44 = WWVH
             station = 'WWV' if minute_number == 8 else 'WWVH'
             
-            with open(self.test_signal_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    minute_number,
-                    1 if detection.detected else 0,
-                    station if detection.detected else '',
-                    round(detection.confidence, 4) if detection.confidence else '',
-                    round(detection.multitone_score, 4) if detection.multitone_score else '',
-                    round(detection.chirp_score, 4) if detection.chirp_score else '',
-                    round(detection.snr_db, 2) if detection.snr_db else '',
-                    round(detection.frequency_selectivity_db, 2) if detection.frequency_selectivity_db else '',
-                    round(detection.delay_spread_ms, 3) if detection.delay_spread_ms else '',
-                    round(detection.toa_offset_ms, 3) if detection.toa_offset_ms else '',
-                    round(detection.coherence_time_sec, 3) if detection.coherence_time_sec else ''
-                ])
-            
             # ================================================================
-            # Write to HDF5 (L2 Test Signal) - Parallel with CSV
+            # Write to HDF5 (L2 Test Signal) only
             # ================================================================
             if self.enable_hdf5_writes and self.hdf5_l2_test_signal_writer:
                 try:
@@ -1783,295 +1457,7 @@ class Phase2AnalyticsService:
         except Exception as e:
             logger.error(f"Failed to write test signal: {e}")
     
-    def _init_discrimination_csv(self):
-        """Initialize discrimination summary CSV for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.discrimination_csv = self.discrimination_dir / f'{file_channel}_discrimination_{today}.csv'
-        
-        if not self.discrimination_csv.exists():
-            with open(self.discrimination_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'dominant_station', 'station_confidence',
-                    'wwv_snr_db', 'wwvh_snr_db', 'bpm_snr_db', 'power_ratio_db', 'ground_truth_station',
-                    'quality_grade', 'method_agreements', 'method_disagreements',
-                    'bpm_detected', 'bpm_timing_ms'
-                ])
-            logger.info(f"Created discrimination CSV: {self.discrimination_csv}")
-    
-    def _write_discrimination(self, minute_boundary: int, result, time_snap, channel_char):
-        """Write discrimination summary combining all methods."""
-        try:
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.discrimination_dir / f'{file_channel}_discrimination_{today}.csv'
-            if self.discrimination_csv != expected_csv:
-                self.discrimination_csv = expected_csv
-                self._init_discrimination_csv()
-            
-            # Calculate power ratio from tone SNRs
-            power_ratio_db = None
-            if time_snap.wwv_snr_db is not None and time_snap.wwvh_snr_db is not None:
-                power_ratio_db = time_snap.wwv_snr_db - time_snap.wwvh_snr_db
-            
-            # Compute quality_grade from uncertainty_ms
-            grade = ''
-            if result:
-                unc = result.uncertainty_ms
-                grade = 'A' if unc < 1.0 else 'B' if unc < 3.0 else 'C' if unc < 10.0 else 'D'
-            
-            with open(self.discrimination_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    channel_char.dominant_station or '',
-                    channel_char.station_confidence or '',
-                    round(time_snap.wwv_snr_db, 2) if time_snap.wwv_snr_db else '',
-                    round(time_snap.wwvh_snr_db, 2) if time_snap.wwvh_snr_db else '',
-                    round(time_snap.bpm_snr_db, 2) if time_snap.bpm_snr_db else '',
-                    round(power_ratio_db, 2) if power_ratio_db else '',
-                    channel_char.ground_truth_station or '',
-                    grade,
-                    ';'.join(channel_char.cross_validation_agreements) if channel_char.cross_validation_agreements else '',
-                    ';'.join(channel_char.cross_validation_disagreements) if channel_char.cross_validation_disagreements else '',
-                    1 if time_snap.bpm_detected else 0,
-                    round(time_snap.bpm_timing_ms, 3) if time_snap.bpm_timing_ms else ''
-                ])
-        except Exception as e:
-            logger.error(f"Failed to write discrimination: {e}")
-    
-    def _init_audio_tones_csv(self):
-        """Initialize audio tones CSV for continuous 500/600 Hz + intermodulation monitoring."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.audio_tones_csv = self.audio_tones_dir / f'{file_channel}_audio_tones_{today}.csv'
-        
-        if not self.audio_tones_csv.exists():
-            with open(self.audio_tones_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary',
-                    'power_400_hz_db', 'power_500_hz_db', 'power_600_hz_db', 'power_700_hz_db',
-                    'power_1000_hz_db', 'power_1200_hz_db',
-                    'ratio_500_600_db', 'ratio_400_700_db',
-                    'wwv_intermod_db', 'wwvh_intermod_db',
-                    'intermod_dominant', 'intermod_confidence'
-                ])
-            logger.info(f"Created audio tones CSV: {self.audio_tones_csv}")
-    
-    def _write_audio_tones(self, minute_boundary: int, iq_samples: np.ndarray):
-        """Analyze and write audio tone powers with intermodulation."""
-        try:
-            from .audio_tone_monitor import AudioToneMonitor
-            
-            today = datetime.now(timezone.utc).strftime('%Y%m%d')
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.audio_tones_dir / f'{file_channel}_audio_tones_{today}.csv'
-            if self.audio_tones_csv != expected_csv:
-                self.audio_tones_csv = expected_csv
-                self._init_audio_tones_csv()
-            
-            # Analyze audio tones
-            monitor = AudioToneMonitor(self.channel_name, self.sample_rate)
-            analysis = monitor.analyze_minute(iq_samples, minute_boundary)
-            
-            with open(self.audio_tones_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    round(analysis.power_400_hz_db, 2),
-                    round(analysis.power_500_hz_db, 2),
-                    round(analysis.power_600_hz_db, 2),
-                    round(analysis.power_700_hz_db, 2),
-                    round(analysis.power_1000_hz_db, 2),
-                    round(analysis.power_1200_hz_db, 2),
-                    round(analysis.ratio_500_600_db, 2),
-                    round(analysis.ratio_400_700_db, 2),
-                    round(analysis.wwv_intermod_500_to_600_db, 2),
-                    round(analysis.wwvh_intermod_600_to_500_db, 2),
-                    analysis.intermod_dominant_station or '',
-                    round(analysis.intermod_confidence, 3) if analysis.intermod_confidence else ''
-                ])
-        except Exception as e:
-            logger.error(f"Failed to write audio tones: {e}")
 
-    def _init_transmission_time_csv(self):
-        """Initialize transmission time (UTC-NIST) CSV for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        file_channel = self._get_file_channel_name()
-        self.transmission_time_csv = self.timing_dir / f'{file_channel}_utc_nist_{today}.csv'
-        
-        if not self.transmission_time_csv.exists():
-            with open(self.transmission_time_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'station', 'frequency_mhz',
-                    'mode', 'n_hops', 'layer_height_km', 'elevation_deg',
-                    'propagation_delay_ms', 'utc_nist_offset_ms', 'utc_nist_verified',
-                    'confidence', 'mode_separation_ms', 'uncertainty_ms'
-                ])
-            logger.info(f"Created transmission time CSV: {self.transmission_time_csv}")
-
-    def _write_transmission_time(self, minute_boundary: int, result):
-        """Write transmission time solution (UTC-NIST back-calculation)."""
-        try:
-            if not result or not result.solution or result.solution.d_clock_ms is None:
-                return
-
-            # Use data timestamp for filename to support backfilling
-            dt = datetime.fromtimestamp(minute_boundary, timezone.utc)
-            date_str = dt.strftime('%Y%m%d')
-            
-            file_channel = self._get_file_channel_name()
-            expected_csv = self.timing_dir / f'{file_channel}_utc_nist_{date_str}.csv'
-            
-            # Initialize if file changed or doesn't exist (handle daily rotation)
-            if self.transmission_time_csv != expected_csv or not expected_csv.exists():
-                self.transmission_time_csv = expected_csv
-                if not self.transmission_time_csv.exists():
-                    with open(self.transmission_time_csv, 'w', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([
-                            'timestamp_utc', 'minute_boundary', 'station', 'frequency_mhz',
-                            'mode', 'n_hops', 'layer_height_km', 'elevation_deg',
-                            'propagation_delay_ms', 'utc_nist_offset_ms', 'utc_nist_verified',
-                            'confidence', 'mode_separation_ms', 'uncertainty_ms'
-                        ])
-                    logger.info(f"Created/Rotated transmission time CSV: {self.transmission_time_csv}")
-            
-            sol = result.solution
-             
-            with open(self.transmission_time_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                
-                # Note: utc_nist_offset_ms IS d_clock_ms in the solution
-                # The API expects 'utc_nist_offset_ms'
-                
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    sol.station,
-                    round(sol.frequency_mhz, 3),
-                    sol.propagation_mode,
-                    sol.n_hops,
-                    round(sol.layer_height_km, 1),
-                    round(getattr(sol, 'elevation_angle_deg', 0.0), 2),
-                    round(sol.t_propagation_ms if sol.t_propagation_ms is not None else 0.0, 3),
-                    round(sol.d_clock_ms if sol.d_clock_ms is not None else 0.0, 3),  # This is the UTC offset
-                    1 if sol.utc_verified else 0,
-                    round(sol.confidence, 3),
-                    round(getattr(sol, 'mode_separation_ms', 0.0), 3),
-                    round(sol.uncertainty_ms, 3)
-                ])
-        except Exception as e:
-            logger.error(f"Failed to write transmission time: {e}")
-    
-
-    def _init_tec_csv(self):
-        """Initialize TEC estimation CSV for today."""
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        # TEC is station-based, not channel-based (aggregates across frequencies)
-        # Use simplified naming: tec_YYYYMMDD.csv
-        self.tec_csv = self.tec_dir / f'tec_{today}.csv'
-        
-        if not self.tec_csv.exists():
-            with open(self.tec_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp_utc', 'minute_boundary', 'station',
-                    'tec_tecu', 't_vacuum_error_ms', 'confidence', 'residuals_ms',
-                    'n_frequencies', 'frequencies_mhz',
-                    'group_delay_2_5_mhz', 'group_delay_5_mhz', 'group_delay_10_mhz',
-                    'group_delay_15_mhz', 'group_delay_20_mhz', 'group_delay_25_mhz'
-                ])
-            logger.info(f"Created TEC CSV: {self.tec_csv}")
-    
-    def _write_tec(self, minute_boundary: int, station: str, measurements: List[Dict]):
-        """Write TEC estimation from multi-frequency measurements.
-        
-        Args:
-            minute_boundary: Unix timestamp of minute boundary
-            station: Station name (WWV, WWVH, CHU, BPM)
-            measurements: List of dicts with 'frequency_hz', 'toa_ms', 'uncertainty_ms'
-        """
-        try:
-            # Need at least 2 frequencies for TEC estimation
-            if len(measurements) < 2:
-                return
-            
-            # Use data timestamp for filename to support backfilling
-            dt = datetime.fromtimestamp(minute_boundary, timezone.utc)
-            date_str = dt.strftime('%Y%m%d')
-            
-            expected_csv = self.tec_dir / f'tec_{date_str}.csv'
-            
-            # Initialize if file changed or doesn't exist (handle daily rotation)
-            if self.tec_csv != expected_csv or not expected_csv.exists():
-                self.tec_csv = expected_csv
-                if not self.tec_csv.exists():
-                    with open(self.tec_csv, 'w', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([
-                            'timestamp_utc', 'minute_boundary', 'station',
-                            'tec_tecu', 't_vacuum_error_ms', 'confidence', 'residuals_ms',
-                            'n_frequencies', 'frequencies_mhz',
-                            'group_delay_2_5_mhz', 'group_delay_5_mhz', 'group_delay_10_mhz',
-                            'group_delay_15_mhz', 'group_delay_20_mhz', 'group_delay_25_mhz'
-                        ])
-                    logger.info(f"Created/Rotated TEC CSV: {self.tec_csv}")
-            
-            # Estimate TEC using multi-frequency least squares
-            tec_result = self.tec_estimator.estimate_tec(
-                measurements=measurements,
-                station=station,
-                timestamp=float(minute_boundary)
-            )
-            
-            if not tec_result:
-                return  # Estimation failed
-            
-            # Extract per-frequency group delays (for visualization)
-            freq_list = sorted([m['frequency_hz'] / 1e6 for m in measurements])
-            freq_str = ';'.join([f"{f:.2f}" for f in freq_list])
-            
-            # Map group delays to standard frequencies (fill with empty if not present)
-            delay_map = tec_result.group_delay_ms  # Dict[float, float] keyed by MHz
-            
-            with open(self.tec_csv, 'a', newline='') as f:
-                writer = csv.writer(f)
-                utc_time = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat()
-                
-                writer.writerow([
-                    utc_time,
-                    minute_boundary,
-                    station,
-                    round(tec_result.tec_u, 3),  # TEC in TECU
-                    round(tec_result.t_vacuum_error_ms, 3),
-                    round(tec_result.confidence, 4),
-                    round(tec_result.residuals_ms, 3),
-                    tec_result.n_frequencies,
-                    freq_str,
-                    round(delay_map.get(2.5, 0), 3) if 2.5 in delay_map else '',
-                    round(delay_map.get(5.0, 0), 3) if 5.0 in delay_map else '',
-                    round(delay_map.get(10.0, 0), 3) if 10.0 in delay_map else '',
-                    round(delay_map.get(15.0, 0), 3) if 15.0 in delay_map else '',
-                    round(delay_map.get(20.0, 0), 3) if 20.0 in delay_map else '',
-                    round(delay_map.get(25.0, 0), 3) if 25.0 in delay_map else ''
-                ])
-                
-            logger.info(
-                f"TEC estimated for {station}: {tec_result.tec_u:.2f} TECU "
-                f"(confidence={tec_result.confidence:.2f}, n_freq={tec_result.n_frequencies})"
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to write TEC: {e}")
 
     def _read_drf_minute(self, target_minute: int):
         """
@@ -2671,9 +2057,6 @@ class Phase2AnalyticsService:
                 
                 if channel_char:
                     self._write_bcd_discrimination(minute_boundary, channel_char)
-                    self._write_doppler(minute_boundary, channel_char)
-                    self._write_station_id(minute_boundary, channel_char)
-                    self._write_discrimination(minute_boundary, primary_result, time_snap, channel_char)
                 
                 logger.info(
                     f"Processed minute {minute_boundary}: {len(results)} stations detected. "
@@ -2743,12 +2126,9 @@ class Phase2AnalyticsService:
             if minute_number in [8, 44] and not self._is_chu_channel():
                 self._write_test_signal(minute_boundary, iq_samples, minute_number)
             
-            # Write audio tones (500/600 Hz + intermodulation) for every minute
-            self._write_audio_tones(minute_boundary, iq_samples)
+            # Write audio tones removed (CSV legacy)
             
-            # Write transmission time solution (Reference for Fusion)
-            if self.last_result:
-                self._write_transmission_time(minute_boundary, self.last_result)
+            # Write transmission time solution removed (CSV legacy)
             
             return True
                 

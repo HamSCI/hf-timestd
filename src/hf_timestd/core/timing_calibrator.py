@@ -726,10 +726,10 @@ class TimingCalibrator:
             
             # Use the station that was actually detected at this RTP offset
             predicted_station = getattr(rtp_cal, 'detected_station', None)
-            if not predicted_station or predicted_station not in ['WWV', 'WWVH', 'CHU']:
+            if not predicted_station or predicted_station not in ['WWV', 'WWVH', 'CHU', 'BPM']:
                 # Fallback to channel name if no detected_station stored
                 predicted_station = channel_name.split()[0].upper()
-                if predicted_station not in ['WWV', 'WWVH', 'CHU']:
+                if predicted_station not in ['WWV', 'WWVH', 'CHU', 'BPM']:
                     predicted_station = 'WWV'
             
             # If detection disagrees with prediction, log it and override
@@ -775,7 +775,8 @@ class TimingCalibrator:
         default_delays = {
             'WWV': 6.5,    # Fort Collins, CO
             'WWVH': 25.0,  # Hawaii
-            'CHU': 4.0     # Ottawa, Canada
+            'CHU': 4.0,    # Ottawa, Canada
+            'BPM': 50.0    # Lintong, China
         }
         return (50.0, default_delays.get(station, 10.0))
         

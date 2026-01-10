@@ -445,6 +445,18 @@ class BinaryArchiveWriter:
                 # Instantaneous offset: unix_time - (rtp_timestamp / sample_rate)
                 inst_offset = system_time - (rtp_timestamp / self.config.sample_rate)
                 
+                # CRITICAL FIX (2026-01-09): Clock drift protection
+                # If the system_time (RTP-derived) is way off from our OS clock,
+                # trust the OS clock for the offset calculation.
+                os_now = time.time()
+                if abs(system_time - os_now) > 3600: # 1 hour threshold
+                    logger.warning(
+                        f"BinaryArchiveWriter: System time drift detected! "
+                        f"Sys={system_time:.0f}, OS={os_now:.0f}, diff={system_time-os_now:.1f}s. "
+                        f"Using OS clock for RTP offset calibration."
+                    )
+                    inst_offset = os_now - (rtp_timestamp / self.config.sample_rate)
+
                 if self.rtp_to_unix_offset is None:
                     # Initialize with first sample so we can write immediately
                     self.rtp_to_unix_offset = inst_offset

@@ -42,7 +42,7 @@ class RobustManagedStream:
     This class implements the same auto-recovery logic but passes 'encoding' to ensure_channel.
     """
     def __init__(self, control: RadiodControl, frequency_hz: float, preset: str = 'iq',
-                 sample_rate: int = 16000, agc_enable: int = 0, gain: float = 0.0,
+                 sample_rate: int = 24000, agc_enable: int = 0, gain: float = 0.0,
                  encoding: int = 4, # F32 default
                  destination: Optional[str] = None, ssrc: Optional[int] = None,
                  on_samples=None, on_stream_dropped=None, on_stream_restored=None,
@@ -567,6 +567,19 @@ class StreamRecorderV2:
                         system_time = dt.timestamp()
                     else:
                         system_time = float(quality.last_packet_utc)
+                    
+                    # CRITICAL FIX (2026-01-09): Clock drift protection
+                    # If the RTP-derived time is significantly different from our OS clock,
+                    # trust the OS clock instead. This prevents 6-day drifts from breaking fusion.
+                    os_now = time.time()
+                    if abs(system_time - os_now) > 3600: # 1 hour threshold
+                        logger.warning(
+                            f"{self.config.description}: RTP Clock Drift Detected! "
+                            f"RTP={system_time:.0f}, OS={os_now:.0f}, diff={system_time-os_now:.1f}s. "
+                            f"Falling back to OS clock."
+                        )
+                        system_time = os_now
+                        
                 except (ValueError, TypeError):
                     system_time = time.time()
             else:

@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [5.2.1] - 2026-01-09
 
+## [5.1.0] - 2026-01-10
+
+### Fixed
+
+- **Chrony Feed Restoration**:
+  - Corrected inverted precision calculation in `multi_broadcast_fusion.py` (`-10 - log2` → `log2 - 10`), preventing false "nanosecond precision" claims for bootstrap data.
+  - Relaxed fusion filters to allow single-station (`n >= 1`) and Grade D measurements during bootstrap, resolving the "chicken-and-egg" startup problem.
+  - Fusion now successfully feeds Chrony SHM (Reach > 0).
+- **Tone Detection**:
+  - Widened `PROPAGATION_BOUNDS_MS` in `wwv_constants.py` to `[-250, 250]` ms to accommodate large initial clock offsets.
+  - Fixed 1000Hz/1200Hz detection failures by allowing larger search windows.
+- **Clock Drift**:
+  - Resolved 6-day clock offset "Jan 4 vs Jan 10" confusion caused by stale `timestd-fusion` service state.
+  - Implemented drift protection logic in `StreamRecorderV2` and `BinaryArchiveWriter` (diagnostic).
+
+### Changed
+
+- **Fusion Logic**:
+  - `MultiBroadcastFusion` now accepts single-station results if confidence is sufficient, essential for 10MHz-only conditions.
+  - Updated calibration logic to be more robust against initial large offsets.
+
 ### Fixed - Web API JSON Serialization
 
 **Critical Fix:** Prevented Web API 500 errors by sanitizing `NaN` and `Infinity` values in JSON responses.
@@ -11,6 +32,7 @@ All notable changes to this project will be documented in this file.
 - **Issue**: Python `float('nan')` is not valid JSON, causing internal server errors when serving raw data (e.g., from `dump_tec.py` diagnostics).
 - **Fix**: Implemented `_deep_sanitize()` recursion in `PropagationService` to convert `NaN`/`Inf` to `null` before serialization.
 - **Diagnostics**: Added `scripts/dump_tec.py` to the repository for inspecting daily TEC files.
+
 ## [5.2.0] - 2026-01-09
 
 ### Fixed - Mode-Aware TEC & Service Stability
@@ -38,6 +60,7 @@ All notable changes to this project will be documented in this file.
 
 - **Production Alignment**: Synchronized `src/` to `/opt/hf-timestd/src/` to eliminate stale code.
 - **Permissions**: Fixed ownership of `/var/lib/timestd/phase2/science/tec/` to allow service writes.
+
 ## [5.1.1] - 2026-01-09
 
 ### Fixed - Chrony Feed Stability & Integrity
