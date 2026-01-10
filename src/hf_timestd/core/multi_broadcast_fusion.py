@@ -628,8 +628,42 @@ class MultiBroadcastFusion:
                     self._init_default_calibration()
                     return
                 
+                # CRITICAL FIX: Restore Kalman state from calibration file
+                # This prevents discontinuities on service restart
+                if '_kalman_state' in data:
+                    ks = data['_kalman_state']
+                    age_seconds = time.time() - ks.get('saved_at', 0)
+                    
+                    # Only restore if state is recent (<1 hour old)
+                    if age_seconds < 3600:
+                        try:
+                            self.kalman_state = np.array([
+                                ks['offset_ms'],
+                                ks['drift_ms_per_min']
+                            ])
+                            self.kalman_P = np.array(ks['covariance'])
+                            self.kalman_converged = ks['converged']
+                            self.kalman_n_updates = ks['n_updates']
+                            self.kalman_initialized = ks['initialized']
+                            
+                            logger.info(
+                                f"Restored Kalman state: offset={self.kalman_state[0]:.3f}ms, "
+                                f"converged={self.kalman_converged}, n_updates={self.kalman_n_updates}, "
+                                f"age={age_seconds:.0f}s"
+                            )
+                        except (KeyError, ValueError, TypeError) as e:
+                            logger.warning(f"Failed to restore Kalman state: {e}, using defaults")
+                    else:
+                        logger.warning(
+                            f"Kalman state too old ({age_seconds:.0f}s), resetting to defaults for safety"
+                        )
+                
                 # Load validated calibration
                 for broadcast_key, cal_data in data.items():
+                    # Skip metadata keys (Kalman state, etc.)
+                    if broadcast_key.startswith('_'):
+                        continue
+                    
                     # Parse station and frequency from key (e.g., "WWV_10.00")
                     parts = broadcast_key.rsplit('_', 1)
                     station = parts[0] if len(parts) > 1 else broadcast_key
@@ -674,7 +708,7 @@ class MultiBroadcastFusion:
         logger.info("Calibration initialized - will learn from data (no hardcoded defaults)")
     
     def _save_calibration(self):
-        """Persist per-broadcast calibration to file."""
+        """Persist per-broadcast calibration and Kalman state to file."""
         self.calibration_file.parent.mkdir(parents=True, exist_ok=True)
         data = {}
         for broadcast_key, cal in self.calibration.items():
@@ -687,6 +721,19 @@ class MultiBroadcastFusion:
                 'last_updated': cal.last_updated,
                 'reference_station': cal.reference_station
             }
+        
+        # CRITICAL FIX: Persist Kalman state to prevent discontinuities on restart
+        # Without this, each restart resets Kalman to [0.0, 0.0] causing ~5ms jumps
+        data['_kalman_state'] = {
+            'offset_ms': float(self.kalman_state[0]),
+            'drift_ms_per_min': float(self.kalman_state[1]),
+            'covariance': self.kalman_P.tolist(),
+            'converged': self.kalman_converged,
+            'n_updates': self.kalman_n_updates,
+            'initialized': self.kalman_initialized,
+            'saved_at': time.time()
+        }
+        
         # Atomic write: write to temp file, fsync, then rename
         temp_file = self.calibration_file.with_suffix('.tmp')
         with open(temp_file, 'w') as f:
@@ -1756,10 +1803,12 @@ class MultiBroadcastFusion:
         
         # CRITICAL FIX (P2.1): Auto-save calibration every 50 updates
         self.calibration_update_count += 1
-        if self.calibration_update_count % 50 == 0:
+        # CRITICAL FIX: Save more frequently (every 10 updates ~80 seconds) to persist Kalman state
+        # This prevents losing convergence progress on service restarts
+        if self.calibration_update_count % 10 == 0:
             try:
                 self._save_calibration()
-                logger.debug(f"Auto-saved calibration (update #{self.calibration_update_count})")
+                logger.debug(f"Auto-saved calibration and Kalman state (update #{self.calibration_update_count})")
             except Exception as e:
                 logger.error(f"Failed to auto-save calibration: {e}")
     
@@ -2004,8 +2053,36 @@ class MultiBroadcastFusion:
         # - Different ionospheric paths (CHU vs WWV = 2000+ km)
         # - Different propagation modes (1E vs 1F)
         # CRITICAL FIX: Adaptive cross-station threshold based on conditions
-        # Base threshold for quiet daytime conditions
-        base_threshold = 0.5  # ms
+        # Bootstrap-aware threshold: relaxed during calibration convergence, strict after
+        # 
+        # BOOTSTRAP PHASE (calibration not yet validated):
+        #   - 5.0ms base threshold accommodates real systematic differences
+        #   - CHU/WWV have ~4.3ms persistent offset (different propagation paths)
+        #   - This is the measured reality - calibration learns to compensate
+        #   - Cross-station disagreement is expected during convergence (30-60 minutes)
+        # 
+        # OPERATIONAL PHASE (after calibration validated):
+        #   - 2.5ms base threshold enforces reasonable cross-station consistency
+        #   - Calibration has converged, large disagreement indicates actual problems
+        #   - Protects against mode mixing, detection errors, ionospheric anomalies
+        #   - Still allows for ~2ms natural ionospheric variability
+        #
+        # NOTE: We track validation status via a rolling window of recent cross-validation results
+        # If we haven't had consistent validation, stay in bootstrap mode
+        if not hasattr(self, 'recent_validations'):
+            self.recent_validations = []
+        
+        # Keep last 20 validation results (rolling window)
+        if len(self.recent_validations) > 20:
+            self.recent_validations.pop(0)
+        
+        # Consider calibration converged if >80% of recent validations passed
+        calibration_converged = (
+            len(self.recent_validations) >= 10 and 
+            sum(self.recent_validations) / len(self.recent_validations) > 0.8
+        )
+        
+        base_threshold = 5.0 if not calibration_converged else 2.5  # ms
         
         # Time of day factor (nighttime more variable)
         from datetime import datetime, timezone
@@ -2021,6 +2098,11 @@ class MultiBroadcastFusion:
                 iono_factor = 2.0  # Disturbed conditions
         
         CROSS_STATION_THRESHOLD_MS = base_threshold * time_factor * iono_factor
+        
+        # Track validation result for adaptive threshold convergence detection
+        # This is done BEFORE the threshold check so we track the actual disagreement status
+        validation_passed = max_disagreement <= CROSS_STATION_THRESHOLD_MS
+        self.recent_validations.append(validation_passed)
         
         if max_disagreement > CROSS_STATION_THRESHOLD_MS:
             # Stations disagree - identify outlier
@@ -2308,13 +2390,21 @@ class MultiBroadcastFusion:
         weights = valid_weights
         
         # ====================================================================
-        # CRITICAL FIX: Do NOT apply calibration during ongoing fusion
-        # Calibration is only for bootstrap/restart to help initial convergence
-        # During normal operation, use raw measurements and let Kalman filter converge naturally
-        # This prevents discontinuities from calibration updates
+        # APPLY CALIBRATION: Apply learned systematic offsets to bring D_clock toward zero
+        # ====================================================================
+        # Calibration removes station/frequency-specific systematic offsets:
+        # - Propagation delay estimation errors
+        # - Detection/matched filter group delays
+        # - Frequency-dependent ionospheric delays
+        #
+        # Rate limiting in _update_calibration (±0.5ms/update) ensures smooth convergence
+        # without discontinuities. The Kalman filter then handles residual variations.
         
-        # Extract raw D_clock values for fusion
+        # Extract raw D_clock values for cross-validation (before calibration)
         raw_d_clocks = [m.d_clock_ms for m in measurements]
+        
+        # Apply calibration to get calibrated D_clock values for fusion
+        calibrated_d_clocks = self._apply_calibration(measurements)
         
         # ====================================================================
         # INTER-STATION AGREEMENT CHECK (Priority 1D - 2026-01-04)
@@ -2357,10 +2447,18 @@ class MultiBroadcastFusion:
         # Use a slower update rate during disagreement to prevent contamination while still converging
         self._update_calibration(measurements, validated=cross_valid)
         
-        # Weighted mean of raw D_clock values
+        # Weighted mean of calibrated D_clock values
+        # Use calibrated values for fusion to converge toward zero
+        # Cross-validation uses raw values to detect calibration issues
         w = np.array(weights)
-        d = np.array(raw_d_clocks)
-        fused_d_clock_raw = np.sum(w * d) / np.sum(w)
+        d_calibrated = np.array(calibrated_d_clocks)
+        d_raw = np.array(raw_d_clocks)
+        
+        # Fuse calibrated measurements
+        fused_d_clock_raw = np.sum(w * d_calibrated) / np.sum(w)
+        
+        # Also track raw fusion for diagnostics
+        fused_d_clock_uncalibrated = np.sum(w * d_raw) / np.sum(w)
         
         # Apply Kalman filter correction with gradual ramp-up to prevent discontinuities
         # Ramp alpha from 0 to 1 over ~50 updates (0.02 per update)
@@ -3160,46 +3258,72 @@ def run_fusion_service(
                 # Only feed validated, multi-station measurements to prevent contamination
                 if chrony_shm:
                     # Check quality criteria
-                    # CRITICAL FIX (2026-01-10): Accept A, B, C for operational stability
-                    # Grade C (uncertainty <2ms) is sufficient for clock discipline
-                    # Only reject grade D (uncertainty >=2ms or very few broadcasts)
-                    quality_ok = result.quality_grade in ('A', 'B', 'C')
+                    # CRITICAL FIX (2026-01-10): Bootstrap-aware quality gating
+                    # During bootstrap (calibration not converged), accept grade D
+                    # The 2-3ms uncertainty is expected during calibration learning
+                    # After convergence, enforce stricter A/B/C requirement
+                    if hasattr(fusion, 'recent_validations') and len(fusion.recent_validations) >= 10:
+                        calibration_converged = sum(fusion.recent_validations) / len(fusion.recent_validations) > 0.8
+                    else:
+                        calibration_converged = False
+                    
+                    if calibration_converged:
+                        quality_ok = result.quality_grade in ('A', 'B', 'C')
+                    else:
+                        # Bootstrap: accept grade D (uncertainty <3ms is acceptable during learning)
+                        quality_ok = result.quality_grade in ('A', 'B', 'C', 'D') and result.uncertainty_ms < 3.0
                     
                     # CRITICAL FIX (2026-01-10): Require multi-station for validation
                     # Single-station mode has no cross-validation, cannot detect systematic errors
                     multi_station = result.n_stations >= 2  # Require at least 2 stations
                     
-                    # CRITICAL FIX (2026-01-10): Stricter consistency criteria
-                    # For scientific temporal accuracy, we must distinguish:
-                    # - Physical ionospheric variation (the signal we want to measure)
-                    # - Measurement errors (the noise we want to reject)
-                    #
-                    # Accept measurements with:
-                    # - OK: Stations agree well
-                    # - INTER_ANOMALY or CROSS_STATION_DISAGREE with uncertainty <1.0ms
-                    #   (indicates well-characterized ionospheric variation, not measurement error)
+                    # CRITICAL FIX (2026-01-10): Bootstrap-aware consistency criteria
+                    # During bootstrap, CROSS_STATION_DISAGREE is expected (calibration learning)
+                    # After convergence, enforce stricter consistency requirements
                     if result.consistency_flag == 'OK':
                         consistent = True
-                    elif result.consistency_flag in ('INTER_ANOMALY', 'CROSS_STATION_DISAGREE') and result.uncertainty_ms < 1.0:
-                        # Allow disagreement if uncertainty is low (<1.0ms)
-                        # This indicates the disagreement is real ionospheric variation,
-                        # not measurement noise (which would inflate uncertainty)
-                        consistent = True
-                        logger.debug(
-                            f"Chrony feed: Accepting {result.consistency_flag} with low uncertainty "
-                            f"({result.uncertainty_ms:.3f}ms < 1.0ms threshold)"
-                        )
+                    elif calibration_converged:
+                        # Operational: only accept disagreement with low uncertainty
+                        if result.consistency_flag in ('INTER_ANOMALY', 'CROSS_STATION_DISAGREE') and result.uncertainty_ms < 1.0:
+                            consistent = True
+                            logger.debug(
+                                f"Chrony feed: Accepting {result.consistency_flag} with low uncertainty "
+                                f"({result.uncertainty_ms:.3f}ms < 1.0ms threshold)"
+                            )
+                        else:
+                            consistent = False
                     else:
-                        # Reject high-uncertainty disagreements
-                        # These indicate potential systematic errors or poor measurement quality
-                        consistent = False
+                        # Bootstrap: accept CROSS_STATION_DISAGREE (expected during calibration)
+                        # The fused result is still valid due to weighted averaging and Kalman filtering
+                        if result.consistency_flag in ('OK', 'CROSS_STATION_DISAGREE'):
+                            consistent = True
+                            if result.consistency_flag == 'CROSS_STATION_DISAGREE':
+                                logger.debug(
+                                    f"Chrony feed: Accepting CROSS_STATION_DISAGREE during bootstrap "
+                                    f"(calibration learning, uncertainty={result.uncertainty_ms:.3f}ms)"
+                                )
+                        else:
+                            consistent = False
                     
-                    # Discontinuity filter: reject large jumps (>3ms)
-                    global last_chrony_d_clock
+                    # Discontinuity filter: reject large jumps (>10ms)
+                    # Increased from 3ms to 10ms to allow for legitimate calibration convergence
+                    # and ionospheric variations while still protecting against major errors
+                    global last_chrony_d_clock, last_chrony_update_time
                     discontinuity_ok = True
+                    
+                    # Reset discontinuity check if no update for >5 minutes (allows recovery)
+                    if 'last_chrony_update_time' in globals() and last_chrony_update_time is not None:
+                        time_since_update = time.time() - last_chrony_update_time
+                        if time_since_update > 300:  # 5 minutes
+                            logger.info(
+                                f"Chrony feed: Resetting discontinuity check after {time_since_update:.0f}s "
+                                f"without updates (allows recovery from stuck state)"
+                            )
+                            last_chrony_d_clock = None
+                    
                     if 'last_chrony_d_clock' in globals() and last_chrony_d_clock is not None:
                         delta = abs(result.d_clock_fused_ms - last_chrony_d_clock)
-                        if delta > 3.0:
+                        if delta > 10.0:
                             logger.warning(
                                 f"Chrony feed: Discontinuity detected ({delta:.1f}ms jump), "
                                 f"skipping update to prevent clock instability"
@@ -3220,8 +3344,9 @@ def run_fusion_service(
                         try:
                             update_success = chrony_shm.update(reference_time, system_time, precision)
                             if update_success:
-                                # Update last value for discontinuity check
+                                # Update last value and timestamp for discontinuity check
                                 last_chrony_d_clock = result.d_clock_fused_ms
+                                last_chrony_update_time = time.time()
                                 
                                 logger.debug(
                                     f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
