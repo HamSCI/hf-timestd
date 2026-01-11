@@ -700,9 +700,18 @@ class TransmissionTimeSolver:
         elif mode == PropagationMode.TWO_HOP_F:
             layer_height = hmF2  # Dynamic F2-layer height
             n_hops = 2
+            # CRITICAL FIX (2026-01-11): Reject 2-hop for short distances
+            # For WWV at 629km, 2-hop is physically implausible
+            if ground_distance_km < 1000:
+                logger.debug(f"2-hop mode rejected for short distance {ground_distance_km:.0f}km")
+                return None
         elif mode == PropagationMode.THREE_HOP_F:
             layer_height = hmF2  # Dynamic F2-layer height
             n_hops = 3
+            # CRITICAL FIX (2026-01-11): Reject 3-hop for short distances
+            if ground_distance_km < 2000:
+                logger.debug(f"3-hop mode rejected for short distance {ground_distance_km:.0f}km")
+                return None
         elif mode == PropagationMode.MIXED_EF:
             # Approximate as 1.5 hops at intermediate height (E + F2)
             layer_height = (hmE + hmF2) / 2
@@ -730,14 +739,19 @@ class TransmissionTimeSolver:
             logger.warning(f"Ground wave mode beyond realistic range: {ground_distance_km:.0f}km")
             plausibility *= 0.1
         
-        # Multi-hop modes at short distances are implausible
-        if n_hops >= 2 and ground_distance_km < 1000:
-            logger.debug(f"{n_hops}-hop mode implausible for short distance {ground_distance_km:.0f}km")
-            plausibility *= 0.3
+        # CRITICAL FIX (2026-01-11): Multi-hop modes at short distances are implausible
+        # Previous penalty (0.3) was too weak, allowing wrong mode selection
+        # For distances < 1500km, 1-hop F-layer is almost always correct
+        # Using very strong penalty (0.001) to essentially force 1-hop selection
+        if n_hops >= 2 and ground_distance_km < 1500:
+            # Extremely strong penalty - essentially reject multi-hop for short distances
+            penalty = 0.001 if ground_distance_km < 1000 else 0.01
+            logger.debug(f"{n_hops}-hop mode strongly penalized for short distance {ground_distance_km:.0f}km (penalty={penalty})")
+            plausibility *= penalty
         
         # 3+ hops are rare and only for very long distances
         if n_hops >= 3 and ground_distance_km < 5000:
-            plausibility *= 0.5
+            plausibility *= 0.1  # Stronger penalty (was 0.5)
         
         # Geometric delay (speed of light)
         geometric_delay_ms = (path_length_km / SPEED_OF_LIGHT_KM_S) * 1000
