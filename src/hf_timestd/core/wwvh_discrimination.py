@@ -215,6 +215,7 @@ from ..interfaces.data_models import ToneDetectionResult, StationType
 from .tone_detector import MultiStationToneDetector
 from .wwv_bcd_encoder import WWVBCDEncoder
 from .wwv_geographic_predictor import WWVGeographicPredictor
+from .timing_discrimination import TimingDiscriminator, TimingValidationResult
 from .wwv_test_signal import WWVTestSignalDetector, TestSignalDetection
 from .wwv_constants import (
     TONE_SCHEDULE_500_600,
@@ -377,7 +378,8 @@ class WWVHDiscriminator:
         channel_name: str,
         receiver_grid: Optional[str] = None,
         history_dir: Optional[str] = None,
-        sample_rate: int = 24000
+        sample_rate: int = 24000,
+        timing_discriminator: Optional[TimingDiscriminator] = None
     ):
         """
         Initialize discriminator
@@ -387,6 +389,7 @@ class WWVHDiscriminator:
             receiver_grid: Maidenhead grid square (e.g., "EM38ww") for geographic ToA prediction
             history_dir: Directory for persisting ToA history (optional)
             sample_rate: Sample rate in Hz (24000 default, 16000 for legacy)
+            timing_discriminator: Optional timing-based discriminator for validation
         """
         self.channel_name = channel_name
         self.sample_rate = sample_rate
@@ -418,6 +421,11 @@ class WWVHDiscriminator:
             logger.info(f"{channel_name}: Geographic ToA prediction enabled for {receiver_grid}")
         else:
             logger.info(f"{channel_name}: Geographic ToA prediction disabled (no grid square configured)")
+        
+        # Timing-based discriminator (optional, for SHARED frequencies)
+        self.timing_discriminator = timing_discriminator
+        if timing_discriminator:
+            logger.info(f"{channel_name}: Timing-based discrimination enabled (phase: {timing_discriminator.phase.value})")
         
         logger.info(f"{channel_name}: WWVHDiscriminator initialized")
     
@@ -967,29 +975,6 @@ class WWVHDiscriminator:
                            f"(WWVH std < WWV std by {std_ratio_db:.1f} dB)")
         
         # === VOTE 7: Test Signal ToA vs BCD ToA Consistency (minutes 8/44) ===
-        # Both Test Signal and BCD are modulated on the carrier simultaneously.
-        # The Test Signal matched filter has superior BT product gain for timing.
-        # If Test Signal ToA aligns with BCD early peak arrival, boost confidence.
-        if minute_number in [8, 44] and result.test_signal_detected and result.test_signal_toa_offset_ms is not None:
-            # Check if BCD also detected dual peaks with timing
-            if result.bcd_differential_delay_ms is not None and result.bcd_differential_delay_ms > 0:
-                # Test signal ToA should be close to the dominant station's BCD arrival
-                # If ToA offset is small (<5ms), the timing is coherent
-                if abs(result.test_signal_toa_offset_ms) < 5.0:
-                    # Boost the test signal vote confidence
-                    w_timing_coherence = 3.0
-                    if result.test_signal_station == 'WWV':
-                        wwv_score += w_timing_coherence
-                    elif result.test_signal_station == 'WWVH':
-                        wwvh_score += w_timing_coherence
-                    total_weight += w_timing_coherence
-                    logger.debug(f"{self.channel_name}: Timing coherence vote: {result.test_signal_station} "
-                               f"(ToA offset={result.test_signal_toa_offset_ms:.2f}ms, BCD delay={result.bcd_differential_delay_ms:.1f}ms)")
-        
-        # === VOTE 7b: Chirp Delay Spread Channel Quality Assessment ===
-        # When chirps are detected, delay spread indicates multipath severity.
-        # Low delay spread (<2ms) = clean channel = high confidence in timing
-        # High delay spread (>5ms) = multipath = reduce confidence in all timing methods
         if minute_number in [8, 44] and result.test_signal_delay_spread_ms is not None:
             delay_spread = result.test_signal_delay_spread_ms
             if delay_spread < 2.0:
@@ -1117,6 +1102,83 @@ class WWVHDiscriminator:
                 # Very stable noise floor - boost confidence in all test signal metrics
                 agreements.append('TS_noise_stable')
                 logger.debug(f"{self.channel_name}: Noise coherence stable (diff={noise_diff:.3f})")
+        
+        # === VOTE 10b: Timing-Based Validation (GPSDO-Anchored Discrimination) ===
+        # Use established timing precision to validate station assignments against
+        # geographic propagation constraints. Once timing is accurate to ±1ms,
+        # geography becomes the discriminator.
+        w_timing_validation = 0.0
+        if self.timing_discriminator is not None:
+            # Weight depends on discrimination phase
+            from .timing_discrimination import DiscriminationPhase
+            if self.timing_discriminator.phase == DiscriminationPhase.REFINED:
+                w_timing_validation = 12.0  # Highest weight when timing is refined
+            elif self.timing_discriminator.phase == DiscriminationPhase.VALIDATING:
+                w_timing_validation = 8.0   # High weight during validation phase
+            else:
+                w_timing_validation = 0.0   # No weight during bootstrap
+            
+            if w_timing_validation > 0 and result.wwv_toa_ms is not None and result.wwvh_toa_ms is not None:
+                # Extract frequency from channel name (e.g., "WWV 10000" -> 10.0 MHz)
+                try:
+                    freq_mhz = float(self.channel_name.split()[-1]) / 1000.0
+                except:
+                    freq_mhz = 10.0  # Default fallback
+                
+                # Validate WWV detection
+                wwv_validation = self.timing_discriminator.validate_detection(
+                    station='WWV',
+                    frequency_mhz=freq_mhz,
+                    measured_toa_ms=result.wwv_toa_ms,
+                    minute_number=minute_number,
+                    second_number=0,  # Minute marker
+                    d_clock_ms=self.timing_discriminator.d_clock_ms or 0.0,
+                    phase_variance_rad2=result.doppler_phase_variance_rad**2 if result.doppler_phase_variance_rad else None,
+                    coherence_quality=result.doppler_quality
+                )
+                
+                # Validate WWVH detection
+                wwvh_validation = self.timing_discriminator.validate_detection(
+                    station='WWVH',
+                    frequency_mhz=freq_mhz,
+                    measured_toa_ms=result.wwvh_toa_ms,
+                    minute_number=minute_number,
+                    second_number=0,  # Minute marker
+                    d_clock_ms=self.timing_discriminator.d_clock_ms or 0.0,
+                    phase_variance_rad2=result.doppler_phase_variance_rad**2 if result.doppler_phase_variance_rad else None,
+                    coherence_quality=result.doppler_quality
+                )
+                
+                # Vote based on timing validation
+                if wwv_validation.timing_valid and not wwvh_validation.timing_valid:
+                    wwv_score += w_timing_validation
+                    total_weight += w_timing_validation
+                    agreements.append('TIMING_WWV')
+                    logger.info(f"{self.channel_name}: Timing validation vote: WWV "
+                              f"(error={wwv_validation.timing_error_ms:.2f}ms, "
+                              f"WWVH rejected: {wwvh_validation.rejection_reason})")
+                elif wwvh_validation.timing_valid and not wwv_validation.timing_valid:
+                    wwvh_score += w_timing_validation
+                    total_weight += w_timing_validation
+                    agreements.append('TIMING_WWVH')
+                    logger.info(f"{self.channel_name}: Timing validation vote: WWVH "
+                              f"(error={wwvh_validation.timing_error_ms:.2f}ms, "
+                              f"WWV rejected: {wwv_validation.rejection_reason})")
+                elif wwv_validation.timing_valid and wwvh_validation.timing_valid:
+                    # Both valid - use confidence to weight
+                    wwv_weight = w_timing_validation * wwv_validation.discrimination_confidence
+                    wwvh_weight = w_timing_validation * wwvh_validation.discrimination_confidence
+                    wwv_score += wwv_weight
+                    wwvh_score += wwvh_weight
+                    total_weight += w_timing_validation
+                    logger.debug(f"{self.channel_name}: Timing validation: Both valid "
+                               f"(WWV conf={wwv_validation.discrimination_confidence:.2f}, "
+                               f"WWVH conf={wwvh_validation.discrimination_confidence:.2f})")
+                else:
+                    # Neither valid - log warning
+                    logger.warning(f"{self.channel_name}: Timing validation rejected both stations "
+                                 f"(WWV: {wwv_validation.rejection_reason}, "
+                                 f"WWVH: {wwvh_validation.rejection_reason})")
         
         # === VOTE 11: High-Precision Timing Cross-Validation ===
         # Burst ToA is the HIGHEST AUTHORITY for timing (single-cycle = best resolution)
