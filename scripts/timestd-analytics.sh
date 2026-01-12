@@ -1,9 +1,9 @@
 #!/bin/bash
-# HF Time Standard Phase 2 Analytics Services Control (all 9 channels)
+# HF Time Standard Metrology Services Control (all 9 channels)
 #
-# Phase 2 processes Phase 1 raw_buffer data to produce:
-#   - D_clock (timing correction for UTC alignment)
-#   - Station discrimination (WWV vs WWVH)
+# Phase 1 processes raw_buffer data to produce:
+#   - L1 Metrology Measurements (HDF5)
+#   - Station discrimination
 #   - Quality metrics and tone detections
 #
 # Input:  raw_buffer/{CHANNEL}/ (20 kHz binary IQ from Phase 1)
@@ -41,10 +41,10 @@ LOG_DIR=$(get_log_dir "$CONFIG")
 
 case $ACTION in
 start)
-    echo "▶️  Starting Phase 2 Analytics Services..."
+    echo "▶️  Starting Metrology Services..."
     
     # Stop existing first
-    pkill -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null
+    pkill -f "hf_timestd.core.metrology_service" 2>/dev/null
     sleep 1
     
     if [ ! -f "$CONFIG" ]; then
@@ -109,7 +109,7 @@ start)
         freq_khz=$(echo "$freq_hz / 1000" | bc)
         channel_dir="SHARED_${freq_khz}"
         
-        nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
+        nohup $PYTHON -m hf_timestd.core.metrology_service \
           --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \
@@ -134,7 +134,7 @@ start)
         freq_khz=$(echo "$freq_hz / 1000" | bc)
         channel_dir="WWV_${freq_khz}"
         
-        nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
+        nohup $PYTHON -m hf_timestd.core.metrology_service \
           --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \
@@ -159,7 +159,7 @@ start)
         freq_khz=$(echo "$freq_hz / 1000" | bc)
         channel_dir="CHU_${freq_khz}"
         
-        nohup $PYTHON -m hf_timestd.core.phase2_analytics_service \
+        nohup $PYTHON -m hf_timestd.core.metrology_service \
           --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \
@@ -177,8 +177,8 @@ start)
     done
     
     sleep 2
-    COUNT=$(pgrep -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null | wc -l)
-    echo "   ✅ Started $COUNT/9 Phase 2 analytics channels"
+    COUNT=$(pgrep -f "hf_timestd.core.metrology_service" 2>/dev/null | wc -l)
+    echo "   ✅ Started $COUNT/9 Metrology analytics channels"
     
     echo "   📄 Logs: $LOG_DIR/phase2-*.log"
     echo "   📊 Output: $DATA_ROOT/phase2/{CHANNEL}/clock_offset/"
@@ -187,29 +187,29 @@ start)
 stop)
     echo "🛑 Stopping Phase 2 Analytics Services..."
     
-    REMAINING=$(pgrep -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null | wc -l)
+    REMAINING=$(pgrep -f "hf_timestd.core.metrology_service" 2>/dev/null | wc -l)
     if [ "$REMAINING" -gt 0 ]; then
-        pkill -9 -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null
+        pkill -9 -f "hf_timestd.core.metrology_service" 2>/dev/null
     fi
     
-    echo "   ✅ Stopped $COUNT Phase 2 services"
+    echo "   ✅ Stopped $COUNT Metrology services"
     ;;
 
 restart)
-    echo "🔄 Restarting Phase 2 Analytics Services..."
+    echo "🔄 Restarting Metrology Services..."
     "$0" stop "$CONFIG"
     sleep 2
     "$0" start "$CONFIG"
     ;;
 
 status)
-    COUNT=$(pgrep -f "hf_timestd.core.phase2_analytics_service" 2>/dev/null | wc -l)
+    COUNT=$(pgrep -f "hf_timestd.core.metrology_service" 2>/dev/null | wc -l)
     if [ "$COUNT" -gt 0 ]; then
-        echo "✅ Phase 2 Analytics: RUNNING ($COUNT/9 channels)"
+        echo "✅ Metrology Services: RUNNING ($COUNT/9 channels)"
         echo "   Input:  $DATA_ROOT/raw_buffer/{CHANNEL}/"
         echo "   Output: $DATA_ROOT/phase2/{CHANNEL}/clock_offset/"
     else
-        echo "⭕ Phase 2 Analytics: STOPPED"
+        echo "⭕ Metrology Services: STOPPED"
     fi
     ;;
 esac

@@ -33,6 +33,18 @@
                 "station_id_440hz"
             ]
         },
+        "L1_metrology_measurements": {
+            "current_version": "v1",
+            "schema_file": "l1_metrology_measurements_v1.json",
+            "description": "Pure metrology measurements: Raw TOA and Signal Metrics",
+            "replaces": []
+        },
+        "L2_physics_interpretation": {
+            "current_version": "v1",
+            "schema_file": "l2_physics_v1.json",
+            "description": "Physics-based interpretation of L1 Metrology",
+            "replaces": []
+        },
         "L3A_tec": {
             "current_version": "v1",
             "schema_file": "l3_tec_v1.json",

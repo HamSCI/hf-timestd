@@ -1,0 +1,128 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L1_metrology_measurements",
+    "description": "Pure metrology measurements: Raw Time of Arrival and Signal Metrics",
+    "cadence_seconds": 60,
+    "processing_level": "L1",
+    "reference": "Raw Reception Time (System Clock + RTP)",
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "rtp_timestamp",
+            "type": "integer",
+            "required": true,
+            "description": "RTP timestamp from raw_buffer"
+        },
+        {
+            "name": "station_id",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "BPM",
+                "UNKNOWN"
+            ],
+            "description": "Identified station"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Carrier frequency",
+            "units": "MHz"
+        },
+        {
+            "name": "raw_toa_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Raw Time of Arrival relative to minute boundary",
+            "units": "milliseconds"
+        },
+        {
+            "name": "tone_detected",
+            "type": "boolean",
+            "required": true,
+            "description": "Was a tone detected?"
+        },
+        {
+            "name": "snr_db",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Signal-to-Noise Ratio",
+            "units": "dB"
+        },
+        {
+            "name": "doppler_hz",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "allow_nan": true,
+            "description": "Doppler shift",
+            "units": "Hz"
+        },
+        {
+            "name": "identification_method",
+            "type": "string",
+            "required": true,
+            "description": "Method used for ID"
+        },
+        {
+            "name": "identification_confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "Confidence of ID"
+        },
+        {
+            "name": "distance_km",
+            "type": "float",
+            "required": true,
+            "description": "Great circle distance to station",
+            "units": "km"
+        },
+        {
+            "name": "light_travel_time_ms",
+            "type": "float",
+            "required": true,
+            "description": "Minimum physical delay (distance/c)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "GOOD",
+                "MARGINAL",
+                "BAD",
+                "MISSING"
+            ],
+            "description": "Overall data quality flag"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Processing version"
+        }
+    ]
+}

@@ -43,10 +43,12 @@ class DataProductRegistry:
         ('L1', 'channel_observables'): 'carrier_power',
         ('L1', 'tone_detections'): 'tone_detections',
         ('L1', 'bcd_timecode'): 'bcd_discrimination',
+        ('L1', 'metrology_measurements'): 'metrology',
         
         # L2 Products (Calibrated Measurements)
         ('L2', 'timing_measurements'): 'clock_offset',
         ('L2', 'test_signal'): 'test_signal',
+        ('L2', 'physics_interpretation'): 'physics',
         
         # L3 Products (Derived/Fused)
         ('L3', 'tec'): 'tec',

@@ -321,27 +321,50 @@ class IonosphericModel:
         if xr is not None and isinstance(value, xr.DataArray):
             if value.size == 0:
                 return default if default is not None else float('nan')
-            return float(value.values.ravel()[0])
+            try:
+                res = float(value.values.ravel()[0])
+                if not np.isfinite(res):
+                    return default if default is not None else float('nan')
+                return res
+            except (IndexError, ValueError, TypeError):
+                return default if default is not None else float('nan')
         
         if isinstance(value, np.ndarray):
             if value.size == 0:
                 return default if default is not None else float('nan')
-            return float(value.reshape(-1)[0])
+            try:
+                res = float(value.reshape(-1)[0])
+                if not np.isfinite(res):
+                    return default if default is not None else float('nan')
+                return res
+            except (IndexError, ValueError, TypeError):
+                return default if default is not None else float('nan')
         
         if hasattr(value, "item"):
             try:
-                return float(value.item())
-            except (AttributeError, TypeError, ValueError) as e:
-                logger.debug(f"Failed to extract scalar via .item(): {e}")
+                res = float(value.item())
+                if not np.isfinite(res):
+                    return default if default is not None else float('nan')
+                return res
+            except (AttributeError, TypeError, ValueError):
                 pass
         
         if isinstance(value, (list, tuple)):
             if len(value) == 0:
                 return default if default is not None else float('nan')
-            return float(value[0])
+            try:
+                res = float(value[0])
+                if not np.isfinite(res):
+                    return default if default is not None else float('nan')
+                return res
+            except (IndexError, ValueError, TypeError):
+                return default if default is not None else float('nan')
         
         try:
-            return float(value)
+            res = float(value)
+            if not np.isfinite(res):
+                return default if default is not None else float('nan')
+            return res
         except (TypeError, ValueError):
             if default is not None:
                 return default
@@ -757,10 +780,13 @@ class IonosphericModel:
         # Filter to recent entries within calibration window
         now = datetime.now(timezone.utc)
         window_seconds = self.calibration_window_hours * 3600
-        recent = [
-            c for c in cal_data
-            if (now - c.timestamp).total_seconds() < window_seconds
-        ]
+        recent = []
+        for c in cal_data:
+            # Skip invalid or old entries
+            if not np.isfinite(c.offset_km) or not np.isfinite(c.confidence):
+                continue
+            if (now - c.timestamp).total_seconds() < window_seconds:
+                recent.append(c)
         
         if not recent:
             return heights
@@ -881,8 +907,16 @@ class IonosphericModel:
             n_hops: Number of ionospheric hops
             confidence: Weight for this calibration point (0-1)
         """
-        if n_hops == 0 or confidence < 0.3:
-            return  # Can't calibrate from ground wave or low-confidence
+        if n_hops == 0:
+            return
+            
+        # SANITY CHECK: Explicitly reject NaN or non-finite values
+        if not np.isfinite(observed_delay_ms) or not np.isfinite(predicted_delay_ms):
+            logger.debug(f"Calibration: rejected NaN/inf delay (obs={observed_delay_ms}, pred={predicted_delay_ms})")
+            return
+            
+        if not np.isfinite(confidence) or confidence < 0.3:
+            return  # Can't calibrate from ground wave or low-confidence/NaN
         
         self.stats['calibration_updates'] += 1
         

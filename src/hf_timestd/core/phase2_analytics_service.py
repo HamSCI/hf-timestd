@@ -146,6 +146,8 @@ from hf_timestd.models import (
     ToneQualityFlag
 )
 from hf_timestd.core.broadcast_kalman_filter import BroadcastKalmanFilter
+from .operational_phase_manager import OperationalPhaseManager
+from .station_identifier import StationIdentifier
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +155,8 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION CONSTANTS
 # ============================================================================
 
-# HDF5 Write Failure Thresholds
+# Phase Architecture Components (Unified System)
+
 HDF5_FAILURE_ALERT_THRESHOLD = 10  # Critical alert after N consecutive failures
 HDF5_FAILURE_RESET_INTERVAL = 300  # Reset counter after N seconds of success
 
@@ -446,6 +449,21 @@ class Phase2AnalyticsService:
             state_file=convergence_state_file
         )
         logger.info(f"Initialized clock convergence model (state file: {convergence_state_file})")
+        
+        # ====================================================================
+        # Unified Phase Architecture (2026-01-12)
+        # ====================================================================
+        # Initialize Operational Phase Manager (System-wide phase control)
+        phase_manager_state_file = self.archive_dir.parent.parent / 'state' / 'operational_phase.json'
+        self.phase_manager = OperationalPhaseManager(state_file=phase_manager_state_file)
+        
+        # Initialize Station Identifier (Physics-based discrimination)
+        self.station_identifier = StationIdentifier(operational_phase_manager=self.phase_manager)
+        
+        logger.info(
+            f"Initialized Unified Phase Architecture: phase={self.phase_manager.get_phase().value}, "
+            f"state_file={phase_manager_state_file}"
+        )
         
         # ====================================================================
         # Per-Broadcast Kalman Filters (Science-First Architecture v5.0)
@@ -945,15 +963,21 @@ class Phase2AnalyticsService:
                                 f"but raw_arrival - propagation = {expected_clock_offset:.3f} ms "
                                 f"(diff={abs(ck_off - expected_clock_offset):.3f} ms)"
                             )
+                        # Use the high-precision expected_clock_offset for HDF5 if they differ
+                        ck_off = expected_clock_offset
                     elif math.isnan(raw_arr) or math.isnan(prop_delay):
-                        # If either input is NaN, clock_offset should be NaN
+                        # If either input is NaN, clock_offset MUST be NaN
                         ck_off = float('nan')
                     
-                    # Determine quality flag based on tone detection
-                    if not tone_detected_flag:
-                        quality_flag_final = 'MISSING'  # No validated tone detected
+                    # Final sanity check for ck_off
+                    if not np.isfinite(ck_off):
+                        ck_off = float('nan')
+
+                    # Determine quality flag based on tone detection and valid clock offset
+                    if not tone_detected_flag or math.isnan(ck_off):
+                        quality_flag_final = QualityFlag.MISSING
                     else:
-                        # Use existing quality flag logic
+                        # Use existing quality flag logic (GOOD/MARGINAL/BAD)
                         quality_flag_final = quality_flag
                         
                     l2_measurement = L2TimingMeasurement(
@@ -972,8 +996,8 @@ class Phase2AnalyticsService:
                         # === DERIVED VALUES ===
                         clock_offset_ms=ck_off,  # NaN if inputs are NaN
                         
-                        uncertainty_ms=float(effective_uncertainty) if effective_uncertainty is not None else 1.0,
-                        expanded_uncertainty_ms=float(unc_result['u_expanded_ms']) if unc_result.get('u_expanded_ms') is not None else 2.0,
+                        uncertainty_ms=max(0.001, float(effective_uncertainty)) if effective_uncertainty is not None else 1.0,
+                        expanded_uncertainty_ms=max(0.002, float(unc_result['u_expanded_ms'])) if unc_result.get('u_expanded_ms') is not None else 2.0,
                         coverage_factor=float(budget.coverage_factor) if budget.coverage_factor is not None else 2.0,
                         confidence_level=float(budget.confidence_level) if budget.confidence_level is not None else 0.95,
                         u_rtp_timestamp_ms=float(budget.u_rtp_timestamp_ms),
@@ -1828,6 +1852,7 @@ class Phase2AnalyticsService:
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'uptime_seconds': int(time.time() - self.start_time),
                 'pid': None,
+                'operational_phase': self.phase_manager.get_phase().value if hasattr(self, 'phase_manager') else 'UNKNOWN',
                 'channels': {
                     self.channel_name: {
                         'channel_name': self.channel_name,
@@ -2156,6 +2181,54 @@ class Phase2AnalyticsService:
                                 minute_boundary=minute_boundary,
                                 arrival_rtp=res.solution.arrival_rtp if res.solution else None
                             )
+                            
+                            # ====================================================================
+                            # Unified Phase Architecture Integration (Observe Mode)
+                            # ====================================================================
+                            # Extract inputs for shadow StationIdentifier
+                            has_1000hz = getattr(time_snap, 'wwv_detected', False) or getattr(time_snap, 'chu_detected', False)
+                            has_1200hz = getattr(time_snap, 'wwvh_detected', False)
+                            
+                            # FSK detection comes from ChannelCharacterization (Step 2)
+                            channel_info = res.channel if hasattr(res, 'channel') else None
+                            has_fsk = getattr(channel_info, 'chu_fsk_detected', False) if channel_info else False
+                            
+                            # Shadow Identify: See how the new physics-based engine compares to legacy voting
+                            shadow_id = self.station_identifier.identify(
+                                frequency_mhz=self.frequency_hz / 1e6,
+                                has_1000hz_tone=has_1000hz,
+                                has_1200hz_tone=has_1200hz,
+                                measured_delay_ms=propagation_delay_ms,
+                                has_fsk=has_fsk
+                            )
+                            
+                            # Log comparison for "Observe Mode" validation
+                            if shadow_id.station != station:
+                                logger.info(
+                                    f"🔍 Unified Phase ID: DISCREPANCY on {self.channel_name} - "
+                                    f"Legacy={station}, Shadow={shadow_id.station or 'NONE'} "
+                                    f"(method={shadow_id.method}, reason={shadow_id.reason})"
+                                )
+                            
+                            # Update Phase Manager Metrics: Drive the system-wide phase transitions
+                            # We use detections with >0.8 confidence to establish stable phase state
+                            if solution.confidence > 0.8:
+                                self.phase_manager.update_metrics(
+                                    station=station,
+                                    d_clock_ms=d_clock_ms,
+                                    timestamp=float(minute_boundary),
+                                    delay_std_ms=res.uncertainty_ms,
+                                    # Anchor stations are CHU and high-freq WWV (20/25 MHz)
+                                    is_anchor=(station in ['CHU', 'WWV'] and self.frequency_hz in [3330000, 7850000, 14670000, 20000000, 25000000])
+                                )
+                                
+                                # Learn delay model: Refine the physics-based bounds for future discrimination
+                                self.station_identifier.update_delay_model(
+                                    station=station,
+                                    frequency_mhz=self.frequency_hz / 1e6,
+                                    measured_delay_ms=propagation_delay_ms
+                                )
+                            # ====================================================================
                             # Format values, handling None during bootstrap
                             prop_str = f"{propagation_delay_ms:.1f}ms" if propagation_delay_ms is not None else "N/A"
                             snr_str = f"{snr_db:.1f}dB" if snr_db is not None else "N/A"

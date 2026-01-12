@@ -35,7 +35,16 @@ def get_schema(product_level: str, product_name: str, version: str = 'v1') -> Di
         >>> schema['schema_version']
         '1.0.0'
     """
-    schema_file = SCHEMA_DIR / f"{product_level.lower()}_{product_name}_{version}.json"
+    # Try to resolve via registry first
+    registry = get_registry()
+    registry_key = f"{product_level.upper()}_{product_name}"
+    
+    if registry_key in registry.get('data_products', {}):
+        schema_filename = registry['data_products'][registry_key]['schema_file']
+        schema_file = SCHEMA_DIR / schema_filename
+    else:
+        # Fallback to legacy naming convention
+        schema_file = SCHEMA_DIR / f"{product_level.lower()}_{product_name}_{version}.json"
     
     if not schema_file.exists():
         raise FileNotFoundError(

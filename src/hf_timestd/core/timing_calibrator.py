@@ -914,6 +914,11 @@ class TimingCalibrator:
         Returns:
             True if detection is physically plausible, False otherwise
         """
+        # SANITY CHECK: Explicitly reject NaN or non-finite values
+        if not np.isfinite(propagation_delay_ms) or not np.isfinite(d_clock_ms):
+            logger.warning(f"Rejected detection: {station} contains NaN values (delay={propagation_delay_ms}, d_clock={d_clock_ms})")
+            return False
+            
         # Get minimum delay for this station (light-speed constraint)
         min_delay = MINIMUM_PROPAGATION_DELAY_MS.get(station, 0.0)
         if propagation_delay_ms < min_delay - 1.0:  # 1ms tolerance for measurement noise
@@ -1213,6 +1218,10 @@ class TimingCalibrator:
         else:
             cal = self.station_calibration[station]
             
+            # SANITY CHECK: Reject NaN
+            if not np.isfinite(propagation_delay_ms) or not np.isfinite(snr_db) or not np.isfinite(confidence):
+                return
+                
             # Weighted update (higher SNR = more weight)
             weight = min(1.0, snr_db / 30.0) * confidence
             alpha = weight / (cal.n_samples + weight)
@@ -1271,6 +1280,11 @@ class TimingCalibrator:
             normalized_rtp_base = rtp_timestamp
         else:
             normalized_rtp_base = arrival_rtp
+
+        # SANITY CHECK: Protect against NaN before rounding/modulo
+        if not np.isfinite(propagation_delay_ms) or not np.isfinite(d_clock_ms):
+            logger.warning(f"RTP calibration aborted: NaN values detected for {channel_name}")
+            return
 
         propagation_samples = round(propagation_delay_ms * self.sample_rate / 1000.0)
         d_clock_samples = round(d_clock_ms * self.sample_rate / 1000.0)

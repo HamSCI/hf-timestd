@@ -289,6 +289,11 @@ BPM_LAT = 34.9489
 BPM_LON = 109.5430
 
 # Convenience dictionary for programmatic access
+WWV_COORDINATES = (WWV_LAT, WWV_LON)
+WWVH_COORDINATES = (WWVH_LAT, WWVH_LON)
+CHU_COORDINATES = (CHU_LAT, CHU_LON)
+BPM_COORDINATES = (BPM_LAT, BPM_LON)
+
 STATION_LOCATIONS = {
     'WWV': {'lat': WWV_LAT, 'lon': WWV_LON, 'name': 'Fort Collins, CO, USA'},
     'WWVH': {'lat': WWVH_LAT, 'lon': WWVH_LON, 'name': 'Kekaha, Kauai, HI, USA'},

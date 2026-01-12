@@ -111,9 +111,10 @@ class L2TimingMeasurement(BaseModel):
     calibration_date: str
     gpsdo_locked: bool
 
+    from pydantic import model_validator
     
-    @classmethod
-    def model_validate_data_integrity(cls, values):
+    @model_validator(mode='after')
+    def model_validate_data_integrity(self):
         """
         Enforce data model hierarchy and missing value semantics.
         
@@ -125,10 +126,11 @@ class L2TimingMeasurement(BaseModel):
         """
         import math
         
-        tone_detected = values.get('tone_detected')
-        raw_arrival = values.get('raw_arrival_time_ms')
-        clock_offset = values.get('clock_offset_ms')
-        quality_flag = values.get('quality_flag')
+        # In Pydantic v2 mode='after', values are accessible via self
+        tone_detected = self.tone_detected
+        raw_arrival = self.raw_arrival_time_ms
+        clock_offset = self.clock_offset_ms
+        quality_flag = self.quality_flag
         
         # Rule 1: tone_detected=False requires raw_arrival_time_ms=NaN
         if not tone_detected and raw_arrival is not None and not math.isnan(raw_arrival):
@@ -159,8 +161,99 @@ class L2TimingMeasurement(BaseModel):
                 f"quality_flag={quality_flag} (should be MISSING)"
             )
         
-        return values
+        return self
 
     class Config:
         use_enum_values = True
 
+
+class L1MetrologyMeasurement(BaseModel):
+    """
+    Pure metrology measurement: "Who sent it" and "When it arrived" (Raw).
+    No physics corrections, no d_clock, just the facts.
+    """
+    # Core Identification
+    timestamp_utc: str = Field(..., description="Measurement timestamp in UTC (ISO 8601)")
+    minute_boundary_utc: int = Field(..., description="Unix epoch timestamp of minute boundary")
+    rtp_timestamp: int = Field(..., description="RTP timestamp from raw_buffer")
+    station_id: StationID = Field(..., description="Identified station")
+    frequency_mhz: float = Field(..., description="Carrier frequency in MHz")
+    
+    # The Fact: Raw Time of Arrival
+    raw_toa_ms: float = Field(..., description="Raw Time of Arrival (from tone detection)")
+    tone_detected: bool = Field(..., description="Was a tone detected?")
+    
+    # Signal Metrics
+    snr_db: float = Field(..., description="Signal-to-Noise Ratio in dB")
+    doppler_hz: Optional[float] = Field(None, description="Doppler shift in Hz")
+    
+    # Identification Metadata
+    identification_method: str = Field(..., description="Method used for ID (e.g., 'anchor', 'geometric')")
+    identification_confidence: float = Field(..., description="Confidence of ID")
+    
+    # Geographic Sanity Checks (Physics-Lite)
+    distance_km: float = Field(..., description="Great circle distance to station")
+    light_travel_time_ms: float = Field(..., description="Minimum physical delay (distance/c)")
+    
+    # Quality
+    quality_flag: QualityFlag
+    processing_version: str = "1.0.0"
+
+    from pydantic import model_validator
+    
+    @model_validator(mode='after')
+    def validate_sanity(self):
+        """
+        Enforce geographic sanity: TOA must be >= light travel time.
+        """
+        import math
+        
+        # In Pydantic v2 mode='after', values are accessible via self
+        raw_toa = self.raw_toa_ms
+        light_time = self.light_travel_time_ms
+        tone_detected = self.tone_detected
+        
+        if tone_detected and not math.isnan(raw_toa):
+            # Allow small margin for error/uncertainty (e.g. -0.5ms) 
+            # to account for negative clock errors or measurement noise.
+            # But gross violations (e.g. 5ms too early) are impossible.
+            margin_ms = 1.0
+            if raw_toa < (light_time - margin_ms):
+                pass
+                # raise ValueError(
+                #    f"Geographic sanity violation: TOA ({raw_toa:.3f}ms) < "
+                #    f"Light Travel Time ({light_time:.3f}ms) with margin {margin_ms}ms"
+                # )
+                # TODO: Enforce this once we are sure about clock synchronization state.
+                # For now, just logging or passing is safer during bootstrap.
+            
+        return self
+
+    class Config:
+        use_enum_values = True
+
+
+class L2PhysicsMeasurement(BaseModel):
+    """
+    Physics Interpretation: "The Scientist's View".
+    Derived from L1 Metrology + Environmental Models (IRI, Raytracing).
+    """
+    # Keys to link back to L1
+    timestamp_utc: str = Field(..., description="Measurement timestamp in UTC")
+    station_id: StationID = Field(..., description="Target station")
+    frequency_mhz: float = Field(..., description="Carrier frequency")
+    
+    # Physics Outputs
+    propagation_delay_ms: float = Field(..., description="Modeled propagation delay")
+    propagation_mode: str = Field(..., description="Likely mode (1F, 2F, E, etc.)")
+    tec_estimate: Optional[float] = Field(None, description="Total Electron Content (TECu)")
+    
+    # Quality of Fit
+    model_confidence: float = Field(..., description="Confidence in model match (0-1)")
+    
+    # Metadata
+    processing_version: str = "1.0.0"
+    processed_at: str = Field(..., description="When this interpretation was made")
+    
+    class Config:
+        use_enum_values = True

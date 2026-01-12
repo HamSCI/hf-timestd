@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
 
 - **Fix**: Resolved Chrony SHM feed failure (`Reach=0`) by correcting struct packing alignment (removed erroneous padding) and recreating the shared memory segment.
 - **Fix**: Relaxed single-station constraints to allow Chrony updates during single-station operation with appropriate uncertainty reporting.
+- **Fix**: Clamped Chrony SHM precision to a minimum of -10 (1ms) to prevent rejection of valid single-station measurements with high uncertainty (log2(32ms) ~ -5).
+- **Diagnostics**: Confirmed "Digital Silence" data gaps are due to `radiod` transmitting zero-amplitude samples, not recorder failure.
 
 #### Kalman Filter Initialization & Tuning
 

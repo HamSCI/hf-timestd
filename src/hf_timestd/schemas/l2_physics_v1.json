@@ -1,0 +1,81 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L2_physics_interpretation",
+    "description": "Physics-based interpretation of L1 Metrology data (Delay, Mode, TEC)",
+    "cadence_seconds": 60,
+    "processing_level": "L2",
+    "reference": "IRI-2020 / Raytracing",
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "station_id",
+            "type": "string",
+            "required": true,
+            "enum": [
+                "WWV",
+                "WWVH",
+                "CHU",
+                "BPM",
+                "UNKNOWN"
+            ],
+            "description": "Station ID"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Carrier frequency",
+            "units": "MHz"
+        },
+        {
+            "name": "propagation_delay_ms",
+            "type": "float",
+            "required": true,
+            "description": "Modeled propagation delay",
+            "units": "milliseconds"
+        },
+        {
+            "name": "propagation_mode",
+            "type": "string",
+            "required": true,
+            "description": "Propagation Mode (e.g. 1F2)"
+        },
+        {
+            "name": "tec_estimate",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Path TEC Estimate",
+            "units": "TECu"
+        },
+        {
+            "name": "model_confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [
+                0,
+                1
+            ],
+            "description": "Confidence in model fit"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Processing timestamp"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Processing version"
+        }
+    ]
+}
