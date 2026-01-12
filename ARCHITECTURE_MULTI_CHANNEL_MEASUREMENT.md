@@ -203,6 +203,36 @@ Each broadcast provides unique propagation information:
 > 
 > Once timing is established, the system measures all 17 broadcasts as independent ionospheric probes. The question is not "which station is this?" but "what is each station telling us about its propagation path?"
 
+## Astronomical Analogy
+
+The system's evolution parallels astrophotography:
+
+**Telescope Setup (Bootstrap)**:
+1. **Orient**: Point telescope at approximate target location
+2. **Focus**: Adjust focus until stars are sharp points
+3. **Calibrate**: Align sidereal drive with Earth's rotation
+
+**Long Exposure (Measurement)**:
+1. **Track**: Sidereal drive keeps telescope aligned
+2. **Stack**: Multiple exposures accumulated
+3. **Measure**: Extract data from each star independently
+
+### Radio Observatory Parallel
+
+**Bootstrap Phase** (Orient & Focus):
+- Use ground truth signals to "find" each station
+- Adjust timing until delays are sharp (±1ms)
+- Calibrate GPSDO-to-UTC alignment
+
+**Measurement Phase** (Track & Stack):
+- Timing system "tracks" each station at its known delay
+- Accumulate measurements over time
+- Extract independent metrics from each broadcast
+
+**Key Insight**: Once aligned, the telescope doesn't need to "discriminate" between stars - it knows where each one is and measures them all simultaneously. Similarly, once timing is calibrated, the system doesn't discriminate between stations - it knows when each arrives and measures them all independently.
+
+The GPSDO is the "sidereal drive" - maintaining stable timing so the system stays aligned with the broadcasts even as ionospheric conditions change (like Earth's rotation changing star positions).
+
 ## Benefits of Multi-Channel Measurement
 
 1. **No information loss**: Measure all stations, not just "winner"
