@@ -115,6 +115,7 @@ The system is composed of six independent services that form a pipeline:
 - **[TECHNICAL_REFERENCE.md](TECHNICAL_REFERENCE.md)** - Deep dive into algorithms, data formats, and physics models.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design philosophy ("The Why").
 - **[DIRECTORY_STRUCTURE.md](DIRECTORY_STRUCTURE.md)** - File layout specification.
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mijahauan/hf-timestd)
 
 ---
 
