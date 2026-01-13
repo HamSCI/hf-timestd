@@ -56,8 +56,6 @@ class PhysicsService:
         self.solver = TransmissionTimeSolver(
             receiver_lat=self.receiver_lat,
             receiver_lon=self.receiver_lon,
-            scale_reference_time=False,
-            # Nominal, only used for RTP conversion logic internally
             sample_rate=24000,
             enable_dynamic_ionosphere=True
         )

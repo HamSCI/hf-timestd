@@ -609,17 +609,24 @@ class MultiBroadcastFusion:
         """
         Load per-broadcast calibration from file.
         
-        Issue 3.2 Fix: Calibration is now keyed by broadcast (station_frequency)
-        rather than just station, to account for frequency-dependent delays.
+        STEEL RULER PHILOSOPHY (2026-01-13):
+        For GPSDO-referenced systems, calibration should NOT persist across restarts.
+        - GPSDO provides fixed time reference (doesn't drift)
+        - UTC doesn't change
+        - Baseline offset should be near-zero and constant
+        - Propagation delays vary (ionosphere) but are science data, not calibration
+        - Always bootstrap from zero to maintain absolute reference
         
-        Issue 3.8.2 Fix: Added sanity checks to prevent loading corrupted
-        calibration files with unreasonably large offsets.
-        
-        CRITICAL FIX (P2.1): Calibration persistence eliminates bootstrap delay.
-        System now loads previous calibration state on startup, allowing immediate
-        grade A performance instead of 10-20 minute convergence period.
+        Previous behavior (calibration persistence) was causing stale calibration issues
+        where old offsets were incorrectly applied after restart.
         """
-        if self.calibration_file.exists():
+        # STEEL RULER: Always bootstrap from zero - GPSDO is the absolute reference
+        logger.info("Steel Ruler mode: Starting fresh bootstrap from zero (GPSDO is absolute reference)")
+        self._init_default_calibration()
+        return
+        
+        # OLD CODE (disabled): Load calibration from file
+        if False and self.calibration_file.exists():
             try:
                 with open(self.calibration_file) as f:
                     data = json.load(f)
@@ -638,12 +645,33 @@ class MultiBroadcastFusion:
                 if '_kalman_state' in data:
                     ks = data['_kalman_state']
                     age_seconds = time.time() - ks.get('saved_at', 0)
+                    offset_ms = ks.get('offset_ms', 0.0)
                     
-                    # Only restore if state is recent (<1 hour old)
+                    # Sanity check: For GPSDO-referenced systems, offset should be near zero
+                    # Reject offsets > 5ms as likely stale calibration from different system state
+                    # Check this FIRST before age check to catch miscalibration regardless of file age
+                    if abs(offset_ms) > 5.0:
+                        logger.error(
+                            f"⚠️  REJECTED stale Kalman state: offset={offset_ms:.3f}ms exceeds 5ms threshold. "
+                            f"Starting fresh bootstrap to prevent incorrect clock offset."
+                        )
+                        print(f"⚠️  REJECTED stale calibration: {offset_ms:.3f}ms > 5ms threshold", flush=True)
+                        
+                        # Reset Chrony discontinuity check to allow feeding after bootstrap
+                        global last_chrony_d_clock, last_chrony_update_time
+                        last_chrony_d_clock = None
+                        last_chrony_update_time = None
+                        logger.info("Reset Chrony discontinuity check after rejecting stale calibration")
+                        
+                        # CRITICAL: Don't load broadcast calibrations either - force complete fresh bootstrap
+                        self._init_default_calibration()
+                        return
+                    
+                    # Check age: only restore if state is recent (<1 hour old)
                     if age_seconds < 3600:
                         try:
                             self.kalman_state = np.array([
-                                ks['offset_ms'],
+                                offset_ms,
                                 ks['drift_ms_per_min']
                             ])
                             self.kalman_P = np.array(ks['covariance'])
