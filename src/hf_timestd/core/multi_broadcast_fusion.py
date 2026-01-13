@@ -1922,11 +1922,21 @@ class MultiBroadcastFusion:
             # P[0,0] = 1e-4  -> 0.01ms uncertainty in offset
             # P[1,1] = 1e-10 -> Effectively zero drift uncertainty
             self.kalman_P = np.array([[1e-4, 0.0], [0.0, 1e-10]])
+            
+            # CRITICAL FIX (2026-01-13): Force zero drift for Pure Steel Ruler
+            # If we trust the GPSDO, any learned drift during convergence is likely 
+            # noise/jitter bias. We freeze the offset but drop the drift.
+            self.kalman_state[1] = 0.0
+            
             logger.info(
                 f"Kalman filter CONVERGED after {self.kalman_n_updates} updates. "
                 f"Baseline offset: {self.kalman_state[0]:.3f}ms. "
-                f"Transitioning to operational mode: Covariance clamped, baseline locked."
+                f"Transitioning to operational mode: Covariance clamped, baseline locked, DRIFT FROZEN AT 0."
             )
+        
+        # OPERATIONAL MODE: Force zero drift to prevent linear "walk away" from 0
+        if self.kalman_converged:
+            self.kalman_state[1] = 0.0
         
         # CRITICAL FIX (2026-01-10): Relaxed divergence bounds and better recovery
         # If state has diverged beyond ±20ms, reset the filter

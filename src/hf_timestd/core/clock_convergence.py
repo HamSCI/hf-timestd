@@ -81,12 +81,12 @@ SOLUTION: KALMAN FILTER with offset+drift state model
 The Kalman filter tracks both the clock offset AND its rate of change:
 
     STATE: x = [D_clock (ms), D_clock_rate (ms/min)]
-    
+
     STATE TRANSITION (constant velocity model):
         x_k = F × x_{k-1} + process_noise
         F = [[1, Δt],
              [0,  1]]
-        
+
     MEASUREMENT MODEL:
         z = H × x + measurement_noise
         H = [1, 0]  (we only measure D_clock, not rate directly)
@@ -95,7 +95,7 @@ PROCESS NOISE (Q matrix):
     Based on oscillator stability specification:
     - GPSDO: ~10⁻¹¹ Allan deviation → very small process noise
     - TCXO:  ~10⁻⁶ Allan deviation → moderate process noise
-    
+
     Q = [[σ_offset², σ_offset×σ_rate],
          [σ_offset×σ_rate, σ_rate²]]
 
@@ -145,7 +145,7 @@ USAGE
         anomaly_sigma=3.0,          # 3σ for anomaly detection
         state_file=Path('/data/state/convergence.json')
     )
-    
+
     # Process each minute's measurement
     result = model.process_measurement(
         station='WWV',
@@ -153,7 +153,7 @@ USAGE
         d_clock_ms=15.234,
         timestamp=time.time()
     )
-    
+
     if result.is_locked:
         # Use residual for space weather science!
         ionospheric_variation_ms = result.residual_ms
@@ -170,15 +170,14 @@ REVISION HISTORY
 2025-11-15: Initial "Set, Monitor, Intervention" implementation
 """
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Dict, List, Optional, Tuple
-import json
-import math
-import logging
 import os
+import json
+import logging
 from pathlib import Path
+from datetime import datetime, timezone
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 
@@ -194,9 +193,10 @@ try:
 except ImportError:
     # Fallback for standalone testing
     STATE_FILE_VERSION = 2
-    from datetime import datetime, timezone
-    def utc_isoformat() -> str:
-        return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    from hf_timestd.utils import (
+        utc_now,
+        utc_isoformat
+    )
 
 # Sanity thresholds for loaded Kalman state
 MAX_REASONABLE_DRIFT_MS_PER_MIN = 0.1  # GPSDO drift < 0.01 PPM = 0.012 ms/min at 20kHz
@@ -207,32 +207,32 @@ MAX_STATE_AGE_HOURS = 24  # Don't trust state older than 24 hours
 def validate_kalman_state(kalman: 'KalmanClockTracker', timestamp: Optional[float] = None) -> Tuple[bool, str]:
     """
     Validate that loaded Kalman state is physically reasonable.
-    
+
     Issue 1.3 Fix (2025-12-08): Prevents corrupted state from poisoning
     fresh measurements. The Dec 8 bug was caused by a drift_rate of
     -6.56 ms/min persisted to state file, which caused all new measurements
     to be rejected as 5-sigma outliers.
-    
+
     Args:
         kalman: KalmanClockTracker instance to validate
         timestamp: Optional ISO timestamp of when state was saved
-        
+
     Returns:
         (is_valid, reason) tuple
     """
     if kalman is None:
         return True, "No Kalman state to validate"
-    
+
     # Check drift rate is physically possible for GPSDO
     drift_rate = kalman.drift_rate_ms_per_min
     if abs(drift_rate) > MAX_REASONABLE_DRIFT_MS_PER_MIN:
         return False, f"Drift rate {drift_rate:.3f} ms/min exceeds GPSDO limit {MAX_REASONABLE_DRIFT_MS_PER_MIN}"
-    
+
     # Check offset is in reasonable range
     offset = kalman.offset_ms
     if abs(offset) > MAX_REASONABLE_OFFSET_MS:
         return False, f"Offset {offset:.1f} ms exceeds reasonable limit {MAX_REASONABLE_OFFSET_MS}"
-    
+
     # Check covariance matrix is positive definite
     try:
         eigenvalues = np.linalg.eigvals(kalman.P)
@@ -240,18 +240,19 @@ def validate_kalman_state(kalman: 'KalmanClockTracker', timestamp: Optional[floa
             return False, f"Covariance matrix not positive definite (min eigenvalue: {np.min(eigenvalues):.2e})"
     except np.linalg.LinAlgError:
         return False, "Covariance matrix decomposition failed"
-    
+
     # Check state age if timestamp provided
     if timestamp is not None:
         try:
-            from datetime import datetime, timezone
             state_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-            age_hours = (datetime.now(timezone.utc) - state_time).total_seconds() / 3600
+            now = datetime.now(timezone.utc)
+            age_hours = (now - state_time).total_seconds() / 3600
             if age_hours > MAX_STATE_AGE_HOURS:
-                return False, f"State is {age_hours:.1f} hours old (limit: {MAX_STATE_AGE_HOURS})"
+                msg = f"State is {age_hours:.1f} hours old (limit: {MAX_STATE_AGE_HOURS})"
+                return False, msg
         except (ValueError, TypeError):
             pass  # Ignore timestamp parsing errors
-    
+
     return True, "State validated"
 
 
@@ -262,31 +263,31 @@ def validate_kalman_state(kalman: 'KalmanClockTracker', timestamp: Optional[floa
 class KalmanClockTracker:
     """
     Kalman filter for tracking clock offset with drift.
-    
+
     This replaces Welford's algorithm to properly handle non-stationary
     clock behavior (temperature drift, ionospheric variations).
-    
+
     State vector: [offset_ms, drift_rate_ms_per_min]
-    
+
     The filter uses a constant-velocity model where:
     - offset(t+dt) = offset(t) + drift_rate * dt
     - drift_rate(t+dt) = drift_rate(t) + noise
-    
+
     This allows the filter to track slow drift while filtering out
     random measurement noise.
     """
-    
+
     def __init__(
         self,
         initial_offset_ms: float = 0.0,
-        initial_uncertainty_ms: float = 100.0,
-        process_noise_offset_ms: float = 0.01,
-        process_noise_drift_ms_per_min: float = 0.001,
-        measurement_noise_ms: float = 1.0
+        initial_uncertainty_ms: float = 5.0,        # Initial covariance
+        process_noise_offset_ms: float = 1e-6,      # Near Zero Stability
+        process_noise_drift_ms_per_min: float = 1e-7,# GPSDO: Drift is negligible
+        measurement_noise_ms: float = 30.0          # Ionospheric noise
     ):
         """
         Initialize Kalman filter.
-        
+
         Args:
             initial_offset_ms: Initial guess for clock offset
             initial_uncertainty_ms: Initial uncertainty (large = uninformed prior)
@@ -296,56 +297,56 @@ class KalmanClockTracker:
         """
         # State vector: [offset, drift_rate]
         self.x = np.array([initial_offset_ms, 0.0])
-        
+
         # State covariance matrix (initially very uncertain)
         self.P = np.array([
             [initial_uncertainty_ms**2, 0.0],
             [0.0, (initial_uncertainty_ms / 10)**2]  # Drift uncertainty
         ])
-        
+
         # Process noise parameters
         self.q_offset = process_noise_offset_ms**2
         self.q_drift = process_noise_drift_ms_per_min**2
-        
+
         # Measurement noise
         self.R = measurement_noise_ms**2
-        
+
         # Measurement matrix: we only observe offset, not drift
         self.H = np.array([[1.0, 0.0]])
-        
+
         # Tracking
         self.count = 0
         self.last_timestamp: Optional[float] = None
         self.innovation_history: List[float] = []
-    
+
     @property
     def offset_ms(self) -> float:
         """Current offset estimate."""
         return float(self.x[0])
-    
+
     @property
     def drift_rate_ms_per_min(self) -> float:
         """Current drift rate estimate (ms/minute)."""
         return float(self.x[1])
-    
+
     @property
     def uncertainty_ms(self) -> float:
         """Current offset uncertainty (1-sigma)."""
         return float(np.sqrt(self.P[0, 0]))
-    
+
     @property
     def drift_uncertainty_ms_per_min(self) -> float:
         """Current drift rate uncertainty (1-sigma)."""
         return float(np.sqrt(self.P[1, 1]))
-    
+
     def predict(self, dt_minutes: float = 1.0) -> None:
         """
         Prediction step: project state forward in time.
-        
+
         Uses constant-velocity model:
             offset(t+dt) = offset(t) + drift * dt
             drift(t+dt) = drift(t)
-        
+
         Args:
             dt_minutes: Time step in minutes (typically 1.0 for per-minute updates)
         """
@@ -354,18 +355,18 @@ class KalmanClockTracker:
             [1.0, dt_minutes],
             [0.0, 1.0]
         ])
-        
+
         # Process noise covariance (scaled by dt)
         # Using continuous white noise acceleration model
         Q = np.array([
             [self.q_offset + self.q_drift * dt_minutes**2 / 3, self.q_drift * dt_minutes / 2],
             [self.q_drift * dt_minutes / 2, self.q_drift]
         ]) * dt_minutes
-        
+
         # Predict state and covariance
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
-    
+
     def update(
         self,
         measurement_ms: float,
@@ -374,12 +375,12 @@ class KalmanClockTracker:
     ) -> Tuple[float, float, bool]:
         """
         Update step: incorporate new measurement.
-        
+
         Args:
             measurement_ms: Measured clock offset
             timestamp: Unix timestamp (for dt calculation)
             measurement_noise_ms: Override measurement noise for this update
-            
+
         Returns:
             (innovation, normalized_innovation, is_outlier)
         """
@@ -389,60 +390,60 @@ class KalmanClockTracker:
             dt_minutes = max(0.1, min(60.0, dt_minutes))  # Clamp to reasonable range
         else:
             dt_minutes = 1.0  # Assume 1 minute between updates
-        
+
         if self.last_timestamp is not None:
             self.predict(dt_minutes)
-        
+
         self.last_timestamp = timestamp
         self.count += 1
-        
+
         # Measurement noise (allow per-measurement override)
         R = (measurement_noise_ms**2) if measurement_noise_ms else self.R
-        
+
         # Innovation (measurement residual)
         z = np.array([measurement_ms])
         y = z - self.H @ self.x  # Innovation
         innovation = float(y[0])
-        
+
         # Innovation covariance
         S = self.H @ self.P @ self.H.T + R
         S_scalar = float(S[0, 0])
-        
+
         # Normalized innovation for outlier detection
         normalized_innovation = abs(innovation) / np.sqrt(S_scalar) if S_scalar > 0 else 0.0
-        
+
         # Track innovation history
         self.innovation_history.append(innovation)
         if len(self.innovation_history) > 60:
             self.innovation_history.pop(0)
-        
+
         # Check for outlier (don't update if extreme outlier)
         is_outlier = normalized_innovation > 5.0  # 5-sigma outlier
-        
+
         if not is_outlier:
             # Kalman gain
             K = self.P @ self.H.T / S_scalar
-            
+
             # Update state
             self.x = self.x + K.flatten() * innovation
-            
+
             # Update covariance (Joseph form for numerical stability)
             I_KH = np.eye(2) - K @ self.H
             # K is 2x1, R is scalar -> K @ K.T is 2x2, then scale by R
             self.P = I_KH @ self.P @ I_KH.T + R * (K @ K.T)
-        
+
         return innovation, normalized_innovation, is_outlier
-    
+
     def get_std_dev(self) -> float:
         """
         Get standard deviation of recent innovations.
-        
+
         This is useful for anomaly detection and quality assessment.
         """
         if len(self.innovation_history) < 5:
             return float('inf')
         return float(np.std(self.innovation_history))
-    
+
     def to_dict(self) -> dict:
         """Serialize state for persistence."""
         return {
@@ -455,7 +456,7 @@ class KalmanClockTracker:
             'last_timestamp': self.last_timestamp,
             'innovation_history': self.innovation_history[-10:]  # Keep last 10
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> 'KalmanClockTracker':
         """Deserialize from dictionary."""
@@ -484,111 +485,111 @@ class ConvergenceState(Enum):
 class StationAccumulator:
     """
     Running statistics for a single station's clock offset measurements.
-    
+
     Issue 3.1 Fix (2025-12-07): Now uses Kalman filter instead of Welford's
     algorithm to properly track clock offset + drift in non-stationary conditions.
-    
+
     The Kalman filter tracks:
     - D_clock offset (ms)
     - D_clock drift rate (ms/minute)
-    
+
     This allows the model to adapt to slow drift while filtering out noise.
     """
     station: str
     frequency_mhz: float
-    
+
     # Kalman filter tracker (replaces Welford's algorithm)
     kalman: Optional[KalmanClockTracker] = field(default=None)
-    
+
     # Legacy fields for backwards compatibility (now derived from Kalman)
     count: int = 0
     mean_ms: float = 0.0
     m2: float = 0.0  # Kept for API compatibility
-    
+
     # Lock state
     state: ConvergenceState = field(default=ConvergenceState.ACQUIRING)
     locked_mean_ms: Optional[float] = None
     locked_uncertainty_ms: Optional[float] = None
     lock_timestamp: Optional[float] = None
-    
+
     # History for anomaly detection
     last_measurements: List[float] = field(default_factory=list)
     max_history: int = 60  # Keep last hour of measurements
-    
+
     # Anomaly tracking
     consecutive_anomalies: int = 0
     total_anomalies: int = 0
-    
+
     # Last innovation from Kalman filter (for anomaly detection)
     last_innovation: float = 0.0
     last_normalized_innovation: float = 0.0
-    
+
     def __post_init__(self):
         """Initialize Kalman filter if not provided."""
         if self.kalman is None:
             self.kalman = KalmanClockTracker(
                 initial_offset_ms=0.0,
-                initial_uncertainty_ms=100.0,
-                process_noise_offset_ms=0.01,      # GPSDO: very stable
-                process_noise_drift_ms_per_min=0.0001,  # Nearly zero - GPSDO has no drift
-                measurement_noise_ms=20.0          # Ionospheric variations ~10-30ms
+                initial_uncertainty_ms=5.0,        # Same as above (Issue 5.1 "Steel Ruler")
+                process_noise_offset_ms=1e-6,
+                process_noise_drift_ms_per_min=1e-7,
+                measurement_noise_ms=30.0          # Reject ionospheric jitter as noise
             )
-    
+
     @property
     def variance(self) -> float:
         """Variance from Kalman innovation history (for compatibility)."""
         if self.kalman is None or len(self.kalman.innovation_history) < 2:
             return float('inf')
         return float(np.var(self.kalman.innovation_history))
-    
+
     @property
     def std_dev(self) -> float:
         """Standard deviation from Kalman filter."""
         if self.kalman is None:
             return float('inf')
         return self.kalman.get_std_dev()
-    
+
     @property
     def uncertainty_ms(self) -> float:
         """State uncertainty from Kalman filter (replaces σ/√N)."""
         if self.kalman is None:
             return float('inf')
         return self.kalman.uncertainty_ms
-    
+
     @property
     def drift_rate_ms_per_min(self) -> float:
         """Estimated clock drift rate (ms/minute)."""
         if self.kalman is None:
             return 0.0
         return self.kalman.drift_rate_ms_per_min
-    
+
     def update(self, measurement_ms: float, timestamp: Optional[float] = None) -> None:
         """
         Add a new measurement using Kalman filter.
-        
+
         Issue 3.1 Fix: Replaces Welford's algorithm with Kalman filter
         to properly track non-stationary clock behavior.
         """
         if self.kalman is None:
             self.__post_init__()
-        
+
         # Kalman filter update
         innovation, norm_innov, is_outlier = self.kalman.update(
             measurement_ms, timestamp=timestamp
         )
-        
+
         self.last_innovation = innovation
         self.last_normalized_innovation = norm_innov
-        
+
         # Update legacy fields for API compatibility
         self.count = self.kalman.count
         self.mean_ms = self.kalman.offset_ms
-        
+
         # Track recent history
         self.last_measurements.append(measurement_ms)
         if len(self.last_measurements) > self.max_history:
             self.last_measurements.pop(0)
-    
+
     def to_dict(self) -> dict:
         """Serialize state to dictionary."""
         return {
@@ -607,14 +608,14 @@ class StationAccumulator:
             # Kalman filter state
             'kalman': self.kalman.to_dict() if self.kalman else None
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> 'StationAccumulator':
         """Deserialize from dictionary."""
         # Load Kalman filter if present
         kalman_data = data.get('kalman')
         kalman = KalmanClockTracker.from_dict(kalman_data) if kalman_data else None
-        
+
         acc = cls(
             station=data['station'],
             frequency_mhz=data['frequency_mhz'],
@@ -638,20 +639,20 @@ class ConvergenceResult:
     """Result of processing a measurement through the convergence model."""
     station: str
     frequency_mhz: float
-    
+
     # Current state
     state: ConvergenceState
     d_clock_ms: float           # Best estimate of clock offset
     uncertainty_ms: float       # Current uncertainty
-    
+
     # Measurement info
     measurement_ms: float       # Raw measurement this minute
     residual_ms: float          # Deviation from converged estimate (propagation effect!)
-    
+
     # Statistics
     sample_count: int
     convergence_progress: float  # 0.0 to 1.0
-    
+
     # Flags
     is_locked: bool
     is_anomaly: bool
@@ -661,12 +662,12 @@ class ConvergenceResult:
 class ClockConvergenceModel:
     """
     Convergence-to-lock model for clock offset estimation.
-    
+
     Implements the "Set, Monitor, Intervention" philosophy:
     1. SET: Converge to a locked clock offset estimate
     2. MONITOR: Track residuals for ionospheric effects
     3. INTERVENTION: Re-acquire only if anomaly detected
-    
+
     Parameters:
     -----------
     lock_uncertainty_ms : float
@@ -678,7 +679,7 @@ class ClockConvergenceModel:
     max_consecutive_anomalies : int
         Anomalies before forcing re-acquire (default: 5)
     """
-    
+
     def __init__(
         self,
         lock_uncertainty_ms: float = 1.0,
@@ -692,23 +693,23 @@ class ClockConvergenceModel:
         self.anomaly_sigma = anomaly_sigma
         self.max_consecutive_anomalies = max_consecutive_anomalies
         self.state_file = state_file
-        
+
         # Per-station accumulators: key = "STATION_FREQ" e.g., "WWV_10.0"
         self.accumulators: Dict[str, StationAccumulator] = {}
-        
+
         # Global state
         self.best_d_clock_ms: Optional[float] = None
         self.best_uncertainty_ms: Optional[float] = None
         self.best_source: Optional[str] = None
-        
+
         # Load persisted state if available
         if state_file and state_file.exists():
             self._load_state()
-    
+
     def _get_key(self, station: str, frequency_mhz: float) -> str:
         """Generate accumulator key."""
         return f"{station}_{frequency_mhz}"
-    
+
     def _get_or_create_accumulator(self, station: str, frequency_mhz: float) -> StationAccumulator:
         """Get existing accumulator or create new one."""
         key = self._get_key(station, frequency_mhz)
@@ -718,7 +719,7 @@ class ClockConvergenceModel:
                 frequency_mhz=frequency_mhz
             )
         return self.accumulators[key]
-    
+
     def process_measurement(
         self,
         station: str,
@@ -730,7 +731,7 @@ class ClockConvergenceModel:
     ) -> ConvergenceResult:
         """
         Process a new clock offset measurement.
-        
+
         Parameters:
         -----------
         station : str
@@ -745,18 +746,18 @@ class ClockConvergenceModel:
             Signal-to-noise ratio
         quality_grade : str, optional
             Quality grade (A-D, X)
-        
+
         Returns:
         --------
         ConvergenceResult with updated state and estimates
         """
         acc = self._get_or_create_accumulator(station, frequency_mhz)
-        
+
         # Add measurement using Kalman filter (Issue 3.1 fix)
         # Skip update if measurement is None (failed detection)
         if d_clock_ms is not None:
             acc.update(d_clock_ms, timestamp=timestamp)
-        
+
         # Calculate residual from current estimate
         # Issue 3.1: For Kalman filter, use the innovation (predicted vs actual)
         if d_clock_ms is not None:
@@ -770,7 +771,7 @@ class ClockConvergenceModel:
                 residual_ms = acc.last_innovation  # From Kalman filter
         else:
             residual_ms = 0.0
-        
+
         # Anomaly detection using Kalman filter's normalized innovation
         # Issue 3.1: This is statistically more robust than std_dev-based detection
         is_anomaly = False
@@ -779,25 +780,25 @@ class ClockConvergenceModel:
             # Use normalized innovation from Kalman filter
             anomaly_sigma = acc.last_normalized_innovation
             is_anomaly = anomaly_sigma > self.anomaly_sigma
-        
+
         # Update anomaly tracking
         if is_anomaly:
             acc.consecutive_anomalies += 1
             acc.total_anomalies += 1
         else:
             acc.consecutive_anomalies = 0
-        
+
         # State machine
         prev_state = acc.state
-        
+
         if acc.state == ConvergenceState.ACQUIRING:
             # Need minimum samples to assess convergence
             if acc.count >= 10:
                 acc.state = ConvergenceState.CONVERGING
-        
+
         elif acc.state == ConvergenceState.CONVERGING:
             # Check lock criterion
-            if (acc.count >= self.min_samples_for_lock and 
+            if (acc.count >= self.min_samples_for_lock and
                 acc.uncertainty_ms < self.lock_uncertainty_ms):
                 acc.state = ConvergenceState.LOCKED
                 acc.locked_mean_ms = acc.mean_ms
@@ -808,7 +809,7 @@ class ClockConvergenceModel:
                     f"D_clock = {acc.locked_mean_ms:.3f} ± {acc.locked_uncertainty_ms:.3f} ms "
                     f"after {acc.count} samples"
                 )
-        
+
         elif acc.state == ConvergenceState.LOCKED:
             # Monitor for anomalies
             if acc.consecutive_anomalies >= self.max_consecutive_anomalies:
@@ -817,7 +818,7 @@ class ClockConvergenceModel:
                     f"⚠️ REACQUIRE: {station} @ {frequency_mhz} MHz - "
                     f"{acc.consecutive_anomalies} consecutive anomalies"
                 )
-        
+
         elif acc.state == ConvergenceState.REACQUIRE:
             # Wait for valid data before re-initializing
             if d_clock_ms is not None:
@@ -831,19 +832,19 @@ class ClockConvergenceModel:
                 # Reset Kalman filter to current measurement (critical fix!)
                 acc.kalman = KalmanClockTracker(
                     initial_offset_ms=d_clock_ms,
-                    initial_uncertainty_ms=100.0,
-                    process_noise_offset_ms=0.01,
-                    process_noise_drift_ms_per_min=0.0001,  # Nearly zero - GPSDO has no drift
-                    measurement_noise_ms=20.0              # Ionospheric variations ~10-30ms
+                    initial_uncertainty_ms=5.0,    # Re-acquire with baseline confidence
+                    process_noise_offset_ms=1e-6,
+                    process_noise_drift_ms_per_min=1e-7,
+                    measurement_noise_ms=30.0
                 )
                 acc.state = ConvergenceState.CONVERGING
                 logger.info(f"Reset Kalman filter for {station} @ {frequency_mhz} MHz to {d_clock_ms:.2f}ms")
                 acc.state = ConvergenceState.ACQUIRING
-        
+
         # Log state transitions
         if acc.state != prev_state:
             logger.info(f"State transition: {station} @ {frequency_mhz} MHz: {prev_state.value} → {acc.state.value}")
-        
+
         # Calculate convergence progress (0 to 1)
         if acc.count < 10:
             progress = acc.count / 10 * 0.2  # 0-20% during acquiring
@@ -857,11 +858,11 @@ class ClockConvergenceModel:
             progress = 1.0
         else:
             progress = 0.5
-        
+
         # Persist state periodically
         if self.state_file and acc.count % 10 == 0:
             self._save_state()
-        
+
         return ConvergenceResult(
             station=station,
             frequency_mhz=frequency_mhz,
@@ -876,21 +877,21 @@ class ClockConvergenceModel:
             is_anomaly=is_anomaly,
             anomaly_sigma=anomaly_sigma
         )
-    
+
     def get_best_estimate(self) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         """
         Get the best current D_clock estimate across all stations.
-        
+
         Returns:
         --------
         (d_clock_ms, uncertainty_ms, source) or (None, None, None)
         """
         best = None
-        
+
         for key, acc in self.accumulators.items():
             if acc.count < 5:
                 continue
-            
+
             # Prefer locked estimates
             if acc.state == ConvergenceState.LOCKED:
                 if best is None or acc.locked_uncertainty_ms < best[1]:
@@ -898,21 +899,21 @@ class ClockConvergenceModel:
             elif best is None or acc.uncertainty_ms < best[1]:
                 if acc.uncertainty_ms != float('inf'):
                     best = (acc.mean_ms, acc.uncertainty_ms, key)
-        
+
         if best:
             self.best_d_clock_ms, self.best_uncertainty_ms, self.best_source = best
             return best
         return (None, None, None)
-    
+
     def get_status(self) -> dict:
         """Get full status of convergence model."""
         d_clock, uncertainty, source = self.get_best_estimate()
-        
-        locked_count = sum(1 for a in self.accumulators.values() 
+
+        locked_count = sum(1 for a in self.accumulators.values()
                           if a.state == ConvergenceState.LOCKED)
-        converging_count = sum(1 for a in self.accumulators.values() 
+        converging_count = sum(1 for a in self.accumulators.values()
                               if a.state == ConvergenceState.CONVERGING)
-        
+
         return {
             'best_d_clock_ms': d_clock,
             'best_uncertainty_ms': uncertainty,
@@ -933,26 +934,26 @@ class ClockConvergenceModel:
                 for key, acc in self.accumulators.items()
             }
         }
-    
+
     def _save_state(self) -> None:
         """
         Persist state to file.
-        
+
         Issue 1.2 Fix (2025-12-08): Now uses STATE_FILE_VERSION constant
         and UTC timestamp for proper version tracking and age validation.
         """
         if not self.state_file:
             return
-        
+
         state = {
             'version': STATE_FILE_VERSION,
             'timestamp': utc_isoformat(),  # Issue 3.2: Use centralized UTC timestamp
             'accumulators': {
-                key: acc.to_dict() 
+                key: acc.to_dict()
                 for key, acc in self.accumulators.items()
             }
         }
-        
+
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             # Atomic write: write to temp file, fsync, then rename
@@ -964,22 +965,22 @@ class ClockConvergenceModel:
             temp_file.replace(self.state_file)
         except Exception as e:
             logger.warning(f"Failed to save convergence state: {e}")
-    
+
     def _load_state(self) -> None:
         """
         Load state from file with version validation and sanity checks.
-        
+
         Issue 1.2 Fix (2025-12-08): Validates state file version before loading.
         Issue 1.3 Fix (2025-12-08): Validates Kalman filter state is physically
         reasonable before using it. Corrupted state is discarded.
         """
         if not self.state_file or not self.state_file.exists():
             return
-        
+
         try:
             with open(self.state_file, 'r') as f:
                 state = json.load(f)
-            
+
             # Issue 1.2: Version validation
             file_version = state.get('version', 0)
             if file_version < STATE_FILE_VERSION:
@@ -988,14 +989,14 @@ class ClockConvergenceModel:
                     "discarding stale state and starting fresh"
                 )
                 return
-            
+
             timestamp = state.get('timestamp')
             loaded_count = 0
             rejected_count = 0
-            
+
             for key, data in state.get('accumulators', {}).items():
                 acc = StationAccumulator.from_dict(data)
-                
+
                 # Issue 1.3: Validate Kalman state is physically reasonable
                 if acc.kalman is not None:
                     is_valid, reason = validate_kalman_state(acc.kalman, timestamp)
@@ -1012,9 +1013,9 @@ class ClockConvergenceModel:
                         rejected_count += 1
                     else:
                         loaded_count += 1
-                
+
                 self.accumulators[key] = acc
-            
+
             if rejected_count > 0:
                 logger.warning(
                     f"Loaded {loaded_count} valid, rejected {rejected_count} corrupted "
@@ -1022,7 +1023,7 @@ class ClockConvergenceModel:
                 )
             else:
                 logger.info(f"Loaded convergence state: {len(self.accumulators)} stations (all valid)")
-                
+
         except json.JSONDecodeError as e:
             logger.warning(f"Corrupted state file {self.state_file}: {e}. Starting fresh.")
         except Exception as e:

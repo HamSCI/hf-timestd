@@ -64,6 +64,7 @@ class MinuteBuffer:
     gap_count: int = 0    # Number of gaps in this minute
     gap_samples: int = 0  # Total gap samples
     start_rtp: Optional[int] = None
+    start_system_time: Optional[float] = None
     
     @property
     def is_complete(self) -> bool:
@@ -155,7 +156,8 @@ class BinaryArchiveWriter:
             minute_boundary=minute_boundary,
             samples=np.zeros(self.samples_per_minute, dtype=np.complex64),
             write_pos=0,
-            start_rtp=rtp_timestamp
+            start_rtp=rtp_timestamp,
+            start_system_time=rtp_derived_time
         )
         
         logger.debug(f"Started new minute buffer: {minute_boundary}")
@@ -314,37 +316,51 @@ class BinaryArchiveWriter:
                 self.write_errors += 1
                 return False
             
+            # Atomic write: write to temp file first
+            bin_path_tmp = bin_path.with_suffix(bin_path.suffix + '.tmp')
+            
             # Apply compression if configured
             if compression == 'zstd':
                 try:
                     import zstandard as zstd
-                    # Use multi-threaded compression (threads=-1 = auto-detect cores)
-                    # This releases the GIL and distributes work across cores
-                    cctx = zstd.ZstdCompressor(level=self.config.compression_level, threads=-1)
+                    # CRITICAL FIX (2026-01-12): Use threads=1 to avoid resource contention/hangs.
+                    # Multi-threaded compression across 9 channels simultaneously was causing 
+                    # the recorder service to stall/hang. Single-threaded is safer on low-core systems.
+                    cctx = zstd.ZstdCompressor(level=self.config.compression_level, threads=1)
                     compressed_data = cctx.compress(raw_data)
-                    with open(bin_path, 'wb') as f:
+                    with open(bin_path_tmp, 'wb') as f:
                         f.write(compressed_data)
+                        f.flush()
+                        os.fsync(f.fileno())
                     compression_ratio = len(raw_data) / len(compressed_data)
                     logger.debug(f"zstd compression: {len(raw_data)} -> {len(compressed_data)} ({compression_ratio:.1f}x)")
                 except ImportError:
                     logger.warning("zstandard not installed, falling back to uncompressed")
                     bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
-                    buffer.samples[:actual_samples].tofile(bin_path)
+                    bin_path_tmp = bin_path.with_suffix('.bin.tmp')
+                    buffer.samples[:actual_samples].tofile(bin_path_tmp)
             elif compression == 'lz4':
                 try:
                     import lz4.frame
                     compressed_data = lz4.frame.compress(raw_data, compression_level=self.config.compression_level)
-                    with open(bin_path, 'wb') as f:
+                    with open(bin_path_tmp, 'wb') as f:
                         f.write(compressed_data)
+                        f.flush()
+                        os.fsync(f.fileno())
                     compression_ratio = len(raw_data) / len(compressed_data)
                     logger.debug(f"lz4 compression: {len(raw_data)} -> {len(compressed_data)} ({compression_ratio:.1f}x)")
                 except ImportError:
                     logger.warning("lz4 not installed, falling back to uncompressed")
                     bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
-                    buffer.samples[:actual_samples].tofile(bin_path)
+                    bin_path_tmp = bin_path.with_suffix('.bin.tmp')
+                    buffer.samples[:actual_samples].tofile(bin_path_tmp)
             else:
                 # No compression - direct write
-                buffer.samples[:actual_samples].tofile(bin_path)
+                buffer.samples[:actual_samples].tofile(bin_path_tmp)
+            
+            # Rename atomic
+            if bin_path_tmp.exists():
+                bin_path_tmp.replace(bin_path)
             
             # Write metadata sidecar
             metadata = {
@@ -358,6 +374,7 @@ class BinaryArchiveWriter:
                 'gap_count': buffer.gap_count,
                 'gap_samples': buffer.gap_samples,
                 'start_rtp_timestamp': buffer.start_rtp,
+                'start_system_time': buffer.start_system_time,
                 'dtype': 'complex64',
                 'byte_order': 'little',
                 'compression': compression if compression != 'none' else None,
@@ -459,8 +476,20 @@ class BinaryArchiveWriter:
 
                 if self.rtp_to_unix_offset is None:
                     # Initialize with first sample so we can write immediately
+                    # But don't "lock" it yet - it will be refined by the mean
                     self.rtp_to_unix_offset = inst_offset
                     logger.info(f"RTP-to-Unix reference initialized: offset={inst_offset:.3f}s")
+                elif not self._offset_params_locked:
+                    # Adaptive refinement: if current sample is significantly different from 
+                    # initial guess (due to buffering), shift the base immediately.
+                    # This prevents the first 50 chunks from being mis-attributed.
+                    diff = inst_offset - self.rtp_to_unix_offset
+                    if abs(diff) > 1.0:
+                        logger.info(f"RTP-to-Unix reference jumping by {diff:+.3f}s (initial buffering?)")
+                        self.rtp_to_unix_offset = inst_offset
+                        # Don't reset _initial_offsets, just let them be outliers or clear them?
+                        # Clearing them is safer to get a clean mean.
+                        self._initial_offsets = [inst_offset]
                 
                 # Accumulate for mean
                 self._initial_offsets.append(inst_offset)

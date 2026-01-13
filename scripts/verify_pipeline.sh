@@ -198,18 +198,26 @@ RAW_BUFFER_DIR="$DATA_ROOT/raw_buffer"
 if [[ -d "$RAW_BUFFER_DIR" ]]; then
     check_pass "Binary archive directory exists: $RAW_BUFFER_DIR"
     
-    # Check for recent .bin.zst files (within last 5 minutes)
-    # Check both cold storage and hot buffer (tiered storage)
     SEARCH_PATHS="$RAW_BUFFER_DIR"
     if [[ -d "/dev/shm/timestd/raw_buffer" ]]; then
         SEARCH_PATHS="$SEARCH_PATHS /dev/shm/timestd/raw_buffer"
         check_pass "Hot buffer (tiered storage) exists: /dev/shm/timestd/raw_buffer"
     fi
     
+    # Check for recent .bin.zst files (within last 5 minutes)
     RECENT_BIN=$(find $SEARCH_PATHS -name "*.bin.zst" -mmin -5 2>/dev/null | wc -l)
     
     if [[ $RECENT_BIN -gt 0 ]]; then
         check_pass "Found $RECENT_BIN recent binary archive files (last 5 min)"
+        
+        # Check for matching .json metadata sidecars
+        RECENT_JSON=$(find $SEARCH_PATHS -name "*.json" -mmin -5 2>/dev/null | wc -l)
+        if [[ $RECENT_JSON -ge $RECENT_BIN ]]; then
+            check_pass "All binary files have matching JSON metadata sidecars"
+        else
+            check_warn "Only found $RECENT_JSON metadata files for $RECENT_BIN binary files"
+            echo "  → Critical for timing alignment (RTP-to-Unix sync)"
+        fi
     else
         check_warn "No recent binary archive files (last 5 min) - recorder may not be running"
     fi
@@ -241,11 +249,21 @@ if [[ -d "$PHASE2_DIR" ]]; then
     for channel_dir in "$PHASE2_DIR"/*_*/; do
         if [[ -d "$channel_dir" ]]; then
             CHANNEL=$(basename "$channel_dir")
-            HDF5_FILES=$(find "$channel_dir" -name "${CHANNEL}_timing_measurements_*.h5" -mmin -10 2>/dev/null)
+            # Metrology (L1/L2 primary metric)
+            HDF5_FILES=$(find "$channel_dir/metrology" -name "${CHANNEL}_metrology_measurements_*.h5" -mmin -10 2>/dev/null)
             
             if [[ -n "$HDF5_FILES" ]]; then
-                SIZE=$(du -h $HDF5_FILES 2>/dev/null | head -1 | cut -f1)
-                check_pass "$CHANNEL: HDF5 timing measurements found ($SIZE)"
+                # Get size and age
+                SIZE=$(du -h $HDF5_FILES | head -1 | cut -f1)
+                LATEST_HDF5=$(ls -t $HDF5_FILES | head -1)
+                HDF5_MTIME=$(stat -c %Y "$LATEST_HDF5")
+                LATENCY=$((NOW - HDF5_MTIME))
+                
+                if [[ $LATENCY -lt 300 ]]; then
+                    check_pass "$CHANNEL: Metrology measurements found (latency: ${LATENCY}s, $SIZE)"
+                else
+                    check_warn "$CHANNEL: Metrology measurements found but STALE (latency: ${LATENCY}s)"
+                fi
                 ((HDF5_COUNT++))
             else
                 check_warn "$CHANNEL: No recent HDF5 timing measurements"
@@ -304,16 +322,28 @@ if [[ -d "$FUSION_DIR" ]]; then
         if [[ $HDF5_AGE -gt 300 ]]; then
             # >5 min is a critical failure
             check_fail "Fusion HDF5 not updated in ${HDF5_AGE}s (expected ~60s)"
-            echo "  → Cause: Service crashed, silent failure, or no input data"
-            echo "  → Diagnose: tail -50 /var/log/hf-timestd/fusion.log"
-            echo "  → Check: Analytics service providing data to fusion"
-            echo "  → Fix: sudo systemctl restart timestd-fusion"
         elif [[ $HDF5_AGE -gt 120 ]]; then
             # >2 min is suspicious
             check_warn "Fusion HDF5 last updated ${HDF5_AGE}s ago (expected ~60s)"
-            echo "  → Check fusion service logs for delays or errors"
         else
             check_pass "Fusion HDF5 actively being written (${HDF5_AGE}s ago, $SIZE)"
+            
+            # Steel Ruler Health Check (Issue 3.5)
+            if command -v jq &>/dev/null; then
+                CAL_FILE="${DATA_ROOT}/state/broadcast_calibration.json"
+                if [[ -f "$CAL_FILE" ]]; then
+                    OFFSET=$(jq -r '._kalman_state.offset_ms' "$CAL_FILE" 2>/dev/null)
+                    DRIFT=$(jq -r '._kalman_state.drift_ms_per_min' "$CAL_FILE" 2>/dev/null)
+                    
+                    if [[ "$DRIFT" == "0.0" || "$DRIFT" == "0" ]]; then
+                        check_pass "Steel Ruler: Baseline is STABLE (drift = 0.0 ms/min)"
+                    else
+                        check_warn "Steel Ruler: Baseline is WALKING (drift = ${DRIFT} ms/min)"
+                        echo "  → System may be in legacy mode or not yet converged"
+                    fi
+                    echo "  → Current Kalman Offset: ${OFFSET} ms"
+                fi
+            fi
         fi
         
         # Check fusion service log file for activity (production only)
@@ -434,70 +464,32 @@ fi
 # =============================================================================
 section "Phase 5: Adaptive Calibration (System State)"
 
-CAL_STATE_FILE="${DATA_ROOT}/state/timing_calibration.json"
+CAL_STATE_FILE="${DATA_ROOT}/state/broadcast_calibration.json"
 
 if [[ -f "$CAL_STATE_FILE" ]]; then
-    check_pass "Calibration state file exists"
+    check_pass "Modern calibration state exists (broadcast_calibration.json)"
     
-     if command -v jq &>/dev/null; then
-        CAL_PHASE=$(jq -r '.phase' "$CAL_STATE_FILE" 2>/dev/null)
-        CAL_UPDATED=$(jq -r '.saved_at' "$CAL_STATE_FILE" 2>/dev/null)
+    if command -v jq &>/dev/null; then
+        # Count calibrated broadcasts (excluding the _kalman_state key)
+        STATIONS=$(jq -r 'keys | map(select(. != "_kalman_state")) | length' "$CAL_STATE_FILE" 2>/dev/null)
+        check_pass "Found $STATIONS calibrated broadcast channels"
         
-        # Check freshness
-        CAL_TS=$(date -d "$CAL_UPDATED" +%s 2>/dev/null || echo "0")
-        CAL_AGE=$((NOW - CAL_TS))
+        # Check last update
+        LATEST_STATION=$(jq -r 'to_entries | map(select(.key != "_kalman_state")) | sort_by(.value.last_updated) | last | .key' "$CAL_STATE_FILE" 2>/dev/null)
+        LATEST_TS=$(jq -r ".\"$LATEST_STATION\".last_updated" "$CAL_STATE_FILE" 2>/dev/null)
         
-        if [[ "$CAL_PHASE" == "calibrated" ]]; then
-            check_pass "System is fully CALIBRATED (Adaptive Windows Active)"
-        elif [[ "$CAL_PHASE" == "provisional" ]]; then
-            check_pass "System is PROVISIONAL (GPSDO-locked)"
-        else
-            # Bootstrap is normal on startup, warn if system up for > 1 hour
-            SYS_UPTIME=$(cut -d. -f1 /proc/uptime)
-            if [[ $SYS_UPTIME -gt 3600 ]]; then
-                check_warn "System stuck in BOOTSTRAP phase (uptime > 1h)"
-                check_pass "System in BOOTSTRAP phase (normal for startup)"
+        if [[ -n "$LATEST_TS" ]]; then
+            TS=$(date -d "$LATEST_TS" +%s 2>/dev/null || echo "0")
+            AGE=$((NOW - TS))
+            if [[ $AGE -lt 600 ]]; then
+                check_pass "Calibration is FRESH (${AGE}s ago, via $LATEST_STATION)"
+            else
+                check_warn "Calibration is STALE (${AGE}s ago)"
             fi
         fi
-        
-        # Calibration freshness check (GPSDO-aware)
-        # With GPSDO: calibration updates only when tones detected (rare)
-        # Without GPSDO: more frequent updates expected
-        if [[ $CAL_AGE -lt 600 ]]; then
-             check_pass "Calibration state fresh (${CAL_AGE}s ago)"
-        elif [[ $CAL_AGE -lt 86400 ]]; then
-             # <24h is normal with GPSDO
-             # Format age
-             if [[ $CAL_AGE -lt 3600 ]]; then
-                 AGE_STR="$((CAL_AGE/60))m"
-             else
-                 AGE_STR="$((CAL_AGE/3600))h"
-             fi
-             echo -e "${BLUE}ℹ️  INFO${NC} Calibration age: ${AGE_STR} (normal with GPSDO-locked system)"
-        else
-             # >24h is unusual even with GPSDO
-             if [[ $CAL_AGE -lt 604800 ]]; then
-                 # <7 days
-                 AGE_STR="$((CAL_AGE/86400))d $(( (CAL_AGE%86400)/3600 ))h"
-                 check_warn "Calibration very stale (${AGE_STR})"
-                 echo "  → Cause: No tone detections in 24+ hours"
-                 echo "  → Normal if: Poor propagation, daytime on low bands"
-                 echo "  → Action: Monitor - check analytics logs for tone attempts"
-             else
-                 # >7 days is a problem
-                 AGE_STR="$((CAL_AGE/86400))d"
-                 check_fail "Calibration extremely stale (${AGE_STR})"
-                 echo "  → Cause: Analytics service not detecting tones"
-                 echo "  → Diagnose: sudo journalctl -u timestd-analytics -n 100"
-                 echo "  → Check: Verify signals present, radiod healthy"
-             fi
-        fi
-        
-     else
-        check_pass "Calibration state valid (install jq for details)"
-     fi
+    fi
 else
-    check_warn "Calibration state file NOT FOUND (Adaptive logic inactive?)"
+    check_warn "Modern calibration state file NOT FOUND"
 fi
 
 
@@ -516,15 +508,13 @@ if [[ "$MODE" == "production" ]]; then
             REACH=$(chronyc sources 2>/dev/null | grep "TMGR" | awk '{print $5}')
             if [[ "$REACH" == "0" ]]; then
                 check_fail "TMGR source not reachable (reach: 0)"
-                echo "  → Cause: Fusion service not writing to Chrony SHM"
-                echo "  → Diagnose: grep 'ChronySHM' /var/log/hf-timestd/fusion.log | tail -5"
-                echo "  → Check: Fusion service running and producing HDF5 output"
-                echo "  → Verify SHM: ipcs -m | grep 0x4e545030"
-                echo "  → Fix: sudo systemctl restart timestd-fusion"
             elif [[ -n "$REACH" ]] && [[ "$REACH" -lt 7 ]]; then
                 check_warn "TMGR reach low ($REACH) - check fusion logs for SHM write errors"
             else
                 check_pass "TMGR source reachable (reach: $REACH)"
+                # Add frequency skew check
+                SKEW=$(chronyc tracking 2>/dev/null | grep "Frequency" | awk '{print $3, $4}')
+                check_pass "System Frequency stability: $SKEW"
             fi
         else
             check_warn "Chrony TMGR source not configured"
