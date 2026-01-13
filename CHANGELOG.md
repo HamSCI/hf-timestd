@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.2] - 2026-01-13
+
+### Fixed - Physics Service Syntax Error
+
+**Hotfix:** Resolved a critical `SyntaxError` (duplicate keyword argument) in `PhysicsService` that caused `timestd-physics` to fail on startup.
+
+- **Issue**: `TransmissionTimeSolver` initialization contained a duplicate `receiver_lat` argument.
+- **Fix**: Removed the duplicate argument in `src/hf_timestd/core/physics_service.py`.
+- **Status**: `timestd-physics` service is now active and running.
+
 ## [5.3.1] - 2026-01-13
 
 ### Fixed - "Steel Ruler" Drift Elimination
