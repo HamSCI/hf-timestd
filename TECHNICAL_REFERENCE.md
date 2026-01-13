@@ -65,13 +65,14 @@ The system is composed of six independent systemd services, each with a specific
 - Downloads global IONEX maps from NASA CDDIS.
 - **Output:** `/var/lib/timestd/gnss_vtec.h5`, `/var/lib/timestd/ionex/`
 
-### 5. Scientific Aggregator (`timestd-science-aggregator`)
+### 5. Physics Service (`timestd-physics`)
 
-**Responsibility:** Higher-Level Science Products
+**Responsibility:** Propagation Modeling & TEC Estimation
 
-- Aggregates multi-channel data for Total Electron Content (TEC) estimation.
-- Generates spectrograms and summary plots.
-- **Output:** `/var/lib/timestd/products/`
+- Computes ionospheric propagation delays using IONEX/IRI-2020 models.
+- Estimates Total Electron Content (TEC) from multi-frequency measurements.
+- Solves transmission time and validates propagation modes.
+- **Output:** Enriched L2 HDF5 files with propagation metadata
 
 ### 6. Web UI & API (`timestd-web-api`)
 

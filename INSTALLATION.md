@@ -11,7 +11,7 @@ This guide covers installing and configuring `hf-timestd` for recording and anal
 
 ### Hardware
 
-- SDR supported by ka9q-radio (e.g. RX888 MkII, Airspy HF+, SDRplay)
+- GPSDO-governed SDR supported by ka9q-radio (e.g. RX888 MkII, Airspy HF+, SDRplay)
 - GNSS receiver for VTEC (Optional but recommended, e.g., ZED-F9P)
 - HF antenna covering 2.5-25 MHz
 - Linux host with multicast-capable LAN
@@ -40,11 +40,17 @@ sudo ./scripts/install.sh --mode production
 # 3. Edit global configuration
 sudo nano /etc/hf-timestd/timestd-config.toml
 
-# 4. Enable and start services
+# 4. Enable and start core services
 sudo systemctl enable --now timestd-core-recorder
 sudo systemctl enable --now timestd-analytics
+sudo systemctl enable --now timestd-physics
 sudo systemctl enable --now timestd-fusion
 sudo systemctl enable --now timestd-web-api
+
+# 5. Enable optional services
+sudo systemctl enable --now timestd-ionex-download.timer  # Daily IONEX downloads
+sudo systemctl enable --now timestd-chrony-monitor.timer  # Chrony health monitoring
+sudo systemctl enable --now timestd-radiod-monitor    # Radiod health monitoring
 ```
 
 ### Production Paths
@@ -119,11 +125,54 @@ gnss_device = "/dev/ttyACM0"
 
 ---
 
+## Service Overview
+
+### Core Services (Required)
+
+- **`timestd-core-recorder`** - Records RTP audio streams from radiod, writes Digital RF archives
+- **`timestd-analytics`** - Phase 2 timing analysis: tone detection, BCD decoding, timing solution
+- **`timestd-physics`** - Propagation modeling using IONEX/IRI-2020, TEC estimation
+- **`timestd-fusion`** - Multi-broadcast Kalman fusion, feeds Chrony SHM for system clock discipline
+- **`timestd-web-api`** - FastAPI web server on port 8000 (metrology dashboard, logs, API)
+
+### Optional Services
+
+- **`timestd-ionex-download.timer`** - Daily download of global IONEX maps from NASA CDDIS
+- **`timestd-chrony-monitor.timer`** - Monitors Chrony reachability and alerts on issues
+- **`timestd-radiod-monitor`** - Monitors radiod health and restarts channels if needed
+- **`grape-daily.timer`** - Daily GRAPE processing: decimation, spectrograms, packaging
+
+**Note:** VTEC monitoring is handled by the `timestd-physics` service using scripts like `live_vtec.py` and `zedf9p_tec_client.py`, not a separate service.
+
+---
+
 ## Verifying Operation
 
-1. **Check Services:** `systemctl status timestd-fusion` (should be Active)
-2. **Check Web API:** Open `http://localhost:8000` (FastAPI monitoring interface)
-3. **Check Data:** Verify Digital RF files are appearing in `/var/lib/timestd/raw_archive/`
-4. **Check Chrony:** Run `chronyc sources` and look for the SHM reference.
+### Check Core Services
+
+```bash
+# All should show "active (running)"
+sudo systemctl status timestd-core-recorder
+sudo systemctl status timestd-analytics
+sudo systemctl status timestd-physics
+sudo systemctl status timestd-fusion
+sudo systemctl status timestd-web-api
+```
+
+### Check Optional Services
+
+```bash
+sudo systemctl status timestd-ionex-download.timer    # Should be active
+sudo systemctl status timestd-chrony-monitor.timer    # Should be active
+sudo systemctl status timestd-radiod-monitor          # If enabled
+```
+
+### Verify Data Flow
+
+1. **Raw Data:** Check Digital RF files: `ls -lh /var/lib/timestd/raw_archive/`
+2. **Analytics:** Check L2 HDF5 files: `ls -lh /var/lib/timestd/phase2/l2/`
+3. **Fusion:** Check fused output: `ls -lh /var/lib/timestd/phase2/fusion/`
+4. **Web API:** Open `http://localhost:8000` in browser
+5. **Chrony:** Run `chronyc sources` and look for SHM reference (should show reachability)
 
 ---

@@ -92,3 +92,24 @@ wsprd-x86-v27
 # WSPR output directories
 wspr_output/
 wspr_*/
+
+# Security - credentials files
+.netrc
+*.pem
+*.key
+id_rsa*
+
+# Node.js artifacts (not used in this project)
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+.pnpm-workspace-state-v1.json
+
+# Debug artifacts
+MagicMock/
+*.html
+!web-api/static/*.html
+!docs/**/*.html
+
+# Compiled binaries
+check_shm_layout

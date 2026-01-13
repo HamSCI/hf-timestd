@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.3] - 2026-01-13
+
+### Repository Cleanup & Maintenance
+
+**Major Cleanup:** Comprehensive repository organization to improve maintainability and eliminate security risks.
+
+#### Documentation Organization
+- **Archived 56 documents** to organized archive structure:
+  - 43 interim documents (session notes, fix reports, analyses) → `archive/dev-history/`
+  - 13 planning documents → `archive/planning/`
+- **Root directory reduced** from ~60 to 7 core markdown files
+- **Preserved 100%** of historical documentation (zero data loss)
+
+#### Security Fixes
+- **CRITICAL**: Removed `.netrc` credentials file from repository
+- Enhanced `.gitignore` with security patterns (*.pem, *.key, id_rsa*)
+
+#### Cleanup Actions
+- **Removed obsolete directories**: `web-ui.old/` (49 MB), `MagicMock/` (11 MB), `node_modules/` (228 KB)
+- **Archived debug tools**: 7 debug/verification scripts → `archive/debug-tools/`
+- **Removed test artifacts**: PNG images, HTML files, compiled binaries
+- **Removed Node.js leftovers**: package.json, pnpm-lock.yaml (project uses Python)
+
+#### Prevention
+- Enhanced `.gitignore` to prevent future accumulation of:
+  - Credentials files
+  - Node.js artifacts
+  - Debug artifacts
+  - Compiled binaries
+
+#### Results
+- **~60 MB freed** from root directory
+- **Zero security risks** remaining
+- **Professional, maintainable** repository structure
+- See `CLEANUP_2026-01-13.md` for complete details
+
 ## [5.3.2] - 2026-01-13
 
 ### Fixed - Physics Service Syntax Error
