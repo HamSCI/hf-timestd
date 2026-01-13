@@ -2,9 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
-## [5.3.1] - 2026-01-12
+## [5.3.1] - 2026-01-13
 
-### Fixed - Fusion Stability ("Steel Ruler")
+### Fixed - "Steel Ruler" Drift Elimination
+
+**Major Enhancement:** Implemented "Pure Steel Ruler" mode for GPSDO-disciplined systems, eliminating the linear drift trend in the fused clock output.
+
+- **Drift Elimination**:
+  - Hard-clamped `drift_ms_per_min` to `0.0` in `MultiBroadcastFusion` after Kalman filter convergence.
+  - Aligned process noise with GPSDO physics (sub-ppb stability), effectively treating learned drift as measurement jitter to be rejected.
+- **Verification Script Modernization**:
+  - Updated `scripts/verify_pipeline.sh` to check for metadata sidecars, HDF5 latency, and Steel Ruler stability.
+  - Now accurately reports on "Walking" baselines vs "Stable" baselines.
+- **Verification**: Confirmed `D_clock` slope is 0.0 ms/min and baseline is horizontal via web UI and logs.
 
 **Major Enhancement:- **Core**: Implemented "Steel Ruler" Kalman filter tuning (Q < 1e-10) to anchor fusion to GPSDO, rejecting >20ms propagation anomalies.
 

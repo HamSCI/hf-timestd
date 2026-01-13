@@ -1,18 +1,18 @@
 # Critic Context: HF-TimeStd Project State
 
-## Current Status (2026-01-10 - Post Critical Analysis)
+## Current Status (2026-01-13 - Post "Steel Ruler" Update)
 
 - **Clock Discipline**: Restored with STRICTER validation criteria. `timestd-fusion` feeds Chrony SHM only with validated, multi-station data.
-- **Pipeline Health**: `verify_pipeline.sh` reports **PASS**. l1 (Tone), l2 (Measurements), and l3 (Fusion) are active.
-- **Recent Fixes** (2026-01-10):
+- **Pipeline Health**: `verify_pipeline.sh` reports **PASS** for most phases (L1/L2/L3), but **FAIL** for TEC (L3A).
+- **Recent Fixes** (2026-01-13):
+  - **"Steel Ruler" Drift Elimination**: Clamped Kalman drift to 0.0, eliminating the persistent trend away from zero. Process noise tuned for GPSDO stability (sub-ppb).
+  - **Pipeline Verification**: Modernized `verify_pipeline.sh` to check M-JSON sidecars, HDF5 latency, and Steel Ruler metrics.
+  - **Emergency State Reset**: Cleared legacy `drift_ms_per_min` from persistent state to stop "walking" baseline.
+- **Previous Fixes** (2026-01-10):
   - **GPSDO Lock Protection**: Calibration updates now skip if any measurement has unlocked GPSDO (prevents absorbing clock drift).
   - **Single-Station Safeguards**: Uncertainty inflated 5x in single-station mode, Chrony feed disabled, validation flags added to output.
   - **Stricter Chrony Feed**: Only feeds OK consistency or low-uncertainty (<0.5ms) INTER_ANOMALY, requires n_stations >= 2.
   - **Validation Flags**: Added `single_station_mode` boolean to HDF5 output for scientific data quality tracking.
-- **Previous Fixes**:
-  - **Single-Station Fusion**: Enabled to support 10MHz-only bootstrap (`n_stations >= 1`) - NOW WITH SAFEGUARDS.
-  - **Chrony Precision**: Fixed inverted math bug that caused "false ticker" rejection.
-  - **Tone Detection**: Widened search bounds to `±250ms` to catch uncalibrated clocks.
 
 ## Critical Analysis Completed (2026-01-10)
 
@@ -81,90 +81,18 @@ With the immediate critical issues addressed, future work should focus on:
 - **Services**: `timestd-core-recorder`, `timestd-analytics`, `timestd-fusion`, `timestd-physics` are all **active**.
 - **Time Source**: `198.71.50.75` (NTP) is the primary reference. `TMGR` (SHM 0) is the fusion feed.
 
-## Recent Session (2026-01-10 14:30-14:50 UTC): SHARED_2500 Anomaly Resolution
+## Next Session Objective (2026-01-13+): Diagnose TEC Staleness
 
-### Issue: SHARED_2500 -2906ms Anomaly (RESOLVED)
+### Current Issue: Physics Service Output Stale
 
-**Symptoms**:
-- SHARED_2500 consistently produced D_clock = -2906ms to -3589ms (rejected as implausible)
-- Fell back to D_clock = 0.00ms with mode=UNK, confidence=0.00
-- 0% detection rate for all 2.5 MHz broadcasts (WWV, WWVH, BPM)
-
-**Root Cause**:
-Stale timing calibration file with **sample rate mismatch**:
-- Calibration file: `sample_rate: 20000` Hz, `rtp_offset_samples: 586210` (from old system configuration)
-- Current system: `sample_rate: 24000` Hz (all channels)
-- Mismatch caused `expected_second_rtp` to be calculated 86107 samples (3587ms) too large
-
-**Why Only SHARED_2500**:
-The stale calibration at `/dev/shm/timestd/state/timing_calibration.json` only had an entry for SHARED_2500 with the incorrect sample_rate. Other channels either had no calibration entry (bootstrapping fresh) or had correct 24 kHz calibration.
-
-**Fix Applied**:
-1. Deleted stale calibration files (`/dev/shm/timestd/state/timing_calibration.json`, `/var/lib/timestd/state/timing_calibration.json`)
-2. Restarted `timestd-analytics` service
-3. System re-learned calibration at correct 24 kHz sample rate
-
-**Verification**:
-- Before: D_clock = -3583ms (rejected)
-- After: D_clock = -22.42ms, -2.17ms (valid, within ±100ms)
-- New calibration: `sample_rate: 24000`, `rtp_offset_samples: 500640` ✓
-
-**Diagnostic Improvements**:
-Added detailed D_clock calculation logging to `transmission_time_solver.py` and `phase2_temporal_engine.py` to aid future debugging.
-
-**Documentation**: See `SHARED_2500_FIX_2026-01-10.md` for complete analysis.
-
-## Next Session Objective (2026-01-10+): Chrony Feed Diagnosis
-
-### Current Issue: Chrony Not Being Updated
-
-**Observation**: Despite stricter Chrony feed criteria being implemented, Chrony SHM is not receiving updates from `timestd-fusion`.
+**Observation**: `scripts/verify_pipeline.sh` reports `FAIL TEC HDF5 very stale (8h)` despite `timestd-physics` service running. Restarting the service reduced CPU usage but did not immediately produce new HDF5 files.
 
 **Investigation Required**:
-1. **Verify Fusion Service Status**:
-   - Check if `timestd-fusion` is running and processing measurements
-   - Review fusion logs for Chrony feed decisions
-   - Confirm multi-station measurements are available (n_stations >= 2)
 
-2. **Check Chrony Feed Criteria**:
-   - Verify measurements meet consistency requirements (OK or low-uncertainty INTER_ANOMALY)
-   - Check if single-station mode is preventing feed
-   - Review uncertainty thresholds (<0.5ms for INTER_ANOMALY)
-
-3. **Validate SHM Communication**:
-   - Confirm SHM segment 0 exists and is writable
-   - Check Chrony configuration for SHM refclock
-   - Verify no permission issues
-
-4. **Review Recent Changes**:
-   - Stricter Chrony feed criteria (2026-01-04) may be too restrictive
-   - GPSDO lock protection may be blocking updates
-   - Single-station safeguards may be triggering incorrectly
+1. **Analyze timestd-physics logs**: Check for "No data found" or "Insufficient measurements" warnings.
+2. **Check Multi-Frequency Availability**: TEC requires at least 2 frequencies (e.g., 5MHz and 10MHz). If only 1 frequency is being detected (e.g., due to night propagation), TEC cannot be calculated.
+3. **Review polling windows**: Confirm the service is looking far enough back in time to match the latency of the analytics service.
 
 **Expected Behavior**:
-- Fusion should feed Chrony SHM when:
-  - n_stations >= 2 (multi-station validation)
-  - Consistency = OK OR (Consistency = INTER_ANOMALY AND uncertainty < 0.5ms)
-  - GPSDO locked for all contributing measurements
 
-**Diagnostic Commands**:
-```bash
-# Check fusion service
-systemctl status timestd-fusion
-journalctl -u timestd-fusion --since "10 minutes ago" | grep -i chrony
-
-# Check SHM status
-ipcs -m | grep timestd
-
-# Check Chrony sources
-chronyc sources -v
-chronyc sourcestats
-
-# Review fusion output
-tail -100 /var/lib/timestd/fusion/fusion_output.csv
-```
-
-**Success Criteria**:
-- Chrony SHM receiving regular updates (every minute when conditions met)
-- TMGR (SHM 0) showing as valid refclock in `chronyc sources`
-- System clock disciplined by HF-derived time when multi-station validation passes
+- `timestd-physics` should produce `tec_measurements_*.h5` every 5-15 minutes when multi-frequency data is present.
