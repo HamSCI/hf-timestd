@@ -1611,55 +1611,61 @@ class Phase2AnalyticsService:
                 padded[:len(iq_samples)] = iq_samples
                 iq_samples = padded
             
-            # CRITICAL FIX (2026-01-10): Calculate actual Unix time from RTP timestamp
-            # Previous code used minute boundary (target_minute), which created 20-30ms systematic offset
-            # because buffers don't start exactly at :00.000
-            logger.debug(f"RTP offset check: json_path.exists()={json_path.exists()}, has_rtp={'start_rtp_timestamp' in metadata}, metadata_keys={list(metadata.keys())[:5]}")
+            # CRITICAL FIX (2026-01-12): Calculate actual Unix time from metadata
+            # 1. Prefer start_system_time if provided by recorder (atomic metadata)
+            # 2. Otherwise learn/drift-protect the offset
             if json_path.exists() and 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
-                logger.debug(f"RTP metadata found: rtp_timestamp={rtp_timestamp}, json_path={json_path}")
                 
-                # Learn RTP-to-Unix offset from metadata if available
-                # CRITICAL FIX: Validate offset isn't stale (e.g., from before recorder restart)
-                inst_offset = target_minute - (rtp_timestamp / self.sample_rate)
+                # Instantaneous offset for this specific file
+                start_system_time = metadata.get('start_system_time')
+                if start_system_time is not None:
+                    # Use recorder's truth immediately
+                    inst_offset = start_system_time - (rtp_timestamp / self.sample_rate)
+                else:
+                    # Fallback: estimate from minute boundary
+                    inst_offset = target_minute - (rtp_timestamp / self.sample_rate)
                 
-                # Check if current offset is stale (differs by >1 second from expected)
+                # Drift protection: reset if offset jumps significantly (recorder restart)
                 if self._rtp_to_unix_offset is not None:
-                    offset_drift = abs(inst_offset - self._rtp_to_unix_offset)
-                    if offset_drift > 1.0:
+                    drift = abs(inst_offset - self._rtp_to_unix_offset)
+                    if drift > 1.0:
                         logger.warning(
-                            f"Stale RTP offset detected! Current: {self._rtp_to_unix_offset:.3f}s, "
-                            f"Expected: {inst_offset:.3f}s, Drift: {offset_drift:.3f}s. "
-                            f"Resetting offset learning (likely recorder restart)."
+                            f"Significant RTP drift detected ({drift:.3f}s)! "
+                            f"Resetting offset reference (likely recorder restart)."
                         )
                         self._rtp_to_unix_offset = None
                         self._offset_samples = []
                 
-                if self._rtp_to_unix_offset is None and len(self._offset_samples) < 10:
-                    # Calculate offset: unix_time = rtp_timestamp / sample_rate + offset
-                    # We know the buffer is for target_minute, so use that as reference
+                # Establish or refine offset
+                if start_system_time is not None:
+                    # We have absolute truth, use it directly (no averaging needed)
+                    self._rtp_to_unix_offset = inst_offset
+                    logger.debug(f"Established precise RTP offset from metadata: {self._rtp_to_unix_offset:.6f}s")
+                elif self._rtp_to_unix_offset is None:
+                    # Learning phase for legacy/fallback
                     self._offset_samples.append(inst_offset)
-                    
-                    if len(self._offset_samples) >= 10:
-                        # Average over 10 samples to reduce jitter
+                    if len(self._offset_samples) >= 5:
                         self._rtp_to_unix_offset = sum(self._offset_samples) / len(self._offset_samples)
-                        logger.info(f"RTP-to-Unix offset established: {self._rtp_to_unix_offset:.6f}s")
+                        logger.info(f"Learned RTP-to-Unix offset: {self._rtp_to_unix_offset:.6f}s")
                     else:
-                        # Use first sample immediately for processing
-                        self._rtp_to_unix_offset = inst_offset
+                        self._rtp_to_unix_offset = inst_offset # Use first sample immediately
                 
-                # Convert RTP timestamp to Unix time using the established offset
-                # This gives us the ACTUAL time of the first sample, not the idealized minute boundary
+                # Calculate precise system_time for engine
                 if self._rtp_to_unix_offset is not None:
                     system_time = rtp_timestamp / self.sample_rate + self._rtp_to_unix_offset
                 else:
-                    # Fallback during initialization
                     system_time = float(target_minute)
+                
+                logger.info(
+                    f"Minute {target_minute}: RTP={rtp_timestamp}, MetaSystem={start_system_time}, "
+                    f"Offset={self._rtp_to_unix_offset:.6f}s, CalculatedSystem={system_time:.6f}"
+                )
             else:
-                # Fallback: use minute boundary (less accurate, but better than nothing)
+                # Fallback: use minute boundary
                 system_time = float(target_minute)
                 rtp_timestamp = int(target_minute * self.sample_rate)
-                logger.warning(f"No RTP timestamp in metadata, using minute boundary as fallback")
+                logger.warning(f"No RTP timestamp in metadata for {target_minute}, using fallback")
             
             logger.debug(f"Read {len(iq_samples)} samples from binary for minute {target_minute}")
             return iq_samples, system_time, rtp_timestamp
@@ -1680,8 +1686,8 @@ class Phase2AnalyticsService:
         - Binary file discovery is used only for validation/backfill
         """
         now = time.time()
-        # Go back 2 minutes for safety (data completeness)
-        latest_minute = ((int(now) // 60) - 2) * 60
+        # Go back 4 minutes for safety (data completeness and atomic write handling)
+        latest_minute = ((int(now) // 60) - 4) * 60
         
         # Optional: Verify data exists (but don't block on it)
         binary_latest = self._get_latest_binary_minute()

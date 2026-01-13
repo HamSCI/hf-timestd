@@ -147,11 +147,14 @@ The system is composed of six independent services that form a pipeline:
 - ✅ Broadcast schedule validation (filters impossible station/frequency combinations)
 - ✅ Auto-refresh (60s), time range selection, responsive Plotly.js visualizations
 
-**v3.8.1 (January 2, 2026) - HDF5 Transition & Verification**
+**v5.3.1 (January 12, 2026) - "Steel Ruler" & Drift Elimination**
 
-- ✅ Fusion service bug fixes (logger initialization, orphaned method calls)
-- ✅ Enhanced pipeline verification with actionable diagnostics
-- ✅ HDF5-only output (CSV writers removed from fusion and analytics)
+- ✅ **"Steel Ruler" Metrology:** Implemented strict GPSDO-anchored Kalman tuning (Q ≈ 0) to treat the local clock as a fixed standard.
+- ✅ **Drift Elimination:** Hard-clamped drift to 0.0 after convergence, eliminating the legacy 0.03 ppm "walking" baseline.
+- ✅ **Pipeline Modernization:** Updated `verify_pipeline.sh` for metadata sidecars and HDF5 latency.
+- ✅ **Metrologist Guide:** Added `docs/METROLOGIST.md` for validating system stability.
+
+**v5.0.0 (January 7, 2026) - HDF5-Native Pipeline**
 
 - **v3.9.0:** Adaptive search window system - Bootstrap → Orient → Focus progression using GPSDO stability
 - **v3.8.2:** Calibration sanity checks - Prevents loading corrupted state files

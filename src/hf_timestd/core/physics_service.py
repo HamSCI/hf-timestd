@@ -55,8 +55,11 @@ class PhysicsService:
         # We enable dynamic ionosphere for maximum accuracy
         self.solver = TransmissionTimeSolver(
             receiver_lat=self.receiver_lat,
+            receiver_lat=self.receiver_lat,
             receiver_lon=self.receiver_lon,
-            sample_rate=24000,  # Nominal, only used for RTP conversion logic internally
+            scale_reference_time=False,
+            # Nominal, only used for RTP conversion logic internally
+            sample_rate=24000,
             enable_dynamic_ionosphere=True
         )
 
@@ -107,9 +110,11 @@ class PhysicsService:
         date_str = now.strftime("%Y%m%d")
 
         # We need to discover channels.
+        # We need to discover channels.
         # Structure: l1_data_dir / CHANNEL / ...
         # Or if l1_data_dir points to root, we search subdirs.
-        # Let's assume standard layout: /var/lib/timestd/phase2/CHANNEL/L1_metrology_measurements_v1_...h5
+        # Let's assume standard layout:
+        # /var/lib/timestd/phase2/CHANNEL/L1_metrology_measurements_v1_...h5
         # Actually reader expects structure.
 
         # Simple glob strategy for "active" channels
@@ -147,15 +152,21 @@ class PhysicsService:
             # Optimization: Only read if file mtime changed?
             # Reader handles SWMR.
 
+            start_t = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}T00:00:00Z"
+            end_t = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}T23:59:59Z"
+
             measurements = reader.read_time_range(
-                start=f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}T00:00:00Z",
-                end=f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}T23:59:59Z"
+                start=start_t,
+                end=end_t
             )
 
             new_measurements = []
             for m in measurements:
                 # Unique ID: timestamp + station
-                mid = f"{m.get('timestamp_utc')}_{m.get('station_id')}"
+                # We need to construct a unique ID from timestamp and station ID.
+                ts = m.get('timestamp_utc')
+                st = m.get('station_id')
+                mid = f"{ts}_{st}"
                 if mid not in self.processed_files:
                     new_measurements.append(m)
                     self.processed_files.add(mid)
@@ -177,6 +188,7 @@ class PhysicsService:
         except Exception as e:
             # File might not exist yet or other error
             pass
+            del e
 
     def _process_single_measurement(self, l1: Dict[str, Any]) -> L2PhysicsMeasurement:
         """Run physics model on a single L1 measurement."""
@@ -213,7 +225,8 @@ class PhysicsService:
                 station=station_str,
                 frequency_mhz=frequency_mhz,
                 arrival_rtp=arrival_rtp,
-                expected_second_rtp=expected_second_rtp,  # Forces observed_delay
+                # Forces observed_delay
+                expected_second_rtp=expected_second_rtp,
                 timestamp=timestamp,
 
                 # Optional metrics (using safe defaults if missing)
@@ -240,7 +253,8 @@ class PhysicsService:
 
                 propagation_delay_ms=result.propagation_delay_ms or 0.0,
                 propagation_mode=result.mode_name,
-                tec_estimate=None,  # Solver uses it internally but doesn't output it easily yet?
+                # Solver uses it internally but doesn't output it easily yet?
+                tec_estimate=None,
                 # Actually solver code might have it in candidates.
 
                 model_confidence=result.confidence,

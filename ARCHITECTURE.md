@@ -107,8 +107,18 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 
 - **Performance:** Binary format is 10x-100x faster than CSV parsing
 - **Low Latency:** SWMR allows Fusion to read data milliseconds after Analytics writes it
-- **Consistency:** Atomic updates ensure no partial reads
 - **Structure:** Hierarchical data storage matches the signal complexity
+- **Low Latency:** SWMR allows Fusion to read data milliseconds after Analytics writes it
+
+### 5. "Steel Ruler" Metrology (v5.3)
+
+**Philosophy:** When disciplining a system with a GPSDO (stratum-1 reference), the local clock is the most stable element in the loop.
+
+- **Concept:** We treat the GPSDO as a "Steel Ruler" (fixed, zero drift) measuring a "Rubber Sheet" (ionosphere).
+- **Implementation:**
+  - **Process Noise:** Extremely low Q (1e-10) for clock drift. We trust the GPSDO hardware spec (sub-ppb).
+  - **Drift Clamping:** `drift_ms_per_min` is hard-clamped to 0.0 after convergence.
+  - **Jitter Rejection:** High measurement noise covariance (R=30ms) forces the Kalman filter to reject ionospheric turbulence rather than chasing it.
 
 ---
 
@@ -415,15 +425,16 @@ We use a **Weighted Voting** system combining:
 The system implements intelligent Bootstrap → Orient → Focus progression, leveraging GPSDO stability as a "steel ruler" for rapid convergence while handling multi-station shared frequencies.
 
 **Key Principles:**
+
 1. **GPSDO is the Foundation** - Provides stable time reference; stations are periodic calibration checks
 2. **Per-Broadcast Tracking** - Each station+frequency has independent state (WWV@10MHz ≠ WWV@5MHz)
 3. **Graceful Degradation** - Automatic back-off when detections fail, re-convergence when signals return
 4. **Opportunistic Multi-Station** - Use whatever stations are available at any given time
 
 **Phase Progression:**
+
 - **Bootstrap** (±500ms): Wide search, no prior knowledge
 - **Provisional** (±5-15ms): Medium window after 10+ detections
 - **Calibrated** (±2-5ms): Narrow window after 30+ detections, 60min span
 
 **Theoretical Foundation:** Kalman filtering applied to multi-target tracking, where each propagation path is an independent observable with its own convergence state.
-

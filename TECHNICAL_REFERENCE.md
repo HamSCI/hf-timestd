@@ -799,6 +799,25 @@ else:  # BOOTSTRAP
 - **Provisional**: 10+ detections, 2+ stations, <10 minutes, D_clock σ < 1ms
 - **Calibrated**: 30+ detections, 60min span, RTP variance < 50²
 
+## Steel Ruler Kalman Filter (v5.3)
+
+### Parameters
+
+To model a GPSDO-disciplined clock, we use extreme parameters that effectively "freeze" the clock model and force all variance into the measurement noise (ionosphere).
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| **Initial P (Offset)** | 5.0 ms | Moderate initial trust (was 100ms) |
+| **Initial P (Drift)** | 1e-7 ms/min | Very high initial trust in factory calibration |
+| **Q (Offset)** | 1e-10 ms | "Steel Ruler" - effectively zero process noise |
+| **Q (Drift)** | 1e-12 ms/min | The clock does not wander |
+| **R (Measurement)** | 30.0 ms | High measurement noise to reject ionospheric turbulence |
+
+### Logic
+
+- **Drift Clamping:** `drift_ms_per_min` is forced to `0.0` after convergence.
+- **Innovation Check:** Updates are skipped if innovation > 3σ (outlier rejection).
+
 **Back-Off Logic:**
 
 - Trigger: 5+ consecutive detection failures
