@@ -34,8 +34,8 @@ This is the recommended installation for 24/7 operation.
 git clone https://github.com/mijahauan/hf-timestd.git
 cd hf-timestd
 
-# 2. Run installer (installs all dependencies)
-sudo ./scripts/install.sh --mode production --user $USER
+# 2. Run installer (installs all dependencies, creates 'timestd' system user)
+sudo ./scripts/install.sh --mode production
 
 # 3. Edit global configuration
 sudo nano /etc/hf-timestd/timestd-config.toml
@@ -44,7 +44,7 @@ sudo nano /etc/hf-timestd/timestd-config.toml
 sudo systemctl enable --now timestd-core-recorder
 sudo systemctl enable --now timestd-analytics
 sudo systemctl enable --now timestd-fusion
-sudo systemctl enable --now timestd-web-ui-fastapi
+sudo systemctl enable --now timestd-web-api
 ```
 
 ### Production Paths
@@ -122,7 +122,7 @@ gnss_device = "/dev/ttyACM0"
 ## Verifying Operation
 
 1. **Check Services:** `systemctl status timestd-fusion` (should be Active)
-2. **Check Web UI:** Open `http://localhost:3000` (or configured port)
+2. **Check Web API:** Open `http://localhost:8000` (FastAPI monitoring interface)
 3. **Check Data:** Verify Digital RF files are appearing in `/var/lib/timestd/raw_archive/`
 4. **Check Chrony:** Run `chronyc sources` and look for the SHM reference.
 

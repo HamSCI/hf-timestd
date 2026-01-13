@@ -44,7 +44,7 @@ fi
 echo -e "${GREEN}Configuration found: $CONFIG_FILE${NC}"
 
 # Check if data directory exists
-DATA_ROOT=$(python3 -c "import tomli; f=open('$CONFIG_FILE','rb'); c=tomli.load(f); print(c['recorder'].get('production_data_root','/var/lib/timestd'))")
+DATA_ROOT=$(python3 -c "import tomllib; f=open('$CONFIG_FILE','rb'); c=tomllib.load(f); print(c['recorder'].get('production_data_root','/var/lib/timestd'))")
 if [ ! -d "$DATA_ROOT" ]; then
     echo -e "${YELLOW}Warning: Data root $DATA_ROOT does not exist${NC}"
     echo -e "${YELLOW}Some features may not work until data is available${NC}"

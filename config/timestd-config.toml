@@ -107,7 +107,7 @@ file_output = true
 enable_metrics = true
 
 [web_ui]
-port = 3000
+port = 8000
 refresh_interval = 60
 
 [gnss_vtec]

@@ -249,13 +249,13 @@ if [[ "$MODE" == "production" ]]; then
     DATA_ROOT="/var/lib/timestd"
     CONFIG_DIR="/etc/hf-timestd"
     VENV_DIR="/opt/hf-timestd/venv"
-    WEBUI_DIR="/opt/hf-timestd/web-ui"
+    WEBUI_DIR="/opt/hf-timestd/web-api"
     LOG_DIR="/var/log/hf-timestd"  # FHS standard: logs in /var/log/
 else
     DATA_ROOT="/tmp/timestd-test"
     CONFIG_DIR="$PROJECT_DIR/config"
     VENV_DIR="$PROJECT_DIR/venv"
-    WEBUI_DIR="$PROJECT_DIR/web-ui"
+    WEBUI_DIR="$PROJECT_DIR/web-api"
     LOG_DIR="$DATA_ROOT/logs"  # Test mode: keep logs with data for simplicity
 fi
 
@@ -404,15 +404,15 @@ deactivate
 
 
 # =============================================================================
-# Step 5: Set up Web UI and Scripts (Python FastAPI)
+# Step 5: Set up Web API and Scripts (Python FastAPI)
 # =============================================================================
-# Web UI is now Python-based (FastAPI) - all dependencies installed via pip above
-# Copy web-ui and scripts directories to production location
+# Web API is now Python-based (FastAPI) - all dependencies installed via pip above
+# Copy web-api and scripts directories to production location
 if [[ "$MODE" == "production" ]]; then
     sudo mkdir -p "$WEBUI_DIR"
-    sudo cp -r "$PROJECT_DIR/web-ui/"* "$WEBUI_DIR/"
+    sudo cp -r "$PROJECT_DIR/web-api/"* "$WEBUI_DIR/"
     sudo chown -R "$INSTALL_USER:$INSTALL_USER" "$WEBUI_DIR"
-    log_info "Web UI installed at $WEBUI_DIR (Python FastAPI)"
+    log_info "Web API installed at $WEBUI_DIR (Python FastAPI)"
     
     # Copy scripts directory for service startup scripts
     sudo mkdir -p /opt/hf-timestd/scripts
@@ -420,7 +420,7 @@ if [[ "$MODE" == "production" ]]; then
     sudo chown -R "$INSTALL_USER:$INSTALL_USER" /opt/hf-timestd/scripts
     log_info "Scripts installed at /opt/hf-timestd/scripts"
 else
-    log_info "Web UI will run from $PROJECT_DIR/web-ui (Python FastAPI)"
+    log_info "Web API will run from $PROJECT_DIR/web-api (Python FastAPI)"
     log_info "Scripts will run from $PROJECT_DIR/scripts"
 fi
 
@@ -588,10 +588,10 @@ StandardError=append:$LOG_DIR/fusion.log
 WantedBy=multi-user.target
 EOF
 
-    # Web UI Service (FastAPI)
-    sudo tee "$SYSTEMD_DIR/timestd-web-ui.service" > /dev/null << EOF
+    # Web API Service (FastAPI)
+    sudo tee "$SYSTEMD_DIR/timestd-web-api.service" > /dev/null << EOF
 [Unit]
-Description=HF-TimeStd Web UI (FastAPI Monitoring Server)
+Description=HF-TimeStd Web API (FastAPI Monitoring Server)
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target timestd-analytics.service
 Wants=network-online.target
@@ -605,10 +605,10 @@ EnvironmentFile=$CONFIG_DIR/environment
 # Environment
 Environment="PYTHONUNBUFFERED=1"
 
-WorkingDirectory=$DATA_ROOT
+WorkingDirectory=$WEBUI_DIR
 
 # Run the startup script which sets up environment and launches uvicorn
-ExecStart=$WEBUI_DIR/start_server.sh
+ExecStart=$WEBUI_DIR/start.sh
 
 Restart=always
 RestartSec=10
@@ -620,7 +620,7 @@ MemoryMax=512M
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=timestd-web-ui
+SyslogIdentifier=timestd-web-api
 
 [Install]
 WantedBy=multi-user.target
@@ -768,7 +768,7 @@ EOF
     log_info "    - timestd-core-recorder.service  (Phase 1: RTP → DRF, continuous)"
     log_info "    - timestd-analytics.service      (Phase 2: Timing analysis, continuous)"
     log_info "    - timestd-fusion.service         (Phase 3: Fusion & Chrony feed)"
-    log_info "    - timestd-web-ui.service         (Web monitoring UI, continuous)"
+    log_info "    - timestd-web-api.service        (Web monitoring API, continuous)"
     log_info "    - timestd-physics.service        (Phase 3: Physics fusion & Science)"
     log_info "    - timestd-radiod-monitor.service (Phase 0.5: Hardware monitor)"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
@@ -780,7 +780,7 @@ EOF
     sudo systemctl enable timestd-core-recorder.service
     sudo systemctl enable timestd-analytics.service
     sudo systemctl enable timestd-fusion.service
-    sudo systemctl enable timestd-web-ui.service
+    sudo systemctl enable timestd-web-api.service
     sudo systemctl enable timestd-physics.service
     sudo systemctl enable timestd-radiod-monitor.service
     
@@ -828,7 +828,7 @@ if [[ "$MODE" == "production" ]]; then
     echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → DRF"
     echo "   sudo systemctl start timestd-analytics       # Phase 2: Timing analysis"
     echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion service"
-    echo "   sudo systemctl start timestd-web-ui          # Web monitoring UI"
+    echo "   sudo systemctl start timestd-web-api         # Web monitoring API"
     echo "   sudo systemctl start timestd-physics         # Physics fusion"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         echo "   sudo systemctl start timestd-vtec            # GNSS VTEC monitor"
@@ -839,9 +839,9 @@ if [[ "$MODE" == "production" ]]; then
     echo ""
     echo "5. Check status:"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
-        echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui timestd-vtec"
+        echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-api timestd-vtec"
     else
-        echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-ui"
+        echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-api"
     fi
     echo "   sudo systemctl list-timers timestd-*"
     echo "   journalctl -u timestd-core-recorder -f"
@@ -856,7 +856,7 @@ if [[ "$MODE" == "production" ]]; then
         echo ""
     fi
     
-    echo "Web UI: http://localhost:3000"
+    echo "Web API: http://localhost:8000"
 else
     echo "Test mode installed. Next steps:"
     echo ""
@@ -872,7 +872,7 @@ else
     echo "4. Stop services:"
     echo "   $PROJECT_DIR/scripts/timestd-all.sh -stop"
     echo ""
-    echo "Web UI: http://localhost:3000"
+    echo "Web API: http://localhost:8000"
 fi
 
 echo ""

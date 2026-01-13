@@ -32,8 +32,8 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 git clone https://github.com/mijahauan/hf-timestd.git
 cd hf-timestd
 
-# Run installer in production mode
-sudo ./scripts/install.sh --mode production --user $USER
+# Run installer in production mode (creates 'timestd' system user automatically)
+sudo ./scripts/install.sh --mode production
 
 # Edit configuration
 sudo nano /etc/hf-timestd/timestd-config.toml
@@ -42,7 +42,7 @@ sudo nano /etc/hf-timestd/timestd-config.toml
 sudo systemctl enable --now timestd-core-recorder
 sudo systemctl enable --now timestd-analytics
 sudo systemctl enable --now timestd-fusion
-sudo systemctl enable --now timestd-web-ui-fastapi
+sudo systemctl enable --now timestd-web-api
 ```
 
 ### Service Control
@@ -52,7 +52,7 @@ sudo systemctl enable --now timestd-web-ui-fastapi
 | Core Recorder | `sudo systemctl status timestd-core-recorder` |
 | Analytics | `sudo systemctl status timestd-analytics` |
 | Fusion | `sudo systemctl status timestd-fusion` |
-| Web UI | `sudo systemctl status timestd-web-api` |
+| Web API | `sudo systemctl status timestd-web-api` |
 | **All Logs** | `journalctl -u timestd-* -f` |
 
 ### Data Locations
@@ -64,7 +64,7 @@ sudo systemctl enable --now timestd-web-ui-fastapi
 | **L3 Fusion** | `/var/lib/timestd/phase2/fusion/` (HDF5) |
 | **IONEX** | `/var/lib/timestd/ionex/` |
 
-**Monitor:** Open `http://localhost:8000` for real-time monitoring:
+**Monitor:** Open `http://localhost:8000` for real-time monitoring (FastAPI Web API):
 
 - **Station Overview** - System metadata and recent activity
 - **System Health** - Process status and true uptime
