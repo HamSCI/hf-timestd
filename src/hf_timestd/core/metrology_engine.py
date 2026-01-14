@@ -267,7 +267,12 @@ class MetrologyEngine:
         )
         
         if not detections:
+             logger.debug(f"{self.channel_name}: No detections for minute {minute_boundary}")
              return []
+        
+        # Log detected stations for multi-station debugging
+        station_names = [det.station.value for det in detections]
+        logger.info(f"{self.channel_name}: Detected {len(detections)} station(s): {station_names}")
              
         # === Step 2: Channel Characterization ===
         # We need this for Station ID and Metrics

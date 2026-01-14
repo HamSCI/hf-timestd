@@ -1,0 +1,31 @@
+[Unit]
+Description=HF Time Standard Metrology Service - L1 Raw Measurements
+Documentation=https://github.com/mijahauan/grape-recorder
+After=timestd-core-recorder.service
+Wants=timestd-core-recorder.service
+
+[Service]
+Type=forking
+User=timestd
+Group=timestd
+EnvironmentFile=/etc/hf-timestd/environment
+WorkingDirectory=/var/lib/timestd
+
+# Use the shell script that starts all 9 channel metrology services
+ExecStart=/opt/hf-timestd/scripts/timestd-metrology.sh -start /etc/hf-timestd/timestd-config.toml
+ExecStop=/opt/hf-timestd/scripts/timestd-metrology.sh -stop
+
+# Type=forking since script backgrounds processes
+RemainAfterExit=yes
+
+Restart=on-failure
+RestartSec=30
+StartLimitInterval=300
+StartLimitBurst=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-metrology
+
+[Install]
+WantedBy=multi-user.target

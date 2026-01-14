@@ -8,7 +8,7 @@
 # Checks:
 #   - Phase 0: Service status (production only)
 #   - Phase 1: Digital RF (L0 raw IQ data)
-#   - Phase 2: Analytics (L2 timing measurements - HDF5 + CSV)
+#   - Phase 2: Metrology (L1 raw measurements - HDF5)
 #   - Phase 3: Fusion (L3 fused timing estimates)
 #   - Chrony integration (production only)
 #
@@ -67,7 +67,7 @@ if [[ "$MODE" == "production" ]]; then
     # Core pipeline services (failures expected if not running)
     CORE_SERVICES=(
         "timestd-core-recorder.service"
-        "timestd-analytics.service"
+        "timestd-metrology.service"
         "timestd-fusion.service"
         "timestd-physics.service"
         "timestd-web-api.service"
@@ -226,9 +226,9 @@ else
 fi
 
 # =============================================================================
-# Phase 2: Analytics (L2 Timing Measurements)
+# Phase 2: Metrology (L1 Raw Measurements)
 # =============================================================================
-section "Phase 2: Analytics (L2 Timing)"
+section "Phase 2: Metrology (L1 Measurements)"
 
 PHASE2_DIR="$DATA_ROOT/phase2"
 if [[ -d "$PHASE2_DIR" ]]; then
@@ -250,23 +250,25 @@ if [[ -d "$PHASE2_DIR" ]]; then
         if [[ -d "$channel_dir" ]]; then
             CHANNEL=$(basename "$channel_dir")
             # Metrology (L1/L2 primary metric)
-            HDF5_FILES=$(find "$channel_dir/metrology" -name "${CHANNEL}_metrology_measurements_*.h5" -mmin -10 2>/dev/null)
+            # Find most recent file (no time filter - we check latency below)
+            LATEST_HDF5=$(find "$channel_dir/metrology" -name "${CHANNEL}_metrology_measurements_*.h5" -type f 2>/dev/null | sort | tail -1)
             
-            if [[ -n "$HDF5_FILES" ]]; then
+            if [[ -n "$LATEST_HDF5" ]]; then
                 # Get size and age
-                SIZE=$(du -h $HDF5_FILES | head -1 | cut -f1)
-                LATEST_HDF5=$(ls -t $HDF5_FILES | head -1)
+                SIZE=$(du -h "$LATEST_HDF5" | cut -f1)
                 HDF5_MTIME=$(stat -c %Y "$LATEST_HDF5")
                 LATENCY=$((NOW - HDF5_MTIME))
                 
-                if [[ $LATENCY -lt 300 ]]; then
+                # Metrology updates vary by channel (10-30 min typical)
+                # Use 30-minute threshold to avoid false positives
+                if [[ $LATENCY -lt 1800 ]]; then
                     check_pass "$CHANNEL: Metrology measurements found (latency: ${LATENCY}s, $SIZE)"
                 else
                     check_warn "$CHANNEL: Metrology measurements found but STALE (latency: ${LATENCY}s)"
                 fi
                 ((HDF5_COUNT++))
             else
-                check_warn "$CHANNEL: No recent HDF5 timing measurements"
+                check_warn "$CHANNEL: No HDF5 metrology measurements found"
             fi
         fi
     done
@@ -420,7 +422,7 @@ if [[ -d "$SCIENCE_DIR" ]]; then
                 # 15-30 min is suspicious
                 check_warn "TEC HDF5 stale (${AGE_STR}, expected ~5min updates)"
                 echo "  → Possible cause: No multi-frequency detections available"
-                echo "  → Check: Analytics producing timing on multiple bands"
+                echo "  → Check: Metrology producing measurements on multiple bands"
                 echo "  → Diagnose: sudo journalctl -u timestd-physics -n 50"
             else
                 # >30 min is a failure

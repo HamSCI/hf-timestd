@@ -1438,9 +1438,9 @@ class MultiBroadcastFusion:
         start_iso = start_dt.isoformat().replace('+00:00', 'Z')
         end_iso = end_dt.isoformat().replace('+00:00', 'Z')
 
-        # Physics outputs are organized by channel (derived from L1 channel)
+        # L2 calibrated timing outputs are in clock_offset directory
         for channel in self.channels:
-            channel_dir = self.phase2_dir / channel
+            channel_dir = self.phase2_dir / channel / "clock_offset"
             if not channel_dir.exists():
                 continue
 
@@ -1448,7 +1448,7 @@ class MultiBroadcastFusion:
                 reader = DataProductReader(
                     data_dir=channel_dir,
                     product_level='L2',
-                    product_name='physics_interpretation',
+                    product_name='timing_measurements',
                     channel=channel
                 )
                 
@@ -1460,7 +1460,8 @@ class MultiBroadcastFusion:
 
                 for m in measurements:
                     ts_str = m.get('timestamp_utc')
-                    station = m.get('station_id')
+                    # L2 timing_measurements uses 'station' field, not 'station_id'
+                    station = m.get('station') or m.get('station_id')
                     if not ts_str or not station:
                         continue
                     
@@ -1474,7 +1475,8 @@ class MultiBroadcastFusion:
 
     def _read_latest_measurements(
         self, 
-        lookback_minutes: int = 5
+        lookback_minutes: int = 5,
+        force_l1_only: bool = False
     ) -> List[BroadcastMeasurement]:
         """
         Read and join L1 (Metrology) and L2 (Physics) data to form Fusion inputs.
@@ -1489,14 +1491,18 @@ class MultiBroadcastFusion:
         from datetime import datetime, timezone
         from .wwv_constants import BPM_UT1_MINUTES
         
-        # 1. Read L1 and L2
+        # 1. Read L1 and L2 (skip L2 in L1-only mode)
         l1_map = self._read_l1_metrology(lookback_minutes)
-        l2_map = self._read_l2_physics(lookback_minutes)
         
-        logger.debug(f"Fusion Reader: L1_count={len(l1_map)}, L2_count={len(l2_map)}")
-
-        if len(l1_map) > 0 and len(l2_map) == 0:
-             logger.warning("Fusion Reader: L1 data found but L2 map empty! Physics/Fusion path mismatch?")
+        if force_l1_only:
+            l2_map = {}  # Skip L2 data in L1-only mode
+            logger.debug(f"Fusion Reader (L1-only mode): L1_count={len(l1_map)}")
+        else:
+            l2_map = self._read_l2_physics(lookback_minutes)
+            logger.debug(f"Fusion Reader: L1_count={len(l1_map)}, L2_count={len(l2_map)}")
+            
+            if len(l1_map) > 0 and len(l2_map) == 0:
+                logger.warning("Fusion Reader: L1 data found but L2 map empty! Physics/Fusion path mismatch?")
 
         measurements = []
         
@@ -2201,7 +2207,7 @@ class MultiBroadcastFusion:
         
         return True, reason, 0
     
-    def fuse(self, lookback_minutes: int = 10) -> Optional[FusedResult]:
+    def fuse(self, lookback_minutes: int = 10, force_l1_only: bool = False) -> Optional[FusedResult]:
         """
         Perform multi-broadcast fusion.
         
@@ -2218,8 +2224,8 @@ class MultiBroadcastFusion:
         except Exception as e:
             logger.debug(f"Global differential solve failed: {e}")
 
-        # Read latest measurements
-        measurements = self._read_latest_measurements(lookback_minutes)
+        # Read latest measurements (L1-only mode skips L2 calibration data)
+        measurements = self._read_latest_measurements(lookback_minutes, force_l1_only=force_l1_only)
         
         # Filter out NaN measurements immediately (tone not detected)
         # CRITICAL FIX (2026-01-08): Leverage GPSDO stability during detection gaps
@@ -3293,26 +3299,40 @@ def run_fusion_service(
         receiver_lon=receiver_lon
     )
     
-    # Initialize Chrony SHM if enabled
-    chrony_shm = None
+    # Initialize dual Chrony SHM outputs if enabled
+    chrony_shm_l1 = None  # SHM 0: timestd.L1 (raw L1 metrology fusion)
+    chrony_shm_l2 = None  # SHM 1: timestd.L2 (calibrated L2 timing fusion)
+    
     if enable_chrony:
         try:
             from hf_timestd.core.chrony_shm import ChronySHM
-            chrony_shm = ChronySHM(unit=0)
-            if chrony_shm.connect():
-                logger.info("Chrony SHM refclock enabled (unit=0, refid=TMGR)")
-                logger.info("SHM updates will occur directly in fusion loop (no threaded updater)")
+            
+            # Initialize L1 feed (SHM unit 0)
+            chrony_shm_l1 = ChronySHM(unit=0)
+            if chrony_shm_l1.connect():
+                logger.info("Chrony SHM L1 feed enabled (unit=0, refid=TSL1)")
             else:
-                logger.warning("Failed to connect to Chrony SHM - continuing without")
-                chrony_shm = None
+                logger.warning("Failed to connect to Chrony SHM unit 0 - L1 feed disabled")
+                chrony_shm_l1 = None
+            
+            # Initialize L2 feed (SHM unit 1)
+            chrony_shm_l2 = ChronySHM(unit=1)
+            if chrony_shm_l2.connect():
+                logger.info("Chrony SHM L2 feed enabled (unit=1, refid=TSL2)")
+            else:
+                logger.warning("Failed to connect to Chrony SHM unit 1 - L2 feed disabled")
+                chrony_shm_l2 = None
+                
         except Exception as e:
             logger.warning(f"Chrony SHM not available: {e}")
-            chrony_shm = None
+            chrony_shm_l1 = None
+            chrony_shm_l2 = None
     
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
-    logger.info(f"  Chrony SHM: {'enabled (direct updates)' if chrony_shm else 'disabled'}")
+    logger.info(f"  Chrony SHM L1: {'enabled' if chrony_shm_l1 else 'disabled'}")
+    logger.info(f"  Chrony SHM L2: {'enabled' if chrony_shm_l2 else 'disabled'}")
     
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s")
@@ -3335,15 +3355,29 @@ def run_fusion_service(
             # BREADCRUMB: Calling fuse
             logger.debug("Calling fusion.fuse()...")
             
-            # Run fusion update
+            # DUAL FEED ARCHITECTURE: Run fusion twice for L1 and L2 feeds
+            # L1 feed: Force L1-only mode (raw metrology, no L2 calibration)
+            # L2 feed: Use L2 calibrated data when available
+            result_l1 = None
+            result_l2 = None
+            
             try:
-                result = fusion.fuse(lookback_minutes=lookback_minutes)
+                # L1-only fusion: Force use of raw L1 metrology only
+                result_l1 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=True)
             except Exception as e_fuse:
-                logger.error(f"Fusion calculation CRASHED: {e_fuse}", exc_info=True)
-                result = None
+                logger.error(f"L1 fusion calculation CRASHED: {e_fuse}", exc_info=True)
+            
+            try:
+                # L2 fusion: Use L2 calibrated data (current behavior)
+                result_l2 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=False)
+            except Exception as e_fuse:
+                logger.error(f"L2 fusion calculation CRASHED: {e_fuse}", exc_info=True)
             
             # BREADCRUMB: Fusion returned
-            logger.debug(f"Fusion returned: {result is not None}")
+            logger.debug(f"L1 fusion returned: {result_l1 is not None}, L2 fusion returned: {result_l2 is not None}")
+            
+            # Use L2 result for logging (primary feed)
+            result = result_l2 if result_l2 else result_l1
             
             if result:
                 # Log summary
@@ -3374,9 +3408,10 @@ def run_fusion_service(
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
                 # Write directly to Chrony SHM (fusion runs at chrony poll rate)
-                # CRITICAL FIX (2026-01-10): STRICTER feed criteria for scientific integrity
-                # Only feed validated, multi-station measurements to prevent contamination
-                if chrony_shm:
+                # DUAL FEED ARCHITECTURE: Write both L1 (raw) and L2 (calibrated) feeds
+                # L1 feed: Uses raw L1 metrology fusion (fallback, fast)
+                # L2 feed: Uses calibrated L2 timing fusion (primary, accurate)
+                if chrony_shm_l1 or chrony_shm_l2:
                     # Check quality criteria
                     # CRITICAL FIX (2026-01-10): Bootstrap-aware quality gating
                     # During bootstrap (calibration not converged), accept grade D
@@ -3456,31 +3491,49 @@ def run_fusion_service(
                     if quality_ok and multi_station and consistent and discontinuity_ok:
                         now = time.time()
                         system_time = now
-                        reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
-                        
-                        # Precision based on uncertainty (log2 of seconds)
-                        # Correct formula: log2(uncertainty_sec) = log2(uncertainty_ms) - 10
-                        # Example: 1000ms -> 0s -> 0. 1ms -> -10. 0.001ms -> -20.
-                        # CLAMP: Ensure at least -10 (1ms) to satisfy Chrony, even if uncertainty is high
-                        uncertainty_sec = max(0.1, result.uncertainty_ms) / 1000.0
-                        raw_precision = int(np.log2(uncertainty_sec))
-                        precision = min(-10, raw_precision) if raw_precision > -10 else raw_precision
                         
                         try:
-                            update_success = chrony_shm.update(reference_time, system_time, precision)
-                            if update_success:
-                                # Update last value and timestamp for discontinuity check
-                                last_chrony_d_clock = result.d_clock_fused_ms
+                            # Update L1 feed (SHM 0) - raw L1 metrology fusion only
+                            if chrony_shm_l1 and result_l1:
+                                reference_time_l1 = system_time - (result_l1.d_clock_fused_ms / 1000.0)
+                                uncertainty_sec_l1 = max(0.1, result_l1.uncertainty_ms) / 1000.0
+                                raw_precision_l1 = int(np.log2(uncertainty_sec_l1))
+                                precision_l1 = min(-10, raw_precision_l1) if raw_precision_l1 > -10 else raw_precision_l1
+                                
+                                update_success_l1 = chrony_shm_l1.update(reference_time_l1, system_time, precision_l1)
+                                if update_success_l1:
+                                    logger.debug(
+                                        f"Chrony SHM L1 (unit=0) updated: D_clock={result_l1.d_clock_fused_ms:+.3f}ms, "
+                                        f"precision={precision_l1} [{result_l1.n_stations}sta, {result_l1.quality_grade}]"
+                                    )
+                                else:
+                                    logger.warning("Chrony SHM L1 write failed")
+                            
+                            # Update L2 feed (SHM 1) - calibrated L2 timing fusion
+                            if chrony_shm_l2 and result_l2:
+                                reference_time_l2 = system_time - (result_l2.d_clock_fused_ms / 1000.0)
+                                uncertainty_sec_l2 = max(0.1, result_l2.uncertainty_ms) / 1000.0
+                                raw_precision_l2 = int(np.log2(uncertainty_sec_l2))
+                                # L2 should have better precision due to calibration
+                                precision_l2 = min(-11, raw_precision_l2) if raw_precision_l2 > -11 else raw_precision_l2
+                                
+                                update_success_l2 = chrony_shm_l2.update(reference_time_l2, system_time, precision_l2)
+                                if update_success_l2:
+                                    logger.debug(
+                                        f"Chrony SHM L2 (unit=1) updated: D_clock={result_l2.d_clock_fused_ms:+.3f}ms, "
+                                        f"precision={precision_l2} [{result_l2.n_stations}sta, {result_l2.quality_grade}]"
+                                    )
+                                else:
+                                    logger.warning("Chrony SHM L2 write failed")
+                            
+                            # Update last value and timestamp for discontinuity check (use L2 as primary)
+                            if result_l2:
+                                last_chrony_d_clock = result_l2.d_clock_fused_ms
+                                last_chrony_update_time = time.time()
+                            elif result_l1:
+                                last_chrony_d_clock = result_l1.d_clock_fused_ms
                                 last_chrony_update_time = time.time()
                                 
-                                logger.debug(
-                                    f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
-                                    f"offset={(system_time-reference_time)*1000:+.3f}ms, precision={precision} "
-                                    f"(raw_prec={raw_precision}) "
-                                    f"[{result.n_stations}sta, {result.quality_grade}, {result.consistency_flag}]"
-                                )
-                            else:
-                                logger.warning("Chrony SHM write failed")
                         except Exception as e:
                             logger.error(f"Chrony SHM update exception: {e}")
                     else:

@@ -1,0 +1,34 @@
+[Unit]
+Description=HF Time Standard L2 Calibration Service - Converts L1 to L2 Timing
+Documentation=https://github.com/mijahauan/grape-recorder
+After=timestd-metrology.service
+Wants=timestd-metrology.service
+
+[Service]
+Type=simple
+User=timestd
+Group=timestd
+EnvironmentFile=/etc/hf-timestd/environment
+WorkingDirectory=/var/lib/timestd
+
+# Run L2 calibration service for all 9 channels
+ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_service \
+    --data-root /var/lib/timestd \
+    --receiver-grid EM38ww40pk \
+    --receiver-lat 38.918461 \
+    --receiver-lon -92.127974 \
+    --channels SHARED_2500 SHARED_5000 SHARED_10000 SHARED_15000 WWV_20000 WWV_25000 CHU_3330 CHU_7850 CHU_14670 \
+    --poll-interval 60.0 \
+    --log-level INFO
+
+Restart=on-failure
+RestartSec=30
+StartLimitInterval=300
+StartLimitBurst=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-l2-calibration
+
+[Install]
+WantedBy=multi-user.target
