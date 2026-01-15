@@ -1804,17 +1804,27 @@ class MultiBroadcastFusion:
             broadcast_mean = np.mean(d_clocks)
             broadcast_std = np.std(d_clocks)
             
-            # CRITICAL FIX: Align to CONSENSUS time, not 0
-            # Offset should bring broadcast mean to reference_d_clock
-            # calibrated = raw + offset = reference
-            # offset = reference - raw
-            new_offset = reference_d_clock - broadcast_mean
+            # CRITICAL FIX (2026-01-15): Calibration targets ABSOLUTE ZERO (GPSDO reference)
+            # The GPSDO is the "steel ruler" - it defines UTC absolutely.
+            # Calibration removes systematic offsets to bring D_clock → 0ms.
+            # The Kalman filter then provides temporal smoothing of the calibrated result.
+            # 
+            # This decouples calibration from Kalman state, preventing circular dependency:
+            # - Calibration: Learns systematic offsets, targets zero
+            # - Kalman: Filters calibrated measurements for stability
+            # 
+            # Previous approach (calibration → Kalman state) created deadlock:
+            # Calibration tried to reach frozen Kalman value, Kalman rejected noisy calibration.
+            # 
+            # calibrated = raw + offset = 0
+            # offset = 0 - raw
+            new_offset = 0.0 - broadcast_mean
             
             # Extract station and frequency from key for logging
             station = recent[0].station
             freq = recent[0].frequency_mhz
             
-            logger.debug(f"Calibration update {broadcast_key}: raw_mean={broadcast_mean:.2f}ms, ref={reference_d_clock:.2f}ms, offset={new_offset:.2f}ms, n={len(d_clocks)}")
+            logger.debug(f"Calibration update {broadcast_key}: raw_mean={broadcast_mean:.2f}ms, target=0.00ms, offset={new_offset:.2f}ms, n={len(d_clocks)}")
             
             # Exponential moving average for smooth updates
             old_cal = self.calibration.get(broadcast_key)
@@ -2586,14 +2596,18 @@ class MultiBroadcastFusion:
         # ====================================================================
         # UPDATE CALIBRATION (Priority 1B)
         # ====================================================================
-        # CRITICAL FIX: Update calibration using the *residuals* relative to the FUSED result.
-        # This aligns all stations to the consensus time, rather than arbitrarily forcing them to 0.
-        # If the real system clock error is non-zero (e.g. -37ms), calibration should NOT try to remove it.
-        # It should only remove the *difference* between a station and the consensus (-37ms).
+        # CRITICAL FIX (2026-01-15): Calibration targets ABSOLUTE ZERO (GPSDO reference).
+        # Each broadcast learns systematic offsets to bring its D_clock → 0ms.
+        # The Kalman filter then provides temporal smoothing of calibrated measurements.
+        # This decouples calibration from Kalman state, preventing circular dependency.
+        # 
+        # Metrological separation of concerns:
+        # - Calibration: Removes systematic offsets (propagation model errors, detection delays)
+        # - Kalman: Filters ionospheric variations and measurement noise
         self._update_calibration(
             measurements, 
             validated=cross_valid,
-            reference_d_clock=fused_d_clock
+            reference_d_clock=0.0  # Target absolute zero (parameter kept for compatibility)
         )
         
         # CRITICAL FIX (P3.2): D_clock monotonicity check

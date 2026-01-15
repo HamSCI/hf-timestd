@@ -388,7 +388,10 @@ log_info "Installing hf-timestd package (and dependencies from pyproject.toml)..
 if [[ "$MODE" == "production" ]]; then
     # Copy source to temp location to avoid any path dependencies
     TEMP_INSTALL_DIR=$(mktemp -d)
-    cp -r "$PROJECT_DIR"/* "$TEMP_INSTALL_DIR/"
+    
+    # Copy all files except legacy setup.py and requirements.txt (project uses pyproject.toml)
+    rsync -a --exclude='setup.py' --exclude='requirements.txt' --exclude='requirements-dev.txt' \
+          "$PROJECT_DIR/" "$TEMP_INSTALL_DIR/"
     
     # Install from temp location (ensures no references to $PROJECT_DIR)
     pip install "$TEMP_INSTALL_DIR"
