@@ -189,15 +189,32 @@ if [[ "$MODE" == "production" ]]; then
 
         if [[ -n "$CHRONY_CONF" ]]; then
             log_info "  Found chrony config: $CHRONY_CONF"
-            if ! grep -q "refclock SHM 0 refid TMGR" "$CHRONY_CONF" 2>/dev/null; then
-            log_info "  Adding timestd SHM refclock to chrony.conf..."
+            if ! grep -q "refclock SHM 0 refid TSL1" "$CHRONY_CONF" 2>/dev/null; then
+            log_info "  Adding timestd dual SHM refclocks to chrony.conf..."
             sudo tee -a "$CHRONY_CONF" > /dev/null <<'EOF'
 
-# HF Time Standard - UTC(NIST) via SHM
-# timestd-analytics service writes fused UTC(NIST) estimates to SHM unit 0
-refclock SHM 0 refid TMGR poll 3 precision 1e-3 offset 0.0
+# HF Time Standard Dual Chrony Refclock Configuration
+# Add this to /etc/chrony/chrony.conf or include it via:
+#   include /etc/hf-timestd/chrony-timestd-refclocks.conf
+
+# L1 Feed: Raw metrology fusion (fast, robust baseline)
+# - Uses L1 metrology measurements (raw TOA)
+# - Uncertainty: ±0.85ms (multi-broadcast fusion with outlier rejection)
+# - Latency: ~75-135 seconds
+# - Fallback feed if L2 pipeline fails
+refclock SHM 0 refid TSL1 poll 4 precision 1e-3 offset 0.0 delay 0.1
+
+# L2 Feed: Calibrated timing fusion (accurate, primary)
+# - Uses L2 calibrated measurements (geometric + TEC + system corrections)
+# - Uncertainty: ±0.3-1.0ms (ISO GUM uncertainty budget)
+# - Latency: ~105-195 seconds
+# - Primary feed for clock discipline
+refclock SHM 1 refid TSL2 poll 4 precision 1e-4 offset 0.0 delay 0.1
+
+# Chrony will automatically prefer TSL2 (lower uncertainty, better precision)
+# TSL1 serves as backup if L2 calibration pipeline fails
 EOF
-            log_info "  ✅ Chrony configured for timestd SHM integration"
+            log_info "  ✅ Chrony configured for timestd dual SHM integration (TSL1=L1, TSL2=L2)"
             log_info "  📝 Note: timestd-fusion must start BEFORE chronyd to create SHM with correct permissions"
         else
             log_info "  ℹ️  Chrony already configured for timestd SHM"

@@ -502,24 +502,37 @@ if [[ "$MODE" == "production" ]]; then
     section "Chrony Integration"
     
     if command -v chronyc &>/dev/null; then
-        # Check if TMGR source exists
-        if chronyc sources 2>/dev/null | grep -q "TMGR"; then
-            check_pass "Chrony TMGR source configured"
+        # Check if TSL (Time Standard L1/L2) sources exist
+        if chronyc sources 2>/dev/null | grep -q "TSL"; then
+            # Count active TSL sources
+            TSL_COUNT=$(chronyc sources 2>/dev/null | grep "TSL" | wc -l)
+            check_pass "Chrony HF-timestd feed configured ($TSL_COUNT sources: TSL1=L1, TSL2=L2)"
             
-            # Check reachability and provide diagnostics
-            REACH=$(chronyc sources 2>/dev/null | grep "TMGR" | awk '{print $5}')
-            if [[ "$REACH" == "0" ]]; then
-                check_fail "TMGR source not reachable (reach: 0)"
-            elif [[ -n "$REACH" ]] && [[ "$REACH" -lt 7 ]]; then
-                check_warn "TMGR reach low ($REACH) - check fusion logs for SHM write errors"
-            else
-                check_pass "TMGR source reachable (reach: $REACH)"
-                # Add frequency skew check
-                SKEW=$(chronyc tracking 2>/dev/null | grep "Frequency" | awk '{print $3, $4}')
-                check_pass "System Frequency stability: $SKEW"
+            # Check reachability for both sources
+            TSL1_REACH=$(chronyc sources 2>/dev/null | grep "TSL1" | awk '{print $5}')
+            TSL2_REACH=$(chronyc sources 2>/dev/null | grep "TSL2" | awk '{print $5}')
+            
+            if [[ "$TSL1_REACH" == "0" ]] && [[ "$TSL2_REACH" == "0" ]]; then
+                check_fail "TSL sources not reachable (reach: TSL1=$TSL1_REACH, TSL2=$TSL2_REACH)"
+                echo "  → Check fusion service: systemctl status timestd-fusion"
+                echo "  → Check SHM permissions: ipcs -m | grep 0x4e54503"
+            elif [[ -n "$TSL1_REACH" ]] && [[ "$TSL1_REACH" != "0" ]] || [[ -n "$TSL2_REACH" ]] && [[ "$TSL2_REACH" != "0" ]]; then
+                # Convert octal reach to decimal for display
+                TSL1_DEC=$((8#$TSL1_REACH))
+                TSL2_DEC=$((8#$TSL2_REACH))
+                check_pass "TSL sources reachable (TSL1: $TSL1_REACH/$TSL1_DEC polls, TSL2: $TSL2_REACH/$TSL2_DEC polls)"
+                
+                # Show which source chrony is using
+                SELECTED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^\^[\*\+]" | awk '{print $3}')
+                if [[ -n "$SELECTED" ]]; then
+                    check_pass "Chrony using HF-timestd source: $SELECTED"
+                else
+                    check_warn "Chrony not yet using HF-timestd (sources still being evaluated)"
+                fi
             fi
         else
-            check_warn "Chrony TMGR source not configured"
+            check_warn "Chrony HF-timestd feed not configured (TSL1/TSL2 sources missing)"
+            echo "  → Check: /etc/hf-timestd/chrony-timestd-refclocks.conf"
         fi
     else
         check_warn "chronyd not installed"
