@@ -296,12 +296,36 @@ class MetrologyEngine:
         if doppler_info:
             doppler_metrics = doppler_info
             
-        # 2C. CHU FSK
+        # 2C. CHU FSK Time Code Decoding
         chu_metrics = {}
         if hasattr(self, 'chu_fsk_decoder'):
-             fsk_res = self.chu_fsk_decoder.decode_minute(iq_samples, system_time)
-             if fsk_res.detected:
-                 chu_metrics['fsk_valid'] = True
+            fsk_res = self.chu_fsk_decoder.decode_minute(iq_samples, system_time)
+            if fsk_res.detected:
+                chu_metrics['fsk_valid'] = True
+                chu_metrics['fsk_frames_decoded'] = fsk_res.frames_decoded
+                chu_metrics['fsk_confidence'] = fsk_res.decode_confidence
+                
+                # Decoded time verification
+                if fsk_res.decoded_day is not None:
+                    chu_metrics['decoded_day'] = fsk_res.decoded_day
+                    chu_metrics['decoded_hour'] = fsk_res.decoded_hour
+                    chu_metrics['decoded_minute'] = fsk_res.decoded_minute
+                
+                # Auxiliary data from Frame B
+                if fsk_res.dut1_seconds is not None:
+                    chu_metrics['dut1_seconds'] = fsk_res.dut1_seconds
+                if fsk_res.tai_utc is not None:
+                    chu_metrics['tai_utc'] = fsk_res.tai_utc
+                if fsk_res.year is not None:
+                    chu_metrics['year'] = fsk_res.year
+                
+                # Timing precision
+                if fsk_res.timing_offset_ms is not None:
+                    chu_metrics['timing_offset_ms'] = fsk_res.timing_offset_ms
+                
+                logger.info(f"{self.channel_name}: CHU FSK decoded - "
+                           f"frames={fsk_res.frames_decoded}/9, "
+                           f"DUT1={fsk_res.dut1_seconds}s, TAI-UTC={fsk_res.tai_utc}s")
                  
         # === Step 3: Package into L1MetrologyMeasurement ===
         results = []

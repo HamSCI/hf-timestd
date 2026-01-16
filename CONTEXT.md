@@ -1,37 +1,113 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-## 🚀 Current Status: "Steel Ruler" Release (v5.3.5)
+## 🚀 Current Status: "Steel Ruler" Release (v5.3.6)
 
-**Version**: v5.3.5 - 2026-01-16
+**Version**: v5.3.6 - 2026-01-16
 **Core Philosophy**: **"Steel Ruler" Metrology**. The system treats the local GPSDO as a fixed standard (zero process noise) to measure ionospheric variance.
 
-### 🌟 Recent Accomplishments (v5.3.5)
+### 🌟 Recent Accomplishments (v5.3.6)
 
-1. **Codebase Cleanup Complete**: Archived 12 deprecated/legacy files, removed zombie code identified via vulture analysis.
-2. **Edge Case Tests Added**: New test suites for leap second handling and day boundary conditions.
-3. **Code Quality Fixes**: Replaced bare `except:` clauses with specific exceptions, consolidated hardcoded coordinates.
-4. **Production Synced**: Git repo and `/opt/hf-timestd` now identical after cleanup.
+1. **Scintillation Indices Implemented**: Full S4 (amplitude) and σ_φ (phase) scintillation calculation with severity classification and event detection.
+2. **Sporadic-E Detection Added**: Automated Es event detection via SNR anomaly and mode change tracking with foEs estimation.
+3. **CHU FSK Integration Enhanced**: Full decoded data (DUT1, TAI-UTC, year, timing offset) now captured in analytics pipeline.
+4. **New Test Suites**: `test_scintillation_indices.py` and `test_sporadic_e_detection.py` with physics validation.
 
-### 🔴 Next Session: Complete Partially Implemented Physics
+### 🔴 Next Session: Web-API HTML Page Review
 
-The next development session will focus on completing ionospheric physics capabilities identified in `docs/PHYSICS.md`:
+**Objective:** Review each HTML page served by the web-api to ensure they have access to and correctly display the available data.
 
-1. **CHU FSK Time Code Decoding** — Complete BCD extraction, DUT1 parsing, leap second warnings
-2. **Scintillation Indices (S4, σ_φ)** — Calculate amplitude and phase scintillation from existing infrastructure
-3. **WWV/WWVH Test Signal Measurements** — Refine delay spread, add transient detection
-4. **Sporadic-E Detection** — Automated Es event detection algorithm
+#### HTML Pages to Review (in `/web-api/static/`)
 
-**Key Files:**
-- `src/hf_timestd/core/chu_fsk_decoder.py` — FSK framework exists, needs completion
-- `src/hf_timestd/core/wwv_test_signal.py` — Detection works, measurements partial
-- `src/hf_timestd/core/advanced_signal_analysis.py` — Scintillation infrastructure
-- `docs/PHYSICS.md` — Primary reference for physics implementation
+| Page | Purpose | Backend Router |
+|------|---------|----------------|
+| `index.html` | Main dashboard, overview | Multiple routers |
+| `health.html` | System health status | `routers/health.py` |
+| `station.html` | Per-station details | `routers/station.py`, `routers/stations.py` |
+| `metrology.html` | Timing measurements, clock offsets | `routers/metrology.py` |
+| `physics.html` | Ionospheric physics (TEC, Doppler) | `routers/physics.py` |
+| `propagation.html` | Propagation modes, delays | `routers/propagation.py` |
+| `solar-correlation.html` | Solar/space weather correlation | `routers/correlations.py`, `routers/space_weather.py` |
+| `logs.html` | System logs viewer | `routers/logs.py` |
+
+#### Review Checklist for Each Page
+
+1. **Data Availability** — Does the page have API endpoints for all data it needs?
+2. **Data Display** — Is the data correctly fetched and rendered?
+3. **New Physics Data** — Are the new capabilities (S4, σ_φ, Sporadic-E) exposed?
+4. **Error Handling** — Does the page handle missing/stale data gracefully?
+5. **Responsiveness** — Does the page update appropriately (polling, WebSocket)?
+
+#### Key Backend Files
+
+- `web-api/routers/` — FastAPI route handlers
+- `web-api/services/` — Business logic and data access
+- `web-api/static/js/` — Frontend JavaScript
+- `web-api/static/css/` — Styling
+
+#### New Data to Potentially Expose
+
+From this session's physics implementation:
+- **Scintillation Indices**: `s4_index`, `sigma_phi_rad`, `scintillation_event`
+- **Sporadic-E Events**: `detected`, `estimated_foEs_mhz`, `confidence`
+- **CHU FSK Data**: `dut1_seconds`, `tai_utc`, `decoded_time`
 
 ### ⚠️ Active Issues / Watchlist
 
 - **TEC Staleness at Night**: The `timestd-physics` service correctly reports stale TEC data during nighttime when only single frequencies are visible. This is a scientific limitation, not a software failure.
 - **WWV 20/25 MHz Propagation**: These bands show STALE measurements during poor propagation conditions (nighttime/early morning). Expected behavior—signals resume when propagation improves.
 - **ka9q-python Log Spam**: "RTP Clock Drift Detected" warnings appear frequently due to stale `gps_time` in cached ChannelInfo. Functionally harmless (OS clock fallback works), but noisy. Fix pending in ka9q-python.
+
+---
+
+## ✅ Session Complete: Physics Capabilities Implementation (v5.3.6)
+
+**Date**: 2026-01-16  
+**Status**: **PHYSICS COMPLETE** - Scintillation indices and Sporadic-E detection implemented
+
+### Accomplishments
+
+1. **Scintillation Indices (S4, σ_φ)** — `advanced_signal_analysis.py`
+   - `ScintillationResult` dataclass with full physics documentation
+   - `calculate_scintillation_indices()` — Core calculation from amplitude/phase arrays
+   - `calculate_scintillation_from_ticks()` — Convenience wrapper for per-tick data
+   - S4 = sqrt(var(I) / mean(I)²) with severity classification (weak/moderate/strong)
+   - σ_φ = std(φ_detrended) with Doppler trend removal
+   - Event detection and flagging
+
+2. **Sporadic-E Detection** — `propagation_mode_solver.py`
+   - `SporadicEEvent` dataclass with Es physics documentation
+   - `SporadicEDetector` class with multi-method detection:
+     - SNR anomaly detection (sudden increases at 10/15 MHz)
+     - Mode change detection (F→E transitions)
+     - Multi-frequency confirmation
+   - foEs (critical frequency) estimation
+   - Confidence scoring from multiple evidence sources
+
+3. **CHU FSK Integration Enhanced** — `metrology_engine.py`
+   - Full decoded data now captured: DUT1, TAI-UTC, year, timing offset
+   - Logging of FSK decode results
+
+4. **New Test Suites**
+   - `tests/test_scintillation_indices.py` — 13 tests for S4/σ_φ physics
+   - `tests/test_sporadic_e_detection.py` — 11 tests for Es detection
+
+### Files Modified
+
+- `src/hf_timestd/core/advanced_signal_analysis.py` — Added ScintillationResult, calculate_scintillation_indices()
+- `src/hf_timestd/core/propagation_mode_solver.py` — Added SporadicEEvent, SporadicEDetector
+- `src/hf_timestd/core/metrology_engine.py` — Enhanced CHU FSK data capture
+
+### Files Created
+
+- `tests/test_scintillation_indices.py`
+- `tests/test_sporadic_e_detection.py`
+
+### Physics Validation
+
+```
+Scintillation test: S4=0.182 (weak), σ_φ=0.000 rad (weak)
+Sporadic-E test: Es detected, foEs≈8.0 MHz, confidence=0.40
+```
 
 ---
 

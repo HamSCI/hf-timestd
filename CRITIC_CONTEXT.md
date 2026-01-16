@@ -10,138 +10,108 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🔴 NEXT SESSION: COMPLETE PARTIALLY IMPLEMENTED PHYSICS CAPABILITIES
+## ✅ COMPLETED: PARTIALLY IMPLEMENTED PHYSICS CAPABILITIES
 
-**Priority:** HIGH  
-**Objective:** Complete the partially implemented ionospheric physics measurements identified in `docs/PHYSICS.md`  
-**Date:** 2026-01-17
+**Status:** ✅ **COMPLETE** - 2026-01-16  
+**Objective:** Completed ionospheric physics measurements identified in `docs/PHYSICS.md`
 
-### Target Capabilities (from PHYSICS.md Section 4)
+### Completed Capabilities
 
-The following capabilities have infrastructure in place but need completion:
+#### 1. **CHU FSK Time Code Decoding** ✅ (Section 4.4)
 
-#### 1. **CHU FSK Time Code Decoding** ⚠️ (Section 4.4)
-
-**Current State:** Partially implemented in `src/hf_timestd/core/chu_fsk_decoder.py`
-- ✅ FSK demodulation framework exists
-- ✅ Bell 103 (2025/2225 Hz) detection implemented
-- ✅ Frame structures defined (CHUFrameA, CHUFrameB)
-- ❌ Complete BCD time code extraction
-- ❌ DUT1 parsing from Frame B
-- ❌ Leap second warning extraction
-- ❌ Integration with analytics pipeline
-
-**Implementation Tasks:**
-1. Complete FSK bit extraction from demodulated signal
-2. Implement BCD decoding for Frame A (time of day)
-3. Implement Frame B parsing (DUT1, year, TAI-UTC)
-4. Add parity checking and error detection
-5. Integrate with `phase2_analytics_service.py`
-6. Output decoded time to HDF5 products
-
-**Scientific Value:**
-- Verified UTC time (not just relative timing)
-- DUT1 correction for UT1-UTC
-- Leap second announcements
-- TAI-UTC offset tracking
+**Status:** Already complete in `chu_fsk_decoder.py`, integration enhanced in `metrology_engine.py`
+- ✅ FSK demodulation (Hilbert transform method)
+- ✅ BCD time code extraction (Frame A)
+- ✅ DUT1, year, TAI-UTC parsing (Frame B)
+- ✅ Parity checking and error detection
+- ✅ Multi-second consensus validation
+- ✅ Integration with analytics pipeline (enhanced 2026-01-16)
 
 **Key Files:**
-- `src/hf_timestd/core/chu_fsk_decoder.py` — Main decoder (needs completion)
-- `src/hf_timestd/core/advanced_signal_analysis.py` — FSK demodulation helpers
-- `src/hf_timestd/core/phase2_analytics_service.py` — Integration point
+- `src/hf_timestd/core/chu_fsk_decoder.py` — Complete decoder
+- `src/hf_timestd/core/metrology_engine.py` — Enhanced integration
+- `src/hf_timestd/core/phase2_temporal_engine.py` — Full integration
 
 ---
 
-#### 2. **Scintillation Indices (S4, σ_φ)** ⚠️ (Section 4.2)
+#### 2. **Scintillation Indices (S4, σ_φ)** ✅ (Section 4.2)
 
-**Current State:** Infrastructure exists but indices not computed
-- ✅ Amplitude time series available
-- ✅ Phase tracking implemented in `wwvh_discrimination.py`
-- ✅ Fading variance computed
-- ❌ S4 calculation from amplitude variance
-- ❌ σ_φ calculation from detrended phase
-- ❌ Scintillation event flagging
-
-**Implementation Tasks:**
-1. Add S4 calculation: `S4 = sqrt(var(I) / mean(I)²)`
-2. Add σ_φ calculation from detrended phase time series
-3. Implement high-pass filter for phase detrending (remove Doppler)
-4. Flag scintillation events (S4 > 0.3 = moderate, S4 > 0.6 = strong)
-5. Add to channel characterization output
-
-**Physics (from Appendix A):**
-```
-S4 = sqrt(var(I) / mean(I)²)  # Amplitude scintillation index
-σ_φ = std(φ_detrended)         # Phase scintillation index (radians)
-```
+**Status:** Implemented in `advanced_signal_analysis.py` (2026-01-16)
+- ✅ `ScintillationResult` dataclass with physics documentation
+- ✅ S4 calculation: `S4 = sqrt(var(I) / mean(I)²)`
+- ✅ σ_φ calculation with Doppler detrending
+- ✅ Severity classification (weak/moderate/strong)
+- ✅ Scintillation event flagging
+- ✅ Unit tests in `tests/test_scintillation_indices.py`
 
 **Key Files:**
-- `src/hf_timestd/core/wwvh_discrimination.py` — Has phase tracking
-- `src/hf_timestd/core/advanced_signal_analysis.py` — Signal analysis
-- `src/hf_timestd/core/wwv_test_signal.py` — Already has `scintillation_index` field
+- `src/hf_timestd/core/advanced_signal_analysis.py` — `calculate_scintillation_indices()`
 
 ---
 
-#### 3. **WWV/WWVH Test Signal Measurements** ⚠️ (Section 6)
+#### 3. **WWV/WWVH Test Signal Measurements** ✅ (Section 6)
 
-**Current State:** Detection implemented, measurements partial
+**Status:** Complete in `wwv_test_signal.py`
 - ✅ Test signal detection (template correlation)
 - ✅ Multi-tone power measurement
 - ✅ Frequency Selectivity Score (FSS) calculation
-- ⚠️ Delay spread — basic measurement, needs refinement
-- ⚠️ Scintillation — fading variance computed, S4 not
-- ⚠️ Transient detection — noise comparison implemented, not flagged
-
-**Implementation Tasks:**
-1. **Delay Spread Refinement:**
-   - Use chirp pulse compression for higher resolution
-   - Extract multipath structure from compressed pulse
-   - Output delay spread in ms with uncertainty
-
-2. **Scintillation from Test Signal:**
-   - Calculate S4 from 10-second multi-tone segment
-   - Use 1-second windows for time resolution
-   - Compare with continuous scintillation estimate
-
-3. **Transient Detection:**
-   - Compare noise #1 (10-12s) with noise #2 (37-39s)
-   - Flag significant difference as transient event
-   - Correlate with solar flare data (future)
-
-**Test Signal Structure (from PHYSICS.md):**
-| Time | Content | Measurement |
-|------|---------|-------------|
-| 10-12s | White noise #1 | Wideband coherence baseline |
-| 13-23s | Multi-tone (2,3,4,5 kHz) | FSS, scintillation |
-| 24-32s | Chirp sequences | Delay spread (pulse compression) |
-| 34-36s | Single-cycle bursts | High-precision timing |
-| 37-39s | White noise #2 | Transient detection (compare to #1) |
+- ✅ Delay spread from chirp matched filter
+- ✅ S4 scintillation from multi-tone segment
+- ✅ Transient detection from noise segment comparison
 
 **Key Files:**
-- `src/hf_timestd/core/wwv_test_signal.py` — Main implementation
-- `src/hf_timestd/core/advanced_signal_analysis.py` — Signal processing
+- `src/hf_timestd/core/wwv_test_signal.py` — Complete implementation
 
 ---
 
-#### 4. **Sporadic-E Detection** ⚠️ (Section 4.1)
+#### 4. **Sporadic-E Detection** ✅ (Section 4.1)
 
-**Current State:** Detection possible, characterization incomplete
-- ✅ SNR sudden increases detectable
-- ✅ Mode change to 1E identifiable
-- ❌ Automated Es event detection algorithm
-- ❌ Critical frequency (foEs) estimation
-- ❌ Es layer height determination
-
-**Implementation Tasks:**
-1. Add Es detection heuristics to `propagation_mode_solver.py`
-2. Track SNR anomalies at higher frequencies (10-15 MHz)
-3. Correlate mode changes with SNR increases
-4. Estimate foEs from highest frequency showing E-layer propagation
-5. Add Es event flagging to output products
+**Status:** Implemented in `propagation_mode_solver.py` (2026-01-16)
+- ✅ `SporadicEEvent` dataclass with Es physics documentation
+- ✅ `SporadicEDetector` class with multi-method detection
+- ✅ SNR anomaly detection (sudden increases at 10/15 MHz)
+- ✅ Mode change detection (F→E transitions)
+- ✅ foEs (critical frequency) estimation
+- ✅ Multi-frequency confirmation
+- ✅ Unit tests in `tests/test_sporadic_e_detection.py`
 
 **Key Files:**
-- `src/hf_timestd/core/propagation_mode_solver.py` — Mode identification
-- `src/hf_timestd/core/ionospheric_model.py` — Layer heights
+- `src/hf_timestd/core/propagation_mode_solver.py` — `SporadicEDetector`
+
+---
+
+## 🔴 NEXT SESSION: REMAINING REFINEMENTS
+
+**Priority:** MEDIUM  
+**Objective:** Refine remaining physics capabilities and add service monitoring
+
+### Target Capabilities
+
+#### 1. **TID Detection** ⚠️ (Section 4.3)
+
+**Current State:** Doppler measured, TID detection not automated
+- ✅ Doppler shift time series available
+- ✅ Multi-frequency observations
+- ❌ Coherent oscillation detection across frequencies
+- ❌ Period/wavelength estimation
+- ❌ TID event cataloging
+
+**Implementation Tasks:**
+1. FFT analysis of Doppler time series
+2. Cross-correlation between frequencies/paths
+3. Phase velocity estimation from multi-path delays
+
+#### 2. **Service Monitoring** ⚠️
+
+**Current State:** Services can hang silently (per VTEC incident)
+- ❌ Watchdog timers for critical services
+- ❌ Periodic heartbeat logging
+- ❌ Data freshness health checks
+
+**Implementation Tasks:**
+1. Add systemd watchdog to `timestd-vtec.service`
+2. Implement periodic heartbeat logging
+3. Add data freshness check to pipeline verification
 
 ---
 

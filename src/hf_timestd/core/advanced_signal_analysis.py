@@ -170,6 +170,58 @@ MULTIPATH_PHASE_STABILITY_THRESHOLD = 0.5  # Phase std > 0.5 rad = unstable
 # =============================================================================
 
 @dataclass
+class ScintillationResult:
+    """
+    Result of ionospheric scintillation analysis.
+    
+    Scintillation indices quantify rapid fluctuations in signal amplitude and phase
+    caused by ionospheric irregularities. These are standard metrics used in
+    ionospheric physics (see ITU-R P.531, GNSS scintillation monitoring).
+    
+    Physics:
+    --------
+    S4 (amplitude scintillation index):
+        S4 = sqrt(var(I) / mean(I)²)
+        where I is signal intensity (power)
+        
+        Interpretation:
+        - S4 < 0.3: Weak scintillation (normal conditions)
+        - 0.3 ≤ S4 < 0.6: Moderate scintillation
+        - S4 ≥ 0.6: Strong scintillation (degraded timing)
+    
+    σ_φ (phase scintillation index):
+        σ_φ = std(φ_detrended)
+        where φ_detrended is phase with Doppler trend removed
+        
+        Interpretation:
+        - σ_φ < 0.2 rad: Weak phase scintillation
+        - 0.2 ≤ σ_φ < 0.5 rad: Moderate phase scintillation
+        - σ_φ ≥ 0.5 rad: Strong phase scintillation
+    """
+    # Amplitude scintillation
+    s4_index: float  # S4 = sqrt(var(I) / mean(I)²), 0-1+
+    s4_severity: str  # 'weak', 'moderate', 'strong'
+    
+    # Phase scintillation
+    sigma_phi_rad: float  # σ_φ in radians
+    sigma_phi_severity: str  # 'weak', 'moderate', 'strong'
+    
+    # Supporting data
+    mean_intensity: float  # Mean signal intensity
+    intensity_variance: float  # Variance of intensity
+    phase_variance_rad: float  # Variance of detrended phase
+    doppler_removed_hz: float  # Doppler trend that was removed
+    
+    # Quality metrics
+    valid_samples: int  # Number of samples used
+    confidence: float  # 0-1, higher = more reliable
+    
+    # Event flagging
+    scintillation_event: bool  # True if S4 > 0.3 or σ_φ > 0.2
+    event_severity: str  # 'none', 'moderate', 'strong'
+
+
+@dataclass
 class ComplexCorrelationResult:
     """
     Result of complex correlation preserving phase information.
@@ -842,6 +894,206 @@ class AdvancedSignalAnalyzer:
             xcorr_snr_db=xcorr_snr_db,
             is_reliable=is_reliable,
             dominant_station=dominant_station
+        )
+    
+    # =========================================================================
+    # SCINTILLATION INDICES (S4, σ_φ)
+    # =========================================================================
+    
+    def calculate_scintillation_indices(
+        self,
+        amplitudes: np.ndarray,
+        phases: np.ndarray,
+        times: Optional[np.ndarray] = None,
+        min_samples: int = 10
+    ) -> ScintillationResult:
+        """
+        Calculate ionospheric scintillation indices S4 and σ_φ.
+        
+        This implements the standard scintillation metrics used in ionospheric
+        physics (ITU-R P.531, GNSS scintillation monitoring).
+        
+        Physics:
+        --------
+        S4 (amplitude scintillation index):
+            S4 = sqrt(var(I) / mean(I)²)
+            where I is signal intensity (amplitude²)
+            
+        σ_φ (phase scintillation index):
+            σ_φ = std(φ_detrended)
+            where φ_detrended has the Doppler trend removed via high-pass filter
+        
+        Args:
+            amplitudes: Array of signal amplitudes (linear, not dB)
+            phases: Array of unwrapped phases (radians)
+            times: Optional array of sample times (seconds). If None, assumes 1s spacing.
+            min_samples: Minimum samples required for valid calculation
+            
+        Returns:
+            ScintillationResult with S4, σ_φ, and quality metrics
+        """
+        n_samples = min(len(amplitudes), len(phases))
+        
+        if n_samples < min_samples:
+            return ScintillationResult(
+                s4_index=0.0,
+                s4_severity='unknown',
+                sigma_phi_rad=0.0,
+                sigma_phi_severity='unknown',
+                mean_intensity=0.0,
+                intensity_variance=0.0,
+                phase_variance_rad=0.0,
+                doppler_removed_hz=0.0,
+                valid_samples=n_samples,
+                confidence=0.0,
+                scintillation_event=False,
+                event_severity='none'
+            )
+        
+        amplitudes = np.asarray(amplitudes[:n_samples])
+        phases = np.asarray(phases[:n_samples])
+        
+        if times is None:
+            times = np.arange(n_samples, dtype=float)
+        else:
+            times = np.asarray(times[:n_samples])
+        
+        # === S4 Calculation ===
+        # Convert amplitude to intensity (power)
+        intensity = amplitudes ** 2
+        
+        mean_intensity = np.mean(intensity)
+        intensity_variance = np.var(intensity)
+        
+        if mean_intensity > 1e-10:
+            s4_index = float(np.sqrt(intensity_variance) / mean_intensity)
+        else:
+            s4_index = 0.0
+        
+        # Classify S4 severity
+        if s4_index < 0.3:
+            s4_severity = 'weak'
+        elif s4_index < 0.6:
+            s4_severity = 'moderate'
+        else:
+            s4_severity = 'strong'
+        
+        # === σ_φ Calculation ===
+        # First, unwrap phases if not already done
+        phases_unwrapped = np.unwrap(phases)
+        
+        # Remove Doppler trend via linear fit (high-pass filter)
+        # φ(t) = 2π·f_D·t + φ₀ + fluctuations
+        try:
+            coeffs = np.polyfit(times, phases_unwrapped, deg=1)
+            doppler_hz = coeffs[0] / (2 * np.pi)  # Slope is rad/s
+            phase_trend = np.polyval(coeffs, times)
+            phase_detrended = phases_unwrapped - phase_trend
+        except (np.linalg.LinAlgError, ValueError):
+            doppler_hz = 0.0
+            phase_detrended = phases_unwrapped - np.mean(phases_unwrapped)
+        
+        # Phase scintillation index
+        sigma_phi_rad = float(np.std(phase_detrended))
+        phase_variance_rad = float(np.var(phase_detrended))
+        
+        # Classify σ_φ severity
+        if sigma_phi_rad < 0.2:
+            sigma_phi_severity = 'weak'
+        elif sigma_phi_rad < 0.5:
+            sigma_phi_severity = 'moderate'
+        else:
+            sigma_phi_severity = 'strong'
+        
+        # === Event Detection ===
+        scintillation_event = (s4_index >= 0.3 or sigma_phi_rad >= 0.2)
+        
+        if s4_severity == 'strong' or sigma_phi_severity == 'strong':
+            event_severity = 'strong'
+        elif s4_severity == 'moderate' or sigma_phi_severity == 'moderate':
+            event_severity = 'moderate'
+        else:
+            event_severity = 'none'
+        
+        # === Confidence ===
+        # Higher confidence with more samples and consistent measurements
+        sample_factor = min(1.0, n_samples / 30.0)  # Full confidence at 30+ samples
+        
+        # Check for outliers that might indicate bad data
+        if mean_intensity > 0:
+            cv = np.sqrt(intensity_variance) / mean_intensity
+            outlier_factor = max(0.5, 1.0 - cv / 2.0)  # Reduce confidence if very high CV
+        else:
+            outlier_factor = 0.5
+        
+        confidence = float(sample_factor * outlier_factor)
+        
+        logger.debug(f"Scintillation: S4={s4_index:.3f} ({s4_severity}), "
+                    f"σ_φ={sigma_phi_rad:.3f} rad ({sigma_phi_severity}), "
+                    f"Doppler={doppler_hz:.3f} Hz, samples={n_samples}")
+        
+        return ScintillationResult(
+            s4_index=s4_index,
+            s4_severity=s4_severity,
+            sigma_phi_rad=sigma_phi_rad,
+            sigma_phi_severity=sigma_phi_severity,
+            mean_intensity=float(mean_intensity),
+            intensity_variance=float(intensity_variance),
+            phase_variance_rad=phase_variance_rad,
+            doppler_removed_hz=float(doppler_hz),
+            valid_samples=n_samples,
+            confidence=confidence,
+            scintillation_event=scintillation_event,
+            event_severity=event_severity
+        )
+    
+    def calculate_scintillation_from_ticks(
+        self,
+        tick_data: List[Tuple[int, float, float, float]],
+        min_snr_db: float = 5.0
+    ) -> Optional[ScintillationResult]:
+        """
+        Calculate scintillation indices from per-tick amplitude and phase data.
+        
+        This is a convenience wrapper for calculate_scintillation_indices() that
+        works with the output of extract_per_tick_phases().
+        
+        Args:
+            tick_data: List of (second, phase_rad, snr_db, amplitude) tuples
+            min_snr_db: Minimum SNR for including a sample
+            
+        Returns:
+            ScintillationResult or None if insufficient data
+        """
+        if not tick_data or len(tick_data) < 10:
+            return None
+        
+        # Filter by SNR and extract arrays
+        times = []
+        amplitudes = []
+        phases = []
+        
+        for item in tick_data:
+            if len(item) >= 4:
+                sec, phase, snr, amp = item[0], item[1], item[2], item[3]
+            elif len(item) >= 3:
+                sec, phase, snr = item[0], item[1], item[2]
+                amp = 10 ** (snr / 20)  # Estimate amplitude from SNR
+            else:
+                continue
+            
+            if snr >= min_snr_db:
+                times.append(float(sec))
+                phases.append(float(phase))
+                amplitudes.append(float(amp))
+        
+        if len(times) < 10:
+            return None
+        
+        return self.calculate_scintillation_indices(
+            amplitudes=np.array(amplitudes),
+            phases=np.array(phases),
+            times=np.array(times)
         )
     
     def _bandpass_filter(

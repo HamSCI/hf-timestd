@@ -2,8 +2,8 @@
 
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 5.3.4  
-**Last Updated:** January 2026
+**System Version:** 5.3.6  
+**Last Updated:** 2026-01-16
 
 ---
 
@@ -241,49 +241,64 @@ delay_spread_ms = FWHM  # Multipath time spreading
 
 ## 4. Partially Implemented Capabilities
 
-### 4.1 Sporadic-E Detection ⚠️
+### 4.1 Sporadic-E Detection ✅
 
-**Status:** Detection possible, characterization needs work
+**Status:** Implemented (2026-01-16)
 
 **Physics:** Sporadic-E (Es) is thin, dense ionization at E-layer heights (~100-120 km) that can reflect frequencies normally above the E-layer MUF.
 
-**Current Capability:**
-- SNR sudden increases at 10-15 MHz detectable
-- Mode change to 1E identifiable
-- Event timing and duration measurable
+**Implementation:** `src/hf_timestd/core/propagation_mode_solver.py` (`SporadicEDetector`)
 
-**Missing:**
-- Automated Es event detection algorithm
-- Critical frequency (foEs) estimation
-- Es layer height determination
+**Capabilities:**
+- ✅ Automated Es event detection algorithm
+- ✅ SNR anomaly detection (sudden increases at 10/15 MHz)
+- ✅ Mode change detection (F→E transitions)
+- ✅ Critical frequency (foEs) estimation
+- ✅ Multi-frequency confirmation
+- ✅ Confidence scoring from multiple evidence sources
 
-**Implementation Path:**
-1. Add Es detection heuristics to mode solver
-2. Track SNR anomalies at higher frequencies
-3. Correlate with propagation mode changes
+**Outputs:**
+- `detected`: Boolean Es event flag
+- `confidence`: Detection confidence (0-1)
+- `estimated_foEs_mhz`: Critical frequency estimate
+- `snr_increase_db`: SNR jump at detection
+- `mode_changed_to_e`: True if mode switched to 1E
+- `detection_method`: 'snr_anomaly', 'mode_change', or 'combined'
 
-### 4.2 Scintillation Indices ⚠️
+**Scientific Value:**
+- Real-time Es event detection and cataloging
+- foEs estimation for propagation prediction
+- Correlation with geomagnetic activity
 
-**Status:** Infrastructure exists, indices not computed
+### 4.2 Scintillation Indices ✅
+
+**Status:** Implemented (2026-01-16)
 
 **Physics:** Ionospheric irregularities cause amplitude and phase scintillation:
 - **S4**: Normalized amplitude variance (amplitude scintillation)
-- **σ_φ**: Phase scintillation index
+- **σ_φ**: Phase scintillation index (Doppler-detrended)
 
-**Current Capability:**
-- Amplitude time series available
-- Phase tracking implemented
-- Fading variance computed
+**Implementation:** `src/hf_timestd/core/advanced_signal_analysis.py` (`calculate_scintillation_indices`)
 
-**Missing:**
-- S4 calculation from amplitude variance
-- σ_φ calculation from detrended phase
-- Scintillation event flagging
+**Capabilities:**
+- ✅ S4 calculation: `S4 = sqrt(var(I) / mean(I)²)`
+- ✅ σ_φ calculation with Doppler trend removal
+- ✅ Severity classification (weak/moderate/strong)
+- ✅ Scintillation event flagging
+- ✅ Confidence scoring
 
-**Implementation Path:**
-1. Add S4 calculation: `S4 = sqrt(var(I) / mean(I)²)`
-2. Add σ_φ calculation from phase time series
-3. Flag scintillation events (S4 > 0.3)
+**Outputs:**
+- `s4_index`: Amplitude scintillation index (0-1+)
+- `s4_severity`: 'weak' (<0.3), 'moderate' (0.3-0.6), 'strong' (≥0.6)
+- `sigma_phi_rad`: Phase scintillation in radians
+- `sigma_phi_severity`: 'weak' (<0.2), 'moderate' (0.2-0.5), 'strong' (≥0.5)
+- `scintillation_event`: Boolean event flag
+- `doppler_removed_hz`: Doppler trend that was removed
+
+**Scientific Value:**
+- Standard ITU-R P.531 scintillation metrics
+- Real-time ionospheric irregularity detection
+- Channel quality assessment for timing
 
 ### 4.3 Traveling Ionospheric Disturbances (TIDs) ⚠️
 
@@ -309,9 +324,9 @@ delay_spread_ms = FWHM  # Multipath time spreading
 2. Cross-correlation between frequencies/paths
 3. Phase velocity estimation from multi-path delays
 
-### 4.4 CHU FSK Time Code Decoding ⚠️
+### 4.4 CHU FSK Time Code Decoding ✅
 
-**Status:** Partially implemented
+**Status:** Implemented and integrated
 
 **Physics:** CHU transmits FSK-encoded time information including:
 - UTC time (verified, not just relative)
@@ -319,19 +334,29 @@ delay_spread_ms = FWHM  # Multipath time spreading
 - Leap second announcements
 - TAI-UTC offset
 
-**Current Capability:**
-- FSK demodulation framework exists
-- Bell 103 (2025/2225 Hz) detection
+**Implementation:** `src/hf_timestd/core/chu_fsk_decoder.py`
 
-**Missing:**
-- Complete BCD time code extraction
-- DUT1 parsing
-- Leap second warning extraction
+**Capabilities:**
+- ✅ FSK demodulation (Hilbert transform method)
+- ✅ BCD time code extraction (Frame A: time of day)
+- ✅ DUT1, year, TAI-UTC parsing (Frame B: auxiliary data)
+- ✅ Parity checking and error detection
+- ✅ Multi-second consensus validation
+- ✅ Integration with analytics pipeline
 
-**Implementation Path:**
-1. Complete FSK demodulator in `advanced_signal_analysis.py`
-2. Parse 10-byte CHU time code packet
-3. Extract DUT1 and leap second fields
+**Outputs:**
+- `decoded_day`, `decoded_hour`, `decoded_minute`: Verified UTC time
+- `dut1_seconds`: UT1-UTC correction
+- `tai_utc`: TAI-UTC offset (leap second count)
+- `year`: Gregorian year
+- `timing_offset_ms`: High-precision timing from FSK boundaries
+- `decode_confidence`: Frame decode quality
+
+**Scientific Value:**
+- Verified UTC time (not just relative timing)
+- DUT1 correction for UT1-UTC
+- Leap second announcements
+- TAI-UTC offset tracking
 
 ---
 
@@ -462,9 +487,9 @@ FSS = 10×log10((P_2kHz + P_3kHz) / (P_4kHz + P_5kHz))
 | Test signal detection | ✅ Implemented | Template correlation |
 | Multi-tone power | ✅ Implemented | Per-frequency power measurement |
 | FSS calculation | ✅ Implemented | Frequency selectivity score |
-| Delay spread | ⚠️ Partial | Basic measurement, needs refinement |
-| Scintillation | ⚠️ Partial | Fading variance computed |
-| Transient detection | ⚠️ Partial | Noise comparison implemented |
+| Delay spread | ✅ Implemented | Chirp matched filter with -3dB width |
+| Scintillation (S4) | ✅ Implemented | From multi-tone amplitude variance |
+| Transient detection | ✅ Implemented | Noise #1 vs #2 comparison |
 
 ---
 
@@ -650,6 +675,9 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 | Propagation Modes | `src/hf_timestd/core/propagation_mode_solver.py` |
 | Physics Propagation | `src/hf_timestd/core/physics_propagation.py` |
 | Doppler/Multipath | `src/hf_timestd/core/advanced_signal_analysis.py` |
+| Scintillation (S4, σ_φ) | `src/hf_timestd/core/advanced_signal_analysis.py` |
+| Sporadic-E Detection | `src/hf_timestd/core/propagation_mode_solver.py` |
+| CHU FSK Decoding | `src/hf_timestd/core/chu_fsk_decoder.py` |
 | Test Signal | `src/hf_timestd/core/wwv_test_signal.py` |
 | Discrimination | `src/hf_timestd/core/wwvh_discrimination.py` |
 | Science Aggregator | `src/hf_timestd/core/science_aggregator.py` |

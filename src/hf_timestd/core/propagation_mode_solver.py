@@ -758,6 +758,286 @@ class PropagationModeSolver:
         return (min(delays), max(delays))
 
 
+@dataclass
+class SporadicEEvent:
+    """
+    Result of Sporadic-E (Es) detection.
+    
+    Sporadic-E is thin, dense ionization at E-layer heights (~100-120 km) that
+    can reflect frequencies normally above the E-layer MUF. Es events are
+    characterized by:
+    - Sudden SNR increases at higher frequencies (10-15 MHz)
+    - Mode change from F-layer to E-layer propagation
+    - Shorter propagation delays (E-layer is lower than F-layer)
+    
+    Physics:
+    --------
+    Es layers form from wind shear concentrating metallic ions (primarily Fe+, Mg+)
+    at ~100-120 km altitude. They can have critical frequencies (foEs) up to 10+ MHz,
+    allowing reflection of signals that would normally penetrate the regular E-layer.
+    """
+    detected: bool
+    confidence: float  # 0-1
+    
+    # Event characteristics
+    event_start_time: Optional[float] = None  # Unix timestamp
+    event_duration_sec: Optional[float] = None
+    
+    # Layer parameters
+    estimated_foEs_mhz: Optional[float] = None  # Critical frequency
+    estimated_height_km: float = 110.0  # Typical Es height
+    
+    # Detection evidence
+    snr_increase_db: Optional[float] = None  # SNR jump at detection
+    mode_changed_to_e: bool = False  # True if mode switched to 1E
+    highest_freq_reflected_mhz: Optional[float] = None  # Highest freq showing Es
+    
+    # Quality
+    detection_method: str = 'snr_anomaly'  # 'snr_anomaly', 'mode_change', 'combined'
+
+
+class SporadicEDetector:
+    """
+    Detect Sporadic-E (Es) events from multi-frequency observations.
+    
+    Detection Strategy:
+    -------------------
+    1. Monitor SNR at higher frequencies (10, 15 MHz) for sudden increases
+    2. Track propagation mode changes from F-layer to E-layer
+    3. Compare arrival times - Es gives shorter delays than F-layer
+    4. Correlate across multiple frequencies for confirmation
+    
+    Usage:
+    ------
+        detector = SporadicEDetector()
+        
+        # Add observations over time
+        detector.add_observation(timestamp, freq_mhz=10.0, snr_db=25.0, mode='1F')
+        detector.add_observation(timestamp, freq_mhz=10.0, snr_db=35.0, mode='1E')  # Es!
+        
+        # Check for Es event
+        event = detector.detect_event()
+        if event.detected:
+            print(f"Es detected! foEs ≈ {event.estimated_foEs_mhz} MHz")
+    """
+    
+    # Detection thresholds
+    SNR_INCREASE_THRESHOLD_DB = 10.0  # Sudden SNR increase indicating Es
+    MIN_OBSERVATIONS = 5  # Minimum observations before detection
+    ES_FREQUENCIES_MHZ = [10.0, 15.0]  # Frequencies where Es is most visible
+    
+    def __init__(self, history_minutes: int = 30):
+        """
+        Initialize Es detector.
+        
+        Args:
+            history_minutes: How long to keep observation history
+        """
+        self.history_minutes = history_minutes
+        self.observations: List[Dict[str, Any]] = []
+        self.current_event: Optional[SporadicEEvent] = None
+        
+        logger.info(f"SporadicEDetector initialized (history={history_minutes} min)")
+    
+    def add_observation(
+        self,
+        timestamp: float,
+        freq_mhz: float,
+        snr_db: float,
+        mode: Optional[str] = None,
+        delay_ms: Optional[float] = None
+    ) -> None:
+        """
+        Add a new observation to the history.
+        
+        Args:
+            timestamp: Unix timestamp
+            freq_mhz: Frequency in MHz
+            snr_db: Signal-to-noise ratio in dB
+            mode: Propagation mode if known ('1E', '1F', '2F', etc.)
+            delay_ms: Propagation delay in ms
+        """
+        self.observations.append({
+            'timestamp': timestamp,
+            'freq_mhz': freq_mhz,
+            'snr_db': snr_db,
+            'mode': mode,
+            'delay_ms': delay_ms
+        })
+        
+        # Prune old observations
+        cutoff = timestamp - (self.history_minutes * 60)
+        self.observations = [o for o in self.observations if o['timestamp'] > cutoff]
+    
+    def detect_event(self, current_timestamp: Optional[float] = None) -> SporadicEEvent:
+        """
+        Analyze observations to detect Sporadic-E event.
+        
+        Returns:
+            SporadicEEvent with detection results
+        """
+        if len(self.observations) < self.MIN_OBSERVATIONS:
+            return SporadicEEvent(detected=False, confidence=0.0)
+        
+        if current_timestamp is None:
+            current_timestamp = self.observations[-1]['timestamp']
+        
+        # Analyze each Es-sensitive frequency
+        es_evidence = []
+        highest_freq_with_es = 0.0
+        
+        for freq in self.ES_FREQUENCIES_MHZ:
+            freq_obs = [o for o in self.observations if abs(o['freq_mhz'] - freq) < 0.5]
+            
+            if len(freq_obs) < 3:
+                continue
+            
+            # Check for SNR anomaly (sudden increase)
+            snr_anomaly = self._detect_snr_anomaly(freq_obs)
+            
+            # Check for mode change to E-layer
+            mode_change = self._detect_mode_change(freq_obs)
+            
+            if snr_anomaly['detected'] or mode_change['detected']:
+                es_evidence.append({
+                    'freq_mhz': freq,
+                    'snr_anomaly': snr_anomaly,
+                    'mode_change': mode_change
+                })
+                if freq > highest_freq_with_es:
+                    highest_freq_with_es = freq
+        
+        if not es_evidence:
+            return SporadicEEvent(detected=False, confidence=0.0)
+        
+        # Calculate overall confidence
+        confidence = self._calculate_confidence(es_evidence)
+        
+        # Estimate foEs from highest frequency showing Es
+        # foEs ≈ highest_freq / sec(elevation_angle)
+        # For typical elevation angles, foEs ≈ highest_freq * 0.8
+        estimated_foEs = highest_freq_with_es * 0.8 if highest_freq_with_es > 0 else None
+        
+        # Get SNR increase from best evidence
+        snr_increase = max(
+            (e['snr_anomaly'].get('increase_db', 0) for e in es_evidence),
+            default=0
+        )
+        
+        # Check if mode changed
+        mode_changed = any(e['mode_change']['detected'] for e in es_evidence)
+        
+        # Determine detection method
+        if mode_changed and snr_increase > self.SNR_INCREASE_THRESHOLD_DB:
+            detection_method = 'combined'
+        elif mode_changed:
+            detection_method = 'mode_change'
+        else:
+            detection_method = 'snr_anomaly'
+        
+        event = SporadicEEvent(
+            detected=True,
+            confidence=confidence,
+            event_start_time=current_timestamp,
+            estimated_foEs_mhz=estimated_foEs,
+            snr_increase_db=snr_increase if snr_increase > 0 else None,
+            mode_changed_to_e=mode_changed,
+            highest_freq_reflected_mhz=highest_freq_with_es if highest_freq_with_es > 0 else None,
+            detection_method=detection_method
+        )
+        
+        logger.info(f"Sporadic-E detected: foEs≈{estimated_foEs:.1f} MHz, "
+                   f"confidence={confidence:.2f}, method={detection_method}")
+        
+        return event
+    
+    def _detect_snr_anomaly(self, observations: List[Dict]) -> Dict[str, Any]:
+        """Detect sudden SNR increase indicating Es onset."""
+        if len(observations) < 3:
+            return {'detected': False}
+        
+        # Sort by timestamp
+        sorted_obs = sorted(observations, key=lambda x: x['timestamp'])
+        
+        # Calculate baseline SNR (first half of observations)
+        mid = len(sorted_obs) // 2
+        baseline_snr = np.mean([o['snr_db'] for o in sorted_obs[:mid]])
+        
+        # Check recent SNR
+        recent_snr = np.mean([o['snr_db'] for o in sorted_obs[mid:]])
+        
+        increase_db = recent_snr - baseline_snr
+        
+        if increase_db >= self.SNR_INCREASE_THRESHOLD_DB:
+            return {
+                'detected': True,
+                'increase_db': float(increase_db),
+                'baseline_snr': float(baseline_snr),
+                'recent_snr': float(recent_snr)
+            }
+        
+        return {'detected': False, 'increase_db': float(increase_db)}
+    
+    def _detect_mode_change(self, observations: List[Dict]) -> Dict[str, Any]:
+        """Detect mode change from F-layer to E-layer."""
+        # Get observations with mode information
+        mode_obs = [o for o in observations if o.get('mode')]
+        
+        if len(mode_obs) < 2:
+            return {'detected': False}
+        
+        # Sort by timestamp
+        sorted_obs = sorted(mode_obs, key=lambda x: x['timestamp'])
+        
+        # Look for F→E transition
+        for i in range(1, len(sorted_obs)):
+            prev_mode = sorted_obs[i-1]['mode']
+            curr_mode = sorted_obs[i]['mode']
+            
+            # Check for transition to E-layer mode
+            if prev_mode and curr_mode:
+                if 'F' in prev_mode.upper() and 'E' in curr_mode.upper():
+                    return {
+                        'detected': True,
+                        'from_mode': prev_mode,
+                        'to_mode': curr_mode,
+                        'transition_time': sorted_obs[i]['timestamp']
+                    }
+        
+        return {'detected': False}
+    
+    def _calculate_confidence(self, evidence: List[Dict]) -> float:
+        """Calculate overall confidence from multiple evidence sources."""
+        if not evidence:
+            return 0.0
+        
+        # Weight factors
+        snr_weight = 0.4
+        mode_weight = 0.4
+        multi_freq_weight = 0.2
+        
+        # SNR evidence
+        snr_scores = []
+        for e in evidence:
+            if e['snr_anomaly']['detected']:
+                increase = e['snr_anomaly'].get('increase_db', 0)
+                # Normalize: 10 dB = 0.5, 20 dB = 1.0
+                snr_scores.append(min(1.0, increase / 20.0))
+        snr_confidence = np.mean(snr_scores) if snr_scores else 0.0
+        
+        # Mode change evidence
+        mode_confidence = 1.0 if any(e['mode_change']['detected'] for e in evidence) else 0.0
+        
+        # Multi-frequency confirmation
+        multi_freq_confidence = min(1.0, len(evidence) / 2.0)
+        
+        total = (snr_weight * snr_confidence + 
+                 mode_weight * mode_confidence + 
+                 multi_freq_weight * multi_freq_confidence)
+        
+        return float(total)
+
+
 # Convenience function for quick testing
 def create_test_solver():
     """Create solver for AC0G station (EM38ww)"""
