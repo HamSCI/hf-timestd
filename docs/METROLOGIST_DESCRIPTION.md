@@ -250,6 +250,46 @@ On 2.5, 5, 10, 15 MHz, **WWV and WWVH transmit simultaneously**. Misidentificati
 
 ## 4. Multi-Broadcast Fusion (The Core Innovation)
 
+### 4.0 The Three-Layer Metrological Architecture
+
+Understanding the fundamental difference between **Frequency Stability** (Slope) and **Time Accuracy** (Offset) is essential to understanding why multi-broadcast fusion is necessary.
+
+#### Layer 1: Single Broadcast — "The Floating Ruler"
+
+A single broadcast (e.g., WWV 15 MHz) provides:
+
+- **Capability**: Measures the stability of local clock's *tick rate* relative to the transmitter's *tick rate*
+- **Limitation**: NOT anchored to UTC — the signal always arrives late by the propagation delay (τ)
+- **Result**: If averaged for a year, you get a perfect line with the correct slope (frequency), but the line is shifted vertically by the average propagation delay (e.g., +8 ms)
+- **You know**: *How fast* time is passing, but not *what time it is*
+
+#### Layer 2: Single Station, Multiple Frequencies — "The Dispersion Anchor"
+
+By adding multiple frequencies (e.g., WWV 5, 10, 15 MHz), you unlock the **dispersion calculation**:
+
+- **Physics**: Lower frequencies are delayed MORE by the ionosphere than higher ones
+- **Mechanism**: This difference allows calculation of **Total Electron Content (TEC)** along that specific path
+- **Gain**: Once TEC is known, the ionospheric delay (τ_iono) can be calculated and subtracted
+- **Result**: Characterizes the **Path Physics**, moves the "Floating Ruler" closer to the true UTC line
+
+#### Layer 3: Multiple Stations (17 Broadcasts) — "The Geometry Lock"
+
+By adding geography (WWV vs WWVH vs CHU vs BPM), you sound the ionosphere from different angles and reflection points:
+
+- **Physics**: Different stations probe different ionospheric regions and paths
+- **Gain**: Cancels localized anomalies ("Weather") — solar flares affect paths differently depending on sun angle
+- **Result**: "Triangulates" the ionosphere globally, provides **Integrity** (validation)
+
+#### The "Steel Ruler" Summary
+
+| Component | Provides | Function |
+|-----------|----------|----------|
+| **GPSDO** | Slope (Rate) | Ensures the ruler is straight and rigid |
+| **Multi-Frequency Dispersion** | Vertical Shift (Path Delay) | Calibrates the zero-point for each station |
+| **Multi-Station Fusion** | Integrity (Validation) | Ensures the zero-point is consistent across the hemisphere |
+
+**Key Insight**: The combined regression of 17 broadcasts doesn't just average noise — it **solves the geometry** of the ionosphere to find the true UTC origin point.
+
 ### 4.1 Calibration (Systematic Error Removal)
 
 Each station has systematic biases due to:

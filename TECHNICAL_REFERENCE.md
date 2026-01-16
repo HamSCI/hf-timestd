@@ -156,6 +156,26 @@ Ionospheric delay is determined by the electron density at the **reflection poin
 
 ---
 
+## The "Steel Ruler" Architecture
+
+The system implements a three-layer metrological architecture that distinguishes between **Frequency Stability** (Slope) and **Time Accuracy** (Offset):
+
+| Layer | Name | Provides | Function |
+|-------|------|----------|----------|
+| 1 | Single Broadcast | "Floating Ruler" | Measures tick rate stability, but NOT anchored to UTC |
+| 2 | Multi-Frequency | "Dispersion Anchor" | TEC calculation → ionospheric delay correction |
+| 3 | Multi-Station | "Geometry Lock" | Cross-validation → integrity across hemisphere |
+
+**The GPSDO provides the Slope (Rate)** — it ensures the ruler is straight and rigid.  
+**Multi-frequency dispersion provides the Vertical Shift** — it calibrates the zero-point per station.  
+**Multi-station fusion provides Integrity** — it ensures the zero-point is consistent globally.
+
+**Key Insight**: The combined regression of 17 broadcasts doesn't just average noise — it **solves the geometry** of the ionosphere to find the true UTC origin point.
+
+For detailed metrological description, see `docs/METROLOGIST_DESCRIPTION.md`.
+
+---
+
 ## Critical Design Principles
 
 ### 1. RTP Timestamp is Primary Reference

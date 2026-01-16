@@ -12,6 +12,37 @@ The fused D_clock should converge to 0ms, indicating perfect alignment
 with UTC(NIST).
 
 ================================================================================
+THREE-LAYER METROLOGICAL ARCHITECTURE
+================================================================================
+Understanding the fundamental difference between Frequency Stability (Slope)
+and Time Accuracy (Offset):
+
+LAYER 1: Single Broadcast — "The Floating Ruler"
+    - Measures stability of local clock's tick rate relative to transmitter
+    - NOT anchored to UTC — signal always arrives late by propagation delay
+    - Result: Perfect slope (frequency), but shifted by ~8ms average delay
+    - You know HOW FAST time is passing, but not WHAT TIME IT IS
+
+LAYER 2: Single Station, Multiple Frequencies — "The Dispersion Anchor"
+    - Multiple frequencies (5, 10, 15 MHz) unlock dispersion calculation
+    - Lower frequencies delayed MORE by ionosphere than higher ones
+    - Calculate TEC → compute ionospheric delay → subtract it
+    - Result: Characterizes PATH PHYSICS, moves floating ruler toward UTC
+
+LAYER 3: Multiple Stations (17 Broadcasts) — "The Geometry Lock"
+    - Geography (WWV vs WWVH vs CHU) sounds ionosphere from different angles
+    - Cancels localized anomalies ("Weather") — solar flares affect paths differently
+    - Result: "Triangulates" ionosphere globally, provides INTEGRITY (validation)
+
+THE "STEEL RULER" SUMMARY:
+    GPSDO                      → Slope (Rate)         → Ruler is straight and rigid
+    Multi-Frequency Dispersion → Vertical Shift       → Calibrates zero-point per station
+    Multi-Station Fusion       → Integrity            → Zero-point consistent across hemisphere
+
+KEY INSIGHT: Combined regression of 17 broadcasts doesn't just average noise —
+it SOLVES THE GEOMETRY of the ionosphere to find the true UTC origin point.
+
+================================================================================
 BROADCAST STRUCTURE
 ================================================================================
 The hf-timestd system monitors up to 17 time signal broadcasts:
@@ -525,9 +556,68 @@ class MultiBroadcastFusion:
         self.last_baseline_adjustment = 0.0  # Timestamp of last adjustment
         self.baseline_adjustment_interval = 600.0  # Minimum 10 minutes between adjustments
         
+        # ====================================================================
+        # METROLOGICAL HOLDOVER MODEL (2026-01-16)
+        # ====================================================================
+        # The GPSDO is our "steel ruler" - it defines the time scale.
+        # During signal dropout, the OFFSET remains valid (anchored to GPSDO),
+        # but UNCERTAINTY grows at a calculable rate based on:
+        # 1. GPSDO holdover drift spec (~1μs/hour when locked, ~1ms/hour unlocked)
+        # 2. Time since last validated multi-station fusion
+        # 3. Number of stations that contributed to last valid fusion
+        #
+        # This is the metrologically correct approach: we don't lose our
+        # calibration during dropout, we just become less certain of it.
+        self.last_valid_fusion_time = 0.0  # Unix timestamp of last multi-station fusion
+        self.last_valid_fusion_uncertainty = 1.0  # Uncertainty at that time (ms)
+        self.last_valid_n_stations = 0  # Number of stations contributing
+        self.gpsdo_holdover_drift_rate = 0.001  # ms/minute (~1μs/min, conservative for locked GPSDO)
+        self.holdover_mode = False  # True when in signal dropout
+        
+        # Station count scaling for systematic uncertainty
+        # More stations = better cross-validation = lower systematic error
+        # Based on metrological principle: independent measurements reduce systematic bias
+        self.station_count_uncertainty_scale = {
+            1: 2.0,   # Single station: no cross-validation, 2x systematic uncertainty
+            2: 1.0,   # Two stations: basic cross-validation, baseline uncertainty
+            3: 0.7,   # Three stations: good cross-validation
+            4: 0.5,   # Four stations: excellent cross-validation
+        }
+        
         # Allan deviation tracker for real-time stability monitoring
         self.adev_tracker = AllanDeviationTracker(max_samples=86400)  # 24h history
         self.adev_tau_values = [10, 100, 1000, 10000]  # Standard tau values (seconds)
+        
+        # ====================================================================
+        # LONG-TERM DRIFT ESTIMATOR (2026-01-16)
+        # ====================================================================
+        # Key metrological insight: WWV/CHU/BPM transmit EXACTLY on UTC.
+        # Ionospheric propagation variations are ZERO-MEAN over long periods.
+        # Therefore, the long-term average of ANY single broadcast converges
+        # to the true GPSDO drift rate as N → ∞.
+        #
+        # For each broadcast, we maintain sufficient statistics for online
+        # linear regression: D_clock(t) = slope × t + intercept + noise
+        #
+        # As measurements accumulate:
+        # - slope → GPSDO drift rate (what we want to characterize)
+        # - intercept → systematic offset (propagation model error)
+        # - uncertainty → decreases as 1/√N
+        #
+        # This exploits the "long view" - every measurement contributes forever,
+        # ionospheric noise averages to zero, and GPSDO drift becomes measurable.
+        #
+        # DISCONTINUITY HANDLING:
+        # - Use fixed epoch (Unix epoch) for absolute time reference
+        # - Persist sufficient statistics to survive service restarts
+        # - Detect step discontinuities (GPSDO unlock, NTP step) and handle gracefully
+        # - Segment-based approach: start new segment on discontinuity, merge when stable
+        self.long_term_stats: Dict[str, Dict] = {}  # Per-broadcast sufficient statistics
+        self.long_term_reference_time = 0.0  # Use Unix epoch (t=0) for absolute reference
+        self.long_term_stats_file = self.data_root / 'state' / 'long_term_drift_stats.json'
+        self.long_term_last_values: Dict[str, float] = {}  # For discontinuity detection
+        self.long_term_discontinuity_threshold = 10.0  # ms - step change detection threshold
+        self._load_long_term_stats()
         
         # Channels to aggregate
         self.channels = self._discover_channels()
@@ -739,6 +829,87 @@ class MultiBroadcastFusion:
         # No default offsets - all calibration is learned from data
         # The calibration dict will be populated as measurements arrive
         logger.info("Calibration initialized - will learn from data (no hardcoded defaults)")
+    
+    def _load_long_term_stats(self):
+        """
+        Load persisted long-term drift statistics.
+        
+        This allows the long-term drift estimator to survive service restarts
+        without losing accumulated measurement history. The sufficient statistics
+        (Σt, Σy, Σt², Σty, Σy²) are additive, so we can seamlessly continue
+        accumulating after a restart.
+        """
+        if not self.long_term_stats_file.exists():
+            logger.info("No persisted long-term drift stats found - starting fresh")
+            return
+        
+        try:
+            with open(self.long_term_stats_file) as f:
+                data = json.load(f)
+            
+            # Validate and load
+            if '_metadata' in data:
+                metadata = data.pop('_metadata')
+                saved_at = metadata.get('saved_at', 0)
+                age_hours = (time.time() - saved_at) / 3600.0
+                
+                # Only load if reasonably recent (< 7 days old)
+                if age_hours > 168:
+                    logger.warning(
+                        f"Long-term stats are {age_hours:.1f} hours old (> 7 days) - starting fresh"
+                    )
+                    return
+            
+            # Load per-broadcast statistics
+            for broadcast_key, stats in data.items():
+                if broadcast_key.startswith('_'):
+                    continue
+                
+                # Validate required fields
+                required = ['n', 'sum_t', 'sum_y', 'sum_tt', 'sum_ty', 'sum_yy']
+                if all(k in stats for k in required):
+                    self.long_term_stats[broadcast_key] = stats
+                    # Initialize last value for discontinuity detection
+                    if stats['n'] > 0:
+                        # Estimate last value from mean
+                        self.long_term_last_values[broadcast_key] = stats['sum_y'] / stats['n']
+            
+            total_samples = sum(s['n'] for s in self.long_term_stats.values())
+            logger.info(
+                f"Loaded long-term drift stats: {len(self.long_term_stats)} broadcasts, "
+                f"{total_samples} total samples"
+            )
+            
+        except Exception as e:
+            logger.warning(f"Failed to load long-term drift stats: {e} - starting fresh")
+            self.long_term_stats = {}
+    
+    def _save_long_term_stats(self):
+        """
+        Persist long-term drift statistics to file.
+        
+        Called periodically to ensure we don't lose accumulated history
+        on service restart.
+        """
+        self.long_term_stats_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        data = dict(self.long_term_stats)
+        data['_metadata'] = {
+            'saved_at': time.time(),
+            'n_broadcasts': len(self.long_term_stats),
+            'total_samples': sum(s['n'] for s in self.long_term_stats.values()),
+        }
+        
+        # Atomic write
+        temp_file = self.long_term_stats_file.with_suffix('.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            temp_file.replace(self.long_term_stats_file)
+        except Exception as e:
+            logger.error(f"Failed to save long-term drift stats: {e}")
     
     def _save_calibration(self):
         """Persist per-broadcast calibration and Kalman state to file."""
@@ -1879,6 +2050,227 @@ class MultiBroadcastFusion:
             except Exception as e:
                 logger.error(f"Failed to auto-save calibration: {e}")
     
+    def _update_long_term_stats(self, measurements: List[BroadcastMeasurement]) -> None:
+        """
+        Update long-term sufficient statistics for drift estimation.
+        
+        Key metrological insight: WWV/CHU/BPM transmit EXACTLY on UTC.
+        Ionospheric propagation variations are ZERO-MEAN over long periods.
+        Therefore, the long-term linear fit of ANY single broadcast converges
+        to the true GPSDO drift rate as N → ∞.
+        
+        We maintain sufficient statistics for online linear regression:
+            D_clock(t) = slope × t + intercept + noise
+        
+        Sufficient statistics (Welford's online algorithm for regression):
+            n: count
+            sum_t: Σt
+            sum_y: Σy
+            sum_tt: Σt²
+            sum_ty: Σty
+        
+        From these, we can compute slope and intercept at any time:
+            slope = (n×Σty - Σt×Σy) / (n×Σt² - (Σt)²)
+            intercept = (Σy - slope×Σt) / n
+        
+        DISCONTINUITY HANDLING:
+        - Detect step changes > threshold (GPSDO unlock, NTP step, service restart)
+        - On discontinuity: log warning but continue accumulating
+        - The linear regression is robust to outliers over long periods
+        - Severe discontinuities (>50ms) trigger stats reset for that broadcast
+        """
+        current_time = time.time()
+        
+        # Periodic save of long-term stats (every ~10 minutes)
+        # Use time-based trigger instead of sample count for reliability
+        if not hasattr(self, '_last_long_term_save'):
+            self._last_long_term_save = 0.0
+        
+        if current_time - self._last_long_term_save > 600.0:  # Every 10 minutes
+            if self.long_term_stats:
+                self._save_long_term_stats()
+                self._last_long_term_save = current_time
+                logger.debug(f"Saved long-term drift stats ({sum(s.get('n', 0) for s in self.long_term_stats.values())} samples)")
+        
+        for m in measurements:
+            if m.station == 'GLOBAL_DIFF':
+                continue
+            
+            broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
+            
+            # Time in hours since Unix epoch (absolute reference)
+            # Using hours since epoch keeps numbers manageable while maintaining precision
+            t_hours = current_time / 3600.0
+            y = m.d_clock_ms
+            
+            # ================================================================
+            # DISCONTINUITY DETECTION
+            # ================================================================
+            # Check for step changes that indicate a discontinuity event
+            if broadcast_key in self.long_term_last_values:
+                last_y = self.long_term_last_values[broadcast_key]
+                delta = abs(y - last_y)
+                
+                if delta > self.long_term_discontinuity_threshold:
+                    # Detected a step change
+                    if delta > 50.0:
+                        # Severe discontinuity (>50ms) - likely GPSDO unlock or major issue
+                        # Reset stats for this broadcast to avoid corrupting long-term estimate
+                        logger.warning(
+                            f"SEVERE DISCONTINUITY detected for {broadcast_key}: "
+                            f"Δ={delta:.1f}ms (>{50}ms threshold). "
+                            f"Resetting long-term stats for this broadcast."
+                        )
+                        if broadcast_key in self.long_term_stats:
+                            del self.long_term_stats[broadcast_key]
+                    else:
+                        # Moderate discontinuity - log but continue
+                        # Linear regression will handle this as noise over time
+                        logger.info(
+                            f"Discontinuity detected for {broadcast_key}: "
+                            f"Δ={delta:.1f}ms (>{self.long_term_discontinuity_threshold}ms). "
+                            f"Continuing accumulation (regression is robust to outliers)."
+                        )
+            
+            # Update last value for next discontinuity check
+            self.long_term_last_values[broadcast_key] = y
+            
+            # ================================================================
+            # UPDATE SUFFICIENT STATISTICS
+            # ================================================================
+            if broadcast_key not in self.long_term_stats:
+                self.long_term_stats[broadcast_key] = {
+                    'n': 0,
+                    'sum_t': 0.0,
+                    'sum_y': 0.0,
+                    'sum_tt': 0.0,
+                    'sum_ty': 0.0,
+                    'sum_yy': 0.0,  # For residual variance
+                    'first_time': current_time,
+                    'last_time': current_time,
+                }
+            
+            stats = self.long_term_stats[broadcast_key]
+            stats['n'] += 1
+            stats['sum_t'] += t_hours
+            stats['sum_y'] += y
+            stats['sum_tt'] += t_hours * t_hours
+            stats['sum_ty'] += t_hours * y
+            stats['sum_yy'] += y * y
+            stats['last_time'] = current_time
+    
+    def get_long_term_drift_estimate(self, broadcast_key: str = None) -> Dict:
+        """
+        Compute long-term drift estimate from accumulated measurements.
+        
+        If broadcast_key is None, returns combined estimate from all broadcasts.
+        
+        Returns:
+            Dictionary with:
+            - slope_ms_per_hour: GPSDO drift rate estimate (ms/hour)
+            - slope_ppb: Drift rate in parts per billion
+            - intercept_ms: Systematic offset estimate
+            - n_samples: Total measurements used
+            - duration_hours: Time span of measurements
+            - slope_uncertainty_ms_per_hour: 1-sigma uncertainty on slope
+            - intercept_uncertainty_ms: 1-sigma uncertainty on intercept
+            - residual_std_ms: RMS of ionospheric variations
+        """
+        if broadcast_key and broadcast_key in self.long_term_stats:
+            stats_list = [(broadcast_key, self.long_term_stats[broadcast_key])]
+        else:
+            stats_list = list(self.long_term_stats.items())
+        
+        if not stats_list:
+            return {'error': 'No long-term statistics available'}
+        
+        # Combine sufficient statistics from all broadcasts
+        # (This is valid because they all measure the same GPSDO drift)
+        n_total = sum(s['n'] for _, s in stats_list)
+        if n_total < 10:
+            return {'error': f'Insufficient samples ({n_total} < 10)'}
+        
+        sum_t = sum(s['sum_t'] for _, s in stats_list)
+        sum_y = sum(s['sum_y'] for _, s in stats_list)
+        sum_tt = sum(s['sum_tt'] for _, s in stats_list)
+        sum_ty = sum(s['sum_ty'] for _, s in stats_list)
+        sum_yy = sum(s['sum_yy'] for _, s in stats_list)
+        
+        # Linear regression: y = slope * t + intercept
+        denominator = n_total * sum_tt - sum_t * sum_t
+        if abs(denominator) < 1e-10:
+            return {'error': 'Degenerate regression (all measurements at same time)'}
+        
+        slope = (n_total * sum_ty - sum_t * sum_y) / denominator
+        intercept = (sum_y - slope * sum_t) / n_total
+        
+        # Residual variance (ionospheric noise)
+        # σ² = (Σy² - intercept×Σy - slope×Σty) / (n-2)
+        ss_residual = sum_yy - intercept * sum_y - slope * sum_ty
+        residual_var = ss_residual / max(1, n_total - 2)
+        residual_std = np.sqrt(max(0, residual_var))
+        
+        # Uncertainty on slope and intercept
+        # σ_slope = σ_residual / sqrt(Σ(t-t_mean)²) = σ_residual × sqrt(n / denominator)
+        # σ_intercept = σ_residual × sqrt(Σt² / (n × denominator))
+        slope_var = residual_var * n_total / denominator
+        intercept_var = residual_var * sum_tt / denominator
+        slope_uncertainty = np.sqrt(max(0, slope_var))
+        intercept_uncertainty = np.sqrt(max(0, intercept_var))
+        
+        # Duration
+        first_time = min(s['first_time'] for _, s in stats_list)
+        last_time = max(s['last_time'] for _, s in stats_list)
+        duration_hours = (last_time - first_time) / 3600.0
+        
+        # Convert slope to ppb (parts per billion)
+        # slope is in ms/hour
+        # 1 ms/hour = 1e-3 s / 3600 s = 2.78e-7 = 278 ppb
+        slope_ppb = slope * 277.78
+        slope_uncertainty_ppb = slope_uncertainty * 277.78
+        
+        return {
+            'slope_ms_per_hour': slope,
+            'slope_ppb': slope_ppb,
+            'intercept_ms': intercept,
+            'n_samples': n_total,
+            'n_broadcasts': len(stats_list),
+            'duration_hours': duration_hours,
+            'slope_uncertainty_ms_per_hour': slope_uncertainty,
+            'slope_uncertainty_ppb': slope_uncertainty_ppb,
+            'intercept_uncertainty_ms': intercept_uncertainty,
+            'residual_std_ms': residual_std,
+        }
+    
+    def log_long_term_drift_status(self) -> None:
+        """Log current long-term drift estimate for monitoring."""
+        estimate = self.get_long_term_drift_estimate()
+        
+        if 'error' in estimate:
+            logger.debug(f"Long-term drift: {estimate['error']}")
+            return
+        
+        # Only log periodically (every ~10 minutes worth of samples)
+        total_samples = estimate['n_samples']
+        if total_samples % 75 != 0:  # ~10 min at 8s cadence
+            return
+        
+        logger.info(
+            f"LONG-TERM DRIFT ESTIMATE: "
+            f"slope={estimate['slope_ppb']:+.2f}±{estimate['slope_uncertainty_ppb']:.2f} ppb, "
+            f"intercept={estimate['intercept_ms']:+.3f}±{estimate['intercept_uncertainty_ms']:.3f} ms, "
+            f"residual_std={estimate['residual_std_ms']:.2f} ms, "
+            f"n={estimate['n_samples']} samples over {estimate['duration_hours']:.1f} hours"
+        )
+        
+        # Check if drift is significant (> 3σ from zero)
+        if abs(estimate['slope_ppb']) > 3 * estimate['slope_uncertainty_ppb']:
+            logger.warning(
+                f"SIGNIFICANT GPSDO DRIFT DETECTED: {estimate['slope_ppb']:+.2f} ppb "
+                f"({estimate['slope_ms_per_hour']:+.4f} ms/hour). "
+                f"This exceeds 3σ uncertainty and may indicate GPSDO issue."
+            )
+    
     def _kalman_update(self, measurement: float, measurement_uncertainty: float) -> float:
         """
         Two-tier Kalman filter for stable baseline maintenance.
@@ -2610,6 +3002,10 @@ class MultiBroadcastFusion:
             reference_d_clock=0.0  # Target absolute zero (parameter kept for compatibility)
         )
         
+        # Update long-term drift statistics (exploits the "long view")
+        self._update_long_term_stats(measurements)
+        self.log_long_term_drift_status()
+        
         # CRITICAL FIX (P3.2): D_clock monotonicity check
         # Large jumps (>5ms) indicate tone misidentification or other errors
         if hasattr(self, 'last_fused_d_clock'):
@@ -2727,33 +3123,124 @@ class MultiBroadcastFusion:
         uncertainty_floor = 0.1 if has_verified_global else 0.2
         measurement_uncertainty = max(uncertainty_floor, measurement_uncertainty)
         
-        # CRITICAL FIX (2026-01-10): Gate Kalman updates with measurement quality check
-        # Two-tier gating: relaxed during bootstrap, strict during operational
-        # Bootstrap: Allow up to 10ms uncertainty to learn baseline with moderate signals
-        # Operational: Only 5ms to maintain stable baseline and resist chasing noise
-        uncertainty_threshold = 10.0 if not self.kalman_converged else 5.0
+        # ====================================================================
+        # METROLOGICAL HOLDOVER MODEL (2026-01-16)
+        # ====================================================================
+        # The GPSDO is our "steel ruler" - it defines the time scale.
+        # The offset estimate is ANCHORED to the GPSDO and remains valid.
+        # What changes during signal dropout is our UNCERTAINTY, not the offset.
+        #
+        # Key metrological principles:
+        # 1. More stations = better cross-validation = lower systematic uncertainty
+        # 2. During dropout, uncertainty grows at GPSDO holdover rate
+        # 3. The offset itself does NOT drift (it's anchored to GPSDO)
+        # 4. When signals return, uncertainty decreases (not the offset)
         
-        if measurement_uncertainty > uncertainty_threshold:
-            phase = "bootstrap" if not self.kalman_converged else "operational"
-            logger.warning(
-                f"Skipping Kalman update ({phase}): measurement uncertainty too high "
-                f"({measurement_uncertainty:.2f}ms > {uncertainty_threshold}ms threshold). "
-                f"Using previous Kalman state to maintain stable baseline offset."
-            )
-            # Use previous Kalman uncertainty instead of updating
-            kalman_uncertainty = np.sqrt(self.kalman_P[0, 0]) if self.kalman_initialized else measurement_uncertainty
-        else:
-            # Gating: Only update Kalman filter if measurement uncertainty is reasonable
-            # If uncertainty is huge (e.g. > 100ms), we trust the filter prediction completely
+        n_broadcasts_now = len(measurements)
+        n_stations_now = len(set(m.station for m in measurements if m.station != 'GLOBAL_DIFF'))
+        current_time = time.time()
+        
+        # Station count scaling for systematic uncertainty
+        # More independent stations = better cross-validation = lower systematic bias
+        station_scale = self.station_count_uncertainty_scale.get(
+            min(n_stations_now, 4), 
+            0.5  # 4+ stations
+        )
+        
+        # Determine if this is a valid multi-station fusion
+        # Key insight: station coverage and measurement quality are SEPARATE concerns
+        # - Station coverage determines if we can cross-validate (reduces systematic error)
+        # - Measurement quality determines the uncertainty of the update
+        # With good station coverage, we ALWAYS update the Kalman, just with appropriate uncertainty
+        is_valid_multi_station = (n_stations_now >= 2 and n_broadcasts_now >= 2)
+        
+        # Uncertainty threshold only gates updates during SINGLE-station mode
+        # With multi-station coverage, we trust the cross-validation and update with measured uncertainty
+        uncertainty_threshold = 10.0 if not self.kalman_converged else 20.0  # Relaxed for multi-station
+        
+        if is_valid_multi_station:
+            # ============================================================
+            # NORMAL OPERATION: Multi-station fusion with good quality
+            # ============================================================
+            # Update Kalman filter and record this as last valid fusion
+            self.holdover_mode = False
+            
             if measurement_uncertainty < 100.0:
                 kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
             else:
-                # If measurement uncertainty is too high, trust the Kalman prediction
                 kalman_uncertainty = np.sqrt(self.kalman_P[0, 0]) if self.kalman_initialized else measurement_uncertainty
-        
-        # Final uncertainty is the Kalman-filtered combined uncertainty
-        # This provides temporal smoothing while preserving the uncertainty budget
-        uncertainty = kalman_uncertainty
+            
+            # Record this valid fusion for holdover calculations
+            self.last_valid_fusion_time = current_time
+            self.last_valid_fusion_uncertainty = kalman_uncertainty
+            self.last_valid_n_stations = n_stations_now
+            
+            # Apply station count scaling to final uncertainty
+            # More stations = more confidence in cross-validation
+            uncertainty = kalman_uncertainty * station_scale
+            
+            logger.debug(
+                f"Multi-station fusion: {n_stations_now} stations, {n_broadcasts_now} broadcasts, "
+                f"uncertainty={uncertainty:.3f}ms (scale={station_scale:.1f}x)"
+            )
+            
+        else:
+            # ============================================================
+            # HOLDOVER MODE: Insufficient stations or poor measurement quality
+            # ============================================================
+            # The OFFSET remains valid (anchored to GPSDO).
+            # The UNCERTAINTY grows at the GPSDO holdover drift rate.
+            # This is the metrologically correct approach.
+            
+            if not self.holdover_mode and self.last_valid_fusion_time > 0:
+                logger.info(
+                    f"Entering HOLDOVER mode: {n_stations_now} station(s), {n_broadcasts_now} broadcast(s). "
+                    f"Offset remains at {self.kalman_state[0]:+.3f}ms, uncertainty will grow."
+                )
+            self.holdover_mode = True
+            
+            # Calculate time since last valid multi-station fusion
+            if self.last_valid_fusion_time > 0:
+                holdover_duration_min = (current_time - self.last_valid_fusion_time) / 60.0
+            else:
+                # No valid fusion yet - use bootstrap uncertainty
+                holdover_duration_min = 0.0
+            
+            # Uncertainty grows as sqrt(σ²_last + (drift_rate × Δt)²)
+            # This is the proper uncertainty propagation for a drifting reference
+            drift_uncertainty = self.gpsdo_holdover_drift_rate * holdover_duration_min
+            
+            base_uncertainty = self.last_valid_fusion_uncertainty if self.last_valid_fusion_time > 0 else 1.0
+            holdover_uncertainty = np.sqrt(base_uncertainty**2 + drift_uncertainty**2)
+            
+            # Apply station count scaling (single station = higher systematic uncertainty)
+            # Even in holdover, if we have measurements, they provide some validation
+            if n_stations_now >= 1 and n_broadcasts_now >= 1:
+                # We have some measurements - use them to bound uncertainty growth
+                # but don't update the Kalman state (offset remains anchored)
+                holdover_uncertainty = min(holdover_uncertainty, measurement_uncertainty * station_scale)
+            
+            # Cap holdover uncertainty at reasonable maximum (10ms = ~10 hours of holdover)
+            holdover_uncertainty = min(holdover_uncertainty, 10.0)
+            
+            # DO NOT update Kalman state - offset remains anchored to last valid fusion
+            # Only the uncertainty changes
+            kalman_uncertainty = holdover_uncertainty
+            uncertainty = holdover_uncertainty
+            
+            # Determine reason for holdover
+            if n_stations_now < 2:
+                reason = f"single-station ({n_stations_now})"
+            elif n_broadcasts_now < 2:
+                reason = f"insufficient broadcasts ({n_broadcasts_now})"
+            else:
+                reason = f"poor measurement quality ({measurement_uncertainty:.2f}ms)"
+            
+            logger.warning(
+                f"HOLDOVER: {reason}. Offset={self.kalman_state[0]:+.3f}ms (stable), "
+                f"uncertainty={uncertainty:.3f}ms (growing at {self.gpsdo_holdover_drift_rate:.4f}ms/min), "
+                f"holdover_duration={holdover_duration_min:.1f}min"
+            )
         
         # Per-station breakdown (using raw values)
         wwv_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'WWV']

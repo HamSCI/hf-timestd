@@ -334,12 +334,15 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Differential delay tracking (WWV - WWVH)
         self.differential_delay_history: List[Dict[str, float]] = []
         
-        # Station priorities (for time_snap selection when multiple detected)
+        # Station priorities - DEPRECATED (2026-01-15)
+        # All detected broadcasts are now treated equally and passed to fusion.
+        # The fusion layer handles weighting based on uncertainty, not arbitrary priority.
+        # Kept for API compatibility but not used for filtering.
         self.station_priorities: Dict[StationType, int] = {
-            StationType.WWV: 100,   # Highest priority
-            StationType.CHU: 50,    # Medium priority
-            StationType.BPM: 10,    # Low priority
-            StationType.WWVH: 0     # Never used for time_snap
+            StationType.WWV: 100,
+            StationType.CHU: 100,
+            StationType.BPM: 100,
+            StationType.WWVH: 100   # All stations equal - fusion handles weighting
         }
         
         logger.info(f"{channel_name}: MultiStationToneDetector initialized - "
@@ -350,16 +353,25 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         Extract frequency in MHz from channel name
         
         Args:
-            channel_name: Channel name like "WWV 2.5 MHz", "WWV_10_MHz", "WWV 10 MHz"
+            channel_name: Channel name like "WWV 2.5 MHz", "WWV_10_MHz", "SHARED_5000"
             
         Returns:
             Frequency in MHz, or None if not found
         """
-        # Match patterns like "WWV 2.5 MHz", "WWV_10_MHz", "WWV 10 MHz", etc.
-        # Allow underscore or space before MHz
+        # Pattern 1: Explicit MHz suffix (e.g., "WWV 2.5 MHz", "WWV_10_MHz")
         match = re.search(r'(\d+(?:\.\d+)?)[_\s]*MHz', channel_name, re.IGNORECASE)
         if match:
             return float(match.group(1))
+        
+        # Pattern 2: Channel names with frequency in kHz (e.g., "SHARED_5000", "WWV_20000")
+        # These use the convention STATION_FREQ where FREQ is in kHz
+        match = re.search(r'[A-Z]+_(\d+)$', channel_name, re.IGNORECASE)
+        if match:
+            freq_khz = int(match.group(1))
+            # Sanity check: HF frequencies are 2500-25000 kHz
+            if 2000 <= freq_khz <= 30000:
+                return freq_khz / 1000.0
+        
         return None
     
     def _create_template(self, frequency_hz: float, duration_sec: float) -> dict:
@@ -1317,13 +1329,10 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # initial preference. The TransmissionTimeSolver does the back-calculation
         # to make WWVH's timing as accurate as WWV.
         #
-        # Priority order for TimeSnapReference creation:
-        #   1. WWV (direct, ~5-6ms propagation from Fort Collins)
-        #   2. CHU (direct, ~4ms propagation from Ottawa)  
-        #   3. WWVH (requires back-calculation, ~21ms from Hawaii)
-        #
-        # All three become valid once propagation delay is subtracted.
-        use_for_time_snap = station_type in [StationType.WWV, StationType.CHU, StationType.WWVH]
+        # All detected stations are valid for timing measurements.
+        # The fusion layer handles uncertainty weighting - no filtering here.
+        # Each broadcast provides an independent measurement of UTC.
+        use_for_time_snap = True  # All stations contribute to timing
         
         # Calculate sample position in ORIGINAL sample rate (for precise RTP calculation)
         # onset_sample_idx is at self.sample_rate (detection rate)
