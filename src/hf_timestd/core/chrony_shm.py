@@ -248,23 +248,22 @@ class ChronySHM:
                 )
             
             data = struct.pack(
-                '@ii q i 4x q i iiii II iiiiiiii 4x',
+                '@ii q i 4x q i 4x iiii II iiiiiiii',
                 0,              # mode = 0 (no count locking)
                 self.count,     # count (sequence number)
-                clock_sec,      # clockTimeStampSec
-                clock_usec,     # clockTimeStampUSec
-                # 4x padding for 8-byte alignment
-                recv_sec,       # receiveTimeStampSec
-                recv_usec,      # receiveTimeStampUSec
-                # NO padding here! (32+4=36, divisible by 4)
-                leap,           # leap
-                precision,      # precision
-                1,              # nsamples ← CRITICAL: Must be 1
-                1,              # valid
-                clock_nsec,     # clockTimeStampNSec
-                recv_nsec,      # receiveTimeStampNSec
-                0, 0, 0, 0, 0, 0, 0, 0  # dummy[8]
-                # 4x padding at end to reach 96 bytes (multiple of 8)
+                clock_sec,      # clockTimeStampSec (8-15)
+                clock_usec,     # clockTimeStampUSec (16-19)
+                # 4x padding (20-23) for 8-byte alignment of receiveTimeStampSec
+                recv_sec,       # receiveTimeStampSec (24-31)
+                recv_usec,      # receiveTimeStampUSec (32-35)
+                # 4x padding (36-39) for alignment before leap
+                leap,           # leap (40-43)
+                precision,      # precision (44-47)
+                1,              # nsamples (48-51) ← CRITICAL: Must be 1
+                1,              # valid (52-55)
+                clock_nsec,     # clockTimeStampNSec (56-59)
+                recv_nsec,      # receiveTimeStampNSec (60-63)
+                0, 0, 0, 0, 0, 0, 0, 0  # dummy[8] (64-95)
             )
             
             # DIAGNOSTIC: Verify packed data
@@ -274,7 +273,7 @@ class ChronySHM:
                 logger.info(f"ChronySHM packed bytes [44:56]: {raw_bytes}")
                 
                 # Unpack to verify
-                verify = struct.unpack('@ii q i 4x q i iiii II iiiiiiii 4x', data)
+                verify = struct.unpack('@ii q i 4x q i 4x iiii II iiiiiiii', data)
                 logger.info(
                     f"ChronySHM verify unpack: precision={verify[7]}, "
                     f"nsamples={verify[8]}, valid={verify[9]}"
@@ -302,7 +301,7 @@ class ChronySHM:
                 logger.info(f"ChronySHM readback bytes [44:56]: {rb_bytes}")
                 
                 # Unpack readback
-                rb_verify = struct.unpack('@ii q i 4x q i iiii II iiiiiiii 4x', readback)
+                rb_verify = struct.unpack('@ii q i 4x q i 4x iiii II iiiiiiii', readback)
                 logger.info(
                     f"ChronySHM readback verify: count={rb_verify[1]}, "
                     f"precision={rb_verify[7]}, nsamples={rb_verify[8]}, valid={rb_verify[9]}"

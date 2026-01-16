@@ -1,23 +1,106 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-## 🚀 Current Status: "Steel Ruler" Release (v5.3.3)
+## 🚀 Current Status: "Steel Ruler" Release (v5.3.4)
 
-**Version**: v5.3.3 (Cleanup) - 2026-01-13
+**Version**: v5.3.4 - 2026-01-16
 **Core Philosophy**: **"Steel Ruler" Metrology**. The system treats the local GPSDO as a fixed standard (zero process noise) to measure ionospheric variance.
 
-### 🌟 Recent Accomplishments through v5.3.3
+### 🌟 Recent Accomplishments (v5.3.4)
 
-1. **"Steel Ruler" Stabilized**: Eliminated 0.03 ppm clock drift by clamping Kalman `drift_ms_per_min` to 0.0 and anchoring to the GPSDO.
-2. **Verification Modernized**: Updated `scripts/verify_pipeline.sh` to check for metadata sidecars, HDF5 latency, and zero drift.
-3. **Documentation Complete**: Added `docs/METROLOGIST.md`, updated `ARCHITECTURE.md` and `TECHNICAL_REFERENCE.md`.
-4. **Service Stability**: Fixed `timestd-physics` syntax error (v5.3.2 hotfix) and restored full service stack.
-5. **Chrony Feed**: Robustly feeding Chrony SHM with sub-millisecond precision.
-6. **Repository Cleanup**: Archived 56 documents, removed security risks, eliminated 60+ MB of obsolete code (v5.3.3).
+1. **Chrony SHM Fixed**: Corrected struct packing alignment in `chrony_shm.py` (missing 4-byte padding caused `valid=0`).
+2. **Chrony Config Tuned**: Reduced `delay` parameter from 100ms to 2ms/1ms for TSL1/TSL2, enabling proper source selection.
+3. **RTP Clock Drift Diagnosed**: Identified ka9q-python `last_packet_utc` staleness (ChannelInfo.gps_time not refreshed). Fallback to OS clock working correctly—cosmetic issue only.
 
 ### ⚠️ Active Issues / Watchlist
 
 - **TEC Staleness at Night**: The `timestd-physics` service correctly reports stale TEC data during nighttime when only single frequencies are visible. This is a scientific limitation, not a software failure.
-- **Service Reliability**: `timestd-physics` had a startup crash fixed in v5.3.2; monitor for regression.
+- **WWV 20/25 MHz Propagation**: These bands show STALE measurements during poor propagation conditions (nighttime/early morning). Expected behavior—signals resume when propagation improves.
+- **ka9q-python Log Spam**: "RTP Clock Drift Detected" warnings appear frequently due to stale `gps_time` in cached ChannelInfo. Functionally harmless (OS clock fallback works), but noisy. Fix pending in ka9q-python.
+
+---
+
+## 🎯 Next Session: Metrology Documentation Consolidation
+
+**Objective:** Consolidate metrology documentation into a single authoritative `docs/METROLOGY.md` document.
+
+### Source Documents to Merge
+
+1. **`docs/METROLOGIST.md`** (81 lines) - "Steel Ruler" verification procedures, validation checklist
+2. **`docs/METROLOGIST_DESCRIPTION.md`** (871 lines) - Comprehensive technical description for time metrology professionals, ISO GUM uncertainty budgets, physics models
+3. **`TECHNICAL_REFERENCE.md`** (917 lines) - System architecture, service descriptions, data products
+
+### Target Audience
+
+The consolidated document should serve **two audiences simultaneously**:
+- **General users**: Clear explanation of objectives, what the system does, how to verify it works
+- **Fastidious metrologists**: Rigorous treatment of uncertainty, traceability, physics models, ISO GUM compliance
+
+### Suggested Structure for `docs/METROLOGY.md`
+
+1. **Executive Summary** - What this system achieves (±0.5ms to UTC(NIST))
+2. **The Measurement Problem** - What we measure (D_clock), the transmission time equation
+3. **"Steel Ruler" Philosophy** - Why we trust GPSDO, zero process noise, ionospheric attribution
+4. **System Architecture** - The six services and data flow (from TECHNICAL_REFERENCE.md)
+5. **Physics Models** - Ionospheric propagation, TEC estimation, multi-hop modes
+6. **Uncertainty Budget** - ISO GUM-compliant breakdown of error sources
+7. **Verification Procedures** - How to validate the system is working correctly
+8. **Data Products** - HDF5 schemas, Chrony SHM feed, output formats
+
+### Key Concepts to Preserve
+
+- **D_clock = T_system - T_UTC(NIST)** - The fundamental measurement
+- **Transmission time equation**: T_arrival = T_emission + τ_propagation + D_clock
+- **L1/L2/L3 data hierarchy**: Raw → Calibrated → Fused
+- **TSL1/TSL2**: Level 1 (raw fusion) vs Level 2 (calibrated fusion) Chrony feeds
+- **Inverse variance weighting** in Kalman fusion
+- **WWV/WWVH discrimination** on shared frequencies (2.5, 5, 10, 15 MHz)
+
+### Files to Archive After Consolidation
+
+- `docs/METROLOGIST.md` → `archive/dev-history/`
+- `docs/METROLOGIST_DESCRIPTION.md` → `archive/dev-history/`
+- Consider whether `TECHNICAL_REFERENCE.md` should remain separate or merge
+
+---
+
+## ✅ Session Complete: Chrony TSL1/TSL2 Debugging (v5.3.4)
+
+**Date**: 2026-01-16  
+**Status**: **FIXES DEPLOYED** - Chrony now correctly using TSL1/TSL2 sources
+
+### Accomplishments
+
+1. **Chrony SHM Struct Alignment Fixed** (`src/hf_timestd/core/chrony_shm.py`)
+   - Added missing 4-byte padding in `struct.pack` format string
+   - Fields `valid=1` and `nsamples=1` now correctly positioned at offsets 52-55 and 48-51
+   - Chrony now reads valid data from SHM segments
+
+2. **Chrony Refclock Config Tuned** (`config/chrony-timestd-refclocks.conf`)
+   - Reduced `delay` from 0.1 (100ms) to 0.002 (2ms) for TSL1
+   - Reduced `delay` from 0.1 (100ms) to 0.001 (1ms) for TSL2
+   - Estimated error now reflects actual uncertainty, enabling proper source selection
+
+3. **RTP Clock Drift Issue Diagnosed**
+   - Root cause: ka9q-python caches `ChannelInfo.gps_time` at stream creation, never refreshes
+   - Impact: `last_packet_utc` drifts behind by stream uptime (36+ hours)
+   - Mitigation: Core recorder falls back to OS clock when drift > 1 hour (working correctly)
+   - Resolution: Cosmetic fix pending in ka9q-python (refresh `gps_time` periodically)
+
+4. **WWV 20/25 MHz STALE Measurements Explained**
+   - Not a software bug—HF propagation on higher bands is poor during night/early morning
+   - These are single-broadcast anchor channels (no WWVH overlap), critical for bootstrap
+   - Measurements resume when propagation improves
+
+### Files Modified
+
+- `src/hf_timestd/core/chrony_shm.py` - Struct packing fix (lines 250-267, 275-276, 303-304)
+- `config/chrony-timestd-refclocks.conf` - Delay parameter reduction (lines 10, 17)
+
+### Deployed To
+
+- `/opt/hf-timestd/src/hf_timestd/core/chrony_shm.py`
+- `/etc/hf-timestd/chrony-timestd-refclocks.conf`
+- Services restarted: `timestd-fusion`, `chronyd`
 
 ---
 
@@ -87,17 +170,6 @@ sudo ./scripts/install.sh --mode production
 - **100% historical preservation** (zero data loss)
 - **Professional structure** ready for long-term maintenance
 - See `CLEANUP_2026-01-13.md` for complete details
-
----
-
-## 🎯 Next Session: Ready for New Development
-
-The repository is now clean, organized, and ready for new development work. Potential next objectives:
-
-- **Feature Development**: New analysis capabilities or UI enhancements
-- **Performance Optimization**: System tuning or efficiency improvements
-- **Documentation**: User guides or scientific methodology documentation
-- **Testing**: Expanded test coverage or validation procedures
 
 ---
 
