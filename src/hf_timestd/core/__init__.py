@@ -91,11 +91,9 @@ from .tiered_storage import (
     get_available_ram_bytes,
 )
 
-# Cross-channel coordination (Station Lock) - Legacy
-from .global_station_voter import GlobalStationVoter, StationAnchor, AnchorQuality
-from .station_lock_coordinator import StationLockCoordinator, GuidedDetection, MinuteProcessingResult
-
-# Multi-Station Detection (Physics-based approach - replaces voting)
+# Multi-Station Detection (Physics-based approach)
+# Note: GlobalStationVoter and StationLockCoordinator archived 2026-01-16
+# Backward-compat aliases available in multi_station_detector.py
 from .multi_station_detector import (
     MultiStationDetector,
     StationDetection,
@@ -128,14 +126,8 @@ from .primary_time_standard import (
 )
 
 # Pipeline
-from .pipeline_recorder import (
-    PipelineRecorder,
-    PipelineRecorderConfig,
-    PipelineRecorderState,
-    create_pipeline_recorder
-)
-# clock_offset_series.py removed - redundant legacy code
-# Analytics uses DataProductWriter directly
+# Note: PipelineRecorder archived 2026-01-16 (used deprecated RTPReceiver)
+# Use StreamRecorderV2 (stream_recorder_v2.py) with ka9q.RadiodStream instead
 from .pipeline_orchestrator import (
     PipelineOrchestrator,
     PipelineConfig,
@@ -156,7 +148,6 @@ from .transmission_time_solver import (
     grid_to_latlon
 )
 
-# Phase 2: Temporal Analysis Engine (Refined temporal analysis order)
 # Phase 2: Temporal Analysis Engine (Refined temporal analysis order)
 from .phase2_temporal_engine import (
     Phase2TemporalEngine,
@@ -274,11 +265,7 @@ __all__ = [
     "PhysicsPropagationModel",
     "PropagationResult",
     "PropagationModelTier",
-    # Two-Phase Pipeline
-    "PipelineRecorder",
-    "PipelineRecorderConfig",
-    "PipelineRecorderState",
-    "create_pipeline_recorder",
+    # Two-Phase Pipeline (PipelineRecorder archived 2026-01-16)
     "BinaryArchiveWriter",
     "BinaryArchiveConfig",
     "BinaryArchiveReader",

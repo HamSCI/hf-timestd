@@ -34,6 +34,8 @@ from enum import Enum
 from ka9q import ChannelInfo
 
 from ..core.recording_session import RecordingSession, SessionConfig, SegmentInfo
+# TODO: Migrate to ka9q.RadiodStream - see rtp_receiver_DEPRECATED.py deprecation notice
+# This import is from a deprecated module that will be removed in v4.0.0
 from ..core.rtp_receiver_DEPRECATED import RTPReceiver
 from .wspr_wav_writer import WsprWAVWriter
 

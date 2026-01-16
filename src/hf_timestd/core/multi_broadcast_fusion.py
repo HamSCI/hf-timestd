@@ -1057,7 +1057,8 @@ class MultiBroadcastFusion:
                                     })
                                 except ValueError:
                                     pass
-                except Exception:
+                except (OSError, IOError, csv.Error) as e:
+                    logger.debug(f"Error reading CSV file: {e}")
                     continue
 
         return by_minute
@@ -1172,7 +1173,8 @@ class MultiBroadcastFusion:
                                     })
                                 except ValueError:
                                     pass
-                except Exception:
+                except (OSError, IOError, csv.Error) as e:
+                    logger.debug(f"Error reading CSV file: {e}")
                     continue
 
             if per_minute:
@@ -1417,7 +1419,8 @@ class MultiBroadcastFusion:
                                 })
                             except ValueError:
                                 pass
-            except Exception:
+            except (OSError, IOError, csv.Error) as e:
+                logger.debug(f"Error reading CSV file: {e}")
                 continue
         
         return per_minute
@@ -1522,8 +1525,8 @@ class MultiBroadcastFusion:
                 f"verified={getattr(result, 'verified', False)} conf={getattr(result, 'confidence', 0.0):.2f} "
                 f"consistency_ms={getattr(result, 'pair_consistency_ms', 0.0):.3f}"
             )
-        except Exception:
-            pass
+        except (AttributeError, TypeError) as e:
+            logger.debug(f"Error logging global solve result: {e}")
         return result, len(observations)
     
     def _read_l1_metrology(

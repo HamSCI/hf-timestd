@@ -182,13 +182,9 @@ class MetrologyEngine:
         Calculate expected light-speed travel time.
         Returns: (min_delay_ms, distance_km, uncertainty_ms)
         """
-        # Hardcoded station coordinates (or move to station_model)
-        STATIONS = {
-            'WWV': {'lat': 40.6776, 'lon': -105.0400},
-            'WWVH': {'lat': 21.9897, 'lon': -159.7600},
-            'CHU': {'lat': 45.2975, 'lon': -75.7663},
-            'BPM': {'lat': 34.9497, 'lon': 109.5597}
-        }
+        # Use centralized station coordinates from wwv_constants (single source of truth)
+        from .wwv_constants import STATION_LOCATIONS
+        STATIONS = {k: {'lat': v['lat'], 'lon': v['lon']} for k, v in STATION_LOCATIONS.items()}
         
         if station not in STATIONS or self.precise_lat is None or self.precise_lon is None:
             return 0.0, 0.0, 500.0 # Blind fallback
@@ -366,8 +362,8 @@ class MetrologyEngine:
                     data = json.load(f)
                     if 'bpm' in data:
                         self.bpm_calibration.update(data['bpm'])
-        except Exception:
-            pass
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            logger.debug(f"Could not load calibration file: {e}")
             
     def _save_calibration(self):
         """Simple saver."""
@@ -376,5 +372,5 @@ class MetrologyEngine:
             data = {'bpm': self.bpm_calibration}
             with open(cal_file, 'w') as f:
                 json.dump(data, f)
-        except Exception:
-            pass
+        except (OSError, IOError) as e:
+            logger.debug(f"Could not save calibration file: {e}")

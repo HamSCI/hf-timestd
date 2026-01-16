@@ -73,23 +73,18 @@ from .stream import (
 # Located in hf_timestd/core/ package
 # Two-phase pipeline: recording + timing analysis
 # =============================================================================
+# Note: PipelineRecorder archived 2026-01-16 (used deprecated RTPReceiver)
+# Use StreamRecorderV2 with ka9q.RadiodStream instead
 try:
-    from .core import (
-        PipelineRecorder, PipelineRecorderConfig, PipelineRecorderState,
-        CoreRecorder,
-    )
+    from .core import CoreRecorder
 except ImportError:
     pass
 
 # =============================================================================
-# WSPR APPLICATION (Weak Signal Propagation Reporter)
-# Located in hf_timestd/wspr/ package
+# WSPR APPLICATION - ARCHIVED 2026-01-16
+# Demo wspr_recorder moved to archive/deprecated-wspr-demo/
+# Use standalone wspr_recorder application instead
 # =============================================================================
-from .wspr import (
-    WsprRecorder, WsprConfig, WsprState,
-    WsprWAVWriter,
-    create_wspr_recorder,
-)
 
 # Channel management (lower-level)
 from .channel_manager import ChannelManager
@@ -132,16 +127,8 @@ __all__ = [
     "RTPPacket",
     "GapInfo",
     # === Time Standard application (two-phase pipeline) ===
-    "PipelineRecorder",
-    "PipelineRecorderConfig",
-    "PipelineRecorderState",
     "CoreRecorder",
-    # === WSPR application ===
-    "WsprRecorder",
-    "WsprConfig",
-    "WsprState",
-    "WsprWAVWriter",
-    "create_wspr_recorder",
+    # === WSPR application (archived 2026-01-16) ===
     # === Lower-level (advanced use) ===
     "ChannelManager",
     "discover_channels_via_control",

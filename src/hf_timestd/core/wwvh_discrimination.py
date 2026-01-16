@@ -1122,7 +1122,8 @@ class WWVHDiscriminator:
                 # Extract frequency from channel name (e.g., "WWV 10000" -> 10.0 MHz)
                 try:
                     freq_mhz = float(self.channel_name.split()[-1]) / 1000.0
-                except:
+                except (ValueError, IndexError) as e:
+                    logger.debug(f"Could not parse frequency from channel name '{self.channel_name}': {e}")
                     freq_mhz = 10.0  # Default fallback
                 
                 # Validate WWV detection

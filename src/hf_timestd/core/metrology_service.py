@@ -251,8 +251,8 @@ class MetrologyService:
             try:
                 with open(json_path) as f:
                     metadata = json.load(f)
-            except Exception:
-                pass
+            except (OSError, IOError, json.JSONDecodeError) as e:
+                logger.debug(f"Could not load metadata file {json_path}: {e}")
                 
         # 3. Read Data
         try:
@@ -356,7 +356,8 @@ class MetrologyService:
         except ImportError:
             logger.error("Compression library missing")
             return None
-        except Exception:
+        except (OSError, IOError, ValueError) as e:
+            logger.debug(f"Error loading IQ file {path}: {e}")
             return None
 
     def _write_status(self, minute: int, results: List[L1MetrologyMeasurement]):

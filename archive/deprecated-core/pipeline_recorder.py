@@ -37,6 +37,8 @@ from enum import Enum
 
 from ka9q import ChannelInfo, RTPHeader
 
+# TODO: Migrate to ka9q.RadiodStream - see rtp_receiver_DEPRECATED.py deprecation notice
+# This import is from a deprecated module that will be removed in v4.0.0
 from ..core.rtp_receiver_DEPRECATED import RTPReceiver
 from ..core.packet_resequencer import PacketResequencer, RTPPacket, GapInfo
 
