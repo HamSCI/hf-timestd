@@ -80,6 +80,7 @@ def main():
     logger.info(f"Connecting to {host}:{port}...")
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(60.0)  # 60 second timeout - will raise socket.timeout if no data
         sock.connect((host, port))
         logger.info("Connected!")
     except Exception as e:
@@ -133,11 +134,23 @@ def main():
         bytes_received = 0
         msg_count = 0
         last_log_time = time.time()
+        last_data_time = time.time()  # Track when we last received valid VTEC data
         
         while True:
-            data = sock.recv(4096)
+            try:
+                data = sock.recv(4096)
+            except socket.timeout:
+                logger.warning("Socket timeout (60s no data) - reconnecting...")
+                break  # Exit loop to trigger service restart
+            
             if not data:
                 logger.warning("Socket closed.")
+                break
+            
+            # Watchdog: Check if we've produced VTEC data recently
+            # If no VTEC output for 5 minutes, something is wrong
+            if time.time() - last_data_time > 300:
+                logger.error("No VTEC data produced for 5 minutes - exiting for restart")
                 break
             
             bytes_received += len(data)
@@ -170,6 +183,7 @@ def main():
                             avg_vtec = sum(valid_vtecs) / len(valid_vtecs)
                             # Sanity check: 0-150 TECU is normal.
                             logger.info(f"VTEC: {avg_vtec:.2f} TECU (Sats: {len(valid_vtecs)})")
+                            last_data_time = time.time()  # Reset watchdog on successful VTEC output
                             
                             # Write to CSV
                             line = f"{timestamp},{avg_vtec:.2f},{len(valid_vtecs)}\n"

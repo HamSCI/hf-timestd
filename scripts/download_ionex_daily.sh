@@ -30,10 +30,13 @@ fi
 
 # Run python script
 # Calculate yesterday's date
+# Strategy: Try Final first (most accurate), fall back to Rapid (~1 day latency)
+# With Rapid fallback, we only need to search back ~7 days
 YESTERDAY=$(date -d "yesterday" +%Y-%m-%d)
-"$VENV_PYTHON" "$IONEX_SCRIPT" "$YESTERDAY" --output-dir "$IONEX_DIR" >> "$LOG_FILE" 2>&1
+"$VENV_PYTHON" "$IONEX_SCRIPT" "$YESTERDAY" --output-dir "$IONEX_DIR" --max-days-back 7 >> "$LOG_FILE" 2>&1
+DOWNLOAD_STATUS=$?
 
-if [ $? -eq 0 ]; then
+if [ $DOWNLOAD_STATUS -eq 0 ]; then
     log "✓ IONEX download successful"
     
     # Clean up old files (>30 days) to save space
