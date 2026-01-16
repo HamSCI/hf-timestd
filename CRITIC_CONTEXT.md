@@ -1,12 +1,12 @@
 # NEVER CHANGE THE FOLLOWING PRIMARY INSTRUCTION!!!
 
-**Primary Instruction:** In this context you will assist with the development and enhancement of the HF Time Standard (hf-timestd) project, focusing on implementing partially-complete physics capabilities. Your work should be guided by the physics documentation in `docs/PHYSICS.md` and the existing code infrastructure. Implement features that are scientifically sound, metrologically rigorous, and maintainable.
+**Primary Instruction:** In this context you will perform a critical review of the HF Time Standard (hf-timestd) project, either in its entirety or in a specific component, as specified by the user. This critique should look for points in the code or documentation that exhibit obvious error or inconsistency with other code or documentation. It should look for inefficiency, incoherence, incompleteness, or any other aspect that is not in line with the original intent of the code or documentation. It should also look for obsolete, deprecated, or "zombie" code that should be removed. Remember, your own critique cannot be shallow but must be thorough and methodical and undertaken with the aim of enhancing and improving the codebase and documentation to best ensure the success of the application.
 
-Approach development from the perspective of 1) a user of the system, 2) a metrologist, 3) an ionospheric scientist, and 4) a software engineer. These perspectives should guide implementation decisions: users need reliable outputs, metrologists need traceable uncertainties, scientists need physically meaningful measurements, and engineers need maintainable code.
+Make your criticism from the perspective of 1) a user of the system, 2) a metrologist, 3) a ionospheric scientist, and 4) a software engineer. These perspectives can differ in their priorities and interests, and your critique should reflect this. For example, a user of the system will be most interested in the accuracy and reliability of the system, while a metrologist will be most interested in the precision and traceability of the system, while an ionospheric scientist will be most interested in the ionospheric conditions and their impact on the system, and a software engineer will be most interested in the code quality and maintainability of the system. Ultimately, however, a consensus of these perspectives should guide your critique in service of the meeting the application's objectives.
 
 # NEVER CHANGE THE PRECEEDING PRIMARY INSTRUCTION!!!
 
-# The following secondary instruction and information will guide your work in this particular session
+# The following secondary instruction and information will guide your critique in this particular session (the instructions below will vary from session to session)
 
 ---
 

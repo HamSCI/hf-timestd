@@ -1,21 +1,81 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-## 🚀 Current Status: "Steel Ruler" Release (v5.3.4)
+## 🚀 Current Status: "Steel Ruler" Release (v5.3.5)
 
-**Version**: v5.3.4 - 2026-01-16
+**Version**: v5.3.5 - 2026-01-16
 **Core Philosophy**: **"Steel Ruler" Metrology**. The system treats the local GPSDO as a fixed standard (zero process noise) to measure ionospheric variance.
 
-### 🌟 Recent Accomplishments (v5.3.4)
+### 🌟 Recent Accomplishments (v5.3.5)
 
-1. **Chrony SHM Fixed**: Corrected struct packing alignment in `chrony_shm.py` (missing 4-byte padding caused `valid=0`).
-2. **Chrony Config Tuned**: Reduced `delay` parameter from 100ms to 2ms/1ms for TSL1/TSL2, enabling proper source selection.
-3. **RTP Clock Drift Diagnosed**: Identified ka9q-python `last_packet_utc` staleness (ChannelInfo.gps_time not refreshed). Fallback to OS clock working correctly—cosmetic issue only.
+1. **Codebase Cleanup Complete**: Archived 12 deprecated/legacy files, removed zombie code identified via vulture analysis.
+2. **Edge Case Tests Added**: New test suites for leap second handling and day boundary conditions.
+3. **Code Quality Fixes**: Replaced bare `except:` clauses with specific exceptions, consolidated hardcoded coordinates.
+4. **Production Synced**: Git repo and `/opt/hf-timestd` now identical after cleanup.
+
+### 🔴 Next Session: Complete Partially Implemented Physics
+
+The next development session will focus on completing ionospheric physics capabilities identified in `docs/PHYSICS.md`:
+
+1. **CHU FSK Time Code Decoding** — Complete BCD extraction, DUT1 parsing, leap second warnings
+2. **Scintillation Indices (S4, σ_φ)** — Calculate amplitude and phase scintillation from existing infrastructure
+3. **WWV/WWVH Test Signal Measurements** — Refine delay spread, add transient detection
+4. **Sporadic-E Detection** — Automated Es event detection algorithm
+
+**Key Files:**
+- `src/hf_timestd/core/chu_fsk_decoder.py` — FSK framework exists, needs completion
+- `src/hf_timestd/core/wwv_test_signal.py` — Detection works, measurements partial
+- `src/hf_timestd/core/advanced_signal_analysis.py` — Scintillation infrastructure
+- `docs/PHYSICS.md` — Primary reference for physics implementation
 
 ### ⚠️ Active Issues / Watchlist
 
 - **TEC Staleness at Night**: The `timestd-physics` service correctly reports stale TEC data during nighttime when only single frequencies are visible. This is a scientific limitation, not a software failure.
 - **WWV 20/25 MHz Propagation**: These bands show STALE measurements during poor propagation conditions (nighttime/early morning). Expected behavior—signals resume when propagation improves.
 - **ka9q-python Log Spam**: "RTP Clock Drift Detected" warnings appear frequently due to stale `gps_time` in cached ChannelInfo. Functionally harmless (OS clock fallback works), but noisy. Fix pending in ka9q-python.
+
+---
+
+## ✅ Session Complete: Codebase Cleanup (v5.3.5)
+
+**Date**: 2026-01-16  
+**Status**: **CLEANUP COMPLETE** - Deprecated code archived, tests added, production synced
+
+### Accomplishments
+
+1. **Archived Deprecated Code** (12 files → `archive/`)
+   - `archive/deprecated-core/`: `core_recorder_v1_DEPRECATED.py`, `rtp_receiver_DEPRECATED.py`, `pipeline_recorder.py`, `global_station_voter.py`, `station_lock_coordinator.py`
+   - `archive/deprecated-wspr-demo/`: Entire `wspr/` directory (replaced by standalone app)
+   - `archive/legacy-services/`: `science_aggregator.py`, `timestd-science-aggregator.service`
+   - `archive/legacy-src/`: Old `legacy/` directory
+
+2. **Code Quality Fixes**
+   - Replaced bare `except:` clauses with specific exceptions + logging (4 files)
+   - Consolidated hardcoded station coordinates to use `wwv_constants.STATION_LOCATIONS`
+   - Removed duplicate comment in `core/__init__.py`
+
+3. **New Test Suites**
+   - `tests/test_leap_second.py` — Comprehensive leap second handling tests
+   - `tests/test_day_boundary.py` — Midnight/day boundary edge case tests
+
+4. **Production Sync**
+   - `/opt/hf-timestd` updated to match git repo
+   - All archived files removed from production
+   - Imports verified working
+
+### Files Modified
+
+- `src/hf_timestd/__init__.py` — Removed archived exports
+- `src/hf_timestd/core/__init__.py` — Removed archived imports, updated comments
+- `src/hf_timestd/core/metrology_engine.py` — Use centralized station coordinates
+- `src/hf_timestd/core/metrology_service.py` — Specific exception handling
+- `src/hf_timestd/core/multi_broadcast_fusion.py` — Specific exception handling
+- `src/hf_timestd/core/wwvh_discrimination.py` — Specific exception handling
+
+### Commit
+
+```
+ac772bc - Codebase cleanup: archive deprecated/legacy code, add edge case tests
+```
 
 ---
 
