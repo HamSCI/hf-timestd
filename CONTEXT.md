@@ -19,47 +19,44 @@
 
 ---
 
-## 🎯 Next Session: Metrology Documentation Consolidation
+## ✅ Session Complete: Documentation Consolidation (v5.3.4)
 
-**Objective:** Consolidate metrology documentation into a single authoritative `docs/METROLOGY.md` document.
+**Date**: 2026-01-16  
+**Status**: **CONSOLIDATION COMPLETE** - Metrology and Physics documentation created
 
-### Source Documents to Merge
+### Accomplishments
 
-1. **`docs/METROLOGIST.md`** (81 lines) - "Steel Ruler" verification procedures, validation checklist
-2. **`docs/METROLOGIST_DESCRIPTION.md`** (871 lines) - Comprehensive technical description for time metrology professionals, ISO GUM uncertainty budgets, physics models
-3. **`TECHNICAL_REFERENCE.md`** (917 lines) - System architecture, service descriptions, data products
+1. **Created `docs/METROLOGY.md`** - Consolidated metrological description (~600 lines)
+   - Executive Summary, Measurement Problem, "Steel Ruler" Philosophy
+   - System Architecture (6 services, 3-phase pipeline)
+   - Physics Models (tone detection, station discrimination, propagation modeling)
+   - ISO GUM Uncertainty Budget (Type A/B errors, coverage factors)
+   - Verification Procedures (baseline stability, Chrony discipline, quality grades)
+   - Data Products (L0-L3 hierarchy, HDF5 schemas)
+   - **Added: Local GNSS-VTEC optional enhancement** with metrological impact analysis
+   - Limitations and Caveats (honest assessment)
 
-### Target Audience
+2. **Created `docs/PHYSICS.md`** - Ionospheric physics capabilities (~700 lines)
+   - Currently implemented: TEC, propagation modes, layer heights, Doppler, multipath, D-layer absorption
+   - Partially implemented: Sporadic-E, scintillation indices, TIDs, CHU FSK decoding
+   - Potential future: foF2 estimation, ionospheric tilt, space weather correlation
+   - WWV/WWVH scientific test signal exploitation
+   - Optional GNSS-VTEC integration
+   - Validation status and limitations
 
-The consolidated document should serve **two audiences simultaneously**:
-- **General users**: Clear explanation of objectives, what the system does, how to verify it works
-- **Fastidious metrologists**: Rigorous treatment of uncertainty, traceability, physics models, ISO GUM compliance
+3. **Archived Source Documents**
+   - `docs/METROLOGIST.md` → `archive/dev-history/`
+   - `docs/METROLOGIST_DESCRIPTION.md` → `archive/dev-history/`
 
-### Suggested Structure for `docs/METROLOGY.md`
+4. **Kept `TECHNICAL_REFERENCE.md` Separate** - Contains system architecture, configuration, installation details
 
-1. **Executive Summary** - What this system achieves (±0.5ms to UTC(NIST))
-2. **The Measurement Problem** - What we measure (D_clock), the transmission time equation
-3. **"Steel Ruler" Philosophy** - Why we trust GPSDO, zero process noise, ionospheric attribution
-4. **System Architecture** - The six services and data flow (from TECHNICAL_REFERENCE.md)
-5. **Physics Models** - Ionospheric propagation, TEC estimation, multi-hop modes
-6. **Uncertainty Budget** - ISO GUM-compliant breakdown of error sources
-7. **Verification Procedures** - How to validate the system is working correctly
-8. **Data Products** - HDF5 schemas, Chrony SHM feed, output formats
+### Documentation Structure
 
-### Key Concepts to Preserve
-
-- **D_clock = T_system - T_UTC(NIST)** - The fundamental measurement
-- **Transmission time equation**: T_arrival = T_emission + τ_propagation + D_clock
-- **L1/L2/L3 data hierarchy**: Raw → Calibrated → Fused
-- **TSL1/TSL2**: Level 1 (raw fusion) vs Level 2 (calibrated fusion) Chrony feeds
-- **Inverse variance weighting** in Kalman fusion
-- **WWV/WWVH discrimination** on shared frequencies (2.5, 5, 10, 15 MHz)
-
-### Files to Archive After Consolidation
-
-- `docs/METROLOGIST.md` → `archive/dev-history/`
-- `docs/METROLOGIST_DESCRIPTION.md` → `archive/dev-history/`
-- Consider whether `TECHNICAL_REFERENCE.md` should remain separate or merge
+| Document | Purpose | Audience |
+|----------|---------|----------|
+| `METROLOGY.md` | Time transfer methodology, uncertainty budgets | Metrologists, time nuts |
+| `PHYSICS.md` | Ionospheric measurements, scientific capabilities | Scientists, researchers |
+| `TECHNICAL_REFERENCE.md` | System architecture, configuration | Developers, operators |
 
 ---
 
