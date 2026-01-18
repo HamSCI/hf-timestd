@@ -116,6 +116,13 @@ else
     MISSING_PREREQS=true
 fi
 
+if command -v git > /dev/null; then
+    log_info "  ✅ git found"
+else
+    log_warn "  ❌ git not found (required for iri2020 dependency)"
+    MISSING_PREREQS=true
+fi
+
 # Check Python version
 PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
 PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
@@ -133,7 +140,7 @@ if [ "$MISSING_PREREQS" = true ]; then
     echo ""
     echo "On Debian/Ubuntu, run:"
     echo "  sudo apt-get update"
-    echo "  sudo apt-get install python3 python3-pip python3-venv python3-dev"
+    echo "  sudo apt-get install python3 python3-pip python3-venv python3-dev git"
     echo "  sudo apt-get install avahi-utils hdf5-tools libhdf5-dev libsystemd-dev"
     echo ""
     exit 1
@@ -502,188 +509,50 @@ fi
 if [[ "$MODE" == "production" ]]; then
     log_step "Installing systemd services..."
     
-    # Create service files with correct paths
     SYSTEMD_DIR="/etc/systemd/system"
     
-    # Core Recorder Service (Phase 1: RTP → Digital RF)
-    sudo tee "$SYSTEMD_DIR/timestd-core-recorder.service" > /dev/null << EOF
-[Unit]
-Description=HF Time Standard Core Recorder - Phase 1 RTP to Raw Buffer Archive
-Documentation=https://github.com/mijahauan/grape-recorder
-After=network-online.target
-Wants=network-online.target
-# Wait for radiod if running on same machine
-After=ka9q-radio.service
-Wants=ka9q-radio.service
-
-[Service]
-Type=simple
-User=$INSTALL_USER
-Group=$INSTALL_USER
-EnvironmentFile=$CONFIG_DIR/environment
-WorkingDirectory=$DATA_ROOT
-
-ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.core_recorder_v2 --config $CONFIG_DIR/timestd-config.toml
+    # Copy pre-tested service files from repository
+    # These files have watchdogs, proper dependencies, and security hardening
+    log_info "  Copying service files from $PROJECT_DIR/systemd/..."
     
-# Wait up to 5 minutes for startup (health check waits for 1st minute of data)
-TimeoutStartSec=300
-
-# Health check: Verify data is being written
-ExecStartPost=/opt/hf-timestd/scripts/health-check-recorder.sh
-
-Restart=always
-RestartSec=10
-StartLimitInterval=300
-StartLimitBurst=5
-
-# Resource limits - prioritize for real-time recording
-Nice=-5
-MemoryMax=2G
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=timestd-core-recorder
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    # Core services (always installed)
+    CORE_SERVICES=(
+        "timestd-core-recorder"
+        "timestd-metrology"
+        "timestd-l2-calibration"
+        "timestd-fusion"
+        "timestd-physics"
+        "timestd-web-api"
+        "timestd-radiod-monitor"
+    )
     
-    # Metrology Service (Phase 2: All 9 channels)
-    # Uses timestd-metrology.sh which starts all channel metrology services
-    sudo tee "$SYSTEMD_DIR/timestd-metrology.service" > /dev/null << EOF
-[Unit]
-Description=HF Time Standard Metrology Service - Phase 2 Timing Analysis
-Documentation=https://github.com/mijahauan/hf-timestd
-After=timestd-core-recorder.service
-Wants=timestd-core-recorder.service
-
-[Service]
-Type=forking
-User=$INSTALL_USER
-Group=$INSTALL_USER
-EnvironmentFile=$CONFIG_DIR/environment
-WorkingDirectory=$DATA_ROOT
-
-# Use the shell script that starts all 9 channel metrology services
-ExecStart=/opt/hf-timestd/scripts/timestd-metrology.sh -start $CONFIG_DIR/timestd-config.toml
-ExecStop=/opt/hf-timestd/scripts/timestd-metrology.sh -stop
-
-# Type=forking since script backgrounds processes
-RemainAfterExit=yes
-
-Restart=on-failure
-RestartSec=30
-StartLimitInterval=300
-StartLimitBurst=3
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=timestd-metrology
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Fusion Service (Phase 3: Multi-Broadcast Fusion)
-    sudo tee "$SYSTEMD_DIR/timestd-fusion.service" > /dev/null << EOF
-[Unit]
-Description=HF-Timestd Multi-Broadcast Fusion (Chrony Feed)
-After=timestd-metrology.service
-Requires=timestd-metrology.service
-
-[Service]
-Type=simple
-User=$INSTALL_USER
-Group=$INSTALL_USER
-# Run as the installed module from the venv
-ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.multi_broadcast_fusion --data-root $DATA_ROOT --interval 15.0 --enable-chrony --log-level INFO
-Restart=always
-RestartSec=10
-# Standard output logging
-StandardOutput=append:$LOG_DIR/fusion.log
-StandardError=append:$LOG_DIR/fusion.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Web API Service (FastAPI)
-    sudo tee "$SYSTEMD_DIR/timestd-web-api.service" > /dev/null << EOF
-[Unit]
-Description=HF-TimeStd Web API (FastAPI Monitoring Server)
-Documentation=https://github.com/mijahauan/hf-timestd
-After=network-online.target timestd-metrology.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$INSTALL_USER
-Group=$INSTALL_USER
-EnvironmentFile=$CONFIG_DIR/environment
-
-# Environment
-Environment="PYTHONUNBUFFERED=1"
-
-WorkingDirectory=$WEBUI_DIR
-
-# Run the startup script which sets up environment and launches uvicorn
-ExecStart=$WEBUI_DIR/start.sh
-
-Restart=always
-RestartSec=10
-StartLimitInterval=300
-StartLimitBurst=5
-
-# Resource limits
-MemoryMax=512M
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=timestd-web-api
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Physics Fusion Service (Phase 3: Science First)
-    sudo tee "$SYSTEMD_DIR/timestd-physics.service" > /dev/null << EOF
-[Unit]
-Description=HF-TimeStd Physics-Based Fusion (Science First)
-Documentation=https://github.com/mijahauan/hf-timestd
-After=timestd-metrology.service
-Requires=timestd-metrology.service
-PartOf=timestd-metrology.service
-
-[Service]
-Type=simple
-User=$INSTALL_USER
-Group=$INSTALL_USER
-
-# Run as the installed module from the venv
-ExecStart=$VENV_DIR/bin/python -m hf_timestd.core.physics_fusion_service \\
-    --data-root $DATA_ROOT \\
-    --output $DATA_ROOT/phase2/fusion
-
-# Ensure correct permissions
-ExecStartPre=+/usr/bin/chown -R $INSTALL_USER:$INSTALL_USER $DATA_ROOT/phase2/fusion
-
-# Restart on failure
-Restart=always
-RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
-
-# Standard output logging
-StandardOutput=append:$LOG_DIR/physics.log
-StandardError=append:$LOG_DIR/physics.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+    for svc in "${CORE_SERVICES[@]}"; do
+        sudo cp "$PROJECT_DIR/systemd/${svc}.service" "$SYSTEMD_DIR/"
+        log_info "    ✅ ${svc}.service"
+    done
+    
+    # Copy timer files
+    TIMER_FILES=(
+        "timestd-ionex-download.service"
+        "timestd-ionex-download.timer"
+        "timestd-chrony-monitor.service"
+        "timestd-chrony-monitor.timer"
+    )
+    
+    for timer_file in "${TIMER_FILES[@]}"; do
+        if [[ -f "$PROJECT_DIR/systemd/$timer_file" ]]; then
+            sudo cp "$PROJECT_DIR/systemd/$timer_file" "$SYSTEMD_DIR/"
+            log_info "    ✅ $timer_file"
+        fi
+    done
+    
+    # Copy alert template service
+    if [[ -f "$PROJECT_DIR/systemd/timestd-alert@.service" ]]; then
+        sudo cp "$PROJECT_DIR/systemd/timestd-alert@.service" "$SYSTEMD_DIR/"
+        log_info "    ✅ timestd-alert@.service"
+    fi
+    
     # GNSS VTEC Service (Optional - only if enabled in config)
-    # Check if GNSS VTEC is enabled in the config
     VTEC_ENABLED=$($VENV_DIR/bin/python3 -c "
 import tomllib
 try:
@@ -695,125 +564,50 @@ except:
 " 2>/dev/null)
 
     if [[ "$VTEC_ENABLED" == "true" ]]; then
-        log_info "  GNSS VTEC enabled in config - installing timestd-vtec.service..."
-        
-        sudo tee "$SYSTEMD_DIR/timestd-vtec.service" > /dev/null <<'VTEC_EOF'
-[Unit]
-Description=HF-TimeStd GNSS VTEC Monitor
-Documentation=https://github.com/mijahauan/hf-timestd
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=$INSTALL_USER
-Group=$INSTALL_USER
-EnvironmentFile=$CONFIG_DIR/environment
-WorkingDirectory=$DATA_ROOT
-
-ExecStart=$VENV_DIR/bin/python -u /opt/hf-timestd/scripts/live_vtec.py --config $CONFIG_DIR/timestd-config.toml
-
-Restart=always
-RestartSec=10
-StartLimitInterval=300
-StartLimitBurst=5
-
-# Health check (verify data production)
-ExecStartPost=/opt/hf-timestd/scripts/health-check-vtec.sh
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=timestd-vtec
-
-[Install]
-WantedBy=multi-user.target
-VTEC_EOF
-        
-        # Substitute variables in the service file
-        sudo sed -i "s|\$INSTALL_USER|$INSTALL_USER|g" "$SYSTEMD_DIR/timestd-vtec.service"
-        sudo sed -i "s|\$CONFIG_DIR|$CONFIG_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
-        sudo sed -i "s|\$PROJECT_DIR|$PROJECT_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
-        sudo sed -i "s|\$VENV_DIR|$VENV_DIR|g" "$SYSTEMD_DIR/timestd-vtec.service"
-        sudo sed -i "s|\$DATA_ROOT|$DATA_ROOT|g" "$SYSTEMD_DIR/timestd-vtec.service"
-
-        
-        log_info "    ✅ timestd-vtec.service installed"
+        sudo cp "$PROJECT_DIR/systemd/timestd-vtec.service" "$SYSTEMD_DIR/"
+        log_info "    ✅ timestd-vtec.service (GNSS VTEC enabled in config)"
     else
-        log_info "  GNSS VTEC disabled in config - skipping timestd-vtec.service"
+        log_info "    ℹ️  timestd-vtec.service skipped (GNSS VTEC disabled in config)"
     fi
-
-
-
-    # Radiod Monitor Service (Phase 0.5: Hardware Health)
-    sudo tee "$SYSTEMD_DIR/timestd-radiod-monitor.service" > /dev/null << EOF
-[Unit]
-Description=HF Time Standard Radiod Health Monitor
-Documentation=https://github.com/mijahauan/hf-timestd
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=$INSTALL_USER
-Group=$INSTALL_USER
-EnvironmentFile=$CONFIG_DIR/environment
-WorkingDirectory=$DATA_ROOT
-
-# Run the radiod health monitor
-ExecStart=$VENV_DIR/bin/python -u /opt/hf-timestd/scripts/monitor_radiod_health.py \\
-    /var/lib/timestd/state/radiod-status.json \\
-    10
-
-Restart=always
-RestartSec=10
-    
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=timestd-radiod-monitor
-
-# Process limits
-LimitNOFILE=65536
-Nice=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
 
     # Reload systemd
     sudo systemctl daemon-reload
     
     log_info "  Installed systemd services:"
-    log_info "    - timestd-core-recorder.service  (Phase 1: RTP → DRF, continuous)"
-    log_info "    - timestd-metrology.service      (Phase 2: Timing analysis, continuous)"
-    log_info "    - timestd-fusion.service         (Phase 3: Fusion & Chrony feed)"
-    log_info "    - timestd-web-api.service        (Web monitoring API, continuous)"
-    log_info "    - timestd-physics.service        (Phase 3: Physics fusion & Science)"
-    log_info "    - timestd-radiod-monitor.service (Phase 0.5: Hardware monitor)"
+    log_info "    - timestd-core-recorder.service  (Phase 1: RTP → Raw Buffer)"
+    log_info "    - timestd-metrology.service      (Phase 2: L1 Raw Measurements)"
+    log_info "    - timestd-l2-calibration.service (Phase 2: L2 Calibrated Timing)"
+    log_info "    - timestd-fusion.service         (Phase 3: Fusion → Chrony SHM)"
+    log_info "    - timestd-physics.service        (Phase 3: TEC Estimation)"
+    log_info "    - timestd-web-api.service        (Web API & Dashboard)"
+    log_info "    - timestd-radiod-monitor.service (Hardware Health Monitor)"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
-        log_info "    - timestd-vtec.service           (GNSS VTEC monitor, continuous)"
+        log_info "    - timestd-vtec.service           (GNSS VTEC Monitor)"
     fi
     
-    # Enable services
+    # Enable core services
     log_step "Enabling services for auto-start..."
     sudo systemctl enable timestd-core-recorder.service
     sudo systemctl enable timestd-metrology.service
+    sudo systemctl enable timestd-l2-calibration.service
     sudo systemctl enable timestd-fusion.service
-    sudo systemctl enable timestd-web-api.service
     sudo systemctl enable timestd-physics.service
+    sudo systemctl enable timestd-web-api.service
     sudo systemctl enable timestd-radiod-monitor.service
+    
+    # Enable optional services
+    sudo systemctl enable timestd-ionex-download.timer
+    sudo systemctl enable timestd-chrony-monitor.timer
     
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         sudo systemctl enable timestd-vtec.service
         log_info "  ✅ timestd-vtec.service enabled"
     fi
-
     
     log_info "  Services enabled (will start on boot)"
 
     # Create logrotate config
-    sudo tee "/etc/logrotate.d/grape-recorder" > /dev/null << EOF
+    sudo tee "/etc/logrotate.d/hf-timestd" > /dev/null << EOF
 $LOG_DIR/*.log {
     daily
     rotate 14
@@ -844,25 +638,23 @@ if [[ "$MODE" == "production" ]]; then
     echo ""
     echo "2. Set your station info (callsign, grid_square, lat/lon, etc.)"
     echo ""
-    echo "3. Start continuous services:"
-    echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → DRF"
-    echo "   sudo systemctl start timestd-metrology       # Phase 2: Timing analysis"
-    echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion service"
-    echo "   sudo systemctl start timestd-web-api         # Web monitoring API"
-    echo "   sudo systemctl start timestd-physics         # Physics fusion"
+    echo "3. Start continuous services (in order):"
+    echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → Raw Buffer"
+    echo "   sudo systemctl start timestd-metrology       # Phase 2: L1 Raw Measurements"
+    echo "   sudo systemctl start timestd-l2-calibration  # Phase 2: L2 Calibrated Timing"
+    echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion → Chrony SHM"
+    echo "   sudo systemctl start timestd-physics         # Phase 3: TEC Estimation"
+    echo "   sudo systemctl start timestd-web-api         # Web API & Dashboard"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
-        echo "   sudo systemctl start timestd-vtec            # GNSS VTEC monitor"
+        echo "   sudo systemctl start timestd-vtec            # GNSS VTEC Monitor"
     fi
     echo ""
     echo "4. Start periodic timers:"
-
+    echo "   sudo systemctl start timestd-ionex-download.timer  # Daily IONEX maps"
+    echo "   sudo systemctl start timestd-chrony-monitor.timer  # Chrony health check"
     echo ""
     echo "5. Check status:"
-    if [[ "$VTEC_ENABLED" == "true" ]]; then
-        echo "   sudo systemctl status timestd-core-recorder timestd-metrology timestd-fusion timestd-web-api timestd-vtec"
-    else
-        echo "   sudo systemctl status timestd-core-recorder timestd-metrology timestd-fusion timestd-web-api"
-    fi
+    echo "   sudo systemctl status timestd-core-recorder timestd-metrology timestd-l2-calibration timestd-fusion timestd-physics timestd-web-api"
     echo "   sudo systemctl list-timers timestd-*"
     echo "   journalctl -u timestd-core-recorder -f"
     echo ""

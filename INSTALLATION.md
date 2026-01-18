@@ -1,7 +1,7 @@
 # HF Time Standard Analysis (hf-timestd) - Installation Guide
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** December 31, 2025
+**Last Updated:** January 18, 2026
 
 This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, CHU, WWV, WWVH).
 
@@ -40,17 +40,19 @@ sudo ./scripts/install.sh --mode production
 # 3. Edit global configuration
 sudo nano /etc/hf-timestd/timestd-config.toml
 
-# 4. Enable and start core services
-sudo systemctl enable --now timestd-core-recorder
-sudo systemctl enable --now timestd-metrology
-sudo systemctl enable --now timestd-physics
-sudo systemctl enable --now timestd-fusion
-sudo systemctl enable --now timestd-web-api
+# 4. Enable and start core services (in dependency order)
+sudo systemctl enable --now timestd-core-recorder    # Phase 1: RTP → Raw Buffer
+sudo systemctl enable --now timestd-metrology        # Phase 2: L1 Raw Measurements
+sudo systemctl enable --now timestd-l2-calibration   # Phase 2: L2 Calibrated Timing
+sudo systemctl enable --now timestd-fusion           # Phase 3: Fusion → Chrony SHM
+sudo systemctl enable --now timestd-physics          # Phase 3: TEC Estimation
+sudo systemctl enable --now timestd-web-api          # Web API & Dashboard
 
 # 5. Enable optional services
-sudo systemctl enable --now timestd-ionex-download.timer  # Daily IONEX downloads
-sudo systemctl enable --now timestd-chrony-monitor.timer  # Chrony health monitoring
-sudo systemctl enable --now timestd-radiod-monitor    # Radiod health monitoring
+sudo systemctl enable --now timestd-vtec                    # GNSS VTEC (if enabled in config)
+sudo systemctl enable --now timestd-ionex-download.timer    # Daily IONEX downloads
+sudo systemctl enable --now timestd-chrony-monitor.timer    # Chrony health monitoring
+sudo systemctl enable --now timestd-radiod-monitor          # Radiod health monitoring
 ```
 
 ### Production Paths
@@ -89,39 +91,39 @@ nano config/timestd-config.toml
 
 ## Configuration Overview
 
-The configuration file controls which stations are recorded.
+After installation, configure your station-specific settings.
 
-### `[station]`
+**📖 See [docs/STATION_SETUP_GUIDE.md](docs/STATION_SETUP_GUIDE.md) for detailed configuration instructions.**
 
-Your geographic details (essential for physics propagation model).
+### Required Settings
+
+Edit `/etc/hf-timestd/timestd-config.toml`:
 
 ```toml
 [station]
-callsign = "AC0G"
-lat = 38.9
-lon = -94.6
+callsign = "<YOUR_CALLSIGN>"      # e.g., "W1ABC"
+grid_square = "<YOUR_GRID>"       # 10-char Maidenhead, e.g., "FN42ab12cd"
+latitude = 0.0                    # Decimal degrees (required for physics)
+longitude = 0.0                   # Decimal degrees (required for physics)
+id = "<PSWS_STATION_ID>"          # e.g., "S000171" (if uploading to PSWS)
+instrument_id = "<PSWS_INSTR_ID>" # e.g., "172" (if uploading to PSWS)
+
+[ka9q]
+status_address = "<YOUR_RADIOD>"  # e.g., "hf-status.local"
 ```
 
-### `[recorder.channels]`
+### Optional: GNSS VTEC Monitoring
 
-Define each frequency you want to monitor.
+If you have a u-blox ZED-F9P or similar dual-frequency GNSS receiver:
 
 ```toml
-[[recorder.channels]]
-description = "WWV 10 MHz"
-frequency_hz = 10000000
+[gnss_vtec]
 enabled = true
+host = "192.168.0.202"   # IP of GNSS receiver or ser2net bridge
+port = 9000              # TCP port for UBX data stream
 ```
 
-### `[vtec]` (Optional)
-
-If you have a local GNSS receiver for local VTEC corrections.
-
-```toml
-[vtec]
-enabled = true
-gnss_device = "/dev/ttyACM0"
-```
+See [docs/ZED_F9P_TEC_CONFIGURATION.md](docs/ZED_F9P_TEC_CONFIGURATION.md) for receiver setup.
 
 ---
 
@@ -129,20 +131,20 @@ gnss_device = "/dev/ttyACM0"
 
 ### Core Services (Required)
 
-- **`timestd-core-recorder`** - Records RTP audio streams from radiod, writes Digital RF archives
-- **`timestd-metrology`** - Phase 2 timing analysis: tone detection, BCD decoding, timing solution
-- **`timestd-physics`** - Propagation modeling using IONEX/IRI-2020, TEC estimation
-- **`timestd-fusion`** - Multi-broadcast Kalman fusion, feeds Chrony SHM for system clock discipline
+- **`timestd-core-recorder`** - Phase 1: Records RTP audio streams from radiod, writes raw buffer archives
+- **`timestd-metrology`** - Phase 2: L1 raw measurements (tone detection, BCD decoding, timing extraction)
+- **`timestd-l2-calibration`** - Phase 2: L2 calibrated timing (geometric + TEC + system corrections)
+- **`timestd-fusion`** - Phase 3: Multi-broadcast Kalman fusion, feeds Chrony SHM (TSL1/TSL2)
+- **`timestd-physics`** - Phase 3: TEC estimation from multi-frequency measurements
 - **`timestd-web-api`** - FastAPI web server on port 8000 (metrology dashboard, logs, API)
 
 ### Optional Services
 
+- **`timestd-vtec`** - GNSS VTEC monitoring (requires GNSS receiver, enabled via config)
 - **`timestd-ionex-download.timer`** - Daily download of global IONEX maps from NASA CDDIS
 - **`timestd-chrony-monitor.timer`** - Monitors Chrony reachability and alerts on issues
 - **`timestd-radiod-monitor`** - Monitors radiod health and restarts channels if needed
 - **`grape-daily.timer`** - Daily GRAPE processing: decimation, spectrograms, packaging
-
-**Note:** VTEC monitoring is handled by the `timestd-physics` service using scripts like `live_vtec.py` and `zedf9p_tec_client.py`, not a separate service.
 
 ---
 
@@ -154,8 +156,9 @@ gnss_device = "/dev/ttyACM0"
 # All should show "active (running)"
 sudo systemctl status timestd-core-recorder
 sudo systemctl status timestd-metrology
-sudo systemctl status timestd-physics
+sudo systemctl status timestd-l2-calibration
 sudo systemctl status timestd-fusion
+sudo systemctl status timestd-physics
 sudo systemctl status timestd-web-api
 ```
 
@@ -169,10 +172,11 @@ sudo systemctl status timestd-radiod-monitor          # If enabled
 
 ### Verify Data Flow
 
-1. **Raw Data:** Check Digital RF files: `ls -lh /var/lib/timestd/raw_archive/`
-2. **Analytics:** Check L2 HDF5 files: `ls -lh /var/lib/timestd/phase2/l2/`
-3. **Fusion:** Check fused output: `ls -lh /var/lib/timestd/phase2/fusion/`
-4. **Web API:** Open `http://localhost:8000` in browser
-5. **Chrony:** Run `chronyc sources` and look for SHM reference (should show reachability)
+1. **Raw Buffer:** Check binary archives: `ls -lh /var/lib/timestd/raw_buffer/`
+2. **L1 Metrology:** Check L1 HDF5 files: `ls -lh /var/lib/timestd/phase2/*/metrology/`
+3. **L2 Calibration:** Check L2 HDF5 files: `ls -lh /var/lib/timestd/phase2/*/clock_offset/`
+4. **Fusion:** Check fused output: `ls -lh /var/lib/timestd/phase2/fusion/`
+5. **Web API:** Open `http://localhost:8000` in browser
+6. **Chrony:** Run `chronyc sources` and look for TSL1/TSL2 references (should show reachability)
 
 ---

@@ -1,9 +1,8 @@
 [Unit]
 Description=HF-Timestd Multi-Broadcast Fusion (Chrony Feed)
 Documentation=https://github.com/mijahauan/hf-timestd
-After=timestd-analytics.service
-Requires=timestd-analytics.service
-PartOf=timestd-analytics.service
+After=timestd-l2-calibration.service
+Requires=timestd-l2-calibration.service
 
 [Service]
 Type=notify

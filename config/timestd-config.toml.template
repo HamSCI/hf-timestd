@@ -5,10 +5,12 @@
 
 [station]
 callsign = "<YOUR_CALLSIGN>"           # e.g., "W1ABC"
-grid_square = "<YOUR_GRID>"            # e.g., "FN31pr"
-id = "<YOUR_STATION_ID>"               # e.g., "AC0G"
-instrument_id = "<YOUR_INSTRUMENT_ID>" # e.g., "RX888"
+grid_square = "<YOUR_GRID>"            # e.g., "FN31pr" (10-char Maidenhead)
+id = "<YOUR_STATION_ID>"               # e.g., "S000001"
+instrument_id = "<YOUR_INSTRUMENT_ID>" # e.g., "172"
 description = "<YOUR_DESCRIPTION>"     # e.g., "RX888 MkII with resonant dipole"
+latitude = 0.0                          # Your latitude in decimal degrees (REQUIRED)
+longitude = 0.0                         # Your longitude in decimal degrees (REQUIRED)
 
 [ka9q]
 # Your ka9q-radio status multicast address
@@ -18,95 +20,84 @@ data_address = ""                        # Auto-discovered; leave empty
 auto_create_channels = true
 
 [recorder]
-# Mode: "test" (uses /tmp) or "production" (uses /var/spool)
+# Mode: "test" (uses /tmp) or "production" (uses /var/lib/timestd)
 # Start with "test" to verify operation, then switch to "production"
 mode = "test"
 
 # Data paths (auto-created based on mode)
 test_data_root = "/tmp/timestd-test"
-production_data_root = "/var/lib/hf-timestd"
+production_data_root = "/var/lib/timestd"
 
 # Recording parameters
 recording_interval = 60
 continuous = true
+blocktime_ms = 20
+max_gap_seconds = 60
+storage_quota = "80%"
 
-# === WWV Channels (2.5, 5, 10, 15, 20, 25 MHz) ===
-# Enable channels you can receive at your location
+# Compression: 'none', 'zstd', or 'lz4' - reduces disk I/O by ~2-3x
+compression = "zstd"
+compression_level = 3
+
+# Digital RF HDF5 output (uses significant storage ~1.5GB/day/channel)
+save_digital_rf = false
+
+# Tiered Storage: Use /dev/shm (RAM) for hot buffer, disk for cold storage
+tiered_storage = true
+hot_buffer_root = "/dev/shm/timestd"
+ram_percent = 20
+
+# Channel defaults (applied to all channels unless overridden)
+[recorder.channel_defaults]
+preset = "iq"
+sample_rate = 24000
+agc = 0
+gain = 0
+encoding = "F32"
+
+# === SHARED Channels (WWV + WWVH + BPM on same frequency) ===
+# 2.5, 5, 10, 15 MHz carry multiple time stations
 
 [[recorder.channels]]
-ssrc = 2500000
 frequency_hz = 2500000
-preset = "iq"
-sample_rate = 16000
-description = "WWV 2.5 MHz"
-enabled = true
+description = "SHARED_2500"
 
 [[recorder.channels]]
-ssrc = 5000000
 frequency_hz = 5000000
-preset = "iq"
-sample_rate = 16000
-description = "WWV 5 MHz"
-enabled = true
+description = "SHARED_5000"
 
 [[recorder.channels]]
-ssrc = 10000000
 frequency_hz = 10000000
-preset = "iq"
-sample_rate = 16000
-description = "WWV 10 MHz"
-enabled = true
+description = "SHARED_10000"
 
 [[recorder.channels]]
-ssrc = 15000000
 frequency_hz = 15000000
-preset = "iq"
-sample_rate = 16000
-description = "WWV 15 MHz"
-enabled = true
+description = "SHARED_15000"
+
+# === WWV-only Channels (20, 25 MHz) ===
 
 [[recorder.channels]]
-ssrc = 20000000
 frequency_hz = 20000000
-preset = "iq"
-sample_rate = 16000
-description = "WWV 20 MHz"
-enabled = true
+description = "WWV_20000"
 
 [[recorder.channels]]
-ssrc = 25000000
 frequency_hz = 25000000
-preset = "iq"
-sample_rate = 16000
-description = "WWV 25 MHz"
-enabled = true
+description = "WWV_25000"
 
 # === CHU Channels (3.33, 7.85, 14.67 MHz) ===
-# Useful for Canadian/northern US stations
+# Canadian time station - useful for northern stations
 
 [[recorder.channels]]
-ssrc = 3330000
 frequency_hz = 3330000
-preset = "iq"
-sample_rate = 16000
-description = "CHU 3.33 MHz"
-enabled = true
+description = "CHU_3330"
 
 [[recorder.channels]]
-ssrc = 7850000
 frequency_hz = 7850000
-preset = "iq"
-sample_rate = 16000
-description = "CHU 7.85 MHz"
-enabled = true
+description = "CHU_7850"
 
 [[recorder.channels]]
-ssrc = 14670000
 frequency_hz = 14670000
-preset = "iq"
-sample_rate = 16000
-description = "CHU 14.67 MHz"
-enabled = true
+description = "CHU_14670"
 
 [uploader]
 enabled = false
@@ -141,5 +132,16 @@ file_output = true
 enable_metrics = true
 
 [web_ui]
-port = 3000
+port = 8000
 refresh_interval = 60
+
+# GNSS VTEC Monitoring (Optional)
+# Requires a GNSS receiver providing RTCM or UBX data stream
+[gnss_vtec]
+enabled = false                         # Set to true if you have a GNSS receiver
+host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge
+port = 9000                             # GNSS data stream port (UBX protocol)
+save_csv = true
+csv_path = "data/gnss_vtec.csv"
+save_hdf5 = true
+hdf5_path = "data/gnss_vtec"

@@ -10,76 +10,73 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🔴 NEXT SESSION: GREENFIELD INSTALLATION REVIEW
+## ✅ COMPLETED: SESSION 2026-01-18 GREENFIELD INSTALLATION REVIEW
 
-**Priority:** HIGH  
+**Status:** ✅ **COMPLETE** - 2026-01-18  
 **Objective:** Review and validate all installation scripts, documentation, and procedures for deploying hf-timestd on a new system from scratch.
 
-### Session Context
+### Critical Issues Found and Fixed
 
-The production system at `bee1` is now stable and fully operational. The 2026-01-18 session completed:
-- Systemd watchdog audit (all services have watchdogs)
-- Data freshness checks (all downstream services warn on stale upstream data)
-- Graceful degradation (services continue processing stale data with warnings)
-- Chrony monitor updated for TSL1/TSL2 (replaced obsolete TMGR)
+#### 1. **`install.sh` Generated Outdated Service Files** 🔴 CRITICAL
 
-**Goal:** Ensure the repository contains everything needed for a clean greenfield installation that replicates the working production setup.
+**Problem:** The install script generated service files inline instead of copying the production-tested files from `systemd/`. This caused:
+- Missing watchdogs (services could hang silently)
+- Missing `timestd-l2-calibration.service` entirely
+- Wrong `Type=simple` instead of `Type=notify`
+- Missing security hardening
 
-### Review Areas
+**Fix:** Replaced inline generation with copy-based approach:
+```bash
+# Now copies pre-tested service files from systemd/ directory
+for svc in "${CORE_SERVICES[@]}"; do
+    sudo cp "$PROJECT_DIR/systemd/${svc}.service" "$SYSTEMD_DIR/"
+done
+```
 
-#### 1. **Installation Script Audit** ⚠️ HIGH PRIORITY
+#### 2. **Service Dependency Errors** 🔴 CRITICAL
 
-Review `scripts/install.sh` for completeness and correctness:
-- Does it create all required directories with correct permissions?
-- Does it install all systemd service files?
-- Does it configure chrony correctly (TSL1/TSL2 SHM feeds)?
-- Does it handle the `timestd` system user creation?
-- Does it set up the Python virtual environment correctly?
+**Problem:** `timestd-fusion.service` and `timestd-physics.service` referenced non-existent `timestd-analytics.service`.
 
-**Key Files:**
-- `scripts/install.sh` — Main installer
-- `systemd/*.service` — All service unit files
-- `config/chrony-timestd-refclocks.conf` — Chrony SHM configuration
-- `config/timestd-config.toml` — Template configuration
+**Fix:** Changed dependencies to `timestd-l2-calibration.service`:
+- `timestd-fusion.service`: `After=timestd-l2-calibration.service`
+- `timestd-physics.service`: `After=timestd-l2-calibration.service`
 
-#### 2. **Documentation Accuracy** ⚠️ HIGH PRIORITY
+#### 3. **INSTALLATION.md Inaccuracies** 🟡 MEDIUM
 
-Verify documentation matches current production setup:
-- `INSTALLATION.md` — Installation guide
-- `README.md` — Project overview
-- `TECHNICAL_REFERENCE.md` — Architecture documentation
+**Problems:**
+- Missing `timestd-l2-calibration` from core services
+- Missing `timestd-vtec` from optional services
+- Wrong data paths (`raw_archive` → `raw_buffer`, `phase2/l2` → `phase2/*/clock_offset`)
 
-**Check for:**
-- Outdated service names (e.g., `timestd-analytics` vs `timestd-metrology`)
-- Missing services (e.g., `timestd-l2-calibration`, `timestd-vtec`)
-- Incorrect paths or configurations
-- Missing prerequisites
+**Fix:** Updated all service lists and data paths to match production.
 
-#### 3. **Service Dependencies** ⚠️ MEDIUM PRIORITY
+#### 4. **Configuration Template Updated** 🟢 LOW
 
-Verify systemd service dependencies are correct:
-- `timestd-core-recorder` → No dependencies (first in chain)
-- `timestd-metrology` → Depends on core-recorder
-- `timestd-l2-calibration` → Depends on metrology
-- `timestd-fusion` → Depends on l2-calibration
-- `timestd-physics` → Depends on l2-calibration
-- `timestd-web-api` → Can start independently
+**Improvements to `config/timestd-config.toml.template`:**
+- Added `latitude`/`longitude` fields (required for physics)
+- Added `gnss_vtec` section
+- Updated channel format to match production (`SHARED_*` naming)
+- Added compression and tiered storage settings
+- Fixed web_ui port (3000 → 8000)
 
-#### 4. **Configuration Template** ⚠️ MEDIUM PRIORITY
+### Files Modified
 
-Review `config/timestd-config.toml` template:
-- Are all required sections present?
-- Are example values appropriate?
-- Are comments helpful for new users?
-- Does it match what the production system uses?
+| File | Change |
+|------|--------|
+| `scripts/install.sh` | Replaced inline service generation with copy from `systemd/` |
+| `systemd/timestd-fusion.service` | Fixed dependency: `analytics` → `l2-calibration` |
+| `systemd/timestd-physics.service` | Fixed dependency: `analytics` → `l2-calibration` |
+| `INSTALLATION.md` | Added missing services, fixed data paths |
+| `config/timestd-config.toml.template` | Added lat/lon, gnss_vtec, updated channels |
 
-#### 5. **Chrony Integration** ⚠️ MEDIUM PRIORITY
+### Verification Checklist
 
-Verify chrony configuration is correct:
-- SHM unit 0 → TSL1 (L1 metrology feed)
-- SHM unit 1 → TSL2 (L2 calibrated feed)
-- Correct refid names
-- Proper permissions (666 for SHM segments)
+After these fixes, a greenfield installation will:
+- ✅ Install all 7 core services with watchdogs
+- ✅ Install all 3 optional timers/services
+- ✅ Have correct service dependencies
+- ✅ Copy production-tested service files (not generate outdated ones)
+- ✅ Have accurate documentation
 
 ### Production Reference (bee1)
 
@@ -94,7 +91,7 @@ Verify chrony configuration is correct:
 **Active Services (7 core + 3 optional):**
 ```
 Core:
-  timestd-core-recorder   — RTP capture → Digital RF
+  timestd-core-recorder   — RTP capture → Raw Buffer
   timestd-metrology       — L1 raw measurements
   timestd-l2-calibration  — L2 calibrated timing
   timestd-fusion          — Multi-broadcast Kalman → Chrony SHM
@@ -107,21 +104,6 @@ Optional:
   timestd-chrony-monitor.timer   — Chrony health check
   timestd-radiod-monitor         — radiod health check
 ```
-
-**Chrony Sources:**
-```
-#* TSL2   0   4   377   — L2 calibrated (primary)
-#- TSL1   0   4   377   — L1 raw (backup)
-```
-
-### Expected Outcomes
-
-After this session:
-- ✅ `scripts/install.sh` validated and updated if needed
-- ✅ `INSTALLATION.md` accurate and complete
-- ✅ All systemd service files in repo match production
-- ✅ Configuration templates are correct
-- ✅ A new user could successfully install from scratch
 
 ---
 

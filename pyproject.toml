@@ -56,6 +56,13 @@ dev = [
     "flake8>=6.0.0",
     "mypy>=1.0.0",
 ]
+lz4 = [
+    "lz4>=4.0.0",
+]
+gnss = [
+    "pyserial>=3.5",
+    "pyubx2>=1.2.0",
+]
 
 [project.scripts]
 hf-timestd = "hf_timestd.cli:main"
