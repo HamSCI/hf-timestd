@@ -136,8 +136,8 @@ The system is composed of six independent systemd services:
 
 | Service | Responsibility | Output |
 |---------|---------------|--------|
-| **timestd-core-recorder** | Reliable Data Capture | `/var/lib/timestd/raw_archive/` |
-| **timestd-analytics** | Signal Processing & Timing Extraction | `/var/lib/timestd/phase2/{CHANNEL}/` |
+| **timestd-core-recorder** | Reliable Data Capture | `/var/lib/timestd/raw_buffer/` |
+| **timestd-metrology** | Signal Processing & Timing Extraction | `/var/lib/timestd/phase2/{CHANNEL}/` |
 | **timestd-fusion** | Multi-Broadcast Synthesis | `/var/lib/timestd/phase2/fusion/` + Chrony SHM |
 | **timestd-vtec** | Ionospheric Data Acquisition | `/var/lib/timestd/gnss_vtec.h5`, `/var/lib/timestd/ionex/` |
 | **timestd-physics** | Propagation Modeling & TEC Estimation | Enriched L2 HDF5 files |

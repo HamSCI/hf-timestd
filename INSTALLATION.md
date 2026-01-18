@@ -42,7 +42,7 @@ sudo nano /etc/hf-timestd/timestd-config.toml
 
 # 4. Enable and start core services
 sudo systemctl enable --now timestd-core-recorder
-sudo systemctl enable --now timestd-analytics
+sudo systemctl enable --now timestd-metrology
 sudo systemctl enable --now timestd-physics
 sudo systemctl enable --now timestd-fusion
 sudo systemctl enable --now timestd-web-api
@@ -130,7 +130,7 @@ gnss_device = "/dev/ttyACM0"
 ### Core Services (Required)
 
 - **`timestd-core-recorder`** - Records RTP audio streams from radiod, writes Digital RF archives
-- **`timestd-analytics`** - Phase 2 timing analysis: tone detection, BCD decoding, timing solution
+- **`timestd-metrology`** - Phase 2 timing analysis: tone detection, BCD decoding, timing solution
 - **`timestd-physics`** - Propagation modeling using IONEX/IRI-2020, TEC estimation
 - **`timestd-fusion`** - Multi-broadcast Kalman fusion, feeds Chrony SHM for system clock discipline
 - **`timestd-web-api`** - FastAPI web server on port 8000 (metrology dashboard, logs, API)
@@ -153,7 +153,7 @@ gnss_device = "/dev/ttyACM0"
 ```bash
 # All should show "active (running)"
 sudo systemctl status timestd-core-recorder
-sudo systemctl status timestd-analytics
+sudo systemctl status timestd-metrology
 sudo systemctl status timestd-physics
 sudo systemctl status timestd-fusion
 sudo systemctl status timestd-web-api

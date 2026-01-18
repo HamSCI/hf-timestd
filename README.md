@@ -40,7 +40,7 @@ sudo nano /etc/hf-timestd/timestd-config.toml
 
 # Start and enable all services
 sudo systemctl enable --now timestd-core-recorder
-sudo systemctl enable --now timestd-analytics
+sudo systemctl enable --now timestd-metrology
 sudo systemctl enable --now timestd-fusion
 sudo systemctl enable --now timestd-web-api
 ```
@@ -50,7 +50,7 @@ sudo systemctl enable --now timestd-web-api
 | Service | Command |
 |---------|---------|
 | Core Recorder | `sudo systemctl status timestd-core-recorder` |
-| Analytics | `sudo systemctl status timestd-analytics` |
+| Metrology | `sudo systemctl status timestd-metrology` |
 | Fusion | `sudo systemctl status timestd-fusion` |
 | Web API | `sudo systemctl status timestd-web-api` |
 | **All Logs** | `journalctl -u timestd-* -f` |
@@ -85,7 +85,7 @@ The system is composed of six independent services that form a pipeline:
 1. CORE RECORDER (timestd-core-recorder)
    • Writes Digital RF HDF5 (Reliable Capture)
      ↓
-2. ANALYTICS (timestd-analytics)
+2. METROLOGY (timestd-metrology)
    • Reads Raw HDF5 -> Detects Tones -> Solves Timing
    • Writes L2 HDF5 (Timing Measurements)
      ↓

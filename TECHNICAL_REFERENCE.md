@@ -37,9 +37,9 @@ The system is composed of six independent systemd services, each with a specific
 - Consumes RTP multicast streams from `ka9q-radio`.
 - Writes **Digital RF** formatted HDF5 files (`.h5`).
 - Maintains sample count integrity (gap filling).
-- **Output:** `/var/lib/timestd/raw_archive/`
+- **Output:** `/var/lib/timestd/raw_buffer/`
 
-### 2. Analytics (`timestd-analytics`)
+### 2. Metrology (`timestd-metrology`)
 
 **Responsibility:** Signal Processing & Timing Extraction
 
@@ -413,8 +413,8 @@ processor = "grape"
 
 # Production mode (24/7 operation)
 sudo ./scripts/install.sh --mode production --user $USER
-sudo systemctl start grape-recorder timestd-analytics grape-webui
-sudo systemctl enable grape-recorder timestd-analytics grape-webui
+sudo systemctl start timestd-core-recorder timestd-metrology timestd-web-api
+sudo systemctl enable timestd-core-recorder timestd-metrology timestd-web-api
 ```
 
 ### Manual Startup (Development)
@@ -429,13 +429,13 @@ python -m grape_recorder.grape.core_recorder --config config/timestd-config.toml
 
 ```bash
 # Service control
-sudo systemctl start|stop|status grape-recorder
-sudo systemctl start|stop|status timestd-analytics
-sudo systemctl start|stop|status grape-webui
+sudo systemctl start|stop|status timestd-core-recorder
+sudo systemctl start|stop|status timestd-metrology
+sudo systemctl start|stop|status timestd-web-api
 
 # View logs
-journalctl -u grape-recorder -f
-journalctl -u timestd-analytics -f
+journalctl -u timestd-core-recorder -f
+journalctl -u timestd-metrology -f
 
 # Enable daily uploads
 sudo systemctl enable --now grape-upload.timer
