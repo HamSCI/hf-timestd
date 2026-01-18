@@ -118,7 +118,7 @@ if [[ "$MODE" == "production" ]]; then
     
     SERVICES=(
         "timestd-core-recorder.service"
-        "timestd-analytics.service"
+        "timestd-metrology.service"
         "timestd-fusion.service"
         "timestd-web-ui.service",
         "timestd-physics.service",
@@ -157,7 +157,7 @@ if [[ "$MODE" == "production" ]]; then
     
     SERVICE_FILES=(
         "/etc/systemd/system/timestd-core-recorder.service"
-        "/etc/systemd/system/timestd-analytics.service"
+        "/etc/systemd/system/timestd-metrology.service"
         "/etc/systemd/system/timestd-fusion.service"
         "/etc/systemd/system/timestd-web-ui.service",
         "/etc/systemd/system/timestd-physics.service",

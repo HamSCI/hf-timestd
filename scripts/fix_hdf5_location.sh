@@ -4,7 +4,7 @@
 PHASE2_DIR="/var/lib/timestd/phase2"
 
 echo "Stopping Analytics Service..."
-sudo systemctl stop timestd-analytics
+sudo systemctl stop timestd-metrology
 
 echo "Scanning for misplaced HDF5 files..."
 for channel_dir in "$PHASE2_DIR"/*; do
@@ -19,7 +19,7 @@ for channel_dir in "$PHASE2_DIR"/*; do
 done
 
 echo "Restarting Analytics Service..."
-sudo systemctl start timestd-analytics
+sudo systemctl start timestd-metrology
 
 echo "Restarting Fusion Service..."
 sudo systemctl restart timestd-fusion

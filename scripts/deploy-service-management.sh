@@ -40,7 +40,7 @@ cp /etc/systemd/system/timestd-*.service /tmp/timestd-service-backup/ 2>/dev/nul
 
 # Copy new service files
 cp $REPO_DIR/systemd/timestd-core-recorder.service /etc/systemd/system/
-cp $REPO_DIR/systemd/timestd-analytics.service /etc/systemd/system/
+cp $REPO_DIR/systemd/timestd-metrology.service /etc/systemd/system/
 cp $REPO_DIR/systemd/timestd-fusion.service /etc/systemd/system/
 cp $REPO_DIR/systemd/timestd-web-ui-fastapi.service /etc/systemd/system/
 cp $REPO_DIR/systemd/timestd-alert@.service /etc/systemd/system/
@@ -74,7 +74,7 @@ echo "   Example: echo 'TIMESTD_ALERT_EMAIL=admin@example.com' >> /etc/hf-timest
 echo
 echo "2. Restart services to enable watchdog support:"
 echo "   sudo systemctl restart timestd-core-recorder"
-echo "   sudo systemctl restart timestd-analytics"
+echo "   sudo systemctl restart timestd-metrology"
 echo "   sudo systemctl restart timestd-fusion"
 echo "   sudo systemctl restart timestd-web-ui-fastapi"
 echo

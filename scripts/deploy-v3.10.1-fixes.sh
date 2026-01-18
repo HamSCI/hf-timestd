@@ -88,10 +88,10 @@ fi
 
 echo ""
 echo "Analytics Service Status:"
-if systemctl is-active --quiet timestd-analytics; then
-    echo "  ✅ timestd-analytics is running"
+if systemctl is-active --quiet timestd-metrology; then
+    echo "  ✅ timestd-metrology is running"
 else
-    echo "  ❌ timestd-analytics is NOT running"
+    echo "  ❌ timestd-metrology is NOT running"
 fi
 
 echo ""

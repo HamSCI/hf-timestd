@@ -56,7 +56,7 @@ $VENV_PIP install .
 # 6. Restart services
 echo "Restarting services..."
 systemctl restart timestd-fusion
-systemctl restart timestd-analytics
+systemctl restart timestd-metrology
 
 echo "=== Deployment Complete ==="
 echo "Monitor logs: journalctl -u timestd-fusion -f"

@@ -7,7 +7,7 @@ DATA_ROOT = Path('/var/lib/timestd/phase2')
 RAW_ROOT = Path('/var/lib/timestd/raw_buffer')
 
 # Map Old Directory -> New Directory
-# Based on existing 'timestd-analytics.sh' and new convention 'Station_kHz'
+# Based on existing 'timestd-metrology.sh' and new convention 'Station_kHz'
 MAPPING = {
     # WWV Only
     'WWV_20_MHz': 'WWV_20000',

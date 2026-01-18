@@ -171,7 +171,7 @@ echo "Environment file created: $PROD_CONFIG_DIR/environment"
 
 # Copy service files and substitute environment variables
 # (systemd doesn't expand env vars in WorkingDirectory)
-for svc in timestd-core-recorder timestd-analytics timestd-web-ui; do
+for svc in timestd-core-recorder timestd-metrology timestd-web-ui; do
     sed -e "s|\${TIMESTD_PROJECT}|$PROJECT_DIR|g" \
         -e "s|\${TIMESTD_VENV}|$PROJECT_DIR/venv|g" \
         -e "s|\${TIMESTD_CONFIG}|$PROD_CONFIG_DIR/timestd-config.toml|g" \
@@ -198,7 +198,7 @@ echo ""
 echo -e "${YELLOW}Step 8: Enabling and starting services...${NC}"
 
 systemctl enable timestd-core-recorder
-systemctl enable timestd-analytics
+systemctl enable timestd-metrology
 systemctl enable timestd-web-ui
 
 echo ""
@@ -206,17 +206,17 @@ echo -e "${GREEN}=== Migration Complete ===${NC}"
 echo ""
 echo "To start services now:"
 echo "  sudo systemctl start timestd-core-recorder"
-echo "  sudo systemctl start timestd-analytics"
+echo "  sudo systemctl start timestd-metrology"
 echo "  sudo systemctl start timestd-web-ui"
 echo ""
 echo "Or start all at once:"
-echo "  sudo systemctl start timestd-core-recorder timestd-analytics timestd-web-ui"
+echo "  sudo systemctl start timestd-core-recorder timestd-metrology timestd-web-ui"
 echo ""
 echo "To check status:"
-echo "  sudo systemctl status timestd-core-recorder timestd-analytics timestd-web-ui"
+echo "  sudo systemctl status timestd-core-recorder timestd-metrology timestd-web-ui"
 echo ""
 echo "To view logs:"
 echo "  journalctl -u timestd-core-recorder -f"
-echo "  journalctl -u timestd-analytics -f"
+echo "  journalctl -u timestd-metrology -f"
 echo ""
 echo -e "${YELLOW}Note: Test data preserved at $TEST_ROOT (can be deleted after verification)${NC}"

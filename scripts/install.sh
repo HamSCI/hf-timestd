@@ -549,12 +549,12 @@ SyslogIdentifier=timestd-core-recorder
 WantedBy=multi-user.target
 EOF
     
-    # Analytics Service (Phase 2: All 9 channels + fusion)
-    # Uses timestd-analytics.sh which starts all channel analyzers
-    sudo tee "$SYSTEMD_DIR/timestd-analytics.service" > /dev/null << EOF
+    # Metrology Service (Phase 2: All 9 channels)
+    # Uses timestd-metrology.sh which starts all channel metrology services
+    sudo tee "$SYSTEMD_DIR/timestd-metrology.service" > /dev/null << EOF
 [Unit]
-Description=HF Time Standard Analytics Service - Phase 2 Timing Analysis
-Documentation=https://github.com/mijahauan/grape-recorder
+Description=HF Time Standard Metrology Service - Phase 2 Timing Analysis
+Documentation=https://github.com/mijahauan/hf-timestd
 After=timestd-core-recorder.service
 Wants=timestd-core-recorder.service
 
@@ -565,9 +565,9 @@ Group=$INSTALL_USER
 EnvironmentFile=$CONFIG_DIR/environment
 WorkingDirectory=$DATA_ROOT
 
-# Use the shell script that starts all 9 channel analyzers + fusion
-ExecStart=/opt/hf-timestd/scripts/timestd-analytics.sh -start $CONFIG_DIR/timestd-config.toml
-ExecStop=/opt/hf-timestd/scripts/timestd-analytics.sh -stop
+# Use the shell script that starts all 9 channel metrology services
+ExecStart=/opt/hf-timestd/scripts/timestd-metrology.sh -start $CONFIG_DIR/timestd-config.toml
+ExecStop=/opt/hf-timestd/scripts/timestd-metrology.sh -stop
 
 # Type=forking since script backgrounds processes
 RemainAfterExit=yes
@@ -579,7 +579,7 @@ StartLimitBurst=3
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=timestd-analytics
+SyslogIdentifier=timestd-metrology
 
 [Install]
 WantedBy=multi-user.target
@@ -589,8 +589,8 @@ EOF
     sudo tee "$SYSTEMD_DIR/timestd-fusion.service" > /dev/null << EOF
 [Unit]
 Description=HF-Timestd Multi-Broadcast Fusion (Chrony Feed)
-After=timestd-analytics.service
-Requires=timestd-analytics.service
+After=timestd-metrology.service
+Requires=timestd-metrology.service
 
 [Service]
 Type=simple
@@ -613,7 +613,7 @@ EOF
 [Unit]
 Description=HF-TimeStd Web API (FastAPI Monitoring Server)
 Documentation=https://github.com/mijahauan/hf-timestd
-After=network-online.target timestd-analytics.service
+After=network-online.target timestd-metrology.service
 Wants=network-online.target
 
 [Service]
@@ -651,9 +651,9 @@ EOF
 [Unit]
 Description=HF-TimeStd Physics-Based Fusion (Science First)
 Documentation=https://github.com/mijahauan/hf-timestd
-After=timestd-analytics.service
-Requires=timestd-analytics.service
-PartOf=timestd-analytics.service
+After=timestd-metrology.service
+Requires=timestd-metrology.service
+PartOf=timestd-metrology.service
 
 [Service]
 Type=simple
@@ -786,7 +786,7 @@ EOF
     
     log_info "  Installed systemd services:"
     log_info "    - timestd-core-recorder.service  (Phase 1: RTP → DRF, continuous)"
-    log_info "    - timestd-analytics.service      (Phase 2: Timing analysis, continuous)"
+    log_info "    - timestd-metrology.service      (Phase 2: Timing analysis, continuous)"
     log_info "    - timestd-fusion.service         (Phase 3: Fusion & Chrony feed)"
     log_info "    - timestd-web-api.service        (Web monitoring API, continuous)"
     log_info "    - timestd-physics.service        (Phase 3: Physics fusion & Science)"
@@ -798,7 +798,7 @@ EOF
     # Enable services
     log_step "Enabling services for auto-start..."
     sudo systemctl enable timestd-core-recorder.service
-    sudo systemctl enable timestd-analytics.service
+    sudo systemctl enable timestd-metrology.service
     sudo systemctl enable timestd-fusion.service
     sudo systemctl enable timestd-web-api.service
     sudo systemctl enable timestd-physics.service
@@ -846,7 +846,7 @@ if [[ "$MODE" == "production" ]]; then
     echo ""
     echo "3. Start continuous services:"
     echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → DRF"
-    echo "   sudo systemctl start timestd-analytics       # Phase 2: Timing analysis"
+    echo "   sudo systemctl start timestd-metrology       # Phase 2: Timing analysis"
     echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion service"
     echo "   sudo systemctl start timestd-web-api         # Web monitoring API"
     echo "   sudo systemctl start timestd-physics         # Physics fusion"
@@ -859,9 +859,9 @@ if [[ "$MODE" == "production" ]]; then
     echo ""
     echo "5. Check status:"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
-        echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-api timestd-vtec"
+        echo "   sudo systemctl status timestd-core-recorder timestd-metrology timestd-fusion timestd-web-api timestd-vtec"
     else
-        echo "   sudo systemctl status timestd-core-recorder timestd-analytics timestd-fusion timestd-web-api"
+        echo "   sudo systemctl status timestd-core-recorder timestd-metrology timestd-fusion timestd-web-api"
     fi
     echo "   sudo systemctl list-timers timestd-*"
     echo "   journalctl -u timestd-core-recorder -f"

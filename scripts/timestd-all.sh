@@ -63,7 +63,7 @@ start)
     "$SCRIPT_DIR/timestd-core.sh" start "$CONFIG"
     echo ""
     echo "📊 Phase 2: Analytics (timing analysis, D_clock)"
-    "$SCRIPT_DIR/timestd-analytics.sh" start "$CONFIG"
+    "$SCRIPT_DIR/timestd-metrology.sh" start "$CONFIG"
     echo ""
     echo "🌐 Web-UI (monitoring dashboard)"
     "$SCRIPT_DIR/timestd-ui.sh" start "$CONFIG"
@@ -83,7 +83,7 @@ stop)
     
     "$SCRIPT_DIR/timestd-ui.sh" stop
     "$SCRIPT_DIR/timestd-fusion.sh" stop
-    "$SCRIPT_DIR/timestd-analytics.sh" stop
+    "$SCRIPT_DIR/timestd-metrology.sh" stop
     "$SCRIPT_DIR/timestd-core.sh" stop
     
     echo ""
