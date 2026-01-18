@@ -114,26 +114,28 @@ class HealthService:
                     statuses.append(status_dict)
                     continue
                 
-                # L1A files are in carrier_power subdirectory
-                carrier_power_dir = channel_dir / 'carrier_power'
+                # L2 timing_measurements are in clock_offset subdirectory
+                clock_offset_dir = channel_dir / 'clock_offset'
                 
-                if not carrier_power_dir.exists():
-                    logger.debug(f"Carrier power directory does not exist: {carrier_power_dir}")
+                if not clock_offset_dir.exists():
+                    logger.debug(f"Clock offset directory does not exist: {clock_offset_dir}")
+                    status_dict['status'] = 'stale'
                     statuses.append(status_dict)
                     continue
                 
                 # Check if any HDF5 files exist
-                h5_files = list(carrier_power_dir.glob('*_channel_observables_*.h5'))
+                h5_files = list(clock_offset_dir.glob('*_timing_measurements_*.h5'))
                 if not h5_files:
-                    logger.debug(f"No HDF5 files found in {carrier_power_dir}")
+                    logger.debug(f"No HDF5 files found in {clock_offset_dir}")
+                    status_dict['status'] = 'stale'
                     statuses.append(status_dict)
                     continue
                 
-                # Try to read recent L1A data
+                # Try to read recent L2 timing data
                 reader = DataProductReader(
-                    data_dir=carrier_power_dir,
-                    product_level='L1',
-                    product_name='channel_observables',
+                    data_dir=channel_dir,
+                    product_level='L2',
+                    product_name='timing_measurements',
                     channel=channel_name
                 )
                 
@@ -146,21 +148,38 @@ class HealthService:
                 if measurements:
                     latest = measurements[-1]
                     
+                    # Calculate completeness as ratio of measurements to expected (60 per hour)
+                    completeness = min(1.0, len(measurements) / 60.0)
+                    
                     status_dict.update({
                         'status': 'active',
                         'last_update': latest.get('timestamp_utc'),
-                        'carrier_snr_db': latest.get('carrier_snr_db'),
-                        'data_quality': latest.get('quality_flag'),
-                        'completeness': latest.get('data_completeness')
+                        'carrier_snr_db': latest.get('snr_db'),
+                        'data_quality': latest.get('quality_grade'),
+                        'completeness': completeness
                     })
                 else:
-                    status_dict['status'] = 'stale'
+                    # No data in last hour - try to get last known data from last 24h
+                    start_24h = (datetime.utcnow() - timedelta(hours=24)).isoformat() + 'Z'
+                    older_measurements = reader.read_time_range(start=start_24h, end=end_time)
+                    
+                    if older_measurements:
+                        latest = older_measurements[-1]
+                        status_dict.update({
+                            'status': 'stale',
+                            'last_update': latest.get('timestamp_utc'),
+                            'carrier_snr_db': latest.get('snr_db'),
+                            'data_quality': latest.get('quality_grade'),
+                            'completeness': 0.0
+                        })
+                    else:
+                        status_dict['status'] = 'stale'
                 
                 statuses.append(status_dict)
             
             except Exception as e:
                 logger.warning(f"Error getting status for {channel_name}: {e}")
-                status_dict['status'] = 'unknown'
+                status_dict['status'] = 'stale'
                 statuses.append(status_dict)
         
         return statuses
@@ -172,7 +191,7 @@ class HealthService:
         # Check for timestd processes with actual command patterns
         process_checks = [
             ('Recorder', 'core_recorder_v2'),
-            ('Analytics', 'phase2_analytics_service'),
+            ('Metrology', 'metrology_service'),
             ('Fusion', 'multi_broadcast_fusion'),
             ('Physics', 'physics_fusion_service'),
             ('GNSS VTEC', 'live_vtec.py'),

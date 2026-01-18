@@ -19,6 +19,7 @@
                 <a href="/static/health.html" class="nav-link">System Health</a>
                 <a href="/static/metrology.html" class="nav-link active">Metrology</a>
                 <a href="/static/propagation.html" class="nav-link">Propagation</a>
+                <a href="/static/physics.html" class="nav-link">Physics</a>
             </nav>
         </div>
 
@@ -85,6 +86,19 @@
                 </div>
             </div>
             <div id="expert-metrics" style="padding: 16px;">
+                <div class="loading"></div>
+            </div>
+        </div>
+
+        <!-- CHU FSK Decoded Data -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">🇨🇦 CHU FSK Time Code</div>
+                    <div class="card-subtitle">Decoded BCD time code from NRC Canada (seconds 31-39)</div>
+                </div>
+            </div>
+            <div id="chu-fsk-data" style="padding: 16px;">
                 <div class="loading"></div>
             </div>
         </div>
@@ -438,6 +452,131 @@
             `;
         }
 
+        async function loadCHUFSK() {
+            try {
+                const data = await api.get('/metrology/chu-fsk/latest');
+                const container = document.getElementById('chu-fsk-data');
+                
+                if (!data.available) {
+                    container.innerHTML = `
+                        <div style="text-align: center; padding: 24px; color: #94a3b8;">
+                            <div style="font-size: 32px; margin-bottom: 12px;">📡</div>
+                            <div style="font-size: 14px;">${data.message || 'No CHU FSK data available'}</div>
+                            <div style="font-size: 12px; margin-top: 8px; color: #64748b;">
+                                CHU FSK decoding requires reception of CHU on 3.33, 7.85, or 14.67 MHz
+                            </div>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                // Format DUT1 with sign
+                const dut1Display = data.dut1_seconds !== null 
+                    ? (data.dut1_seconds >= 0 ? '+' : '') + data.dut1_seconds.toFixed(1) + ' s'
+                    : 'N/A';
+                
+                // Format decoded time
+                const decodedTime = data.decoded_day && data.decoded_hour !== null && data.decoded_minute !== null
+                    ? `Day ${data.decoded_day} ${String(data.decoded_hour).padStart(2, '0')}:${String(data.decoded_minute).padStart(2, '0')} UTC`
+                    : 'N/A';
+                
+                // Confidence color
+                const confColor = data.decode_confidence >= 0.8 ? '#10b981' 
+                    : data.decode_confidence >= 0.5 ? '#f59e0b' : '#ef4444';
+                
+                container.innerHTML = `
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px;">
+                        <!-- DUT1 -->
+                        <div style="text-align: center; padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px;">
+                            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px; text-transform: uppercase;">
+                                DUT1 (UT1 - UTC)
+                            </div>
+                            <div style="font-size: 28px; font-weight: 700; font-family: 'Courier New', monospace; color: #f59e0b;">
+                                ${dut1Display}
+                            </div>
+                            <div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+                                Earth rotation correction
+                            </div>
+                        </div>
+                        
+                        <!-- TAI-UTC -->
+                        <div style="text-align: center; padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px;">
+                            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px; text-transform: uppercase;">
+                                TAI - UTC
+                            </div>
+                            <div style="font-size: 28px; font-weight: 700; font-family: 'Courier New', monospace; color: #8b5cf6;">
+                                ${data.tai_utc !== null ? data.tai_utc + ' s' : 'N/A'}
+                            </div>
+                            <div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+                                Leap second count
+                            </div>
+                        </div>
+                        
+                        <!-- Timing Offset -->
+                        <div style="text-align: center; padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px;">
+                            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px; text-transform: uppercase;">
+                                FSK Timing Offset
+                            </div>
+                            <div style="font-size: 28px; font-weight: 700; font-family: 'Courier New', monospace; color: #3b82f6;">
+                                ${data.timing_offset_ms !== null ? formatNumber(data.timing_offset_ms, 3) + ' ms' : 'N/A'}
+                            </div>
+                            <div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+                                500ms boundary precision
+                            </div>
+                        </div>
+                        
+                        <!-- Decode Confidence -->
+                        <div style="text-align: center; padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px;">
+                            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px; text-transform: uppercase;">
+                                Decode Quality
+                            </div>
+                            <div style="font-size: 28px; font-weight: 700; font-family: 'Courier New', monospace; color: ${confColor};">
+                                ${data.decode_confidence !== null ? (data.decode_confidence * 100).toFixed(0) + '%' : 'N/A'}
+                            </div>
+                            <div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+                                ${data.frames_decoded || 0}/${data.frames_total || 9} frames decoded
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-top: 20px; padding: 16px; background: rgba(30, 41, 59, 0.3); border-radius: 8px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px;">
+                        <div>
+                            <span style="color: #94a3b8; font-size: 12px;">Decoded Time:</span>
+                            <span style="font-family: 'Courier New', monospace; margin-left: 8px;">${decodedTime}</span>
+                        </div>
+                        <div>
+                            <span style="color: #94a3b8; font-size: 12px;">Year:</span>
+                            <span style="font-family: 'Courier New', monospace; margin-left: 8px;">${data.year || 'N/A'}</span>
+                        </div>
+                        <div>
+                            <span style="color: #94a3b8; font-size: 12px;">Channel:</span>
+                            <span style="font-family: 'Courier New', monospace; margin-left: 8px;">${data.channel || 'N/A'}</span>
+                        </div>
+                        <div>
+                            <span style="color: #94a3b8; font-size: 12px;">Last Decode:</span>
+                            <span style="font-family: 'Courier New', monospace; margin-left: 8px;">${data.last_decode ? formatTime(data.last_decode) : 'N/A'}</span>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-top: 16px; padding: 12px; background: rgba(139, 92, 246, 0.1); border-left: 3px solid #8b5cf6; border-radius: 4px;">
+                        <div style="font-size: 12px; color: #a78bfa;">
+                            <strong>About CHU FSK:</strong> CHU broadcasts a 300-baud FSK time code during seconds 31-39 of each minute.
+                            This provides verified UTC time, DUT1 correction (UT1-UTC), and TAI-UTC leap second count directly from NRC Canada.
+                            The 500ms frame boundary provides an independent timing reference.
+                        </div>
+                    </div>
+                `;
+                
+            } catch (error) {
+                console.error('Failed to load CHU FSK data:', error);
+                document.getElementById('chu-fsk-data').innerHTML = `
+                    <div style="text-align: center; padding: 24px; color: #94a3b8;">
+                        <div style="font-size: 14px;">Unable to load CHU FSK data</div>
+                    </div>
+                `;
+            }
+        }
+
         async function loadLatestFusion() {
             try {
                 clearError();
@@ -673,12 +812,14 @@
         // Initialize
         async function init() {
             await loadLatestFusion();
+            await loadCHUFSK();
             await loadFusionHistory(currentRange);
             await loadAllanDeviation(currentAdevRange);
 
             // Auto-refresh every 60 seconds
             const refresh = new AutoRefresh(() => {
                 loadLatestFusion();
+                loadCHUFSK();
                 loadFusionHistory(currentRange);
                 // Don't auto-refresh ADEV - it's computationally expensive
             }, 60000);

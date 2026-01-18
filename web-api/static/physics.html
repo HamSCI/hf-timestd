@@ -13,7 +13,7 @@
     <div class="container">
         <div class="header">
             <h1>⚛️ Ionospheric Physics</h1>
-            <div class="header-subtitle">Physics-based Total Electron Content (TEC) & Model Validation</div>
+            <div class="header-subtitle">Multi-path ionospheric analysis, scintillation, and channel characterization</div>
             <nav class="nav">
                 <a href="/" class="nav-link">Overview</a>
                 <a href="/static/health.html" class="nav-link">System Health</a>
@@ -25,70 +25,193 @@
 
         <div id="error-container" style="display: none;"></div>
 
-        <!-- Hero: UTC Consistency -->
-        <div class="hero-metric" id="hero-metric">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
-                <div style="font-size: 18px; font-weight: 600; color: #94a3b8;">UTC Model Consistency</div>
-                <div class="live-indicator">
-                    <div class="live-dot"></div>
-                    <span>Live</span>
+        <!-- View Tabs -->
+        <div class="view-tabs">
+            <button class="view-tab active" data-view="paths">📍 Paths</button>
+            <button class="view-tab" data-view="channels">📊 Channels</button>
+            <button class="view-tab" data-view="events">⚡ Events</button>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- PATHS VIEW -->
+        <!-- ============================================================ -->
+        <div id="view-paths" class="view-content active">
+            <!-- Hero: UTC Consistency -->
+            <div class="hero-metric" id="hero-metric">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+                    <div style="font-size: 18px; font-weight: 600; color: #94a3b8;">UTC Model Consistency</div>
+                    <div class="live-indicator">
+                        <div class="live-dot"></div>
+                        <span>Live</span>
+                    </div>
+                </div>
+
+                <div class="hero-value" id="hero-consistency">
+                    <div class="loading"></div>
+                </div>
+
+                <div style="font-size: 18px; color: #94a3b8; margin-bottom: 16px;">
+                    Physics Model Validity
+                </div>
+
+                <div style="display: flex; justify-content: center; gap: 24px; flex-wrap: wrap;">
+                    <div style="text-align: center;">
+                        <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Stations Used</div>
+                        <div style="font-size: 24px; font-weight: 600;" id="hero-stations">-</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Residuals</div>
+                        <div style="font-size: 24px; font-weight: 600;" id="hero-residuals">-</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Timestamp</div>
+                        <div style="font-size: 16px; font-weight: 500; font-family: 'Courier New', monospace;"
+                            id="hero-timestamp">-</div>
+                    </div>
                 </div>
             </div>
 
-            <div class="hero-value" id="hero-consistency">
-                <div class="loading"></div>
+            <!-- Path Cards with TEC and Scintillation -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">Propagation Paths</div>
+                        <div class="card-subtitle">TEC, scintillation, and signal quality per broadcast station path</div>
+                    </div>
+                </div>
+                <div class="grid grid-4" id="path-cards">
+                    <div class="loading"></div>
+                </div>
             </div>
 
-            <div style="font-size: 18px; color: #94a3b8; margin-bottom: 16px;">
-                Physics Model Validity
-            </div>
-
-            <div style="display: flex; justify-content: center; gap: 24px; flex-wrap: wrap;">
-                <div style="text-align: center;">
-                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Stations Used</div>
-                    <div style="font-size: 24px; font-weight: 600;" id="hero-stations">-</div>
+            <!-- Measurement History Plot -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">Measurement History</div>
+                    <div class="card-subtitle">Signal quality and scintillation over time</div>
                 </div>
-                <div style="text-align: center;">
-                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Residuals</div>
-                    <div style="font-size: 24px; font-weight: 600;" id="hero-residuals">-</div>
+                <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button class="time-range-btn active" data-range="-6h">Last 6 Hours</button>
+                    <button class="time-range-btn" data-range="-24h">Last 24 Hours</button>
+                    <button class="time-range-btn" data-range="-7d">Last 7 Days</button>
                 </div>
-                <div style="text-align: center;">
-                    <div style="font-size: 14px; color: #64748b; margin-bottom: 4px;">Timestamp</div>
-                    <div style="font-size: 16px; font-weight: 500; font-family: 'Courier New', monospace;"
-                        id="hero-timestamp">-</div>
-                </div>
+                <div id="tec-plot" style="width: 100%; height: 400px;"></div>
             </div>
         </div>
 
-        <!-- TEC Estimates -->
-        <div class="card">
-            <div class="card-header">
-                <div>
-                    <div class="card-title">Real-time TEC Estimation</div>
-                    <div class="card-subtitle">Total Electron Content derived from differential Time-of-Flight</div>
+        <!-- ============================================================ -->
+        <!-- CHANNELS VIEW -->
+        <!-- ============================================================ -->
+        <div id="view-channels" class="view-content">
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">📡 Channel Characterization</div>
+                        <div class="card-subtitle">WWV/WWVH scientific test signal analysis (minutes 8 & 44)</div>
+                    </div>
+                </div>
+                <div id="channel-summary">
+                    <div class="loading"></div>
                 </div>
             </div>
-            <div class="grid grid-2" id="tec-cards">
-                <div class="loading"></div>
+
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">Test Signal Results</div>
+                        <div class="card-subtitle">Latest multi-tone, chirp, and burst analysis</div>
+                    </div>
+                </div>
+                <div id="test-signal-results">
+                    <div class="loading"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">Channel Quality History</div>
+                </div>
+                <div id="channel-history-plot" style="width: 100%; height: 350px;"></div>
             </div>
         </div>
 
-        <!-- TEC History Plot -->
-        <div class="card">
-            <div class="card-header">
-                <div class="card-title">TEC History</div>
-                <div class="card-subtitle">Ionospheric electron content evolution over time</div>
+        <!-- ============================================================ -->
+        <!-- EVENTS VIEW -->
+        <!-- ============================================================ -->
+        <div id="view-events" class="view-content">
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">⚡ Ionospheric Events</div>
+                        <div class="card-subtitle">Detected events and anomalies</div>
+                    </div>
+                </div>
+                <div id="events-timeline">
+                    <div style="padding: 40px; text-align: center; color: #94a3b8;">
+                        <div style="font-size: 48px; margin-bottom: 16px;">🔭</div>
+                        <div style="font-size: 16px; margin-bottom: 8px;">Event Detection</div>
+                        <div style="font-size: 13px; color: #64748b;">
+                            Monitoring for: Sporadic-E, TIDs, Solar Flares, Day/Night Transitions
+                        </div>
+                    </div>
+                </div>
             </div>
-            <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
-                <button class="time-range-btn active" data-range="-6h">Last 6 Hours</button>
-                <button class="time-range-btn" data-range="-24h">Last 24 Hours</button>
-                <button class="time-range-btn" data-range="-7d">Last 7 Days</button>
+
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">Scintillation Monitor</div>
+                        <div class="card-subtitle">S4 (amplitude) and σ_φ (phase) scintillation indices</div>
+                    </div>
+                </div>
+                <div id="scintillation-display">
+                    <div class="loading"></div>
+                </div>
             </div>
-            <div id="tec-plot" style="width: 100%; height: 400px;"></div>
         </div>
     </div>
 
     <style>
+        .view-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            padding: 4px;
+            background: rgba(30, 41, 59, 0.5);
+            border-radius: 12px;
+            width: fit-content;
+        }
+
+        .view-tab {
+            padding: 12px 24px;
+            background: transparent;
+            border: none;
+            border-radius: 8px;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .view-tab:hover {
+            background: rgba(59, 130, 246, 0.1);
+            color: #e0e0e0;
+        }
+
+        .view-tab.active {
+            background: #3b82f6;
+            color: #fff;
+        }
+
+        .view-content {
+            display: none;
+        }
+
+        .view-content.active {
+            display: block;
+        }
+
         .time-range-btn {
             padding: 8px 16px;
             background: rgba(59, 130, 246, 0.1);
@@ -122,132 +245,486 @@
             color: #94a3b8;
             font-weight: 400;
         }
+
+        .path-card {
+            background: rgba(30, 41, 59, 0.5);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        .path-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .path-station {
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .path-metric {
+            text-align: center;
+            padding: 8px;
+            background: rgba(15, 23, 42, 0.5);
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+
+        .path-metric-label {
+            font-size: 11px;
+            color: #64748b;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+
+        .path-metric-value {
+            font-size: 18px;
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+        }
+
+        .severity-none { color: #10b981; }
+        .severity-weak { color: #84cc16; }
+        .severity-moderate { color: #f59e0b; }
+        .severity-strong { color: #ef4444; }
+
+        .channel-card {
+            background: rgba(30, 41, 59, 0.3);
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+        }
+
+        .channel-quality-excellent { border-left: 4px solid #10b981; }
+        .channel-quality-good { border-left: 4px solid #84cc16; }
+        .channel-quality-fair { border-left: 4px solid #f59e0b; }
+        .channel-quality-poor { border-left: 4px solid #ef4444; }
+
+        .event-item {
+            padding: 16px;
+            background: rgba(30, 41, 59, 0.3);
+            border-radius: 8px;
+            margin-bottom: 12px;
+            border-left: 4px solid #3b82f6;
+        }
+
+        .event-time {
+            font-size: 12px;
+            color: #64748b;
+            font-family: 'Courier New', monospace;
+        }
+
+        .event-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 8px 0;
+        }
+
+        .event-details {
+            font-size: 13px;
+            color: #94a3b8;
+        }
     </style>
 
     <script src="/static/js/common.js"></script>
     <script>
         let currentRange = '-6h';
+        let currentView = 'paths';
 
+        // ================================================================
+        // VIEW TAB HANDLING
+        // ================================================================
+        document.querySelectorAll('.view-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const view = tab.dataset.view;
+                
+                // Update tab styles
+                document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                
+                // Show/hide views
+                document.querySelectorAll('.view-content').forEach(v => v.classList.remove('active'));
+                document.getElementById(`view-${view}`).classList.add('active');
+                
+                currentView = view;
+                
+                // Load data for the view if needed
+                if (view === 'channels') {
+                    loadChannelData();
+                } else if (view === 'events') {
+                    loadEventsData();
+                }
+            });
+        });
+
+        // ================================================================
+        // PATHS VIEW
+        // ================================================================
         async function loadLatestPhysics() {
             try {
                 clearError();
-                const data = await api.get('/physics/latest');
+                const [physicsData, scintData] = await Promise.all([
+                    api.get('/physics/latest').catch(() => null),
+                    api.get('/physics/scintillation/paths').catch(() => ({ paths: {} }))
+                ]);
 
-                if (!data) {
-                    document.getElementById('hero-consistency').textContent = 'NO DATA';
-                    return;
-                }
-
-                // Update Hero
-                const consistency = data.utc_consistency_flag ? 'CONSISTENT' : 'INCONSISTENT';
+                // Update Hero with physics consistency
                 const heroEl = document.getElementById('hero-consistency');
-                heroEl.textContent = consistency;
-
-                // Color code consistency
                 const heroMetric = document.getElementById('hero-metric');
-                if (data.utc_consistency_flag) {
-                    heroEl.style.color = '#10b981'; // Green
-                    heroMetric.className = 'hero-metric status-healthy';
+                
+                if (!physicsData) {
+                    heroEl.textContent = 'NO DATA';
+                    heroEl.style.color = '#94a3b8';
                 } else {
-                    heroEl.style.color = '#ef4444'; // Red
-                    heroMetric.className = 'hero-metric status-error';
+                    const consistency = physicsData.utc_consistency_flag ? 'CONSISTENT' : 'CHECKING';
+                    heroEl.textContent = consistency;
+                    
+                    if (physicsData.utc_consistency_flag) {
+                        heroEl.style.color = '#10b981';
+                        heroMetric.className = 'hero-metric status-healthy';
+                    } else {
+                        heroEl.style.color = '#f59e0b';
+                        heroMetric.className = 'hero-metric';
+                    }
+                    
+                    document.getElementById('hero-timestamp').textContent = formatTime(physicsData.timestamp_utc);
                 }
 
-                document.getElementById('hero-stations').textContent = data.stations_used ? data.stations_used.length : 0;
-                document.getElementById('hero-residuals').textContent = formatNumber(data.utc_uncertainty_ms, 3) + ' ms'; // Using uncertainty as proxy for residuals for now
-                document.getElementById('hero-timestamp').textContent = formatTime(data.timestamp_utc);
-
-                // Update TEC Cards
-                const tecContainer = document.getElementById('tec-cards');
-                if (data.tec_estimates && Object.keys(data.tec_estimates).length > 0) {
-                    tecContainer.innerHTML = Object.entries(data.tec_estimates).map(([station, tec]) => `
-                        <div style="background: rgba(30, 41, 59, 0.5); padding: 20px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.1);">
-                            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
-                                <div style="font-size: 20px; font-weight: 600;">${station}</div>
-                                <div class="badge ${data.utc_consistency_flag ? 'status-healthy' : 'status-degraded'}">Active</div>
+                // Build path cards from scintillation data (which has measurement counts)
+                const pathContainer = document.getElementById('path-cards');
+                const stations = ['WWV', 'WWVH', 'CHU', 'BPM'];
+                
+                const pathCards = stations.map(station => {
+                    const scint = scintData.paths ? scintData.paths[station] : null;
+                    const hasData = scint && scint.n_measurements > 0;
+                    const nMeasurements = scint ? scint.n_measurements : 0;
+                    const frequencies = scint && scint.frequencies_observed ? scint.frequencies_observed : [];
+                    const s4 = scint ? scint.s4_mean : null;
+                    const severity = scint ? scint.severity : 'unknown';
+                    const severityClass = `severity-${severity}`;
+                    
+                    return `
+                        <div class="path-card" style="opacity: ${hasData ? 1 : 0.5}">
+                            <div class="path-card-header">
+                                <div class="path-station">${station}</div>
+                                <div class="badge ${hasData ? 'status-healthy' : 'status-degraded'}">${hasData ? 'Active' : 'No Data'}</div>
                             </div>
-                            <div class="tec-value">
-                                ${formatNumber(tec, 2)} <span class="unit">TECU</span>
+                            <div class="path-metric">
+                                <div class="path-metric-label">Measurements (2h)</div>
+                                <div class="path-metric-value" style="color: #3b82f6;">
+                                    ${nMeasurements}
+                                </div>
                             </div>
-                            <div style="margin-top: 12px; font-size: 13px; color: #94a3b8;">
-                                Uncertainty: ±${formatNumber(data.tec_uncertainties ? data.tec_uncertainties[station] : 0, 2)} TECU
+                            <div class="path-metric">
+                                <div class="path-metric-label">Frequencies</div>
+                                <div class="path-metric-value" style="color: #f59e0b; font-size: 14px;">
+                                    ${frequencies.length > 0 ? frequencies.map(f => f + ' MHz').join(', ') : '—'}
+                                </div>
+                            </div>
+                            <div class="path-metric">
+                                <div class="path-metric-label">S4 Index</div>
+                                <div class="path-metric-value ${severityClass}">
+                                    ${s4 !== null ? formatNumber(s4, 2) : '—'}
+                                </div>
+                            </div>
+                            <div style="font-size: 11px; color: #64748b; text-align: center; margin-top: 8px;">
+                                ${severity !== 'unknown' ? `Scintillation: ${severity}` : 'Monitoring...'}
                             </div>
                         </div>
-                     `).join('');
-                } else {
-                    tecContainer.innerHTML = '<div style="grid-column: span 2; padding: 20px; text-align: center; color: #94a3b8;">No TEC estimates available</div>';
-                }
+                    `;
+                }).join('');
+                
+                pathContainer.innerHTML = pathCards;
+                
+                // Update hero stats
+                const totalMeasurements = Object.values(scintData.paths || {}).reduce((sum, p) => sum + (p.n_measurements || 0), 0);
+                const activePaths = Object.values(scintData.paths || {}).filter(p => p.n_measurements > 0).length;
+                document.getElementById('hero-stations').textContent = activePaths;
+                document.getElementById('hero-residuals').textContent = totalMeasurements + ' meas';
 
             } catch (error) {
                 console.error("Latest load failed", error);
-                // Don't show global error for partial missing data, just logs
+                document.getElementById('hero-consistency').textContent = 'ERROR';
             }
         }
 
         async function loadPhysicsHistory(range = '-6h') {
             try {
-                const data = await api.get('/physics/history', {
-                    start: range,
-                    end: 'now'
-                });
+                // Get scintillation history which has actual measurement data
+                const data = await api.get('/physics/scintillation/history', { start: range, end: 'now' });
 
                 if (!data.measurements || data.measurements.length === 0) {
+                    document.getElementById('tec-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #94a3b8;">No measurement history available for this time range</div>';
                     return;
                 }
 
-                // Parse data for plotting
-                // We need to group by station
+                // Group by station
                 const stations = {};
-
                 data.measurements.forEach(m => {
-                    const ts = m.timestamp_utc;
-                    if (m.tec_estimates) {
-                        for (const [station, tec] of Object.entries(m.tec_estimates)) {
-                            if (!stations[station]) {
-                                stations[station] = { x: [], y: [] };
-                            }
-                            stations[station].x.push(ts);
-                            stations[station].y.push(tec);
-                        }
+                    const ts = m.timestamp;
+                    const station = m.station;
+                    const s4 = m.s4;
+                    
+                    if (station && ts) {
+                        if (!stations[station]) stations[station] = { x: [], y: [] };
+                        stations[station].x.push(ts);
+                        stations[station].y.push(s4 !== null ? s4 : 0);
                     }
                 });
 
+                if (Object.keys(stations).length === 0) {
+                    document.getElementById('tec-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #94a3b8;">No scintillation data available</div>';
+                    return;
+                }
+
+                const colors = { WWV: '#3b82f6', WWVH: '#10b981', CHU: '#f59e0b', BPM: '#8b5cf6' };
                 const traces = Object.entries(stations).map(([station, d]) => ({
-                    x: d.x,
-                    y: d.y,
-                    type: 'scatter',
-                    mode: 'lines+markers',
-                    name: station,
-                    marker: { size: 4 }
+                    x: d.x, y: d.y,
+                    type: 'scatter', mode: 'markers',
+                    name: station, marker: { size: 5, color: colors[station] || '#94a3b8' }
                 }));
 
                 const layout = {
-                    title: '',
-                    xaxis: {
-                        title: 'Time (UTC)',
-                        gridcolor: '#334155',
-                        color: '#94a3b8'
-                    },
-                    yaxis: {
-                        title: 'Vertical TEC (TECU)',
-                        gridcolor: '#334155',
-                        color: '#94a3b8'
-                    },
-                    plot_bgcolor: '#0f172a',
-                    paper_bgcolor: 'transparent',
-                    font: { color: '#e0e0e0' },
-                    margin: { t: 20, r: 20, b: 60, l: 60 },
-                    legend: { orientation: 'h', y: 1.1 }
+                    xaxis: { title: 'Time (UTC)', gridcolor: '#334155', color: '#94a3b8' },
+                    yaxis: { title: 'S4 Scintillation Index', gridcolor: '#334155', color: '#94a3b8', range: [0, 1] },
+                    plot_bgcolor: '#0f172a', paper_bgcolor: 'transparent',
+                    font: { color: '#e0e0e0' }, margin: { t: 20, r: 20, b: 60, l: 60 },
+                    legend: { orientation: 'h', y: 1.1 },
+                    shapes: [
+                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 0.2, y1: 0.2, line: { color: '#84cc16', width: 1, dash: 'dot' } },
+                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 0.4, y1: 0.4, line: { color: '#f59e0b', width: 1, dash: 'dot' } },
+                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 0.6, y1: 0.6, line: { color: '#ef4444', width: 1, dash: 'dot' } }
+                    ]
                 };
 
                 Plotly.newPlot('tec-plot', traces, layout, { responsive: true });
-
             } catch (error) {
                 console.error("History load failed", error);
+                document.getElementById('tec-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #94a3b8;">Error loading history</div>';
             }
         }
 
-        // Time range button handlers
+        // ================================================================
+        // CHANNELS VIEW
+        // ================================================================
+        async function loadChannelData() {
+            try {
+                const data = await api.get('/physics/channels/latest');
+                
+                // Channel summary
+                const summaryContainer = document.getElementById('channel-summary');
+                if (!data.latest_by_frequency || Object.keys(data.latest_by_frequency).length === 0) {
+                    summaryContainer.innerHTML = `
+                        <div style="padding: 40px; text-align: center; color: #94a3b8;">
+                            <div style="font-size: 32px; margin-bottom: 12px;">📡</div>
+                            <div>No test signal data available</div>
+                            <div style="font-size: 12px; margin-top: 8px; color: #64748b;">
+                                Test signals are broadcast at minute 8 (WWV) and minute 44 (WWVH)
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    const freqCards = Object.entries(data.latest_by_frequency)
+                        .sort(([a], [b]) => parseFloat(a) - parseFloat(b))
+                        .map(([freq, result]) => {
+                            const quality = result.channel_quality || 'unknown';
+                            const qualityClass = `channel-quality-${quality}`;
+                            return `
+                                <div class="channel-card ${qualityClass}">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <div>
+                                            <div style="font-size: 18px; font-weight: 600;">${freq} MHz</div>
+                                            <div style="font-size: 12px; color: #64748b;">${result.station || 'Unknown'}</div>
+                                        </div>
+                                        <div class="badge status-${quality === 'excellent' || quality === 'good' ? 'healthy' : quality === 'fair' ? 'degraded' : 'error'}">
+                                            ${quality.toUpperCase()}
+                                        </div>
+                                    </div>
+                                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 12px;">
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 10px; color: #64748b;">SNR</div>
+                                            <div style="font-family: monospace; font-weight: 600;">${result.snr_db !== null ? formatNumber(result.snr_db, 1) + ' dB' : '—'}</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 10px; color: #64748b;">Delay Spread</div>
+                                            <div style="font-family: monospace; font-weight: 600;">${result.delay_spread_ms !== null ? formatNumber(result.delay_spread_ms, 2) + ' ms' : '—'}</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 10px; color: #64748b;">Coherence</div>
+                                            <div style="font-family: monospace; font-weight: 600;">${result.coherence_time_sec !== null ? formatNumber(result.coherence_time_sec, 1) + ' s' : '—'}</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 10px; color: #64748b;">Multipath</div>
+                                            <div style="font-family: monospace; font-weight: 600; color: ${result.multipath_detected ? '#ef4444' : '#10b981'};">
+                                                ${result.multipath_detected ? 'YES' : 'NO'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('');
+                    summaryContainer.innerHTML = freqCards;
+                }
+
+                // Test signal results table
+                const resultsContainer = document.getElementById('test-signal-results');
+                if (data.all_recent && data.all_recent.length > 0) {
+                    const rows = data.all_recent.slice(0, 10).map(r => `
+                        <tr>
+                            <td style="font-family: monospace; font-size: 12px;">${formatTime(r.timestamp)}</td>
+                            <td>${r.station}</td>
+                            <td>${r.frequency_mhz} MHz</td>
+                            <td>${r.multitone_score !== null ? (r.multitone_score * 100).toFixed(0) + '%' : '—'}</td>
+                            <td>${r.chirp_score !== null ? (r.chirp_score * 100).toFixed(0) + '%' : '—'}</td>
+                            <td>${r.burst_score !== null ? (r.burst_score * 100).toFixed(0) + '%' : '—'}</td>
+                            <td class="badge status-${r.channel_quality === 'excellent' || r.channel_quality === 'good' ? 'healthy' : 'degraded'}">${r.channel_quality || '—'}</td>
+                        </tr>
+                    `).join('');
+                    
+                    resultsContainer.innerHTML = `
+                        <div style="overflow-x: auto;">
+                            <table style="width: 100%; border-collapse: collapse;">
+                                <thead>
+                                    <tr style="border-bottom: 1px solid rgba(148, 163, 184, 0.2);">
+                                        <th style="text-align: left; padding: 8px; color: #94a3b8; font-size: 12px;">Time</th>
+                                        <th style="text-align: left; padding: 8px; color: #94a3b8; font-size: 12px;">Station</th>
+                                        <th style="text-align: left; padding: 8px; color: #94a3b8; font-size: 12px;">Freq</th>
+                                        <th style="text-align: left; padding: 8px; color: #94a3b8; font-size: 12px;">Multitone</th>
+                                        <th style="text-align: left; padding: 8px; color: #94a3b8; font-size: 12px;">Chirp</th>
+                                        <th style="text-align: left; padding: 8px; color: #94a3b8; font-size: 12px;">Burst</th>
+                                        <th style="text-align: left; padding: 8px; color: #94a3b8; font-size: 12px;">Quality</th>
+                                    </tr>
+                                </thead>
+                                <tbody>${rows}</tbody>
+                            </table>
+                        </div>
+                    `;
+                } else {
+                    resultsContainer.innerHTML = '<div style="padding: 20px; text-align: center; color: #94a3b8;">No recent test signal results</div>';
+                }
+
+                // Channel history plot placeholder
+                document.getElementById('channel-history-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #64748b;">Channel history plot - coming soon</div>';
+
+            } catch (error) {
+                console.error("Channel data load failed", error);
+                document.getElementById('channel-summary').innerHTML = '<div style="padding: 20px; color: #94a3b8;">Unable to load channel data</div>';
+            }
+        }
+
+        // ================================================================
+        // EVENTS VIEW
+        // ================================================================
+        async function loadEventsData() {
+            try {
+                const [eventsData, scintData, conditionsData] = await Promise.all([
+                    api.get('/physics/events/recent', { hours: 24 }),
+                    api.get('/physics/scintillation/paths').catch(() => ({ paths: {} })),
+                    api.get('/physics/events/conditions').catch(() => ({}))
+                ]);
+                
+                // Events timeline
+                const eventsContainer = document.getElementById('events-timeline');
+                if (!eventsData.events || eventsData.events.length === 0) {
+                    eventsContainer.innerHTML = `
+                        <div style="padding: 40px; text-align: center; color: #94a3b8;">
+                            <div style="font-size: 48px; margin-bottom: 16px;">🔭</div>
+                            <div style="font-size: 16px; margin-bottom: 8px;">No Events Detected</div>
+                            <div style="font-size: 13px; color: #64748b;">
+                                ${conditionsData.conditions_summary || 'Monitoring for ionospheric events...'}
+                            </div>
+                            ${conditionsData.sun_times ? `
+                                <div style="margin-top: 16px; font-size: 12px; color: #64748b;">
+                                    <span style="margin-right: 16px;">🌅 Sunrise: ${conditionsData.sun_times.sunrise ? formatTime(conditionsData.sun_times.sunrise) : 'N/A'}</span>
+                                    <span>🌆 Sunset: ${conditionsData.sun_times.sunset ? formatTime(conditionsData.sun_times.sunset) : 'N/A'}</span>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                } else {
+                    const eventItems = eventsData.events.slice(0, 15).map(event => `
+                        <div class="event-item" style="border-left-color: ${event.color || '#3b82f6'};">
+                            <div class="event-time">${formatTime(event.timestamp)}</div>
+                            <div class="event-title">
+                                <span style="margin-right: 8px;">${event.icon || '📡'}</span>
+                                ${event.title}
+                            </div>
+                            <div class="event-details">${event.description}</div>
+                        </div>
+                    `).join('');
+                    
+                    eventsContainer.innerHTML = `
+                        <div style="margin-bottom: 16px; padding: 12px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <span style="font-size: 14px; font-weight: 600;">${conditionsData.is_daytime ? '☀️ Daytime' : '🌙 Nighttime'}</span>
+                                <span style="margin-left: 12px; font-size: 12px; color: #94a3b8;">${eventsData.count} events in last 24h</span>
+                            </div>
+                            ${conditionsData.sun_times ? `
+                                <div style="font-size: 11px; color: #64748b;">
+                                    🌅 ${conditionsData.sun_times.sunrise ? formatTime(conditionsData.sun_times.sunrise) : '—'} | 
+                                    🌆 ${conditionsData.sun_times.sunset ? formatTime(conditionsData.sun_times.sunset) : '—'}
+                                </div>
+                            ` : ''}
+                        </div>
+                        ${eventItems}
+                    `;
+                }
+                
+                // Scintillation display
+                const scintContainer = document.getElementById('scintillation-display');
+                if (!scintData.paths || Object.keys(scintData.paths).length === 0) {
+                    scintContainer.innerHTML = `
+                        <div style="padding: 24px; text-align: center; color: #94a3b8;">
+                            <div>No scintillation data available</div>
+                        </div>
+                    `;
+                } else {
+                    const cards = Object.entries(scintData.paths).map(([station, data]) => {
+                        const severityClass = `severity-${data.severity || 'unknown'}`;
+                        return `
+                            <div style="display: inline-block; padding: 16px; margin: 8px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; min-width: 150px; text-align: center;">
+                                <div style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">${station}</div>
+                                <div style="font-size: 11px; color: #64748b; margin-bottom: 4px;">S4 Index</div>
+                                <div style="font-size: 24px; font-weight: 700; font-family: monospace;" class="${severityClass}">
+                                    ${data.s4_mean !== null ? formatNumber(data.s4_mean, 2) : '—'}
+                                </div>
+                                <div style="font-size: 12px; margin-top: 8px; color: #94a3b8;">
+                                    ${data.severity !== 'unknown' ? data.severity : 'no data'}
+                                </div>
+                                <div style="font-size: 10px; color: #64748b; margin-top: 4px;">
+                                    ${data.n_measurements || 0} measurements
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                    
+                    scintContainer.innerHTML = `
+                        <div style="display: flex; flex-wrap: wrap; justify-content: center;">
+                            ${cards}
+                        </div>
+                        <div style="margin-top: 16px; padding: 12px; background: rgba(139, 92, 246, 0.1); border-left: 3px solid #8b5cf6; border-radius: 4px;">
+                            <div style="font-size: 12px; color: #a78bfa;">
+                                <strong>Scintillation Severity:</strong>
+                                <span class="severity-none">None (S4 < 0.2)</span> |
+                                <span class="severity-weak">Weak (0.2-0.4)</span> |
+                                <span class="severity-moderate">Moderate (0.4-0.6)</span> |
+                                <span class="severity-strong">Strong (> 0.6)</span>
+                            </div>
+                        </div>
+                    `;
+                }
+
+            } catch (error) {
+                console.error("Events data load failed", error);
+            }
+        }
+
+        // ================================================================
+        // TIME RANGE BUTTONS
+        // ================================================================
         document.querySelectorAll('.time-range-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
@@ -257,13 +734,22 @@
             });
         });
 
+        // ================================================================
+        // INITIALIZATION
+        // ================================================================
         async function init() {
             await loadLatestPhysics();
             await loadPhysicsHistory(currentRange);
 
             const refresh = new AutoRefresh(() => {
                 loadLatestPhysics();
-                loadPhysicsHistory(currentRange);
+                if (currentView === 'paths') {
+                    loadPhysicsHistory(currentRange);
+                } else if (currentView === 'channels') {
+                    loadChannelData();
+                } else if (currentView === 'events') {
+                    loadEventsData();
+                }
             }, 60000);
             refresh.start();
         }

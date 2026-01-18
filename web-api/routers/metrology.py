@@ -8,6 +8,7 @@ from typing import Optional
 
 from models.timing import FusionResponse, FusionHistoryResponse
 from services.fusion_service import FusionService
+from services.chu_fsk_service import CHUFSKService
 from config import config
 
 router = APIRouter(prefix="/metrology", tags=["metrology"])
@@ -111,6 +112,58 @@ async def get_fusion_history(
             end=end_dt,
             min_quality_grade=min_quality
         )
+    
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/chu-fsk/latest")
+async def get_latest_chu_fsk():
+    """
+    Get latest CHU FSK decoded data.
+    
+    Returns decoded CHU FSK time code data including:
+    - DUT1 (UT1-UTC) correction in seconds
+    - TAI-UTC leap second count
+    - Decoded time for verification
+    - FSK timing offset measurement
+    - Decode confidence and quality metrics
+    """
+    try:
+        service = CHUFSKService(data_root=config.data_root)
+        result = service.get_latest()
+        return result
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/chu-fsk/history")
+async def get_chu_fsk_history(
+    start: str = Query("-24h", description="Start time (ISO8601 or relative)"),
+    end: str = Query("now", description="End time (ISO8601 or 'now')")
+):
+    """
+    Get CHU FSK decode history.
+    
+    Returns time series of CHU FSK decodes for the specified time range.
+    """
+    try:
+        start_dt = parse_time_param(start)
+        end_dt = parse_time_param(end)
+        
+        if start_dt > end_dt:
+            raise HTTPException(
+                status_code=400,
+                detail="Start time must be before end time"
+            )
+        
+        service = CHUFSKService(data_root=config.data_root)
+        return service.get_history(start=start_dt, end=end_dt)
     
     except HTTPException:
         raise

@@ -46,6 +46,35 @@ class PhysicsService:
             channel='global'
         )
     
+    def _convert_to_native(self, obj: Any) -> Any:
+        """Convert numpy types to native Python types for JSON serialization."""
+        import numpy as np
+        import math
+        
+        if isinstance(obj, dict):
+            return {k: self._convert_to_native(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._convert_to_native(item) for item in obj]
+        elif isinstance(obj, np.ndarray):
+            return [self._convert_to_native(item) for item in obj.tolist()]
+        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            val = float(obj)
+            # Handle NaN/Inf which are not JSON compliant
+            if math.isnan(val) or math.isinf(val):
+                return None
+            return val
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, float):
+            # Also check native floats for NaN/Inf
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        else:
+            return obj
+    
     def get_latest(self) -> Optional[Dict[str, Any]]:
         """
         Get latest physics estimate.
@@ -54,21 +83,22 @@ class PhysicsService:
             Dictionary with latest physics data or None if unavailable
         """
         try:
-            # Try to read from today's file (last 1 hour)
-            end_time = datetime.utcnow().isoformat() + 'Z'
-            start_time = (datetime.utcnow() - timedelta(hours=1)).isoformat() + 'Z'
+            # Try progressively longer time ranges to find data
+            for hours in [1, 6, 24]:
+                end_time = datetime.utcnow().isoformat() + 'Z'
+                start_time = (datetime.utcnow() - timedelta(hours=hours)).isoformat() + 'Z'
+                
+                measurements = self.reader.read_time_range(
+                    start=start_time,
+                    end=end_time
+                )
+                
+                if measurements:
+                    # Get most recent measurement and convert numpy types
+                    latest = self._convert_to_native(measurements[-1])
+                    return latest
             
-            measurements = self.reader.read_time_range(
-                start=start_time,
-                end=end_time
-            )
-            
-            if not measurements:
-                return None
-            
-            # Get most recent measurement
-            latest = measurements[-1]
-            return latest
+            return None
             
         except Exception as e:
             logger.error(f"Error getting latest physics data: {e}")
@@ -98,22 +128,12 @@ class PhysicsService:
                 end=end_iso
             )
             
-            timestamps = []
-            utc_consistent = []
-            
-            # TEC is a map/dict in schema, flattened or handled potentially
-            # For specific station extraction, we might need logic.
-            # Assuming 'stations_used' indicates which keys exist in tec_estimates.
-            
-            # Since HDF5 reader returns flattened dicts usually, or handles complex types?
-            # DataProductReader returns whatever h5py returns.
-            # If we flattened it in writer, we read it back.
-            # Currently PhysicsFusionService writes it as map if supported.
-            # Let's return the raw list of measurements for now, client can parse.
+            # Convert numpy types to native Python types
+            converted = [self._convert_to_native(m) for m in measurements]
             
             return {
-                'measurements': measurements,
-                'count': len(measurements)
+                'measurements': converted,
+                'count': len(converted)
             }
         
         except Exception as e:
