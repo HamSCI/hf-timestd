@@ -17,7 +17,9 @@
 - **Kalman-filtered fusion** with inverse variance weighting
 - **Chrony SHM integration** for system clock discipline
 
-Unlike simpler implementations, this system treats timing as a **measurement problem** with proper uncertainty quantification, systematic error correction, and validation against physical constraints.
+**The Core Value Proposition:** Unlike typical implementations that require expensive atomic oscillators for holdover, this system leverages the short-term frequency stability of a standard GPSDO and fuses it with multi-station HF broadcasts to synthesize a UTC-traceable time standard. In essence, it uses software complexity and ionospheric physics to upgrade a GPSDO into a precision time standard—without the cost of a Cesium beam.
+
+This system treats timing as a **measurement problem** with proper uncertainty quantification, systematic error correction, and validation against physical constraints.
 
 ---
 
@@ -66,11 +68,23 @@ Single-broadcast methods achieve only **±5-10 ms** due to mode ambiguity. Our m
 
 ### 3.1 Core Principle
 
-The **"Steel Ruler"** philosophy asserts that in a GPSDO-disciplined system, the local clock is significantly more stable (sub-ppb stability) than the ionosphere (10-100 ppb equivalent jitter). Therefore, we must:
+The **"Steel Ruler"** philosophy asserts that a GPSDO provides a rigid "ruler" (precise tick rate/frequency), but this ruler is floating in time. The system's job is not to straighten the ruler (the GPSDO does that), but to use ionospheric physics to **pin the ruler's zero-point to UTC**.
+
+In a GPSDO-disciplined system, the local clock is significantly more stable (sub-ppb stability) than the ionosphere (10-100 ppb equivalent jitter). Therefore, we must:
 
 1. **Trust the local clock** (zero process noise)
 2. **Attribute all residuals** to ionospheric path variation
 3. **Clamp long-term drift** to 0.0, as the GPSDO prevents accumulation
+
+**The Hardware Hierarchy:**
+
+| Hardware | Frequency (Slope) | Time (Offset) | Cost |
+|----------|-------------------|---------------|------|
+| **GPSDO** | Excellent | Drifting (if undisciplined) | ~$200-500 |
+| **Cesium Beam** | Excellent | Excellent | ~$30,000+ |
+| **GPSDO + hf-timestd** | Excellent | ±0.5 ms | Software |
+
+This system bridges the gap between a common GPSDO (which provides excellent *frequency*) and a laboratory Cesium Standard (which provides absolute *time*), using the ionosphere as the correction mechanism.
 
 ### 3.2 The Three-Layer Metrological Architecture
 
@@ -543,7 +557,7 @@ Not a software bug—HF propagation on higher bands is poor during night/early m
 ### 10.3 What This System Does NOT Do
 
 - **Not a frequency standard:** Disciplines system clock, not a standalone oscillator
-- **Not better than GPS:** GPS achieves ±10 ns; this achieves ±0.5 ms (useful for GPS-denied scenarios)
+- **Not better than GPS:** GPS achieves ±10 ns; this achieves ±0.5 ms (demonstrates the capability to derive precision timing from frequency-standard hardware)
 - **Not ionospheric tomography:** Single receiver, limited spatial resolution
 
 ---
@@ -565,7 +579,7 @@ Not a software bug—HF propagation on higher bands is poor during night/early m
 
 ### 11.3 The Bottom Line
 
-This is not an amateur "time sync" project. This is a **metrological instrument** for HF time transfer with:
+This is not an amateur "time sync" project. This is an **instrument of synthetic metrology** for HF time transfer with:
 
 - Proper uncertainty quantification
 - Physics-based validation
@@ -573,7 +587,7 @@ This is not an amateur "time sync" project. This is a **metrological instrument*
 - Multi-broadcast redundancy
 - ISO GUM compliance
 
-**For a time nut:** This achieves what GPS does, but 50,000x worse. However, it does so with proper metrology, honest uncertainty, and no reliance on GNSS.
+**For a time nut:** This extracts maximum utility from your existing GPSDO. It transforms a device that only disciplines *frequency* into a system that disciplines *time*, providing a second, physics-based opinion on UTC that validates your GPS solution.
 
 **For a metrologist:** This is traceable to UTC(NIST), has a complete uncertainty budget, and follows ISO GUM best practices.
 
