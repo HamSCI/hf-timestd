@@ -10,167 +10,193 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🔴 NEXT SESSION: SERVICE RESILIENCE AND DATA PIPELINE ROBUSTNESS
+## 🔴 NEXT SESSION: GREENFIELD INSTALLATION REVIEW
 
 **Priority:** HIGH  
-**Objective:** Ensure all systemd services are resilient, recoverable, and that data write problems at one stage do not clobber downstream data needs.
+**Objective:** Review and validate all installation scripts, documentation, and procedures for deploying hf-timestd on a new system from scratch.
 
 ### Session Context
 
-The 2026-01-18 session revealed critical gaps in service resilience:
-1. **L2 Calibration Service** stalled for 20+ hours without detection (no watchdog)
-2. **Kalman state restoration bug** caused D_clock discontinuities on restart
-3. **Silent service hangs** can corrupt downstream data pipelines
+The production system at `bee1` is now stable and fully operational. The 2026-01-18 session completed:
+- Systemd watchdog audit (all services have watchdogs)
+- Data freshness checks (all downstream services warn on stale upstream data)
+- Graceful degradation (services continue processing stale data with warnings)
+- Chrony monitor updated for TSL1/TSL2 (replaced obsolete TMGR)
 
-### Critical Review Areas
+**Goal:** Ensure the repository contains everything needed for a clean greenfield installation that replicates the working production setup.
 
-#### 1. **Systemd Service Audit** 🔴 HIGH PRIORITY
+### Review Areas
 
-**Current Watchdog Status:**
-| Service | Type | WatchdogSec | Restart | Status |
-|---------|------|-------------|---------|--------|
-| timestd-fusion | notify | 60s | always | ✅ Has watchdog |
-| timestd-l2-calibration | notify | 180s | always | ✅ Fixed 2026-01-18 |
-| timestd-physics | notify | 120s | always | ✅ Fixed 2026-01-18 |
-| timestd-metrology | simple | None | always | ⚠️ **NEEDS WATCHDOG** |
-| timestd-vtec | simple | None | on-failure | ⚠️ **NEEDS WATCHDOG** |
-| timestd-web-api | simple | None | always | ⚠️ **NEEDS WATCHDOG** |
-| timestd-core-recorder | simple | None | always | ⚠️ **NEEDS WATCHDOG** |
+#### 1. **Installation Script Audit** ⚠️ HIGH PRIORITY
 
-**Review Tasks:**
-1. Audit ALL service files in `systemd/` and `/etc/systemd/system/`
-2. Add `Type=notify` and `WatchdogSec` to services that can hang
-3. Implement `systemd.daemon.notify('WATCHDOG=1')` in Python service loops
-4. Ensure `Restart=always` for all critical services
-5. Test watchdog by simulating service hangs
+Review `scripts/install.sh` for completeness and correctness:
+- Does it create all required directories with correct permissions?
+- Does it install all systemd service files?
+- Does it configure chrony correctly (TSL1/TSL2 SHM feeds)?
+- Does it handle the `timestd` system user creation?
+- Does it set up the Python virtual environment correctly?
 
 **Key Files:**
-- `systemd/*.service` — Service unit files
-- All Python services need watchdog integration
+- `scripts/install.sh` — Main installer
+- `systemd/*.service` — All service unit files
+- `config/chrony-timestd-refclocks.conf` — Chrony SHM configuration
+- `config/timestd-config.toml` — Template configuration
 
-#### 2. **Data Pipeline Dependency Analysis** 🔴 HIGH PRIORITY
+#### 2. **Documentation Accuracy** ⚠️ HIGH PRIORITY
 
-**Pipeline Flow:**
+Verify documentation matches current production setup:
+- `INSTALLATION.md` — Installation guide
+- `README.md` — Project overview
+- `TECHNICAL_REFERENCE.md` — Architecture documentation
+
+**Check for:**
+- Outdated service names (e.g., `timestd-analytics` vs `timestd-metrology`)
+- Missing services (e.g., `timestd-l2-calibration`, `timestd-vtec`)
+- Incorrect paths or configurations
+- Missing prerequisites
+
+#### 3. **Service Dependencies** ⚠️ MEDIUM PRIORITY
+
+Verify systemd service dependencies are correct:
+- `timestd-core-recorder` → No dependencies (first in chain)
+- `timestd-metrology` → Depends on core-recorder
+- `timestd-l2-calibration` → Depends on metrology
+- `timestd-fusion` → Depends on l2-calibration
+- `timestd-physics` → Depends on l2-calibration
+- `timestd-web-api` → Can start independently
+
+#### 4. **Configuration Template** ⚠️ MEDIUM PRIORITY
+
+Review `config/timestd-config.toml` template:
+- Are all required sections present?
+- Are example values appropriate?
+- Are comments helpful for new users?
+- Does it match what the production system uses?
+
+#### 5. **Chrony Integration** ⚠️ MEDIUM PRIORITY
+
+Verify chrony configuration is correct:
+- SHM unit 0 → TSL1 (L1 metrology feed)
+- SHM unit 1 → TSL2 (L2 calibrated feed)
+- Correct refid names
+- Proper permissions (666 for SHM segments)
+
+### Production Reference (bee1)
+
+**Current Working Configuration:**
 ```
-L0: Raw IQ → L1: Metrology → L2: Calibration → L3: Fusion → Science Products
-                                    ↓
-                              Physics/TEC
-```
-
-**Failure Scenarios to Handle:**
-1. **L1 Metrology stalls** → L2 has no input → L3 has no input → Chrony feed stale
-2. **L2 Calibration stalls** → Physics has no input → TEC stale (20h gap observed)
-3. **HDF5 write fails** → Downstream readers get stale/corrupt data
-4. **Service restart** → State loss causes discontinuities
-
-**Review Tasks:**
-1. Map all data dependencies between services
-2. Identify single points of failure
-3. Implement graceful degradation (use last-known-good data)
-4. Add data freshness checks before processing
-5. Ensure upstream failures don't corrupt downstream data
-
-#### 3. **State Persistence and Recovery** 🔴 HIGH PRIORITY
-
-**Current Issues Found:**
-- Kalman state was restored to wrong variables (bug fixed 2026-01-18)
-- Calibration state can be overwritten with bad data on restart
-- No validation of loaded state before use
-
-**Review Tasks:**
-1. Audit all state persistence files:
-   - `/var/lib/timestd/state/broadcast_calibration.json`
-   - `/var/lib/timestd/state/kalman_state.json` (if exists)
-   - Any other state files
-2. Add state validation on load (sanity checks)
-3. Implement state backup before overwrite
-4. Add state versioning for compatibility
-5. Test recovery from corrupted state files
-
-#### 4. **HDF5 SWMR Robustness** ⚠️ MEDIUM PRIORITY
-
-**Current Implementation:**
-- SWMR mode enabled via `DataProductWriter`
-- Lock recovery with `h5clear` fallback
-- Readers use `swmr=True`
-
-**Review Tasks:**
-1. Verify all writers use `DataProductWriter` (no direct h5py)
-2. Test concurrent read/write scenarios
-3. Verify lock recovery works under all failure modes
-4. Add timeout for HDF5 operations to prevent hangs
-5. Implement write verification (read-back check)
-
-#### 5. **Error Handling and Logging** ⚠️ MEDIUM PRIORITY
-
-**Review Tasks:**
-1. Audit exception handling in service main loops
-2. Ensure errors are logged with sufficient context
-3. Add structured logging for easier debugging
-4. Implement error rate monitoring
-5. Add alerts for repeated errors
-
-### Implementation Guidelines
-
-**Watchdog Integration Pattern:**
-```python
-# At service start
-from systemd import daemon as systemd_daemon
-systemd_daemon.notify('READY=1')
-
-# In main loop
-while running:
-    systemd_daemon.notify('WATCHDOG=1')
-    # ... do work ...
-    time.sleep(interval)
+/opt/hf-timestd/          — Production code
+/etc/hf-timestd/          — Configuration
+/var/lib/timestd/         — Data storage
+/var/log/hf-timestd/      — Logs (via journald)
 ```
 
-**Data Freshness Check Pattern:**
-```python
-def check_data_freshness(path, max_age_seconds):
-    """Return True if data is fresh enough to use."""
-    if not path.exists():
-        return False
-    age = time.time() - path.stat().st_mtime
-    return age < max_age_seconds
+**Active Services (7 core + 3 optional):**
+```
+Core:
+  timestd-core-recorder   — RTP capture → Digital RF
+  timestd-metrology       — L1 raw measurements
+  timestd-l2-calibration  — L2 calibrated timing
+  timestd-fusion          — Multi-broadcast Kalman → Chrony SHM
+  timestd-physics         — TEC estimation
+  timestd-vtec            — GNSS VTEC monitoring
+  timestd-web-api         — REST API + dashboard
+
+Optional:
+  timestd-ionex-download.timer   — Daily IONEX maps
+  timestd-chrony-monitor.timer   — Chrony health check
+  timestd-radiod-monitor         — radiod health check
 ```
 
-**Graceful Degradation Pattern:**
-```python
-def get_l2_data(channel, fallback_minutes=10):
-    """Get L2 data, falling back to older data if recent unavailable."""
-    for lookback in [1, 5, 10, fallback_minutes]:
-        data = read_l2_data(channel, lookback_minutes=lookback)
-        if data:
-            if lookback > 1:
-                logger.warning(f"Using {lookback}min old data for {channel}")
-            return data
-    logger.error(f"No valid L2 data for {channel}")
-    return None
+**Chrony Sources:**
+```
+#* TSL2   0   4   377   — L2 calibrated (primary)
+#- TSL1   0   4   377   — L1 raw (backup)
 ```
 
-### Testing Approach
+### Expected Outcomes
 
-**Service Resilience Tests:**
-1. Kill service process → verify automatic restart
-2. Simulate hang (infinite loop) → verify watchdog triggers restart
-3. Corrupt state file → verify service recovers gracefully
-4. Stop upstream service → verify downstream handles gracefully
-
-**Data Pipeline Tests:**
-1. Stop L1 → verify L2/L3 don't crash, use stale data with warnings
-2. Corrupt HDF5 file → verify reader handles gracefully
-3. Fill disk → verify services handle write failures
-
-### Key Documentation
-
-- `docs/changes/SESSION_2026_01_18_SERVICE_RESILIENCE.md` — Recent fixes
-- `TECHNICAL_REFERENCE.md` — System architecture
-- `docs/METROLOGY.md` — Data flow description
+After this session:
+- ✅ `scripts/install.sh` validated and updated if needed
+- ✅ `INSTALLATION.md` accurate and complete
+- ✅ All systemd service files in repo match production
+- ✅ Configuration templates are correct
+- ✅ A new user could successfully install from scratch
 
 ---
 
-## ✅ COMPLETED: SESSION 2026-01-18 SERVICE RESILIENCE FIXES
+## ✅ COMPLETED: SESSION 2026-01-18 DATA FRESHNESS CHECKS
+
+**Status:** ✅ **COMPLETE** - 2026-01-18  
+**Objective:** Implement graceful degradation when upstream services are stale
+
+### Data Freshness Checks Implemented
+
+| Service | Checks | Threshold | Behavior |
+|---------|--------|-----------|----------|
+| `l2_calibration_service.py` | L1 metrology HDF5 mtime | 5 minutes | Warns if stale, continues |
+| `multi_broadcast_fusion.py` | L1/L2 HDF5 mtime | 5 minutes | Warns if stale, continues |
+| `physics_fusion_service.py` | L2 clock_offset HDF5 mtime | 5 minutes | Warns if stale, continues |
+
+### Key Design Decision
+Services continue processing stale data (graceful degradation) rather than blocking:
+- Downstream services don't crash when upstream stops
+- Chrony feed continues with last-known-good data
+- Clear warnings in logs identify the stalled upstream service
+
+---
+
+## ✅ COMPLETED: SESSION 2026-01-18 SERVICE RESILIENCE (PART 2)
+
+**Status:** ✅ **COMPLETE** - 2026-01-18  
+**Objective:** Comprehensive systemd watchdog audit and implementation
+
+### Watchdog Status (All Services)
+
+| Service | Type | WatchdogSec | Restart | Python Watchdog | Status |
+|---------|------|-------------|---------|-----------------|--------|
+| timestd-fusion | notify | 120s | always | ✅ Yes | ✅ Complete |
+| timestd-l2-calibration | notify | 180s | always | ✅ Yes | ✅ Complete |
+| timestd-physics | notify | 120s | always | ✅ Yes | ✅ Complete |
+| timestd-core-recorder | notify | 60s | always | ✅ Yes | ✅ Complete |
+| timestd-metrology | forking | N/A | always | N/A (shell) | ✅ Fixed |
+| timestd-vtec | notify | 60s | always | ✅ Yes | ✅ Fixed |
+| timestd-web-api | notify | 60s | always | ✅ Yes | ✅ Fixed |
+
+### Files Modified (Part 2)
+- `systemd/timestd-metrology.service` — Changed Restart=on-failure → Restart=always
+- `systemd/timestd-vtec.service` — Added Type=notify, WatchdogSec=60
+- `systemd/timestd-web-api.service` — Added Type=notify, WatchdogSec=60, User=timestd
+- `systemd/timestd-ionex-download.service` — Added retry (3x), OnFailure alert, 5min timeout
+- `scripts/live_vtec.py` — Added systemd watchdog notifications
+- `web-api/main.py` — Added systemd watchdog via async background task
+
+### State Persistence Audit
+
+| File | Purpose | Validation |
+|------|---------|------------|
+| `broadcast_calibration.json` | Kalman state + calibration | ✅ Offset < 150ms, age < 7 days |
+| `long_term_drift_stats.json` | Drift estimator | ✅ Age < 7 days |
+
+### Data Pipeline Map
+
+```
+L0: Raw IQ (core-recorder)
+    ↓
+L1: Metrology (metrology-service) → /phase2/{CHANNEL}/metrology/
+    ↓
+L2: Calibration (l2-calibration) → /phase2/{CHANNEL}/clock_offset/
+    ↓
+L3: Fusion (multi_broadcast_fusion) → /phase2/fusion/ → Chrony SHM
+    ↓
+Physics (physics_fusion_service) → TEC estimates
+
+Parallel: GNSS VTEC (live_vtec) → /data/gnss_vtec/
+```
+
+---
+
+## ✅ COMPLETED: SESSION 2026-01-18 SERVICE RESILIENCE FIXES (PART 1)
 
 **Status:** ✅ **COMPLETE** - 2026-01-18  
 **Objective:** Fixed TEC staleness and D_clock discontinuities

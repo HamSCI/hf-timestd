@@ -15,6 +15,18 @@ EnvironmentFile=-/etc/hf-timestd/environment
 # Run the download script
 ExecStart=/opt/hf-timestd/scripts/download_ionex_daily.sh
 
+# Retry on failure (up to 3 attempts with 5 minute delay)
+Restart=on-failure
+RestartSec=300
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+# Email alert on failure
+OnFailure=timestd-alert@%n.service
+
+# Timeout (IONEX download should complete within 5 minutes)
+TimeoutStartSec=300
+
 # Logging
 StandardOutput=journal
 StandardError=journal

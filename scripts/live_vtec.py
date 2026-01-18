@@ -6,7 +6,12 @@ import sys
 import argparse
 from datetime import datetime
 
-
+# Systemd watchdog support
+try:
+    from systemd import daemon as systemd_daemon
+    SYSTEMD_AVAILABLE = True
+except ImportError:
+    SYSTEMD_AVAILABLE = False
 
 from hf_timestd.core.ubx_parser import UBXParser
 from hf_timestd.core.gnss_tec import GNSSTECAnalyzer
@@ -91,6 +96,11 @@ def main():
     parser_ubx = UBXParser()
     analyzer = GNSSTECAnalyzer(dcb_data)
     
+    # Notify systemd we're ready
+    if SYSTEMD_AVAILABLE:
+        systemd_daemon.notify('READY=1')
+        logger.info("Systemd watchdog enabled")
+    
     # Open CSV if enabled
     csv_file = None
     if gnss_cfg.get("save_csv", False):
@@ -161,6 +171,10 @@ def main():
                 last_log_time = time.time()
                 bytes_received = 0
                 msg_count = 0
+                
+                # Notify systemd watchdog
+                if SYSTEMD_AVAILABLE:
+                    systemd_daemon.notify('WATCHDOG=1')
                 
             for msg_class, msg_id, payload in parser_ubx.process_data(data):
                 msg_count += 1

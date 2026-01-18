@@ -622,6 +622,10 @@ class MultiBroadcastFusion:
         # Channels to aggregate
         self.channels = self._discover_channels()
         
+        # Data freshness tracking for upstream starvation detection
+        self.upstream_stale_warning_issued = False
+        self.max_upstream_age_seconds = 300.0  # 5 minutes - warn if L1/L2 data older than this
+        
         logger.info(f"MultiBroadcastFusion initialized")
         logger.info(f"  Data root: {data_root}")
         logger.info(f"  Channels: {len(self.channels)}")
@@ -1522,6 +1526,38 @@ class MultiBroadcastFusion:
             logger.debug(f"Error logging global solve result: {e}")
         return result, len(observations)
     
+    def _check_upstream_freshness(self) -> Tuple[bool, float]:
+        """
+        Check if upstream L1/L2 data is fresh enough.
+        
+        Returns:
+            Tuple of (is_fresh, newest_age_seconds)
+        """
+        newest_mtime = 0.0
+        
+        for channel in self.channels:
+            # Check L1 metrology directory
+            l1_dir = self.phase2_dir / channel / "metrology"
+            if l1_dir.exists():
+                h5_files = list(l1_dir.glob("*.h5"))
+                if h5_files:
+                    channel_mtime = max(f.stat().st_mtime for f in h5_files)
+                    newest_mtime = max(newest_mtime, channel_mtime)
+            
+            # Check L2 clock_offset directory
+            l2_dir = self.phase2_dir / channel / "clock_offset"
+            if l2_dir.exists():
+                h5_files = list(l2_dir.glob("*.h5"))
+                if h5_files:
+                    channel_mtime = max(f.stat().st_mtime for f in h5_files)
+                    newest_mtime = max(newest_mtime, channel_mtime)
+        
+        if newest_mtime == 0.0:
+            return False, float('inf')
+        
+        age_seconds = time.time() - newest_mtime
+        return age_seconds < self.max_upstream_age_seconds, age_seconds
+    
     def _read_l1_metrology(
         self,
         lookback_minutes: int = 5
@@ -1649,14 +1685,31 @@ class MultiBroadcastFusion:
         Read and join L1 (Metrology) and L2 (Physics) data to form Fusion inputs.
         
         Logic:
-           1. Read L1 (Raw TOA).
-           2. Read L2 (Propagation Delay).
-           3. Join on Timestamp + Station.
-           4. Calculate D_clock = Raw_TOA - Propagation_Delay.
-           5. Fallback: If L2 missing, D_clock = Raw_TOA - (LightTime + 1.5ms).
+           1. Check upstream data freshness (warn if stale)
+           2. Read L1 (Raw TOA).
+           3. Read L2 (Propagation Delay).
+           4. Join on Timestamp + Station.
+           5. Calculate D_clock = Raw_TOA - Propagation_Delay.
+           6. Fallback: If L2 missing, D_clock = Raw_TOA - (LightTime + 1.5ms).
         """
         from datetime import datetime, timezone
         from .wwv_constants import BPM_UT1_MINUTES
+        
+        # 0. Check upstream data freshness
+        is_fresh, age_seconds = self._check_upstream_freshness()
+        if not is_fresh:
+            if not self.upstream_stale_warning_issued:
+                logger.warning(
+                    f"Upstream L1/L2 data is stale ({age_seconds:.0f}s old, "
+                    f"threshold={self.max_upstream_age_seconds:.0f}s). "
+                    "Metrology or L2 calibration service may have stopped."
+                )
+                self.upstream_stale_warning_issued = True
+            # Continue processing - use whatever data is available
+        else:
+            if self.upstream_stale_warning_issued:
+                logger.info(f"Upstream data is fresh again ({age_seconds:.0f}s old)")
+                self.upstream_stale_warning_issued = False
         
         # 1. Read L1 and L2 (skip L2 in L1-only mode)
         l1_map = self._read_l1_metrology(lookback_minutes)

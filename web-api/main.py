@@ -13,6 +13,14 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import logging
+import asyncio
+
+# Systemd watchdog support
+try:
+    from systemd import daemon as systemd_daemon
+    SYSTEMD_AVAILABLE = True
+except ImportError:
+    SYSTEMD_AVAILABLE = False
 
 from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router
 from config import config
@@ -98,9 +106,17 @@ async def health_check():
     }
 
 
+async def watchdog_task():
+    """Background task to send systemd watchdog notifications."""
+    while True:
+        if SYSTEMD_AVAILABLE:
+            systemd_daemon.notify('WATCHDOG=1')
+        await asyncio.sleep(10)  # Send heartbeat every 10 seconds
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Log startup information."""
+    """Log startup information and start watchdog."""
     logger.info("=" * 60)
     logger.info("hf-timestd Web UI Starting")
     logger.info("=" * 60)
@@ -109,6 +125,12 @@ async def startup_event():
     logger.info(f"Channels: {len(config.channels)}")
     logger.info(f"Mode: {config.station_metadata['mode']}")
     logger.info("=" * 60)
+    
+    # Notify systemd we're ready and start watchdog
+    if SYSTEMD_AVAILABLE:
+        systemd_daemon.notify('READY=1')
+        logger.info("Systemd watchdog enabled")
+        asyncio.create_task(watchdog_task())
 
 
 if __name__ == "__main__":

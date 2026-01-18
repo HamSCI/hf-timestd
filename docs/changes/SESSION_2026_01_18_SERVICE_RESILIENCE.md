@@ -79,13 +79,124 @@ After deployment:
 2. Chrony sources show TSL1/TSL2 with reasonable offsets
 3. Kalman filter reconverging after state reset
 
+## Session 2026-01-18 (Part 2): Comprehensive Watchdog Audit
+
+### Additional Services Updated
+
+| Service | Before | After |
+|---------|--------|-------|
+| timestd-metrology | Type=forking, Restart=on-failure | Restart=always |
+| timestd-vtec | Type=simple, no watchdog | Type=notify, WatchdogSec=60 |
+| timestd-web-api | Type=simple, User=root | Type=notify, WatchdogSec=60, User=timestd |
+
+### Files Modified (Part 2)
+
+- `systemd/timestd-metrology.service` - Changed Restart=on-failure → Restart=always
+- `systemd/timestd-vtec.service` - Added Type=notify, WatchdogSec=60
+- `systemd/timestd-web-api.service` - Added Type=notify, WatchdogSec=60, changed User to timestd
+- `systemd/timestd-ionex-download.service` - Added retry mechanism, OnFailure alert, timeout
+- `scripts/live_vtec.py` - Added systemd watchdog notifications
+- `web-api/main.py` - Added systemd watchdog notifications via async background task
+
+### Complete Watchdog Status (Post-Audit)
+
+| Service | Type | WatchdogSec | Restart | Python Watchdog | Status |
+|---------|------|-------------|---------|-----------------|--------|
+| timestd-fusion | notify | 120s | always | ✅ Yes | ✅ Complete |
+| timestd-l2-calibration | notify | 180s | always | ✅ Yes | ✅ Complete |
+| timestd-physics | notify | 120s | always | ✅ Yes | ✅ Complete |
+| timestd-core-recorder | notify | 60s | always | ✅ Yes | ✅ Complete |
+| timestd-metrology | forking | N/A | always | N/A (shell) | ✅ Fixed |
+| timestd-vtec | notify | 60s | always | ✅ Yes | ✅ Fixed |
+| timestd-web-api | notify | 60s | always | ✅ Yes | ✅ Fixed |
+
+### Data Pipeline Dependency Map
+
+```
+L0: Raw IQ (core-recorder)
+    ↓
+L1: Metrology (metrology-service) → /phase2/{CHANNEL}/metrology/
+    ↓
+L2: Calibration (l2-calibration) → /phase2/{CHANNEL}/clock_offset/
+    ↓
+L3: Fusion (multi_broadcast_fusion) → /phase2/fusion/
+    ↓                                    ↓
+Chrony SHM                          Physics (physics_fusion_service)
+                                         ↓
+                                    TEC estimates → /phase2/science/tec/
+
+Parallel: GNSS VTEC (live_vtec) → /data/gnss_vtec/
+```
+
+### State Persistence Files
+
+| File | Purpose | Validation |
+|------|---------|------------|
+| `/var/lib/timestd/state/broadcast_calibration.json` | Kalman state + calibration offsets | ✅ Has sanity checks (offset < 150ms, age < 7 days) |
+| `/var/lib/timestd/state/long_term_drift_stats.json` | Long-term drift estimator | ✅ Has age check (< 7 days) |
+| `/var/lib/timestd/state/radiod-status.json` | Radiod monitoring state | Informational only |
+
+### Single Points of Failure Identified
+
+1. **L1 Metrology stalls** → L2 has no input → L3 has no input → Chrony feed stale
+   - **Mitigation:** Restart=always ensures recovery, but no graceful degradation
+
+2. **L2 Calibration stalls** → Physics has no input → TEC stale
+   - **Mitigation:** Now has watchdog (WatchdogSec=180)
+
+3. **HDF5 write fails** → Downstream readers get stale/corrupt data
+   - **Mitigation:** SWMR mode + h5clear fallback already implemented
+
+### Data Freshness Checks (Implemented)
+
+Added upstream data freshness monitoring to prevent downstream services from silently processing stale data:
+
+| Service | Checks | Threshold | Behavior |
+|---------|--------|-----------|----------|
+| `l2_calibration_service.py` | L1 metrology HDF5 mtime | 5 minutes | Warns if stale, continues processing |
+| `multi_broadcast_fusion.py` | L1/L2 HDF5 mtime | 5 minutes | Warns if stale, continues processing |
+| `physics_fusion_service.py` | L2 clock_offset HDF5 mtime | 5 minutes | Warns if stale, continues processing |
+
+**Key Design Decision:** Services continue processing stale data (graceful degradation) rather than blocking. This ensures:
+- Downstream services don't crash when upstream stops
+- Chrony feed continues with last-known-good data
+- Clear warnings in logs identify the stalled upstream service
+
+### Chrony Monitor Fix
+
+Updated `scripts/check-chrony-reach.sh` to check for TSL1/TSL2 sources instead of obsolete TMGR:
+- Now checks both TSL1 and TSL2 sources
+- Reports OK if at least one source meets threshold
+- Warns if both sources are stale
+
+### Recommendations for Future Work
+
+1. **Alerting** - Add OnFailure= to more services for email alerts
+2. **Monitoring Dashboard** - Add data freshness metrics to web UI
+3. **Automatic Recovery** - Consider restarting upstream services when stale
+
 ## Known Issues for Next Session
 
 1. **CHU FSK Decoder** - Infrastructure complete but decoder not producing successful decodes (signal processing issue, not infrastructure)
 
-2. **Service Resilience** - Need comprehensive review of all systemd services to ensure:
-   - All services have appropriate watchdog timeouts
-   - Data write failures don't clobber downstream data
-   - Services recover gracefully from transient errors
+## Files Modified This Session (Complete List)
 
-3. **Pipeline Data Dependencies** - Need to ensure upstream service failures don't corrupt downstream data products
+### Systemd Service Files
+- `systemd/timestd-metrology.service` - Restart=always
+- `systemd/timestd-vtec.service` - Type=notify, WatchdogSec=60
+- `systemd/timestd-web-api.service` - Type=notify, WatchdogSec=60, User=timestd
+- `systemd/timestd-ionex-download.service` - Retry mechanism, OnFailure alert
+
+### Python Scripts
+- `scripts/live_vtec.py` - Systemd watchdog notifications
+- `scripts/check-chrony-reach.sh` - TSL1/TSL2 instead of TMGR
+- `web-api/main.py` - Systemd watchdog via async task
+
+### Core Services (Data Freshness)
+- `src/hf_timestd/core/l2_calibration_service.py` - Upstream freshness check
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - Upstream freshness check
+- `src/hf_timestd/core/physics_fusion_service.py` - Upstream freshness check
+
+### Documentation
+- `docs/changes/SESSION_2026_01_18_SERVICE_RESILIENCE.md` - This file
+- `CRITIC_CONTEXT.md` - Updated for next session (greenfield installation review)

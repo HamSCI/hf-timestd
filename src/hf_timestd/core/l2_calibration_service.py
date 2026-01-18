@@ -115,6 +115,10 @@ class L2CalibrationService:
         self.running = False
         self.last_processed: Dict[str, int] = {ch: 0 for ch in channels}
         
+        # Data freshness tracking
+        self.stale_warning_issued: Dict[str, bool] = {ch: False for ch in channels}
+        self.max_data_age_seconds = 300.0  # 5 minutes - warn if L1 data older than this
+        
         # Register signal handlers
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -163,6 +167,31 @@ class L2CalibrationService:
         logger.info(f"Received signal {signum}")
         self.stop()
     
+    def _check_l1_freshness(self, channel: str) -> Tuple[bool, float]:
+        """
+        Check if L1 data for a channel is fresh enough to process.
+        
+        Args:
+            channel: Channel name
+            
+        Returns:
+            Tuple of (is_fresh, age_seconds)
+        """
+        l1_dir = self.data_root / "phase2" / channel / "metrology"
+        if not l1_dir.exists():
+            return False, float('inf')
+        
+        # Find most recent HDF5 file
+        h5_files = list(l1_dir.glob("*.h5"))
+        if not h5_files:
+            return False, float('inf')
+        
+        # Get modification time of newest file
+        newest_mtime = max(f.stat().st_mtime for f in h5_files)
+        age_seconds = time.time() - newest_mtime
+        
+        return age_seconds < self.max_data_age_seconds, age_seconds
+    
     def _process_channel(self, channel: str):
         """
         Process L1 data for a single channel and produce L2 output.
@@ -171,6 +200,25 @@ class L2CalibrationService:
             channel: Channel name (e.g., 'SHARED_10000')
         """
         try:
+            # Check L1 data freshness before processing
+            is_fresh, age_seconds = self._check_l1_freshness(channel)
+            
+            if not is_fresh:
+                if not self.stale_warning_issued.get(channel, False):
+                    logger.warning(
+                        f"{channel}: L1 metrology data is stale ({age_seconds:.0f}s old, "
+                        f"threshold={self.max_data_age_seconds:.0f}s). "
+                        "Upstream metrology service may have stopped."
+                    )
+                    self.stale_warning_issued[channel] = True
+                # Continue processing stale data - don't block downstream
+                # but the warning is logged
+            else:
+                # Data is fresh - clear stale warning flag
+                if self.stale_warning_issued.get(channel, False):
+                    logger.info(f"{channel}: L1 metrology data is fresh again ({age_seconds:.0f}s old)")
+                    self.stale_warning_issued[channel] = False
+            
             # Read recent L1 measurements
             end_time = datetime.now(timezone.utc)
             start_time = end_time - timedelta(minutes=self.lookback_minutes)

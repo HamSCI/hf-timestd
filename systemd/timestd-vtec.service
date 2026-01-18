@@ -1,0 +1,33 @@
+[Unit]
+Description=HF-TimeStd GNSS VTEC Monitor
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+User=timestd
+Group=timestd
+EnvironmentFile=/etc/hf-timestd/environment
+WorkingDirectory=/var/lib/timestd
+
+# Watchdog: restart if no heartbeat for 60s (6 poll intervals at 10s each)
+WatchdogSec=60
+NotifyAccess=main
+
+ExecStart=/opt/hf-timestd/venv/bin/python -u /opt/hf-timestd/scripts/live_vtec.py \
+    --config /etc/hf-timestd/timestd-config.toml
+
+# Always restart - VTEC data is important for ionospheric corrections
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-vtec
+
+[Install]
+WantedBy=multi-user.target

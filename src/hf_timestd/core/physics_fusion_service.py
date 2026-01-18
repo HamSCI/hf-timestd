@@ -104,6 +104,10 @@ class PhysicsFusionService:
         self.last_processed_minute = 0
         self.channels = self._discover_channels()
         
+        # Data freshness tracking for upstream starvation detection
+        self.upstream_stale_warning_issued = False
+        self.max_upstream_age_seconds = 300.0  # 5 minutes - warn if L2 data older than this
+        
         logger.info(f"PhysicsFusionService initialized with {len(self.channels)} channels")
 
     def _discover_channels(self) -> List[str]:
@@ -117,6 +121,29 @@ class PhysicsFusionService:
                     if (subdir / 'clock_offset').exists():
                         channels.append(subdir.name)
         return sorted(channels)
+    
+    def _check_upstream_freshness(self) -> Tuple[bool, float]:
+        """
+        Check if upstream L2 data is fresh enough.
+        
+        Returns:
+            Tuple of (is_fresh, newest_age_seconds)
+        """
+        newest_mtime = 0.0
+        
+        for channel in self.channels:
+            l2_dir = self.data_root / 'phase2' / channel / 'clock_offset'
+            if l2_dir.exists():
+                h5_files = list(l2_dir.glob("*.h5"))
+                if h5_files:
+                    channel_mtime = max(f.stat().st_mtime for f in h5_files)
+                    newest_mtime = max(newest_mtime, channel_mtime)
+        
+        if newest_mtime == 0.0:
+            return False, float('inf')
+        
+        age_seconds = time.time() - newest_mtime
+        return age_seconds < self.max_upstream_age_seconds, age_seconds
         
     def _read_l2_slice(self, minute_timestamp: int) -> Dict[tuple, List[Dict]]:
         """
@@ -203,6 +230,22 @@ class PhysicsFusionService:
     def process_minute(self, minute_timestamp: int):
         """Process a single minute of data."""
         logger.info(f"Processing minute {minute_timestamp} ({datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)})")
+        
+        # 0. Check upstream data freshness
+        is_fresh, age_seconds = self._check_upstream_freshness()
+        if not is_fresh:
+            if not self.upstream_stale_warning_issued:
+                logger.warning(
+                    f"Upstream L2 data is stale ({age_seconds:.0f}s old, "
+                    f"threshold={self.max_upstream_age_seconds:.0f}s). "
+                    "L2 calibration service may have stopped."
+                )
+                self.upstream_stale_warning_issued = True
+            # Continue processing - use whatever data is available
+        else:
+            if self.upstream_stale_warning_issued:
+                logger.info(f"Upstream L2 data is fresh again ({age_seconds:.0f}s old)")
+                self.upstream_stale_warning_issued = False
         
         # 1. Read Data
         station_data = self._read_l2_slice(minute_timestamp)

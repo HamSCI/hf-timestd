@@ -18,7 +18,7 @@ ExecStop=/opt/hf-timestd/scripts/timestd-metrology.sh -stop
 # Type=forking since script backgrounds processes
 RemainAfterExit=yes
 
-Restart=on-failure
+Restart=always
 RestartSec=30
 StartLimitInterval=300
 StartLimitBurst=3

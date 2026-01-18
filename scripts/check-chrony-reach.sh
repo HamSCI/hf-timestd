@@ -1,8 +1,12 @@
 #!/bin/bash
 # =============================================================================
-# Chrony TMGR Reach Monitor
+# Chrony TSL1/TSL2 Reach Monitor
 # =============================================================================
-# Monitors the Chrony TMGR (Time Manager) source reach value and alerts if low.
+# Monitors the Chrony TSL1 and TSL2 (Time Standard Layer 1/2) source reach
+# values and alerts if low.
+#
+# TSL1 = L1 Metrology timing (raw measurements)
+# TSL2 = L2 Calibrated timing (Kalman-filtered, higher quality)
 #
 # Reach is an octal value (0-377) representing the last 8 poll attempts:
 #   377 (octal) = 11111111 (binary) = 8/8 successful polls (optimal)
@@ -13,9 +17,9 @@
 #   ./check-chrony-reach.sh [--threshold DECIMAL] [--alert-command "COMMAND"]
 #
 # Exit codes:
-#   0 = OK (reach >= threshold)
-#   1 = WARNING (reach < threshold)
-#   2 = CRITICAL (TMGR source not found or chronyd not running)
+#   0 = OK (at least one source reach >= threshold)
+#   1 = WARNING (all sources reach < threshold)
+#   2 = CRITICAL (no TSL sources found or chronyd not running)
 # =============================================================================
 
 set -euo pipefail
@@ -42,7 +46,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Chrony TMGR Reach Monitor"
+            echo "Chrony TSL1/TSL2 Reach Monitor"
             echo ""
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -75,26 +79,79 @@ if ! systemctl is-active --quiet chronyd 2>/dev/null; then
     exit 2
 fi
 
-# Get TMGR source info
-TMGR_LINE=$(chronyc sources 2>/dev/null | grep "TMGR" || true)
+# Get TSL1 and TSL2 source info (new naming convention)
+TSL1_LINE=$(chronyc sources 2>/dev/null | grep "TSL1" || true)
+TSL2_LINE=$(chronyc sources 2>/dev/null | grep "TSL2" || true)
 
-if [[ -z "$TMGR_LINE" ]]; then
-    echo "CRITICAL: TMGR source not found in chronyc sources"
+if [[ -z "$TSL1_LINE" ]] && [[ -z "$TSL2_LINE" ]]; then
+    echo "CRITICAL: Neither TSL1 nor TSL2 source found in chronyc sources"
     echo "  Fusion service may not be writing to Chrony SHM"
     exit 2
 fi
 
-# Extract reach value (5th column in chronyc sources output)
-REACH_OCT=$(echo "$TMGR_LINE" | awk '{print $5}')
+# Function to extract and check reach for a source
+check_source_reach() {
+    local SOURCE_NAME="$1"
+    local SOURCE_LINE="$2"
+    
+    if [[ -z "$SOURCE_LINE" ]]; then
+        echo "  $SOURCE_NAME: not present"
+        return 1
+    fi
+    
+    # Extract reach value (5th column in chronyc sources output)
+    local REACH_OCT=$(echo "$SOURCE_LINE" | awk '{print $5}')
+    
+    # Convert octal to decimal
+    local REACH_DEC=$((8#$REACH_OCT))
+    
+    # Calculate success percentage
+    local SUCCESS_PCT=$((REACH_DEC * 100 / 255))
+    
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo "  $SOURCE_NAME: reach = $REACH_OCT (octal) = $REACH_DEC (decimal) = $SUCCESS_PCT%"
+    fi
+    
+    # Return success if reach >= threshold
+    if [[ $REACH_DEC -ge $THRESHOLD_DEC ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
 
-# Convert octal to decimal
-REACH_DEC=$((8#$REACH_OCT))
+# Check both sources - OK if at least one meets threshold
+TSL1_OK=false
+TSL2_OK=false
+BEST_REACH=0
 
-# Calculate success percentage
-SUCCESS_PCT=$((REACH_DEC * 100 / 255))
+if [[ -n "$TSL1_LINE" ]]; then
+    TSL1_REACH_OCT=$(echo "$TSL1_LINE" | awk '{print $5}')
+    TSL1_REACH_DEC=$((8#$TSL1_REACH_OCT))
+    if [[ $TSL1_REACH_DEC -ge $THRESHOLD_DEC ]]; then
+        TSL1_OK=true
+    fi
+    if [[ $TSL1_REACH_DEC -gt $BEST_REACH ]]; then
+        BEST_REACH=$TSL1_REACH_DEC
+    fi
+fi
 
-# Determine status
-if [[ $REACH_DEC -ge $THRESHOLD_DEC ]]; then
+if [[ -n "$TSL2_LINE" ]]; then
+    TSL2_REACH_OCT=$(echo "$TSL2_LINE" | awk '{print $5}')
+    TSL2_REACH_DEC=$((8#$TSL2_REACH_OCT))
+    if [[ $TSL2_REACH_DEC -ge $THRESHOLD_DEC ]]; then
+        TSL2_OK=true
+    fi
+    if [[ $TSL2_REACH_DEC -gt $BEST_REACH ]]; then
+        BEST_REACH=$TSL2_REACH_DEC
+    fi
+fi
+
+# Calculate success percentage for best reach
+SUCCESS_PCT=$((BEST_REACH * 100 / 255))
+
+# Determine status - OK if at least one source is good
+if [[ "$TSL1_OK" == "true" ]] || [[ "$TSL2_OK" == "true" ]]; then
     STATUS="OK"
     EXIT_CODE=0
 else
@@ -104,9 +161,10 @@ fi
 
 # Output
 if [[ "$VERBOSE" == "true" ]] || [[ $EXIT_CODE -ne 0 ]]; then
-    echo "$STATUS: Chrony TMGR reach = $REACH_OCT (octal) = $REACH_DEC (decimal) = $SUCCESS_PCT%"
+    echo "$STATUS: Chrony TSL reach (best) = $BEST_REACH (decimal) = $SUCCESS_PCT%"
     echo "  Threshold: $THRESHOLD_DEC (decimal)"
-    echo "  Full line: $TMGR_LINE"
+    [[ -n "$TSL1_LINE" ]] && echo "  TSL1: $TSL1_LINE"
+    [[ -n "$TSL2_LINE" ]] && echo "  TSL2: $TSL2_LINE"
 fi
 
 # Run alert command if provided and status is not OK
@@ -114,10 +172,9 @@ if [[ -n "$ALERT_COMMAND" ]] && [[ $EXIT_CODE -ne 0 ]]; then
     eval "$ALERT_COMMAND"
 fi
 
-# Restart logic
-if [[ "$RESTART_ON_FAILURE" == "true" ]] && [[ "$REACH_DEC" -eq 0 ]]; then
-    echo "CRITICAL: Chrony reach is 0. Attempting to restart chronyd..."
-    # Should ideally also clear SHM or restart fusion, but start with chronyd
+# Restart logic - only if BOTH sources have zero reach
+if [[ "$RESTART_ON_FAILURE" == "true" ]] && [[ "$BEST_REACH" -eq 0 ]]; then
+    echo "CRITICAL: All Chrony TSL sources have reach 0. Attempting to restart chronyd..."
     systemctl restart chronyd
     echo "Restarted chronyd. Fusion service should auto-reconnect."
 fi
