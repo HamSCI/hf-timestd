@@ -112,6 +112,26 @@ class MetrologyService:
             raw_root = self.archive_dir.parent
             self._tiered_manager = TieredStorageManager(raw_root)
             logger.info("Tiered storage manager initialized")
+        
+        # CHU FSK Writer (for CHU channels only)
+        self.fsk_writer = None
+        if 'CHU' in channel_name.upper():
+            fsk_output_dir = DataProductRegistry.get_data_dir(
+                channel_dir=self.output_dir,
+                product_level="L2",
+                product_name="chu_fsk",
+                create=True
+            )
+            self.fsk_writer = DataProductWriter(
+                output_dir=fsk_output_dir,
+                product_level="L2",
+                product_name="chu_fsk",
+                channel=self.channel_name,
+                version="v1",
+                processing_version="1.0.0",
+                station_metadata=self.station_config
+            )
+            logger.info(f"CHU FSK writer initialized for {channel_name}")
              
         logger.info(f"MetrologyService initialized for {channel_name}")
 
@@ -185,6 +205,33 @@ class MetrologyService:
                 
                 self.writer.write_measurement(rec)
                 
+            # Write CHU FSK data if available
+            if self.fsk_writer and hasattr(self.engine, '_last_chu_fsk_data'):
+                fsk_data = self.engine._last_chu_fsk_data
+                if fsk_data and fsk_data.get('fsk_valid'):
+                    fsk_rec = {
+                        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                        'minute_boundary_utc': minute_boundary,
+                        'channel': self.channel_name,
+                        'fsk_valid': fsk_data.get('fsk_valid', False),
+                        'frames_decoded': fsk_data.get('fsk_frames_decoded', 0),
+                        'decode_confidence': fsk_data.get('fsk_confidence', 0.0),
+                        'decoded_day': fsk_data.get('decoded_day'),
+                        'decoded_hour': fsk_data.get('decoded_hour'),
+                        'decoded_minute': fsk_data.get('decoded_minute'),
+                        'dut1_seconds': fsk_data.get('dut1_seconds'),
+                        'tai_utc': fsk_data.get('tai_utc'),
+                        'year': fsk_data.get('year'),
+                        'timing_offset_ms': fsk_data.get('timing_offset_ms'),
+                        'processed_at': datetime.now(timezone.utc).isoformat(),
+                        'processing_version': "1.0.0"
+                    }
+                    try:
+                        self.fsk_writer.write_measurement(fsk_rec)
+                        logger.info(f"CHU FSK data written: DUT1={fsk_data.get('dut1_seconds')}s, TAI-UTC={fsk_data.get('tai_utc')}s")
+                    except Exception as fsk_err:
+                        logger.warning(f"Failed to write FSK data: {fsk_err}")
+                
             self.minutes_processed += 1
             self._write_status(minute_boundary, results)
             
@@ -201,6 +248,8 @@ class MetrologyService:
         self.running = False
         if self.writer:
             self.writer.close()
+        if self.fsk_writer:
+            self.fsk_writer.close()
 
     def _handle_signal(self, signum, frame):
         logger.info(f"Received signal {signum}")

@@ -5,11 +5,14 @@ After=timestd-metrology.service
 Wants=timestd-metrology.service
 
 [Service]
-Type=simple
+Type=notify
 User=timestd
 Group=timestd
 EnvironmentFile=/etc/hf-timestd/environment
 WorkingDirectory=/var/lib/timestd
+
+# Watchdog: restart if no heartbeat for 180s (3 poll intervals)
+WatchdogSec=180
 
 # Run L2 calibration service for all 9 channels
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_service \
@@ -21,10 +24,8 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_serv
     --poll-interval 60.0 \
     --log-level INFO
 
-Restart=on-failure
+Restart=always
 RestartSec=30
-StartLimitInterval=300
-StartLimitBurst=3
 
 StandardOutput=journal
 StandardError=journal

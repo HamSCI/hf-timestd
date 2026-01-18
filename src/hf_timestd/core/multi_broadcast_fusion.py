@@ -665,13 +665,17 @@ class MultiBroadcastFusion:
         Returns:
             True if calibration is safe to use, False otherwise.
         """
-        MAX_OFFSET_MS = 100.0  # Maximum reasonable offset
+        MAX_OFFSET_MS = 150.0  # Maximum reasonable offset (BPM from China can be ~120ms)
         MAX_AGE_DAYS = 7       # Maximum calibration age
         
         current_time = time.time()
         max_age_seconds = MAX_AGE_DAYS * 86400
         
         for broadcast_key, cal_data in data.items():
+            # Skip metadata keys (Kalman state, etc.)
+            if broadcast_key.startswith('_'):
+                continue
+                
             offset_ms = cal_data.get('offset_ms', 0.0)
             last_updated = cal_data.get('last_updated', 0)
             
@@ -683,8 +687,18 @@ class MultiBroadcastFusion:
                 )
                 return False
             
-            # Check age
-            age_seconds = current_time - last_updated
+            # Check age - handle both Unix timestamp (float) and ISO string formats
+            if isinstance(last_updated, str):
+                try:
+                    from datetime import datetime, timezone
+                    dt = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                    last_updated_ts = dt.timestamp()
+                except (ValueError, AttributeError):
+                    last_updated_ts = 0
+            else:
+                last_updated_ts = last_updated
+            
+            age_seconds = current_time - last_updated_ts
             if age_seconds > max_age_seconds:
                 logger.warning(
                     f"Calibration sanity check FAILED: {broadcast_key} is "
@@ -699,24 +713,25 @@ class MultiBroadcastFusion:
         """
         Load per-broadcast calibration from file.
         
-        STEEL RULER PHILOSOPHY (2026-01-13):
-        For GPSDO-referenced systems, calibration should NOT persist across restarts.
-        - GPSDO provides fixed time reference (doesn't drift)
-        - UTC doesn't change
-        - Baseline offset should be near-zero and constant
-        - Propagation delays vary (ionosphere) but are science data, not calibration
-        - Always bootstrap from zero to maintain absolute reference
+        STEEL RULER PHILOSOPHY (2026-01-18 - CORRECTED):
+        The GPSDO provides a stable FREQUENCY reference (no drift), but broadcast
+        calibration offsets represent REAL systematic delays that should persist:
+        - Matched filter group delay (~1-2ms)
+        - Propagation model errors (station-specific)
+        - Tone rise time differences
         
-        Previous behavior (calibration persistence) was causing stale calibration issues
-        where old offsets were incorrectly applied after restart.
+        What SHOULD reset on restart:
+        - Kalman filter state (drift rate) - GPSDO doesn't drift
+        
+        What SHOULD persist:
+        - Broadcast calibration offsets - these are real systematic delays
+        
+        The previous "always bootstrap from zero" approach was incorrect because
+        it discarded learned calibration offsets, causing D_clock to jump from
+        ~1ms to ~0ms on every restart.
         """
-        # STEEL RULER: Always bootstrap from zero - GPSDO is the absolute reference
-        logger.info("Steel Ruler mode: Starting fresh bootstrap from zero (GPSDO is absolute reference)")
-        self._init_default_calibration()
-        return
-        
-        # OLD CODE (disabled): Load calibration from file
-        if False and self.calibration_file.exists():
+        # Load calibration from file if it exists
+        if self.calibration_file.exists():
             try:
                 with open(self.calibration_file) as f:
                     data = json.load(f)
@@ -730,55 +745,33 @@ class MultiBroadcastFusion:
                     self._init_default_calibration()
                     return
                 
-                # CRITICAL FIX: Restore Kalman state from calibration file
-                # This prevents discontinuities on service restart
+                # STEEL RULER (2026-01-18 - REVISED): Restore Kalman OFFSET but not drift
+                # The GPSDO doesn't drift, so drift_ms_per_min should stay at zero.
+                # But the Kalman offset represents the current D_clock estimate, which is
+                # a real physical quantity that should persist across restarts.
+                # NOT restoring it causes visible discontinuities in the D_clock trace.
                 if '_kalman_state' in data:
-                    ks = data['_kalman_state']
-                    age_seconds = time.time() - ks.get('saved_at', 0)
-                    offset_ms = ks.get('offset_ms', 0.0)
-                    
-                    # Sanity check: For GPSDO-referenced systems, offset should be near zero
-                    # Reject offsets > 5ms as likely stale calibration from different system state
-                    # Check this FIRST before age check to catch miscalibration regardless of file age
-                    if abs(offset_ms) > 5.0:
-                        logger.error(
-                            f"⚠️  REJECTED stale Kalman state: offset={offset_ms:.3f}ms exceeds 5ms threshold. "
-                            f"Starting fresh bootstrap to prevent incorrect clock offset."
+                    kalman_state = data['_kalman_state']
+                    if kalman_state.get('converged', False):
+                        # Restore the offset but keep drift at zero (Steel Ruler)
+                        restored_offset = kalman_state.get('offset_ms', 0.0)
+                        # CRITICAL: Set kalman_state array, not separate variables
+                        self.kalman_state[0] = restored_offset  # offset_ms
+                        self.kalman_state[1] = 0.0  # drift forced to zero (Steel Ruler)
+                        self.kalman_n_updates = kalman_state.get('n_updates', 0)
+                        self.kalman_initialized = True
+                        self.kalman_converged = True
+                        # Restore covariance for proper uncertainty propagation
+                        if 'covariance' in kalman_state:
+                            self.kalman_P = np.array(kalman_state['covariance'])
+                        logger.info(
+                            f"Steel Ruler mode: Restored Kalman state[0]={self.kalman_state[0]:.3f}ms "
+                            f"(drift forced to 0, n_updates={self.kalman_n_updates})"
                         )
-                        print(f"⚠️  REJECTED stale calibration: {offset_ms:.3f}ms > 5ms threshold", flush=True)
-                        
-                        # Reset Chrony discontinuity check to allow feeding after bootstrap
-                        global last_chrony_d_clock, last_chrony_update_time
-                        last_chrony_d_clock = None
-                        last_chrony_update_time = None
-                        logger.info("Reset Chrony discontinuity check after rejecting stale calibration")
-                        
-                        # CRITICAL: Don't load broadcast calibrations either - force complete fresh bootstrap
-                        self._init_default_calibration()
-                        return
-                    
-                    # Check age: only restore if state is recent (<1 hour old)
-                    if age_seconds < 3600:
-                        try:
-                            self.kalman_state = np.array([
-                                offset_ms,
-                                ks['drift_ms_per_min']
-                            ])
-                            self.kalman_P = np.array(ks['covariance'])
-                            self.kalman_converged = ks['converged']
-                            self.kalman_n_updates = ks['n_updates']
-                            self.kalman_initialized = ks['initialized']
-                            
-                            logger.info(
-                                f"Restored Kalman state: offset={self.kalman_state[0]:.3f}ms, "
-                                f"converged={self.kalman_converged}, n_updates={self.kalman_n_updates}, "
-                                f"age={age_seconds:.0f}s"
-                            )
-                        except (KeyError, ValueError, TypeError) as e:
-                            logger.warning(f"Failed to restore Kalman state: {e}, using defaults")
                     else:
-                        logger.warning(
-                            f"Kalman state too old ({age_seconds:.0f}s), resetting to defaults for safety"
+                        logger.info(
+                            "Steel Ruler mode: Kalman not converged, starting fresh. "
+                            "Broadcast calibrations will be loaded."
                         )
                 
                 # Load validated calibration

@@ -49,6 +49,7 @@ class DataProductRegistry:
         ('L2', 'timing_measurements'): 'clock_offset',
         ('L2', 'test_signal'): 'test_signal',
         ('L2', 'physics_interpretation'): 'physics',
+        ('L2', 'chu_fsk'): 'chu_fsk',
         
         # L3 Products (Derived/Fused)
         ('L3', 'tec'): 'tec',

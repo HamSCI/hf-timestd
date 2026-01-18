@@ -1,0 +1,115 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L2_chu_fsk",
+    "description": "CHU FSK decoded time code data from NRC Canada",
+    "cadence_seconds": 60,
+    "processing_level": "L2",
+    "standards": [
+        "NRC Canada CHU time signal specification"
+    ],
+    "reference": "UTC(NRC) via CHU FSK time code",
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "channel",
+            "type": "string",
+            "required": true,
+            "description": "Channel name (e.g., CHU_14670)"
+        },
+        {
+            "name": "fsk_valid",
+            "type": "boolean",
+            "required": true,
+            "description": "FSK decode was successful"
+        },
+        {
+            "name": "frames_decoded",
+            "type": "integer",
+            "required": true,
+            "description": "Number of FSK frames successfully decoded (0-9)"
+        },
+        {
+            "name": "decode_confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [0, 1],
+            "description": "Overall decode confidence score"
+        },
+        {
+            "name": "decoded_day",
+            "type": "integer",
+            "required": false,
+            "allow_empty": true,
+            "description": "Decoded day of year (1-366)"
+        },
+        {
+            "name": "decoded_hour",
+            "type": "integer",
+            "required": false,
+            "allow_empty": true,
+            "description": "Decoded hour (0-23)"
+        },
+        {
+            "name": "decoded_minute",
+            "type": "integer",
+            "required": false,
+            "allow_empty": true,
+            "description": "Decoded minute (0-59)"
+        },
+        {
+            "name": "dut1_seconds",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "DUT1 correction (UT1-UTC) in seconds",
+            "units": "seconds"
+        },
+        {
+            "name": "tai_utc",
+            "type": "integer",
+            "required": false,
+            "allow_empty": true,
+            "description": "TAI-UTC leap second count"
+        },
+        {
+            "name": "year",
+            "type": "integer",
+            "required": false,
+            "allow_empty": true,
+            "description": "Decoded year"
+        },
+        {
+            "name": "timing_offset_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Timing offset from FSK frame boundary",
+            "units": "milliseconds"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Processing timestamp"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Analytics version"
+        }
+    ]
+}

@@ -243,10 +243,16 @@ class MetrologyEngine:
             geom_delay, dist, unc = self._predict_geometric_delay(likely_station)
             if geom_delay > 0:
                 expected_offset_ms = geom_delay + 2.0 # Bias slightly for skywave
-                adaptive_window_ms = 50.0 # Narrower window if we know geometry? 
-                # Actually, during bootstrap, keep it wide? 
-                # Let's stick to 200ms around geometric delay.
-                adaptive_window_ms = 200.0
+                
+                # CHU uses 0.5s template, so correlation peak is at tone_start + 250ms
+                # Need wider window to capture this offset from minute boundary
+                if likely_station == 'CHU':
+                    # CHU: correlation peak at ~250ms + propagation delay
+                    # Use 500ms window to reliably capture the peak
+                    adaptive_window_ms = 500.0
+                else:
+                    # WWV/WWVH: 0.8s template, peak at ~400ms but we search for onset
+                    adaptive_window_ms = 200.0
         
         # Run detection
         # Note: We replicate _step1_tone_detection logic simplified
@@ -300,6 +306,8 @@ class MetrologyEngine:
         chu_metrics = {}
         if hasattr(self, 'chu_fsk_decoder'):
             fsk_res = self.chu_fsk_decoder.decode_minute(iq_samples, system_time)
+            logger.debug(f"{self.channel_name}: FSK decode result: detected={fsk_res.detected}, "
+                        f"frames={fsk_res.frames_decoded}/9, confidence={fsk_res.decode_confidence:.2f}")
             if fsk_res.detected:
                 chu_metrics['fsk_valid'] = True
                 chu_metrics['fsk_frames_decoded'] = fsk_res.frames_decoded
@@ -367,6 +375,9 @@ class MetrologyEngine:
             
         with self._lock:
             self.minutes_processed += 1
+        
+        # Store FSK data for caller to retrieve
+        self._last_chu_fsk_data = chu_metrics if chu_metrics else None
             
         return results
 

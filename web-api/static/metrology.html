@@ -64,15 +64,127 @@
             </div>
         </div>
 
-        <!-- Station Contributions -->
+        <!-- How It Works (Collapsible) -->
+        <div class="card">
+            <div class="card-header" style="cursor: pointer;" onclick="toggleHowItWorks()">
+                <div>
+                    <div class="card-title">📐 How It Works</div>
+                    <div class="card-subtitle">The transmission time equation and what D_clock means</div>
+                </div>
+                <div id="how-it-works-toggle" style="font-size: 20px; color: #94a3b8;">▼</div>
+            </div>
+            <div id="how-it-works-content" style="padding: 16px; display: none;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
+                    <!-- The Measurement -->
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #e0e0e0;">The Measurement Problem</h3>
+                        <p style="font-size: 13px; color: #cbd5e1; line-height: 1.6; margin-bottom: 12px;">
+                            <strong>D_clock</strong> is the offset between your local system clock and UTC(NIST):
+                        </p>
+                        <div style="background: rgba(30, 41, 59, 0.5); padding: 12px; border-radius: 6px; font-family: 'Courier New', monospace; font-size: 13px; margin-bottom: 12px;">
+                            D_clock = T<sub>system</sub> − T<sub>UTC(NIST)</sub>
+                        </div>
+                        <p style="font-size: 13px; color: #cbd5e1; line-height: 1.6;">
+                            This is extracted from HF time signals by solving the <strong>transmission time equation</strong>:
+                        </p>
+                        <div style="background: rgba(59, 130, 246, 0.1); border-left: 3px solid #3b82f6; padding: 12px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; margin-top: 12px;">
+                            T<sub>arrival</sub> = T<sub>emission</sub> + τ<sub>propagation</sub> + D<sub>clock</sub>
+                        </div>
+                    </div>
+                    
+                    <!-- The Variables -->
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #e0e0e0;">The Variables</h3>
+                        <div style="display: flex; flex-direction: column; gap: 10px;">
+                            <div style="display: flex; gap: 12px; align-items: flex-start;">
+                                <span style="background: #3b82f6; color: white; padding: 2px 8px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 12px; white-space: nowrap;">T<sub>arrival</sub></span>
+                                <span style="font-size: 13px; color: #cbd5e1;">Measured tone arrival time (RTP timestamp from GPSDO-disciplined SDR)</span>
+                            </div>
+                            <div style="display: flex; gap: 12px; align-items: flex-start;">
+                                <span style="background: #10b981; color: white; padding: 2px 8px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 12px; white-space: nowrap;">T<sub>emission</sub></span>
+                                <span style="font-size: 13px; color: #cbd5e1;">Known transmission time (top of minute, UTC)</span>
+                            </div>
+                            <div style="display: flex; gap: 12px; align-items: flex-start;">
+                                <span style="background: #f59e0b; color: white; padding: 2px 8px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 12px; white-space: nowrap;">τ<sub>prop</sub></span>
+                                <span style="font-size: 13px; color: #cbd5e1;">Ionospheric path delay (2-70 ms, station-dependent)</span>
+                            </div>
+                            <div style="display: flex; gap: 12px; align-items: flex-start;">
+                                <span style="background: #8b5cf6; color: white; padding: 2px 8px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 12px; white-space: nowrap;">D<sub>clock</sub></span>
+                                <span style="font-size: 13px; color: #cbd5e1;"><strong>The unknown we solve for</strong></span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Three-Layer Architecture -->
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #e0e0e0;">Three-Layer Architecture</h3>
+                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                            <div style="background: rgba(59, 130, 246, 0.1); padding: 10px; border-radius: 6px; border-left: 3px solid #3b82f6;">
+                                <div style="font-weight: 600; font-size: 13px; color: #3b82f6;">Layer 1: Single Broadcast</div>
+                                <div style="font-size: 12px; color: #94a3b8;">Measures tick rate, but floating in time</div>
+                            </div>
+                            <div style="background: rgba(16, 185, 129, 0.1); padding: 10px; border-radius: 6px; border-left: 3px solid #10b981;">
+                                <div style="font-weight: 600; font-size: 13px; color: #10b981;">Layer 2: Multi-Frequency</div>
+                                <div style="font-size: 12px; color: #94a3b8;">Dispersion → TEC → path delay correction</div>
+                            </div>
+                            <div style="background: rgba(139, 92, 246, 0.1); padding: 10px; border-radius: 6px; border-left: 3px solid #8b5cf6;">
+                                <div style="font-weight: 600; font-size: 13px; color: #8b5cf6;">Layer 3: Multi-Station</div>
+                                <div style="font-size: 12px; color: #94a3b8;">Geometry lock → integrity validation</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 20px; padding: 16px; background: rgba(139, 92, 246, 0.1); border-radius: 8px;">
+                    <div style="font-size: 14px; font-weight: 600; color: #a78bfa; margin-bottom: 8px;">💡 The Key Insight</div>
+                    <p style="font-size: 13px; color: #cbd5e1; line-height: 1.6; margin: 0;">
+                        Single-broadcast methods achieve only ±5-10 ms due to mode ambiguity. Our multi-broadcast fusion achieves <strong>±0.5 ms</strong> by:
+                        (1) Calibrating systematic propagation biases per station,
+                        (2) Fusing 9-17 independent measurements with inverse variance weighting, and
+                        (3) Validating against physical constraints (cross-station consistency, continuity).
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Steel Ruler Status -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">📏 Steel Ruler Status</div>
+                    <div class="card-subtitle">Kalman filter mode and baseline stability</div>
+                </div>
+            </div>
+            <div id="steel-ruler-status" style="padding: 16px;">
+                <div class="loading"></div>
+            </div>
+        </div>
+
+        <!-- Station Contributions (Enhanced) -->
         <div class="card">
             <div class="card-header">
                 <div>
                     <div class="card-title">Station Contributions</div>
-                    <div class="card-subtitle">Per-station timing offsets and broadcast counts</div>
+                    <div class="card-subtitle">Per-station D_clock values, weights, and broadcast counts</div>
                 </div>
             </div>
-            <div class="grid grid-4" id="station-contributions">
+            <div id="station-contributions" style="padding: 16px;">
+                <div class="loading"></div>
+            </div>
+            <!-- Fusion Equation Visualization -->
+            <div id="fusion-equation" style="padding: 0 16px 16px 16px; display: none;">
+            </div>
+        </div>
+
+        <!-- Quality Grade Explanation -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">🎖️ Quality Grade Criteria</div>
+                    <div class="card-subtitle">What criteria were met for the current grade</div>
+                </div>
+            </div>
+            <div id="quality-grade-explanation" style="padding: 16px;">
                 <div class="loading"></div>
             </div>
         </div>
@@ -205,6 +317,344 @@
     <script src="/static/js/common.js"></script>
     <script>
         let currentRange = '-6h';
+
+        // Toggle How It Works section
+        function toggleHowItWorks() {
+            const content = document.getElementById('how-it-works-content');
+            const toggle = document.getElementById('how-it-works-toggle');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggle.textContent = '▲';
+            } else {
+                content.style.display = 'none';
+                toggle.textContent = '▼';
+            }
+        }
+
+        // Update Steel Ruler Status
+        function updateSteelRulerStatus(data) {
+            const container = document.getElementById('steel-ruler-status');
+            const kalmanState = data.kalman_state || 'UNKNOWN';
+            const isLocked = kalmanState === 'LOCKED';
+            const calibrationApplied = data.calibration_applied;
+            
+            container.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                    <!-- Kalman State -->
+                    <div style="text-align: center; padding: 20px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border: 2px solid ${isLocked ? '#10b981' : '#f59e0b'};">
+                        <div style="font-size: 32px; margin-bottom: 8px;">${isLocked ? '🔒' : '🔄'}</div>
+                        <div style="font-size: 18px; font-weight: 600; color: ${isLocked ? '#10b981' : '#f59e0b'};">
+                            ${kalmanState}
+                        </div>
+                        <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Kalman Filter State</div>
+                    </div>
+                    
+                    <!-- Drift Status -->
+                    <div style="text-align: center; padding: 20px; background: rgba(30, 41, 59, 0.5); border-radius: 8px;">
+                        <div style="font-size: 32px; margin-bottom: 8px;">📏</div>
+                        <div style="font-size: 18px; font-weight: 600; font-family: 'Courier New', monospace; color: #10b981;">
+                            0.0 ms/min
+                        </div>
+                        <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Drift (Clamped)</div>
+                    </div>
+                    
+                    <!-- Process Noise -->
+                    <div style="text-align: center; padding: 20px; background: rgba(30, 41, 59, 0.5); border-radius: 8px;">
+                        <div style="font-size: 32px; margin-bottom: 8px;">🎯</div>
+                        <div style="font-size: 18px; font-weight: 600; font-family: 'Courier New', monospace; color: #3b82f6;">
+                            ~0
+                        </div>
+                        <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Process Noise (Q)</div>
+                    </div>
+                    
+                    <!-- Calibration -->
+                    <div style="text-align: center; padding: 20px; background: rgba(30, 41, 59, 0.5); border-radius: 8px;">
+                        <div style="font-size: 32px; margin-bottom: 8px;">${calibrationApplied ? '✅' : '⚠️'}</div>
+                        <div style="font-size: 18px; font-weight: 600; color: ${calibrationApplied ? '#10b981' : '#f59e0b'};">
+                            ${calibrationApplied ? 'APPLIED' : 'PENDING'}
+                        </div>
+                        <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Calibration</div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 16px; padding: 12px; background: rgba(16, 185, 129, 0.1); border-left: 3px solid #10b981; border-radius: 4px;">
+                    <div style="font-size: 13px; color: #cbd5e1; line-height: 1.5;">
+                        <strong style="color: #10b981;">Steel Ruler Philosophy:</strong>
+                        The GPSDO provides a rigid "ruler" (precise tick rate). The system's job is to use ionospheric physics to 
+                        <strong>pin the ruler's zero-point to UTC</strong>. Drift is clamped to 0.0 because the GPSDO prevents accumulation.
+                    </div>
+                </div>
+            `;
+        }
+
+        // Update Station Contributions (Enhanced)
+        function updateStationContributions(data) {
+            const container = document.getElementById('station-contributions');
+            const fusionEqDiv = document.getElementById('fusion-equation');
+            
+            // Station data with colors
+            const stationConfig = {
+                'WWV': { color: '#3b82f6', icon: '🇺🇸', location: 'Fort Collins, CO' },
+                'WWVH': { color: '#10b981', icon: '🌺', location: 'Kauai, HI' },
+                'CHU': { color: '#f59e0b', icon: '🇨🇦', location: 'Ottawa, Canada' },
+                'BPM': { color: '#8b5cf6', icon: '🇨🇳', location: 'Pucheng, China' }
+            };
+            
+            // Build station cards with detailed data
+            const stations = [];
+            let totalWeight = 0;
+            
+            // WWV
+            if (data.wwv_count && data.wwv_count > 0) {
+                const uncertainty = data.wwv_intra_std_ms || 1.0;
+                const weight = 1 / (uncertainty * uncertainty);
+                totalWeight += weight;
+                stations.push({
+                    name: 'WWV',
+                    count: data.wwv_count,
+                    mean: data.wwv_mean_ms,
+                    std: data.wwv_intra_std_ms,
+                    weight: weight,
+                    ...stationConfig['WWV']
+                });
+            }
+            
+            // WWVH
+            if (data.wwvh_count && data.wwvh_count > 0) {
+                const uncertainty = data.wwvh_intra_std_ms || 1.0;
+                const weight = 1 / (uncertainty * uncertainty);
+                totalWeight += weight;
+                stations.push({
+                    name: 'WWVH',
+                    count: data.wwvh_count,
+                    mean: data.wwvh_mean_ms,
+                    std: data.wwvh_intra_std_ms,
+                    weight: weight,
+                    ...stationConfig['WWVH']
+                });
+            }
+            
+            // CHU
+            if (data.chu_count && data.chu_count > 0) {
+                const uncertainty = data.chu_intra_std_ms || 1.0;
+                const weight = 1 / (uncertainty * uncertainty);
+                totalWeight += weight;
+                stations.push({
+                    name: 'CHU',
+                    count: data.chu_count,
+                    mean: data.chu_mean_ms,
+                    std: data.chu_intra_std_ms,
+                    weight: weight,
+                    ...stationConfig['CHU']
+                });
+            }
+            
+            // BPM
+            if (data.bpm_count && data.bpm_count > 0) {
+                const uncertainty = 1.0; // No intra-std for BPM yet
+                const weight = 1 / (uncertainty * uncertainty);
+                totalWeight += weight;
+                stations.push({
+                    name: 'BPM',
+                    count: data.bpm_count,
+                    mean: data.bpm_mean_ms,
+                    std: null,
+                    weight: weight,
+                    ...stationConfig['BPM']
+                });
+            }
+            
+            if (stations.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #94a3b8;">No station data available</div>';
+                fusionEqDiv.style.display = 'none';
+                return;
+            }
+            
+            // Normalize weights to percentages
+            stations.forEach(s => s.weightPct = (s.weight / totalWeight * 100));
+            
+            // Render station cards
+            container.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px;">
+                    ${stations.map(s => `
+                        <div style="padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border-left: 4px solid ${s.color};">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                                <div style="font-size: 20px;">${s.icon}</div>
+                                <div style="font-weight: 700; font-size: 18px; color: ${s.color};">${s.name}</div>
+                            </div>
+                            <div style="font-size: 11px; color: #64748b; margin-bottom: 12px;">${s.location}</div>
+                            
+                            <div style="display: flex; flex-direction: column; gap: 8px;">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span style="color: #94a3b8; font-size: 12px;">D_clock</span>
+                                    <span style="font-family: 'Courier New', monospace; font-weight: 600; font-size: 14px;">
+                                        ${s.mean !== null && s.mean !== undefined ? formatNumber(s.mean, 3) + ' ms' : 'N/A'}
+                                    </span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span style="color: #94a3b8; font-size: 12px;">Broadcasts</span>
+                                    <span style="font-weight: 600;">${s.count}</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span style="color: #94a3b8; font-size: 12px;">Intra-σ</span>
+                                    <span style="font-family: 'Courier New', monospace; font-size: 13px;">
+                                        ${s.std !== null && s.std !== undefined ? formatNumber(s.std * 1000, 1) + ' µs' : 'N/A'}
+                                    </span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <span style="color: #94a3b8; font-size: 12px;">Weight</span>
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <div style="width: 60px; height: 6px; background: rgba(30, 41, 59, 0.8); border-radius: 3px; overflow: hidden;">
+                                            <div style="height: 100%; background: ${s.color}; width: ${s.weightPct}%;"></div>
+                                        </div>
+                                        <span style="font-size: 12px; font-weight: 600;">${s.weightPct.toFixed(0)}%</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+            
+            // Render fusion equation
+            if (stations.length >= 2) {
+                const terms = stations.map(s => 
+                    `<span style="color: ${s.color};">${s.weightPct.toFixed(0)}% × ${s.mean !== null ? formatNumber(s.mean, 2) : '?'}</span>`
+                ).join(' + ');
+                
+                fusionEqDiv.innerHTML = `
+                    <div style="margin-top: 16px; padding: 16px; background: rgba(30, 41, 59, 0.3); border-radius: 8px;">
+                        <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px;">Inverse Variance Weighted Mean:</div>
+                        <div style="font-family: 'Courier New', monospace; font-size: 13px; color: #e0e0e0; overflow-x: auto;">
+                            D<sub>clock_fused</sub> = (${terms}) = <strong style="color: #10b981;">${formatNumber(data.d_clock_ms, 3)} ms</strong>
+                        </div>
+                        <div style="font-size: 11px; color: #64748b; margin-top: 8px;">
+                            w<sub>i</sub> = 1/σ<sub>i</sub>² — Measurements with lower uncertainty get higher weight
+                        </div>
+                    </div>
+                `;
+                fusionEqDiv.style.display = 'block';
+            } else {
+                fusionEqDiv.style.display = 'none';
+            }
+        }
+
+        // Update Quality Grade Explanation
+        function updateQualityGradeExplanation(data) {
+            const container = document.getElementById('quality-grade-explanation');
+            const grade = data.quality_grade || 'D';
+            const nBroadcasts = data.n_broadcasts || 0;
+            const nStations = data.n_stations || 0;
+            const interStationSpread = data.inter_station_spread_ms || 0;
+            const calibrationApplied = data.calibration_applied;
+            const kalmanState = data.kalman_state || 'UNKNOWN';
+            const consistencyFlag = data.consistency_flag || 'UNKNOWN';
+            
+            // Define criteria for each grade
+            const criteria = [
+                {
+                    name: '30+ detections',
+                    met: nBroadcasts >= 30,
+                    value: `${nBroadcasts} detections`,
+                    required: 'A'
+                },
+                {
+                    name: '10+ detections',
+                    met: nBroadcasts >= 10,
+                    value: `${nBroadcasts} detections`,
+                    required: 'B'
+                },
+                {
+                    name: '2+ stations',
+                    met: nStations >= 2,
+                    value: `${nStations} stations`,
+                    required: 'B'
+                },
+                {
+                    name: 'Inter-station < 1 ms',
+                    met: interStationSpread < 1.0,
+                    value: `${formatNumber(interStationSpread, 3)} ms`,
+                    required: 'A'
+                },
+                {
+                    name: 'Calibration applied',
+                    met: calibrationApplied === true,
+                    value: calibrationApplied ? 'Yes' : 'No',
+                    required: 'A'
+                },
+                {
+                    name: 'Kalman LOCKED',
+                    met: kalmanState === 'LOCKED',
+                    value: kalmanState,
+                    required: 'A'
+                },
+                {
+                    name: 'Consistency OK',
+                    met: consistencyFlag === 'OK',
+                    value: consistencyFlag,
+                    required: 'A'
+                }
+            ];
+            
+            const gradeColors = {
+                'A': '#10b981',
+                'B': '#3b82f6',
+                'C': '#f59e0b',
+                'D': '#ef4444',
+                'F': '#dc2626'
+            };
+            
+            const gradeDescriptions = {
+                'A': '±0.5 ms — Full metrological quality',
+                'B': '±1.0 ms — Good quality, provisional phase',
+                'C': '±2.0 ms — Bootstrap phase, limited validation',
+                'D': '> 2.0 ms — Insufficient data',
+                'F': 'Failed — Validation failures'
+            };
+            
+            container.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
+                    <!-- Current Grade -->
+                    <div style="text-align: center; padding: 24px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border: 3px solid ${gradeColors[grade] || '#64748b'};">
+                        <div style="font-size: 64px; font-weight: 800; color: ${gradeColors[grade] || '#64748b'}; margin-bottom: 8px;">
+                            ${grade}
+                        </div>
+                        <div style="font-size: 14px; color: #cbd5e1;">
+                            ${gradeDescriptions[grade] || 'Unknown grade'}
+                        </div>
+                    </div>
+                    
+                    <!-- Criteria Checklist -->
+                    <div>
+                        <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #94a3b8;">Criteria Checklist</h3>
+                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                            ${criteria.map(c => `
+                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: rgba(30, 41, 59, 0.3); border-radius: 6px;">
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span style="font-size: 16px;">${c.met ? '✅' : '❌'}</span>
+                                        <span style="font-size: 13px; color: ${c.met ? '#cbd5e1' : '#94a3b8'};">${c.name}</span>
+                                        <span style="font-size: 10px; padding: 2px 6px; background: ${gradeColors[c.required]}20; color: ${gradeColors[c.required]}; border-radius: 3px;">Grade ${c.required}</span>
+                                    </div>
+                                    <span style="font-family: 'Courier New', monospace; font-size: 12px; color: ${c.met ? '#10b981' : '#ef4444'};">
+                                        ${c.value}
+                                    </span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 16px; padding: 12px; background: rgba(59, 130, 246, 0.1); border-left: 3px solid #3b82f6; border-radius: 4px;">
+                    <div style="font-size: 12px; color: #94a3b8;">
+                        <strong style="color: #3b82f6;">Grade Requirements:</strong>
+                        <strong>A</strong> requires all criteria met. 
+                        <strong>B</strong> requires 10+ detections and 2+ stations. 
+                        <strong>C</strong> is bootstrap phase. 
+                        <strong>D/F</strong> indicates insufficient data or validation failures.
+                    </div>
+                </div>
+            `;
+        }
 
         function updateExpertMetrics(data) {
             const expertDiv = document.getElementById('expert-metrics');
@@ -596,22 +1046,11 @@
                 const heroMetric = document.getElementById('hero-metric');
                 heroMetric.className = `hero-metric ${getQualityClass(data.quality_grade)}`;
 
-                // Update expert metrics
+                // Update all new sections
+                updateSteelRulerStatus(data);
+                updateStationContributions(data);
+                updateQualityGradeExplanation(data);
                 updateExpertMetrics(data);
-
-                // Update station contributions
-                const stationsDiv = document.getElementById('station-contributions');
-                if (data.stations_used && data.stations_used.length > 0) {
-                    stationsDiv.innerHTML = data.stations_used.map(station => `
-                        <div style="padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; text-align: center;">
-                            <div style="font-size: 24px; margin-bottom: 8px;">📡</div>
-                            <div style="font-weight: 600; font-size: 18px;">${station}</div>
-                            <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Contributing</div>
-                        </div>
-                    `).join('');
-                } else {
-                    stationsDiv.innerHTML = '<div>No station information available</div>';
-                }
 
             } catch (error) {
                 showError(`Failed to load latest fusion: ${error.message}`);

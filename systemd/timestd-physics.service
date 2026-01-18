@@ -6,14 +6,17 @@ Requires=timestd-analytics.service
 PartOf=timestd-analytics.service
 
 [Service]
-Type=simple
+Type=notify
 User=timestd
 Group=timestd
 
+# Watchdog: restart if no heartbeat for 120s (2 minutes)
+WatchdogSec=120
+
 # Run as the installed module from the venv
-ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.physics_service \
+ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.physics_fusion_service \
     --data-root /var/lib/timestd \
-    --output /var/lib/timestd/phase2
+    --output /var/lib/timestd/phase2/fusion
 
 # Ensure correct permissions
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
@@ -21,8 +24,6 @@ ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
 # Restart on failure
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Email alert on failure
 OnFailure=timestd-alert@%n.service

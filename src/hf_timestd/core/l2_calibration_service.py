@@ -36,6 +36,13 @@ from ..io.hdf5_reader import DataProductReader
 from .propagation_mode_solver import PropagationModeSolver
 from .wwv_constants import STATION_LOCATIONS
 
+# Systemd watchdog support
+try:
+    from systemd import daemon as systemd_daemon
+    SYSTEMD_AVAILABLE = True
+except ImportError:
+    SYSTEMD_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,8 +127,17 @@ class L2CalibrationService:
         self.running = True
         logger.info("L2 Calibration Service starting...")
         
+        # Notify systemd we're ready
+        if SYSTEMD_AVAILABLE:
+            systemd_daemon.notify('READY=1')
+            logger.info("Systemd watchdog enabled")
+        
         while self.running:
             try:
+                # Notify systemd watchdog
+                if SYSTEMD_AVAILABLE:
+                    systemd_daemon.notify('WATCHDOG=1')
+                
                 # Process each channel
                 for channel in self.channels:
                     self._process_channel(channel)

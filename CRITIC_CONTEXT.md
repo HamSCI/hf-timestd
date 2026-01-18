@@ -10,108 +10,201 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## ✅ COMPLETED: PARTIALLY IMPLEMENTED PHYSICS CAPABILITIES
+## 🔴 NEXT SESSION: SERVICE RESILIENCE AND DATA PIPELINE ROBUSTNESS
 
-**Status:** ✅ **COMPLETE** - 2026-01-16  
+**Priority:** HIGH  
+**Objective:** Ensure all systemd services are resilient, recoverable, and that data write problems at one stage do not clobber downstream data needs.
+
+### Session Context
+
+The 2026-01-18 session revealed critical gaps in service resilience:
+1. **L2 Calibration Service** stalled for 20+ hours without detection (no watchdog)
+2. **Kalman state restoration bug** caused D_clock discontinuities on restart
+3. **Silent service hangs** can corrupt downstream data pipelines
+
+### Critical Review Areas
+
+#### 1. **Systemd Service Audit** 🔴 HIGH PRIORITY
+
+**Current Watchdog Status:**
+| Service | Type | WatchdogSec | Restart | Status |
+|---------|------|-------------|---------|--------|
+| timestd-fusion | notify | 60s | always | ✅ Has watchdog |
+| timestd-l2-calibration | notify | 180s | always | ✅ Fixed 2026-01-18 |
+| timestd-physics | notify | 120s | always | ✅ Fixed 2026-01-18 |
+| timestd-metrology | simple | None | always | ⚠️ **NEEDS WATCHDOG** |
+| timestd-vtec | simple | None | on-failure | ⚠️ **NEEDS WATCHDOG** |
+| timestd-web-api | simple | None | always | ⚠️ **NEEDS WATCHDOG** |
+| timestd-core-recorder | simple | None | always | ⚠️ **NEEDS WATCHDOG** |
+
+**Review Tasks:**
+1. Audit ALL service files in `systemd/` and `/etc/systemd/system/`
+2. Add `Type=notify` and `WatchdogSec` to services that can hang
+3. Implement `systemd.daemon.notify('WATCHDOG=1')` in Python service loops
+4. Ensure `Restart=always` for all critical services
+5. Test watchdog by simulating service hangs
+
+**Key Files:**
+- `systemd/*.service` — Service unit files
+- All Python services need watchdog integration
+
+#### 2. **Data Pipeline Dependency Analysis** 🔴 HIGH PRIORITY
+
+**Pipeline Flow:**
+```
+L0: Raw IQ → L1: Metrology → L2: Calibration → L3: Fusion → Science Products
+                                    ↓
+                              Physics/TEC
+```
+
+**Failure Scenarios to Handle:**
+1. **L1 Metrology stalls** → L2 has no input → L3 has no input → Chrony feed stale
+2. **L2 Calibration stalls** → Physics has no input → TEC stale (20h gap observed)
+3. **HDF5 write fails** → Downstream readers get stale/corrupt data
+4. **Service restart** → State loss causes discontinuities
+
+**Review Tasks:**
+1. Map all data dependencies between services
+2. Identify single points of failure
+3. Implement graceful degradation (use last-known-good data)
+4. Add data freshness checks before processing
+5. Ensure upstream failures don't corrupt downstream data
+
+#### 3. **State Persistence and Recovery** 🔴 HIGH PRIORITY
+
+**Current Issues Found:**
+- Kalman state was restored to wrong variables (bug fixed 2026-01-18)
+- Calibration state can be overwritten with bad data on restart
+- No validation of loaded state before use
+
+**Review Tasks:**
+1. Audit all state persistence files:
+   - `/var/lib/timestd/state/broadcast_calibration.json`
+   - `/var/lib/timestd/state/kalman_state.json` (if exists)
+   - Any other state files
+2. Add state validation on load (sanity checks)
+3. Implement state backup before overwrite
+4. Add state versioning for compatibility
+5. Test recovery from corrupted state files
+
+#### 4. **HDF5 SWMR Robustness** ⚠️ MEDIUM PRIORITY
+
+**Current Implementation:**
+- SWMR mode enabled via `DataProductWriter`
+- Lock recovery with `h5clear` fallback
+- Readers use `swmr=True`
+
+**Review Tasks:**
+1. Verify all writers use `DataProductWriter` (no direct h5py)
+2. Test concurrent read/write scenarios
+3. Verify lock recovery works under all failure modes
+4. Add timeout for HDF5 operations to prevent hangs
+5. Implement write verification (read-back check)
+
+#### 5. **Error Handling and Logging** ⚠️ MEDIUM PRIORITY
+
+**Review Tasks:**
+1. Audit exception handling in service main loops
+2. Ensure errors are logged with sufficient context
+3. Add structured logging for easier debugging
+4. Implement error rate monitoring
+5. Add alerts for repeated errors
+
+### Implementation Guidelines
+
+**Watchdog Integration Pattern:**
+```python
+# At service start
+from systemd import daemon as systemd_daemon
+systemd_daemon.notify('READY=1')
+
+# In main loop
+while running:
+    systemd_daemon.notify('WATCHDOG=1')
+    # ... do work ...
+    time.sleep(interval)
+```
+
+**Data Freshness Check Pattern:**
+```python
+def check_data_freshness(path, max_age_seconds):
+    """Return True if data is fresh enough to use."""
+    if not path.exists():
+        return False
+    age = time.time() - path.stat().st_mtime
+    return age < max_age_seconds
+```
+
+**Graceful Degradation Pattern:**
+```python
+def get_l2_data(channel, fallback_minutes=10):
+    """Get L2 data, falling back to older data if recent unavailable."""
+    for lookback in [1, 5, 10, fallback_minutes]:
+        data = read_l2_data(channel, lookback_minutes=lookback)
+        if data:
+            if lookback > 1:
+                logger.warning(f"Using {lookback}min old data for {channel}")
+            return data
+    logger.error(f"No valid L2 data for {channel}")
+    return None
+```
+
+### Testing Approach
+
+**Service Resilience Tests:**
+1. Kill service process → verify automatic restart
+2. Simulate hang (infinite loop) → verify watchdog triggers restart
+3. Corrupt state file → verify service recovers gracefully
+4. Stop upstream service → verify downstream handles gracefully
+
+**Data Pipeline Tests:**
+1. Stop L1 → verify L2/L3 don't crash, use stale data with warnings
+2. Corrupt HDF5 file → verify reader handles gracefully
+3. Fill disk → verify services handle write failures
+
+### Key Documentation
+
+- `docs/changes/SESSION_2026_01_18_SERVICE_RESILIENCE.md` — Recent fixes
+- `TECHNICAL_REFERENCE.md` — System architecture
+- `docs/METROLOGY.md` — Data flow description
+
+---
+
+## ✅ COMPLETED: SESSION 2026-01-18 SERVICE RESILIENCE FIXES
+
+**Status:** ✅ **COMPLETE** - 2026-01-18  
+**Objective:** Fixed TEC staleness and D_clock discontinuities
+
+### Issues Fixed
+
+1. **TEC HDF5 20+ hour staleness** — L2 calibration service stalled without detection
+   - Added systemd watchdog to `l2_calibration_service.py` and `physics_fusion_service.py`
+   - Updated service files with `Type=notify`, `WatchdogSec`, `Restart=always`
+
+2. **D_clock discontinuities on restart** — Kalman state not properly restored
+   - Bug: Code set `self.kalman_offset` (unused) instead of `self.kalman_state[0]`
+   - Fix: Now correctly restores `kalman_state[0]` and sets `kalman_initialized=True`
+
+### Files Modified
+- `src/hf_timestd/core/l2_calibration_service.py` — Watchdog integration
+- `src/hf_timestd/core/physics_fusion_service.py` — Watchdog integration
+- `src/hf_timestd/core/multi_broadcast_fusion.py` — Kalman state restoration fix
+- `systemd/timestd-l2-calibration.service` — Type=notify, WatchdogSec=180
+- `systemd/timestd-physics.service` — Type=notify, WatchdogSec=120
+
+---
+
+## ✅ COMPLETED: PHYSICS CAPABILITIES (2026-01-16)
+
+**Status:** ✅ **COMPLETE**  
 **Objective:** Completed ionospheric physics measurements identified in `docs/PHYSICS.md`
 
 ### Completed Capabilities
 
-#### 1. **CHU FSK Time Code Decoding** ✅ (Section 4.4)
-
-**Status:** Already complete in `chu_fsk_decoder.py`, integration enhanced in `metrology_engine.py`
-- ✅ FSK demodulation (Hilbert transform method)
-- ✅ BCD time code extraction (Frame A)
-- ✅ DUT1, year, TAI-UTC parsing (Frame B)
-- ✅ Parity checking and error detection
-- ✅ Multi-second consensus validation
-- ✅ Integration with analytics pipeline (enhanced 2026-01-16)
-
-**Key Files:**
-- `src/hf_timestd/core/chu_fsk_decoder.py` — Complete decoder
-- `src/hf_timestd/core/metrology_engine.py` — Enhanced integration
-- `src/hf_timestd/core/phase2_temporal_engine.py` — Full integration
-
----
-
-#### 2. **Scintillation Indices (S4, σ_φ)** ✅ (Section 4.2)
-
-**Status:** Implemented in `advanced_signal_analysis.py` (2026-01-16)
-- ✅ `ScintillationResult` dataclass with physics documentation
-- ✅ S4 calculation: `S4 = sqrt(var(I) / mean(I)²)`
-- ✅ σ_φ calculation with Doppler detrending
-- ✅ Severity classification (weak/moderate/strong)
-- ✅ Scintillation event flagging
-- ✅ Unit tests in `tests/test_scintillation_indices.py`
-
-**Key Files:**
-- `src/hf_timestd/core/advanced_signal_analysis.py` — `calculate_scintillation_indices()`
-
----
-
-#### 3. **WWV/WWVH Test Signal Measurements** ✅ (Section 6)
-
-**Status:** Complete in `wwv_test_signal.py`
-- ✅ Test signal detection (template correlation)
-- ✅ Multi-tone power measurement
-- ✅ Frequency Selectivity Score (FSS) calculation
-- ✅ Delay spread from chirp matched filter
-- ✅ S4 scintillation from multi-tone segment
-- ✅ Transient detection from noise segment comparison
-
-**Key Files:**
-- `src/hf_timestd/core/wwv_test_signal.py` — Complete implementation
-
----
-
-#### 4. **Sporadic-E Detection** ✅ (Section 4.1)
-
-**Status:** Implemented in `propagation_mode_solver.py` (2026-01-16)
-- ✅ `SporadicEEvent` dataclass with Es physics documentation
-- ✅ `SporadicEDetector` class with multi-method detection
-- ✅ SNR anomaly detection (sudden increases at 10/15 MHz)
-- ✅ Mode change detection (F→E transitions)
-- ✅ foEs (critical frequency) estimation
-- ✅ Multi-frequency confirmation
-- ✅ Unit tests in `tests/test_sporadic_e_detection.py`
-
-**Key Files:**
-- `src/hf_timestd/core/propagation_mode_solver.py` — `SporadicEDetector`
-
----
-
-## 🔴 NEXT SESSION: REMAINING REFINEMENTS
-
-**Priority:** MEDIUM  
-**Objective:** Refine remaining physics capabilities and add service monitoring
-
-### Target Capabilities
-
-#### 1. **TID Detection** ⚠️ (Section 4.3)
-
-**Current State:** Doppler measured, TID detection not automated
-- ✅ Doppler shift time series available
-- ✅ Multi-frequency observations
-- ❌ Coherent oscillation detection across frequencies
-- ❌ Period/wavelength estimation
-- ❌ TID event cataloging
-
-**Implementation Tasks:**
-1. FFT analysis of Doppler time series
-2. Cross-correlation between frequencies/paths
-3. Phase velocity estimation from multi-path delays
-
-#### 2. **Service Monitoring** ⚠️
-
-**Current State:** Services can hang silently (per VTEC incident)
-- ❌ Watchdog timers for critical services
-- ❌ Periodic heartbeat logging
-- ❌ Data freshness health checks
-
-**Implementation Tasks:**
-1. Add systemd watchdog to `timestd-vtec.service`
-2. Implement periodic heartbeat logging
-3. Add data freshness check to pipeline verification
+- ✅ **CHU FSK Time Code Decoding** — `chu_fsk_decoder.py`
+- ✅ **Scintillation Indices (S4, σ_φ)** — `advanced_signal_analysis.py`
+- ✅ **WWV/WWVH Test Signal Measurements** — `wwv_test_signal.py`
+- ✅ **Sporadic-E Detection** — `propagation_mode_solver.py`
 
 ---
 

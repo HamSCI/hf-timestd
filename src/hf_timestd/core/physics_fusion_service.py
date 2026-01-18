@@ -41,6 +41,13 @@ import numpy as np
 from hf_timestd.core.tec_estimator import TECEstimator, TECResult
 from hf_timestd.io import DataProductReader, DataProductWriter
 
+# Systemd watchdog support
+try:
+    from systemd import daemon as systemd_daemon
+    SYSTEMD_AVAILABLE = True
+except ImportError:
+    SYSTEMD_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -314,10 +321,19 @@ class PhysicsFusionService:
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
         
+        # Notify systemd we're ready
+        if SYSTEMD_AVAILABLE:
+            systemd_daemon.notify('READY=1')
+            logger.info("Systemd watchdog enabled")
+        
         logger.info("Service started. Polling for data...")
         
         while self.running:
             try:
+                # Notify systemd watchdog
+                if SYSTEMD_AVAILABLE:
+                    systemd_daemon.notify('WATCHDOG=1')
+                
                 # Align to next minute boundary processing
                 now = time.time()
                 # Process last few minutes to find enough frequencies for verification

@@ -398,12 +398,21 @@ class WWVHDiscriminator:
         # Keep last 1000 measurements
         self.max_history = 1000
         
-        # Initialize BCD encoder for template generation
-        self.bcd_encoder = WWVBCDEncoder(sample_rate=sample_rate)
+        # Initialize BCD encoder for template generation (WWV/WWVH only)
+        # CHU doesn't use BCD encoding
+        self.is_chu_channel = 'CHU' in channel_name.upper()
+        if not self.is_chu_channel:
+            self.bcd_encoder = WWVBCDEncoder(sample_rate=sample_rate)
+        else:
+            self.bcd_encoder = None
         
-        # Initialize test signal detector for minute 8/44 discrimination
-        self.test_signal_detector = WWVTestSignalDetector(sample_rate=sample_rate)
-        logger.info(f"{channel_name}: Test signal detector initialized for minutes 8/44 @ {sample_rate} Hz")
+        # Initialize test signal detector for minute 8/44 discrimination (WWV/WWVH only)
+        # CHU doesn't broadcast test signals
+        if not self.is_chu_channel:
+            self.test_signal_detector = WWVTestSignalDetector(sample_rate=sample_rate)
+            logger.info(f"{channel_name}: Test signal detector initialized for minutes 8/44 @ {sample_rate} Hz")
+        else:
+            self.test_signal_detector = None
         
         # Initialize geographic predictor if grid square provided
         self.geo_predictor: Optional[WWVGeographicPredictor] = None
@@ -3061,6 +3070,10 @@ class WWVHDiscriminator:
             60-second BCD template as numpy array, or None if generation fails
         """
         try:
+            # BCD encoder not available for CHU channels
+            if self.bcd_encoder is None:
+                return None
+            
             # Use the encoder instance that was created during __init__
             template = self.bcd_encoder.encode_minute(minute_timestamp, envelope_only=envelope_only)
             return template
@@ -3566,7 +3579,8 @@ class WWVHDiscriminator:
         # PHASE 4.5: Test Signal Discrimination (minutes 8 and 44 only)
         # Scientific modulation test provides strongest discrimination when present
         # Minute 8 = WWV, Minute 44 = WWVH
-        if minute_number in [8, 44]:
+        # Note: CHU doesn't broadcast test signals, so skip for CHU channels
+        if minute_number in [8, 44] and self.test_signal_detector is not None:
             try:
                 test_detection = self.test_signal_detector.detect(
                     iq_samples, minute_number, sample_rate
