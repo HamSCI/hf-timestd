@@ -574,6 +574,33 @@ except:
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         sudo cp "$PROJECT_DIR/systemd/timestd-vtec.service" "$SYSTEMD_DIR/"
         log_info "    ✅ timestd-vtec.service (GNSS VTEC enabled in config)"
+        
+        # Add GNSS timeserver to chrony if gnss_vtec is enabled
+        # The ZED-F9P host typically also provides NTP service
+        GNSS_HOST=$($VENV_DIR/bin/python3 -c "
+import tomllib
+try:
+    with open('$MAIN_CONFIG', 'rb') as f:
+        config = tomllib.load(f)
+    print(config.get('gnss_vtec', {}).get('host', ''))
+except:
+    print('')
+" 2>/dev/null)
+        
+        if [[ -n "$GNSS_HOST" && -n "$CHRONY_CONF" ]]; then
+            if ! grep -q "server $GNSS_HOST" "$CHRONY_CONF" 2>/dev/null; then
+                log_info "  Adding GNSS timeserver ($GNSS_HOST) to chrony.conf..."
+                sudo tee -a "$CHRONY_CONF" > /dev/null <<EOF
+
+# GNSS Timeserver (ZED-F9P host providing NTP)
+# Added by hf-timestd install when gnss_vtec is enabled
+server $GNSS_HOST iburst prefer
+EOF
+                log_info "  ✅ Added GNSS timeserver $GNSS_HOST to chrony"
+            else
+                log_info "  ℹ️  GNSS timeserver $GNSS_HOST already in chrony.conf"
+            fi
+        fi
     else
         log_info "    ℹ️  timestd-vtec.service skipped (GNSS VTEC disabled in config)"
     fi

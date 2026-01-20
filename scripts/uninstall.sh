@@ -227,19 +227,30 @@ if [[ "$MODE" == "production" ]]; then
     fi
     
     if [[ -n "$CHRONY_CONF" ]]; then
+        CHRONY_CHANGED=false
+        
         if grep -q "refclock SHM 0 refid TSL1" "$CHRONY_CONF" 2>/dev/null; then
             log_info "  Removing timestd SHM refclock from $CHRONY_CONF..."
             # Remove the dual refclock block added by install.sh
             sudo sed -i '/# HF Time Standard Dual Chrony Refclock Configuration/,/# TSL1 serves as backup/d' "$CHRONY_CONF"
             log_info "  ✅ Removed SHM refclock configuration"
-            
-            # Restart chronyd if running
-            if systemctl is-active --quiet chronyd; then
-                log_info "  Restarting chronyd..."
-                sudo systemctl restart chronyd
-            fi
+            CHRONY_CHANGED=true
         else
             log_info "  ℹ️  No timestd SHM configuration found in chrony.conf"
+        fi
+        
+        # Remove GNSS timeserver if added by install.sh
+        if grep -q "# GNSS Timeserver (ZED-F9P host providing NTP)" "$CHRONY_CONF" 2>/dev/null; then
+            log_info "  Removing GNSS timeserver from $CHRONY_CONF..."
+            sudo sed -i '/# GNSS Timeserver (ZED-F9P host providing NTP)/,/^server .* iburst prefer$/d' "$CHRONY_CONF"
+            log_info "  ✅ Removed GNSS timeserver configuration"
+            CHRONY_CHANGED=true
+        fi
+        
+        # Restart chronyd if we made changes and it's running
+        if [[ "$CHRONY_CHANGED" == "true" ]] && systemctl is-active --quiet chronyd; then
+            log_info "  Restarting chronyd..."
+            sudo systemctl restart chronyd
         fi
     fi
 fi
@@ -260,6 +271,12 @@ if [[ "$MODE" == "production" ]]; then
     if [[ -f "/etc/tmpfiles.d/timestd.conf" ]]; then
         sudo rm -f "/etc/tmpfiles.d/timestd.conf"
         log_info "  Removed: /etc/tmpfiles.d/timestd.conf"
+    fi
+    
+    # Remove logrotate configuration
+    if [[ -f "/etc/logrotate.d/hf-timestd" ]]; then
+        sudo rm -f "/etc/logrotate.d/hf-timestd"
+        log_info "  Removed: /etc/logrotate.d/hf-timestd"
     fi
     
     # Remove shared memory directory
