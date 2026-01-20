@@ -576,17 +576,7 @@ class CoreRecorderV2:
                     logger.warning(
                         f"Channel {recorder.config.description} silent for {silence:.0f}s"
                     )
-                    
-                    # Check if channel still exists
-                    try:
-                        ssrc = recorder.config.ssrc
-                        if ssrc and ssrc != 0:
-                            # Use generous timeout for check
-                            channels = discover_channels(self.status_address, listen_duration=2.5)
-                            if ssrc not in channels:
-                                logger.error(f"Channel {ssrc:x} ({recorder.config.description}) missing from radiod")
-                    except Exception:
-                        pass
+                    # StreamRecorderV2's health monitor will handle channel recreation
             
             # DATA FRESHNESS CHECK: Verify output files are being written
             # This catches silent failures where process runs but doesn't write data

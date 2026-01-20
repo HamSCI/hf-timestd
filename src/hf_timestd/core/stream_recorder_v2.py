@@ -355,74 +355,35 @@ class StreamRecorderV2:
             raise
     
     def _create_channel(self):
-        """Create channel and start RadiodStream (extracted for retry logic)."""
-        from ka9q import ChannelInfo
+        """Create channel and start RadiodStream.
         
-        logger.info(f"{self.config.description}: Creating channel at {self.config.frequency_hz/1e6:.3f} MHz")
+        Uses ka9q-python's ensure_channel which handles all SSRC management,
+        channel reuse, and verification internally.
+        """
+        logger.info(f"{self.config.description}: Requesting channel at {self.config.frequency_hz/1e6:.3f} MHz")
         logger.info(f"  Parameters: preset={self.config.preset}, rate={self.config.sample_rate}, "
                    f"agc={self.config.agc_enable}, gain={self.config.gain}, enc={self.config.encoding}")
         
-        # Try ensure_channel first (works when discovery works)
-        try:
-            self.channel_info = self._control.ensure_channel(
-                frequency_hz=float(self.config.frequency_hz),
-                preset=self.config.preset,
-                sample_rate=self.config.sample_rate,
-                agc_enable=self.config.agc_enable,
-                gain=self.config.gain,
-                destination=self.config.destination,
-                encoding=self.config.encoding,
-                timeout=5.0,
-                frequency_tolerance=1.0
-            )
-            ssrc = self.channel_info.ssrc
-            logger.info(f"{self.config.description}: Channel ready via ensure_channel SSRC {ssrc:08x}")
-        except (TimeoutError, RuntimeError) as e:
-            # Discovery failed - fall back to create_channel + manual ChannelInfo
-            logger.warning(f"{self.config.description}: ensure_channel failed ({e}), using create_channel fallback")
-            
-            ssrc = self._control.create_channel(
-                frequency_hz=float(self.config.frequency_hz),
-                preset=self.config.preset,
-                sample_rate=self.config.sample_rate,
-                agc_enable=self.config.agc_enable,
-                gain=self.config.gain,
-                destination=self.config.destination,
-                encoding=self.config.encoding,
-            )
-            
-            if ssrc is None:
-                raise RuntimeError(f"Failed to create channel at {self.config.frequency_hz/1e6:.3f} MHz")
-            
-            # Construct ChannelInfo manually using radiod's default multicast address
-            multicast_addr = getattr(self._control, 'status_mcast_addr', None)
-            if not multicast_addr:
-                # Fallback: extract from dest_addr tuple
-                dest = getattr(self._control, 'dest_addr', None)
-                if dest and isinstance(dest, tuple):
-                    multicast_addr = dest[0]
-            
-            if not multicast_addr:
-                raise RuntimeError("Cannot determine radiod multicast address")
-            
-            self.channel_info = ChannelInfo(
-                ssrc=ssrc,
-                preset=self.config.preset,
-                sample_rate=self.config.sample_rate,
-                frequency=float(self.config.frequency_hz),
-                snr=0.0,
-                multicast_address=multicast_addr,
-                port=5004,
-                encoding=self.config.encoding
-            )
-            logger.info(f"{self.config.description}: Channel created via fallback SSRC {ssrc:08x}")
+        # Let ka9q-python handle all channel management
+        self.channel_info = self._control.ensure_channel(
+            frequency_hz=float(self.config.frequency_hz),
+            preset=self.config.preset,
+            sample_rate=self.config.sample_rate,
+            agc_enable=self.config.agc_enable,
+            gain=self.config.gain,
+            destination=self.config.destination,
+            encoding=self.config.encoding,
+            timeout=10.0,
+            frequency_tolerance=1.0
+        )
         
+        # Update config with SSRC from ka9q-python
         self.config.ssrc = self.channel_info.ssrc
-        logger.info(f"{self.config.description}: Using channel - "
-                   f"Dest: {self.channel_info.multicast_address}:{getattr(self.channel_info, 'port', 5004)}, "
-                   f"Enc: {getattr(self.channel_info, 'encoding', 'N/A')}")
         
-        # Step 4: Create RadiodStream to receive data
+        logger.info(f"{self.config.description}: Channel ready SSRC {self.channel_info.ssrc:08x} "
+                   f"at {self.channel_info.multicast_address}:{getattr(self.channel_info, 'port', 5004)}")
+        
+        # Create RadiodStream to receive data
         # Stop existing stream if any
         if self.stream:
             try:
