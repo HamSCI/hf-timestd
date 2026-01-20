@@ -30,7 +30,7 @@
             "description": "Vertical Total Electron Content",
             "units": "TECU (10^16 electrons/m²)",
             "valid_range": [
-                0,
+                -5,
                 200
             ]
         },

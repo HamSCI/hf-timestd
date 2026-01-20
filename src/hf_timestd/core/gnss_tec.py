@@ -160,22 +160,50 @@ class GNSSTECAnalyzer:
                 state['count'] = 0
                 state['sum_diff'] = 0.0
                 state['smooth_stec'] = 0.0
+                state['last_l_gf'] = None
                 
             # Carrier Smoothing (Arc based)
-            # Check for cycle slip (large jump in L_gf)?
-            # Simple check: if jump > 1 meter?
+            # Check for cycle slip (large jump in L_gf)
+            # A cycle slip causes a sudden jump in the geometry-free phase combination
+            CYCLE_SLIP_THRESHOLD = 0.5  # meters - typical L1 wavelength is ~0.19m
+            
+            if state['last_l_gf'] is not None:
+                l_gf_jump = abs(l_gf - state['last_l_gf'])
+                if l_gf_jump > CYCLE_SLIP_THRESHOLD:
+                    # Cycle slip detected - reset leveling for this satellite
+                    logger.debug(f"{key}: Cycle slip detected (jump={l_gf_jump:.2f}m), resetting leveling")
+                    state['count'] = 0
+                    state['sum_diff'] = 0.0
+            
+            state['last_l_gf'] = l_gf
             
             diff = stec_code - stec_phase_raw
             
-            # Update running mean (Levelling)
+            # Update running mean (Levelling) with exponential weighting
+            # This prevents unbounded accumulation of bias
             n = state['count'] + 1
-            # Simple recursive average
-            avg_diff = (state.get('sum_diff', 0.0) + diff) / (1 if n==1 else 1) # Wait, need accumulation
-            state['sum_diff'] = state.get('sum_diff', 0.0) + diff
-            state['count'] = n
             
-            offset = state['sum_diff'] / n
+            # Use exponential moving average after initial convergence (100 samples)
+            if n <= 100:
+                # Initial convergence: simple accumulation
+                state['sum_diff'] = state.get('sum_diff', 0.0) + diff
+                state['count'] = n
+                offset = state['sum_diff'] / n
+            else:
+                # After convergence: exponential moving average (alpha = 0.01)
+                # This allows slow adaptation while preventing runaway drift
+                alpha = 0.01
+                old_offset = state['sum_diff'] / state['count']
+                offset = (1 - alpha) * old_offset + alpha * diff
+                state['sum_diff'] = offset * state['count']  # Update sum to match new offset
+            
             stec_smooth = stec_phase_raw + offset
+            
+            # Sanity check: STEC should be positive (ionosphere delays signals)
+            # If negative, use code-only STEC (less precise but always valid)
+            if stec_smooth < 0:
+                logger.debug(f"{key}: Negative STEC ({stec_smooth/TECU:.2f} TECU), using code-only")
+                stec_smooth = stec_code
             
             # 3. Mapping Function (VTEC)
             # SLM (Single Layer Model)
