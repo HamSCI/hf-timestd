@@ -3611,7 +3611,12 @@ class MultiBroadcastFusion:
             try:
                 from datetime import datetime, timezone, timedelta
                 
-                vtec_dir = self.data_root / 'gnss_vtec'
+                # Check both possible locations for GNSS VTEC data
+                # Primary: data_root/data/gnss_vtec (where live_vtec.py writes with relative path)
+                # Fallback: data_root/gnss_vtec (legacy location)
+                vtec_dir = self.data_root / 'data' / 'gnss_vtec'
+                if not vtec_dir.exists():
+                    vtec_dir = self.data_root / 'gnss_vtec'
                 if vtec_dir.exists():
                     reader = DataProductReader(
                         data_dir=vtec_dir,
