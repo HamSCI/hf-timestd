@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 def check_radiod_process():
-    """Check if radiod process is running using pgrep"""
+    """Check if radiod process is running using pgrep (local or containerized)"""
     try:
+        # First try local process
         result = subprocess.run(
             ['pgrep', '-x', 'radiod'],
             capture_output=True,
@@ -34,14 +35,38 @@ def check_radiod_process():
             return {
                 'running': True,
                 'pid': int(pids[0]) if pids else None,
-                'count': len(pids)
+                'count': len(pids),
+                'containerized': False
             }
-        else:
-            return {
-                'running': False,
-                'pid': None,
-                'count': 0
-            }
+        
+        # Check for containerized radiod (docker)
+        try:
+            docker_result = subprocess.run(
+                ['docker', 'ps', '--filter', 'name=radiod', '--format', '{{.ID}}'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if docker_result.returncode == 0 and docker_result.stdout.strip():
+                container_id = docker_result.stdout.strip().split('\n')[0]
+                return {
+                    'running': True,
+                    'pid': 1,  # Container PID namespace
+                    'count': 1,
+                    'containerized': True,
+                    'container_id': container_id[:12]
+                }
+        except FileNotFoundError:
+            pass  # Docker not installed
+        except Exception:
+            pass  # Docker check failed, continue
+        
+        return {
+            'running': False,
+            'pid': None,
+            'count': 0,
+            'containerized': False
+        }
     except Exception as e:
         logger.error(f"Error checking radiod process: {e}")
         return {
@@ -254,28 +279,53 @@ def main():
                     status['health'] = 'unknown'
                     
             else:
-                consecutive_failures += 1
-                status['health'] = 'critical'
-                status['alerts'].append({
-                    'severity': 'critical',
-                    'message': f'Radiod process not found (failed {consecutive_failures} checks)'
-                })
+                # Process not found locally - check if data is still flowing
+                # (radiod may be running remotely or in a container we can't detect)
+                data_flow = check_data_flow(Path(output_file))
+                status['data_flow'] = data_flow
                 
-                if last_known_good:
-                    downtime = int(time.time() - last_known_good)
+                if data_flow.get('flowing') is True:
+                    # Data is flowing, so radiod must be running somewhere
+                    consecutive_failures = 0
+                    last_known_good = time.time()
+                    status['health'] = 'healthy'
+                    status['process']['running'] = True  # Inferred from data flow
+                    status['process']['pid'] = 1  # Unknown PID (remote/container)
+                    status['uptime_seconds'] = data_flow.get('latest_file_age', 0)
+                    status['alerts'].append({
+                        'severity': 'info',
+                        'message': 'Radiod detected via data flow (remote or containerized)'
+                    })
+                else:
+                    consecutive_failures += 1
+                    status['health'] = 'critical'
                     status['alerts'].append({
                         'severity': 'critical',
-                        'message': f'Radiod down for {downtime} seconds'
+                        'message': f'Radiod process not found and no data flow (failed {consecutive_failures} checks)'
                     })
+                    
+                    if last_known_good:
+                        downtime = int(time.time() - last_known_good)
+                        status['alerts'].append({
+                            'severity': 'critical',
+                            'message': f'Radiod down for {downtime} seconds'
+                        })
             
             # Write status
             write_status(status, output_file)
             
             # Log status changes
-            if proc_status['running']:
-                logger.info(f"✓ radiod healthy (PID {proc_status['pid']}, uptime {status['uptime_seconds']}s)")
+            if status['health'] == 'healthy':
+                if proc_status.get('containerized'):
+                    logger.info(f"✓ radiod healthy (container {proc_status.get('container_id', 'unknown')}, uptime {status['uptime_seconds']}s)")
+                elif proc_status['running']:
+                    logger.info(f"✓ radiod healthy (PID {proc_status['pid']}, uptime {status['uptime_seconds']}s)")
+                else:
+                    logger.info(f"✓ radiod healthy (detected via data flow)")
+            elif status['health'] == 'critical':
+                logger.error(f"✗ radiod CRITICAL (consecutive failures: {consecutive_failures})")
             else:
-                logger.error(f"✗ radiod NOT RUNNING (consecutive failures: {consecutive_failures})")
+                logger.warning(f"⚠ radiod {status['health']}")
             
             time.sleep(poll_interval)
             
