@@ -104,106 +104,73 @@ def check_radiod_connectivity():
         return None
 
 
-def check_rtp_timestamp_advancing(state_file: Path) -> dict:
-    """Check if RTP timestamps are advancing (not frozen).
+def check_data_flow(state_file: Path) -> dict:
+    """Check if data is flowing by verifying raw buffer files are being written.
     
-    This detects the failure mode where radiod is running but its
-    RTP clock is frozen/stuck, causing downstream data loss.
+    This is more reliable than checking RTP timestamps directly, as it verifies
+    the end-to-end data flow from radiod through core-recorder to disk.
     
     Returns:
-        dict with 'advancing', 'last_rtp', 'current_rtp', 'drift_seconds'
+        dict with 'flowing', 'latest_file_age', 'error'
     """
     try:
-        # Read last known RTP timestamp from state
-        rtp_state_file = state_file.parent / 'radiod-rtp-state.json'
+        # Check hot buffer for recent files
+        hot_buffer = Path('/dev/shm/timestd/raw_buffer')
+        cold_buffer = Path('/var/lib/timestd/raw_buffer')
         
-        last_check = None
-        if rtp_state_file.exists():
-            with open(rtp_state_file, 'r') as f:
-                last_check = json.load(f)
+        search_path = hot_buffer if hot_buffer.exists() else cold_buffer
+        if not search_path.exists():
+            return {'flowing': None, 'error': 'No raw buffer directory'}
         
-        # Get current RTP timestamp from core-recorder status
-        recorder_status_file = state_file.parent.parent / 'status' / 'core-recorder-status.json'
-        if not recorder_status_file.exists():
-            return {'advancing': None, 'error': 'No recorder status file'}
+        # Find most recent .bin file
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        dates_to_check = [
+            now.strftime('%Y%m%d'),
+            (now - timedelta(days=1)).strftime('%Y%m%d')
+        ]
         
-        with open(recorder_status_file, 'r') as f:
-            recorder_status = json.load(f)
+        latest_mtime = 0
+        latest_file = None
         
-        # Extract RTP info from any channel
-        current_rtp = None
-        for ch_key, ch_data in recorder_status.get('channels', {}).items():
-            if 'last_rtp_timestamp' in ch_data:
-                current_rtp = ch_data['last_rtp_timestamp']
-                break
-        
-        if current_rtp is None:
-            # Try to get from the raw buffer metadata files
-            hot_buffer = Path('/dev/shm/timestd/raw_buffer')
-            if hot_buffer.exists():
-                # Find most recent JSON sidecar
-                today = datetime.now(timezone.utc).strftime('%Y%m%d')
-                for channel_dir in hot_buffer.iterdir():
-                    if not channel_dir.is_dir():
+        for channel_dir in search_path.iterdir():
+            if not channel_dir.is_dir():
+                continue
+            for date_str in dates_to_check:
+                day_dir = channel_dir / date_str
+                if not day_dir.exists():
+                    continue
+                for f in day_dir.glob('*.bin*'):
+                    try:
+                        mtime = f.stat().st_mtime
+                        if mtime > latest_mtime:
+                            latest_mtime = mtime
+                            latest_file = f
+                    except (OSError, IOError):
                         continue
-                    today_dir = channel_dir / today
-                    if not today_dir.exists():
-                        continue
-                    json_files = sorted(today_dir.glob('*.json'), key=lambda f: f.stat().st_mtime, reverse=True)
-                    if json_files:
-                        with open(json_files[0], 'r') as f:
-                            meta = json.load(f)
-                            current_rtp = meta.get('start_rtp_timestamp')
-                            break
         
-        now = time.time()
+        if latest_file is None:
+            return {'flowing': False, 'error': 'No raw buffer files found'}
+        
+        file_age = time.time() - latest_mtime
+        
         result = {
-            'advancing': None,
-            'current_rtp': current_rtp,
-            'check_time': now
+            'flowing': file_age < 120,  # Data flowing if file < 2 min old
+            'latest_file': str(latest_file.name),
+            'latest_file_age': file_age
         }
         
-        if current_rtp is None:
-            result['error'] = 'Could not get current RTP timestamp'
-            return result
-        
-        # Compare with last check
-        if last_check and 'current_rtp' in last_check:
-            last_rtp = last_check['current_rtp']
-            last_time = last_check.get('check_time', now - 60)
-            time_delta = now - last_time
-            rtp_delta = current_rtp - last_rtp
-            
-            # RTP should advance roughly 1 per sample (20kHz = 20000/sec)
-            # Over 60 seconds, expect ~1.2M RTP ticks
-            expected_rtp_delta = time_delta * 20000  # Approximate
-            
-            result['last_rtp'] = last_rtp
-            result['rtp_delta'] = rtp_delta
-            result['time_delta'] = time_delta
-            
-            # If RTP hasn't advanced at all, or advanced way too little, it's frozen
-            if rtp_delta <= 0:
-                result['advancing'] = False
-                result['drift_seconds'] = time_delta  # Frozen for this long
-                logger.error(f"RTP CLOCK FROZEN: RTP={current_rtp}, last={last_rtp}, no advancement in {time_delta:.0f}s")
-            elif rtp_delta < expected_rtp_delta * 0.5:
-                result['advancing'] = False
-                result['drift_seconds'] = time_delta - (rtp_delta / 20000)
-                logger.warning(f"RTP CLOCK SLOW: Expected ~{expected_rtp_delta:.0f} ticks, got {rtp_delta}")
-            else:
-                result['advancing'] = True
-                result['drift_seconds'] = 0
-        
-        # Save current state for next check
-        with open(rtp_state_file, 'w') as f:
-            json.dump(result, f)
+        if file_age > 300:  # 5 minutes
+            result['flowing'] = False
+            logger.error(f"DATA FLOW STOPPED: Latest file {latest_file.name} is {file_age:.0f}s old")
+        elif file_age > 120:  # 2 minutes
+            logger.warning(f"DATA FLOW SLOW: Latest file {latest_file.name} is {file_age:.0f}s old")
         
         return result
         
     except Exception as e:
-        logger.warning(f"Could not check RTP timestamp: {e}")
-        return {'advancing': None, 'error': str(e)}
+        logger.warning(f"Could not check data flow: {e}")
+        return {'flowing': None, 'error': str(e)}
 
 
 def write_status(status, output_file):
@@ -261,19 +228,19 @@ def main():
                 # Check connectivity
                 status['connectivity'] = check_radiod_connectivity()
                 
-                # Check RTP timestamp advancement (detect frozen clocks)
-                rtp_check = check_rtp_timestamp_advancing(Path(output_file))
-                status['rtp_status'] = rtp_check
+                # Check data flow (detect stale output)
+                data_flow = check_data_flow(Path(output_file))
+                status['data_flow'] = data_flow
                 
                 # Determine health
                 if status['connectivity'] is True:
-                    # Check for frozen RTP clock
-                    if rtp_check.get('advancing') is False:
+                    # Check for data flow issues
+                    if data_flow.get('flowing') is False:
                         status['health'] = 'critical'
-                        drift = rtp_check.get('drift_seconds', 0)
+                        age = data_flow.get('latest_file_age', 0)
                         status['alerts'].append({
                             'severity': 'critical',
-                            'message': f'RTP clock frozen/drifted by {drift:.0f}s - data loss occurring!'
+                            'message': f'Data flow stopped - latest file is {age:.0f}s old'
                         })
                     else:
                         status['health'] = 'healthy'
