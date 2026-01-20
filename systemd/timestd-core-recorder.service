@@ -22,6 +22,12 @@ EnvironmentFile=-/etc/hf-timestd/environment
 # Working directory (production installation path)
 WorkingDirectory=/opt/hf-timestd
 
+# Ensure directories exist and have correct permissions
+ExecStartPre=+/bin/mkdir -p /var/lib/timestd/raw_buffer
+ExecStartPre=+/bin/mkdir -p /dev/shm/timestd/raw_buffer
+ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/raw_buffer
+ExecStartPre=+/usr/bin/chown -R timestd:timestd /dev/shm/timestd
+
 # Core recorder V2 uses RadiodStream for RTP handling (no manual multicast)
 ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.core.core_recorder_v2 \
     --config /etc/hf-timestd/timestd-config.toml
