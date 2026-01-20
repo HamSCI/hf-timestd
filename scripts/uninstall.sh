@@ -351,9 +351,10 @@ if [[ "$MODE" == "production" ]]; then
             sudo gpasswd -d timestd "$CHRONY_GROUP" 2>/dev/null || true
         fi
         
-        # Remove user
+        # Remove user and group
         sudo userdel timestd 2>/dev/null || true
-        log_info "  ✅ Removed system user: timestd"
+        sudo groupdel timestd 2>/dev/null || true
+        log_info "  ✅ Removed system user and group: timestd"
     else
         log_info "  ℹ️  System user 'timestd' not found"
     fi
