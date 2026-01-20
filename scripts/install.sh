@@ -532,12 +532,14 @@ if [[ "$MODE" == "production" ]]; then
         log_info "    ✅ ${svc}.service"
     done
     
-    # Copy timer files
+    # Copy timer files and optional services
     TIMER_FILES=(
         "timestd-ionex-download.service"
         "timestd-ionex-download.timer"
         "timestd-chrony-monitor.service"
         "timestd-chrony-monitor.timer"
+        "grape-daily.service"
+        "grape-daily.timer"
     )
     
     for timer_file in "${TIMER_FILES[@]}"; do
@@ -596,9 +598,15 @@ except:
     sudo systemctl enable timestd-web-api.service
     sudo systemctl enable timestd-radiod-monitor.service
     
-    # Enable optional services
+    # Enable optional services/timers
     sudo systemctl enable timestd-ionex-download.timer
     sudo systemctl enable timestd-chrony-monitor.timer
+    
+    # Enable grape-daily timer if service file exists
+    if [[ -f "$SYSTEMD_DIR/grape-daily.timer" ]]; then
+        sudo systemctl enable grape-daily.timer
+        log_info "  ✅ grape-daily.timer enabled"
+    fi
     
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         sudo systemctl enable timestd-vtec.service

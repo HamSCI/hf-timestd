@@ -126,6 +126,11 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-vtec.service"
         "timestd-radiod-monitor.service"
         "timestd-chrony-monitor.service"
+        "timestd-ionex-download.service"
+        "grape-daily.service"
+        # Legacy services
+        "timestd-analytics.service"
+        "timestd-web-ui.service"
     )
     
     for service in "${SERVICES[@]}"; do
@@ -140,6 +145,9 @@ if [[ "$MODE" == "production" ]]; then
     # Stop timers
     TIMERS=(
         "timestd-upload-daily.timer"
+        "timestd-ionex-download.timer"
+        "timestd-chrony-monitor.timer"
+        "grape-daily.timer"
     )
     
     for timer in "${TIMERS[@]}"; do
@@ -168,10 +176,17 @@ if [[ "$MODE" == "production" ]]; then
         "/etc/systemd/system/timestd-vtec.service"
         "/etc/systemd/system/timestd-radiod-monitor.service"
         "/etc/systemd/system/timestd-chrony-monitor.service"
+        "/etc/systemd/system/timestd-chrony-monitor.timer"
+        "/etc/systemd/system/timestd-ionex-download.service"
+        "/etc/systemd/system/timestd-ionex-download.timer"
         "/etc/systemd/system/timestd-upload-daily.service"
         "/etc/systemd/system/timestd-upload-daily.timer"
+        "/etc/systemd/system/timestd-alert@.service"
         "/etc/systemd/system/grape-daily.service"
         "/etc/systemd/system/grape-daily.timer"
+        # Legacy services (no longer used)
+        "/etc/systemd/system/timestd-analytics.service"
+        "/etc/systemd/system/timestd-web-ui.service"
     )
     
     for file in "${SERVICE_FILES[@]}"; do
