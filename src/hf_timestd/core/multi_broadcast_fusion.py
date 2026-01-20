@@ -800,11 +800,12 @@ class MultiBroadcastFusion:
                     )
                 logger.info(f"✅ Loaded {len(self.calibration)} broadcast calibrations from {self.calibration_file}")
                 
-                # CRITICAL: Skip warmup penalty if we have valid calibration data
-                # This allows immediate grade A performance after service restart
+                # CRITICAL: Skip warmup penalty AND bootstrap mode if we have valid calibration data
+                # This prevents calibration from jumping around on restart
                 if len(self.calibration) >= 2:
                     self.kalman_n_updates = 200
-                    logger.info("✅ Skipping warmup penalty (calibration loaded from disk)")
+                    self.calibration_update_count = 200  # Skip bootstrap mode (threshold is 100)
+                    logger.info("✅ Skipping warmup and bootstrap (calibration loaded from disk)")
 
             except Exception as e:
                 logger.warning(f"Could not load calibration: {e}")
