@@ -46,6 +46,7 @@ dependencies = [
     "digital_rf>=2.6.0",
     "paramiko>=3.0.0",
     "pydantic>=2.0.0",
+    "toml>=0.10.0",
 ]
 
 [project.optional-dependencies]

@@ -447,6 +447,11 @@ if [[ "$MODE" == "production" ]]; then
     sudo cp -r "$PROJECT_DIR/scripts/"* /opt/hf-timestd/scripts/
     sudo chown -R "$INSTALL_USER:$INSTALL_USER" /opt/hf-timestd/scripts
     log_info "Scripts installed at /opt/hf-timestd/scripts"
+    
+    # Create config symlink for web-api (expects /opt/hf-timestd/config/)
+    sudo mkdir -p /opt/hf-timestd/config
+    sudo ln -sf /etc/hf-timestd/timestd-config.toml /opt/hf-timestd/config/timestd-config.toml
+    log_info "Config symlink created: /opt/hf-timestd/config -> /etc/hf-timestd"
 else
     log_info "Web API will run from $PROJECT_DIR/web-api (Python FastAPI)"
     log_info "Scripts will run from $PROJECT_DIR/scripts"
