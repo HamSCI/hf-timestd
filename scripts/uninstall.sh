@@ -119,10 +119,13 @@ if [[ "$MODE" == "production" ]]; then
     SERVICES=(
         "timestd-core-recorder.service"
         "timestd-metrology.service"
+        "timestd-l2-calibration.service"
         "timestd-fusion.service"
-        "timestd-web-ui.service",
-        "timestd-physics.service",
+        "timestd-physics.service"
+        "timestd-web-api.service"
         "timestd-vtec.service"
+        "timestd-radiod-monitor.service"
+        "timestd-chrony-monitor.service"
     )
     
     for service in "${SERVICES[@]}"; do
@@ -158,12 +161,17 @@ if [[ "$MODE" == "production" ]]; then
     SERVICE_FILES=(
         "/etc/systemd/system/timestd-core-recorder.service"
         "/etc/systemd/system/timestd-metrology.service"
+        "/etc/systemd/system/timestd-l2-calibration.service"
         "/etc/systemd/system/timestd-fusion.service"
-        "/etc/systemd/system/timestd-web-ui.service",
-        "/etc/systemd/system/timestd-physics.service",
-        "/etc/systemd/system/timestd-vtec.service",
+        "/etc/systemd/system/timestd-physics.service"
+        "/etc/systemd/system/timestd-web-api.service"
+        "/etc/systemd/system/timestd-vtec.service"
+        "/etc/systemd/system/timestd-radiod-monitor.service"
+        "/etc/systemd/system/timestd-chrony-monitor.service"
         "/etc/systemd/system/timestd-upload-daily.service"
         "/etc/systemd/system/timestd-upload-daily.timer"
+        "/etc/systemd/system/grape-daily.service"
+        "/etc/systemd/system/grape-daily.timer"
     )
     
     for file in "${SERVICE_FILES[@]}"; do
@@ -204,9 +212,10 @@ if [[ "$MODE" == "production" ]]; then
     fi
     
     if [[ -n "$CHRONY_CONF" ]]; then
-        if grep -q "refclock SHM 0 refid TMGR" "$CHRONY_CONF" 2>/dev/null; then
+        if grep -q "refclock SHM 0 refid TSL1" "$CHRONY_CONF" 2>/dev/null; then
             log_info "  Removing timestd SHM refclock from $CHRONY_CONF..."
-            sudo sed -i '/# HF Time Standard - UTC(NIST) via SHM/,/refclock SHM 0 refid TMGR/d' "$CHRONY_CONF"
+            # Remove the dual refclock block added by install.sh
+            sudo sed -i '/# HF Time Standard Dual Chrony Refclock Configuration/,/# TSL1 serves as backup/d' "$CHRONY_CONF"
             log_info "  ✅ Removed SHM refclock configuration"
             
             # Restart chronyd if running
