@@ -62,8 +62,10 @@ fi
 # =============================================================================
 log_info "Step 1: Updating Python package..."
 
-"$VENV_DIR/bin/pip" install -e "$PROJECT_DIR" --quiet
-log_info "  ✅ Python package updated (editable install)"
+# Use regular install (not editable) so timestd user can access the installed code
+# Editable installs require the source directory to be readable by the service user
+"$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet --no-deps
+log_info "  ✅ Python package updated"
 
 # =============================================================================
 # Step 2: Copy Updated Scripts
