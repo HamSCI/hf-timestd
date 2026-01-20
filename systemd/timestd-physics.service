@@ -18,8 +18,11 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.physics_fusion_serv
     --data-root /var/lib/timestd \
     --output /var/lib/timestd/phase2/fusion
 
-# Ensure correct permissions
+# Ensure directories exist and have correct permissions
+ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/fusion
+ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/science
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
+ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/science
 
 # Restart on failure
 Restart=always

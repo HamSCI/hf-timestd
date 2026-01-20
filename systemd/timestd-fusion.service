@@ -28,8 +28,9 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fus
     --enable-chrony \
     --log-level INFO
 
-# Ensure correct permissions (recovery from manual root runs)
+# Ensure directories exist and have correct permissions
 # Note: + prefix executes with full privileges (root) before dropping to User=timestd
+ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/fusion
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
 
 # Health check: Verify Chrony SHM is being updated (disabled - service needs time to start)
