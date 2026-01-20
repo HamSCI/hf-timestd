@@ -207,16 +207,16 @@ if [[ "$MODE" == "production" ]]; then
 
 # L1 Feed: Raw metrology fusion (backup)
 # - Uses L1 metrology measurements (raw TOA)
-# - Uncertainty: ±0.85ms (multi-broadcast fusion with outlier rejection)
+# - Measured uncertainty: ±0.5-1.0ms
 # - Backup feed if L2 pipeline fails
-refclock SHM 0 refid TSL1 poll 4 precision 1e-3 offset 0.0 delay 0.05
+refclock SHM 0 refid TSL1 poll 4 precision 1e-3 offset 0.0 delay 0.002
 
 # L2 Feed: Calibrated timing fusion (primary HF source)
 # - Uses L2 calibrated measurements (geometric + TEC + system corrections)
-# - Uncertainty: ±0.3-1.0ms (ISO GUM uncertainty budget)
+# - Measured uncertainty: ±0.1-0.2ms (verified from fusion logs)
 # - 'trust' ensures it's always combined with other sources
 # - If no GNSS timeserver, add 'prefer' to make TSL2 primary
-refclock SHM 1 refid TSL2 poll 4 precision 1e-4 offset 0.0 delay 0.05 trust
+refclock SHM 1 refid TSL2 poll 4 precision 1e-4 offset 0.0 delay 0.001 trust
 EOF
             log_info "  ✅ Chrony configured for timestd dual SHM integration (TSL1=L1, TSL2=L2)"
             log_info "  📝 Note: timestd-fusion must start BEFORE chronyd to create SHM with correct permissions"
