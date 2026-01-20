@@ -507,6 +507,16 @@ class MultiBroadcastFusion:
             self.data_root / 'state' / 'broadcast_calibration.json'
         )
         self.calibration: Dict[str, StationCalibration] = {}
+        
+        # CRITICAL FIX (2026-01-20): Initialize Kalman state BEFORE loading calibration
+        # so that _load_calibration can restore the persisted Kalman state
+        self.kalman_state = np.array([0.0, 0.0])  # [offset_ms, drift_ms_per_min]
+        self.kalman_P = np.array([[100.0, 0.0], [0.0, 1.0]])  # Initial uncertainty
+        self.kalman_initialized = False
+        self.kalman_n_updates = 0
+        self.kalman_converged = False
+        self.kalman_convergence_threshold = 50
+        
         self._load_calibration()
         
         # Fusion output
@@ -541,18 +551,11 @@ class MultiBroadcastFusion:
         self.measurement_history: Dict[str, List[BroadcastMeasurement]] = defaultdict(list)
         self.history_max_size = 100  # Keep last N measurements per station
         
-        # Kalman filter state for convergence
-        # State: [d_clock_offset, d_clock_drift_rate]
-        self.kalman_state = np.array([0.0, 0.0])  # [offset_ms, drift_ms_per_min]
-        self.kalman_P = np.array([[100.0, 0.0], [0.0, 1.0]])  # Initial uncertainty
-        self.kalman_initialized = False
-        self.kalman_n_updates = 0
-        
         # Two-tier Kalman approach (2026-01-10)
         # Tier 1: Fast measurements (every 8s) - record variations, don't adjust baseline
         # Tier 2: Slow adjustments (detect persistent drift) - only adjust if GPSDO drifting
-        self.kalman_converged = False  # True after ~50 updates (~7 minutes)
-        self.kalman_convergence_threshold = 50  # Updates needed for convergence
+        # NOTE: kalman_state, kalman_P, kalman_initialized, kalman_n_updates, kalman_converged,
+        # and kalman_convergence_threshold are initialized BEFORE _load_calibration() above
         self.measurement_window = []  # Recent measurements for drift detection
         self.measurement_window_size = 30  # 30 measurements = ~4 minutes
         self.last_baseline_adjustment = 0.0  # Timestamp of last adjustment
@@ -786,6 +789,7 @@ class MultiBroadcastFusion:
                 # NOT restoring it causes visible discontinuities in the D_clock trace.
                 if '_kalman_state' in data:
                     kalman_state = data['_kalman_state']
+                    logger.info(f"Found _kalman_state: converged={kalman_state.get('converged')}, offset={kalman_state.get('offset_ms', 0):.3f}ms")
                     if kalman_state.get('converged', False):
                         # Restore the offset but keep drift at zero (Steel Ruler)
                         restored_offset = kalman_state.get('offset_ms', 0.0)
@@ -2138,11 +2142,11 @@ class MultiBroadcastFusion:
                 reference_station=self.reference_station
             )
         
-        # CRITICAL FIX (P2.1): Auto-save calibration every 50 updates
+        # CRITICAL FIX (P2.1): Auto-save calibration every 10 updates
         self.calibration_update_count += 1
-        # CRITICAL FIX: Save more frequently (every 10 updates ~80 seconds) to persist Kalman state
-        # This prevents losing convergence progress on service restarts
-        if self.calibration_update_count % 10 == 0:
+        # CRITICAL FIX (2026-01-20): Only save when Kalman has converged
+        # This prevents overwriting a good converged state with an unconverged one on restart
+        if self.calibration_update_count % 10 == 0 and self.kalman_converged:
             try:
                 self._save_calibration()
                 logger.debug(f"Auto-saved calibration and Kalman state (update #{self.calibration_update_count})")
@@ -3942,12 +3946,23 @@ def run_fusion_service(
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s")
     
+    # CRITICAL FIX (2026-01-20): Handle SIGTERM for clean shutdown with calibration save
+    running = True
+    def handle_shutdown(signum, frame):
+        nonlocal running
+        logger.info(f"Received signal {signum}, initiating clean shutdown...")
+        running = False
+    
+    import signal
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+    
     # Notify systemd we're ready
     if SYSTEMD_AVAILABLE:
         systemd_daemon.notify('READY=1')
         logger.info("Notified systemd: READY")
     
-    while True:
+    while running:
         try:
             # BREADCRUMB: Loop start
             loop_start_time = time.time()
@@ -4172,13 +4187,25 @@ def run_fusion_service(
             time.sleep(interval_sec)
             
         except KeyboardInterrupt:
-            logger.info("Fusion service stopped")
+            logger.info("Fusion service stopped by keyboard interrupt")
             break
         except Exception as e:
             logger.error(f"Fusion error: {e}", exc_info=True)
             time.sleep(interval_sec)
-
-
+    
+    # CRITICAL FIX (2026-01-20): Save calibration on clean shutdown
+    # This ensures the converged Kalman state is preserved for the next restart
+    logger.info("Saving calibration before shutdown...")
+    try:
+        if fusion.kalman_converged:
+            fusion._save_calibration()
+            logger.info(f"Calibration saved: offset={fusion.kalman_state[0]:.3f}ms, converged=True")
+        else:
+            logger.warning(f"Kalman not converged (n_updates={fusion.kalman_n_updates}), skipping calibration save to preserve previous state")
+    except Exception as e:
+        logger.error(f"Failed to save calibration on shutdown: {e}")
+    
+    logger.info("Fusion service shutdown complete")
 
 
 if __name__ == '__main__':

@@ -174,10 +174,23 @@ start_service "timestd-l2-calibration" "L2 Calibrated Timing"
 
 # Phase 3: Fusion and physics
 log_step "Phase 3: Starting fusion and physics..."
+
+# CRITICAL: Clear any stale SHM segments before starting fusion
+# If chrony created them first, they'll have wrong permissions (root:600)
+# Fusion needs to create them with timestd:666 for chrony to read
+log_info "  Clearing stale Chrony SHM segments..."
+for key in 0x4e545030 0x4e545031; do
+    shmid=$(ipcs -m 2>/dev/null | grep "$key" | awk '{print $2}')
+    if [[ -n "$shmid" ]]; then
+        ipcrm -m "$shmid" 2>/dev/null || true
+        log_info "    Removed SHM $key (id=$shmid)"
+    fi
+done
+
 start_service "timestd-fusion" "Fusion → Chrony SHM"
 start_service "timestd-physics" "TEC Estimation"
 
-# Restart chronyd to pick up SHM (fusion creates SHM segments)
+# Restart chronyd to pick up SHM (fusion creates SHM segments with correct permissions)
 if systemctl is-active --quiet chronyd; then
     log_info "  Restarting chronyd to pick up SHM segments..."
     systemctl restart chronyd

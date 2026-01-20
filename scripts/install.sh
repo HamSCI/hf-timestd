@@ -663,6 +663,42 @@ $LOG_DIR/*.log {
 }
 EOF
     log_info "  Created logrotate configuration"
+    
+    # =============================================================================
+    # Initial IONEX Download
+    # =============================================================================
+    log_info "Downloading initial IONEX data..."
+    
+    # Create IONEX directory
+    sudo mkdir -p /var/lib/timestd/ionex
+    sudo chown timestd:timestd /var/lib/timestd/ionex
+    
+    # Run initial IONEX download (yesterday's data)
+    if [[ -f "$INSTALL_DIR/scripts/download_ionex_daily.sh" ]]; then
+        sudo -u timestd "$INSTALL_DIR/scripts/download_ionex_daily.sh" 2>&1 | head -20 || true
+        if ls /var/lib/timestd/ionex/*.gz 2>/dev/null | head -1 > /dev/null; then
+            log_info "  ✅ Initial IONEX data downloaded"
+        else
+            log_warn "  ⚠️  IONEX download may have failed (check ~/.netrc for NASA CDDIS credentials)"
+            log_info "     See: https://cddis.nasa.gov/Data_and_Derived_Products/CreateNetrcFile.html"
+        fi
+    else
+        log_warn "  ⚠️  IONEX download script not found at $INSTALL_DIR/scripts/download_ionex_daily.sh"
+    fi
+    
+    # =============================================================================
+    # SHM Permissions Setup
+    # =============================================================================
+    log_info "Setting up Chrony SHM permissions..."
+    
+    # Remove any stale SHM segments that might have wrong permissions
+    for key in 0x4e545030 0x4e545031; do
+        shmid=$(ipcs -m | grep "$key" | awk '{print $2}')
+        if [[ -n "$shmid" ]]; then
+            ipcrm -m "$shmid" 2>/dev/null || true
+        fi
+    done
+    log_info "  ✅ Cleared stale SHM segments (fusion will recreate with correct permissions)"
 fi
 
 # =============================================================================
