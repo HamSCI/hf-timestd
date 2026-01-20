@@ -120,6 +120,13 @@ class BinaryArchiveWriter:
         self._initial_offsets: List[float] = []  # Accumulator for streaming mean
         self._offset_params_locked: bool = False
         
+        # RTP clock drift detection (after offset is locked)
+        # If RTP-derived time diverges from wall clock by more than this threshold,
+        # we reset the offset calibration to recover from frozen/drifted RTP clocks
+        self._rtp_drift_threshold_sec: float = 300.0  # 5 minutes
+        self._rtp_drift_check_interval: int = 100  # Check every N chunks
+        self._chunks_since_drift_check: int = 0
+        
         self.last_rtp_timestamp: Optional[int] = None
         self.cumulative_samples: int = 0  # Total samples processed
         
@@ -503,6 +510,42 @@ class BinaryArchiveWriter:
                     self._offset_params_locked = True
                     self._initial_offsets = [] # free memory
                     logger.info(f"RTP-to-Unix reference LOCKED: offset={mean_offset:.3f}s (adjusted by {diff*1000:+.1f}ms after 50 chunks)")
+            
+            # CRITICAL: RTP clock drift detection AFTER offset is locked
+            # This catches frozen/stuck RTP clocks from radiod issues
+            if self._offset_params_locked:
+                self._chunks_since_drift_check += 1
+                if self._chunks_since_drift_check >= self._rtp_drift_check_interval:
+                    self._chunks_since_drift_check = 0
+                    
+                    # Compare RTP-derived time to wall clock
+                    rtp_derived_time = self._rtp_to_unix_time(rtp_timestamp)
+                    wall_clock_time = time.time()
+                    drift = abs(rtp_derived_time - wall_clock_time)
+                    
+                    if drift > self._rtp_drift_threshold_sec:
+                        logger.error(
+                            f"CRITICAL: RTP clock drift detected! "
+                            f"RTP-derived={rtp_derived_time:.0f}, wall={wall_clock_time:.0f}, "
+                            f"drift={drift:.0f}s ({drift/3600:.1f}h). "
+                            f"Resetting RTP-to-Unix calibration to recover."
+                        )
+                        # Reset calibration state to re-establish mapping
+                        self.rtp_to_unix_offset = None
+                        self._initial_offsets = []
+                        self._offset_params_locked = False
+                        
+                        # Flush current buffer to avoid data loss
+                        if self.current_buffer and self.current_buffer.write_pos > 0:
+                            # Use wall clock time for the flush since RTP is unreliable
+                            self.current_buffer.minute_boundary = (int(wall_clock_time) // 60) * 60
+                            self._flush_minute(self.current_buffer)
+                            self.current_buffer = None
+                        
+                        # Re-initialize with wall clock as reference
+                        # The next iteration will establish a new offset
+                        if system_time is None:
+                            system_time = wall_clock_time
             
             # Ensure complex64
             if samples.dtype != np.complex64:

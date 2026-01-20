@@ -567,8 +567,9 @@ class CoreRecorderV2:
         return None
     
     def _monitor_health(self):
-        """Monitor stream health."""
+        """Monitor stream health and data freshness."""
         try:
+            # Check individual channel health
             for freq, recorder in self.recorders.items():
                 if not recorder.is_healthy():
                     silence = recorder.get_silence_duration()
@@ -586,8 +587,97 @@ class CoreRecorderV2:
                                 logger.error(f"Channel {ssrc:x} ({recorder.config.description}) missing from radiod")
                     except Exception:
                         pass
+            
+            # DATA FRESHNESS CHECK: Verify output files are being written
+            # This catches silent failures where process runs but doesn't write data
+            self._check_data_freshness()
+            
         except Exception as e:
             logger.error(f"Health monitoring error: {e}")
+    
+    def _check_data_freshness(self):
+        """Check that raw buffer files are being written recently.
+        
+        This catches failure modes where:
+        - RTP clock is frozen/drifted
+        - Disk is full
+        - Permissions issues
+        - Silent processing failures
+        
+        If data is stale for >10 minutes, triggers a self-restart via sys.exit(1).
+        Systemd will restart the service automatically.
+        """
+        try:
+            from datetime import datetime, timedelta
+            
+            # Check hot buffer (tiered storage) or cold buffer
+            hot_buffer = Path('/dev/shm/timestd/raw_buffer')
+            cold_buffer = self.output_dir / 'raw_buffer'
+            
+            search_path = hot_buffer if hot_buffer.exists() else cold_buffer
+            if not search_path.exists():
+                return
+            
+            # Find most recent .bin or .bin.zst file
+            # Check today and yesterday (for just-after-midnight edge case)
+            now = datetime.now(timezone.utc)
+            dates_to_check = [
+                now.strftime('%Y%m%d'),
+                (now - timedelta(days=1)).strftime('%Y%m%d')
+            ]
+            
+            latest_mtime = 0
+            latest_file = None
+            
+            for channel_dir in search_path.iterdir():
+                if not channel_dir.is_dir():
+                    continue
+                for date_str in dates_to_check:
+                    day_dir = channel_dir / date_str
+                    if not day_dir.exists():
+                        continue
+                    for f in day_dir.glob('*.bin*'):
+                        try:
+                            mtime = f.stat().st_mtime
+                            if mtime > latest_mtime:
+                                latest_mtime = mtime
+                                latest_file = f
+                        except (OSError, IOError):
+                            continue
+            
+            if latest_file is None:
+                # No files found - service may be starting up
+                # Only alert if we've been running for a while
+                uptime = time.time() - self.start_time
+                if uptime > 300:  # 5 minutes
+                    logger.error(
+                        f"DATA FRESHNESS CRITICAL: No raw buffer files found after {uptime:.0f}s uptime!"
+                    )
+                return
+            
+            file_age = time.time() - latest_mtime
+            
+            # Alert if no new files in 5 minutes (300 seconds)
+            if file_age > 300:
+                logger.error(
+                    f"DATA FRESHNESS WARNING: No new raw buffer files in {file_age:.0f}s! "
+                    f"Latest: {latest_file.name} ({file_age/60:.1f} min old). "
+                    f"Check for RTP clock drift, disk full, or processing errors."
+                )
+            
+            # CRITICAL: Trigger self-restart if stale for >10 minutes
+            # This ensures automatic recovery from silent failures
+            if file_age > 600:  # 10 minutes
+                logger.critical(
+                    f"DATA FRESHNESS CRITICAL: No new data in {file_age:.0f}s ({file_age/60:.1f} min). "
+                    f"Triggering self-restart to recover. Latest file: {latest_file}"
+                )
+                # Exit with error code - systemd will restart us (Restart=always)
+                self.running = False
+                sys.exit(1)
+                
+        except Exception as e:
+            logger.debug(f"Data freshness check error: {e}")
     
     def _enforce_quota(self):
         """Enforce disk quota."""

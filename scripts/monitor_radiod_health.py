@@ -104,6 +104,108 @@ def check_radiod_connectivity():
         return None
 
 
+def check_rtp_timestamp_advancing(state_file: Path) -> dict:
+    """Check if RTP timestamps are advancing (not frozen).
+    
+    This detects the failure mode where radiod is running but its
+    RTP clock is frozen/stuck, causing downstream data loss.
+    
+    Returns:
+        dict with 'advancing', 'last_rtp', 'current_rtp', 'drift_seconds'
+    """
+    try:
+        # Read last known RTP timestamp from state
+        rtp_state_file = state_file.parent / 'radiod-rtp-state.json'
+        
+        last_check = None
+        if rtp_state_file.exists():
+            with open(rtp_state_file, 'r') as f:
+                last_check = json.load(f)
+        
+        # Get current RTP timestamp from core-recorder status
+        recorder_status_file = state_file.parent.parent / 'status' / 'core-recorder-status.json'
+        if not recorder_status_file.exists():
+            return {'advancing': None, 'error': 'No recorder status file'}
+        
+        with open(recorder_status_file, 'r') as f:
+            recorder_status = json.load(f)
+        
+        # Extract RTP info from any channel
+        current_rtp = None
+        for ch_key, ch_data in recorder_status.get('channels', {}).items():
+            if 'last_rtp_timestamp' in ch_data:
+                current_rtp = ch_data['last_rtp_timestamp']
+                break
+        
+        if current_rtp is None:
+            # Try to get from the raw buffer metadata files
+            hot_buffer = Path('/dev/shm/timestd/raw_buffer')
+            if hot_buffer.exists():
+                # Find most recent JSON sidecar
+                today = datetime.now(timezone.utc).strftime('%Y%m%d')
+                for channel_dir in hot_buffer.iterdir():
+                    if not channel_dir.is_dir():
+                        continue
+                    today_dir = channel_dir / today
+                    if not today_dir.exists():
+                        continue
+                    json_files = sorted(today_dir.glob('*.json'), key=lambda f: f.stat().st_mtime, reverse=True)
+                    if json_files:
+                        with open(json_files[0], 'r') as f:
+                            meta = json.load(f)
+                            current_rtp = meta.get('start_rtp_timestamp')
+                            break
+        
+        now = time.time()
+        result = {
+            'advancing': None,
+            'current_rtp': current_rtp,
+            'check_time': now
+        }
+        
+        if current_rtp is None:
+            result['error'] = 'Could not get current RTP timestamp'
+            return result
+        
+        # Compare with last check
+        if last_check and 'current_rtp' in last_check:
+            last_rtp = last_check['current_rtp']
+            last_time = last_check.get('check_time', now - 60)
+            time_delta = now - last_time
+            rtp_delta = current_rtp - last_rtp
+            
+            # RTP should advance roughly 1 per sample (20kHz = 20000/sec)
+            # Over 60 seconds, expect ~1.2M RTP ticks
+            expected_rtp_delta = time_delta * 20000  # Approximate
+            
+            result['last_rtp'] = last_rtp
+            result['rtp_delta'] = rtp_delta
+            result['time_delta'] = time_delta
+            
+            # If RTP hasn't advanced at all, or advanced way too little, it's frozen
+            if rtp_delta <= 0:
+                result['advancing'] = False
+                result['drift_seconds'] = time_delta  # Frozen for this long
+                logger.error(f"RTP CLOCK FROZEN: RTP={current_rtp}, last={last_rtp}, no advancement in {time_delta:.0f}s")
+            elif rtp_delta < expected_rtp_delta * 0.5:
+                result['advancing'] = False
+                result['drift_seconds'] = time_delta - (rtp_delta / 20000)
+                logger.warning(f"RTP CLOCK SLOW: Expected ~{expected_rtp_delta:.0f} ticks, got {rtp_delta}")
+            else:
+                result['advancing'] = True
+                result['drift_seconds'] = 0
+        
+        # Save current state for next check
+        with open(rtp_state_file, 'w') as f:
+            json.dump(result, f)
+        
+        return result
+        
+    except Exception as e:
+        logger.warning(f"Could not check RTP timestamp: {e}")
+        return {'advancing': None, 'error': str(e)}
+
+
 def write_status(status, output_file):
     """Write status to JSON file atomically"""
     try:
@@ -159,9 +261,22 @@ def main():
                 # Check connectivity
                 status['connectivity'] = check_radiod_connectivity()
                 
+                # Check RTP timestamp advancement (detect frozen clocks)
+                rtp_check = check_rtp_timestamp_advancing(Path(output_file))
+                status['rtp_status'] = rtp_check
+                
                 # Determine health
                 if status['connectivity'] is True:
-                    status['health'] = 'healthy'
+                    # Check for frozen RTP clock
+                    if rtp_check.get('advancing') is False:
+                        status['health'] = 'critical'
+                        drift = rtp_check.get('drift_seconds', 0)
+                        status['alerts'].append({
+                            'severity': 'critical',
+                            'message': f'RTP clock frozen/drifted by {drift:.0f}s - data loss occurring!'
+                        })
+                    else:
+                        status['health'] = 'healthy'
                 elif status['connectivity'] is False:
                     status['health'] = 'degraded'
                     status['alerts'].append({

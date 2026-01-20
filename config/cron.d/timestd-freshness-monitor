@@ -1,0 +1,11 @@
+# HF-TimeStd Data Freshness Monitor
+# Runs every 5 minutes to check for stale data and send alerts
+# Install: sudo cp /opt/hf-timestd/config/cron.d/timestd-freshness-monitor /etc/cron.d/
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Optional: Set email for alerts (or set in /etc/default/timestd)
+# TIMESTD_ALERT_EMAIL=admin@example.com
+
+*/5 * * * * root /opt/hf-timestd/scripts/check-freshness-alert.sh >/dev/null 2>&1
