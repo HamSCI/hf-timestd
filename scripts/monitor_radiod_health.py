@@ -108,8 +108,43 @@ def get_radiod_uptime(pid):
         return None
 
 
+def check_radiod_status_channel(status_address: str = None, timeout: float = 2.0):
+    """Check if radiod status channel is responding"""
+    try:
+        from ka9q import RadiodControl
+        
+        # Try common status addresses if none specified
+        addresses_to_try = []
+        if status_address:
+            addresses_to_try.append(status_address)
+        else:
+            # Try to read from config or use common defaults
+            addresses_to_try = ['bee4-status.local', 'bee1-status.local', 'radiod-status.local']
+        
+        for addr in addresses_to_try:
+            try:
+                ctrl = RadiodControl(addr)
+                # If we can create the control object and it has a valid status address, radiod is responding
+                if hasattr(ctrl, 'status_mcast_addr') and ctrl.status_mcast_addr:
+                    return {
+                        'responding': True,
+                        'status_address': addr,
+                        'multicast_addr': ctrl.status_mcast_addr
+                    }
+            except Exception:
+                continue
+        
+        return {'responding': False, 'status_address': None}
+    except ImportError:
+        logger.warning("ka9q module not available for status check")
+        return {'responding': None, 'status_address': None}
+    except Exception as e:
+        logger.error(f"Error checking radiod status channel: {e}")
+        return {'responding': False, 'error': str(e)}
+
+
 def check_radiod_connectivity():
-    """Check if radiod is responsive (listening on multicast)"""
+    """Check if radiod is responsive (listening on multicast) - legacy method"""
     try:
         # Check if radiod is listening on its typical ports
         result = subprocess.run(
@@ -230,78 +265,62 @@ def main():
     
     while True:
         try:
-            # Check process status
-            proc_status = check_radiod_process()
-            
             status = {
                 'timestamp': datetime.now(timezone.utc).isoformat(),
-                'process': proc_status,
+                'process': {'running': False, 'pid': None, 'count': 0},
                 'uptime_seconds': None,
                 'connectivity': None,
                 'health': 'unknown',
                 'alerts': []
             }
             
-            if proc_status['running']:
+            # Primary check: Is radiod status channel responding?
+            status_check = check_radiod_status_channel()
+            status['status_channel'] = status_check
+            
+            if status_check.get('responding') is True:
+                # Radiod is responding - this is the authoritative health check
                 consecutive_failures = 0
                 last_known_good = time.time()
+                status['health'] = 'healthy'
+                status['process']['running'] = True
+                status['process']['pid'] = 1  # Unknown PID (may be remote/container)
+                status['connectivity'] = True
                 
-                # Get uptime
-                if proc_status['pid']:
-                    status['uptime_seconds'] = get_radiod_uptime(proc_status['pid'])
-                
-                # Check connectivity
-                status['connectivity'] = check_radiod_connectivity()
-                
-                # Check data flow (detect stale output)
+                # Check data flow for additional diagnostics
                 data_flow = check_data_flow(Path(output_file))
                 status['data_flow'] = data_flow
                 
-                # Determine health
-                if status['connectivity'] is True:
-                    # Check for data flow issues
-                    if data_flow.get('flowing') is False:
-                        status['health'] = 'critical'
-                        age = data_flow.get('latest_file_age', 0)
-                        status['alerts'].append({
-                            'severity': 'critical',
-                            'message': f'Data flow stopped - latest file is {age:.0f}s old'
-                        })
-                    else:
-                        status['health'] = 'healthy'
-                elif status['connectivity'] is False:
+                if data_flow.get('flowing') is False:
+                    # Status channel works but no data - degraded
+                    status['health'] = 'degraded'
+                    age = data_flow.get('latest_file_age', 0)
+                    status['alerts'].append({
+                        'severity': 'warning',
+                        'message': f'Radiod responding but no recent data (last file {age:.0f}s ago)'
+                    })
+                    
+            else:
+                # Status channel not responding - check local process as fallback
+                proc_status = check_radiod_process()
+                status['process'] = proc_status
+                
+                if proc_status['running']:
+                    # Local process running but status channel not responding
                     status['health'] = 'degraded'
                     status['alerts'].append({
                         'severity': 'warning',
-                        'message': 'Radiod running but no multicast detected'
+                        'message': 'Radiod process running but status channel not responding'
                     })
+                    if proc_status['pid']:
+                        status['uptime_seconds'] = get_radiod_uptime(proc_status['pid'])
                 else:
-                    status['health'] = 'unknown'
-                    
-            else:
-                # Process not found locally - check if data is still flowing
-                # (radiod may be running remotely or in a container we can't detect)
-                data_flow = check_data_flow(Path(output_file))
-                status['data_flow'] = data_flow
-                
-                if data_flow.get('flowing') is True:
-                    # Data is flowing, so radiod must be running somewhere
-                    consecutive_failures = 0
-                    last_known_good = time.time()
-                    status['health'] = 'healthy'
-                    status['process']['running'] = True  # Inferred from data flow
-                    status['process']['pid'] = 1  # Unknown PID (remote/container)
-                    status['uptime_seconds'] = data_flow.get('latest_file_age', 0)
-                    status['alerts'].append({
-                        'severity': 'info',
-                        'message': 'Radiod detected via data flow (remote or containerized)'
-                    })
-                else:
+                    # No status channel, no local process - critical
                     consecutive_failures += 1
                     status['health'] = 'critical'
                     status['alerts'].append({
                         'severity': 'critical',
-                        'message': f'Radiod process not found and no data flow (failed {consecutive_failures} checks)'
+                        'message': f'Radiod not responding (failed {consecutive_failures} checks)'
                     })
                     
                     if last_known_good:
@@ -316,12 +335,8 @@ def main():
             
             # Log status changes
             if status['health'] == 'healthy':
-                if proc_status.get('containerized'):
-                    logger.info(f"✓ radiod healthy (container {proc_status.get('container_id', 'unknown')}, uptime {status['uptime_seconds']}s)")
-                elif proc_status['running']:
-                    logger.info(f"✓ radiod healthy (PID {proc_status['pid']}, uptime {status['uptime_seconds']}s)")
-                else:
-                    logger.info(f"✓ radiod healthy (detected via data flow)")
+                sc = status.get('status_channel', {})
+                logger.info(f"✓ radiod healthy (status: {sc.get('status_address', 'unknown')}, mcast: {sc.get('multicast_addr', 'unknown')})")
             elif status['health'] == 'critical':
                 logger.error(f"✗ radiod CRITICAL (consecutive failures: {consecutive_failures})")
             else:
