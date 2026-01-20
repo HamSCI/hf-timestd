@@ -168,13 +168,14 @@ if [[ "$MODE" == "production" ]]; then
     fi
 
     # Check for chrony - REQUIRED for production (system clock discipline is core functionality)
-    if ! command -v chronyd &> /dev/null; then
+    # Note: chronyd is in /usr/sbin which may not be in PATH for non-root users
+    if ! command -v chronyd &> /dev/null && [[ ! -x /usr/sbin/chronyd ]]; then
         log_warn "  ⚠️  chronyd not found"
         log_info "  Chrony is REQUIRED for production mode (system clock discipline)"
         log_info "  Installing chrony..."
         sudo apt-get update && sudo apt-get install -y chrony
         
-        if ! command -v chronyd &> /dev/null; then
+        if ! command -v chronyd &> /dev/null && [[ ! -x /usr/sbin/chronyd ]]; then
             log_error "Failed to install chrony. This is required for production mode."
             exit 1
         fi
@@ -184,7 +185,7 @@ if [[ "$MODE" == "production" ]]; then
     fi
     
     # Configure chrony for timestd SHM integration
-    if command -v chronyd &> /dev/null; then
+    if command -v chronyd &> /dev/null || [[ -x /usr/sbin/chronyd ]]; then
         # Detect chrony config file location
         if [[ -f "/etc/chrony/chrony.conf" ]]; then
             CHRONY_CONF="/etc/chrony/chrony.conf"
