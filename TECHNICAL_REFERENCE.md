@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** December 31, 2025
+**Last Updated:** January 20, 2026
 
 ---
 
@@ -208,7 +208,7 @@ To achieve low latency while maintaining archival integrity, we use HDF5's SWMR 
 
 | Component | Path |
 |-----------|------|
-| **Code** | `/opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/` |
+| **Code** | `/opt/hf-timestd/venv/lib/python3.*/site-packages/hf_timestd/` |
 | **Config** | `/etc/hf-timestd/` |
 | **Logs** | `/var/log/hf-timestd/` |
 | **Data Root** | `/var/lib/timestd/` |
@@ -761,9 +761,9 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ---
 
-**Version**: 2.2.0  
-**Last Updated**: December 2, 2025  
-**Purpose**: Technical reference for GRAPE Signal Recorder developers
+**Version**: 5.3.2  
+**Last Updated**: January 20, 2026  
+**Purpose**: Technical reference for HF Time Standard developers
 
 **v2.2.0 Release (Dec 2, 2025):**
 

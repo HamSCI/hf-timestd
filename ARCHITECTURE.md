@@ -1,6 +1,6 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** December 31, 2025  
+**Last Updated:** January 20, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
 **Version:** V5.0 (HDF5-Native Pipeline)
@@ -381,10 +381,12 @@ We use a **Weighted Voting** system combining:
 | Service | Purpose |
 |---------|---------|
 | `timestd-core-recorder.service` | Phase 1: RTP → raw_buffer |
-| `timestd-analytics.service` | Phase 2: Timing analysis (all channels) |
+| `timestd-metrology.service` | Phase 2: L1 timing analysis |
+| `timestd-l2-calibration.service` | Phase 2: L2 calibrated timing |
 | `timestd-fusion.service` | Phase 3: Multi-broadcast fusion & Chrony feed |
-| `timestd-web-ui-fastapi.service` | Web monitoring UI (FastAPI) |
-| `timestd-science-aggregator.service` | Background science product generation |
+| `timestd-physics.service` | Phase 3: TEC estimation |
+| `timestd-web-api.service` | Web monitoring UI (FastAPI) |
+| `timestd-radiod-monitor.service` | Hardware health monitoring |
 
 ### Resilience
 
@@ -416,7 +418,7 @@ We use a **Weighted Voting** system combining:
 
 ---
 
-**Last Updated:** December 31, 2025
+**Last Updated:** January 20, 2026
 
 ## Adaptive Search Window System (v3.9.0)
 

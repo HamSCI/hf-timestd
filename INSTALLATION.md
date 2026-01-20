@@ -1,7 +1,7 @@
 # HF Time Standard Analysis (hf-timestd) - Installation Guide
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 18, 2026
+**Last Updated:** January 20, 2026
 
 This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, CHU, WWV, WWVH).
 

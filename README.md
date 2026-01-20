@@ -59,7 +59,7 @@ sudo systemctl enable --now timestd-web-api
 
 | Data Type | Path |
 |-----------|------|
-| **Raw IQ** | `/var/lib/timestd/raw_archive/{CHANNEL}/` (Digital RF .h5) |
+| **Raw IQ** | `/var/lib/timestd/raw_buffer/{CHANNEL}/` (Binary + JSON) |
 | **L2 Timing** | `/var/lib/timestd/phase2/{CHANNEL}/` (HDF5) |
 | **L3 Fusion** | `/var/lib/timestd/phase2/fusion/` (HDF5) |
 | **IONEX** | `/var/lib/timestd/ionex/` |
@@ -75,30 +75,35 @@ sudo systemctl enable --now timestd-web-api
 
 ---
 
-## Architecture (The Six Services)
+## Architecture (The Eight Services)
 
-The system is composed of six independent services that form a pipeline:
+The system is composed of eight independent services that form a pipeline:
 
 ```text
 [ka9q-radio] (RTP Multicast)
      ↓
 1. CORE RECORDER (timestd-core-recorder)
-   • Writes Digital RF HDF5 (Reliable Capture)
+   • Writes Binary IQ + JSON sidecars (Reliable Capture)
      ↓
 2. METROLOGY (timestd-metrology)
-   • Reads Raw HDF5 -> Detects Tones -> Solves Timing
-   • Writes L2 HDF5 (Timing Measurements)
+   • Reads Raw IQ -> Detects Tones -> L1 Measurements
      ↓
-3. FUSION (timestd-fusion) <------- 4. VTEC (timestd-vtec)
+3. L2 CALIBRATION (timestd-l2-calibration)
+   • Applies geometric + TEC corrections -> L2 Timing
+     ↓
+4. FUSION (timestd-fusion) <------- 5. VTEC (timestd-vtec)
    • Reads L2 HDF5 (SWMR)           • Downloads IONEX Maps
-   • Applies Physics Corrections    • GNSS Observables
-   • Feeds Chrony SHM
+   • Kalman filtering               • GNSS Observables
+   • Feeds Chrony SHM (TSL1/TSL2)
      ↓
-5. SCIENCE AGGREGATOR (timestd-science-aggregator)
-   • TEC Estimation, Spectrograms
+6. PHYSICS (timestd-physics)
+   • TEC Estimation from multi-frequency
      ↓
-6. WEB UI (timestd-web-ui-fastapi)
-   • Visualization & Monitoring
+7. WEB API (timestd-web-api)
+   • FastAPI dashboard & REST API
+     ↓
+8. RADIOD MONITOR (timestd-radiod-monitor)
+   • Hardware health monitoring
 ```
 
 ### Key Technologies
@@ -138,25 +143,20 @@ The system is composed of six independent services that form a pipeline:
 
 ### Recent Updates
 
-**v3.9.0 (January 3, 2026) - Phase 1 & Phase 2 Web UI Complete**
+**v5.3.2 (January 20, 2026) - Fusion Restart & Install Improvements**
 
-- ✅ FastAPI web UI with 4 pages: Station Overview, System Health, Metrology Dashboard, Propagation Analysis
-- ✅ Allan Deviation analysis (τ=1s to 10,000s) with noise identification
-- ✅ Per-broadcast propagation modes (not misleading global aggregation)
-- ✅ Multi-frequency comparison by station for TEC validation
-- ✅ Per-path TEC visualization with error bars and quality indicators
-- ✅ Broadcast schedule validation (filters impossible station/frequency combinations)
-- ✅ Auto-refresh (60s), time range selection, responsive Plotly.js visualizations
+- ✅ **Kalman State Persistence:** Fixed state restore on service restart (no more D_clock jumps)
+- ✅ **SHM Permissions:** Automatic cleanup of stale Chrony SHM segments
+- ✅ **Install Process:** Initial IONEX download, proper service ordering
+- ✅ **Update Script:** `scripts/update-production.sh` for easy updates after `git pull`
 
 **v5.3.1 (January 12, 2026) - "Steel Ruler" & Drift Elimination**
 
-- ✅ **"Steel Ruler" Metrology:** Implemented strict GPSDO-anchored Kalman tuning (Q ≈ 0) to treat the local clock as a fixed standard.
-- ✅ **Drift Elimination:** Hard-clamped drift to 0.0 after convergence, eliminating the legacy 0.03 ppm "walking" baseline.
-- ✅ **Pipeline Modernization:** Updated `verify_pipeline.sh` for metadata sidecars and HDF5 latency.
-- ✅ **Metrologist Guide:** Added `docs/METROLOGIST.md` for validating system stability.
+- ✅ **"Steel Ruler" Metrology:** Strict GPSDO-anchored Kalman tuning (Q ≈ 0)
+- ✅ **Drift Elimination:** Hard-clamped drift to 0.0 after convergence
 
 **v5.0.0 (January 7, 2026) - HDF5-Native Pipeline**
 
-- **v3.9.0:** Adaptive search window system - Bootstrap → Orient → Focus progression using GPSDO stability
-- **v3.8.2:** Calibration sanity checks - Prevents loading corrupted state files
-- **v3.8.1:** Fixed calibration semantic bug - Removed incorrect use of offsets as search priors
+- ✅ **Digital RF Storage:** Standard HDF5 format for raw IQ
+- ✅ **HDF5-Native Analytics:** All L1/L2/L3 data uses HDF5 with SWMR
+- ✅ **Physics-Informed Propagation:** IONEX VTEC maps for precise path delay
