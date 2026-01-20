@@ -1,9 +1,9 @@
-# GRAPE Directory Structure - Canonical Reference
+# HF-TimeStd Directory Structure - Canonical Reference
 
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - This is the single source of truth for all file paths  
-**Last Updated:** 2025-12-09  
-**Enforcement:** ALL code MUST use `src/grape_recorder/paths.py` GRAPEPaths API
+**Last Updated:** 2026-01-20  
+**Version:** v5.4.0
 
 ---
 
@@ -59,18 +59,20 @@ config/environment                  # Environment variables
 ├── state/                          # Service state
 └── status/                         # Health status
 
-/var/log/grape-recorder/            # GRAPE_LOG_DIR - Application logs
-├── recorder.log
-├── analytics.log
-└── daily-upload.log
+/var/log/hf-timestd/                # Application logs
+├── core-recorder.log
+├── metrology.log
+├── fusion.log
+└── web-api.log
 
-/etc/hf-timestd/                # Configuration
+/etc/hf-timestd/                    # Configuration
 ├── timestd-config.toml
 └── environment
 
-/opt/grape-recorder/                # Application binaries
+/opt/hf-timestd/                    # Application binaries
 ├── venv/                           # Python virtual environment
-└── web-ui/                         # Node.js web interface
+├── scripts/                        # Operational scripts
+└── web-api/                        # FastAPI web interface
 ```
 
 ---
@@ -89,10 +91,10 @@ production_data_root = "/var/lib/timestd"
 Environment file (`/etc/hf-timestd/environment` or `config/environment`):
 
 ```bash
-GRAPE_MODE=production
-GRAPE_DATA_ROOT=/var/lib/timestd
-GRAPE_LOG_DIR=/var/log/grape-recorder
-GRAPE_CONFIG=/etc/hf-timestd/timestd-config.toml
+TIMESTD_MODE=production
+TIMESTD_DATA_ROOT=/var/lib/timestd
+TIMESTD_LOG_DIR=/var/log/hf-timestd
+TIMESTD_CONFIG=/etc/hf-timestd/timestd-config.toml
 ```
 
 ---
