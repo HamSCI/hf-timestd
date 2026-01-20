@@ -205,22 +205,18 @@ if [[ "$MODE" == "production" ]]; then
 # Add this to /etc/chrony/chrony.conf or include it via:
 #   include /etc/hf-timestd/chrony-timestd-refclocks.conf
 
-# L1 Feed: Raw metrology fusion (fast, robust baseline)
+# L1 Feed: Raw metrology fusion (backup)
 # - Uses L1 metrology measurements (raw TOA)
 # - Uncertainty: ±0.85ms (multi-broadcast fusion with outlier rejection)
-# - Latency: ~75-135 seconds
-# - Fallback feed if L2 pipeline fails
-refclock SHM 0 refid TSL1 poll 4 precision 1e-3 offset 0.0 delay 0.1
+# - Backup feed if L2 pipeline fails
+refclock SHM 0 refid TSL1 poll 4 precision 1e-3 offset 0.0 delay 0.05
 
-# L2 Feed: Calibrated timing fusion (accurate, primary)
+# L2 Feed: Calibrated timing fusion (primary HF source)
 # - Uses L2 calibrated measurements (geometric + TEC + system corrections)
 # - Uncertainty: ±0.3-1.0ms (ISO GUM uncertainty budget)
-# - Latency: ~105-195 seconds
-# - Primary feed for clock discipline
-refclock SHM 1 refid TSL2 poll 4 precision 1e-4 offset 0.0 delay 0.1
-
-# Chrony will automatically prefer TSL2 (lower uncertainty, better precision)
-# TSL1 serves as backup if L2 calibration pipeline fails
+# - 'trust' ensures it's always combined with other sources
+# - If no GNSS timeserver, add 'prefer' to make TSL2 primary
+refclock SHM 1 refid TSL2 poll 4 precision 1e-4 offset 0.0 delay 0.05 trust
 EOF
             log_info "  ✅ Chrony configured for timestd dual SHM integration (TSL1=L1, TSL2=L2)"
             log_info "  📝 Note: timestd-fusion must start BEFORE chronyd to create SHM with correct permissions"
@@ -603,6 +599,13 @@ EOF
         fi
     else
         log_info "    ℹ️  timestd-vtec.service skipped (GNSS VTEC disabled in config)"
+        
+        # No GNSS timeserver - make TSL2 the preferred source
+        if [[ -n "$CHRONY_CONF" ]] && grep -q "refclock SHM 1 refid TSL2.*trust$" "$CHRONY_CONF" 2>/dev/null; then
+            log_info "  Adding 'prefer' to TSL2 (no GNSS timeserver available)..."
+            sudo sed -i 's/refclock SHM 1 refid TSL2\(.*\) trust$/refclock SHM 1 refid TSL2\1 trust prefer/' "$CHRONY_CONF"
+            log_info "  ✅ TSL2 is now the preferred time source"
+        fi
     fi
 
     # Reload systemd
