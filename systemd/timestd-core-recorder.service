@@ -3,6 +3,9 @@ Description=HF Time Standard Core Recorder - Phase 1 RTP to Raw Buffer Archive
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target ka9q-radio.service
 Wants=network-online.target ka9q-radio.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+OnFailure=timestd-alert@%n.service
 
 [Service]
 Type=notify
@@ -32,11 +35,6 @@ ExecStartPost=/opt/hf-timestd/scripts/health-check-recorder.sh
 # AGGRESSIVE restart policy - data loss is unacceptable
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=10
-
-# Email alert on failure
-OnFailure=timestd-alert@%n.service
 
 # Logging to file and journal
 StandardOutput=append:/var/log/hf-timestd/core-recorder.log

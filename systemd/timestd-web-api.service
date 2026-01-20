@@ -1,6 +1,8 @@
 [Unit]
 Description=HF Time Standard Web API & UI
 After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -20,8 +22,6 @@ ExecStart=/opt/hf-timestd/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 # Always restart - web UI is important for monitoring
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Logging
 StandardOutput=journal

@@ -3,6 +3,9 @@ Description=HF-TimeStd IONEX Download Service
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+OnFailure=timestd-alert@%n.service
 
 [Service]
 Type=oneshot
@@ -18,11 +21,6 @@ ExecStart=/opt/hf-timestd/scripts/download_ionex_daily.sh
 # Retry on failure (up to 3 attempts with 5 minute delay)
 Restart=on-failure
 RestartSec=300
-StartLimitIntervalSec=3600
-StartLimitBurst=3
-
-# Email alert on failure
-OnFailure=timestd-alert@%n.service
 
 # Timeout (IONEX download should complete within 5 minutes)
 TimeoutStartSec=300

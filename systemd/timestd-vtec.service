@@ -3,6 +3,8 @@ Description=HF-TimeStd GNSS VTEC Monitor
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network.target
 Wants=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -21,8 +23,6 @@ ExecStart=/opt/hf-timestd/venv/bin/python -u /opt/hf-timestd/scripts/live_vtec.p
 # Always restart - VTEC data is important for ionospheric corrections
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Logging
 StandardOutput=journal

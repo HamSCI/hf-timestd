@@ -3,6 +3,7 @@ Description=HF-Timestd Physics Service (L2 Interpretation)
 Documentation=https://github.com/mijahauan/hf-timestd
 After=timestd-l2-calibration.service
 Requires=timestd-l2-calibration.service
+OnFailure=timestd-alert@%n.service
 
 [Service]
 Type=notify
@@ -23,9 +24,6 @@ ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
 # Restart on failure
 Restart=always
 RestartSec=10
-
-# Email alert on failure
-OnFailure=timestd-alert@%n.service
 
 # Standard output logging
 StandardOutput=append:/var/log/hf-timestd/physics.log
