@@ -9,7 +9,7 @@ MAX_AGE_SECONDS=120  # Alert if no new files in 2 minutes
 # Find most recent .bin file across all channels IN TODAY'S DIRECTORY ONLY
 # Retry loop for cold start (service takes up to 120s to write first chunk if starting just after minute boundary)
 MAX_RETRIES=40  # 40 * 5s = 200s wait
-TODAY=$(date +%Y%m%d)
+TODAY=$(date -u +%Y%m%d)  # Use UTC date to match data directory structure
 
 for i in $(seq 1 $MAX_RETRIES); do
     # Search only in today's directories to avoid finding old files from previous days
