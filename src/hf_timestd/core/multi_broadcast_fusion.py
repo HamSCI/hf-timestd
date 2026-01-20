@@ -467,6 +467,8 @@ class MultiBroadcastFusion:
         self.phase2_dir = self.data_root / 'phase2'
         self.calibration: Dict[str, BroadcastCalibration] = {}
         self.calibration_update_count = 0  # Track updates for auto-save
+        self.calibration_trust_level = 1.0  # Trust level from loaded calibration (1.0 = full trust)
+        self.calibration_age_hours = 0.0    # Age of loaded calibration in hours
         self.auto_calibrate = auto_calibrate
         self.reference_station = reference_station
         self.correction_alpha = 0.0  # Gradual ramp-up for Kalman correction (0→1)
@@ -655,25 +657,35 @@ class MultiBroadcastFusion:
         logger.info(f"Discovered {len(channels)} channels: {sorted(channels)[:5]}...")
         return sorted(channels)
     
-    def _validate_calibration_data(self, data: dict) -> bool:
+    def _validate_calibration_data(self, data: dict) -> tuple:
         """
-        Validate loaded calibration data for sanity.
+        Validate loaded calibration data and compute trust level based on age.
         
         Prevents loading corrupted or stale calibration files that could
         trap the system in an unrecoverable state.
         
         Validation criteria:
-        - Offset magnitude must be < 100ms (realistic max ~60ms for multi-hop)
+        - Offset magnitude must be < 150ms (realistic max ~120ms for BPM multi-hop)
         - Calibration age must be < 7 days (ionospheric conditions change)
         
+        Trust decay model (based on ionospheric variability):
+        - < 1 hour: Full trust (ionosphere stable on this timescale)
+        - 1-6 hours: High trust (diurnal changes beginning)
+        - 6-24 hours: Medium trust (significant diurnal variation)
+        - 1-7 days: Low trust (major ionospheric changes possible)
+        - > 7 days: Reject (too stale)
+        
         Returns:
-            True if calibration is safe to use, False otherwise.
+            (valid: bool, trust_level: float, max_age_hours: float)
+            trust_level: 1.0 = full trust, 0.0 = no trust
         """
         MAX_OFFSET_MS = 150.0  # Maximum reasonable offset (BPM from China can be ~120ms)
         MAX_AGE_DAYS = 7       # Maximum calibration age
         
         current_time = time.time()
         max_age_seconds = MAX_AGE_DAYS * 86400
+        
+        max_age_hours = 0.0
         
         for broadcast_key, cal_data in data.items():
             # Skip metadata keys (Kalman state, etc.)
@@ -689,7 +701,7 @@ class MultiBroadcastFusion:
                     f"Calibration sanity check FAILED: {broadcast_key} has "
                     f"offset={offset_ms:+.1f}ms (exceeds ±{MAX_OFFSET_MS}ms limit)"
                 )
-                return False
+                return (False, 0.0, 0.0)
             
             # Check age - handle both Unix timestamp (float) and ISO string formats
             if isinstance(last_updated, str):
@@ -703,15 +715,28 @@ class MultiBroadcastFusion:
                 last_updated_ts = last_updated
             
             age_seconds = current_time - last_updated_ts
+            age_hours = age_seconds / 3600.0
+            max_age_hours = max(max_age_hours, age_hours)
+            
             if age_seconds > max_age_seconds:
                 logger.warning(
                     f"Calibration sanity check FAILED: {broadcast_key} is "
                     f"{age_seconds/86400:.1f} days old (exceeds {MAX_AGE_DAYS} day limit)"
                 )
-                return False
+                return (False, 0.0, max_age_hours)
         
-        logger.info(f"Calibration sanity check PASSED for {len(data)} broadcasts")
-        return True
+        # Compute trust level based on maximum age
+        # Trust decay: exponential with 12-hour half-life
+        # This reflects ionospheric variability timescales
+        TRUST_HALFLIFE_HOURS = 12.0
+        trust_level = 0.5 ** (max_age_hours / TRUST_HALFLIFE_HOURS)
+        trust_level = max(0.1, min(1.0, trust_level))  # Clamp to [0.1, 1.0]
+        
+        logger.info(
+            f"Calibration sanity check PASSED for {len(data) - 1} broadcasts. "
+            f"Age: {max_age_hours:.1f}h, trust: {trust_level:.2f}"
+        )
+        return (True, trust_level, max_age_hours)
     
     def _load_calibration(self):
         """
@@ -740,14 +765,19 @@ class MultiBroadcastFusion:
                 with open(self.calibration_file) as f:
                     data = json.load(f)
                 
-                # SANITY CHECK: Validate before loading
-                if not self._validate_calibration_data(data):
+                # SANITY CHECK: Validate before loading and get trust level
+                valid, trust_level, age_hours = self._validate_calibration_data(data)
+                if not valid:
                     logger.warning(
                         f"Calibration file {self.calibration_file} failed sanity checks. "
                         "Discarding and starting fresh with bootstrap mode."
                     )
                     self._init_default_calibration()
                     return
+                
+                # Store trust level for use in calibration updates
+                self.calibration_trust_level = trust_level
+                self.calibration_age_hours = age_hours
                 
                 # STEEL RULER (2026-01-18 - REVISED): Restore Kalman OFFSET but not drift
                 # The GPSDO doesn't drift, so drift_ms_per_min should stay at zero.
@@ -802,10 +832,29 @@ class MultiBroadcastFusion:
                 
                 # CRITICAL: Skip warmup penalty AND bootstrap mode if we have valid calibration data
                 # This prevents calibration from jumping around on restart
+                # Trust level modulates how much we allow calibration to change
                 if len(self.calibration) >= 2:
                     self.kalman_n_updates = 200
-                    self.calibration_update_count = 200  # Skip bootstrap mode (threshold is 100)
-                    logger.info("✅ Skipping warmup and bootstrap (calibration loaded from disk)")
+                    # Scale calibration_update_count by trust level
+                    # High trust (1.0) -> 200 (full skip of bootstrap)
+                    # Low trust (0.1) -> 20 (partial bootstrap, allows some adjustment)
+                    self.calibration_update_count = int(200 * trust_level)
+                    
+                    # Also scale Kalman covariance by inverse trust
+                    # Low trust -> higher uncertainty -> Kalman adapts faster
+                    if trust_level < 0.9:
+                        uncertainty_scale = 1.0 / trust_level
+                        self.kalman_P[0, 0] *= uncertainty_scale
+                        logger.info(
+                            f"✅ Loaded calibration (age={age_hours:.1f}h, trust={trust_level:.2f}). "
+                            f"Bootstrap count={self.calibration_update_count}, "
+                            f"Kalman uncertainty scaled by {uncertainty_scale:.1f}x"
+                        )
+                    else:
+                        logger.info(
+                            f"✅ Loaded calibration (age={age_hours:.1f}h, trust={trust_level:.2f}). "
+                            f"Full trust - skipping warmup and bootstrap"
+                        )
 
             except Exception as e:
                 logger.warning(f"Could not load calibration: {e}")
