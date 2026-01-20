@@ -356,66 +356,32 @@ class StreamRecorderV2:
     
     def _create_channel(self):
         """Create channel and start RadiodStream (extracted for retry logic)."""
-        # WSPR-RECORDER PATTERN: Use create_channel() instead of ensure_channel()
-        # But FIRST check if a matching channel already exists to avoid duplicates
+        # Use ensure_channel() which returns ChannelInfo directly without needing discovery
+        # This works even when discovery fails (e.g., radiod version mismatch)
         
-        logger.info(f"{self.config.description}: Checking for existing channel at {self.config.frequency_hz/1e6:.3f} MHz")
+        logger.info(f"{self.config.description}: Ensuring channel at {self.config.frequency_hz/1e6:.3f} MHz")
+        logger.info(f"  Parameters: preset={self.config.preset}, rate={self.config.sample_rate}, "
+                   f"agc={self.config.agc_enable}, gain={self.config.gain}, enc={self.config.encoding}")
         
-        # Step 1: Discover existing channels
-        from ka9q import discover_channels
-        
-        existing_channels = discover_channels(
-            self._control.status_address,
-            listen_duration=3.0
+        # ensure_channel creates or reuses existing channel and returns ChannelInfo directly
+        self.channel_info = self._control.ensure_channel(
+            frequency_hz=float(self.config.frequency_hz),
+            preset=self.config.preset,
+            sample_rate=self.config.sample_rate,
+            agc_enable=self.config.agc_enable,
+            gain=self.config.gain,
+            destination=self.config.destination,  # None = use radiod default
+            encoding=self.config.encoding,
+            timeout=10.0,  # Wait up to 10s for channel to appear
+            frequency_tolerance=1.0  # 1 Hz tolerance for matching
         )
         
-        # Step 2: Look for matching channel (same freq, preset, sample_rate)
-        ssrc = None
-        for existing_ssrc, channel_info in existing_channels.items():
-            if (abs(channel_info.frequency - self.config.frequency_hz) < 1.0 and
-                channel_info.preset.lower() == self.config.preset.lower() and
-                channel_info.sample_rate == self.config.sample_rate):
-                # Found matching channel - reuse it
-                ssrc = existing_ssrc
-                self.channel_info = channel_info
-                logger.info(f"{self.config.description}: Found existing channel SSRC {ssrc:08x}")
-                break
+        if self.channel_info is None:
+            raise RuntimeError(f"Failed to ensure channel at {self.config.frequency_hz/1e6:.3f} MHz")
         
-        # Step 3: Create channel only if it doesn't exist
-        if ssrc is None:
-            logger.info(f"{self.config.description}: Creating new channel")
-            logger.info(f"  Parameters: preset={self.config.preset}, rate={self.config.sample_rate}, "
-                       f"agc={self.config.agc_enable}, gain={self.config.gain}, enc={self.config.encoding}")
-            
-            ssrc = self._control.create_channel(
-                frequency_hz=float(self.config.frequency_hz),
-                preset=self.config.preset,
-                sample_rate=self.config.sample_rate,
-                agc_enable=self.config.agc_enable,
-                gain=self.config.gain,
-                ssrc=None,  # Let radiod assign SSRC
-                encoding=self.config.encoding,
-                destination=self.config.destination  # None = use radiod default
-            )
-            
-            if ssrc is None:
-                raise RuntimeError("Failed to create channel - radiod returned None")
-            
-            logger.info(f"{self.config.description}: Channel created with SSRC {ssrc:08x}")
-            
-            # Discover again to get multicast address
-            logger.info(f"{self.config.description}: Discovering channel details...")
-            channels = discover_channels(
-                self._control.status_address,
-                listen_duration=3.0
-            )
-            
-            if ssrc not in channels:
-                raise RuntimeError(f"Channel SSRC {ssrc:08x} not found in discovery")
-            
-            self.channel_info = channels[ssrc]
-        
+        ssrc = self.channel_info.ssrc
         self.config.ssrc = ssrc
+        logger.info(f"{self.config.description}: Channel ready SSRC {ssrc:08x}")
         logger.info(f"{self.config.description}: Using channel - "
                    f"Dest: {self.channel_info.multicast_address}, "
                    f"Enc: {getattr(self.channel_info, 'encoding', 'N/A')}")
