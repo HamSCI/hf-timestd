@@ -356,34 +356,70 @@ class StreamRecorderV2:
     
     def _create_channel(self):
         """Create channel and start RadiodStream (extracted for retry logic)."""
-        # Use ensure_channel() which returns ChannelInfo directly without needing discovery
-        # This works even when discovery fails (e.g., radiod version mismatch)
+        from ka9q import ChannelInfo
         
-        logger.info(f"{self.config.description}: Ensuring channel at {self.config.frequency_hz/1e6:.3f} MHz")
+        logger.info(f"{self.config.description}: Creating channel at {self.config.frequency_hz/1e6:.3f} MHz")
         logger.info(f"  Parameters: preset={self.config.preset}, rate={self.config.sample_rate}, "
                    f"agc={self.config.agc_enable}, gain={self.config.gain}, enc={self.config.encoding}")
         
-        # ensure_channel creates or reuses existing channel and returns ChannelInfo directly
-        self.channel_info = self._control.ensure_channel(
-            frequency_hz=float(self.config.frequency_hz),
-            preset=self.config.preset,
-            sample_rate=self.config.sample_rate,
-            agc_enable=self.config.agc_enable,
-            gain=self.config.gain,
-            destination=self.config.destination,  # None = use radiod default
-            encoding=self.config.encoding,
-            timeout=10.0,  # Wait up to 10s for channel to appear
-            frequency_tolerance=1.0  # 1 Hz tolerance for matching
-        )
+        # Try ensure_channel first (works when discovery works)
+        try:
+            self.channel_info = self._control.ensure_channel(
+                frequency_hz=float(self.config.frequency_hz),
+                preset=self.config.preset,
+                sample_rate=self.config.sample_rate,
+                agc_enable=self.config.agc_enable,
+                gain=self.config.gain,
+                destination=self.config.destination,
+                encoding=self.config.encoding,
+                timeout=5.0,
+                frequency_tolerance=1.0
+            )
+            ssrc = self.channel_info.ssrc
+            logger.info(f"{self.config.description}: Channel ready via ensure_channel SSRC {ssrc:08x}")
+        except (TimeoutError, RuntimeError) as e:
+            # Discovery failed - fall back to create_channel + manual ChannelInfo
+            logger.warning(f"{self.config.description}: ensure_channel failed ({e}), using create_channel fallback")
+            
+            ssrc = self._control.create_channel(
+                frequency_hz=float(self.config.frequency_hz),
+                preset=self.config.preset,
+                sample_rate=self.config.sample_rate,
+                agc_enable=self.config.agc_enable,
+                gain=self.config.gain,
+                destination=self.config.destination,
+                encoding=self.config.encoding,
+            )
+            
+            if ssrc is None:
+                raise RuntimeError(f"Failed to create channel at {self.config.frequency_hz/1e6:.3f} MHz")
+            
+            # Construct ChannelInfo manually using radiod's default multicast address
+            multicast_addr = getattr(self._control, 'status_mcast_addr', None)
+            if not multicast_addr:
+                # Fallback: extract from dest_addr tuple
+                dest = getattr(self._control, 'dest_addr', None)
+                if dest and isinstance(dest, tuple):
+                    multicast_addr = dest[0]
+            
+            if not multicast_addr:
+                raise RuntimeError("Cannot determine radiod multicast address")
+            
+            self.channel_info = ChannelInfo(
+                ssrc=ssrc,
+                preset=self.config.preset,
+                sample_rate=self.config.sample_rate,
+                frequency=float(self.config.frequency_hz),
+                snr=0.0,
+                multicast_address=multicast_addr,
+                port=5004,
+                encoding=self.config.encoding
+            )
+            logger.info(f"{self.config.description}: Channel created via fallback SSRC {ssrc:08x}")
         
-        if self.channel_info is None:
-            raise RuntimeError(f"Failed to ensure channel at {self.config.frequency_hz/1e6:.3f} MHz")
-        
-        ssrc = self.channel_info.ssrc
-        self.config.ssrc = ssrc
-        logger.info(f"{self.config.description}: Channel ready SSRC {ssrc:08x}")
+        self.config.ssrc = self.channel_info.ssrc
         logger.info(f"{self.config.description}: Using channel - "
-                   f"Dest: {self.channel_info.multicast_address}, "
+                   f"Dest: {self.channel_info.multicast_address}:{getattr(self.channel_info, 'port', 5004)}, "
                    f"Enc: {getattr(self.channel_info, 'encoding', 'N/A')}")
         
         # Step 4: Create RadiodStream to receive data
