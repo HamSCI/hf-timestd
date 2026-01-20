@@ -12,8 +12,8 @@ EnvironmentFile=/etc/hf-timestd/environment
 WorkingDirectory=/var/lib/timestd
 
 # Use the shell script that starts all 9 channel metrology services
-ExecStart=/opt/hf-timestd/scripts/timestd-metrology.sh -start /etc/hf-timestd/timestd-config.toml
-ExecStop=/opt/hf-timestd/scripts/timestd-metrology.sh -stop
+ExecStart=/opt/hf-timestd/scripts/timestd-metrology.sh start /etc/hf-timestd/timestd-config.toml
+ExecStop=/opt/hf-timestd/scripts/timestd-metrology.sh stop
 
 # Type=forking since script backgrounds processes
 RemainAfterExit=yes
