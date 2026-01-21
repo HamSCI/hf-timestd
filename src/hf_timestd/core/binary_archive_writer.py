@@ -440,6 +440,87 @@ class BinaryArchiveWriter:
             return 0.0
         return rtp_timestamp / self.config.sample_rate + self.rtp_to_unix_offset
     
+    def _interpolate_gaps(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Replace zero-filled gaps with phase-continuous interpolation.
+        
+        ka9q-python fills gaps with zeros which breaks phase continuity.
+        This method detects zero runs and replaces them with samples that
+        maintain phase continuity from the surrounding valid samples.
+        
+        Args:
+            samples: Complex64 samples potentially containing zero-filled gaps
+            
+        Returns:
+            Samples with gaps interpolated to preserve phase continuity
+        """
+        # Find zero samples (gap fills from ka9q-python)
+        zero_mask = np.abs(samples) < 1e-10
+        
+        if not np.any(zero_mask):
+            return samples  # No gaps to interpolate
+        
+        # Make a copy to modify
+        result = samples.copy()
+        
+        # Find runs of zeros
+        # Pad with False to detect edges at boundaries
+        padded = np.concatenate([[False], zero_mask, [False]])
+        diff = np.diff(padded.astype(int))
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        
+        for start, end in zip(starts, ends):
+            gap_len = end - start
+            
+            # Get samples before and after gap
+            before_idx = start - 1 if start > 0 else None
+            after_idx = end if end < len(samples) else None
+            
+            if before_idx is not None and after_idx is not None:
+                # Interpolate phase between before and after
+                before_sample = samples[before_idx]
+                after_sample = samples[after_idx]
+                
+                if np.abs(before_sample) > 1e-10 and np.abs(after_sample) > 1e-10:
+                    # Linear interpolation of phase and amplitude
+                    before_phase = np.angle(before_sample)
+                    after_phase = np.angle(after_sample)
+                    before_amp = np.abs(before_sample)
+                    after_amp = np.abs(after_sample)
+                    
+                    # Unwrap phase difference to avoid jumps
+                    phase_diff = after_phase - before_phase
+                    if phase_diff > np.pi:
+                        phase_diff -= 2 * np.pi
+                    elif phase_diff < -np.pi:
+                        phase_diff += 2 * np.pi
+                    
+                    # Interpolate
+                    for i in range(gap_len):
+                        t = (i + 1) / (gap_len + 1)
+                        interp_phase = before_phase + t * phase_diff
+                        interp_amp = before_amp + t * (after_amp - before_amp)
+                        result[start + i] = interp_amp * np.exp(1j * interp_phase)
+                        
+            elif before_idx is not None:
+                # Gap at end - extrapolate from before
+                before_sample = samples[before_idx]
+                if np.abs(before_sample) > 1e-10:
+                    # Hold phase and amplitude constant
+                    for i in range(gap_len):
+                        result[start + i] = before_sample
+                        
+            elif after_idx is not None:
+                # Gap at start - extrapolate from after
+                after_sample = samples[after_idx]
+                if np.abs(after_sample) > 1e-10:
+                    # Hold phase and amplitude constant
+                    for i in range(gap_len):
+                        result[start + i] = after_sample
+        
+        return result
+    
     def write_samples(
         self,
         samples: np.ndarray,
@@ -550,6 +631,12 @@ class BinaryArchiveWriter:
             # Ensure complex64
             if samples.dtype != np.complex64:
                 samples = samples.astype(np.complex64)
+            
+            # Phase-preserving gap interpolation
+            # ka9q-python fills gaps with zeros which breaks phase continuity
+            # Replace zeros with phase-continuous interpolation from surrounding samples
+            # Always check for zeros, not just when gap_samples is explicitly set
+            samples = self._interpolate_gaps(samples)
             
             # Determine which minute this belongs to FROM RTP TIMESTAMP (GPSDO-disciplined)
             # This avoids wall clock jitter from NTP/chrony adjustments

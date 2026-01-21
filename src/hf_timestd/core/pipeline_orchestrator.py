@@ -320,7 +320,8 @@ class PipelineOrchestrator:
         self,
         samples: np.ndarray,
         rtp_timestamp: int,
-        system_time: Optional[float] = None
+        system_time: Optional[float] = None,
+        gap_samples: int = 0
     ):
         """
         Process incoming IQ samples through the pipeline.
@@ -331,6 +332,7 @@ class PipelineOrchestrator:
             samples: Complex64 IQ samples
             rtp_timestamp: RTP timestamp of first sample
             system_time: System wall clock time (uses current if None)
+            gap_samples: Number of zero-filled gap samples in this batch
         """
         with self._lock:
             if self.state != PipelineState.RUNNING:
@@ -357,7 +359,8 @@ class PipelineOrchestrator:
             written = self.raw_buffer_writer.write_samples(
                 samples=current_slice,
                 rtp_timestamp=current_rtp,
-                system_time=system_time
+                system_time=system_time,
+                gap_samples=gap_samples if samples_processed == 0 else 0  # Only count gaps once
             )
             
             if written == 0:

@@ -548,12 +548,19 @@ class StreamRecorderV2:
             else:
                 system_time = time.time()
             
+            # Calculate gap samples for this batch
+            # ka9q-python fills gaps with zeros which breaks phase continuity
+            batch_gap_samples = 0
+            if quality.batch_gaps:
+                batch_gap_samples = sum(gap.samples_filled for gap in quality.batch_gaps)
+            
             # Feed to pipeline orchestrator
             # This writes to Phase 1 and queues for Phase 2/3
             self.orchestrator.process_samples(
                 samples=samples,
                 rtp_timestamp=quality.last_rtp_timestamp,
-                system_time=system_time
+                system_time=system_time,
+                gap_samples=batch_gap_samples
             )
             
             self.samples_written += len(samples)

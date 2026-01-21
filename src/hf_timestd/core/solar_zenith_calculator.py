@@ -23,14 +23,15 @@ from typing import Tuple, List, Dict
 # Import transmitter coordinates from single source of truth
 # Handle both module import and standalone script execution
 try:
-    from .wwv_constants import WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, CHU_LAT, CHU_LON
+    from .wwv_constants import WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, CHU_LAT, CHU_LON, BPM_LAT, BPM_LON
 except ImportError:
-    from wwv_constants import WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, CHU_LAT, CHU_LON
+    from wwv_constants import WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, CHU_LAT, CHU_LON, BPM_LAT, BPM_LON
 
 # Transmitter coordinates (lat, lon in degrees) - from wwv_constants.py
 WWV_LOCATION = (WWV_LAT, WWV_LON)     # Fort Collins, Colorado - NIST verified
 WWVH_LOCATION = (WWVH_LAT, WWVH_LON)  # Kekaha, Kauai, Hawaii - NIST verified
 CHU_LOCATION = (CHU_LAT, CHU_LON)     # Ottawa, Canada - NRC verified
+BPM_LOCATION = (BPM_LAT, BPM_LON)     # Pucheng, Shaanxi, China - NTSC
 
 
 def grid_to_latlon(grid: str) -> Tuple[float, float]:
@@ -226,6 +227,7 @@ def calculate_solar_zenith_for_day(
     wwv_mid_lat, wwv_mid_lon = calculate_midpoint(rx_lat, rx_lon, *WWV_LOCATION)
     wwvh_mid_lat, wwvh_mid_lon = calculate_midpoint(rx_lat, rx_lon, *WWVH_LOCATION)
     chu_mid_lat, chu_mid_lon = calculate_midpoint(rx_lat, rx_lon, *CHU_LOCATION)
+    bpm_mid_lat, bpm_mid_lon = calculate_midpoint(rx_lat, rx_lon, *BPM_LOCATION)
     
     # Generate time series
     start_time = datetime(year, month, day, 0, 0, 0)
@@ -233,6 +235,7 @@ def calculate_solar_zenith_for_day(
     wwv_elevations = []
     wwvh_elevations = []
     chu_elevations = []
+    bpm_elevations = []
     
     current_time = start_time
     end_time = start_time + timedelta(days=1)
@@ -252,6 +255,10 @@ def calculate_solar_zenith_for_day(
         _, chu_el = solar_position(current_time, chu_mid_lat, chu_mid_lon)
         chu_elevations.append(round(chu_el, 2))
         
+        # BPM path midpoint
+        _, bpm_el = solar_position(current_time, bpm_mid_lat, bpm_mid_lon)
+        bpm_elevations.append(round(bpm_el, 2))
+        
         current_time += timedelta(minutes=interval_minutes)
     
     return {
@@ -261,11 +268,13 @@ def calculate_solar_zenith_for_day(
         "wwv_midpoint": {"lat": round(wwv_mid_lat, 4), "lon": round(wwv_mid_lon, 4)},
         "wwvh_midpoint": {"lat": round(wwvh_mid_lat, 4), "lon": round(wwvh_mid_lon, 4)},
         "chu_midpoint": {"lat": round(chu_mid_lat, 4), "lon": round(chu_mid_lon, 4)},
+        "bpm_midpoint": {"lat": round(bpm_mid_lat, 4), "lon": round(bpm_mid_lon, 4)},
         "interval_minutes": interval_minutes,
         "timestamps": times,
         "wwv_solar_elevation": wwv_elevations,
         "wwvh_solar_elevation": wwvh_elevations,
-        "chu_solar_elevation": chu_elevations
+        "chu_solar_elevation": chu_elevations,
+        "bpm_solar_elevation": bpm_elevations
     }
 
 
