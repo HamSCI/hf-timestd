@@ -80,6 +80,23 @@ chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
 log_info "  ✅ Scripts copied to $INSTALL_DIR/scripts/"
 
 # =============================================================================
+# Step 2b: Sync Web API Directory
+# =============================================================================
+log_info "Step 2b: Syncing web-api directory..."
+
+# Sync web-api (excluding __pycache__ and .pyc files)
+rsync -a --delete \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    --exclude '.pytest_cache' \
+    "$PROJECT_DIR/web-api/" "$INSTALL_DIR/web-api/"
+
+# Ensure correct ownership
+chown -R timestd:timestd "$INSTALL_DIR/web-api/"
+
+log_info "  ✅ Web API synced to $INSTALL_DIR/web-api/"
+
+# =============================================================================
 # Step 3: Update Systemd Service Files (if changed)
 # =============================================================================
 log_info "Step 3: Checking systemd service files..."
