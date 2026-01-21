@@ -1,6 +1,8 @@
 """
 Station-specific dashboard Data API.
 Aggregates propagation, fusion, and status data for a single station.
+
+Uses the BroadcastRegistry for station-centric data model with computed geometry.
 """
 
 import logging
@@ -14,6 +16,9 @@ from fastapi import APIRouter, HTTPException, Query
 from services.propagation_service import PropagationService
 from services.fusion_service import FusionService
 from hf_timestd.core.solar_zenith_calculator import calculate_midpoint, solar_position
+from hf_timestd.models.broadcast import (
+    BroadcastRegistry, ReceiverLocation, create_registry_from_config
+)
 from config import config
 
 router = APIRouter(prefix="/stations", tags=["stations"])
@@ -24,6 +29,7 @@ logger = logging.getLogger(__name__)
 # consistent with other routers
 _prop_service = None
 _fusion_service = None
+_broadcast_registry = None
 
 def get_prop_service():
     global _prop_service
@@ -37,7 +43,22 @@ def get_fusion_service():
         _fusion_service = FusionService(config.data_root / "phase2" / "fusion")
     return _fusion_service
 
-# Valid stations
+def get_broadcast_registry() -> BroadcastRegistry:
+    """Get or create the broadcast registry singleton."""
+    global _broadcast_registry
+    if _broadcast_registry is None:
+        # Create receiver from config
+        receiver = ReceiverLocation(
+            callsign=config.station_metadata.get('callsign', 'UNKNOWN'),
+            latitude=config.station_metadata.get('latitude', 0.0),
+            longitude=config.station_metadata.get('longitude', 0.0),
+            grid_square=config.station_metadata.get('grid_square', ''),
+        )
+        _broadcast_registry = BroadcastRegistry(receiver)
+        logger.info(f"Initialized BroadcastRegistry with {_broadcast_registry.n_broadcasts} broadcasts")
+    return _broadcast_registry
+
+# Valid stations (derived from registry)
 STATIONS = {"WWV", "WWVH", "CHU", "BPM"}
 
 def sanitize_for_json(obj):
@@ -55,6 +76,128 @@ def sanitize_for_json(obj):
     elif isinstance(obj, np.bool_):
         return bool(obj)
     return obj
+
+@router.get("/")
+async def list_stations():
+    """
+    List all broadcast stations with summary info.
+    
+    Returns the 4 stations (WWV, WWVH, CHU, BPM) with their broadcasts
+    and computed geometry from the receiver location.
+    """
+    try:
+        registry = get_broadcast_registry()
+        
+        stations = []
+        for station_name in ["WWV", "WWVH", "CHU", "BPM"]:
+            station = registry.get_station(station_name)
+            if not station:
+                continue
+            
+            broadcasts = registry.get_broadcasts_for_station(station_name)
+            if not broadcasts:
+                continue
+            
+            # Use first broadcast for geometry
+            b = broadcasts[0]
+            
+            stations.append({
+                "station_id": station_name,
+                "location": station.location,
+                "coordinates": {"lat": station.latitude, "lon": station.longitude},
+                "n_frequencies": len(station.frequencies_hz),
+                "frequencies_mhz": station.frequencies_mhz,
+                "distance_km": round(b.distance_km, 1),
+                "azimuth_deg": round(b.azimuth_deg, 1),
+                "min_propagation_ms": round(b.min_propagation_ms, 2),
+            })
+        
+        return {
+            "receiver": {
+                "callsign": registry.receiver.callsign,
+                "latitude": registry.receiver.latitude,
+                "longitude": registry.receiver.longitude,
+                "grid_square": registry.receiver.grid_square,
+            },
+            "source_mode": registry.source_mode.value,
+            "n_stations": registry.n_stations,
+            "n_broadcasts": registry.n_broadcasts,
+            "n_channels": registry.n_channels,
+            "stations": stations,
+        }
+    except Exception as e:
+        logger.error(f"Error listing stations: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/broadcasts")
+async def list_broadcasts():
+    """
+    List all 17 broadcasts with computed geometry.
+    
+    This is the station-centric view of the data pipeline, showing
+    each station+frequency combination as a distinct broadcast.
+    """
+    try:
+        registry = get_broadcast_registry()
+        
+        broadcasts = []
+        for broadcast_id, b in sorted(registry.broadcasts.items()):
+            broadcasts.append({
+                "broadcast_id": b.broadcast_id,
+                "station": b.station,
+                "frequency_hz": b.frequency_hz,
+                "frequency_mhz": b.frequency_mhz,
+                "channel_name": b.channel_name,
+                "requires_discrimination": b.requires_discrimination,
+                "distance_km": round(b.distance_km, 1),
+                "azimuth_deg": round(b.azimuth_deg, 1),
+                "min_propagation_ms": round(b.min_propagation_ms, 2),
+                "tone_pattern": b.tone_pattern.value,
+            })
+        
+        return {
+            "source_mode": registry.source_mode.value,
+            "n_broadcasts": len(broadcasts),
+            "broadcasts": broadcasts,
+        }
+    except Exception as e:
+        logger.error(f"Error listing broadcasts: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/channels")
+async def list_channels():
+    """
+    List derived channels for recording.
+    
+    In radiod mode: 9 channels (unique frequencies)
+    In phase-engine mode: 17 channels (one per broadcast)
+    """
+    try:
+        registry = get_broadcast_registry()
+        
+        channels = []
+        for ch in registry.channels:
+            channels.append({
+                "name": ch.name,
+                "frequency_hz": ch.frequency_hz,
+                "frequency_mhz": ch.frequency_hz / 1e6,
+                "stations": ch.stations,
+                "requires_discrimination": ch.requires_discrimination,
+                "target_station": ch.target_station,
+                "beam_azimuth_deg": round(ch.beam_azimuth_deg, 1) if ch.beam_azimuth_deg else None,
+            })
+        
+        return {
+            "source_mode": registry.source_mode.value,
+            "n_channels": len(channels),
+            "channels": channels,
+        }
+    except Exception as e:
+        logger.error(f"Error listing channels: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/{station_id}")
 async def get_station_dashboard(station_id: str):
@@ -219,36 +362,54 @@ async def get_station_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 def get_station_info(station_id: str) -> Dict[str, Any]:
-    """Helper to get static info."""
-    # This could come from a database or config file
-    info_map = {
-        "WWV": {
-            "name": "NIST Radio Station WWV",
-            "location": "Fort Collins, Colorado, USA",
-            "coordinates": {"lat": 40.6776, "lon": -105.0405},
-            "frequencies": [2.5, 5, 10, 15, 20, 25],
-            "description": "Standard frequency and time signal station."
-        },
-        "WWVH": {
-            "name": "NIST Radio Station WWVH",
-            "location": "Kekaha, Kauai, Hawaii, USA",
-            "coordinates": {"lat": 21.983, "lon": -159.765},
-            "frequencies": [2.5, 5, 10, 15],
-            "description": "Pacific sister station to WWV."
-        },
-        "CHU": {
-            "name": "NRC Radio Station CHU",
-            "location": "Ottawa, Ontario, Canada",
-            "coordinates": {"lat": 45.2978, "lon": -75.7663},
-            "frequencies": [3.33, 7.85, 14.67],
-            "description": "Canadian standard time station."
-        },
-        "BPM": {
-            "name": "NTSC Radio Station BPM",
-            "location": "Pucheng, Shaanxi, China",
-            "coordinates": {"lat": 34.9479, "lon": 109.5447},
-            "frequencies": [2.5, 5, 10, 15],
-            "description": "Chinese standard time station."
+    """
+    Get station info from BroadcastRegistry.
+    
+    Returns computed geometry (distance, azimuth, min propagation time)
+    in addition to static station data.
+    """
+    registry = get_broadcast_registry()
+    station = registry.get_station(station_id)
+    
+    if not station:
+        return {}
+    
+    # Get broadcasts for this station (with computed geometry)
+    broadcasts = registry.get_broadcasts_for_station(station_id)
+    
+    # Use first broadcast for geometry (all same station have same geometry)
+    geometry = {}
+    if broadcasts:
+        b = broadcasts[0]
+        geometry = {
+            "distance_km": round(b.distance_km, 1),
+            "azimuth_deg": round(b.azimuth_deg, 1),
+            "min_propagation_ms": round(b.min_propagation_ms, 2),
         }
+    
+    # Station descriptions (static, could be moved to config)
+    descriptions = {
+        "WWV": "NIST standard frequency and time signal station.",
+        "WWVH": "NIST Pacific sister station to WWV.",
+        "CHU": "NRC Canadian standard time station.",
+        "BPM": "NTSC Chinese standard time station.",
     }
-    return info_map.get(station_id, {})
+    
+    return {
+        "name": f"Radio Station {station_id}",
+        "location": station.location,
+        "coordinates": {"lat": station.latitude, "lon": station.longitude},
+        "frequencies": station.frequencies_mhz,
+        "description": descriptions.get(station_id, "Time signal station."),
+        "tone_pattern": station.tone_pattern.value,
+        "geometry": geometry,
+        "broadcasts": [
+            {
+                "broadcast_id": b.broadcast_id,
+                "frequency_mhz": b.frequency_mhz,
+                "channel_name": b.channel_name,
+                "requires_discrimination": b.requires_discrimination,
+            }
+            for b in broadcasts
+        ]
+    }

@@ -10,6 +10,230 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
+## 🔴 CURRENT SESSION: DATA PROCESSING PIPELINE CRITICAL REVIEW
+
+**Status:** 🔴 **IN PROGRESS**  
+**Objective:** Critically review whether the data processing pipeline properly serves the fundamental interest in **17 broadcasts from 4 stations**, given the current **9-channel** architecture.
+
+---
+
+### The Fundamental Question
+
+The system's **fundamental interest** is in the characteristics of each **broadcast** and the **ionospheric conditions** between the receiver and the 4 transmitting stations. The invariant distinguishing features of each broadcast are:
+
+1. **Distance and direction** to the transmitting station
+2. **Frequency** of the broadcast
+
+Yet the current architecture is organized around **9 channels** (frequency-based), not **17 broadcasts** (station+frequency). This session must critically examine whether this structure serves or hinders the fundamental scientific and metrological goals.
+
+---
+
+### The 17 Broadcasts from 4 Stations
+
+| Station | Location | Frequencies | Broadcasts | Unique Properties |
+|---------|----------|-------------|------------|-------------------|
+| **WWV** | Fort Collins, CO | 2.5, 5, 10, 15, 20, 25 MHz | 6 | Closest to most US receivers, 1000 Hz tick |
+| **WWVH** | Kauai, HI | 2.5, 5, 10, 15 MHz | 4 | Long ocean path, 1200 Hz tick |
+| **CHU** | Ottawa, Canada | 3.33, 7.85, 14.67 MHz | 3 | FSK time code, different frequencies |
+| **BPM** | Pucheng, China | 2.5, 5, 10, 15 MHz | 4 | Trans-Pacific path, UT1 encoding |
+
+**Total: 17 broadcasts**
+
+### The 9 Channels (Current Architecture)
+
+| Channel | Frequency | Broadcasts on Channel | Discrimination Required |
+|---------|-----------|----------------------|------------------------|
+| `SHARED_2500` | 2.5 MHz | WWV, WWVH, BPM | Yes (3 stations) |
+| `SHARED_5000` | 5 MHz | WWV, WWVH, BPM | Yes (3 stations) |
+| `SHARED_10000` | 10 MHz | WWV, WWVH, BPM | Yes (3 stations) |
+| `SHARED_15000` | 15 MHz | WWV, WWVH, BPM | Yes (3 stations) |
+| `WWV_20000` | 20 MHz | WWV only | No |
+| `WWV_25000` | 25 MHz | WWV only | No |
+| `CHU_3330` | 3.33 MHz | CHU only | No |
+| `CHU_7850` | 7.85 MHz | CHU only | No |
+| `CHU_14670` | 14.67 MHz | CHU only | No |
+
+---
+
+### Critical Review Questions
+
+#### 1. **Data Model Alignment**
+
+Does the data model at each pipeline stage preserve broadcast identity?
+
+| Stage | Current Keying | Should Be | Issue? |
+|-------|---------------|-----------|--------|
+| L0 (Raw IQ) | Channel | Channel | ✅ Correct (frequency-based capture) |
+| L1 (Detections) | Channel + Station | Broadcast | ⚠️ Review needed |
+| L2 (Timing) | Broadcast | Broadcast | ✅ Correct |
+| L3 (Fusion) | Broadcast | Broadcast | ✅ Correct |
+| HDF5 Files | Channel directories | ? | ⚠️ Review needed |
+
+**Key Files to Examine:**
+- `src/hf_timestd/core/phase2_analytics_service.py` — L1→L2 processing
+- `src/hf_timestd/core/multi_broadcast_fusion.py` — L2→L3 fusion
+- `src/hf_timestd/models/measurement.py` — Data models
+
+#### 2. **Ionospheric Path Characterization**
+
+Each broadcast represents a **unique ionospheric path**. Does the pipeline properly characterize:
+
+| Characteristic | Per-Broadcast? | Per-Channel? | Issue? |
+|---------------|----------------|--------------|--------|
+| Propagation delay | ✅ Yes | N/A | OK |
+| TEC estimate | ? | ? | Review |
+| Doppler shift | ✅ Yes | N/A | OK |
+| Multipath spread | ? | ? | Review |
+| Mode (1F/2F/3F) | ? | ? | Review |
+| Scintillation (S4) | ? | ? | Review |
+
+**Key Files to Examine:**
+- `src/hf_timestd/core/tec_estimator.py` — TEC calculation
+- `src/hf_timestd/core/propagation_mode_solver.py` — Mode identification
+- `src/hf_timestd/core/advanced_signal_analysis.py` — Scintillation
+
+#### 3. **Station-Centric vs Frequency-Centric Views**
+
+The **ionospheric scientist** wants to see:
+- How does the path to WWV differ from the path to WWVH?
+- How does TEC vary across the 4 station paths?
+- Are there station-specific propagation anomalies?
+
+The **metrologist** wants to see:
+- Per-station timing consistency
+- Per-station calibration offsets
+- Per-station uncertainty contributions
+
+**Question:** Does the current UI/API expose station-centric views, or only channel-centric views?
+
+**Key Files to Examine:**
+- `web-api/services/fusion_service.py` — API data exposure
+- `web-api/static/metrology.html` — UI presentation
+- `web-api/static/physics.html` — Physics UI
+
+#### 4. **Calibration Architecture**
+
+The calibration system uses **per-broadcast** keys (`station_frequency`):
+
+```python
+# From multi_broadcast_fusion.py
+def _get_broadcast_key(self, station: str, frequency_mhz: float) -> str:
+    return f"{station}_{frequency_mhz:.1f}"
+```
+
+**Questions:**
+- Is calibration properly per-broadcast, or does it conflate broadcasts?
+- Are calibration offsets physically meaningful (station geometry + frequency dispersion)?
+- Does the calibration system account for the invariant properties (distance, direction, frequency)?
+
+#### 5. **Missing Station-Level Aggregations**
+
+The fusion layer combines 17 broadcasts into a single D_clock. But intermediate aggregations may be valuable:
+
+| Aggregation | Currently Computed? | Value |
+|-------------|---------------------|-------|
+| Per-station mean D_clock | Partial | Cross-station validation |
+| Per-station TEC | ? | Path-specific ionosphere |
+| Per-station Doppler | ? | Path-specific dynamics |
+| Station pair differentials | ? | Baseline ionospheric gradients |
+
+---
+
+### Specific Code Review Targets
+
+#### A. `phase2_analytics_service.py` (L1→L2)
+
+**Review Focus:**
+- How are broadcasts identified within a channel?
+- Is station discrimination reliable?
+- Are per-broadcast Kalman filters properly keyed?
+
+```python
+# Line ~470: Kalman filters keyed by broadcast
+broadcast_id = f"{station}_{int(frequency_hz/1000)}"
+self.broadcast_filters[broadcast_id] = filter
+```
+
+#### B. `multi_broadcast_fusion.py` (L2→L3)
+
+**Review Focus:**
+- Does fusion properly weight broadcasts by their unique uncertainties?
+- Is per-station consistency checked?
+- Are station-specific systematic errors handled?
+
+```python
+# Line ~2000: Broadcast key generation
+def _get_broadcast_key(self, station: str, frequency_mhz: float) -> str:
+    return f"{station}_{frequency_mhz:.1f}"
+```
+
+#### C. `tec_estimator.py` (TEC Calculation)
+
+**Review Focus:**
+- Is TEC computed per-station (using multiple frequencies from same station)?
+- Or is it computed per-channel (mixing stations)?
+- The physics requires per-station TEC (same ionospheric path).
+
+#### D. HDF5 Output Structure
+
+**Review Focus:**
+- Are output files organized by channel or by broadcast?
+- Can downstream analysis easily aggregate by station?
+- Is the file structure aligned with the fundamental interest?
+
+---
+
+### Expected Outcomes
+
+After this review session, we should have:
+
+1. **Gap Analysis:** Clear identification of where the pipeline loses broadcast/station identity
+2. **Recommendations:** Specific changes to better serve the fundamental interest
+3. **Priority List:** Ranked issues by impact on metrological and scientific goals
+4. **Action Items:** Concrete code changes or architectural improvements
+
+---
+
+### Reference: Station Geometry (from receiver perspective)
+
+The **invariant properties** that distinguish each broadcast:
+
+| Station | Typical Distance | Azimuth (from central US) | Path Character |
+|---------|-----------------|---------------------------|----------------|
+| WWV | 500-1500 km | West | Short, often 1F |
+| WWVH | 5000-6000 km | West-Southwest | Long, multi-hop |
+| CHU | 1500-2500 km | Northeast | Medium, often 1-2F |
+| BPM | 10000+ km | Northwest (great circle) | Very long, complex |
+
+These geometric differences mean each station probes a **different ionospheric region** and **different propagation modes**. The fundamental scientific value is in understanding these differences.
+
+---
+
+### Reference: Key Constants
+
+From `src/hf_timestd/core/wwv_constants.py`:
+
+```python
+STATION_LOCATIONS = {
+    'WWV': {'lat': 40.6807, 'lon': -105.0407, 'name': 'Fort Collins, CO'},
+    'WWVH': {'lat': 21.9872, 'lon': -159.7636, 'name': 'Kekaha, Kauai, HI'},
+    'CHU': {'lat': 45.2953, 'lon': -75.7544, 'name': 'Ottawa, ON, Canada'},
+    'BPM': {'lat': 34.9489, 'lon': 109.5430, 'name': 'Pucheng, Shaanxi, China'},
+}
+
+STANDARD_CHANNELS = [
+    'WWV 2.5 MHz', 'WWV 5 MHz', 'WWV 10 MHz', 'WWV 15 MHz', 
+    'WWV 20 MHz', 'WWV 25 MHz',
+    'WWVH 2.5 MHz', 'WWVH 5 MHz', 'WWVH 10 MHz', 'WWVH 15 MHz',
+    'CHU 3.33 MHz', 'CHU 7.85 MHz', 'CHU 14.67 MHz',
+    'BPM 2.5 MHz', 'BPM 5 MHz', 'BPM 10 MHz', 'BPM 15 MHz'
+]
+```
+
+Note: `STANDARD_CHANNELS` lists 17 items (broadcasts), not 9 (channels).
+
+---
+
 ## ✅ COMPLETED: SESSION 2026-01-18 GREENFIELD INSTALLATION REVIEW
 
 **Status:** ✅ **COMPLETE** - 2026-01-18  

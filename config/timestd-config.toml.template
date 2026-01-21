@@ -16,7 +16,6 @@ longitude = 0.0                         # Your longitude in decimal degrees (REQ
 # Your ka9q-radio status multicast address
 # Find this in your radiod config file or use: avahi-browse -rt _ka9q-ctl._udp
 status_address = "<YOUR_RADIOD_STATUS>"  # e.g., "hf-status.local" or "239.x.x.x"
-data_address = ""                        # Auto-discovered; leave empty
 auto_create_channels = true
 
 [recorder]

@@ -11,7 +11,7 @@ latitude = 38.918461
 longitude = -92.127974
 
 [ka9q]
-status_address = "bee1-hf-status.local"
+status_address = "bee1-status.local"
 auto_create_channels = true
 
 [recorder]
