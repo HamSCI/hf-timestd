@@ -50,16 +50,17 @@ except ImportError:
 from .decimated_buffer import DecimatedBuffer, SAMPLE_RATE, SAMPLES_PER_DAY
 
 # Standard GRAPE channels (sorted by frequency)
+# Uses new naming convention: SHARED_XXXX for shared WWV/WWVH/BPM frequencies
 STANDARD_CHANNELS = [
-    ('WWV 2.5 MHz', 2.5e6),
-    ('CHU 3.33 MHz', 3.33e6),
-    ('WWV 5 MHz', 5e6),
-    ('CHU 7.85 MHz', 7.85e6),
-    ('WWV 10 MHz', 10e6),
-    ('CHU 14.67 MHz', 14.67e6),
-    ('WWV 15 MHz', 15e6),
-    ('WWV 20 MHz', 20e6),
-    ('WWV 25 MHz', 25e6),
+    ('SHARED 2500', 2.5e6),
+    ('CHU 3330', 3.33e6),
+    ('SHARED 5000', 5e6),
+    ('CHU 7850', 7.85e6),
+    ('SHARED 10000', 10e6),
+    ('CHU 14670', 14.67e6),
+    ('SHARED 15000', 15e6),
+    ('WWV 20000', 20e6),
+    ('WWV 25000', 25e6),
 ]
 
 
@@ -228,14 +229,17 @@ class DailyDRFPackager:
         
         # Build stacked IQ array: shape (samples, 2 * num_channels)
         # Format: [ch1_I, ch1_Q, ch2_I, ch2_Q, ...]
+        # Only include channels that have data
         stacked = np.zeros((max_samples, 2 * num_channels), dtype=np.float32)
         
-        for i, (channel_name, _) in enumerate(self.channels):
+        channel_idx = 0
+        for channel_name, _ in self.channels:
             if channel_name in channel_data:
                 iq = channel_data[channel_name]
                 n_samples = len(iq)
-                stacked[:n_samples, i*2] = iq.real.astype(np.float32)
-                stacked[:n_samples, i*2+1] = iq.imag.astype(np.float32)
+                stacked[:n_samples, channel_idx*2] = iq.real.astype(np.float32)
+                stacked[:n_samples, channel_idx*2+1] = iq.imag.astype(np.float32)
+                channel_idx += 1
         
         # Calculate start index (samples since Unix epoch at 10 Hz)
         start_utc = date_obj.timestamp()

@@ -127,7 +127,7 @@ class DecimatedBuffer:
         
         Args:
             data_root: Root data directory
-            channel_name: Channel name (e.g., "WWV 10 MHz")
+            channel_name: Channel name (e.g., "SHARED 10000")
         """
         self.data_root = Path(data_root)
         self.channel_name = channel_name

@@ -25,40 +25,20 @@ class RawBinaryReader:
         
         Args:
             data_root: Root data directory (containing raw_archive/)
-            channel_name: Channel name (e.g., "WWV 10 MHz")
+            channel_name: Channel name (e.g., "SHARED 10000", "CHU 3330", "WWV 20000")
         """
         self.data_root = Path(data_root)
         self.channel_name = channel_name
         
-        # Resolve channel directory
-        # hf-timestd uses kHz in directory names: "WWV 10 MHz" -> "WWV_10000"
-        # Convert MHz to kHz: extract frequency and multiply by 1000
-        parts = channel_name.split()
-        if len(parts) >= 2 and parts[-1].upper() in ['MHZ', 'KHZ']:
-            station = parts[0]
-            freq_str = parts[1]
-            unit = parts[-1].upper()
-            
-            try:
-                freq = float(freq_str)
-                if unit == 'MHZ':
-                    freq_khz = int(freq * 1000)
-                else:  # KHZ
-                    freq_khz = int(freq)
-                self.channel_dir_name = f"{station}_{freq_khz}"
-            except ValueError:
-                # Fallback to simple replacement if parsing fails
-                self.channel_dir_name = channel_name.replace(' ', '_')
-        else:
-            # Fallback for non-standard names
-            self.channel_dir_name = channel_name.replace(' ', '_')
+        # Channel directory: spaces become underscores
+        # e.g., "SHARED 10000" -> "SHARED_10000"
+        self.channel_dir_name = channel_name.replace(' ', '_')
         
         # Check raw_archive first (Phase 1 storage)
         self.archive_dir = self.data_root / 'raw_archive' / self.channel_dir_name
         
-        # Fallback to test paths or direct channel paths if needed
+        # Fallback to raw_buffer (for very fresh data)
         if not self.archive_dir.exists():
-            # Try raw_buffer (for very fresh data or diff config)
             self.archive_dir = self.data_root / 'raw_buffer' / self.channel_dir_name
             
         logger.debug(f"RawBinaryReader initialized for {channel_name} at {self.archive_dir}")

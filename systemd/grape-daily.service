@@ -12,14 +12,20 @@ WorkingDirectory=/var/lib/timestd
 # Decimate all channels from yesterday
 ExecStart=/usr/bin/python3 -m hf_timestd.cli grape decimate --all-channels
 
-# Generate spectrograms for key channels
-ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWV 10 MHz"
-ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWV 15 MHz"
-ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWVH 10 MHz"
+# Generate spectrograms for all 9 channels
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "SHARED 2500"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "SHARED 5000"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "SHARED 10000"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "SHARED 15000"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWV 20000"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWV 25000"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "CHU 3330"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "CHU 7850"
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape spectrogram --channel "CHU 14670"
 
-# Optional: Package and upload (uncomment when ready)
-# ExecStart=/usr/bin/python3 -m hf_timestd.cli grape package --callsign AC0G --grid EM28
-# ExecStart=/usr/bin/python3 -m hf_timestd.cli grape upload
+# Package and upload to PSWS
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape package --callsign AC0G --grid EM38ww
+ExecStart=/usr/bin/python3 -m hf_timestd.cli grape upload
 
 # Logging
 StandardOutput=journal
