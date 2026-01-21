@@ -126,7 +126,7 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Status
 
-**Production Ready (V5.0)** - HDF5-native pipeline operation.
+**Testing (V5.3)** - Active development and field testing in progress.
 
 ### V5.0 Capabilities (December 2025)
 
