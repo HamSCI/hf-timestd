@@ -10,8 +10,8 @@ Features:
 - 24-hour daily spectrograms with aligned power graph
 - Solar zenith angle overlays for propagation context:
   - CHU channels: Single curve (receiver ↔ Ottawa)
-  - WWV 20/25 MHz: Single curve (receiver ↔ Ft. Collins)
-  - WWV 2.5/5/10/15 MHz: Dual curves (Ft. Collins + Kauai)
+  - WWV 20000/25000: Single curve (receiver ↔ Ft. Collins)
+  - SHARED 2500/5000/10000/15000: Triple curves (Ft. Collins + Kauai + China)
 - Rolling spectrograms (last 6h, 12h, 24h)
 - Quality grade coloring
 - Gap visualization
@@ -42,31 +42,20 @@ logger = logging.getLogger(__name__)
 
 # Channel to station mapping for solar zenith overlays
 # Format: channel_pattern -> list of stations to overlay
+# Channel naming: SHARED_XXXX (shared WWV/WWVH/BPM), WWV_XXXXX, CHU_XXXXX (freq in kHz)
 CHANNEL_STATION_MAP = {
     # CHU channels - single station (Ottawa)
     'CHU': ['CHU'],
     
-    # WWV high frequency - WWVH doesn't broadcast on 20/25 MHz
-    'WWV 20 MHz': ['WWV'],
-    'WWV 25 MHz': ['WWV'],
+    # WWV-only frequencies (20/25 MHz) - WWVH doesn't broadcast here
+    'WWV 20000': ['WWV'],
+    'WWV 25000': ['WWV'],
     
-    # WWV/WWVH shared frequencies - both stations broadcast
-    'WWV 10 MHz': ['WWV', 'WWVH', 'BPM'],
-    'WWV 15 MHz': ['WWV', 'WWVH', 'BPM'],
-    'WWV 2.5 MHz': ['WWV', 'WWVH', 'BPM'],
-    'WWV 5 MHz': ['WWV', 'WWVH', 'BPM'],
-    'WWV 20 MHz': ['WWV', 'WWVH', 'BPM'], # BPM transmits on 2.5, 5, 10, 15 MHz, but 20 is possible? User said 2.5, 5, 20, 15
-    # Wait, user said "2.5, 5, 20, and 15 contain components... from WWV, WWVH, and BPM."
-    # BPM frequencies are 2.5, 5, 10, 15 MHz standard. 
-    # But user specifically mentioned 20 MHz too? Re-reading user request: 
-    # "2.5, 5, 20, and 15 contain components...". This implies 20 MHz also has BPM?
-    # Standard BPM is 2.5, 5, 10, 15. Maybe 20 is harmonic or user meant 10?
-    # I will trust the user and add BPM to 20 MHz as well if they listed it.
-    # Actually, let's just update the list based on user request.
-    # User listed: 2.5, 5, 20, 15. 
-    # So I will add BPM to these.
-    'WWV 20 MHz': ['WWV'], # WWVH and BPM not on 20 MHz
-    'WWV 25 MHz': ['WWV'], # No BPM on 25 typically
+    # Shared frequencies - WWV, WWVH, and BPM all broadcast
+    'SHARED 2500': ['WWV', 'WWVH', 'BPM'],
+    'SHARED 5000': ['WWV', 'WWVH', 'BPM'],
+    'SHARED 10000': ['WWV', 'WWVH', 'BPM'],
+    'SHARED 15000': ['WWV', 'WWVH', 'BPM'],
 }
 
 # Station colors for solar zenith curves
@@ -103,8 +92,8 @@ from .decimated_buffer import DecimatedBuffer, SAMPLE_RATE, SAMPLES_PER_MINUTE
 @dataclass
 class SpectrogramConfig:
     """Configuration for spectrogram generation."""
-    nfft: int = 256  # FFT size
-    noverlap: int = 192  # 75% overlap for smooth display
+    nfft: int = 512  # FFT size (512 @ 10Hz = 51.2s window, better freq resolution)
+    noverlap: int = 480  # 93.75% overlap for smooth display (3.2s steps)
     cmap: str = 'viridis'
     vmin_db: float = -60  # Minimum dB for colormap
     vmax_db: float = 0    # Maximum dB (relative to peak)
@@ -138,7 +127,7 @@ class CarrierSpectrogramGenerator:
         
         Args:
             data_root: Root data directory
-            channel_name: Channel name (e.g., "WWV 10 MHz")
+            channel_name: Channel name (e.g., "SHARED 10000")
             receiver_grid: Maidenhead grid square for solar zenith calculations
             config: Spectrogram configuration
         """
@@ -173,7 +162,7 @@ class CarrierSpectrogramGenerator:
         if channel_name in CHANNEL_STATION_MAP:
             return CHANNEL_STATION_MAP[channel_name]
         
-        # Check prefix match (e.g., "CHU 3.33 MHz" matches "CHU")
+        # Check prefix match (e.g., "CHU 3330" matches "CHU")
         for pattern, stations in CHANNEL_STATION_MAP.items():
             if channel_name.startswith(pattern):
                 return stations
@@ -184,9 +173,9 @@ class CarrierSpectrogramGenerator:
         elif 'WWV' in channel_name:
             # Check frequency for WWVH coverage
             try:
-                freq_str = channel_name.split()[-2]  # e.g., "10" from "WWV 10 MHz"
-                freq_mhz = float(freq_str)
-                if freq_mhz >= 20:
+                freq_str = channel_name.split()[-1]  # e.g., "20000" from "WWV 20000"
+                freq_khz = float(freq_str)
+                if freq_khz >= 20000:
                     return ['WWV']  # WWVH doesn't broadcast 20/25 MHz
                 else:
                     return ['WWV', 'WWVH']
@@ -195,13 +184,83 @@ class CarrierSpectrogramGenerator:
         
         return []
     
+    def _interpolate_zeros(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Replace zero samples with interpolated values to reduce spectral artifacts.
+        
+        Zeros from gaps cause dark vertical bands in spectrograms due to
+        spectral leakage. This interpolates across zero regions using
+        phase-continuous samples from surrounding valid data.
+        
+        Args:
+            samples: Complex64 IQ samples potentially containing zeros
+            
+        Returns:
+            Samples with zeros replaced by interpolated values
+        """
+        zero_mask = np.abs(samples) < 1e-10
+        
+        if not np.any(zero_mask):
+            return samples  # No zeros to interpolate
+        
+        result = samples.copy()
+        
+        # Find runs of zeros
+        padded = np.concatenate([[False], zero_mask, [False]])
+        diff = np.diff(padded.astype(int))
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        
+        for start, end in zip(starts, ends):
+            gap_len = end - start
+            
+            # Get samples before and after gap
+            before_idx = start - 1 if start > 0 else None
+            after_idx = end if end < len(samples) else None
+            
+            if before_idx is not None and after_idx is not None:
+                before_sample = samples[before_idx]
+                after_sample = samples[after_idx]
+                
+                if np.abs(before_sample) > 1e-10 and np.abs(after_sample) > 1e-10:
+                    # Linear interpolation of amplitude and phase
+                    before_phase = np.angle(before_sample)
+                    after_phase = np.angle(after_sample)
+                    before_amp = np.abs(before_sample)
+                    after_amp = np.abs(after_sample)
+                    
+                    # Unwrap phase difference
+                    phase_diff = after_phase - before_phase
+                    if phase_diff > np.pi:
+                        phase_diff -= 2 * np.pi
+                    elif phase_diff < -np.pi:
+                        phase_diff += 2 * np.pi
+                    
+                    # Interpolate
+                    t = np.linspace(0, 1, gap_len + 2)[1:-1]
+                    interp_phase = before_phase + t * phase_diff
+                    interp_amp = before_amp + t * (after_amp - before_amp)
+                    result[start:end] = interp_amp * np.exp(1j * interp_phase)
+                    
+            elif before_idx is not None:
+                before_sample = samples[before_idx]
+                if np.abs(before_sample) > 1e-10:
+                    result[start:end] = before_sample
+                    
+            elif after_idx is not None:
+                after_sample = samples[after_idx]
+                if np.abs(after_sample) > 1e-10:
+                    result[start:end] = after_sample
+        
+        return result
+    
     def _get_solar_zenith_data(self, date_str: str) -> Optional[Dict]:
-        """Get solar zenith data for the day."""
+        """Get solar zenith data for the day (path midpoint solar elevation)."""
         if not self.receiver_grid or not self.solar_stations:
             return None
         
         try:
-            from .solar_zenith_calculator import calculate_solar_zenith_for_day
+            from ..core.solar_zenith_calculator import calculate_solar_zenith_for_day
             
             # Normalize date format
             if '-' in date_str:
@@ -333,6 +392,7 @@ class CarrierSpectrogramGenerator:
         f, t, Sxx = signal.spectrogram(
             iq_data,
             fs=SAMPLE_RATE,
+            window='blackman',  # Better sidelobe suppression than default Hann
             nperseg=self.config.nfft,
             noverlap=self.config.noverlap,
             mode='magnitude',
@@ -524,9 +584,14 @@ class CarrierSpectrogramGenerator:
             if meta.get('valid', False):
                 valid_minutes[i] = True
         
+        # Interpolate zeros to reduce vertical bar artifacts
+        # Zeros from gaps cause spectral leakage and dark vertical bands
+        iq_interpolated = self._interpolate_zeros(iq_data)
+        
         f, t, Sxx = signal.spectrogram(
-            iq_data,
+            iq_interpolated,
             fs=SAMPLE_RATE,
+            window='blackman',  # Better sidelobe suppression than default Hann
             nperseg=self.config.nfft,
             noverlap=self.config.noverlap,
             mode='magnitude',
@@ -554,10 +619,11 @@ class CarrierSpectrogramGenerator:
             if not column_valid[t_idx]:
                 Sxx_db[:, t_idx] = np.nan
         
-        # Normalize to peak of valid data
+        # Normalize using 95th percentile instead of peak to avoid
+        # single bright spots washing out the rest of the spectrogram
         if np.any(~np.isnan(Sxx_db)):
-            peak_db = np.nanmax(Sxx_db)
-            Sxx_db = Sxx_db - peak_db  # Now ranges from ~-60 to 0
+            ref_db = np.nanpercentile(Sxx_db, 95)
+            Sxx_db = Sxx_db - ref_db  # Now 95th percentile maps to 0 dB
         
         t_hours = t / 3600
         
@@ -715,7 +781,7 @@ if __name__ == '__main__':
     parser.add_argument('--data-root', type=Path, required=True,
                        help='Root data directory')
     parser.add_argument('--channel', type=str,
-                       help='Channel name (e.g., "WWV 10 MHz")')
+                       help='Channel name (e.g., "SHARED 10000")')
     parser.add_argument('--all-channels', action='store_true',
                        help='Generate for all channels')
     parser.add_argument('--hours', type=int, default=6,

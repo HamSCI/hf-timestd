@@ -140,6 +140,12 @@ def main():
     grape_upload_parser.add_argument('--dry-run', action='store_true', help='Show what would be uploaded')
     grape_upload_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
     
+    # GRAPE status
+    grape_status_parser = grape_subparsers.add_parser('status', help='Show upload status and history')
+    grape_status_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
+    grape_status_parser.add_argument('--days', type=int, default=7, help='Days of history to show')
+    grape_status_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
+    
     args = parser.parse_args()
     
     # If no command specified, show help
@@ -341,11 +347,23 @@ def main():
                 
         elif args.grape_command == 'spectrogram':
             from .grape.spectrogram import CarrierSpectrogramGenerator
+            import toml
+            
+            # Get grid from args or config file
+            receiver_grid = args.grid
+            if not receiver_grid:
+                config_path = Path('/etc/hf-timestd/timestd-config.toml')
+                if config_path.exists():
+                    with open(config_path, 'r') as f:
+                        config = toml.load(f)
+                    receiver_grid = config.get('station', {}).get('grid_square', '')
+                    if receiver_grid:
+                        print(f"Using grid from config: {receiver_grid}")
             
             gen = CarrierSpectrogramGenerator(
                 data_root=data_root,
                 channel_name=args.channel,
-                receiver_grid=args.grid
+                receiver_grid=receiver_grid or ''
             )
             
             if args.date:
@@ -359,30 +377,135 @@ def main():
                 gen.generate_daily(date_str)
                 
         elif args.grape_command == 'package':
-            from .grape.packager import DailyDRFPackager
+            from .grape.packager import DailyDRFPackager, StationConfig
             
             date_str = args.date.replace('-', '')
+            station_config = StationConfig(
+                callsign=args.callsign,
+                grid_square=args.grid
+            )
             packager = DailyDRFPackager(
                 data_root=data_root,
-                station_config={
-                    'callsign': args.callsign,
-                    'grid_square': args.grid
-                }
+                station_config=station_config
             )
             packager.package_day(date_str)
             
         elif args.grape_command == 'upload':
-            from .grape.uploader import UploadManager
+            from .grape.uploader import UploadManager, SFTPUpload
+            import toml
             
             if args.date:
-                date_str = args.date
+                date_str = args.date.replace('-', '')
             else:
-                date_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+                date_str = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
             
-            print(f"Upload for {date_str}")
+            # Load config for station info
+            config_path = Path('/etc/hf-timestd/timestd-config.toml')
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = toml.load(f)
+            else:
+                print(f"❌ Config not found: {config_path}")
+                sys.exit(1)
+            
+            station = config.get('station', {})
+            
+            # Find packaged data for the date
+            upload_dir = data_root / 'upload' / date_str
+            if not upload_dir.exists():
+                print(f"❌ No packaged data for {date_str} at {upload_dir}")
+                print(f"   Run 'grape package --date {date_str}' first")
+                sys.exit(1)
+            
+            # Find OBS directories
+            obs_dirs = list(upload_dir.rglob('OBS*'))
+            if not obs_dirs:
+                print(f"❌ No OBS directories found in {upload_dir}")
+                sys.exit(1)
+            
+            print(f"📤 Upload for {date_str}")
+            print(f"   Found {len(obs_dirs)} dataset(s)")
+            
             if args.dry_run:
-                print("(Dry run - no actual upload)")
-            # TODO: Implement upload logic
+                print("   (Dry run - no actual upload)")
+                for obs_dir in obs_dirs:
+                    print(f"   Would upload: {obs_dir}")
+                sys.exit(0)
+            
+            # Create uploader from config
+            uploader_config = config.get('uploader', {})
+            sftp_config = uploader_config.get('sftp', {})
+            
+            # Expand ~ in ssh_key path
+            import os
+            ssh_key = os.path.expanduser(sftp_config.get('ssh_key', '~/.ssh/psws_key'))
+            
+            upload_config = {
+                'protocol': uploader_config.get('protocol', 'sftp'),
+                'host': sftp_config.get('host', 'pswsnetwork.eng.ua.edu'),
+                'user': sftp_config.get('user', station.get('id', '')),
+                'ssh': {'key_file': ssh_key},
+                'bandwidth_limit_kbps': sftp_config.get('bandwidth_limit_kbps', 100),
+                'max_retries': uploader_config.get('max_retries', 5),
+                'queue_file': data_root / 'upload' / 'queue.json'
+            }
+            
+            manager = UploadManager(upload_config)
+            
+            # Enqueue and process
+            for obs_dir in obs_dirs:
+                metadata = {
+                    'date': f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}",
+                    'callsign': station.get('callsign', 'AC0G'),
+                    'grid_square': station.get('grid_square', 'EM38ww'),
+                    'station_id': station.get('id', 'S000171'),
+                    'instrument_id': station.get('instrument_id', '172')
+                }
+                manager.enqueue(obs_dir, metadata)
+            
+            manager.process_queue()
+            
+            status = manager.get_status()
+            print(f"   Queue status: {status['completed']} completed, {status['pending']} pending, {status['failed']} failed")
+            
+            # Write upload report
+            report_file = manager.write_upload_report()
+            print(f"   Report: {report_file}")
+            
+        elif args.grape_command == 'status':
+            from .grape.uploader import UploadManager
+            
+            # Create minimal config just to read queue
+            upload_config = {
+                'protocol': 'sftp',
+                'host': 'pswsnetwork.eng.ua.edu',
+                'user': 'status_check',
+                'ssh': {'key_file': '/dev/null'},
+                'queue_file': data_root / 'upload' / 'queue.json'
+            }
+            
+            manager = UploadManager(upload_config)
+            
+            # Current queue status
+            status = manager.get_status()
+            print(f"\n📊 GRAPE Upload Status")
+            print(f"   Queue: {status['total']} total")
+            print(f"   ├─ Completed: {status['completed']}")
+            print(f"   ├─ Pending:   {status['pending']}")
+            print(f"   ├─ Uploading: {status['uploading']}")
+            print(f"   └─ Failed:    {status['failed']}")
+            
+            # History
+            history = manager.get_upload_history(days=args.days)
+            if history:
+                print(f"\n📅 Upload History (last {args.days} days):")
+                for day in history:
+                    summary = day.get('summary', {})
+                    print(f"   {day['date']}: "
+                          f"{summary.get('completed', 0)} completed, "
+                          f"{summary.get('failed', 0)} failed")
+            else:
+                print(f"\n   No upload history found")
         else:
             grape_parser.print_help()
             sys.exit(1)

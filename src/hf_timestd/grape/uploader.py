@@ -313,63 +313,103 @@ class SFTPUpload(UploadProtocol):
         
         logger.info(f"Trigger directory: {trigger_dir}")
         
-        # Create SFTP batch commands file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.sftp', delete=False) as f:
-            sftp_cmds_file = f.name
-            # Change to parent directory, upload dataset, create trigger
-            f.write(f"put -r {local_path.name}\n")
-            f.write(f"mkdir {trigger_dir}\n")
-            f.write("quit\n")
-        
         try:
-            # Build SFTP command
-            cmd = ["sftp", "-v"]  # Verbose for logging
+            # Use scp for recursive upload (more reliable than sftp batch)
+            cmd = [
+                "scp", "-r", "-q",
+                "-i", str(self.ssh_key),
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                str(local_path),
+                f"{self.user}@{self.psws_server_url}:"
+            ]
             
-            # Add SSH key if specified
-            if self.ssh_key:
-                cmd.extend(["-i", str(self.ssh_key)])
+            logger.info(f"Running scp upload to {self.user}@{self.psws_server_url}")
             
-            # Add bandwidth limit
-            cmd.extend(["-l", str(self.bandwidth_limit_kbps)])
-            
-            # Add batch file
-            cmd.extend(["-b", sftp_cmds_file])
-            
-            # Add destination
-            cmd.append(f"{self.user}@{self.psws_server_url}")
-            
-            logger.debug(f"Running: {' '.join(cmd)}")
-            logger.debug(f"Working directory: {local_path.parent}")
-            
-            # Run SFTP from parent directory
             result = subprocess.run(
                 cmd,
-                cwd=str(local_path.parent),
-                check=True,
                 capture_output=True,
                 text=True,
-                timeout=3600  # 1 hour timeout
+                timeout=3600
             )
             
-            logger.info(f"SFTP upload successful: {local_path}")
-            logger.debug(f"SFTP output: {result.stdout}")
+            if result.returncode != 0:
+                logger.error(f"scp failed (exit {result.returncode}): {result.stderr}")
+                return False
             
-            # Clean up temp file
-            Path(sftp_cmds_file).unlink(missing_ok=True)
+            logger.info(f"scp complete, creating trigger directory via sftp")
             
+            # Create trigger directory via sftp (single command, won't hang)
+            trigger_cmd = [
+                "sftp", "-q",
+                "-i", str(self.ssh_key),
+                "-o", "BatchMode=yes",
+                f"{self.user}@{self.psws_server_url}"
+            ]
+            
+            # Use stdin to send the mkdir command
+            trigger_result = subprocess.run(
+                trigger_cmd,
+                input=f"mkdir {trigger_dir}\nquit\n",
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if trigger_result.returncode != 0:
+                logger.warning(f"Trigger mkdir may have failed: {trigger_result.stderr}")
+            
+            logger.info(f"Upload successful: {local_path}")
             return True
         
-        except subprocess.CalledProcessError as e:
-            logger.error(f"SFTP failed: {e.stderr}")
-            Path(sftp_cmds_file).unlink(missing_ok=True)
-            return False
         except subprocess.TimeoutExpired:
-            logger.error(f"SFTP timeout after 1 hour")
-            Path(sftp_cmds_file).unlink(missing_ok=True)
+            logger.error(f"Upload timeout after 1 hour")
             return False
         except Exception as e:
-            logger.error(f"SFTP error: {e}")
-            Path(sftp_cmds_file).unlink(missing_ok=True)
+            logger.error(f"Upload error: {e}")
+            return False
+    
+    def _upload_sftp_fallback(self, local_path: Path, trigger_dir: str, sftp_cmds_file: str) -> bool:
+        """Fallback SFTP upload using rsync over SSH"""
+        logger.info(f"Using rsync fallback for {local_path}")
+        
+        # Use rsync which is more reliable than sftp batch mode
+        ssh_cmd = f"ssh -i {self.ssh_key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        
+        cmd = [
+            "rsync", "-avz", "--progress",
+            "-e", ssh_cmd,
+            str(local_path),
+            f"{self.user}@{self.psws_server_url}:"
+        ]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=3600
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"rsync failed: {result.stderr}")
+                return False
+            
+            # Create trigger directory via ssh
+            trigger_cmd = [
+                "ssh", "-i", str(self.ssh_key),
+                "-o", "BatchMode=yes",
+                f"{self.user}@{self.psws_server_url}",
+                f"mkdir -p {trigger_dir}"
+            ]
+            
+            subprocess.run(trigger_cmd, capture_output=True, timeout=30)
+            
+            logger.info(f"rsync upload successful: {local_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"rsync fallback failed: {e}")
             return False
     
     def verify(self, remote_path: str) -> bool:
@@ -416,7 +456,7 @@ class UploadManager:
         self.queue: List[UploadTask] = []
         
         # Init protocol
-        self.protocol = self._init_protocol(config)
+        self.protocol = self._create_protocol()
         
         # Load queue from disk
         self._load_queue()
@@ -481,7 +521,7 @@ class UploadManager:
         Checks if dataset is readable and has valid structure.
         
         Args:
-            dataset_path: Path to dataset directory
+            dataset_path: Path to OBS dataset directory (contains ch0, ch1, etc.)
             
         Returns:
             True if valid
@@ -501,22 +541,28 @@ class UploadManager:
             
             logger.info(f"Validating {len(channels)} channels in {dataset_path}")
             
-            for channel_dir in channels:
-                try:
-                    # Try to open as Digital RF
-                    reader = drf.DigitalRFReader(str(channel_dir))
-                    bounds = reader.get_bounds()
-                    
+            # DigitalRFReader expects the parent directory containing channel dirs
+            # So we pass dataset_path (OBS dir), not individual channel dirs
+            try:
+                reader = drf.DigitalRFReader(str(dataset_path))
+                channel_names = reader.get_channels()
+                
+                if not channel_names:
+                    logger.error(f"No readable channels in {dataset_path}")
+                    return False
+                
+                for ch_name in channel_names:
+                    bounds = reader.get_bounds(ch_name)
                     if bounds[0] is None or bounds[1] is None:
-                        logger.error(f"Channel {channel_dir.name}: No data found")
+                        logger.error(f"Channel {ch_name}: No data found")
                         return False
                     
                     sample_count = bounds[1] - bounds[0]
-                    logger.info(f"Channel {channel_dir.name}: {sample_count} samples valid")
-                    
-                except Exception as e:
-                    logger.error(f"Channel {channel_dir.name}: Validation failed - {e}")
-                    return False
+                    logger.info(f"Channel {ch_name}: {sample_count} samples valid")
+                
+            except Exception as e:
+                logger.error(f"Digital RF validation failed: {e}")
+                return False
             
             logger.info(f"✅ Digital RF validation passed for {dataset_path}")
             return True
@@ -751,4 +797,88 @@ class UploadManager:
         if removed > 0:
             logger.info(f"Removed {removed} completed tasks from queue")
             self._save_queue()
+    
+    def write_upload_report(self, report_dir: Optional[Path] = None) -> Path:
+        """
+        Write a daily upload report summarizing upload status.
+        
+        Args:
+            report_dir: Directory for reports (default: queue_file parent / reports)
+            
+        Returns:
+            Path to the report file
+        """
+        if report_dir is None:
+            report_dir = self.queue_file.parent / 'reports'
+        
+        report_dir = Path(report_dir)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate report
+        now = datetime.now(timezone.utc)
+        status = self.get_status()
+        
+        report = {
+            'generated_at': now.isoformat(),
+            'summary': status,
+            'tasks': []
+        }
+        
+        for task in self.queue:
+            report['tasks'].append({
+                'dataset': task.dataset_path,
+                'status': task.status,
+                'attempts': task.attempts,
+                'created': task.created_at,
+                'completed': task.completed_at,
+                'error': task.error_message
+            })
+        
+        # Write daily report
+        report_file = report_dir / f"upload_report_{now.strftime('%Y%m%d')}.json"
+        with open(report_file, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        logger.info(f"Upload report written: {report_file}")
+        
+        # Also append to running log
+        log_file = report_dir / 'upload_history.log'
+        with open(log_file, 'a') as f:
+            f.write(f"{now.isoformat()} | "
+                   f"completed={status['completed']} "
+                   f"pending={status['pending']} "
+                   f"failed={status['failed']}\n")
+        
+        return report_file
+    
+    def get_upload_history(self, days: int = 7) -> List[Dict]:
+        """
+        Get upload history for the last N days.
+        
+        Args:
+            days: Number of days to look back
+            
+        Returns:
+            List of daily summaries
+        """
+        report_dir = self.queue_file.parent / 'reports'
+        history = []
+        
+        for i in range(days):
+            date = datetime.now(timezone.utc) - timedelta(days=i)
+            report_file = report_dir / f"upload_report_{date.strftime('%Y%m%d')}.json"
+            
+            if report_file.exists():
+                try:
+                    with open(report_file, 'r') as f:
+                        report = json.load(f)
+                    history.append({
+                        'date': date.strftime('%Y-%m-%d'),
+                        'summary': report.get('summary', {}),
+                        'task_count': len(report.get('tasks', []))
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to read report {report_file}: {e}")
+        
+        return history
 

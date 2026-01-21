@@ -55,10 +55,8 @@ class DecimationPipeline:
                     # Best to stick to what the directories actually are.
                     for d in p.iterdir():
                         if d.is_dir():
-                            # Convert directory name back to channel name format if possible
-                            # e.g., WWV_10_MHz -> WWV 10 MHz
-                            # But DecimatedBuffer expects "WWV 10 MHz" and converts to "WWV_10_MHz"
-                            # So let's try to reverse map or just support directory names
+                            # Convert directory name to channel name format
+                            # e.g., SHARED_10000 -> SHARED 10000
                             name = d.name.replace('_', ' ')
                             if name not in channels_to_process:
                                 channels_to_process.append(name)
@@ -79,7 +77,13 @@ class DecimationPipeline:
                 logger.error(f"Failed to process {ch}: {e}", exc_info=True)
 
     def _process_channel_day(self, date_str: str, channel_name: str):
-        """Process one channel for one day."""
+        """
+        Process one channel for one day.
+        
+        Uses a single StatefulDecimator instance across all minutes to preserve
+        phase continuity. The decimator maintains filter state between calls,
+        eliminating phase discontinuities at minute boundaries.
+        """
         logger.info(f"Starting {channel_name} for {date_str}")
         
         reader = RawBinaryReader(self.data_root, channel_name)
@@ -88,45 +92,51 @@ class DecimationPipeline:
         # Determine sample rate
         input_rate = reader.get_sample_rate(date_str)
         logger.info(f"  Input rate: {input_rate} Hz")
-
         
-        # Initialize decimator
+        expected_raw_samples = input_rate * 60  # e.g., 1440000 for 24kHz
+        
+        # Single decimator instance for entire day - preserves phase continuity
         decimator = StatefulDecimator(input_rate=input_rate, output_rate=10)
         
         minutes_processed = 0
         samples_generated = 0
-        gaps_detected = 0
+        prev_minute_ts = None
         
-        # Iterate over minutes
+        # Process minute by minute, but with continuous decimator state
         for minute_ts, samples, meta in reader.read_day(date_str):
             decimated_chunk = None
             gap_info = 0
             
             if samples is not None and len(samples) > 0:
-                # Process valid samples
+                # Check for gaps (missing minutes) - if so, feed zeros to maintain
+                # filter state and time alignment
+                if prev_minute_ts is not None:
+                    gap_minutes = int((minute_ts - prev_minute_ts) / 60) - 1
+                    if gap_minutes > 0:
+                        # Feed zeros for missing minutes to maintain filter state
+                        gap_samples = np.zeros(expected_raw_samples * gap_minutes, dtype=np.complex64)
+                        _ = decimator.process(gap_samples)  # Discard output, keep state
+                        logger.debug(f"Fed {gap_minutes} minutes of zeros for gap before {minute_ts}")
+                
+                # Pad incomplete minutes to maintain sample alignment
+                if len(samples) < expected_raw_samples:
+                    padded = np.zeros(expected_raw_samples, dtype=np.complex64)
+                    padded[:len(samples)] = samples
+                    samples = padded
+                    gap_info = expected_raw_samples - len(samples)
+                elif len(samples) > expected_raw_samples:
+                    samples = samples[:expected_raw_samples]
+                
+                # Process with continuous decimator state
                 decimated_chunk = decimator.process(samples)
                 
-                # Check for gaps in input
+                # Check for gaps in metadata
                 if meta and 'gap_samples' in meta:
-                    gap_info = meta['gap_samples']
-            else:
-                # Missing input data for this minute
-                # We should produce a gap minute (zeros or just flag it)
-                # StatefulDecimator.process([]) returns empty array
-                # But we need to maintain 10 Hz output continuity?
-                # DecimatedBuffer expects 600 samples for a valid minute
-                # If we have NO data, we can't really "decimate" it.
-                # However, to keep phase continuity, we might feed zeros to the filter?
-                # Feeding zeros to IIR can ring. 
-                # Better approach: Just skip writing valid=True for this minute 
-                # or write zeros. DecimatedBuffer handles "valid=False" implictly 
-                # if we don't call write_minute.
-                pass
-
-            if decimated_chunk is not None and len(decimated_chunk) > 0:
-                # Write to output
-                # We need minute_utc from timestamp
+                    gap_info = max(gap_info, meta.get('gap_samples', 0))
                 
+                prev_minute_ts = minute_ts
+            
+            if decimated_chunk is not None and len(decimated_chunk) > 0:
                 # Metadata extraction
                 d_clock = 0.0
                 uncertainty = 999.9
@@ -149,9 +159,5 @@ class DecimationPipeline:
                 if success:
                     minutes_processed += 1
                     samples_generated += len(decimated_chunk)
-            
-            # Handle gaps in output continuity?
-            # The reader yields available minutes. If a minute is missing entirely
-            # from the archive, we skip it here. DecimatedBuffer won't have it.
         
         logger.info(f"  Completed {channel_name}: {minutes_processed} minutes, {samples_generated} samples")

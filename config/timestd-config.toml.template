@@ -113,9 +113,9 @@ max_queue_size_gb = 100
 host = "pswsnetwork.eng.ua.edu"
 port = 22
 user = "<YOUR_PSWS_STATION_ID>"         # Same as station.id
-ssh_key = "~/.ssh/psws_key"             # Path to your SSH private key
+ssh_key = "/home/timestd/.ssh/psws_key" # Dedicated PSWS SSH key (see docs/PSWS_SETUP_GUIDE.md)
 remote_base_path = "/"
-bandwidth_limit_kbps = 0                # 0 = unlimited
+bandwidth_limit_kbps = 100              # Limit upload bandwidth (KB/s)
 verify_after_upload = true
 delete_after_upload = false
 create_trigger_directory = true
