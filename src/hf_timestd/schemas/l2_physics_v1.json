@@ -5,6 +5,12 @@
     "cadence_seconds": 60,
     "processing_level": "L2",
     "reference": "IRI-2020 / Raytracing",
+    "quality_flags": {
+        "GOOD": "Physics model converged with high confidence",
+        "MARGINAL": "Physics model converged with moderate confidence",
+        "BAD": "Physics model failed or low confidence",
+        "MISSING": "Insufficient data for physics interpretation"
+    },
     "fields": [
         {
             "name": "timestamp_utc",

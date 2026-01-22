@@ -8,6 +8,12 @@
         "NRC Canada CHU time signal specification"
     ],
     "reference": "UTC(NRC) via CHU FSK time code",
+    "quality_flags": {
+        "GOOD": "Valid BCD decode with correct parity",
+        "MARGINAL": "BCD decode with minor parity errors (correctable)",
+        "BAD": "BCD decode failed or uncorrectable parity errors",
+        "MISSING": "No FSK signal detected"
+    },
     "fields": [
         {
             "name": "timestamp_utc",

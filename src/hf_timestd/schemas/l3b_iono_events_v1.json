@@ -8,6 +8,12 @@
         "CEDAR Madrigal patterns",
         "Space Weather event formats"
     ],
+    "quality_flags": {
+        "GOOD": "Event detected with high confidence across multiple broadcasts",
+        "MARGINAL": "Event detected with moderate confidence",
+        "BAD": "Possible event but low confidence",
+        "MISSING": "No ionospheric events detected"
+    },
     "fields": [
         {
             "name": "timestamp_utc",

@@ -5,6 +5,12 @@
     "cadence_seconds": 60,
     "processing_level": "L1",
     "reference": "Raw Reception Time (System Clock + RTP)",
+    "quality_flags": {
+        "GOOD": "Tone detected with high SNR (>20 dB) and confident station ID",
+        "MARGINAL": "Tone detected with moderate SNR (10-20 dB) or uncertain ID",
+        "BAD": "Weak detection (SNR < 10 dB) or ambiguous identification",
+        "MISSING": "No tone detected"
+    },
     "fields": [
         {
             "name": "timestamp_utc",

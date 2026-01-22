@@ -8,6 +8,12 @@
         "ISO GUM uncertainty budget",
         "NetCDF CF conventions"
     ],
+    "quality_flags": {
+        "GOOD": "Multi-broadcast fusion with high confidence TEC estimate",
+        "MARGINAL": "Fusion with moderate confidence or limited broadcasts",
+        "BAD": "Fusion failed or very low confidence",
+        "MISSING": "Insufficient data for physics fusion"
+    },
     "fields": [
         {
             "name": "timestamp_utc",
