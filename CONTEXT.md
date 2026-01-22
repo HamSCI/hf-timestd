@@ -1,184 +1,153 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-## 🚀 Current Status: "Steel Ruler" Release (v5.3.7)
+## 🚀 Current Status: "Steel Ruler" Release (v5.3.8)
 
-**Version**: v5.3.7 - 2026-01-18
+**Version**: v5.3.8 - 2026-01-22
 **Core Philosophy**: **"Steel Ruler" Metrology**. The system treats the local GPSDO as a fixed standard (zero process noise) to measure ionospheric variance.
 
-### 🌟 Recent Accomplishments (v5.3.7)
+### 🌟 Recent Accomplishments (v5.3.8)
 
-1. **Allan Deviation Fix**: Corrected ADEV calculation to use proper IEEE 1139-2008 second-difference formula for phase data. ADEV now correctly decreases with averaging time.
-2. **Core Stability Module**: Created `src/hf_timestd/core/stability_analysis.py` with proper ADEV algorithms in the core library (not web-api).
-3. **Pipeline Recovery**: Fixed recorder RTP timestamp stall and fusion logging issues.
-4. **Web UI Enhancements**: Physics multi-view tabs, CHU FSK section in metrology, health page fixes.
+1. **Station-Centric Architecture**: Added `BroadcastRegistry` class for phase-engine integration (17 broadcasts, 9/17 channels).
+2. **Test Suite Restoration**: Fixed 79 tests, added 27 new BroadcastRegistry tests, archived 3 deprecated tests.
+3. **Verification Script Fixes**: Fixed chrony detection regex, removed obsolete checks.
+4. **Config Schema**: Added `[ka9q].source` field for radiod/phase-engine mode selection.
 
-### 🔴 Next Session: Metrology Page Enhancement
+### 🔴 Next Session: Propagation & Physics Page Review
 
-**Objective:** Enhance `metrology.html` to more explicitly display the data and calculations described in `docs/METROLOGY.md` that accomplish the stated metrological goal and provide the timing accuracy that enables ionospheric measurements.
+**Objective:** Review `propagation.html` and `physics.html` for errors, omissions, or reasonable improvements.
 
 ---
 
-## 📋 Metrology Page Enhancement Task
+## 📋 Propagation & Physics Page Review Task
 
-### The Metrological Goal (from METROLOGY.md)
+### Page Overview
 
-The system achieves **±0.5 ms (1σ) accuracy to UTC(NIST)** through:
+| Page | Purpose | Key Features |
+|------|---------|--------------|
+| **propagation.html** | Ionospheric conditions and propagation modes | MUF estimate, per-broadcast mode analysis, TEC by path, mode timeline |
+| **physics.html** | Multi-path ionospheric analysis | 3 tabs: Paths (TEC/scintillation), Channels (test signals), Events (ionospheric events) |
 
-1. **Multi-broadcast fusion** of 9-17 independent measurements
-2. **ISO GUM-compliant uncertainty budgets** with Type A (statistical) and Type B (systematic) components
-3. **Inverse variance weighting** for statistically optimal combination
-4. **Kalman filtering** with "Steel Ruler" parameters (zero process noise)
-5. **Inter-station consistency validation** (cross-station agreement < 1 ms)
+### propagation.html Structure (664 lines)
 
-### Current metrology.html Structure
+| Section | What It Shows | API Endpoint |
+|---------|---------------|--------------|
+| **Current Conditions** | MUF estimate, active broadcasts, measurement count | `/api/propagation/conditions` |
+| **Per-Broadcast Cards** | Station, frequency, dominant mode, SNR, mode distribution | `/api/propagation/conditions` |
+| **Multi-Frequency Comparison** | Per-station table comparing modes across frequencies | `/api/propagation/conditions` |
+| **Frequency-Mode Bar Chart** | Observations by frequency with dominant mode | `/api/propagation/conditions` |
+| **TEC by Path** | Time series with error bars, quality summary, per-station details | `/api/propagation/tec` |
+| **Mode Timeline** | Scatter plot of modes over time, colored by mode type | `/api/propagation/timeline` |
 
-| Section | What It Shows | What's Missing |
-|---------|---------------|----------------|
-| **Hero Display** | D_clock, uncertainty, grade, broadcast count | No explanation of what D_clock means |
-| **Station Contributions** | List of contributing stations | No per-station D_clock values or weights |
-| **Expert Metrics** | ISO GUM budget, inter-station consistency | Good coverage, but could show the fusion equation |
-| **CHU FSK** | DUT1, TAI-UTC, timing offset | Complete |
-| **Fusion History** | D_clock time series with error bars | No propagation delay breakdown |
-| **Allan Deviation** | ADEV plot with noise type | Complete |
-| **Uncertainty Evolution** | Uncertainty time series | No breakdown by component |
+### physics.html Structure (761 lines)
 
-### Key Concepts to Expose (from METROLOGY.md)
+| Tab | Section | What It Shows | API Endpoint |
+|-----|---------|---------------|--------------|
+| **Paths** | Hero: UTC Consistency | Physics model validity, stations used, residuals | `/api/physics/latest` |
+| **Paths** | Path Cards | Per-station: measurements, frequencies, S4 index, scintillation severity | `/api/physics/scintillation/paths` |
+| **Paths** | Measurement History | S4 scintillation index over time with threshold lines | `/api/physics/scintillation/history` |
+| **Channels** | Channel Characterization | WWV/WWVH test signal analysis (minutes 8 & 44) | `/api/physics/test-signals/latest` |
+| **Channels** | Test Signal Results | Multi-tone, chirp, burst analysis | `/api/physics/test-signals/latest` |
+| **Channels** | Channel Quality History | Quality metrics over time | `/api/physics/test-signals/history` |
+| **Events** | Ionospheric Events | Sporadic-E, TIDs, solar flares, day/night transitions | `/api/physics/events` |
+| **Events** | Scintillation Monitor | S4 (amplitude) and σ_φ (phase) indices | `/api/physics/scintillation/paths` |
 
-#### 1. The Transmission Time Equation
-```
-T_arrival = T_emission + τ_propagation + D_clock
-```
-Where:
-- **T_arrival**: Measured tone arrival time (RTP timestamp from GPSDO-disciplined SDR)
-- **T_emission**: Known transmission time (top of minute, UTC)
-- **τ_propagation**: Ionospheric path delay (2-70 ms, station-dependent)
-- **D_clock**: The unknown we solve for
+### Key API Endpoints
 
-#### 2. The Three-Layer Architecture
-- **Layer 1 (Single Broadcast)**: Measures tick rate, but floating in time
-- **Layer 2 (Multi-Frequency)**: Dispersion calculation → TEC → path delay correction
-- **Layer 3 (Multi-Station)**: Geometry lock → integrity validation
+```bash
+# Propagation endpoints
+curl -s http://localhost:8000/api/propagation/conditions | jq
+curl -s http://localhost:8000/api/propagation/timeline?start=-6h | jq
+curl -s http://localhost:8000/api/propagation/tec?start=-7d | jq
 
-#### 3. Inverse Variance Weighting
-```
-w_i = 1 / σ_i²
-D_clock_fused = Σ(w_i × D_clock_i) / Σ(w_i)
-```
-Measurements with 0.5 ms uncertainty get 4x weight vs 1.0 ms uncertainty.
-
-#### 4. ISO GUM Uncertainty Components
-- **Type A (Statistical)**: Weighted standard error, reduces as √N
-- **Type B (Systematic)**: Tone detection (±0.1 ms), propagation model (±1-2 ms), RTP jitter (±0.1 ms)
-- **Combined**: u_combined = √(u_A² + u_B² + u_propagation²)
-
-#### 5. Quality Grades
-| Grade | Uncertainty | Criteria |
-|-------|-------------|----------|
-| **A** | ±0.5 ms | 30+ detections, 60 min span, calibrated, inter-station < 1 ms |
-| **B** | ±1.0 ms | 10+ detections, provisional phase |
-| **C** | ±2.0 ms | Bootstrap phase, limited validation |
-| **D/F** | > 2.0 ms | Insufficient data or validation failures |
-
-### Available API Data (from fusion_service.py)
-
-The `/api/metrology/fusion/latest` endpoint returns:
-
-```python
-{
-    'd_clock_ms': float,           # Fused clock offset
-    'd_clock_raw_ms': float,       # Raw (pre-Kalman) offset
-    'uncertainty_ms': float,       # Combined uncertainty
-    'statistical_uncertainty_ms',  # Type A
-    'systematic_uncertainty_ms',   # Type B  
-    'propagation_uncertainty_ms',  # Propagation model
-    'quality_grade': str,          # A/B/C/D/F
-    'n_broadcasts': int,           # Number of measurements
-    'n_stations': int,             # Number of stations
-    'stations_used': list,         # Station names
-    'inter_station_spread_ms',     # Cross-station consistency
-    'consistency_flag': str,       # OK / CROSS_STATION_DISAGREE
-    'kalman_state': str,           # LOCKED / CONVERGING
-    'calibration_applied': bool,
-    # Per-station data:
-    'wwv_mean_ms', 'wwvh_mean_ms', 'chu_mean_ms', 'bpm_mean_ms',
-    'wwv_count', 'wwvh_count', 'chu_count', 'bpm_count',
-    'wwv_intra_std_ms', 'wwvh_intra_std_ms', 'chu_intra_std_ms',
-    # Global solve:
-    'global_solve_verified': bool,
-    'global_solve_consistency_ms': float,
-}
+# Physics endpoints
+curl -s http://localhost:8000/api/physics/latest | jq
+curl -s http://localhost:8000/api/physics/scintillation/paths | jq
+curl -s http://localhost:8000/api/physics/scintillation/history?start=-6h | jq
+curl -s http://localhost:8000/api/physics/test-signals/latest | jq
+curl -s http://localhost:8000/api/physics/events | jq
 ```
 
-### Suggested Enhancements
-
-#### 1. Add "How It Works" Explainer Section
-A collapsible section explaining the transmission time equation and what D_clock represents. Target audience: time nuts who want to understand the methodology.
-
-#### 2. Enhance Station Contributions Display
-Show per-station:
-- D_clock value (with calibration offset applied)
-- Weight in fusion (1/σ²)
-- Number of broadcasts
-- Intra-station standard deviation
-
-#### 3. Add Fusion Equation Visualization
-Show the actual weighted mean calculation:
-```
-D_clock_fused = (w_WWV × D_WWV + w_WWVH × D_WWVH + w_CHU × D_CHU) / (w_WWV + w_WWVH + w_CHU)
-```
-With actual values filled in.
-
-#### 4. Add Propagation Delay Breakdown
-For each station, show:
-- Geometric delay (great circle distance / c)
-- Ionospheric delay (K × TEC / f²)
-- Total propagation delay
-- Propagation model source (IONEX / IRI / empirical)
-
-#### 5. Add Quality Grade Explanation
-Show what criteria were met/not met for the current grade.
-
-#### 6. Add "Steel Ruler" Status Indicator
-Show that the Kalman filter is in "Steel Ruler" mode:
-- Drift clamped to 0.0 ms/min
-- Process noise effectively zero
-- Baseline is STABLE
-
-### Key Files to Modify
+### Key Files
 
 | File | Purpose |
 |------|---------|
-| `web-api/static/metrology.html` | Main UI - add new sections, enhance existing |
-| `web-api/services/fusion_service.py` | May need to expose additional fields |
-| `web-api/routers/metrology.py` | May need new endpoints |
-| `src/hf_timestd/core/multi_broadcast_fusion.py` | Source of fusion calculations |
+| `web-api/static/propagation.html` | Propagation analysis UI (664 lines) |
+| `web-api/static/physics.html` | Physics dashboard UI (761 lines) |
+| `web-api/routers/propagation.py` | Propagation API endpoints |
+| `web-api/routers/physics.py` | Physics API endpoints |
+| `web-api/services/propagation_service.py` | Propagation data service |
+| `web-api/services/physics_service.py` | Physics data service |
+| `web-api/services/scintillation_service.py` | S4/σ_φ calculations |
+| `web-api/services/test_signal_service.py` | WWV/WWVH test signal analysis |
+| `web-api/services/event_service.py` | Ionospheric event detection |
 
-### Data Not Currently Exposed (May Need New Endpoints)
+### Ionospheric Physics Concepts
 
-1. **Per-broadcast raw D_clock values** (before fusion)
-2. **Per-broadcast propagation delays** (τ_propagation breakdown)
-3. **Calibration offsets per station** (from broadcast_calibration.json)
-4. **Kalman filter state** (P matrix, innovation)
-5. **Historical quality grade transitions**
+#### Propagation Modes
+| Mode | Description | Typical Delay |
+|------|-------------|---------------|
+| **1E** | Single E-layer hop (~100 km) | 2-10 ms |
+| **1F** | Single F-layer hop (~300 km) | 5-20 ms |
+| **2F** | Double F-layer hop | 10-40 ms |
+| **3F** | Triple F-layer hop | 15-60 ms |
+| **GW** | Ground wave (< 200 km) | < 1 ms |
+
+#### TEC (Total Electron Content)
+- **Units**: TECU (10¹⁶ electrons/m²)
+- **Calculation**: From multi-frequency differential delay (K × TEC / f²)
+- **Typical values**: 5-50 TECU (day), 1-10 TECU (night)
+
+#### Scintillation Indices
+| Index | Meaning | Thresholds |
+|-------|---------|------------|
+| **S4** | Amplitude scintillation (normalized std dev) | < 0.2 weak, 0.2-0.4 moderate, > 0.4 strong |
+| **σ_φ** | Phase scintillation (radians) | < 0.1 weak, 0.1-0.3 moderate, > 0.3 strong |
+
+#### MUF (Maximum Usable Frequency)
+- Highest frequency that will reflect from ionosphere
+- Estimated from highest frequency with successful propagation
+- Varies with solar activity, time of day, season
+
+### Potential Review Areas
+
+#### propagation.html
+1. **MUF Estimate**: Is the calculation reasonable? What happens with insufficient data?
+2. **Mode Distribution**: Are percentages calculated correctly?
+3. **TEC Quality**: Are error bars and quality flags properly displayed?
+4. **Multi-Frequency Comparison**: Does it correctly identify multi-hop vs single-hop?
+5. **Time Range Buttons**: Do all ranges work correctly?
+
+#### physics.html
+1. **UTC Consistency**: What does "CONSISTENT" vs "CHECKING" mean?
+2. **Path Cards**: Are measurements correctly attributed to stations?
+3. **S4 Thresholds**: Are the horizontal threshold lines at correct values?
+4. **Test Signal Analysis**: Is minutes 8/44 data being captured?
+5. **Events Tab**: Is event detection working? (Currently shows placeholder)
+6. **Scintillation History**: Is the data being plotted correctly?
+
+### Testing Commands
+
+```bash
+# Verify pipeline is healthy
+scripts/verify_pipeline.sh
+
+# Check propagation service logs
+sudo journalctl -u timestd-physics -n 50 --no-pager
+
+# Test API endpoints directly
+curl -s http://localhost:8000/api/propagation/conditions | python3 -m json.tool
+curl -s http://localhost:8000/api/physics/scintillation/paths | python3 -m json.tool
+
+# Check for JavaScript errors in browser console
+# Open http://localhost:8000/static/propagation.html
+# Open http://localhost:8000/static/physics.html
+```
 
 ### Reference Documentation
 
-- **`docs/METROLOGY.md`** — Complete metrological description (662 lines)
 - **`docs/PHYSICS.md`** — Ionospheric physics capabilities
+- **`docs/METROLOGY.md`** — Metrological description
 - **`TECHNICAL_REFERENCE.md`** — System architecture
-
-### Testing the Page
-
-```bash
-# Verify API is returning data
-curl -s http://localhost:8000/api/metrology/fusion/latest | python3 -m json.tool
-
-# Check fusion service logs
-sudo journalctl -u timestd-fusion -n 20 --no-pager
-
-# Verify pipeline health
-scripts/verify_pipeline.sh
-```
 
 ---
 
@@ -186,60 +155,43 @@ scripts/verify_pipeline.sh
 
 - **TEC Staleness at Night**: The `timestd-physics` service correctly reports stale TEC data during nighttime when only single frequencies are visible. This is a scientific limitation, not a software failure.
 - **WWV 20/25 MHz Propagation**: These bands show STALE measurements during poor propagation conditions (nighttime/early morning). Expected behavior—signals resume when propagation improves.
+- **CHU Channels Stale**: CHU frequencies (3.33, 7.85, 14.67 MHz) may show stale during poor propagation to Ottawa.
 
 ---
 
-## ✅ Session Complete: Web UI & ADEV Fix (v5.3.7)
+## ✅ Session Complete: Test Suite & Phase-Engine Prep (v5.3.8)
 
-**Date**: 2026-01-18  
-**Status**: **COMPLETE** - Allan deviation fixed, web UI enhanced, pipeline recovered
-
-### Accomplishments
-
-1. **Allan Deviation Fix** — `stability_analysis.py` (core) + `stability_service.py` (web-api)
-   - Fixed ADEV calculation to use IEEE 1139-2008 second-difference formula
-   - ADEV now correctly decreases with averaging time
-   - Moved core algorithms to `src/hf_timestd/core/stability_analysis.py`
-   - Web-api service is now a thin wrapper
-
-2. **Pipeline Recovery**
-   - Fixed recorder RTP timestamp stall (restarted to re-sync)
-   - Fixed fusion log rotation issue (service restart)
-   - Pipeline now at 32 PASS, 0 FAIL
-
-3. **Web UI Enhancements**
-   - Physics page: Multi-view tabs (Paths, Channels, Events)
-   - Metrology page: CHU FSK decoded data section
-   - Health page: Renamed Analytics→Metrology, stale channels show last known data
-
-### Files Created
-
-- `src/hf_timestd/core/stability_analysis.py` — Core ADEV algorithms
-- `web-api/services/stability_core.py` — Web-api fallback
-- `web-api/services/chu_fsk_service.py` — CHU FSK data
-- `web-api/services/event_service.py` — Ionospheric events
-- `web-api/services/scintillation_service.py` — S4/σ_φ data
-- `web-api/services/test_signal_service.py` — Channel characterization
-
-### Commit
-
-```
-d22dfb8 - Web UI enhancements and ADEV fix
-```
-
----
-
-## ✅ Session Complete: Physics Capabilities Implementation (v5.3.6)
-
-**Date**: 2026-01-16  
-**Status**: **PHYSICS COMPLETE** - Scintillation indices and Sporadic-E detection implemented
+**Date**: 2026-01-22  
+**Status**: **COMPLETE** - Test suite restored, phase-engine architecture ready
 
 ### Accomplishments
 
-1. **Scintillation Indices (S4, σ_φ)** — `advanced_signal_analysis.py`
-2. **Sporadic-E Detection** — `propagation_mode_solver.py`
-3. **CHU FSK Integration Enhanced** — `metrology_engine.py`
-4. **New Test Suites** — `test_scintillation_indices.py`, `test_sporadic_e_detection.py`
+1. **BroadcastRegistry** — Station-centric data model for phase-engine integration
+   - 17 broadcasts, geometry computation, channel derivation
+   - radiod mode: 9 channels, phase-engine mode: 17 channels
+   - 27 comprehensive tests
+
+2. **Test Suite Restoration**
+   - Fixed schema tests (quality_flags, version checks)
+   - Fixed HDF5 IO tests (hardcoded versions, missing fields)
+   - Archived 3 deprecated tests (stale imports)
+   - 79 tests now passing
+
+3. **Verification Script Fixes**
+   - Fixed chrony source detection (# prefix for refclocks, not ^)
+   - Removed obsolete BCD/tone detection checks
+
+4. **Config Schema**
+   - Added `[ka9q].source` field for radiod/phase-engine mode
+
+### Commits
+
+```
+28fb134 - Fix test suite and add BroadcastRegistry tests
+1a3ba13 - Add source field to config schema
+ec63631 - Fix chrony source detection in verify_pipeline.sh
+f14583e - Remove obsolete BCD/tone detection checks
+```
 
 ---
 
@@ -248,6 +200,7 @@ d22dfb8 - Web UI enhancements and ADEV fix
 ```
 archive/
 ├── debug-tools/          # Debug scripts and tools
+├── deprecated-tests/     # Tests for deprecated/refactored code
 ├── dev-history/          # Historical development documents
 │   ├── 2026-01-fixes/    # Recent fix and session documents
 │   └── analysis/         # Analysis and critique documents
