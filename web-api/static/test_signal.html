@@ -1012,16 +1012,18 @@
 
         async function plotFrequencyData(data) {
             const container = document.getElementById('chart-freq-snr');
-            const measurements = data.by_frequency?.[selectedFrequency] || [];
             
-            if (!measurements.length) {
+            // Filter by selected frequency from by_station data
+            const wwvAll = data.by_station?.WWV || [];
+            const wwvhAll = data.by_station?.WWVH || [];
+            
+            const wwv = wwvAll.filter(m => m.frequency_mhz === selectedFrequency);
+            const wwvh = wwvhAll.filter(m => m.frequency_mhz === selectedFrequency);
+            
+            if (!wwv.length && !wwvh.length) {
                 container.innerHTML = '<div style="padding: 40px; text-align: center; color: #64748b;">No data for this frequency</div>';
                 return;
             }
-
-            // SNR over time for selected frequency
-            const wwv = measurements.filter(m => m.station === 'WWV');
-            const wwvh = measurements.filter(m => m.station === 'WWVH');
 
             const traces = [
                 {
