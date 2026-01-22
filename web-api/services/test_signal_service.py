@@ -199,18 +199,20 @@ class TestSignalService:
         self,
         start: datetime,
         end: datetime,
-        frequency_mhz: Optional[float] = None
+        frequency_mhz: Optional[float] = None,
+        station: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Get test signal history.
+        Get test signal history with full metrics.
         
         Args:
             start: Start datetime
             end: End datetime
             frequency_mhz: Optional frequency filter
+            station: Optional station filter (WWV or WWVH)
             
         Returns:
-            Time series of test signal results
+            Time series of test signal results with all metrics
         """
         try:
             results = []
@@ -236,16 +238,35 @@ class TestSignalService:
                     for m in measurements:
                         if frequency_mhz and m.get('frequency_mhz') != frequency_mhz:
                             continue
+                        if station and m.get('station') != station:
+                            continue
                         if m.get('detected'):
                             results.append({
                                 'timestamp': m.get('timestamp_utc'),
                                 'station': m.get('station'),
                                 'frequency_mhz': m.get('frequency_mhz'),
+                                'channel': channel,
                                 'snr_db': self._clean_value(m.get('snr_db')),
+                                'effective_snr_db': self._clean_value(m.get('effective_snr_db')),
                                 'delay_spread_ms': self._clean_value(m.get('delay_spread_ms')),
                                 'coherence_time_sec': self._clean_value(m.get('coherence_time_sec')),
+                                'frequency_selectivity_db': self._clean_value(m.get('frequency_selectivity_db')),
                                 'channel_quality': m.get('channel_quality'),
-                                'scintillation_index': self._clean_value(m.get('scintillation_index'))
+                                'multipath_detected': m.get('multipath_detected'),
+                                'scintillation_index': self._clean_value(m.get('scintillation_index')),
+                                's4_2khz': self._clean_value(m.get('s4_2khz')),
+                                's4_3khz': self._clean_value(m.get('s4_3khz')),
+                                's4_4khz': self._clean_value(m.get('s4_4khz')),
+                                's4_5khz': self._clean_value(m.get('s4_5khz')),
+                                's4_frequency_slope': self._clean_value(m.get('s4_frequency_slope')),
+                                'noise_toa_offset_ms': self._clean_value(m.get('noise_toa_offset_ms')),
+                                'noise_correlation_peak': self._clean_value(m.get('noise_correlation_peak')),
+                                'multitone_score': self._clean_value(m.get('multitone_score')),
+                                'chirp_score': self._clean_value(m.get('chirp_score')),
+                                'burst_score': self._clean_value(m.get('burst_score')),
+                                'detection_confidence': self._clean_value(m.get('detection_confidence')),
+                                'anomaly_detected': m.get('anomaly_detected'),
+                                'anomaly_type': m.get('anomaly_type')
                             })
                             
                 except Exception as e:
@@ -262,3 +283,113 @@ class TestSignalService:
         except Exception as e:
             logger.error(f"Error getting test signal history: {e}")
             return {'measurements': [], 'count': 0, 'error': str(e)}
+    
+    def get_daily_comparison(self, date: Optional[datetime] = None) -> Dict[str, Any]:
+        """
+        Get test signal data organized for daily comparison views.
+        
+        Returns data structured for:
+        - WWV vs WWVH comparison at same frequencies
+        - Same station across different frequencies
+        - Evolution over the UTC day
+        
+        Args:
+            date: Date to analyze (defaults to today)
+            
+        Returns:
+            Structured comparison data
+        """
+        try:
+            if date is None:
+                date = datetime.utcnow()
+            
+            # Get full day of data
+            start = datetime(date.year, date.month, date.day, 0, 0, 0)
+            end = start + timedelta(days=1)
+            
+            history = self.get_history(start=start, end=end)
+            measurements = history.get('measurements', [])
+            
+            # Organize by station
+            by_station = {'WWV': [], 'WWVH': []}
+            for m in measurements:
+                station = m.get('station')
+                if station in by_station:
+                    by_station[station].append(m)
+            
+            # Organize by frequency
+            frequencies = sorted(set(m.get('frequency_mhz') for m in measurements if m.get('frequency_mhz')))
+            by_frequency = {freq: [] for freq in frequencies}
+            for m in measurements:
+                freq = m.get('frequency_mhz')
+                if freq in by_frequency:
+                    by_frequency[freq].append(m)
+            
+            # Find matching pairs (same time, same frequency, different station)
+            wwv_wwvh_pairs = []
+            wwv_by_time_freq = {}
+            for m in by_station['WWV']:
+                # Extract hour from timestamp
+                ts = m.get('timestamp', '')
+                freq = m.get('frequency_mhz')
+                if ts and freq:
+                    hour = ts[:13]  # YYYY-MM-DDTHH
+                    wwv_by_time_freq[(hour, freq)] = m
+            
+            for m in by_station['WWVH']:
+                ts = m.get('timestamp', '')
+                freq = m.get('frequency_mhz')
+                if ts and freq:
+                    hour = ts[:13]
+                    wwv_match = wwv_by_time_freq.get((hour, freq))
+                    if wwv_match:
+                        wwv_wwvh_pairs.append({
+                            'hour': hour,
+                            'frequency_mhz': freq,
+                            'wwv': wwv_match,
+                            'wwvh': m,
+                            'snr_diff_db': (wwv_match.get('snr_db') or 0) - (m.get('snr_db') or 0) if wwv_match.get('snr_db') and m.get('snr_db') else None,
+                            's4_diff': (wwv_match.get('scintillation_index') or 0) - (m.get('scintillation_index') or 0) if wwv_match.get('scintillation_index') is not None and m.get('scintillation_index') is not None else None,
+                            'toa_diff_ms': (wwv_match.get('noise_toa_offset_ms') or 0) - (m.get('noise_toa_offset_ms') or 0) if wwv_match.get('noise_toa_offset_ms') is not None and m.get('noise_toa_offset_ms') is not None else None
+                        })
+            
+            # Statistics
+            def calc_stats(values):
+                values = [v for v in values if v is not None]
+                if not values:
+                    return None
+                return {
+                    'min': min(values),
+                    'max': max(values),
+                    'mean': sum(values) / len(values),
+                    'count': len(values)
+                }
+            
+            stats = {
+                'wwv': {
+                    'count': len(by_station['WWV']),
+                    'snr_db': calc_stats([m.get('snr_db') for m in by_station['WWV']]),
+                    's4': calc_stats([m.get('scintillation_index') for m in by_station['WWV']]),
+                    'toa_offset_ms': calc_stats([m.get('noise_toa_offset_ms') for m in by_station['WWV']])
+                },
+                'wwvh': {
+                    'count': len(by_station['WWVH']),
+                    'snr_db': calc_stats([m.get('snr_db') for m in by_station['WWVH']]),
+                    's4': calc_stats([m.get('scintillation_index') for m in by_station['WWVH']]),
+                    'toa_offset_ms': calc_stats([m.get('noise_toa_offset_ms') for m in by_station['WWVH']])
+                }
+            }
+            
+            return self._convert_to_native({
+                'date': start.strftime('%Y-%m-%d'),
+                'by_station': by_station,
+                'by_frequency': by_frequency,
+                'wwv_wwvh_pairs': wwv_wwvh_pairs,
+                'frequencies': frequencies,
+                'stats': stats,
+                'total_measurements': len(measurements)
+            })
+            
+        except Exception as e:
+            logger.error(f"Error getting daily comparison: {e}")
+            return {'error': str(e)}

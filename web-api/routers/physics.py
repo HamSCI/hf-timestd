@@ -146,15 +146,41 @@ async def get_channel_summary():
 async def get_channel_history(
     start: str = Query("-24h", description="Start time"),
     end: str = Query("now", description="End time"),
-    frequency_mhz: Optional[float] = Query(None, description="Frequency filter")
+    frequency_mhz: Optional[float] = Query(None, description="Frequency filter"),
+    station: Optional[str] = Query(None, description="Station filter (WWV or WWVH)")
 ):
-    """Get test signal history."""
+    """Get test signal history with full metrics."""
     try:
         start_dt = parse_time_param(start)
         end_dt = parse_time_param(end)
         
         service = TestSignalService(data_root=config.data_root)
-        return service.get_history(start=start_dt, end=end_dt, frequency_mhz=frequency_mhz)
+        return service.get_history(start=start_dt, end=end_dt, frequency_mhz=frequency_mhz, station=station)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/channels/daily")
+async def get_channel_daily_comparison(
+    date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format (defaults to today)")
+):
+    """
+    Get test signal data organized for daily comparison.
+    
+    Returns structured data for:
+    - WWV vs WWVH comparison at same frequencies
+    - Same station across different frequencies  
+    - Evolution over the UTC day
+    """
+    try:
+        date_dt = None
+        if date:
+            date_dt = datetime.strptime(date, '%Y-%m-%d')
+        
+        service = TestSignalService(data_root=config.data_root)
+        return service.get_daily_comparison(date=date_dt)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
