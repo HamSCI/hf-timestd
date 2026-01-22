@@ -523,11 +523,19 @@ if [[ "$MODE" == "production" ]]; then
                 check_pass "TSL sources reachable (TSL1: $TSL1_REACH/$TSL1_DEC polls, TSL2: $TSL2_REACH/$TSL2_DEC polls)"
                 
                 # Show which source chrony is using
-                SELECTED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^\^[\*\+]" | awk '{print $3}')
+                # Note: SHM/refclock sources use '#' prefix, NTP servers use '^'
+                # '*' = selected, '+' = combined, '?' = unreachable/evaluating
+                SELECTED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^#\*" | awk '{print $2}')
                 if [[ -n "$SELECTED" ]]; then
                     check_pass "Chrony using HF-timestd source: $SELECTED"
                 else
-                    check_warn "Chrony not yet using HF-timestd (sources still being evaluated)"
+                    # Check if any TSL source is combined (+)
+                    COMBINED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^#\+" | awk '{print $2}')
+                    if [[ -n "$COMBINED" ]]; then
+                        check_pass "Chrony combining HF-timestd source: $COMBINED"
+                    else
+                        check_warn "Chrony not yet using HF-timestd (sources still being evaluated)"
+                    fi
                 fi
             fi
         else
