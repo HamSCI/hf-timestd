@@ -62,6 +62,7 @@ from .wwvh_discrimination import WWVHDiscriminator
 from .bpm_discriminator import BPMDiscriminator, BPMTimingMode, BPMDiscriminationResult
 from .physics_propagation import PhysicsPropagationModel, PropagationResult, PropagationModelTier
 from .wwv_test_signal import WWVTestSignalDetector
+from .metrology_service import MetrologyService, MetrologyEngine
 # Phase2AnalyticsService archived 2026-01-22 - replaced by MetrologyService
 
 # Supporting components
@@ -127,13 +128,8 @@ from .primary_time_standard import (
 
 # Pipeline
 # Note: PipelineRecorder archived 2026-01-16 (used deprecated RTPReceiver)
+# Note: PipelineOrchestrator archived 2026-01-22 (replaced by MetrologyService)
 # Use StreamRecorderV2 (stream_recorder_v2.py) with ka9q.RadiodStream instead
-from .pipeline_orchestrator import (
-    PipelineOrchestrator,
-    PipelineConfig,
-    PipelineState,
-    create_pipeline
-)
 
 # Transmission Time Solver (UTC back-calculation)
 from .transmission_time_solver import (
@@ -148,15 +144,8 @@ from .transmission_time_solver import (
     grid_to_latlon
 )
 
-# Phase 2: Temporal Analysis Engine (Refined temporal analysis order)
-from .phase2_temporal_engine import (
-    Phase2TemporalEngine,
-    Phase2Result,
-    TimeSnapResult,
-    ChannelCharacterization,
-    TransmissionTimeSolution,
-    create_phase2_engine
-)
+# Phase 2: Temporal Analysis Engine
+# Note: Phase2TemporalEngine archived 2026-01-22 (replaced by MetrologyService)
 
 # GPSDO Monitoring
 from .gpsdo_monitor import (
@@ -261,6 +250,9 @@ __all__ = [
     "BPMDiscriminator",
     "BPMTimingMode",
     "BPMDiscriminationResult",
+    # Metrology Service
+    "MetrologyService",
+    "MetrologyEngine",
     # Physics Propagation Model
     "PhysicsPropagationModel",
     "PropagationResult",
@@ -277,11 +269,8 @@ __all__ = [
     "calculate_hot_minutes",
     "get_available_ram_bytes",
     # ClockOffsetEngine removed - redundant legacy code
-    "PipelineOrchestrator",
-    "PipelineConfig",
-    "PipelineState",
+    # PipelineOrchestrator archived 2026-01-22
     "BatchReprocessor",
-    "create_pipeline",
     # Transmission Time Solver
     "TransmissionTimeSolver",
     "MultiStationSolver",
@@ -291,13 +280,7 @@ __all__ = [
     "create_solver_from_grid",
     "create_multi_station_solver",
     "grid_to_latlon",
-    # Phase 2: Temporal Analysis Engine
-    "Phase2TemporalEngine",
-    "Phase2Result",
-    "TimeSnapResult",
-    "ChannelCharacterization",
-    "TransmissionTimeSolution",
-    "create_phase2_engine",
+    # Phase 2: Temporal Analysis Engine - archived 2026-01-22
     # GPSDO Monitoring
     "GPSDOMonitor",
     "AnchorState",
