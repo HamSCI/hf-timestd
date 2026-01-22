@@ -278,26 +278,8 @@ if [[ -d "$PHASE2_DIR" ]]; then
     fi
     
     # Note: CSV files no longer updated (HDF5-only as of 2026-01-02)
-    
-    # Check for other Phase 2 products
-    echo ""
-    echo "  Checking other Phase 2 products..."
-    
-    # BCD discrimination
-    BCD_FILES=$(find "$PHASE2_DIR" -path "*/bcd_discrimination/*.h5" -mmin -10 2>/dev/null | wc -l)
-    if [[ $BCD_FILES -gt 0 ]]; then
-        check_pass "BCD discrimination: $BCD_FILES recent HDF5 files"
-    else
-        check_warn "BCD discrimination: No recent HDF5 files"
-    fi
-    
-    # Tone detections
-    TONE_FILES=$(find "$PHASE2_DIR" -path "*/tone_detections/*.h5" -mmin -10 2>/dev/null | wc -l)
-    if [[ $TONE_FILES -gt 0 ]]; then
-        check_pass "Tone detections: $TONE_FILES recent HDF5 files"
-    else
-        check_warn "Tone detections: No recent HDF5 files"
-    fi
+    # Note: BCD discrimination and tone_detections HDF5 are legacy products from phase2_analytics_service
+    #       The current metrology_service writes L1 metrology measurements directly.
     
 else
     check_fail "Phase 2 directory not found: $PHASE2_DIR"
