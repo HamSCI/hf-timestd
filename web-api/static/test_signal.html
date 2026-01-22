@@ -214,6 +214,14 @@
             color: #64748b;
             margin-top: 4px;
         }
+        
+        .view-content {
+            display: none;
+        }
+        
+        .view-content.active {
+            display: block;
+        }
     </style>
 </head>
 
@@ -509,9 +517,10 @@
                 if (view === 'evolution') {
                     setToday();
                 } else if (view === 'comparison') {
-                    loadComparisonData();
+                    // Small delay to ensure container is visible before Plotly renders
+                    setTimeout(() => loadComparisonData(), 50);
                 } else if (view === 'frequency') {
-                    loadFrequencyData();
+                    setTimeout(() => loadFrequencyData(), 50);
                 }
             });
         });
@@ -807,6 +816,12 @@
         async function loadComparisonData() {
             try {
                 const data = await api.get('/physics/channels/daily');
+                console.log('Comparison data:', data);
+                
+                if (!data || data.error) {
+                    console.error('API error:', data?.error);
+                    return;
+                }
                 
                 // Update station stats
                 const wwv = data.stats?.wwv || {};
@@ -836,6 +851,12 @@
             
             // Group by frequency for bar chart
             const frequencies = data.frequencies || [];
+            
+            if (!frequencies.length) {
+                container.innerHTML = '<div style="padding: 40px; text-align: center; color: #64748b;">No frequency data available</div>';
+                return;
+            }
+            
             const wwvByFreq = {};
             const wwvhByFreq = {};
             
@@ -850,25 +871,28 @@
             });
 
             const wwvAvg = frequencies.map(f => {
-                const vals = wwvByFreq[f] || [];
+                const vals = (wwvByFreq[f] || []).filter(v => v !== null && v !== undefined);
                 return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
             });
             
             const wwvhAvg = frequencies.map(f => {
-                const vals = wwvhByFreq[f] || [];
+                const vals = (wwvhByFreq[f] || []).filter(v => v !== null && v !== undefined);
                 return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
             });
 
+            console.log('SNR Chart - frequencies:', frequencies, 'wwvAvg:', wwvAvg, 'wwvhAvg:', wwvhAvg);
+
+            const xLabels = frequencies.map(f => f + ' MHz');
             const traces = [
                 {
-                    x: frequencies.map(f => f + ' MHz'),
+                    x: xLabels,
                     y: wwvAvg,
                     name: 'WWV',
                     type: 'bar',
                     marker: { color: '#3b82f6' }
                 },
                 {
-                    x: frequencies.map(f => f + ' MHz'),
+                    x: xLabels,
                     y: wwvhAvg,
                     name: 'WWVH',
                     type: 'bar',
@@ -892,6 +916,12 @@
             const container = document.getElementById('chart-comparison-s4');
             
             const frequencies = data.frequencies || [];
+            
+            if (!frequencies.length) {
+                container.innerHTML = '<div style="padding: 40px; text-align: center; color: #64748b;">No frequency data available</div>';
+                return;
+            }
+            
             const wwvByFreq = {};
             const wwvhByFreq = {};
             
