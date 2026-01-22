@@ -132,6 +132,26 @@ class MetrologyService:
                 station_metadata=self.station_config
             )
             logger.info(f"CHU FSK writer initialized for {channel_name}")
+        
+        # Test Signal Writer (for WWV/WWVH channels - minutes 8 and 44)
+        self.test_signal_writer = None
+        if 'CHU' not in channel_name.upper():  # WWV/WWVH channels only
+            test_signal_output_dir = DataProductRegistry.get_data_dir(
+                channel_dir=self.output_dir,
+                product_level="L2",
+                product_name="test_signal",
+                create=True
+            )
+            self.test_signal_writer = DataProductWriter(
+                output_dir=test_signal_output_dir,
+                product_level="L2",
+                product_name="test_signal",
+                channel=self.channel_name,
+                version="v1",
+                processing_version="1.0.0",
+                station_metadata=self.station_config
+            )
+            logger.info(f"Test signal writer initialized for {channel_name}")
              
         logger.info(f"MetrologyService initialized for {channel_name}")
 
@@ -232,6 +252,11 @@ class MetrologyService:
                     except Exception as fsk_err:
                         logger.warning(f"Failed to write FSK data: {fsk_err}")
                 
+            # Write test signal for minutes 8 and 44 (WWV/WWVH channel sounding)
+            minute_number = (minute_boundary // 60) % 60
+            if minute_number in [8, 44] and self.test_signal_writer:
+                self._write_test_signal(minute_boundary, iq_samples, minute_number)
+                
             self.minutes_processed += 1
             self._write_status(minute_boundary, results)
             
@@ -250,6 +275,98 @@ class MetrologyService:
             self.writer.close()
         if self.fsk_writer:
             self.fsk_writer.close()
+        if self.test_signal_writer:
+            self.test_signal_writer.close()
+    
+    def _write_test_signal(self, minute_boundary: int, iq_samples: np.ndarray, minute_number: int):
+        """
+        Detect and write test signal for minutes 8 and 44.
+        
+        Minute 8: WWV test signal (WWVH silent)
+        Minute 44: WWVH test signal (WWV silent)
+        """
+        try:
+            logger.info(f"{self.channel_name}: Processing test signal for minute {minute_number}")
+            
+            # Detect test signal using the engine's discriminator
+            detection = self.engine.discriminator.test_signal_detector.detect(
+                iq_samples=iq_samples,
+                minute_number=minute_number,
+                sample_rate=self.engine.sample_rate
+            )
+            
+            # Determine station from schedule: minute 8 = WWV, minute 44 = WWVH
+            station = 'WWV' if minute_number == 8 else 'WWVH'
+            
+            conf = detection.confidence if detection.confidence is not None else 0.0
+            logger.info(
+                f"{self.channel_name}: Test signal detection: detected={detection.detected}, "
+                f"confidence={conf:.2f}, station={station}"
+            )
+            
+            # Build measurement record
+            timestamp_utc = datetime.fromtimestamp(minute_boundary, timezone.utc).isoformat().replace('+00:00', 'Z')
+            
+            # Determine quality flag
+            if not detection.detected:
+                quality_flag = 'MISSING'
+            elif detection.confidence and detection.confidence >= 0.8:
+                quality_flag = 'GOOD'
+            elif detection.confidence and detection.confidence >= 0.5:
+                quality_flag = 'MARGINAL'
+            else:
+                quality_flag = 'BAD'
+            
+            measurement = {
+                'timestamp_utc': timestamp_utc,
+                'minute_boundary_utc': minute_boundary,
+                'minute_number': minute_number,
+                'station': station if detection.detected else '',
+                'frequency_mhz': self.frequency_hz / 1e6,
+                'detected': bool(detection.detected),
+                'detection_confidence': detection.confidence if detection.confidence is not None else 0.0,
+                'snr_db': detection.snr_db,
+                'effective_snr_db': detection.effective_snr_db,
+                'multitone_score': detection.multitone_score,
+                'chirp_score': detection.chirp_score,
+                'burst_score': None,
+                'noise_correlation': detection.noise_correlation,
+                'toa_offset_ms': detection.toa_offset_ms,
+                'toa_source': detection.toa_source or '',
+                'burst_toa_offset_ms': detection.burst_toa_offset_ms,
+                'delay_spread_ms': detection.delay_spread_ms,
+                'coherence_time_sec': detection.coherence_time_sec,
+                'frequency_selectivity_db': detection.frequency_selectivity_db,
+                'tone_power_2khz_db': detection.tone_powers_db.get(2000) if detection.tone_powers_db else None,
+                'tone_power_3khz_db': detection.tone_powers_db.get(3000) if detection.tone_powers_db else None,
+                'tone_power_4khz_db': detection.tone_powers_db.get(4000) if detection.tone_powers_db else None,
+                'tone_power_5khz_db': detection.tone_powers_db.get(5000) if detection.tone_powers_db else None,
+                'fading_variance': detection.fading_variance,
+                'scintillation_index': detection.scintillation_index,
+                's4_2khz': detection.s4_by_frequency.get(2000) if detection.s4_by_frequency else None,
+                's4_3khz': detection.s4_by_frequency.get(3000) if detection.s4_by_frequency else None,
+                's4_4khz': detection.s4_by_frequency.get(4000) if detection.s4_by_frequency else None,
+                's4_5khz': detection.s4_by_frequency.get(5000) if detection.s4_by_frequency else None,
+                's4_frequency_slope': detection.s4_frequency_slope,
+                'noise_toa_offset_ms': detection.noise_toa_offset_ms,
+                'noise_correlation_peak': detection.noise_correlation_peak,
+                'anomaly_detected': bool(detection.anomaly_detected) if detection.anomaly_detected is not None else False,
+                'anomaly_type': detection.anomaly_type or 'none',
+                'anomaly_confidence': detection.anomaly_confidence,
+                'field_strength_db': detection.field_strength_db,
+                'field_strength_stability': detection.field_strength_stability,
+                'multipath_detected': bool(detection.multipath_detected) if detection.multipath_detected is not None else False,
+                'channel_quality': detection.channel_quality or '',
+                'quality_flag': quality_flag,
+                'processing_version': '1.0.0',
+                'processed_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            }
+            
+            self.test_signal_writer.write_measurement(measurement)
+            logger.info(f"{self.channel_name}: Wrote test signal to HDF5: detected={detection.detected}, station={station}")
+            
+        except Exception as e:
+            logger.error(f"{self.channel_name}: Failed to write test signal: {e}", exc_info=True)
 
     def _handle_signal(self, signum, frame):
         logger.info(f"Received signal {signum}")

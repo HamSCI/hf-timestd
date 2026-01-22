@@ -88,7 +88,7 @@
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">Measurement History</div>
-                    <div class="card-subtitle">Signal quality and scintillation over time</div>
+                    <div class="card-subtitle">Signal-to-noise ratio by station over time</div>
                 </div>
                 <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
                     <button class="time-range-btn active" data-range="-6h">Last 6 Hours</button>
@@ -334,6 +334,25 @@
         let currentRange = '-6h';
         let currentView = 'paths';
 
+        // S4 scintillation index color coding
+        // S4 < 0.3: weak (green), 0.3-0.6: moderate (yellow), > 0.6: strong (red)
+        function getS4Color(s4) {
+            if (s4 === null || s4 === undefined) return '#94a3b8';
+            if (s4 < 0.3) return '#10b981';  // Green - weak scintillation
+            if (s4 < 0.6) return '#f59e0b';  // Yellow - moderate
+            return '#ef4444';  // Red - strong scintillation
+        }
+
+        // S4 frequency slope color coding
+        // Positive slope = D-layer absorption (frequency-dependent)
+        // Near-zero = F-layer (frequency-independent)
+        function getS4SlopeColor(slope) {
+            if (slope === null || slope === undefined) return '#94a3b8';
+            if (Math.abs(slope) < 0.02) return '#10b981';  // Green - F-layer (stable)
+            if (slope > 0) return '#f59e0b';  // Yellow - D-layer absorption
+            return '#3b82f6';  // Blue - inverse (unusual)
+        }
+
         // ================================================================
         // VIEW TAB HANDLING
         // ================================================================
@@ -453,30 +472,32 @@
 
         async function loadPhysicsHistory(range = '-6h') {
             try {
-                // Get scintillation history which has actual measurement data
-                const data = await api.get('/physics/scintillation/history', { start: range, end: 'now' });
+                // Get propagation timeline which has actual timing measurements
+                const data = await api.get('/propagation/timeline', { start: range, end: 'now' });
 
-                if (!data.measurements || data.measurements.length === 0) {
+                if (!data.timestamps || data.timestamps.length === 0) {
                     document.getElementById('tec-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #94a3b8;">No measurement history available for this time range</div>';
                     return;
                 }
 
-                // Group by station
+                // Group by station, plotting SNR over time
                 const stations = {};
-                data.measurements.forEach(m => {
-                    const ts = m.timestamp;
-                    const station = m.station;
-                    const s4 = m.s4;
+                for (let i = 0; i < data.timestamps.length; i++) {
+                    const ts = data.timestamps[i];
+                    const station = data.stations[i];
+                    const snr = data.snr_db[i];
+                    const freq = data.frequencies[i];
                     
-                    if (station && ts) {
-                        if (!stations[station]) stations[station] = { x: [], y: [] };
+                    if (station && ts && snr !== null) {
+                        if (!stations[station]) stations[station] = { x: [], y: [], freq: [] };
                         stations[station].x.push(ts);
-                        stations[station].y.push(s4 !== null ? s4 : 0);
+                        stations[station].y.push(snr);
+                        stations[station].freq.push(freq);
                     }
-                });
+                }
 
                 if (Object.keys(stations).length === 0) {
-                    document.getElementById('tec-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #94a3b8;">No scintillation data available</div>';
+                    document.getElementById('tec-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #94a3b8;">No timing measurements available</div>';
                     return;
                 }
 
@@ -484,26 +505,31 @@
                 const traces = Object.entries(stations).map(([station, d]) => ({
                     x: d.x, y: d.y,
                     type: 'scatter', mode: 'markers',
-                    name: station, marker: { size: 5, color: colors[station] || '#94a3b8' }
+                    name: `${station} (${d.x.length})`,
+                    marker: { size: 4, color: colors[station] || '#94a3b8', opacity: 0.7 },
+                    hovertemplate: `<b>${station}</b><br>%{x}<br>SNR: %{y:.1f} dB<extra></extra>`
                 }));
 
                 const layout = {
                     xaxis: { title: 'Time (UTC)', gridcolor: '#334155', color: '#94a3b8' },
-                    yaxis: { title: 'S4 Scintillation Index', gridcolor: '#334155', color: '#94a3b8', range: [0, 1] },
+                    yaxis: { title: 'SNR (dB)', gridcolor: '#334155', color: '#94a3b8' },
                     plot_bgcolor: '#0f172a', paper_bgcolor: 'transparent',
                     font: { color: '#e0e0e0' }, margin: { t: 20, r: 20, b: 60, l: 60 },
                     legend: { orientation: 'h', y: 1.1 },
                     shapes: [
-                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 0.2, y1: 0.2, line: { color: '#84cc16', width: 1, dash: 'dot' } },
-                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 0.4, y1: 0.4, line: { color: '#f59e0b', width: 1, dash: 'dot' } },
-                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 0.6, y1: 0.6, line: { color: '#ef4444', width: 1, dash: 'dot' } }
+                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 10, y1: 10, line: { color: '#84cc16', width: 1, dash: 'dot' } },
+                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 20, y1: 20, line: { color: '#f59e0b', width: 1, dash: 'dot' } }
+                    ],
+                    annotations: [
+                        { x: 1.02, y: 10, xref: 'paper', yref: 'y', text: 'Min', showarrow: false, font: { size: 10, color: '#84cc16' } },
+                        { x: 1.02, y: 20, xref: 'paper', yref: 'y', text: 'Good', showarrow: false, font: { size: 10, color: '#f59e0b' } }
                     ]
                 };
 
                 Plotly.newPlot('tec-plot', traces, layout, { responsive: true });
             } catch (error) {
                 console.error("History load failed", error);
-                document.getElementById('tec-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #94a3b8;">Error loading history</div>';
+                document.getElementById('tec-plot').innerHTML = '<div style="padding: 40px; text-align: center; color: #94a3b8;">Error loading measurement history</div>';
             }
         }
 
@@ -555,6 +581,28 @@
                                         <div style="text-align: center;">
                                             <div style="font-size: 10px; color: #64748b;">Coherence</div>
                                             <div style="font-family: monospace; font-weight: 600;">${result.coherence_time_sec !== null ? formatNumber(result.coherence_time_sec, 1) + ' s' : '—'}</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 10px; color: #64748b;">S4 Index</div>
+                                            <div style="font-family: monospace; font-weight: 600; color: ${getS4Color(result.scintillation_index)};">
+                                                ${result.scintillation_index !== null ? formatNumber(result.scintillation_index, 2) : '—'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(148, 163, 184, 0.1);">
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 10px; color: #64748b;">ToA Offset</div>
+                                            <div style="font-family: monospace; font-weight: 600;">${result.noise_toa_offset_ms !== null ? formatNumber(result.noise_toa_offset_ms, 1) + ' ms' : '—'}</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 10px; color: #64748b;">Corr Peak</div>
+                                            <div style="font-family: monospace; font-weight: 600;">${result.noise_correlation_peak !== null ? (result.noise_correlation_peak * 100).toFixed(0) + '%' : '—'}</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 10px; color: #64748b;">S4 Slope</div>
+                                            <div style="font-family: monospace; font-weight: 600; color: ${getS4SlopeColor(result.s4_frequency_slope)};">
+                                                ${result.s4_frequency_slope !== null ? formatNumber(result.s4_frequency_slope, 3) : '—'}
+                                            </div>
                                         </div>
                                         <div style="text-align: center;">
                                             <div style="font-size: 10px; color: #64748b;">Multipath</div>

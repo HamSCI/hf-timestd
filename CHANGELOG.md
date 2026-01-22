@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.4.0] - 2026-01-22
+
+### Enhanced Test Signal Analysis
+
+**Major Enhancement:** Improved scintillation calculation and added high-precision timing extraction from WWV/WWVH test signals, based on ionospheric science standards and the wwv-signal-timing-analysis notebook methodology.
+
+#### Scintillation Improvements
+- **Fixed S4 clipping**: Removed artificial `np.clip(0, 1)` - S4 > 1.0 is valid for saturated scintillation and now logged as warning
+- **Added detrending**: S4 now calculated from detrended intensity, removing the expected -3dB/sec attenuation pattern to isolate ionospheric fading
+- **Multi-frequency S4**: Computes S4 at 2, 3, 4, 5 kHz tones separately for frequency-dependent analysis
+- **S4 frequency slope**: Linear regression of S4 vs frequency for D-layer (positive slope) vs F-layer (near-zero) discrimination
+
+#### High-Precision Timing
+- **White noise template correlation**: New `_detect_noise_template_correlation()` method provides highest-precision timing via matched filter
+- **Processing gain**: ~40dB from BT product (2s × 10kHz = 20,000)
+- **ToA offset**: Sub-millisecond timing extraction from deterministic white noise segments
+
+#### New Data Fields
+- `s4_by_frequency`: Per-frequency S4 values {2000: 0.3, 3000: 0.4, ...}
+- `s4_frequency_slope`: Slope for ionospheric layer discrimination
+- `noise_toa_offset_ms`: High-precision ToA from template correlation
+- `noise_correlation_peak`: Correlation coefficient (0-1)
+
+#### Schema & API Updates
+- Updated `l2_test_signal_v1.json` schema with 8 new fields
+- Updated `MetrologyService` to write new fields to HDF5
+- Updated `TestSignalService` API to return new fields
+
+#### UI Enhancement
+- Enhanced `physics.html` Channels tab with new metrics display
+- Color-coded S4 values: green (<0.3 weak), yellow (0.3-0.6 moderate), red (>0.6 strong)
+- S4 slope color: green (F-layer stable), yellow (D-layer absorption), blue (unusual)
+- Added ToA offset and correlation peak display
+
 ## [5.3.3] - 2026-01-13
 
 ### Repository Cleanup & Maintenance

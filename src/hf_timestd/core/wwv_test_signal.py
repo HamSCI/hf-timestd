@@ -94,9 +94,15 @@ class TestSignalDetection:
     
     # Fading and scintillation metrics
     fading_variance: Optional[float] = None  # Normalized variance of fading (detrended)
-    scintillation_index: Optional[float] = None  # S4 scintillation index
+    scintillation_index: Optional[float] = None  # S4 scintillation index (can exceed 1.0 for saturated scintillation)
+    s4_by_frequency: Optional[Dict[int, float]] = None  # Per-frequency S4: {2000: 0.3, 3000: 0.4, ...}
+    s4_frequency_slope: Optional[float] = None  # S4 vs frequency slope (positive = D-layer, near-zero = F-layer)
     field_strength_db: Optional[float] = None  # Overall field strength
     field_strength_stability: Optional[float] = None  # Stability metric (1/CV)
+    
+    # White noise template correlation timing (highest precision)
+    noise_toa_offset_ms: Optional[float] = None  # ToA from white noise template correlation
+    noise_correlation_peak: Optional[float] = None  # Peak correlation coefficient (0-1)
     
     # Noise segment analysis for transient interference detection
     noise1_score: float = 0.0  # Noise segment at 10-12s
@@ -507,6 +513,9 @@ class WWVTestSignalDetector:
         noise1_score, noise2_score, noise_coherence_diff = self._detect_both_noise_segments(audio_signal)
         noise_score = (noise1_score + noise2_score) / 2.0  # Average for overall detection
         
+        # White noise template correlation (highest precision timing)
+        noise_correlation_peak, noise_toa_offset_ms = self._detect_noise_template_correlation(audio_signal)
+        
         # Chirp matched filter detection
         chirp_score, chirp_toa_sec, delay_spread_ms = self._detect_chirp_matched(audio_signal)
         
@@ -548,12 +557,14 @@ class WWVTestSignalDetector:
         # Frequency Selectivity Score (FSS) - path signature
         fss_db, tone_powers = self._calculate_frequency_selectivity(audio_signal)
         
-        # Per-frequency time-series extraction (NEW - comprehensive analysis)
+        # Per-frequency time-series extraction (comprehensive analysis)
         tone_power_timeseries = {}
         fading_variance = None
         scintillation_index = None
+        s4_by_frequency = {}
+        s4_frequency_slope = None
         if detected:
-            tone_power_timeseries, fading_variance, scintillation_index = \
+            tone_power_timeseries, fading_variance, scintillation_index, s4_by_frequency, s4_frequency_slope = \
                 self._extract_per_frequency_timeseries(audio_signal)
         
         # Coherence time from multi-tone fading pattern
@@ -645,8 +656,12 @@ class WWVTestSignalDetector:
             tone_power_timeseries=tone_power_timeseries if tone_power_timeseries else None,
             fading_variance=fading_variance,
             scintillation_index=scintillation_index,
+            s4_by_frequency=s4_by_frequency if s4_by_frequency else None,
+            s4_frequency_slope=s4_frequency_slope,
             field_strength_db=field_strength_db,
             field_strength_stability=field_strength_stability,
+            noise_toa_offset_ms=noise_toa_offset_ms,
+            noise_correlation_peak=noise_correlation_peak,
             noise1_score=noise1_score,
             noise2_score=noise2_score,
             noise_coherence_diff=noise_coherence_diff,
@@ -934,6 +949,89 @@ class WWVTestSignalDetector:
                     f"flatness={spectral_flatness:.3f}, score={score:.3f}")
         
         return score, toa_sec
+    
+    def _detect_noise_template_correlation(self, audio_signal: np.ndarray) -> Tuple[float, Optional[float]]:
+        """
+        Detect white noise via template correlation for high-precision timing.
+        
+        The white noise segments (10-12s and 37-39s) are generated with a known seed,
+        making them deterministic and suitable for matched filter detection.
+        Cross-correlation provides sub-sample timing precision with ~40dB processing
+        gain (BT product = 2s × 10kHz = 20,000).
+        
+        Reference: wwv-signal-timing-analysis notebook methodology
+        
+        Returns:
+            (correlation_peak, toa_offset_ms) - peak correlation and timing offset
+        """
+        # Generate template with known seed (must match broadcast)
+        # WWV uses seed=42 for reproducibility
+        template = self.generator.generate_white_noise(2.0, seed=42)
+        
+        # High-pass filter to isolate white noise (per notebook: >95% Nyquist)
+        # This removes voice/tone content and focuses on wideband noise
+        nyquist = self.sample_rate / 2
+        Wn = 0.90 * nyquist  # 90% of Nyquist to be safe
+        
+        try:
+            b, a = signal.butter(4, Wn, 'high', fs=self.sample_rate)
+            template_filt = signal.filtfilt(b, a, template)
+            
+            # Search in first noise segment window (8-14s to allow for propagation delay)
+            search_start = int(8.0 * self.sample_rate)
+            search_end = int(14.0 * self.sample_rate)
+            
+            if search_end > len(audio_signal):
+                search_end = len(audio_signal)
+            
+            search_segment = audio_signal[search_start:search_end]
+            
+            if len(search_segment) < len(template):
+                return 0.0, None
+            
+            # Filter the search segment
+            search_filt = signal.filtfilt(b, a, search_segment)
+            
+            # Cross-correlation
+            Rxy = signal.correlate(search_filt, template_filt, mode='valid')
+            
+            # Normalize by template energy for correlation coefficient
+            template_energy = np.sum(template_filt**2)
+            
+            # Find peak
+            peak_idx = np.argmax(np.abs(Rxy))
+            peak_val = np.abs(Rxy[peak_idx])
+            
+            # Normalize to 0-1 range (correlation coefficient)
+            # Account for signal energy in the window
+            window_start = peak_idx
+            window_end = peak_idx + len(template_filt)
+            if window_end <= len(search_filt):
+                signal_window = search_filt[window_start:window_end]
+                signal_energy = np.sum(signal_window**2)
+                if signal_energy > 0 and template_energy > 0:
+                    correlation_coef = peak_val / np.sqrt(template_energy * signal_energy)
+                    correlation_coef = np.clip(correlation_coef, 0.0, 1.0)
+                else:
+                    correlation_coef = 0.0
+            else:
+                correlation_coef = 0.0
+            
+            # Calculate ToA offset from expected position
+            # Expected: noise starts at 10.0s, peak should be at search_start + peak_idx
+            actual_sample = search_start + peak_idx
+            expected_sample = int(self.NOISE1_START * self.sample_rate)
+            toa_offset_samples = actual_sample - expected_sample
+            toa_offset_ms = (toa_offset_samples / self.sample_rate) * 1000.0
+            
+            logger.debug(f"Noise template correlation: peak={correlation_coef:.3f}, "
+                        f"toa_offset={toa_offset_ms:+.2f}ms")
+            
+            return float(correlation_coef), float(toa_offset_ms) if correlation_coef > 0.1 else None
+            
+        except Exception as e:
+            logger.warning(f"Noise template correlation failed: {e}")
+            return 0.0, None
     
     def _detect_chirp_matched(self, audio_signal: np.ndarray) -> Tuple[float, Optional[float], Optional[float]]:
         """
@@ -1357,7 +1455,7 @@ class WWVTestSignalDetector:
         
         return noise1_score, noise2_score, coherence_diff
     
-    def _extract_per_frequency_timeseries(self, audio_signal: np.ndarray) -> Tuple[Dict[int, List[float]], float, float]:
+    def _extract_per_frequency_timeseries(self, audio_signal: np.ndarray) -> Tuple[Dict[int, List[float]], Optional[float], Optional[float], Dict[int, float], Optional[float]]:
         """
         Extract per-frequency power time-series from multi-tone segment
         
@@ -1414,30 +1512,59 @@ class WWVTestSignalDetector:
                 power_db = 10 * np.log10(peak_power + 1e-10)
                 tone_power_timeseries[target_freq].append(power_db)
         
-        # Calculate fading variance (use 2 kHz as reference, most reliable)
+        # Calculate fading variance and multi-frequency S4 scintillation
         fading_variance = None
         scintillation_index = None
+        s4_by_frequency = {}
+        s4_frequency_slope = None
         
-        if len(tone_power_timeseries[2000]) >= 5:
+        # Compute S4 for each frequency
+        for freq, powers in tone_power_timeseries.items():
+            if len(powers) >= 5:
+                powers_arr = np.array(powers)
+                
+                # Expected attenuation pattern: -3dB per second
+                expected_atten_db = np.array([-3.0 * i for i in range(len(powers_arr))])
+                
+                # Detrend: remove expected attenuation before computing S4
+                # This isolates ionospheric fading from designed signal structure
+                detrended_db = powers_arr - (powers_arr[0] + expected_atten_db)
+                
+                # Convert detrended dB to linear intensity for S4 calculation
+                # S4 = σ(I) / μ(I) where I is intensity (not dB)
+                intensity = 10**(detrended_db / 10)
+                
+                if np.mean(intensity) > 0:
+                    s4 = float(np.std(intensity) / np.mean(intensity))
+                    s4_by_frequency[freq] = s4
+                    
+                    # Log warning for strong scintillation (S4 > 1.0 is valid)
+                    if s4 > 1.0:
+                        logger.warning(f"Strong scintillation at {freq}Hz: S4={s4:.2f}")
+        
+        # Use 2 kHz as primary S4 (most reliable, furthest from Nyquist)
+        if 2000 in s4_by_frequency:
+            scintillation_index = s4_by_frequency[2000]
+        
+        # Calculate S4 frequency slope (D-layer vs F-layer discrimination)
+        # D-layer absorption is frequency-dependent, F-layer is not
+        if len(s4_by_frequency) >= 3:
+            freqs_khz = np.array(sorted(s4_by_frequency.keys())) / 1000.0
+            s4_values = np.array([s4_by_frequency[int(f*1000)] for f in freqs_khz])
+            
+            # Linear regression: S4 = slope * freq + intercept
+            if len(freqs_khz) > 1:
+                slope, _ = np.polyfit(freqs_khz, s4_values, 1)
+                s4_frequency_slope = float(slope)
+        
+        # Fading variance from 2 kHz (for backward compatibility)
+        if len(tone_power_timeseries.get(2000, [])) >= 5:
             powers_2k = np.array(tone_power_timeseries[2000])
-            
-            # Expected attenuation pattern: -3dB per second
             expected_atten_db = np.array([-3.0 * i for i in range(len(powers_2k))])
-            
-            # Detrend by expected pattern
             detrended = powers_2k - (powers_2k[0] + expected_atten_db)
-            
-            # Fading variance (normalized)
             fading_variance = float(np.var(detrended))
-            
-            # S4 scintillation index: std(I) / mean(I) where I is intensity
-            # Convert from dB to linear intensity
-            intensity = 10**(powers_2k / 10)
-            if np.mean(intensity) > 0:
-                scintillation_index = float(np.std(intensity) / np.mean(intensity))
-                scintillation_index = np.clip(scintillation_index, 0.0, 1.0)
         
-        return tone_power_timeseries, fading_variance, scintillation_index
+        return tone_power_timeseries, fading_variance, scintillation_index, s4_by_frequency, s4_frequency_slope
     
     def _detect_anomalies(
         self, 

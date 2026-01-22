@@ -256,9 +256,64 @@
             "type": "float",
             "required": false,
             "allow_empty": true,
-            "description": "S4 scintillation index from amplitude fluctuations",
-            "units": "dimensionless",
-            "valid_range": [0, 1]
+            "description": "S4 scintillation index from amplitude fluctuations (can exceed 1.0 for saturated scintillation)",
+            "units": "dimensionless"
+        },
+        {
+            "name": "s4_2khz",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "S4 scintillation index at 2 kHz tone",
+            "units": "dimensionless"
+        },
+        {
+            "name": "s4_3khz",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "S4 scintillation index at 3 kHz tone",
+            "units": "dimensionless"
+        },
+        {
+            "name": "s4_4khz",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "S4 scintillation index at 4 kHz tone",
+            "units": "dimensionless"
+        },
+        {
+            "name": "s4_5khz",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "S4 scintillation index at 5 kHz tone",
+            "units": "dimensionless"
+        },
+        {
+            "name": "s4_frequency_slope",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "S4 vs frequency slope (positive = D-layer absorption, near-zero = F-layer)",
+            "units": "per_kHz"
+        },
+        {
+            "name": "noise_toa_offset_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Time-of-arrival offset from white noise template correlation (highest precision)",
+            "units": "ms"
+        },
+        {
+            "name": "noise_correlation_peak",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "valid_range": [0, 1],
+            "description": "Peak correlation coefficient from white noise template matching"
         },
         {
             "name": "noise1_score",
