@@ -294,7 +294,7 @@ class TestSignalService:
         - Evolution over the UTC day
         
         Args:
-            date: Date to analyze (defaults to today)
+            date: Date to analyze (defaults to today, falls back to most recent data)
             
         Returns:
             Structured comparison data
@@ -309,6 +309,19 @@ class TestSignalService:
             
             history = self.get_history(start=start, end=end)
             measurements = history.get('measurements', [])
+            
+            # If no data for requested date, try to find most recent data (up to 14 days back)
+            if not measurements and date.date() == datetime.utcnow().date():
+                for days_back in range(1, 15):
+                    fallback_date = datetime.utcnow() - timedelta(days=days_back)
+                    start = datetime(fallback_date.year, fallback_date.month, fallback_date.day, 0, 0, 0)
+                    end = start + timedelta(days=1)
+                    history = self.get_history(start=start, end=end)
+                    measurements = history.get('measurements', [])
+                    if measurements:
+                        date = fallback_date
+                        logger.info(f"No data for today, using {date.date()} ({len(measurements)} measurements)")
+                        break
             
             # Organize by station
             by_station = {'WWV': [], 'WWVH': []}
