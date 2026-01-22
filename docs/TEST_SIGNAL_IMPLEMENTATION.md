@@ -6,7 +6,163 @@ Completed implementation of test signal detection and visualization for WWV/WWVH
 - **Minute :08** - WWV (Fort Collins, CO)
 - **Minute :44** - WWVH (Kauai, HI)
 
-## Components Implemented
+## Current Architecture (v5.4.0)
+
+The test signal pipeline now uses HDF5 data products with enhanced scintillation and timing analysis:
+
+### Data Flow
+```
+IQ Samples → MetrologyService → WWVTestSignalDetector
+                                        ↓
+                              TestSignalDetection dataclass
+                                        ↓
+                              DataProductWriter (HDF5 L2)
+                                        ↓
+              /var/lib/timestd/phase2/{CHANNEL}/L2/test_signal/
+                                        ↓
+                              TestSignalService API
+                                        ↓
+                              physics.html Channels tab
+```
+
+### Key Components
+
+| Component | Location | Responsibility |
+|-----------|----------|----------------|
+| `WWVTestSignalDetector` | `core/wwv_test_signal.py` | Detection, timing, scintillation |
+| `MetrologyService` | `core/metrology_service.py` | Triggers detection, writes HDF5 |
+| `TestSignalService` | `web-api/services/test_signal_service.py` | API for test signal data |
+| `physics.html` | `web-api/static/physics.html` | Channels tab visualization |
+
+### HDF5 Schema
+
+Schema: `l2_test_signal_v1.json`
+
+Output: `/var/lib/timestd/phase2/{CHANNEL}/L2/test_signal/test_signal_YYYYMMDD.h5`
+
+## Scintillation Analysis (v5.4.0)
+
+### S4 Scintillation Index
+
+The S4 index measures amplitude scintillation: `S4 = σ(I) / μ(I)`
+
+**Implementation** (`_extract_per_frequency_timeseries`):
+```python
+# Detrend: remove expected -3dB/sec attenuation
+expected_atten_db = np.array([-3.0 * i for i in range(len(powers_arr))])
+detrended_db = powers_arr - (powers_arr[0] + expected_atten_db)
+
+# Convert to linear intensity for S4
+intensity = 10**(detrended_db / 10)
+s4 = float(np.std(intensity) / np.mean(intensity))
+```
+
+**Key improvements (v5.4.0):**
+- **No artificial clipping**: S4 > 1.0 is valid for saturated scintillation
+- **Detrending**: Removes designed signal attenuation to isolate ionospheric fading
+- **Multi-frequency**: S4 computed at 2, 3, 4, 5 kHz separately
+
+### S4 Frequency Slope
+
+Discriminates D-layer vs F-layer propagation:
+- **Positive slope**: D-layer absorption (frequency-dependent)
+- **Near-zero slope**: F-layer (frequency-independent)
+
+```python
+# Linear regression: S4 = slope * freq + intercept
+slope, _ = np.polyfit(freqs_khz, s4_values, 1)
+s4_frequency_slope = float(slope)
+```
+
+## High-Precision Timing (v5.4.0)
+
+### White Noise Template Correlation
+
+The white noise segments (10-12s and 37-39s) are deterministic (known seed), enabling matched filter timing extraction with ~40dB processing gain.
+
+**Implementation** (`_detect_noise_template_correlation`):
+```python
+# Generate template with known seed
+template = self.generator.generate_white_noise(2.0, seed=42)
+
+# High-pass filter to isolate wideband noise
+b, a = signal.butter(4, Wn, 'high', fs=self.sample_rate)
+template_filt = signal.filtfilt(b, a, template)
+search_filt = signal.filtfilt(b, a, search_segment)
+
+# Cross-correlation for ToA
+Rxy = signal.correlate(search_filt, template_filt, mode='valid')
+peak_idx = np.argmax(np.abs(Rxy))
+toa_offset_ms = (actual_sample - expected_sample) / sample_rate * 1000.0
+```
+
+**Timing sources (priority order):**
+1. **Burst** (single-cycle pulses): Highest time resolution
+2. **Chirp** (matched filter): High BT product (~5000)
+3. **Noise** (template correlation): Highest processing gain (~40dB)
+4. **Multitone** (onset detection): Coarse timing
+
+## Data Fields
+
+### TestSignalDetection Dataclass
+
+```python
+@dataclass
+class TestSignalDetection:
+    detected: bool
+    confidence: float  # 0.0 to 1.0
+    station: Optional[str]  # 'WWV' or 'WWVH'
+    minute_number: int
+    
+    # Detection scores
+    multitone_score: float
+    chirp_score: float
+    noise_correlation: float
+    
+    # Timing
+    toa_offset_ms: Optional[float]
+    toa_source: Optional[str]  # 'burst', 'chirp', 'multitone', 'noise'
+    burst_toa_offset_ms: Optional[float]
+    noise_toa_offset_ms: Optional[float]  # v5.4.0
+    noise_correlation_peak: Optional[float]  # v5.4.0
+    
+    # Channel characterization
+    snr_db: Optional[float]
+    effective_snr_db: Optional[float]
+    delay_spread_ms: Optional[float]
+    coherence_time_sec: Optional[float]
+    frequency_selectivity_db: Optional[float]
+    
+    # Scintillation (v5.4.0 enhanced)
+    scintillation_index: Optional[float]  # S4, can exceed 1.0
+    s4_by_frequency: Optional[Dict[int, float]]  # {2000: 0.3, ...}
+    s4_frequency_slope: Optional[float]  # D-layer vs F-layer
+    fading_variance: Optional[float]
+    
+    # Anomaly detection
+    anomaly_detected: bool
+    anomaly_type: Optional[str]
+    channel_quality: Optional[str]  # 'excellent', 'good', 'fair', 'poor'
+```
+
+## Web UI Display
+
+### physics.html Channels Tab
+
+Displays per-frequency test signal results with:
+
+| Metric | Description | Color Coding |
+|--------|-------------|--------------|
+| SNR | Signal-to-noise ratio | — |
+| Delay Spread | Multipath delay | — |
+| Coherence | Channel coherence time | — |
+| S4 Index | Scintillation index | Green <0.3, Yellow 0.3-0.6, Red >0.6 |
+| ToA Offset | Timing from noise correlation | — |
+| Corr Peak | Correlation coefficient | — |
+| S4 Slope | Frequency dependence | Green (F-layer), Yellow (D-layer) |
+| Multipath | Multipath detected | Green NO, Red YES |
+
+## Legacy Components
 
 ### 1. CSV Writer Infrastructure (`discrimination_csv_writers.py`)
 
@@ -250,13 +406,14 @@ tail -f /tmp/grape-test/logs/analytics-wwv10.log | grep -i "test signal"
 
 ## Deployment Status
 
-✅ **Code Deployed** - All changes committed  
-✅ **Services Restarted** - Analytics and Web-UI running  
-✅ **Directories Created** - `/tmp/grape-test/analytics/*/test_signal/`  
-⏳ **Awaiting Data** - Next test signals at :08 and :44  
+✅ **Code Deployed** - All changes committed (v5.4.0)  
+✅ **Services Restarted** - MetrologyService and Web-API running  
+✅ **HDF5 Output** - `/var/lib/timestd/phase2/{CHANNEL}/L2/test_signal/`  
+✅ **Web UI** - physics.html Channels tab displays test signal data  
 
 ---
 
-**Implementation Date:** 2024-11-26  
+**Initial Implementation:** 2024-11-26  
+**v5.4.0 Enhancement:** 2026-01-22  
 **Status:** Complete and operational  
-**Next Test Signal:** Minute :44 (WWVH) at 04:44 UTC
+**Test Signal Schedule:** Minute :08 (WWV), Minute :44 (WWVH)
