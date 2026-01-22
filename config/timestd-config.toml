@@ -13,6 +13,8 @@ longitude = -92.127974
 [ka9q]
 status_address = "bee1-status.local"
 auto_create_channels = true
+# Data source mode: "radiod" (single antenna, 9 channels) or "phase-engine" (beamformed, 17 channels)
+source = "radiod"
 
 [recorder]
 mode = "production"

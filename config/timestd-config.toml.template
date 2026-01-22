@@ -17,6 +17,8 @@ longitude = 0.0                         # Your longitude in decimal degrees (REQ
 # Find this in your radiod config file or use: avahi-browse -rt _ka9q-ctl._udp
 status_address = "<YOUR_RADIOD_STATUS>"  # e.g., "hf-status.local" or "239.x.x.x"
 auto_create_channels = true
+# Data source mode: "radiod" (single antenna, 9 channels) or "phase-engine" (beamformed, 17 channels)
+source = "radiod"
 
 [recorder]
 # Mode: "test" (uses /tmp) or "production" (uses /var/lib/timestd)

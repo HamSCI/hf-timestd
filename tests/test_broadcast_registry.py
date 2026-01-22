@@ -254,6 +254,28 @@ class TestConfigIntegration:
         # Should use defaults
         registry = create_registry_from_config(config)
         assert registry.receiver.callsign == 'UNKNOWN'
+    
+    def test_create_registry_with_source_mode(self):
+        """Test creating registry with source mode from config."""
+        config = {
+            'station': {'callsign': 'TEST', 'latitude': 40.0, 'longitude': -100.0},
+            'ka9q': {'source': 'phase-engine'}
+        }
+        
+        registry = create_registry_from_config(config)
+        assert registry.source_mode == SourceMode.PHASE_ENGINE
+        assert registry.n_channels == 17
+    
+    def test_create_registry_invalid_source_mode(self):
+        """Test creating registry with invalid source mode defaults to radiod."""
+        config = {
+            'station': {'callsign': 'TEST', 'latitude': 40.0, 'longitude': -100.0},
+            'ka9q': {'source': 'invalid-mode'}
+        }
+        
+        registry = create_registry_from_config(config)
+        assert registry.source_mode == SourceMode.RADIOD
+        assert registry.n_channels == 9
 
 
 class TestDefaultStations:
