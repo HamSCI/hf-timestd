@@ -3,40 +3,40 @@
 This package provides core components for recording and analyzing
 WWV/WWVH/CHU time station signals for precise timing measurements.
 
-Architecture:
-=============
-Two-Phase Robust Time-Aligned Data Pipeline:
+Architecture (v5.4.0):
+======================
+Six-service systemd pipeline:
 
-Phase 1: Immutable raw_buffer (20 kHz IQ binary)
-- Stores raw data with system time only (no UTC corrections)
-- Fixed-duration file splitting (1 hour) - NOT event-based
-- Lossless compression (Shuffle + ZSTD/gzip)
-- NEVER modified based on subsequent analysis
-- Key: BinaryArchiveWriter, CoreRecorder
+1. CoreRecorder (timestd-core-recorder)
+   - Consumes RTP multicast from ka9q-radio
+   - Writes raw IQ to /var/lib/timestd/raw_buffer/
+   - Key: CoreRecorderV2, BinaryArchiveWriter
 
-Phase 2: Analytical Engine (Clock Offset Series)
-- Reads from Phase 1 raw_buffer
-- Produces D_clock = t_system - t_UTC
-- Uses tone detection, discrimination, propagation modeling
-- Output: Separate versionable CSV/JSON files
-- Key: Phase2AnalyticsService, Phase2TemporalEngine
+2. MetrologyService (timestd-metrology)
+   - Reads raw_buffer, produces L1 metrology measurements
+   - Tone detection, discrimination, test signal analysis
+   - Output: /var/lib/timestd/phase2/{CHANNEL}/L1/
+   - Key: MetrologyService, MetrologyEngine
 
-Note: hf-timestd does not use DigitalRF or decimation.
+3. L2CalibrationService (timestd-l2-calibration)
+   - Converts L1 metrology to L2 timing measurements
+   - Applies propagation corrections
+   - Output: /var/lib/timestd/phase2/{CHANNEL}/L2/
 
-Example:
-    from hf_timestd.core import create_pipeline
-    
-    orchestrator = create_pipeline(
-        data_dir=Path('/data/timestd'),
-        channel_name='WWV_10MHz',
-        frequency_hz=10e6,
-        receiver_grid='EM38ww',
-        station_config={'callsign': 'W3PM', 'grid_square': 'EM38ww'}
-    )
-    orchestrator.start()
-    
-    # Feed RTP data
-    orchestrator.process_samples(iq_samples, rtp_timestamp)
+4. FusionService (timestd-fusion)
+   - Multi-broadcast weighted fusion
+   - Kalman filtering, Chrony SHM feed
+   - Output: /var/lib/timestd/phase2/fusion/
+
+5. PhysicsService (timestd-physics)
+   - Ionospheric modeling, TEC estimation
+   - Output: /var/lib/timestd/phase2/{CHANNEL}/L3/
+
+6. WebAPI (timestd-web-api)
+   - REST API and web UI
+   - Reads HDF5 data products via SWMR
+
+Note: Phase2AnalyticsService and PipelineOrchestrator archived 2026-01-22.
 """
 
 # RTP infrastructure
@@ -62,7 +62,7 @@ from .wwvh_discrimination import WWVHDiscriminator
 from .bpm_discriminator import BPMDiscriminator, BPMTimingMode, BPMDiscriminationResult
 from .physics_propagation import PhysicsPropagationModel, PropagationResult, PropagationModelTier
 from .wwv_test_signal import WWVTestSignalDetector
-from .phase2_analytics_service import Phase2AnalyticsService
+# Phase2AnalyticsService archived 2026-01-22 - replaced by MetrologyService
 
 # Supporting components
 from .wwv_geographic_predictor import WWVGeographicPredictor
