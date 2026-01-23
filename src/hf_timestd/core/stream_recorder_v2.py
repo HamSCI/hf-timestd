@@ -277,29 +277,22 @@ class StreamRecorderV2:
         self._health_check_interval = 5.0  # Check every 5 seconds (fast detection)
         self._silence_threshold = 10.0  # Recreate if silent for 10 seconds
         
-        # Initialize pipeline orchestrator for Phase 1/2/3
-        from .pipeline_orchestrator import PipelineOrchestrator, PipelineConfig
+        # Initialize BinaryArchiveWriter for Phase 1 raw IQ storage
+        # Phase 2/3 are handled by separate systemd services (6-service architecture)
+        from .binary_archive_writer import BinaryArchiveWriter, BinaryArchiveConfig
         
-        pipeline_config = PipelineConfig(
-            data_dir=config.output_dir,
+        archive_config = BinaryArchiveConfig(
+            output_dir=config.output_dir,
             channel_name=config.description,
             frequency_hz=config.frequency_hz,
             sample_rate=config.sample_rate,
-            receiver_grid=config.receiver_grid,
             station_config=config.station_config,
-            raw_buffer_compression=config.raw_buffer_compression,
-            raw_buffer_file_duration_sec=config.raw_buffer_file_duration_sec,
-            analysis_latency_sec=config.analysis_latency_sec,
-            output_sample_rate=config.output_sample_rate,
-            streaming_latency_minutes=config.streaming_latency_minutes,
-
             compression=config.compression,
             compression_level=config.compression_level,
             use_tiered_storage=config.tiered_storage,
-            use_digital_rf=config.use_digital_rf,
         )
         
-        self.orchestrator = PipelineOrchestrator(pipeline_config)
+        self.archive_writer = BinaryArchiveWriter(archive_config)
         
         # Statistics
         self.samples_received = 0
@@ -325,8 +318,7 @@ class StreamRecorderV2:
             self._running = True
         
         try:
-            # Start the pipeline orchestrator
-            self.orchestrator.start()
+            # BinaryArchiveWriter doesn't need explicit start - it's ready on init
             
             # Create channel and start stream
             self._create_channel()
@@ -481,8 +473,8 @@ class StreamRecorderV2:
                 
                 self.stream = None
             
-            # Stop the orchestrator (flushes all phases)
-            self.orchestrator.stop()
+            # Close the archive writer (flushes pending data)
+            self.archive_writer.close()
             
         except Exception as e:
             logger.error(f"{self.config.description}: Error during stop: {e}")
@@ -554,9 +546,8 @@ class StreamRecorderV2:
             if quality.batch_gaps:
                 batch_gap_samples = sum(gap.samples_filled for gap in quality.batch_gaps)
             
-            # Feed to pipeline orchestrator
-            # This writes to Phase 1 and queues for Phase 2/3
-            self.orchestrator.process_samples(
+            # Write to Phase 1 archive (Phase 2/3 handled by separate services)
+            self.archive_writer.write_samples(
                 samples=samples,
                 rtp_timestamp=quality.last_rtp_timestamp,
                 system_time=system_time,
@@ -612,7 +603,7 @@ class StreamRecorderV2:
     def get_stats(self) -> Dict[str, Any]:
         """Get current statistics."""
         with self._lock:
-            pipeline_stats = self.orchestrator.get_stats()
+            archive_stats = self.archive_writer.get_stats()
             
             uptime = 0.0
             if self.session_start_time:
@@ -625,10 +616,9 @@ class StreamRecorderV2:
                 'batches_received': self.batches_received,
                 'uptime_seconds': uptime,
                 'last_sample_time': self.last_sample_time,
-                # Pipeline phase stats
-                'phase1_samples': pipeline_stats.get('samples_archived', 0),
-                'phase2_minutes': pipeline_stats.get('minutes_analyzed', 0),
-                'minutes_written': pipeline_stats.get('minutes_written', 0),
+                # Archive stats
+                'phase1_samples': archive_stats.get('samples_written', 0),
+                'minutes_written': archive_stats.get('minutes_written', 0),
             }
             
             # Add quality metrics if available
