@@ -674,8 +674,8 @@ EOF
     sudo chown timestd:timestd /var/lib/timestd/ionex
     
     # Run initial IONEX download (yesterday's data)
-    if [[ -f "$INSTALL_DIR/scripts/download_ionex_daily.sh" ]]; then
-        sudo -u timestd "$INSTALL_DIR/scripts/download_ionex_daily.sh" 2>&1 | head -20 || true
+    if [[ -f "$PROJECT_DIR/scripts/download_ionex_daily.sh" ]]; then
+        sudo -u timestd "$PROJECT_DIR/scripts/download_ionex_daily.sh" 2>&1 | head -20 || true
         if ls /var/lib/timestd/ionex/*.gz 2>/dev/null | head -1 > /dev/null; then
             log_info "  ✅ Initial IONEX data downloaded"
         else
@@ -683,7 +683,7 @@ EOF
             log_info "     See: https://cddis.nasa.gov/Data_and_Derived_Products/CreateNetrcFile.html"
         fi
     else
-        log_warn "  ⚠️  IONEX download script not found at $INSTALL_DIR/scripts/download_ionex_daily.sh"
+        log_warn "  ⚠️  IONEX download script not found at $PROJECT_DIR/scripts/download_ionex_daily.sh"
     fi
     
     # =============================================================================
