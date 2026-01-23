@@ -25,6 +25,35 @@ logger = logging.getLogger(__name__)
 class TestSignalService:
     """Service for accessing test signal analysis data."""
     
+    # Valid broadcast frequencies for each station (MHz)
+    # WWV broadcasts on: 2.5, 5, 10, 15, 20, 25 MHz
+    # WWVH broadcasts on: 2.5, 5, 10, 15 MHz (does NOT broadcast on 20 or 25 MHz)
+    VALID_STATION_FREQUENCIES = {
+        'WWV': [2.5, 5.0, 10.0, 15.0, 20.0, 25.0],
+        'WWVH': [2.5, 5.0, 10.0, 15.0],  # No 20 or 25 MHz!
+    }
+    
+    def _is_valid_measurement(self, measurement: Dict[str, Any]) -> bool:
+        """
+        Check if measurement has a valid station/frequency combination.
+        
+        Filters out spurious detections like WWVH on 20/25 MHz which are
+        impossible since WWVH does not broadcast on those frequencies.
+        """
+        station = measurement.get('station')
+        freq_mhz = measurement.get('frequency_mhz')
+        
+        if station is None or freq_mhz is None:
+            return False
+        
+        valid_freqs = self.VALID_STATION_FREQUENCIES.get(station)
+        if valid_freqs is None:
+            # Unknown station, allow it through
+            return True
+        
+        # Use tolerance-based comparison (handles int vs float mismatch)
+        return any(abs(freq_mhz - vf) < 0.1 for vf in valid_freqs)
+    
     def __init__(self, data_root: Path):
         self.data_root = Path(data_root)
         self.phase2_dir = self.data_root / 'phase2'
@@ -104,7 +133,7 @@ class TestSignalService:
                     
                     for m in measurements:
                         if m.get('detected'):
-                            results.append({
+                            record = {
                                 'timestamp': m.get('timestamp_utc'),
                                 'station': m.get('station'),
                                 'frequency_mhz': m.get('frequency_mhz'),
@@ -135,7 +164,11 @@ class TestSignalService:
                                 'tone_power_3khz_db': self._clean_value(m.get('tone_power_3khz_db')),
                                 'tone_power_4khz_db': self._clean_value(m.get('tone_power_4khz_db')),
                                 'tone_power_5khz_db': self._clean_value(m.get('tone_power_5khz_db'))
-                            })
+                            }
+                            # Filter out invalid station/frequency combinations
+                            # (e.g., WWVH on 20/25 MHz is impossible)
+                            if self._is_valid_measurement(record):
+                                results.append(record)
                             
                 except Exception as e:
                     logger.debug(f"Could not read test signal from {channel}: {e}")
@@ -241,7 +274,7 @@ class TestSignalService:
                         if station and m.get('station') != station:
                             continue
                         if m.get('detected'):
-                            results.append({
+                            record = {
                                 'timestamp': m.get('timestamp_utc'),
                                 'station': m.get('station'),
                                 'frequency_mhz': m.get('frequency_mhz'),
@@ -267,7 +300,10 @@ class TestSignalService:
                                 'detection_confidence': self._clean_value(m.get('detection_confidence')),
                                 'anomaly_detected': m.get('anomaly_detected'),
                                 'anomaly_type': m.get('anomaly_type')
-                            })
+                            }
+                            # Filter out invalid station/frequency combinations
+                            if self._is_valid_measurement(record):
+                                results.append(record)
                             
                 except Exception as e:
                     logger.debug(f"Could not read from {channel}: {e}")
