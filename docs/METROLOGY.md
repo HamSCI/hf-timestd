@@ -865,6 +865,8 @@ This section describes procedures for validating hf-timestd performance against 
 
 The dual Chrony feed architecture (TSL1 and TSL2) provides built-in validation of propagation corrections.
 
+<!-- LIVE: l1-l2-comparison -->
+
 **What TSL1 and TSL2 Represent:**
 
 | Feed | SHM | Data Source | Processing | Typical Uncertainty |
@@ -882,6 +884,8 @@ This difference reveals the **quality of propagation corrections**:
 - **Stable difference (~0.5-1 ms)**: Propagation model is working correctly
 - **Diurnal variation**: Ionospheric effects are being captured
 - **Large divergence (>5 ms)**: Calibration problem or model failure
+
+<!-- LOGS: L1-L2 | filter: "L1-L2 difference" -->
 
 **Data Recording (v6.2):**
 
@@ -1061,6 +1065,8 @@ The system identifies propagation modes (1F2, 2F2, GW, etc.) based on:
 2. **Ionospheric layer height** from IRI-2020 or IONEX
 3. **Frequency-dependent behavior** (higher frequencies → higher layers)
 
+<!-- LIVE: propagation-modes -->
+
 **Data Recording (v6.2):**
 
 - `propagation_modes_used`: Comma-separated list of modes identified
@@ -1082,6 +1088,8 @@ See `docs/PHYSICS.md` for detailed explanation of propagation mode identificatio
 
 The system learns per-broadcast calibration offsets over time. Convergence is tracked via:
 
+<!-- LIVE: calibration-status -->
+
 **Data Recording (v6.2):**
 
 - `calibration_age_hours`: Age of calibration data
@@ -1099,6 +1107,8 @@ The system learns per-broadcast calibration offsets over time. Convergence is tr
 ### 13.7 Uncertainty Budget Summary
 
 The complete uncertainty budget for a fused D_clock measurement:
+
+<!-- LIVE: uncertainty-budget -->
 
 | Component | Source | Typical Value | Data Field |
 |-----------|--------|---------------|------------|

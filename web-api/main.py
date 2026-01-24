@@ -22,7 +22,7 @@ try:
 except ImportError:
     SYSTEMD_AVAILABLE = False
 
-from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router
+from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router
 from config import config
 
 # Configure logging
@@ -61,6 +61,7 @@ app.include_router(logs_router, prefix="/api")
 app.include_router(space_weather_router, prefix="/api")
 app.include_router(correlations_router, prefix="/api")
 app.include_router(physics_router, prefix="/api")
+app.include_router(docs_router)  # No prefix - router has its own /api/docs prefix
 
 # Static files directory
 static_dir = Path(__file__).parent / "static"

@@ -427,12 +427,63 @@ STATION_SEPARATION_MS = 15.0
 
 # Propagation delay bounds by station (ms)
 # Format: (min_delay_ms, max_delay_ms)
-PROPAGATION_BOUNDS_MS = {
-    'WWV': (-250.0, 250.0),    # Widened for bootstrap / clock drift
-    'WWVH': (-250.0, 250.0),  # Widened for bootstrap / clock drift
-    'CHU': (-250.0, 250.0),    # Widened for bootstrap / clock drift
-    'BPM': (-250.0, 250.0),  # Widened for bootstrap / clock drift
+# 
+# BOOTSTRAP vs CALIBRATED bounds:
+# - Bootstrap: Wide bounds to find initial lock (but still physically plausible)
+# - Calibrated: Tight bounds (3σ around learned expectation)
+#
+# These are the BOOTSTRAP bounds - physically plausible for continental US
+# NOTE (2026-01-24): Widened temporarily to allow detections while investigating
+# systematic ~50ms offset. Original values were tighter.
+PROPAGATION_BOUNDS_MS_BOOTSTRAP = {
+    'WWV': (-10.0, 80.0),    # Fort Collins: 500-3000km → 3-25ms + margin + investigation
+    'WWVH': (0.0, 100.0),    # Hawaii: 4000-6000km → 15-50ms + margin + investigation
+    'CHU': (-10.0, 80.0),    # Ottawa: 1000-4000km → 5-30ms + margin + investigation
+    'BPM': (10.0, 150.0),    # China: 10000-12000km → 40-100ms multi-hop + investigation
 }
+
+# Legacy alias for backwards compatibility (uses bootstrap bounds)
+PROPAGATION_BOUNDS_MS = PROPAGATION_BOUNDS_MS_BOOTSTRAP
 
 # Default bounds for unknown stations
 DEFAULT_PROPAGATION_BOUNDS_MS = (0.0, 100.0)
+
+# =============================================================================
+# UNAMBIGUOUS BOOTSTRAP CHANNELS
+# =============================================================================
+# These channels have only ONE station transmitting, so there's no ambiguity
+# about which station is being detected. Prefer these during bootstrap.
+#
+# WWV-only frequencies: 20 MHz, 25 MHz (WWVH doesn't transmit)
+# CHU: All frequencies (3.33, 7.85, 14.67 MHz) - unique station
+#
+UNAMBIGUOUS_BOOTSTRAP_CHANNELS = {
+    'WWV_20.0': 'WWV',
+    'WWV_25.0': 'WWV', 
+    'CHU_3.33': 'CHU',
+    'CHU_7.85': 'CHU',
+    'CHU_14.67': 'CHU',
+}
+
+# =============================================================================
+# CROSS-STATION GEOGRAPHIC CONSISTENCY
+# =============================================================================
+# Stations at similar distances should have similar propagation delays.
+# These pairs should agree within the specified tolerance (accounting for
+# ionospheric variation and path differences).
+#
+# Format: ((station1, freq1), (station2, freq2), max_difference_ms)
+#
+GEOGRAPHIC_CONSISTENCY_PAIRS = [
+    # Similar distance pairs (daytime, stable ionosphere)
+    # WWV 5 MHz and CHU 3.33 MHz: both ~1000-2000km, should be within ~10ms
+    (('WWV', 5.0), ('CHU', 3.33), 15.0),
+    # WWV 15 MHz and CHU 14.67 MHz: similar frequency, similar distance
+    (('WWV', 15.0), ('CHU', 14.67), 15.0),
+    # WWV 10 MHz and CHU 7.85 MHz: mid-band comparison
+    (('WWV', 10.0), ('CHU', 7.85), 15.0),
+]
+
+# Maximum calibration offset allowed (ms)
+# Any offset larger than this indicates a systematic error, not real propagation
+MAX_CALIBRATION_OFFSET_MS = 80.0  # BPM multi-hop can be ~60-70ms

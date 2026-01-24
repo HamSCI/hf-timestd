@@ -2096,6 +2096,12 @@ class MultiBroadcastFusion:
             '1E': 1.0, '1F': 0.95, '2F': 0.85, '3F': 0.7, 'GW': 1.0
         }
         
+        # BOOTSTRAP PREFERENCE (2026-01-24): Prefer unambiguous channels during bootstrap
+        # These channels have only ONE station transmitting, so there's no ambiguity
+        # about which station is being detected. This prevents locking onto wrong timing.
+        from .wwv_constants import UNAMBIGUOUS_BOOTSTRAP_CHANNELS
+        is_bootstrap = self.calibration_update_count < 100
+        
         for m in measurements:
             # Special handling for GLOBAL_DIFF (cross-station validation)
             if m.station == 'GLOBAL_DIFF':
@@ -2140,6 +2146,27 @@ class MultiBroadcastFusion:
             
             # Combine: base precision × quality factors
             w = base_weight * confidence_scale * grade_scale_factor * mode_scale_factor * snr_scale
+            
+            # BOOTSTRAP PREFERENCE (2026-01-24): Boost unambiguous channels during bootstrap
+            # WWV 20/25 MHz and all CHU frequencies have no station ambiguity
+            # BPM is excluded from bootstrap entirely - too distant for reliable calibration
+            if is_bootstrap:
+                if m.station == 'BPM':
+                    # BPM excluded from bootstrap - use minimal weight
+                    w *= 0.1
+                    logger.debug(f"Bootstrap: Suppressing BPM weight (too distant for calibration)")
+                else:
+                    broadcast_key = f"{m.station}_{m.frequency_mhz:.2f}"
+                    # Check if this is an unambiguous channel (exact key match)
+                    is_unambiguous = any(
+                        broadcast_key.startswith(prefix.replace('.', ''))  
+                        for prefix in UNAMBIGUOUS_BOOTSTRAP_CHANNELS.keys()
+                    ) or m.station == 'CHU' or m.frequency_mhz in (20.0, 25.0)
+                    
+                    if is_unambiguous:
+                        # 3x weight boost for unambiguous channels during bootstrap
+                        w *= 3.0
+                        logger.debug(f"Bootstrap: Boosting unambiguous channel {broadcast_key} weight 3x")
             
             # Ensure minimum weight for numerical stability
             weights.append(max(0.01, w))
@@ -2252,8 +2279,14 @@ class MultiBroadcastFusion:
             return
         
         # Add to history keyed by broadcast (station + frequency)
+        # CRITICAL (2026-01-24): Exclude BPM from calibration role
+        # BPM's distance (~10,000km) makes it unreliable for bootstrap calibration.
+        # Detection of BPM will be a by-product of good calibration from WWV/CHU.
         for m in measurements:
             if m.station == 'GLOBAL_DIFF':
+                continue
+            if m.station == 'BPM':
+                # BPM excluded from calibration - too distant for reliable bootstrap
                 continue
             broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
             history = self.measurement_history[broadcast_key]
@@ -2325,6 +2358,20 @@ class MultiBroadcastFusion:
                     logger.debug(f"Calibration {broadcast_key}: rate-limited Δ={delta_offset:.3f}ms to ±{max_delta}ms")
                 
                 logger.debug(f"Calibration {broadcast_key}: alpha={alpha:.3f} (validated={validated}, bootstrap={is_bootstrap})")
+            
+            # CRITICAL FIX (2026-01-24): Sanity check calibration offset magnitude
+            # Any offset larger than MAX_CALIBRATION_OFFSET_MS indicates a systematic
+            # error (wrong tone detection, buffer timestamp issue, etc.), not real propagation.
+            from .wwv_constants import MAX_CALIBRATION_OFFSET_MS
+            if abs(new_offset) > MAX_CALIBRATION_OFFSET_MS:
+                logger.error(
+                    f"CALIBRATION SANITY FAILURE: {broadcast_key} offset={new_offset:+.1f}ms "
+                    f"exceeds ±{MAX_CALIBRATION_OFFSET_MS}ms limit. "
+                    f"This indicates a systematic error in tone detection. "
+                    f"Rejecting this calibration update."
+                )
+                # Don't update calibration - keep old value or skip
+                continue
             
             self.calibration[broadcast_key] = BroadcastCalibration(
                 station=station,

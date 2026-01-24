@@ -1810,6 +1810,10 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             station_name, DEFAULT_PROPAGATION_BOUNDS_MS
         )
         
+        # DEBUG: Log bounds check (2026-01-24)
+        logger.info(f"  -> BOUNDS CHECK {station_type.value}: timing={timing_error_ms:+.1f}ms, "
+                   f"bounds=[{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms")
+        
         if timing_error_ms < min_delay_ms or timing_error_ms > max_delay_ms:
             logger.info(f"  -> REJECTED {station_type.value} (timing {timing_error_ms:+.1f}ms outside "
                         f"plausible range [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms for {station_name})")

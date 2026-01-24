@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Living Documentation - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        .doc-container {
+            max-width: 950px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        
+        .doc-content {
+            background: rgba(30, 41, 59, 0.6);
+            border-radius: 12px;
+            padding: 32px 40px;
+            line-height: 1.8;
+            font-size: 15px;
+        }
+        
+        .doc-content h1 { font-size: 28px; border-bottom: 2px solid #3b82f6; padding-bottom: 12px; margin-bottom: 24px; }
+        .doc-content h2 { font-size: 22px; margin-top: 40px; margin-bottom: 16px; color: #60a5fa; }
+        .doc-content h3 { font-size: 18px; margin-top: 28px; margin-bottom: 12px; color: #93c5fd; }
+        .doc-content h4 { font-size: 16px; margin-top: 20px; color: #bfdbfe; }
+        .doc-content p { margin-bottom: 16px; color: #cbd5e1; }
+        .doc-content code { background: rgba(59, 130, 246, 0.15); padding: 2px 6px; border-radius: 4px; font-family: 'Fira Code', 'Courier New', monospace; font-size: 13px; }
+        .doc-content pre { background: rgba(15, 23, 42, 0.8); border: 1px solid #334155; border-radius: 8px; padding: 16px; overflow-x: auto; margin: 16px 0; }
+        .doc-content pre code { background: none; padding: 0; font-size: 13px; line-height: 1.6; }
+        .doc-content table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+        .doc-content th { background: rgba(59, 130, 246, 0.2); padding: 12px; text-align: left; border: 1px solid #334155; font-weight: 600; }
+        .doc-content td { padding: 10px 12px; border: 1px solid #334155; color: #cbd5e1; }
+        .doc-content tr:nth-child(even) { background: rgba(30, 41, 59, 0.4); }
+        .doc-content ul, .doc-content ol { margin: 12px 0; padding-left: 24px; color: #cbd5e1; }
+        .doc-content li { margin-bottom: 8px; }
+        .doc-content strong { color: #f1f5f9; }
+        .doc-content blockquote { border-left: 4px solid #3b82f6; margin: 16px 0; padding: 12px 20px; background: rgba(59, 130, 246, 0.1); border-radius: 0 8px 8px 0; }
+        
+        /* Live widget styles */
+        .live-widget {
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(139, 92, 246, 0.08));
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 24px 0;
+            position: relative;
+        }
+        .live-widget::before {
+            content: '📊 LIVE DATA';
+            position: absolute;
+            top: -10px;
+            left: 16px;
+            background: #1e293b;
+            padding: 2px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #60a5fa;
+            border-radius: 4px;
+            letter-spacing: 0.5px;
+        }
+        .live-widget .widget-title { font-size: 14px; font-weight: 600; color: #94a3b8; margin-bottom: 12px; }
+        .widget-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-top: 12px; }
+        .widget-metric { text-align: center; padding: 12px; background: rgba(15, 23, 42, 0.5); border-radius: 8px; }
+        .widget-metric-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .widget-metric-value { font-size: 20px; font-weight: 600; font-family: 'Fira Code', monospace; }
+        .widget-unit { font-size: 12px; color: #64748b; margin-left: 4px; }
+        .widget-subtitle { font-size: 12px; color: #64748b; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(100,116,139,0.2); }
+        .status-good { color: #22c55e; }
+        .status-warn { color: #f59e0b; }
+        .status-bad { color: #ef4444; }
+        
+        /* Log panel styles */
+        .log-panel {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid #334155;
+            border-radius: 8px;
+            margin: 16px 0;
+            overflow: hidden;
+        }
+        .log-panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 16px;
+            background: rgba(30, 41, 59, 0.6);
+            border-bottom: 1px solid #334155;
+            cursor: pointer;
+        }
+        .log-panel-header:hover { background: rgba(30, 41, 59, 0.8); }
+        .log-panel-title { font-size: 12px; font-weight: 600; color: #94a3b8; display: flex; align-items: center; gap: 8px; }
+        .log-panel-toggle { color: #64748b; font-size: 14px; }
+        .log-panel-content { max-height: 200px; overflow-y: auto; font-family: 'Fira Code', monospace; font-size: 12px; line-height: 1.6; display: none; }
+        .log-panel-content.expanded { display: block; }
+        .log-line { padding: 4px 16px; border-bottom: 1px solid rgba(51, 65, 85, 0.3); }
+        .log-line:hover { background: rgba(59, 130, 246, 0.1); }
+        .log-time { color: #64748b; margin-right: 12px; }
+        .log-level-INFO { color: #60a5fa; }
+        .log-level-WARNING { color: #f59e0b; }
+        .log-level-ERROR { color: #ef4444; }
+        .log-level-DEBUG { color: #94a3b8; }
+        .log-message { color: #cbd5e1; }
+        .log-empty { padding: 16px; color: #64748b; text-align: center; font-style: italic; }
+        
+        /* Document selector */
+        .doc-selector { margin-bottom: 24px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+        .doc-selector select {
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid #334155;
+            color: #e2e8f0;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            min-width: 280px;
+        }
+        .doc-selector select:focus { outline: none; border-color: #3b82f6; }
+        
+        /* Section navigation */
+        .section-nav {
+            position: fixed;
+            right: 24px;
+            top: 120px;
+            width: 220px;
+            background: rgba(30, 41, 59, 0.95);
+            border-radius: 8px;
+            padding: 16px;
+            font-size: 13px;
+            max-height: calc(100vh - 160px);
+            overflow-y: auto;
+            border: 1px solid #334155;
+        }
+        .section-nav-title { font-weight: 600; color: #94a3b8; margin-bottom: 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .section-nav a { display: block; color: #64748b; text-decoration: none; padding: 6px 0 6px 12px; border-left: 2px solid transparent; transition: all 0.2s; }
+        .section-nav a:hover { color: #60a5fa; border-left-color: #60a5fa; }
+        .section-nav a.level-3 { padding-left: 24px; font-size: 12px; }
+        .section-nav a.level-4 { padding-left: 36px; font-size: 11px; }
+        
+        @media (max-width: 1300px) { .section-nav { display: none; } }
+        
+        .refresh-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #64748b;
+        }
+        .refresh-dot {
+            width: 8px;
+            height: 8px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📚 Living Documentation</h1>
+            <div class="header-subtitle">Documentation with real-time data — see theory meet reality</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">System Health</a>
+                <a href="/static/metrology.html" class="nav-link">Metrology</a>
+                <a href="/static/docs.html" class="nav-link active">Living Docs</a>
+            </nav>
+        </div>
+        
+        <div class="doc-container">
+            <div class="doc-selector">
+                <select id="doc-select" onchange="loadDocument(this.value)">
+                    <option value="">Loading documents...</option>
+                </select>
+                <select id="section-select" onchange="scrollToSection(this.value)">
+                    <option value="">Jump to section...</option>
+                </select>
+                <div class="refresh-indicator">
+                    <div class="refresh-dot"></div>
+                    <span>Live data updates every 5s</span>
+                </div>
+            </div>
+            
+            <div class="doc-content" id="doc-content">
+                <div style="text-align: center; padding: 60px; color: #64748b;">
+                    <div class="loading"></div>
+                    <p style="margin-top: 16px;">Loading documentation...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="section-nav" id="section-nav">
+        <div class="section-nav-title">On This Page</div>
+        <div id="nav-links"></div>
+    </div>
+
+    <script>
+        // State
+        let currentDoc = null;
+        let liveData = { fusion: null, stability: null, logs: [] };
+        let logBuffer = [];
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadDocumentList();
+            await fetchLiveData();
+            setInterval(fetchLiveData, 5000);
+            // setInterval(fetchLogs, 3000);  // Disabled until logs endpoint is fixed
+        });
+        
+        // Load document list
+        async function loadDocumentList() {
+            console.log('loadDocumentList called');
+            try {
+                const res = await fetch('/api/living-docs/list');
+                console.log('API response status:', res.status);
+                const data = await res.json();
+                console.log('Documents loaded:', data);
+                const select = document.getElementById('doc-select');
+                select.innerHTML = data.documents.map(d => 
+                    `<option value="${d.key}">${d.title}</option>`
+                ).join('');
+                
+                // Load first document (or METROLOGY if available)
+                const defaultDoc = data.documents.find(d => d.key === 'METROLOGY') || data.documents[0];
+                if (defaultDoc) {
+                    select.value = defaultDoc.key;
+                    loadDocument(defaultDoc.key);
+                }
+            } catch (e) {
+                console.error('Failed to load document list:', e);
+            }
+        }
+        
+        // Load a document
+        async function loadDocument(docName) {
+            if (!docName) return;
+            
+            try {
+                const res = await fetch(`/api/living-docs/${docName}`);
+                const doc = await res.json();
+                currentDoc = doc;
+                
+                // Render markdown
+                renderDocument(doc);
+                
+                // Update section navigation
+                updateSectionNav(doc.sections);
+                
+            } catch (e) {
+                console.error('Failed to load document:', e);
+                document.getElementById('doc-content').innerHTML = 
+                    `<div style="color: #ef4444; padding: 20px;">Failed to load document: ${e.message}</div>`;
+            }
+        }
+        
+        // Render document with widgets
+        function renderDocument(doc) {
+            // Configure marked
+            marked.setOptions({
+                gfm: true,
+                breaks: false
+            });
+            
+            // Process markdown - replace directives with HTML placeholders BEFORE marked parsing
+            let markdown = doc.markdown;
+            let widgetIndex = 0;
+            let logIndex = 0;
+            
+            // Replace LIVE directives with special markers that survive markdown parsing
+            markdown = markdown.replace(/<!--\s*LIVE:\s*([^>]+?)\s*-->/g, (match, widgetType) => {
+                const id = `widget-${widgetIndex++}`;
+                // Use a div that marked won't touch
+                return `\n\n<div class="live-widget" id="${id}" data-widget="${widgetType.trim()}"><div style="color:#64748b;padding:12px;">Loading widget...</div></div>\n\n`;
+            });
+            
+            // Replace LOGS directives with log panel placeholders
+            markdown = markdown.replace(/<!--\s*LOGS:\s*([^|>]+?)(?:\s*\|\s*filter:\s*"([^"]*)")?\s*-->/g, (match, tag, filter) => {
+                const id = `logs-${logIndex++}`;
+                return `\n\n<div class="log-panel" id="${id}" data-tag="${tag.trim()}" data-filter="${filter || ''}">
+                    <div class="log-panel-header" onclick="toggleLogPanel('${id}')">
+                        <div class="log-panel-title">📋 Relevant Logs: <code>${tag.trim()}</code></div>
+                        <div class="log-panel-toggle">▼</div>
+                    </div>
+                    <div class="log-panel-content" id="${id}-content"></div>
+                </div>\n\n`;
+            });
+            
+            // Render markdown to HTML
+            const html = marked.parse(markdown);
+            document.getElementById('doc-content').innerHTML = html;
+            
+            // Add IDs to all headings for navigation - match with API section IDs
+            const headings = document.querySelectorAll('#doc-content h1, #doc-content h2, #doc-content h3, #doc-content h4, #doc-content h5, #doc-content h6');
+            const sections = doc.sections || [];
+            headings.forEach((h, idx) => {
+                // Try to match with API section by title
+                const headingText = h.textContent.trim();
+                const matchingSection = sections.find(s => s.title === headingText);
+                if (matchingSection) {
+                    h.id = matchingSection.id;
+                } else {
+                    // Fallback: generate ID from text
+                    h.id = headingText.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                }
+            });
+            
+            // Initialize widgets with current data
+            updateWidgets();
+            updateLogPanels();
+        }
+        
+        // Update section navigation
+        function updateSectionNav(sections) {
+            const nav = document.getElementById('nav-links');
+            const select = document.getElementById('section-select');
+            
+            // Filter to show only h2 and h3
+            const navSections = sections.filter(s => s.level >= 2 && s.level <= 4);
+            
+            nav.innerHTML = navSections.map(s => 
+                `<a href="javascript:void(0)" onclick="scrollToSection('${s.id}')" class="level-${s.level}">${s.title}</a>`
+            ).join('');
+            
+            select.innerHTML = '<option value="">Jump to section...</option>' +
+                navSections.map(s => 
+                    `<option value="${s.id}">${'  '.repeat(s.level - 2)}${s.title}</option>`
+                ).join('');
+        }
+        
+        function scrollToSection(sectionId) {
+            // Find heading by text content since marked doesn't add IDs
+            const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6');
+            for (const h of headings) {
+                const text = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                if (text === sectionId || h.id === sectionId) {
+                    h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    return;
+                }
+            }
+            // Fallback: try direct ID
+            const el = document.getElementById(sectionId);
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+        
+        // Fetch live data
+        async function fetchLiveData() {
+            try {
+                const [fusionRes, stabilityRes] = await Promise.all([
+                    fetch('/api/metrology/fusion/latest').then(r => r.ok ? r.json() : null).catch(() => null),
+                    fetch('/api/metrology/fusion/latest').then(r => r.ok ? r.json() : null).catch(() => null)
+                ]);
+                
+                liveData.fusion = fusionRes;
+                liveData.stability = stabilityRes;
+                updateWidgets();
+            } catch (e) {
+                console.error('Failed to fetch live data:', e);
+            }
+        }
+        
+        // Fetch logs
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/logs/?service=fusion&lines=100');
+                if (res.ok) {
+                    const data = await res.json();
+                    logBuffer = data.logs || [];
+                    updateLogPanels();
+                }
+            } catch (e) {
+                console.error('Failed to fetch logs:', e);
+            }
+        }
+        
+        // Update all widgets
+        function updateWidgets() {
+            document.querySelectorAll('.live-widget[data-widget]').forEach(widget => {
+                const widgetType = widget.dataset.widget;
+                renderWidget(widget, widgetType);
+            });
+        }
+        
+        // Update all log panels
+        function updateLogPanels() {
+            document.querySelectorAll('.log-panel[data-tag]').forEach(panel => {
+                const tag = panel.dataset.tag;
+                const filter = panel.dataset.filter;
+                const contentEl = document.getElementById(panel.id + '-content');
+                if (contentEl) {
+                    renderLogPanel(contentEl, tag, filter);
+                }
+            });
+        }
+        
+        // Toggle log panel
+        function toggleLogPanel(id) {
+            const content = document.getElementById(id + '-content');
+            const toggle = document.querySelector(`#${id} .log-panel-toggle`);
+            if (content.classList.contains('expanded')) {
+                content.classList.remove('expanded');
+                toggle.textContent = '▼';
+            } else {
+                content.classList.add('expanded');
+                toggle.textContent = '▲';
+            }
+        }
+        
+        // Render a widget
+        function renderWidget(container, widgetType) {
+            const f = liveData.fusion;
+            
+            switch (widgetType) {
+                case 'l1-l2-comparison':
+                    renderL1L2Widget(container, f);
+                    break;
+                case 'uncertainty-budget':
+                    renderUncertaintyWidget(container, f);
+                    break;
+                case 'current-dclock':
+                    renderDclockWidget(container, f);
+                    break;
+                case 'calibration-status':
+                    renderCalibrationWidget(container, f);
+                    break;
+                case 'propagation-modes':
+                    renderPropModesWidget(container, f);
+                    break;
+                case 'adev-summary':
+                    renderAdevWidget(container, f);
+                    break;
+                default:
+                    container.innerHTML = `<div class="widget-title">Unknown widget: ${widgetType}</div>`;
+            }
+        }
+        
+        // Widget: L1 vs L2 Comparison
+        function renderL1L2Widget(container, f) {
+            if (!f) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Waiting for fusion data...</div>';
+                return;
+            }
+            
+            // Use actual API fields: d_clock_raw_ms (L1) and d_clock_ms (L2 calibrated)
+            const l1 = f.d_clock_raw_ms;
+            const l2 = f.d_clock_ms;
+            const diff = (l1 !== null && l2 !== null) ? l1 - l2 : null;
+            
+            const diffAbs = diff !== null ? Math.abs(diff) : 999;
+            const diffStatus = diffAbs < 1 ? 'status-good' : diffAbs < 3 ? 'status-warn' : 'status-bad';
+            const statusMsg = diffAbs < 1 ? '✅ Propagation corrections working correctly' :
+                              diffAbs < 3 ? '⚠️ Normal ionospheric variation' :
+                              '❌ Large divergence — investigate calibration';
+            
+            container.innerHTML = `
+                <div class="widget-title">TSL1 vs TSL2 Comparison — Live</div>
+                <div class="widget-grid">
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">TSL1 (L1 Raw)</div>
+                        <div class="widget-metric-value">${l1?.toFixed(3) ?? '—'}<span class="widget-unit">ms</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">TSL2 (L2 Calibrated)</div>
+                        <div class="widget-metric-value">${l2?.toFixed(3) ?? '—'}<span class="widget-unit">ms</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">L1 − L2 Difference</div>
+                        <div class="widget-metric-value ${diffStatus}">${diff !== null ? (diff >= 0 ? '+' : '') + diff.toFixed(3) : '—'}<span class="widget-unit">ms</span></div>
+                    </div>
+                </div>
+                <div class="widget-subtitle">${statusMsg}</div>
+            `;
+        }
+        
+        // Widget: Uncertainty Budget
+        function renderUncertaintyWidget(container, f) {
+            if (!f) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Waiting for fusion data...</div>';
+                return;
+            }
+            
+            const stat = f.statistical_uncertainty_ms ?? 0;
+            const sys = f.systematic_uncertainty_ms ?? 0;
+            const prop = f.propagation_uncertainty_ms ?? 0;
+            const total = f.uncertainty_ms ?? Math.sqrt(stat*stat + sys*sys + prop*prop);
+            
+            container.innerHTML = `
+                <div class="widget-title">Uncertainty Budget — Live</div>
+                <div class="widget-grid">
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Statistical</div>
+                        <div class="widget-metric-value">${stat.toFixed(3)}<span class="widget-unit">ms</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Systematic</div>
+                        <div class="widget-metric-value">${sys.toFixed(3)}<span class="widget-unit">ms</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Propagation</div>
+                        <div class="widget-metric-value">${prop.toFixed(3)}<span class="widget-unit">ms</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Combined (RSS)</div>
+                        <div class="widget-metric-value status-good">±${total.toFixed(3)}<span class="widget-unit">ms</span></div>
+                    </div>
+                </div>
+                <div class="widget-subtitle">u_combined = √(u_stat² + u_sys² + u_prop²) per ISO GUM</div>
+            `;
+        }
+        
+        // Widget: Current D_clock
+        function renderDclockWidget(container, f) {
+            if (!f) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Waiting for fusion data...</div>';
+                return;
+            }
+            
+            const dclock = f.d_clock_ms;
+            const unc = f.uncertainty_ms;
+            const grade = f.quality_grade;
+            const nBroadcasts = f.n_broadcasts;
+            
+            const gradeColor = grade === 'A' ? 'status-good' : grade === 'B' ? 'status-good' : grade === 'C' ? 'status-warn' : 'status-bad';
+            
+            container.innerHTML = `
+                <div class="widget-title">Current UTC Offset — Live</div>
+                <div style="text-align: center; padding: 12px 0;">
+                    <div style="font-size: 36px; font-weight: 700; font-family: 'Fira Code', monospace;">${dclock >= 0 ? '+' : ''}${dclock?.toFixed(3) ?? '—'}<span class="widget-unit">ms</span></div>
+                    <div style="margin-top: 8px; color: #94a3b8;">D_clock = T_system − T_UTC(NIST)</div>
+                </div>
+                <div class="widget-grid">
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Uncertainty</div>
+                        <div class="widget-metric-value">±${unc?.toFixed(3) ?? '—'}<span class="widget-unit">ms</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Quality</div>
+                        <div class="widget-metric-value ${gradeColor}">${grade ?? '—'}</div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Broadcasts</div>
+                        <div class="widget-metric-value">${nBroadcasts ?? '—'}</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // Widget: Calibration Status
+        function renderCalibrationWidget(container, f) {
+            if (!f) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Waiting for fusion data...</div>';
+                return;
+            }
+            
+            const converged = f.calibration_converged;
+            const age = f.calibration_age_hours;
+            const samples = f.calibration_n_samples;
+            
+            const statusClass = converged ? 'status-good' : 'status-warn';
+            const statusText = converged ? '✅ Converged' : '⏳ Learning';
+            
+            container.innerHTML = `
+                <div class="widget-title">Calibration Status — Live</div>
+                <div class="widget-grid">
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Status</div>
+                        <div class="widget-metric-value ${statusClass}">${statusText}</div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Age</div>
+                        <div class="widget-metric-value">${age?.toFixed(1) ?? '—'}<span class="widget-unit">hrs</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Samples</div>
+                        <div class="widget-metric-value">${samples ?? '—'}</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // Widget: Propagation Modes
+        function renderPropModesWidget(container, f) {
+            if (!f) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Waiting for fusion data...</div>';
+                return;
+            }
+            
+            const modes = f.propagation_modes_used || 'Unknown';
+            const dominant = f.dominant_propagation_mode || 'Unknown';
+            
+            container.innerHTML = `
+                <div class="widget-title">Propagation Modes — Live</div>
+                <div class="widget-grid">
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Dominant Mode</div>
+                        <div class="widget-metric-value">${dominant}</div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">All Modes</div>
+                        <div class="widget-metric-value" style="font-size: 14px;">${modes}</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // Widget: Allan Deviation
+        function renderAdevWidget(container, f) {
+            if (!f) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Waiting for fusion data...</div>';
+                return;
+            }
+            
+            const adev60 = f.adev_60s;
+            const adev1000 = f.adev_1000s;
+            
+            container.innerHTML = `
+                <div class="widget-title">Allan Deviation — Live</div>
+                <div class="widget-grid">
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">ADEV τ=60s</div>
+                        <div class="widget-metric-value">${adev60 ? adev60.toExponential(2) : '—'}</div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">ADEV τ=1000s</div>
+                        <div class="widget-metric-value">${adev1000 ? adev1000.toExponential(2) : '—'}</div>
+                    </div>
+                </div>
+                <div class="widget-subtitle">Fractional frequency stability (dimensionless)</div>
+            `;
+        }
+        
+        // Render log panel
+        function renderLogPanel(container, tag, filter) {
+            // Filter logs by tag pattern and optional text filter
+            let filtered = logBuffer.filter(log => {
+                const msg = log.message || '';
+                const matchesTag = tag === '*' || msg.toLowerCase().includes(tag.toLowerCase());
+                const matchesFilter = !filter || msg.toLowerCase().includes(filter.toLowerCase());
+                return matchesTag && matchesFilter;
+            }).slice(-20);  // Last 20 matching logs
+            
+            if (filtered.length === 0) {
+                container.innerHTML = '<div class="log-empty">No matching log entries yet</div>';
+                return;
+            }
+            
+            container.innerHTML = filtered.map(log => {
+                const time = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '';
+                const level = log.level || 'INFO';
+                const msg = log.message || '';
+                return `<div class="log-line">
+                    <span class="log-time">${time}</span>
+                    <span class="log-level-${level}">[${level}]</span>
+                    <span class="log-message">${escapeHtml(msg)}</span>
+                </div>`;
+            }).join('');
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
