@@ -480,8 +480,11 @@ class MetrologyService:
                 else:
                     system_time = float(target_minute)
                 
+                # DIAGNOSTIC: Log timing source for restart variance investigation
+                timing_source = "metadata" if start_system_time is not None else "learned"
                 logger.info(
-                    f"Minute {target_minute}: RTP={rtp_timestamp}, MetaSystem={start_system_time}, "
+                    f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
+                    f"RTP={rtp_timestamp}, MetaSystem={start_system_time}, "
                     f"Offset={self._rtp_to_unix_offset:.6f}s, CalculatedSystem={system_time:.6f}"
                 )
             else:

@@ -587,6 +587,17 @@ class BinaryArchiveWriter:
                     # Calculate mean and lock
                     mean_offset = sum(self._initial_offsets) / len(self._initial_offsets)
                     diff = mean_offset - self.rtp_to_unix_offset
+                    
+                    # DIAGNOSTIC: Log offset statistics for restart variance investigation
+                    offsets_ms = [(o - mean_offset) * 1000 for o in self._initial_offsets]
+                    std_ms = (sum(x*x for x in offsets_ms) / len(offsets_ms)) ** 0.5
+                    min_ms, max_ms = min(offsets_ms), max(offsets_ms)
+                    logger.info(
+                        f"[OFFSET_DIAG] RTP-to-Unix calibration stats: "
+                        f"mean={mean_offset:.6f}s, std={std_ms:.3f}ms, "
+                        f"range=[{min_ms:+.3f}, {max_ms:+.3f}]ms, n={len(self._initial_offsets)}"
+                    )
+                    
                     self.rtp_to_unix_offset = mean_offset
                     self._offset_params_locked = True
                     self._initial_offsets = [] # free memory
