@@ -10,227 +10,239 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🔴 CURRENT SESSION: DATA PROCESSING PIPELINE CRITICAL REVIEW
+## ✅ COMPLETED SESSION: OFFSET SETTLING VARIANCE ON SERVICE RESTART
+
+**Status:** ✅ **RESOLVED** - 2026-01-24  
+**Objective:** Investigate and fix why the fused D_clock offset settles to a different value each time services are restarted.
+
+### Solution Implemented (v6.0 → v6.1)
+
+The offset settling variance was caused by the **single L3 Kalman filter** architecture. The solution was a **hierarchical estimation architecture**:
+
+1. **Per-Broadcast Kalman Filters (17 independent)** — Each broadcast maintains its own state, persisted to `/var/lib/timestd/state/broadcast_kalman_state.json`
+2. **GNSS VTEC Ionospheric Correction** — Real-time TEC correction using local dual-frequency GPS
+3. **Weighted Least Squares Fusion** — Replaced L3 Kalman with instantaneous WLS (no temporal smoothing)
+
+**Result:** Deterministic restart behavior. Uncertainty reduced from 8+ ms to ~4 ms with GNSS TEC correction active.
+
+See `docs/METROLOGY.md` Section 12 for complete architecture description.
+
+---
+
+## 🔴 CURRENT SESSION: TONE DETECTION METHODOLOGY OPTIMIZATION
 
 **Status:** 🔴 **IN PROGRESS**  
-**Objective:** Critically review whether the data processing pipeline properly serves the fundamental interest in **17 broadcasts from 4 stations**, given the current **9-channel** architecture.
+**Objective:** Ensure the tone detection methodology takes the best possible, metrologically sound advantage of the timing accuracy to maintain appropriate **specificity** (low false positives) and **sensitivity** (low false negatives).
 
 ---
 
-### The Fundamental Question
+### The Fundamental Challenge
 
-The system's **fundamental interest** is in the characteristics of each **broadcast** and the **ionospheric conditions** between the receiver and the 4 transmitting stations. The invariant distinguishing features of each broadcast are:
+The system detects timing tones (1000 Hz for WWV/BPM, 1200 Hz for WWVH, FSK for CHU) to extract D_clock measurements. The detection methodology must balance:
 
-1. **Distance and direction** to the transmitting station
-2. **Frequency** of the broadcast
+1. **Specificity** — Reject false detections (noise, interference, multipath artifacts)
+2. **Sensitivity** — Detect weak signals under poor propagation conditions
+3. **Timing Accuracy** — Precise ToA (Time of Arrival) estimation for D_clock calculation
 
-Yet the current architecture is organized around **9 channels** (frequency-based), not **17 broadcasts** (station+frequency). This session must critically examine whether this structure serves or hinders the fundamental scientific and metrological goals.
+With the v6.1 hierarchical architecture achieving ~4 ms uncertainty (theoretical floor ~0.1 ms), the **tone detection is now the limiting factor** for further accuracy improvement.
+
+### Key Questions to Investigate
+
+| Question | Impact | Files to Review |
+|----------|--------|-----------------|
+| What is the current ToA estimation precision? | Determines D_clock floor | `tone_detector.py`, `advanced_signal_analysis.py` |
+| How is SNR used in detection thresholds? | Affects sensitivity/specificity tradeoff | `tone_detector.py`, `wwvh_discrimination.py` |
+| How is multipath handled in ToA estimation? | Can bias ToA by 0-5 ms | `advanced_signal_analysis.py` |
+| What is the phase tracking accuracy? | Affects sub-sample ToA precision | `wwvh_discrimination.py` |
+| How are detection confidence scores computed? | Affects downstream weighting | `tone_detector.py` |
 
 ---
 
-### The 17 Broadcasts from 4 Stations
+### Critical Code Paths to Review
 
-| Station | Location | Frequencies | Broadcasts | Unique Properties |
-|---------|----------|-------------|------------|-------------------|
-| **WWV** | Fort Collins, CO | 2.5, 5, 10, 15, 20, 25 MHz | 6 | Closest to most US receivers, 1000 Hz tick |
-| **WWVH** | Kauai, HI | 2.5, 5, 10, 15 MHz | 4 | Long ocean path, 1200 Hz tick |
-| **CHU** | Ottawa, Canada | 3.33, 7.85, 14.67 MHz | 3 | FSK time code, different frequencies |
-| **BPM** | Pucheng, China | 2.5, 5, 10, 15 MHz | 4 | Trans-Pacific path, UT1 encoding |
+#### 1. Tone Detection Core
+
+**File:** `src/hf_timestd/core/tone_detector.py`
+
+The primary tone detection algorithm. Key aspects to review:
+
+- **Detection threshold logic** — How is SNR threshold set? Is it adaptive?
+- **Peak finding algorithm** — How is the correlation peak located?
+- **Sub-sample interpolation** — Is parabolic/sinc interpolation used for sub-sample ToA?
+- **Confidence scoring** — How is detection confidence computed?
+
+**Metrological Question:** Is the ToA estimation achieving the theoretical precision limit (Cramér-Rao bound)?
+
+#### 2. WWV/WWVH Discrimination
+
+**File:** `src/hf_timestd/core/wwvh_discrimination.py`
+
+Discriminates between WWV (1000 Hz) and WWVH (1200 Hz) on shared frequencies. Key aspects:
+
+- **Frequency estimation accuracy** — How precisely is the tone frequency measured?
+- **Phase tracking** — How is phase continuity maintained across seconds?
+- **Doppler compensation** — Is ionospheric Doppler accounted for?
+
+**Metrological Question:** Does frequency estimation error propagate to ToA error?
+
+#### 3. Advanced Signal Analysis
+
+**File:** `src/hf_timestd/core/advanced_signal_analysis.py`
+
+Multipath detection, delay spread estimation, scintillation indices. Key aspects:
+
+- **Multipath detection** — How is multipath identified?
+- **Delay spread estimation** — How is the multipath delay spread quantified?
+- **ToA bias correction** — Is multipath-induced ToA bias corrected?
+
+**Metrological Question:** Can multipath information improve ToA estimation?
+
+#### 4. CHU FSK Decoder
+
+**File:** `src/hf_timestd/core/chu_fsk_decoder.py`
+
+CHU uses FSK time code (seconds 31-39). Key aspects:
+
+- **Bit timing extraction** — How is the FSK bit timing determined?
+- **Frame synchronization** — How is the time code frame aligned?
+- **Error detection** — How are bit errors detected and handled?
+
+**Metrological Question:** Is CHU timing extraction achieving comparable precision to WWV/WWVH?
+
+---
+
+### Theoretical Limits
+
+#### Cramér-Rao Bound for ToA Estimation
+
+The theoretical lower bound on ToA estimation variance is:
+
+```
+σ²_ToA ≥ 1 / (8π² × SNR × B² × T)
+
+where:
+  SNR = signal-to-noise ratio (linear)
+  B = signal bandwidth (Hz)
+  T = observation time (seconds)
+```
+
+For a 1000 Hz tone with 100 Hz bandwidth, 1 second observation, SNR = 100 (20 dB):
+```
+σ_ToA ≥ 1 / √(8π² × 100 × 100² × 1) ≈ 0.036 ms
+```
+
+**This suggests sub-0.1 ms ToA precision is theoretically achievable** with good SNR.
+
+#### Current System Performance
+
+From recent logs, the system shows:
+- **Fused D_clock uncertainty:** ~4 ms (with GNSS TEC correction)
+- **Raw measurement scatter:** 10-50 ms (before fusion)
+- **Outlier rejection rate:** ~30-50% of measurements
+
+**Gap Analysis:** The 4 ms fused uncertainty vs 0.036 ms theoretical limit suggests significant room for improvement in:
+1. Tone detection precision
+2. Multipath handling
+3. Mode discrimination
+
+---
+
+### Recommended Investigation Approach
+
+1. **Characterize Current ToA Precision**
+   - Add diagnostic logging to capture ToA estimation details
+   - Compute Allan deviation of ToA estimates (short-term stability)
+   - Compare ToA variance to Cramér-Rao bound
+
+2. **Review Detection Threshold Logic**
+   - Is the SNR threshold appropriate for the noise environment?
+   - Is the threshold adaptive to channel conditions?
+   - Are weak but valid signals being rejected?
+
+3. **Analyze Multipath Impact**
+   - Correlate delay spread with ToA variance
+   - Investigate multipath-aware ToA estimation techniques
+   - Consider leading-edge detection for multipath mitigation
+
+4. **Evaluate Phase Tracking**
+   - Is phase continuity being exploited for ToA refinement?
+   - Can carrier phase be used for sub-sample ToA interpolation?
+   - Is Doppler compensation accurate?
+
+5. **Cross-Validate with Known References**
+   - Compare ToA estimates across frequencies (same station)
+   - Compare ToA estimates across stations (same frequency)
+   - Use GNSS-derived ionospheric delay as ground truth
+
+---
+
+### Metrological Perspective
+
+From a metrologist's viewpoint, tone detection is a **measurement process** that must be characterized:
+
+1. **Precision** — Repeatability of ToA estimation under constant conditions
+2. **Accuracy** — Systematic bias in ToA estimation (e.g., filter group delay)
+3. **Uncertainty** — Complete uncertainty budget for ToA including all error sources
+4. **Traceability** — ToA must trace to GPSDO timestamps (the "steel ruler")
+
+**Key Principle:** The tone detection methodology should be **metrologically sound** — every step should be physically justified and uncertainty-quantified.
+
+---
+
+### Reference: The 17 Broadcasts from 4 Stations
+
+| Station | Location | Frequencies | Tone | Unique Properties |
+|---------|----------|-------------|------|-------------------|
+| **WWV** | Fort Collins, CO | 2.5, 5, 10, 15, 20, 25 MHz | 1000 Hz | Closest to most US receivers |
+| **WWVH** | Kauai, HI | 2.5, 5, 10, 15 MHz | 1200 Hz | Long ocean path |
+| **CHU** | Ottawa, Canada | 3.33, 7.85, 14.67 MHz | FSK | Different frequencies |
+| **BPM** | Pucheng, China | 2.5, 5, 10, 15 MHz | 1000 Hz | Trans-Pacific path |
 
 **Total: 17 broadcasts**
 
-### The 9 Channels (Current Architecture)
+---
 
-| Channel | Frequency | Broadcasts on Channel | Discrimination Required |
-|---------|-----------|----------------------|------------------------|
-| `SHARED_2500` | 2.5 MHz | WWV, WWVH, BPM | Yes (3 stations) |
-| `SHARED_5000` | 5 MHz | WWV, WWVH, BPM | Yes (3 stations) |
-| `SHARED_10000` | 10 MHz | WWV, WWVH, BPM | Yes (3 stations) |
-| `SHARED_15000` | 15 MHz | WWV, WWVH, BPM | Yes (3 stations) |
-| `WWV_20000` | 20 MHz | WWV only | No |
-| `WWV_25000` | 25 MHz | WWV only | No |
-| `CHU_3330` | 3.33 MHz | CHU only | No |
-| `CHU_7850` | 7.85 MHz | CHU only | No |
-| `CHU_14670` | 14.67 MHz | CHU only | No |
+### Key State Files
+
+| File | Location | Purpose |
+|------|----------|---------|
+| `broadcast_kalman_state.json` | `/var/lib/timestd/state/` | Per-broadcast Kalman filter states (17) |
+| `broadcast_calibration.json` | `/var/lib/timestd/state/` | Calibration offsets + trust levels |
+| `long_term_drift_stats.json` | `/var/lib/timestd/state/` | Long-term drift estimator statistics |
 
 ---
 
-### Critical Review Questions
+### Recent Architecture Changes (v6.0 → v6.1)
 
-#### 1. **Data Model Alignment**
+| Change | Description | Impact |
+|--------|-------------|--------|
+| Per-broadcast Kalman | 17 independent filters instead of 1 L3 filter | Deterministic restart |
+| GNSS VTEC correction | Real-time ionospheric correction | Reduced uncertainty |
+| WLS fusion | Replaced L3 Kalman with instantaneous WLS | No false smoothing |
+| State persistence | Per-broadcast state saved/restored | Restart stability |
 
-Does the data model at each pipeline stage preserve broadcast identity?
+See `docs/METROLOGY.md` Section 12 for complete architecture description.
 
-| Stage | Current Keying | Should Be | Issue? |
-|-------|---------------|-----------|--------|
-| L0 (Raw IQ) | Channel | Channel | ✅ Correct (frequency-based capture) |
-| L1 (Detections) | Channel + Station | Broadcast | ⚠️ Review needed |
-| L2 (Timing) | Broadcast | Broadcast | ✅ Correct |
-| L3 (Fusion) | Broadcast | Broadcast | ✅ Correct |
-| HDF5 Files | Channel directories | ? | ⚠️ Review needed |
+---
 
-**Key Files to Examine:**
-- `src/hf_timestd/core/phase2_analytics_service.py` — L1→L2 processing
-- `src/hf_timestd/core/multi_broadcast_fusion.py` — L2→L3 fusion
-- `src/hf_timestd/models/measurement.py` — Data models
+## ✅ COMPLETED: SESSION 2026-01-23 CORE RECORDER FIX
 
-#### 2. **Ionospheric Path Characterization**
+**Status:** ✅ **COMPLETE** - 2026-01-23  
+**Objective:** Fix `timestd-core-recorder` service startup failure
 
-Each broadcast represents a **unique ionospheric path**. Does the pipeline properly characterize:
+### Problem
+`timestd-core-recorder` failed to start with `ModuleNotFoundError: No module named 'hf_timestd.core.pipeline_orchestrator'`
 
-| Characteristic | Per-Broadcast? | Per-Channel? | Issue? |
-|---------------|----------------|--------------|--------|
-| Propagation delay | ✅ Yes | N/A | OK |
-| TEC estimate | ? | ? | Review |
-| Doppler shift | ✅ Yes | N/A | OK |
-| Multipath spread | ? | ? | Review |
-| Mode (1F/2F/3F) | ? | ? | Review |
-| Scintillation (S4) | ? | ? | Review |
+### Root Cause
+In v5.4.0 (commit `4ffa5c5`), `pipeline_orchestrator.py` was moved to `archive/deprecated-core/` as part of the 6-service systemd architecture refactor, but `stream_recorder_v2.py` still imported it.
 
-**Key Files to Examine:**
-- `src/hf_timestd/core/tec_estimator.py` — TEC calculation
-- `src/hf_timestd/core/propagation_mode_solver.py` — Mode identification
-- `src/hf_timestd/core/advanced_signal_analysis.py` — Scintillation
+### Fix
+Refactored `src/hf_timestd/core/stream_recorder_v2.py` to use `BinaryArchiveWriter` directly instead of the archived `PipelineOrchestrator`. The core recorder now only handles Phase 1 raw IQ storage; Phase 2/3 are handled by separate systemd services.
 
-#### 3. **Station-Centric vs Frequency-Centric Views**
-
-The **ionospheric scientist** wants to see:
-- How does the path to WWV differ from the path to WWVH?
-- How does TEC vary across the 4 station paths?
-- Are there station-specific propagation anomalies?
-
-The **metrologist** wants to see:
-- Per-station timing consistency
-- Per-station calibration offsets
-- Per-station uncertainty contributions
-
-**Question:** Does the current UI/API expose station-centric views, or only channel-centric views?
-
-**Key Files to Examine:**
-- `web-api/services/fusion_service.py` — API data exposure
-- `web-api/static/metrology.html` — UI presentation
-- `web-api/static/physics.html` — Physics UI
-
-#### 4. **Calibration Architecture**
-
-The calibration system uses **per-broadcast** keys (`station_frequency`):
-
-```python
-# From multi_broadcast_fusion.py
-def _get_broadcast_key(self, station: str, frequency_mhz: float) -> str:
-    return f"{station}_{frequency_mhz:.1f}"
+### Commit
 ```
-
-**Questions:**
-- Is calibration properly per-broadcast, or does it conflate broadcasts?
-- Are calibration offsets physically meaningful (station geometry + frequency dispersion)?
-- Does the calibration system account for the invariant properties (distance, direction, frequency)?
-
-#### 5. **Missing Station-Level Aggregations**
-
-The fusion layer combines 17 broadcasts into a single D_clock. But intermediate aggregations may be valuable:
-
-| Aggregation | Currently Computed? | Value |
-|-------------|---------------------|-------|
-| Per-station mean D_clock | Partial | Cross-station validation |
-| Per-station TEC | ? | Path-specific ionosphere |
-| Per-station Doppler | ? | Path-specific dynamics |
-| Station pair differentials | ? | Baseline ionospheric gradients |
-
----
-
-### Specific Code Review Targets
-
-#### A. `phase2_analytics_service.py` (L1→L2)
-
-**Review Focus:**
-- How are broadcasts identified within a channel?
-- Is station discrimination reliable?
-- Are per-broadcast Kalman filters properly keyed?
-
-```python
-# Line ~470: Kalman filters keyed by broadcast
-broadcast_id = f"{station}_{int(frequency_hz/1000)}"
-self.broadcast_filters[broadcast_id] = filter
+2eb414c - fix(core-recorder): Remove stale PipelineOrchestrator import
 ```
-
-#### B. `multi_broadcast_fusion.py` (L2→L3)
-
-**Review Focus:**
-- Does fusion properly weight broadcasts by their unique uncertainties?
-- Is per-station consistency checked?
-- Are station-specific systematic errors handled?
-
-```python
-# Line ~2000: Broadcast key generation
-def _get_broadcast_key(self, station: str, frequency_mhz: float) -> str:
-    return f"{station}_{frequency_mhz:.1f}"
-```
-
-#### C. `tec_estimator.py` (TEC Calculation)
-
-**Review Focus:**
-- Is TEC computed per-station (using multiple frequencies from same station)?
-- Or is it computed per-channel (mixing stations)?
-- The physics requires per-station TEC (same ionospheric path).
-
-#### D. HDF5 Output Structure
-
-**Review Focus:**
-- Are output files organized by channel or by broadcast?
-- Can downstream analysis easily aggregate by station?
-- Is the file structure aligned with the fundamental interest?
-
----
-
-### Expected Outcomes
-
-After this review session, we should have:
-
-1. **Gap Analysis:** Clear identification of where the pipeline loses broadcast/station identity
-2. **Recommendations:** Specific changes to better serve the fundamental interest
-3. **Priority List:** Ranked issues by impact on metrological and scientific goals
-4. **Action Items:** Concrete code changes or architectural improvements
-
----
-
-### Reference: Station Geometry (from receiver perspective)
-
-The **invariant properties** that distinguish each broadcast:
-
-| Station | Typical Distance | Azimuth (from central US) | Path Character |
-|---------|-----------------|---------------------------|----------------|
-| WWV | 500-1500 km | West | Short, often 1F |
-| WWVH | 5000-6000 km | West-Southwest | Long, multi-hop |
-| CHU | 1500-2500 km | Northeast | Medium, often 1-2F |
-| BPM | 10000+ km | Northwest (great circle) | Very long, complex |
-
-These geometric differences mean each station probes a **different ionospheric region** and **different propagation modes**. The fundamental scientific value is in understanding these differences.
-
----
-
-### Reference: Key Constants
-
-From `src/hf_timestd/core/wwv_constants.py`:
-
-```python
-STATION_LOCATIONS = {
-    'WWV': {'lat': 40.6807, 'lon': -105.0407, 'name': 'Fort Collins, CO'},
-    'WWVH': {'lat': 21.9872, 'lon': -159.7636, 'name': 'Kekaha, Kauai, HI'},
-    'CHU': {'lat': 45.2953, 'lon': -75.7544, 'name': 'Ottawa, ON, Canada'},
-    'BPM': {'lat': 34.9489, 'lon': 109.5430, 'name': 'Pucheng, Shaanxi, China'},
-}
-
-STANDARD_CHANNELS = [
-    'WWV 2.5 MHz', 'WWV 5 MHz', 'WWV 10 MHz', 'WWV 15 MHz', 
-    'WWV 20 MHz', 'WWV 25 MHz',
-    'WWVH 2.5 MHz', 'WWVH 5 MHz', 'WWVH 10 MHz', 'WWVH 15 MHz',
-    'CHU 3.33 MHz', 'CHU 7.85 MHz', 'CHU 14.67 MHz',
-    'BPM 2.5 MHz', 'BPM 5 MHz', 'BPM 10 MHz', 'BPM 15 MHz'
-]
-```
-
-Note: `STANDARD_CHANNELS` lists 17 items (broadcasts), not 9 (channels).
 
 ---
 

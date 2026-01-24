@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 20, 2026
+**Last Updated:** January 24, 2026
 
 ---
 
@@ -50,12 +50,22 @@ The system is composed of six independent systemd services, each with a specific
 
 ### 3. Fusion (`timestd-fusion`)
 
-**Responsibility:** Multi-Broadcast Synthesis
+**Responsibility:** Multi-Broadcast Synthesis (v6.1 Architecture)
 
 - Reads L2 HDF5 measurements from all 9 channels via **SWMR** (low latency).
-- Performs weighted fusion, Kalman filtering, and global consistency checks.
+- **Per-broadcast Kalman filtering** — tracks ionospheric path dynamics for each of 17 broadcasts.
+- **GNSS VTEC correction** — applies real-time ionospheric correction when local GNSS available.
+- **Weighted Least Squares fusion** — optimal linear combination without temporal smoothing.
 - Feeds **Chrony SHM** to discipline the system clock.
 - **Output:** `/var/lib/timestd/phase2/fusion/` (HDF5 L3, Fused CSV)
+
+**v6.1 Hierarchical Architecture:**
+| Layer | Method | Purpose |
+|-------|--------|---------|
+| Per-Broadcast | Kalman filter | Track ionospheric dynamics |
+| Per-Station | TEC validation | Multi-frequency consistency |
+| GNSS VTEC | Direct correction | Remove model TEC bias |
+| Multi-Station | WLS fusion | Optimal combination |
 
 ### 4. VTEC (`timestd-vtec`)
 

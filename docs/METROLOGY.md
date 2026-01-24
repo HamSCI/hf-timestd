@@ -1,8 +1,8 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 5.3.4  
-**Last Updated:** January 2026  
+**System Version:** 6.1.0  
+**Last Updated:** January 24, 2026  
 **Author:** Michael James Hauan (AC0G)
 
 ---
@@ -592,6 +592,230 @@ This is not an amateur "time sync" project. This is an **instrument of synthetic
 **For a metrologist:** This is traceable to UTC(NIST), has a complete uncertainty budget, and follows ISO GUM best practices.
 
 **For a skeptic:** The code is open source, the physics is documented, and the limitations are honestly stated. Verify it yourself.
+
+---
+
+## 12. Hierarchical Estimation Architecture (v6.0)
+
+### 12.1 Motivation: Why Hierarchical?
+
+The original architecture (v5.x) used a **single Kalman filter at the fusion layer**. This caused:
+
+1. **Restart variance**: The fused D_clock settled to different values on each service restart
+2. **False smoothing**: Ionospheric variations were smoothed away, hiding science
+3. **Single point of failure**: All state concentrated in one filter
+
+The revised architecture (v6.0) distributes filtering to where it is **physically justified**:
+
+| Layer | Method | Physical Justification |
+|-------|--------|------------------------|
+| Per-Broadcast | Kalman filter | Ionosphere has temporal continuity |
+| Per-Station | TEC 1/f² fit | Multi-frequency dispersion is physics |
+| Multi-Station | Weighted Least Squares | Optimal linear combination, no temporal smoothing |
+
+### 12.2 The Estimation Problem
+
+**Quantity of interest:** `offset_to_UTC = T_local - T_UTC(NIST)`
+
+**Observation model:** For each broadcast i:
+```
+D_clock_i = T_arrival_i - ToF_i - T_transmit_i
+          = offset_to_UTC + ε_i
+```
+
+Where:
+- `T_arrival_i` — measured precisely by GPSDO (known)
+- `ToF_i` — ionospheric path delay (nuisance parameter, varies)
+- `T_transmit_i` — scheduled transmission time (known by definition)
+- `ε_i` — residual error (ionospheric + noise)
+
+**Key insight:** All 17 broadcasts share the **same unknown** (offset_to_UTC). The ionospheric paths are **nuisance parameters** we must estimate to extract the quantity of interest.
+
+### 12.3 Layer 1: Per-Broadcast Kalman Filter
+
+**Purpose:** Track ionospheric path dynamics for each of the 17 broadcasts.
+
+**State vector:**
+```
+x = [ToF_ms, dToF_dt]
+```
+
+**Physical model:**
+- The ionosphere is a continuous medium — it cannot teleport
+- ToF changes are bounded by ionospheric dynamics (~1-5 ms/minute max)
+- A Kalman filter here models **real physics**
+
+**Process noise (tuned per frequency):**
+- Low frequencies (2.5-5 MHz): Higher Q (E-layer volatility)
+- High frequencies (15-25 MHz): Lower Q (F-layer stability)
+
+**Measurement noise:** SNR-dependent (high SNR → trust measurement)
+
+**Implementation:** `src/hf_timestd/core/broadcast_kalman_filter.py`
+
+**What this achieves:**
+- Rejects detection glitches (false peaks, multipath)
+- Preserves real ionospheric dynamics (science signal)
+- Provides smoothed ToF with uncertainty for downstream processing
+
+### 12.4 Layer 2: Per-Station TEC Estimation
+
+**Purpose:** Validate multi-frequency consistency and estimate ionospheric TEC.
+
+**Physics:** The ionospheric group delay follows:
+```
+τ_iono(f) = K × TEC / f²
+where K = 40.3 m³/s²
+```
+
+For a given path, **TEC is the same** for all frequencies. Only the delay differs by 1/f².
+
+**Algorithm:** Weighted Least Squares regression on ToF vs 1/f²:
+```
+ToF(f) = ToF_geometric + k/f²
+
+Solve for:
+  - ToF_geometric (ionosphere-free delay)
+  - k (proportional to TEC)
+```
+
+**Implementation:** `src/hf_timestd/core/tec_estimator.py`
+
+**Metrological Constraints:**
+
+The HF-derived TEC estimator provides validation and science products, but **does not directly modify D_clock values** because mode mixing can corrupt the 1/f² fit.
+
+**What HF TEC achieves:**
+- **Validates** that multi-frequency measurements follow 1/f² physics
+- **Boosts confidence** for measurements with good TEC fit (R² > 0.9)
+- **Reduces confidence** for measurements with poor TEC fit
+- **Produces TEC science products** for ionospheric research
+- **Detects mode changes** when 1/f² relationship breaks
+
+### 12.4.1 GNSS VTEC Ionospheric Correction (v6.1)
+
+**NEW in v6.1:** When local GNSS VTEC is available, the fusion layer applies a **direct ionospheric correction** to D_clock measurements.
+
+**Physics Basis:**
+
+The propagation model computes D_clock using a **modeled** TEC value (from IRI-2020, IONEX, or parametric fallback). GNSS VTEC provides a **direct measurement** of the actual ionospheric electron content. The correction is:
+
+```
+D_clock_corrected = D_clock + Δiono
+where Δiono = K × (TEC_model - TEC_gnss) × n_hops × obliquity / f²
+      K = 1.344 ms·MHz²/TECU (ionospheric delay constant)
+```
+
+**Why this is metrologically justified:**
+
+1. **GNSS VTEC is a direct measurement** — dual-frequency GPS receivers measure TEC to ±1-2 TECU accuracy
+2. **The 1/f² physics is well-established** — ionospheric group delay follows this dispersion relation exactly
+3. **We're correcting model error** — not adding new uncertainty, but removing systematic bias
+
+**TEC Source Hierarchy:**
+
+| Priority | Source | Latency | Accuracy | Usage |
+|----------|--------|---------|----------|-------|
+| 1 | Local GNSS VTEC | ~1s | ±1-2 TECU | Direct D_clock correction |
+| 2 | IONEX maps | 2 hours | ±2-5 TECU | Propagation model (Tier 1.5) |
+| 3 | IRI-2020 | Climatology | ±5-10 TECU | Propagation model (Tier 1) |
+| 4 | Parametric | Climatology | ±10-20 TECU | Propagation model (Tier 2) |
+
+**Implementation:** `src/hf_timestd/core/multi_broadcast_fusion.py` (GNSS VTEC correction block)
+
+**Typical Correction Magnitude:**
+
+For ΔTEC = 10 TECU, f = 10 MHz, 1 hop, obliquity = 1.5:
+```
+Δiono = 1.344 × 10 × 1 × 1.5 / 100 = 0.20 ms
+```
+
+For ΔTEC = 30 TECU, f = 5 MHz, 1 hop, obliquity = 1.5:
+```
+Δiono = 1.344 × 30 × 1 × 1.5 / 25 = 2.42 ms
+```
+
+**Uncertainty Floor with GNSS TEC:**
+
+With proper GNSS VTEC correction, the theoretical uncertainty floor is:
+- **Per-station:** ~0.1-0.2 ms (geometric path becomes calibratable constant)
+- **Multi-station WLS:** ~0.05-0.1 ms
+
+**Example:**
+```
+WWV 5 MHz:  ToF = 35.2 ms
+WWV 10 MHz: ToF = 33.8 ms  
+WWV 15 MHz: ToF = 33.4 ms
+
+Fit: ToF = 33.1 ms + 530/(f_MHz)²
+R² = 0.98 (good fit)
+
+Result: Measurements validated, confidence boosted 15%
+TEC estimate = 25 TECU (science product)
+```
+
+### 12.5 Layer 3: Multi-Station Weighted Least Squares
+
+**Purpose:** Combine per-station D_clock estimates into a single offset_to_UTC.
+
+**Method:** Best Linear Unbiased Estimator (BLUE):
+```
+offset_to_UTC = Σ(w_i × D_clock_i) / Σ(w_i)
+where w_i = 1/σ_i²
+```
+
+**Why NOT a Kalman filter here?**
+
+A Kalman filter at L3 would model `offset_to_UTC` as having **process noise** — implying the offset drifts randomly. But:
+
+1. The GPSDO doesn't drift randomly — it has deterministic (tiny) drift
+2. Any apparent "drift" in the fused offset is actually **ionospheric bias** leaking through
+3. A Kalman would **mask** this bias instead of **estimating** it
+
+**Cross-station validation:**
+- Compute per-station residuals from the weighted mean
+- If a station systematically deviates → flag for calibration review
+- Detect ionospheric gradients (science signal, not error)
+
+**Implementation:** `src/hf_timestd/core/multi_broadcast_fusion.py` (method: `_weighted_least_squares_fusion`)
+
+### 12.6 State Persistence
+
+**Per-broadcast state:** Each of the 17 Kalman filters persists its state:
+```json
+{
+  "WWV_5000": {"tof_ms": 33.8, "dtof_dt": 0.001, "P": [[0.1, 0], [0, 0.001]], "n_updates": 1234},
+  "WWV_10000": {"tof_ms": 33.4, "dtof_dt": 0.002, "P": [[0.08, 0], [0, 0.001]], "n_updates": 1189},
+  ...
+}
+```
+
+**File:** `/var/lib/timestd/state/broadcast_kalman_state.json`
+
+**Restart behavior:**
+- Each broadcast resumes from its last known ToF
+- No single point of state that can drift
+- Fusion is instantaneous (WLS), not path-dependent
+
+### 12.7 Comparison: Old vs New Architecture
+
+| Aspect | v5.x (Single L3 Kalman) | v6.0 (Hierarchical) |
+|--------|-------------------------|---------------------|
+| **Filtering location** | Fusion layer only | Per-broadcast |
+| **State persistence** | Single Kalman state | 17 independent states |
+| **Restart behavior** | Variance depends on trust decay | Deterministic from per-broadcast state |
+| **Ionospheric bias** | Smoothed away | Removed by TEC fit |
+| **Science preservation** | Variations hidden | Variations preserved |
+| **Fusion method** | Kalman (temporal) | WLS (instantaneous) |
+
+### 12.8 Code References
+
+| Component | File | Key Method |
+|-----------|------|------------|
+| Per-Broadcast Kalman | `core/broadcast_kalman_filter.py` | `BroadcastKalmanFilter.update()` |
+| TEC Estimation | `core/tec_estimator.py` | `TECEstimator.estimate_tec()` |
+| WLS Fusion | `core/multi_broadcast_fusion.py` | `_weighted_least_squares_fusion()` |
+| State Persistence | `core/multi_broadcast_fusion.py` | `_save_broadcast_kalman_state()` |
 
 ---
 

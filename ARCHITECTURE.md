@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** January 20, 2026  
+**Last Updated:** January 24, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V5.0 (HDF5-Native Pipeline)
+**Version:** V6.1 (Hierarchical Estimation with GNSS TEC Correction)
 
 ---
 
@@ -168,23 +168,28 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 └─────────────────────────────────────────────────────────────────┘
                               ↓ (HDF5 SWMR)
 ┌─────────────────────────────────────────────────────────────────┐
-│                    PHASE 3: FUSION SERVICE                      │
-│                (Multi-Broadcast UTC Alignment)                  │
+│                    PHASE 3: FUSION SERVICE (v6.1)               │
+│           (Hierarchical Estimation with GNSS TEC Correction)    │
 │                                                                 │
 │  Input:  L2 HDF5 Measurements from Phase 2 (all channels)       │
-│  Process:                                                       │
-│    1. Weighted Fusion (SNR, Quality, Mode)                      │
-│    2. Physics Verification (IONEX VTEC + IRI-2020)              │
-│    3. Global Differential Solve (Cross-frequency physics)       │
-│    4. Kalman Filtering (Convergence to UTC)                     │
+│          GNSS VTEC from timestd-vtec service (real-time)        │
+│                                                                 │
+│  Process (Hierarchical Architecture):                           │
+│    1. Per-Broadcast Kalman Filtering (17 independent filters)   │
+│    2. GNSS VTEC Ionospheric Correction (when available)         │
+│    3. Per-Station TEC Validation (1/f² physics check)           │
+│    4. Weighted Least Squares Fusion (BLUE estimator)            │
 │                                                                 │
 │  Outputs:                                                       │
 │  • Chrony SHM (System Clock Discipline)                         │
 │  • L3: Fused Timing HDF5 (phase2/fusion/)                       │
-│  • calibration.json (System state learning)                     │
+│  • broadcast_kalman_state.json (17 per-broadcast states)        │
+│  • broadcast_calibration.json (calibration + trust)             │
 │                                                                 │
 │  Responsibilities:                                              │
 │  ✅ Single source of truth for system clock                      │
+│  ✅ Deterministic restart (per-broadcast state persistence)     │
+│  ✅ Real-time ionospheric correction via GNSS VTEC              │
 │  ✅ Cross-channel consistency enforcement                       │
 │  ✅ Real-time Allan Deviation tracking                          │
 │  ✅ Feeds Dashboard via FastAPI                                 │

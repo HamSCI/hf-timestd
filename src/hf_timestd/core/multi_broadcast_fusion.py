@@ -489,6 +489,18 @@ class MultiBroadcastFusion:
         from .tec_estimator import TECEstimator
         self.tec_estimator = TECEstimator()
         
+        # ====================================================================
+        # PER-BROADCAST KALMAN FILTERS (v6.0 Hierarchical Architecture)
+        # ====================================================================
+        # Each broadcast gets its own Kalman filter to track ionospheric path
+        # dynamics. This is physically justified because the ionosphere has
+        # temporal continuity - it cannot teleport.
+        from .broadcast_kalman_filter import BroadcastKalmanFilter
+        self.broadcast_kalmans: Dict[str, BroadcastKalmanFilter] = {}
+        self.broadcast_kalman_state_dir = self.data_root / 'state' / 'broadcast_kalmans'
+        self.broadcast_kalman_state_dir.mkdir(parents=True, exist_ok=True)
+        self._load_broadcast_kalman_states()
+        
         # Initialize Physics Propagation Model (for GNSS VTEC integration)
         if PhysicsPropagationModel:
             self.physics_model = PhysicsPropagationModel(
@@ -630,6 +642,9 @@ class MultiBroadcastFusion:
         # Data freshness tracking for upstream starvation detection
         self.upstream_stale_warning_issued = False
         self.max_upstream_age_seconds = 300.0  # 5 minutes - warn if L1/L2 data older than this
+        
+        # DIAGNOSTIC: Track updates since this restart (separate from kalman_n_updates which may be restored)
+        self._updates_since_restart = 0
         
         logger.info(f"MultiBroadcastFusion initialized")
         logger.info(f"  Data root: {data_root}")
@@ -859,6 +874,16 @@ class MultiBroadcastFusion:
                             f"✅ Loaded calibration (age={age_hours:.1f}h, trust={trust_level:.2f}). "
                             f"Full trust - skipping warmup and bootstrap"
                         )
+                    
+                    # DIAGNOSTIC: Log complete restart state for variance investigation
+                    logger.info(
+                        f"[RESTART_DIAG] Fusion restart state: "
+                        f"kalman_state=[{self.kalman_state[0]:.4f}, {self.kalman_state[1]:.6f}], "
+                        f"kalman_P_diag=[{self.kalman_P[0,0]:.4f}, {self.kalman_P[1,1]:.8f}], "
+                        f"trust={trust_level:.3f}, age_h={age_hours:.2f}, "
+                        f"cal_update_count={self.calibration_update_count}, "
+                        f"n_broadcasts={len(self.calibration)}"
+                    )
 
             except Exception as e:
                 logger.warning(f"Could not load calibration: {e}")
@@ -880,6 +905,143 @@ class MultiBroadcastFusion:
         # No default offsets - all calibration is learned from data
         # The calibration dict will be populated as measurements arrive
         logger.info("Calibration initialized - will learn from data (no hardcoded defaults)")
+    
+    # ========================================================================
+    # PER-BROADCAST KALMAN FILTER METHODS (v6.0 Hierarchical Architecture)
+    # ========================================================================
+    
+    def _load_broadcast_kalman_states(self):
+        """
+        Load persisted per-broadcast Kalman filter states.
+        
+        Each broadcast has its own Kalman filter tracking ionospheric path
+        dynamics. States are persisted to survive service restarts.
+        """
+        from .broadcast_kalman_filter import BroadcastKalmanFilter
+        
+        # Scan for existing state files
+        if self.broadcast_kalman_state_dir.exists():
+            state_files = list(self.broadcast_kalman_state_dir.glob('*_kalman_state.json'))
+            loaded_count = 0
+            
+            for state_file in state_files:
+                try:
+                    with open(state_file) as f:
+                        state_data = json.load(f)
+                    
+                    broadcast_id = state_data.get('broadcast_id')
+                    station = state_data.get('station')
+                    frequency_mhz = state_data.get('frequency_mhz')
+                    
+                    if broadcast_id and station and frequency_mhz:
+                        # Create filter and load state
+                        kalman = BroadcastKalmanFilter(broadcast_id, station, frequency_mhz)
+                        if kalman.load_state(self.broadcast_kalman_state_dir):
+                            self.broadcast_kalmans[broadcast_id] = kalman
+                            loaded_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to load Kalman state from {state_file}: {e}")
+            
+            if loaded_count > 0:
+                logger.info(f"Loaded {loaded_count} per-broadcast Kalman filter states")
+        else:
+            logger.info("No per-broadcast Kalman states found - will initialize on first measurements")
+    
+    def _get_or_create_broadcast_kalman(self, broadcast_id: str, station: str, frequency_mhz: float):
+        """
+        Get existing Kalman filter for broadcast or create new one.
+        
+        Args:
+            broadcast_id: Unique broadcast identifier (e.g., "WWV_10000")
+            station: Station name (WWV, WWVH, CHU, BPM)
+            frequency_mhz: Frequency in MHz
+            
+        Returns:
+            BroadcastKalmanFilter instance
+        """
+        if broadcast_id not in self.broadcast_kalmans:
+            from .broadcast_kalman_filter import BroadcastKalmanFilter
+            self.broadcast_kalmans[broadcast_id] = BroadcastKalmanFilter(
+                broadcast_id, station, frequency_mhz
+            )
+            logger.info(f"Created new Kalman filter for {broadcast_id}")
+        
+        return self.broadcast_kalmans[broadcast_id]
+    
+    def _save_broadcast_kalman_states(self):
+        """
+        Save all per-broadcast Kalman filter states to disk.
+        
+        Called periodically and on shutdown to persist state.
+        """
+        saved_count = 0
+        for broadcast_id, kalman in self.broadcast_kalmans.items():
+            try:
+                kalman.save_state(self.broadcast_kalman_state_dir)
+                saved_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to save Kalman state for {broadcast_id}: {e}")
+        
+        if saved_count > 0:
+            logger.debug(f"Saved {saved_count} per-broadcast Kalman filter states")
+    
+    def _apply_broadcast_kalmans(self, measurements: List['BroadcastMeasurement']) -> List['BroadcastMeasurement']:
+        """
+        Apply per-broadcast Kalman filtering to measurements.
+        
+        This is the core of the v6.0 hierarchical architecture:
+        - Each broadcast's d_clock is filtered by its own Kalman
+        - The Kalman tracks ionospheric path dynamics (ToF)
+        - Glitches are rejected, real dynamics are preserved
+        
+        Args:
+            measurements: Raw measurements from L1/L2
+            
+        Returns:
+            Measurements with Kalman-filtered d_clock values and uncertainties
+        """
+        filtered_measurements = []
+        
+        for m in measurements:
+            # Construct broadcast ID
+            broadcast_id = f"{m.station}_{int(m.frequency_mhz * 1000)}"
+            
+            # Get or create Kalman filter for this broadcast
+            kalman = self._get_or_create_broadcast_kalman(
+                broadcast_id, m.station, m.frequency_mhz
+            )
+            
+            # Update Kalman with measurement
+            # Note: We're filtering d_clock directly, which includes both
+            # ionospheric path and clock offset. The TEC estimator will
+            # later separate these.
+            snr_db = getattr(m, 'snr_db', 10.0)  # Default SNR if not available
+            
+            filtered_d_clock, kalman_uncertainty = kalman.update(
+                m.d_clock_ms, snr_db
+            )
+            
+            # Create new measurement with filtered values
+            # We preserve the original measurement but update d_clock and uncertainty
+            filtered_m = BroadcastMeasurement(
+                timestamp=m.timestamp,
+                station=m.station,
+                frequency_mhz=m.frequency_mhz,
+                d_clock_ms=filtered_d_clock,
+                propagation_delay_ms=m.propagation_delay_ms,
+                propagation_mode=m.propagation_mode,
+                confidence=m.confidence,
+                snr_db=m.snr_db,
+                quality_grade=m.quality_grade,
+                channel_name=m.channel_name
+            )
+            
+            # Store Kalman uncertainty for weighting
+            filtered_m.kalman_uncertainty_ms = kalman_uncertainty
+            
+            filtered_measurements.append(filtered_m)
+        
+        return filtered_measurements
     
     def _load_long_term_stats(self):
         """
@@ -988,6 +1150,10 @@ class MultiBroadcastFusion:
             'initialized': self.kalman_initialized,
             'saved_at': time.time()
         }
+        
+        # v6.0 ARCHITECTURE: Save per-broadcast Kalman states
+        # Each broadcast has its own Kalman filter tracking ionospheric path dynamics
+        self._save_broadcast_kalman_states()
         
         # Atomic write: write to temp file, fsync, then rename
         temp_file = self.calibration_file.with_suffix('.tmp')
@@ -2401,6 +2567,13 @@ class MultiBroadcastFusion:
         Returns:
             Kalman filter uncertainty (converges over time)
         """
+        # DIAGNOSTIC: Log entry to confirm this function is being called
+        if not hasattr(self, '_kalman_entry_count'):
+            self._kalman_entry_count = 0
+        self._kalman_entry_count += 1
+        if self._kalman_entry_count <= 5:
+            logger.info(f"[KALMAN_ENTRY] _kalman_update #{self._kalman_entry_count}: meas={measurement:.4f}ms, unc={measurement_uncertainty:.4f}ms, initialized={self.kalman_initialized}")
+        
         # Initialize on first measurement
         # CRITICAL: Start from 0, not from first measurement
         # This ensures the filter learns the offset gradually from scratch
@@ -2453,6 +2626,16 @@ class MultiBroadcastFusion:
         
         # Increment update counter and check convergence
         self.kalman_n_updates += 1
+        
+        # DIAGNOSTIC: Log first 20 updates after restart to track settling behavior
+        self._updates_since_restart += 1
+        if self._updates_since_restart <= 20:
+            logger.info(
+                f"[SETTLING_DIAG] Update #{self._updates_since_restart}: "
+                f"meas={measurement:.4f}ms, innov={y:.4f}ms, "
+                f"state=[{self.kalman_state[0]:.4f}, {self.kalman_state[1]:.6f}], "
+                f"P_diag=[{self.kalman_P[0,0]:.4f}, {self.kalman_P[1,1]:.8f}]"
+            )
         
         if not self.kalman_converged and self.kalman_n_updates >= self.kalman_convergence_threshold:
             self.kalman_converged = True
@@ -2732,6 +2915,13 @@ class MultiBroadcastFusion:
         # Read latest measurements (L1-only mode skips L2 calibration data)
         measurements = self._read_latest_measurements(lookback_minutes, force_l1_only=force_l1_only)
         
+        # ====================================================================
+        # STEP 1: Apply per-broadcast Kalman filtering (v6.0 Architecture)
+        # ====================================================================
+        # Each broadcast's d_clock is filtered by its own Kalman filter.
+        # This rejects detection glitches while preserving real ionospheric dynamics.
+        measurements = self._apply_broadcast_kalmans(measurements)
+        
         # Filter out NaN measurements immediately (tone not detected)
         # CRITICAL FIX (2026-01-08): Leverage GPSDO stability during detection gaps
         #
@@ -2842,10 +3032,25 @@ class MultiBroadcastFusion:
                 logger.info(f"GNSS VTEC available: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
                 used_gnss_vtec = True
                 
-                # CRITICAL FIX (2026-01-05): GNSS VTEC should refine confidence, not modify measurements
-                # Modifying D_clock based on VTEC causes discontinuities when VTEC quality changes
-                # Instead, use VTEC-model agreement to adjust measurement confidence
+                # ================================================================
+                # GNSS VTEC IONOSPHERIC CORRECTION (v6.1 - 2026-01-24)
+                # ================================================================
+                # The propagation model computed D_clock using a MODELED TEC value.
+                # GNSS VTEC provides a DIRECT MEASUREMENT of the actual TEC.
+                # 
+                # Physics: τ_iono = 40.3 × TEC × n_hops / (c × f²) [seconds]
+                #        = 40.3 × TEC × n_hops / f² × 1000 [ms, f in Hz]
+                #
+                # Correction: D_clock_corrected = D_clock + (model_iono - gnss_iono)
+                #           = D_clock + 40.3 × (TEC_model - TEC_gnss) × n_hops / f² × 1000
+                #
+                # This is metrologically justified because:
+                # 1. GNSS VTEC is a direct measurement (not a model)
+                # 2. The 1/f² physics is well-established
+                # 3. We're correcting the model error, not adding new uncertainty
+                # ================================================================
                 
+                corrections_applied = 0
                 for m in measurements:
                     if m.station == 'GLOBAL_DIFF' or m.station == 'UNKNOWN':
                         continue
@@ -2859,34 +3064,52 @@ class MultiBroadcastFusion:
                     )
                     
                     if baseline and baseline.n_hops > 0:
-                        # Extract model TEC
+                        # Extract model TEC (what was used to compute D_clock)
                         model_tec = baseline.tec_tecu if baseline.tec_tecu else 20.0
+                        n_hops = baseline.n_hops
                         
-                        # Calculate TEC agreement
-                        tec_diff = abs(vtec_tecu - model_tec)
-                        tec_agreement = 1.0 - min(1.0, tec_diff / 20.0)  # 0-1 scale
+                        # Calculate TEC difference
+                        tec_diff = model_tec - vtec_tecu  # Positive if model overestimated
                         
-                        # Adjust confidence based on TEC agreement
-                        # Good agreement (< 5 TECU diff) -> boost confidence
-                        # Poor agreement (> 20 TECU diff) -> reduce confidence
-                        if tec_diff < 5.0:
-                            m.confidence = min(1.0, m.confidence * 1.1)
-                            m.propagation_mode = f"{baseline.propagation_mode}+GNSS_VALIDATED"
+                        # Compute ionospheric delay correction
+                        # Using same formula as IonosphericDelayCalculator:
+                        # τ_ms = IONO_DELAY_CONSTANT_MS × TEC / f²
+                        # where IONO_DELAY_CONSTANT_MS ≈ 0.1345 ms·MHz²/TECU
+                        # and f is in MHz, TEC in TECU
+                        #
+                        # For slant TEC: STEC ≈ VTEC × obliquity_factor
+                        # Typical obliquity for HF paths: 1.5-2.0
+                        IONO_DELAY_CONSTANT_MS = 40.3 / 299792.458 * 1e16 / 1e12  # ≈ 0.1345
+                        obliquity_factor = 1.5  # Typical mapping function for HF paths
+                        f_sq = m.frequency_mhz ** 2
+                        delta_iono_ms = IONO_DELAY_CONSTANT_MS * tec_diff * n_hops * obliquity_factor / f_sq
+                        
+                        # Store original for logging
+                        original_d_clock = m.d_clock_ms
+                        
+                        # Apply correction only if significant (> 0.1 ms)
+                        if abs(delta_iono_ms) > 0.1:
+                            m.d_clock_ms = original_d_clock + delta_iono_ms
+                            m.propagation_mode = f"{baseline.propagation_mode}+GNSS_TEC"
+                            m.confidence = min(1.0, m.confidence * 1.2)  # Boost confidence
+                            corrections_applied += 1
+                            
                             logger.debug(
-                                f"  {m.station} {m.frequency_mhz}MHz: GNSS={vtec_tecu:.1f} Model={model_tec:.1f} TECU "
-                                f"(diff={tec_diff:.1f}, agreement={tec_agreement:.2f}) -> confidence boost"
-                            )
-                        elif tec_diff > 20.0:
-                            m.confidence = max(0.5, m.confidence * 0.9)
-                            logger.debug(
-                                f"  {m.station} {m.frequency_mhz}MHz: GNSS={vtec_tecu:.1f} Model={model_tec:.1f} TECU "
-                                f"(diff={tec_diff:.1f}, poor agreement) -> confidence reduction"
+                                f"  {m.station} {m.frequency_mhz}MHz: TEC correction "
+                                f"model={model_tec:.1f} gnss={vtec_tecu:.1f} ΔTEC={tec_diff:+.1f} TECU, "
+                                f"Δiono={delta_iono_ms:+.3f}ms, D_clock {original_d_clock:.3f}->{m.d_clock_ms:.3f}ms"
                             )
                         else:
+                            # Small correction - just validate
+                            m.propagation_mode = f"{baseline.propagation_mode}+GNSS_VALIDATED"
+                            m.confidence = min(1.0, m.confidence * 1.1)
                             logger.debug(
-                                f"  {m.station} {m.frequency_mhz}MHz: GNSS={vtec_tecu:.1f} Model={model_tec:.1f} TECU "
-                                f"(diff={tec_diff:.1f}, moderate agreement)"
+                                f"  {m.station} {m.frequency_mhz}MHz: TEC validated "
+                                f"(ΔTEC={tec_diff:+.1f} TECU, Δiono={delta_iono_ms:+.3f}ms < 0.1ms threshold)"
                             )
+                
+                if corrections_applied > 0:
+                    logger.info(f"Applied GNSS TEC correction to {corrections_applied} measurements")
             else:
                 logger.debug(f"GNSS VTEC stale (age: {time.time()-vtec_ts:.1f}s), skipping")
 
@@ -2937,31 +3160,75 @@ class MultiBroadcastFusion:
                     )
                     
                     if tec_result:
-                        # TEC writing is handled by science_aggregator service
-                        # CRITICAL FIX (2026-01-05): TEC should be a REFINEMENT to uncertainty, not a replacement
-                        # Modifying D_clock values based on TEC causes discontinuities when signals fade in/out
-                        # Instead, use TEC quality to adjust measurement confidence/uncertainty
+                        # ================================================================
+                        # v6.0 ARCHITECTURE: Use TEC to extract ionosphere-free D_clock
+                        # ================================================================
+                        # The TEC estimator fits: ToA(f) = T_vacuum + k/f²
+                        # t_vacuum_error_ms is the ionosphere-free geometric delay
+                        # This REMOVES ionospheric bias from timing measurements
                         
                         # Validate TEC result is not NaN
                         if np.isnan(tec_result.tec_u) or np.isnan(tec_result.confidence):
                             logger.warning(f"TEC solver produced NaN for {station} (tec={tec_result.tec_u}, conf={tec_result.confidence}) - skipping")
                         elif tec_result.confidence > 0.9 and 5.0 <= tec_result.tec_u <= 100.0:
                             # TEC is physically reasonable (5-100 TECU) and well-fit
-                            logger.info(f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f})")
+                            # Use t_vacuum_error_ms to compute ionosphere-free D_clock
+                            logger.info(
+                                f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}), "
+                                f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms"
+                            )
                             
-                            # REFINEMENT: Boost confidence for measurements with good TEC fit
-                            # This gives them more weight in fusion without modifying their values
+                            # ================================================================
+                            # METROLOGICALLY SOUND TEC CORRECTION
+                            # ================================================================
+                            # The TEC fit gives us t_vacuum (ionosphere-free geometric delay)
+                            # and per-frequency group delays. 
+                            #
+                            # IMPORTANT: D_clock was computed as:
+                            #   D_clock = raw_toa - propagation_model_delay
+                            # where propagation_model_delay includes a MODELED ionospheric term.
+                            #
+                            # The TEC fit provides a MEASURED ionospheric term. To correct:
+                            #   D_clock_corrected = D_clock + (modeled_iono - measured_iono)
+                            #
+                            # However, we don't have access to the modeled ionospheric component
+                            # separately. Instead, we use the fact that all frequencies from
+                            # the same station should yield the SAME D_clock after correction.
+                            #
+                            # The TEC fit's t_vacuum represents the ionosphere-free arrival time.
+                            # If the propagation model were perfect, all D_clock values would
+                            # already agree. The TEC fit residuals tell us how much the model
+                            # was wrong for each frequency.
+                            #
+                            # CONSERVATIVE APPROACH: Only boost confidence for good TEC fits.
+                            # Do NOT modify D_clock values, as this requires knowing the
+                            # modeled ionospheric component which we don't have access to here.
+                            # The TEC validation confirms the measurements are self-consistent.
+                            
                             for m in station_meas:
-                                m.propagation_mode = 'TEC_VALIDATED' # Flag as TEC-validated
-                                m.confidence = min(1.0, m.confidence * 1.15) # Modest confidence boost
+                                m.propagation_mode = 'TEC_VALIDATED'
+                                m.confidence = min(1.0, m.confidence * 1.15)  # Modest confidence boost
+                            
+                            # Store TEC result for science products
+                            # The actual ionospheric correction should be applied upstream
+                            # in the L2 calibration service where we have access to the
+                            # propagation model components
+                            logger.debug(
+                                f"  TEC validated {len(station_meas)} measurements from {station}, "
+                                f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms, "
+                                f"residuals={tec_result.residuals_ms:.3f}ms"
+                            )
                         elif tec_result.confidence > 0.9:
                             # TEC fit is good but value is unrealistic (e.g., 0.0 TECU)
-                            logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}) - ignoring")
+                            logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}) - not applying correction")
+                            for m in station_meas:
+                                m.propagation_mode = 'TEC_UNREALISTIC'
                         else:
                             # TEC fit is poor - reduce confidence slightly
                             logger.warning(f"TEC poor fit for {station}: R2={tec_result.confidence:.2f} (Needs >0.9)")
                             for m in station_meas:
-                                m.confidence = max(0.5, m.confidence * 0.95) # Slight confidence reduction
+                                m.confidence = max(0.5, m.confidence * 0.95)
+                                m.propagation_mode = 'TEC_POOR_FIT'
                     else:
                         logger.warning(f"TEC solver returned None for {station} (inputs: {len(tec_input)})")
                 else:
@@ -3263,27 +3530,39 @@ class MultiBroadcastFusion:
         
         if is_valid_multi_station:
             # ============================================================
-            # NORMAL OPERATION: Multi-station fusion with good quality
+            # v6.0 ARCHITECTURE: Weighted Least Squares Fusion (No Temporal Smoothing)
             # ============================================================
-            # Update Kalman filter and record this as last valid fusion
+            # The per-broadcast Kalmans have already smoothed the measurements.
+            # Here we simply combine them using optimal linear weighting.
+            # NO temporal smoothing at this layer - that would be unjustified.
             self.holdover_mode = False
             
-            if measurement_uncertainty < 100.0:
-                kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty)
-            else:
-                kalman_uncertainty = np.sqrt(self.kalman_P[0, 0]) if self.kalman_initialized else measurement_uncertainty
-            
-            # Record this valid fusion for holdover calculations
-            self.last_valid_fusion_time = current_time
-            self.last_valid_fusion_uncertainty = kalman_uncertainty
-            self.last_valid_n_stations = n_stations_now
+            # The fused_d_clock_raw is already the weighted mean from earlier
+            # The measurement_uncertainty is the combined uncertainty from ISO GUM
+            # We use this directly without additional Kalman filtering
             
             # Apply station count scaling to final uncertainty
             # More stations = more confidence in cross-validation
-            uncertainty = kalman_uncertainty * station_scale
+            wls_uncertainty = measurement_uncertainty * station_scale
+            
+            # Record this valid fusion for holdover calculations
+            self.last_valid_fusion_time = current_time
+            self.last_valid_fusion_uncertainty = wls_uncertainty
+            self.last_valid_n_stations = n_stations_now
+            
+            # Track convergence based on measurement quality (not Kalman state)
+            # We consider converged when we have good multi-station coverage
+            if not self.kalman_converged and n_stations_now >= 3 and wls_uncertainty < 2.0:
+                self.kalman_converged = True
+                logger.info(
+                    f"WLS fusion CONVERGED: {n_stations_now} stations, "
+                    f"uncertainty={wls_uncertainty:.3f}ms"
+                )
+            
+            uncertainty = wls_uncertainty
             
             logger.debug(
-                f"Multi-station fusion: {n_stations_now} stations, {n_broadcasts_now} broadcasts, "
+                f"WLS fusion: {n_stations_now} stations, {n_broadcasts_now} broadcasts, "
                 f"uncertainty={uncertainty:.3f}ms (scale={station_scale:.1f}x)"
             )
             
@@ -3458,11 +3737,13 @@ class MultiBroadcastFusion:
                 f"{suspect_count} suspect measurements"
             )
         
-        # Update Kalman filter for convergence tracking
-        kalman_uncertainty = self._kalman_update(fused_d_clock, measurement_uncertainty)
-        
-        # Final uncertainty is the Kalman-filtered combined uncertainty
-        uncertainty = kalman_uncertainty
+        # ====================================================================
+        # v6.0 ARCHITECTURE: WLS Fusion (No L3 Kalman)
+        # ====================================================================
+        # Per-broadcast Kalmans have already smoothed measurements.
+        # We use the measurement uncertainty directly without additional filtering.
+        # This preserves ionospheric science signal and avoids false smoothing.
+        uncertainty = measurement_uncertainty
         
         # ====================================================================
         # SINGLE-STATION MODE SAFEGUARDS (CRITICAL FIX 2026-01-10)

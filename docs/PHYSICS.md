@@ -2,8 +2,8 @@
 
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 5.3.6  
-**Last Updated:** 2026-01-16
+**System Version:** 6.1.0  
+**Last Updated:** 2026-01-24
 
 ---
 
@@ -54,39 +54,58 @@ This geometry provides ionospheric sampling across:
 
 ### 3.1 Total Electron Content (TEC) ✅
 
-**Status:** Implemented, validation in progress
+**Status:** Fully implemented with GNSS VTEC correction (v6.1)
 
 **Physics:** The ionospheric group delay follows the dispersion relation:
 
 ```
 τ_iono = K × TEC / f²
 where K = 40.3 m³/s² (ionospheric constant)
+      τ_ms = 1.344 × TEC_TECU / f_MHz² (delay in milliseconds)
 ```
 
-**Implementation:** `src/hf_timestd/core/tec_estimator.py`
+**Implementation:**
+- HF-derived TEC: `src/hf_timestd/core/tec_estimator.py`
+- GNSS VTEC: `src/hf_timestd/core/gnss_tec.py`
+- Ionospheric correction: `src/hf_timestd/core/multi_broadcast_fusion.py`
 
-The system performs least-squares fitting across multiple frequencies to solve for TEC:
+**TEC Source Hierarchy (v6.1):**
 
-```python
-# Model: T_obs(f) = T_vacuum + (40.3 × TEC) / f²
-# Solve for TEC and T_vacuum simultaneously
+| Priority | Source | Method | Accuracy | Latency |
+|----------|--------|--------|----------|---------|
+| 1 | Local GNSS VTEC | Dual-frequency GPS (ZED-F9P) | ±1-2 TECU | ~1s |
+| 2 | IONEX maps | Global GPS network (NASA CDDIS) | ±2-5 TECU | 2 hours |
+| 3 | IRI-2020 | Climatological model | ±5-10 TECU | N/A |
+| 4 | Parametric | Diurnal/solar model | ±10-20 TECU | N/A |
+
+**GNSS VTEC Ionospheric Correction (NEW in v6.1):**
+
+When local GNSS VTEC is available, the system applies a direct correction to D_clock:
+
 ```
+D_clock_corrected = D_clock + Δiono
+Δiono = 1.344 × (TEC_model - TEC_gnss) × n_hops × obliquity / f²
+```
+
+This correction removes the systematic bias from using modeled TEC instead of measured TEC.
 
 **Outputs:**
 - `tec_tecu`: Total Electron Content in TECU (10¹⁶ electrons/m²)
 - `t_vacuum_error_ms`: Residual timing error after TEC correction
 - `confidence`: R² of the dispersion fit
 - `group_delay_ms`: Per-frequency ionospheric delay
+- `gnss_vtec_tecu`: Local GNSS-measured vertical TEC
 
 **Validation:**
+- Cross-validation between GNSS VTEC and HF-derived TEC
 - Comparison with GPS-derived IONEX maps (1-2 hour latency)
-- Optional local GNSS-VTEC from dual-frequency receiver (real-time)
-- Expected agreement: ±2-5 TECU under quiet conditions
+- Expected agreement: ±2-5 TECU under quiet conditions (validated 2026-01-16)
 
 **Scientific Value:**
 - Continuous TEC monitoring along multiple paths
 - Diurnal TEC variation tracking
 - Storm-time TEC enhancement detection
+- Real-time ionospheric correction for timing
 
 ### 3.2 Propagation Mode Identification ✅
 
