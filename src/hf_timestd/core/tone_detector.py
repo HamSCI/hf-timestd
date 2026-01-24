@@ -1563,6 +1563,11 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # All stations reference the minute boundary
         reference_time = minute_boundary
         
+        # DEBUG (2026-01-24): Trace timing calculation
+        logger.debug(f"[TIMING_TRACE] current_unix_time={current_unix_time:.3f}, "
+                    f"buffer_len_sec={buffer_len_sec:.3f}, buffer_start_time={buffer_start_time:.3f}, "
+                    f"minute_boundary={minute_boundary}, offset_in_buffer={(reference_time - buffer_start_time):.3f}s")
+        
         # Tone position in buffer (samples from start)
         # For Pass 0: search around minute boundary (expected_offset = 0)
         # For Pass 1+: search around expected arrival (minute_boundary + expected_offset)
