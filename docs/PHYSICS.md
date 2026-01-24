@@ -109,38 +109,124 @@ This correction removes the systematic bias from using modeled TEC instead of me
 
 ### 3.2 Propagation Mode Identification ✅
 
-**Status:** Implemented
+**Status:** Implemented (Enhanced in v6.2)
 
 **Physics:** HF signals can propagate via multiple ionospheric modes:
 
-| Mode | Layer | Height | Typical Delay |
-|------|-------|--------|---------------|
-| **1E** | E-layer | 110 km | Shortest |
-| **1F** | F-layer | 250-350 km | Medium |
-| **2F** | F-layer (2-hop) | 250-350 km | Longer |
-| **3F** | F-layer (3-hop) | 250-350 km | Longest |
+| Mode | Layer | Height | Typical Delay | Timing Uncertainty |
+|------|-------|--------|---------------|-------------------|
+| **GW** | Ground Wave | N/A | ~3.3 ms/1000km | ±0.1 ms |
+| **1E** | E-layer | 110 km | Shortest sky | ±1.0 ms |
+| **1F2** | F2-layer | 250-350 km | Medium | ±0.5 ms |
+| **2F2** | F2-layer (2-hop) | 250-350 km | Longer | ±1.5 ms |
+| **3F2** | F2-layer (3-hop) | 250-350 km | Longest | ±2.5 ms |
 
 **Implementation:** `src/hf_timestd/core/propagation_mode_solver.py`
 
-The system calculates expected delays for each mode and matches against observed arrival times:
+#### 3.2.1 Mode Identification Algorithm
+
+The system identifies propagation modes through a multi-step process:
+
+**Step 1: Calculate Candidate Mode Delays**
+
+For each candidate mode, compute the expected propagation delay:
 
 ```python
-# For each candidate mode:
-path_length = calculate_hop_geometry(distance, layer_height, n_hops)
-delay_ms = path_length / speed_of_light + ionospheric_delay
-# Match to observed delay
+# Geometric path length calculation
+for n_hops in [1, 2, 3]:
+    # Virtual reflection height from IRI-2020 or parametric model
+    h_reflection = get_layer_height(frequency, time, location)
+    
+    # Ray geometry: signal reflects off ionosphere n_hops times
+    # Using spherical Earth geometry
+    earth_radius = 6371 km
+    path_length = calculate_hop_path(
+        tx_lat, tx_lon,
+        rx_lat, rx_lon,
+        h_reflection,
+        n_hops
+    )
+    
+    # Total delay = geometric + ionospheric
+    delay_geometric_ms = path_length / c * 1000
+    delay_ionospheric_ms = K * TEC / f² * n_hops
+    delay_total_ms = delay_geometric_ms + delay_ionospheric_ms
 ```
 
+**Step 2: Match Observed Delay to Candidates**
+
+Compare the measured arrival time against each candidate:
+
+```python
+# Observed delay from tone detection
+observed_delay_ms = T_arrival - T_emission
+
+# Find best-matching mode
+for mode, expected_delay in candidates.items():
+    residual = abs(observed_delay_ms - expected_delay)
+    if residual < threshold:
+        matched_modes.append((mode, residual))
+
+# Select mode with smallest residual
+best_mode = min(matched_modes, key=lambda x: x[1])
+```
+
+**Step 3: Validate with Multi-Frequency Consistency**
+
+For stations with multiple frequencies, validate mode identification:
+
+```python
+# Same station, different frequencies should show 1/f² dispersion
+# within the same mode
+for freq_pair in frequency_pairs:
+    delay_diff = delay[f1] - delay[f2]
+    expected_diff = K * TEC * (1/f1² - 1/f2²)
+    
+    if abs(delay_diff - expected_diff) < tolerance:
+        mode_validated = True
+    else:
+        # Mode mixing or misidentification
+        flag_for_review()
+```
+
+#### 3.2.2 Mode Uncertainty by Type
+
+| Mode | Physical Basis | Uncertainty Source |
+|------|----------------|-------------------|
+| **GW** | Direct surface wave | Path loss limits range |
+| **1F2** | Single F-layer reflection | Layer height uncertainty |
+| **2F2** | Double F-layer reflection | Cumulative height uncertainty |
+| **1E** | E-layer reflection | E-layer variability |
+| **Mixed** | Multiple simultaneous modes | Multipath interference |
+
+#### 3.2.3 v6.2 Enhancement: Mode Tracking in Fusion
+
+The fusion service now records propagation modes for each measurement:
+
+```python
+# In FusedResult (v6.2):
+propagation_modes_used: str      # e.g., "1F2,2F2,GW"
+dominant_propagation_mode: str   # Most common mode
+```
+
+This enables:
+- **Mode statistics** by time of day, season, frequency
+- **Uncertainty weighting** based on mode reliability
+- **Science products** for propagation research
+
 **Outputs:**
-- `propagation_mode`: Identified mode (1E, 1F, 2F, etc.)
+- `propagation_mode`: Identified mode (GW, 1E, 1F2, 2F2, etc.)
 - `n_hops`: Number of ionospheric reflections
-- `confidence`: Match quality
+- `confidence`: Match quality (0-1)
 - `multipath_detected`: Flag for multiple simultaneous modes
+- `propagation_modes_used`: All modes in fusion window (v6.2)
+- `dominant_propagation_mode`: Most common mode (v6.2)
 
 **Scientific Value:**
 - Mode statistics by time of day, season, frequency
 - MUF (Maximum Usable Frequency) estimation
 - Propagation prediction validation
+- Ionospheric research (mode transitions indicate layer changes)
 
 ### 3.3 Ionospheric Layer Heights (hmF2, hmE) ✅
 

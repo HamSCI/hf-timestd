@@ -318,6 +318,34 @@ class FusedResult:
     
     # Validation flags (CRITICAL FIX 2026-01-10)
     single_station_mode: bool = False            # True if only one station available (no cross-validation)
+    
+    # ========================================================================
+    # METROLOGICAL TRACKING FIELDS (v6.2)
+    # ========================================================================
+    # TSL1 vs TSL2 comparison (for validation and propagation correction quality)
+    d_clock_l1_ms: Optional[float] = None        # L1-only fusion (raw metrology)
+    d_clock_l2_ms: Optional[float] = None        # L2 fusion (calibrated)
+    l1_l2_difference_ms: Optional[float] = None  # L1 - L2 (propagation correction quality)
+    
+    # Calibration convergence tracking
+    calibration_age_hours: Optional[float] = None      # Age of calibration data
+    calibration_n_samples: Optional[int] = None        # Total samples in calibration
+    calibration_converged: Optional[bool] = None       # True if converged
+    
+    # Multipath and Doppler aggregates from v6.2 tone detection
+    multipath_detected_count: int = 0                  # Measurements with multipath
+    multipath_mean_delay_spread_ms: Optional[float] = None  # Mean delay spread
+    doppler_mean_hz: Optional[float] = None            # Mean Doppler shift
+    doppler_correction_applied_ms: Optional[float] = None   # Total correction applied
+    cramer_rao_mean_ms: Optional[float] = None         # Mean Cramér-Rao uncertainty
+    
+    # Propagation mode identification
+    propagation_modes_used: Optional[str] = None       # Comma-separated modes
+    dominant_propagation_mode: Optional[str] = None    # Most common mode
+    
+    # Allan deviation (stability metrics)
+    adev_60s: Optional[float] = None                   # ADEV at tau=60s
+    adev_1000s: Optional[float] = None                 # ADEV at tau=1000s
 
 
 class AllanDeviationTracker:
@@ -3771,6 +3799,22 @@ class MultiBroadcastFusion:
         else:
             grade = 'D'
         
+        # ====================================================================
+        # PROPAGATION MODE TRACKING (v6.2)
+        # ====================================================================
+        # Collect propagation modes from all measurements
+        prop_modes = [m.propagation_mode for m in measurements if hasattr(m, 'propagation_mode') and m.propagation_mode]
+        unique_modes = sorted(set(prop_modes)) if prop_modes else []
+        propagation_modes_used = ','.join(unique_modes) if unique_modes else None
+        
+        # Find dominant mode (most common)
+        if prop_modes:
+            from collections import Counter
+            mode_counts = Counter(prop_modes)
+            dominant_propagation_mode = mode_counts.most_common(1)[0][0]
+        else:
+            dominant_propagation_mode = None
+        
         result = FusedResult(
             timestamp=time.time(),
             d_clock_fused_ms=fused_d_clock,
@@ -3804,7 +3848,10 @@ class MultiBroadcastFusion:
             systematic_uncertainty_ms=systematic_uncertainty,
             propagation_uncertainty_ms=propagation_uncertainty,
             # Validation flags (CRITICAL FIX 2026-01-10)
-            single_station_mode=single_station_mode
+            single_station_mode=single_station_mode,
+            # Propagation mode tracking (v6.2)
+            propagation_modes_used=propagation_modes_used,
+            dominant_propagation_mode=dominant_propagation_mode
         )
         
         # Track measurement for Allan deviation calculation
@@ -3923,8 +3970,25 @@ class MultiBroadcastFusion:
                 quality_grade=FusionQualityGrade(result.quality_grade),
                 kalman_state=FusionKalmanState(kalman_state),
                 quality_flag=FusionQualityFlag(quality_flag),
-                processing_version='3.2.0',
-                single_station_mode=bool(result.single_station_mode)
+                processing_version='6.2.0',
+                single_station_mode=bool(result.single_station_mode),
+                
+                # Metrological tracking fields (v6.2)
+                d_clock_l1_ms=float(result.d_clock_l1_ms) if result.d_clock_l1_ms is not None else None,
+                d_clock_l2_ms=float(result.d_clock_l2_ms) if result.d_clock_l2_ms is not None else None,
+                l1_l2_difference_ms=float(result.l1_l2_difference_ms) if result.l1_l2_difference_ms is not None else None,
+                calibration_age_hours=float(result.calibration_age_hours) if result.calibration_age_hours is not None else None,
+                calibration_n_samples=int(result.calibration_n_samples) if result.calibration_n_samples is not None else None,
+                calibration_converged=bool(result.calibration_converged) if result.calibration_converged is not None else None,
+                multipath_detected_count=int(result.multipath_detected_count) if result.multipath_detected_count else None,
+                multipath_mean_delay_spread_ms=float(result.multipath_mean_delay_spread_ms) if result.multipath_mean_delay_spread_ms is not None else None,
+                doppler_mean_hz=float(result.doppler_mean_hz) if result.doppler_mean_hz is not None else None,
+                doppler_correction_applied_ms=float(result.doppler_correction_applied_ms) if result.doppler_correction_applied_ms is not None else None,
+                cramer_rao_mean_ms=float(result.cramer_rao_mean_ms) if result.cramer_rao_mean_ms is not None else None,
+                propagation_modes_used=result.propagation_modes_used,
+                dominant_propagation_mode=result.dominant_propagation_mode,
+                adev_60s=float(result.adev_60s) if result.adev_60s is not None else None,
+                adev_1000s=float(result.adev_1000s) if result.adev_1000s is not None else None
             )
             
             # Write to HDF5 with schema validation
@@ -4279,6 +4343,39 @@ def run_fusion_service(
             
             # Use L2 result for logging (primary feed)
             result = result_l2 if result_l2 else result_l1
+            
+            # ================================================================
+            # METROLOGICAL TRACKING: Populate L1/L2 comparison fields (v6.2)
+            # ================================================================
+            if result:
+                # Record L1 vs L2 comparison for propagation correction validation
+                if result_l1 is not None:
+                    result.d_clock_l1_ms = result_l1.d_clock_fused_ms
+                if result_l2 is not None:
+                    result.d_clock_l2_ms = result_l2.d_clock_fused_ms
+                if result_l1 is not None and result_l2 is not None:
+                    result.l1_l2_difference_ms = result_l1.d_clock_fused_ms - result_l2.d_clock_fused_ms
+                    logger.debug(
+                        f"L1-L2 difference: {result.l1_l2_difference_ms:+.3f} ms "
+                        f"(L1={result_l1.d_clock_fused_ms:+.3f}, L2={result_l2.d_clock_fused_ms:+.3f})"
+                    )
+                
+                # Record calibration convergence metrics
+                if hasattr(fusion, 'calibration_age_hours'):
+                    result.calibration_age_hours = fusion.calibration_age_hours
+                total_cal_samples = sum(
+                    cal.n_samples for cal in fusion.calibration.values()
+                ) if fusion.calibration else 0
+                result.calibration_n_samples = total_cal_samples
+                if hasattr(fusion, 'recent_validations') and len(fusion.recent_validations) >= 10:
+                    result.calibration_converged = sum(fusion.recent_validations) / len(fusion.recent_validations) > 0.8
+                else:
+                    result.calibration_converged = False
+                
+                # Record Allan deviation from tracker
+                adev_values = fusion.adev_tracker.compute_all_adev([60, 1000])
+                result.adev_60s = adev_values.get('adev_60s')
+                result.adev_1000s = adev_values.get('adev_1000s')
             
             if result:
                 # Log summary

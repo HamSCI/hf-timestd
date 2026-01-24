@@ -86,6 +86,34 @@ class L3FusionTiming(BaseModel):
     quality_flag: FusionQualityFlag
     processing_version: str
     single_station_mode: bool = Field(..., description="True if only one station available (no cross-validation)")
+    
+    # ========================================================================
+    # METROLOGICAL TRACKING FIELDS (v6.2)
+    # ========================================================================
+    # TSL1 vs TSL2 comparison
+    d_clock_l1_ms: Optional[float] = Field(None, description="L1-only fusion D_clock (raw metrology)")
+    d_clock_l2_ms: Optional[float] = Field(None, description="L2 fusion D_clock (calibrated)")
+    l1_l2_difference_ms: Optional[float] = Field(None, description="L1 - L2 difference (propagation correction quality)")
+    
+    # Calibration convergence
+    calibration_age_hours: Optional[float] = Field(None, description="Age of calibration data in hours")
+    calibration_n_samples: Optional[int] = Field(None, description="Total samples in calibration")
+    calibration_converged: Optional[bool] = Field(None, description="True if calibration converged")
+    
+    # Multipath and Doppler aggregates
+    multipath_detected_count: Optional[int] = Field(None, description="Measurements with multipath detected")
+    multipath_mean_delay_spread_ms: Optional[float] = Field(None, description="Mean multipath delay spread")
+    doppler_mean_hz: Optional[float] = Field(None, description="Mean Doppler shift")
+    doppler_correction_applied_ms: Optional[float] = Field(None, description="Total Doppler correction applied")
+    cramer_rao_mean_ms: Optional[float] = Field(None, description="Mean Cramér-Rao uncertainty")
+    
+    # Propagation mode identification
+    propagation_modes_used: Optional[str] = Field(None, description="Comma-separated propagation modes")
+    dominant_propagation_mode: Optional[str] = Field(None, description="Most common propagation mode")
+    
+    # Allan deviation
+    adev_60s: Optional[float] = Field(None, description="Allan deviation at tau=60s")
+    adev_1000s: Optional[float] = Field(None, description="Allan deviation at tau=1000s")
 
     class Config:
         use_enum_values = True

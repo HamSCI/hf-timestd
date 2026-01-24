@@ -857,6 +857,261 @@ A Kalman filter at L3 would model `offset_to_UTC` as having **process noise** �
 
 ---
 
+## 13. Metrological Validation (v6.2)
+
+This section describes procedures for validating hf-timestd performance against external references and theoretical predictions.
+
+### 13.1 TSL1 vs TSL2 Comparison
+
+The dual Chrony feed architecture (TSL1 and TSL2) provides built-in validation of propagation corrections.
+
+**What TSL1 and TSL2 Represent:**
+
+| Feed | SHM | Data Source | Processing | Typical Uncertainty |
+|------|-----|-------------|------------|---------------------|
+| **TSL1** | 0 | L1 metrology (raw ToA) | Multi-broadcast fusion only | ±0.85 ms |
+| **TSL2** | 1 | L2 calibrated (corrected D_clock) | + Geometric delay, TEC, system cal, Kalman | ±0.3-1.0 ms |
+
+**The L1-L2 Difference:**
+
+```
+L1 - L2 = geometric_delay + ionospheric_TEC + system_calibration
+```
+
+This difference reveals the **quality of propagation corrections**:
+- **Stable difference (~0.5-1 ms)**: Propagation model is working correctly
+- **Diurnal variation**: Ionospheric effects are being captured
+- **Large divergence (>5 ms)**: Calibration problem or model failure
+
+**Data Recording (v6.2):**
+
+The fusion service now records L1/L2 comparison in every HDF5 output:
+- `d_clock_l1_ms`: L1-only fusion result
+- `d_clock_l2_ms`: L2 fusion result  
+- `l1_l2_difference_ms`: L1 - L2 (propagation correction quality metric)
+
+**Validation Procedure:**
+
+```bash
+# Check current L1-L2 difference via Chrony
+chronyc sources -v | grep TSL
+
+# Expected output:
+# #* TSL2    0   4   377    15   +0.234ms[+0.234ms] +/- 0.3ms
+# #- TSL1    0   4   377    15   +0.856ms[+0.856ms] +/- 0.9ms
+# 
+# L1-L2 difference = 0.856 - 0.234 = 0.622 ms (propagation correction)
+```
+
+### 13.2 Comparison with External Time Sources
+
+#### 13.2.1 hf-timestd vs GPS Time Server
+
+If you have a local GPS-based time server (e.g., at 192.168.0.202), you can compare hf-timestd against it:
+
+**Expected Performance:**
+
+| Source | Stratum | Typical Offset | Uncertainty | Traceability |
+|--------|---------|----------------|-------------|--------------|
+| **Local GPS (PPS)** | 1 | <1 μs | ~10-100 ns | UTC(USNO) via GPS |
+| **hf-timestd TSL2** | 1 | ±0.3-1 ms | ±0.5 ms | UTC(NIST) via WWV/CHU |
+| **hf-timestd TSL1** | 1 | ±0.8-1.5 ms | ±0.85 ms | UTC(NIST) via WWV/CHU |
+| **Public NTP (pool)** | 2-3 | ±1-50 ms | ±5-20 ms | Varies |
+
+**Key Insight:** hf-timestd is **not a replacement for GPS** for sub-millisecond timing. Its value is:
+1. **Independent traceability** to UTC(NIST) — different from GPS's UTC(USNO)
+2. **Resilience** — works when GPS is jammed/spoofed
+3. **Ionospheric science** — the "error" is the measurement
+
+**Validation Procedure:**
+
+```bash
+# Configure Chrony to use both GPS and hf-timestd
+# In /etc/chrony/chrony.conf:
+server 192.168.0.202 iburst prefer  # GPS time server
+refclock SHM 0 refid TSL1 poll 4 precision 1e-3
+refclock SHM 1 refid TSL2 poll 4 precision 1e-4
+
+# Compare sources
+chronyc sources -v
+chronyc sourcestats
+
+# Track offset between TSL2 and GPS over time
+# The difference should be stable within ±1 ms
+```
+
+**Interpreting Results:**
+
+- **TSL2 offset from GPS < 1 ms**: System is working correctly
+- **TSL2 offset from GPS 1-3 ms**: Normal ionospheric variation
+- **TSL2 offset from GPS > 5 ms**: Investigate calibration or propagation model
+- **Consistent drift**: Possible GPSDO issue (see Section 13.3)
+
+#### 13.2.2 GPS PPS Exposure
+
+If your GPS receiver outputs PPS (Pulse Per Second), it provides the highest-precision timing reference available. The PPS signal marks the exact second boundary with ~10-100 ns accuracy.
+
+**Note:** Most GPS time servers expose PPS internally for NTP discipline but may not expose it as a separate output. Check your receiver's documentation for:
+- **Hardware PPS output** (BNC or SMA connector)
+- **Software PPS** (via gpsd or similar)
+
+**Using PPS for Validation:**
+
+If PPS is available, you can compare the GPSDO's 1PPS output against the GPS receiver's PPS to detect GPSDO drift directly. This is the most rigorous validation method.
+
+### 13.3 GPSDO Drift Detection
+
+The "Steel Ruler" philosophy assumes the GPSDO provides a stable frequency reference. However, GPSDOs can drift if:
+- GPS lock is lost for extended periods
+- The internal oscillator ages
+- Temperature variations affect the oscillator
+
+**Current Capability:**
+
+The system assumes GPSDO is the "steel ruler" (Q ≈ 0 in Kalman). It **cannot directly detect** GPSDO drift because all timing is relative to GPSDO.
+
+**Indirect Detection Methods:**
+
+1. **Long-term D_clock trend**: If D_clock shows consistent drift (e.g., +0.1 ms/day), that's GPSDO drift
+2. **Compare TSL2 to GPS NTP**: Long-term trend in `chronyc sources` offset
+3. **Allan deviation at long tau**: Increasing ADEV at τ > 10000s indicates drift
+
+**Data Recording (v6.2):**
+
+The fusion service now records Allan deviation in every HDF5 output:
+- `adev_60s`: ADEV at τ=60s (short-term stability)
+- `adev_1000s`: ADEV at τ=1000s (medium-term stability)
+
+**Validation Procedure:**
+
+```bash
+# Check Allan deviation via web UI (metrology.html)
+# Or query the API:
+curl http://localhost:8000/api/stability/adev
+
+# Expected ADEV values for a healthy system:
+# τ=60s:   ~1e-9 to 1e-8 (dominated by ionosphere)
+# τ=1000s: ~1e-10 to 1e-9 (should decrease with averaging)
+# τ=10000s: ~1e-10 (should plateau, not increase)
+#
+# If ADEV increases at long tau, suspect GPSDO drift
+```
+
+### 13.4 Theoretical Predictions vs Measured Performance
+
+#### 13.4.1 Cramér-Rao Bound
+
+The theoretical minimum timing uncertainty is given by the Cramér-Rao bound:
+
+```
+σ_ToA = 1 / (2π × √(2 × SNR × B × T))
+```
+
+Where:
+- SNR = Signal-to-noise ratio (linear)
+- B = Effective bandwidth (Hz)
+- T = Tone duration (seconds)
+
+**Theoretical vs Measured:**
+
+| Condition | Cramér-Rao Bound | Measured (v6.2) | Notes |
+|-----------|------------------|-----------------|-------|
+| 20 dB SNR, 800ms tone, 50 Hz BW | 0.036 ms | 0.1-0.5 ms | Multipath, Doppler limit |
+| 10 dB SNR, 800ms tone, 50 Hz BW | 0.11 ms | 0.5-1.0 ms | Noise-limited |
+| 6 dB SNR, 800ms tone, 50 Hz BW | 0.9 ms | 1-2 ms | Near detection threshold |
+
+**Data Recording (v6.2):**
+
+The fusion service records Cramér-Rao uncertainty:
+- `cramer_rao_mean_ms`: Mean Cramér-Rao bound across measurements
+
+#### 13.4.2 Multipath Impact
+
+Multipath propagation causes delay spread that inflates timing uncertainty:
+
+```
+u_multipath = delay_spread / 2
+```
+
+**Data Recording (v6.2):**
+
+- `multipath_detected_count`: Number of measurements with multipath
+- `multipath_mean_delay_spread_ms`: Mean delay spread
+
+#### 13.4.3 Doppler Correction
+
+Doppler shift from ionospheric motion causes systematic timing bias:
+
+```
+Δt_bias ≈ (f_doppler / f_tone) × (T_tone / 2)
+```
+
+For typical HF Doppler (±1-5 Hz) on 1000 Hz tone over 800 ms:
+- Δt_bias ≈ (5 / 1000) × 0.4 = **2 ms** (worst case)
+
+**Data Recording (v6.2):**
+
+- `doppler_mean_hz`: Mean Doppler shift
+- `doppler_correction_applied_ms`: Total correction applied
+
+### 13.5 Propagation Mode Identification
+
+The system identifies propagation modes (1F2, 2F2, GW, etc.) based on:
+1. **Geometric delay** from transmitter-receiver distance
+2. **Ionospheric layer height** from IRI-2020 or IONEX
+3. **Frequency-dependent behavior** (higher frequencies → higher layers)
+
+**Data Recording (v6.2):**
+
+- `propagation_modes_used`: Comma-separated list of modes identified
+- `dominant_propagation_mode`: Most common mode in fusion window
+
+**Mode Uncertainty:**
+
+| Mode | Typical Uncertainty | Physical Basis |
+|------|---------------------|----------------|
+| GW (Ground Wave) | ±0.1 ms | Direct path, no ionosphere |
+| 1F2 (Single F-layer hop) | ±0.5 ms | Well-characterized path |
+| 2F2 (Double F-layer hop) | ±1.5 ms | Longer path, more variability |
+| 1E (E-layer) | ±1.0 ms | Lower, more variable layer |
+| Mixed/Unknown | ±2.5 ms | Mode ambiguity |
+
+See `docs/PHYSICS.md` for detailed explanation of propagation mode identification physics.
+
+### 13.6 Calibration Convergence
+
+The system learns per-broadcast calibration offsets over time. Convergence is tracked via:
+
+**Data Recording (v6.2):**
+
+- `calibration_age_hours`: Age of calibration data
+- `calibration_n_samples`: Total samples used in learning
+- `calibration_converged`: True if converged (>80% validation success rate)
+
+**Convergence Criteria:**
+
+| Metric | Threshold | Meaning |
+|--------|-----------|---------|
+| `calibration_n_samples` | > 100 | Sufficient data for learning |
+| `calibration_age_hours` | < 24 | Calibration is fresh |
+| `calibration_converged` | True | Validation success rate > 80% |
+
+### 13.7 Uncertainty Budget Summary
+
+The complete uncertainty budget for a fused D_clock measurement:
+
+| Component | Source | Typical Value | Data Field |
+|-----------|--------|---------------|------------|
+| **Cramér-Rao** | Tone detection SNR | 0.036-0.9 ms | `cramer_rao_mean_ms` |
+| **Multipath** | Delay spread | 0.5-2.5 ms | `multipath_mean_delay_spread_ms` |
+| **Doppler** | Ionospheric motion | 0.1-2 ms (corrected) | `doppler_correction_applied_ms` |
+| **Propagation model** | Mode uncertainty | 0.5-2.5 ms | `propagation_uncertainty_ms` |
+| **Calibration** | Learning convergence | 0.1-1 ms | `systematic_uncertainty_ms` |
+| **Statistical** | Measurement scatter | 0.1-0.5 ms | `statistical_uncertainty_ms` |
+| **Combined (RSS)** | All sources | **0.3-1.0 ms** | `uncertainty_ms` |
+
+---
+
 ## Appendix A: Key Equations
 
 **D_clock Calculation:**

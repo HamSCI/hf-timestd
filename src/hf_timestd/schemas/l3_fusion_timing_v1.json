@@ -289,6 +289,121 @@
             "type": "boolean",
             "required": true,
             "description": "True if only one station available (no cross-validation possible, systematic errors undetectable)"
+        },
+        {
+            "name": "d_clock_l1_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "L1-only fusion D_clock (raw metrology, no L2 calibration)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "d_clock_l2_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "L2 fusion D_clock (calibrated, with propagation corrections)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "l1_l2_difference_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "L1 - L2 difference (reveals propagation correction quality)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "calibration_age_hours",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Age of calibration data in hours (freshness indicator)",
+            "units": "hours"
+        },
+        {
+            "name": "calibration_n_samples",
+            "type": "integer",
+            "required": false,
+            "allow_empty": true,
+            "description": "Total samples used in calibration learning"
+        },
+        {
+            "name": "calibration_converged",
+            "type": "boolean",
+            "required": false,
+            "allow_empty": true,
+            "description": "True if calibration has converged (sufficient samples, low uncertainty)"
+        },
+        {
+            "name": "multipath_detected_count",
+            "type": "integer",
+            "required": false,
+            "allow_empty": true,
+            "description": "Number of measurements with multipath detected"
+        },
+        {
+            "name": "multipath_mean_delay_spread_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Mean multipath delay spread across measurements",
+            "units": "milliseconds"
+        },
+        {
+            "name": "doppler_mean_hz",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Mean Doppler shift across measurements",
+            "units": "hertz"
+        },
+        {
+            "name": "doppler_correction_applied_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Total Doppler timing correction applied",
+            "units": "milliseconds"
+        },
+        {
+            "name": "cramer_rao_mean_ms",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Mean Cramér-Rao bound uncertainty across measurements",
+            "units": "milliseconds"
+        },
+        {
+            "name": "propagation_modes_used",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "description": "Comma-separated list of propagation modes identified (e.g., '1F2,2F2,GW')"
+        },
+        {
+            "name": "dominant_propagation_mode",
+            "type": "string",
+            "required": false,
+            "allow_empty": true,
+            "description": "Most common propagation mode in this fusion window"
+        },
+        {
+            "name": "adev_60s",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Allan deviation at tau=60s (fractional frequency stability)",
+            "units": "dimensionless"
+        },
+        {
+            "name": "adev_1000s",
+            "type": "float",
+            "required": false,
+            "allow_empty": true,
+            "description": "Allan deviation at tau=1000s (fractional frequency stability)",
+            "units": "dimensionless"
         }
     ],
     "quality_grades": {
