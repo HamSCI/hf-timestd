@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 24, 2026
+**Last Updated:** January 24, 2026 (v6.2.0)
 
 ---
 
@@ -771,9 +771,19 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ---
 
-**Version**: 5.3.2  
-**Last Updated**: January 20, 2026  
+**Version**: 6.2.0  
+**Last Updated**: January 24, 2026  
 **Purpose**: Technical reference for HF Time Standard developers
+
+**v6.2.0 Release (January 24, 2026) - Metrological Enhancements:**
+
+- **Cramér-Rao Bound Uncertainty** - Rigorous ToA uncertainty calculation based on SNR, bandwidth, and duration
+- **Complex Correlation with Phase** - Preserves phase for sub-sample timing and Doppler estimation
+- **Multipath Detection** - Integrated into tone detector with uncertainty inflation
+- **Doppler Correction** - Removes systematic timing bias from ionospheric motion
+- **Adaptive SNR Threshold** - CFAR-like approach improves sensitivity in varying conditions
+- **CHU Tick Timing** - High-precision timing from 1000 Hz tick (~0.05 ms vs ~1-2 ms from FSK)
+- **New ToneDetectionResult Fields** - `timing_uncertainty_ms`, `multipath_detected`, `multipath_delay_spread_ms`, `multipath_quality`, `doppler_hz`, `phase_at_peak_rad`
 
 **v2.2.0 Release (Dec 2, 2025):**
 

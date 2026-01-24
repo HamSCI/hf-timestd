@@ -427,6 +427,14 @@ class ToneDetectionResult:
         tone_power_db: Power of detected tone relative to noise floor (dB) - for discrimination
         sample_position_original: Sample position in ORIGINAL rate buffer (for RTP calculation)
         original_sample_rate: Original sample rate (Hz) for sample_position_original
+        
+    Metrological Fields (2026-01-24 Enhancement):
+        timing_uncertainty_ms: ToA uncertainty from Cramér-Rao bound (ms)
+        multipath_detected: True if multipath propagation detected
+        multipath_delay_spread_ms: Delay spread from multipath analysis (ms)
+        multipath_quality: Quality metric (0-1, higher = cleaner signal)
+        doppler_hz: Estimated Doppler shift (Hz)
+        phase_at_peak_rad: Phase at correlation peak for sub-sample refinement (rad)
     """
     station: StationType
     frequency_hz: float
@@ -442,6 +450,13 @@ class ToneDetectionResult:
     sample_position_original: Optional[int] = None  # Sample position in original rate
     original_sample_rate: Optional[int] = None  # Original sample rate (e.g., 20000 Hz)
     buffer_rtp_start: Optional[int] = None  # RTP timestamp at start of detection buffer
+    # Metrological fields for uncertainty propagation
+    timing_uncertainty_ms: Optional[float] = None  # Cramér-Rao bound ToA uncertainty
+    multipath_detected: Optional[bool] = None  # Multipath flag
+    multipath_delay_spread_ms: Optional[float] = None  # Delay spread (ms)
+    multipath_quality: Optional[float] = None  # 0-1, higher = cleaner
+    doppler_hz: Optional[float] = None  # Doppler shift estimate
+    phase_at_peak_rad: Optional[float] = None  # Phase for sub-sample refinement
     
     def is_wwv_or_chu(self) -> bool:
         """Check if this is a timing reference station (not WWVH)"""
@@ -472,6 +487,13 @@ class ToneDetectionResult:
             'sample_position_original': self.sample_position_original,
             'original_sample_rate': self.original_sample_rate,
             'buffer_rtp_start': self.buffer_rtp_start,
+            # Metrological fields
+            'timing_uncertainty_ms': self.timing_uncertainty_ms,
+            'multipath_detected': self.multipath_detected,
+            'multipath_delay_spread_ms': self.multipath_delay_spread_ms,
+            'multipath_quality': self.multipath_quality,
+            'doppler_hz': self.doppler_hz,
+            'phase_at_peak_rad': self.phase_at_peak_rad,
         }
 
 

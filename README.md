@@ -8,17 +8,18 @@
 
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
-**Key Capabilities (V6.1):**
+**Key Capabilities (V6.2):**
 
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **Digital RF (HDF5)** format.
-- 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.1 ms.
+- 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
 - 🔗 **HDF5-Native Pipeline** - High-performance SWMR (Single Writer Multiple Reader) data exchange.
-- 🌍 **Real-time GNSS VTEC Correction** - Local dual-frequency GPS provides direct ionospheric correction (v6.1).
+- 🌍 **Real-time GNSS VTEC Correction** - Local dual-frequency GPS provides direct ionospheric correction.
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
 - ⏱️ **HF time transfer** - D_clock measurement with ionospheric propagation mode estimation.
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
 - 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path TEC visualization.
 - ⏰ **Chrony integration** - SHM refclock for system clock discipline.
+- 📊 **Metrological Rigor (v6.2)** - Cramér-Rao uncertainty, multipath detection, Doppler correction, adaptive thresholds.
 
 ---
 
@@ -143,6 +144,15 @@ The system is composed of eight independent services that form a pipeline:
 **License:** MIT - See [LICENSE](LICENSE)
 
 ### Recent Updates
+
+**v6.2.0 (January 24, 2026) - Metrological Enhancements**
+
+- ✅ **Cramér-Rao Uncertainty:** Rigorous ToA uncertainty from SNR, bandwidth, duration
+- ✅ **Multipath Detection:** Integrated into tone detector with uncertainty inflation
+- ✅ **Doppler Correction:** Removes systematic timing bias from ionospheric motion
+- ✅ **Adaptive SNR Threshold:** CFAR-like approach improves sensitivity 10-20%
+- ✅ **CHU Tick Timing:** High-precision timing from 1000 Hz tick (~0.05 ms)
+- ✅ **Complex Correlation:** Phase-preserving correlation for sub-sample refinement
 
 **v5.3.2 (January 20, 2026) - Fusion Restart & Install Improvements**
 

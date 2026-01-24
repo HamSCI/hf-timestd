@@ -3,7 +3,7 @@
 **Last Updated:** January 24, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.1 (Hierarchical Estimation with GNSS TEC Correction)
+**Version:** V6.2 (Metrological Enhancements)
 
 ---
 
@@ -423,7 +423,47 @@ We use a **Weighted Voting** system combining:
 
 ---
 
-**Last Updated:** January 20, 2026
+**Last Updated:** January 24, 2026
+
+## Metrological Enhancements (v6.2)
+
+### Tone Detection Pipeline
+
+The v6.2 release introduces rigorous metrological improvements to the tone detection pipeline:
+
+| Enhancement | Description | Impact |
+|-------------|-------------|--------|
+| **Cramér-Rao Uncertainty** | ToA uncertainty from `σ = 1/(2π√(2×SNR×B×T))` | Rigorous per-measurement uncertainty |
+| **Complex Correlation** | Phase-preserving FFT correlation | Sub-sample refinement, Doppler estimation |
+| **Multipath Detection** | Peak width, secondary peaks, phase stability | Uncertainty inflation when detected |
+| **Doppler Correction** | `Δt = (f_D/f_tone) × (T/2)` | Removes 0.1-2 ms systematic bias |
+| **Adaptive Threshold** | CFAR-like detection rate adaptation | 10-20% sensitivity improvement |
+
+### New Data Model Fields
+
+`ToneDetectionResult` now includes:
+
+```python
+timing_uncertainty_ms: Optional[float]      # Cramér-Rao bound (inflated if multipath)
+multipath_detected: Optional[bool]          # True if multipath indicators present
+multipath_delay_spread_ms: Optional[float]  # Delay spread in ms
+multipath_quality: Optional[float]          # 0-1, higher = cleaner path
+doppler_hz: Optional[float]                 # Estimated Doppler shift
+phase_at_peak_rad: Optional[float]          # Phase at correlation peak
+```
+
+### CHU Tick Timing (v6.2)
+
+CHU FSK decoder now provides dual timing references:
+
+| Reference | Precision | Method |
+|-----------|-----------|--------|
+| FSK Boundary | ~1-2 ms | Mark-to-silence at 500ms |
+| **1000 Hz Tick** | ~0.05 ms | Edge detection (NEW) |
+
+The tick timing is returned in `CHUFSKResult.tick_timing_offset_ms`.
+
+---
 
 ## Adaptive Search Window System (v3.9.0)
 

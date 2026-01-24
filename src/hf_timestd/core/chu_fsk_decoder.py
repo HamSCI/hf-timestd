@@ -106,8 +106,10 @@ class CHUFSKResult:
     year: Optional[int] = None
     tai_utc: Optional[int] = None
     
-    # Timing precision
-    timing_offset_ms: Optional[float] = None  # Measured vs expected 500ms boundary
+    # Timing precision (2026-01-24 Enhancement: dual timing references)
+    timing_offset_ms: Optional[float] = None  # FSK 500ms boundary (secondary, ~1-2ms precision)
+    tick_timing_offset_ms: Optional[float] = None  # 1000 Hz tick onset (primary, ~0.05ms precision)
+    tick_timing_count: int = 0  # Number of valid tick timing measurements
     
     # Quality metrics
     snr_db: Optional[float] = None  # FSK signal SNR
@@ -495,15 +497,126 @@ class CHUFSKDecoder:
         
         return True
     
+    def detect_tick_onset(
+        self,
+        audio: np.ndarray,
+        expected_sample: int,
+        search_window_ms: float = 20.0
+    ) -> Tuple[float, float, float]:
+        """
+        Detect precise onset of 1000 Hz tick for high-precision timing.
+        
+        CHU transmits a 10-cycle (10ms) 1000 Hz tick at the start of each second.
+        This tick provides much higher timing precision (~0.05ms) than the FSK
+        data boundary (~1-2ms).
+        
+        METROLOGICAL ENHANCEMENT (2026-01-24):
+        --------------------------------------
+        The tick is hard-keyed (essentially zero rise time), making edge detection
+        optimal for timing. This method uses:
+        1. Bandpass filtering to isolate 1000 Hz
+        2. Energy envelope computation
+        3. Rising edge detection with sub-sample interpolation
+        
+        Args:
+            audio: AM demodulated audio signal
+            expected_sample: Expected sample index of tick start
+            search_window_ms: Search window half-width (default ±20ms)
+            
+        Returns:
+            Tuple of (tick_onset_sample, timing_offset_ms, confidence):
+                - tick_onset_sample: Precise sample index of tick onset
+                - timing_offset_ms: Offset from expected position
+                - confidence: Detection confidence (0-1)
+        """
+        search_samples = int(search_window_ms * self.sample_rate / 1000)
+        search_start = max(0, expected_sample - search_samples)
+        search_end = min(len(audio), expected_sample + search_samples)
+        
+        if search_end <= search_start + 100:
+            return float(expected_sample), 0.0, 0.0
+        
+        search_region = audio[search_start:search_end]
+        
+        # Bandpass filter around 1000 Hz (±100 Hz)
+        try:
+            nyq = self.sample_rate / 2
+            low = 900 / nyq
+            high = min(1100 / nyq, 0.99)
+            b, a = butter(4, [low, high], btype='band')
+            filtered = filtfilt(b, a, search_region)
+        except Exception:
+            filtered = search_region
+        
+        # Compute energy envelope
+        energy = filtered ** 2
+        window_samples = max(3, int(0.002 * self.sample_rate))  # 2ms window
+        kernel = np.ones(window_samples) / window_samples
+        envelope = np.convolve(energy, kernel, mode='same')
+        
+        # Estimate noise floor from first 10% of search region
+        noise_region_end = max(10, len(envelope) // 10)
+        envelope_noise = np.median(envelope[:noise_region_end])
+        envelope_max = np.max(envelope)
+        
+        # Threshold: geometric mean of noise and max
+        if envelope_max > envelope_noise * 2:
+            threshold = np.sqrt(envelope_noise * envelope_max) * 0.5
+        else:
+            threshold = envelope_noise + 2 * np.std(envelope[:noise_region_end])
+        
+        # Find first crossing above threshold (rising edge)
+        above_threshold = envelope > threshold
+        onset_candidates = np.where(above_threshold)[0]
+        
+        if len(onset_candidates) == 0:
+            return float(expected_sample), 0.0, 0.3
+        
+        onset_local = onset_candidates[0]
+        
+        # Sub-sample interpolation at threshold crossing
+        sub_sample_offset = 0.0
+        if onset_local > 0:
+            y_before = envelope[onset_local - 1]
+            y_after = envelope[onset_local]
+            if y_after > y_before:
+                t = (threshold - y_before) / (y_after - y_before)
+                sub_sample_offset = t - 1.0
+                sub_sample_offset = max(-1.0, min(0.0, sub_sample_offset))
+        
+        # Convert to global sample index
+        tick_onset_sample = search_start + onset_local + sub_sample_offset
+        
+        # Calculate timing offset from expected
+        timing_offset_ms = (tick_onset_sample - expected_sample) / self.sample_rate * 1000
+        
+        # Confidence based on edge sharpness
+        if onset_local + 5 < len(envelope) and onset_local > 0:
+            rise = envelope[onset_local + 5] - envelope[onset_local - 1]
+            max_rise = envelope_max - envelope_noise
+            if max_rise > 0:
+                sharpness = min(1.0, rise / max_rise)
+                confidence = 0.5 + 0.5 * sharpness
+            else:
+                confidence = 0.5
+        else:
+            confidence = 0.5
+        
+        return tick_onset_sample, timing_offset_ms, confidence
+    
     def decode_second(
         self,
         audio: np.ndarray,
         second_start_sample: int,
         second_number: int,
         time_delay_ms: float = 0.0  # Hilbert demodulator has zero delay
-    ) -> Tuple[Optional[object], float, float]:
+    ) -> Tuple[Optional[object], float, float, Optional[float]]:
         """
-        Decode one second of CHU FSK data.
+        Decode one second of CHU FSK data with enhanced tick timing.
+        
+        METROLOGICAL ENHANCEMENT (2026-01-24):
+        Now returns both FSK timing (500ms boundary) and tick timing (second start).
+        The tick timing is more precise (~0.05ms vs ~1-2ms for FSK).
         
         Args:
             audio: AM demodulated audio signal
@@ -512,10 +625,24 @@ class CHUFSKDecoder:
             time_delay_ms: Offset to account for filter group delay
             
         Returns:
-            frame: CHUFrameA or CHUFrameB if decoded, None otherwise
-            timing_offset_ms: Measured timing offset from expected 500ms boundary
-            confidence: Decode confidence (0-1)
+            Tuple of (frame, fsk_timing_offset_ms, confidence, tick_timing_offset_ms):
+                - frame: CHUFrameA or CHUFrameB if decoded, None otherwise
+                - fsk_timing_offset_ms: Timing offset from expected 500ms boundary
+                - confidence: Decode confidence (0-1)
+                - tick_timing_offset_ms: High-precision timing from 1000 Hz tick (NEW)
         """
+        # === PRIMARY TIMING: Detect 1000 Hz tick onset ===
+        # The tick provides ~0.05ms precision vs ~1-2ms from FSK boundary
+        tick_onset, tick_timing_offset_ms, tick_confidence = self.detect_tick_onset(
+            audio=audio,
+            expected_sample=second_start_sample,
+            search_window_ms=20.0
+        )
+        
+        if tick_confidence > 0.5:
+            logger.debug(f"CHU tick detected: offset={tick_timing_offset_ms:+.3f}ms, "
+                        f"confidence={tick_confidence:.2f}")
+        
         # FSK demodulate
         soft_decision = self._fsk_demodulate(audio)
         
@@ -528,13 +655,14 @@ class CHUFSKDecoder:
         bits, bit_confidence = self._extract_bits(soft_decision, data_start_sample, BITS_PER_FRAME)
         
         if len(bits) < BITS_PER_FRAME:
-            return None, 0.0, 0.0
+            # Return tick timing even if FSK decode fails
+            return None, 0.0, 0.0, tick_timing_offset_ms if tick_confidence > 0.5 else None
         
         # Convert to bytes
         raw_bytes = self._bits_to_bytes(bits)
         
         if len(raw_bytes) < 10:
-            return None, 0.0, bit_confidence
+            return None, 0.0, bit_confidence, tick_timing_offset_ms if tick_confidence > 0.5 else None
         
         # Decode based on second number
         if second_number == 31:
@@ -542,7 +670,7 @@ class CHUFSKDecoder:
         else:
             frame = self._decode_frame_a(raw_bytes)
         
-        # Measure timing offset from 500ms boundary
+        # Measure timing offset from 500ms boundary (SECONDARY timing reference)
         # The last stop bit should end at exactly 500ms
         # Find where the mark tone ends (transition to silence)
         expected_end_sample = second_start_sample + int(DATA_END_MS * self.sample_rate / 1000)
@@ -560,13 +688,14 @@ class CHUFSKDecoder:
             
             if len(transitions) > 0:
                 actual_end = window_start + transitions[-1]
-                timing_offset_ms = (actual_end - expected_end_sample) / self.sample_rate * 1000
+                fsk_timing_offset_ms = (actual_end - expected_end_sample) / self.sample_rate * 1000
             else:
-                timing_offset_ms = 0.0
+                fsk_timing_offset_ms = 0.0
         else:
-            timing_offset_ms = 0.0
+            fsk_timing_offset_ms = 0.0
         
-        return frame, timing_offset_ms, bit_confidence
+        # Return both FSK timing and tick timing (tick is primary, FSK is secondary)
+        return frame, fsk_timing_offset_ms, bit_confidence, tick_timing_offset_ms if tick_confidence > 0.5 else None
     
     def decode_minute(
         self,
@@ -600,7 +729,8 @@ class CHUFSKDecoder:
         
         frame_a_results: List[CHUFrameA] = []
         frame_b_result: Optional[CHUFrameB] = None
-        timing_offsets: List[float] = []
+        fsk_timing_offsets: List[float] = []
+        tick_timing_offsets: List[float] = []  # NEW: High-precision tick timing
         confidences: List[float] = []
         
         for second in FSK_SECONDS:
@@ -612,16 +742,22 @@ class CHUFSKDecoder:
                 continue
             
             try:
-                frame, timing_offset, confidence = self.decode_second(
+                # decode_second now returns 4 values (2026-01-24 enhancement)
+                frame, fsk_timing_offset, confidence, tick_timing_offset = self.decode_second(
                     audio, second_start_sample, second
                 )
                 
                 result.frame_results.append({
                     'second': second,
                     'decoded': frame is not None,
-                    'timing_offset_ms': timing_offset,
+                    'fsk_timing_offset_ms': fsk_timing_offset,
+                    'tick_timing_offset_ms': tick_timing_offset,
                     'confidence': confidence
                 })
+                
+                # Collect tick timing even if FSK decode fails
+                if tick_timing_offset is not None:
+                    tick_timing_offsets.append(tick_timing_offset)
                 
                 if frame is not None:
                     result.frames_decoded += 1
@@ -631,7 +767,7 @@ class CHUFSKDecoder:
                     elif isinstance(frame, CHUFrameB):
                         frame_b_result = frame
                     
-                    timing_offsets.append(timing_offset)
+                    fsk_timing_offsets.append(fsk_timing_offset)
                     confidences.append(confidence)
                     
             except Exception as e:
@@ -690,18 +826,30 @@ class CHUFSKDecoder:
                 result.year = frame_b_result.year
                 result.tai_utc = frame_b_result.tai_utc
             
-            # Timing precision from 500ms boundaries
-            if timing_offsets:
-                result.timing_offset_ms = np.mean(timing_offsets)
+            # Timing precision from 500ms boundaries (secondary)
+            if fsk_timing_offsets:
+                result.timing_offset_ms = np.mean(fsk_timing_offsets)
+            
+            # HIGH-PRECISION timing from 1000 Hz tick (primary) - 2026-01-24 Enhancement
+            if tick_timing_offsets:
+                result.tick_timing_offset_ms = np.mean(tick_timing_offsets)
+                result.tick_timing_count = len(tick_timing_offsets)
+                logger.debug(f"{self.channel_name} FSK: Tick timing from {result.tick_timing_count} seconds: "
+                            f"{result.tick_timing_offset_ms:+.3f}ms (high precision)")
             
             # Estimate BER from redundancy failures
             frames_attempted = len(result.frame_results)
             if frames_attempted > 0:
                 result.bit_error_rate = 1.0 - (result.frames_decoded / frames_attempted)
             
+            # Log with both timing references
+            timing_str = f"FSK={result.timing_offset_ms:.3f}ms" if result.timing_offset_ms else "FSK=N/A"
+            if result.tick_timing_offset_ms is not None:
+                timing_str += f", tick={result.tick_timing_offset_ms:+.3f}ms (n={result.tick_timing_count})"
+            
             logger.info(
                 f"{self.channel_name} FSK: Decoded {result.frames_decoded}/{result.frames_total} frames, "
-                f"timing_offset={result.timing_offset_ms:.3f}ms, confidence={result.decode_confidence:.2f}"
+                f"timing=[{timing_str}], confidence={result.decode_confidence:.2f}"
             )
             
             if result.dut1_seconds is not None:

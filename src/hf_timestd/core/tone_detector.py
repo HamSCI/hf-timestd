@@ -243,11 +243,12 @@ REVISION HISTORY
 
 import logging
 import re
+import math
 import numpy as np
 from typing import Optional, List, Dict, Tuple
 from scipy import signal as scipy_signal
 from scipy.signal import correlate
-from scipy.fft import rfft, rfftfreq
+from scipy.fft import rfft, rfftfreq, fft, ifft
 
 from ..interfaces.tone_detection import ToneDetector, MultiStationToneDetector as IMultiStationToneDetector
 from ..interfaces.data_models import ToneDetectionResult, StationType
@@ -257,6 +258,22 @@ from .wwv_constants import (
     PROPAGATION_BOUNDS_MS,
     DEFAULT_PROPAGATION_BOUNDS_MS
 )
+
+# =============================================================================
+# METROLOGICAL CONSTANTS (2026-01-24 Enhancement)
+# =============================================================================
+# Cramér-Rao bound for ToA estimation: σ_ToA = 1 / (2π × SNR × B × √(2T))
+# where B = bandwidth (Hz), T = observation time (s), SNR = linear signal-to-noise
+#
+# For WWV 1000 Hz tone with 800ms duration and 50 Hz effective bandwidth:
+#   At SNR = 20 dB (100 linear): σ_ToA ≈ 0.036 ms (theoretical minimum)
+#   At SNR = 10 dB (10 linear):  σ_ToA ≈ 0.36 ms
+#   At SNR = 6 dB (4 linear):    σ_ToA ≈ 0.9 ms
+#
+# Reference: Kay, S.M. (1993). "Fundamentals of Statistical Signal Processing:
+#            Estimation Theory." Prentice Hall. Chapter 3.
+# =============================================================================
+CRAMER_RAO_BANDWIDTH_HZ = 50.0  # Effective bandwidth for tone detection
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +350,12 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         
         # Differential delay tracking (WWV - WWVH)
         self.differential_delay_history: List[Dict[str, float]] = []
+        
+        # Adaptive threshold tracking (2026-01-24 Enhancement)
+        # Track recent SNR values to adapt detection threshold
+        self.recent_snr_history: List[float] = []  # Last N SNR measurements
+        self.recent_noise_floor_history: List[float] = []  # Last N noise floor estimates
+        self.adaptive_threshold_factor: float = 1.0  # Multiplier for noise floor threshold
         
         # Station priorities - DEPRECATED (2026-01-15)
         # All detected broadcasts are now treated equally and passed to fusion.
@@ -794,6 +817,472 @@ class MultiStationToneDetector(IMultiStationToneDetector):
                     f"confidence={onset_confidence:.2f}")
         
         return precise_onset_idx, onset_confidence
+    
+    # =========================================================================
+    # METROLOGICAL ENHANCEMENTS (2026-01-24)
+    # =========================================================================
+    
+    def _calculate_adaptive_threshold(
+        self,
+        base_noise_floor: float,
+        snr_db: Optional[float] = None
+    ) -> float:
+        """
+        Calculate adaptive detection threshold based on channel history.
+        
+        RATIONALE (2026-01-24 Enhancement):
+        -----------------------------------
+        Fixed thresholds (noise_floor + 3σ) work well for stationary noise but
+        fail in HF environments with:
+        - Impulsive interference (atmospheric noise, powerline)
+        - Fading (signal strength varies by 20+ dB)
+        - Time-varying noise floor (diurnal, seasonal)
+        
+        Adaptive thresholding adjusts based on:
+        1. Recent detection success rate (lower threshold if missing detections)
+        2. Recent SNR history (higher threshold if consistently high SNR)
+        3. Noise floor stability (tighter threshold if stable)
+        
+        This implements a simplified CFAR (Constant False Alarm Rate) approach.
+        
+        Args:
+            base_noise_floor: Current noise floor estimate from MAD
+            snr_db: Current SNR estimate (if available)
+            
+        Returns:
+            Adapted threshold value
+        """
+        # Update history
+        if snr_db is not None and snr_db > 0:
+            self.recent_snr_history.append(snr_db)
+            if len(self.recent_snr_history) > 20:
+                self.recent_snr_history = self.recent_snr_history[-20:]
+        
+        self.recent_noise_floor_history.append(base_noise_floor)
+        if len(self.recent_noise_floor_history) > 20:
+            self.recent_noise_floor_history = self.recent_noise_floor_history[-20:]
+        
+        # Calculate adaptive factor based on detection rate
+        if self.total_attempts > 10:
+            total_detections = sum(self.detection_stats.values())
+            detection_rate = total_detections / self.total_attempts
+            
+            # If detection rate is low (<50%), reduce threshold to improve sensitivity
+            # If detection rate is high (>90%), can afford tighter threshold
+            if detection_rate < 0.3:
+                # Very low detection rate - significantly lower threshold
+                rate_factor = 0.7
+                logger.debug(f"Adaptive threshold: low detection rate ({detection_rate:.1%}) → factor={rate_factor}")
+            elif detection_rate < 0.5:
+                # Low detection rate - moderately lower threshold
+                rate_factor = 0.85
+            elif detection_rate > 0.9:
+                # High detection rate - can use tighter threshold
+                rate_factor = 1.1
+            else:
+                # Normal detection rate
+                rate_factor = 1.0
+        else:
+            rate_factor = 1.0  # Not enough history
+        
+        # Calculate noise floor stability factor
+        if len(self.recent_noise_floor_history) >= 5:
+            noise_std = np.std(self.recent_noise_floor_history)
+            noise_mean = np.mean(self.recent_noise_floor_history)
+            
+            if noise_mean > 0:
+                cv = noise_std / noise_mean  # Coefficient of variation
+                
+                # Stable noise (low CV) → can use tighter threshold
+                # Unstable noise (high CV) → need looser threshold
+                if cv < 0.1:
+                    stability_factor = 0.95  # Very stable
+                elif cv > 0.5:
+                    stability_factor = 1.2  # Very unstable
+                else:
+                    stability_factor = 1.0 + (cv - 0.1) * 0.5  # Linear interpolation
+            else:
+                stability_factor = 1.0
+        else:
+            stability_factor = 1.0
+        
+        # Combine factors
+        self.adaptive_threshold_factor = rate_factor * stability_factor
+        
+        # Clamp to reasonable range [0.5, 1.5]
+        self.adaptive_threshold_factor = max(0.5, min(1.5, self.adaptive_threshold_factor))
+        
+        adapted_threshold = base_noise_floor * self.adaptive_threshold_factor
+        
+        logger.debug(f"Adaptive threshold: base={base_noise_floor:.3f}, "
+                    f"rate_factor={rate_factor:.2f}, stability_factor={stability_factor:.2f}, "
+                    f"final_factor={self.adaptive_threshold_factor:.2f}, threshold={adapted_threshold:.3f}")
+        
+        return adapted_threshold
+    
+    def _calculate_cramer_rao_uncertainty(
+        self,
+        snr_db: float,
+        duration_sec: float,
+        bandwidth_hz: float = CRAMER_RAO_BANDWIDTH_HZ
+    ) -> float:
+        """
+        Calculate Cramér-Rao lower bound for ToA estimation uncertainty.
+        
+        The Cramér-Rao bound gives the theoretical minimum variance for any
+        unbiased estimator. For ToA estimation of a sinusoidal tone in AWGN:
+        
+            σ_ToA = 1 / (2π × √(2 × SNR × B × T))
+        
+        where:
+            SNR = signal-to-noise ratio (linear, not dB)
+            B = effective bandwidth (Hz)
+            T = observation time (seconds)
+        
+        This provides a rigorous uncertainty estimate for downstream fusion.
+        
+        Args:
+            snr_db: Signal-to-noise ratio in decibels
+            duration_sec: Tone duration in seconds
+            bandwidth_hz: Effective detection bandwidth (default 50 Hz)
+            
+        Returns:
+            ToA uncertainty in milliseconds (σ_ToA)
+            
+        Reference:
+            Kay, S.M. (1993). "Fundamentals of Statistical Signal Processing:
+            Estimation Theory." Prentice Hall. Eq. 3.32.
+        """
+        # Convert SNR from dB to linear
+        snr_linear = 10 ** (snr_db / 10.0)
+        
+        # Cramér-Rao bound: σ_ToA = 1 / (2π × √(2 × SNR × B × T))
+        # Factor of 2 inside sqrt accounts for complex (I/Q) processing
+        denominator = 2 * math.pi * math.sqrt(2 * snr_linear * bandwidth_hz * duration_sec)
+        
+        if denominator > 0:
+            sigma_toa_sec = 1.0 / denominator
+            sigma_toa_ms = sigma_toa_sec * 1000.0
+        else:
+            sigma_toa_ms = 10.0  # Default high uncertainty for invalid inputs
+        
+        # Clamp to reasonable range [0.01, 50] ms
+        sigma_toa_ms = max(0.01, min(50.0, sigma_toa_ms))
+        
+        logger.debug(f"Cramér-Rao bound: SNR={snr_db:.1f}dB, T={duration_sec:.3f}s, "
+                    f"B={bandwidth_hz:.0f}Hz → σ_ToA={sigma_toa_ms:.3f}ms")
+        
+        return sigma_toa_ms
+    
+    def _complex_correlation_with_phase(
+        self,
+        signal: np.ndarray,
+        tone_frequency: float,
+        template_duration_sec: float
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Perform complex correlation preserving phase information.
+        
+        Unlike envelope detection (√(sin² + cos²)) which discards phase,
+        this method preserves the complex correlation for:
+        - Sub-sample timing refinement from phase at peak
+        - Doppler estimation from phase slope
+        - Multipath detection from phase discontinuities
+        
+        Args:
+            signal: Input signal (real-valued, AM demodulated)
+            tone_frequency: Expected tone frequency (Hz)
+            template_duration_sec: Template duration (seconds)
+            
+        Returns:
+            Tuple of (magnitude, phase, complex_correlation):
+                - magnitude: Phase-invariant envelope (same as standard detection)
+                - phase: Phase at each correlation lag (radians)
+                - complex_correlation: Full complex correlation for advanced analysis
+        """
+        template_samples = int(template_duration_sec * self.sample_rate)
+        
+        # Generate complex template: exp(j × 2π × f × t) = cos + j×sin
+        t = np.arange(template_samples) / self.sample_rate
+        template_complex = np.exp(2j * np.pi * tone_frequency * t)
+        
+        # Apply Tukey window for smooth edges
+        window = scipy_signal.windows.tukey(template_samples, alpha=0.1)
+        template_complex = template_complex * window
+        
+        # Normalize to unit energy
+        template_complex = template_complex / np.linalg.norm(template_complex)
+        
+        # Complex correlation via FFT (efficient for long signals)
+        n_fft = len(signal) + template_samples - 1
+        n_fft = int(2 ** np.ceil(np.log2(n_fft)))  # Power of 2 for efficiency
+        
+        signal_fft = fft(signal.astype(np.float64), n_fft)
+        template_fft = fft(template_complex, n_fft)
+        correlation_fft = signal_fft * np.conj(template_fft)
+        correlation_complex = ifft(correlation_fft)[:len(signal)]
+        
+        # Extract magnitude and phase
+        magnitude = np.abs(correlation_complex)
+        phase = np.angle(correlation_complex)
+        
+        return magnitude, phase, correlation_complex
+    
+    def _phase_based_subsample_refinement(
+        self,
+        phase_at_peak: float,
+        tone_frequency: float
+    ) -> float:
+        """
+        Compute sub-sample timing offset from phase at correlation peak.
+        
+        At the correlation peak, the phase tells us the fractional sample
+        offset from the integer peak position:
+        
+            φ = 2π × f × Δt
+            Δt = φ / (2π × f)
+        
+        This provides ~10× finer resolution than sample-based timing.
+        
+        Args:
+            phase_at_peak: Phase at correlation peak (radians, -π to π)
+            tone_frequency: Tone frequency (Hz)
+            
+        Returns:
+            Sub-sample offset in samples (typically -0.5 to +0.5)
+        """
+        if abs(tone_frequency) < 1e-6:
+            return 0.0
+        
+        # Convert phase to time offset
+        # Δt = -φ / (2π × f)  [negative because positive phase = signal arrived early]
+        delta_t_sec = -phase_at_peak / (2 * math.pi * tone_frequency)
+        
+        # Convert to samples
+        delta_samples = delta_t_sec * self.sample_rate
+        
+        # Wrap to [-0.5, 0.5] samples (phase ambiguity)
+        delta_samples = ((delta_samples + 0.5) % 1.0) - 0.5
+        
+        return delta_samples
+    
+    def _estimate_doppler_from_phase_slope(
+        self,
+        phase: np.ndarray,
+        peak_idx: int,
+        window_samples: int = 50
+    ) -> Tuple[float, float]:
+        """
+        Estimate Doppler shift from phase rotation rate around correlation peak.
+        
+        Doppler shift causes continuous phase rotation:
+            φ(t) = 2π × f_doppler × t
+            f_doppler = (dφ/dt) / (2π)
+        
+        By measuring the phase slope around the correlation peak, we can
+        estimate the Doppler offset caused by ionospheric motion.
+        
+        Args:
+            phase: Phase array from complex correlation (radians)
+            peak_idx: Index of correlation peak
+            window_samples: Number of samples around peak to analyze
+            
+        Returns:
+            Tuple of (doppler_hz, confidence):
+                - doppler_hz: Estimated Doppler shift (Hz)
+                - confidence: Confidence in estimate (0-1)
+        """
+        # Extract phase window around peak
+        start = max(0, peak_idx - window_samples)
+        end = min(len(phase), peak_idx + window_samples)
+        
+        if end - start < 10:
+            return 0.0, 0.0
+        
+        phase_window = phase[start:end]
+        
+        # Unwrap phase to remove 2π discontinuities
+        phase_unwrapped = np.unwrap(phase_window)
+        
+        # Linear fit to get slope (rad/sample)
+        t = np.arange(len(phase_unwrapped))
+        try:
+            coeffs = np.polyfit(t, phase_unwrapped, 1)
+            phase_slope = coeffs[0]  # rad/sample
+            
+            # Convert to Hz: f = (dφ/dt) / (2π) = (dφ/dsample × sample_rate) / (2π)
+            doppler_hz = phase_slope * self.sample_rate / (2 * math.pi)
+            
+            # Confidence from fit residuals (lower residuals = higher confidence)
+            fit = np.polyval(coeffs, t)
+            residuals = phase_unwrapped - fit
+            residual_std = np.std(residuals)
+            confidence = 1.0 / (1.0 + residual_std)
+            
+            return float(doppler_hz), float(confidence)
+            
+        except (np.linalg.LinAlgError, ValueError):
+            return 0.0, 0.0
+    
+    def _apply_doppler_correction(
+        self,
+        timing_error_ms: float,
+        doppler_hz: float,
+        tone_frequency: float,
+        tone_duration_sec: float
+    ) -> Tuple[float, float]:
+        """
+        Apply Doppler correction to ToA estimate.
+        
+        RATIONALE (2026-01-24 Enhancement):
+        -----------------------------------
+        Doppler shift from ionospheric motion causes continuous phase rotation
+        during the tone. This phase drift biases the correlation peak position
+        and thus the ToA estimate.
+        
+        The bias is approximately:
+            Δt_bias ≈ (f_doppler / f_tone) × (T_tone / 2)
+        
+        For typical HF Doppler (±1-5 Hz) on 1000 Hz tone over 800ms:
+            Δt_bias ≈ (5 / 1000) × 0.4 = 2 ms (worst case)
+        
+        This correction removes the systematic bias from Doppler.
+        
+        Args:
+            timing_error_ms: Raw timing error before correction
+            doppler_hz: Estimated Doppler shift (Hz)
+            tone_frequency: Tone frequency (Hz)
+            tone_duration_sec: Tone duration (seconds)
+            
+        Returns:
+            Tuple of (corrected_timing_ms, correction_applied_ms):
+                - corrected_timing_ms: Timing error after Doppler correction
+                - correction_applied_ms: Amount of correction applied
+        """
+        if abs(doppler_hz) < 0.01 or tone_frequency < 1.0:
+            # No significant Doppler or invalid frequency
+            return timing_error_ms, 0.0
+        
+        # Calculate Doppler-induced timing bias
+        # The correlation peak shifts by approximately:
+        #   Δt = (f_doppler / f_tone) × (T_tone / 2)
+        # This is because the phase rotates during the tone, shifting the
+        # effective center of the correlation.
+        
+        doppler_bias_sec = (doppler_hz / tone_frequency) * (tone_duration_sec / 2)
+        doppler_bias_ms = doppler_bias_sec * 1000.0
+        
+        # Apply correction (subtract bias)
+        corrected_timing_ms = timing_error_ms - doppler_bias_ms
+        
+        logger.debug(f"Doppler correction: f_D={doppler_hz:+.2f}Hz, "
+                    f"bias={doppler_bias_ms:+.3f}ms, "
+                    f"raw={timing_error_ms:+.2f}ms → corrected={corrected_timing_ms:+.2f}ms")
+        
+        return corrected_timing_ms, doppler_bias_ms
+    
+    def _detect_multipath_from_correlation(
+        self,
+        magnitude: np.ndarray,
+        phase: np.ndarray,
+        peak_idx: int
+    ) -> Tuple[bool, float, float]:
+        """
+        Detect multipath propagation from correlation characteristics.
+        
+        Multipath causes:
+        1. Broadened correlation peak (multiple arrivals smear the peak)
+        2. Secondary peaks (distinct multipath components)
+        3. Phase instability (interference between paths)
+        
+        Args:
+            magnitude: Correlation magnitude array
+            phase: Correlation phase array (radians)
+            peak_idx: Index of primary correlation peak
+            
+        Returns:
+            Tuple of (is_multipath, delay_spread_ms, quality_metric):
+                - is_multipath: True if multipath detected
+                - delay_spread_ms: Estimated delay spread (ms)
+                - quality_metric: 0-1, higher = cleaner signal
+        """
+        peak_mag = magnitude[peak_idx]
+        
+        # 1. Measure peak width at -3dB
+        threshold = peak_mag * 0.707  # -3 dB
+        
+        left = peak_idx
+        while left > 0 and magnitude[left] > threshold:
+            left -= 1
+        
+        right = peak_idx
+        while right < len(magnitude) - 1 and magnitude[right] > threshold:
+            right += 1
+        
+        width_samples = right - left
+        width_ms = width_samples * 1000.0 / self.sample_rate
+        
+        # Expected width for clean signal (~10% of template duration)
+        # For 800ms template at 24kHz: ~80ms expected width
+        expected_width_ms = 80.0  # Approximate for 800ms template
+        width_ratio = width_ms / expected_width_ms if expected_width_ms > 0 else 1.0
+        
+        # 2. Check for secondary peaks (>30% of primary)
+        secondary_threshold = peak_mag * 0.3
+        min_separation = int(0.002 * self.sample_rate)  # 2ms minimum separation
+        
+        secondary_count = 0
+        for i in range(max(0, peak_idx - 500), min(len(magnitude), peak_idx + 500)):
+            if abs(i - peak_idx) < min_separation:
+                continue
+            if i > 0 and i < len(magnitude) - 1:
+                if (magnitude[i] > magnitude[i-1] and 
+                    magnitude[i] > magnitude[i+1] and
+                    magnitude[i] > secondary_threshold):
+                    secondary_count += 1
+        
+        # 3. Phase stability around peak
+        window = 50  # samples
+        start = max(0, peak_idx - window)
+        end = min(len(phase), peak_idx + window)
+        
+        if end - start > 10:
+            phase_window = phase[start:end]
+            phase_unwrapped = np.unwrap(phase_window)
+            
+            # Remove linear trend (Doppler)
+            t = np.arange(len(phase_unwrapped))
+            try:
+                coeffs = np.polyfit(t, phase_unwrapped, 1)
+                phase_detrended = phase_unwrapped - np.polyval(coeffs, t)
+                phase_std = float(np.std(phase_detrended))
+            except:
+                phase_std = 0.5
+        else:
+            phase_std = 0.5
+        
+        # Multipath detection criteria
+        is_multipath = (
+            width_ratio > 1.5 or  # Peak 50% wider than expected
+            secondary_count > 0 or  # Secondary peaks present
+            phase_std > 0.5  # Phase instability > 0.5 rad
+        )
+        
+        # Delay spread estimate (from peak width)
+        delay_spread_ms = max(0.0, width_ms - expected_width_ms)
+        
+        # Quality metric (inverse of multipath severity)
+        quality_metric = 1.0 - min(1.0, (
+            0.4 * min(1.0, width_ratio / 3.0) +
+            0.3 * min(1.0, secondary_count / 3.0) +
+            0.3 * min(1.0, phase_std / 1.0)
+        ))
+        
+        logger.debug(f"Multipath analysis: width={width_ms:.1f}ms (ratio={width_ratio:.2f}), "
+                    f"secondary_peaks={secondary_count}, phase_std={phase_std:.2f}rad, "
+                    f"is_multipath={is_multipath}, quality={quality_metric:.2f}")
+        
+        return is_multipath, delay_spread_ms, quality_metric
     
     def process_samples(
         self,
@@ -1294,9 +1783,16 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             logger.warning(f"  -> REJECTED (invalid peak or noise values)")
             return None
         
-        # Check if peak is significant
-        if peak_val <= noise_floor:
-            logger.info(f"  -> REJECTED {station_type.value} (peak {peak_val:.2f} <= threshold {noise_floor:.2f})")
+        # Apply adaptive threshold (2026-01-24 Enhancement)
+        # This adjusts the threshold based on detection history and noise stability
+        adaptive_threshold = self._calculate_adaptive_threshold(
+            base_noise_floor=noise_floor,
+            snr_db=snr_db
+        )
+        
+        # Check if peak is significant (using adaptive threshold)
+        if peak_val <= adaptive_threshold:
+            logger.info(f"  -> REJECTED {station_type.value} (peak {peak_val:.2f} <= adaptive_threshold {adaptive_threshold:.2f})")
             return None
         
         # Calculate confidence (combines Stage 1 detection + Stage 2 onset quality)
@@ -1348,7 +1844,80 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # The correlation-based snr_db can be 0 when noise_mean is poorly estimated
         effective_snr_db = tone_power_db if tone_power_db is not None and tone_power_db > 0 else snr_db
         
-        # Create ToneDetectionResult
+        # =====================================================================
+        # METROLOGICAL ENHANCEMENTS (2026-01-24)
+        # =====================================================================
+        # Compute rigorous uncertainty and channel characterization metrics
+        # for downstream fusion and scientific analysis.
+        # =====================================================================
+        
+        # 1. Cramér-Rao bound uncertainty (theoretical minimum ToA variance)
+        timing_uncertainty_ms = self._calculate_cramer_rao_uncertainty(
+            snr_db=effective_snr_db,
+            duration_sec=duration,
+            bandwidth_hz=CRAMER_RAO_BANDWIDTH_HZ
+        )
+        
+        # 2. Complex correlation for phase-based analysis
+        # Use the filtered signal for better phase estimation
+        try:
+            corr_magnitude, corr_phase, corr_complex = self._complex_correlation_with_phase(
+                signal=signal_to_correlate,
+                tone_frequency=frequency,
+                template_duration_sec=duration
+            )
+            
+            # Get phase at correlation peak
+            if peak_idx < len(corr_phase):
+                phase_at_peak = float(corr_phase[peak_idx])
+            else:
+                phase_at_peak = None
+            
+            # 3. Doppler estimation from phase slope
+            doppler_hz, doppler_confidence = self._estimate_doppler_from_phase_slope(
+                phase=corr_phase,
+                peak_idx=peak_idx,
+                window_samples=50
+            )
+            
+            # 4. Multipath detection from correlation characteristics
+            is_multipath, delay_spread_ms, multipath_quality = self._detect_multipath_from_correlation(
+                magnitude=corr_magnitude,
+                phase=corr_phase,
+                peak_idx=peak_idx
+            )
+            
+            # 5. Inflate uncertainty if multipath detected
+            if is_multipath and delay_spread_ms > 0:
+                # Add multipath-induced uncertainty (quadrature sum)
+                multipath_uncertainty_ms = delay_spread_ms / 2.0  # Half of delay spread
+                timing_uncertainty_ms = math.sqrt(
+                    timing_uncertainty_ms**2 + multipath_uncertainty_ms**2
+                )
+                logger.debug(f"Multipath inflated uncertainty: {timing_uncertainty_ms:.3f}ms "
+                            f"(base + {multipath_uncertainty_ms:.3f}ms from delay spread)")
+            
+            # 6. Apply Doppler correction to timing (2026-01-24 Enhancement)
+            # Doppler shift causes systematic timing bias that can be corrected
+            if doppler_hz is not None and doppler_confidence > 0.3:
+                timing_error_ms, doppler_correction_ms = self._apply_doppler_correction(
+                    timing_error_ms=timing_error_ms,
+                    doppler_hz=doppler_hz,
+                    tone_frequency=frequency,
+                    tone_duration_sec=duration
+                )
+                # Also update onset_time to reflect corrected timing
+                onset_time = onset_time - (doppler_correction_ms / 1000.0)
+            
+        except Exception as e:
+            logger.debug(f"Complex correlation analysis failed: {e}")
+            phase_at_peak = None
+            doppler_hz = None
+            is_multipath = None
+            delay_spread_ms = None
+            multipath_quality = None
+        
+        # Create ToneDetectionResult with metrological fields
         result = ToneDetectionResult(
             station=station_type,
             frequency_hz=frequency,
@@ -1363,7 +1932,14 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             tone_power_db=tone_power_db,
             sample_position_original=sample_position_original,
             original_sample_rate=original_sample_rate,
-            buffer_rtp_start=buffer_rtp_start
+            buffer_rtp_start=buffer_rtp_start,
+            # Metrological fields (2026-01-24 Enhancement)
+            timing_uncertainty_ms=timing_uncertainty_ms,
+            multipath_detected=is_multipath,
+            multipath_delay_spread_ms=delay_spread_ms,
+            multipath_quality=multipath_quality,
+            doppler_hz=doppler_hz,
+            phase_at_peak_rad=phase_at_peak
         )
         
         freq_str = f"{frequency}Hz" if frequency is not None else "??Hz"

@@ -2,7 +2,7 @@
 
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 6.1.0  
+**System Version:** 6.2.0  
 **Last Updated:** 2026-01-24
 
 ---
@@ -176,7 +176,7 @@ Plus **calibration layer** that learns from actual propagation measurements.
 
 ### 3.4 Doppler Shift Measurement ✅
 
-**Status:** Implemented
+**Status:** Implemented (Enhanced in v6.2)
 
 **Physics:** Ionospheric motion causes Doppler shifts:
 
@@ -186,47 +186,95 @@ Plus **calibration layer** that learns from actual propagation measurements.
 
 Where v_iono is the effective ionospheric velocity along the propagation path.
 
-**Implementation:** `src/hf_timestd/core/wwvh_discrimination.py` (estimate_doppler_shift)
+**Implementation:** 
+- `src/hf_timestd/core/wwvh_discrimination.py` (estimate_doppler_shift)
+- `src/hf_timestd/core/tone_detector.py` (_estimate_doppler_from_phase_slope) — **NEW in v6.2**
 
-Phase tracking of timing tones across consecutive seconds:
+**v6.2 Enhancement: Phase-Based Doppler Estimation**
+
+The tone detector now estimates Doppler directly from the complex correlation phase slope:
 
 ```python
-# Track phase progression
-φ_k = phase at tick k
-Δφ = φ_k - φ_{k-1}  # Unwrapped phase difference
-Δf_D = Δφ / (2π × 1s)  # Doppler shift in Hz
+# Extract phase around correlation peak
+phase_window = corr_phase[peak_idx - N : peak_idx + N]
+# Unwrap phase and fit linear slope
+phase_unwrapped = np.unwrap(phase_window)
+slope = np.polyfit(t, phase_unwrapped, 1)[0]  # rad/sample
+doppler_hz = slope × sample_rate / (2π)
 ```
+
+**Doppler Timing Correction (v6.2):**
+
+Doppler shift causes systematic timing bias that is now corrected:
+
+```
+Δt_bias ≈ (f_doppler / f_tone) × (T_tone / 2)
+```
+
+For typical HF Doppler (±1-5 Hz) on 1000 Hz tone over 800 ms:
+- Δt_bias ≈ (5 / 1000) × 0.4 = **2 ms** (worst case)
 
 **Outputs:**
 - `doppler_hz`: Measured Doppler shift (±0.01-0.1 Hz precision)
 - `doppler_std_hz`: Doppler spread (variability)
 - `max_coherent_window_sec`: Maximum coherent integration time
+- `timing_error_ms`: Now Doppler-corrected (v6.2)
 
 **Scientific Value:**
 - Ionospheric velocity estimation
 - TID (Traveling Ionospheric Disturbance) detection
 - Channel stability assessment
+- **Improved timing accuracy** via Doppler correction
 
 ### 3.5 Multipath and Delay Spread ✅
 
-**Status:** Implemented
+**Status:** Implemented (Enhanced in v6.2)
 
 **Physics:** When multiple propagation modes arrive simultaneously, they create:
 - Delay spread (time spreading of the signal)
 - Fading (constructive/destructive interference)
 - Phase distortion
 
-**Implementation:** `src/hf_timestd/core/advanced_signal_analysis.py`
+**Implementation:** 
+- `src/hf_timestd/core/advanced_signal_analysis.py`
+- `src/hf_timestd/core/tone_detector.py` (_detect_multipath_from_correlation) — **NEW in v6.2**
+
+**v6.2 Enhancement: Integrated Multipath Detection**
+
+The tone detector now performs multipath detection as part of the main detection pipeline:
 
 ```python
-# Correlation peak width analysis
-FWHM = time width where peak > peak_max/2
-delay_spread_ms = FWHM  # Multipath time spreading
+# Three-indicator multipath detection:
+# 1. Peak width analysis (broadening indicates multipath)
+peak_width = correlation_fwhm_samples / sample_rate * 1000  # ms
+is_broadened = peak_width > expected_width * 1.5
+
+# 2. Secondary peak detection
+secondary_peaks = find_peaks(magnitude, height=0.3 * peak_max)
+has_secondary = len(secondary_peaks) > 1
+
+# 3. Phase stability around peak
+phase_std = np.std(phase[peak_idx - N : peak_idx + N])
+phase_unstable = phase_std > 0.5  # radians
+```
+
+**Uncertainty Inflation (v6.2):**
+
+When multipath is detected, the timing uncertainty is inflated:
+
+```python
+if is_multipath and delay_spread_ms > 0:
+    multipath_uncertainty_ms = delay_spread_ms / 2.0
+    timing_uncertainty_ms = sqrt(
+        timing_uncertainty_ms² + multipath_uncertainty_ms²
+    )
 ```
 
 **Outputs:**
 - `delay_spread_ms`: Multipath delay spread
-- `multipath_detected`: Boolean flag
+- `multipath_detected`: Boolean flag (now in ToneDetectionResult)
+- `multipath_delay_spread_ms`: Delay spread in ms (now in ToneDetectionResult)
+- `multipath_quality`: 0-1 metric, higher = cleaner path (now in ToneDetectionResult)
 - `fading_variance`: Amplitude variation metric
 - `phase_stability`: Phase coherence metric
 
@@ -234,6 +282,7 @@ delay_spread_ms = FWHM  # Multipath time spreading
 - Channel characterization
 - Mode mixing detection
 - Propagation quality assessment
+- **Rigorous uncertainty propagation** for timing measurements
 
 ### 3.6 D-Layer Absorption ✅
 
@@ -345,7 +394,7 @@ delay_spread_ms = FWHM  # Multipath time spreading
 
 ### 4.4 CHU FSK Time Code Decoding ✅
 
-**Status:** Implemented and integrated
+**Status:** Implemented and integrated (Enhanced in v6.2)
 
 **Physics:** CHU transmits FSK-encoded time information including:
 - UTC time (verified, not just relative)
@@ -362,13 +411,35 @@ delay_spread_ms = FWHM  # Multipath time spreading
 - ✅ Parity checking and error detection
 - ✅ Multi-second consensus validation
 - ✅ Integration with analytics pipeline
+- ✅ **High-precision tick timing** (v6.2) — NEW
+
+**v6.2 Enhancement: Dual Timing References**
+
+CHU provides two timing references with different precision:
+
+| Reference | Method | Precision | Implementation |
+|-----------|--------|-----------|----------------|
+| **FSK Boundary** | Mark-to-silence transition at 500ms | ~1-2 ms | `decode_second()` |
+| **1000 Hz Tick** | Edge detection on 10-cycle tick | ~0.05 ms | `detect_tick_onset()` — **NEW** |
+
+The tick at the start of each second provides much higher timing precision than the FSK data boundary:
+
+```python
+def detect_tick_onset(audio, expected_sample, search_window_ms=20.0):
+    # Bandpass filter around 1000 Hz
+    # Compute energy envelope
+    # Find rising edge with sub-sample interpolation
+    return tick_onset_sample, timing_offset_ms, confidence
+```
 
 **Outputs:**
 - `decoded_day`, `decoded_hour`, `decoded_minute`: Verified UTC time
 - `dut1_seconds`: UT1-UTC correction
 - `tai_utc`: TAI-UTC offset (leap second count)
 - `year`: Gregorian year
-- `timing_offset_ms`: High-precision timing from FSK boundaries
+- `timing_offset_ms`: FSK boundary timing (secondary, ~1-2 ms)
+- `tick_timing_offset_ms`: 1000 Hz tick timing (primary, ~0.05 ms) — **NEW in v6.2**
+- `tick_timing_count`: Number of valid tick measurements — **NEW in v6.2**
 - `decode_confidence`: Frame decode quality
 
 **Scientific Value:**
@@ -376,6 +447,7 @@ delay_spread_ms = FWHM  # Multipath time spreading
 - DUT1 correction for UT1-UTC
 - Leap second announcements
 - TAI-UTC offset tracking
+- **High-precision timing** from 1000 Hz tick (v6.2)
 
 ---
 
