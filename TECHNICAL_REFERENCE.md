@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 24, 2026 (v6.2.0)
+**Last Updated:** January 25, 2026 (v6.3.0)
 
 ---
 
@@ -182,7 +182,70 @@ The system implements a three-layer metrological architecture that distinguishes
 
 **Key Insight**: The combined regression of 17 broadcasts doesn't just average noise — it **solves the geometry** of the ionosphere to find the true UTC origin point.
 
-For detailed metrological description, see `docs/METROLOGIST_DESCRIPTION.md`.
+For detailed metrological description, see `METROLOGY.md` and `docs/METROLOGIST_DESCRIPTION.md`.
+
+---
+
+## Timing Bootstrap System (v6.3.0)
+
+The Timing Bootstrap establishes the critical RTP-to-UTC offset that allows conversion between SDR sample counts and Coordinated Universal Time.
+
+### The Problem
+
+RTP timestamps are arbitrary 32-bit counters that start at a random value when the SDR begins streaming. To convert detected tone arrivals to UTC, we need:
+
+```
+UTC = RTP_timestamp / sample_rate + offset
+```
+
+### Two-Phase Solution
+
+#### Phase 1: Metadata-Based Offset
+
+Each minute buffer includes metadata with both RTP and system time:
+
+```json
+{
+  "start_rtp_timestamp": 164520840,
+  "start_system_time": 1769306160.0665529
+}
+```
+
+The offset is calculated directly:
+```python
+offset = system_time - (rtp_timestamp / sample_rate)
+```
+
+#### Phase 2: Broadcast Validation
+
+Once established, the offset is validated using discriminating features:
+
+| Feature | Purpose |
+|---------|---------|
+| **Tone frequency** | WWV=1000Hz, WWVH=1200Hz |
+| **Tone schedule** | Ground-truth minutes (WWV-only: 1,16,17,19) |
+| **Geographic ordering** | WWVH always arrives after WWV |
+| **Unambiguous channels** | CHU, WWV 20/25 MHz |
+
+### State Machine
+
+```
+ACQUIRING → CORRELATING → TRACKING → LOCKED
+    ↓           ↓            ↓          ↓
+  1 min      3 min       10 min    Continuous
+```
+
+### Implementation
+
+Key class: `TimingBootstrap` in `src/hf_timestd/core/timing_bootstrap.py`
+
+```python
+bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+result = bootstrap.establish_offset_from_metadata(rtp_start, system_time, channel)
+# Returns: "TRACKING" or "LOCKED" when validated
+```
+
+For complete methodology, see `METROLOGY.md`.
 
 ---
 

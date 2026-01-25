@@ -507,6 +507,15 @@ class MultiBroadcastFusion:
         self.receiver_lat = receiver_lat if receiver_lat is not None else 39.0
         self.receiver_lon = receiver_lon if receiver_lon is not None else -98.0
 
+        # Bootstrap Validator (2026-01-24): Multi-station correlation for offset validation
+        # This validates the RTP-to-UTC offset using cross-station agreement
+        from .bootstrap_validator import BootstrapValidator
+        self.bootstrap_validator = BootstrapValidator(
+            receiver_lat=self.receiver_lat,
+            receiver_lon=self.receiver_lon
+        )
+        self._bootstrap_offset_correction: Optional[float] = None
+
         from .differential_time_solver import GlobalDifferentialSolver
         self.global_solver = GlobalDifferentialSolver(
             receiver_lat=self.receiver_lat,
@@ -2247,6 +2256,72 @@ class MultiBroadcastFusion:
                 calibrated.append(m.d_clock_ms)
         return calibrated
     
+    def _validate_bootstrap_with_measurements(
+        self,
+        measurements: List[BroadcastMeasurement]
+    ):
+        """
+        Feed measurements to bootstrap validator for multi-station correlation.
+        
+        The bootstrap validator checks:
+        1. WWVH > WWV delay ordering (on shared frequencies)
+        2. CHU timing consistency with geographic prediction
+        3. All delays within geographic bounds
+        
+        Once validated, logs the offset correction (actual application happens
+        at the metrology service level where RTP-to-UTC offset is managed).
+        """
+        from .bootstrap_validator import BootstrapPhase
+        
+        if self.bootstrap_validator.phase == BootstrapPhase.LOCKED:
+            return  # Already validated
+        
+        logger.info(f"[BOOTSTRAP] Processing {len(measurements)} measurements, phase={self.bootstrap_validator.phase.name}")
+        
+        for m in measurements:
+            if m.station in ('GLOBAL_DIFF', 'UNKNOWN'):
+                continue
+            
+            # Use d_clock_ms as timing error (it's the offset from expected)
+            if m.d_clock_ms is None or np.isnan(m.d_clock_ms):
+                continue
+            
+            # Feed to validator
+            offset_correction = self.bootstrap_validator.add_detection(
+                channel=m.channel_name,
+                station=m.station,
+                frequency_mhz=m.frequency_mhz,
+                timing_error_ms=m.d_clock_ms,
+                confidence=m.confidence,
+                snr_db=m.snr_db if m.snr_db is not None else 0.0,
+                rtp_timestamp=0,  # Not available at fusion layer
+                sample_rate=self.sample_rate,
+                minute_boundary=int(m.timestamp),
+                tone_frequency_hz=None,
+                propagation_delay_ms=m.propagation_delay_ms
+            )
+            
+            if offset_correction is not None:
+                self._bootstrap_offset_correction = offset_correction
+                logger.info(
+                    f"[BOOTSTRAP] Fusion layer detected offset correction: "
+                    f"{offset_correction*1000:+.1f}ms"
+                )
+        
+        # Log status periodically
+        if hasattr(self, '_bootstrap_log_counter'):
+            self._bootstrap_log_counter += 1
+        else:
+            self._bootstrap_log_counter = 0
+        
+        if self._bootstrap_log_counter % 10 == 0:
+            status = self.bootstrap_validator.get_status()
+            logger.info(
+                f"[BOOTSTRAP] Fusion status: phase={status['phase']}, "
+                f"candidates={status['n_candidates']}, "
+                f"stations={status.get('confirming_stations', [])}"
+            )
+    
     def _update_calibration(
         self,
         measurements: List[BroadcastMeasurement],
@@ -2989,6 +3064,14 @@ class MultiBroadcastFusion:
 
         # Read latest measurements (L1-only mode skips L2 calibration data)
         measurements = self._read_latest_measurements(lookback_minutes, force_l1_only=force_l1_only)
+        
+        # ====================================================================
+        # BOOTSTRAP VALIDATION (2026-01-24): Multi-station correlation
+        # ====================================================================
+        # Feed measurements to bootstrap validator for cross-station agreement.
+        # This validates the RTP-to-UTC offset using WWVH > WWV delay ordering,
+        # CHU timing consistency, and geographic bounds.
+        self._validate_bootstrap_with_measurements(measurements)
         
         # ====================================================================
         # STEP 1: Apply per-broadcast Kalman filtering (v6.0 Architecture)

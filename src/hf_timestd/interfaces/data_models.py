@@ -403,6 +403,38 @@ class StationType(Enum):
 
 
 @dataclass(frozen=True)
+class ToneAcquisitionResult:
+    """
+    Result of tone acquisition (bootstrap mode) - no timing assumptions.
+    
+    Unlike ToneDetectionResult which calculates timing_error_ms relative to
+    an assumed minute boundary, this reports the raw sample position where
+    a tone was found. Used during bootstrap to discover the RTP-to-UTC
+    correspondence from the broadcasts themselves.
+    
+    Attributes:
+        station: Which station template matched (WWV, WWVH, CHU, BPM)
+        frequency_hz: Tone frequency (1000 Hz, 1200 Hz, etc.)
+        sample_position: Sample index in buffer where tone onset detected
+        rtp_timestamp: RTP timestamp of tone onset (buffer_rtp_start + sample_position)
+        snr_db: Signal-to-noise ratio of detection (dB)
+        confidence: Detection confidence (0.0-1.0)
+        correlation_peak: Peak correlation value
+        noise_floor: Estimated noise floor
+        buffer_rtp_start: RTP timestamp at start of buffer
+    """
+    station: StationType
+    frequency_hz: float
+    sample_position: int  # Sample index in buffer
+    rtp_timestamp: int    # Absolute RTP timestamp of tone onset
+    snr_db: float
+    confidence: float
+    correlation_peak: float
+    noise_floor: float
+    buffer_rtp_start: int
+
+
+@dataclass(frozen=True)
 class ToneDetectionResult:
     """
     Result of WWV/WWVH/CHU tone detection.

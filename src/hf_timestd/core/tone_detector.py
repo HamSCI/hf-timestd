@@ -2263,3 +2263,180 @@ class MultiStationToneDetector(IMultiStationToneDetector):
     
     # ===== Legacy Compatibility =====
     
+    # =========================================================================
+    # ACQUISITION MODE (2026-01-25): Bootstrap without timing assumptions
+    # =========================================================================
+    
+    def acquire_tones(
+        self,
+        samples: np.ndarray,
+        buffer_rtp_start: int,
+        snr_threshold_db: float = 10.0,
+        max_candidates: int = 5
+    ) -> List['ToneAcquisitionResult']:
+        """
+        Acquisition mode: Find ALL tone candidates in buffer without timing assumptions.
+        
+        Unlike process_samples() which searches a narrow window around an assumed
+        minute boundary, this method searches the ENTIRE buffer and returns all
+        correlation peaks that exceed the threshold. Used during bootstrap to
+        discover the RTP-to-UTC correspondence from the broadcasts themselves.
+        
+        ALGORITHM:
+        ----------
+        1. Cross-correlate entire buffer with each station template (1000 Hz, 1200 Hz)
+        2. Find all peaks above SNR threshold
+        3. For each peak, calculate RTP timestamp of tone onset
+        4. Return sorted by SNR (strongest first)
+        
+        The caller (bootstrap state machine) then validates candidates using:
+        - Relative timing constraints (WWVH after WWV on shared frequencies)
+        - Minute spacing (1,440,000 samples between consecutive tones)
+        - Geographic priors (expected propagation delays)
+        - Discriminating features (tone schedule, voice timing, etc.)
+        
+        Args:
+            samples: Complex IQ samples (full minute buffer)
+            buffer_rtp_start: RTP timestamp at start of buffer
+            snr_threshold_db: Minimum SNR for candidate detection (default 10 dB)
+            max_candidates: Maximum candidates to return per station type
+            
+        Returns:
+            List of ToneAcquisitionResult, sorted by SNR (strongest first)
+        """
+        from ..interfaces.data_models import ToneAcquisitionResult
+        
+        # AM demodulation
+        magnitude = np.abs(samples)
+        audio_signal = magnitude - np.mean(magnitude)
+        
+        candidates: List[ToneAcquisitionResult] = []
+        
+        for station_type, template in self.templates.items():
+            station_candidates = self._acquire_station_tones(
+                audio_signal=audio_signal,
+                station_type=station_type,
+                template=template,
+                buffer_rtp_start=buffer_rtp_start,
+                snr_threshold_db=snr_threshold_db,
+                max_candidates=max_candidates
+            )
+            candidates.extend(station_candidates)
+        
+        # Sort by SNR (strongest first)
+        candidates.sort(key=lambda c: c.snr_db, reverse=True)
+        
+        logger.info(f"[ACQUIRE] Found {len(candidates)} tone candidates: "
+                   f"{[(c.station.value, c.snr_db) for c in candidates[:5]]}")
+        
+        return candidates
+    
+    def _acquire_station_tones(
+        self,
+        audio_signal: np.ndarray,
+        station_type: StationType,
+        template: dict,
+        buffer_rtp_start: int,
+        snr_threshold_db: float,
+        max_candidates: int
+    ) -> List['ToneAcquisitionResult']:
+        """
+        Find all tone candidates for a specific station template.
+        
+        Searches entire buffer, finds all peaks above threshold, applies
+        non-maximum suppression to avoid duplicate detections of same tone.
+        """
+        from ..interfaces.data_models import ToneAcquisitionResult
+        
+        template_sin = template['sin']
+        template_cos = template['cos']
+        frequency = template['frequency']
+        duration = template['duration']
+        
+        # Bandpass filter to isolate tone frequency
+        try:
+            bw = 250.0
+            low = max(50, frequency - bw)
+            high = min(self.sample_rate / 2 - 50, frequency + bw)
+            sos = scipy_signal.butter(4, [low, high], btype='band', 
+                                      fs=self.sample_rate, output='sos')
+            filtered = scipy_signal.sosfiltfilt(sos, audio_signal)
+        except Exception:
+            filtered = audio_signal
+        
+        # Quadrature correlation
+        try:
+            corr_sin = scipy_signal.correlate(filtered, template_sin, mode='valid')
+            corr_cos = scipy_signal.correlate(filtered, template_cos, mode='valid')
+        except ValueError:
+            return []
+        
+        if len(corr_sin) == 0:
+            return []
+        
+        min_len = min(len(corr_sin), len(corr_cos))
+        correlation = np.sqrt(corr_sin[:min_len]**2 + corr_cos[:min_len]**2)
+        
+        # Noise floor estimation (robust)
+        noise_floor = np.median(correlation)
+        noise_std = np.median(np.abs(correlation - noise_floor)) * 1.4826  # MAD to std
+        
+        if noise_floor <= 0:
+            return []
+        
+        # Find all peaks above threshold
+        # Convert SNR threshold to absolute threshold
+        snr_linear = 10 ** (snr_threshold_db / 10)
+        threshold = noise_floor * np.sqrt(snr_linear)
+        
+        # Find local maxima above threshold
+        candidates = []
+        template_samples = int(duration * self.sample_rate)
+        min_separation = template_samples  # Minimum separation between peaks
+        
+        # Simple peak finding with non-maximum suppression
+        peak_indices = []
+        i = 0
+        while i < len(correlation):
+            if correlation[i] > threshold:
+                # Find local maximum in this region
+                region_end = min(i + min_separation, len(correlation))
+                local_max_idx = i + np.argmax(correlation[i:region_end])
+                peak_indices.append(local_max_idx)
+                i = local_max_idx + min_separation  # Skip past this peak
+            else:
+                i += 1
+        
+        # Convert peaks to acquisition results
+        for peak_idx in peak_indices[:max_candidates]:
+            peak_val = correlation[peak_idx]
+            
+            # SNR calculation
+            snr_db = 10 * np.log10(peak_val**2 / noise_floor**2) if noise_floor > 0 else 0
+            
+            # Confidence based on SNR and peak sharpness
+            confidence = min(1.0, snr_db / 20.0)  # Saturates at 20 dB
+            
+            # Sample position: correlation peak corresponds to template center
+            # Onset is approximately template_samples/2 before peak
+            # For 'valid' mode correlation, output[k] corresponds to signal[k:k+template_len]
+            # So peak at k means tone starts at sample k
+            onset_sample = peak_idx
+            
+            # RTP timestamp of tone onset
+            rtp_timestamp = buffer_rtp_start + onset_sample
+            
+            candidates.append(ToneAcquisitionResult(
+                station=station_type,
+                frequency_hz=frequency,
+                sample_position=onset_sample,
+                rtp_timestamp=rtp_timestamp,
+                snr_db=snr_db,
+                confidence=confidence,
+                correlation_peak=float(peak_val),
+                noise_floor=float(noise_floor),
+                buffer_rtp_start=buffer_rtp_start
+            ))
+        
+        return candidates
+

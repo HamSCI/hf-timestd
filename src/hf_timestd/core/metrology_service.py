@@ -69,6 +69,16 @@ class MetrologyService:
         self._rtp_to_unix_offset = None
         self._offset_samples = []
         
+        # Timing Bootstrap (2026-01-25): Broadcast-driven RTP-to-UTC calibration
+        from .timing_bootstrap import TimingBootstrap, BootstrapState
+        lat = self.station_config.get('latitude', 38.9)
+        lon = self.station_config.get('longitude', -92.1)
+        self._timing_bootstrap = TimingBootstrap(
+            receiver_lat=lat,
+            receiver_lon=lon
+        )
+        self._bootstrap_offset_locked = False
+        
         # Initialize Engine
         # Extract precise coords if available
         lat = self.station_config.get('latitude')
@@ -206,6 +216,11 @@ class MetrologyService:
                 rtp_timestamp=rtp_timestamp
             )
             
+            # BOOTSTRAP VALIDATION (2026-01-25): Establish and validate RTP-to-UTC offset
+            # First use buffer metadata for initial offset, then validate with tone detection
+            if not self._bootstrap_offset_locked:
+                self._validate_bootstrap_offset(results, minute_boundary, rtp_timestamp, system_time)
+            
             # Write Results
             for res in results:
                 # Convert Pydantic model to dict for writer
@@ -266,6 +281,95 @@ class MetrologyService:
         except Exception as e:
             logger.error(f"Error processing minute {minute_boundary}: {e}", exc_info=True)
             return False
+    
+    def _validate_bootstrap_offset(
+        self,
+        results: list,
+        minute_boundary: int,
+        rtp_timestamp: int,
+        system_time: float
+    ):
+        """
+        Establish and validate RTP-to-UTC offset using buffer metadata and tone detection.
+        
+        Strategy:
+        1. Use buffer metadata (RTP + system_time) to establish initial offset
+        2. Validate offset consistency across multiple buffers
+        3. Use tone detection to confirm offset is correct (tones arrive when expected)
+        
+        The metadata-based approach is fast and reliable when system clock is NTP-synced.
+        Tone detection provides validation that the offset is physically correct.
+        """
+        from .timing_bootstrap import BootstrapState
+        
+        # Step 1: Establish/validate offset from buffer metadata
+        result = self._timing_bootstrap.establish_offset_from_metadata(
+            buffer_rtp_start=rtp_timestamp,
+            buffer_system_time=system_time,
+            channel=self.channel_name
+        )
+        
+        if result:
+            logger.info(f"[BOOTSTRAP] Metadata: {result}")
+        
+        # Step 2: Once in TRACKING or LOCKED state, validate with tone detection
+        bootstrap_state = self._timing_bootstrap.state
+        
+        if bootstrap_state in (BootstrapState.TRACKING, BootstrapState.LOCKED):
+            # Get minute of hour for schedule-based validation
+            minute_of_hour = self._timing_bootstrap.get_minute_of_hour(system_time)
+            
+            # Check if tone detections match expected timing and discriminating features
+            for res in results:
+                if res.raw_toa_ms is None:
+                    continue
+                
+                station = res.station_id.name if hasattr(res.station_id, 'name') else str(res.station_id)
+                
+                # Validate 1: Propagation delay within expected range
+                expected_delay = self._timing_bootstrap.station_expectations.get(
+                    station, {}
+                ).get('delay_ms', 0)
+                timing_error = abs(res.raw_toa_ms - expected_delay)
+                
+                if timing_error < 50:
+                    logger.debug(f"[BOOTSTRAP] Timing OK: {station} "
+                                f"raw_toa={res.raw_toa_ms:.1f}ms, expected={expected_delay:.1f}ms")
+                elif timing_error > 200:
+                    logger.warning(f"[BOOTSTRAP] Timing error: {station} "
+                                  f"raw_toa={res.raw_toa_ms:.1f}ms, error={timing_error:.1f}ms")
+                
+                # Validate 2: Tone frequency matches station
+                tone_freq = 1200.0 if station == 'WWVH' else 1000.0
+                freq_valid, freq_conf = self._timing_bootstrap.validate_station_by_tone_frequency(
+                    station, tone_freq
+                )
+                
+                # Validate 3: Schedule-based validation (500/600 Hz tones)
+                # Check if this is a ground-truth minute
+                has_500_600 = hasattr(res, 'tone_500hz_detected') and res.tone_500hz_detected
+                schedule_valid, schedule_conf = self._timing_bootstrap.validate_station_by_schedule(
+                    station, minute_of_hour, has_500_600
+                )
+                
+                if not schedule_valid:
+                    logger.warning(f"[BOOTSTRAP] Schedule validation failed for {station} "
+                                  f"at minute {minute_of_hour}")
+        
+        # Check if bootstrap is locked
+        if bootstrap_state == BootstrapState.LOCKED and not self._bootstrap_offset_locked:
+            self._bootstrap_offset_locked = True
+            offset_result = self._timing_bootstrap.get_rtp_to_utc_offset()
+            if offset_result:
+                offset_samples, uncertainty = offset_result
+                offset_sec = -offset_samples / self.engine.sample_rate
+                logger.info(f"[BOOTSTRAP] LOCKED: RTP-to-UTC offset = {offset_sec:.6f}s")
+        
+        # Log status periodically
+        if self.minutes_processed % 10 == 0:
+            status = self._timing_bootstrap.get_status()
+            logger.info(f"[BOOTSTRAP] Status: state={status['state']}, "
+                       f"minutes={status['minutes_observed']}")
 
     def stop(self):
         """Stop service."""

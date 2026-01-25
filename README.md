@@ -8,14 +8,14 @@
 
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
-**Key Capabilities (V6.2):**
+**Key Capabilities (V6.3):**
 
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **Digital RF (HDF5)** format.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
 - 🔗 **HDF5-Native Pipeline** - High-performance SWMR (Single Writer Multiple Reader) data exchange.
 - 🌍 **Real-time GNSS VTEC Correction** - Local dual-frequency GPS provides direct ionospheric correction.
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
-- ⏱️ **HF time transfer** - D_clock measurement with ionospheric propagation mode estimation.
+- ⏱️ **Timing Bootstrap (v6.3)** - Robust RTP-to-UTC calibration using metadata + broadcast validation.
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
 - 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path TEC visualization.
 - ⏰ **Chrony integration** - SHM refclock for system clock discipline.
@@ -120,6 +120,7 @@ The system is composed of eight independent services that form a pipeline:
 
 - **[INSTALLATION.md](INSTALLATION.md)** - Detailed setup guide.
 - **[TECHNICAL_REFERENCE.md](TECHNICAL_REFERENCE.md)** - Deep dive into algorithms, data formats, and physics models.
+- **[METROLOGY.md](METROLOGY.md)** - RTP-to-UTC calibration methodology and timing bootstrap.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design philosophy ("The Why").
 - **[DIRECTORY_STRUCTURE.md](DIRECTORY_STRUCTURE.md)** - File layout specification.
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mijahauan/hf-timestd)
@@ -128,7 +129,7 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Status
 
-**Testing (V5.3)** - Active development and field testing in progress.
+**Testing (V6.3)** - Active development and field testing in progress.
 
 ### V5.0 Capabilities (December 2025)
 
@@ -144,6 +145,14 @@ The system is composed of eight independent services that form a pipeline:
 **License:** MIT - See [LICENSE](LICENSE)
 
 ### Recent Updates
+
+**v6.3.0 (January 25, 2026) - Timing Bootstrap System**
+
+- ✅ **RTP-to-UTC Bootstrap:** Two-phase calibration using metadata + broadcast validation
+- ✅ **Discriminating Features:** Tone frequency, schedule, geographic ordering validation
+- ✅ **State Machine:** ACQUIRING → CORRELATING → TRACKING → LOCKED progression
+- ✅ **Geographic Priors:** Expected propagation delays based on transmitter/receiver locations
+- ✅ **Unambiguous Channels:** High-confidence station ID on CHU and WWV 20/25 MHz
 
 **v6.2.0 (January 24, 2026) - Metrological Enhancements**
 
