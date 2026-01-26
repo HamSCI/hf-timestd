@@ -231,83 +231,169 @@ async def get_section(doc_name: str, section_id: str):
     return await get_document(doc_name, section=section_id)
 
 
-# Bootstrap evidence patterns for Living Documentation
-BOOTSTRAP_EVIDENCE_PATTERNS = {
-    "geographic_expectations": r"\[BOOTSTRAP\] Geographic expectations computed.*|\s+\w+:.*delay=",
-    "multi_station_detection": r"\[BOOTSTRAP\] Clustering:.*SNR",
-    "recurring_clusters": r"\[BOOTSTRAP\] RECURRING CLUSTERS FOUND",
-    "cluster_lock": r"\[BOOTSTRAP\] CLUSTER LOCK:",
-    "state_transitions": r"→ CORRELATING|→ TRACKING|→ LOCKED",
-    "rtp_lock": r"RTP-to-Unix reference LOCKED",
-    "detector_creation": r"\[BOOTSTRAP_SERVICE\] Created ToneDetector",
+# =============================================================================
+# LIVING DOCUMENTATION EVIDENCE SYSTEM
+# =============================================================================
+# Unified approach for fetching live evidence from this installation's logs.
+# 
+# Directive format in Markdown: <!-- LOGS: source | filter: "pattern" -->
+# 
+# Sources map to log files and have predefined filter patterns.
+# The frontend calls /api/living-docs/evidence/{source}/{filter} to fetch.
+# =============================================================================
+
+# Evidence sources: maps source name to (log_file, service_name_for_journalctl)
+EVIDENCE_SOURCES = {
+    "bootstrap": ("/var/log/hf-timestd/core-recorder.log", "timestd-core-recorder"),
+    "fusion": ("/var/log/hf-timestd/fusion.log", "timestd-fusion"),
+    "physics": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
+    "TEC": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
+    "L1-L2": ("/var/log/hf-timestd/l2-calibration.log", "timestd-l2-calibration"),
+    "metrology": ("/var/log/hf-timestd/metrology.log", "timestd-metrology"),
+}
+
+# Predefined filter patterns for each source
+# Format: { "source": { "filter_name": "regex_pattern" } }
+EVIDENCE_PATTERNS = {
+    "bootstrap": {
+        "geographic_expectations": r"\[BOOTSTRAP\] Geographic expectations computed.*|\s+\w+:.*delay=",
+        "multi_station_detection": r"\[BOOTSTRAP\] Clustering:.*SNR",
+        "recurring_clusters": r"\[BOOTSTRAP\] RECURRING CLUSTERS FOUND",
+        "cluster_lock": r"\[BOOTSTRAP\] CLUSTER LOCK:",
+        "state_transitions": r"→ CORRELATING|→ TRACKING|→ LOCKED",
+        "rtp_lock": r"RTP-to-Unix reference LOCKED",
+        "detector_creation": r"\[BOOTSTRAP_SERVICE\] Created ToneDetector",
+    },
+    "fusion": {
+        "uncertainty": r"uncertainty|σ|sigma|±",
+        "kalman": r"[Kk]alman|state|offset",
+        "chrony": r"[Cc]hrony|SHM|TSL",
+        "convergence": r"converg|settled|stable",
+    },
+    "physics": {
+        "sunrise": r"sunrise|sunset|terminator|solar",
+        "tec": r"TEC|TECU|ionospher",
+        "propagation": r"propagation|delay|path",
+    },
+    "TEC": {
+        "dispersion": r"dispersion|1/f|frequency|ratio",
+        "vtec": r"VTEC|vertical|slant",
+        "ionex": r"IONEX|map|grid",
+    },
+    "L1-L2": {
+        "L1-L2 difference": r"L1.*L2|difference|calibrat|offset",
+        "calibration": r"calibrat|adjust|correct",
+    },
+    "metrology": {
+        "detection": r"detect|tone|signal",
+        "measurement": r"measure|D_clock|timing",
+    },
 }
 
 
-class BootstrapEvidenceResponse(BaseModel):
-    """Response containing bootstrap evidence from logs."""
-    evidence_type: str
+class EvidenceResponse(BaseModel):
+    """Response containing evidence from logs."""
+    source: str
+    filter: str
     lines: List[str]
     timestamp: str
+    log_file: Optional[str] = None
     installation_location: Optional[str] = None
 
 
-@router.get("/evidence/bootstrap/{evidence_type}", response_model=BootstrapEvidenceResponse)
-async def get_bootstrap_evidence(evidence_type: str, lines: int = 20):
-    """
-    Fetch live bootstrap evidence from this installation's logs.
-    
-    Evidence types:
-    - geographic_expectations: Propagation delay calculations for receiver location
-    - multi_station_detection: Multi-station candidate clustering
-    - recurring_clusters: 60-second recurrence validation
-    - cluster_lock: State transition to CORRELATING
-    - state_transitions: All state machine transitions
-    - rtp_lock: Final RTP-to-UTC offset lock
-    - detector_creation: Per-channel tone detector initialization
-    """
+def _fetch_evidence(source: str, filter_name: str, max_lines: int = 20) -> EvidenceResponse:
+    """Fetch evidence from logs for a given source and filter."""
     import subprocess
     from datetime import datetime
     
-    if evidence_type not in BOOTSTRAP_EVIDENCE_PATTERNS:
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown evidence type. Available: {list(BOOTSTRAP_EVIDENCE_PATTERNS.keys())}"
+    # Get source configuration
+    if source not in EVIDENCE_SOURCES:
+        return EvidenceResponse(
+            source=source,
+            filter=filter_name,
+            lines=[f"Unknown source '{source}'. Available: {list(EVIDENCE_SOURCES.keys())}"],
+            timestamp=datetime.utcnow().isoformat() + "Z"
         )
     
-    pattern = BOOTSTRAP_EVIDENCE_PATTERNS[evidence_type]
+    log_file, service_name = EVIDENCE_SOURCES[source]
     
-    # Fetch from log file with grep
-    LOG_FILE = "/var/log/hf-timestd/core-recorder.log"
+    # Get pattern - either predefined or use filter_name as literal search
+    if source in EVIDENCE_PATTERNS and filter_name in EVIDENCE_PATTERNS[source]:
+        pattern = EVIDENCE_PATTERNS[source][filter_name]
+    else:
+        # Use filter_name as a literal search pattern (escape regex special chars)
+        pattern = filter_name.replace(".", r"\.").replace("*", r".*")
+    
+    log_lines = []
+    location = None
+    
     try:
-        # Get recent logs from core-recorder log file
-        cmd = f"tail -10000 {LOG_FILE} 2>/dev/null | grep -E '{pattern}' | tail -{lines}"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-        log_lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+        # Try log file first
+        if log_file:
+            cmd = f"tail -10000 {log_file} 2>/dev/null | grep -iE '{pattern}' | tail -{max_lines}"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            log_lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
         
-        # Try to extract installation location from geographic expectations
-        location = None
-        if evidence_type == "geographic_expectations" or not log_lines:
-            loc_cmd = f"tail -10000 {LOG_FILE} 2>/dev/null | grep -oP 'receiver at \\(\\K[^)]+' | tail -1"
+        # Fall back to journalctl if no results from file
+        if not log_lines and service_name:
+            cmd = f"journalctl -u {service_name} --no-pager -n 5000 2>/dev/null | grep -iE '{pattern}' | tail -{max_lines}"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            log_lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+        
+        # For bootstrap, try to extract installation location
+        if source == "bootstrap":
+            loc_cmd = f"tail -10000 {log_file} 2>/dev/null | grep -oP 'receiver at \\(\\K[^)]+' | tail -1"
             loc_result = subprocess.run(loc_cmd, shell=True, capture_output=True, text=True, timeout=5)
             if loc_result.stdout.strip():
                 location = loc_result.stdout.strip()
         
-        return BootstrapEvidenceResponse(
-            evidence_type=evidence_type,
-            lines=log_lines if log_lines else ["No evidence found - bootstrap may not have run yet"],
+        return EvidenceResponse(
+            source=source,
+            filter=filter_name,
+            lines=log_lines if log_lines else [f"No '{filter_name}' evidence found in {source} logs"],
             timestamp=datetime.utcnow().isoformat() + "Z",
+            log_file=log_file,
             installation_location=location
         )
     except subprocess.TimeoutExpired:
-        return BootstrapEvidenceResponse(
-            evidence_type=evidence_type,
+        return EvidenceResponse(
+            source=source,
+            filter=filter_name,
             lines=["Timeout fetching logs"],
             timestamp=datetime.utcnow().isoformat() + "Z"
         )
     except Exception as e:
-        return BootstrapEvidenceResponse(
-            evidence_type=evidence_type,
+        return EvidenceResponse(
+            source=source,
+            filter=filter_name,
             lines=[f"Error fetching logs: {str(e)}"],
             timestamp=datetime.utcnow().isoformat() + "Z"
         )
+
+
+@router.get("/evidence/{source}/{filter_name}", response_model=EvidenceResponse)
+async def get_evidence(source: str, filter_name: str, lines: int = 20):
+    """
+    Fetch live evidence from this installation's logs.
+    
+    This is the unified endpoint for all Living Documentation evidence.
+    
+    Args:
+        source: Log source (bootstrap, fusion, physics, TEC, L1-L2, metrology)
+        filter_name: Predefined filter name or literal search pattern
+        lines: Maximum number of log lines to return (default 20)
+    
+    Examples:
+        /api/living-docs/evidence/bootstrap/geographic_expectations
+        /api/living-docs/evidence/fusion/uncertainty
+        /api/living-docs/evidence/TEC/dispersion
+        /api/living-docs/evidence/L1-L2/L1-L2%20difference
+    """
+    return _fetch_evidence(source, filter_name, lines)
+
+
+# Keep backward compatibility with old bootstrap-specific endpoint
+@router.get("/evidence/bootstrap/{evidence_type}", response_model=EvidenceResponse, include_in_schema=False)
+async def get_bootstrap_evidence_legacy(evidence_type: str, lines: int = 20):
+    """Legacy endpoint - redirects to unified evidence endpoint."""
+    return _fetch_evidence("bootstrap", evidence_type, lines)

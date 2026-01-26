@@ -960,76 +960,65 @@
             `;
         }
         
-        // Render log panel
-        async function renderLogPanel(container, tag, filter) {
-            // Check if this is a bootstrap evidence request
-            if (tag === 'bootstrap' && filter) {
-                await renderBootstrapEvidence(container, filter);
+        // Render log panel - unified Living Documentation evidence system
+        // Fetches evidence from /api/living-docs/evidence/{source}/{filter}
+        async function renderLogPanel(container, source, filter) {
+            if (!source || !filter) {
+                container.innerHTML = '<div class="log-empty">Invalid LOGS directive - requires source and filter</div>';
                 return;
             }
             
-            // Filter logs by tag pattern and optional text filter
-            let filtered = logBuffer.filter(log => {
-                const msg = log.message || '';
-                const matchesTag = tag === '*' || msg.toLowerCase().includes(tag.toLowerCase());
-                const matchesFilter = !filter || msg.toLowerCase().includes(filter.toLowerCase());
-                return matchesTag && matchesFilter;
-            }).slice(-20);  // Last 20 matching logs
-            
-            if (filtered.length === 0) {
-                container.innerHTML = '<div class="log-empty">No matching log entries yet</div>';
-                return;
-            }
-            
-            container.innerHTML = filtered.map(log => {
-                const time = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '';
-                const level = log.level || 'INFO';
-                const msg = log.message || '';
-                return `<div class="log-line">
-                    <span class="log-time">${time}</span>
-                    <span class="log-level-${level}">[${level}]</span>
-                    <span class="log-message">${escapeHtml(msg)}</span>
-                </div>`;
-            }).join('');
-        }
-        
-        // Render bootstrap evidence from dedicated API
-        async function renderBootstrapEvidence(container, evidenceType) {
             try {
-                const res = await fetch(`/api/living-docs/evidence/bootstrap/${evidenceType}`);
+                // URL-encode the filter in case it has spaces or special chars
+                const encodedFilter = encodeURIComponent(filter);
+                const res = await fetch(`/api/living-docs/evidence/${source}/${encodedFilter}`);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 
-                if (data.lines.length === 0 || (data.lines.length === 1 && data.lines[0].includes('No evidence'))) {
-                    container.innerHTML = `<div class="log-empty">No ${evidenceType} evidence found yet — bootstrap may not have run</div>`;
+                // Check for no results
+                if (data.lines.length === 0 || 
+                    (data.lines.length === 1 && (data.lines[0].includes('No ') || data.lines[0].includes('Unknown')))) {
+                    container.innerHTML = `<div class="log-empty">${escapeHtml(data.lines[0] || 'No evidence found')}</div>`;
                     return;
                 }
                 
-                // Show location if available
-                let locationHtml = '';
+                // Show installation location if available (for bootstrap)
+                let headerHtml = '';
                 if (data.installation_location) {
-                    locationHtml = `<div style="padding: 8px 16px; background: rgba(59,130,246,0.1); border-bottom: 1px solid #334155; font-size: 12px; color: #60a5fa;">
+                    headerHtml = `<div style="padding: 8px 16px; background: rgba(59,130,246,0.1); border-bottom: 1px solid #334155; font-size: 12px; color: #60a5fa;">
                         📍 This installation: <strong>${data.installation_location}</strong>
                     </div>`;
                 }
                 
-                container.innerHTML = locationHtml + data.lines.map(line => {
-                    // Parse log line to extract timestamp and level
-                    const match = line.match(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d+)\s+-\s+(\w+)\s+-\s+(.*)$/);
-                    if (match) {
-                        const [, timestamp, level, msg] = match;
-                        const time = timestamp.split(' ')[1].split(',')[0];
+                // Render log lines
+                container.innerHTML = headerHtml + data.lines.map(line => {
+                    // Try to parse standard Python log format: "2026-01-26 21:54:08,199 - INFO - message"
+                    const pyMatch = line.match(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}),\d+\s+-\s+(\w+)\s+-\s+(.*)$/);
+                    if (pyMatch) {
+                        const [, timestamp, level, msg] = pyMatch;
+                        const time = timestamp.split(' ')[1];
                         return `<div class="log-line">
                             <span class="log-time">${time}</span>
                             <span class="log-level-${level}">[${level}]</span>
                             <span class="log-message">${escapeHtml(msg)}</span>
                         </div>`;
                     }
+                    
+                    // Try journalctl format: "Jan 26 21:54:08 hostname service[pid]: message"
+                    const jctlMatch = line.match(/^(\w+\s+\d+\s+\d{2}:\d{2}:\d{2})\s+\S+\s+\S+:\s+(.*)$/);
+                    if (jctlMatch) {
+                        const [, timestamp, msg] = jctlMatch;
+                        return `<div class="log-line">
+                            <span class="log-time">${timestamp}</span>
+                            <span class="log-message">${escapeHtml(msg)}</span>
+                        </div>`;
+                    }
+                    
                     // Fallback for lines without standard format (like indented station info)
                     return `<div class="log-line"><span class="log-message">${escapeHtml(line)}</span></div>`;
                 }).join('');
             } catch (e) {
-                container.innerHTML = `<div class="log-empty">Failed to fetch evidence: ${e.message}</div>`;
+                container.innerHTML = `<div class="log-empty">Failed to fetch ${source}/${filter} evidence: ${e.message}</div>`;
             }
         }
         
