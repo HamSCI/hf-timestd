@@ -204,7 +204,7 @@ class CoreRecorderV2:
                     # Try to get from grid square
                     grid = self.station_config.get('grid_square', '')
                     if grid:
-                        from ..utils.grid_square import grid_to_latlon
+                        from .transmission_time_solver import grid_to_latlon
                         receiver_lat, receiver_lon = grid_to_latlon(grid)
                 
                 bootstrap_config = BootstrapConfig(
