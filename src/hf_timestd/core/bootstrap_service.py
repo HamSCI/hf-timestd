@@ -1,0 +1,496 @@
+"""
+Bootstrap Service: Coordinates Bootstrap Acquisition Across All Channels
+
+This service manages the bootstrap process for the entire hf-timestd system:
+1. Receives samples from all channel recorders
+2. Accumulates them in rolling buffers (no archiving during bootstrap)
+3. Searches for minute marker tones
+4. Validates detections across multiple broadcasts
+5. Establishes RTP-to-UTC correspondence
+6. Signals lock to enable archiving and operational mode
+
+Architecture:
+------------
+                     ┌─────────────────────────────────────────┐
+                     │         Bootstrap Service               │
+                     │                                         │
+  Channel 1 ────────►│  ┌─────────────────────────────────┐   │
+  (CHU 3.33)         │  │  Rolling Buffer (2.5 min)       │   │
+                     │  └─────────────────────────────────┘   │
+                     │                                         │
+  Channel 2 ────────►│  ┌─────────────────────────────────┐   │
+  (WWV 10)           │  │  Rolling Buffer (2.5 min)       │   │
+                     │  └─────────────────────────────────┘   │
+                     │                                         │
+  Channel N ────────►│  ┌─────────────────────────────────┐   │
+  (...)              │  │  Rolling Buffer (2.5 min)       │   │
+                     │  └─────────────────────────────────┘   │
+                     │                                         │
+                     │  ┌─────────────────────────────────┐   │
+                     │  │  TimingBootstrap State Machine   │   │
+                     │  │  ACQUIRING → CORRELATING →       │   │
+                     │  │  TRACKING → LOCKED               │   │
+                     │  └─────────────────────────────────┘   │
+                     │                                         │
+                     │  ──────────► LOCK SIGNAL ──────────►   │
+                     │              (to recorders)             │
+                     └─────────────────────────────────────────┘
+
+Bootstrap Philosophy:
+--------------------
+During bootstrap, we DON'T KNOW what time it is. The system clock is just
+a starting point. The tones ARE the ground truth - they tell us UTC.
+
+We search for tones without assuming minute boundaries, validate the pattern
+across multiple broadcasts, and only then establish the RTP-to-UTC mapping.
+
+Once locked:
+- Feed D_clock to Chrony to discipline system clock
+- Enable minute-aligned archiving (now we know where minutes are)
+- Switch to narrow-window operational detection
+
+Usage:
+------
+    # Create service
+    bootstrap_service = BootstrapService(
+        receiver_lat=38.9,
+        receiver_lon=-92.1,
+        sample_rate=24000
+    )
+    
+    # In recorder's _handle_samples:
+    if not bootstrap_service.is_locked:
+        bootstrap_service.add_samples(channel_name, samples, rtp_timestamp)
+        # Don't archive yet
+    else:
+        # Normal archiving
+        archive_writer.write_samples(...)
+    
+    # Periodically check for lock
+    if bootstrap_service.check_for_lock():
+        offset = bootstrap_service.get_rtp_to_utc_offset()
+        # Start archiving, feed Chrony, etc.
+"""
+
+import logging
+import time
+import threading
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Callable
+from enum import Enum
+from pathlib import Path
+
+from .bootstrap_rolling_buffer import (
+    BootstrapRollingBuffer,
+    BootstrapBufferManager,
+    ToneCandidate,
+    DEFAULT_SAMPLE_RATE,
+    DEFAULT_BUFFER_DURATION_SEC
+)
+from .timing_bootstrap import TimingBootstrap, BootstrapState
+
+logger = logging.getLogger(__name__)
+
+
+class BootstrapPhase(Enum):
+    """High-level bootstrap phases."""
+    INITIALIZING = "initializing"    # Starting up, waiting for data
+    SEARCHING = "searching"          # Searching for tones in rolling buffers
+    CONFIRMING = "confirming"        # Found candidates, validating pattern
+    PROVISIONAL_LOCK = "provisional" # Provisional lock, feeding Chrony
+    LOCKED = "locked"               # Full lock, operational mode
+
+
+@dataclass
+class BootstrapConfig:
+    """Configuration for bootstrap service."""
+    receiver_lat: float
+    receiver_lon: float
+    sample_rate: int = DEFAULT_SAMPLE_RATE
+    buffer_duration_sec: float = DEFAULT_BUFFER_DURATION_SEC
+    
+    # Search parameters
+    search_interval_sec: float = 10.0  # How often to search buffers
+    min_data_duration_sec: float = 65.0  # Minimum data before searching
+    
+    # Lock criteria
+    min_stations_for_provisional: int = 2  # Stations needed for provisional lock
+    min_frequencies_for_provisional: int = 2  # Frequencies needed
+    min_minutes_for_full_lock: int = 3  # Minutes of consistent tracking
+    
+    # Timeouts
+    bootstrap_timeout_sec: float = 600.0  # Give up after 10 minutes
+    
+    # Callbacks
+    on_provisional_lock: Optional[Callable[[float], None]] = None  # Called with D_clock
+    on_full_lock: Optional[Callable[[float, float], None]] = None  # Called with D_clock, uncertainty
+
+
+class BootstrapService:
+    """
+    Service that coordinates bootstrap acquisition across all channels.
+    
+    This is the main entry point for the bootstrap system. It:
+    1. Receives samples from channel recorders
+    2. Manages rolling buffers per channel
+    3. Coordinates tone detection and validation
+    4. Establishes RTP-to-UTC correspondence
+    5. Signals when operational mode can begin
+    """
+    
+    def __init__(self, config: BootstrapConfig):
+        """
+        Initialize the bootstrap service.
+        
+        Args:
+            config: BootstrapConfig with receiver location and parameters
+        """
+        self.config = config
+        
+        # Bootstrap state machine
+        self.timing_bootstrap = TimingBootstrap(
+            receiver_lat=config.receiver_lat,
+            receiver_lon=config.receiver_lon,
+            sample_rate=config.sample_rate
+        )
+        
+        # Buffer manager
+        self.buffer_manager = BootstrapBufferManager(
+            sample_rate=config.sample_rate,
+            buffer_duration_sec=config.buffer_duration_sec
+        )
+        self.buffer_manager.bootstrap = self.timing_bootstrap
+        
+        # Tone detector (lazy initialization to avoid circular imports)
+        self._tone_detector = None
+        
+        # State
+        self.phase = BootstrapPhase.INITIALIZING
+        self._lock = threading.RLock()
+        self._start_time = time.time()
+        self._last_search_time = 0.0
+        
+        # Results
+        self._rtp_to_utc_offset_samples: Optional[int] = None
+        self._offset_uncertainty_samples: int = 0
+        self._d_clock_ms: Optional[float] = None
+        
+        # Statistics
+        self.stats = {
+            'samples_received': 0,
+            'searches_performed': 0,
+            'candidates_found': 0,
+            'validations_passed': 0,
+            'validations_failed': 0,
+        }
+        
+        logger.info(f"[BOOTSTRAP_SERVICE] Initialized for receiver at "
+                   f"({config.receiver_lat:.2f}, {config.receiver_lon:.2f})")
+    
+    @property
+    def is_locked(self) -> bool:
+        """Check if bootstrap has achieved lock."""
+        return self.phase in (BootstrapPhase.PROVISIONAL_LOCK, BootstrapPhase.LOCKED)
+    
+    @property
+    def is_fully_locked(self) -> bool:
+        """Check if bootstrap has achieved full lock."""
+        return self.phase == BootstrapPhase.LOCKED
+    
+    def _get_tone_detector(self):
+        """Lazy initialization of tone detector."""
+        if self._tone_detector is None:
+            from .tone_detector import ToneDetector
+            self._tone_detector = ToneDetector(
+                sample_rate=self.config.sample_rate,
+                channel_name="bootstrap"
+            )
+        return self._tone_detector
+    
+    def add_samples(
+        self,
+        channel_name: str,
+        samples: np.ndarray,
+        rtp_timestamp: int
+    ) -> bool:
+        """
+        Add samples from a channel recorder.
+        
+        During bootstrap, samples are accumulated in rolling buffers.
+        Once locked, this method returns True to signal that normal
+        archiving should proceed.
+        
+        Args:
+            channel_name: Channel identifier (e.g., "CHU_3330")
+            samples: IQ samples (complex64)
+            rtp_timestamp: RTP timestamp of first sample
+            
+        Returns:
+            True if locked (caller should archive), False if still bootstrapping
+        """
+        with self._lock:
+            if self.phase == BootstrapPhase.LOCKED:
+                return True  # Already locked, proceed with archiving
+            
+            self.stats['samples_received'] += len(samples)
+        
+        # Add to rolling buffer
+        self.buffer_manager.add_samples(channel_name, samples, rtp_timestamp)
+        
+        # Update phase if we have enough data
+        if self.phase == BootstrapPhase.INITIALIZING:
+            if self._has_enough_data():
+                with self._lock:
+                    self.phase = BootstrapPhase.SEARCHING
+                    logger.info("[BOOTSTRAP_SERVICE] Enough data accumulated → SEARCHING")
+        
+        return False
+    
+    def _has_enough_data(self) -> bool:
+        """Check if we have enough data to start searching."""
+        for buffer in self.buffer_manager.buffers.values():
+            if buffer.has_enough_data(self.config.min_data_duration_sec):
+                return True
+        return False
+    
+    def search_and_update(self) -> Optional[str]:
+        """
+        Search all buffers for tones and update bootstrap state.
+        
+        This should be called periodically (e.g., every 10 seconds).
+        
+        Returns:
+            Status message or None
+        """
+        with self._lock:
+            if self.phase == BootstrapPhase.LOCKED:
+                return "LOCKED"
+            
+            if self.phase == BootstrapPhase.INITIALIZING:
+                return "INITIALIZING"
+            
+            # Rate limit searches
+            now = time.time()
+            if now - self._last_search_time < self.config.search_interval_sec:
+                return None
+            
+            self._last_search_time = now
+            self.stats['searches_performed'] += 1
+        
+        # Check timeout
+        elapsed = time.time() - self._start_time
+        if elapsed > self.config.bootstrap_timeout_sec:
+            logger.error(f"[BOOTSTRAP_SERVICE] Bootstrap timeout after {elapsed:.0f}s")
+            return "TIMEOUT"
+        
+        # Search each channel
+        tone_detector = self._get_tone_detector()
+        status = None
+        
+        for channel_name in list(self.buffer_manager.buffers.keys()):
+            result = self.buffer_manager.search_and_process(
+                channel_name=channel_name,
+                tone_detector=tone_detector,
+                current_time=time.time()
+            )
+            
+            if result:
+                status = result
+                
+                # Check if bootstrap state machine has progressed
+                self._update_phase_from_bootstrap()
+        
+        return status
+    
+    def _update_phase_from_bootstrap(self):
+        """Update our phase based on TimingBootstrap state."""
+        bootstrap_state = self.timing_bootstrap.state
+        
+        with self._lock:
+            if bootstrap_state == BootstrapState.LOCKED:
+                if self.phase != BootstrapPhase.LOCKED:
+                    self._on_lock_achieved()
+                    self.phase = BootstrapPhase.LOCKED
+                    
+            elif bootstrap_state == BootstrapState.TRACKING:
+                if self.phase not in (BootstrapPhase.PROVISIONAL_LOCK, BootstrapPhase.LOCKED):
+                    self._on_provisional_lock()
+                    self.phase = BootstrapPhase.PROVISIONAL_LOCK
+                    
+            elif bootstrap_state == BootstrapState.CORRELATING:
+                if self.phase == BootstrapPhase.SEARCHING:
+                    self.phase = BootstrapPhase.CONFIRMING
+                    logger.info("[BOOTSTRAP_SERVICE] Found candidates → CONFIRMING")
+    
+    def _on_provisional_lock(self):
+        """Handle provisional lock event."""
+        offset = self.timing_bootstrap.get_rtp_to_utc_offset()
+        if offset:
+            self._rtp_to_utc_offset_samples, self._offset_uncertainty_samples = offset
+            
+            # Calculate D_clock (system clock offset from UTC)
+            # This is approximate until we have more data
+            self._d_clock_ms = self._calculate_d_clock()
+            
+            logger.info(f"[BOOTSTRAP_SERVICE] PROVISIONAL LOCK achieved! "
+                       f"D_clock ≈ {self._d_clock_ms:+.1f}ms")
+            
+            if self.config.on_provisional_lock:
+                try:
+                    self.config.on_provisional_lock(self._d_clock_ms)
+                except Exception as e:
+                    logger.error(f"Error in on_provisional_lock callback: {e}")
+    
+    def _on_lock_achieved(self):
+        """Handle full lock event."""
+        offset = self.timing_bootstrap.get_rtp_to_utc_offset()
+        if offset:
+            self._rtp_to_utc_offset_samples, self._offset_uncertainty_samples = offset
+            self._d_clock_ms = self._calculate_d_clock()
+            
+            uncertainty_ms = self._offset_uncertainty_samples * 1000 / self.config.sample_rate
+            
+            logger.info(f"[BOOTSTRAP_SERVICE] FULL LOCK achieved! "
+                       f"D_clock = {self._d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms")
+            
+            if self.config.on_full_lock:
+                try:
+                    self.config.on_full_lock(self._d_clock_ms, uncertainty_ms)
+                except Exception as e:
+                    logger.error(f"Error in on_full_lock callback: {e}")
+    
+    def _calculate_d_clock(self) -> Optional[float]:
+        """
+        Calculate D_clock (system clock offset from UTC).
+        
+        D_clock = system_time - UTC
+        Positive means system clock is ahead of UTC.
+        """
+        if self._rtp_to_utc_offset_samples is None:
+            return None
+        
+        # The RTP-to-UTC offset tells us which RTP sample corresponds to UTC=0
+        # We need to compare this to what the system clock thinks
+        
+        # For now, return a placeholder - the actual calculation depends on
+        # having a current RTP timestamp and system time pair
+        # This will be refined when we integrate with the recorder
+        
+        return 0.0  # Placeholder
+    
+    def get_rtp_to_utc_offset(self) -> Optional[Tuple[int, int]]:
+        """
+        Get the RTP-to-UTC offset if available.
+        
+        Returns:
+            Tuple of (offset_samples, uncertainty_samples) or None
+        """
+        if self._rtp_to_utc_offset_samples is not None:
+            return (self._rtp_to_utc_offset_samples, self._offset_uncertainty_samples)
+        return self.timing_bootstrap.get_rtp_to_utc_offset()
+    
+    def get_d_clock_ms(self) -> Optional[float]:
+        """Get current D_clock estimate in milliseconds."""
+        return self._d_clock_ms
+    
+    def get_minute_boundary_rtp(self, minute_index: int = 0) -> Optional[int]:
+        """
+        Get the RTP timestamp of a minute boundary.
+        
+        Args:
+            minute_index: Which minute (0 = reference minute)
+            
+        Returns:
+            RTP timestamp at the minute boundary, or None if not locked
+        """
+        if self._rtp_to_utc_offset_samples is None:
+            return None
+        
+        samples_per_minute = self.config.sample_rate * 60
+        return self._rtp_to_utc_offset_samples + (minute_index * samples_per_minute)
+    
+    def get_status(self) -> dict:
+        """Get current bootstrap status."""
+        with self._lock:
+            elapsed = time.time() - self._start_time
+            
+            return {
+                'phase': self.phase.value,
+                'is_locked': self.is_locked,
+                'is_fully_locked': self.is_fully_locked,
+                'elapsed_sec': elapsed,
+                'd_clock_ms': self._d_clock_ms,
+                'rtp_offset_samples': self._rtp_to_utc_offset_samples,
+                'offset_uncertainty_samples': self._offset_uncertainty_samples,
+                'stats': self.stats.copy(),
+                'bootstrap_state': self.timing_bootstrap.get_status(),
+                'buffers': {
+                    name: buf.get_status()
+                    for name, buf in self.buffer_manager.buffers.items()
+                }
+            }
+    
+    def reset(self):
+        """Reset bootstrap state to start over."""
+        with self._lock:
+            self.phase = BootstrapPhase.INITIALIZING
+            self._start_time = time.time()
+            self._last_search_time = 0.0
+            self._rtp_to_utc_offset_samples = None
+            self._offset_uncertainty_samples = 0
+            self._d_clock_ms = None
+            
+            # Reset buffer manager
+            self.buffer_manager.clear_all()
+            self.buffer_manager.is_locked = False
+            
+            # Reset timing bootstrap
+            self.timing_bootstrap = TimingBootstrap(
+                receiver_lat=self.config.receiver_lat,
+                receiver_lon=self.config.receiver_lon,
+                sample_rate=self.config.sample_rate
+            )
+            self.buffer_manager.bootstrap = self.timing_bootstrap
+            
+            # Reset stats
+            self.stats = {
+                'samples_received': 0,
+                'searches_performed': 0,
+                'candidates_found': 0,
+                'validations_passed': 0,
+                'validations_failed': 0,
+            }
+            
+            logger.info("[BOOTSTRAP_SERVICE] Reset to INITIALIZING")
+
+
+def create_bootstrap_service(
+    receiver_lat: float,
+    receiver_lon: float,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    on_provisional_lock: Optional[Callable[[float], None]] = None,
+    on_full_lock: Optional[Callable[[float, float], None]] = None
+) -> BootstrapService:
+    """
+    Factory function to create a bootstrap service.
+    
+    Args:
+        receiver_lat: Receiver latitude in degrees
+        receiver_lon: Receiver longitude in degrees
+        sample_rate: Sample rate in Hz
+        on_provisional_lock: Callback when provisional lock achieved
+        on_full_lock: Callback when full lock achieved
+        
+    Returns:
+        Configured BootstrapService instance
+    """
+    config = BootstrapConfig(
+        receiver_lat=receiver_lat,
+        receiver_lon=receiver_lon,
+        sample_rate=sample_rate,
+        on_provisional_lock=on_provisional_lock,
+        on_full_lock=on_full_lock
+    )
+    
+    return BootstrapService(config)
