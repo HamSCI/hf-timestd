@@ -262,6 +262,45 @@ class BootstrapRollingBuffer:
         
         return result, self.buffer_start_rtp
     
+    def get_samples_at_rtp(
+        self,
+        start_rtp: int,
+        num_samples: int
+    ) -> Optional[np.ndarray]:
+        """
+        Get samples starting at a specific RTP timestamp.
+        
+        Args:
+            start_rtp: RTP timestamp of first sample to retrieve
+            num_samples: Number of samples to retrieve
+            
+        Returns:
+            Array of samples, or None if requested range not in buffer
+        """
+        if self.buffer_start_rtp is None:
+            return None
+        
+        # Check if requested range is in buffer
+        buffer_end_rtp = self.buffer_start_rtp + min(self.total_samples_written, self.buffer_size)
+        
+        if start_rtp < self.buffer_start_rtp or start_rtp >= buffer_end_rtp:
+            return None
+        
+        if start_rtp + num_samples > buffer_end_rtp:
+            # Partial data available - return what we have
+            num_samples = buffer_end_rtp - start_rtp
+        
+        # Calculate buffer offset
+        offset_from_start = start_rtp - self.buffer_start_rtp
+        
+        # Get contiguous buffer and slice
+        contiguous, _ = self.get_contiguous_buffer()
+        
+        if offset_from_start + num_samples <= len(contiguous):
+            return contiguous[offset_from_start:offset_from_start + num_samples].copy()
+        
+        return None
+    
     def search_for_minute_markers(
         self,
         tone_detector,
@@ -270,9 +309,8 @@ class BootstrapRollingBuffer:
         """
         Search the entire buffer for minute marker tones.
         
-        This performs a full-buffer cross-correlation search for 1000 Hz (WWV/CHU)
-        and 1200 Hz (WWVH) tones. Unlike operational mode, we don't assume where
-        the minute boundary is - we search everywhere.
+        Uses the ToneDetector's acquire_tones() method which has proper matched
+        filtering with duration-specific templates (800ms for WWV/WWVH, 500ms for CHU).
         
         Args:
             tone_detector: ToneDetector instance for correlation
@@ -294,147 +332,35 @@ class BootstrapRollingBuffer:
         logger.info(f"[BOOTSTRAP_BUFFER] {self.channel_name}: Searching {len(samples)/self.sample_rate:.1f}s "
                    f"buffer for minute markers (RTP {start_rtp} to {start_rtp + len(samples)})")
         
+        # Use the ToneDetector's acquire_tones method which has proper matched filtering
+        # with duration-specific templates (800ms WWV/WWVH, 500ms CHU)
+        try:
+            acquisition_results = tone_detector.acquire_tones(
+                samples=samples,
+                buffer_rtp_start=start_rtp,
+                snr_threshold_db=15.0,  # Require strong match to template
+                max_candidates=10  # Per station type
+            )
+        except Exception as e:
+            logger.error(f"[BOOTSTRAP_BUFFER] {self.channel_name}: acquire_tones failed: {e}")
+            return []
+        
+        # Convert ToneAcquisitionResult to ToneCandidate
         candidates = []
-        
-        # Search for each station type
-        # Import here to avoid circular dependency
-        from hf_timestd.core.tone_detector import StationType
-        
-        station_configs = []
-        
-        # Determine which stations to search based on channel
-        channel_upper = self.channel_name.upper()
-        
-        if 'CHU' in channel_upper:
-            # CHU-only channel
-            station_configs.append((StationType.CHU, 1000, 0.5))
-        elif any(f in channel_upper for f in ['20000', '25000']):
-            # WWV-only frequencies
-            station_configs.append((StationType.WWV, 1000, 0.8))
-        else:
-            # Shared frequency - search for all
-            station_configs.append((StationType.WWV, 1000, 0.8))
-            station_configs.append((StationType.WWVH, 1200, 0.8))
-            station_configs.append((StationType.CHU, 1000, 0.5))
-        
-        for station_type, tone_freq, duration in station_configs:
-            # Use tone detector's correlation method
-            # We need to search the ENTIRE buffer, not just around expected position
-            try:
-                found = self._search_buffer_for_tone(
-                    samples=samples,
-                    start_rtp=start_rtp,
-                    tone_detector=tone_detector,
-                    station_type=station_type,
-                    tone_frequency=tone_freq,
-                    duration=duration
-                )
-                candidates.extend(found)
-            except Exception as e:
-                logger.error(f"[BOOTSTRAP_BUFFER] {self.channel_name}: Error searching for "
-                            f"{station_type.value}: {e}")
+        for result in acquisition_results:
+            candidate = ToneCandidate(
+                rtp_timestamp=result.rtp_timestamp,
+                sample_position=result.sample_position,
+                station=result.station.value,
+                tone_frequency_hz=int(result.frequency_hz),
+                correlation_peak=result.correlation_peak,
+                snr_db=result.snr_db,
+                confidence=result.confidence,
+                duration_sec=0.8 if result.station.value in ('WWV', 'WWVH') else 0.5
+            )
+            candidates.append(candidate)
         
         logger.info(f"[BOOTSTRAP_BUFFER] {self.channel_name}: Found {len(candidates)} candidates")
-        
-        return candidates
-    
-    def _search_buffer_for_tone(
-        self,
-        samples: np.ndarray,
-        start_rtp: int,
-        tone_detector,
-        station_type,
-        tone_frequency: int,
-        duration: float
-    ) -> List[ToneCandidate]:
-        """
-        Search buffer for a specific tone type.
-        
-        Uses sliding window correlation to find all instances of the tone
-        in the buffer, not just the strongest one.
-        """
-        from hf_timestd.core.tone_detector import StationType
-        import scipy.signal as scipy_signal
-        
-        candidates = []
-        
-        # Create matched filter template
-        template_samples = int(duration * self.sample_rate)
-        t = np.arange(template_samples) / self.sample_rate
-        
-        # Quadrature template for phase-invariant detection
-        template_sin = np.sin(2 * np.pi * tone_frequency * t)
-        template_cos = np.cos(2 * np.pi * tone_frequency * t)
-        
-        # Apply window
-        window = scipy_signal.windows.tukey(template_samples, alpha=0.1)
-        template_sin *= window
-        template_cos *= window
-        
-        # Normalize
-        template_sin /= np.linalg.norm(template_sin)
-        template_cos /= np.linalg.norm(template_cos)
-        
-        # Demodulate to baseband (extract audio)
-        # For now, just use magnitude of complex samples as proxy
-        audio = np.abs(samples)
-        
-        # Correlate with both templates
-        corr_sin = scipy_signal.correlate(audio, template_sin, mode='valid')
-        corr_cos = scipy_signal.correlate(audio, template_cos, mode='valid')
-        
-        # Quadrature combination (phase-invariant)
-        correlation = np.sqrt(corr_sin**2 + corr_cos**2)
-        
-        # Estimate noise floor using median
-        noise_floor = np.median(correlation)
-        noise_std = np.median(np.abs(correlation - noise_floor)) * 1.4826  # MAD to std
-        
-        # Adaptive threshold
-        threshold = noise_floor + 4.0 * noise_std
-        
-        if threshold <= 0:
-            return candidates
-        
-        # Find peaks above threshold
-        # Minimum distance between peaks: 0.9 seconds (to separate per-second ticks)
-        min_distance = int(0.9 * self.sample_rate)
-        
-        peaks, properties = scipy_signal.find_peaks(
-            correlation,
-            height=threshold,
-            distance=min_distance
-        )
-        
-        logger.debug(f"[BOOTSTRAP_BUFFER] {self.channel_name}: {station_type.value} "
-                    f"found {len(peaks)} peaks above threshold {threshold:.4f}")
-        
-        # Convert peaks to candidates
-        for peak_idx in peaks:
-            peak_val = correlation[peak_idx]
-            
-            # Calculate SNR
-            snr_db = 20 * np.log10(peak_val / noise_floor) if noise_floor > 0 else 0
-            
-            # Confidence based on SNR
-            confidence = min(1.0, snr_db / 20.0)  # Saturates at 20 dB
-            
-            # RTP timestamp of this peak
-            # For mode='valid', peak_idx corresponds to where template starts
-            rtp_timestamp = start_rtp + peak_idx
-            
-            candidate = ToneCandidate(
-                rtp_timestamp=rtp_timestamp,
-                sample_position=peak_idx,
-                station=station_type.value,
-                tone_frequency_hz=tone_frequency,
-                correlation_peak=float(peak_val),
-                snr_db=snr_db,
-                confidence=confidence,
-                duration_sec=duration
-            )
-            
-            candidates.append(candidate)
         
         return candidates
     
@@ -591,6 +517,9 @@ class BootstrapBufferManager:
             return None
         
         status = None
+        from hf_timestd.core.timing_bootstrap import BootstrapState
+        logger.info(f"[BOOTSTRAP_MANAGER] Processing {len(candidates)} candidates from {channel_name}, "
+                   f"bootstrap state={self.bootstrap.state.value if self.bootstrap else 'None'}")
         for candidate in candidates:
             # Extract frequency from channel name
             try:
@@ -598,6 +527,7 @@ class BootstrapBufferManager:
             except (IndexError, ValueError):
                 freq_khz = 0
             
+            logger.debug(f"[BOOTSTRAP_MANAGER] Candidate: {candidate.station} RTP={candidate.rtp_timestamp} SNR={candidate.snr_db:.1f}dB")
             result = self.bootstrap.add_candidate(
                 channel=channel_name,
                 station=candidate.station,
@@ -619,8 +549,82 @@ class BootstrapBufferManager:
                     self.is_locked = True
                     logger.info("[BOOTSTRAP_MANAGER] Bootstrap LOCKED - transitioning to operational mode")
                     break
+                
+                # If in TRACKING state, attempt time confirmation
+                if self.bootstrap.state == BootstrapState.TRACKING:
+                    confirm_result = self._attempt_time_confirmation()
+                    if confirm_result:
+                        status = confirm_result
+                        if self.bootstrap.state == BootstrapState.LOCKED:
+                            self.is_locked = True
+                            break
         
         return status
+    
+    def _attempt_time_confirmation(self) -> Optional[str]:
+        """
+        Attempt to confirm time by decoding BCD/FSK from station broadcasts.
+        
+        Called when bootstrap reaches TRACKING state to get decoded time
+        confirmation before final LOCKED state.
+        """
+        logger.info("[BOOTSTRAP_MANAGER] Attempting time confirmation via BCD/FSK decode")
+        
+        if self.bootstrap is None or self.bootstrap.reference_rtp is None:
+            logger.warning("[BOOTSTRAP_MANAGER] Cannot confirm time: no bootstrap or reference_rtp")
+            return None
+        
+        import time
+        ntp_time = time.time()  # Current system time as NTP hypothesis
+        
+        # Get 60 seconds of samples from each relevant channel
+        samples_per_minute = 60 * self.sample_rate
+        reference_rtp = self.bootstrap.reference_rtp
+        
+        chu_samples = None
+        wwv_samples = None
+        wwvh_samples = None
+        
+        for channel_name, buffer in self.buffers.items():
+            channel_upper = channel_name.upper()
+            
+            samples = buffer.get_samples_at_rtp(reference_rtp, samples_per_minute)
+            if samples is None:
+                logger.debug(f"[BOOTSTRAP_MANAGER] {channel_name}: no samples at RTP {reference_rtp} "
+                            f"(buffer range: {buffer.buffer_start_rtp} to {buffer.buffer_start_rtp + buffer.buffer_size if buffer.buffer_start_rtp else 'N/A'})")
+                continue
+            if len(samples) < samples_per_minute * 0.5:
+                logger.debug(f"[BOOTSTRAP_MANAGER] {channel_name}: only {len(samples)} samples (need {samples_per_minute})")
+                continue
+            
+            if 'CHU' in channel_upper:
+                if chu_samples is None or len(samples) > len(chu_samples):
+                    chu_samples = samples
+                    logger.info(f"[BOOTSTRAP_MANAGER] Got {len(samples)} CHU samples for time confirmation")
+            elif 'WWV' in channel_upper and 'WWVH' not in channel_upper:
+                if wwv_samples is None or len(samples) > len(wwv_samples):
+                    wwv_samples = samples
+                    logger.info(f"[BOOTSTRAP_MANAGER] Got {len(samples)} WWV samples for time confirmation")
+        
+        # Log what we're passing to confirmation
+        logger.info(f"[BOOTSTRAP_MANAGER] Time confirmation: CHU={len(chu_samples) if chu_samples is not None else 0}, "
+                   f"WWV={len(wwv_samples) if wwv_samples is not None else 0}, "
+                   f"WWVH={len(wwvh_samples) if wwvh_samples is not None else 0}")
+        
+        # Attempt confirmation
+        result = self.bootstrap.attempt_time_confirmation(
+            ntp_time=ntp_time,
+            chu_samples=chu_samples,
+            wwv_samples=wwv_samples,
+            wwvh_samples=wwvh_samples,
+        )
+        
+        if result:
+            logger.info(f"[BOOTSTRAP_MANAGER] Time confirmation result: {result}")
+        else:
+            logger.info("[BOOTSTRAP_MANAGER] Time confirmation: no result (decoders may have failed)")
+        
+        return result
     
     def get_status(self) -> dict:
         """Get overall bootstrap status."""

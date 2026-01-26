@@ -7,42 +7,40 @@ time accuracy.
 
 Architecture:
 ------------
-ACQUIRING → CORRELATING → TRACKING
+ACQUIRING → CORRELATING → TRACKING → LOCKED
     ↑______________|___________|
          (retreat on errors)
 
-ACQUIRING: Full-buffer cross-correlation to find any tones
-CORRELATING: Validate candidates using relative timing and discriminating features
+ACQUIRING: Collect candidates and look for minute marker clusters
+CORRELATING: Validate clusters using cross-station timing
 TRACKING: Narrow-window detection around predicted positions
+LOCKED: Offset determined with high confidence
 
-Key Insight:
------------
-Time station tones are emitted exactly on UTC minute boundaries. The arrival
-pattern itself IS the clock reference. We validate using:
-- Relative timing: WWVH always arrives after WWV on shared frequencies
-- Minute spacing: Consecutive tones are exactly 1,440,000 samples apart
-- Discriminating features: 1000/1200 Hz, tone duration, voice timing, tone schedule
+Key Insight - Clustering:
+------------------------
+At each UTC minute boundary, WWV, CHU, and WWVH all transmit minute markers.
+These arrive within a tight window (~50ms) with predictable ordering:
+  WWV arrives first (closest to most US receivers)
+  CHU arrives ~1-5ms after WWV
+  WWVH arrives ~15-30ms after WWV
+
+By finding CLUSTERS of high-quality candidates that match this pattern,
+we can identify true minute markers and reject per-second ticks.
 
 Discriminating Features:
 -----------------------
-1. Tone frequency: WWV=1000Hz, WWVH=1200Hz (minute marker)
-2. Tone schedule: 500/600 Hz tones follow known per-minute pattern
-3. Test signals: WWV minute 8, WWVH minute 44
-4. Voice announcements: WWV male voice, WWVH female voice
-5. BCD time code: WWV/WWVH encode time in 100Hz subcarrier
+1. Tone duration: WWV/WWVH 800ms, CHU 500ms minute markers
+2. Tone frequency: WWV=1000Hz, WWVH=1200Hz, CHU=1000Hz
+3. Clustering: True minute markers cluster across stations
+4. Geographic ordering: WWV < CHU < WWVH arrival times
 
 Geographic Priors (receiver-dependent):
 --------------------------------------
-The expected delay difference between WWV and WWVH depends on receiver location.
+The expected delay difference between stations depends on receiver location.
 For a receiver in Missouri (~38.9°N, 92.1°W):
 - WWV (Colorado): ~1100 km, ~4-12ms propagation
+- CHU (Ottawa): ~1500 km, ~5-15ms propagation  
 - WWVH (Hawaii): ~5500 km, ~18-40ms propagation
-- Expected WWVH-WWV delay: ~15-30ms
-
-Unambiguous Channels:
---------------------
-- CHU (3.33, 7.85, 14.67 MHz): Only CHU transmits
-- WWV 20 MHz, 25 MHz: Only WWV transmits (WWVH doesn't use these)
 """
 
 import logging
@@ -217,6 +215,167 @@ class TimingBootstrap:
         for station, exp in self.station_expectations.items():
             logger.info(f"  {station}: {exp['distance_km']:.0f}km, "
                        f"delay={exp['delay_ms']:.1f}ms [{exp['delay_min_ms']:.1f}-{exp['delay_max_ms']:.1f}]")
+        
+        # All candidates collected (for clustering)
+        self.all_candidates: List[AcquisitionCandidate] = []
+        # Validated minute marker clusters
+        self.validated_clusters: List[dict] = []
+        
+        # Time confirmation (Phase 2: decode actual UTC from broadcasts)
+        self._time_confirmer = None
+        self._time_confirmed = False
+        self._confirmed_minute: Optional[int] = None
+        self._confirmed_hour: Optional[int] = None
+    
+    def find_minute_clusters(self, min_snr_db: float = 15.0) -> List[dict]:
+        """
+        Find clusters of candidates that represent true minute markers.
+        
+        A valid cluster has candidates from multiple stations arriving within
+        expected delay windows based on geographic priors. The arrival ORDER
+        depends on receiver location (e.g., CHU first near Ottawa, WWV first
+        in central US).
+        
+        Returns list of clusters, each with:
+        - 'anchor_rtp': RTP timestamp of earliest-arriving station
+        - 'anchor_station': Which station arrived first
+        - 'members': Dict of station -> candidate list
+        - 'confidence': Overall cluster confidence
+        """
+        # Filter high-quality candidates
+        good_candidates = [c for c in self.all_candidates if c.snr_db >= min_snr_db]
+        
+        if not good_candidates:
+            return []
+        
+        # Separate by station
+        by_station = {}
+        for c in good_candidates:
+            if c.station not in by_station:
+                by_station[c.station] = []
+            by_station[c.station].append(c)
+        
+        stations_found = list(by_station.keys())
+        logger.info(f"[BOOTSTRAP] Clustering: " + 
+                   ", ".join(f"{len(by_station[s])} {s}" for s in stations_found) +
+                   f" (SNR >= {min_snr_db}dB)")
+        
+        if not stations_found:
+            return []
+        
+        # Get expected delays for all stations
+        delays = {s: self.station_expectations.get(s, {}).get('delay_ms', 0) 
+                  for s in stations_found}
+        
+        # Find the earliest-arriving station (smallest delay)
+        anchor_station = min(delays.keys(), key=lambda s: delays[s])
+        anchor_delay = delays[anchor_station]
+        
+        clusters = []
+        window_ms = 100  # Allow 100ms tolerance for ionospheric variability
+        
+        logger.debug(f"[BOOTSTRAP] Anchor station: {anchor_station} (delay={anchor_delay:.1f}ms), "
+                    f"window={window_ms}ms")
+        
+        # Use candidates from earliest-arriving station as anchors
+        for anchor_cand in by_station.get(anchor_station, []):
+            cluster = {
+                'anchor_rtp': anchor_cand.rtp_timestamp,
+                'anchor_station': anchor_station,
+                'members': {anchor_station: [anchor_cand]},
+                'stations': {anchor_station},
+            }
+            
+            # Look for candidates from other stations within expected delay windows
+            for other_station, other_cands in by_station.items():
+                if other_station == anchor_station:
+                    continue
+                
+                # Expected offset: other station's delay minus anchor's delay
+                expected_offset_ms = delays[other_station] - anchor_delay
+                
+                # Find closest candidate from this station
+                best_match = None
+                best_error = float('inf')
+                
+                for cand in other_cands:
+                    offset_samples = cand.rtp_timestamp - anchor_cand.rtp_timestamp
+                    offset_ms = offset_samples * 1000 / self.sample_rate
+                    
+                    # Allow matching across minute boundaries:
+                    # The offset should be expected_offset + N*60000ms for some integer N
+                    # This handles cases where different channels have different buffer ranges
+                    raw_error = offset_ms - expected_offset_ms
+                    minutes_diff = round(raw_error / 60000)
+                    error = abs(raw_error - minutes_diff * 60000)
+                    
+                    if error < best_error:
+                        best_error = error
+                        best_match = (cand, offset_ms, minutes_diff)
+                    
+                    if error < window_ms:
+                        if other_station not in cluster['members']:
+                            cluster['members'][other_station] = []
+                        cluster['members'][other_station].append(cand)
+                        cluster['stations'].add(other_station)
+                        # Log successful cross-minute clustering
+                        if minutes_diff != 0 and other_station in ('CHU', 'WWVH'):
+                            logger.info(f"[BOOTSTRAP] Cross-minute match: {other_station} at "
+                                       f"minute_diff={minutes_diff}, error={error:.1f}ms")
+            
+            # Calculate cluster confidence
+            num_stations = len(cluster['stations'])
+            snr_values = [anchor_cand.snr_db]
+            for station, cands in cluster['members'].items():
+                if station != anchor_station and cands:
+                    snr_values.append(max(c.snr_db for c in cands))
+            avg_snr = sum(snr_values) / len(snr_values)
+            
+            cluster['confidence'] = min(1.0, (num_stations / 3) * (avg_snr / 30))
+            cluster['num_stations'] = num_stations
+            
+            # Only keep clusters with at least 2 stations or very high SNR
+            if num_stations >= 2 or anchor_cand.snr_db >= 25:
+                clusters.append(cluster)
+                other_stations = [s for s in cluster['stations'] if s != anchor_station]
+                # Log with more detail for debugging multi-station clustering
+                if num_stations >= 2 and ('CHU' in cluster['stations'] or 'WWVH' in cluster['stations']):
+                    logger.info(f"[BOOTSTRAP] MULTI-STATION cluster: {anchor_station}@{anchor_cand.rtp_timestamp} "
+                               f"({anchor_cand.snr_db:.1f}dB) + {other_stations}, "
+                               f"conf={cluster['confidence']:.2f}")
+                else:
+                    logger.info(f"[BOOTSTRAP] Found cluster: {anchor_station}@{anchor_cand.rtp_timestamp} "
+                               f"({anchor_cand.snr_db:.1f}dB) + {other_stations}, "
+                               f"conf={cluster['confidence']:.2f}")
+        
+        # Log summary for CHU/WWVH clustering issues (only if no multi-station clusters found)
+        chu_wwvh_clusters = [c for c in clusters if 'CHU' in c['stations'] or 'WWVH' in c['stations']]
+        if not chu_wwvh_clusters and ('CHU' in stations_found or 'WWVH' in stations_found):
+            # Show why CHU/WWVH aren't clustering with WWV (sample one anchor)
+            if by_station.get(anchor_station) and len(clusters) % 50 == 0:  # Reduce log spam
+                sample_anchor = by_station[anchor_station][0]
+                for other_station in ['CHU', 'WWVH']:
+                    if other_station not in stations_found:
+                        continue
+                    expected_offset = delays.get(other_station, 0) - anchor_delay
+                    if by_station.get(other_station):
+                        # Find closest match accounting for minute boundaries
+                        best_errors = []
+                        for c in by_station[other_station][:5]:
+                            offset_ms = (c.rtp_timestamp - sample_anchor.rtp_timestamp) * 1000 / self.sample_rate
+                            raw_error = offset_ms - expected_offset
+                            minutes_diff = round(raw_error / 60000)
+                            error = abs(raw_error - minutes_diff * 60000)
+                            best_errors.append((error, minutes_diff, offset_ms))
+                        min_error = min(e[0] for e in best_errors) if best_errors else float('inf')
+                        logger.info(f"[BOOTSTRAP] {other_station} clustering check: "
+                                   f"expected offset={expected_offset:.1f}ms, "
+                                   f"min_error={min_error:.0f}ms (need <{window_ms}ms)")
+        
+        # Sort by confidence
+        clusters.sort(key=lambda c: c['confidence'], reverse=True)
+        
+        return clusters
     
     def _haversine_km(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calculate great-circle distance between two points."""
@@ -269,6 +428,82 @@ class TimingBootstrap:
             buffer_rtp_start=buffer_rtp_start
         )
         
+        # Always collect candidates for clustering
+        self.all_candidates.append(candidate)
+        
+        # Log state on first few candidates
+        if len(self.all_candidates) <= 3:
+            logger.info(f"[BOOTSTRAP] add_candidate #{len(self.all_candidates)}: state={self.state.value}, "
+                       f"reference_rtp={self.reference_rtp}")
+        
+        # In ACQUIRING state, try to find clusters that RECUR at 60-second intervals
+        if self.state == BootstrapState.ACQUIRING:
+            # Only check for clusters periodically (every 50 candidates) to reduce log spam
+            if len(self.all_candidates) % 50 == 0:
+                logger.info(f"[BOOTSTRAP] ACQUIRING: {len(self.all_candidates)} candidates collected")
+            
+            clusters = self.find_minute_clusters(min_snr_db=20.0)  # High threshold - true minute markers are 25-45dB
+            # Filter to multi-station clusters
+            multi_station = [c for c in clusters if c['num_stations'] >= 2]
+            
+            if not multi_station:
+                return None
+            
+            # KEY: Find clusters that recur at 60-second (1,440,000 sample) intervals
+            # This distinguishes true minute markers from per-second ticks
+            for cluster in multi_station:
+                anchor_rtp = cluster['anchor_rtp']
+                
+                # Look for another cluster at anchor_rtp ± N*SAMPLES_PER_MINUTE
+                for other in multi_station:
+                    if other is cluster:
+                        continue
+                    
+                    other_rtp = other['anchor_rtp']
+                    diff = abs(other_rtp - anchor_rtp)
+                    
+                    # Check if difference is close to N minutes (within 500ms tolerance)
+                    minutes_apart = round(diff / SAMPLES_PER_MINUTE)
+                    if minutes_apart == 0:
+                        continue  # Same minute boundary
+                    
+                    expected_diff = minutes_apart * SAMPLES_PER_MINUTE
+                    error_samples = abs(diff - expected_diff)
+                    error_ms = error_samples * 1000 / self.sample_rate
+                    
+                    if error_ms < 100:  # Within 100ms of expected minute spacing (tight tolerance for true minute markers)
+                        # Found recurring clusters! Use earlier one as reference
+                        if anchor_rtp < other_rtp:
+                            ref_cluster = cluster
+                        else:
+                            ref_cluster = other
+                        
+                        anchor_station = ref_cluster['anchor_station']
+                        anchor_cands = ref_cluster['members'][anchor_station]
+                        anchor_cand = anchor_cands[0]
+                        
+                        self.reference_rtp = ref_cluster['anchor_rtp']
+                        self.reference_channel = anchor_cand.channel
+                        self.reference_station = anchor_station
+                        self.validated_clusters.append(ref_cluster)
+                        self.validated_clusters.append(other if ref_cluster is cluster else cluster)
+                        self.state = BootstrapState.CORRELATING
+                        self.minutes_observed = minutes_apart + 1
+                        
+                        stations_list = list(ref_cluster['stations'])
+                        logger.info(f"[BOOTSTRAP] RECURRING CLUSTERS FOUND: "
+                                   f"{minutes_apart} minutes apart, error={error_ms:.1f}ms")
+                        logger.info(f"[BOOTSTRAP] CLUSTER LOCK: {anchor_station}@{ref_cluster['anchor_rtp']} "
+                                   f"with stations {stations_list} → CORRELATING")
+                        
+                        return f"CLUSTER: {ref_cluster['num_stations']} stations, {minutes_apart}min recurrence"
+            
+            # No recurring clusters found yet - keep collecting
+            if multi_station and len(self.all_candidates) % 100 == 0:
+                logger.info(f"[BOOTSTRAP] Found {len(multi_station)} multi-station clusters, "
+                           f"waiting for 60-second recurrence validation")
+            return None
+        
         # If system time hint provided, check if this candidate is near a minute boundary
         # This helps filter out per-second ticks and focus on minute markers
         if system_time_hint is not None:
@@ -290,8 +525,31 @@ class TimingBootstrap:
             minute_index = 0
         else:
             samples_from_ref = rtp_timestamp - self.reference_rtp
-            # Round to nearest minute, but be tolerant of propagation delay variance
+            
+            # Account for propagation delay difference between stations
+            if station != self.reference_station:
+                ref_delay_ms = self.station_expectations.get(
+                    self.reference_station, {}
+                ).get('delay_ms', 0)
+                cand_delay_ms = self.station_expectations.get(
+                    station, {}
+                ).get('delay_ms', 0)
+                delay_diff_samples = int((cand_delay_ms - ref_delay_ms) * self.sample_rate / 1000)
+                samples_from_ref -= delay_diff_samples
+            
+            # Round to nearest minute
             minute_index = round(samples_from_ref / SAMPLES_PER_MINUTE)
+            
+            # CRITICAL: Check if this candidate is close to an expected minute boundary
+            # If not, it's likely not a minute marker - reject early
+            expected_samples = minute_index * SAMPLES_PER_MINUTE
+            offset_from_expected = abs(samples_from_ref - expected_samples)
+            offset_ms = offset_from_expected * 1000 / self.sample_rate
+            
+            if offset_ms > 500:  # More than 500ms from expected minute boundary
+                logger.debug(f"[BOOTSTRAP] Rejecting {station} candidate: {offset_ms:.0f}ms "
+                            f"from expected minute {minute_index}")
+                return None
             
             # If this candidate is BEFORE the reference (negative minute index),
             # it might be a better reference. In CORRELATING state, we should
@@ -311,9 +569,8 @@ class TimingBootstrap:
         self.candidates_by_minute[minute_index].append(candidate)
         
         # Process based on state
-        if self.state == BootstrapState.ACQUIRING:
-            return self._handle_acquiring(candidate, minute_index)
-        elif self.state == BootstrapState.CORRELATING:
+        # Note: ACQUIRING state is handled by clustering logic above (line 406)
+        if self.state == BootstrapState.CORRELATING:
             return self._handle_correlating(candidate, minute_index)
         elif self.state == BootstrapState.TRACKING:
             return self._handle_tracking(candidate, minute_index)
@@ -322,13 +579,26 @@ class TimingBootstrap:
     
     def _is_unambiguous_channel(self, channel: str, station: str) -> bool:
         """Check if this is an unambiguous channel (only one station transmits)."""
-        # CHU frequencies
-        if 'CHU' in channel.upper():
-            return True
-        # WWV 20 and 25 MHz (WWVH doesn't transmit here)
+        # WWV 20 and 25 MHz are PREFERRED for initial reference
+        # They have distinctive 800ms minute markers and no competing station
         if station == 'WWV':
             freq_khz = self._extract_frequency_khz(channel)
             if freq_khz in [20000, 25000]:
+                return True
+        # CHU frequencies are unambiguous but have multiple 500ms tones per minute
+        # Only use as reference if we haven't found WWV yet
+        if 'CHU' in channel.upper():
+            # Only accept CHU as reference if SNR is very high (>25dB)
+            # This helps ensure we're getting the minute marker, not another tone
+            return True
+        return False
+    
+    def _is_preferred_reference(self, channel: str, station: str, snr_db: float) -> bool:
+        """Check if this is a preferred channel for initial reference."""
+        # WWV 20/25 MHz with 800ms tones are the best reference
+        if station == 'WWV':
+            freq_khz = self._extract_frequency_khz(channel)
+            if freq_khz in [20000, 25000] and snr_db > 12:
                 return True
         return False
     
@@ -347,17 +617,35 @@ class TimingBootstrap:
     ) -> Optional[str]:
         """
         ACQUIRING state: Looking for first high-confidence tone on unambiguous channel.
+        
+        Prefers WWV 20/25 MHz as initial reference since they have distinctive 800ms
+        minute markers. CHU is accepted but requires higher SNR since it has multiple
+        500ms tones per minute.
         """
         # Only accept high-confidence detections
         if candidate.confidence < 0.7 or candidate.snr_db < 12:
+            logger.debug(f"[BOOTSTRAP] Rejecting {candidate.station} on {candidate.channel}: "
+                        f"confidence={candidate.confidence:.2f}, SNR={candidate.snr_db:.1f}dB")
             return None
         
-        # Prefer unambiguous channels for initial reference
+        # Check if this is a preferred reference (WWV 20/25 MHz)
+        is_preferred = self._is_preferred_reference(
+            candidate.channel, candidate.station, candidate.snr_db
+        )
+        
+        # Check if unambiguous (includes CHU)
         is_unambiguous = self._is_unambiguous_channel(
             candidate.channel, candidate.station
         )
         
-        if is_unambiguous:
+        # For CHU, require higher SNR since it has multiple 500ms tones
+        if 'CHU' in candidate.channel.upper() and not is_preferred:
+            if candidate.snr_db < 25:
+                logger.debug(f"[BOOTSTRAP] CHU candidate SNR {candidate.snr_db:.1f}dB < 25dB, "
+                            f"waiting for WWV or higher SNR CHU")
+                return None
+        
+        if is_preferred or is_unambiguous:
             # Establish reference
             self.reference_rtp = candidate.rtp_timestamp
             self.reference_channel = candidate.channel
@@ -393,117 +681,135 @@ class TimingBootstrap:
         minute_index: int
     ) -> Optional[str]:
         """
-        CORRELATING state: Validate candidates match expected pattern.
+        CORRELATING state: Look for additional clusters at subsequent minute boundaries.
         
-        Checks:
-        1. Minute spacing: ~1,440,000 samples from reference
-        2. Geographic ordering: WWVH after WWV on shared frequencies
-        3. Propagation delay within expected bounds
-        
-        Note: Multiple tones may be detected in the same buffer (per-second ticks).
-        We only validate the MINUTE marker tone, not every tick.
+        Uses clustering to find minute markers - looks for WWV/CHU/WWVH candidates
+        that cluster within ~50ms of expected minute boundaries.
         """
         if self.reference_rtp is None:
             return None
         
-        # For minute index 0, we may have multiple candidates from the same buffer
-        # These are per-second ticks, not minute markers. Only validate if this
-        # candidate is close to the reference (same minute marker).
-        if minute_index == 0:
-            samples_from_ref = abs(candidate.rtp_timestamp - self.reference_rtp)
-            # If within 1 second of reference, it's likely the same minute marker
-            # or a per-second tick - skip validation
-            if samples_from_ref < self.sample_rate:
-                # Same tone or very close - already validated
-                return None
-            # If more than 1 second but less than 59 seconds, it's a per-second tick
-            # These are not minute markers - skip
-            if samples_from_ref < 59 * self.sample_rate:
-                logger.debug(f"[BOOTSTRAP] Skipping per-second tick at offset "
-                            f"{samples_from_ref/self.sample_rate:.1f}s from reference")
-                return None
+        # Look for clusters that recur at minute boundaries (N × 1,440,000 samples from reference)
+        # 
+        # The clustering finds groups of candidates within ~100ms of each other.
+        # We then check if any cluster's anchor is at an expected minute boundary:
+        #   expected_rtp = reference_rtp + N * SAMPLES_PER_MINUTE (where N = 1, 2, 3, ...)
         
-        # Check minute spacing for actual minute markers (minute_index > 0)
-        expected_rtp = self.reference_rtp + (minute_index * SAMPLES_PER_MINUTE)
-        actual_rtp = candidate.rtp_timestamp
-        spacing_error_samples = abs(actual_rtp - expected_rtp)
-        spacing_error_ms = spacing_error_samples * 1000 / self.sample_rate
+        clusters = self.find_minute_clusters(min_snr_db=20.0)  # High threshold - true minute markers are 25-45dB
         
-        # Allow up to 100ms spacing error (propagation variability)
-        if spacing_error_ms > 100:
-            logger.warning(f"[BOOTSTRAP] Minute spacing error {spacing_error_ms:.1f}ms "
-                          f"for {candidate.station} minute {minute_index}")
-            self.consecutive_failures += 1
-            if self.consecutive_failures >= 3:
-                self._retreat_to_acquiring("Too many spacing errors")
+        # Log periodically
+        if len(self.all_candidates) % 50 == 0:
+            logger.info(f"[BOOTSTRAP] CORRELATING: {len(self.all_candidates)} total candidates, "
+                       f"{len(clusters)} clusters found")
+        
+        for cluster in clusters:
+            anchor = cluster['anchor_rtp']
+            
+            # Check if this cluster is at a new minute boundary
+            samples_from_ref = anchor - self.reference_rtp
+            minute_offset = round(samples_from_ref / SAMPLES_PER_MINUTE)
+            
+            # Skip minute 0 (already validated)
+            if minute_offset == 0:
+                continue
+            
+            # Check spacing error
+            expected_rtp = self.reference_rtp + (minute_offset * SAMPLES_PER_MINUTE)
+            spacing_error_samples = abs(anchor - expected_rtp)
+            spacing_error_ms = spacing_error_samples * 1000 / self.sample_rate
+            
+            # Log cluster evaluation
+            if cluster['num_stations'] >= 2:
+                logger.info(f"[BOOTSTRAP] Evaluating cluster: minute_offset={minute_offset}, "
+                           f"spacing_error={spacing_error_ms:.1f}ms, stations={cluster['num_stations']}")
+            
+            if spacing_error_ms < 200:  # Within 200ms of expected
+                # Valid cluster at minute N!
+                self.validated_clusters.append(cluster)
+                self.minutes_observed = max(self.minutes_observed, abs(minute_offset) + 1)
+                
+                logger.info(f"[BOOTSTRAP] Validated cluster at minute {minute_offset}: "
+                           f"{cluster['num_stations']} stations, error={spacing_error_ms:.1f}ms")
+                
+                # Check if ready for time confirmation or tracking
+                if len(self.validated_clusters) >= 2 and self.minutes_observed >= 2:
+                    self._compute_offset()
+                    
+                    # Note: Time confirmation (BCD/FSK decode) happens externally
+                    # via attempt_time_confirmation() when buffer data is available.
+                    # For now, transition to TRACKING and await confirmation.
+                    self.state = BootstrapState.TRACKING
+                    logger.info(f"[BOOTSTRAP] {len(self.validated_clusters)} clusters over "
+                               f"{self.minutes_observed} minutes → TRACKING "
+                               f"(awaiting time confirmation from BCD/FSK decode)")
+                    return "TRACKING"
+        
+        return None
+    
+    def attempt_time_confirmation(
+        self,
+        ntp_time: float,
+        chu_samples: Optional['np.ndarray'] = None,
+        wwv_samples: Optional['np.ndarray'] = None,
+        wwvh_samples: Optional['np.ndarray'] = None,
+    ) -> Optional[str]:
+        """
+        Attempt to confirm time by decoding BCD/FSK from station broadcasts.
+        
+        This is Phase 2 of bootstrap: after clustering finds minute boundaries,
+        we decode the actual UTC time from the broadcasts to confirm.
+        
+        Args:
+            ntp_time: Unix timestamp from NTP (hypothesis)
+            chu_samples: 60 seconds of CHU IQ data
+            wwv_samples: 60 seconds of WWV IQ data
+            wwvh_samples: 60 seconds of WWVH IQ data
+            
+        Returns:
+            Status string if confirmation succeeded, None otherwise
+        """
+        if self.state not in (BootstrapState.TRACKING, BootstrapState.CORRELATING):
             return None
         
-        # Validate geographic ordering on shared frequencies
-        freq_khz = candidate.frequency_khz
-        if freq_khz in [2500, 5000, 10000, 15000]:
-            # Check if we have both WWV and WWVH for this minute
-            minute_candidates = self.candidates_by_minute.get(minute_index, [])
-            wwv_candidates = [c for c in minute_candidates 
-                            if c.station == 'WWV' and c.frequency_khz == freq_khz]
-            wwvh_candidates = [c for c in minute_candidates 
-                             if c.station == 'WWVH' and c.frequency_khz == freq_khz]
+        # Lazy-load time confirmer
+        if self._time_confirmer is None:
+            try:
+                from .bootstrap_time_confirmation import BootstrapTimeConfirmer
+                self._time_confirmer = BootstrapTimeConfirmer(sample_rate=self.sample_rate)
+            except ImportError as e:
+                logger.warning(f"[BOOTSTRAP] Time confirmation not available: {e}")
+                return None
+        
+        result = self._time_confirmer.confirm_time(
+            ntp_time=ntp_time,
+            chu_samples=chu_samples,
+            wwv_samples=wwv_samples,
+            wwvh_samples=wwvh_samples,
+        )
+        
+        if result.confirmed:
+            self._time_confirmed = True
+            self._confirmed_minute = result.minute
+            self._confirmed_hour = result.hour
             
-            if wwv_candidates and wwvh_candidates:
-                wwv_rtp = min(c.rtp_timestamp for c in wwv_candidates)
-                wwvh_rtp = min(c.rtp_timestamp for c in wwvh_candidates)
+            if result.matches_ntp():
+                # Decoded time matches NTP hypothesis - high confidence lock!
+                logger.info(f"[BOOTSTRAP] TIME CONFIRMED: {result.hour:02d}:{result.minute:02d} "
+                           f"(source={result.source.value}, matches NTP)")
                 
-                # WWVH must arrive AFTER WWV
-                if wwvh_rtp <= wwv_rtp:
-                    logger.warning(f"[BOOTSTRAP] Geographic violation: WWVH arrived "
-                                  f"before/with WWV on {freq_khz}kHz")
-                    self.consecutive_failures += 1
-                    if self.consecutive_failures >= 3:
-                        self._retreat_to_acquiring("Geographic ordering violated")
-                    return None
-                
-                # Check delay difference is reasonable
-                delay_diff_samples = wwvh_rtp - wwv_rtp
-                delay_diff_ms = delay_diff_samples * 1000 / self.sample_rate
-                
-                # Expected delay difference from geographic priors
-                wwv_delay = self.station_expectations['WWV']['delay_ms']
-                wwvh_delay = self.station_expectations['WWVH']['delay_ms']
-                expected_diff = wwvh_delay - wwv_delay
-                
-                # Allow 2x tolerance for ionospheric variability
-                if delay_diff_ms < expected_diff * 0.3 or delay_diff_ms > expected_diff * 3.0:
-                    logger.warning(f"[BOOTSTRAP] Delay difference {delay_diff_ms:.1f}ms "
-                                  f"outside expected range (~{expected_diff:.1f}ms)")
-                    # Don't fail hard on this, just note it
+                if self.state == BootstrapState.TRACKING:
+                    # Can now transition to LOCKED with high confidence
+                    self.state = BootstrapState.LOCKED
+                    logger.info(f"[BOOTSTRAP] Offset LOCKED with decoded time confirmation")
+                    return "LOCKED (time confirmed)"
+            else:
+                # Decoded time differs from NTP - need to adjust!
+                logger.warning(f"[BOOTSTRAP] Decoded time {result.hour:02d}:{result.minute:02d} "
+                              f"differs from NTP {result.ntp_hour:02d}:{result.ntp_minute:02d}")
+                # TODO: Adjust offset based on decoded time
+                return f"TIME_MISMATCH: decoded={result.hour:02d}:{result.minute:02d}"
         
-        # Validation passed
-        is_unambiguous = self._is_unambiguous_channel(candidate.channel, candidate.station)
-        
-        self.validated_tones.append(ValidatedTone(
-            candidate=candidate,
-            minute_index=minute_index,
-            validation_score=candidate.confidence,
-            is_unambiguous=is_unambiguous
-        ))
-        
-        self.consecutive_failures = 0
-        self.consecutive_validations += 1
-        
-        # Check if ready to transition to TRACKING
-        if minute_index > self.minutes_observed:
-            self.minutes_observed = minute_index + 1
-        
-        # Need at least 3 minutes and 5 validated tones to lock
-        unambiguous_count = sum(1 for t in self.validated_tones if t.is_unambiguous)
-        
-        if self.minutes_observed >= 3 and unambiguous_count >= 3:
-            self._compute_offset()
-            self.state = BootstrapState.TRACKING
-            logger.info(f"[BOOTSTRAP] Validated {len(self.validated_tones)} tones over "
-                       f"{self.minutes_observed} minutes → TRACKING")
-            return "TRACKING"
-        
-        return f"Validated: {candidate.station} minute {minute_index}"
+        return None
     
     def _handle_tracking(
         self,

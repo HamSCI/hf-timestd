@@ -1,0 +1,278 @@
+# Bootstrap Time Synchronization Methodology
+
+## Living Documentation with Evidence
+
+This document describes the bootstrap process that establishes RTP-to-UTC time alignment
+without relying on NTP or any external time reference. The system uses only the physics
+of radio propagation and the known timing of time standard broadcasts.
+
+> **Note**: Evidence sections below are populated dynamically from this installation's logs.
+> View this document at `/docs.html?doc=BOOTSTRAP_METHODOLOGY` to see live evidence widgets.
+
+---
+
+## 1. The Bootstrap Problem
+
+### Challenge
+
+When the system starts, we have:
+- **RTP timestamps**: Monotonic sample counters from the SDR (24,000 samples/second)
+- **No trusted time reference**: NTP may be wrong, GPS may be unavailable
+- **Multiple radio channels**: WWV (6 frequencies), WWVH (4 frequencies), CHU (3 frequencies)
+
+We need to determine the **RTP-to-UTC offset** - the mapping between RTP sample numbers
+and absolute UTC time - with sub-millisecond precision.
+
+### Solution: Multi-Station Tone Detection with Geographic Validation
+
+The bootstrap uses a **physics-based approach**:
+
+1. **Detect minute marker tones** on all channels
+2. **Cluster detections** from multiple stations that arrive within expected propagation windows
+3. **Validate recurrence** at 60-second intervals (distinguishes minute markers from per-second ticks)
+4. **Confirm with BCD/FSK decoding** to extract actual UTC time
+
+---
+
+## 2. Minute Marker Characteristics
+
+Each time standard station transmits distinctive minute markers:
+
+| Station | Tone Frequency | Duration | Template |
+|---------|---------------|----------|----------|
+| **WWV** (Fort Collins, CO) | 1000 Hz | 800 ms | Matched filter at 24 kHz |
+| **WWVH** (Kauai, HI) | 1200 Hz | 800 ms | Matched filter at 24 kHz |
+| **CHU** (Ottawa, Canada) | 1000 Hz | 500 ms | Matched filter at 24 kHz |
+| **BPM** (Xi'an, China) | 1000 Hz | 300 ms | Matched filter at 24 kHz |
+
+### Why Duration Matters
+
+Per-second ticks are only **5-10 ms** long. The matched filter templates (500-800 ms)
+produce **dramatically higher correlation** for minute markers than for ticks:
+
+- **Minute marker (800 ms)**: Full template match → high correlation, high SNR
+- **Per-second tick (5 ms)**: Only 0.6% of template matches → weak correlation, low SNR
+
+**Evidence - SNR Discrimination:**
+<!-- LOGS: bootstrap | filter: "recurring_clusters" -->
+
+The system requires **SNR ≥ 20 dB** for candidate acceptance, which effectively filters
+out short ticks that produce only 12-15 dB correlation peaks.
+
+---
+
+## 3. Bootstrap State Machine
+
+```
+ACQUIRING → CORRELATING → TRACKING → LOCKED
+    ↑______________|___________|
+         (retreat on errors)
+```
+
+### State Descriptions
+
+| State | Purpose | Exit Condition |
+|-------|---------|----------------|
+| **ACQUIRING** | Collect candidates, find recurring clusters | Multi-station cluster recurs at 60s intervals |
+| **CORRELATING** | Validate clusters across channels | 3+ clusters over 2+ minutes validated |
+| **TRACKING** | Narrow-window detection, await BCD/FSK confirmation | Time confirmed by decoded broadcast |
+| **LOCKED** | Offset established with high confidence | Continuous operation |
+
+### Evidence - State Transitions
+<!-- LOGS: bootstrap | filter: "state_transitions" -->
+
+---
+
+## 4. Tone Detection Pipeline
+
+### 4.1 Per-Channel Tone Detectors
+
+Each channel gets its own `ToneDetector` with appropriate templates:
+
+```python
+# bootstrap_service.py
+def _get_tone_detector(self, channel_name: str):
+    """Get or create tone detector for a specific channel.
+    
+    Each channel needs its own detector with appropriate templates:
+    - CHU channels get CHU templates (500ms @ 1000Hz)
+    - WWV channels get WWV templates (800ms @ 1000Hz)
+    - Shared channels get WWV + WWVH + BPM templates
+    """
+```
+
+**Evidence - Detector Creation:**
+<!-- LOGS: bootstrap | filter: "detector_creation" -->
+
+### 4.2 Matched Filter Detection
+
+The `ToneDetector.acquire_tones()` method uses:
+
+1. **AM Demodulation**: Extract envelope from IQ samples
+2. **Bandpass Filtering**: Isolate tone frequency (1000 Hz or 1200 Hz)
+3. **Quadrature Correlation**: Phase-invariant matched filtering
+4. **Noise Floor Estimation**: Median + MAD for robust thresholding
+5. **Peak Detection**: Non-maximum suppression with minimum separation
+
+**Evidence - Multi-Station Detection:**
+<!-- LOGS: bootstrap | filter: "multi_station_detection" -->
+
+This shows simultaneous detection across all station types with high SNR.
+
+---
+
+## 5. Geographic Validation
+
+### 5.1 Propagation Delay Expectations
+
+The system computes expected propagation delays based on receiver location:
+
+```python
+# timing_bootstrap.py
+def __post_init__(self):
+    """Compute geographic expectations for each station."""
+    for station, (lat, lon) in STATION_LOCATIONS.items():
+        distance_km = self._haversine_km(self.receiver_lat, self.receiver_lon, lat, lon)
+        path_km = distance_km * IONOSPHERIC_PATH_FACTOR  # 1.15 for F-layer
+        delay_ms = (path_km / SPEED_OF_LIGHT_KM_S) * 1000
+```
+
+**Evidence - Geographic Expectations (this installation):**
+<!-- LOGS: bootstrap | filter: "geographic_expectations" -->
+
+### 5.2 Multi-Station Clustering
+
+Candidates from different stations are clustered if their arrival times match
+the expected propagation delay differences (within 100 ms tolerance):
+
+```python
+# timing_bootstrap.py - find_minute_clusters()
+for cand in other_cands:
+    offset_ms = (cand.rtp_timestamp - anchor_cand.rtp_timestamp) * 1000 / sample_rate
+    
+    # Allow matching across minute boundaries
+    raw_error = offset_ms - expected_offset_ms
+    minutes_diff = round(raw_error / 60000)
+    error = abs(raw_error - minutes_diff * 60000)
+    
+    if error < window_ms:  # 100ms tolerance
+        cluster['members'][other_station].append(cand)
+```
+
+**Evidence - Multi-Station Clusters:**
+<!-- LOGS: bootstrap | filter: "cluster_lock" -->
+
+---
+
+## 6. Recurrence Validation
+
+### The Key Insight
+
+Per-second ticks occur every second. Minute markers occur every 60 seconds.
+By requiring clusters to **recur at 60-second intervals**, we definitively
+distinguish minute markers from ticks.
+
+```python
+# timing_bootstrap.py - ACQUIRING state
+for cluster in multi_station:
+    anchor_rtp = cluster['anchor_rtp']
+    
+    for other in multi_station:
+        diff = abs(other['anchor_rtp'] - anchor_rtp)
+        minutes_apart = round(diff / SAMPLES_PER_MINUTE)  # 1,440,000 samples
+        
+        if minutes_apart > 0:
+            expected_diff = minutes_apart * SAMPLES_PER_MINUTE
+            error_ms = abs(diff - expected_diff) * 1000 / sample_rate
+            
+            if error_ms < 100:  # Within 100ms of expected
+                # Found recurring minute markers!
+                self.state = BootstrapState.CORRELATING
+```
+
+**Evidence - Recurrence Detection:**
+<!-- LOGS: bootstrap | filter: "recurring_clusters" -->
+
+The error shown is well within the 100 ms tolerance, confirming these are
+true minute markers recurring at exactly 60-second intervals.
+
+---
+
+## 7. Time Confirmation
+
+### BCD/FSK Decoding
+
+Once in TRACKING state, the system attempts to decode the actual UTC time
+from the broadcast:
+
+- **WWV/WWVH**: BCD time code in the audio subcarrier
+- **CHU**: FSK time code in seconds 31-39 of each minute
+
+This provides **absolute time confirmation** rather than just relative timing.
+
+**Evidence - Offset Lock:**
+<!-- LOGS: bootstrap | filter: "rtp_lock" -->
+
+The offset should be stable to within ±2 ms across multiple channels.
+
+---
+
+## 8. Summary: Bootstrap Timeline
+
+A typical bootstrap sequence:
+
+| Time | Event | Evidence |
+|------|-------|----------|
+| T+0s | Service starts, buffers accumulate | `Searching 150.0s buffer for minute markers` |
+| T+30s | First candidates detected | `Found 10 candidates` |
+| T+60s | Candidates from all stations | `Clustering: 66 WWV, 67 BPM, 118 CHU` |
+| T+90s | Recurring clusters found | `RECURRING CLUSTERS FOUND: 1 minutes apart` |
+| T+90s | State → CORRELATING | `CLUSTER LOCK: WWV@... → CORRELATING` |
+| T+90s | State → TRACKING | `3 clusters over 2 minutes → TRACKING` |
+| T+93s | RTP-to-UTC locked | `RTP-to-Unix reference LOCKED: offset=...` |
+
+**Total bootstrap time: ~90-120 seconds** (requires at least 2 minute boundaries)
+
+---
+
+## 9. Key Design Decisions
+
+### Why Multi-Station?
+
+Single-station detection is ambiguous:
+- Could be a per-second tick
+- Could be interference
+- No cross-validation
+
+Multi-station clustering provides:
+- **Redundancy**: Multiple independent detections
+- **Validation**: Geographic consistency check
+- **Confidence**: Higher SNR through combination
+
+### Why 60-Second Recurrence?
+
+Per-second ticks would produce clusters every second. By requiring 60-second
+recurrence, we guarantee we've found minute markers, not ticks.
+
+### Why Duration-Matched Templates?
+
+The 800 ms (WWV/WWVH) and 500 ms (CHU) templates provide:
+- **Duration discrimination**: Short ticks produce weak correlation
+- **High SNR**: Full template match maximizes signal extraction
+- **Phase invariance**: Quadrature correlation handles unknown carrier phase
+
+---
+
+## 10. Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `bootstrap_service.py` | Orchestrates bootstrap process, manages per-channel detectors |
+| `bootstrap_rolling_buffer.py` | Accumulates samples, searches for candidates |
+| `timing_bootstrap.py` | State machine, clustering, recurrence validation |
+| `tone_detector.py` | Matched filter detection, template generation |
+| `bootstrap_time_confirmation.py` | BCD/FSK decoding for time confirmation |
+
+---
+
+*Evidence is fetched dynamically from this installation's logs via `/api/living-docs/evidence/bootstrap/{type}`*

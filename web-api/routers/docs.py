@@ -32,6 +32,7 @@ AVAILABLE_DOCS = {
     "PHYSICS": "PHYSICS.md",
     "IONOSPHERIC_RESOLUTION": "IONOSPHERIC_RESOLUTION.md",
     "DUAL_CHRONY_FEED_ARCHITECTURE": "DUAL_CHRONY_FEED_ARCHITECTURE.md",
+    "BOOTSTRAP_METHODOLOGY": "BOOTSTRAP_METHODOLOGY.md",
     "TECHNICAL_REFERENCE": "../TECHNICAL_REFERENCE.md",
 }
 
@@ -228,3 +229,85 @@ def extract_section(markdown: str, section_id: str, sections: List[Dict]) -> str
 async def get_section(doc_name: str, section_id: str):
     """Get a specific section of a document."""
     return await get_document(doc_name, section=section_id)
+
+
+# Bootstrap evidence patterns for Living Documentation
+BOOTSTRAP_EVIDENCE_PATTERNS = {
+    "geographic_expectations": r"\[BOOTSTRAP\] Geographic expectations computed.*|\s+\w+:.*delay=",
+    "multi_station_detection": r"\[BOOTSTRAP\] Clustering:.*SNR",
+    "recurring_clusters": r"\[BOOTSTRAP\] RECURRING CLUSTERS FOUND",
+    "cluster_lock": r"\[BOOTSTRAP\] CLUSTER LOCK:",
+    "state_transitions": r"→ CORRELATING|→ TRACKING|→ LOCKED",
+    "rtp_lock": r"RTP-to-Unix reference LOCKED",
+    "detector_creation": r"\[BOOTSTRAP_SERVICE\] Created ToneDetector",
+}
+
+
+class BootstrapEvidenceResponse(BaseModel):
+    """Response containing bootstrap evidence from logs."""
+    evidence_type: str
+    lines: List[str]
+    timestamp: str
+    installation_location: Optional[str] = None
+
+
+@router.get("/evidence/bootstrap/{evidence_type}", response_model=BootstrapEvidenceResponse)
+async def get_bootstrap_evidence(evidence_type: str, lines: int = 20):
+    """
+    Fetch live bootstrap evidence from this installation's logs.
+    
+    Evidence types:
+    - geographic_expectations: Propagation delay calculations for receiver location
+    - multi_station_detection: Multi-station candidate clustering
+    - recurring_clusters: 60-second recurrence validation
+    - cluster_lock: State transition to CORRELATING
+    - state_transitions: All state machine transitions
+    - rtp_lock: Final RTP-to-UTC offset lock
+    - detector_creation: Per-channel tone detector initialization
+    """
+    import subprocess
+    from datetime import datetime
+    
+    if evidence_type not in BOOTSTRAP_EVIDENCE_PATTERNS:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown evidence type. Available: {list(BOOTSTRAP_EVIDENCE_PATTERNS.keys())}"
+        )
+    
+    pattern = BOOTSTRAP_EVIDENCE_PATTERNS[evidence_type]
+    
+    # Fetch from log file with grep
+    LOG_FILE = "/var/log/hf-timestd/core-recorder.log"
+    try:
+        # Get recent logs from core-recorder log file
+        cmd = f"tail -10000 {LOG_FILE} 2>/dev/null | grep -E '{pattern}' | tail -{lines}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        log_lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+        
+        # Try to extract installation location from geographic expectations
+        location = None
+        if evidence_type == "geographic_expectations" or not log_lines:
+            loc_cmd = f"tail -10000 {LOG_FILE} 2>/dev/null | grep -oP 'receiver at \\(\\K[^)]+' | tail -1"
+            loc_result = subprocess.run(loc_cmd, shell=True, capture_output=True, text=True, timeout=5)
+            if loc_result.stdout.strip():
+                location = loc_result.stdout.strip()
+        
+        return BootstrapEvidenceResponse(
+            evidence_type=evidence_type,
+            lines=log_lines if log_lines else ["No evidence found - bootstrap may not have run yet"],
+            timestamp=datetime.utcnow().isoformat() + "Z",
+            installation_location=location
+        )
+    except subprocess.TimeoutExpired:
+        return BootstrapEvidenceResponse(
+            evidence_type=evidence_type,
+            lines=["Timeout fetching logs"],
+            timestamp=datetime.utcnow().isoformat() + "Z"
+        )
+    except Exception as e:
+        return BootstrapEvidenceResponse(
+            evidence_type=evidence_type,
+            lines=[f"Error fetching logs: {str(e)}"],
+            timestamp=datetime.utcnow().isoformat() + "Z"
+        )

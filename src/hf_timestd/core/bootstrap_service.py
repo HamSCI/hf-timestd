@@ -162,8 +162,9 @@ class BootstrapService:
         )
         self.buffer_manager.bootstrap = self.timing_bootstrap
         
-        # Tone detector (lazy initialization to avoid circular imports)
-        self._tone_detector = None
+        # Tone detectors per channel (lazy initialization to avoid circular imports)
+        # Each channel needs its own detector with appropriate templates
+        self._tone_detectors: Dict[str, Any] = {}
         
         # State
         self.phase = BootstrapPhase.INITIALIZING
@@ -198,16 +199,22 @@ class BootstrapService:
         """Check if bootstrap has achieved full lock."""
         return self.phase == BootstrapPhase.LOCKED
     
-    def _get_tone_detector(self):
-        """Lazy initialization of tone detector."""
-        if self._tone_detector is None:
-            # Import the concrete MultiStationToneDetector, not the abstract interface
+    def _get_tone_detector(self, channel_name: str):
+        """Get or create tone detector for a specific channel.
+        
+        Each channel needs its own detector with appropriate templates:
+        - CHU channels get CHU templates (500ms @ 1000Hz)
+        - WWV channels get WWV templates (800ms @ 1000Hz)
+        - Shared channels get WWV + WWVH + CHU templates
+        """
+        if channel_name not in self._tone_detectors:
             from .tone_detector import MultiStationToneDetector
-            self._tone_detector = MultiStationToneDetector(
-                channel_name="bootstrap",
+            self._tone_detectors[channel_name] = MultiStationToneDetector(
+                channel_name=channel_name,  # Use actual channel name for correct templates
                 sample_rate=self.config.sample_rate
             )
-        return self._tone_detector
+            logger.info(f"[BOOTSTRAP_SERVICE] Created ToneDetector for {channel_name}")
+        return self._tone_detectors[channel_name]
     
     def add_samples(
         self,
@@ -285,11 +292,12 @@ class BootstrapService:
             logger.error(f"[BOOTSTRAP_SERVICE] Bootstrap timeout after {elapsed:.0f}s")
             return "TIMEOUT"
         
-        # Search each channel
-        tone_detector = self._get_tone_detector()
+        # Search each channel with its own tone detector
         status = None
         
         for channel_name in list(self.buffer_manager.buffers.keys()):
+            # Get channel-specific tone detector (CHU channels get CHU templates, etc.)
+            tone_detector = self._get_tone_detector(channel_name)
             result = self.buffer_manager.search_and_process(
                 channel_name=channel_name,
                 tone_detector=tone_detector,
