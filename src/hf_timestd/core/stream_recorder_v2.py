@@ -546,7 +546,7 @@ class StreamRecorderV2:
             # ka9q-python fills gaps with zeros which breaks phase continuity
             batch_gap_samples = 0
             if quality.batch_gaps:
-                batch_gap_samples = sum(gap.samples_filled for gap in quality.batch_gaps)
+                batch_gap_samples = sum(gap.duration_samples for gap in quality.batch_gaps)
             
             # Bootstrap mode: feed samples to bootstrap service instead of archiving
             # Once locked, normal archiving begins

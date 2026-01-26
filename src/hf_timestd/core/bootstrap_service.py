@@ -201,10 +201,11 @@ class BootstrapService:
     def _get_tone_detector(self):
         """Lazy initialization of tone detector."""
         if self._tone_detector is None:
-            from .tone_detector import ToneDetector
-            self._tone_detector = ToneDetector(
-                sample_rate=self.config.sample_rate,
-                channel_name="bootstrap"
+            # Import the concrete MultiStationToneDetector, not the abstract interface
+            from .tone_detector import MultiStationToneDetector
+            self._tone_detector = MultiStationToneDetector(
+                channel_name="bootstrap",
+                sample_rate=self.config.sample_rate
             )
         return self._tone_detector
     
