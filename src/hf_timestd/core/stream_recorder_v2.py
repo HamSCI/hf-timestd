@@ -143,19 +143,11 @@ class RobustManagedStream:
             
         return False
 
-    def _monitor_loop(self):
-        """Monitor stream health and reconnect."""
-        while self._running:
-            # Simple keep-alive check via re-ensuring channel existence
-            # Real ManagedStream uses packet timeouts.
-            # Here we just periodic check if stream stopped?
-            # RadiodStream runs on its own thread. 
-            # If we want pure robustness, we rely on ensure_channel being idempotent.
-            try:
-                pass 
-            except Exception:
-                pass
-            time.sleep(self.params['restore_interval_sec'])
+    def get_quality(self) -> Optional[StreamQuality]:
+        """Get current stream quality metrics."""
+        if self.stream:
+            return self.stream.get_quality()
+        return None
 
 
 class StreamRecorderState(Enum):
@@ -609,13 +601,6 @@ class StreamRecorderV2:
         # Update channel info with new values
         self.channel_info = channel
         self.config.ssrc = channel.ssrc
-        
-        # Forward to external callback if provided
-        if self._on_stream_restored:
-            try:
-                self._on_stream_restored(channel)
-            except Exception as e:
-                logger.error(f"Error in stream_restored callback: {e}")
         
         # Forward to external callback if provided
         if self._on_stream_restored:
