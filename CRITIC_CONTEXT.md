@@ -10,6 +10,36 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
+## ✅ COMPLETED SESSION: IONOSPHERIC RESOLUTION LIVING DOCUMENTATION
+
+**Status:** ✅ **COMPLETE** - 2026-01-26  
+**Objective:** Create Living Documentation page demonstrating that multi-broadcast fusion measures ionospheric physics, not receiver noise.
+
+### Deliverables
+
+1. **`docs/IONOSPHERIC_RESOLUTION.md`** — Full argument structure with embedded live data directives
+   - Error source hierarchy (ionosphere dominates 10-100× over local noise)
+   - Mathematical proof: σ_fused ≈ 0.5 ms proves ionosphere-limited, not noise-limited
+   - Dispersion test: 1/f² ratio validates ionospheric measurement
+   - Terminator test: D_clock correlation with solar geometry
+   - Cross-station residuals: Continental-scale physics validation
+
+2. **New widgets in `docs.html`**:
+   - `station-geometry` — Shows 4 stations with distance/azimuth
+   - `dispersion-ratio` — Tests 1/f² relationship
+   - `terminator-plot` — D_clock range over 12h
+   - `cross-station-residuals` — Per-station deviations
+   - `performance-summary` — Current uncertainty, broadcasts, improvement factor
+   - `validation-status` — Checklist validating claims against live data
+
+3. **Registered in `routers/docs.py`** — `IONOSPHERIC_RESOLUTION` added to `AVAILABLE_DOCS`
+
+### Key Argument (Counter to Skeptic)
+
+> "If local noise were the dominant error source, multi-frequency measurements from the same receiver would be uncorrelated. Instead, we observe that 5 MHz, 10 MHz, and 15 MHz variations are correlated with amplitude ratios following the 1/f² ionospheric dispersion relation. This is only possible if we're measuring ionospheric TEC, not receiver noise."
+
+---
+
 ## ✅ COMPLETED SESSION: OFFSET SETTLING VARIANCE ON SERVICE RESTART
 
 **Status:** ✅ **RESOLVED** - 2026-01-24  
@@ -29,10 +59,60 @@ See `docs/METROLOGY.md` Section 12 for complete architecture description.
 
 ---
 
-## 🔴 CURRENT SESSION: TONE DETECTION METHODOLOGY OPTIMIZATION
+## 🔴 NEXT SESSION: TONE DETECTION CRITICAL ANALYSIS
 
-**Status:** 🔴 **IN PROGRESS**  
-**Objective:** Ensure the tone detection methodology takes the best possible, metrologically sound advantage of the timing accuracy to maintain appropriate **specificity** (low false positives) and **sensitivity** (low false negatives).
+**Status:** 🔴 **PLANNED**  
+**Objective:** Critically analyze the tone detection implementation to ensure we are zeroing in properly on the essential timing tones of the time standard stations.
+
+---
+
+### Session Focus Areas
+
+The next session should critically analyze three key aspects:
+
+#### 1. Essential Timing Tone Identification
+
+**Question:** Are we detecting the RIGHT tones for timing?
+
+Each station has specific timing markers:
+- **WWV/WWVH:** 1000/1200 Hz tones mark the second, but the **absence of tone** at minute 0 is also a timing marker
+- **CHU:** FSK time code (seconds 31-39) provides BCD-encoded time
+- **BPM:** 1000 Hz tone with different modulation pattern
+
+**Critical Review:**
+- Are we using the per-second tones or the per-minute markers (or both)?
+- Is the minute marker (tone absence) being exploited for coarse alignment?
+- Are we detecting the correct tone frequencies for each station?
+
+#### 2. Correlation with Known Broadcast Features
+
+**Question:** Do our detections correlate with the known broadcast schedule?
+
+Each broadcast has predictable features:
+- **WWV:** Tone at seconds 1-59, silent at second 0; voice announcements; test signals at minute 8
+- **WWVH:** Tone at seconds 1-59, silent at second 0; voice announcements; test signals at minute 44
+- **CHU:** FSK burst seconds 31-39; 1000 Hz tone other seconds
+- **BPM:** Different pattern with 100ms pulses
+
+**Critical Review:**
+- Are detected tones appearing at the expected times within each minute?
+- Are we rejecting detections that occur during voice announcements?
+- Is the per-minute pattern consistent with the station's known schedule?
+
+#### 3. Geographic and Propagation Consistency
+
+**Question:** Does the ToA sequence match known geography and propagation physics?
+
+Given receiver location and station coordinates:
+- **WWV (Fort Collins, CO):** ~1,100 km → ~3.7 ms minimum propagation delay
+- **WWVH (Kauai, HI):** ~5,500 km → ~18 ms minimum propagation delay
+- **CHU (Ottawa, Canada):** ~1,500 km → ~5 ms minimum propagation delay
+- **BPM (Pucheng, China):** ~11,000 km → ~37 ms minimum propagation delay
+
+**Critical Review:**
+- Do observed ToA values fall within physically plausible bounds for each station?
+- Is the ToA ordering consistent with distance (WWV < CHU < WWVH < BPM)?
+- Are ionospheric delays (additional 1-15 ms) being properly modeled?
 
 ---
 
@@ -55,6 +135,8 @@ With the v6.1 hierarchical architecture achieving ~4 ms uncertainty (theoretical
 | How is multipath handled in ToA estimation? | Can bias ToA by 0-5 ms | `advanced_signal_analysis.py` |
 | What is the phase tracking accuracy? | Affects sub-sample ToA precision | `wwvh_discrimination.py` |
 | How are detection confidence scores computed? | Affects downstream weighting | `tone_detector.py` |
+| Are per-minute markers being used for coarse alignment? | Affects robustness | `tone_detector.py`, `metrology_service.py` |
+| Do ToA values match geographic expectations? | Validates detection correctness | `multi_broadcast_fusion.py` |
 
 ---
 

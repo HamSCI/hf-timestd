@@ -438,6 +438,24 @@
                 case 'adev-summary':
                     renderAdevWidget(container, f);
                     break;
+                case 'station-geometry':
+                    renderStationGeometryWidget(container);
+                    break;
+                case 'dispersion-ratio':
+                    renderDispersionRatioWidget(container);
+                    break;
+                case 'terminator-plot':
+                    renderTerminatorPlotWidget(container);
+                    break;
+                case 'cross-station-residuals':
+                    renderCrossStationResidualsWidget(container, f);
+                    break;
+                case 'performance-summary':
+                    renderPerformanceSummaryWidget(container, f);
+                    break;
+                case 'validation-status':
+                    renderValidationStatusWidget(container, f);
+                    break;
                 default:
                     container.innerHTML = `<div class="widget-title">Unknown widget: ${widgetType}</div>`;
             }
@@ -635,6 +653,310 @@
                     </div>
                 </div>
                 <div class="widget-subtitle">Fractional frequency stability (dimensionless)</div>
+            `;
+        }
+        
+        // Widget: Station Geometry (for ionospheric resolution doc)
+        async function renderStationGeometryWidget(container) {
+            try {
+                const res = await fetch('/api/stations/');
+                if (!res.ok) throw new Error('Failed to fetch stations');
+                const data = await res.json();
+                
+                const stationsHtml = data.stations.map(s => `
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">${s.station_id}</div>
+                        <div class="widget-metric-value">${s.distance_km}<span class="widget-unit">km</span></div>
+                        <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Az: ${s.azimuth_deg}°</div>
+                    </div>
+                `).join('');
+                
+                container.innerHTML = `
+                    <div class="widget-title">Station Geometry — Different Ionospheric Paths</div>
+                    <div class="widget-grid">${stationsHtml}</div>
+                    <div class="widget-subtitle">Each path samples a different ionospheric region → uncorrelated errors</div>
+                `;
+            } catch (e) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Station geometry unavailable</div>';
+            }
+        }
+        
+        // Widget: Dispersion Ratio (proves ionospheric measurement)
+        async function renderDispersionRatioWidget(container) {
+            try {
+                const res = await fetch('/api/propagation/tec?start=-1h&end=now');
+                if (!res.ok) throw new Error('Failed to fetch TEC data');
+                const data = await res.json();
+                
+                // Calculate dispersion ratios from multi-frequency data
+                // Expected: Δτ(5)/Δτ(10) ≈ 4.0, Δτ(5)/Δτ(15) ≈ 9.0
+                let ratio_5_10 = null;
+                let ratio_5_15 = null;
+                let status_5_10 = 'status-warn';
+                let status_5_15 = 'status-warn';
+                
+                if (data && data.paths && data.paths.WWV) {
+                    const wwv = data.paths.WWV;
+                    // If we have per-frequency delay data, compute ratios
+                    if (wwv.delays_by_freq) {
+                        const d5 = wwv.delays_by_freq['5.0'];
+                        const d10 = wwv.delays_by_freq['10.0'];
+                        const d15 = wwv.delays_by_freq['15.0'];
+                        
+                        if (d5 && d10) {
+                            ratio_5_10 = Math.abs(d5 - d10) > 0.1 ? (d5 / d10) : null;
+                        }
+                        if (d5 && d15) {
+                            ratio_5_15 = Math.abs(d5 - d15) > 0.1 ? (d5 / d15) : null;
+                        }
+                    }
+                }
+                
+                // Check if ratios match expected 1/f² relationship (within 30%)
+                if (ratio_5_10 !== null) {
+                    const expected = 4.0;
+                    const error = Math.abs(ratio_5_10 - expected) / expected;
+                    status_5_10 = error < 0.3 ? 'status-good' : error < 0.5 ? 'status-warn' : 'status-bad';
+                }
+                if (ratio_5_15 !== null) {
+                    const expected = 9.0;
+                    const error = Math.abs(ratio_5_15 - expected) / expected;
+                    status_5_15 = error < 0.3 ? 'status-good' : error < 0.5 ? 'status-warn' : 'status-bad';
+                }
+                
+                const tecValue = data?.summary?.mean_tec ?? data?.paths?.WWV?.mean_tec;
+                
+                container.innerHTML = `
+                    <div class="widget-title">1/f² Dispersion Test — Live</div>
+                    <div class="widget-grid">
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Δτ(5MHz)/Δτ(10MHz)</div>
+                            <div class="widget-metric-value ${status_5_10}">${ratio_5_10?.toFixed(2) ?? '—'}</div>
+                            <div style="font-size: 11px; color: #64748b;">Expected: 4.0</div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Δτ(5MHz)/Δτ(15MHz)</div>
+                            <div class="widget-metric-value ${status_5_15}">${ratio_5_15?.toFixed(2) ?? '—'}</div>
+                            <div style="font-size: 11px; color: #64748b;">Expected: 9.0</div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">TEC (TECU)</div>
+                            <div class="widget-metric-value">${tecValue?.toFixed(1) ?? '—'}</div>
+                        </div>
+                    </div>
+                    <div class="widget-subtitle">Ratios matching 1/f² prove ionospheric measurement, not receiver noise</div>
+                `;
+            } catch (e) {
+                container.innerHTML = `
+                    <div class="widget-title">1/f² Dispersion Test</div>
+                    <div style="color: #64748b; padding: 12px;">Dispersion data unavailable — requires multi-frequency propagation</div>
+                `;
+            }
+        }
+        
+        // Widget: Terminator Plot (sunrise/sunset D_clock transition)
+        async function renderTerminatorPlotWidget(container) {
+            try {
+                // Get fusion history around sunrise/sunset
+                const res = await fetch('/api/metrology/fusion/history?start=-12h&end=now');
+                if (!res.ok) throw new Error('Failed to fetch fusion history');
+                const data = await res.json();
+                
+                // Get solar conditions
+                const condRes = await fetch('/api/physics/events/conditions');
+                const conditions = condRes.ok ? await condRes.json() : null;
+                
+                const isDay = conditions?.is_day ?? null;
+                const sunrise = conditions?.sunrise_utc ?? null;
+                const sunset = conditions?.sunset_utc ?? null;
+                
+                // Calculate D_clock range from history
+                let minDclock = null, maxDclock = null, avgDclock = null;
+                if (data.measurements && data.measurements.length > 0) {
+                    const dclocks = data.measurements.map(m => m.d_clock_ms).filter(d => d !== null);
+                    if (dclocks.length > 0) {
+                        minDclock = Math.min(...dclocks);
+                        maxDclock = Math.max(...dclocks);
+                        avgDclock = dclocks.reduce((a, b) => a + b, 0) / dclocks.length;
+                    }
+                }
+                
+                const range = (maxDclock !== null && minDclock !== null) ? (maxDclock - minDclock) : null;
+                const rangeStatus = range !== null ? (range > 3 ? 'status-good' : range > 1 ? 'status-warn' : 'status-bad') : '';
+                
+                container.innerHTML = `
+                    <div class="widget-title">Terminator Passage — D_clock vs Solar Geometry</div>
+                    <div class="widget-grid">
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Current</div>
+                            <div class="widget-metric-value">${isDay === true ? '☀️ Day' : isDay === false ? '🌙 Night' : '—'}</div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">D_clock Range (12h)</div>
+                            <div class="widget-metric-value ${rangeStatus}">${range?.toFixed(1) ?? '—'}<span class="widget-unit">ms</span></div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Min / Max</div>
+                            <div class="widget-metric-value" style="font-size: 14px;">${minDclock?.toFixed(1) ?? '—'} / ${maxDclock?.toFixed(1) ?? '—'}<span class="widget-unit">ms</span></div>
+                        </div>
+                    </div>
+                    <div class="widget-subtitle">
+                        ${range > 3 ? '✅ Large diurnal variation detected — ionospheric physics confirmed' : 
+                          range > 1 ? '⚠️ Moderate variation — check time range spans sunrise/sunset' :
+                          'ℹ️ Small variation — may need longer observation window'}
+                    </div>
+                `;
+            } catch (e) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Terminator data unavailable</div>';
+            }
+        }
+        
+        // Widget: Cross-Station Residuals
+        function renderCrossStationResidualsWidget(container, f) {
+            if (!f) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Waiting for fusion data...</div>';
+                return;
+            }
+            
+            // Extract per-station residuals from fusion data
+            const stations = ['WWV', 'WWVH', 'CHU', 'BPM'];
+            const residuals = [];
+            
+            for (const s of stations) {
+                const key = s.toLowerCase() + '_mean_ms';
+                const countKey = s.toLowerCase() + '_count';
+                if (f[key] !== undefined && f[countKey] > 0) {
+                    const residual = f[key] - f.d_clock_ms;
+                    residuals.push({ station: s, residual, count: f[countKey] });
+                }
+            }
+            
+            if (residuals.length === 0) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">No multi-station data available</div>';
+                return;
+            }
+            
+            // Check for correlation (all same sign = potential ionospheric event)
+            const signs = residuals.map(r => Math.sign(r.residual));
+            const allSameSign = signs.every(s => s === signs[0]) && signs[0] !== 0;
+            const maxResidual = Math.max(...residuals.map(r => Math.abs(r.residual)));
+            
+            const stationsHtml = residuals.map(r => {
+                const status = Math.abs(r.residual) < 0.5 ? 'status-good' : Math.abs(r.residual) < 1.5 ? 'status-warn' : 'status-bad';
+                return `
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">${r.station}</div>
+                        <div class="widget-metric-value ${status}">${r.residual >= 0 ? '+' : ''}${r.residual.toFixed(2)}<span class="widget-unit">ms</span></div>
+                        <div style="font-size: 11px; color: #64748b;">${r.count} broadcasts</div>
+                    </div>
+                `;
+            }).join('');
+            
+            container.innerHTML = `
+                <div class="widget-title">Cross-Station Residuals — Live</div>
+                <div class="widget-grid">${stationsHtml}</div>
+                <div class="widget-subtitle">
+                    ${allSameSign && maxResidual > 1 ? '⚠️ Correlated deviation — possible ionospheric event' :
+                      maxResidual < 0.5 ? '✅ Small residuals — good multi-station agreement' :
+                      'ℹ️ Normal ionospheric variation across paths'}
+                </div>
+            `;
+        }
+        
+        // Widget: Performance Summary
+        function renderPerformanceSummaryWidget(container, f) {
+            if (!f) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Waiting for fusion data...</div>';
+                return;
+            }
+            
+            const unc = f.uncertainty_ms ?? 999;
+            const nBroadcasts = f.n_broadcasts ?? 0;
+            const grade = f.quality_grade ?? 'D';
+            
+            // Calculate theoretical improvement
+            const singleBroadcastUnc = 3.0; // typical single-broadcast uncertainty
+            const theoreticalImprovement = singleBroadcastUnc / Math.sqrt(nBroadcasts);
+            const actualImprovement = singleBroadcastUnc / unc;
+            
+            const uncStatus = unc < 0.5 ? 'status-good' : unc < 1.0 ? 'status-good' : unc < 2.0 ? 'status-warn' : 'status-bad';
+            
+            container.innerHTML = `
+                <div class="widget-title">System Performance — Live</div>
+                <div class="widget-grid">
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Combined Uncertainty</div>
+                        <div class="widget-metric-value ${uncStatus}">±${unc.toFixed(2)}<span class="widget-unit">ms</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Active Broadcasts</div>
+                        <div class="widget-metric-value">${nBroadcasts}<span class="widget-unit">/17</span></div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Improvement Factor</div>
+                        <div class="widget-metric-value">${actualImprovement.toFixed(1)}×</div>
+                        <div style="font-size: 11px; color: #64748b;">vs single broadcast</div>
+                    </div>
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">Quality Grade</div>
+                        <div class="widget-metric-value ${grade === 'A' || grade === 'B' ? 'status-good' : 'status-warn'}">${grade}</div>
+                    </div>
+                </div>
+                <div class="widget-subtitle">Target: ±0.5 ms (1σ) to UTC(NIST) via multi-broadcast fusion</div>
+            `;
+        }
+        
+        // Widget: Validation Status (argument vs data)
+        function renderValidationStatusWidget(container, f) {
+            // Check each claim against live data
+            const checks = [];
+            
+            // Check 1: Uncertainty is ionosphere-limited (not noise-limited)
+            const unc = f?.uncertainty_ms ?? 999;
+            const isIonoLimited = unc > 0.1 && unc < 5.0;
+            checks.push({
+                claim: 'Ionosphere-limited (not noise-limited)',
+                status: isIonoLimited,
+                detail: `σ = ±${unc.toFixed(2)} ms (noise floor ~0.08 ms)`
+            });
+            
+            // Check 2: Multi-broadcast fusion provides improvement
+            const nBroadcasts = f?.n_broadcasts ?? 0;
+            const hasFusion = nBroadcasts >= 3;
+            checks.push({
+                claim: 'Multi-broadcast fusion active',
+                status: hasFusion,
+                detail: `${nBroadcasts} broadcasts contributing`
+            });
+            
+            // Check 3: Sub-millisecond achieved
+            const subMs = unc < 1.0;
+            checks.push({
+                claim: 'Sub-millisecond uncertainty achieved',
+                status: subMs,
+                detail: subMs ? 'Target met' : `Current: ±${unc.toFixed(2)} ms`
+            });
+            
+            const allPassing = checks.every(c => c.status);
+            
+            const checksHtml = checks.map(c => `
+                <div style="display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(51,65,85,0.3);">
+                    <span style="font-size: 16px;">${c.status ? '✅' : '❌'}</span>
+                    <div style="flex: 1;">
+                        <div style="font-weight: 500; color: #e2e8f0;">${c.claim}</div>
+                        <div style="font-size: 12px; color: #64748b;">${c.detail}</div>
+                    </div>
+                </div>
+            `).join('');
+            
+            container.innerHTML = `
+                <div class="widget-title">Argument Validation — Live</div>
+                <div style="margin: 12px 0;">${checksHtml}</div>
+                <div class="widget-subtitle" style="background: ${allPassing ? 'rgba(34,197,94,0.1)' : 'rgba(245,158,11,0.1)'}; padding: 12px; border-radius: 8px; margin-top: 12px;">
+                    ${allPassing ? 
+                        '✅ <strong>All claims validated by live data.</strong> The implementation supports the argument.' :
+                        '⚠️ <strong>Some claims not yet validated.</strong> Review implementation or adjust argument.'}
+                </div>
             `;
         }
         

@@ -23,12 +23,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/living-docs", tags=["documentation"])
 
 # Path to documentation directory (relative to web-api parent)
-DOCS_DIR = Path(__file__).parent.parent.parent / "docs"
+# Use resolve() to get absolute path from the actual file location
+DOCS_DIR = Path(__file__).resolve().parent.parent.parent / "docs"
 
 # Available documents
 AVAILABLE_DOCS = {
     "METROLOGY": "METROLOGY.md",
     "PHYSICS": "PHYSICS.md",
+    "IONOSPHERIC_RESOLUTION": "IONOSPHERIC_RESOLUTION.md",
     "DUAL_CHRONY_FEED_ARCHITECTURE": "DUAL_CHRONY_FEED_ARCHITECTURE.md",
     "TECHNICAL_REFERENCE": "../TECHNICAL_REFERENCE.md",
 }
