@@ -10,6 +10,69 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
+## ✅ COMPLETED SESSION: BOOTSTRAP LIVING DOCUMENTATION
+
+**Status:** ✅ **COMPLETE** - 2026-01-26  
+**Objective:** Create Living Documentation for bootstrap methodology with dynamic evidence injection.
+
+### Deliverables
+
+1. **`docs/BOOTSTRAP_METHODOLOGY.md`** — Comprehensive bootstrap methodology documentation
+   - State machine: ACQUIRING → CORRELATING → TRACKING → LOCKED
+   - Tone detection: Per-channel ToneDetector with station-specific templates
+   - Multi-station clustering with geographic propagation delay validation
+   - 60-second recurrence validation to distinguish minute markers from ticks
+   - Dynamic `<!-- LOGS: bootstrap | filter: "type" -->` directives for live evidence
+
+2. **New API endpoint** `/api/living-docs/evidence/bootstrap/{type}`:
+   - `geographic_expectations` — Propagation delays for receiver location
+   - `multi_station_detection` — Candidate clustering with SNR
+   - `recurring_clusters` — 60-second recurrence validation
+   - `cluster_lock` — State transition to CORRELATING
+   - `state_transitions` — All state machine transitions
+   - `rtp_lock` — Final RTP-to-UTC offset lock
+   - `detector_creation` — Per-channel tone detector initialization
+
+3. **Frontend updates** in `docs.html`:
+   - `renderBootstrapEvidence()` function fetches live evidence from API
+   - Displays installation location when available
+   - Parses and formats log lines with timestamps and levels
+
+### Key Achievement
+
+The bootstrap documentation now shows **live evidence from any installation**, not hardcoded logs from bee1. Each installation displays its own geographic location, propagation delays, and bootstrap sequence.
+
+---
+
+## ✅ COMPLETED SESSION: BOOTSTRAP TONE DETECTION & CLUSTERING
+
+**Status:** ✅ **COMPLETE** - 2026-01-26  
+**Objective:** Fix multi-station clustering to include CHU and WWVH with WWV.
+
+### Problems Fixed
+
+1. **Single global ToneDetector** — All channels used same detector with WWV templates
+   - **Fix:** Per-channel ToneDetector instances in `bootstrap_service.py`
+   - CHU channels now get CHU templates (500ms @ 1000Hz)
+   - WWV channels get WWV templates (800ms @ 1000Hz)
+
+2. **Cross-minute-boundary clustering** — Candidates from different minutes weren't clustering
+   - **Fix:** Modified `timing_bootstrap.py` to allow N*60 second offsets
+   - Error calculation: `error = abs(raw_error - minutes_diff * 60000)`
+
+3. **Redundant tone detection** — `bootstrap_rolling_buffer.py` had custom correlation
+   - **Fix:** Replaced with call to `ToneDetector.acquire_tones()`
+
+### Results
+
+```
+[BOOTSTRAP] RECURRING CLUSTERS FOUND: 1 minutes apart, error=30.7ms
+[BOOTSTRAP] CLUSTER LOCK: WWV@6459013 with stations ['WWV', 'BPM'] → CORRELATING
+RTP-to-Unix reference LOCKED: offset=1769464110.937s
+```
+
+---
+
 ## ✅ COMPLETED SESSION: IONOSPHERIC RESOLUTION LIVING DOCUMENTATION
 
 **Status:** ✅ **COMPLETE** - 2026-01-26  
@@ -18,25 +81,8 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 ### Deliverables
 
 1. **`docs/IONOSPHERIC_RESOLUTION.md`** — Full argument structure with embedded live data directives
-   - Error source hierarchy (ionosphere dominates 10-100× over local noise)
-   - Mathematical proof: σ_fused ≈ 0.5 ms proves ionosphere-limited, not noise-limited
-   - Dispersion test: 1/f² ratio validates ionospheric measurement
-   - Terminator test: D_clock correlation with solar geometry
-   - Cross-station residuals: Continental-scale physics validation
-
-2. **New widgets in `docs.html`**:
-   - `station-geometry` — Shows 4 stations with distance/azimuth
-   - `dispersion-ratio` — Tests 1/f² relationship
-   - `terminator-plot` — D_clock range over 12h
-   - `cross-station-residuals` — Per-station deviations
-   - `performance-summary` — Current uncertainty, broadcasts, improvement factor
-   - `validation-status` — Checklist validating claims against live data
-
+2. **New widgets in `docs.html`**: `station-geometry`, `dispersion-ratio`, `terminator-plot`, `cross-station-residuals`, `performance-summary`, `validation-status`
 3. **Registered in `routers/docs.py`** — `IONOSPHERIC_RESOLUTION` added to `AVAILABLE_DOCS`
-
-### Key Argument (Counter to Skeptic)
-
-> "If local noise were the dominant error source, multi-frequency measurements from the same receiver would be uncorrelated. Instead, we observe that 5 MHz, 10 MHz, and 15 MHz variations are correlated with amplitude ratios following the 1/f² ionospheric dispersion relation. This is only possible if we're measuring ionospheric TEC, not receiver noise."
 
 ---
 
@@ -59,228 +105,205 @@ See `docs/METROLOGY.md` Section 12 for complete architecture description.
 
 ---
 
-## 🔴 NEXT SESSION: TONE DETECTION CRITICAL ANALYSIS
+## 🔴 NEXT SESSION: DATA FLOW VALIDATION — LOCKED SYSTEM TO CHRONY FEED
 
 **Status:** 🔴 **PLANNED**  
-**Objective:** Critically analyze the tone detection implementation to ensure we are zeroing in properly on the essential timing tones of the time standard stations.
+**Objective:** Critically examine the data flow from the locked bootstrap system through metrology analytics to the chrony feed, identifying mistakes, vulnerabilities, and missed opportunities that might threaten analytics validity and chrony system time updates.
 
 ---
 
-### Session Focus Areas
+### Session Focus: End-to-End Data Flow Audit
 
-The next session should critically analyze three key aspects:
+Now that bootstrap is working and locking correctly, we need to validate the **downstream data flow**:
 
-#### 1. Essential Timing Tone Identification
-
-**Question:** Are we detecting the RIGHT tones for timing?
-
-Each station has specific timing markers:
-- **WWV/WWVH:** 1000/1200 Hz tones mark the second, but the **absence of tone** at minute 0 is also a timing marker
-- **CHU:** FSK time code (seconds 31-39) provides BCD-encoded time
-- **BPM:** 1000 Hz tone with different modulation pattern
-
-**Critical Review:**
-- Are we using the per-second tones or the per-minute markers (or both)?
-- Is the minute marker (tone absence) being exploited for coarse alignment?
-- Are we detecting the correct tone frequencies for each station?
-
-#### 2. Correlation with Known Broadcast Features
-
-**Question:** Do our detections correlate with the known broadcast schedule?
-
-Each broadcast has predictable features:
-- **WWV:** Tone at seconds 1-59, silent at second 0; voice announcements; test signals at minute 8
-- **WWVH:** Tone at seconds 1-59, silent at second 0; voice announcements; test signals at minute 44
-- **CHU:** FSK burst seconds 31-39; 1000 Hz tone other seconds
-- **BPM:** Different pattern with 100ms pulses
-
-**Critical Review:**
-- Are detected tones appearing at the expected times within each minute?
-- Are we rejecting detections that occur during voice announcements?
-- Is the per-minute pattern consistent with the station's known schedule?
-
-#### 3. Geographic and Propagation Consistency
-
-**Question:** Does the ToA sequence match known geography and propagation physics?
-
-Given receiver location and station coordinates:
-- **WWV (Fort Collins, CO):** ~1,100 km → ~3.7 ms minimum propagation delay
-- **WWVH (Kauai, HI):** ~5,500 km → ~18 ms minimum propagation delay
-- **CHU (Ottawa, Canada):** ~1,500 km → ~5 ms minimum propagation delay
-- **BPM (Pucheng, China):** ~11,000 km → ~37 ms minimum propagation delay
-
-**Critical Review:**
-- Do observed ToA values fall within physically plausible bounds for each station?
-- Is the ToA ordering consistent with distance (WWV < CHU < WWVH < BPM)?
-- Are ionospheric delays (additional 1-15 ms) being properly modeled?
+```
+Bootstrap LOCKED (RTP-to-UTC offset established)
+    ↓
+Metrology Service (L1 raw measurements)
+    ↓
+L2 Calibration Service (calibrated timing)
+    ↓
+Multi-Broadcast Fusion (Kalman filtering, WLS)
+    ↓
+Chrony SHM Feed (TSL1/TSL2)
+    ↓
+System Time Updates
+```
 
 ---
 
-### The Fundamental Challenge
+### Critical Questions by Stage
 
-The system detects timing tones (1000 Hz for WWV/BPM, 1200 Hz for WWVH, FSK for CHU) to extract D_clock measurements. The detection methodology must balance:
+#### 1. Bootstrap → Metrology Handoff
 
-1. **Specificity** — Reject false detections (noise, interference, multipath artifacts)
-2. **Sensitivity** — Detect weak signals under poor propagation conditions
-3. **Timing Accuracy** — Precise ToA (Time of Arrival) estimation for D_clock calculation
+**Question:** How does the locked RTP-to-UTC offset propagate to metrology measurements?
 
-With the v6.1 hierarchical architecture achieving ~4 ms uncertainty (theoretical floor ~0.1 ms), the **tone detection is now the limiting factor** for further accuracy improvement.
+| Concern | Risk | Files to Review |
+|---------|------|-----------------|
+| Offset application timing | Stale offset used for new measurements | `metrology_service.py`, `stream_recorder_v2.py` |
+| Offset persistence | Lost on service restart? | `bootstrap_service.py`, state files |
+| Multiple channels | All channels use same offset? | `bootstrap_service.py` |
+| Offset drift | Does offset need periodic refresh? | `timing_bootstrap.py` |
 
-### Key Questions to Investigate
+**Vulnerability:** If metrology service restarts but bootstrap doesn't, is the offset still available?
 
-| Question | Impact | Files to Review |
-|----------|--------|-----------------|
-| What is the current ToA estimation precision? | Determines D_clock floor | `tone_detector.py`, `advanced_signal_analysis.py` |
-| How is SNR used in detection thresholds? | Affects sensitivity/specificity tradeoff | `tone_detector.py`, `wwvh_discrimination.py` |
-| How is multipath handled in ToA estimation? | Can bias ToA by 0-5 ms | `advanced_signal_analysis.py` |
-| What is the phase tracking accuracy? | Affects sub-sample ToA precision | `wwvh_discrimination.py` |
-| How are detection confidence scores computed? | Affects downstream weighting | `tone_detector.py` |
-| Are per-minute markers being used for coarse alignment? | Affects robustness | `tone_detector.py`, `metrology_service.py` |
-| Do ToA values match geographic expectations? | Validates detection correctness | `multi_broadcast_fusion.py` |
+#### 2. Metrology → L2 Calibration
 
----
+**Question:** Are L1 measurements correctly transformed to L2 calibrated values?
 
-### Critical Code Paths to Review
+| Concern | Risk | Files to Review |
+|---------|------|-----------------|
+| Calibration staleness | Old calibration applied to new data | `l2_calibration_service.py` |
+| Per-broadcast calibration | Correct broadcast identified? | `l2_calibration_service.py` |
+| Calibration persistence | State corruption on restart? | `broadcast_calibration.json` |
+| Calibration target | Still targeting absolute zero? | `multi_broadcast_fusion.py:1821` |
 
-#### 1. Tone Detection Core
+**Vulnerability:** Circular dependency between calibration and Kalman (fixed in v6.1, but verify).
 
-**File:** `src/hf_timestd/core/tone_detector.py`
+#### 3. L2 → Fusion
 
-The primary tone detection algorithm. Key aspects to review:
+**Question:** Is multi-broadcast fusion correctly weighting and combining measurements?
 
-- **Detection threshold logic** — How is SNR threshold set? Is it adaptive?
-- **Peak finding algorithm** — How is the correlation peak located?
-- **Sub-sample interpolation** — Is parabolic/sinc interpolation used for sub-sample ToA?
-- **Confidence scoring** — How is detection confidence computed?
+| Concern | Risk | Files to Review |
+|---------|------|-----------------|
+| Stale data detection | Old L2 data used in fusion? | `multi_broadcast_fusion.py` |
+| Outlier rejection | Valid data rejected? Invalid accepted? | `multi_broadcast_fusion.py` |
+| Kalman state persistence | State corruption? | `broadcast_kalman_state.json` |
+| Holdover behavior | Correct uncertainty growth during dropout? | `multi_broadcast_fusion.py` |
+| Station weighting | Geographic/SNR weighting correct? | `multi_broadcast_fusion.py` |
 
-**Metrological Question:** Is the ToA estimation achieving the theoretical precision limit (Cramér-Rao bound)?
+**Vulnerability:** Single-station bias during ionospheric fadeout (fixed with holdover model, but verify).
 
-#### 2. WWV/WWVH Discrimination
+#### 4. Fusion → Chrony SHM
 
-**File:** `src/hf_timestd/core/wwvh_discrimination.py`
+**Question:** Is the fused D_clock correctly written to Chrony shared memory?
 
-Discriminates between WWV (1000 Hz) and WWVH (1200 Hz) on shared frequencies. Key aspects:
+| Concern | Risk | Files to Review |
+|---------|------|-----------------|
+| SHM permissions | Write failures? | `/dev/shm/chrony.*`, service files |
+| Update rate | Too fast? Too slow? | `multi_broadcast_fusion.py` |
+| TSL1 vs TSL2 | Correct values in each? | `multi_broadcast_fusion.py` |
+| Leap second handling | Correct during leap? | `multi_broadcast_fusion.py` |
+| Uncertainty propagation | Chrony sees correct uncertainty? | SHM protocol |
 
-- **Frequency estimation accuracy** — How precisely is the tone frequency measured?
-- **Phase tracking** — How is phase continuity maintained across seconds?
-- **Doppler compensation** — Is ionospheric Doppler accounted for?
+**Vulnerability:** SHM permission issues after reboot (fixed, but verify persistence).
 
-**Metrological Question:** Does frequency estimation error propagate to ToA error?
+#### 5. Chrony → System Time
 
-#### 3. Advanced Signal Analysis
+**Question:** Is Chrony correctly using our time feed?
 
-**File:** `src/hf_timestd/core/advanced_signal_analysis.py`
+| Concern | Risk | Files to Review |
+|---------|------|-----------------|
+| Source selection | TSL1/TSL2 selected or ignored? | `/etc/chrony/chrony.conf` |
+| Stratum/trust | Correct stratum assigned? | Chrony config |
+| Competing sources | NTP overriding our feed? | `chronyc sources` |
+| Offset convergence | System time actually correcting? | `chronyc tracking` |
 
-Multipath detection, delay spread estimation, scintillation indices. Key aspects:
-
-- **Multipath detection** — How is multipath identified?
-- **Delay spread estimation** — How is the multipath delay spread quantified?
-- **ToA bias correction** — Is multipath-induced ToA bias corrected?
-
-**Metrological Question:** Can multipath information improve ToA estimation?
-
-#### 4. CHU FSK Decoder
-
-**File:** `src/hf_timestd/core/chu_fsk_decoder.py`
-
-CHU uses FSK time code (seconds 31-39). Key aspects:
-
-- **Bit timing extraction** — How is the FSK bit timing determined?
-- **Frame synchronization** — How is the time code frame aligned?
-- **Error detection** — How are bit errors detected and handled?
-
-**Metrological Question:** Is CHU timing extraction achieving comparable precision to WWV/WWVH?
+**Vulnerability:** Chrony may prefer other sources if our uncertainty is too high.
 
 ---
 
-### Theoretical Limits
+### Data Freshness Chain
 
-#### Cramér-Rao Bound for ToA Estimation
+Verify each stage has freshness checks:
 
-The theoretical lower bound on ToA estimation variance is:
+| Stage | Freshness Check | Threshold | Behavior on Stale |
+|-------|-----------------|-----------|-------------------|
+| Bootstrap → Metrology | ? | ? | ? |
+| L1 → L2 | HDF5 mtime | 5 min | Warn, continue |
+| L2 → Fusion | HDF5 mtime | 5 min | Warn, continue |
+| Fusion → Chrony | ? | ? | ? |
 
-```
-σ²_ToA ≥ 1 / (8π² × SNR × B² × T)
+**Gap:** Are there freshness checks at Bootstrap→Metrology and Fusion→Chrony stages?
 
-where:
-  SNR = signal-to-noise ratio (linear)
-  B = signal bandwidth (Hz)
-  T = observation time (seconds)
-```
+---
 
-For a 1000 Hz tone with 100 Hz bandwidth, 1 second observation, SNR = 100 (20 dB):
-```
-σ_ToA ≥ 1 / √(8π² × 100 × 100² × 1) ≈ 0.036 ms
-```
+### State Persistence Audit
 
-**This suggests sub-0.1 ms ToA precision is theoretically achievable** with good SNR.
+| State File | Location | Purpose | Validation |
+|------------|----------|---------|------------|
+| `broadcast_kalman_state.json` | `/var/lib/timestd/state/` | Per-broadcast Kalman states | Offset < 150ms, age < 7 days |
+| `broadcast_calibration.json` | `/var/lib/timestd/state/` | Calibration offsets | Age < 7 days |
+| `long_term_drift_stats.json` | `/var/lib/timestd/state/` | Drift estimator | Age < 7 days |
+| Bootstrap offset | ? | RTP-to-UTC mapping | ? |
 
-#### Current System Performance
+**Question:** Where is the bootstrap offset persisted? Is it validated on load?
 
-From recent logs, the system shows:
-- **Fused D_clock uncertainty:** ~4 ms (with GNSS TEC correction)
-- **Raw measurement scatter:** 10-50 ms (before fusion)
-- **Outlier rejection rate:** ~30-50% of measurements
+---
 
-**Gap Analysis:** The 4 ms fused uncertainty vs 0.036 ms theoretical limit suggests significant room for improvement in:
-1. Tone detection precision
-2. Multipath handling
-3. Mode discrimination
+### Error Propagation Analysis
+
+Trace how errors at each stage affect downstream:
+
+1. **Bootstrap error (±30 ms)** → All measurements biased by same amount
+2. **Metrology error (±10 ms)** → Per-measurement noise, averaged by fusion
+3. **Calibration error (±5 ms)** → Systematic bias per broadcast
+4. **Fusion error (±2 ms)** → Final uncertainty to Chrony
+5. **Chrony error (±1 ms)** → System time accuracy
+
+**Key Question:** Is the uncertainty budget correctly propagated through all stages?
 
 ---
 
 ### Recommended Investigation Approach
 
-1. **Characterize Current ToA Precision**
-   - Add diagnostic logging to capture ToA estimation details
-   - Compute Allan deviation of ToA estimates (short-term stability)
-   - Compare ToA variance to Cramér-Rao bound
+1. **Trace a single measurement** from RTP capture to Chrony update
+   - Add diagnostic logging at each stage
+   - Verify timestamps and offsets are consistent
 
-2. **Review Detection Threshold Logic**
-   - Is the SNR threshold appropriate for the noise environment?
-   - Is the threshold adaptive to channel conditions?
-   - Are weak but valid signals being rejected?
+2. **Simulate failure modes**
+   - What happens if bootstrap loses lock?
+   - What happens if metrology service restarts?
+   - What happens if fusion service restarts?
+   - What happens if Chrony restarts?
 
-3. **Analyze Multipath Impact**
-   - Correlate delay spread with ToA variance
-   - Investigate multipath-aware ToA estimation techniques
-   - Consider leading-edge detection for multipath mitigation
+3. **Verify state restoration**
+   - Restart each service individually
+   - Check state files are correctly loaded
+   - Verify no discontinuities in output
 
-4. **Evaluate Phase Tracking**
-   - Is phase continuity being exploited for ToA refinement?
-   - Can carrier phase be used for sub-sample ToA interpolation?
-   - Is Doppler compensation accurate?
+4. **Audit freshness checks**
+   - Identify missing freshness checks
+   - Verify thresholds are appropriate
+   - Test behavior when upstream is stale
 
-5. **Cross-Validate with Known References**
-   - Compare ToA estimates across frequencies (same station)
-   - Compare ToA estimates across stations (same frequency)
-   - Use GNSS-derived ionospheric delay as ground truth
-
----
-
-### Metrological Perspective
-
-From a metrologist's viewpoint, tone detection is a **measurement process** that must be characterized:
-
-1. **Precision** — Repeatability of ToA estimation under constant conditions
-2. **Accuracy** — Systematic bias in ToA estimation (e.g., filter group delay)
-3. **Uncertainty** — Complete uncertainty budget for ToA including all error sources
-4. **Traceability** — ToA must trace to GPSDO timestamps (the "steel ruler")
-
-**Key Principle:** The tone detection methodology should be **metrologically sound** — every step should be physically justified and uncertainty-quantified.
+5. **Cross-validate with external reference**
+   - Compare system time to NTP servers
+   - Compare D_clock to expected values
+   - Verify uncertainty estimates are realistic
 
 ---
 
-### Reference: The 17 Broadcasts from 4 Stations
+### Key Files to Review
 
-| Station | Location | Frequencies | Tone | Unique Properties |
-|---------|----------|-------------|------|-------------------|
-| **WWV** | Fort Collins, CO | 2.5, 5, 10, 15, 20, 25 MHz | 1000 Hz | Closest to most US receivers |
-| **WWVH** | Kauai, HI | 2.5, 5, 10, 15 MHz | 1200 Hz | Long ocean path |
-| **CHU** | Ottawa, Canada | 3.33, 7.85, 14.67 MHz | FSK | Different frequencies |
-| **BPM** | Pucheng, China | 2.5, 5, 10, 15 MHz | 1000 Hz | Trans-Pacific path |
+| File | Purpose | Priority |
+|------|---------|----------|
+| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion + Chrony SHM | HIGH |
+| `src/hf_timestd/core/l2_calibration_service.py` | L1→L2 calibration | HIGH |
+| `src/hf_timestd/services/metrology_service.py` | L1 measurement | HIGH |
+| `src/hf_timestd/core/bootstrap_service.py` | Bootstrap offset | MEDIUM |
+| `src/hf_timestd/core/timing_bootstrap.py` | Bootstrap state machine | MEDIUM |
+| `/etc/chrony/chrony.conf` | Chrony configuration | MEDIUM |
 
-**Total: 17 broadcasts**
+---
+
+### Reference: Data Pipeline Map
+
+```
+L0: Raw IQ (core-recorder)
+    ↓
+Bootstrap: RTP-to-UTC offset (bootstrap_service)
+    ↓
+L1: Metrology (metrology_service) → /phase2/{CHANNEL}/metrology/
+    ↓
+L2: Calibration (l2_calibration) → /phase2/{CHANNEL}/clock_offset/
+    ↓
+L3: Fusion (multi_broadcast_fusion) → /phase2/fusion/ → Chrony SHM
+    ↓
+System Time (chronyd)
+
+Parallel: GNSS VTEC (live_vtec) → /data/gnss_vtec/
+```
 
 ---
 
@@ -291,19 +314,6 @@ From a metrologist's viewpoint, tone detection is a **measurement process** that
 | `broadcast_kalman_state.json` | `/var/lib/timestd/state/` | Per-broadcast Kalman filter states (17) |
 | `broadcast_calibration.json` | `/var/lib/timestd/state/` | Calibration offsets + trust levels |
 | `long_term_drift_stats.json` | `/var/lib/timestd/state/` | Long-term drift estimator statistics |
-
----
-
-### Recent Architecture Changes (v6.0 → v6.1)
-
-| Change | Description | Impact |
-|--------|-------------|--------|
-| Per-broadcast Kalman | 17 independent filters instead of 1 L3 filter | Deterministic restart |
-| GNSS VTEC correction | Real-time ionospheric correction | Reduced uncertainty |
-| WLS fusion | Replaced L3 Kalman with instantaneous WLS | No false smoothing |
-| State persistence | Per-broadcast state saved/restored | Restart stability |
-
-See `docs/METROLOGY.md` Section 12 for complete architecture description.
 
 ---
 
