@@ -52,6 +52,7 @@ from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, E
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 from .timing_calibrator import TimingCalibrator
+from .bootstrap_service import BootstrapService, BootstrapConfig
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,38 @@ class CoreRecorderV2:
         except Exception as e:
             logger.error(f"Failed to initialize TimingCalibrator: {e}")
             self.calibrator = None
+        
+        # Bootstrap Service for RTP-to-UTC calibration
+        # During bootstrap, samples are fed to rolling buffers instead of being archived.
+        # Once locked, normal archiving begins with proper minute boundaries.
+        self.bootstrap_service: Optional[BootstrapService] = None
+        bootstrap_enabled = self.recorder_config.get('bootstrap_enabled', True)
+        if bootstrap_enabled:
+            try:
+                receiver_lat = float(self.station_config.get('latitude', 0.0))
+                receiver_lon = float(self.station_config.get('longitude', 0.0))
+                
+                if receiver_lat == 0.0 and receiver_lon == 0.0:
+                    # Try to get from grid square
+                    grid = self.station_config.get('grid_square', '')
+                    if grid:
+                        from ..utils.grid_square import grid_to_latlon
+                        receiver_lat, receiver_lon = grid_to_latlon(grid)
+                
+                bootstrap_config = BootstrapConfig(
+                    receiver_lat=receiver_lat,
+                    receiver_lon=receiver_lon,
+                    sample_rate=self.channel_defaults.get('sample_rate', 24000),
+                    on_provisional_lock=self._on_bootstrap_provisional_lock,
+                    on_full_lock=self._on_bootstrap_full_lock,
+                )
+                self.bootstrap_service = BootstrapService(bootstrap_config)
+                logger.info(f"Bootstrap service initialized for receiver at ({receiver_lat:.2f}, {receiver_lon:.2f})")
+            except Exception as e:
+                logger.error(f"Failed to initialize bootstrap service: {e}")
+                self.bootstrap_service = None
+        else:
+            logger.info("Bootstrap service disabled in config")
         
         # Status tracking
         self.start_time = time.time()
@@ -457,7 +490,8 @@ class CoreRecorderV2:
                 # Create recorder - it will call ensure_channel() which handles everything
                 recorder = StreamRecorderV2(
                     config=rec_config,
-                    control=self.control 
+                    control=self.control,
+                    bootstrap_service=self.bootstrap_service  # Share bootstrap service across all channels
                 )
                 
                 self.recorders[freq] = recorder
@@ -546,6 +580,27 @@ class CoreRecorderV2:
         """Thread-safe accessor for NTP status."""
         with self.ntp_status_lock:
             return self.ntp_status.copy()
+    
+    def _on_bootstrap_provisional_lock(self, d_clock_ms: float):
+        """Handle bootstrap provisional lock event.
+        
+        Called when bootstrap has found enough corroborating evidence to
+        establish a provisional RTP-to-UTC mapping. At this point we can
+        start feeding D_clock to Chrony, but should continue validating.
+        """
+        logger.info(f"[BOOTSTRAP] PROVISIONAL LOCK: D_clock ≈ {d_clock_ms:+.1f}ms")
+        # TODO: Start feeding D_clock to Chrony SHM
+        # For now, just log the event
+    
+    def _on_bootstrap_full_lock(self, d_clock_ms: float, uncertainty_ms: float):
+        """Handle bootstrap full lock event.
+        
+        Called when bootstrap has achieved full lock with high confidence.
+        Normal archiving can now begin with proper minute boundaries.
+        """
+        logger.info(f"[BOOTSTRAP] FULL LOCK: D_clock = {d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms")
+        logger.info("[BOOTSTRAP] Transitioning to operational mode - archiving enabled")
+        # TODO: Feed D_clock to Chrony SHM with full confidence
     
     @staticmethod
     def _get_ntp_offset() -> Optional[float]:
