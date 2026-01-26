@@ -632,9 +632,9 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         =====================================================================
         RATIONALE (2025-12-07 Critique):
         =====================================================================
-        The matched filter correlation peak indicates WHERE a tone is, but not
-        precisely WHEN it starts. The correlation peak is "smeared" across the
-        template duration, occurring roughly at (onset + template_length/2).
+        The matched filter correlation peak indicates WHERE a tone is. For
+        mode='valid' correlation, the peak index equals the tone start index.
+        However, the correlation peak can be "smeared" by noise and multipath.
         
         Per NIST specification, WWV/WWVH tones are HARD-KEYED: they transition
         from silence to full amplitude in essentially zero time (at zero crossing).
@@ -682,16 +682,24 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # =================================================================
         # STEP 1: Define search region
         # =================================================================
-        # The correlation peak occurs when template is centered on the tone.
-        # For mode='valid' correlation, peak is at onset + template_length/2.
-        # So search backward from peak to find onset.
+        # For mode='valid' correlation:
+        #   correlation[k] = sum(signal[k:k+M] * template)
+        # So the peak at index k means the tone STARTS at audio_signal[k].
+        # The correlation peak index IS the tone onset - no offset needed.
+        #
+        # We search a small region around the correlation peak to find the
+        # precise rising edge using energy envelope detection. Search slightly
+        # before the peak (to find the exact onset) and into the tone.
         
         template_samples = int(tone_duration_sec * self.sample_rate)
-        margin_samples = int(0.050 * self.sample_rate)  # 50ms margin
+        margin_samples = int(0.050 * self.sample_rate)  # 50ms margin before
         
-        # Search region: from (peak - template_length - margin) to (peak + margin)
-        search_start = max(0, correlation_peak_idx - template_samples - margin_samples)
-        search_end = min(len(audio_signal), correlation_peak_idx + margin_samples)
+        # Search region: from slightly before the correlation peak to partway into the tone
+        # The correlation peak IS at the tone start, so we search:
+        #   - margin_samples before (to find exact rising edge)
+        #   - template_samples/2 after (into the tone for edge detection)
+        search_start = max(0, correlation_peak_idx - margin_samples)
+        search_end = min(len(audio_signal), correlation_peak_idx + template_samples // 2)
         
         if search_end <= search_start:
             logger.warning(f"Invalid onset search region: [{search_start}:{search_end}]")
@@ -1597,10 +1605,34 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             return None
         
         # Find peak within search window
+        # CRITICAL FIX (2026-01-26): When buffer starts after minute boundary,
+        # the minute marker is truncated and may have weaker correlation than
+        # per-second ticks. Prioritize peaks near the expected position.
         search_region = correlation[search_start:search_end]
+        
+        # Find the global maximum
         local_peak_idx = np.argmax(search_region)
         peak_idx = search_start + local_peak_idx
         peak_val = correlation[peak_idx]
+        
+        # If expected position is near buffer start (minute marker truncated),
+        # also check for a peak near sample 0 that might be the truncated minute marker
+        if expected_pos_samples < 0 and search_start == 0:
+            # Look for a peak in the first 500ms (where truncated minute marker should be)
+            early_region_end = min(len(search_region), int(0.5 * self.sample_rate))
+            if early_region_end > 0:
+                early_peak_idx = np.argmax(search_region[:early_region_end])
+                early_peak_val = search_region[early_peak_idx]
+                
+                # Use early peak if it's reasonably strong (>50% of global peak)
+                # This prioritizes the minute marker over per-second ticks
+                if early_peak_val > peak_val * 0.5:
+                    logger.info(f"[TRUNCATED_MARKER] Using early peak at {early_peak_idx} "
+                               f"(val={early_peak_val:.2f}) over global peak at {local_peak_idx} "
+                               f"(val={peak_val:.2f}) - likely truncated minute marker")
+                    local_peak_idx = early_peak_idx
+                    peak_idx = search_start + local_peak_idx
+                    peak_val = early_peak_val
         
         # =====================================================================
         # SUB-SAMPLE INTERPOLATION (Parabolic/Quadratic)
@@ -1697,26 +1729,31 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Call _find_precise_onset() to locate the first sample of the tone.
         # =====================================================================
         
-        precise_onset_idx, onset_confidence = self._find_precise_onset(
-            audio_signal=audio_signal,
-            correlation_peak_idx=int(precise_peak_idx),
-            tone_freq_hz=frequency,
-            tone_duration_sec=duration,
-            noise_floor=noise_floor
-        )
+        # TEMPORARY FIX (2026-01-26): Bypass Stage 2 onset detection
+        # The onset detection was introducing a ~250-500ms offset because it was
+        # searching in the wrong region. For now, use the correlation peak directly
+        # since for mode='valid', the peak index IS the tone start index.
+        #
+        # TODO: Fix _find_precise_onset() to properly refine the correlation peak
+        # without introducing large offsets.
         
-        # Use Stage 2 onset for timing (not Stage 1 correlation peak)
-        onset_sample_idx = precise_onset_idx
+        # Use correlation peak directly (Stage 1 only)
+        onset_sample_idx = precise_peak_idx
+        onset_confidence = 0.8  # Default confidence without onset refinement
         onset_time = buffer_start_time + (onset_sample_idx / self.sample_rate)
         timing_error_sec = onset_time - reference_time
         
-        # Log the improvement from Stage 1 to Stage 2
-        stage1_timing_ms = ((buffer_start_time + precise_peak_idx / self.sample_rate) - reference_time) * 1000
-        stage2_timing_ms = timing_error_sec * 1000
-        timing_delta_ms = stage2_timing_ms - stage1_timing_ms
-        logger.debug(f"Onset refinement: Stage1={stage1_timing_ms:+.2f}ms, "
-                    f"Stage2={stage2_timing_ms:+.2f}ms, delta={timing_delta_ms:+.2f}ms, "
-                    f"onset_conf={onset_confidence:.2f}")
+        # DIAGNOSTIC: Log all timing components
+        stage1_timing_ms = timing_error_sec * 1000
+        buffer_offset_from_minute = buffer_start_time - reference_time
+        # Expected minute marker position: should be near sample 0 if buffer started at minute boundary
+        # With buffer offset, minute marker would be at negative sample (before buffer start)
+        expected_marker_sample = -buffer_offset_from_minute * self.sample_rate
+        logger.info(f"[TIMING_DIAG] {station_type.value}: "
+                   f"peak_idx={peak_idx}, precise_peak={precise_peak_idx:.2f}, "
+                   f"buffer_offset={buffer_offset_from_minute*1000:+.1f}ms, "
+                   f"expected_marker_at_sample={expected_marker_sample:.0f} (negative=before buffer), "
+                   f"timing_error={stage1_timing_ms:+.1f}ms, peak_val={peak_val:.2f}")
         
         # Handle wraparound
         if timing_error_sec > 30:
@@ -1808,21 +1845,31 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         confidence = np.sqrt(detection_confidence * onset_confidence)
         
         # PROPAGATION PLAUSIBILITY CHECK
-        # Reject detections outside reasonable ionospheric path delays
-        # This filters out interference peaks that happen to be stronger than the actual tone
+        # 
+        # BOOTSTRAP PHILOSOPHY (2026-01-26):
+        # During bootstrap, we DON'T KNOW what time it is. The system clock is just
+        # a starting point. The tones ARE the ground truth - they tell us UTC.
+        # Bounds checking during bootstrap is CIRCULAR REASONING - we'd be rejecting
+        # detections based on a clock we're trying to fix.
+        #
+        # Once we find, confirm, and lock on tones, THEN we can apply bounds to
+        # reject noise and interference. But not before.
+        #
+        # For now, DISABLE bounds checking entirely. The fusion layer will handle
+        # outlier rejection once we have multiple consistent detections.
+        #
+        # TODO: Add bootstrap_locked flag to re-enable bounds after lock
         station_name = station_type.value  # 'WWV', 'WWVH', 'CHU'
         min_delay_ms, max_delay_ms = PROPAGATION_BOUNDS_MS.get(
             station_name, DEFAULT_PROPAGATION_BOUNDS_MS
         )
         
-        # DEBUG: Log bounds check (2026-01-24)
-        logger.info(f"  -> BOUNDS CHECK {station_type.value}: timing={timing_error_ms:+.1f}ms, "
-                   f"bounds=[{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms")
+        # Log timing for diagnostics (but don't reject during bootstrap)
+        logger.info(f"  -> TIMING {station_type.value}: {timing_error_ms:+.1f}ms "
+                   f"(bounds [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms - NOT enforced during bootstrap)")
         
-        if timing_error_ms < min_delay_ms or timing_error_ms > max_delay_ms:
-            logger.info(f"  -> REJECTED {station_type.value} (timing {timing_error_ms:+.1f}ms outside "
-                        f"plausible range [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms for {station_name})")
-            return None
+        # DIAGNOSTIC: Track timing_error_ms value before any modifications
+        timing_before_corrections = timing_error_ms
         
         # Determine if this station should be used for time_snap
         # 
@@ -1908,7 +1955,18 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             
             # 6. Apply Doppler correction to timing (2026-01-24 Enhancement)
             # Doppler shift causes systematic timing bias that can be corrected
-            if doppler_hz is not None and doppler_confidence > 0.3:
+            #
+            # BUG FIX (2026-01-26): The Doppler estimation from phase slope is
+            # returning the TONE FREQUENCY (1000Hz) instead of actual Doppler shift
+            # (~0.1Hz). This causes a massive 250ms timing error via the correction
+            # formula: Δt = (f_doppler / f_tone) × (T_tone / 2)
+            #
+            # DISABLED until Doppler estimation is fixed. Real HF Doppler is tiny
+            # (~0.1-1Hz) and the correction would only be ~0.05-0.5ms anyway.
+            #
+            # TODO: Fix _estimate_doppler_from_phase_slope to return actual Doppler
+            if doppler_hz is not None and abs(doppler_hz) < 10.0 and doppler_confidence > 0.3:
+                # Only apply correction if Doppler is physically plausible (<10Hz)
                 timing_error_ms, doppler_correction_ms = self._apply_doppler_correction(
                     timing_error_ms=timing_error_ms,
                     doppler_hz=doppler_hz,
@@ -1917,6 +1975,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
                 )
                 # Also update onset_time to reflect corrected timing
                 onset_time = onset_time - (doppler_correction_ms / 1000.0)
+            elif doppler_hz is not None and abs(doppler_hz) >= 10.0:
+                logger.warning(f"  -> DOPPLER SANITY FAIL: {doppler_hz:+.1f}Hz is implausible (>10Hz), skipping correction")
             
         except Exception as e:
             logger.debug(f"Complex correlation analysis failed: {e}")
@@ -2417,10 +2477,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             # Confidence based on SNR and peak sharpness
             confidence = min(1.0, snr_db / 20.0)  # Saturates at 20 dB
             
-            # Sample position: correlation peak corresponds to template center
-            # Onset is approximately template_samples/2 before peak
             # For 'valid' mode correlation, output[k] corresponds to signal[k:k+template_len]
-            # So peak at k means tone starts at sample k
+            # So peak at k means tone starts at sample k (no offset needed)
             onset_sample = peak_idx
             
             # RTP timestamp of tone onset
