@@ -396,6 +396,12 @@ class BootstrapService:
             self.timing_bootstrap.lock_tier = LockTier.PROVISIONAL
             self.timing_bootstrap.provisional_lock_time = time.time()
             
+            # CRITICAL FIX (2026-01-27): Enable propagation bounds enforcement
+            # After bootstrap locks, tone detectors should reject detections outside
+            # physical propagation bounds. This prevents bad detections (400-500ms)
+            # from polluting the D_clock calculation.
+            self._set_tone_detectors_locked(True)
+            
             logger.info(f"[BOOTSTRAP_SERVICE] PROVISIONAL LOCK achieved! "
                        f"D_clock ≈ {self._d_clock_ms:+.1f}ms")
             logger.info(f"[BOOTSTRAP] PROVISIONAL LOCK: D_clock ≈ {self._d_clock_ms:+.1f}ms")

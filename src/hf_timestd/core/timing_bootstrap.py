@@ -630,8 +630,13 @@ class TimingBootstrap:
             return self._handle_correlating(candidate, minute_index)
         elif self.state == BootstrapState.TRACKING:
             return self._handle_tracking(candidate, minute_index)
+        elif self.state == BootstrapState.LOCKED:
+            # CRITICAL FIX (2026-01-27): LOCKED is a confidence threshold, not a terminal state
+            # Continue refining the offset as we gather more observations.
+            # The offset refinement in _handle_tracking drives raw D_clock toward zero.
+            return self._handle_locked(candidate, minute_index)
         else:
-            return None  # LOCKED - no action needed
+            return None
     
     def _is_unambiguous_channel(self, channel: str, station: str) -> bool:
         """Check if this is an unambiguous channel (only one station transmits)."""
@@ -939,10 +944,36 @@ class TimingBootstrap:
         error_samples = actual_rtp - expected_rtp
         error_ms = error_samples * 1000 / self.sample_rate
         
-        # Tighter tolerance in tracking mode
-        if abs(error_ms) > 50:
+        # ================================================================
+        # ADAPTIVE TOLERANCE AND REFINEMENT (2026-01-27)
+        # ================================================================
+        # During initial convergence, allow larger errors and apply aggressive
+        # corrections. After convergence, tighten tolerance and use gentler alpha.
+        #
+        # This solves the chicken-and-egg problem: we need to accept large errors
+        # to refine them, but we also need to reject true outliers.
+        
+        # Determine tolerance based on convergence state
+        # The initial metadata-derived offset can be off by 100-500ms, so we need
+        # very permissive tolerance during initial convergence to allow refinement.
+        if self.lock_tier == LockTier.NONE:
+            # Before provisional lock: very permissive (initial convergence)
+            # Allow up to 500ms error to handle metadata offset errors
+            ERROR_TOLERANCE_MS = 500.0
+            OFFSET_CORRECTION_ALPHA = 0.4  # Very aggressive: 40% of error
+        elif self.lock_tier == LockTier.PROVISIONAL:
+            # After provisional lock: moderate tolerance
+            # Still allow large errors as we continue converging
+            ERROR_TOLERANCE_MS = 200.0
+            OFFSET_CORRECTION_ALPHA = 0.3  # Aggressive: 30% of error
+        else:
+            # After refined lock: tighter tolerance
+            ERROR_TOLERANCE_MS = 100.0
+            OFFSET_CORRECTION_ALPHA = 0.2  # Moderate: 20% of error
+        
+        if abs(error_ms) > ERROR_TOLERANCE_MS:
             logger.warning(f"[BOOTSTRAP] Tracking error {error_ms:.1f}ms for "
-                          f"{candidate.station}, expected RTP={expected_rtp}")
+                          f"{candidate.station} (tolerance={ERROR_TOLERANCE_MS}ms)")
             self.consecutive_failures += 1
             if self.consecutive_failures >= 5:
                 self._retreat_to_acquiring("Tracking errors exceeded threshold")
@@ -964,28 +995,23 @@ class TimingBootstrap:
             self.minutes_observed = minute_index + 1
         
         # ================================================================
-        # METROLOGICAL FIX: Continuously refine offset using timing errors
+        # CONTINUOUS OFFSET REFINEMENT
         # ================================================================
-        # The timing error tells us how far off our RTP-to-UTC mapping is.
-        # If error_ms > 0, tones arrive later than expected → offset is too low
-        # If error_ms < 0, tones arrive earlier than expected → offset is too high
-        #
-        # Apply a damped correction to avoid oscillation from ionospheric noise.
-        # Use exponential smoothing with alpha = 0.1 (slow convergence, stable)
-        OFFSET_CORRECTION_ALPHA = 0.1  # Smoothing factor (0.1 = 10% of error per update)
-        MIN_CORRECTION_MS = 0.5  # Don't bother with tiny corrections
+        # Apply corrections to drive raw D_clock toward zero.
+        # The alpha value is set above based on convergence state.
+        MIN_CORRECTION_MS = 0.1  # Apply even small corrections
         
         if abs(error_ms) > MIN_CORRECTION_MS:
             correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
             if correction_samples != 0:
-                old_offset = self.rtp_to_utc_offset_samples
                 self.rtp_to_utc_offset_samples += correction_samples
                 correction_ms = correction_samples * 1000 / self.sample_rate
                 
-                # Log significant corrections
-                if abs(correction_ms) > 1.0 or self.consecutive_validations <= 20:
-                    logger.info(f"[BOOTSTRAP] Offset refined: {correction_ms:+.2f}ms correction "
-                               f"(error was {error_ms:+.1f}ms, α={OFFSET_CORRECTION_ALPHA})")
+                # Log corrections > 0.5ms
+                if abs(correction_ms) > 0.5:
+                    logger.info(f"[BOOTSTRAP] Offset refined: {correction_ms:+.2f}ms "
+                               f"(error={error_ms:+.1f}ms, α={OFFSET_CORRECTION_ALPHA}, "
+                               f"tier={self.lock_tier.name})")
         
         # === TWO-TIER BOOTSTRAP LOGIC ===
         
@@ -1126,6 +1152,79 @@ class TimingBootstrap:
         logger.info(f"  Station distribution: {station_counts}")
         
         return "REFINED_LOCK"
+    
+    def _handle_locked(
+        self,
+        candidate: AcquisitionCandidate,
+        minute_index: int
+    ) -> Optional[str]:
+        """
+        LOCKED state: Continue refining offset as we gather more observations.
+        
+        CRITICAL INSIGHT (2026-01-27):
+        LOCKED is a confidence threshold, not a terminal state. We've reached
+        sufficient confidence to:
+        - Start archiving data (PROVISIONAL)
+        - Feed Chrony with timing (REFINED)
+        
+        But we should NEVER stop learning. Each tone arrival provides information
+        about the true RTP-to-UTC offset. Continue applying corrections to drive
+        raw D_clock toward zero (within propagation delay uncertainty ~5-10ms).
+        
+        This is metrologically correct: the offset estimate improves with more
+        observations, and ionospheric conditions change over time.
+        """
+        import time
+        
+        if self.rtp_to_utc_offset_samples is None:
+            return None
+        
+        # Predict expected RTP for this minute
+        expected_rtp = self.rtp_to_utc_offset_samples + (minute_index * SAMPLES_PER_MINUTE)
+        
+        # Add expected propagation delay for this station
+        station_delay_samples = self.station_expectations.get(
+            candidate.station, {}
+        ).get('delay_samples', 0)
+        expected_rtp += station_delay_samples
+        
+        actual_rtp = candidate.rtp_timestamp
+        error_samples = actual_rtp - expected_rtp
+        error_ms = error_samples * 1000 / self.sample_rate
+        
+        # In LOCKED state, we're more confident - reject large outliers
+        if abs(error_ms) > 100:
+            logger.debug(f"[BOOTSTRAP] LOCKED: Ignoring outlier {candidate.station} "
+                        f"error={error_ms:.1f}ms (>100ms threshold)")
+            return None
+        
+        # ================================================================
+        # CONTINUOUS OFFSET REFINEMENT
+        # ================================================================
+        # Apply corrections to drive raw D_clock toward zero.
+        # Use more aggressive alpha in LOCKED state (higher confidence).
+        # 
+        # After REFINED lock, use even more aggressive correction since
+        # we have high confidence in the offset estimate.
+        if self.lock_tier == LockTier.REFINED:
+            OFFSET_CORRECTION_ALPHA = 0.3  # 30% of error per update
+        else:
+            OFFSET_CORRECTION_ALPHA = 0.2  # 20% of error per update
+        
+        MIN_CORRECTION_MS = 0.1  # Apply even small corrections
+        
+        if abs(error_ms) > MIN_CORRECTION_MS:
+            correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
+            if correction_samples != 0:
+                self.rtp_to_utc_offset_samples += correction_samples
+                correction_ms = correction_samples * 1000 / self.sample_rate
+                
+                # Log significant corrections (>0.5ms) or periodically
+                if abs(correction_ms) > 0.5:
+                    logger.info(f"[BOOTSTRAP] LOCKED refinement: {correction_ms:+.2f}ms "
+                               f"(error was {error_ms:+.1f}ms from {candidate.station})")
+        
+        return f"LOCKED: {candidate.station} error={error_ms:+.1f}ms"
     
     def _compute_offset(self):
         """

@@ -338,6 +338,11 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         self.detection_count = 0
         self.last_detection_time: Optional[float] = None
         
+        # Bootstrap lock state (2026-01-27)
+        # When True, enforce propagation bounds to reject bad detections.
+        # When False (during bootstrap), allow wider bounds to find initial lock.
+        self.bootstrap_locked = False
+        
         # Statistics tracking
         self.detection_stats: Dict[StationType, int] = {
             StationType.WWV: 0,
@@ -1855,18 +1860,26 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Once we find, confirm, and lock on tones, THEN we can apply bounds to
         # reject noise and interference. But not before.
         #
-        # For now, DISABLE bounds checking entirely. The fusion layer will handle
-        # outlier rejection once we have multiple consistent detections.
-        #
-        # TODO: Add bootstrap_locked flag to re-enable bounds after lock
+        # PROPAGATION BOUNDS ENFORCEMENT (2026-01-27)
+        # After bootstrap locks, enforce propagation bounds to reject bad detections.
+        # During bootstrap, allow wider bounds to find initial lock.
         station_name = station_type.value  # 'WWV', 'WWVH', 'CHU'
         min_delay_ms, max_delay_ms = PROPAGATION_BOUNDS_MS.get(
             station_name, DEFAULT_PROPAGATION_BOUNDS_MS
         )
         
-        # Log timing for diagnostics (but don't reject during bootstrap)
-        logger.info(f"  -> TIMING {station_type.value}: {timing_error_ms:+.1f}ms "
-                   f"(bounds [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms - NOT enforced during bootstrap)")
+        if self.bootstrap_locked:
+            # ENFORCE bounds after lock - reject detections outside physical range
+            if timing_error_ms < min_delay_ms or timing_error_ms > max_delay_ms:
+                logger.warning(f"  -> TIMING {station_type.value}: {timing_error_ms:+.1f}ms "
+                              f"REJECTED (outside bounds [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms)")
+                return None
+            logger.info(f"  -> TIMING {station_type.value}: {timing_error_ms:+.1f}ms "
+                       f"(within bounds [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms)")
+        else:
+            # During bootstrap, log but don't reject
+            logger.info(f"  -> TIMING {station_type.value}: {timing_error_ms:+.1f}ms "
+                       f"(bounds [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms - NOT enforced during bootstrap)")
         
         # DIAGNOSTIC: Track timing_error_ms value before any modifications
         timing_before_corrections = timing_error_ms
