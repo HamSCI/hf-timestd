@@ -628,30 +628,36 @@ class CoreRecorderV2:
                 sample_rate = self.bootstrap_service.config.sample_rate
                 tb = self.bootstrap_service.timing_bootstrap
                 
-                # Get reference point from bootstrap: RTP at a known minute boundary
-                # and the absolute UTC of that minute
-                if tb.rtp_to_utc_offset_samples is not None:
+                # Get reference point: we need a consistent (RTP, UTC) pair
+                # The bootstrap's rtp_to_utc_offset_samples is the RTP at minute 0 of its
+                # reference frame. We need to know what absolute UTC that corresponds to.
+                #
+                # Strategy: Use the most recent validated tone to establish the reference.
+                # The tone's RTP and the minute_index tell us the relationship.
+                if tb.validated_tones and tb.rtp_to_utc_offset_samples is not None:
+                    # Get the most recent validated tone
+                    latest_tone = tb.validated_tones[-1]
+                    tone_rtp = latest_tone.candidate.rtp_timestamp
+                    minute_index = latest_tone.minute_index
+                    
+                    # The tone arrived at this RTP, which is minute_index minutes after
+                    # the bootstrap's reference minute 0. Use NTP to identify minute 0's UTC.
+                    import time
+                    now = time.time()
+                    current_minute_utc = (int(now) // 60) * 60
+                    
+                    # How many minutes ago was the tone detected?
+                    # Approximate using RTP difference
+                    samples_since_tone = tb.rtp_to_utc_offset_samples - tone_rtp + (minute_index * sample_rate * 60)
+                    # This is approximately 0 if our offset is correct
+                    
+                    # The reference minute 0 is minute_index minutes before the tone's minute
+                    # Use NTP to identify the current minute, then work backwards
+                    reference_utc = current_minute_utc - (minute_index * 60)
                     reference_rtp = tb.rtp_to_utc_offset_samples
                     
-                    if tb._time_confirmed and tb._confirmed_hour is not None and tb._confirmed_minute is not None:
-                        # BEST: Time confirmed from BCD/FSK decoding (no NTP dependency)
-                        import time
-                        now = time.time()
-                        midnight_utc = (int(now) // 86400) * 86400
-                        reference_utc = midnight_utc + tb._confirmed_hour * 3600 + tb._confirmed_minute * 60
-                        logger.info(f"[BOOTSTRAP] Reference from confirmed time: "
-                                   f"{tb._confirmed_hour:02d}:{tb._confirmed_minute:02d} UTC")
-                    else:
-                        # FALLBACK: Use NTP as a HINT to determine which minute
-                        # The tones tell us WHERE the minute boundary is (reference_rtp)
-                        # NTP tells us approximately WHICH minute it is
-                        # This is acceptable because NTP is typically within 10ms
-                        import time
-                        now = time.time()
-                        # Round to nearest minute boundary
-                        reference_utc = (int(now) // 60) * 60
-                        logger.info(f"[BOOTSTRAP] Reference from NTP hint: "
-                                   f"UTC={reference_utc} (NTP-derived minute, tone-derived RTP)")
+                    logger.debug(f"[BOOTSTRAP] Reference: minute_index={minute_index}, "
+                                f"ref_rtp={reference_rtp}, ref_utc={reference_utc}")
             
             writer = BootstrapStateWriter()
             writer.write_locked(
