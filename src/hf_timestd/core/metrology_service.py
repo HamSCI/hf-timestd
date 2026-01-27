@@ -667,8 +667,12 @@ class MetrologyService:
                 
                 if self._bootstrap_offset_samples is not None:
                     # Use bootstrap-derived offset (tone-based, accurate)
-                    # UTC = (RTP - offset_samples) / sample_rate
-                    system_time = (rtp_timestamp - self._bootstrap_offset_samples) / self._bootstrap_sample_rate
+                    # offset_samples = RTP at minute 0 (reference minute)
+                    # minute_index = (RTP - offset_samples) / SAMPLES_PER_MINUTE
+                    # UTC_seconds = minute_index * 60
+                    SAMPLES_PER_MINUTE = self._bootstrap_sample_rate * 60
+                    minute_index = (rtp_timestamp - self._bootstrap_offset_samples) / SAMPLES_PER_MINUTE
+                    system_time = minute_index * 60
                     timing_source = "bootstrap"
                 else:
                     # Fallback to metadata (NTP-derived)

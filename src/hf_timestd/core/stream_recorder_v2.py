@@ -575,10 +575,13 @@ class StreamRecorderV2:
                 if offset:
                     offset_samples, _ = offset
                     # Convert RTP to UTC using bootstrap-derived offset
-                    # offset_samples = RTP value that corresponds to UTC epoch
-                    # system_time = rtp / sample_rate - offset_samples / sample_rate
+                    # offset_samples = RTP at minute 0 (reference minute)
+                    # minute_index = (RTP - offset_samples) / SAMPLES_PER_MINUTE
+                    # UTC_seconds = minute_index * 60
                     sample_rate = self._bootstrap_service.config.sample_rate
-                    archive_system_time = (quality.last_rtp_timestamp - offset_samples) / sample_rate
+                    SAMPLES_PER_MINUTE = sample_rate * 60
+                    minute_index = (quality.last_rtp_timestamp - offset_samples) / SAMPLES_PER_MINUTE
+                    archive_system_time = minute_index * 60
             
             # Write to Phase 1 archive (Phase 2/3 handled by separate services)
             self.archive_writer.write_samples(
