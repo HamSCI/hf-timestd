@@ -69,14 +69,16 @@ class MetrologyService:
         self._rtp_to_unix_offset = None
         self._offset_samples = []
         
-        # Bootstrap Offset (2026-01-27): RTP-to-UTC(NIST) correspondence
+        # Bootstrap Reference (2026-01-27): RTP-to-UTC(NIST) correspondence
         # GPSDO RTP is the steel ruler. Bootstrap derives UTC(NIST) from HF tones.
         # NTP is only an external reference, NOT authoritative.
+        # UTC = reference_utc + (RTP - reference_rtp) / sample_rate
         from .bootstrap_state import BootstrapState as SharedBootstrapState, DEFAULT_STATE_FILE
         self._bootstrap_state_file = DEFAULT_STATE_FILE
-        self._bootstrap_offset_samples = None  # RTP at UTC(NIST) minute 0
+        self._reference_rtp = None      # RTP at known minute boundary
+        self._reference_utc = None      # UTC of that minute boundary
         self._bootstrap_sample_rate = 24000
-        self._ntp_correction_loaded = False  # Flag to load once
+        self._bootstrap_loaded = False  # Flag to load once
         
         # NOTE (2026-01-27): Metrology service no longer runs its own bootstrap.
         # The core recorder establishes the RTP-to-UTC(NIST) offset and writes it
@@ -220,10 +222,10 @@ class MetrologyService:
                 rtp_timestamp=rtp_timestamp
             )
             
-            # NOTE (2026-01-27): Initial bootstrap removed - we use the shared offset
+            # NOTE (2026-01-27): Initial bootstrap removed - we use the shared reference
             # from the core recorder's bootstrap state file. But we continue refining
-            # that offset based on tone arrivals to drive raw D_clock toward zero.
-            if self._bootstrap_offset_samples is not None:
+            # that reference based on tone arrivals to drive raw D_clock toward zero.
+            if self._reference_rtp is not None:
                 self._refine_offset_from_tones(results)
             
             # Write Results
@@ -290,15 +292,15 @@ class MetrologyService:
 
     def _refine_offset_from_tones(self, results: list):
         """
-        Continue refining RTP-to-UTC(NIST) offset based on tone arrivals.
+        Continue refining RTP-to-UTC(NIST) reference based on tone arrivals.
         
-        The core recorder's bootstrap establishes the initial offset. We continue
+        The core recorder's bootstrap establishes the initial reference. We continue
         refining it here based on tone timing errors to drive raw D_clock toward zero.
         
         timing_error = raw_toa - expected_propagation_delay
-        If timing_error > 0, tones arrive later than expected → offset needs adjustment
+        If timing_error > 0, tones arrive later than expected → reference_rtp needs adjustment
         """
-        if self._bootstrap_offset_samples is None:
+        if self._reference_rtp is None:
             return
         
         OFFSET_CORRECTION_ALPHA = 0.3  # 30% of error per update
@@ -324,37 +326,41 @@ class MetrologyService:
                 correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
                 
                 if correction_samples != 0:
-                    self._bootstrap_offset_samples += correction_samples
+                    # Adjust reference_rtp: if tones arrive late, reference_rtp should increase
+                    self._reference_rtp += correction_samples
                     correction_ms = correction_samples * 1000 / self.engine.sample_rate
                     
                     if abs(correction_ms) > 0.5:
                         logger.info(f"[OFFSET_REFINE] {station}: {correction_ms:+.2f}ms correction "
                                    f"(error was {timing_error_ms:+.1f}ms, raw_toa={res.raw_toa_ms:.1f}ms)")
 
-    def _load_ntp_correction(self):
-        """Load bootstrap offset from shared state file.
+    def _load_bootstrap_reference(self):
+        """Load bootstrap reference from shared state file.
         
-        The bootstrap offset establishes the RTP-to-UTC(NIST) correspondence
+        The bootstrap reference establishes the RTP-to-UTC(NIST) correspondence
         by finding minute markers in the HF tones. This is the authoritative
         time reference - GPSDO RTP is the steel ruler, tones derive UTC(NIST).
+        
+        UTC = reference_utc + (RTP - reference_rtp) / sample_rate
         """
         from .bootstrap_state import BootstrapState as SharedBootstrapState
         
         try:
             state = SharedBootstrapState.from_file(self._bootstrap_state_file)
-            if state and state.locked and state.rtp_to_utc_offset_samples is not None:
-                self._bootstrap_offset_samples = state.rtp_to_utc_offset_samples
+            if state and state.locked and state.reference_rtp is not None and state.reference_utc is not None:
+                self._reference_rtp = state.reference_rtp
+                self._reference_utc = state.reference_utc
                 self._bootstrap_sample_rate = state.sample_rate
-                self._ntp_correction_loaded = True
+                self._bootstrap_loaded = True
                 logger.info(
-                    f"[BOOTSTRAP] Loaded RTP-to-UTC(NIST) offset: {self._bootstrap_offset_samples} samples "
-                    f"@ {self._bootstrap_sample_rate}Hz (tier={state.lock_tier})"
+                    f"[BOOTSTRAP] Loaded reference: RTP={self._reference_rtp} @ UTC={self._reference_utc:.3f} "
+                    f"(tier={state.lock_tier})"
                 )
             else:
-                self._ntp_correction_loaded = True  # Mark as loaded even if not available
-                logger.debug("[BOOTSTRAP] State not locked or missing offset - using NTP fallback")
+                self._bootstrap_loaded = True  # Mark as loaded even if not available
+                logger.debug("[BOOTSTRAP] State not locked or missing reference - using NTP fallback")
         except Exception as e:
-            self._ntp_correction_loaded = True  # Don't retry on error
+            self._bootstrap_loaded = True  # Don't retry on error
             logger.warning(f"[BOOTSTRAP] Failed to load state: {e} - using NTP fallback")
     
     def stop(self):
@@ -533,20 +539,17 @@ class MetrologyService:
             if 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
                 
-                # Load bootstrap offset (once)
-                if not self._ntp_correction_loaded:
-                    self._load_ntp_correction()
+                # Load bootstrap reference (once)
+                if not self._bootstrap_loaded:
+                    self._load_bootstrap_reference()
                 
                 # Try bootstrap-derived UTC(NIST) first
-                if self._bootstrap_offset_samples is not None:
-                    # Bootstrap offset semantics (from establish_offset_from_metadata):
-                    #   offset_samples = -offset_sec * sample_rate
-                    #   where offset_sec = UTC - RTP/sample_rate
-                    # Therefore: UTC = (RTP - offset_samples) / sample_rate
-                    system_time = (rtp_timestamp - self._bootstrap_offset_samples) / self._bootstrap_sample_rate
+                # UTC = reference_utc + (RTP - reference_rtp) / sample_rate
+                if self._reference_rtp is not None and self._reference_utc is not None:
+                    system_time = self._reference_utc + (rtp_timestamp - self._reference_rtp) / self._bootstrap_sample_rate
                     timing_source = "bootstrap"
                 else:
-                    # Fallback to NTP-derived metadata
+                    # Fallback to NTP-derived metadata (external reference only)
                     start_system_time = metadata.get('start_system_time')
                     if start_system_time is not None:
                         system_time = start_system_time

@@ -603,26 +603,41 @@ class CoreRecorderV2:
         try:
             from .bootstrap_state import BootstrapStateWriter
             
-            # Get RTP-to-UTC offset and NTP correction from bootstrap service
-            offset_samples = None
             sample_rate = 24000
-            ntp_correction_ms = None
+            reference_rtp = None
+            reference_utc = None
+            
             if self.bootstrap_service:
-                offset = self.bootstrap_service.timing_bootstrap.get_rtp_to_utc_offset()
-                if offset:
-                    offset_samples, _ = offset
                 sample_rate = self.bootstrap_service.config.sample_rate
-                # Get NTP correction (how much to adjust NTP time for minute alignment)
-                ntp_correction_ms = self.bootstrap_service._calculate_ntp_correction()
+                tb = self.bootstrap_service.timing_bootstrap
+                
+                # Get reference point from bootstrap: RTP at a known minute boundary
+                # and the absolute UTC of that minute (from tone-derived time confirmation)
+                if tb.rtp_to_utc_offset_samples is not None and tb._time_confirmed:
+                    # We have a confirmed minute from BCD/FSK decoding
+                    # reference_rtp is the RTP at minute 0 of bootstrap's reference frame
+                    reference_rtp = tb.rtp_to_utc_offset_samples
+                    
+                    # Compute reference_utc from confirmed hour:minute
+                    # The confirmed time tells us which minute of the day we're at
+                    if tb._confirmed_hour is not None and tb._confirmed_minute is not None:
+                        import time
+                        # Get today's date at midnight UTC
+                        now = time.time()
+                        midnight_utc = (int(now) // 86400) * 86400
+                        # Add confirmed hour and minute
+                        reference_utc = midnight_utc + tb._confirmed_hour * 3600 + tb._confirmed_minute * 60
+                        logger.info(f"[BOOTSTRAP] Reference from confirmed time: "
+                                   f"{tb._confirmed_hour:02d}:{tb._confirmed_minute:02d} UTC")
             
             writer = BootstrapStateWriter()
             writer.write_locked(
                 lock_tier=lock_tier,
                 d_clock_ms=d_clock_ms,
                 uncertainty_ms=uncertainty_ms,
-                rtp_to_utc_offset_samples=offset_samples or 0,
                 sample_rate=sample_rate,
-                ntp_correction_ms=ntp_correction_ms
+                reference_rtp=reference_rtp,
+                reference_utc=reference_utc
             )
         except Exception as e:
             logger.warning(f"Failed to write bootstrap state file: {e}")

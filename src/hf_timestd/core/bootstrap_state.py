@@ -36,11 +36,14 @@ class BootstrapState:
     d_clock_ms: Optional[float] = None
     uncertainty_ms: Optional[float] = None
     lock_time: Optional[str] = None  # ISO timestamp
-    rtp_to_utc_offset_samples: Optional[int] = None
     sample_rate: int = 24000
-    # NTP-to-tone correction: how much to adjust NTP time to align with tone arrivals
-    # Positive = tones arrive later than NTP predicts (add to NTP time)
-    # This is the key value for minute boundary alignment
+    # Reference point for RTP-to-UTC(NIST) conversion (derived from tones, NOT NTP)
+    # UTC = reference_utc + (RTP - reference_rtp) / sample_rate
+    reference_rtp: Optional[int] = None      # RTP at a known minute boundary
+    reference_utc: Optional[float] = None    # UTC timestamp of that minute boundary
+    # Legacy fields (may be removed)
+    rtp_to_utc_offset_samples: Optional[int] = None
+    rtp_to_utc_offset_sec: Optional[float] = None
     ntp_correction_ms: Optional[float] = None
     
     def to_json(self) -> str:
@@ -81,9 +84,9 @@ class BootstrapStateWriter:
         lock_tier: str,
         d_clock_ms: float,
         uncertainty_ms: float,
-        rtp_to_utc_offset_samples: int,
         sample_rate: int = 24000,
-        ntp_correction_ms: Optional[float] = None
+        reference_rtp: Optional[int] = None,
+        reference_utc: Optional[float] = None
     ):
         """Write locked state to file.
         
@@ -91,10 +94,9 @@ class BootstrapStateWriter:
             lock_tier: Lock tier (PROVISIONAL or REFINED)
             d_clock_ms: Estimated D_clock (system clock offset from UTC)
             uncertainty_ms: Uncertainty in D_clock estimate
-            rtp_to_utc_offset_samples: RTP offset for relative minute indexing
             sample_rate: Sample rate in Hz
-            ntp_correction_ms: Correction to apply to NTP time for minute alignment
-                              Positive = tones arrive later than NTP predicts
+            reference_rtp: RTP value at a known minute boundary (from tones)
+            reference_utc: UTC timestamp of that minute boundary (from tones + station ID)
         """
         state = BootstrapState(
             locked=True,
@@ -102,14 +104,16 @@ class BootstrapStateWriter:
             d_clock_ms=d_clock_ms,
             uncertainty_ms=uncertainty_ms,
             lock_time=datetime.now(timezone.utc).isoformat(),
-            rtp_to_utc_offset_samples=rtp_to_utc_offset_samples,
             sample_rate=sample_rate,
-            ntp_correction_ms=ntp_correction_ms
+            reference_rtp=reference_rtp,
+            reference_utc=reference_utc
         )
         self._write(state)
-        logger.info(f"[BOOTSTRAP] Wrote lock state: {lock_tier}, D_clock={d_clock_ms:+.1f}ms, "
-                   f"NTP_correction={ntp_correction_ms:+.1f}ms" if ntp_correction_ms else 
-                   f"[BOOTSTRAP] Wrote lock state: {lock_tier}, D_clock={d_clock_ms:+.1f}ms")
+        if reference_utc:
+            logger.info(f"[BOOTSTRAP] Wrote lock state: {lock_tier}, D_clock={d_clock_ms:+.1f}ms, "
+                       f"ref_rtp={reference_rtp}, ref_utc={reference_utc:.3f}")
+        else:
+            logger.info(f"[BOOTSTRAP] Wrote lock state: {lock_tier}, D_clock={d_clock_ms:+.1f}ms")
     
     def write_unlocked(self):
         """Write unlocked state to file."""
