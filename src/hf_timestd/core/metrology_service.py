@@ -539,8 +539,9 @@ class MetrologyService:
             if 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
                 
-                # Load bootstrap reference (once)
-                if not self._bootstrap_loaded:
+                # Load/refresh bootstrap reference periodically
+                # The core recorder continues to refine the offset after lock
+                if not self._bootstrap_loaded or self.minutes_processed % 5 == 0:
                     self._load_bootstrap_reference()
                 
                 # Try bootstrap-derived UTC(NIST) first

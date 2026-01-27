@@ -334,6 +334,7 @@ class CoreRecorderV2:
         last_status_time = 0
         last_health_check = 0
         last_quota_check = 0
+        last_bootstrap_update = 0
         
         try:
             while self.running:
@@ -363,6 +364,11 @@ class CoreRecorderV2:
                 if now - last_quota_check >= 300:
                     self._enforce_quota()
                     last_quota_check = now
+                
+                # Update bootstrap state file (every 60 seconds after lock)
+                if now - last_bootstrap_update >= 60:
+                    self._update_bootstrap_state_if_locked()
+                    last_bootstrap_update = now
         
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")
@@ -597,6 +603,17 @@ class CoreRecorderV2:
         
         # Write bootstrap state file for fusion service (inotify-based coordination)
         self._write_bootstrap_state('REFINED', d_clock_ms, uncertainty_ms)
+    
+    def _update_bootstrap_state_if_locked(self):
+        """Periodically update bootstrap state file with refined offset."""
+        if not self.bootstrap_service:
+            return
+        
+        tb = self.bootstrap_service.timing_bootstrap
+        if tb.lock_tier.value >= 1:  # PROVISIONAL or higher
+            d_clock_ms = self.bootstrap_service._calculate_d_clock() or 0.0
+            tier_name = 'PROVISIONAL' if tb.lock_tier.value == 1 else 'REFINED'
+            self._write_bootstrap_state(tier_name, d_clock_ms, uncertainty_ms=5.0)
     
     def _write_bootstrap_state(self, lock_tier: str, d_clock_ms: float, uncertainty_ms: float):
         """Write bootstrap state file for inter-service coordination."""
