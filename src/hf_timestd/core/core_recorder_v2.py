@@ -576,6 +576,9 @@ class CoreRecorderV2:
         """
         logger.info(f"[BOOTSTRAP] PROVISIONAL LOCK: D_clock ≈ {d_clock_ms:+.1f}ms")
         logger.info("[BOOTSTRAP] Archiving enabled - fusion service will handle Chrony feed")
+        
+        # Write bootstrap state file for fusion service (inotify-based coordination)
+        self._write_bootstrap_state('PROVISIONAL', d_clock_ms, uncertainty_ms=5.0)
     
     def _on_bootstrap_full_lock(self, d_clock_ms: float, uncertainty_ms: float):
         """Handle bootstrap full lock event.
@@ -591,6 +594,34 @@ class CoreRecorderV2:
         """
         logger.info(f"[BOOTSTRAP] FULL LOCK: D_clock = {d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms")
         logger.info("[BOOTSTRAP] Transitioning to operational mode - archiving enabled")
+        
+        # Write bootstrap state file for fusion service (inotify-based coordination)
+        self._write_bootstrap_state('REFINED', d_clock_ms, uncertainty_ms)
+    
+    def _write_bootstrap_state(self, lock_tier: str, d_clock_ms: float, uncertainty_ms: float):
+        """Write bootstrap state file for inter-service coordination."""
+        try:
+            from .bootstrap_state import BootstrapStateWriter
+            
+            # Get RTP-to-UTC offset from bootstrap service
+            offset_samples = None
+            sample_rate = 24000
+            if self.bootstrap_service:
+                offset = self.bootstrap_service.timing_bootstrap.get_rtp_to_utc_offset()
+                if offset:
+                    offset_samples, _ = offset
+                sample_rate = self.bootstrap_service.config.sample_rate
+            
+            writer = BootstrapStateWriter()
+            writer.write_locked(
+                lock_tier=lock_tier,
+                d_clock_ms=d_clock_ms,
+                uncertainty_ms=uncertainty_ms,
+                rtp_to_utc_offset_samples=offset_samples or 0,
+                sample_rate=sample_rate
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write bootstrap state file: {e}")
     
     @staticmethod
     def _get_ntp_offset() -> Optional[float]:

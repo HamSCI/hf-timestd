@@ -515,8 +515,9 @@
                 </div>
                 <div class="widget-subtitle">${statusMsg}</div>
                 <div style="margin-top: 8px; font-size: 0.8em; color: #64748b;">
-                    Note: Both feeds converge to ~0ms as chrony disciplines the clock. 
-                    The L1-L2 difference reveals propagation correction quality.
+                    L1 = geometric delay only (light time + 1.5ms fallback)<br>
+                    L2 = full physics model (ionosphere + propagation mode)<br>
+                    L1-L2 = propagation correction magnitude
                 </div>
             `;
         }

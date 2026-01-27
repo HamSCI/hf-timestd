@@ -4446,6 +4446,45 @@ def run_fusion_service(
         systemd_daemon.notify('READY=1')
         logger.info("Notified systemd: READY")
     
+    # ================================================================
+    # BOOTSTRAP LOCK GATE (v6.2) - Wait for bootstrap before fusion
+    # ================================================================
+    # Fusion should not run until bootstrap has established the RTP-to-UTC
+    # correspondence. Without this, D_clock calculations are meaningless.
+    #
+    # We use inotify-based file watching for efficient coordination with
+    # the core recorder, which writes bootstrap_state.json on lock.
+    try:
+        from .bootstrap_state import BootstrapStateWatcher
+        bootstrap_watcher = BootstrapStateWatcher()
+        
+        # Check if already locked (e.g., service restart after lock)
+        if not bootstrap_watcher.is_locked():
+            logger.info("[BOOTSTRAP] Waiting for bootstrap lock before starting fusion...")
+            # Wait indefinitely for bootstrap lock (with watchdog keepalive)
+            while running and not bootstrap_watcher.is_locked():
+                if SYSTEMD_AVAILABLE:
+                    systemd_daemon.notify('WATCHDOG=1')
+                time.sleep(1.0)
+            
+            if not running:
+                logger.info("[BOOTSTRAP] Shutdown requested while waiting for lock")
+                return
+        
+        state = bootstrap_watcher.get_state()
+        if state:
+            logger.info(
+                f"[BOOTSTRAP] Lock confirmed: {state.lock_tier}, "
+                f"D_clock={state.d_clock_ms:+.1f}ms ± {state.uncertainty_ms:.1f}ms"
+            )
+        else:
+            logger.info("[BOOTSTRAP] Lock detected (state file exists)")
+            
+    except ImportError as e:
+        logger.warning(f"[BOOTSTRAP] State watcher not available: {e}. Proceeding without gate.")
+    except Exception as e:
+        logger.warning(f"[BOOTSTRAP] Error checking lock state: {e}. Proceeding without gate.")
+    
     while running:
         try:
             # BREADCRUMB: Loop start
@@ -4477,8 +4516,8 @@ def run_fusion_service(
             except Exception as e_fuse:
                 logger.error(f"L2 fusion calculation CRASHED: {e_fuse}", exc_info=True)
             
-            # BREADCRUMB: Fusion returned
-            logger.debug(f"L1 fusion returned: {result_l1 is not None}, L2 fusion returned: {result_l2 is not None}")
+            # BREADCRUMB: Fusion returned (INFO level for visibility)
+            logger.info(f"Dual fusion: L1={result_l1 is not None}, L2={result_l2 is not None}")
             
             # Use L2 result for logging (primary feed)
             result = result_l2 if result_l2 else result_l1
@@ -4486,17 +4525,29 @@ def run_fusion_service(
             # ================================================================
             # METROLOGICAL TRACKING: Populate L1/L2 comparison fields (v6.2)
             # ================================================================
+            # CRITICAL: Use d_clock_raw_ms (weighted mean before Kalman), NOT d_clock_fused_ms
+            # 
+            # d_clock_fused_ms = self.kalman_state[0] (same for both L1 and L2!)
+            # d_clock_raw_ms = weighted mean of measurements (different for L1 vs L2)
+            #
+            # The L1-L2 difference reveals propagation correction quality:
+            #   L1: D_clock = raw_toa - (light_time + 1.5ms)  [geometric fallback]
+            #   L2: D_clock = raw_toa - propagation_delay     [full physics model]
+            #   L1-L2 = ionospheric_delay + mode_correction - 1.5ms_fallback
+            #
+            # This is the metrologically meaningful comparison.
             if result:
                 # Record L1 vs L2 comparison for propagation correction validation
                 if result_l1 is not None:
-                    result.d_clock_l1_ms = result_l1.d_clock_fused_ms
+                    result.d_clock_l1_ms = result_l1.d_clock_raw_ms
                 if result_l2 is not None:
-                    result.d_clock_l2_ms = result_l2.d_clock_fused_ms
+                    result.d_clock_l2_ms = result_l2.d_clock_raw_ms
                 if result_l1 is not None and result_l2 is not None:
-                    result.l1_l2_difference_ms = result_l1.d_clock_fused_ms - result_l2.d_clock_fused_ms
-                    logger.debug(
+                    result.l1_l2_difference_ms = result_l1.d_clock_raw_ms - result_l2.d_clock_raw_ms
+                    logger.info(
                         f"L1-L2 difference: {result.l1_l2_difference_ms:+.3f} ms "
-                        f"(L1={result_l1.d_clock_fused_ms:+.3f}, L2={result_l2.d_clock_fused_ms:+.3f})"
+                        f"(L1_raw={result_l1.d_clock_raw_ms:+.3f}, L2_raw={result_l2.d_clock_raw_ms:+.3f}) "
+                        f"[propagation correction quality]"
                     )
                 
                 # Record calibration convergence metrics
@@ -4515,6 +4566,10 @@ def run_fusion_service(
                 adev_values = fusion.adev_tracker.compute_all_adev([60, 1000])
                 result.adev_60s = adev_values.get('adev_60s')
                 result.adev_1000s = adev_values.get('adev_1000s')
+                
+                # CRITICAL: Re-write HDF5 with L1/L2 fields now populated
+                # The initial write in fuse() happened before L1/L2 were set
+                fusion._write_fused_result(result)
             
             if result:
                 # Log summary
