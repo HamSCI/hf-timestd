@@ -515,9 +515,11 @@
                 </div>
                 <div class="widget-subtitle">${statusMsg}</div>
                 <div style="margin-top: 8px; font-size: 0.8em; color: #64748b;">
-                    L1 = geometric delay only (light time + 1.5ms fallback)<br>
-                    L2 = full physics model (ionosphere + propagation mode)<br>
-                    L1-L2 = propagation correction magnitude
+                    <strong>TSL1/TSL2 values</strong> = D_clock offset (local clock vs UTC(NIST)) before Chrony disciplines it<br>
+                    Large values (100s of ms) are normal — Chrony uses these to steer the system clock toward zero offset<br><br>
+                    <strong>L1</strong> = geometric delay only (light time + 1.5ms fallback)<br>
+                    <strong>L2</strong> = full physics model (ionosphere + propagation mode)<br>
+                    <strong>L1−L2</strong> = propagation correction magnitude (should be small, typically &lt;2ms)
                 </div>
             `;
         }
