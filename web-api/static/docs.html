@@ -515,11 +515,11 @@
                 </div>
                 <div class="widget-subtitle">${statusMsg}</div>
                 <div style="margin-top: 8px; font-size: 0.8em; color: #64748b;">
-                    <strong>TSL1/TSL2 values</strong> = D_clock offset (local clock vs UTC(NIST)) before Chrony disciplines it<br>
-                    Large values (100s of ms) are normal — Chrony uses these to steer the system clock toward zero offset<br><br>
-                    <strong>L1</strong> = geometric delay only (light time + 1.5ms fallback)<br>
-                    <strong>L2</strong> = full physics model (ionosphere + propagation mode)<br>
-                    <strong>L1−L2</strong> = propagation correction magnitude (should be small, typically &lt;2ms)
+                    <strong>Why ~100s of ms?</strong> These are <em>raw</em> D_clock values before calibration.<br>
+                    The offset comes from the RTP timestamp epoch (arbitrary, not UTC-aligned).<br>
+                    Chrony sees the <em>calibrated</em> D_clock ≈ 0ms after the Kalman filter absorbs this offset.<br><br>
+                    <strong>L1−L2 difference</strong> is the key metric — it shows propagation correction quality<br>
+                    (should be small, typically &lt;2ms, independent of the absolute offset)
                 </div>
             `;
         }
