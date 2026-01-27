@@ -1,20 +1,110 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-## 🚀 Current Status: "Steel Ruler" Release (v5.3.8)
+## 🚀 Current Status: Memory & Bootstrap Fixes (v5.3.9)
 
-**Version**: v5.3.8 - 2026-01-22
+**Version**: v5.3.9 - 2026-01-27
 **Core Philosophy**: **"Steel Ruler" Metrology**. The system treats the local GPSDO as a fixed standard (zero process noise) to measure ionospheric variance.
 
-### 🌟 Recent Accomplishments (v5.3.8)
+### 🌟 Recent Accomplishments (v5.3.9)
 
-1. **Station-Centric Architecture**: Added `BroadcastRegistry` class for phase-engine integration (17 broadcasts, 9/17 channels).
-2. **Test Suite Restoration**: Fixed 79 tests, added 27 new BroadcastRegistry tests, archived 3 deprecated tests.
-3. **Verification Script Fixes**: Fixed chrony detection regex, removed obsolete checks.
-4. **Config Schema**: Added `[ka9q].source` field for radiod/phase-engine mode selection.
+1. **Memory Leak Fixes**: Capped `all_candidates` list at 500 entries, freed bootstrap buffers on provisional lock (~250MB reclaimed).
+2. **Bootstrap Phase Logic**: Fixed `_update_phase_from_bootstrap()` to always check state, not just when search returns results.
+3. **Calibration Convergence**: Relaxed sanity check (3× limit) and discontinuity threshold (100ms) during initial convergence.
+4. **Timer Fix**: Changed chrony monitor timer from `OnUnitActiveSec` to `OnCalendar` to prevent stalling.
+5. **ka9q-python 3.4.1**: Upgraded to fix RTP stream deduplication.
 
-### 🔴 Next Session: Propagation & Physics Page Review
+### 🔴 Next Session: Two-Tier Bootstrap for Ionospheric Averaging
 
-**Objective:** Review `propagation.html` and `physics.html` for errors, omissions, or reasonable improvements.
+**Objective:** Implement two-tier bootstrap locking that accounts for ionospheric variations before refining the RTP-to-UTC offset.
+
+---
+
+## 📋 Two-Tier Bootstrap Implementation Task
+
+### Problem Statement
+
+The current bootstrap system locks too quickly, capturing ionospheric variability as systematic offset error. The ionosphere introduces path delay variations at multiple timescales:
+
+| Timescale | Phenomenon | Typical Variation |
+|-----------|------------|-------------------|
+| **Seconds** | Scintillation, multipath | ±5-20 ms |
+| **Minutes** | Traveling Ionospheric Disturbances (TIDs) | ±10-30 ms |
+| **Hours** | Diurnal TEC variation | ±50-100 ms equivalent |
+
+To achieve a stable RTP-to-UTC offset, we need to average over the TID timescale (~10-15 minutes). Locking in 2-3 minutes captures ionospheric variability as systematic offset error.
+
+### Two-Tier Bootstrap Design
+
+| Tier | Name | Purpose | Timing | Criteria |
+|------|------|---------|--------|----------|
+| **Tier 1** | Provisional Lock | Establish minute boundaries for archiving | 2-3 minutes | 2+ stations, 2+ frequencies, consistent clusters |
+| **Tier 2** | Refined Lock | Stable RTP-to-UTC offset after ionospheric averaging | 10-15 minutes | 50+ measurements, offset std < 15ms, median-based |
+
+### Current Implementation State
+
+The `BootstrapConfig` dataclass in `bootstrap_service.py` already has the two-tier parameters defined:
+
+```python
+# Tier 1: Provisional lock criteria (quick, for minute alignment)
+min_stations_for_provisional: int = 2
+min_frequencies_for_provisional: int = 2
+min_minutes_for_provisional: int = 2
+
+# Tier 2: Refined lock criteria (stable, after ionospheric averaging)
+refined_lock_duration_sec: float = 600.0  # 10 minutes for TID averaging
+min_measurements_for_refined: int = 50
+max_offset_std_for_refined_ms: float = 15.0
+
+# Callbacks
+on_provisional_lock: Optional[Callable[[float], None]] = None
+on_full_lock: Optional[Callable[[float, float], None]] = None
+```
+
+### Implementation Tasks
+
+1. **Track offset measurements during provisional lock**
+   - After provisional lock, continue collecting tone detections
+   - Store offset measurements with timestamps in a rolling window
+   - Calculate running median and standard deviation
+
+2. **Implement refined lock transition logic**
+   - After `refined_lock_duration_sec` (10 min), check if criteria are met:
+     - At least `min_measurements_for_refined` (50) measurements
+     - Offset standard deviation < `max_offset_std_for_refined_ms` (15ms)
+   - If met, transition to `LOCKED` phase with refined offset (median)
+   - If not met, continue collecting until criteria are satisfied
+
+3. **Update offset calculation**
+   - Provisional lock: Use first valid cluster offset (current behavior)
+   - Refined lock: Use median of all measurements during provisional phase
+
+4. **Expose lock tier in status**
+   - Add `lock_tier` field to bootstrap status (0=none, 1=provisional, 2=refined)
+   - Log tier transitions with offset statistics
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/hf_timestd/core/bootstrap_service.py` | Bootstrap coordination, phase management, config |
+| `src/hf_timestd/core/timing_bootstrap.py` | State machine, candidate clustering, offset calculation |
+| `src/hf_timestd/core/bootstrap_rolling_buffer.py` | Circular buffer for IQ samples |
+| `src/hf_timestd/core/tone_detector.py` | FFT-based tone detection |
+
+### Testing Strategy
+
+1. **Unit tests**: Add tests for refined lock transition logic
+2. **Integration test**: Verify offset improves after 10 minutes
+3. **Monitoring**: Log offset statistics during provisional phase to validate improvement
+
+### Reference: Ionospheric Averaging Theory
+
+The Allan deviation of ionospheric delay reaches a minimum at τ ≈ 10-20 minutes. This is the optimal averaging time to:
+- Average out scintillation (seconds)
+- Average out TIDs (minutes)
+- Not be affected by diurnal trends (hours)
+
+Using the median instead of mean provides robustness against outliers from multipath or interference.
 
 ---
 
@@ -159,39 +249,44 @@ curl -s http://localhost:8000/api/physics/scintillation/paths | python3 -m json.
 
 ---
 
+## ✅ Session Complete: Memory & Bootstrap Fixes (v5.3.9)
+
+**Date**: 2026-01-27  
+**Status**: **COMPLETE** - Memory leaks fixed, bootstrap buffer cleanup working
+
+### Accomplishments
+
+1. **Memory Leak Fixes**
+   - Capped `TimingBootstrap.all_candidates` at 500 entries
+   - Free bootstrap buffers on provisional lock (~250MB reclaimed)
+   - Fixed `_update_phase_from_bootstrap()` to always check state
+
+2. **Calibration Convergence Fixes**
+   - Relaxed sanity check to 3× limit (240ms) during initial convergence
+   - Relaxed discontinuity threshold to 100ms during convergence
+
+3. **Timer & Monitoring Fixes**
+   - Changed chrony monitor timer from `OnUnitActiveSec` to `OnCalendar`
+   - Added SHM, calibration freshness, single-station mode checks
+
+4. **ka9q-python 3.4.1**
+   - Upgraded to fix RTP stream deduplication
+
+### Files Modified
+
+- `systemd/timestd-chrony-monitor.timer`
+- `scripts/check-chrony-reach.sh`
+- `src/hf_timestd/core/multi_broadcast_fusion.py`
+- `src/hf_timestd/core/bootstrap_service.py`
+- `src/hf_timestd/core/timing_bootstrap.py`
+- `docs/changes/SESSION_2026_01_27_TSL_UNREACHABLE_DIAGNOSIS.md`
+
+---
+
 ## ✅ Session Complete: Test Suite & Phase-Engine Prep (v5.3.8)
 
 **Date**: 2026-01-22  
 **Status**: **COMPLETE** - Test suite restored, phase-engine architecture ready
-
-### Accomplishments
-
-1. **BroadcastRegistry** — Station-centric data model for phase-engine integration
-   - 17 broadcasts, geometry computation, channel derivation
-   - radiod mode: 9 channels, phase-engine mode: 17 channels
-   - 27 comprehensive tests
-
-2. **Test Suite Restoration**
-   - Fixed schema tests (quality_flags, version checks)
-   - Fixed HDF5 IO tests (hardcoded versions, missing fields)
-   - Archived 3 deprecated tests (stale imports)
-   - 79 tests now passing
-
-3. **Verification Script Fixes**
-   - Fixed chrony source detection (# prefix for refclocks, not ^)
-   - Removed obsolete BCD/tone detection checks
-
-4. **Config Schema**
-   - Added `[ka9q].source` field for radiod/phase-engine mode
-
-### Commits
-
-```
-28fb134 - Fix test suite and add BroadcastRegistry tests
-1a3ba13 - Add source field to config schema
-ec63631 - Fix chrony source detection in verify_pipeline.sh
-f14583e - Remove obsolete BCD/tone detection checks
-```
 
 ---
 

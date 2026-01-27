@@ -217,7 +217,13 @@ class TimingBootstrap:
                        f"delay={exp['delay_ms']:.1f}ms [{exp['delay_min_ms']:.1f}-{exp['delay_max_ms']:.1f}]")
         
         # All candidates collected (for clustering)
+        # CRITICAL FIX (2026-01-27): Limit size to prevent memory leak
+        # With 9 channels adding candidates every few seconds, this list can grow
+        # to thousands of entries. Keep only the most recent candidates needed
+        # for clustering (last ~5 minutes worth = ~500 candidates max).
         self.all_candidates: List[AcquisitionCandidate] = []
+        self._max_candidates = 500  # Limit to prevent unbounded growth
+        
         # Validated minute marker clusters
         self.validated_clusters: List[dict] = []
         
@@ -430,6 +436,14 @@ class TimingBootstrap:
         
         # Always collect candidates for clustering
         self.all_candidates.append(candidate)
+        
+        # CRITICAL FIX (2026-01-27): Trim list to prevent memory leak
+        # Keep only the most recent candidates needed for clustering
+        if len(self.all_candidates) > self._max_candidates:
+            # Remove oldest 20% to avoid frequent trimming
+            trim_count = self._max_candidates // 5
+            self.all_candidates = self.all_candidates[trim_count:]
+            logger.debug(f"[BOOTSTRAP] Trimmed {trim_count} old candidates, keeping {len(self.all_candidates)}")
         
         # Log state on first few candidates
         if len(self.all_candidates) <= 3:

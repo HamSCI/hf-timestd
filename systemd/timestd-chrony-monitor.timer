@@ -3,12 +3,16 @@ Description=HF-Timestd Chrony Reach Monitor Timer
 Documentation=https://github.com/mijahauan/hf-timestd
 
 [Timer]
-# Run every 5 minutes
+# Run every 5 minutes using calendar-based scheduling (more reliable than OnUnitActiveSec)
+# OnUnitActiveSec can get stuck if the service fails to complete
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnCalendar=*:0/5
 
-# Ensure timer persists across reboots
+# Ensure timer persists across reboots and catches up on missed runs
 Persistent=true
+
+# Don't accumulate missed runs - just run once if we missed some
+AccuracySec=30s
 
 [Install]
 WantedBy=timers.target

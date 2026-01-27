@@ -2437,11 +2437,20 @@ class MultiBroadcastFusion:
             # CRITICAL FIX (2026-01-24): Sanity check calibration offset magnitude
             # Any offset larger than MAX_CALIBRATION_OFFSET_MS indicates a systematic
             # error (wrong tone detection, buffer timestamp issue, etc.), not real propagation.
+            # 
+            # CRITICAL FIX (2026-01-27): Allow larger offsets during initial convergence
+            # After a bootstrap re-lock, raw d_clock values can be 100-200ms off until
+            # calibrations converge. Use a relaxed limit until Kalman converges.
             from .wwv_constants import MAX_CALIBRATION_OFFSET_MS
-            if abs(new_offset) > MAX_CALIBRATION_OFFSET_MS:
+            
+            # During initial convergence, allow 3x the normal limit to permit recovery
+            # after bootstrap re-lock. Once converged, enforce strict limit.
+            effective_limit = MAX_CALIBRATION_OFFSET_MS if self.kalman_converged else MAX_CALIBRATION_OFFSET_MS * 3
+            
+            if abs(new_offset) > effective_limit:
                 logger.error(
                     f"CALIBRATION SANITY FAILURE: {broadcast_key} offset={new_offset:+.1f}ms "
-                    f"exceeds ±{MAX_CALIBRATION_OFFSET_MS}ms limit. "
+                    f"exceeds ±{effective_limit:.0f}ms limit (converged={self.kalman_converged}). "
                     f"This indicates a systematic error in tone detection. "
                     f"Rejecting this calibration update."
                 )
@@ -4608,9 +4617,13 @@ def run_fusion_service(
                     
                     if 'last_chrony_d_clock' in globals() and last_chrony_d_clock is not None:
                         delta = abs(result.d_clock_fused_ms - last_chrony_d_clock)
-                        if delta > 10.0:
+                        # CRITICAL FIX (2026-01-27): Relax discontinuity threshold during convergence
+                        # During initial calibration, D_clock can jump significantly as calibrations
+                        # are learned. Use a relaxed threshold until Kalman converges.
+                        discontinuity_threshold = 10.0 if fusion.kalman_converged else 100.0
+                        if delta > discontinuity_threshold:
                             logger.warning(
-                                f"Chrony feed: Discontinuity detected ({delta:.1f}ms jump), "
+                                f"Chrony feed: Discontinuity detected ({delta:.1f}ms jump > {discontinuity_threshold:.0f}ms), "
                                 f"skipping update to prevent clock instability"
                             )
                             discontinuity_ok = False

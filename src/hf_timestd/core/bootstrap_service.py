@@ -104,7 +104,30 @@ class BootstrapPhase(Enum):
 
 @dataclass
 class BootstrapConfig:
-    """Configuration for bootstrap service."""
+    """
+    Configuration for bootstrap service.
+    
+    Two-Tier Bootstrap Philosophy (2026-01-27):
+    -------------------------------------------
+    The ionosphere introduces path delay variations at multiple timescales:
+    - Seconds: Scintillation/multipath (±5-20ms)
+    - Minutes: Traveling Ionospheric Disturbances (±10-30ms)  
+    - Hours: Diurnal TEC variation (±50-100ms equivalent)
+    
+    To achieve a stable RTP-to-UTC offset, we need to average over the TID
+    timescale (~10-15 minutes). Locking too quickly captures ionospheric
+    variability as systematic offset error.
+    
+    Tier 1 (Provisional): Quick lock to establish minute boundaries
+    - Allows archiving to begin with correct alignment
+    - Uses wide detection window (±500ms)
+    - Achieved in 2-3 minutes
+    
+    Tier 2 (Refined): Stable lock after ionospheric averaging
+    - Refines RTP-to-UTC offset using median of many measurements
+    - Narrows detection window for operational mode
+    - Requires 10-15 minutes of consistent tracking
+    """
     receiver_lat: float
     receiver_lon: float
     sample_rate: int = DEFAULT_SAMPLE_RATE
@@ -114,13 +137,19 @@ class BootstrapConfig:
     search_interval_sec: float = 10.0  # How often to search buffers
     min_data_duration_sec: float = 65.0  # Minimum data before searching
     
-    # Lock criteria
+    # Tier 1: Provisional lock criteria (quick, for minute alignment)
     min_stations_for_provisional: int = 2  # Stations needed for provisional lock
     min_frequencies_for_provisional: int = 2  # Frequencies needed
-    min_minutes_for_full_lock: int = 3  # Minutes of consistent tracking
+    min_minutes_for_provisional: int = 2  # Minutes of tracking before provisional
+    
+    # Tier 2: Refined lock criteria (stable, after ionospheric averaging)
+    # The Allan deviation of ionospheric delay reaches minimum at τ ≈ 10-20 min
+    refined_lock_duration_sec: float = 600.0  # 10 minutes for TID averaging
+    min_measurements_for_refined: int = 50  # Minimum tone detections for median
+    max_offset_std_for_refined_ms: float = 15.0  # Offset std must be below this
     
     # Timeouts
-    bootstrap_timeout_sec: float = 600.0  # Give up after 10 minutes
+    bootstrap_timeout_sec: float = 900.0  # 15 minutes (allow time for refined lock)
     
     # Callbacks
     on_provisional_lock: Optional[Callable[[float], None]] = None  # Called with D_clock
@@ -306,9 +335,10 @@ class BootstrapService:
             
             if result:
                 status = result
-                
-                # Check if bootstrap state machine has progressed
-                self._update_phase_from_bootstrap()
+        
+        # CRITICAL FIX (2026-01-27): Always check phase, not just when result is truthy
+        # The TimingBootstrap state can change without search_and_process returning a result
+        self._update_phase_from_bootstrap()
         
         return status
     
@@ -326,6 +356,11 @@ class BootstrapService:
                 if self.phase not in (BootstrapPhase.PROVISIONAL_LOCK, BootstrapPhase.LOCKED):
                     self._on_provisional_lock()
                     self.phase = BootstrapPhase.PROVISIONAL_LOCK
+                    
+                    # CRITICAL FIX (2026-01-27): Free bootstrap resources on provisional lock
+                    # Once we're in TRACKING/PROVISIONAL_LOCK, archiving begins and we no longer
+                    # need the rolling buffers. Waiting for LOCKED state wastes ~250MB of memory.
+                    self._free_bootstrap_buffers()
                     
             elif bootstrap_state == BootstrapState.CORRELATING:
                 if self.phase == BootstrapPhase.SEARCHING:
@@ -362,6 +397,10 @@ class BootstrapService:
             
             logger.info(f"[BOOTSTRAP_SERVICE] FULL LOCK achieved! "
                        f"D_clock = {self._d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms")
+            
+            # CRITICAL FIX (2026-01-27): Free bootstrap buffers after lock to prevent memory leak
+            # The rolling buffers are no longer needed once we've locked - they hold ~250MB
+            self._free_bootstrap_buffers()
             
             if self.config.on_full_lock:
                 try:
@@ -402,6 +441,36 @@ class BootstrapService:
     def get_d_clock_ms(self) -> Optional[float]:
         """Get current D_clock estimate in milliseconds."""
         return self._d_clock_ms
+    
+    def _free_bootstrap_buffers(self):
+        """
+        Free bootstrap rolling buffers after lock to reclaim memory.
+        
+        The rolling buffers hold ~250MB (9 channels × 27MB each) and are no longer
+        needed once we've achieved lock. This prevents memory growth over time.
+        """
+        import gc
+        
+        # Count buffers before clearing
+        n_buffers = len(self.buffer_manager.buffers)
+        total_samples = sum(
+            buf.buffer_size for buf in self.buffer_manager.buffers.values()
+        )
+        estimated_mb = (total_samples * 8) / (1024 * 1024)  # complex64 = 8 bytes
+        
+        # Clear all buffers
+        self.buffer_manager.clear_all()
+        
+        # Also clear tone detectors (they hold FFT templates)
+        self._tone_detectors.clear()
+        
+        # Force garbage collection to actually free the memory
+        gc.collect()
+        
+        logger.info(
+            f"[BOOTSTRAP_SERVICE] Freed {n_buffers} bootstrap buffers "
+            f"(~{estimated_mb:.0f}MB) after lock"
+        )
     
     def get_minute_boundary_rtp(self, minute_index: int = 0) -> Optional[int]:
         """

@@ -79,6 +79,50 @@ if ! systemctl is-active --quiet chronyd 2>/dev/null; then
     exit 2
 fi
 
+# =============================================================================
+# NEW: Check for Chrony SHM segments (indicates fusion is writing)
+# =============================================================================
+SHM_MISSING=false
+if [[ ! -e /dev/shm/chrony.0.sock ]] && [[ ! -e /dev/shm/NTP0 ]]; then
+    # Check if fusion service is even supposed to be writing
+    if systemctl is-active --quiet timestd-fusion 2>/dev/null; then
+        echo "WARNING: Chrony SHM segments not found but fusion service is running"
+        echo "  This may indicate fusion is in single-station mode (Chrony feed disabled)"
+        SHM_MISSING=true
+    fi
+fi
+
+# =============================================================================
+# NEW: Check calibration state freshness
+# =============================================================================
+CALIBRATION_FILE="/var/lib/timestd/state/broadcast_calibration.json"
+CALIBRATION_MAX_AGE_HOURS=48
+
+if [[ -f "$CALIBRATION_FILE" ]]; then
+    CALIBRATION_AGE_SEC=$(( $(date +%s) - $(stat -c %Y "$CALIBRATION_FILE") ))
+    CALIBRATION_AGE_HOURS=$(( CALIBRATION_AGE_SEC / 3600 ))
+    
+    if [[ $CALIBRATION_AGE_HOURS -gt $CALIBRATION_MAX_AGE_HOURS ]]; then
+        echo "WARNING: Calibration state is ${CALIBRATION_AGE_HOURS}h old (max: ${CALIBRATION_MAX_AGE_HOURS}h)"
+        echo "  File: $CALIBRATION_FILE"
+        echo "  This may indicate Kalman filters are not converging or saving"
+    fi
+fi
+
+# =============================================================================
+# NEW: Check for single-station mode in fusion logs
+# =============================================================================
+if systemctl is-active --quiet timestd-fusion 2>/dev/null; then
+    # Check recent logs for single-station warnings
+    SINGLE_STATION_COUNT=$(journalctl -u timestd-fusion --since "10 minutes ago" --no-pager 2>/dev/null | grep -c "single-station" 2>/dev/null || true)
+    SINGLE_STATION_COUNT=${SINGLE_STATION_COUNT:-0}
+    if [[ "$SINGLE_STATION_COUNT" -gt 10 ]]; then
+        echo "WARNING: Fusion service in single-station mode (${SINGLE_STATION_COUNT} warnings in last 10 min)"
+        echo "  Chrony feed is likely DISABLED for safety"
+        echo "  Check calibration state and upstream data quality"
+    fi
+fi
+
 # Get TSL1 and TSL2 source info (new naming convention)
 TSL1_LINE=$(chronyc sources 2>/dev/null | grep "TSL1" || true)
 TSL2_LINE=$(chronyc sources 2>/dev/null | grep "TSL2" || true)

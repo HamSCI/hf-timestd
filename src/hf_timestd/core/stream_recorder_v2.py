@@ -359,6 +359,9 @@ class StreamRecorderV2:
                    f"agc={self.config.agc_enable}, gain={self.config.gain}, enc={self.config.encoding}")
         
         # Let ka9q-python handle all channel management
+        # NOTE: ka9q-python's ensure_channel doesn't accept SSRC parameter - radiod assigns it.
+        # Channel reuse depends on radiod finding an existing channel with matching parameters.
+        # Duplicate channels occur when radiod doesn't find a match (e.g., after radiod restart).
         self.channel_info = self._control.ensure_channel(
             frequency_hz=float(self.config.frequency_hz),
             preset=self.config.preset,
