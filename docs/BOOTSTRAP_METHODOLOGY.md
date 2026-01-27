@@ -217,9 +217,151 @@ The offset should be stable to within ±2 ms across multiple channels.
 
 ---
 
-## 8. Summary: Bootstrap Timeline
+## 8. Two-Tier Bootstrap Lock (v5.3.10)
 
-A typical bootstrap sequence:
+### The Ionospheric Problem
+
+The initial bootstrap achieves minute alignment quickly (~90 seconds), but the RTP-to-UTC
+offset computed at that moment captures **instantaneous ionospheric conditions**. The
+ionosphere introduces variable propagation delays that change over minutes to hours:
+
+- **Traveling Ionospheric Disturbances (TIDs)**: 10-30 minute period oscillations
+- **Diurnal variations**: Sunrise/sunset transitions cause rapid changes
+- **Solar activity**: Flares and CMEs cause sudden ionospheric disturbances
+
+If we lock the offset immediately, we capture a **snapshot** that may be biased by
+current ionospheric state. This bias becomes a systematic error in all subsequent
+timing measurements.
+
+### Solution: Two-Tier Lock
+
+The bootstrap now uses a **two-tier approach**:
+
+| Tier | Name | Purpose | Duration | Criteria |
+|------|------|---------|----------|----------|
+| **1** | Provisional Lock | Enable archiving with minute alignment | ~2-3 min | 10 validations, 2 minutes observed |
+| **2** | Refined Lock | Stable offset after ionospheric averaging | ~10-15 min | 50 measurements, std < 15ms, 10 min elapsed |
+
+```
+ACQUIRING → CORRELATING → TRACKING → PROVISIONAL_LOCK → REFINED_LOCK
+                              ↓              ↓
+                         (archiving)    (offset refined)
+```
+
+### Tier 1: Provisional Lock
+
+**Purpose**: Get archiving started quickly with approximate timing.
+
+When the bootstrap reaches TRACKING state with sufficient validations:
+- `lock_tier` transitions to `PROVISIONAL` (value=1)
+- Archiving begins immediately
+- Offset measurements continue to be collected
+
+**Evidence - Provisional Lock:**
+<!-- LOGS: bootstrap | filter: "PROVISIONAL LOCK" -->
+
+The provisional lock enables data capture while the system continues to refine its
+timing estimate.
+
+### Tier 2: Refined Lock
+
+**Purpose**: Compute a stable, ionospherically-averaged offset.
+
+During the provisional phase, the system collects offset measurements from each
+validated tone detection. After sufficient time and measurements:
+
+1. **Duration requirement**: 10 minutes since provisional lock (averages over TID periods)
+2. **Measurement count**: 50+ independent offset measurements
+3. **Stability criterion**: Offset standard deviation < 15 ms
+
+The refined offset uses the **median** of all measurements, providing robustness
+against outliers from multipath or interference.
+
+**Evidence - Refined Lock:**
+<!-- LOGS: bootstrap | filter: "TIER 2 REFINED LOCK" -->
+
+### Offset Measurement Collection
+
+Each validated tone provides an independent offset measurement:
+
+```python
+# timing_bootstrap.py - OffsetMeasurement dataclass
+@dataclass
+class OffsetMeasurement:
+    timestamp: float          # Unix time of measurement
+    offset_samples: int       # Computed RTP-to-UTC offset
+    station: str              # Source station (WWV, WWVH, CHU, BPM)
+    snr_db: float            # Signal-to-noise ratio
+    frequency_khz: int       # Carrier frequency
+```
+
+The system tracks:
+- **Station distribution**: Ensures measurements come from multiple stations
+- **Temporal spread**: Measurements span the full averaging window
+- **SNR weighting**: Higher-SNR measurements are more reliable
+
+**Evidence - Offset Measurements:**
+<!-- LOGS: bootstrap | filter: "offset measurements" -->
+
+### Offset Refinement
+
+The refined offset typically differs from the provisional offset by several milliseconds:
+
+| Metric | Provisional | Refined | Improvement |
+|--------|-------------|---------|-------------|
+| Basis | First few detections | 50+ measurements | Statistical robustness |
+| Method | Weighted average | Median | Outlier rejection |
+| Ionosphere | Instantaneous | 10-min average | TID averaging |
+
+**Evidence - Offset Change:**
+<!-- LOGS: bootstrap | filter: "Offset change from provisional" -->
+
+A change of 5-15 ms is typical and represents the ionospheric bias that would
+otherwise become a systematic error.
+
+### Lock Tier in Status
+
+The current lock tier is exposed in the bootstrap status:
+
+```json
+{
+  "phase": "LOCKED",
+  "lock_tier": 2,
+  "is_locked": true,
+  "is_fully_locked": true,
+  "bootstrap_state": {
+    "lock_tier": 2,
+    "refined_offset_samples": 798457904,
+    "refined_offset_std_ms": 12.3
+  }
+}
+```
+
+- `lock_tier: 0` = No lock (ACQUIRING/CORRELATING)
+- `lock_tier: 1` = Provisional lock (archiving enabled, offset being refined)
+- `lock_tier: 2` = Refined lock (stable offset, full precision)
+
+### Configuration
+
+The two-tier thresholds are configurable in `TimingBootstrap`:
+
+```python
+# Production values (timing_bootstrap.py)
+refined_lock_duration_sec: float = 600.0   # 10 minutes
+min_measurements_for_refined: int = 50     # Minimum measurements
+max_offset_std_for_refined_ms: float = 15.0  # Stability criterion
+```
+
+These values are chosen based on:
+- **600 seconds**: Covers 1-2 TID periods for averaging
+- **50 measurements**: Statistical significance for median
+- **15 ms std**: Indicates stable ionospheric conditions
+
+---
+
+## 9. Summary: Bootstrap Timeline
+
+A typical bootstrap sequence with two-tier lock:
 
 | Time | Event | Evidence |
 |------|-------|----------|
@@ -229,13 +371,16 @@ A typical bootstrap sequence:
 | T+90s | Recurring clusters found | `RECURRING CLUSTERS FOUND: 1 minutes apart` |
 | T+90s | State → CORRELATING | `CLUSTER LOCK: WWV@... → CORRELATING` |
 | T+90s | State → TRACKING | `3 clusters over 2 minutes → TRACKING` |
-| T+93s | RTP-to-UTC locked | `RTP-to-Unix reference LOCKED: offset=...` |
+| T+93s | **TIER 1: Provisional Lock** | `PROVISIONAL LOCK achieved! D_clock ≈ +0.0ms` |
+| T+93s | Archiving begins | `📁 Wrote minute ...` |
+| T+693s | **TIER 2: Refined Lock** | `TIER 2 REFINED LOCK achieved!` |
 
-**Total bootstrap time: ~90-120 seconds** (requires at least 2 minute boundaries)
+**Tier 1 (Provisional)**: ~90-120 seconds - enables archiving
+**Tier 2 (Refined)**: ~10-12 minutes - stable ionospherically-averaged offset
 
 ---
 
-## 9. Key Design Decisions
+## 10. Key Design Decisions
 
 ### Why Multi-Station?
 
@@ -263,7 +408,7 @@ The 800 ms (WWV/WWVH) and 500 ms (CHU) templates provide:
 
 ---
 
-## 10. Implementation Files
+## 11. Implementation Files
 
 | File | Purpose |
 |------|---------|

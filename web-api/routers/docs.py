@@ -263,6 +263,12 @@ EVIDENCE_PATTERNS = {
         "state_transitions": r"→ CORRELATING|→ TRACKING|→ LOCKED",
         "rtp_lock": r"RTP-to-Unix reference LOCKED",
         "detector_creation": r"\[BOOTSTRAP_SERVICE\] Created ToneDetector",
+        # Two-tier bootstrap (v5.3.10)
+        "PROVISIONAL LOCK": r"PROVISIONAL LOCK|TIER 1",
+        "TIER 2 REFINED LOCK": r"TIER 2 REFINED LOCK|Refined Lock achieved",
+        "offset measurements": r"Collected.*offset measurements|offset measurements for refined",
+        "Offset change from provisional": r"Offset change from provisional",
+        "Station distribution": r"Station distribution:",
     },
     "fusion": {
         "uncertainty": r"uncertainty|σ|sigma|±",

@@ -1,25 +1,29 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-## 🚀 Current Status: Memory & Bootstrap Fixes (v5.3.9)
+## 🚀 Current Status: Two-Tier Bootstrap (v5.3.10)
 
-**Version**: v5.3.9 - 2026-01-27
+**Version**: v5.3.10 - 2026-01-27
 **Core Philosophy**: **"Steel Ruler" Metrology**. The system treats the local GPSDO as a fixed standard (zero process noise) to measure ionospheric variance.
 
-### 🌟 Recent Accomplishments (v5.3.9)
+### 🌟 Recent Accomplishments (v5.3.10)
 
-1. **Memory Leak Fixes**: Capped `all_candidates` list at 500 entries, freed bootstrap buffers on provisional lock (~250MB reclaimed).
-2. **Bootstrap Phase Logic**: Fixed `_update_phase_from_bootstrap()` to always check state, not just when search returns results.
-3. **Calibration Convergence**: Relaxed sanity check (3× limit) and discontinuity threshold (100ms) during initial convergence.
-4. **Timer Fix**: Changed chrony monitor timer from `OnUnitActiveSec` to `OnCalendar` to prevent stalling.
-5. **ka9q-python 3.4.1**: Upgraded to fix RTP stream deduplication.
+1. **Two-Tier Bootstrap**: Implemented ionospheric averaging before refined lock.
+   - Tier 1 (Provisional): Quick lock in 2-3 min for minute alignment
+   - Tier 2 (Refined): Stable lock after 10 min with median offset, std < 15ms
+2. **LockTier Enum**: Added `LockTier.NONE`, `PROVISIONAL`, `REFINED` states
+3. **Offset Measurement Tracking**: Collect measurements during provisional phase
+4. **Median-Based Offset**: Refined lock uses median for outlier robustness
+5. **Status Exposure**: `lock_tier`, `time_to_refined_sec`, `current_offset_std_ms` in status
 
-### 🔴 Next Session: Two-Tier Bootstrap for Ionospheric Averaging
+### 🔴 Next Session: Deploy and Monitor Two-Tier Bootstrap
 
-**Objective:** Implement two-tier bootstrap locking that accounts for ionospheric variations before refining the RTP-to-UTC offset.
+**Objective:** Deploy v5.3.10 and monitor the two-tier bootstrap behavior in production. Verify that refined lock achieves lower offset std than provisional lock.
 
 ---
 
-## 📋 Two-Tier Bootstrap Implementation Task
+## ✅ Two-Tier Bootstrap Implementation Task (COMPLETE)
+
+**Status**: Implemented in v5.3.10 - See `docs/changes/SESSION_2026_01_27_TWO_TIER_BOOTSTRAP.md`
 
 ### Problem Statement
 

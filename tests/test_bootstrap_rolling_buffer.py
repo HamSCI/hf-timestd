@@ -25,6 +25,14 @@ from hf_timestd.core.bootstrap_service import (
     BootstrapPhase,
     create_bootstrap_service
 )
+from hf_timestd.core.timing_bootstrap import (
+    TimingBootstrap,
+    BootstrapState,
+    LockTier,
+    AcquisitionCandidate,
+    OffsetMeasurement,
+    SAMPLES_PER_MINUTE as TB_SAMPLES_PER_MINUTE
+)
 
 
 class TestBootstrapRollingBuffer:
@@ -475,6 +483,321 @@ class TestIntegration:
         
         result = service.search_and_update()
         assert result == "TIMEOUT"
+
+
+class TestTwoTierBootstrap:
+    """Tests for two-tier bootstrap (provisional and refined lock)."""
+    
+    def test_lock_tier_initialization(self):
+        """Test that lock tier starts at NONE."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        assert bootstrap.lock_tier == LockTier.NONE
+        assert bootstrap.provisional_lock_time is None
+        assert len(bootstrap._offset_measurements) == 0
+    
+    def test_lock_tier_in_status(self):
+        """Test that lock_tier is exposed in status."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        status = bootstrap.get_status()
+        
+        assert 'lock_tier' in status
+        assert status['lock_tier'] == 0  # LockTier.NONE.value
+    
+    def test_provisional_lock_transition(self):
+        """Test transition to provisional lock after sufficient validations."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        # Set up state for tracking
+        bootstrap.state = BootstrapState.TRACKING
+        bootstrap.rtp_to_utc_offset_samples = 1000000
+        bootstrap.minutes_observed = 2
+        
+        # Simulate 10 consecutive validations to trigger provisional lock
+        for i in range(10):
+            candidate = AcquisitionCandidate(
+                channel="WWV_10000",
+                station="WWV",
+                frequency_khz=10000,
+                tone_frequency_hz=1000.0,
+                rtp_timestamp=1000000 + (i * TB_SAMPLES_PER_MINUTE) + 100,  # Small offset for propagation
+                sample_position=0,
+                snr_db=30.0,
+                confidence=0.9,
+                buffer_rtp_start=0
+            )
+            result = bootstrap._handle_tracking(candidate, i)
+        
+        assert bootstrap.lock_tier == LockTier.PROVISIONAL
+        assert bootstrap.provisional_lock_time is not None
+    
+    def test_offset_measurement_recording(self):
+        """Test that offset measurements are recorded during provisional lock."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        # Set up provisional lock state
+        bootstrap.state = BootstrapState.TRACKING
+        bootstrap.lock_tier = LockTier.PROVISIONAL
+        bootstrap.provisional_lock_time = time.time()
+        bootstrap.rtp_to_utc_offset_samples = 1000000
+        bootstrap.minutes_observed = 3
+        bootstrap.consecutive_validations = 15
+        
+        # Add a candidate - should record offset measurement
+        candidate = AcquisitionCandidate(
+            channel="WWV_10000",
+            station="WWV",
+            frequency_khz=10000,
+            tone_frequency_hz=1000.0,
+            rtp_timestamp=1000100,  # Close to expected
+            sample_position=0,
+            snr_db=30.0,
+            confidence=0.9,
+            buffer_rtp_start=0
+        )
+        
+        bootstrap._handle_tracking(candidate, 0)
+        
+        assert len(bootstrap._offset_measurements) == 1
+        assert bootstrap._offset_measurements[0].station == "WWV"
+        assert bootstrap._offset_measurements[0].snr_db == 30.0
+    
+    def test_refined_lock_criteria_duration(self):
+        """Test that refined lock requires minimum duration."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        # Set up provisional lock that just started
+        bootstrap.lock_tier = LockTier.PROVISIONAL
+        bootstrap.provisional_lock_time = time.time()  # Just now
+        bootstrap.refined_lock_duration_sec = 600.0  # 10 minutes
+        
+        # Add enough measurements
+        for i in range(60):
+            bootstrap._offset_measurements.append(OffsetMeasurement(
+                timestamp=time.time(),
+                offset_samples=1000000 + i,  # Small variation
+                station="WWV",
+                snr_db=30.0,
+                frequency_khz=10000
+            ))
+        
+        # Should not achieve refined lock - not enough time elapsed
+        result = bootstrap._check_refined_lock_criteria()
+        assert result is None
+        assert bootstrap.lock_tier == LockTier.PROVISIONAL
+    
+    def test_refined_lock_criteria_measurements(self):
+        """Test that refined lock requires minimum measurements."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        # Set up provisional lock with enough time elapsed
+        bootstrap.lock_tier = LockTier.PROVISIONAL
+        bootstrap.provisional_lock_time = time.time() - 700  # 11+ minutes ago
+        bootstrap.refined_lock_duration_sec = 600.0
+        bootstrap.min_measurements_for_refined = 50
+        
+        # Add only 30 measurements (not enough)
+        for i in range(30):
+            bootstrap._offset_measurements.append(OffsetMeasurement(
+                timestamp=time.time(),
+                offset_samples=1000000 + i,
+                station="WWV",
+                snr_db=30.0,
+                frequency_khz=10000
+            ))
+        
+        result = bootstrap._check_refined_lock_criteria()
+        assert result is None
+        assert bootstrap.lock_tier == LockTier.PROVISIONAL
+    
+    def test_refined_lock_criteria_stability(self):
+        """Test that refined lock requires low offset std."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        # Set up provisional lock with enough time and measurements
+        bootstrap.lock_tier = LockTier.PROVISIONAL
+        bootstrap.provisional_lock_time = time.time() - 700
+        bootstrap.refined_lock_duration_sec = 600.0
+        bootstrap.min_measurements_for_refined = 50
+        bootstrap.max_offset_std_for_refined_ms = 15.0
+        
+        # Add measurements with HIGH variance (should fail stability check)
+        # std of 50ms = 1200 samples at 24kHz
+        np.random.seed(42)
+        for i in range(60):
+            # Large spread: ±2000 samples = ±83ms
+            offset = 1000000 + int(np.random.randn() * 2000)
+            bootstrap._offset_measurements.append(OffsetMeasurement(
+                timestamp=time.time(),
+                offset_samples=offset,
+                station="WWV",
+                snr_db=30.0,
+                frequency_khz=10000
+            ))
+        
+        result = bootstrap._check_refined_lock_criteria()
+        assert result is None  # Should fail due to high std
+        assert bootstrap.lock_tier == LockTier.PROVISIONAL
+    
+    def test_refined_lock_success(self):
+        """Test successful transition to refined lock."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        # Set up provisional lock with all criteria met
+        bootstrap.state = BootstrapState.TRACKING
+        bootstrap.lock_tier = LockTier.PROVISIONAL
+        bootstrap.provisional_lock_time = time.time() - 700  # 11+ minutes ago
+        bootstrap.refined_lock_duration_sec = 600.0
+        bootstrap.min_measurements_for_refined = 50
+        bootstrap.max_offset_std_for_refined_ms = 15.0
+        bootstrap.rtp_to_utc_offset_samples = 1000000
+        
+        # Add measurements with LOW variance (should pass stability check)
+        # std of 5ms = 120 samples at 24kHz
+        np.random.seed(42)
+        for i in range(60):
+            # Small spread: ±100 samples = ±4ms
+            offset = 1000000 + int(np.random.randn() * 100)
+            bootstrap._offset_measurements.append(OffsetMeasurement(
+                timestamp=time.time(),
+                offset_samples=offset,
+                station="WWV",
+                snr_db=30.0,
+                frequency_khz=10000
+            ))
+        
+        result = bootstrap._check_refined_lock_criteria()
+        
+        assert result == "REFINED_LOCK"
+        assert bootstrap.lock_tier == LockTier.REFINED
+        assert bootstrap.state == BootstrapState.LOCKED
+        assert bootstrap._refined_offset_samples is not None
+        assert bootstrap._refined_offset_std_ms is not None
+        assert bootstrap._refined_offset_std_ms < 15.0
+    
+    def test_refined_lock_uses_median(self):
+        """Test that refined lock uses median (not mean) for robustness."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        bootstrap.state = BootstrapState.TRACKING
+        bootstrap.lock_tier = LockTier.PROVISIONAL
+        bootstrap.provisional_lock_time = time.time() - 700
+        bootstrap.refined_lock_duration_sec = 600.0
+        bootstrap.min_measurements_for_refined = 50
+        bootstrap.max_offset_std_for_refined_ms = 20.0  # Relaxed for this test
+        bootstrap.rtp_to_utc_offset_samples = 1000000
+        
+        # Add 50 measurements clustered around 1000000
+        for i in range(50):
+            bootstrap._offset_measurements.append(OffsetMeasurement(
+                timestamp=time.time(),
+                offset_samples=1000000 + (i % 10) - 5,  # ±5 samples
+                station="WWV",
+                snr_db=30.0,
+                frequency_khz=10000
+            ))
+        
+        # Add 5 outliers (should be rejected by median)
+        for i in range(5):
+            bootstrap._offset_measurements.append(OffsetMeasurement(
+                timestamp=time.time(),
+                offset_samples=1100000,  # 100000 samples off = 4+ seconds!
+                station="WWV",
+                snr_db=30.0,
+                frequency_khz=10000
+            ))
+        
+        result = bootstrap._check_refined_lock_criteria()
+        
+        # Median should be close to 1000000, not pulled by outliers
+        # Mean would be ~1009090, but median should be ~1000000
+        assert bootstrap._refined_offset_samples is not None
+        assert abs(bootstrap._refined_offset_samples - 1000000) < 100
+    
+    def test_retreat_resets_two_tier_state(self):
+        """Test that retreating to ACQUIRING resets two-tier state."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        # Set up provisional lock state
+        bootstrap.state = BootstrapState.TRACKING
+        bootstrap.lock_tier = LockTier.PROVISIONAL
+        bootstrap.provisional_lock_time = time.time() - 300
+        bootstrap._offset_measurements.append(OffsetMeasurement(
+            timestamp=time.time(),
+            offset_samples=1000000,
+            station="WWV",
+            snr_db=30.0,
+            frequency_khz=10000
+        ))
+        
+        # Retreat
+        bootstrap._retreat_to_acquiring("Test retreat")
+        
+        assert bootstrap.lock_tier == LockTier.NONE
+        assert bootstrap.provisional_lock_time is None
+        assert len(bootstrap._offset_measurements) == 0
+        assert bootstrap._refined_offset_samples is None
+    
+    def test_status_during_provisional_lock(self):
+        """Test status includes provisional lock details."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        bootstrap.lock_tier = LockTier.PROVISIONAL
+        bootstrap.provisional_lock_time = time.time() - 300  # 5 minutes ago
+        bootstrap.refined_lock_duration_sec = 600.0
+        
+        # Add some measurements
+        for i in range(20):
+            bootstrap._offset_measurements.append(OffsetMeasurement(
+                timestamp=time.time(),
+                offset_samples=1000000 + i * 10,
+                station="WWV",
+                snr_db=30.0,
+                frequency_khz=10000
+            ))
+        
+        status = bootstrap.get_status()
+        
+        assert status['lock_tier'] == 1  # PROVISIONAL
+        assert 'provisional_lock_elapsed_sec' in status
+        assert status['provisional_lock_elapsed_sec'] >= 300
+        assert 'offset_measurements_count' in status
+        assert status['offset_measurements_count'] == 20
+        assert 'time_to_refined_sec' in status
+        assert status['time_to_refined_sec'] <= 300  # ~5 min remaining
+        assert 'current_offset_std_ms' in status
+    
+    def test_status_during_refined_lock(self):
+        """Test status includes refined lock details."""
+        bootstrap = TimingBootstrap(receiver_lat=38.9, receiver_lon=-92.1)
+        
+        bootstrap.lock_tier = LockTier.REFINED
+        bootstrap._refined_offset_samples = 1000000
+        bootstrap._refined_offset_std_ms = 8.5
+        bootstrap._offset_measurements = [Mock()] * 75  # 75 measurements
+        
+        status = bootstrap.get_status()
+        
+        assert status['lock_tier'] == 2  # REFINED
+        assert 'refined_offset_samples' in status
+        assert status['refined_offset_samples'] == 1000000
+        assert 'refined_offset_std_ms' in status
+        assert status['refined_offset_std_ms'] == 8.5
+        assert status['offset_measurements_count'] == 75
+
+
+class TestBootstrapServiceTwoTier:
+    """Tests for two-tier bootstrap in BootstrapService."""
+    
+    def test_lock_tier_in_service_status(self):
+        """Test that lock_tier is exposed in service status."""
+        service = create_bootstrap_service(38.9, -92.1)
+        
+        status = service.get_status()
+        
+        assert 'lock_tier' in status
+        assert status['lock_tier'] == 0  # NONE
 
 
 if __name__ == "__main__":

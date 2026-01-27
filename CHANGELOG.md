@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.10] - 2026-01-27
+
+### Two-Tier Bootstrap for Ionospheric Averaging
+
+**Major Enhancement:** Implemented two-tier bootstrap locking that accounts for ionospheric variations before refining the RTP-to-UTC offset.
+
+#### Problem Addressed
+The previous bootstrap locked too quickly (2-3 min), capturing ionospheric variability as systematic offset error. The ionosphere introduces ±10-30ms variations from Traveling Ionospheric Disturbances (TIDs) with ~10-15 minute periods.
+
+#### Two-Tier Solution
+- **Tier 1 (Provisional Lock)**: Quick lock in 2-3 minutes for minute alignment, allowing archiving to begin
+- **Tier 2 (Refined Lock)**: Stable lock after 10+ minutes of ionospheric averaging with median-based offset
+
+#### New Features
+- `LockTier` enum: `NONE` (0), `PROVISIONAL` (1), `REFINED` (2)
+- `OffsetMeasurement` dataclass for tracking individual offset measurements
+- Offset measurements collected during provisional phase for statistical analysis
+- Median-based offset calculation for outlier robustness
+- Refined lock criteria: 50+ measurements, std < 15ms, 10+ minutes elapsed
+
+#### Status Exposure
+- `lock_tier` in bootstrap status (0/1/2)
+- `provisional_lock_elapsed_sec` - time since provisional lock
+- `time_to_refined_sec` - estimated time until refined lock
+- `current_offset_std_ms` - current offset standard deviation
+- `refined_offset_samples` and `refined_offset_std_ms` after tier 2
+
+#### Files Modified
+- `src/hf_timestd/core/timing_bootstrap.py` - Core two-tier logic
+- `src/hf_timestd/core/bootstrap_service.py` - Status exposure
+- `tests/test_bootstrap_rolling_buffer.py` - 12 new unit tests
+
 ## [5.4.0] - 2026-01-22
 
 ### Enhanced Test Signal Analysis

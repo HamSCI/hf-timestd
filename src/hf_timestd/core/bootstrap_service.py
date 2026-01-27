@@ -88,7 +88,7 @@ from .bootstrap_rolling_buffer import (
     DEFAULT_SAMPLE_RATE,
     DEFAULT_BUFFER_DURATION_SEC
 )
-from .timing_bootstrap import TimingBootstrap, BootstrapState
+from .timing_bootstrap import TimingBootstrap, BootstrapState, LockTier
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +220,13 @@ class BootstrapService:
     
     @property
     def is_locked(self) -> bool:
-        """Check if bootstrap has achieved lock."""
+        """Check if bootstrap has achieved lock (provisional or full)."""
+        # Also check for refined lock transition during provisional phase
+        if self.phase == BootstrapPhase.PROVISIONAL_LOCK:
+            try:
+                self._check_refined_lock()
+            except Exception as e:
+                logger.error(f"[BOOTSTRAP] Error in _check_refined_lock: {e}")
         return self.phase in (BootstrapPhase.PROVISIONAL_LOCK, BootstrapPhase.LOCKED)
     
     @property
@@ -357,10 +363,17 @@ class BootstrapService:
                     self._on_provisional_lock()
                     self.phase = BootstrapPhase.PROVISIONAL_LOCK
                     
+                    # Collect offset measurements from validated clusters for refined lock
+                    self._collect_offset_measurements()
+                    
                     # CRITICAL FIX (2026-01-27): Free bootstrap resources on provisional lock
                     # Once we're in TRACKING/PROVISIONAL_LOCK, archiving begins and we no longer
                     # need the rolling buffers. Waiting for LOCKED state wastes ~250MB of memory.
                     self._free_bootstrap_buffers()
+                
+                # During provisional lock, check for refined lock criteria
+                elif self.phase == BootstrapPhase.PROVISIONAL_LOCK:
+                    self._check_refined_lock()
                     
             elif bootstrap_state == BootstrapState.CORRELATING:
                 if self.phase == BootstrapPhase.SEARCHING:
@@ -369,6 +382,8 @@ class BootstrapService:
     
     def _on_provisional_lock(self):
         """Handle provisional lock event."""
+        import time
+        
         offset = self.timing_bootstrap.get_rtp_to_utc_offset()
         if offset:
             self._rtp_to_utc_offset_samples, self._offset_uncertainty_samples = offset
@@ -377,8 +392,13 @@ class BootstrapService:
             # This is approximate until we have more data
             self._d_clock_ms = self._calculate_d_clock()
             
+            # Set two-tier bootstrap state (Tier 1: Provisional Lock)
+            self.timing_bootstrap.lock_tier = LockTier.PROVISIONAL
+            self.timing_bootstrap.provisional_lock_time = time.time()
+            
             logger.info(f"[BOOTSTRAP_SERVICE] PROVISIONAL LOCK achieved! "
                        f"D_clock ≈ {self._d_clock_ms:+.1f}ms")
+            logger.info(f"[BOOTSTRAP] PROVISIONAL LOCK: D_clock ≈ {self._d_clock_ms:+.1f}ms")
             
             if self.config.on_provisional_lock:
                 try:
@@ -426,6 +446,176 @@ class BootstrapService:
         # This will be refined when we integrate with the recorder
         
         return 0.0  # Placeholder
+    
+    def _collect_offset_measurements(self):
+        """
+        Collect offset measurements from validated tones during provisional lock.
+        
+        This is called once when entering provisional lock to gather all existing
+        offset measurements for computing the refined lock.
+        """
+        import time
+        from .timing_bootstrap import OffsetMeasurement, SAMPLES_PER_MINUTE
+        
+        tb = self.timing_bootstrap
+        
+        # Only collect once (when _offset_measurements is empty)
+        if tb._offset_measurements:
+            return
+        
+        # Use validated_tones (populated by _handle_tracking) if available
+        if tb.validated_tones:
+            for vt in tb.validated_tones:
+                c = vt.candidate
+                
+                # Get propagation delay for this station
+                delay_samples = tb.station_expectations.get(
+                    c.station, {}
+                ).get('delay_samples', 0)
+                
+                # Compute offset: RTP at UTC minute 0
+                minute_rtp = c.rtp_timestamp - delay_samples
+                minute_0_rtp = minute_rtp - (vt.minute_index * SAMPLES_PER_MINUTE)
+                
+                # Extract frequency from channel name
+                try:
+                    freq_khz = int(c.channel.split('_')[1])
+                except (IndexError, ValueError):
+                    freq_khz = 0
+                
+                measurement = OffsetMeasurement(
+                    timestamp=time.time(),
+                    offset_samples=minute_0_rtp,
+                    station=c.station,
+                    snr_db=c.snr_db,
+                    frequency_khz=freq_khz
+                )
+                tb._offset_measurements.append(measurement)
+            
+            if tb._offset_measurements:
+                logger.info(f"[BOOTSTRAP] Collected {len(tb._offset_measurements)} offset measurements "
+                           f"from {len(tb.validated_tones)} validated tones")
+            return
+        
+        # Fallback to validated_clusters if no validated_tones
+        if not tb.validated_clusters or tb.reference_rtp is None:
+            return
+        
+        for cluster in tb.validated_clusters:
+            anchor_rtp = cluster['anchor_rtp']
+            anchor_station = cluster['anchor_station']
+            anchor_snr = cluster.get('anchor_snr', 20.0)
+            
+            # Compute minute index from reference
+            samples_from_ref = anchor_rtp - tb.reference_rtp
+            minute_index = round(samples_from_ref / SAMPLES_PER_MINUTE)
+            
+            # Get propagation delay for this station
+            delay_samples = tb.station_expectations.get(
+                anchor_station, {}
+            ).get('delay_samples', 0)
+            
+            # Compute offset: RTP at UTC minute 0
+            minute_rtp = anchor_rtp - delay_samples
+            minute_0_rtp = minute_rtp - (minute_index * SAMPLES_PER_MINUTE)
+            
+            # Extract frequency from cluster if available
+            freq_khz = cluster.get('frequency_khz', 0)
+            
+            measurement = OffsetMeasurement(
+                timestamp=time.time(),
+                offset_samples=minute_0_rtp,
+                station=anchor_station,
+                snr_db=anchor_snr,
+                frequency_khz=freq_khz
+            )
+            tb._offset_measurements.append(measurement)
+        
+        if tb._offset_measurements:
+            logger.info(f"[BOOTSTRAP] Collected {len(tb._offset_measurements)} offset measurements "
+                       f"from {len(tb.validated_clusters)} validated clusters")
+    
+    def _check_refined_lock(self):
+        """
+        Check if criteria for refined (Tier 2) lock are met.
+        
+        Criteria:
+        1. At least refined_lock_duration_sec (10 min) since provisional lock
+        2. At least min_measurements_for_refined (50) measurements
+        3. Offset standard deviation < max_offset_std_for_refined_ms (15ms)
+        """
+        import time
+        from math import sqrt
+        from statistics import median
+        
+        tb = self.timing_bootstrap
+        
+        if tb.provisional_lock_time is None:
+            return
+        
+        # Already at refined lock
+        if tb.lock_tier == LockTier.REFINED:
+            return
+        
+        elapsed = time.time() - tb.provisional_lock_time
+        n_measurements = len(tb._offset_measurements)
+        
+        # Check minimum duration
+        if elapsed < tb.refined_lock_duration_sec:
+            return
+        
+        # Check minimum measurements
+        if n_measurements < tb.min_measurements_for_refined:
+            if n_measurements > 0 and n_measurements % 10 == 0:
+                logger.info(f"[BOOTSTRAP] Refined lock: {n_measurements}/{tb.min_measurements_for_refined} "
+                           f"measurements after {elapsed:.0f}s")
+            return
+        
+        # Compute median and standard deviation
+        offsets = [m.offset_samples for m in tb._offset_measurements]
+        median_offset = int(median(offsets))
+        
+        # Standard deviation in ms
+        mean_offset = sum(offsets) / len(offsets)
+        variance = sum((o - mean_offset) ** 2 for o in offsets) / len(offsets)
+        std_samples = sqrt(variance)
+        std_ms = std_samples * 1000 / self.config.sample_rate
+        
+        # Check stability criterion
+        if std_ms > tb.max_offset_std_for_refined_ms:
+            logger.info(f"[BOOTSTRAP] Refined lock: std={std_ms:.1f}ms > {tb.max_offset_std_for_refined_ms}ms, "
+                       f"continuing to collect measurements")
+            return
+        
+        # All criteria met - transition to refined lock!
+        tb._refined_offset_samples = median_offset
+        tb._refined_offset_std_ms = std_ms
+        
+        # Update the main offset with refined value
+        old_offset = tb.rtp_to_utc_offset_samples
+        tb.rtp_to_utc_offset_samples = median_offset
+        tb.offset_uncertainty_samples = int(std_samples)
+        
+        # Transition to LOCKED state with Tier 2
+        tb.lock_tier = LockTier.REFINED
+        tb.state = BootstrapState.LOCKED
+        self.phase = BootstrapPhase.LOCKED
+        
+        offset_change_ms = (median_offset - old_offset) * 1000 / self.config.sample_rate if old_offset else 0
+        
+        logger.info(f"[BOOTSTRAP] TIER 2 REFINED LOCK achieved!")
+        logger.info(f"  Duration: {elapsed:.0f}s, Measurements: {n_measurements}")
+        logger.info(f"  Offset: {median_offset} samples (median), std={std_ms:.1f}ms")
+        logger.info(f"  Offset change from provisional: {offset_change_ms:+.1f}ms")
+        
+        # Log station distribution
+        station_counts = {}
+        for m in tb._offset_measurements:
+            station_counts[m.station] = station_counts.get(m.station, 0) + 1
+        logger.info(f"  Station distribution: {station_counts}")
+        
+        # Trigger full lock callback
+        self._on_lock_achieved()
     
     def get_rtp_to_utc_offset(self) -> Optional[Tuple[int, int]]:
         """
@@ -489,20 +679,22 @@ class BootstrapService:
         return self._rtp_to_utc_offset_samples + (minute_index * samples_per_minute)
     
     def get_status(self) -> dict:
-        """Get current bootstrap status."""
+        """Get current bootstrap status including two-tier lock information."""
         with self._lock:
             elapsed = time.time() - self._start_time
+            bootstrap_status = self.timing_bootstrap.get_status()
             
             return {
                 'phase': self.phase.value,
                 'is_locked': self.is_locked,
                 'is_fully_locked': self.is_fully_locked,
+                'lock_tier': bootstrap_status.get('lock_tier', 0),  # 0=none, 1=provisional, 2=refined
                 'elapsed_sec': elapsed,
                 'd_clock_ms': self._d_clock_ms,
                 'rtp_offset_samples': self._rtp_to_utc_offset_samples,
                 'offset_uncertainty_samples': self._offset_uncertainty_samples,
                 'stats': self.stats.copy(),
-                'bootstrap_state': self.timing_bootstrap.get_status(),
+                'bootstrap_state': bootstrap_status,
                 'buffers': {
                     name: buf.get_status()
                     for name, buf in self.buffer_manager.buffers.items()
