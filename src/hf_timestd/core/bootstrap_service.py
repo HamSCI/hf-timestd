@@ -697,6 +697,20 @@ class BootstrapService:
             f"(~{estimated_mb:.0f}MB) after lock"
         )
     
+    def _set_tone_detectors_locked(self, locked: bool):
+        """Set bootstrap_locked flag on all tone detectors.
+        
+        When locked=True, tone detectors will enforce propagation bounds and
+        reject detections outside physical range (e.g., 400-500ms values).
+        
+        This prevents bad detections from polluting the D_clock calculation
+        after bootstrap has established the RTP-to-UTC mapping.
+        """
+        for channel_name, detector in self._tone_detectors.items():
+            if hasattr(detector, 'bootstrap_locked'):
+                detector.bootstrap_locked = locked
+                logger.info(f"[BOOTSTRAP_SERVICE] Set {channel_name} detector bootstrap_locked={locked}")
+    
     def get_minute_boundary_rtp(self, minute_index: int = 0) -> Optional[int]:
         """
         Get the RTP timestamp of a minute boundary.

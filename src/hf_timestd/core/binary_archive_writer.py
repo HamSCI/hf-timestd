@@ -53,6 +53,13 @@ class BinaryArchiveConfig:
     storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
     use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
     radiod_snr_db: Optional[float] = None  # SNR from radiod (updated periodically)
+    
+    # Pre-roll: Start buffer before minute boundary to capture full minute markers.
+    # The minute marker tone starts at second 0, so we need samples BEFORE the
+    # minute boundary to capture the full tone onset. NTP is used as a hint for
+    # where to look, not as ground truth - the bootstrap establishes timing from
+    # the tones themselves.
+    pre_roll_seconds: float = 2.0  # Start buffer 2s before minute boundary
 
 
 @dataclass
