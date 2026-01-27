@@ -667,11 +667,11 @@ class MetrologyService:
                 
                 # Try bootstrap-derived UTC(NIST) first
                 if self._bootstrap_offset_samples is not None:
-                    # Bootstrap offset: RTP value at UTC(NIST) minute 0
-                    # UTC_seconds = ((RTP - offset) / SAMPLES_PER_MINUTE) * 60
-                    SAMPLES_PER_MINUTE = self.engine.sample_rate * 60
-                    minute_index = (rtp_timestamp - self._bootstrap_offset_samples) / SAMPLES_PER_MINUTE
-                    system_time = minute_index * 60.0
+                    # Bootstrap offset semantics (from establish_offset_from_metadata):
+                    #   offset_samples = -offset_sec * sample_rate
+                    #   where offset_sec = UTC - RTP/sample_rate
+                    # Therefore: UTC = (RTP - offset_samples) / sample_rate
+                    system_time = (rtp_timestamp - self._bootstrap_offset_samples) / self._bootstrap_sample_rate
                     timing_source = "bootstrap"
                 else:
                     # Fallback to NTP-derived metadata
