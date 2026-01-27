@@ -612,23 +612,29 @@ class CoreRecorderV2:
                 tb = self.bootstrap_service.timing_bootstrap
                 
                 # Get reference point from bootstrap: RTP at a known minute boundary
-                # and the absolute UTC of that minute (from tone-derived time confirmation)
-                if tb.rtp_to_utc_offset_samples is not None and tb._time_confirmed:
-                    # We have a confirmed minute from BCD/FSK decoding
-                    # reference_rtp is the RTP at minute 0 of bootstrap's reference frame
+                # and the absolute UTC of that minute
+                if tb.rtp_to_utc_offset_samples is not None:
                     reference_rtp = tb.rtp_to_utc_offset_samples
                     
-                    # Compute reference_utc from confirmed hour:minute
-                    # The confirmed time tells us which minute of the day we're at
-                    if tb._confirmed_hour is not None and tb._confirmed_minute is not None:
+                    if tb._time_confirmed and tb._confirmed_hour is not None and tb._confirmed_minute is not None:
+                        # BEST: Time confirmed from BCD/FSK decoding (no NTP dependency)
                         import time
-                        # Get today's date at midnight UTC
                         now = time.time()
                         midnight_utc = (int(now) // 86400) * 86400
-                        # Add confirmed hour and minute
                         reference_utc = midnight_utc + tb._confirmed_hour * 3600 + tb._confirmed_minute * 60
                         logger.info(f"[BOOTSTRAP] Reference from confirmed time: "
                                    f"{tb._confirmed_hour:02d}:{tb._confirmed_minute:02d} UTC")
+                    else:
+                        # FALLBACK: Use NTP as a HINT to determine which minute
+                        # The tones tell us WHERE the minute boundary is (reference_rtp)
+                        # NTP tells us approximately WHICH minute it is
+                        # This is acceptable because NTP is typically within 10ms
+                        import time
+                        now = time.time()
+                        # Round to nearest minute boundary
+                        reference_utc = (int(now) // 60) * 60
+                        logger.info(f"[BOOTSTRAP] Reference from NTP hint: "
+                                   f"UTC={reference_utc} (NTP-derived minute, tone-derived RTP)")
             
             writer = BootstrapStateWriter()
             writer.write_locked(
