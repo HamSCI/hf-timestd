@@ -565,29 +565,11 @@ class StreamRecorderV2:
                 # Don't archive during bootstrap - we don't know minute boundaries yet
                 return
             
-            # CRITICAL FIX (2026-01-27): Use bootstrap-derived time for minute alignment
-            # After bootstrap locks, we know where minutes actually begin from the tones.
-            # Use the bootstrap offset to compute system_time, not NTP directly.
-            # This ensures minute boundaries align with actual tone arrivals.
-            archive_system_time = system_time  # Default to NTP-derived
-            if self._bootstrap_service is not None:
-                offset = self._bootstrap_service.timing_bootstrap.get_rtp_to_utc_offset()
-                if offset:
-                    offset_samples, _ = offset
-                    # Convert RTP to UTC using bootstrap-derived offset
-                    # offset_samples = RTP at minute 0 (reference minute)
-                    # minute_index = (RTP - offset_samples) / SAMPLES_PER_MINUTE
-                    # UTC_seconds = minute_index * 60
-                    sample_rate = self._bootstrap_service.config.sample_rate
-                    SAMPLES_PER_MINUTE = sample_rate * 60
-                    minute_index = (quality.last_rtp_timestamp - offset_samples) / SAMPLES_PER_MINUTE
-                    archive_system_time = minute_index * 60
-            
             # Write to Phase 1 archive (Phase 2/3 handled by separate services)
             self.archive_writer.write_samples(
                 samples=samples,
                 rtp_timestamp=quality.last_rtp_timestamp,
-                system_time=archive_system_time,
+                system_time=system_time,
                 gap_samples=batch_gap_samples
             )
             

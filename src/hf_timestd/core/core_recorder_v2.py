@@ -603,14 +603,17 @@ class CoreRecorderV2:
         try:
             from .bootstrap_state import BootstrapStateWriter
             
-            # Get RTP-to-UTC offset from bootstrap service
+            # Get RTP-to-UTC offset and NTP correction from bootstrap service
             offset_samples = None
             sample_rate = 24000
+            ntp_correction_ms = None
             if self.bootstrap_service:
                 offset = self.bootstrap_service.timing_bootstrap.get_rtp_to_utc_offset()
                 if offset:
                     offset_samples, _ = offset
                 sample_rate = self.bootstrap_service.config.sample_rate
+                # Get NTP correction (how much to adjust NTP time for minute alignment)
+                ntp_correction_ms = self.bootstrap_service._calculate_ntp_correction()
             
             writer = BootstrapStateWriter()
             writer.write_locked(
@@ -618,7 +621,8 @@ class CoreRecorderV2:
                 d_clock_ms=d_clock_ms,
                 uncertainty_ms=uncertainty_ms,
                 rtp_to_utc_offset_samples=offset_samples or 0,
-                sample_rate=sample_rate
+                sample_rate=sample_rate,
+                ntp_correction_ms=ntp_correction_ms
             )
         except Exception as e:
             logger.warning(f"Failed to write bootstrap state file: {e}")

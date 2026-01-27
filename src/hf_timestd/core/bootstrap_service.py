@@ -438,49 +438,57 @@ class BootstrapService:
         """
         Calculate D_clock (system clock offset from UTC).
         
-        D_clock = system_time - UTC
-        Positive means system clock is ahead of UTC.
+        This is calculated from the timing errors observed during bootstrap.
+        The timing error is: (actual_tone_arrival - expected_minute_boundary)
+        After subtracting propagation delay, this gives us D_clock.
         
-        Calculation:
-        1. Get the most recent RTP timestamp from any active buffer
-        2. Convert RTP to UTC using the bootstrap offset
-        3. Compare to current system time
-        
-        D_clock = system_time - UTC_from_RTP
-               = time.time() - (last_rtp - rtp_to_utc_offset) / sample_rate
+        D_clock = timing_error - propagation_delay
+        Positive means system clock is ahead of UTC (tones arrive "late").
         """
-        if self._rtp_to_utc_offset_samples is None:
+        # Use the timing errors from validated tones
+        tb = self.timing_bootstrap
+        if not tb.validated_tones:
             return None
         
-        # Find the most recent RTP timestamp from any buffer
-        last_rtp = None
-        for buffer in self.buffer_manager.buffers.values():
-            if buffer.last_rtp is not None:
-                if last_rtp is None or buffer.last_rtp > last_rtp:
-                    last_rtp = buffer.last_rtp
+        # Calculate D_clock from each validated tone
+        d_clocks = []
+        for tone in tb.validated_tones:
+            # timing_error_ms is how far the tone was from expected minute boundary
+            # Subtract propagation delay to get D_clock
+            prop_delay_ms = tb.station_expectations.get(
+                tone.station, {}
+            ).get('delay_ms', 0)
+            d_clock = tone.timing_error_ms - prop_delay_ms
+            d_clocks.append(d_clock)
         
-        if last_rtp is None:
-            logger.debug("[BOOTSTRAP] Cannot calculate D_clock: no RTP timestamps available")
+        if not d_clocks:
             return None
         
-        # Convert RTP to UTC seconds
-        # rtp_to_utc_offset_samples is the RTP sample number at UTC=0
-        # So: UTC_seconds = (current_rtp - offset) / sample_rate
-        rtp_since_epoch = last_rtp - self._rtp_to_utc_offset_samples
-        utc_from_rtp = rtp_since_epoch / self.config.sample_rate
-        
-        # D_clock = system_time - UTC
-        system_time = time.time()
-        d_clock_sec = system_time - utc_from_rtp
-        d_clock_ms = d_clock_sec * 1000.0
-        
-        # Sanity check: D_clock should be small if system is NTP-synced
-        # Large values (>1 second) suggest calculation error or unsynced clock
-        if abs(d_clock_ms) > 1000:
-            logger.warning(f"[BOOTSTRAP] D_clock={d_clock_ms:+.1f}ms is large - "
-                          f"system clock may be unsynced or calculation error")
+        # Use median for robustness
+        from statistics import median
+        d_clock_ms = median(d_clocks)
         
         return d_clock_ms
+    
+    def _calculate_ntp_correction(self) -> Optional[float]:
+        """
+        Calculate the NTP-to-tone correction in milliseconds.
+        
+        This is the correction needed to align NTP-derived minute boundaries
+        with actual tone arrivals. It's essentially the negative of D_clock
+        (if D_clock is positive, NTP is ahead, so we need to subtract).
+        
+        NTP_correction = -D_clock
+        
+        Apply this to NTP time: corrected_time = ntp_time + ntp_correction_ms/1000
+        """
+        d_clock = self._calculate_d_clock()
+        if d_clock is None:
+            return None
+        
+        # NTP correction is negative of D_clock
+        # If D_clock is +100ms (system ahead), we need to subtract 100ms from NTP time
+        return -d_clock
     
     def _collect_offset_measurements(self):
         """

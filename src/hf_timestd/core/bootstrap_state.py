@@ -38,6 +38,10 @@ class BootstrapState:
     lock_time: Optional[str] = None  # ISO timestamp
     rtp_to_utc_offset_samples: Optional[int] = None
     sample_rate: int = 24000
+    # NTP-to-tone correction: how much to adjust NTP time to align with tone arrivals
+    # Positive = tones arrive later than NTP predicts (add to NTP time)
+    # This is the key value for minute boundary alignment
+    ntp_correction_ms: Optional[float] = None
     
     def to_json(self) -> str:
         """Serialize to JSON."""
@@ -78,9 +82,20 @@ class BootstrapStateWriter:
         d_clock_ms: float,
         uncertainty_ms: float,
         rtp_to_utc_offset_samples: int,
-        sample_rate: int = 24000
+        sample_rate: int = 24000,
+        ntp_correction_ms: Optional[float] = None
     ):
-        """Write locked state to file."""
+        """Write locked state to file.
+        
+        Args:
+            lock_tier: Lock tier (PROVISIONAL or REFINED)
+            d_clock_ms: Estimated D_clock (system clock offset from UTC)
+            uncertainty_ms: Uncertainty in D_clock estimate
+            rtp_to_utc_offset_samples: RTP offset for relative minute indexing
+            sample_rate: Sample rate in Hz
+            ntp_correction_ms: Correction to apply to NTP time for minute alignment
+                              Positive = tones arrive later than NTP predicts
+        """
         state = BootstrapState(
             locked=True,
             lock_tier=lock_tier,
@@ -88,10 +103,13 @@ class BootstrapStateWriter:
             uncertainty_ms=uncertainty_ms,
             lock_time=datetime.now(timezone.utc).isoformat(),
             rtp_to_utc_offset_samples=rtp_to_utc_offset_samples,
-            sample_rate=sample_rate
+            sample_rate=sample_rate,
+            ntp_correction_ms=ntp_correction_ms
         )
         self._write(state)
-        logger.info(f"[BOOTSTRAP] Wrote lock state: {lock_tier}, D_clock={d_clock_ms:+.1f}ms")
+        logger.info(f"[BOOTSTRAP] Wrote lock state: {lock_tier}, D_clock={d_clock_ms:+.1f}ms, "
+                   f"NTP_correction={ntp_correction_ms:+.1f}ms" if ntp_correction_ms else 
+                   f"[BOOTSTRAP] Wrote lock state: {lock_tier}, D_clock={d_clock_ms:+.1f}ms")
     
     def write_unlocked(self):
         """Write unlocked state to file."""

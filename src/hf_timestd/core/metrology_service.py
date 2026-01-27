@@ -69,18 +69,15 @@ class MetrologyService:
         self._rtp_to_unix_offset = None
         self._offset_samples = []
         
-        # Bootstrap State (2026-01-27): Read offset from shared state file
-        # The core_recorder establishes the RTP-to-UTC offset by finding minute markers
-        # in the tones. We read that offset from the shared state file rather than
-        # learning it independently from NTP. This ensures minute boundaries align
-        # with actual tone arrivals, not NTP-derived estimates.
+        # NTP Correction (2026-01-27): Apply bootstrap-derived correction to NTP time
+        # This corrects for the difference between NTP-predicted minute boundaries
+        # and actual tone arrivals. Read from shared bootstrap state file.
         from .bootstrap_state import BootstrapState as SharedBootstrapState, DEFAULT_STATE_FILE
         self._bootstrap_state_file = DEFAULT_STATE_FILE
-        self._bootstrap_offset_samples = None  # From shared state file
-        self._bootstrap_sample_rate = 24000
+        self._ntp_correction_ms = None  # Loaded from bootstrap state
+        self._ntp_correction_loaded = False
         
         # Timing Bootstrap (2026-01-25): Broadcast-driven RTP-to-UTC calibration
-        # NOTE: This is now secondary - we prefer the shared bootstrap state
         from .timing_bootstrap import TimingBootstrap, BootstrapState
         lat = self.station_config.get('latitude', 38.9)
         lon = self.station_config.get('longitude', -92.1)
@@ -461,29 +458,27 @@ class MetrologyService:
                         logger.info(f"[OFFSET_REFINE] {station}: {correction_ms:+.2f}ms correction "
                                    f"(error was {timing_error_ms:+.1f}ms, raw_toa={res.raw_toa_ms:.1f}ms)")
 
-    def _load_bootstrap_offset(self):
-        """Load bootstrap offset from shared state file.
+    def _load_ntp_correction(self):
+        """Load NTP correction from shared bootstrap state file.
         
-        The core_recorder writes the RTP-to-UTC offset to a shared state file
-        after finding minute markers in the tones. We read that offset here
-        to ensure minute boundaries align with actual tone arrivals.
+        The core_recorder writes the NTP correction after bootstrap locks.
+        This correction aligns NTP-derived minute boundaries with actual tone arrivals.
         """
         from .bootstrap_state import BootstrapState as SharedBootstrapState
         
         try:
             state = SharedBootstrapState.from_file(self._bootstrap_state_file)
-            if state and state.locked and state.rtp_to_utc_offset_samples is not None:
-                self._bootstrap_offset_samples = state.rtp_to_utc_offset_samples
-                self._bootstrap_sample_rate = state.sample_rate
+            if state and state.locked and state.ntp_correction_ms is not None:
+                self._ntp_correction_ms = state.ntp_correction_ms
+                self._ntp_correction_loaded = True
                 logger.info(
-                    f"[BOOTSTRAP] Loaded offset from state file: "
-                    f"{self._bootstrap_offset_samples} samples @ {self._bootstrap_sample_rate}Hz "
+                    f"[NTP_CORRECTION] Loaded from bootstrap state: {self._ntp_correction_ms:+.1f}ms "
                     f"(tier={state.lock_tier})"
                 )
             else:
-                logger.debug(f"[BOOTSTRAP] State file not locked or missing offset")
+                logger.debug("[NTP_CORRECTION] Bootstrap state not locked or missing correction")
         except Exception as e:
-            logger.warning(f"[BOOTSTRAP] Failed to load state file: {e}")
+            logger.warning(f"[NTP_CORRECTION] Failed to load bootstrap state: {e}")
     
     def stop(self):
         """Stop service."""
@@ -649,47 +644,62 @@ class MetrologyService:
             if iq_samples is None:
                 return None
                 
-            # 4. Determine Time (from bootstrap-derived offset)
+            # 4. Determine Time (Absolute timing from GPSDO-derived metadata)
             # -------------------------------------------------------------
-            # CRITICAL FIX (2026-01-27): Use bootstrap-derived offset, not NTP
-            # The core_recorder establishes the RTP-to-UTC offset by finding minute
-            # markers in the tones. We read that offset from the shared state file.
-            # This ensures minute boundaries align with actual tone arrivals.
-            #
-            # PRIORITY 1: Bootstrap offset from shared state file (tone-derived)
-            # PRIORITY 2: Metadata start_system_time (NTP-derived, fallback)
+            # PRIORITY 1: Use start_system_time from recorder metadata (NTP-synced)
+            # PRIORITY 2: Apply NTP correction from bootstrap (tone-derived)
+            # PRIORITY 3: Learn/maintain RTP-to-Unix offset with drift protection
             if 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
                 
-                # Try to load bootstrap offset from shared state file
-                if self._bootstrap_offset_samples is None:
-                    self._load_bootstrap_offset()
+                # Load NTP correction from bootstrap state (once)
+                if not self._ntp_correction_loaded:
+                    self._load_ntp_correction()
                 
-                if self._bootstrap_offset_samples is not None:
-                    # Use bootstrap-derived offset (tone-based, accurate)
-                    # offset_samples = RTP at minute 0 (reference minute)
-                    # minute_index = (RTP - offset_samples) / SAMPLES_PER_MINUTE
-                    # UTC_seconds = minute_index * 60
-                    SAMPLES_PER_MINUTE = self._bootstrap_sample_rate * 60
-                    minute_index = (rtp_timestamp - self._bootstrap_offset_samples) / SAMPLES_PER_MINUTE
-                    system_time = minute_index * 60
-                    timing_source = "bootstrap"
+                # Instantaneous offset for this specific file
+                start_system_time = metadata.get('start_system_time')
+                if start_system_time is not None:
+                    inst_offset = start_system_time - (rtp_timestamp / self.engine.sample_rate)
                 else:
-                    # Fallback to metadata (NTP-derived)
-                    start_system_time = metadata.get('start_system_time')
-                    if start_system_time is not None:
-                        inst_offset = start_system_time - (rtp_timestamp / self.engine.sample_rate)
-                        self._rtp_to_unix_offset = inst_offset
-                        system_time = rtp_timestamp / self.engine.sample_rate + self._rtp_to_unix_offset
-                        timing_source = "metadata"
-                    else:
-                        system_time = float(target_minute)
-                        timing_source = "fallback"
+                    inst_offset = target_minute - (rtp_timestamp / self.engine.sample_rate)
                 
-                # DIAGNOSTIC: Log timing source
+                # Drift protection: reset if offset jumps significantly (recorder restart)
+                if self._rtp_to_unix_offset is not None:
+                    drift = abs(inst_offset - self._rtp_to_unix_offset)
+                    if drift > 1.0:
+                        logger.warning(
+                            f"Significant RTP drift detected ({drift:.3f}s)! "
+                            f"Resetting offset reference (likely recorder restart)."
+                        )
+                        self._rtp_to_unix_offset = None
+                        self._offset_samples = []
+                
+                # Establish or refine offset
+                if start_system_time is not None:
+                    self._rtp_to_unix_offset = inst_offset
+                elif self._rtp_to_unix_offset is None:
+                    self._offset_samples.append(inst_offset)
+                    if len(self._offset_samples) >= 5:
+                        self._rtp_to_unix_offset = sum(self._offset_samples) / len(self._offset_samples)
+                    else:
+                        self._rtp_to_unix_offset = inst_offset
+                
+                # Calculate system_time for engine
+                if self._rtp_to_unix_offset is not None:
+                    system_time = rtp_timestamp / self.engine.sample_rate + self._rtp_to_unix_offset
+                else:
+                    system_time = float(target_minute)
+                
+                # CRITICAL FIX (2026-01-27): Apply NTP correction from bootstrap
+                # This aligns NTP-derived minute boundaries with actual tone arrivals
+                timing_source = "metadata" if start_system_time is not None else "learned"
+                if self._ntp_correction_ms is not None:
+                    system_time += self._ntp_correction_ms / 1000.0
+                    timing_source += "+bootstrap"
                 logger.info(
                     f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
-                    f"RTP={rtp_timestamp}, CalculatedSystem={system_time:.6f}"
+                    f"RTP={rtp_timestamp}, MetaSystem={start_system_time}, "
+                    f"Offset={self._rtp_to_unix_offset:.6f}s, CalculatedSystem={system_time:.6f}"
                 )
             else:
                 # Fallback: use minute boundary
