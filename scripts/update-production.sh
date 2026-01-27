@@ -114,10 +114,16 @@ fi
 # =============================================================================
 log_info "Step 1: Updating Python package..."
 
-# Use regular install (not editable) so timestd user can access the installed code
-# Editable installs require the source directory to be readable by the service user
-"$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet --no-deps
-log_info "  ✅ Python package updated"
+# CRITICAL: Clean up stale .pyc files from the venv to prevent old compiled code
+# from interfering with new behavior. This is a common source of subtle bugs.
+log_info "  Cleaning stale .pyc files from venv..."
+find "$VENV_DIR/lib" -name '*.pyc' -delete 2>/dev/null || true
+find "$VENV_DIR/lib" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Reinstall the package (not editable) to ensure production uses installed code
+# Force reinstall to ensure all modules are updated
+"$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet --force-reinstall --no-deps
+log_info "  ✅ Python package updated (pyc cache cleared)"
 
 # =============================================================================
 # Step 2: Copy Updated Scripts
@@ -231,6 +237,17 @@ fi
 # Step 5: Verify Update
 # =============================================================================
 log_info "Step 5: Verifying update..."
+
+# Verify the venv is using the installed package, not the repo
+INSTALLED_PATH=$("$VENV_DIR/bin/python3" -c "import hf_timestd; print(hf_timestd.__file__)" 2>/dev/null || echo "FAILED")
+if [[ "$INSTALLED_PATH" == *"/opt/hf-timestd/venv/"* ]]; then
+    log_info "  ✅ Venv using installed package: $INSTALLED_PATH"
+elif [[ "$INSTALLED_PATH" == *"/home/"* ]] || [[ "$INSTALLED_PATH" == *"$PROJECT_DIR"* ]]; then
+    log_warn "  ⚠️  Venv may be using repo path (editable install?): $INSTALLED_PATH"
+    log_warn "     This can cause production/development confusion!"
+else
+    log_warn "  ⚠️  Could not verify package location: $INSTALLED_PATH"
+fi
 
 # Check services are running
 FAILED_SERVICES=()

@@ -3054,7 +3054,7 @@ class MultiBroadcastFusion:
         
         return True, reason, 0
     
-    def fuse(self, lookback_minutes: int = 10, force_l1_only: bool = False) -> Optional[FusedResult]:
+    def fuse(self, lookback_minutes: int = 10, force_l1_only: bool = False, skip_write: bool = False) -> Optional[FusedResult]:
         """
         Perform multi-broadcast fusion.
         
@@ -3996,8 +3996,9 @@ class MultiBroadcastFusion:
         # Track measurement for Allan deviation calculation
         self.adev_tracker.add_measurement(result.timestamp, result.d_clock_fused_ms)
         
-        # Write to CSV
-        self._write_fused_result(result)
+        # Write to HDF5 (skip if caller will write after populating L1/L2 fields)
+        if not skip_write:
+            self._write_fused_result(result)
         
         return result
     
@@ -4506,13 +4507,15 @@ def run_fusion_service(
             
             try:
                 # L1-only fusion: Force use of raw L1 metrology only
-                result_l1 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=True)
+                # skip_write=True because we write once after L1/L2 fields are populated
+                result_l1 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=True, skip_write=True)
             except Exception as e_fuse:
                 logger.error(f"L1 fusion calculation CRASHED: {e_fuse}", exc_info=True)
             
             try:
                 # L2 fusion: Use L2 calibrated data (current behavior)
-                result_l2 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=False)
+                # skip_write=True because we write once after L1/L2 fields are populated
+                result_l2 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=False, skip_write=True)
             except Exception as e_fuse:
                 logger.error(f"L2 fusion calculation CRASHED: {e_fuse}", exc_info=True)
             

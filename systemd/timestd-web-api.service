@@ -9,7 +9,8 @@ Type=notify
 User=timestd
 Group=timestd
 WorkingDirectory=/opt/hf-timestd/web-api
-Environment="PYTHONPATH=/opt/hf-timestd/src"
+# NOTE: No PYTHONPATH set - the venv has hf_timestd installed as a proper package
+# Setting PYTHONPATH to a non-existent or repo path causes import confusion
 Environment="PATH=/opt/hf-timestd/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Watchdog: restart if no heartbeat for 60s (6 heartbeats at 10s each)

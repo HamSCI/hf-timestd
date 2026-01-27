@@ -41,6 +41,10 @@ class FusionResponse(BaseModel):
     wwv_intra_std_ms: Optional[float] = Field(None, description="WWV intra-station std")
     wwvh_intra_std_ms: Optional[float] = Field(None, description="WWVH intra-station std")
     chu_intra_std_ms: Optional[float] = Field(None, description="CHU intra-station std")
+    # L1 vs L2 comparison (v6.2 metrological tracking)
+    d_clock_l1_ms: Optional[float] = Field(None, description="L1 fusion D_clock (geometric delay only)")
+    d_clock_l2_ms: Optional[float] = Field(None, description="L2 fusion D_clock (full physics model)")
+    l1_l2_difference_ms: Optional[float] = Field(None, description="L1-L2 difference (propagation correction magnitude)")
 
 
 class FusionHistoryResponse(BaseModel):
