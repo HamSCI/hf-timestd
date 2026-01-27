@@ -36,6 +36,7 @@ SERVICES=(
 TIMERS=(
     "timestd-ionex-download.timer"
     "timestd-chrony-monitor.timer"
+    "timestd-upload-daily.timer"
     "grape-daily.timer"
 )
 

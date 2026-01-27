@@ -1,17 +1,20 @@
 #!/bin/bash
 #
-# update-production.sh - Update production installation after git pull
+# update-production.sh - Update production installation from git repository
 #
 # Usage:
-#   cd /home/mjh/git/hf-timestd
-#   git pull
-#   sudo scripts/update-production.sh
+#   sudo scripts/update-production.sh [--pull]
+#
+# Options:
+#   --pull    Run 'git pull' before updating (recommended)
 #
 # This script:
-# 1. Reinstalls the Python package (editable install)
-# 2. Copies updated scripts to /opt/hf-timestd/scripts
-# 3. Restarts affected services
-# 4. Verifies the update was successful
+# 1. Optionally pulls latest code from git (--pull)
+# 2. Reinstalls the Python package
+# 3. Copies updated scripts, web-api, and docs to /opt/hf-timestd
+# 4. Updates systemd service files if changed
+# 5. Restarts affected services
+# 6. Verifies the update was successful
 #
 
 set -e
@@ -25,6 +28,29 @@ NC='\033[0m' # No Color
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Parse arguments
+DO_GIT_PULL=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --pull)
+            DO_GIT_PULL=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: sudo $0 [--pull]"
+            echo ""
+            echo "Options:"
+            echo "  --pull    Run 'git pull' before updating (recommended)"
+            echo "  --help    Show this help"
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
 
 # Configuration
 INSTALL_DIR="/opt/hf-timestd"
@@ -55,6 +81,32 @@ if [[ ! -d "$VENV_DIR" ]]; then
     log_error "Virtual environment not found at $VENV_DIR"
     log_error "Run scripts/install.sh first"
     exit 1
+fi
+
+# =============================================================================
+# Step 0: Git Pull (optional)
+# =============================================================================
+if [[ "$DO_GIT_PULL" == "true" ]]; then
+    log_info "Step 0: Pulling latest code from git..."
+    
+    # Get current commit for comparison
+    OLD_COMMIT=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    
+    # Pull as the owner of the repo (not root)
+    REPO_OWNER=$(stat -c '%U' "$PROJECT_DIR")
+    if sudo -u "$REPO_OWNER" git -C "$PROJECT_DIR" pull --ff-only; then
+        NEW_COMMIT=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        if [[ "$OLD_COMMIT" == "$NEW_COMMIT" ]]; then
+            log_info "  ✅ Already up to date ($NEW_COMMIT)"
+        else
+            log_info "  ✅ Updated: $OLD_COMMIT → $NEW_COMMIT"
+        fi
+    else
+        log_error "Git pull failed. Resolve conflicts manually and re-run."
+        exit 1
+    fi
+else
+    log_info "Skipping git pull (use --pull to update from remote)"
 fi
 
 # =============================================================================
@@ -97,6 +149,21 @@ chown -R timestd:timestd "$INSTALL_DIR/web-api/"
 log_info "  ✅ Web API synced to $INSTALL_DIR/web-api/"
 
 # =============================================================================
+# Step 2c: Sync Documentation (for Living Docs)
+# =============================================================================
+log_info "Step 2c: Syncing documentation..."
+
+# Sync docs directory (for living documentation feature)
+if [[ -d "$PROJECT_DIR/docs" ]]; then
+    mkdir -p "$INSTALL_DIR/docs"
+    rsync -a --delete \
+        --exclude '__pycache__' \
+        "$PROJECT_DIR/docs/" "$INSTALL_DIR/docs/"
+    chown -R timestd:timestd "$INSTALL_DIR/docs/"
+    log_info "  ✅ Documentation synced to $INSTALL_DIR/docs/"
+fi
+
+# =============================================================================
 # Step 3: Update Systemd Service Files (if changed)
 # =============================================================================
 log_info "Step 3: Checking systemd service files..."
@@ -131,12 +198,14 @@ fi
 log_info "Step 4: Restarting services..."
 
 # List of services to restart (in order)
+# Note: Matches services in start-services.sh and install.sh
 SERVICES=(
-    "timestd-fusion"
     "timestd-metrology"
     "timestd-l2-calibration"
+    "timestd-fusion"
     "timestd-physics"
     "timestd-web-api"
+    "timestd-radiod-monitor"
 )
 
 for service in "${SERVICES[@]}"; do
@@ -150,6 +219,12 @@ done
 if systemctl is-active --quiet "timestd-core-recorder"; then
     log_warn "  ⚠️  timestd-core-recorder NOT restarted (to avoid data gaps)"
     log_info "     Restart manually if needed: sudo systemctl restart timestd-core-recorder"
+fi
+
+# Restart optional VTEC service if running
+if systemctl is-active --quiet "timestd-vtec"; then
+    systemctl restart "timestd-vtec"
+    log_info "  Restarted: timestd-vtec"
 fi
 
 # =============================================================================
