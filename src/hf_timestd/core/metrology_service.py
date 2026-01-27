@@ -327,17 +327,44 @@ class MetrologyService:
                 station = res.station_id.name if hasattr(res.station_id, 'name') else str(res.station_id)
                 
                 # Validate 1: Propagation delay within expected range
+                # raw_toa_ms = time of arrival relative to minute boundary
+                # expected_delay = propagation delay from station
+                # If offset is correct: raw_toa_ms ≈ expected_delay
                 expected_delay = self._timing_bootstrap.station_expectations.get(
                     station, {}
                 ).get('delay_ms', 0)
-                timing_error = abs(res.raw_toa_ms - expected_delay)
+                timing_error_ms = res.raw_toa_ms - expected_delay  # Signed error
                 
-                if timing_error < 50:
+                if abs(timing_error_ms) < 50:
                     logger.debug(f"[BOOTSTRAP] Timing OK: {station} "
                                 f"raw_toa={res.raw_toa_ms:.1f}ms, expected={expected_delay:.1f}ms")
-                elif timing_error > 200:
+                elif abs(timing_error_ms) > 200:
                     logger.warning(f"[BOOTSTRAP] Timing error: {station} "
-                                  f"raw_toa={res.raw_toa_ms:.1f}ms, error={timing_error:.1f}ms")
+                                  f"raw_toa={res.raw_toa_ms:.1f}ms, error={timing_error_ms:+.1f}ms")
+                
+                # ================================================================
+                # METROLOGICAL FIX (2026-01-27): Feed timing error back to bootstrap
+                # ================================================================
+                # The timing error tells us how far off our RTP-to-UTC mapping is.
+                # If timing_error_ms > 0, tones arrive later than expected → offset too low
+                # Apply damped correction to drive raw D_clock toward zero.
+                if self._timing_bootstrap.rtp_to_utc_offset_samples is not None:
+                    OFFSET_CORRECTION_ALPHA = 0.1  # Smoothing factor
+                    MIN_CORRECTION_MS = 0.5
+                    
+                    if abs(timing_error_ms) > MIN_CORRECTION_MS and abs(timing_error_ms) < 100:
+                        # Convert ms error to samples and apply damped correction
+                        error_samples = int(timing_error_ms * self.engine.sample_rate / 1000)
+                        correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
+                        
+                        if correction_samples != 0:
+                            self._timing_bootstrap.rtp_to_utc_offset_samples += correction_samples
+                            correction_ms = correction_samples * 1000 / self.engine.sample_rate
+                            
+                            if abs(correction_ms) > 1.0:
+                                logger.info(f"[BOOTSTRAP] Offset refined via {station}: "
+                                           f"{correction_ms:+.2f}ms correction "
+                                           f"(error was {timing_error_ms:+.1f}ms)")
                 
                 # Validate 2: Tone frequency matches station
                 tone_freq = 1200.0 if station == 'WWVH' else 1000.0

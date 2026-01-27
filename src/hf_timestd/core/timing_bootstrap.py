@@ -908,11 +908,18 @@ class TimingBootstrap:
         Tier 1 (Provisional): Quick lock for minute alignment (2-3 min)
         - Allows archiving to begin
         - Uses initial offset estimate
+        - CONTINUOUSLY REFINES offset using timing errors (metrological fix 2026-01-27)
         
         Tier 2 (Refined): Stable lock after ionospheric averaging (10-15 min)
         - Collects offset measurements during provisional phase
         - Uses median for robustness against outliers
         - Requires std < 15ms and 50+ measurements
+        
+        METROLOGICAL FIX (2026-01-27):
+        The raw D_clock should converge to near zero once bootstrap locks.
+        Previously, the metadata-derived offset was used without refinement,
+        causing raw D_clock to be ~100-300ms off. Now we continuously apply
+        timing error corrections to drive raw D_clock toward zero.
         """
         import time
         
@@ -955,6 +962,30 @@ class TimingBootstrap:
         
         if minute_index > self.minutes_observed:
             self.minutes_observed = minute_index + 1
+        
+        # ================================================================
+        # METROLOGICAL FIX: Continuously refine offset using timing errors
+        # ================================================================
+        # The timing error tells us how far off our RTP-to-UTC mapping is.
+        # If error_ms > 0, tones arrive later than expected → offset is too low
+        # If error_ms < 0, tones arrive earlier than expected → offset is too high
+        #
+        # Apply a damped correction to avoid oscillation from ionospheric noise.
+        # Use exponential smoothing with alpha = 0.1 (slow convergence, stable)
+        OFFSET_CORRECTION_ALPHA = 0.1  # Smoothing factor (0.1 = 10% of error per update)
+        MIN_CORRECTION_MS = 0.5  # Don't bother with tiny corrections
+        
+        if abs(error_ms) > MIN_CORRECTION_MS:
+            correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
+            if correction_samples != 0:
+                old_offset = self.rtp_to_utc_offset_samples
+                self.rtp_to_utc_offset_samples += correction_samples
+                correction_ms = correction_samples * 1000 / self.sample_rate
+                
+                # Log significant corrections
+                if abs(correction_ms) > 1.0 or self.consecutive_validations <= 20:
+                    logger.info(f"[BOOTSTRAP] Offset refined: {correction_ms:+.2f}ms correction "
+                               f"(error was {error_ms:+.1f}ms, α={OFFSET_CORRECTION_ALPHA})")
         
         # === TWO-TIER BOOTSTRAP LOGIC ===
         

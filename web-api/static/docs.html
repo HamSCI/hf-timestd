@@ -515,11 +515,11 @@
                 </div>
                 <div class="widget-subtitle">${statusMsg}</div>
                 <div style="margin-top: 8px; font-size: 0.8em; color: #64748b;">
-                    <strong>Why ~100s of ms?</strong> These are <em>raw</em> D_clock values before calibration.<br>
-                    The offset comes from the RTP timestamp epoch (arbitrary, not UTC-aligned).<br>
-                    Chrony sees the <em>calibrated</em> D_clock ≈ 0ms after the Kalman filter absorbs this offset.<br><br>
-                    <strong>L1−L2 difference</strong> is the key metric — it shows propagation correction quality<br>
-                    (should be small, typically &lt;2ms, independent of the absolute offset)
+                    <strong>TSL1/TSL2</strong> = raw D_clock (tone arrival − propagation delay)<br>
+                    Should converge to near zero as bootstrap refines the RTP-to-UTC offset.<br>
+                    Values of 5-40ms are normal (ionospheric variability).<br><br>
+                    <strong>L1−L2 difference</strong> shows propagation correction quality<br>
+                    (L1 = geometric only, L2 = full physics model, difference typically &lt;3ms)
                 </div>
             `;
         }
