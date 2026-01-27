@@ -626,38 +626,21 @@ class CoreRecorderV2:
             
             if self.bootstrap_service:
                 sample_rate = self.bootstrap_service.config.sample_rate
-                tb = self.bootstrap_service.timing_bootstrap
                 
-                # Get reference point: we need a consistent (RTP, UTC) pair
-                # The bootstrap's rtp_to_utc_offset_samples is the RTP at minute 0 of its
-                # reference frame. We need to know what absolute UTC that corresponds to.
-                #
-                # Strategy: Use the most recent validated tone to establish the reference.
-                # The tone's RTP and the minute_index tell us the relationship.
-                if tb.validated_tones and tb.rtp_to_utc_offset_samples is not None:
-                    # Get the most recent validated tone
-                    latest_tone = tb.validated_tones[-1]
-                    tone_rtp = latest_tone.candidate.rtp_timestamp
-                    minute_index = latest_tone.minute_index
-                    
-                    # The tone arrived at this RTP, which is minute_index minutes after
-                    # the bootstrap's reference minute 0. Use NTP to identify minute 0's UTC.
-                    import time
-                    now = time.time()
-                    current_minute_utc = (int(now) // 60) * 60
-                    
-                    # How many minutes ago was the tone detected?
-                    # Approximate using RTP difference
-                    samples_since_tone = tb.rtp_to_utc_offset_samples - tone_rtp + (minute_index * sample_rate * 60)
-                    # This is approximately 0 if our offset is correct
-                    
-                    # The reference minute 0 is minute_index minutes before the tone's minute
-                    # Use NTP to identify the current minute, then work backwards
-                    reference_utc = current_minute_utc - (minute_index * 60)
-                    reference_rtp = tb.rtp_to_utc_offset_samples
-                    
-                    logger.debug(f"[BOOTSTRAP] Reference: minute_index={minute_index}, "
-                                f"ref_rtp={reference_rtp}, ref_utc={reference_utc}")
+                # Get a consistent (RTP, UTC) pair from the most recent buffer metadata
+                # This is the simplest and most reliable approach:
+                # - Buffer metadata has both start_rtp_timestamp and start_system_time
+                # - These are recorded at the same instant, so they're a consistent pair
+                # - The bootstrap's offset refinement ensures minute boundaries align with tones
+                for recorder in self.recorders.values():
+                    if hasattr(recorder, '_last_metadata') and recorder._last_metadata:
+                        meta = recorder._last_metadata
+                        if 'start_rtp_timestamp' in meta and 'start_system_time' in meta:
+                            reference_rtp = int(meta['start_rtp_timestamp'])
+                            reference_utc = float(meta['start_system_time'])
+                            logger.debug(f"[BOOTSTRAP] Reference from buffer metadata: "
+                                        f"RTP={reference_rtp}, UTC={reference_utc:.3f}")
+                            break
             
             writer = BootstrapStateWriter()
             writer.write_locked(
