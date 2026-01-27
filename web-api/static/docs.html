@@ -468,10 +468,28 @@
                 return;
             }
             
-            // Use actual API fields: d_clock_raw_ms (L1) and d_clock_ms (L2 calibrated)
-            const l1 = f.d_clock_raw_ms;
-            const l2 = f.d_clock_ms;
-            const diff = (l1 !== null && l2 !== null) ? l1 - l2 : null;
+            // Use the actual L1/L2 fusion results (what gets fed to Chrony)
+            // These are the Kalman-filtered values from separate L1-only and L2 fusion pipelines
+            const l1 = f.d_clock_l1_ms;
+            const l2 = f.d_clock_l2_ms;
+            const diff = f.l1_l2_difference_ms;
+            
+            // If L1/L2 fields not available, show explanation
+            if (l1 === null && l2 === null) {
+                container.innerHTML = `
+                    <div class="widget-title">TSL1 vs TSL2 Comparison — Live</div>
+                    <div style="padding: 16px; color: #94a3b8;">
+                        <p><strong>Note:</strong> Both TSL1 and TSL2 show <code>+0ns</code> in chrony because the feedback loop has converged.</p>
+                        <p style="margin-top: 8px;">This is correct behavior — it means the system clock now tracks the HF estimate of UTC.</p>
+                        <p style="margin-top: 8px;">To validate absolute accuracy, compare against external references (GPS, NTP pools) in <code>chronyc sources</code>.</p>
+                        <p style="margin-top: 12px; font-size: 0.85em; color: #64748b;">
+                            L1/L2 comparison data not available in current fusion output. 
+                            Check that both L1 and L2 fusion pipelines are running.
+                        </p>
+                    </div>
+                `;
+                return;
+            }
             
             const diffAbs = diff !== null ? Math.abs(diff) : 999;
             const diffStatus = diffAbs < 1 ? 'status-good' : diffAbs < 3 ? 'status-warn' : 'status-bad';
@@ -483,11 +501,11 @@
                 <div class="widget-title">TSL1 vs TSL2 Comparison — Live</div>
                 <div class="widget-grid">
                     <div class="widget-metric">
-                        <div class="widget-metric-label">TSL1 (L1 Raw)</div>
+                        <div class="widget-metric-label">TSL1 (L1 Fusion)</div>
                         <div class="widget-metric-value">${l1?.toFixed(3) ?? '—'}<span class="widget-unit">ms</span></div>
                     </div>
                     <div class="widget-metric">
-                        <div class="widget-metric-label">TSL2 (L2 Calibrated)</div>
+                        <div class="widget-metric-label">TSL2 (L2 Fusion)</div>
                         <div class="widget-metric-value">${l2?.toFixed(3) ?? '—'}<span class="widget-unit">ms</span></div>
                     </div>
                     <div class="widget-metric">
@@ -496,6 +514,10 @@
                     </div>
                 </div>
                 <div class="widget-subtitle">${statusMsg}</div>
+                <div style="margin-top: 8px; font-size: 0.8em; color: #64748b;">
+                    Note: Both feeds converge to ~0ms as chrony disciplines the clock. 
+                    The L1-L2 difference reveals propagation correction quality.
+                </div>
             `;
         }
         

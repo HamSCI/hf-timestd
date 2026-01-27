@@ -117,6 +117,10 @@ class FusionService:
                 'wwv_intra_std_ms': clean_float(latest.get('wwv_intra_std_ms')),
                 'wwvh_intra_std_ms': clean_float(latest.get('wwvh_intra_std_ms')),
                 'chu_intra_std_ms': clean_float(latest.get('chu_intra_std_ms')),
+                # L1 vs L2 comparison (v6.2 metrological tracking)
+                'd_clock_l1_ms': clean_float(latest.get('d_clock_l1_ms')),
+                'd_clock_l2_ms': clean_float(latest.get('d_clock_l2_ms')),
+                'l1_l2_difference_ms': clean_float(latest.get('l1_l2_difference_ms')),
             }
         
         except Exception as e:

@@ -887,6 +887,40 @@ This difference reveals the **quality of propagation corrections**:
 
 <!-- LOGS: L1-L2 | filter: "L1-L2 difference" -->
 
+#### Understanding the Feedback Loop
+
+**Why chrony shows `+0ns` for both TSL1 and TSL2:**
+
+When you run `chronyc sources`, you may see both HF feeds showing `+0ns`:
+
+```
+#? TSL1    0   4   204    54     +0ns[   +0ns] +/- 2000us
+#* TSL2    0   4   204    54     +0ns[   +0ns] +/- 600us
+```
+
+This is **correct behavior**, not an error. Here's why:
+
+1. **The HF time standard measures:** `D_clock = system_time - UTC_from_HF`
+2. **Chrony uses D_clock** to discipline the system clock
+3. **After convergence:** The system clock matches the HF estimate, so D_clock → 0
+
+This is a **feedback control loop working correctly**. The `+0ns` means the system clock now tracks the HF estimate of UTC — it does NOT mean the HF estimate is perfectly accurate.
+
+**The real accuracy information is in:**
+- **`+/- 600us`**: The stated uncertainty (±0.6ms for TSL2)
+- **External references**: Compare against GPS or NTP pools to see absolute accuracy
+
+**Example interpretation:**
+
+```
+#* TSL2    0   4   204    54     +0ns[   +0ns] +/- 600us   ← HF feed (converged)
+^x 192.168.0.202   1   6   377    40  +1168us[+1168us] +/- 345us   ← GPS reference
+```
+
+The GPS source shows `+1168us`, meaning the system clock (disciplined by TSL2) is **~1.2ms ahead of GPS time**. This is the **actual systematic offset** of the HF time standard relative to GPS/UTC — well within expected accuracy for HF propagation-based timing.
+
+**Key insight:** Once the feedback loop converges, external references (GPS, NTP pools) become the validation mechanism for absolute accuracy.
+
 **Data Recording (v6.2):**
 
 The fusion service now records L1/L2 comparison in every HDF5 output:
@@ -897,14 +931,15 @@ The fusion service now records L1/L2 comparison in every HDF5 output:
 **Validation Procedure:**
 
 ```bash
-# Check current L1-L2 difference via Chrony
-chronyc sources -v | grep TSL
+# Check current chrony sources
+chronyc sources -v | grep -E "TSL|192.168"
 
-# Expected output:
-# #* TSL2    0   4   377    15   +0.234ms[+0.234ms] +/- 0.3ms
-# #- TSL1    0   4   377    15   +0.856ms[+0.856ms] +/- 0.9ms
-# 
-# L1-L2 difference = 0.856 - 0.234 = 0.622 ms (propagation correction)
+# Expected output after convergence:
+# #* TSL2    0   4   377    15     +0ns[   +0ns] +/- 600us   ← HF (converged)
+# #- TSL1    0   4   377    15     +0ns[   +0ns] +/- 900us   ← HF (converged)
+# ^x GPS     1   6   377    40  +1200us[+1200us] +/- 300us   ← External reference
+#
+# The GPS offset (+1200us) reveals the HF systematic error (~1.2ms)
 ```
 
 ### 13.2 Comparison with External Time Sources
