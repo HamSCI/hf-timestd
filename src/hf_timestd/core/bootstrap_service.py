@@ -436,39 +436,45 @@ class BootstrapService:
     
     def _calculate_d_clock(self) -> Optional[float]:
         """
-        Calculate D_clock (system clock offset from UTC).
+        Calculate D_clock (system clock offset from UTC(NIST)).
         
-        This is calculated from the timing errors observed during bootstrap.
-        The timing error is: (actual_tone_arrival - expected_minute_boundary)
-        After subtracting propagation delay, this gives us D_clock.
+        D_clock represents the difference between the local system clock and UTC(NIST).
+        We calculate this by comparing where tones actually arrive (in RTP space)
+        versus where they should arrive based on the bootstrap offset.
         
-        D_clock = timing_error - propagation_delay
-        Positive means system clock is ahead of UTC (tones arrive "late").
+        For each validated tone:
+          expected_rtp = offset + minute_index * SAMPLES_PER_MINUTE + prop_delay
+          error_samples = actual_rtp - expected_rtp
+          D_clock = error_samples / sample_rate * 1000 (in ms)
         """
-        # Use the timing errors from validated tones
+        from .timing_bootstrap import SAMPLES_PER_MINUTE
+        
         tb = self.timing_bootstrap
-        if not tb.validated_tones:
+        if not tb.validated_tones or tb.rtp_to_utc_offset_samples is None:
             return None
         
-        # Calculate D_clock from each validated tone
         d_clocks = []
         for tone in tb.validated_tones:
-            # timing_error_ms is how far the tone was from expected minute boundary
-            # Subtract propagation delay to get D_clock
-            prop_delay_ms = tb.station_expectations.get(
-                tone.station, {}
-            ).get('delay_ms', 0)
-            d_clock = tone.timing_error_ms - prop_delay_ms
-            d_clocks.append(d_clock)
+            candidate = tone.candidate
+            station = candidate.station
+            
+            # Expected RTP for this minute
+            expected_rtp = tb.rtp_to_utc_offset_samples + (tone.minute_index * SAMPLES_PER_MINUTE)
+            
+            # Add propagation delay
+            delay_samples = tb.station_expectations.get(station, {}).get('delay_samples', 0)
+            expected_rtp += delay_samples
+            
+            # Error = actual - expected
+            error_samples = candidate.rtp_timestamp - expected_rtp
+            error_ms = error_samples * 1000 / self.config.sample_rate
+            d_clocks.append(error_ms)
         
         if not d_clocks:
             return None
         
-        # Use median for robustness
         from statistics import median
-        d_clock_ms = median(d_clocks)
-        
-        return d_clock_ms
+        return median(d_clocks)
     
     def _calculate_ntp_correction(self) -> Optional[float]:
         """
