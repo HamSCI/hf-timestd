@@ -78,15 +78,10 @@ class MetrologyService:
         self._bootstrap_sample_rate = 24000
         self._ntp_correction_loaded = False  # Flag to load once
         
-        # Timing Bootstrap (2026-01-25): Broadcast-driven RTP-to-UTC calibration
-        from .timing_bootstrap import TimingBootstrap, BootstrapState
-        lat = self.station_config.get('latitude', 38.9)
-        lon = self.station_config.get('longitude', -92.1)
-        self._timing_bootstrap = TimingBootstrap(
-            receiver_lat=lat,
-            receiver_lon=lon
-        )
-        self._bootstrap_offset_locked = False
+        # NOTE (2026-01-27): Metrology service no longer runs its own bootstrap.
+        # The core recorder establishes the RTP-to-UTC(NIST) offset and writes it
+        # to the shared state file. We read that offset and use it directly.
+        # This avoids conflicts between two independent bootstrap processes.
         
         # Initialize Engine
         # Extract precise coords if available
@@ -225,13 +220,10 @@ class MetrologyService:
                 rtp_timestamp=rtp_timestamp
             )
             
-            # BOOTSTRAP VALIDATION (2026-01-25): Establish and validate RTP-to-UTC offset
-            # First use buffer metadata for initial offset, then validate with tone detection
-            if not self._bootstrap_offset_locked:
-                self._validate_bootstrap_offset(results, minute_boundary, rtp_timestamp, system_time)
-            else:
-                # METROLOGICAL FIX (2026-01-27): Continue refining offset even after lock
-                # The initial lock may have residual offset error that needs correction
+            # NOTE (2026-01-27): Initial bootstrap removed - we use the shared offset
+            # from the core recorder's bootstrap state file. But we continue refining
+            # that offset based on tone arrivals to drive raw D_clock toward zero.
+            if self._bootstrap_offset_samples is not None:
                 self._refine_offset_from_tones(results)
             
             # Write Results
@@ -295,140 +287,22 @@ class MetrologyService:
             logger.error(f"Error processing minute {minute_boundary}: {e}", exc_info=True)
             return False
     
-    def _validate_bootstrap_offset(
-        self,
-        results: list,
-        minute_boundary: int,
-        rtp_timestamp: int,
-        system_time: float
-    ):
-        """
-        Establish and validate RTP-to-UTC offset using buffer metadata and tone detection.
-        
-        Strategy:
-        1. Use buffer metadata (RTP + system_time) to establish initial offset
-        2. Validate offset consistency across multiple buffers
-        3. Use tone detection to confirm offset is correct (tones arrive when expected)
-        
-        The metadata-based approach is fast and reliable when system clock is NTP-synced.
-        Tone detection provides validation that the offset is physically correct.
-        """
-        from .timing_bootstrap import BootstrapState
-        
-        # Step 1: Establish/validate offset from buffer metadata
-        result = self._timing_bootstrap.establish_offset_from_metadata(
-            buffer_rtp_start=rtp_timestamp,
-            buffer_system_time=system_time,
-            channel=self.channel_name
-        )
-        
-        if result:
-            logger.info(f"[BOOTSTRAP] Metadata: {result}")
-        
-        # Step 2: Once in TRACKING or LOCKED state, validate with tone detection
-        bootstrap_state = self._timing_bootstrap.state
-        
-        if bootstrap_state in (BootstrapState.TRACKING, BootstrapState.LOCKED):
-            # Get minute of hour for schedule-based validation
-            minute_of_hour = self._timing_bootstrap.get_minute_of_hour(system_time)
-            
-            # Check if tone detections match expected timing and discriminating features
-            for res in results:
-                if res.raw_toa_ms is None:
-                    continue
-                
-                station = res.station_id.name if hasattr(res.station_id, 'name') else str(res.station_id)
-                
-                # Validate 1: Propagation delay within expected range
-                # raw_toa_ms = time of arrival relative to minute boundary
-                # expected_delay = propagation delay from station
-                # If offset is correct: raw_toa_ms ≈ expected_delay
-                expected_delay = self._timing_bootstrap.station_expectations.get(
-                    station, {}
-                ).get('delay_ms', 0)
-                timing_error_ms = res.raw_toa_ms - expected_delay  # Signed error
-                
-                if abs(timing_error_ms) < 50:
-                    logger.debug(f"[BOOTSTRAP] Timing OK: {station} "
-                                f"raw_toa={res.raw_toa_ms:.1f}ms, expected={expected_delay:.1f}ms")
-                elif abs(timing_error_ms) > 200:
-                    logger.warning(f"[BOOTSTRAP] Timing error: {station} "
-                                  f"raw_toa={res.raw_toa_ms:.1f}ms, error={timing_error_ms:+.1f}ms")
-                
-                # ================================================================
-                # METROLOGICAL FIX (2026-01-27): Feed timing error back to bootstrap
-                # ================================================================
-                # The timing error tells us how far off our RTP-to-UTC mapping is.
-                # If timing_error_ms > 0, tones arrive later than expected → offset too low
-                # Apply damped correction to drive raw D_clock toward zero.
-                if self._timing_bootstrap.rtp_to_utc_offset_samples is not None:
-                    OFFSET_CORRECTION_ALPHA = 0.1  # Smoothing factor
-                    MIN_CORRECTION_MS = 0.5
-                    
-                    if abs(timing_error_ms) > MIN_CORRECTION_MS and abs(timing_error_ms) < 100:
-                        # Convert ms error to samples and apply damped correction
-                        error_samples = int(timing_error_ms * self.engine.sample_rate / 1000)
-                        correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
-                        
-                        if correction_samples != 0:
-                            self._timing_bootstrap.rtp_to_utc_offset_samples += correction_samples
-                            correction_ms = correction_samples * 1000 / self.engine.sample_rate
-                            
-                            if abs(correction_ms) > 1.0:
-                                logger.info(f"[BOOTSTRAP] Offset refined via {station}: "
-                                           f"{correction_ms:+.2f}ms correction "
-                                           f"(error was {timing_error_ms:+.1f}ms)")
-                
-                # Validate 2: Tone frequency matches station
-                tone_freq = 1200.0 if station == 'WWVH' else 1000.0
-                freq_valid, freq_conf = self._timing_bootstrap.validate_station_by_tone_frequency(
-                    station, tone_freq
-                )
-                
-                # Validate 3: Schedule-based validation (500/600 Hz tones)
-                # Check if this is a ground-truth minute
-                has_500_600 = hasattr(res, 'tone_500hz_detected') and res.tone_500hz_detected
-                schedule_valid, schedule_conf = self._timing_bootstrap.validate_station_by_schedule(
-                    station, minute_of_hour, has_500_600
-                )
-                
-                if not schedule_valid:
-                    logger.warning(f"[BOOTSTRAP] Schedule validation failed for {station} "
-                                  f"at minute {minute_of_hour}")
-        
-        # Check if bootstrap is locked
-        if bootstrap_state == BootstrapState.LOCKED and not self._bootstrap_offset_locked:
-            self._bootstrap_offset_locked = True
-            offset_result = self._timing_bootstrap.get_rtp_to_utc_offset()
-            if offset_result:
-                offset_samples, uncertainty = offset_result
-                offset_sec = -offset_samples / self.engine.sample_rate
-                logger.info(f"[BOOTSTRAP] LOCKED: RTP-to-UTC offset = {offset_sec:.6f}s")
-        
-        # Log status periodically
-        if self.minutes_processed % 10 == 0:
-            status = self._timing_bootstrap.get_status()
-            logger.info(f"[BOOTSTRAP] Status: state={status['state']}, "
-                       f"minutes={status['minutes_observed']}")
 
     def _refine_offset_from_tones(self, results: list):
         """
-        Continue refining RTP-to-UTC offset after bootstrap lock.
+        Continue refining RTP-to-UTC(NIST) offset based on tone arrivals.
         
-        METROLOGICAL FIX (2026-01-27):
-        The initial bootstrap lock may have residual offset error (~50-100ms).
-        Continue applying damped corrections from tone timing errors to drive
-        raw D_clock toward zero.
+        The core recorder's bootstrap establishes the initial offset. We continue
+        refining it here based on tone timing errors to drive raw D_clock toward zero.
         
-        This is more aggressive than the pre-lock refinement (α=0.3 vs 0.1)
-        because we have higher confidence in the measurements after lock.
+        timing_error = raw_toa - expected_propagation_delay
+        If timing_error > 0, tones arrive later than expected → offset needs adjustment
         """
-        if self._timing_bootstrap.rtp_to_utc_offset_samples is None:
+        if self._bootstrap_offset_samples is None:
             return
         
-        # More aggressive correction after lock (faster convergence)
         OFFSET_CORRECTION_ALPHA = 0.3  # 30% of error per update
-        MIN_CORRECTION_MS = 0.1  # Apply even small corrections
+        MIN_CORRECTION_MS = 0.5  # Ignore tiny corrections
         
         for res in results:
             if res.raw_toa_ms is None:
@@ -436,25 +310,23 @@ class MetrologyService:
             
             station = res.station_id.name if hasattr(res.station_id, 'name') else str(res.station_id)
             
-            # raw_toa_ms = time of arrival relative to minute boundary
-            # expected_delay = propagation delay from station
-            # If offset is correct: raw_toa_ms ≈ expected_delay
-            expected_delay = self._timing_bootstrap.station_expectations.get(
-                station, {}
-            ).get('delay_ms', 0)
-            timing_error_ms = res.raw_toa_ms - expected_delay  # Signed error
+            # Get expected propagation delay from engine
+            try:
+                expected_delay, _, _ = self.engine._predict_geometric_delay(station)
+            except Exception:
+                continue
+            
+            timing_error_ms = res.raw_toa_ms - expected_delay
             
             # Apply correction if error is significant but not crazy
-            if abs(timing_error_ms) > MIN_CORRECTION_MS and abs(timing_error_ms) < 200:
-                # Convert ms error to samples and apply damped correction
+            if abs(timing_error_ms) > MIN_CORRECTION_MS and abs(timing_error_ms) < 100:
                 error_samples = int(timing_error_ms * self.engine.sample_rate / 1000)
                 correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
                 
                 if correction_samples != 0:
-                    self._timing_bootstrap.rtp_to_utc_offset_samples += correction_samples
+                    self._bootstrap_offset_samples += correction_samples
                     correction_ms = correction_samples * 1000 / self.engine.sample_rate
                     
-                    # Log corrections > 0.5ms
                     if abs(correction_ms) > 0.5:
                         logger.info(f"[OFFSET_REFINE] {station}: {correction_ms:+.2f}ms correction "
                                    f"(error was {timing_error_ms:+.1f}ms, raw_toa={res.raw_toa_ms:.1f}ms)")
