@@ -555,20 +555,42 @@ class CoreRecorderV2:
         Called when bootstrap has found enough corroborating evidence to
         establish a provisional RTP-to-UTC mapping. At this point we can
         start feeding D_clock to Chrony, but should continue validating.
+        
+        Architecture Note (2026-01-27):
+        ------------------------------
+        The Chrony SHM feed is handled by the fusion service (multi_broadcast_fusion.py),
+        not the recorder. This is intentional:
+        
+        1. Bootstrap provides initial RTP-to-UTC calibration (this callback)
+        2. Metrology service starts writing L1 measurements with proper timestamps
+        3. Fusion service reads L1/L2 data and feeds Chrony with quality-gated updates
+        
+        During the ~60s gap between bootstrap lock and first fusion output, the system
+        relies on NTP for clock discipline. This is acceptable because:
+        - NTP provides ~1ms accuracy, sufficient for this brief period
+        - Fusion provides multi-station cross-validation that bootstrap cannot
+        - Feeding Chrony directly from bootstrap would bypass quality gates
+        
+        If sub-millisecond accuracy is needed during bootstrap, implement direct
+        Chrony feed here using ChronySHM with conservative precision (-8 = ~4ms).
         """
         logger.info(f"[BOOTSTRAP] PROVISIONAL LOCK: D_clock ≈ {d_clock_ms:+.1f}ms")
-        # TODO: Start feeding D_clock to Chrony SHM
-        # For now, just log the event
+        logger.info("[BOOTSTRAP] Archiving enabled - fusion service will handle Chrony feed")
     
     def _on_bootstrap_full_lock(self, d_clock_ms: float, uncertainty_ms: float):
         """Handle bootstrap full lock event.
         
         Called when bootstrap has achieved full lock with high confidence.
         Normal archiving can now begin with proper minute boundaries.
+        
+        Architecture Note (2026-01-27):
+        ------------------------------
+        See _on_bootstrap_provisional_lock for why Chrony feed is handled by fusion.
+        At full lock, the uncertainty_ms reflects ionospheric averaging and can be
+        used to set appropriate precision if direct Chrony feed is implemented.
         """
         logger.info(f"[BOOTSTRAP] FULL LOCK: D_clock = {d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms")
         logger.info("[BOOTSTRAP] Transitioning to operational mode - archiving enabled")
-        # TODO: Feed D_clock to Chrony SHM with full confidence
     
     @staticmethod
     def _get_ntp_offset() -> Optional[float]:

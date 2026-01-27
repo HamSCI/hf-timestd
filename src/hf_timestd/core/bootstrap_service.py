@@ -434,18 +434,47 @@ class BootstrapService:
         
         D_clock = system_time - UTC
         Positive means system clock is ahead of UTC.
+        
+        Calculation:
+        1. Get the most recent RTP timestamp from any active buffer
+        2. Convert RTP to UTC using the bootstrap offset
+        3. Compare to current system time
+        
+        D_clock = system_time - UTC_from_RTP
+               = time.time() - (last_rtp - rtp_to_utc_offset) / sample_rate
         """
         if self._rtp_to_utc_offset_samples is None:
             return None
         
-        # The RTP-to-UTC offset tells us which RTP sample corresponds to UTC=0
-        # We need to compare this to what the system clock thinks
+        # Find the most recent RTP timestamp from any buffer
+        last_rtp = None
+        for buffer in self.buffer_manager.buffers.values():
+            if buffer.last_rtp is not None:
+                if last_rtp is None or buffer.last_rtp > last_rtp:
+                    last_rtp = buffer.last_rtp
         
-        # For now, return a placeholder - the actual calculation depends on
-        # having a current RTP timestamp and system time pair
-        # This will be refined when we integrate with the recorder
+        if last_rtp is None:
+            logger.debug("[BOOTSTRAP] Cannot calculate D_clock: no RTP timestamps available")
+            return None
         
-        return 0.0  # Placeholder
+        # Convert RTP to UTC seconds
+        # rtp_to_utc_offset_samples is the RTP sample number at UTC=0
+        # So: UTC_seconds = (current_rtp - offset) / sample_rate
+        rtp_since_epoch = last_rtp - self._rtp_to_utc_offset_samples
+        utc_from_rtp = rtp_since_epoch / self.config.sample_rate
+        
+        # D_clock = system_time - UTC
+        system_time = time.time()
+        d_clock_sec = system_time - utc_from_rtp
+        d_clock_ms = d_clock_sec * 1000.0
+        
+        # Sanity check: D_clock should be small if system is NTP-synced
+        # Large values (>1 second) suggest calculation error or unsynced clock
+        if abs(d_clock_ms) > 1000:
+            logger.warning(f"[BOOTSTRAP] D_clock={d_clock_ms:+.1f}ms is large - "
+                          f"system clock may be unsynced or calculation error")
+        
+        return d_clock_ms
     
     def _collect_offset_measurements(self):
         """

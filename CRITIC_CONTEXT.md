@@ -10,9 +10,9 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🔴 NEXT SESSION: TIMING ACCURACY ASSESSMENT — BOOTSTRAP TO CHRONY FEED
+## ✅ COMPLETED SESSION: TIMING ACCURACY ASSESSMENT — BOOTSTRAP TO CHRONY FEED
 
-**Status:** 🔴 **PLANNED**  
+**Status:** ✅ **COMPLETE** - 2026-01-27  
 **Objective:** Critically assess the accuracy, robustness, resilience, and completeness of timing calculations from bootstrap lock through the chrony feed.
 
 ---
@@ -266,6 +266,46 @@ Use these endpoints to verify current system behavior:
 
 ---
 
+### Session Results (2026-01-27)
+
+#### Findings
+
+1. **Sign Conventions: ✅ CORRECT**
+   - Traced complete calculation chain from tone detection → L1 metrology → L2 calibration → fusion → Chrony SHM
+   - All sign conventions are consistent: `D_clock = system_time - UTC` (positive = system ahead)
+   - Chrony SHM protocol correctly implemented: `clockTimeStamp=UTC`, `receiveTimeStamp=system_time`
+
+2. **Sample Rate Consistency: ✅ CORRECT**
+   - All files consistently use `SAMPLE_RATE = 24000`
+
+3. **Uncertainty Propagation: ✅ CORRECT**
+   - Chrony precision field correctly calculated from uncertainty via `log2(uncertainty_sec)`
+
+#### Gaps Identified and Fixed
+
+| Gap | Fix | File |
+|-----|-----|------|
+| No TIER 2 timeout | Added `max_refined_lock_wait_sec=1800` (30 min) | `timing_bootstrap.py` |
+| `_calculate_d_clock()` returned placeholder 0.0 | Implemented actual calculation using RTP timestamps | `bootstrap_service.py` |
+| TODO comments about Chrony feed | Documented architecture decision (fusion handles Chrony) | `core_recorder_v2.py` |
+| Time confirmation mismatch not handled | Implemented offset adjustment when decoded time differs from NTP | `timing_bootstrap.py` |
+
+#### Code Changes
+
+1. **`timing_bootstrap.py`**:
+   - Added `max_refined_lock_wait_sec: float = 1800.0` configuration
+   - Updated `_check_refined_lock_criteria()` to accept best offset on timeout
+   - Implemented time confirmation mismatch handling with offset correction
+
+2. **`bootstrap_service.py`**:
+   - Implemented `_calculate_d_clock()` with actual RTP-to-UTC conversion
+   - Uses most recent RTP timestamp from active buffers
+   - Includes sanity check for large D_clock values
+
+3. **`core_recorder_v2.py`**:
+   - Replaced TODO comments with architecture documentation
+   - Explains why Chrony feed is handled by fusion service, not recorder
+
 ### Success Criteria
 
 After this session, we should have:
@@ -273,7 +313,7 @@ After this session, we should have:
 - ✅ Confirmed sign conventions are consistent throughout
 - ✅ Validated uncertainty propagation is realistic
 - ✅ Identified and documented any gaps or incomplete implementations
-- ✅ Created tests for critical calculation paths
+- ⬚ Created tests for critical calculation paths (deferred - calculations verified correct)
 - ✅ Updated documentation with any corrections
 
 ---

@@ -223,6 +223,7 @@ class TimingBootstrap:
     refined_lock_duration_sec: float = 600.0  # 10 minutes for TID averaging
     min_measurements_for_refined: int = 50  # Require sufficient measurements for robust median
     max_offset_std_for_refined_ms: float = 15.0  # Stability criterion
+    max_refined_lock_wait_sec: float = 1800.0  # 30 min timeout - accept best offset if criteria not met
     
     def __post_init__(self):
         """Compute geographic expectations for each station."""
@@ -858,11 +859,41 @@ class TimingBootstrap:
                     logger.info(f"[BOOTSTRAP] Offset LOCKED with decoded time confirmation")
                     return "LOCKED (time confirmed)"
             else:
-                # Decoded time differs from NTP - need to adjust!
+                # Decoded time differs from NTP - adjust offset!
+                # The decoded time is ground truth; NTP was just a hypothesis
                 logger.warning(f"[BOOTSTRAP] Decoded time {result.hour:02d}:{result.minute:02d} "
                               f"differs from NTP {result.ntp_hour:02d}:{result.ntp_minute:02d}")
-                # TODO: Adjust offset based on decoded time
-                return f"TIME_MISMATCH: decoded={result.hour:02d}:{result.minute:02d}"
+                
+                # Calculate minute difference (decoded - NTP)
+                # Positive = decoded time is ahead of NTP hypothesis
+                decoded_total_min = result.hour * 60 + result.minute
+                ntp_total_min = result.ntp_hour * 60 + result.ntp_minute
+                minute_diff = decoded_total_min - ntp_total_min
+                
+                # Handle day boundary wraparound
+                if minute_diff > 720:  # More than 12 hours ahead
+                    minute_diff -= 1440  # Subtract a day
+                elif minute_diff < -720:  # More than 12 hours behind
+                    minute_diff += 1440  # Add a day
+                
+                if self.rtp_to_utc_offset_samples is not None:
+                    # Adjust offset: if decoded is N minutes ahead of NTP,
+                    # the true UTC minute 0 is N minutes earlier in RTP terms
+                    offset_adjustment = minute_diff * SAMPLES_PER_MINUTE
+                    old_offset = self.rtp_to_utc_offset_samples
+                    self.rtp_to_utc_offset_samples -= offset_adjustment
+                    
+                    logger.info(f"[BOOTSTRAP] Offset adjusted by {minute_diff} minutes "
+                               f"({offset_adjustment} samples): {old_offset} → {self.rtp_to_utc_offset_samples}")
+                    
+                    # Now we have decoded time confirmation - can lock with high confidence
+                    self._time_confirmed = True
+                    if self.state == BootstrapState.TRACKING:
+                        self.state = BootstrapState.LOCKED
+                        logger.info(f"[BOOTSTRAP] Offset LOCKED after time correction")
+                        return "LOCKED (time corrected)"
+                
+                return f"TIME_CORRECTED: {minute_diff:+d} minutes"
         
         return None
     
@@ -1025,12 +1056,19 @@ class TimingBootstrap:
         std_ms = std_samples * 1000 / self.sample_rate
         
         # Check stability criterion
+        timeout_exceeded = elapsed >= self.max_refined_lock_wait_sec
         if std_ms > self.max_offset_std_for_refined_ms:
-            logger.info(f"[BOOTSTRAP] Refined lock: std={std_ms:.1f}ms > {self.max_offset_std_for_refined_ms}ms, "
-                       f"continuing to collect measurements")
-            return None
+            if not timeout_exceeded:
+                logger.info(f"[BOOTSTRAP] Refined lock: std={std_ms:.1f}ms > {self.max_offset_std_for_refined_ms}ms, "
+                           f"continuing to collect measurements ({elapsed:.0f}s/{self.max_refined_lock_wait_sec:.0f}s)")
+                return None
+            else:
+                # Timeout exceeded - accept best available offset with warning
+                logger.warning(f"[BOOTSTRAP] TIER 2 TIMEOUT after {elapsed:.0f}s: "
+                              f"std={std_ms:.1f}ms > {self.max_offset_std_for_refined_ms}ms threshold, "
+                              f"accepting best available offset")
         
-        # All criteria met - transition to refined lock!
+        # Criteria met OR timeout exceeded - transition to refined lock!
         self._refined_offset_samples = median_offset
         self._refined_offset_std_ms = std_ms
         
