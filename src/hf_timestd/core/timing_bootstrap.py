@@ -995,23 +995,28 @@ class TimingBootstrap:
             self.minutes_observed = minute_index + 1
         
         # ================================================================
-        # CONTINUOUS OFFSET REFINEMENT
+        # OFFSET REFINEMENT - ONLY AFTER TIER 2 (REFINED LOCK)
         # ================================================================
-        # Apply corrections to drive raw D_clock toward zero.
-        # The alpha value is set above based on convergence state.
-        MIN_CORRECTION_MS = 0.1  # Apply even small corrections
+        # During Tier 1 (PROVISIONAL), we're still discovering the pattern.
+        # We don't know the offset yet - we're just validating that clusters
+        # recur at 1,440,000 sample intervals.
+        #
+        # Only after Tier 2 lock (with BCD/FSK time confirmation) do we have
+        # a reliable offset to refine.
         
-        if abs(error_ms) > MIN_CORRECTION_MS:
-            correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
-            if correction_samples != 0:
-                self.rtp_to_utc_offset_samples += correction_samples
-                correction_ms = correction_samples * 1000 / self.sample_rate
-                
-                # Log corrections > 0.5ms
-                if abs(correction_ms) > 0.5:
-                    logger.info(f"[BOOTSTRAP] Offset refined: {correction_ms:+.2f}ms "
-                               f"(error={error_ms:+.1f}ms, α={OFFSET_CORRECTION_ALPHA}, "
-                               f"tier={self.lock_tier.name})")
+        if self.lock_tier == LockTier.REFINED:
+            MIN_CORRECTION_MS = 0.5  # Only correct significant errors
+            OFFSET_CORRECTION_ALPHA = 0.2  # Gentle refinement
+            
+            if abs(error_ms) > MIN_CORRECTION_MS and abs(error_ms) < 50:
+                correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
+                if correction_samples != 0:
+                    self.rtp_to_utc_offset_samples += correction_samples
+                    correction_ms = correction_samples * 1000 / self.sample_rate
+                    
+                    if abs(correction_ms) > 0.5:
+                        logger.info(f"[BOOTSTRAP] Offset refined: {correction_ms:+.2f}ms "
+                                   f"(error={error_ms:+.1f}ms)")
         
         # === TWO-TIER BOOTSTRAP LOGIC ===
         
@@ -1199,30 +1204,24 @@ class TimingBootstrap:
             return None
         
         # ================================================================
-        # CONTINUOUS OFFSET REFINEMENT
+        # OFFSET REFINEMENT - ONLY AFTER TIER 2 (REFINED LOCK)
         # ================================================================
-        # Apply corrections to drive raw D_clock toward zero.
-        # Use more aggressive alpha in LOCKED state (higher confidence).
-        # 
-        # After REFINED lock, use even more aggressive correction since
-        # we have high confidence in the offset estimate.
+        # Only refine offset after we have BCD/FSK time confirmation.
+        # Before that, we're still validating the pattern.
+        
         if self.lock_tier == LockTier.REFINED:
-            OFFSET_CORRECTION_ALPHA = 0.3  # 30% of error per update
-        else:
-            OFFSET_CORRECTION_ALPHA = 0.2  # 20% of error per update
-        
-        MIN_CORRECTION_MS = 0.1  # Apply even small corrections
-        
-        if abs(error_ms) > MIN_CORRECTION_MS:
-            correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
-            if correction_samples != 0:
-                self.rtp_to_utc_offset_samples += correction_samples
-                correction_ms = correction_samples * 1000 / self.sample_rate
-                
-                # Log significant corrections (>0.5ms) or periodically
-                if abs(correction_ms) > 0.5:
-                    logger.info(f"[BOOTSTRAP] LOCKED refinement: {correction_ms:+.2f}ms "
-                               f"(error was {error_ms:+.1f}ms from {candidate.station})")
+            MIN_CORRECTION_MS = 0.5
+            OFFSET_CORRECTION_ALPHA = 0.2
+            
+            if abs(error_ms) > MIN_CORRECTION_MS and abs(error_ms) < 50:
+                correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
+                if correction_samples != 0:
+                    self.rtp_to_utc_offset_samples += correction_samples
+                    correction_ms = correction_samples * 1000 / self.sample_rate
+                    
+                    if abs(correction_ms) > 0.5:
+                        logger.info(f"[BOOTSTRAP] LOCKED refinement: {correction_ms:+.2f}ms "
+                                   f"(error was {error_ms:+.1f}ms from {candidate.station})")
         
         return f"LOCKED: {candidate.station} error={error_ms:+.1f}ms"
     
