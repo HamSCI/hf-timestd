@@ -342,7 +342,7 @@ class MetrologyService:
         
         try:
             ref = BootstrapTimingReference.from_file(self._bootstrap_ref_file)
-            if ref and ref.is_valid():
+            if ref and ref.is_valid() and ref.reference_utc is not None:
                 self._bootstrap_ref = ref
                 self._bootstrap_ref_loaded = True
                 logger.info(
@@ -350,9 +350,12 @@ class MetrologyService:
                     f"(tier={ref.lock_tier}, ±{ref.uncertainty_ms:.1f}ms)"
                 )
             else:
+                self._bootstrap_ref = None  # Clear any stale reference
                 self._bootstrap_ref_loaded = True  # Mark as loaded even if not available
-                logger.debug("[BOOTSTRAP_REF] Not available or invalid - using NTP fallback")
+                utc_str = f"{ref.reference_utc}" if ref and ref.reference_utc else "None"
+                logger.debug(f"[BOOTSTRAP_REF] Not available or invalid (utc={utc_str}) - using NTP fallback")
         except Exception as e:
+            self._bootstrap_ref = None  # Clear any stale reference
             self._bootstrap_ref_loaded = True  # Don't retry on error
             logger.warning(f"[BOOTSTRAP_REF] Failed to load: {e} - using NTP fallback")
     
@@ -522,48 +525,43 @@ class MetrologyService:
                 
             # 4. Determine Time (from GPSDO RTP + bootstrap-derived UTC(NIST) offset)
             # -------------------------------------------------------------
-            # ARCHITECTURE (2026-01-27):
+            # ARCHITECTURE (2026-01-28):
             # - GPSDO-governed RTP timestamps are the steel ruler (ground truth)
-            # - Bootstrap derives UTC(NIST) from HF tone arrivals
-            # - NTP is only an external reference, NOT authoritative
+            # - Bootstrap derives UTC(NIST) from HF tone arrivals + BCD/FSK decode
+            # - Metrology WAITS for bootstrap to provide complete DTO
+            # - NTP is only a sanity check, NOT the basis for timing
             #
-            # PRIORITY 1: Use bootstrap reference to convert RTP to UTC(NIST)
-            # PRIORITY 2: Fall back to NTP-derived metadata if bootstrap not locked
+            # The time reference comes from the tones, not from NTP.
             if 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
                 
-                # Load/refresh bootstrap reference periodically
+                # Load bootstrap reference - this is the ONLY source of timing
+                # Time is derived from HF tone arrivals, not NTP
                 if not self._bootstrap_ref_loaded or self.minutes_processed % 5 == 0:
                     self._load_bootstrap_reference()
                 
-                # Try bootstrap-derived UTC(NIST) first
-                # UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
-                if self._bootstrap_ref and self._bootstrap_ref.is_valid():
+                # Wait for bootstrap to provide a complete DTO
+                # (clusters found AND UTC minute confirmed via BCD/FSK)
+                if self._bootstrap_ref and self._bootstrap_ref.reference_utc is not None:
                     system_time = self._bootstrap_ref.rtp_to_utc(rtp_timestamp)
-                    timing_source = "bootstrap_ref"
-                    logger.info(
-                        f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
-                        f"RTP={rtp_timestamp}, UTC(NIST)={system_time:.6f}, "
-                        f"ref_rtp={self._bootstrap_ref.reference_rtp}, ref_utc={self._bootstrap_ref.reference_utc:.3f}"
-                    )
-                else:
-                    # Fallback to NTP-derived metadata
-                    start_system_time = metadata.get('start_system_time')
-                    if start_system_time is not None:
-                        system_time = start_system_time
-                        timing_source = "ntp_metadata"
+                    if system_time is not None:
+                        timing_source = "bootstrap"
+                        logger.info(
+                            f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
+                            f"RTP={rtp_timestamp}, UTC(NIST)={system_time:.6f}"
+                        )
                     else:
-                        system_time = float(target_minute)
-                        timing_source = "fallback"
-                    logger.info(
-                        f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
-                        f"RTP={rtp_timestamp}, system_time={system_time:.6f}"
-                    )
+                        # rtp_to_utc returned None - skip this minute
+                        logger.debug(f"[TIMING_DIAG] Minute {target_minute}: bootstrap ref invalid, skipping")
+                        return None
+                else:
+                    # Bootstrap not ready - skip this minute
+                    logger.debug(f"[TIMING_DIAG] Minute {target_minute}: waiting for bootstrap, skipping")
+                    return None
             else:
-                # Fallback: use minute boundary
-                system_time = float(target_minute)
-                rtp_timestamp = int(target_minute * self.engine.sample_rate)
-                logger.warning(f"No RTP timestamp in metadata for {target_minute}, using fallback")
+                # No RTP timestamp in metadata - cannot process without it
+                logger.warning(f"No RTP timestamp in metadata for {target_minute}, skipping")
+                return None
 
             # Pad/Clip
             expected_len = self.engine.sample_rate * 60

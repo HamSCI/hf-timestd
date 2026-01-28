@@ -667,17 +667,29 @@ class CoreRecorderV2:
             decoded_minute = getattr(tb, '_confirmed_minute', None)
             time_confirmed = tb._time_confirmed if hasattr(tb, '_time_confirmed') else False
             
-            # If time is confirmed, compute reference_utc
+            # Only compute reference_utc when BCD/FSK has confirmed the UTC minute
+            # Until then, metrology should use NTP metadata (which is accurate to a few ms)
+            #
+            # The bootstrap provides:
+            #   reference_rtp = RTP at UTC minute 0 (derived from tone arrivals)
+            #
+            # BCD/FSK provides:
+            #   decoded_hour, decoded_minute = the actual UTC time
+            #
+            # Together they form a consistent (RTP, UTC) pair:
+            #   reference_utc = decoded_hour * 3600 + decoded_minute * 60
+            #   (in Unix time, we add the date from system clock)
+            
             reference_utc = None
             if time_confirmed and decoded_hour is not None and decoded_minute is not None:
-                # BCD/FSK has confirmed the absolute time
-                # reference_utc = hour * 3600 + minute * 60 (seconds since midnight)
-                # But we need Unix timestamp, so we need to know the date
-                # For now, use today's date from system clock (this is the one NTP dependency)
                 import time
                 now = time.time()
+                # Get today's midnight in Unix time
                 midnight_today = (int(now) // 86400) * 86400
                 reference_utc = float(midnight_today + decoded_hour * 3600 + decoded_minute * 60)
+                
+                logger.info(f"[BOOTSTRAP_REF] BCD/FSK confirmed: {decoded_hour:02d}:{decoded_minute:02d} UTC, "
+                           f"reference_utc={reference_utc:.0f}")
             
             # Log D_clock for diagnostics
             d_clock_ms = self.bootstrap_service._calculate_d_clock()
