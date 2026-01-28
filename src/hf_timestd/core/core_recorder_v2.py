@@ -654,9 +654,11 @@ class CoreRecorderV2:
                 return
             
             # Get bootstrap's D_clock (NTP offset from tone-derived UTC)
+            # D_clock = NTP - UTC(NIST), so UTC(NIST) = NTP - D_clock
             d_clock_ms = self.bootstrap_service._calculate_d_clock()
             if d_clock_ms is None:
                 d_clock_ms = 0.0
+            d_clock_sec = d_clock_ms / 1000.0
             
             # Use current time to get a reference point
             import time
@@ -665,21 +667,34 @@ class CoreRecorderV2:
             # NTP-derived minute boundary
             ntp_minute = (int(now) // 60) * 60
             
-            # Apply D_clock correction: UTC(NIST) = NTP_time - D_clock
-            # D_clock = NTP - UTC(NIST), so UTC(NIST) = NTP - D_clock
-            reference_utc = float(ntp_minute) - (d_clock_ms / 1000.0)
+            # The key insight: we need a CONSISTENT (RTP, UTC) pair.
+            # 
+            # The recorder's rtp_to_unix_offset maps RTP to NTP time:
+            #   ntp_time = rtp / sample_rate + rtp_to_unix_offset
+            #
+            # To map RTP to UTC(NIST), we apply the D_clock correction:
+            #   utc_nist = ntp_time - D_clock
+            #   utc_nist = rtp / sample_rate + rtp_to_unix_offset - D_clock
+            #   utc_nist = rtp / sample_rate + (rtp_to_unix_offset - D_clock)
+            #
+            # So the "RTP to UTC(NIST) offset" is: rtp_to_unix_offset - D_clock
+            #
+            # For the reference pair:
+            #   reference_utc = ntp_minute (a known UTC point)
+            #   reference_rtp = (reference_utc - (rtp_to_unix_offset - D_clock)) * sample_rate
+            #                 = (reference_utc - rtp_to_unix_offset + D_clock) * sample_rate
             
-            # Compute RTP for this UTC using the recorder's offset
-            # unix_time = rtp / sample_rate + offset
-            # rtp = (unix_time - offset) * sample_rate
-            # But we want RTP at reference_utc, which is tone-aligned
-            # The recorder's offset maps RTP to NTP time, so:
-            # ntp_time = rtp / sample_rate + offset
-            # rtp = (ntp_time - offset) * sample_rate
-            reference_rtp = int((ntp_minute - rtp_to_unix_offset) * sample_rate)
+            # Use the NTP minute as reference_utc (this is in UTC(NIST) terms)
+            # The D_clock correction is already baked into the RTP calculation
+            reference_utc = float(ntp_minute)
+            
+            # Compute RTP that corresponds to this UTC(NIST) time
+            # utc_nist = rtp / sample_rate + rtp_to_unix_offset - D_clock
+            # rtp = (utc_nist - rtp_to_unix_offset + D_clock) * sample_rate
+            reference_rtp = int((reference_utc - rtp_to_unix_offset + d_clock_sec) * sample_rate)
             
             logger.info(f"[BOOTSTRAP_REF] Computing reference: ntp_minute={ntp_minute}, "
-                       f"D_clock={d_clock_ms:+.1f}ms, reference_utc={reference_utc:.3f}")
+                       f"D_clock={d_clock_ms:+.1f}ms, ref_rtp={reference_rtp}, ref_utc={reference_utc:.3f}")
             
             writer = BootstrapTimingReferenceWriter()
             writer.write(
