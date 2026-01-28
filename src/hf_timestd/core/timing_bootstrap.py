@@ -1251,6 +1251,19 @@ class TimingBootstrap:
             if self.reference_rtp is None:
                 continue
             samples_from_ref = anchor_rtp - self.reference_rtp
+            
+            # Account for propagation delay difference between stations
+            # (same adjustment as in add_candidate for consistency)
+            if anchor_station != self.reference_station:
+                ref_delay_ms = self.station_expectations.get(
+                    self.reference_station, {}
+                ).get('delay_ms', 0)
+                anchor_delay_ms = self.station_expectations.get(
+                    anchor_station, {}
+                ).get('delay_ms', 0)
+                delay_diff_samples = int((anchor_delay_ms - ref_delay_ms) * self.sample_rate / 1000)
+                samples_from_ref -= delay_diff_samples
+            
             minute_index = round(samples_from_ref / SAMPLES_PER_MINUTE)
             
             # Get propagation delay for this station
