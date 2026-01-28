@@ -4,7 +4,7 @@ Bootstrap Timing Reference DTO
 This module defines the data transfer object (DTO) for passing timing reference
 information from the bootstrap service to the metrology service.
 
-ARCHITECTURE (2026-01-27):
+ARCHITECTURE (2026-01-28):
 ==========================
 The bootstrap service establishes a mapping between RTP timestamps (GPSDO-governed)
 and UTC(NIST) (derived from HF tone arrivals). This mapping is passed to the
@@ -12,31 +12,41 @@ metrology service via a well-defined DTO.
 
 KEY CONCEPTS:
 - RTP timestamps are the "steel ruler" - governed by GPSDO, monotonic, jitter-free
-- UTC(NIST) is derived from HF tone arrivals, NOT from NTP
-- NTP is used only as a hint for minute identification, not as ground truth
+- UTC(NIST) is derived PURELY from HF tone arrivals
+- NTP is NOT used in the timing pipeline - only as a hint for minute identification
+
+BOOTSTRAP SEQUENCE:
+1. GPSDO provides RTP sample counts (no time basis, just counts)
+2. Bootstrap finds tone clusters, validates 1,440,000 sample recurrence
+3. Offset = earliest_tone_rtp - geometric_delay (RTP at minute boundary)
+4. We now have RELATIVE time - "minute N" from first detection
+5. BCD/FSK decoding gives INITIAL ESTIMATE of which absolute minute
+6. Initial Unix time is an ESTIMATE requiring further refinement:
+   - Ionospheric delay is variable (not just geometric)
+   - Multipath effects
+   - Station-specific biases
+7. Ongoing refinement: continuously compare tone arrivals to refine offset
 
 THE DTO CONTAINS:
-1. A consistent (RTP, UTC) reference pair:
-   - reference_rtp: RTP timestamp at a known minute boundary
-   - reference_utc: UTC(NIST) timestamp of that same minute boundary
-   
-2. Conversion formula:
-   UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
+1. reference_rtp: RTP timestamp at a minute boundary (from tone detection)
+2. minute_offset: Which minute relative to bootstrap start (0, 1, 2, ...)
+3. decoded_minute: Absolute minute from BCD/FSK (None until decoded)
+4. decoded_hour: Absolute hour from BCD/FSK (None until decoded)
+5. reference_utc: ESTIMATED UTC (refined over time, None until BCD/FSK)
+6. offset_uncertainty_ms: Current uncertainty in the offset estimate
 
-3. Quality indicators:
-   - lock_tier: PROVISIONAL or REFINED
-   - uncertainty_ms: Estimated uncertainty in the reference
+CONVERSION (after BCD/FSK, with ongoing refinement):
+  UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
+  (reference_utc is continuously refined based on tone arrivals)
 
 USAGE IN METROLOGY SERVICE:
 ---------------------------
-Given a buffer with:
-  - start_rtp_timestamp: RTP when buffer started
-  - start_system_time: NTP-derived time when buffer started (for fallback only)
-
-The metrology service converts RTP to UTC(NIST):
-  buffer_utc = reference_utc + (start_rtp_timestamp - reference_rtp) / sample_rate
-
-This buffer_utc is then used as the timing reference for tone detection.
+If time_confirmed (BCD/FSK decoded):
+  - Use reference_rtp and reference_utc for RTP-to-UTC conversion
+  - reference_utc is an estimate that improves over time
+If not time_confirmed (pattern confirmed but not absolute time):
+  - Can compute relative timing errors between tones
+  - Cannot compute absolute UTC until BCD/FSK confirms
 """
 
 import json
@@ -57,60 +67,105 @@ class BootstrapTimingReference:
     """
     Timing reference from bootstrap to metrology.
     
-    This DTO provides everything needed to convert RTP timestamps to UTC(NIST).
+    This DTO provides the RTP-to-UTC mapping derived purely from tone arrivals.
     
     Attributes:
-        locked: Whether bootstrap has achieved lock
+        locked: Whether bootstrap has achieved pattern lock
         lock_tier: Lock quality (NONE, PROVISIONAL, REFINED)
         
-        reference_rtp: RTP timestamp at a known minute boundary
-        reference_utc: UTC(NIST) timestamp of that minute boundary
+        reference_rtp: RTP timestamp at a minute boundary (from tone detection)
         sample_rate: Sample rate in Hz (for RTP-to-seconds conversion)
+        
+        # Relative timing (always available after PROVISIONAL lock)
+        minute_offset: Which minute relative to bootstrap start (0, 1, 2, ...)
+        
+        # Absolute timing (only after BCD/FSK confirmation)
+        decoded_hour: Hour from BCD/FSK decode (0-23), None if not confirmed
+        decoded_minute: Minute from BCD/FSK decode (0-59), None if not confirmed
+        time_confirmed: Whether BCD/FSK has confirmed absolute time
+        
+        # For backward compatibility (computed from decoded time if available)
+        reference_utc: UTC timestamp of reference_rtp (None until time confirmed)
         
         uncertainty_ms: Estimated uncertainty in the reference (1-sigma)
         lock_time: ISO timestamp when lock was achieved
         
-    Conversion:
+    Conversion (after time confirmation):
         UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
     """
     # Lock status
     locked: bool = False
     lock_tier: str = 'NONE'  # NONE, PROVISIONAL, REFINED
     
-    # The reference pair: (RTP, UTC) at the same instant
-    # This is the core of the handoff - a consistent mapping point
+    # The RTP reference point (from tone detection)
     reference_rtp: Optional[int] = None
-    reference_utc: Optional[float] = None
     
     # Conversion parameter
     sample_rate: int = 24000
+    
+    # Relative timing (minute offset from bootstrap start)
+    minute_offset: int = 0
+    
+    # Absolute timing from BCD/FSK decode
+    decoded_hour: Optional[int] = None
+    decoded_minute: Optional[int] = None
+    time_confirmed: bool = False
+    
+    # UTC reference (computed from decoded time, for backward compatibility)
+    reference_utc: Optional[float] = None
     
     # Quality indicators
     uncertainty_ms: Optional[float] = None
     lock_time: Optional[str] = None  # ISO timestamp
     
     def is_valid(self) -> bool:
-        """Check if the reference is valid for use."""
+        """Check if the reference is valid for relative timing."""
         return (
             self.locked and
             self.reference_rtp is not None and
-            self.reference_utc is not None and
             self.sample_rate > 0
+        )
+    
+    def is_time_confirmed(self) -> bool:
+        """Check if absolute time has been confirmed via BCD/FSK."""
+        return (
+            self.is_valid() and
+            self.time_confirmed and
+            self.decoded_hour is not None and
+            self.decoded_minute is not None
         )
     
     def rtp_to_utc(self, rtp_timestamp: int) -> Optional[float]:
         """
         Convert an RTP timestamp to UTC(NIST).
         
+        Requires time_confirmed=True (BCD/FSK decode completed).
+        
         Args:
             rtp_timestamp: RTP timestamp to convert
             
         Returns:
-            UTC(NIST) timestamp, or None if reference is not valid
+            UTC(NIST) timestamp, or None if time not confirmed
+        """
+        if not self.is_time_confirmed() or self.reference_utc is None:
+            return None
+        return self.reference_utc + (rtp_timestamp - self.reference_rtp) / self.sample_rate
+    
+    def rtp_to_relative_seconds(self, rtp_timestamp: int) -> Optional[float]:
+        """
+        Convert an RTP timestamp to seconds relative to reference.
+        
+        Available even before BCD/FSK confirmation.
+        
+        Args:
+            rtp_timestamp: RTP timestamp to convert
+            
+        Returns:
+            Seconds from reference_rtp, or None if not valid
         """
         if not self.is_valid():
             return None
-        return self.reference_utc + (rtp_timestamp - self.reference_rtp) / self.sample_rate
+        return (rtp_timestamp - self.reference_rtp) / self.sample_rate
     
     def to_json(self) -> str:
         """Serialize to JSON."""
