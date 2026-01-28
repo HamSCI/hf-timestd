@@ -618,71 +618,50 @@ class CoreRecorderV2:
         """
         Write bootstrap timing reference for metrology service.
         
-        The reference is a consistent (RTP, UTC) pair derived from validated tones.
+        The reference is a consistent (RTP, UTC) pair.
         
         Strategy:
         ---------
-        1. Get the most recent validated tone from bootstrap
-        2. The tone's RTP timestamp tells us when it arrived (in GPSDO time)
-        3. The tone's minute_index tells us which minute it is
-        4. Use NTP to identify the absolute UTC of minute 0, then add minute_index * 60
+        Get the RTP-to-Unix offset from one of the recorders (they all share the same
+        GPSDO-governed RTP stream). This offset was established at startup using NTP
+        and is stable thereafter.
+        
+        reference_rtp = any recent RTP timestamp
+        reference_utc = rtp_to_unix_offset + reference_rtp / sample_rate
         
         This gives us a consistent (RTP, UTC) pair where:
         - RTP is from the GPSDO-governed stream (authoritative)
-        - UTC is derived from tone timing + NTP hint for minute identification
+        - UTC is derived from the recorder's RTP-to-Unix calibration
         """
         try:
             from .bootstrap_timing_reference import BootstrapTimingReferenceWriter
-            from .timing_bootstrap import SAMPLES_PER_MINUTE
             
             if not self.bootstrap_service:
                 return
             
-            tb = self.bootstrap_service.timing_bootstrap
             sample_rate = self.bootstrap_service.config.sample_rate
             
-            # Get reference from the most recent validated tone
-            if not tb.validated_tones or tb.rtp_to_utc_offset_samples is None:
-                logger.debug("[BOOTSTRAP_REF] No validated tones yet")
+            # Get RTP-to-Unix offset from a recorder's archive writer
+            rtp_to_unix_offset = None
+            for recorder in self.recorders.values():
+                if hasattr(recorder, 'archive_writer') and recorder.archive_writer:
+                    if recorder.archive_writer.rtp_to_unix_offset is not None:
+                        rtp_to_unix_offset = recorder.archive_writer.rtp_to_unix_offset
+                        break
+            
+            if rtp_to_unix_offset is None:
+                logger.debug("[BOOTSTRAP_REF] No RTP-to-Unix offset available yet")
                 return
             
-            # The bootstrap's rtp_to_utc_offset_samples is the RTP at minute 0 of its frame
-            # We need to find the absolute UTC of that minute 0
-            
-            # Get the most recent validated tone
-            latest_tone = tb.validated_tones[-1]
-            tone_rtp = latest_tone.candidate.rtp_timestamp
-            minute_index = latest_tone.minute_index
-            
-            # The tone arrived at tone_rtp, which is minute_index minutes after minute 0
-            # Expected RTP for this tone = offset + minute_index * SAMPLES_PER_MINUTE
-            expected_rtp = tb.rtp_to_utc_offset_samples + (minute_index * SAMPLES_PER_MINUTE)
-            
-            # Use NTP to identify the current minute, then work backwards to minute 0
+            # Use current time to get a reference point
             import time
             now = time.time()
-            current_minute_utc = (int(now) // 60) * 60
             
-            # How many minutes has it been since the tone was detected?
-            # The tone was at minute_index in the bootstrap's frame
-            # We need to figure out what absolute UTC minute that was
-            
-            # Estimate: the tone was detected recently (within the last few minutes)
-            # The tone's minute_index tells us its position in the bootstrap's frame
-            # Use the RTP difference to estimate time elapsed since tone
-            samples_since_tone = int(now * sample_rate) - tone_rtp  # Approximate
-            seconds_since_tone = samples_since_tone / sample_rate
-            
-            # The tone's absolute UTC was approximately:
-            tone_utc = now - seconds_since_tone
-            tone_minute_utc = (int(tone_utc) // 60) * 60
-            
-            # Minute 0 of bootstrap's frame is minute_index minutes before the tone's minute
-            minute_0_utc = tone_minute_utc - (minute_index * 60)
-            
-            # Reference pair: (rtp_to_utc_offset_samples, minute_0_utc)
-            reference_rtp = tb.rtp_to_utc_offset_samples
-            reference_utc = float(minute_0_utc)
+            # Convert current Unix time to RTP using the inverse of the offset formula
+            # unix_time = rtp / sample_rate + offset
+            # rtp = (unix_time - offset) * sample_rate
+            reference_utc = (int(now) // 60) * 60  # Round to minute boundary
+            reference_rtp = int((reference_utc - rtp_to_unix_offset) * sample_rate)
             
             writer = BootstrapTimingReferenceWriter()
             writer.write(
