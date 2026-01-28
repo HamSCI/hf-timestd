@@ -48,7 +48,7 @@ BIT_DURATION_MS = 1000.0 / BAUD_RATE  # 3.333... ms
 # Frame timing (relative to second boundary)
 TICK_END_MS = 10.0  # End of 1000 Hz tick
 MARK_START_MS = 10.0  # Start of mark sync tone
-DATA_START_MS = 133.33  # Start of FSK data
+DATA_START_MS = 100.0  # Start of FSK data (search from here)
 DATA_END_MS = 500.0  # End of FSK data (precise timing reference!)
 BITS_PER_FRAME = 110  # 10 bytes × 11 bits
 
@@ -138,73 +138,150 @@ class CHUFSKDecoder:
         self.sample_rate = sample_rate
         self.channel_name = channel_name
         
-        # Pre-calculate filter coefficients for mark/space detection
-        # Bandpass filters centered on mark and space frequencies
-        # Bell 103 300 baud requires sufficient bandwidth (approx 500Hz)
-        self.mark_filter = self._design_bandpass(MARK_FREQ, bandwidth=500)
-        self.space_filter = self._design_bandpass(SPACE_FREQ, bandwidth=500)
-        
-        # Samples per bit
+        # Samples per bit (keep as int for backward compatibility, use float in critical paths)
         self.samples_per_bit = int(sample_rate / BAUD_RATE)
+        
+        # Pre-compute mixing oscillator for FSK demodulation (-2125 Hz)
+        # Create 1.2 second buffer to handle full second plus margin
+        t = np.arange(int(sample_rate * 1.2)) / sample_rate
+        self._mixing_oscillator = np.exp(-2j * np.pi * 2125 * t).astype(np.complex64)
+        
+        # Pre-compute LPF coefficients for FSK filtering
+        from scipy.signal import firwin, butter
+        nyq = sample_rate / 2
+        self._lpf_coeffs = firwin(101, 300 / nyq)
+        
+        # Pre-compute tick detection filter (bandpass 900-1100 Hz)
+        low = 900 / nyq
+        high = min(1100 / nyq, 0.99)
+        self._tick_b, self._tick_a = butter(4, [low, high], btype='band')
         
         logger.debug(f"CHU FSK Decoder initialized: {sample_rate} Hz, {self.samples_per_bit} samples/bit")
     
-    def _design_bandpass(self, center_freq: float, bandwidth: float) -> Tuple[np.ndarray, np.ndarray]:
-        """Design a bandpass filter for mark or space frequency"""
-        nyq = self.sample_rate / 2
-        low = (center_freq - bandwidth/2) / nyq
-        high = (center_freq + bandwidth/2) / nyq
+    def _fsk_demodulate_iq(self, iq_samples: np.ndarray) -> np.ndarray:
+        """
+        FSK demodulation using proper Bell 103 DSP chain.
         
-        # Ensure valid range
-        low = max(0.01, min(low, 0.99))
-        high = max(low + 0.01, min(high, 0.99))
+        The IQ data has carrier at DC, FSK tones at +2025/+2225 Hz.
         
-        b, a = butter(4, [low, high], btype='band')
-        return b, a
+        DSP Flow:
+        1. Frequency translate by -2125 Hz to center FSK at DC
+        2. Low-pass filter at 300 Hz to reject ticks and voice
+        3. Quadrature demod: Δθ = angle(sample[n] × conj(sample[n-1]))
+        
+        After translation: mark is at +100 Hz, space is at -100 Hz.
+        """
+        from scipy.signal import filtfilt
+        
+        # Step 1: Frequency translate by -2125 Hz using pre-computed oscillator
+        n_samples = len(iq_samples)
+        if n_samples <= len(self._mixing_oscillator):
+            shift = self._mixing_oscillator[:n_samples]
+        else:
+            # Fallback for unexpectedly long input
+            t = np.arange(n_samples) / self.sample_rate
+            shift = np.exp(-2j * np.pi * 2125 * t).astype(np.complex64)
+        
+        baseband = iq_samples.astype(np.complex64) * shift
+        
+        # Step 2: Low-pass filter using pre-computed coefficients
+        # Use filtfilt for zero-phase filtering (no group delay)
+        filtered = filtfilt(self._lpf_coeffs, 1.0, baseband)
+        
+        # Step 3: Quadrature demodulation
+        # Δθ = angle(sample[n] × conj(sample[n-1]))
+        delta_phase = np.angle(filtered[1:] * np.conj(filtered[:-1]))
+        delta_phase = np.concatenate([[0], delta_phase])
+        
+        # Convert to frequency: f = Δθ * sample_rate / (2π)
+        inst_freq = delta_phase * self.sample_rate / (2 * np.pi)
+        
+        # Normalize: +100 Hz (mark) -> +1, -100 Hz (space) -> -1
+        # Standard UART: Mark (2225 Hz) = Logic 1 (Idle/Stop)
+        #                Space (2025 Hz) = Logic 0 (Start)
+        # After mixing by -2125 Hz: Mark = +100 Hz, Space = -100 Hz
+        # So: positive inst_freq = Mark = Logic 1, negative = Space = Logic 0
+        soft_decision = inst_freq / 100.0
+        
+        return soft_decision
     
     def _am_demodulate(self, iq_samples: np.ndarray) -> np.ndarray:
-        """AM demodulate IQ samples to audio"""
-        magnitude = np.abs(iq_samples)
-        audio = magnitude - np.mean(magnitude)
-        return audio.astype(np.float64)
+        """
+        Extract audio from IQ samples for FSK decoding.
+        
+        This method now uses the proper Bell 103 DSP chain and returns
+        the soft decision directly (not audio).
+        """
+        return self._fsk_demodulate_iq(iq_samples)
     
     def _fsk_demodulate(self, audio: np.ndarray) -> np.ndarray:
         """
-        FSK demodulation using Instantaneous Frequency (Hilbert Transform).
-        Robust for Bell 103 (200Hz shift, 300 baud) where spectra overlap.
+        FSK demodulation - now a pass-through since _am_demodulate
+        returns soft decision directly.
         """
-        # Pre-filter to remove out-of-band noise (keep 1800-2500 Hz)
-        # We can use the existing 'mark_filter' slot but redesigned, or just make a new one.
-        # For simplicity, reuse the bandpass design logic but making a single wide filter.
-        # But wait, self.mark/space filters are computed in __init__.
-        # Let's compute a wide filter here or just assume audio is clean (it is generated).
-        # In real usage, pre-filter is important.
+        # The input is already soft decision from _fsk_demodulate_iq
+        return audio
+    
+    def _find_first_start_bit(self, soft_decision: np.ndarray, search_start: int, search_end: int, expected_byte: Optional[int] = 0x06) -> Optional[int]:
+        """
+        Find first start bit.
         
-        # Analytic signal
-        analytic = hilbert(audio)
+        If expected_byte is provided (Frame A), matches full 11-bit pattern.
+        If None (Frame B at second 31), looks for simple Mark-to-Space transition.
         
-        # Instantaneous Phase
-        phase = np.unwrap(np.angle(analytic))
+        Standard UART: 0 = negative soft decision (space), 1 = positive (mark)
+        """
+        samples_per_bit_float = self.sample_rate / BAUD_RATE
         
-        # Instantaneous Frequency (Hz)
-        # f = d(phi)/dt / (2*pi)
-        # diff gives d(phi) per sample. * sr gives per second.
-        inst_freq = np.diff(phase) * self.sample_rate / (2 * np.pi)
+        # --- STRATEGY 1: Pattern Match (Frame A) ---
+        if expected_byte is not None:
+            # Construct pattern: Start(0) + 8 data bits (LSB) + Parity + Stop(1)
+            parity_bit = bin(expected_byte).count('1') % 2
+            
+            expected = [0]  # Start bit
+            for i in range(8):
+                expected.append((expected_byte >> i) & 1)
+            expected.append(parity_bit)
+            expected.append(1)  # Stop bit
+            
+            best_match = 0
+            best_pos = None
+            
+            step = max(1, int(samples_per_bit_float / 4))
+            
+            for i in range(search_start, min(search_end, len(soft_decision) - int(11 * samples_per_bit_float)), step):
+                bits = []
+                for j in range(11):
+                    bit_center = int(i + (j + 0.5) * samples_per_bit_float)
+                    if bit_center >= len(soft_decision):
+                        break
+                    val = soft_decision[bit_center]
+                    bits.append(1 if val > 0 else 0)
+                
+                if len(bits) < 11:
+                    continue
+                
+                match = sum(1 for a, b in zip(bits, expected) if a == b)
+                
+                if match > best_match:
+                    best_match = match
+                    best_pos = i
+            
+            if best_match >= 9:
+                return best_pos
+            return None
         
-        # Pad to match length (diff removes one sample)
-        inst_freq = np.append(inst_freq, inst_freq[-1])
-        
-        # Soft decision based on deviation from center (2125 Hz)
-        # 2225 (Mark) -> +1
-        # 2025 (Space) -> -1
-        # Center = 2125. Deviation = 100.
-        
-        center_freq = 2125.0
-        deviation = 100.0
-        
-        soft_decision = (inst_freq - center_freq) / deviation
-        
-        return soft_decision
+        # --- STRATEGY 2: Edge Detection (Frame B) ---
+        else:
+            # Look for transition from Mark (>0.2) to Space (<-0.2)
+            check_len = int(samples_per_bit_float / 2)
+            
+            for i in range(search_start + 1, min(search_end, len(soft_decision) - check_len)):
+                if soft_decision[i-1] > 0.2 and soft_decision[i] < -0.2:
+                    # Verify it stays low for at least half a bit
+                    if np.mean(soft_decision[i:i+check_len]) < -0.2:
+                        return i
+            return None
     
     def _extract_bits(self, soft_decision: np.ndarray, start_sample: int, num_bits: int) -> Tuple[List[int], float]:
         """
@@ -538,13 +615,9 @@ class CHUFSKDecoder:
         
         search_region = audio[search_start:search_end]
         
-        # Bandpass filter around 1000 Hz (±100 Hz)
+        # Bandpass filter around 1000 Hz using pre-computed coefficients
         try:
-            nyq = self.sample_rate / 2
-            low = 900 / nyq
-            high = min(1100 / nyq, 0.99)
-            b, a = butter(4, [low, high], btype='band')
-            filtered = filtfilt(b, a, search_region)
+            filtered = filtfilt(self._tick_b, self._tick_a, search_region)
         except Exception:
             filtered = search_region
         
@@ -646,10 +719,20 @@ class CHUFSKDecoder:
         # FSK demodulate
         soft_decision = self._fsk_demodulate(audio)
         
-        # Calculate expected data start (133.33ms into second) + Delay
-        # Delay is needed because filters lag the signal.
-        delay_samples = int(time_delay_ms * self.sample_rate / 1000)
-        data_start_sample = second_start_sample + int(DATA_START_MS * self.sample_rate / 1000) + delay_samples
+        # Find the first start bit by searching for expected pattern
+        # Search from ~50ms to ~200ms into the second
+        search_start = second_start_sample + int(50 * self.sample_rate / 1000)
+        search_end = second_start_sample + int(200 * self.sample_rate / 1000)
+        
+        # Frame A (seconds 32-39) starts with 0x06, Frame B (second 31) has variable first byte
+        expected_byte = 0x06 if second_number != 31 else None
+        
+        data_start_sample = self._find_first_start_bit(soft_decision, search_start, search_end, expected_byte)
+        
+        if data_start_sample is None:
+            # Fallback to fixed offset if start bit not found
+            delay_samples = int(time_delay_ms * self.sample_rate / 1000)
+            data_start_sample = second_start_sample + int(DATA_START_MS * self.sample_rate / 1000) + delay_samples
         
         # Extract bits
         bits, bit_confidence = self._extract_bits(soft_decision, data_start_sample, BITS_PER_FRAME)
@@ -733,9 +816,15 @@ class CHUFSKDecoder:
         tick_timing_offsets: List[float] = []  # NEW: High-precision tick timing
         confidences: List[float] = []
         
+        # Account for fractional second offset in the input data
+        # minute_boundary_unix may have a fractional part indicating when recording started
+        fractional_offset = minute_boundary_unix % 60
+        
         for second in FSK_SECONDS:
-            # Calculate second start sample
-            second_start_sample = int(second * self.sample_rate)
+            # Calculate second start sample, accounting for fractional offset
+            # If recording started at 0.055s into the minute, CHU second 32 is at
+            # (32 - 0.055) seconds into the recording
+            second_start_sample = int((second - fractional_offset) * self.sample_rate)
             
             if second_start_sample + int(1.0 * self.sample_rate) > len(audio):
                 logger.debug(f"Insufficient data for second {second}")

@@ -156,6 +156,7 @@ class AcquisitionCandidate:
     snr_db: float               # Signal-to-noise ratio
     confidence: float           # Detection confidence (0-1)
     buffer_rtp_start: int       # RTP at start of buffer
+    wallclock_time: Optional[float] = None  # GPS-aligned Unix timestamp (for cross-SSRC comparison)
 
 
 @dataclass
@@ -347,8 +348,14 @@ class TimingBootstrap:
                 best_error = float('inf')
                 
                 for cand in other_cands:
-                    offset_samples = cand.rtp_timestamp - anchor_cand.rtp_timestamp
-                    offset_ms = offset_samples * 1000 / self.sample_rate
+                    # Use wallclock time for cross-SSRC comparison if available
+                    # Different SSRCs have different RTP epochs, so raw RTP comparison won't work
+                    if anchor_cand.wallclock_time is not None and cand.wallclock_time is not None:
+                        offset_ms = (cand.wallclock_time - anchor_cand.wallclock_time) * 1000
+                    else:
+                        # Fallback to RTP comparison (only works within same SSRC)
+                        offset_samples = cand.rtp_timestamp - anchor_cand.rtp_timestamp
+                        offset_ms = offset_samples * 1000 / self.sample_rate
                     
                     # Allow matching across minute boundaries:
                     # The offset should be expected_offset + N*60000ms for some integer N
@@ -356,6 +363,18 @@ class TimingBootstrap:
                     raw_error = offset_ms - expected_offset_ms
                     minutes_diff = round(raw_error / 60000)
                     error = abs(raw_error - minutes_diff * 60000)
+                    
+                    # VALIDATION: Check relative ToA matches geographic expectations
+                    # BPM false positive detection: The 300ms BPM template can match
+                    # the first 300ms of WWV's 800ms tone, causing BPM to appear to
+                    # arrive ~0-10ms after WWV instead of the expected ~38ms.
+                    # Reject BPM if it arrives less than 25ms after WWV (min expected ~30ms)
+                    if other_station == 'BPM' and anchor_station == 'WWV':
+                        actual_offset_in_minute = offset_ms - minutes_diff * 60000
+                        if actual_offset_in_minute < 25:
+                            logger.debug(f"[BOOTSTRAP] Rejecting BPM: arrives only {actual_offset_in_minute:.1f}ms "
+                                        f"after WWV (expected >{expected_offset_ms:.0f}ms) - likely false positive")
+                            continue
                     
                     if error < best_error:
                         best_error = error
@@ -451,7 +470,8 @@ class TimingBootstrap:
         snr_db: float,
         confidence: float,
         buffer_rtp_start: int,
-        system_time_hint: Optional[float] = None
+        system_time_hint: Optional[float] = None,
+        wallclock_time: Optional[float] = None
     ) -> Optional[str]:
         """
         Add an acquisition candidate and process through state machine.
@@ -460,6 +480,9 @@ class TimingBootstrap:
             system_time_hint: Optional system time of buffer start. Used to identify
                              which candidate is likely the minute marker (closest to
                              a minute boundary). Not required but speeds up bootstrap.
+            wallclock_time: Optional GPS-aligned Unix timestamp for this tone.
+                           Used for cross-SSRC comparison (different SSRCs have
+                           different RTP epochs but share the same GPS timeline).
         
         Returns:
             Status message or None
@@ -473,7 +496,8 @@ class TimingBootstrap:
             sample_position=sample_position,
             snr_db=snr_db,
             confidence=confidence,
-            buffer_rtp_start=buffer_rtp_start
+            buffer_rtp_start=buffer_rtp_start,
+            wallclock_time=wallclock_time
         )
         
         # Always collect candidates for clustering
@@ -505,31 +529,72 @@ class TimingBootstrap:
             if not multi_station:
                 return None
             
-            # KEY: Find clusters that recur at 60-second (1,440,000 sample) intervals
+            # KEY: Find clusters that recur at 60-second intervals
             # This distinguishes true minute markers from per-second ticks
+            # 
+            # IMPORTANT: Different SSRCs have different RTP epochs, so we use
+            # wallclock_time (GPS-aligned) for cross-SSRC comparison instead of raw RTP.
+            if len(multi_station) >= 2:
+                # Log wallclock times for debugging
+                wc_times = []
+                for c in multi_station[:5]:  # First 5 clusters
+                    anchor_cands = c['members'][c['anchor_station']]
+                    wc = anchor_cands[0].wallclock_time if anchor_cands else None
+                    wc_times.append(f"{wc:.1f}" if wc else "N/A")
+                logger.info(f"[BOOTSTRAP] Checking {len(multi_station)} multi-station clusters for recurrence, "
+                           f"wallclocks: {wc_times}")
+            
             for cluster in multi_station:
                 anchor_rtp = cluster['anchor_rtp']
+                anchor_station = cluster['anchor_station']
+                anchor_cands = cluster['members'][anchor_station]
+                anchor_wallclock = anchor_cands[0].wallclock_time if anchor_cands else None
                 
-                # Look for another cluster at anchor_rtp ± N*SAMPLES_PER_MINUTE
+                # Look for another cluster at ~60 seconds apart
                 for other in multi_station:
                     if other is cluster:
                         continue
                     
-                    other_rtp = other['anchor_rtp']
-                    diff = abs(other_rtp - anchor_rtp)
+                    other_station = other['anchor_station']
+                    other_cands = other['members'][other_station]
+                    other_wallclock = other_cands[0].wallclock_time if other_cands else None
                     
-                    # Check if difference is close to N minutes (within 500ms tolerance)
-                    minutes_apart = round(diff / SAMPLES_PER_MINUTE)
-                    if minutes_apart == 0:
-                        continue  # Same minute boundary
+                    # Use wallclock for cross-SSRC comparison if available
+                    if anchor_wallclock is not None and other_wallclock is not None:
+                        # Compare wallclock times (seconds)
+                        time_diff = abs(other_wallclock - anchor_wallclock)
+                        minutes_apart = round(time_diff / 60.0)
+                        if minutes_apart == 0:
+                            continue  # Same minute boundary
+                        expected_diff = minutes_apart * 60.0
+                        error_sec = abs(time_diff - expected_diff)
+                        error_ms = error_sec * 1000
+                    else:
+                        # Fallback to RTP comparison (only works within same SSRC)
+                        other_rtp = other['anchor_rtp']
+                        diff = abs(other_rtp - anchor_rtp)
+                        minutes_apart = round(diff / SAMPLES_PER_MINUTE)
+                        if minutes_apart == 0:
+                            continue  # Same minute boundary
+                        expected_diff = minutes_apart * SAMPLES_PER_MINUTE
+                        error_samples = abs(diff - expected_diff)
+                        error_ms = error_samples * 1000 / self.sample_rate
                     
-                    expected_diff = minutes_apart * SAMPLES_PER_MINUTE
-                    error_samples = abs(diff - expected_diff)
-                    error_ms = error_samples * 1000 / self.sample_rate
+                    # Log close matches for debugging
+                    if minutes_apart >= 1 and error_ms < 500:
+                        logger.info(f"[BOOTSTRAP] Recurrence check: {minutes_apart} min apart, error={error_ms:.1f}ms")
                     
-                    if error_ms < 100:  # Within 100ms of expected minute spacing (tight tolerance for true minute markers)
+                    if error_ms < 100:  # Within 100ms of expected minute spacing
+                        logger.info(f"[BOOTSTRAP] RECURRING CLUSTERS FOUND: {minutes_apart} min apart, error={error_ms:.1f}ms")
                         # Found recurring clusters! Use earlier one as reference
-                        if anchor_rtp < other_rtp:
+                        # Use wallclock for comparison if available, otherwise RTP
+                        other_rtp = other['anchor_rtp']
+                        if anchor_wallclock is not None and other_wallclock is not None:
+                            use_earlier = anchor_wallclock < other_wallclock
+                        else:
+                            use_earlier = anchor_rtp < other_rtp
+                        
+                        if use_earlier:
                             ref_cluster = cluster
                         else:
                             ref_cluster = other

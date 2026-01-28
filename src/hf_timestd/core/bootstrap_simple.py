@@ -132,16 +132,30 @@ class SimpleBootstrap:
         return delays
     
     def add_samples(
-        self,
-        channel: str,
-        samples: np.ndarray,
-        rtp_start: int
+        self, 
+        channel: str, 
+        samples: np.ndarray, 
+        rtp_start: int,
+        system_time: Optional[float] = None
     ) -> None:
-        """Add IQ samples from a channel."""
+        """Add samples from a channel buffer.
+        
+        Args:
+            channel: Channel name
+            samples: IQ samples
+            rtp_start: RTP timestamp at start of buffer
+            system_time: System time (Unix timestamp) at start of buffer
+        """
         if channel not in self.channel_buffers:
             self.channel_buffers[channel] = []
         
         self.channel_buffers[channel].append((samples, rtp_start))
+        
+        # Store metadata for time estimation
+        if system_time is not None:
+            if not hasattr(self, 'buffer_metadata'):
+                self.buffer_metadata = {}
+            self.buffer_metadata[(channel, rtp_start)] = system_time
     
     def find_clusters(self) -> List[ToneCluster]:
         """
@@ -202,44 +216,66 @@ class SimpleBootstrap:
         station: str,
         channel: str
     ) -> List[Dict]:
-        """Detect minute marker tones in a buffer."""
-        # Simple energy-based detection for minute markers
-        # Minute markers are 800ms tones at the start of each minute
+        """Detect per-second ticks in a buffer using FFT-based matched filtering.
+        
+        We detect all ticks (not just minute markers) and later use the
+        60-second recurrence pattern to identify minute boundaries.
+        """
+        from scipy.signal import find_peaks, fftconvolve
+        from scipy.signal.windows import tukey
         
         detections = []
         
-        # Look for high-energy segments that could be minute markers
-        # This is a simplified version - production would use matched filtering
-        
-        window_samples = int(0.8 * self.sample_rate)  # 800ms window
-        hop_samples = int(0.1 * self.sample_rate)     # 100ms hop
-        
-        # Compute envelope
-        envelope = np.abs(samples)
-        
-        # Smooth with moving average
-        kernel_size = int(0.05 * self.sample_rate)  # 50ms
-        if kernel_size > 0:
-            kernel = np.ones(kernel_size) / kernel_size
-            envelope = np.convolve(envelope, kernel, mode='same')
-        
-        # Find peaks
-        threshold = np.median(envelope) * 3
-        
-        for i in range(0, len(samples) - window_samples, hop_samples):
-            window_energy = np.mean(envelope[i:i+window_samples])
+        try:
+            # Determine tone parameters based on channel
+            channel_upper = channel.upper()
+            if 'CHU' in channel_upper:
+                tone_freq = 1000  # Hz
+                station_name = 'CHU'
+            else:
+                tone_freq = 1000  # Hz (WWV also uses 1000Hz)
+                station_name = 'WWV'
             
-            if window_energy > threshold:
-                # Potential minute marker
-                rtp = rtp_start + i
-                snr_db = 10 * np.log10(window_energy / np.median(envelope) + 1e-10)
+            # Use SHORT template (100ms) to detect tick onsets
+            # This detects all ticks, not just minute markers
+            tone_duration = 0.1
+            
+            n_template = int(tone_duration * self.sample_rate)
+            t = np.arange(n_template) / self.sample_rate
+            window = tukey(n_template, alpha=0.1)
+            
+            template_sin = np.sin(2 * np.pi * tone_freq * t) * window
+            template_cos = np.cos(2 * np.pi * tone_freq * t) * window
+            template_sin /= np.linalg.norm(template_sin)
+            template_cos /= np.linalg.norm(template_cos)
+            
+            # FFT-based correlation
+            corr_sin = fftconvolve(samples, template_sin[::-1], mode='same')
+            corr_cos = fftconvolve(samples, template_cos[::-1], mode='same')
+            corr_mag = np.sqrt(np.abs(corr_sin)**2 + np.abs(corr_cos)**2)
+            
+            noise_floor = np.median(corr_mag)
+            threshold = noise_floor * 3
+            
+            # Find peaks ~1 second apart (per-second ticks)
+            min_distance = int(0.8 * self.sample_rate)
+            peaks, _ = find_peaks(corr_mag, height=threshold, distance=min_distance)
+            
+            for peak_idx in peaks:
+                peak_val = corr_mag[peak_idx]
+                snr_db = 10 * np.log10(peak_val / noise_floor + 1e-10)
                 
-                detections.append({
-                    'rtp': rtp,
-                    'station': station,
-                    'channel': channel,
-                    'snr_db': snr_db,
-                })
+                if snr_db > 6:
+                    rtp = rtp_start + peak_idx
+                    detections.append({
+                        'rtp': rtp,
+                        'station': station_name,
+                        'channel': channel,
+                        'snr_db': snr_db,
+                    })
+                        
+        except Exception as e:
+            logger.warning(f"Tone detection failed for {channel}: {e}")
         
         return detections
     
@@ -288,73 +324,196 @@ class SimpleBootstrap:
     
     def find_recurring_clusters(self) -> Optional[Tuple[ToneCluster, ToneCluster]]:
         """
-        Find two clusters that are exactly 60 seconds apart.
+        Find minute boundaries using multi-channel sliding template approach.
+        
+        This method:
+        1. Detects all ticks across all channels
+        2. Adjusts for propagation delay to get transmission time
+        3. Slides through looking for positions where multiple channels
+           have detections within tolerance
+        4. Finds pairs of such positions 60 seconds apart
         
         Returns the pair of clusters if found, None otherwise.
         """
-        clusters = self.find_clusters()
+        # Get all detections with propagation delay adjustment
+        all_detections = []
+        for channel, buffer_list in self.channel_buffers.items():
+            station = self._channel_to_station(channel)
+            if station is None:
+                continue
+            
+            delay = self.propagation_delays.get(station, 0)
+            
+            for samples, rtp_start in buffer_list:
+                detections = self._detect_tones_in_buffer(samples, rtp_start, station, channel)
+                for det in detections:
+                    det['delay'] = delay
+                    det['tx_rtp'] = det['rtp'] - delay  # Transmission time
+                all_detections.extend(detections)
         
-        if len(clusters) < 2:
-            logger.debug(f"Only {len(clusters)} clusters found, need at least 2")
+        if len(all_detections) < 2:
+            logger.debug(f"Only {len(all_detections)} detections found")
             return None
         
-        # Look for pairs that are 60 seconds apart (within 50ms tolerance)
-        tolerance_samples = int(0.05 * self.sample_rate)  # 50ms
+        logger.info(f"Multi-channel search: {len(all_detections)} ticks across {len(self.channel_buffers)} channels")
         
-        for i, c1 in enumerate(clusters):
-            for c2 in clusters[i+1:]:
-                diff = abs(c2.rtp_timestamp - c1.rtp_timestamp)
-                
-                # Check if difference is close to N minutes
-                minutes_apart = round(diff / SAMPLES_PER_MINUTE)
-                if minutes_apart == 0:
-                    continue
-                
-                expected_diff = minutes_apart * SAMPLES_PER_MINUTE
-                error = abs(diff - expected_diff)
-                
-                if error < tolerance_samples:
-                    logger.info(f"Found recurring clusters {minutes_apart} minutes apart "
-                               f"(error={error * 1000 / self.sample_rate:.1f}ms)")
-                    
-                    # Return earlier cluster first
-                    if c1.rtp_timestamp < c2.rtp_timestamp:
-                        return (c1, c2)
-                    else:
-                        return (c2, c1)
+        # Sort by tx_rtp (transmission time)
+        all_detections.sort(key=lambda x: x['tx_rtp'])
+        tx_rtps = np.array([d['tx_rtp'] for d in all_detections])
+        channels = np.array([d['channel'] for d in all_detections])
+        snrs = np.array([d['snr_db'] for d in all_detections])
         
-        logger.debug("No recurring clusters found")
-        return None
+        min_tx = int(tx_rtps.min())
+        max_tx = int(tx_rtps.max())
+        
+        # Coarse search: 1-second steps
+        CLUSTER_TOLERANCE = int(0.1 * self.sample_rate)  # 100ms
+        step = self.sample_rate
+        
+        coarse_scores = []
+        for pos in range(min_tx, max_tx - SAMPLES_PER_MINUTE, step):
+            mask = np.abs(tx_rtps - pos) < CLUSTER_TOLERANCE
+            unique_channels = len(set(channels[mask]))
+            total_snr = snrs[mask].sum() if mask.any() else 0
+            coarse_scores.append((pos, unique_channels, total_snr))
+        
+        # Find best 60s pairs
+        score_dict = {pos: (ch, snr) for pos, ch, snr in coarse_scores}
+        
+        best_pair_score = 0
+        best_pair = None
+        
+        for pos, ch_count, snr_sum in coarse_scores:
+            pos2 = pos + SAMPLES_PER_MINUTE
+            if pos2 in score_dict:
+                ch2, snr2 = score_dict[pos2]
+                combined_ch = ch_count + ch2
+                
+                if combined_ch > best_pair_score:
+                    best_pair_score = combined_ch
+                    best_pair = (pos, pos2)
+        
+        if best_pair is None or best_pair_score < 2:
+            logger.debug(f"No good 60s pairs found (best score: {best_pair_score})")
+            return None
+        
+        pos1, pos2 = best_pair
+        
+        # Fine search around best positions (±0.5s at 10ms steps)
+        fine_step = int(0.01 * self.sample_rate)
+        fine_range = int(0.5 * self.sample_rate)
+        
+        best_fine_score = 0
+        best_fine_pos = pos1
+        
+        for offset in range(-fine_range, fine_range, fine_step):
+            test_pos = pos1 + offset
+            mask = np.abs(tx_rtps - test_pos) < CLUSTER_TOLERANCE
+            unique_channels = len(set(channels[mask]))
+            
+            mask2 = np.abs(tx_rtps - (test_pos + SAMPLES_PER_MINUTE)) < CLUSTER_TOLERANCE
+            unique_channels2 = len(set(channels[mask2]))
+            
+            combined = unique_channels + unique_channels2
+            if combined > best_fine_score:
+                best_fine_score = combined
+                best_fine_pos = test_pos
+        
+        logger.info(f"Found minute boundary at tx_rtp={best_fine_pos} (score={best_fine_score})")
+        
+        # Get detections at each minute boundary
+        mask1 = np.abs(tx_rtps - best_fine_pos) < CLUSTER_TOLERANCE
+        mask2 = np.abs(tx_rtps - (best_fine_pos + SAMPLES_PER_MINUTE)) < CLUSTER_TOLERANCE
+        
+        dets1 = [all_detections[i] for i in np.where(mask1)[0]]
+        dets2 = [all_detections[i] for i in np.where(mask2)[0]]
+        
+        if not dets1 or not dets2:
+            return None
+        
+        # Use strongest detection to anchor
+        anchor1 = max(dets1, key=lambda x: x['snr_db'])
+        anchor2 = max(dets2, key=lambda x: x['snr_db'])
+        
+        # Compute minute boundary RTP from anchor
+        minute_rtp1 = anchor1['rtp'] - (anchor1['tx_rtp'] - best_fine_pos)
+        minute_rtp2 = minute_rtp1 + SAMPLES_PER_MINUTE
+        
+        logger.info(f"  Minute 1: RTP={minute_rtp1}, anchor={anchor1['channel']} SNR={anchor1['snr_db']:.1f}dB")
+        logger.info(f"  Minute 2: RTP={minute_rtp2}, anchor={anchor2['channel']} SNR={anchor2['snr_db']:.1f}dB")
+        
+        c1 = ToneCluster(
+            rtp_timestamp=int(minute_rtp1),
+            stations=[d['station'] for d in dets1],
+            snr_db=anchor1['snr_db'],
+            confidence=best_fine_score / (2 * len(self.channel_buffers))
+        )
+        c2 = ToneCluster(
+            rtp_timestamp=int(minute_rtp2),
+            stations=[d['station'] for d in dets2],
+            snr_db=anchor2['snr_db'],
+            confidence=best_fine_score / (2 * len(self.channel_buffers))
+        )
+        
+        return (c1, c2)
     
-    def decode_time(self, cluster: ToneCluster) -> Optional[Tuple[int, int]]:
+    def decode_time(self, cluster: ToneCluster) -> Optional[Tuple[int, int, int]]:
         """
-        Decode BCD/FSK to get hour and minute.
+        Decode BCD/FSK to get hour and minute using the KNOWN minute boundary.
         
-        Returns (hour, minute) if successful, None otherwise.
+        Architecture:
+        ------------
+        The minute boundary is already known from relative ToA validation:
+          minute_boundary_rtp = anchor_arrival_rtp - propagation_delay
+        
+        This method extracts samples starting at second 0 of the minute and
+        passes them to the BCD/FSK decoder. The decoder's job is to:
+          - WWV BCD: Extract hour/minute from 100 Hz subcarrier pulse widths
+          - CHU FSK: Extract hour/minute from FSK data frames
+        
+        The decoder does NOT need to search for the minute boundary - it's given.
+        
+        Returns (hour, minute, timing_offset_samples) if successful, None otherwise.
+        The timing_offset is provided for diagnostics but not used for timing.
         """
-        # Get samples around the cluster for BCD/FSK decoding
-        # We need the full minute of data
+        minute_boundary_rtp = cluster.rtp_timestamp
         
         for channel, buffer_list in self.channel_buffers.items():
             station = self._channel_to_station(channel)
             if station not in ['WWV', 'WWVH', 'CHU']:
                 continue
             
-            # Find buffer containing this cluster
+            # Concatenate all buffers for this channel
+            all_samples = []
+            min_rtp = None
             for samples, rtp_start in buffer_list:
-                rtp_end = rtp_start + len(samples)
-                
-                if rtp_start <= cluster.rtp_timestamp < rtp_end:
-                    # Found the buffer - try to decode
-                    offset = cluster.rtp_timestamp - rtp_start
-                    
-                    if station in ['WWV', 'WWVH']:
-                        result = self._decode_wwv_bcd(samples, offset)
-                    else:  # CHU
-                        result = self._decode_chu_fsk(samples, offset)
-                    
-                    if result:
-                        return result
+                if min_rtp is None:
+                    min_rtp = rtp_start
+                all_samples.append(samples)
+            
+            if not all_samples or min_rtp is None:
+                continue
+            
+            combined = np.concatenate(all_samples)
+            
+            # Compute offset of minute boundary in combined buffer
+            minute_offset = minute_boundary_rtp - min_rtp
+            
+            if minute_offset < 0 or minute_offset + SAMPLES_PER_MINUTE > len(combined):
+                logger.debug(f"{channel}: minute boundary outside buffer range")
+                continue
+            
+            logger.debug(f"{channel}: trying decode at offset {minute_offset} ({minute_offset/self.sample_rate:.3f}s)")
+            
+            # Try to decode at this position
+            if station in ['WWV', 'WWVH']:
+                result = self._decode_wwv_bcd(combined, int(minute_offset))
+            else:  # CHU
+                result = self._decode_chu_fsk(combined, int(minute_offset))
+            
+            if result:
+                logger.info(f"Decoded from {channel}: {result[0]:02d}:{result[1]:02d} UTC")
+                return result
         
         return None
     
@@ -362,8 +521,13 @@ class SimpleBootstrap:
         self,
         samples: np.ndarray,
         minute_start_offset: int
-    ) -> Optional[Tuple[int, int]]:
-        """Decode WWV/WWVH BCD time code."""
+    ) -> Optional[Tuple[int, int, int]]:
+        """Decode WWV/WWVH BCD time code.
+        
+        Returns:
+            Tuple of (hour, minute, coarse_sync_offset_samples) or None
+            The coarse_sync_offset is the correction needed for system clock error.
+        """
         try:
             from hf_timestd.core.wwv_bcd_decoder import WWVBCDDecoder
             
@@ -375,11 +539,13 @@ class SimpleBootstrap:
             if len(minute_samples) < SAMPLES_PER_MINUTE:
                 return None
             
-            result = decoder.decode(minute_samples)
+            result = decoder.decode_minute(minute_samples)
             
-            if result and result.valid:
-                logger.info(f"WWV BCD decode: {result.hour:02d}:{result.minute:02d}")
-                return (result.hour, result.minute)
+            if result and result.detected and result.decoded_hour is not None:
+                offset_ms = result.coarse_sync_offset_samples / self.sample_rate * 1000
+                logger.info(f"WWV BCD decode: {result.decoded_hour:02d}:{result.decoded_minute:02d} "
+                           f"(coarse_sync={offset_ms:.0f}ms)")
+                return (result.decoded_hour, result.decoded_minute, result.coarse_sync_offset_samples)
             
         except Exception as e:
             logger.debug(f"WWV BCD decode failed: {e}")
@@ -390,10 +556,16 @@ class SimpleBootstrap:
         self,
         samples: np.ndarray,
         minute_start_offset: int
-    ) -> Optional[Tuple[int, int]]:
-        """Decode CHU FSK time code."""
+    ) -> Optional[Tuple[int, int, int]]:
+        """Decode CHU FSK time code.
+        
+        Returns:
+            Tuple of (hour, minute, timing_offset_samples) or None
+            The timing_offset is derived from frame B edge detection.
+        """
         try:
             from hf_timestd.core.chu_fsk_decoder import CHUFSKDecoder
+            import time
             
             decoder = CHUFSKDecoder(sample_rate=self.sample_rate)
             
@@ -403,53 +575,109 @@ class SimpleBootstrap:
             if len(minute_samples) < SAMPLES_PER_MINUTE:
                 return None
             
-            result = decoder.decode(minute_samples)
+            # For bootstrap, use current system time as approximate reference
+            # The decoder validates that decoded time is within ±1 hour of this
+            approx_minute_unix = time.time()
             
-            if result and result.valid:
-                logger.info(f"CHU FSK decode: {result.hour:02d}:{result.minute:02d}")
-                return (result.hour, result.minute)
+            result = decoder.decode_minute(minute_samples, approx_minute_unix)
+            
+            # Check if we got valid decoded time
+            if result and result.detected and result.decoded_hour is not None:
+                # CHU timing offset from frame B edge (if available)
+                timing_offset_samples = 0
+                if hasattr(result, 'timing_offset_ms') and result.timing_offset_ms is not None:
+                    timing_offset_samples = int(result.timing_offset_ms * self.sample_rate / 1000)
+                
+                logger.info(f"CHU FSK decode: {result.decoded_hour:02d}:{result.decoded_minute:02d}")
+                return (result.decoded_hour, result.decoded_minute, timing_offset_samples)
             
         except Exception as e:
             logger.debug(f"CHU FSK decode failed: {e}")
         
         return None
     
+    def estimate_time_from_system_clock(self, minute_boundary_rtp: int) -> Optional[Tuple[int, int]]:
+        """
+        DEPRECATED: This method should NOT be used.
+        
+        UTC time must come from BCD/FSK decode of the actual broadcasts,
+        not from NTP or any other external source.
+        
+        Returns None - time confirmation requires BCD/FSK decode.
+        """
+        logger.debug("estimate_time_from_system_clock called but NTP fallback is disabled")
+        return None
+    
     def compute_result(self) -> Optional[BootstrapResult]:
         """
         Run the full bootstrap process and return the result.
         
+        Bootstrap Architecture:
+        ----------------------
+        1. Find recurring clusters validated by RELATIVE ToA differences
+           - Geographic delay + ionospheric delay determines expected ToA pattern
+           - Multi-station clusters prove we found real minute markers
+           
+        2. Back-calculate minute boundary RTP from validated cluster
+           - minute_boundary_rtp = anchor_arrival_rtp - propagation_delay_samples
+           - This is the RTP timestamp of second 0 of the minute
+           
+        3. Attempt BCD/FSK decode using the KNOWN minute boundary
+           - BCD (100 Hz subcarrier) and FSK schemas orient within a minute
+           - Decoder is told where second 0 is, extracts hour:minute
+           
+        4. If BCD/FSK succeeds: full timing reference available
+           If BCD/FSK fails: we have minute boundary but not which UTC minute
+        
         Returns BootstrapResult if successful, None otherwise.
         """
-        # Step 1: Find recurring clusters
+        # Step 1: Find recurring clusters (validated by relative ToA)
         cluster_pair = self.find_recurring_clusters()
         if cluster_pair is None:
-            logger.info("Bootstrap: waiting for recurring clusters")
+            logger.info("Bootstrap: waiting for recurring clusters (relative ToA validation)")
             return None
         
         cluster1, cluster2 = cluster_pair
         
-        # Step 2: Decode BCD/FSK to get UTC time
+        # Step 2: Back-calculate minute boundary RTP from anchor tone
+        # The cluster.rtp_timestamp is already the minute boundary (anchor - delay)
+        # computed during cluster formation
+        best_station = cluster1.stations[0]
+        delay_ms = self.propagation_delays.get(best_station, 0)
+        delay_samples = int(delay_ms * self.sample_rate / 1000)
+        
+        # cluster1.rtp_timestamp is the anchor arrival time
+        # minute_boundary = arrival - propagation_delay
+        minute_boundary_rtp = cluster1.rtp_timestamp - delay_samples
+        
+        logger.info(f"Bootstrap: minute boundary at RTP={minute_boundary_rtp} "
+                   f"(anchor={best_station}, delay={delay_ms:.1f}ms)")
+        
+        # Step 3: Attempt BCD/FSK decode using the KNOWN minute boundary
+        # The decoder is given samples starting at second 0 of the minute
         decoded_time = self.decode_time(cluster1)
         if decoded_time is None:
             decoded_time = self.decode_time(cluster2)
         
         if decoded_time is None:
-            logger.info("Bootstrap: waiting for BCD/FSK decode")
-            return None
+            # BCD/FSK decode failed - we have minute boundary but not UTC minute
+            # NO NTP FALLBACK - time must come from broadcasts
+            logger.info("Bootstrap: minute boundary found, waiting for BCD/FSK decode")
+            
+            # Return partial result with minute boundary but no UTC confirmation
+            result = BootstrapResult(
+                reference_rtp=minute_boundary_rtp,
+                reference_utc=None,  # Not confirmed yet
+                uncertainty_ms=5.0,
+                decoded_hour=None,
+                decoded_minute=None,
+                stations_used=cluster1.stations + cluster2.stations
+            )
+            self._result = result
+            return result
         
-        decoded_hour, decoded_minute = decoded_time
-        
-        # Step 3: Compute reference_rtp (RTP at UTC minute 0)
-        # cluster1 is at minute N, so minute 0 is cluster1.rtp - N * SAMPLES_PER_MINUTE
-        
-        # First, adjust for propagation delay
-        # The tone arrives delay_ms after transmission
-        best_station = cluster1.stations[0]
-        delay_ms = self.propagation_delays.get(best_station, 0)
-        delay_samples = int(delay_ms * self.sample_rate / 1000)
-        
-        # RTP at minute boundary = tone arrival - propagation delay
-        minute_boundary_rtp = cluster1.rtp_timestamp - delay_samples
+        # Step 4: BCD/FSK succeeded - compute full timing reference
+        decoded_hour, decoded_minute, _ = decoded_time
         
         # Compute which minute this is (from decoded time)
         minutes_since_midnight = decoded_hour * 60 + decoded_minute
@@ -457,7 +685,7 @@ class SimpleBootstrap:
         # Reference RTP = minute boundary RTP - (minutes * samples_per_minute)
         reference_rtp = minute_boundary_rtp - (minutes_since_midnight * SAMPLES_PER_MINUTE)
         
-        # Reference UTC = midnight today
+        # Reference UTC = midnight today (date from system clock, time from BCD/FSK)
         now = time.time()
         midnight_today = (int(now) // 86400) * 86400
         reference_utc = float(midnight_today)
@@ -476,6 +704,7 @@ class SimpleBootstrap:
         
         logger.info(f"Bootstrap complete: {decoded_hour:02d}:{decoded_minute:02d} UTC")
         logger.info(f"  reference_rtp={reference_rtp}, reference_utc={reference_utc}")
+        logger.info(f"  minute_boundary_rtp={minute_boundary_rtp}")
         logger.info(f"  stations: {result.stations_used}")
         
         self._result = result

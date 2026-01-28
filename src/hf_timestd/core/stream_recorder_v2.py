@@ -555,10 +555,12 @@ class StreamRecorderV2:
             # Once locked, normal archiving begins
             if self._bootstrap_service is not None and not self._bootstrap_service.is_locked:
                 # Feed to bootstrap service for RTP-to-UTC calibration
+                # Pass channel_info for GPS-aligned wallclock conversion (per-SSRC RTP alignment)
                 self._bootstrap_service.add_samples(
                     channel_name=self.config.description,
                     samples=samples,
-                    rtp_timestamp=quality.last_rtp_timestamp
+                    rtp_timestamp=quality.last_rtp_timestamp,
+                    channel_info=self.channel_info
                 )
                 # Periodically search for tones (rate-limited internally)
                 self._bootstrap_service.search_and_update()

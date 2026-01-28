@@ -2,6 +2,52 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.11] - 2026-01-28
+
+### RTP Wallclock Alignment for Multi-SSRC Bootstrap
+
+**Major Fix:** Implemented GPS-aligned wallclock timestamps for cross-SSRC comparison in bootstrap clustering and recurring cluster detection.
+
+#### Problem Addressed
+Different radio channels (WWV, CHU, etc.) have independent RTP clock spaces with different epochs. The bootstrap was comparing raw RTP timestamps across SSRCs, which have offsets of ~1.2 billion samples (~14 hours), preventing multi-station cluster formation and recurring cluster detection.
+
+#### Solution: GPS Wallclock Alignment
+Each SSRC broadcasts `GPS_TIME` and `RTP_TIMESNAP` which allows converting RTP timestamps to a common GPS-aligned wallclock timeline. This is used **only for inter-channel synchronization**, not for establishing the time basis (which comes from HF signal decoding).
+
+#### Key Changes
+1. **Helper functions** in `bootstrap_rolling_buffer.py`:
+   - `rtp_to_wallclock(rtp, channel_info, sample_rate)` - Convert RTP to Unix timestamp
+   - `wallclock_to_rtp(wallclock, channel_info, sample_rate)` - Convert back to RTP
+
+2. **ChannelInfo passthrough**: `channel_info` (with `gps_time`, `rtp_timesnap`) now flows from `stream_recorder_v2.py` → `bootstrap_service.py` → `bootstrap_rolling_buffer.py`
+
+3. **AcquisitionCandidate.wallclock_time**: New field for GPS-aligned timestamp of tone detections
+
+4. **Clustering uses wallclock**: `find_minute_clusters()` now uses wallclock for cross-SSRC offset comparison
+
+5. **Recurring cluster detection uses wallclock**: 60-second recurrence validation now works across different SSRCs
+
+#### Results
+- Multi-station clusters now form correctly: `WWV + CHU + BPM` with conf=1.00
+- Recurring clusters found with 2.9ms error (within 100ms threshold)
+- Bootstrap reaches TRACKING → PROVISIONAL state
+- D_clock calculated from 17+ tones with median ~29ms
+
+#### Current Bootstrap State
+```
+lock_tier: PROVISIONAL
+time_confirmed: false (BCD/FSK decode pending - separate issue)
+D_clock: ~+29ms
+```
+
+The system is operational: writing minute archives at 100% completeness, calculating D_clock from multi-station tone detections. BCD/FSK time confirmation is a separate issue from the wallclock alignment work.
+
+#### Files Modified
+- `src/hf_timestd/core/bootstrap_rolling_buffer.py` - Wallclock helpers, ChannelInfo storage
+- `src/hf_timestd/core/bootstrap_service.py` - ChannelInfo passthrough
+- `src/hf_timestd/core/stream_recorder_v2.py` - Pass channel_info to bootstrap
+- `src/hf_timestd/core/timing_bootstrap.py` - wallclock_time field, wallclock-based clustering
+
 ## [5.3.10] - 2026-01-27
 
 ### Two-Tier Bootstrap for Ionospheric Averaging

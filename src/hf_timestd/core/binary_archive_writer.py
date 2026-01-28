@@ -609,6 +609,34 @@ class BinaryArchiveWriter:
                     self._offset_params_locked = True
                     self._initial_offsets = [] # free memory
                     logger.info(f"RTP-to-Unix reference LOCKED: offset={mean_offset:.3f}s (adjusted by {diff*1000:+.1f}ms after 50 chunks)")
+                    
+                    # VALIDATION: Check that RTP aligns to minute boundaries
+                    # If the offset is correct, RTP mod samples_per_minute should be small
+                    # when we're at a minute boundary (system_time mod 60 ≈ 0)
+                    samples_per_minute = self.config.sample_rate * 60
+                    rtp_in_minute = rtp_timestamp % samples_per_minute
+                    rtp_second_in_minute = rtp_in_minute / self.config.sample_rate
+                    system_second_in_minute = system_time % 60
+                    
+                    # The difference tells us if there's a calibration error
+                    alignment_error = rtp_second_in_minute - system_second_in_minute
+                    # Normalize to [-30, 30] range
+                    if alignment_error > 30:
+                        alignment_error -= 60
+                    elif alignment_error < -30:
+                        alignment_error += 60
+                    
+                    if abs(alignment_error) > 5.0:  # More than 5 seconds misalignment
+                        logger.warning(
+                            f"[OFFSET_VALIDATION] RTP-minute alignment error: {alignment_error:.1f}s "
+                            f"(RTP at second {rtp_second_in_minute:.1f}, system at second {system_second_in_minute:.1f}). "
+                            f"This may indicate ka9q-radio buffering delay. "
+                            f"Consider adjusting offset by {-alignment_error:.1f}s."
+                        )
+                        # Auto-correct the offset
+                        corrected_offset = mean_offset - alignment_error
+                        logger.info(f"[OFFSET_VALIDATION] Auto-correcting offset: {mean_offset:.3f}s -> {corrected_offset:.3f}s")
+                        self.rtp_to_unix_offset = corrected_offset
             
             # CRITICAL: RTP clock drift detection AFTER offset is locked
             # This catches frozen/stuck RTP clocks from radiod issues

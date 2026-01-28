@@ -101,6 +101,10 @@ class WWVBCDResult:
     decode_confidence: float = 0.0
     pulse_quality: float = 0.0  # How well pulses match expected widths
     
+    # Timing offset: samples from file start to actual second boundary
+    # This is the coarse_sync offset - critical for correcting system clock error
+    coarse_sync_offset_samples: int = 0
+    
     # Per-second pulse widths (for debugging)
     pulse_widths_ms: List[float] = field(default_factory=list)
     
@@ -115,10 +119,15 @@ class WWVBCDResult:
     def __str__(self):
         if not self.detected:
             return "BCD: Not detected"
-        return (f"BCD: Day {self.decoded_day:03d} "
-                f"{self.decoded_hour:02d}:{self.decoded_minute:02d} "
-                f"(year {self.decoded_year:02d}), "
-                f"DUT1={self.dut1_seconds:+.1f}s, "
+        day = self.decoded_day if self.decoded_day is not None else 0
+        hour = self.decoded_hour if self.decoded_hour is not None else 0
+        minute = self.decoded_minute if self.decoded_minute is not None else 0
+        year = self.decoded_year if self.decoded_year is not None else 0
+        dut1 = self.dut1_seconds if self.dut1_seconds is not None else 0.0
+        return (f"BCD: Day {day:03d} "
+                f"{hour:02d}:{minute:02d} "
+                f"(year {year:02d}), "
+                f"DUT1={dut1:+.1f}s, "
                 f"conf={self.decode_confidence:.2f}")
 
 
@@ -139,9 +148,14 @@ class WWVBCDDecoder:
         self.channel_name = channel_name
         self.samples_per_second = sample_rate
         
-        # Design bandpass filter for 100 Hz subcarrier
-        # Narrow bandwidth since it's a pure tone
-        self.subcarrier_filter = self._design_bandpass(SUBCARRIER_FREQ, bandwidth=20)
+        # Design FIR bandpass filter for 100 Hz subcarrier
+        # Use FIR instead of IIR to avoid numerical issues with narrow bandwidth
+        from scipy.signal import firwin
+        nyq = sample_rate / 2
+        low = 80 / nyq
+        high = 120 / nyq
+        num_taps = 501  # Long filter for narrow bandwidth
+        self._subcarrier_fir = firwin(num_taps, [low, high], pass_zero=False)
         
         logger.debug(f"WWV BCD Decoder initialized: {sample_rate} Hz")
     
@@ -160,76 +174,226 @@ class WWVBCDDecoder:
     
     def _extract_subcarrier(self, iq_samples: np.ndarray) -> np.ndarray:
         """
-        Extract 100 Hz subcarrier envelope from IQ samples.
+        Extract 100 Hz subcarrier power using short-time FFT.
         
-        The 100 Hz subcarrier appears as AM sidebands at carrier ± 100 Hz.
-        We AM demodulate first, then extract the 100 Hz component.
+        This is more robust than envelope detection for weak/noisy signals.
+        Returns power values in 20ms windows.
         """
-        # AM demodulate (magnitude of IQ)
-        audio = np.abs(iq_samples)
-        audio = audio - np.mean(audio)  # Remove DC
+        # Use real part of IQ (the 100 Hz subcarrier is in baseband)
+        audio = np.real(iq_samples).astype(np.float64)
         
-        # Bandpass filter around 100 Hz
-        b, a = self.subcarrier_filter
-        try:
-            filtered = filtfilt(b, a, audio)
-        except ValueError:
-            # Signal too short for filter
-            return np.zeros(len(audio))
+        # Compute 100 Hz power in 20ms windows
+        window_samples = int(0.02 * self.sample_rate)  # 20ms
+        powers = []
         
-        # Get envelope of 100 Hz signal
-        analytic = hilbert(filtered)
-        envelope = np.abs(analytic)
+        for i in range(0, len(audio) - window_samples, window_samples):
+            window = audio[i:i + window_samples]
+            fft_data = np.abs(np.fft.fft(window))
+            freqs = np.fft.fftfreq(len(fft_data), 1/self.sample_rate)
+            
+            # Get power at 100 Hz (±10 Hz)
+            mask = (freqs > 90) & (freqs < 110)
+            power = fft_data[mask].max() if mask.any() else 0
+            powers.append(power)
         
-        return envelope
+        # Expand to sample-level resolution for compatibility
+        # Each power value represents 20ms = 480 samples at 24kHz
+        envelope = np.repeat(powers, window_samples)
+        
+        # Pad to original length if needed
+        if len(envelope) < len(audio):
+            envelope = np.concatenate([envelope, np.zeros(len(audio) - len(envelope))])
+        
+        return envelope[:len(audio)]
     
     def _measure_pulse_widths(self, envelope: np.ndarray) -> List[float]:
         """
-        Measure pulse width for each second.
+        Measure pulse width for each second using integration method.
         
         Returns list of 60 pulse widths in milliseconds.
+        
+        WWV BCD pulses: 100 Hz subcarrier is ON for 200/500/800ms at start of second.
+        
+        ROBUSTNESS: Uses total energy integration (not contiguous counting) to
+        survive HF fading (QSB). A 500ms pulse that fades briefly will still
+        measure ~500ms because we count ALL samples above threshold.
+        
+        Note: The 100 Hz subcarrier begins 30ms after the second boundary.
         """
         pulse_widths = []
         
-        # Normalize envelope
-        if envelope.max() > 0:
-            envelope = envelope / envelope.max()
-        
-        # Threshold for pulse detection (adaptive)
-        threshold = 0.3
+        # Adaptive threshold: Use 40% of the 95th percentile
+        # This ignores static crashes (spikes) while being robust to QSB
+        global_max = np.percentile(envelope, 95)
+        threshold = global_max * 0.4
         
         for second in range(60):
             start_idx = second * self.samples_per_second
-            end_idx = (second + 1) * self.samples_per_second
+            # Window: WWV pulses are max 800ms. Look at first 900ms.
+            # Account for 30ms offset: subcarrier starts at 30ms, ends by 830ms
+            window_samples = int(0.9 * self.samples_per_second)
+            end_idx = min(start_idx + window_samples, len(envelope))
             
-            if end_idx > len(envelope):
+            if start_idx >= len(envelope):
                 pulse_widths.append(0)
                 continue
             
             second_data = envelope[start_idx:end_idx]
             
-            # Find pulse width by counting samples above threshold
-            above_threshold = second_data > threshold
+            # ROBUSTNESS: Count TOTAL samples above threshold, not contiguous
+            # This survives signal dropouts (fading)
+            samples_above = np.sum(second_data > threshold)
             
-            # Find first and last sample above threshold
-            indices = np.where(above_threshold)[0]
-            if len(indices) > 0:
-                # Use the contiguous region from the start
-                # (pulse should start at beginning of second)
-                pulse_samples = 0
-                for i, idx in enumerate(indices):
-                    if i == 0 or indices[i] == indices[i-1] + 1:
-                        pulse_samples = idx + 1
-                    else:
-                        break
-                
-                pulse_ms = pulse_samples * 1000 / self.sample_rate
-            else:
-                pulse_ms = 0
-            
+            # Convert to milliseconds
+            pulse_ms = samples_above * 1000 / self.sample_rate
             pulse_widths.append(pulse_ms)
         
         return pulse_widths
+    
+    def coarse_sync(self, envelope: np.ndarray) -> int:
+        """
+        Find the sample index where second boundaries most likely align.
+        
+        Uses "folded epoch" averaging: fold the minute into a 1-second profile
+        by superposing all 60 seconds. This averages out noise and reveals
+        the persistent pulse structure.
+        
+        The 100 Hz subcarrier rises ~30ms after the second boundary.
+        
+        Returns: offset in samples to align to second boundaries
+        """
+        samples_per_sec = self.sample_rate
+        num_seconds = len(envelope) // samples_per_sec
+        
+        if num_seconds < 10:
+            return 0
+        
+        # Fold the minute into a 1-second average profile (Superposed Epoch)
+        # This averages out noise and reveals the persistent pulse structure
+        folded = np.zeros(samples_per_sec)
+        count = 0
+        
+        for i in range(num_seconds):
+            chunk = envelope[i * samples_per_sec : (i + 1) * samples_per_sec]
+            if len(chunk) == samples_per_sec:
+                folded += chunk
+                count += 1
+        
+        if count > 0:
+            folded /= count
+        
+        # The 100 Hz tone rises ~30ms after the second start.
+        # Find the point where energy rises above 50% of the average peak
+        threshold = np.max(folded) * 0.5
+        
+        # Find rising edges
+        above_threshold = (folded > threshold).astype(int)
+        rising_edges = np.where(np.diff(above_threshold) == 1)[0]
+        
+        if len(rising_edges) > 0:
+            # We found the pulse start within a second. The second boundary is 30ms BEFORE this.
+            pulse_start = rising_edges[0]
+            sub_second_offset = pulse_start - int(0.030 * self.sample_rate)
+            
+            # Handle wrap-around if the pulse is right at the start
+            if sub_second_offset < 0:
+                sub_second_offset += samples_per_sec
+            
+            logger.debug(f"BCD coarse sync: sub-second offset={sub_second_offset} samples "
+                        f"({sub_second_offset/self.sample_rate*1000:.0f}ms)")
+            
+            # Now find the multi-second offset to align markers to expected positions
+            # Markers should be at seconds 0, 9, 19, 29, 39, 49, 59 (mod 10 = 0 or 9)
+            # Search 0-9 second offsets to find best marker alignment
+            best_multi_sec_offset = 0
+            best_marker_score = 0
+            
+            for sec_offset in range(10):
+                total_offset = sub_second_offset + sec_offset * samples_per_sec
+                if total_offset >= len(envelope):
+                    continue
+                
+                # Count markers at expected positions with this offset
+                marker_score = 0
+                for marker_sec in [0, 9, 19, 29, 39, 49]:
+                    sec_start = total_offset + marker_sec * samples_per_sec
+                    sec_end = sec_start + samples_per_sec
+                    
+                    if sec_end > len(envelope):
+                        continue
+                    
+                    sec_env = envelope[sec_start:sec_end]
+                    
+                    # Check if this looks like a marker (high energy in first 800ms)
+                    first_800ms = np.mean(sec_env[:int(0.8 * samples_per_sec)])
+                    last_200ms = np.mean(sec_env[int(0.8 * samples_per_sec):])
+                    
+                    if first_800ms > last_200ms * 1.3:
+                        marker_score += 1
+                
+                if marker_score > best_marker_score:
+                    best_marker_score = marker_score
+                    best_multi_sec_offset = sec_offset
+            
+            final_offset = sub_second_offset + best_multi_sec_offset * samples_per_sec
+            
+            logger.debug(f"BCD coarse sync: multi-second offset={best_multi_sec_offset}s, "
+                        f"markers={best_marker_score}/6, final={final_offset} samples "
+                        f"({final_offset/self.sample_rate*1000:.0f}ms)")
+            
+            return final_offset
+        
+        # Fallback: search for best marker alignment
+        logger.debug("BCD coarse sync: folded epoch failed, using marker search")
+        return self._coarse_sync_marker_search(envelope)
+    
+    def _coarse_sync_marker_search(self, envelope: np.ndarray) -> int:
+        """
+        Fallback coarse sync using marker position search.
+        
+        Searches for the offset that maximizes marker detection (800ms pulses
+        at positions 0, 9, 19, 29, 39, 49).
+        """
+        samples_per_sec = self.sample_rate
+        num_seconds = len(envelope) // samples_per_sec
+        
+        if num_seconds < 10:
+            return 0
+        
+        best_markers = 0
+        best_offset = 0
+        
+        # Search across 10 seconds with 100ms resolution
+        search_range_sec = min(10, num_seconds - 50)  # Need 50 seconds for markers
+        step_samples = int(0.1 * self.sample_rate)  # 100ms steps
+        
+        for offset_samples in range(0, search_range_sec * samples_per_sec, step_samples):
+            markers_found = 0
+            for marker_sec in [0, 9, 19, 29, 39, 49]:
+                sec_start = offset_samples + marker_sec * samples_per_sec
+                sec_end = sec_start + samples_per_sec
+                
+                if sec_end > len(envelope):
+                    continue
+                
+                sec_env = envelope[sec_start:sec_end]
+                
+                # For marker (800ms), first 80% should have higher power than last 20%
+                first_800ms = np.mean(sec_env[:int(0.8 * samples_per_sec)])
+                last_200ms = np.mean(sec_env[int(0.8 * samples_per_sec):])
+                
+                if first_800ms > last_200ms * 1.5:
+                    markers_found += 1
+            
+            if markers_found > best_markers:
+                best_markers = markers_found
+                best_offset = offset_samples
+        
+        if best_markers >= 3:
+            logger.debug(f"BCD coarse sync (marker search): offset={best_offset} samples "
+                        f"({best_offset/self.sample_rate*1000:.0f}ms), markers={best_markers}/6")
+        
+        return best_offset
     
     def _classify_pulse(self, width_ms: float) -> str:
         """Classify pulse as '0', '1', 'P' (marker), or '?' (unknown)"""
@@ -239,7 +403,7 @@ class WWVBCDDecoder:
             return '0'
         elif width_ms < THRESHOLD_ONE_MARKER:
             return '1'
-        elif width_ms < 900:
+        elif width_ms <= 900:
             return 'P'
         else:
             return '?'  # Too long
@@ -266,12 +430,20 @@ class WWVBCDDecoder:
         
         return value
     
-    def decode_minute(self, iq_samples: np.ndarray) -> WWVBCDResult:
+    def decode_minute(
+        self, 
+        iq_samples: np.ndarray,
+        second_offset_samples: Optional[int] = None
+    ) -> WWVBCDResult:
         """
         Decode BCD time code from one minute of IQ samples.
         
         Args:
             iq_samples: Complex IQ samples for one minute (60 seconds)
+            second_offset_samples: Optional offset to second boundary (from bootstrap).
+                If provided, skips coarse_sync and uses this offset directly.
+                This should be the number of samples from file start to the first
+                complete second boundary.
             
         Returns:
             WWVBCDResult with decoded time and quality metrics
@@ -287,7 +459,21 @@ class WWVBCDDecoder:
         # Extract 100 Hz subcarrier envelope
         envelope = self._extract_subcarrier(iq_samples)
         
-        # Measure pulse widths
+        # Align to second boundaries
+        if second_offset_samples is not None:
+            # Use bootstrap-provided offset (more reliable than per-file coarse_sync)
+            offset = second_offset_samples
+            logger.debug(f"BCD using bootstrap offset: {offset} samples ({offset/self.sample_rate*1000:.1f}ms)")
+        else:
+            # Fall back to coarse_sync (less reliable due to ~30ms variation)
+            offset = self.coarse_sync(envelope)
+            logger.debug(f"BCD coarse sync: offset={offset} samples ({offset/self.sample_rate*1000:.1f}ms)")
+        
+        result.coarse_sync_offset_samples = offset
+        if offset > 0 and offset < len(envelope):
+            envelope = envelope[offset:]
+        
+        # Measure pulse widths (using integration method for HF robustness)
         pulse_widths = self._measure_pulse_widths(envelope)
         result.pulse_widths_ms = pulse_widths
         

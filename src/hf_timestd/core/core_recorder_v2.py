@@ -584,7 +584,7 @@ class CoreRecorderV2:
         logger.info("[BOOTSTRAP] Archiving enabled - fusion service will handle Chrony feed")
         
         # Write bootstrap state file for fusion service (inotify-based coordination)
-        self._write_bootstrap_state('PROVISIONAL', d_clock_ms, uncertainty_ms=5.0)
+        self._write_bootstrap_timing_reference('PROVISIONAL', uncertainty_ms=5.0)
     
     def _on_bootstrap_full_lock(self, d_clock_ms: float, uncertainty_ms: float):
         """Handle bootstrap full lock event.
@@ -680,16 +680,18 @@ class CoreRecorderV2:
             #   reference_utc = decoded_hour * 3600 + decoded_minute * 60
             #   (in Unix time, we add the date from system clock)
             
+            # Compute reference_utc ONLY from BCD/FSK decode - NO NTP
             reference_utc = None
             if time_confirmed and decoded_hour is not None and decoded_minute is not None:
                 import time
                 now = time.time()
-                # Get today's midnight in Unix time
+                # Get today's midnight in Unix time (only for date, not time)
                 midnight_today = (int(now) // 86400) * 86400
                 reference_utc = float(midnight_today + decoded_hour * 3600 + decoded_minute * 60)
                 
                 logger.info(f"[BOOTSTRAP_REF] BCD/FSK confirmed: {decoded_hour:02d}:{decoded_minute:02d} UTC, "
                            f"reference_utc={reference_utc:.0f}")
+            # NO NTP FALLBACK - time_confirmed stays False until BCD/FSK succeeds
             
             # Log D_clock for diagnostics
             d_clock_ms = self.bootstrap_service._calculate_d_clock()

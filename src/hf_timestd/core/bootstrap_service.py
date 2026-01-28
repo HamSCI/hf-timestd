@@ -77,7 +77,7 @@ import time
 import threading
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Any, Dict, List, Optional, Tuple, Callable
 from enum import Enum
 from pathlib import Path
 
@@ -255,7 +255,8 @@ class BootstrapService:
         self,
         channel_name: str,
         samples: np.ndarray,
-        rtp_timestamp: int
+        rtp_timestamp: int,
+        channel_info: Optional[Any] = None
     ) -> bool:
         """
         Add samples from a channel recorder.
@@ -268,6 +269,8 @@ class BootstrapService:
             channel_name: Channel identifier (e.g., "CHU_3330")
             samples: IQ samples (complex64)
             rtp_timestamp: RTP timestamp of first sample
+            channel_info: Optional ChannelInfo with gps_time/rtp_timesnap for
+                         GPS-aligned wallclock conversion (per-SSRC RTP alignment)
             
         Returns:
             True if locked (caller should archive), False if still bootstrapping
@@ -278,8 +281,8 @@ class BootstrapService:
             
             self.stats['samples_received'] += len(samples)
         
-        # Add to rolling buffer
-        self.buffer_manager.add_samples(channel_name, samples, rtp_timestamp)
+        # Add to rolling buffer (with channel_info for wallclock alignment)
+        self.buffer_manager.add_samples(channel_name, samples, rtp_timestamp, channel_info)
         
         # Update phase if we have enough data
         if self.phase == BootstrapPhase.INITIALIZING:
@@ -330,7 +333,11 @@ class BootstrapService:
         # Search each channel with its own tone detector
         status = None
         
-        for channel_name in list(self.buffer_manager.buffers.keys()):
+        buffer_keys = list(self.buffer_manager.buffers.keys())
+        if len(buffer_keys) > 2 and self.stats['searches_performed'] % 10 == 1:
+            logger.info(f"[BOOTSTRAP_SERVICE] Searching {len(buffer_keys)} channels: {buffer_keys}")
+        
+        for channel_name in buffer_keys:
             # Get channel-specific tone detector (CHU channels get CHU templates, etc.)
             tone_detector = self._get_tone_detector(channel_name)
             result = self.buffer_manager.search_and_process(
@@ -453,9 +460,26 @@ class BootstrapService:
             return None
         
         d_clocks = []
+        wwv_rtp_by_minute = {}  # Track WWV arrivals to detect BPM false positives
+        
+        # First pass: collect WWV arrivals
+        for tone in tb.validated_tones[-10:]:
+            if tone.candidate.station == 'WWV':
+                wwv_rtp_by_minute[tone.minute_index] = tone.candidate.rtp_timestamp
+        
         for tone in tb.validated_tones[-5:]:  # Only use last 5 tones for logging
             candidate = tone.candidate
             station = candidate.station
+            
+            # Skip BPM if it's likely a false positive (arrives <25ms after WWV)
+            # The 300ms BPM template can match WWV's 800ms tone, causing false detections
+            if station == 'BPM' and tone.minute_index in wwv_rtp_by_minute:
+                wwv_rtp = wwv_rtp_by_minute[tone.minute_index]
+                bpm_wwv_diff_ms = (candidate.rtp_timestamp - wwv_rtp) * 1000 / self.config.sample_rate
+                if bpm_wwv_diff_ms < 25:
+                    logger.debug(f"[D_CLOCK] Skipping BPM: arrives {bpm_wwv_diff_ms:.1f}ms after WWV "
+                                f"(expected >30ms) - likely false positive")
+                    continue
             
             # Expected RTP for this minute
             expected_rtp = tb.rtp_to_utc_offset_samples + (tone.minute_index * SAMPLES_PER_MINUTE)
