@@ -217,41 +217,60 @@ class BootstrapTimingReferenceWriter:
     def write(
         self,
         reference_rtp: int,
-        reference_utc: float,
         lock_tier: str = 'PROVISIONAL',
         uncertainty_ms: float = 5.0,
-        sample_rate: int = 24000
+        sample_rate: int = 24000,
+        minute_offset: int = 0,
+        decoded_hour: Optional[int] = None,
+        decoded_minute: Optional[int] = None,
+        reference_utc: Optional[float] = None
     ) -> bool:
         """
         Write a timing reference.
         
         Args:
-            reference_rtp: RTP timestamp at a known minute boundary
-            reference_utc: UTC(NIST) timestamp of that minute boundary
+            reference_rtp: RTP timestamp at a minute boundary (from tone detection)
             lock_tier: Lock quality (PROVISIONAL or REFINED)
             uncertainty_ms: Estimated uncertainty
             sample_rate: Sample rate in Hz
+            minute_offset: Which minute relative to bootstrap start
+            decoded_hour: Hour from BCD/FSK decode (None if not confirmed)
+            decoded_minute: Minute from BCD/FSK decode (None if not confirmed)
+            reference_utc: Estimated UTC (None until BCD/FSK confirms)
             
         Returns:
             True if write succeeded
         """
+        time_confirmed = decoded_hour is not None and decoded_minute is not None
+        
         ref = BootstrapTimingReference(
             locked=True,
             lock_tier=lock_tier,
             reference_rtp=reference_rtp,
-            reference_utc=reference_utc,
             sample_rate=sample_rate,
+            minute_offset=minute_offset,
+            decoded_hour=decoded_hour,
+            decoded_minute=decoded_minute,
+            time_confirmed=time_confirmed,
+            reference_utc=reference_utc,
             uncertainty_ms=uncertainty_ms,
             lock_time=datetime.now(timezone.utc).isoformat()
         )
         
         success = ref.to_file(self.state_file)
         if success:
-            logger.info(
-                f"[BOOTSTRAP_REF] Wrote timing reference: "
-                f"RTP={reference_rtp} @ UTC={reference_utc:.3f} "
-                f"(tier={lock_tier}, ±{uncertainty_ms:.1f}ms)"
-            )
+            if time_confirmed:
+                logger.info(
+                    f"[BOOTSTRAP_REF] Wrote timing reference: "
+                    f"RTP={reference_rtp} @ UTC={reference_utc:.3f} "
+                    f"(tier={lock_tier}, time_confirmed, ±{uncertainty_ms:.1f}ms)"
+                )
+            else:
+                logger.info(
+                    f"[BOOTSTRAP_REF] Wrote timing reference: "
+                    f"RTP={reference_rtp}, minute_offset={minute_offset} "
+                    f"(tier={lock_tier}, awaiting BCD/FSK, ±{uncertainty_ms:.1f}ms)"
+                )
         return success
     
     def clear(self) -> bool:

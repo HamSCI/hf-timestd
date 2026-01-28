@@ -652,57 +652,51 @@ class CoreRecorderV2:
             
             offset_samples = tb.rtp_to_utc_offset_samples
             
-            # The bootstrap's offset is the RTP at "minute 0" of its reference frame.
-            # But we need to know what Unix time that corresponds to.
+            # The bootstrap's offset is the RTP at a minute boundary, derived purely
+            # from tone arrivals. We don't know which absolute minute yet - that
+            # requires BCD/FSK decoding.
             #
-            # The bootstrap's minute_index is relative to the first detected tone.
-            # We need to use NTP as a hint to figure out which absolute minute
-            # the bootstrap's minute 0 corresponds to.
-            #
-            # Strategy: Use the recorder's RTP-to-Unix offset to convert the
-            # bootstrap's offset to a Unix timestamp.
+            # For now, write the reference with just the RTP offset.
+            # The metrology service can use this for relative timing.
+            # Absolute time will be added when BCD/FSK confirms.
             
-            # Get RTP-to-Unix offset from a recorder's archive writer
-            rtp_to_unix_offset = None
-            for recorder in self.recorders.values():
-                if hasattr(recorder, 'archive_writer') and recorder.archive_writer:
-                    if recorder.archive_writer.rtp_to_unix_offset is not None:
-                        rtp_to_unix_offset = recorder.archive_writer.rtp_to_unix_offset
-                        break
-            
-            if rtp_to_unix_offset is None:
-                logger.debug("[BOOTSTRAP_REF] No RTP-to-Unix offset available yet")
-                return
-            
-            # Convert bootstrap's offset (RTP at minute boundary) to Unix time
-            # unix_time = rtp / sample_rate + rtp_to_unix_offset
-            # This gives us the NTP-derived time of the bootstrap's minute 0
-            bootstrap_minute_0_unix = offset_samples / sample_rate + rtp_to_unix_offset
-            
-            # Round to nearest minute boundary (the bootstrap's offset should be at a minute)
-            bootstrap_minute_0_unix = round(bootstrap_minute_0_unix / 60) * 60
-            
-            # Now we have a consistent (RTP, UTC) pair:
-            # reference_rtp = offset_samples (RTP at minute boundary)
-            # reference_utc = bootstrap_minute_0_unix (Unix time of that boundary)
             reference_rtp = offset_samples
-            reference_utc = float(bootstrap_minute_0_unix)
+            
+            # Check if bootstrap has confirmed time via BCD/FSK
+            decoded_hour = getattr(tb, '_confirmed_hour', None)
+            decoded_minute = getattr(tb, '_confirmed_minute', None)
+            time_confirmed = tb._time_confirmed if hasattr(tb, '_time_confirmed') else False
+            
+            # If time is confirmed, compute reference_utc
+            reference_utc = None
+            if time_confirmed and decoded_hour is not None and decoded_minute is not None:
+                # BCD/FSK has confirmed the absolute time
+                # reference_utc = hour * 3600 + minute * 60 (seconds since midnight)
+                # But we need Unix timestamp, so we need to know the date
+                # For now, use today's date from system clock (this is the one NTP dependency)
+                import time
+                now = time.time()
+                midnight_today = (int(now) // 86400) * 86400
+                reference_utc = float(midnight_today + decoded_hour * 3600 + decoded_minute * 60)
             
             # Log D_clock for diagnostics
             d_clock_ms = self.bootstrap_service._calculate_d_clock()
             if d_clock_ms is None:
                 d_clock_ms = 0.0
             
-            logger.info(f"[BOOTSTRAP_REF] Using bootstrap offset: "
-                       f"ref_rtp={reference_rtp}, ref_utc={reference_utc:.0f}, D_clock={d_clock_ms:+.1f}ms")
+            logger.info(f"[BOOTSTRAP_REF] Bootstrap offset: ref_rtp={reference_rtp}, "
+                       f"time_confirmed={time_confirmed}, D_clock={d_clock_ms:+.1f}ms")
             
             writer = BootstrapTimingReferenceWriter()
             writer.write(
                 reference_rtp=reference_rtp,
-                reference_utc=reference_utc,
                 lock_tier=lock_tier,
                 uncertainty_ms=uncertainty_ms,
-                sample_rate=sample_rate
+                sample_rate=sample_rate,
+                minute_offset=tb.minutes_observed,
+                decoded_hour=decoded_hour,
+                decoded_minute=decoded_minute,
+                reference_utc=reference_utc
             )
             
         except Exception as e:
