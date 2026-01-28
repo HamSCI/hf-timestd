@@ -10,6 +10,226 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
+## 🔧 ACTIVE SESSION: BCD/FSK DECODER DIAGNOSIS
+
+**Status:** 🔧 **IN PROGRESS** - 2026-01-28  
+**Objective:** Diagnose and fix why BCD (WWV/WWVH) and FSK (CHU) decoders fail to decode time codes during bootstrap time confirmation.
+
+---
+
+### Problem Statement
+
+The bootstrap successfully:
+1. ✅ Detects multi-station tone clusters (WWV + CHU + BPM, conf=1.00)
+2. ✅ Finds recurring clusters at 60-second intervals (2.9ms error)
+3. ✅ Reaches TRACKING → PROVISIONAL state
+4. ✅ Retrieves correct sample counts (1,440,000 = 60 seconds)
+5. ❌ **BCD/FSK decoders fail to decode time codes**
+
+**Current Log Evidence:**
+```
+[CONFIRM] Attempting CHU FSK decode on 1440000 samples
+[CONFIRM] CHU FSK result: detected=False, frames=0/9, conf=0.00
+
+[CONFIRM] Attempting WWV BCD decode on 1440000 samples
+[CONFIRM] WWV BCD result: detected=False, markers=0/7, conf=0.00
+```
+
+**Note:** Recent logs show WWV BCD finding 1/7 markers, suggesting partial detection but not enough for decode.
+
+---
+
+### Architecture Overview
+
+```
+Bootstrap TRACKING state
+    ↓
+_attempt_time_confirmation() [bootstrap_rolling_buffer.py:667]
+    ↓
+Retrieves 60s samples from each channel using wallclock-aligned RTP
+    ↓
+bootstrap.attempt_time_confirmation() [timing_bootstrap.py:875]
+    ↓
+BootstrapTimeConfirmer.confirm_time() [bootstrap_time_confirmation.py:129]
+    ↓
+├── CHUFSKDecoder.decode_minute() [chu_fsk_decoder.py]
+│   └── Expects: FSK frames at seconds 31-39, 2225/2025 Hz tones
+│
+└── WWVBCDDecoder.decode_minute() [wwv_bcd_decoder.py]
+    └── Expects: 100 Hz subcarrier, pulse widths 200/500/800ms
+```
+
+---
+
+### Key Files to Review
+
+| File | Purpose | Priority |
+|------|---------|----------|
+| `src/hf_timestd/core/wwv_bcd_decoder.py` | WWV/WWVH BCD time code decoder | **CRITICAL** |
+| `src/hf_timestd/core/chu_fsk_decoder.py` | CHU FSK time code decoder | **CRITICAL** |
+| `src/hf_timestd/core/bootstrap_time_confirmation.py` | Orchestrates decode attempts | HIGH |
+| `src/hf_timestd/core/bootstrap_rolling_buffer.py` | Sample retrieval for confirmation | HIGH |
+
+---
+
+### Diagnostic Questions
+
+#### 1. Sample Alignment
+- **Q:** Are the samples correctly aligned to the minute boundary?
+- **Context:** The samples are retrieved using `wallclock_to_rtp()` conversion from the reference minute boundary. If the minute boundary estimate is off by several seconds, the decoders won't find the expected patterns.
+- **Check:** The BCD decoder expects position markers at seconds 0, 9, 19, 29, 39, 49, 59. If samples start mid-minute, markers won't be at expected positions.
+
+#### 2. Sample Rate Mismatch
+- **Q:** Are decoders initialized with correct sample rate?
+- **Context:** CHU channels may have different sample rates than WWV channels.
+- **Check:** `BootstrapTimeConfirmer` uses `self.sample_rate` (24000) for both decoders. Verify channel sample rates match.
+
+#### 3. IQ vs Audio Format
+- **Q:** Are decoders receiving IQ samples or audio?
+- **Context:** 
+  - `WWVBCDDecoder._extract_subcarrier()` uses `np.real(iq_samples)` - expects IQ with 100 Hz subcarrier at baseband
+  - `CHUFSKDecoder._fsk_demodulate_iq()` expects IQ with FSK tones at +2025/+2225 Hz
+- **Check:** Verify the samples passed are complex IQ, not real audio.
+
+#### 4. Signal Presence
+- **Q:** Is there actually signal in the samples?
+- **Check:** Add diagnostic logging to show signal power/SNR before decode attempt.
+
+#### 5. Minute Boundary Offset
+- **Q:** How accurate is the minute boundary estimate from clustering?
+- **Context:** The bootstrap finds tone clusters but the exact minute boundary may be offset by the propagation delay or detection latency.
+- **Check:** The `reference_rtp` should point to the start of the minute (second 0), not the tone detection time.
+
+---
+
+### WWV BCD Decoder Analysis
+
+**Expected Signal:**
+- 100 Hz subcarrier (double-sideband AM on carrier)
+- Pulse widths: 200ms (0), 500ms (1), 800ms (marker)
+- Position markers at seconds 0, 9, 19, 29, 39, 49, 59
+
+**Current Implementation:**
+```python
+# wwv_bcd_decoder.py:175-207
+def _extract_subcarrier(self, iq_samples):
+    audio = np.real(iq_samples).astype(np.float64)
+    # Computes 100 Hz power in 20ms windows via FFT
+```
+
+**Potential Issues:**
+1. **Baseband assumption:** Code assumes 100 Hz subcarrier is at baseband. If the channel is tuned differently, subcarrier may be at different frequency.
+2. **Threshold sensitivity:** Uses 40% of 95th percentile as threshold - may be too high/low for weak signals.
+3. **No SNR check:** Decoder doesn't verify signal is present before attempting decode.
+
+---
+
+### CHU FSK Decoder Analysis
+
+**Expected Signal:**
+- FSK at 2225 Hz (mark) / 2025 Hz (space)
+- 300 baud, 11 bits per byte
+- Data at seconds 31-39 of each minute
+- 1000 Hz tick at start of each second
+
+**Current Implementation:**
+```python
+# chu_fsk_decoder.py:161-206
+def _fsk_demodulate_iq(self, iq_samples):
+    # Frequency translate by -2125 Hz to center FSK at DC
+    # LPF at 300 Hz
+    # Quadrature demod
+```
+
+**Potential Issues:**
+1. **Carrier frequency assumption:** Code assumes FSK tones are at +2025/+2225 Hz from carrier. If channel tuning is different, demodulation will fail.
+2. **No frame sync:** If minute boundary is wrong, decoder looks for FSK at wrong seconds.
+3. **Weak signal handling:** No SNR threshold before attempting decode.
+
+---
+
+### Recommended Investigation Approach
+
+#### Step 1: Add Diagnostic Logging
+Add signal power/SNR logging before decode attempts:
+```python
+# In bootstrap_time_confirmation.py, before decode:
+if chu_samples is not None:
+    power_db = 10 * np.log10(np.mean(np.abs(chu_samples)**2) + 1e-10)
+    logger.info(f"[CONFIRM] CHU samples power: {power_db:.1f} dB")
+```
+
+#### Step 2: Verify Sample Alignment
+Log the expected vs actual minute boundary:
+```python
+# In _attempt_time_confirmation:
+logger.info(f"[CONFIRM] Reference RTP: {reference_rtp}, "
+           f"Minute boundary wallclock: {minute_boundary_wallclock}, "
+           f"Expected UTC minute: {datetime.fromtimestamp(minute_boundary_wallclock, tz=timezone.utc)}")
+```
+
+#### Step 3: Test Decoders Independently
+Create a test script that:
+1. Loads a known-good minute of archived IQ data
+2. Runs the decoder
+3. Verifies expected output
+
+#### Step 4: Check Channel Tuning
+Verify that:
+- WWV channels have 100 Hz subcarrier at baseband
+- CHU channels have FSK tones at +2025/+2225 Hz
+
+---
+
+### Current Bootstrap State (2026-01-28)
+
+```json
+{
+  "locked": true,
+  "lock_tier": "PROVISIONAL",
+  "reference_rtp": 3783278236,
+  "sample_rate": 24000,
+  "minute_offset": 2,
+  "time_confirmed": false,
+  "D_clock": "+29.2ms"
+}
+```
+
+The system is operational (writing archives, calculating D_clock) but `time_confirmed: false` because BCD/FSK decode hasn't succeeded.
+
+---
+
+### Success Criteria
+
+After this session, we should have:
+- ⬚ Identified root cause of BCD decoder failure (0/7 markers → 7/7)
+- ⬚ Identified root cause of FSK decoder failure (0/9 frames → 9/9)
+- ⬚ Fixed decoders to successfully decode time codes
+- ⬚ Bootstrap achieves `time_confirmed: true`
+- ⬚ Bootstrap transitions to LOCKED state with decoded time confirmation
+
+---
+
+## ✅ COMPLETED SESSION: RTP WALLCLOCK ALIGNMENT (v5.3.11)
+
+**Status:** ✅ **COMPLETE** - 2026-01-28  
+**Objective:** Fix multi-SSRC bootstrap clustering using GPS-aligned wallclock timestamps.
+
+### Problem Solved
+Different radio channels have independent RTP clock spaces with different epochs (~1.2B samples / ~14 hours offset). The bootstrap was comparing raw RTP timestamps across SSRCs, preventing multi-station cluster formation.
+
+### Solution
+- Added `rtp_to_wallclock()` / `wallclock_to_rtp()` helpers
+- Added `wallclock_time` field to `AcquisitionCandidate`
+- Updated clustering and recurring cluster detection to use wallclock for cross-SSRC comparison
+
+### Results
+- Multi-station clusters form correctly (WWV + CHU + BPM, conf=1.00)
+- Recurring clusters found with 2.9ms error
+- Bootstrap reaches TRACKING → PROVISIONAL state
+
+---
+
 ## ✅ COMPLETED SESSION: TIMING ACCURACY ASSESSMENT — BOOTSTRAP TO CHRONY FEED
 
 **Status:** ✅ **COMPLETE** - 2026-01-27  
