@@ -3,11 +3,22 @@
 ## Living Documentation with Evidence
 
 This document describes the bootstrap process that establishes RTP-to-UTC time alignment
-without relying on NTP or any external time reference. The system uses only the physics
-of radio propagation and the known timing of time standard broadcasts.
+**without relying on NTP or any external time reference**. The system discovers the time basis
+purely from the physics of radio propagation and the known timing of time standard broadcasts.
 
 > **Note**: Evidence sections below are populated dynamically from this installation's logs.
 > View this document at `/docs.html?doc=BOOTSTRAP_METHODOLOGY` to see live evidence widgets.
+
+### Key Principle: NTP-Free Timing
+
+The bootstrap operates on a fundamental principle: **the time basis is unknown at startup
+and must be discovered from tone signals only**. The system clock (NTP) is used only as an
+optimization hint to start the buffer near a minute boundary—it is never used as ground truth
+for timing.
+
+This means the system could operate with the system clock completely inaccessible. The only
+difference would be that buffer start would be at a random point rather than near a minute
+boundary, making bootstrap slightly slower.
 
 ---
 
@@ -16,21 +27,27 @@ of radio propagation and the known timing of time standard broadcasts.
 ### Challenge
 
 When the system starts, we have:
-- **RTP timestamps**: Monotonic sample counters from the SDR (24,000 samples/second)
-- **No trusted time reference**: NTP may be wrong, GPS may be unavailable
+- **RTP timestamps**: Monotonic sample counters from the GPSDO-disciplined SDR (24,000 samples/second)
+- **No time basis**: RTP counts samples but has no connection to UTC
 - **Multiple radio channels**: WWV (6 frequencies), WWVH (4 frequencies), CHU (3 frequencies)
 
 We need to determine the **RTP-to-UTC offset** - the mapping between RTP sample numbers
-and absolute UTC time - with sub-millisecond precision.
+and absolute UTC time - with sub-millisecond precision. **NTP is not trusted** because it
+may be wrong, unavailable, or insufficiently accurate for our needs.
 
-### Solution: Multi-Station Tone Detection with Geographic Validation
+### Solution: Tone-Derived Time Discovery
 
-The bootstrap uses a **physics-based approach**:
+The bootstrap discovers the time basis **purely from tone arrivals**:
 
-1. **Detect minute marker tones** on all channels
-2. **Cluster detections** from multiple stations that arrive within expected propagation windows
-3. **Validate recurrence** at 60-second intervals (distinguishes minute markers from per-second ticks)
-4. **Confirm with BCD/FSK decoding** to extract actual UTC time
+1. **GPSDO provides RTP counts** — a "steel ruler" with no time basis, just sample counts
+2. **Detect tone clusters** — find groups of tones from multiple stations
+3. **Validate 1,440,000 sample recurrence** — confirms these are minute markers (not per-second ticks)
+4. **Compute offset = earliest_tone_rtp - geometric_delay** — RTP at minute boundary
+5. **BCD/FSK decoding** — gives initial estimate of which absolute minute
+6. **Ongoing refinement** — continuously improve the offset estimate
+
+The key insight: we don't need to know what time it is to find minute boundaries. We just
+need to find recurring patterns at exactly 60-second (1,440,000 sample) intervals.
 
 ---
 
@@ -219,63 +236,94 @@ The offset should be stable to within ±2 ms across multiple channels.
 
 ## 8. Two-Tier Bootstrap Lock (v5.3.10)
 
-### The Ionospheric Problem
+### The Core Problem: Discovering Time Without Knowing Time
 
-The initial bootstrap achieves minute alignment quickly (~90 seconds), but the RTP-to-UTC
-offset computed at that moment captures **instantaneous ionospheric conditions**. The
-ionosphere introduces variable propagation delays that change over minutes to hours:
+The bootstrap must solve a chicken-and-egg problem:
+- We need to know the RTP-to-UTC offset to compute timing errors
+- We need timing errors to refine the offset
 
-- **Traveling Ionospheric Disturbances (TIDs)**: 10-30 minute period oscillations
-- **Diurnal variations**: Sunrise/sunset transitions cause rapid changes
-- **Solar activity**: Flares and CMEs cause sudden ionospheric disturbances
+The solution is a **two-tier approach** that separates pattern discovery from offset refinement:
 
-If we lock the offset immediately, we capture a **snapshot** that may be biased by
-current ionospheric state. This bias becomes a systematic error in all subsequent
-timing measurements.
+### Tier 1: Pattern Discovery (PROVISIONAL Lock)
 
-### Solution: Two-Tier Lock
+**Purpose**: Find and validate minute marker clusters without knowing the offset.
 
-The bootstrap now uses a **two-tier approach**:
+During Tier 1:
+- **NO offset correction** — we don't know the offset yet!
+- **Just validate cluster recurrence** at 1,440,000 sample intervals
+- **Confirm pattern stability** over multiple minutes
 
-| Tier | Name | Purpose | Duration | Criteria |
-|------|------|---------|----------|----------|
-| **1** | Provisional Lock | Enable archiving with minute alignment | ~2-3 min | 10 validations, 2 minutes observed |
-| **2** | Refined Lock | Stable offset after ionospheric averaging | ~10-15 min | 50 measurements, std < 15ms, 10 min elapsed |
+Once the pattern is confirmed:
+- Compute `minute_boundary_rtp = earliest_tone_rtp - geometric_delay`
+- This gives us the RTP at a minute boundary (we don't know which minute yet)
+- Apply ionospheric correction to estimate UTC emission time
+
+### Tier 2: Absolute Time Confirmation (REFINED Lock)
+
+**Purpose**: Use BCD/FSK to confirm which absolute minute, then engage formal refinement.
+
+During Tier 2:
+- **BCD/FSK decoding** tells us the hour:minute
+- **Initial Unix time is an ESTIMATE** requiring further refinement
+- **Ongoing refinement** compares tone arrivals to improve the offset
+
+| Tier | Name | Purpose | What We Know |
+|------|------|---------|---------------|
+| **1** | Provisional Lock | Pattern discovery | Relative time only (minute N from start) |
+| **2** | Refined Lock | Absolute time | Estimated UTC (refined over time) |
 
 ```
 ACQUIRING → CORRELATING → TRACKING → PROVISIONAL_LOCK → REFINED_LOCK
                               ↓              ↓
-                         (archiving)    (offset refined)
+                         (pattern found)  (BCD/FSK confirms minute)
 ```
 
-### Tier 1: Provisional Lock
+### Why No Offset Correction in Tier 1?
 
-**Purpose**: Get archiving started quickly with approximate timing.
+You can't correct an offset you don't know! During Tier 1, we're still discovering
+the cluster pattern. We have to:
+1. Confirm the cluster pattern is relatively stable
+2. Apply subtraction to count back to the geometric offset
+3. Count back more for the ionospheric offset to estimate emission time (UTC)
+4. Confirm this over a few cycles
+5. Only then engage formal ongoing refinement
 
-When the bootstrap reaches TRACKING state with sufficient validations:
+### Tier 1 Details: Provisional Lock
+
+**Purpose**: Validate pattern, compute initial offset from tone arrivals.
+
+When the bootstrap finds recurring clusters:
 - `lock_tier` transitions to `PROVISIONAL` (value=1)
-- Archiving begins immediately
-- Offset measurements continue to be collected
+- Archiving can begin (we know minute boundaries)
+- **No offset refinement yet** — just pattern validation
+
+The offset is computed purely from tone arrivals:
+```
+minute_boundary_rtp = earliest_tone_rtp - propagation_delay_samples
+```
+
+This is the RTP at a minute boundary. We don't know which minute yet, but we know
+the pattern recurs at exactly 1,440,000 sample intervals.
 
 **Evidence - Provisional Lock:**
 <!-- LOGS: bootstrap | filter: "PROVISIONAL LOCK" -->
 
-The provisional lock enables data capture while the system continues to refine its
-timing estimate.
+### Tier 2 Details: Refined Lock
 
-### Tier 2: Refined Lock
+**Purpose**: Confirm absolute time via BCD/FSK, then refine the offset.
 
-**Purpose**: Compute a stable, ionospherically-averaged offset.
+Once BCD/FSK decoding confirms the hour:minute:
+- We now have an **estimate** of absolute UTC
+- This estimate requires refinement (ionospheric variability)
+- Ongoing tone arrivals are compared to expected arrivals
+- The offset is refined based on these comparisons
 
-During the provisional phase, the system collects offset measurements from each
-validated tone detection. After sufficient time and measurements:
+The initial Unix time estimate is computed as:
+```
+reference_utc = decoded_hour * 3600 + decoded_minute * 60
+```
 
-1. **Duration requirement**: 10 minutes since provisional lock (averages over TID periods)
-2. **Measurement count**: 50+ independent offset measurements
-3. **Stability criterion**: Offset standard deviation < 15 ms
-
-The refined offset uses the **median** of all measurements, providing robustness
-against outliers from multipath or interference.
+This is refined over time as more tone arrivals are processed.
 
 **Evidence - Refined Lock:**
 <!-- LOGS: bootstrap | filter: "TIER 2 REFINED LOCK" -->
