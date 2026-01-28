@@ -471,11 +471,9 @@ class BootstrapService:
             d_clocks.append(error_ms)
             
             # Diagnostic logging
-            logger.debug(f"[D_CLOCK_DIAG] {station} min_idx={tone.minute_index}: "
-                        f"actual_rtp={candidate.rtp_timestamp}, "
-                        f"offset={tb.rtp_to_utc_offset_samples}, "
-                        f"delay={delay_samples} ({delay_samples*1000/self.config.sample_rate:.1f}ms), "
-                        f"expected={expected_rtp}, error={error_ms:+.1f}ms")
+            logger.info(f"[D_CLOCK_DIAG] {station} min_idx={tone.minute_index}: "
+                       f"actual={candidate.rtp_timestamp}, offset={tb.rtp_to_utc_offset_samples}, "
+                       f"delay={delay_samples}, expected={expected_rtp}, error={error_ms:+.1f}ms")
         
         if not d_clocks:
             return None
