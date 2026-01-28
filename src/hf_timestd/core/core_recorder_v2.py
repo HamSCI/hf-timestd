@@ -618,20 +618,22 @@ class CoreRecorderV2:
         """
         Write bootstrap timing reference for metrology service.
         
-        The reference is a consistent (RTP, UTC) pair that incorporates the bootstrap's
-        tone-derived offset refinement.
+        The reference is a consistent (RTP, UTC) pair derived from the bootstrap's
+        tone-based offset.
         
         Strategy:
         ---------
-        1. Get the recorder's NTP-derived RTP-to-Unix offset (baseline)
-        2. Apply the bootstrap's D_clock correction to get tone-aligned UTC
+        The bootstrap's rtp_to_utc_offset_samples IS the RTP at UTC minute 0,
+        derived purely from tone arrivals:
+          minute_boundary_rtp = tone_rtp - propagation_delay
         
-        The bootstrap's D_clock represents how much the NTP-derived time differs from
-        the tone-derived UTC(NIST). By applying this correction, we get a reference
-        that aligns with actual tone arrivals.
+        So we use that directly:
+          reference_rtp = bootstrap.rtp_to_utc_offset_samples (RTP at minute 0)
+          reference_utc = 0.0 (minute 0 in seconds)
         
-        reference_utc = ntp_time - D_clock  (tone-aligned)
-        reference_rtp = computed from ntp_time using recorder's offset
+        Or equivalently, for a specific minute N:
+          reference_rtp = offset + N * 1440000
+          reference_utc = N * 60.0
         """
         try:
             from .bootstrap_timing_reference import BootstrapTimingReferenceWriter
@@ -639,62 +641,37 @@ class CoreRecorderV2:
             if not self.bootstrap_service:
                 return
             
+            tb = self.bootstrap_service.timing_bootstrap
             sample_rate = self.bootstrap_service.config.sample_rate
             
-            # Get RTP-to-Unix offset from a recorder's archive writer
-            rtp_to_unix_offset = None
-            for recorder in self.recorders.values():
-                if hasattr(recorder, 'archive_writer') and recorder.archive_writer:
-                    if recorder.archive_writer.rtp_to_unix_offset is not None:
-                        rtp_to_unix_offset = recorder.archive_writer.rtp_to_unix_offset
-                        break
-            
-            if rtp_to_unix_offset is None:
-                logger.debug("[BOOTSTRAP_REF] No RTP-to-Unix offset available yet")
+            # Get the bootstrap's tone-derived offset
+            # This is the RTP at UTC minute 0
+            if tb.rtp_to_utc_offset_samples is None:
+                logger.debug("[BOOTSTRAP_REF] No bootstrap offset available yet")
                 return
             
-            # Get bootstrap's D_clock (NTP offset from tone-derived UTC)
-            # D_clock = NTP - UTC(NIST), so UTC(NIST) = NTP - D_clock
+            offset_samples = tb.rtp_to_utc_offset_samples
+            
+            # Use current time to pick a reference minute close to now
+            # (This helps avoid very large RTP values in the DTO)
+            import time
+            now = time.time()
+            current_minute = int(now) // 60
+            
+            # The bootstrap offset gives us RTP at minute 0
+            # For minute N: rtp = offset + N * SAMPLES_PER_MINUTE
+            SAMPLES_PER_MINUTE = 24000 * 60  # 1,440,000
+            
+            reference_rtp = offset_samples + (current_minute * SAMPLES_PER_MINUTE)
+            reference_utc = float(current_minute * 60)  # Unix timestamp of minute boundary
+            
+            # Log D_clock for diagnostics
             d_clock_ms = self.bootstrap_service._calculate_d_clock()
             if d_clock_ms is None:
                 d_clock_ms = 0.0
-            d_clock_sec = d_clock_ms / 1000.0
             
-            # Use current time to get a reference point
-            import time
-            now = time.time()
-            
-            # NTP-derived minute boundary
-            ntp_minute = (int(now) // 60) * 60
-            
-            # The key insight: we need a CONSISTENT (RTP, UTC) pair.
-            # 
-            # The recorder's rtp_to_unix_offset maps RTP to NTP time:
-            #   ntp_time = rtp / sample_rate + rtp_to_unix_offset
-            #
-            # To map RTP to UTC(NIST), we apply the D_clock correction:
-            #   utc_nist = ntp_time - D_clock
-            #   utc_nist = rtp / sample_rate + rtp_to_unix_offset - D_clock
-            #   utc_nist = rtp / sample_rate + (rtp_to_unix_offset - D_clock)
-            #
-            # So the "RTP to UTC(NIST) offset" is: rtp_to_unix_offset - D_clock
-            #
-            # For the reference pair:
-            #   reference_utc = ntp_minute (a known UTC point)
-            #   reference_rtp = (reference_utc - (rtp_to_unix_offset - D_clock)) * sample_rate
-            #                 = (reference_utc - rtp_to_unix_offset + D_clock) * sample_rate
-            
-            # Use the NTP minute as reference_utc (this is in UTC(NIST) terms)
-            # The D_clock correction is already baked into the RTP calculation
-            reference_utc = float(ntp_minute)
-            
-            # Compute RTP that corresponds to this UTC(NIST) time
-            # utc_nist = rtp / sample_rate + rtp_to_unix_offset - D_clock
-            # rtp = (utc_nist - rtp_to_unix_offset + D_clock) * sample_rate
-            reference_rtp = int((reference_utc - rtp_to_unix_offset + d_clock_sec) * sample_rate)
-            
-            logger.info(f"[BOOTSTRAP_REF] Computing reference: ntp_minute={ntp_minute}, "
-                       f"D_clock={d_clock_ms:+.1f}ms, ref_rtp={reference_rtp}, ref_utc={reference_utc:.3f}")
+            logger.info(f"[BOOTSTRAP_REF] Using bootstrap offset: minute={current_minute}, "
+                       f"ref_rtp={reference_rtp}, ref_utc={reference_utc:.0f}, D_clock={d_clock_ms:+.1f}ms")
             
             writer = BootstrapTimingReferenceWriter()
             writer.write(
