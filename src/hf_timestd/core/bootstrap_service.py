@@ -366,10 +366,9 @@ class BootstrapService:
                     # Collect offset measurements from validated clusters for refined lock
                     self._collect_offset_measurements()
                     
-                    # CRITICAL FIX (2026-01-27): Free bootstrap resources on provisional lock
-                    # Once we're in TRACKING/PROVISIONAL_LOCK, archiving begins and we no longer
-                    # need the rolling buffers. Waiting for LOCKED state wastes ~250MB of memory.
-                    self._free_bootstrap_buffers()
+                    # NOTE: Do NOT free buffers here - BCD/FSK decoding needs them
+                    # to confirm the UTC minute. Buffers are freed after time_confirmed=True
+                    # or after REFINED lock (whichever comes first).
                 
                 # During provisional lock, check for refined lock criteria
                 elif self.phase == BootstrapPhase.PROVISIONAL_LOCK:

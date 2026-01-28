@@ -602,7 +602,7 @@ class TimingBootstrap:
             offset_from_expected = abs(samples_from_ref - expected_samples)
             offset_ms = offset_from_expected * 1000 / self.sample_rate
             
-            if offset_ms > 500:  # More than 500ms from expected minute boundary
+            if offset_ms > 100:  # More than 100ms from expected minute boundary
                 logger.debug(f"[BOOTSTRAP] Rejecting {station} candidate: {offset_ms:.0f}ms "
                             f"from expected minute {minute_index}")
                 return None
