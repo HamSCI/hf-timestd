@@ -618,20 +618,20 @@ class CoreRecorderV2:
         """
         Write bootstrap timing reference for metrology service.
         
-        The reference is a consistent (RTP, UTC) pair.
+        The reference is a consistent (RTP, UTC) pair that incorporates the bootstrap's
+        tone-derived offset refinement.
         
         Strategy:
         ---------
-        Get the RTP-to-Unix offset from one of the recorders (they all share the same
-        GPSDO-governed RTP stream). This offset was established at startup using NTP
-        and is stable thereafter.
+        1. Get the recorder's NTP-derived RTP-to-Unix offset (baseline)
+        2. Apply the bootstrap's D_clock correction to get tone-aligned UTC
         
-        reference_rtp = any recent RTP timestamp
-        reference_utc = rtp_to_unix_offset + reference_rtp / sample_rate
+        The bootstrap's D_clock represents how much the NTP-derived time differs from
+        the tone-derived UTC(NIST). By applying this correction, we get a reference
+        that aligns with actual tone arrivals.
         
-        This gives us a consistent (RTP, UTC) pair where:
-        - RTP is from the GPSDO-governed stream (authoritative)
-        - UTC is derived from the recorder's RTP-to-Unix calibration
+        reference_utc = ntp_time - D_clock  (tone-aligned)
+        reference_rtp = computed from ntp_time using recorder's offset
         """
         try:
             from .bootstrap_timing_reference import BootstrapTimingReferenceWriter
@@ -653,15 +653,30 @@ class CoreRecorderV2:
                 logger.debug("[BOOTSTRAP_REF] No RTP-to-Unix offset available yet")
                 return
             
+            # Get bootstrap's D_clock (NTP offset from tone-derived UTC)
+            d_clock_ms = self.bootstrap_service._calculate_d_clock()
+            if d_clock_ms is None:
+                d_clock_ms = 0.0
+            
             # Use current time to get a reference point
             import time
             now = time.time()
             
-            # Convert current Unix time to RTP using the inverse of the offset formula
+            # NTP-derived minute boundary
+            ntp_minute = (int(now) // 60) * 60
+            
+            # Apply D_clock correction: UTC(NIST) = NTP_time - D_clock
+            # D_clock = NTP - UTC(NIST), so UTC(NIST) = NTP - D_clock
+            reference_utc = float(ntp_minute) - (d_clock_ms / 1000.0)
+            
+            # Compute RTP for this UTC using the recorder's offset
             # unix_time = rtp / sample_rate + offset
             # rtp = (unix_time - offset) * sample_rate
-            reference_utc = (int(now) // 60) * 60  # Round to minute boundary
-            reference_rtp = int((reference_utc - rtp_to_unix_offset) * sample_rate)
+            # But we want RTP at reference_utc, which is tone-aligned
+            # The recorder's offset maps RTP to NTP time, so:
+            # ntp_time = rtp / sample_rate + offset
+            # rtp = (ntp_time - offset) * sample_rate
+            reference_rtp = int((ntp_minute - rtp_to_unix_offset) * sample_rate)
             
             writer = BootstrapTimingReferenceWriter()
             writer.write(
@@ -671,6 +686,8 @@ class CoreRecorderV2:
                 uncertainty_ms=uncertainty_ms,
                 sample_rate=sample_rate
             )
+            
+            logger.debug(f"[BOOTSTRAP_REF] D_clock={d_clock_ms:+.1f}ms applied to reference")
             
         except Exception as e:
             logger.warning(f"Failed to write bootstrap timing reference: {e}", exc_info=True)
