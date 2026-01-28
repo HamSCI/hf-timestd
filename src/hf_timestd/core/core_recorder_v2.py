@@ -678,6 +678,9 @@ class CoreRecorderV2:
             # rtp = (ntp_time - offset) * sample_rate
             reference_rtp = int((ntp_minute - rtp_to_unix_offset) * sample_rate)
             
+            logger.info(f"[BOOTSTRAP_REF] Computing reference: ntp_minute={ntp_minute}, "
+                       f"D_clock={d_clock_ms:+.1f}ms, reference_utc={reference_utc:.3f}")
+            
             writer = BootstrapTimingReferenceWriter()
             writer.write(
                 reference_rtp=reference_rtp,
@@ -686,8 +689,6 @@ class CoreRecorderV2:
                 uncertainty_ms=uncertainty_ms,
                 sample_rate=sample_rate
             )
-            
-            logger.debug(f"[BOOTSTRAP_REF] D_clock={d_clock_ms:+.1f}ms applied to reference")
             
         except Exception as e:
             logger.warning(f"Failed to write bootstrap timing reference: {e}", exc_info=True)
