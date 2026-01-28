@@ -652,25 +652,48 @@ class CoreRecorderV2:
             
             offset_samples = tb.rtp_to_utc_offset_samples
             
-            # Use current time to pick a reference minute close to now
-            # (This helps avoid very large RTP values in the DTO)
-            import time
-            now = time.time()
-            current_minute = int(now) // 60
+            # The bootstrap's offset is the RTP at "minute 0" of its reference frame.
+            # But we need to know what Unix time that corresponds to.
+            #
+            # The bootstrap's minute_index is relative to the first detected tone.
+            # We need to use NTP as a hint to figure out which absolute minute
+            # the bootstrap's minute 0 corresponds to.
+            #
+            # Strategy: Use the recorder's RTP-to-Unix offset to convert the
+            # bootstrap's offset to a Unix timestamp.
             
-            # The bootstrap offset gives us RTP at minute 0
-            # For minute N: rtp = offset + N * SAMPLES_PER_MINUTE
-            SAMPLES_PER_MINUTE = 24000 * 60  # 1,440,000
+            # Get RTP-to-Unix offset from a recorder's archive writer
+            rtp_to_unix_offset = None
+            for recorder in self.recorders.values():
+                if hasattr(recorder, 'archive_writer') and recorder.archive_writer:
+                    if recorder.archive_writer.rtp_to_unix_offset is not None:
+                        rtp_to_unix_offset = recorder.archive_writer.rtp_to_unix_offset
+                        break
             
-            reference_rtp = offset_samples + (current_minute * SAMPLES_PER_MINUTE)
-            reference_utc = float(current_minute * 60)  # Unix timestamp of minute boundary
+            if rtp_to_unix_offset is None:
+                logger.debug("[BOOTSTRAP_REF] No RTP-to-Unix offset available yet")
+                return
+            
+            # Convert bootstrap's offset (RTP at minute boundary) to Unix time
+            # unix_time = rtp / sample_rate + rtp_to_unix_offset
+            # This gives us the NTP-derived time of the bootstrap's minute 0
+            bootstrap_minute_0_unix = offset_samples / sample_rate + rtp_to_unix_offset
+            
+            # Round to nearest minute boundary (the bootstrap's offset should be at a minute)
+            bootstrap_minute_0_unix = round(bootstrap_minute_0_unix / 60) * 60
+            
+            # Now we have a consistent (RTP, UTC) pair:
+            # reference_rtp = offset_samples (RTP at minute boundary)
+            # reference_utc = bootstrap_minute_0_unix (Unix time of that boundary)
+            reference_rtp = offset_samples
+            reference_utc = float(bootstrap_minute_0_unix)
             
             # Log D_clock for diagnostics
             d_clock_ms = self.bootstrap_service._calculate_d_clock()
             if d_clock_ms is None:
                 d_clock_ms = 0.0
             
-            logger.info(f"[BOOTSTRAP_REF] Using bootstrap offset: minute={current_minute}, "
+            logger.info(f"[BOOTSTRAP_REF] Using bootstrap offset: "
                        f"ref_rtp={reference_rtp}, ref_utc={reference_utc:.0f}, D_clock={d_clock_ms:+.1f}ms")
             
             writer = BootstrapTimingReferenceWriter()
