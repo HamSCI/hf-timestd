@@ -454,7 +454,7 @@ class BootstrapService:
             return None
         
         d_clocks = []
-        for tone in tb.validated_tones:
+        for tone in tb.validated_tones[-5:]:  # Only use last 5 tones for logging
             candidate = tone.candidate
             station = candidate.station
             
@@ -469,12 +469,26 @@ class BootstrapService:
             error_samples = candidate.rtp_timestamp - expected_rtp
             error_ms = error_samples * 1000 / self.config.sample_rate
             d_clocks.append(error_ms)
+            
+            # Diagnostic logging
+            logger.debug(f"[D_CLOCK_DIAG] {station} min_idx={tone.minute_index}: "
+                        f"actual_rtp={candidate.rtp_timestamp}, "
+                        f"offset={tb.rtp_to_utc_offset_samples}, "
+                        f"delay={delay_samples} ({delay_samples*1000/self.config.sample_rate:.1f}ms), "
+                        f"expected={expected_rtp}, error={error_ms:+.1f}ms")
         
         if not d_clocks:
             return None
         
         from statistics import median
-        return median(d_clocks)
+        result = median(d_clocks)
+        
+        # Log summary
+        if len(d_clocks) > 0:
+            logger.info(f"[D_CLOCK] Calculated from {len(tb.validated_tones)} tones: "
+                       f"median={result:+.1f}ms, range=[{min(d_clocks):+.1f}, {max(d_clocks):+.1f}]ms")
+        
+        return result
     
     def _calculate_ntp_correction(self) -> Optional[float]:
         """
