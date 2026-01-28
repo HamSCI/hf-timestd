@@ -69,17 +69,16 @@ class MetrologyService:
         self._rtp_to_unix_offset = None
         self._offset_samples = []
         
-        # Bootstrap Reference (2026-01-27): D_clock correction for NTP-to-UTC(NIST)
+        # Bootstrap Timing Reference (2026-01-27): RTP-to-UTC(NIST) conversion
         # GPSDO RTP is the steel ruler. Bootstrap derives UTC(NIST) from HF tones.
         # NTP is only an external reference, NOT authoritative.
-        # D_clock = system_clock - UTC(NIST), so UTC(NIST) = NTP_time - D_clock
-        from .bootstrap_state import BootstrapState as SharedBootstrapState, DEFAULT_STATE_FILE
-        self._bootstrap_state_file = DEFAULT_STATE_FILE
-        self._bootstrap_d_clock_ms = None  # D_clock correction in milliseconds
-        self._reference_rtp = None      # (legacy, kept for compatibility)
-        self._reference_utc = None      # (legacy, kept for compatibility)
-        self._bootstrap_sample_rate = 24000
-        self._bootstrap_loaded = False  # Flag to load once
+        # 
+        # The DTO provides a consistent (RTP, UTC) pair:
+        #   UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
+        from .bootstrap_timing_reference import BootstrapTimingReference, DEFAULT_STATE_FILE
+        self._bootstrap_ref_file = DEFAULT_STATE_FILE
+        self._bootstrap_ref: Optional[BootstrapTimingReference] = None
+        self._bootstrap_ref_loaded = False
         
         # NOTE (2026-01-27): Metrology service no longer runs its own bootstrap.
         # The core recorder establishes the RTP-to-UTC(NIST) offset and writes it
@@ -223,11 +222,10 @@ class MetrologyService:
                 rtp_timestamp=rtp_timestamp
             )
             
-            # NOTE (2026-01-27): Initial bootstrap removed - we use the shared reference
-            # from the core recorder's bootstrap state file. But we continue refining
-            # that reference based on tone arrivals to drive raw D_clock toward zero.
-            if self._reference_rtp is not None:
-                self._refine_offset_from_tones(results)
+            # Continue refining the bootstrap reference based on tone arrivals
+            # Bootstrap provides initial estimate after 2-tier lock, metrology refines further
+            if self._bootstrap_ref and self._bootstrap_ref.is_valid():
+                self._refine_bootstrap_reference(results)
             
             # Write Results
             for res in results:
@@ -290,18 +288,17 @@ class MetrologyService:
             logger.error(f"Error processing minute {minute_boundary}: {e}", exc_info=True)
             return False
     
-
-    def _refine_offset_from_tones(self, results: list):
+    def _refine_bootstrap_reference(self, results: list):
         """
-        Continue refining RTP-to-UTC(NIST) reference based on tone arrivals.
+        Refine the bootstrap reference based on tone arrivals.
         
-        The core recorder's bootstrap establishes the initial reference. We continue
-        refining it here based on tone timing errors to drive raw D_clock toward zero.
+        The bootstrap provides an initial (RTP, UTC) estimate after 2-tier lock.
+        Metrology continues refining this based on tone timing errors.
         
         timing_error = raw_toa - expected_propagation_delay
-        If timing_error > 0, tones arrive later than expected → reference_rtp needs adjustment
+        If timing_error > 0, tones arrive later than expected → reference_rtp needs to increase
         """
-        if self._reference_rtp is None:
+        if not self._bootstrap_ref or not self._bootstrap_ref.is_valid():
             return
         
         OFFSET_CORRECTION_ALPHA = 0.3  # 30% of error per update
@@ -328,39 +325,36 @@ class MetrologyService:
                 
                 if correction_samples != 0:
                     # Adjust reference_rtp: if tones arrive late, reference_rtp should increase
-                    self._reference_rtp += correction_samples
+                    self._bootstrap_ref.reference_rtp += correction_samples
                     correction_ms = correction_samples * 1000 / self.engine.sample_rate
                     
                     if abs(correction_ms) > 0.5:
                         logger.info(f"[OFFSET_REFINE] {station}: {correction_ms:+.2f}ms correction "
                                    f"(error was {timing_error_ms:+.1f}ms, raw_toa={res.raw_toa_ms:.1f}ms)")
-
+    
     def _load_bootstrap_reference(self):
-        """Load bootstrap D_clock from shared state file.
+        """Load bootstrap timing reference from shared state file.
         
-        D_clock = system_clock - UTC(NIST)
-        So: UTC(NIST) = NTP_time - D_clock
-        
-        This is simpler than trying to maintain a (reference_rtp, reference_utc) pair.
+        The DTO provides a consistent (RTP, UTC) pair for conversion:
+            UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
         """
-        from .bootstrap_state import BootstrapState as SharedBootstrapState
+        from .bootstrap_timing_reference import BootstrapTimingReference
         
         try:
-            state = SharedBootstrapState.from_file(self._bootstrap_state_file)
-            if state and state.locked and state.d_clock_ms is not None:
-                self._bootstrap_d_clock_ms = state.d_clock_ms
-                self._bootstrap_sample_rate = state.sample_rate
-                self._bootstrap_loaded = True
+            ref = BootstrapTimingReference.from_file(self._bootstrap_ref_file)
+            if ref and ref.is_valid():
+                self._bootstrap_ref = ref
+                self._bootstrap_ref_loaded = True
                 logger.info(
-                    f"[BOOTSTRAP] Loaded D_clock: {self._bootstrap_d_clock_ms:+.1f}ms "
-                    f"(tier={state.lock_tier})"
+                    f"[BOOTSTRAP_REF] Loaded: RTP={ref.reference_rtp} @ UTC={ref.reference_utc:.3f} "
+                    f"(tier={ref.lock_tier}, ±{ref.uncertainty_ms:.1f}ms)"
                 )
             else:
-                self._bootstrap_loaded = True  # Mark as loaded even if not available
-                logger.debug("[BOOTSTRAP] State not locked or missing D_clock - using NTP fallback")
+                self._bootstrap_ref_loaded = True  # Mark as loaded even if not available
+                logger.debug("[BOOTSTRAP_REF] Not available or invalid - using NTP fallback")
         except Exception as e:
-            self._bootstrap_loaded = True  # Don't retry on error
-            logger.warning(f"[BOOTSTRAP] Failed to load state: {e} - using NTP fallback")
+            self._bootstrap_ref_loaded = True  # Don't retry on error
+            logger.warning(f"[BOOTSTRAP_REF] Failed to load: {e} - using NTP fallback")
     
     def stop(self):
         """Stop service."""
@@ -533,34 +527,38 @@ class MetrologyService:
             # - Bootstrap derives UTC(NIST) from HF tone arrivals
             # - NTP is only an external reference, NOT authoritative
             #
-            # PRIORITY 1: Use bootstrap offset to convert RTP to UTC(NIST)
+            # PRIORITY 1: Use bootstrap reference to convert RTP to UTC(NIST)
             # PRIORITY 2: Fall back to NTP-derived metadata if bootstrap not locked
             if 'start_rtp_timestamp' in metadata:
                 rtp_timestamp = int(metadata['start_rtp_timestamp'])
                 
-                # Load/refresh bootstrap state periodically for D_clock
-                if not self._bootstrap_loaded or self.minutes_processed % 5 == 0:
+                # Load/refresh bootstrap reference periodically
+                if not self._bootstrap_ref_loaded or self.minutes_processed % 5 == 0:
                     self._load_bootstrap_reference()
                 
-                # Use buffer metadata's system_time (NTP-derived) and apply D_clock correction
-                # D_clock = system_clock - UTC(NIST), so UTC(NIST) = system_clock - D_clock
-                start_system_time = metadata.get('start_system_time')
-                if start_system_time is not None:
-                    if self._bootstrap_d_clock_ms is not None:
-                        # Apply D_clock correction: UTC(NIST) = NTP_time - D_clock/1000
-                        system_time = start_system_time - (self._bootstrap_d_clock_ms / 1000.0)
-                        timing_source = "bootstrap_corrected"
-                    else:
+                # Try bootstrap-derived UTC(NIST) first
+                # UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
+                if self._bootstrap_ref and self._bootstrap_ref.is_valid():
+                    system_time = self._bootstrap_ref.rtp_to_utc(rtp_timestamp)
+                    timing_source = "bootstrap_ref"
+                    logger.info(
+                        f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
+                        f"RTP={rtp_timestamp}, UTC(NIST)={system_time:.6f}, "
+                        f"ref_rtp={self._bootstrap_ref.reference_rtp}, ref_utc={self._bootstrap_ref.reference_utc:.3f}"
+                    )
+                else:
+                    # Fallback to NTP-derived metadata
+                    start_system_time = metadata.get('start_system_time')
+                    if start_system_time is not None:
                         system_time = start_system_time
                         timing_source = "ntp_metadata"
-                else:
-                    system_time = float(target_minute)
-                    timing_source = "fallback"
-                
-                logger.info(
-                    f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
-                    f"RTP={rtp_timestamp}, CalculatedSystem={system_time:.6f}"
-                )
+                    else:
+                        system_time = float(target_minute)
+                        timing_source = "fallback"
+                    logger.info(
+                        f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
+                        f"RTP={rtp_timestamp}, system_time={system_time:.6f}"
+                    )
             else:
                 # Fallback: use minute boundary
                 system_time = float(target_minute)
