@@ -425,10 +425,14 @@ class BootstrapService:
             self._rtp_to_utc_offset_samples, self._offset_uncertainty_samples = offset
             self._d_clock_ms = self._calculate_d_clock()
             
-            uncertainty_ms = self._offset_uncertainty_samples * 1000 / self.config.sample_rate
+            uncertainty_ms = self._offset_uncertainty_samples * 1000 / self.config.sample_rate if self._offset_uncertainty_samples else 0
             
-            logger.info(f"[BOOTSTRAP_SERVICE] FULL LOCK achieved! "
-                       f"D_clock = {self._d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms")
+            if self._d_clock_ms is not None:
+                logger.info(f"[BOOTSTRAP_SERVICE] FULL LOCK achieved! "
+                           f"D_clock = {self._d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms")
+            else:
+                logger.info(f"[BOOTSTRAP_SERVICE] FULL LOCK achieved! "
+                           f"D_clock = pending (no validated tones yet)")
             
             # CRITICAL FIX (2026-01-27): Free bootstrap buffers after lock to prevent memory leak
             # The rolling buffers are no longer needed once we've locked - they hold ~250MB

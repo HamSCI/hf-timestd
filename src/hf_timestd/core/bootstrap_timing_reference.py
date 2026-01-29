@@ -169,7 +169,19 @@ class BootstrapTimingReference:
     
     def to_json(self) -> str:
         """Serialize to JSON."""
-        return json.dumps(asdict(self), indent=2)
+        import numpy as np
+        
+        def json_serializer(obj):
+            """Handle numpy types for JSON serialization."""
+            if isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            if isinstance(obj, (np.floating, np.float64, np.float32)):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+        
+        return json.dumps(asdict(self), indent=2, default=json_serializer)
     
     @classmethod
     def from_json(cls, json_str: str) -> 'BootstrapTimingReference':

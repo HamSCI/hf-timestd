@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** January 24, 2026  
+**Last Updated:** January 29, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.2 (Metrological Enhancements)
+**Version:** V6.4 (NTP-Based Time Confirmation)
 
 ---
 
@@ -119,6 +119,19 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
   - **Process Noise:** Extremely low Q (1e-10) for clock drift. We trust the GPSDO hardware spec (sub-ppb).
   - **Drift Clamping:** `drift_ms_per_min` is hard-clamped to 0.0 after convergence.
   - **Jitter Rejection:** High measurement noise covariance (R=30ms) forces the Kalman filter to reject ionospheric turbulence rather than chasing it.
+
+### 6. NTP-Based Time Confirmation (v6.4)
+
+**Architecture Change (2026-01-29):** Bootstrap no longer requires BCD/FSK decode to reach LOCKED state.
+
+- **Problem:** BCD/FSK decoding is fragile under HF fading conditions, blocking the pipeline.
+- **Solution:** Use NTP-derived wallclock from GPSDO to identify UTC minute directly.
+- **Implementation:**
+  - Cluster detection finds minute markers (800ms tones at second 0)
+  - `wallclock_time` from GPSDO tells us WHICH minute this is in UTC
+  - Bootstrap transitions to LOCKED based on NTP confirmation
+  - BCD/FSK decode becomes OPTIONAL refinement for sub-second accuracy
+- **Benefit:** Pipeline proceeds to metrology within ~2 minutes instead of waiting indefinitely for decode.
 
 ---
 

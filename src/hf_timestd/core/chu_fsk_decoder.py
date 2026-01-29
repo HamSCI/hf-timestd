@@ -158,11 +158,13 @@ class CHUFSKDecoder:
         
         logger.debug(f"CHU FSK Decoder initialized: {sample_rate} Hz, {self.samples_per_bit} samples/bit")
     
-    def _fsk_demodulate_iq(self, iq_samples: np.ndarray) -> np.ndarray:
+    def _fsk_demodulate_audio(self, audio: np.ndarray) -> np.ndarray:
         """
-        FSK demodulation using proper Bell 103 DSP chain.
+        FSK demodulation from audio using Bell 103 DSP chain.
         
-        The IQ data has carrier at DC, FSK tones at +2025/+2225 Hz.
+        CHU FSK Signal Structure:
+        - Audio tones at 2025 Hz (space/0) and 2225 Hz (mark/1)
+        - 300 baud, so each bit is ~3.33ms
         
         DSP Flow:
         1. Frequency translate by -2125 Hz to center FSK at DC
@@ -173,8 +175,12 @@ class CHUFSKDecoder:
         """
         from scipy.signal import filtfilt
         
+        # Convert real audio to analytic signal for frequency translation
+        # Use Hilbert transform to create complex signal
+        analytic = hilbert(audio.astype(np.float64))
+        
         # Step 1: Frequency translate by -2125 Hz using pre-computed oscillator
-        n_samples = len(iq_samples)
+        n_samples = len(analytic)
         if n_samples <= len(self._mixing_oscillator):
             shift = self._mixing_oscillator[:n_samples]
         else:
@@ -182,7 +188,7 @@ class CHUFSKDecoder:
             t = np.arange(n_samples) / self.sample_rate
             shift = np.exp(-2j * np.pi * 2125 * t).astype(np.complex64)
         
-        baseband = iq_samples.astype(np.complex64) * shift
+        baseband = analytic.astype(np.complex64) * shift
         
         # Step 2: Low-pass filter using pre-computed coefficients
         # Use filtfilt for zero-phase filtering (no group delay)
@@ -207,20 +213,40 @@ class CHUFSKDecoder:
     
     def _am_demodulate(self, iq_samples: np.ndarray) -> np.ndarray:
         """
-        Extract audio from IQ samples for FSK decoding.
+        AM demodulate IQ samples to extract audio.
         
-        This method now uses the proper Bell 103 DSP chain and returns
-        the soft decision directly (not audio).
+        CHU Signal Structure:
+        - Carrier is at DC in baseband IQ
+        - Audio (including FSK tones) is AM modulated onto the carrier
+        - FSK tones are at 2025/2225 Hz in the audio spectrum
+        
+        Returns audio signal (not FSK soft decisions - that's done in decode_second).
         """
-        return self._fsk_demodulate_iq(iq_samples)
+        # AM demodulation - extract envelope from IQ
+        audio = np.abs(iq_samples).astype(np.float64)
+        
+        # Remove DC (carrier level) and normalize
+        audio = audio - np.mean(audio)
+        
+        # Normalize to reasonable amplitude
+        max_amp = np.max(np.abs(audio))
+        if max_amp > 0:
+            audio = audio / max_amp
+        
+        # Log diagnostic info
+        iq_power_db = 10 * np.log10(np.mean(np.abs(iq_samples)**2) + 1e-10)
+        logger.info(f"[CHU] AM demod: IQ_power={iq_power_db:.1f}dB, audio_peak={max_amp:.4f}, "
+                   f"samples={len(iq_samples)}")
+        
+        return audio
     
     def _fsk_demodulate(self, audio: np.ndarray) -> np.ndarray:
         """
-        FSK demodulation - now a pass-through since _am_demodulate
-        returns soft decision directly.
+        FSK demodulate audio to get soft decisions.
+        
+        Takes AM-demodulated audio and extracts FSK soft decisions.
         """
-        # The input is already soft decision from _fsk_demodulate_iq
-        return audio
+        return self._fsk_demodulate_audio(audio)
     
     def _find_first_start_bit(self, soft_decision: np.ndarray, search_start: int, search_end: int, expected_byte: Optional[int] = 0x06) -> Optional[int]:
         """

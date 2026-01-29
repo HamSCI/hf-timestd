@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 25, 2026 (v6.3.0)
+**Last Updated:** January 29, 2026 (v6.4.0)
 
 ---
 
@@ -46,6 +46,7 @@ The system is composed of six independent systemd services, each with a specific
 - Polls for new Digital RF files.
 - Performs tone detection (1000/1200 Hz), BCD decoding, and WWV/WWVH discrimination.
 - Calculates `D_clock` (System - UTC) using physics propagation models.
+- **Timing (v6.4):** Uses `start_system_time` from raw buffer metadata (NTP-derived, per-channel).
 - **Output:** `/var/lib/timestd/phase2/{CHANNEL}/` (HDF5 L1/L2)
 
 ### 3. Fusion (`timestd-fusion`)

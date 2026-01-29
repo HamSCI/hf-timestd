@@ -104,6 +104,11 @@ TONE_CHARACTERISTICS = {
 # Shared frequencies where WWV and WWVH both transmit
 SHARED_FREQUENCIES_KHZ: Set[int] = {2500, 5000, 10000, 15000}
 
+# Stations to exclude from initial bootstrap clustering
+# BPM (China) is ~10,000 km from North America with weak, variable signal
+# Include it only after TRACKING state when observation windows are narrow
+BOOTSTRAP_EXCLUDE_STATIONS: Set[str] = {'BPM'}
+
 # Unambiguous channels (only one station transmits)
 UNAMBIGUOUS_CHANNELS: Dict[str, str] = {
     'CHU_3330': 'CHU',
@@ -292,7 +297,13 @@ class TimingBootstrap:
         - 'confidence': Overall cluster confidence
         """
         # Filter high-quality candidates
-        good_candidates = [c for c in self.all_candidates if c.snr_db >= min_snr_db]
+        # Exclude BPM during initial bootstrap (weak/variable signal from China)
+        # BPM will be included after TRACKING state when windows are narrow
+        exclude_stations = BOOTSTRAP_EXCLUDE_STATIONS if self.state in (BootstrapState.ACQUIRING, BootstrapState.CORRELATING) else set()
+        good_candidates = [
+            c for c in self.all_candidates 
+            if c.snr_db >= min_snr_db and c.station not in exclude_stations
+        ]
         
         if not good_candidates:
             return []
@@ -305,9 +316,10 @@ class TimingBootstrap:
             by_station[c.station].append(c)
         
         stations_found = list(by_station.keys())
+        excluded_str = f" (excluding {exclude_stations})" if exclude_stations else ""
         logger.info(f"[BOOTSTRAP] Clustering: " + 
                    ", ".join(f"{len(by_station[s])} {s}" for s in stations_found) +
-                   f" (SNR >= {min_snr_db}dB)")
+                   f" (SNR >= {min_snr_db}dB){excluded_str}")
         
         if not stations_found:
             return []
@@ -581,7 +593,7 @@ class TimingBootstrap:
                         error_ms = error_samples * 1000 / self.sample_rate
                     
                     # Log close matches for debugging
-                    if minutes_apart >= 1 and error_ms < 500:
+                    if minutes_apart >= 1 and error_ms < 1000:
                         logger.info(f"[BOOTSTRAP] Recurrence check: {minutes_apart} min apart, error={error_ms:.1f}ms")
                     
                     if error_ms < 100:  # Within 100ms of expected minute spacing
@@ -828,21 +840,46 @@ class TimingBootstrap:
             logger.info(f"[BOOTSTRAP] CORRELATING: {len(self.all_candidates)} total candidates, "
                        f"{len(clusters)} clusters found")
         
+        # Get reference wallclock from the MOST RECENT validated cluster (for cross-SSRC comparison)
+        # Using the most recent avoids stale references that cause huge spacing errors
+        ref_wallclock = None
+        if self.validated_clusters:
+            # Use the most recent cluster as reference (last in list)
+            ref_cluster = self.validated_clusters[-1]
+            ref_station = ref_cluster.get('anchor_station')
+            ref_members = ref_cluster.get('members', {})
+            if ref_station and ref_station in ref_members:
+                ref_cands = ref_members[ref_station]
+                if ref_cands and hasattr(ref_cands[0], 'wallclock_time'):
+                    ref_wallclock = ref_cands[0].wallclock_time
+        
         for cluster in clusters:
             anchor = cluster['anchor_rtp']
+            anchor_station = cluster.get('anchor_station')
+            anchor_members = cluster.get('members', {})
+            anchor_wallclock = None
+            if anchor_station and anchor_station in anchor_members:
+                anchor_cands = anchor_members[anchor_station]
+                if anchor_cands and hasattr(anchor_cands[0], 'wallclock_time'):
+                    anchor_wallclock = anchor_cands[0].wallclock_time
             
-            # Check if this cluster is at a new minute boundary
-            samples_from_ref = anchor - self.reference_rtp
-            minute_offset = round(samples_from_ref / SAMPLES_PER_MINUTE)
-            
-            # Skip minute 0 (already validated)
-            if minute_offset == 0:
-                continue
-            
-            # Check spacing error
-            expected_rtp = self.reference_rtp + (minute_offset * SAMPLES_PER_MINUTE)
-            spacing_error_samples = abs(anchor - expected_rtp)
-            spacing_error_ms = spacing_error_samples * 1000 / self.sample_rate
+            # Use WALLCLOCK for cross-SSRC comparison (different SSRCs have different RTP epochs)
+            if ref_wallclock is not None and anchor_wallclock is not None:
+                time_diff = anchor_wallclock - ref_wallclock
+                minute_offset = round(time_diff / 60.0)
+                if minute_offset == 0:
+                    continue  # Same minute boundary
+                expected_diff = minute_offset * 60.0
+                spacing_error_ms = abs(time_diff - expected_diff) * 1000
+            else:
+                # Fallback to RTP comparison (only works within same SSRC)
+                samples_from_ref = anchor - self.reference_rtp
+                minute_offset = round(samples_from_ref / SAMPLES_PER_MINUTE)
+                if minute_offset == 0:
+                    continue
+                expected_rtp = self.reference_rtp + (minute_offset * SAMPLES_PER_MINUTE)
+                spacing_error_samples = abs(anchor - expected_rtp)
+                spacing_error_ms = spacing_error_samples * 1000 / self.sample_rate
             
             # Log cluster evaluation
             if cluster['num_stations'] >= 2:
@@ -872,6 +909,85 @@ class TimingBootstrap:
         
         return None
     
+    def confirm_time_from_ntp(
+        self,
+        ntp_wallclock: float,
+        anchor_rtp: int,
+        anchor_channel: str,
+    ) -> Optional[str]:
+        """
+        Confirm time using NTP-derived wallclock from validated cluster.
+        
+        ARCHITECTURE (2026-01-29):
+        --------------------------
+        This method uses the NTP-synchronized wallclock from GPSDO to establish
+        the RTP-to-UTC offset, without requiring BCD/FSK decode.
+        
+        The cluster detection already found minute markers (800ms tones at second 0).
+        The wallclock tells us WHICH minute this is in UTC. Combined with the
+        anchor_rtp, we can compute the RTP-to-UTC offset.
+        
+        Args:
+            ntp_wallclock: Unix timestamp of minute boundary (from GPSDO/NTP)
+            anchor_rtp: RTP timestamp where minute marker was detected
+            anchor_channel: Channel name where detection occurred
+            
+        Returns:
+            Status string if confirmation succeeded, None otherwise
+        """
+        if self.state not in (BootstrapState.TRACKING, BootstrapState.CORRELATING):
+            return None
+        
+        import datetime
+        
+        # Extract UTC time from wallclock
+        utc_dt = datetime.datetime.utcfromtimestamp(ntp_wallclock)
+        ntp_hour = utc_dt.hour
+        ntp_minute = utc_dt.minute
+        
+        # Compute minute index from UTC midnight
+        minute_index = ntp_hour * 60 + ntp_minute
+        
+        # The anchor_rtp is at the detected minute marker (correlation peak, ~400ms into tone)
+        # Adjust back to second 0 boundary
+        tone_peak_offset_samples = int(0.400 * self.sample_rate)
+        second_0_rtp = anchor_rtp - tone_peak_offset_samples
+        
+        # Compute RTP-to-UTC offset: RTP value at UTC minute 0 of the day
+        # offset = second_0_rtp - (minute_index * SAMPLES_PER_MINUTE)
+        rtp_at_minute_0 = second_0_rtp - (minute_index * SAMPLES_PER_MINUTE)
+        
+        # Handle 32-bit RTP wraparound
+        if rtp_at_minute_0 < 0:
+            rtp_at_minute_0 += 0x100000000
+        
+        logger.info(f"[BOOTSTRAP] NTP time confirmation: {ntp_hour:02d}:{ntp_minute:02d} UTC "
+                   f"(minute_index={minute_index}), anchor_rtp={anchor_rtp}, "
+                   f"second_0_rtp={second_0_rtp}, rtp_at_minute_0={rtp_at_minute_0}")
+        
+        # Set the RTP-to-UTC offset
+        old_offset = self.rtp_to_utc_offset_samples
+        self.rtp_to_utc_offset_samples = rtp_at_minute_0
+        
+        if old_offset is not None:
+            offset_change_ms = (rtp_at_minute_0 - old_offset) * 1000 / self.sample_rate
+            logger.info(f"[BOOTSTRAP] Offset updated: {old_offset} → {rtp_at_minute_0} "
+                       f"(change={offset_change_ms:+.1f}ms)")
+        
+        # Mark time as confirmed
+        self._time_confirmed = True
+        self._confirmed_hour = ntp_hour
+        self._confirmed_minute = ntp_minute
+        
+        # Transition to LOCKED state
+        if self.state == BootstrapState.TRACKING:
+            self.state = BootstrapState.LOCKED
+            self.lock_tier = LockTier.PROVISIONAL  # NTP-based lock is provisional
+            logger.info(f"[BOOTSTRAP] → LOCKED (NTP-confirmed: {ntp_hour:02d}:{ntp_minute:02d} UTC)")
+            return f"LOCKED (NTP: {ntp_hour:02d}:{ntp_minute:02d} UTC)"
+        
+        return f"NTP_CONFIRMED: {ntp_hour:02d}:{ntp_minute:02d} UTC"
+    
     def attempt_time_confirmation(
         self,
         ntp_time: float,
@@ -881,6 +997,10 @@ class TimingBootstrap:
     ) -> Optional[str]:
         """
         Attempt to confirm time by decoding BCD/FSK from station broadcasts.
+        
+        NOTE (2026-01-29): This method is now OPTIONAL. The primary time confirmation
+        uses confirm_time_from_ntp() which uses NTP-derived wallclock directly.
+        BCD/FSK decode provides additional confidence and sub-second refinement.
         
         This is Phase 2 of bootstrap: after clustering finds minute boundaries,
         we decode the actual UTC time from the broadcasts to confirm.

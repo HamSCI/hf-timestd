@@ -523,44 +523,39 @@ class MetrologyService:
             if iq_samples is None:
                 return None
                 
-            # 4. Determine Time (from GPSDO RTP + bootstrap-derived UTC(NIST) offset)
+            # 4. Determine Time
             # -------------------------------------------------------------
-            # ARCHITECTURE (2026-01-28):
-            # - GPSDO-governed RTP timestamps are the steel ruler (ground truth)
-            # - Bootstrap derives UTC(NIST) from HF tone arrivals + BCD/FSK decode
-            # - Metrology WAITS for bootstrap to provide complete DTO
-            # - NTP is only a sanity check, NOT the basis for timing
+            # ARCHITECTURE (2026-01-29):
+            # The raw buffer metadata already contains start_system_time which is
+            # NTP-derived wallclock time from the GPSDO "steel ruler". Use this
+            # directly - it's already per-channel and doesn't require RTP conversion.
             #
-            # The time reference comes from the tones, not from NTP.
-            if 'start_rtp_timestamp' in metadata:
-                rtp_timestamp = int(metadata['start_rtp_timestamp'])
-                
-                # Load bootstrap reference - this is the ONLY source of timing
-                # Time is derived from HF tone arrivals, not NTP
-                if not self._bootstrap_ref_loaded or self.minutes_processed % 5 == 0:
-                    self._load_bootstrap_reference()
-                
-                # Wait for bootstrap to provide a complete DTO
-                # (clusters found AND UTC minute confirmed via BCD/FSK)
-                if self._bootstrap_ref and self._bootstrap_ref.reference_utc is not None:
-                    system_time = self._bootstrap_ref.rtp_to_utc(rtp_timestamp)
-                    if system_time is not None:
-                        timing_source = "bootstrap"
-                        logger.info(
-                            f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
-                            f"RTP={rtp_timestamp}, UTC(NIST)={system_time:.6f}"
-                        )
-                    else:
-                        # rtp_to_utc returned None - skip this minute
-                        logger.debug(f"[TIMING_DIAG] Minute {target_minute}: bootstrap ref invalid, skipping")
-                        return None
-                else:
-                    # Bootstrap not ready - skip this minute
-                    logger.debug(f"[TIMING_DIAG] Minute {target_minute}: waiting for bootstrap, skipping")
-                    return None
+            # The bootstrap reference is SSRC-specific and cannot be used across
+            # channels (each channel has its own RTP epoch).
+            #
+            # Wait for bootstrap to be LOCKED before processing (ensures timing is valid).
+            if not self._bootstrap_ref_loaded or self.minutes_processed % 5 == 0:
+                self._load_bootstrap_reference()
+            
+            if not self._bootstrap_ref or not self._bootstrap_ref.locked:
+                logger.debug(f"[TIMING_DIAG] Minute {target_minute}: waiting for bootstrap lock, skipping")
+                return None
+            
+            # Use start_system_time from metadata (NTP-derived, per-channel)
+            if 'start_system_time' in metadata:
+                system_time = float(metadata['start_system_time'])
+                rtp_timestamp = int(metadata.get('start_rtp_timestamp', 0))
+                timing_source = "metadata"
+                logger.info(
+                    f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
+                    f"system_time={system_time:.6f}"
+                )
+            elif 'start_rtp_timestamp' in metadata:
+                # Fallback: no system_time, skip (shouldn't happen with current recorder)
+                logger.warning(f"No start_system_time in metadata for {target_minute}, skipping")
+                return None
             else:
-                # No RTP timestamp in metadata - cannot process without it
-                logger.warning(f"No RTP timestamp in metadata for {target_minute}, skipping")
+                logger.warning(f"No timing info in metadata for {target_minute}, skipping")
                 return None
 
             # Pad/Clip

@@ -157,7 +157,10 @@ class BootstrapTimeConfirmer:
         # Try CHU FSK decode
         if chu_samples is not None and len(chu_samples) >= 30 * self.sample_rate:
             try:
-                logger.info(f"[CONFIRM] Attempting CHU FSK decode on {len(chu_samples)} samples")
+                import numpy as np
+                iq_power_db = 10 * np.log10(np.mean(np.abs(chu_samples)**2) + 1e-10)
+                logger.info(f"[CONFIRM] Attempting CHU FSK decode on {len(chu_samples)} samples, "
+                           f"IQ_power={iq_power_db:.1f}dB, dtype={chu_samples.dtype}")
                 chu_result = self.chu_decoder.decode_minute(
                     chu_samples, 
                     minute_boundary_unix=ntp_time
@@ -180,12 +183,16 @@ class BootstrapTimeConfirmer:
                                f"{chu_result.decoded_hour:02d}:{chu_result.decoded_minute:02d} "
                                f"day={chu_result.decoded_day}")
             except Exception as e:
-                logger.warning(f"[CONFIRM] CHU FSK decode failed: {e}")
+                import traceback
+                logger.warning(f"[CONFIRM] CHU FSK decode failed: {e}\n{traceback.format_exc()}")
         
         # Try WWV BCD decode
         if wwv_samples is not None and len(wwv_samples) >= 30 * self.sample_rate:
             try:
-                logger.info(f"[CONFIRM] Attempting WWV BCD decode on {len(wwv_samples)} samples")
+                import numpy as np
+                iq_power_db = 10 * np.log10(np.mean(np.abs(wwv_samples)**2) + 1e-10)
+                logger.info(f"[CONFIRM] Attempting WWV BCD decode on {len(wwv_samples)} samples, "
+                           f"IQ_power={iq_power_db:.1f}dB, dtype={wwv_samples.dtype}")
                 wwv_result = self.wwv_decoder.decode_minute(wwv_samples)
                 result.wwv_result = wwv_result
                 

@@ -3,7 +3,7 @@
 **Comprehensive guide to the metrological methodology used in hf-timestd for RTP-to-UTC calibration and time transfer.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 25, 2026 (v6.3.0)
+**Last Updated:** January 29, 2026 (v6.4.0)
 
 ---
 
@@ -109,19 +109,48 @@ ACQUIRING → CORRELATING → TRACKING → LOCKED
 
 | State | Description | Criteria to Advance |
 |-------|-------------|---------------------|
-| **ACQUIRING** | Initial state, no offset | First metadata observation |
-| **CORRELATING** | Validating offset consistency | 3 consistent observations |
-| **TRACKING** | Offset established, validating with tones | 10 consistent observations |
-| **LOCKED** | High confidence, offset stable | Continuous validation |
+| **ACQUIRING** | Initial state, no offset | First tone cluster detected |
+| **CORRELATING** | Validating cluster consistency | Recurring clusters at 60s intervals |
+| **TRACKING** | Clusters validated, awaiting time confirmation | NTP-based time confirmation |
+| **LOCKED** | Time confirmed, offset stable | Continuous validation |
 
-### Convergence Timeline
+### Convergence Timeline (v6.4)
 
 | Time | State | Uncertainty |
 |------|-------|-------------|
 | 0 min | ACQUIRING | Unknown |
-| 1 min | CORRELATING | ±10ms (NTP) |
-| 3 min | TRACKING | ±1ms |
-| 10 min | LOCKED | <0.1ms |
+| 1 min | CORRELATING | ±30ms |
+| 2 min | TRACKING → LOCKED | ±5ms (NTP-confirmed) |
+| 10+ min | LOCKED (refined) | <1ms (with BCD/FSK) |
+
+### NTP-Based Time Confirmation (v6.4)
+
+**Architecture Change (2026-01-29):** Bootstrap no longer requires BCD/FSK decode to reach LOCKED state.
+
+**Previous Approach (v6.3):**
+- Bootstrap waited for BCD/FSK decode to confirm UTC minute
+- BCD decode fragile under HF fading (often 0/7 markers)
+- Pipeline blocked indefinitely waiting for decode
+
+**New Approach (v6.4):**
+- Cluster detection finds minute markers (800ms tones at second 0)
+- `wallclock_time` from GPSDO "steel ruler" identifies UTC minute directly
+- Bootstrap transitions to LOCKED based on NTP confirmation (~2 minutes)
+- BCD/FSK decode becomes OPTIONAL refinement for sub-second accuracy
+
+**Implementation:**
+```python
+# confirm_time_from_ntp() in timing_bootstrap.py
+# Uses NTP-derived wallclock from cluster detection
+minute_boundary_wallclock = (best_wallclock // 60) * 60
+utc_dt = datetime.utcfromtimestamp(minute_boundary_wallclock)
+# Compute RTP-to-UTC offset from anchor_rtp and UTC minute
+```
+
+**Metrology Service Timing (v6.4):**
+- Each raw buffer file contains `start_system_time` (NTP-derived wallclock)
+- Metrology uses this directly instead of converting through bootstrap RTP reference
+- Avoids SSRC mismatch issues (each channel has independent RTP epoch)
 
 ---
 

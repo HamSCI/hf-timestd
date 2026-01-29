@@ -10,14 +10,151 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🔧 ACTIVE SESSION: BCD/FSK DECODER DIAGNOSIS
+## � ACTIVE SESSION: LIVING DOCUMENTATION REVIEW
 
-**Status:** 🔧 **IN PROGRESS** - 2026-01-28  
-**Objective:** Diagnose and fix why BCD (WWV/WWVH) and FSK (CHU) decoders fail to decode time codes during bootstrap time confirmation.
+**Status:** � **READY FOR REVIEW** - 2026-01-29  
+**Objective:** Critically review the Living Documentation system to ensure it accurately reflects the current system behavior and architecture.
 
 ---
 
-### Problem Statement
+### Living Documentation Concept
+
+The Living Documentation system keeps documentation intimately connected with how the application actually works. Key features:
+
+1. **Markdown docs contain embedded directives**: `<!-- LOGS: source | filter: "pattern" -->`
+2. **Frontend fetches live evidence**: `/api/living-docs/evidence/{source}/{filter}`
+3. **Backend searches log files**: Falls back to journalctl if log files unavailable
+4. **Evidence is installation-specific**: Not hardcoded, fetched from local system
+
+### Documentation Files to Review
+
+| File | Purpose | Priority |
+|------|---------|----------|
+| `docs/BOOTSTRAP_METHODOLOGY.md` | Bootstrap state machine, tone detection, clustering | **CRITICAL** |
+| `docs/IONOSPHERIC_RESOLUTION.md` | Multi-broadcast fusion, ionospheric physics | HIGH |
+| `docs/METROLOGY.md` | Time transfer methodology, uncertainty | HIGH |
+| `ARCHITECTURE.md` | System design philosophy, three-phase architecture | HIGH |
+| `TECHNICAL_REFERENCE.md` | Developer reference, service descriptions | MEDIUM |
+
+### Review Criteria
+
+For each document, assess:
+
+1. **Accuracy**: Does the documentation match current code behavior?
+2. **Completeness**: Are all major features documented?
+3. **Consistency**: Do different documents agree with each other?
+4. **Currency**: Is the documentation up-to-date with v6.4 changes?
+5. **Evidence**: Do the `<!-- LOGS: -->` directives produce meaningful output?
+
+### Recent Architecture Changes (v6.4 - 2026-01-29)
+
+**NTP-Based Time Confirmation:**
+- Bootstrap no longer requires BCD/FSK decode to reach LOCKED state
+- Uses NTP-derived wallclock from GPSDO to identify UTC minute directly
+- `confirm_time_from_ntp()` method in `timing_bootstrap.py`
+- BCD/FSK decode is now OPTIONAL refinement
+
+**Metrology Service Timing:**
+- Uses `start_system_time` from raw buffer metadata (NTP-derived, per-channel)
+- Avoids SSRC mismatch issues (each channel has independent RTP epoch)
+- No longer converts through bootstrap RTP reference
+
+### Key Files Changed in v6.4
+
+| File | Change |
+|------|--------|
+| `timing_bootstrap.py` | Added `confirm_time_from_ntp()` method |
+| `bootstrap_rolling_buffer.py` | NTP-based time confirmation, calls `confirm_time_from_ntp()` |
+| `metrology_service.py` | Uses `start_system_time` from metadata instead of bootstrap RTP |
+| `bootstrap_service.py` | Fixed NoneType format error in `_on_lock_achieved()` |
+| `bootstrap_timing_reference.py` | Fixed JSON serialization for numpy int64 |
+
+### Living Documentation Endpoints
+
+Test these endpoints to verify the system is producing live evidence:
+
+| Evidence Type | Endpoint |
+|---------------|----------|
+| Bootstrap State Transitions | `/api/living-docs/evidence/bootstrap/state_transitions` |
+| NTP Confirmation | `/api/living-docs/evidence/bootstrap/NTP.*confirmed` |
+| Cluster Detection | `/api/living-docs/evidence/bootstrap/multi_station_detection` |
+| Fusion Status | `/api/living-docs/evidence/fusion/D_clock` |
+| Metrology Timing | `/api/living-docs/evidence/metrology/TIMING_DIAG` |
+
+### Questions to Answer
+
+1. **Does BOOTSTRAP_METHODOLOGY.md accurately describe the v6.4 NTP-based confirmation?**
+2. **Are the `<!-- LOGS: -->` directives producing relevant evidence?**
+3. **Does METROLOGY.md explain the "steel ruler" philosophy correctly?**
+4. **Is the three-phase architecture in ARCHITECTURE.md still accurate?**
+5. **Are there any obsolete references to BCD/FSK as a hard requirement?**
+
+### Success Criteria
+
+After this review session:
+- ⬚ All Living Documentation files reviewed for accuracy
+- ⬚ Obsolete content identified and flagged for update
+- ⬚ Missing v6.4 content identified
+- ⬚ `<!-- LOGS: -->` directives verified to produce meaningful output
+- ⬚ Cross-document consistency verified
+
+---
+
+## ✅ COMPLETED SESSION: NTP-BASED TIME CONFIRMATION (v6.4)
+
+**Status:** ✅ **COMPLETE** - 2026-01-29  
+**Objective:** Replace BCD/FSK decode requirement with NTP-based time confirmation for bootstrap metrology.
+
+### Problem Solved
+
+BCD/FSK decoding was fragile under HF fading conditions (often 0/7 markers), blocking the pipeline indefinitely. The system already had NTP-synchronized wallclock from GPSDO available in cluster detection.
+
+### Solution Implemented
+
+1. **`timing_bootstrap.py`** — Added `confirm_time_from_ntp()` method
+   - Uses NTP-derived wallclock from cluster detection to identify UTC minute
+   - Computes RTP-to-UTC offset from anchor_rtp and UTC minute
+   - Transitions to LOCKED state without requiring BCD/FSK decode
+   - BCD/FSK decode becomes OPTIONAL refinement
+
+2. **`bootstrap_rolling_buffer.py`** — Modified `_attempt_time_confirmation()`
+   - Calls `confirm_time_from_ntp()` first
+   - Falls back to BCD/FSK decode as optional refinement
+
+3. **`metrology_service.py`** — Fixed SSRC mismatch issue
+   - Uses `start_system_time` from raw buffer metadata (NTP-derived, per-channel)
+   - Avoids converting through bootstrap RTP reference (SSRC-specific)
+
+4. **Bug fixes:**
+   - `bootstrap_service.py`: Fixed NoneType format error in `_on_lock_achieved()`
+   - `bootstrap_timing_reference.py`: Fixed JSON serialization for numpy int64
+
+### Results
+
+```
+→ LOCKED (NTP-confirmed: 03:21 UTC)
+FULL LOCK achieved! D_clock = pending (no validated tones yet)
+Bootstrap offset: ref_rtp=2029632423, time_confirmed=True, D_clock=+0.0ms
+```
+
+- Bootstrap reaches LOCKED state in ~2 minutes (vs indefinite wait for BCD/FSK)
+- Pipeline proceeds to metrology immediately
+- HDF5 files being written, measurements being recorded
+
+---
+
+## ✅ COMPLETED SESSION: BCD/FSK DECODER DIAGNOSIS
+
+**Status:** ✅ **SUPERSEDED** - 2026-01-28/29  
+**Objective:** Diagnose and fix why BCD (WWV/WWVH) and FSK (CHU) decoders fail to decode time codes during bootstrap time confirmation.
+
+### Outcome
+
+Rather than fixing the fragile BCD/FSK decoders, the architecture was changed to use NTP-based time confirmation (v6.4). BCD/FSK decode is now optional refinement, not a blocking requirement.
+
+---
+
+### Previous Problem Statement (for reference)
 
 The bootstrap successfully:
 1. ✅ Detects multi-station tone clusters (WWV + CHU + BPM, conf=1.00)

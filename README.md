@@ -8,14 +8,14 @@
 
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
-**Key Capabilities (V6.3):**
+**Key Capabilities (V6.4):**
 
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **Digital RF (HDF5)** format.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
 - 🔗 **HDF5-Native Pipeline** - High-performance SWMR (Single Writer Multiple Reader) data exchange.
 - 🌍 **Real-time GNSS VTEC Correction** - Local dual-frequency GPS provides direct ionospheric correction.
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
-- ⏱️ **Timing Bootstrap (v6.3)** - Robust RTP-to-UTC calibration using metadata + broadcast validation.
+- ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
 - 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path TEC visualization.
 - ⏰ **Chrony integration** - SHM refclock for system clock discipline.

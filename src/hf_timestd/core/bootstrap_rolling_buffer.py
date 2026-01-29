@@ -370,6 +370,8 @@ class BootstrapRollingBuffer:
         buffer_end_rtp = self.buffer_start_rtp + min(self.total_samples_written, self.buffer_size)
         
         if start_rtp < self.buffer_start_rtp or start_rtp >= buffer_end_rtp:
+            logger.debug(f"[BOOTSTRAP_BUFFER] {self.channel_name}: RTP {start_rtp} out of range "
+                        f"[{self.buffer_start_rtp}, {buffer_end_rtp})")
             return None
         
         if start_rtp + num_samples > buffer_end_rtp:
@@ -379,11 +381,31 @@ class BootstrapRollingBuffer:
         # Calculate buffer offset
         offset_from_start = start_rtp - self.buffer_start_rtp
         
-        # Get contiguous buffer and slice
-        contiguous, _ = self.get_contiguous_buffer()
+        # DIRECT buffer access instead of get_contiguous_buffer()
+        # This avoids the expensive copy and potential reordering issues
+        samples_available = min(self.total_samples_written, self.buffer_size)
         
-        if offset_from_start + num_samples <= len(contiguous):
-            return contiguous[offset_from_start:offset_from_start + num_samples].copy()
+        if self.total_samples_written <= self.buffer_size:
+            # Buffer hasn't wrapped - simple slice
+            if offset_from_start + num_samples <= samples_available:
+                return self.buffer[offset_from_start:offset_from_start + num_samples].copy()
+        else:
+            # Buffer has wrapped - need to handle circular indexing
+            # The oldest sample is at write_pos, buffer_start_rtp corresponds to that position
+            # So offset_from_start maps to (write_pos + offset_from_start) % buffer_size
+            start_idx = (self.write_pos + offset_from_start) % self.buffer_size
+            end_idx = start_idx + num_samples
+            
+            if end_idx <= self.buffer_size:
+                # No wraparound needed for this slice
+                return self.buffer[start_idx:end_idx].copy()
+            else:
+                # Slice wraps around
+                result = np.empty(num_samples, dtype=np.complex64)
+                first_part = self.buffer_size - start_idx
+                result[:first_part] = self.buffer[start_idx:]
+                result[first_part:] = self.buffer[:num_samples - first_part]
+                return result
         
         return None
     
@@ -666,63 +688,139 @@ class BootstrapBufferManager:
     
     def _attempt_time_confirmation(self) -> Optional[str]:
         """
-        Attempt to confirm time by decoding BCD/FSK from station broadcasts.
+        Confirm time using NTP-derived wallclock from validated clusters.
         
-        Called when bootstrap reaches TRACKING state to get decoded time
-        confirmation before final LOCKED state.
+        ARCHITECTURE CHANGE (2026-01-29):
+        ---------------------------------
+        Previously required BCD/FSK decode to confirm time before proceeding to
+        metrology. This was problematic because:
+        1. BCD decode is fragile under HF fading conditions
+        2. FSK decode requires good signal quality
+        3. We already have NTP-synchronized wallclock from GPSDO
         
-        Architecture:
-        ------------
-        Each SSRC has its own RTP clock space. We use GPS timing info (gps_time,
-        rtp_timesnap) from ChannelInfo to convert the reference minute boundary
-        to each channel's RTP space.
+        NEW APPROACH:
+        - Use NTP-derived wallclock from cluster detection to identify UTC minute
+        - Proceed to LOCKED state based on NTP confirmation
+        - BCD/FSK decode becomes OPTIONAL refinement for sub-second accuracy
         
-        1. Get reference_rtp from the anchor channel (where tone was detected)
-        2. Convert to wallclock time using anchor channel's GPS timing
-        3. For each target channel, convert wallclock back to that channel's RTP
-        4. Retrieve samples at the converted RTP position
+        The cluster's wallclock_time comes from rtp_to_wallclock() which uses
+        the GPSDO "steel ruler" (GPS-synchronized NTP time). This is already
+        accurate to within a few milliseconds.
         """
-        logger.info("[BOOTSTRAP_MANAGER] Attempting time confirmation via BCD/FSK decode")
+        logger.info("[BOOTSTRAP_MANAGER] Attempting NTP-based time confirmation")
         
-        if self.bootstrap is None or self.bootstrap.reference_rtp is None:
-            logger.warning("[BOOTSTRAP_MANAGER] Cannot confirm time: no bootstrap or reference_rtp")
+        if self.bootstrap is None:
+            logger.warning("[BOOTSTRAP_MANAGER] Cannot confirm time: no bootstrap")
             return None
         
+        # Use the DETECTED TONE POSITIONS from validated_clusters, not system time
+        # The tone detection already found where minute boundaries are in the sample stream
+        # We decode BCD/FSK at those positions to learn what UTC time they represent
+        
+        validated_clusters = getattr(self.bootstrap, 'validated_clusters', [])
+        if not validated_clusters:
+            logger.warning("[BOOTSTRAP_MANAGER] No validated clusters for time confirmation")
+            return None
+        
+        # Find the most recent validated cluster that's still in the buffer
+        # CRITICAL: Use the cluster's EXACT RTP timestamp - this is where the tone was detected
+        # The tone marks the START of a second (within ~30ms), so we retrieve 60s starting there
         import time
-        ntp_time = time.time()  # Current system time as NTP hypothesis
+        current_time = time.time()
+        
+        best_cluster = None
+        best_anchor_rtp = None
+        best_anchor_channel = None
+        best_wallclock = None
+        
+        for cluster in reversed(validated_clusters):  # Most recent first
+            anchor_rtp = cluster.get('anchor_rtp')
+            anchor_station = cluster.get('anchor_station')
+            members = cluster.get('members', {})
+            
+            if anchor_rtp is None:
+                continue
+                
+            # Find which channel this RTP belongs to
+            if anchor_station and anchor_station in members:
+                anchor_cands = members[anchor_station]
+                if anchor_cands:
+                    anchor_channel = anchor_cands[0].channel
+                    wc = getattr(anchor_cands[0], 'wallclock_time', None)
+                    
+                    if wc is not None:
+                        age = current_time - wc
+                        # CRITICAL: Need cluster that is at least 60s old
+                        # The tone marks the START of a minute, so we need 60s of data AFTER it
+                        # If age < 60s, we don't have the full minute yet
+                        if age >= 60 and age < 120:  # Between 60-120s old - full minute available
+                            best_cluster = cluster
+                            best_anchor_rtp = anchor_rtp
+                            best_anchor_channel = anchor_channel
+                            best_wallclock = wc
+                            logger.info(f"[BOOTSTRAP_MANAGER] Using cluster: {anchor_station} on {anchor_channel}, "
+                                       f"RTP={anchor_rtp}, wallclock={wc:.3f}, age={age:.1f}s (full minute available)")
+                            break
+                        elif age < 60:
+                            logger.debug(f"[BOOTSTRAP_MANAGER] Cluster {anchor_station} too recent ({age:.1f}s), "
+                                        f"need 60s for full minute")
+        
+        if best_anchor_rtp is None or best_anchor_channel is None or best_wallclock is None:
+            logger.warning("[BOOTSTRAP_MANAGER] No recent validated cluster with RTP/channel/wallclock info")
+            return None
+        
+        # ================================================================
+        # NTP-BASED TIME CONFIRMATION (2026-01-29)
+        # ================================================================
+        # The cluster's wallclock_time is derived from GPSDO-synchronized NTP.
+        # We use this directly to identify the UTC minute of the detected tone,
+        # without requiring BCD/FSK decode.
+        #
+        # The tone detection finds minute markers (800ms tones at second 0).
+        # The wallclock tells us WHICH minute this is in UTC.
+        # This is sufficient to establish the RTP-to-UTC offset.
+        
+        # Round wallclock down to minute boundary
+        minute_boundary_wallclock = (best_wallclock // 60) * 60
+        
+        # Extract UTC time components from the NTP-derived wallclock
+        import datetime
+        utc_dt = datetime.datetime.utcfromtimestamp(minute_boundary_wallclock)
+        ntp_hour = utc_dt.hour
+        ntp_minute = utc_dt.minute
+        
+        logger.info(f"[BOOTSTRAP_MANAGER] NTP-based time confirmation: "
+                   f"wallclock={best_wallclock:.3f} → {ntp_hour:02d}:{ntp_minute:02d} UTC, "
+                   f"anchor_rtp={best_anchor_rtp}")
+        
+        # Confirm time using NTP directly - no BCD/FSK decode required
+        # The bootstrap will use this to establish the RTP-to-UTC offset
+        result = self.bootstrap.confirm_time_from_ntp(
+            ntp_wallclock=minute_boundary_wallclock,
+            anchor_rtp=best_anchor_rtp,
+            anchor_channel=best_anchor_channel,
+        )
+        
+        if result:
+            logger.info(f"[BOOTSTRAP_MANAGER] NTP time confirmation: {result}")
+            return result
+        
+        # ================================================================
+        # OPTIONAL: Attempt BCD/FSK decode for sub-second refinement
+        # ================================================================
+        # BCD/FSK decode is no longer required for LOCKED state, but can
+        # provide additional confidence and sub-second accuracy if successful.
         
         samples_per_minute = 60 * self.sample_rate
-        reference_rtp = self.bootstrap.reference_rtp
-        reference_channel = getattr(self.bootstrap, 'reference_channel', None)
-        
-        # Convert reference_rtp to wallclock using the anchor channel's timing info
-        minute_boundary_wallclock = None
-        if reference_channel and reference_channel in self.channel_infos:
-            anchor_info = self.channel_infos[reference_channel]
-            minute_boundary_wallclock = rtp_to_wallclock(reference_rtp, anchor_info, self.sample_rate)
-            if minute_boundary_wallclock:
-                logger.info(f"[BOOTSTRAP_MANAGER] Minute boundary: wallclock={minute_boundary_wallclock:.3f} "
-                           f"(from {reference_channel} RTP={reference_rtp})")
-        
-        if minute_boundary_wallclock is None:
-            # Fallback: try to find any channel with timing info
-            for ch_name, ch_info in self.channel_infos.items():
-                if ch_name in self.buffers:
-                    buffer = self.buffers[ch_name]
-                    if buffer.buffer_start_rtp is not None:
-                        # Use buffer midpoint as reference
-                        mid_rtp = buffer.buffer_start_rtp + buffer.buffer_size // 2
-                        test_wallclock = rtp_to_wallclock(mid_rtp, ch_info, self.sample_rate)
-                        if test_wallclock:
-                            # Estimate minute boundary from reference_rtp offset
-                            # This is approximate but better than nothing
-                            logger.info(f"[BOOTSTRAP_MANAGER] Using {ch_name} for wallclock alignment")
-                            minute_boundary_wallclock = test_wallclock
-                            break
         
         chu_samples = None
         wwv_samples = None
         wwvh_samples = None
+        chu_power_db = -200.0
+        wwv_power_db = -200.0
+        wwvh_power_db = -200.0
+        
+        import numpy as np
         
         for channel_name, buffer in self.buffers.items():
             channel_upper = channel_name.upper()
@@ -730,15 +828,32 @@ class BootstrapBufferManager:
             # Get this channel's timing info
             channel_info = self.channel_infos.get(channel_name)
             
-            # Convert minute boundary wallclock to this channel's RTP space
-            if minute_boundary_wallclock and channel_info:
+            # CRITICAL: For the anchor channel, use the RTP where tone was detected
+            # BUT adjust for the fact that tone detection finds the correlation PEAK
+            # which is ~400ms into the 800ms tone, not at the second boundary.
+            # Go BACK 400ms to align with second 0.
+            if channel_name == best_anchor_channel:
+                # Tone detection RTP is at correlation peak (~400ms after second start)
+                # Go back to get to the actual second 0 boundary
+                tone_peak_offset_samples = int(0.400 * self.sample_rate)  # 400ms = 9600 samples at 24kHz
+                channel_rtp = best_anchor_rtp - tone_peak_offset_samples
+                logger.info(f"[BOOTSTRAP_MANAGER] {channel_name}: Using anchor RTP {best_anchor_rtp} - 400ms = {channel_rtp}")
+            elif channel_info:
+                # Convert minute boundary wallclock to this channel's RTP space
                 channel_rtp = wallclock_to_rtp(minute_boundary_wallclock, channel_info, self.sample_rate)
                 if channel_rtp is None:
-                    logger.debug(f"[BOOTSTRAP_MANAGER] {channel_name}: cannot convert wallclock to RTP")
+                    logger.debug(f"[BOOTSTRAP_MANAGER] {channel_name}: cannot convert wallclock to RTP (no GPS timing)")
                     continue
+                
+                # Diagnostic: Check if computed RTP is within buffer range
+                if buffer.buffer_start_rtp is not None:
+                    buffer_end_rtp = buffer.buffer_start_rtp + min(buffer.total_samples_written, buffer.buffer_size)
+                    if channel_rtp < buffer.buffer_start_rtp or channel_rtp >= buffer_end_rtp:
+                        logger.warning(f"[BOOTSTRAP_MANAGER] {channel_name}: computed RTP {channel_rtp} outside buffer "
+                                      f"[{buffer.buffer_start_rtp}, {buffer_end_rtp}), wallclock={minute_boundary_wallclock:.3f}")
             else:
-                # No wallclock alignment available - use reference_rtp directly (may fail for different SSRCs)
-                channel_rtp = reference_rtp
+                logger.debug(f"[BOOTSTRAP_MANAGER] {channel_name}: no channel_info available")
+                continue
             
             # Log buffer range for debugging
             buffer_end = buffer.buffer_start_rtp + buffer.buffer_size if buffer.buffer_start_rtp else None
@@ -752,26 +867,29 @@ class BootstrapBufferManager:
                 logger.debug(f"[BOOTSTRAP_MANAGER] {channel_name}: only {len(samples)} samples (need {samples_per_minute})")
                 continue
             
+            # Check signal power in retrieved samples
+            sample_power_db = 10 * np.log10(np.mean(np.abs(samples)**2) + 1e-10)
+            logger.info(f"[BOOTSTRAP_MANAGER] {channel_name}: Retrieved {len(samples)} samples at RTP {channel_rtp}, "
+                       f"power={sample_power_db:.1f}dB")
+            
+            # Select samples based on SIGNAL POWER (not just length)
+            # This ensures we use the strongest signal for decoding
             if 'CHU' in channel_upper:
-                if chu_samples is None or len(samples) > len(chu_samples):
+                if sample_power_db > chu_power_db:
                     chu_samples = samples
-                    logger.info(f"[BOOTSTRAP_MANAGER] Got {len(samples)} CHU samples for time confirmation")
+                    chu_power_db = sample_power_db
+                    logger.info(f"[BOOTSTRAP_MANAGER] Selected {channel_name} for CHU decode (power={sample_power_db:.1f}dB)")
             elif 'WWVH' in channel_upper:
-                # Explicit WWVH channel
-                if wwvh_samples is None or len(samples) > len(wwvh_samples):
+                if sample_power_db > wwvh_power_db:
                     wwvh_samples = samples
-                    logger.info(f"[BOOTSTRAP_MANAGER] Got {len(samples)} WWVH samples for time confirmation")
-            elif 'WWV' in channel_upper:
-                # WWV channel (not WWVH)
-                if wwv_samples is None or len(samples) > len(wwv_samples):
+                    wwvh_power_db = sample_power_db
+                    logger.info(f"[BOOTSTRAP_MANAGER] Selected {channel_name} for WWVH decode (power={sample_power_db:.1f}dB)")
+            elif 'WWV' in channel_upper or 'SHARED' in channel_upper:
+                # WWV and SHARED channels - select strongest for WWV decode
+                if sample_power_db > wwv_power_db:
                     wwv_samples = samples
-                    logger.info(f"[BOOTSTRAP_MANAGER] Got {len(samples)} WWV samples for time confirmation")
-            elif 'SHARED' in channel_upper:
-                # SHARED channels contain WWV/WWVH - use for WWV/WWVH decode
-                # The BCD decoder handles both WWV and WWVH (same 100 Hz subcarrier)
-                if wwv_samples is None or len(samples) > len(wwv_samples):
-                    wwv_samples = samples
-                    logger.info(f"[BOOTSTRAP_MANAGER] Got {len(samples)} SHARED samples for WWV/WWVH time confirmation")
+                    wwv_power_db = sample_power_db
+                    logger.info(f"[BOOTSTRAP_MANAGER] Selected {channel_name} for WWV decode (power={sample_power_db:.1f}dB)")
         
         # Log what we're passing to confirmation
         logger.info(f"[BOOTSTRAP_MANAGER] Time confirmation: CHU={len(chu_samples) if chu_samples is not None else 0}, "

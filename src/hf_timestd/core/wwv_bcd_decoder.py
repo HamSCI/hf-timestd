@@ -150,11 +150,12 @@ class WWVBCDDecoder:
         
         # Design FIR bandpass filter for 100 Hz subcarrier
         # Use FIR instead of IIR to avoid numerical issues with narrow bandwidth
+        # Widen to 50-150 Hz to tolerate Doppler shift and frequency uncertainty
         from scipy.signal import firwin
         nyq = sample_rate / 2
-        low = 80 / nyq
-        high = 120 / nyq
-        num_taps = 501  # Long filter for narrow bandwidth
+        low = 50 / nyq
+        high = 150 / nyq
+        num_taps = 201  # Shorter filter for wider bandwidth
         self._subcarrier_fir = firwin(num_taps, [low, high], pass_zero=False)
         
         logger.debug(f"WWV BCD Decoder initialized: {sample_rate} Hz")
@@ -174,37 +175,75 @@ class WWVBCDDecoder:
     
     def _extract_subcarrier(self, iq_samples: np.ndarray) -> np.ndarray:
         """
-        Extract 100 Hz subcarrier power using short-time FFT.
+        Extract 100 Hz subcarrier power from IQ samples.
         
-        This is more robust than envelope detection for weak/noisy signals.
-        Returns power values in 20ms windows.
+        WWV/WWVH Signal Structure:
+        - The carrier is at DC in baseband IQ
+        - The 100 Hz subcarrier is AM modulated onto the carrier
+        - In baseband IQ, this appears as 100 Hz amplitude modulation of the envelope
+        
+        DSP Flow:
+        1. AM demodulate: Extract envelope using |IQ| (magnitude)
+        2. Bandpass filter around 100 Hz to isolate subcarrier
+        3. Extract envelope of the 100 Hz component
+        
+        Returns power values representing 100 Hz subcarrier presence.
         """
-        # Use real part of IQ (the 100 Hz subcarrier is in baseband)
-        audio = np.real(iq_samples).astype(np.float64)
+        # Step 1: AM demodulation - extract envelope from IQ
+        # The 100 Hz subcarrier modulates the carrier amplitude
+        envelope = np.abs(iq_samples).astype(np.float64)
         
-        # Compute 100 Hz power in 20ms windows
-        window_samples = int(0.02 * self.sample_rate)  # 20ms
-        powers = []
+        # Remove DC component (carrier level)
+        envelope = envelope - np.mean(envelope)
         
-        for i in range(0, len(audio) - window_samples, window_samples):
-            window = audio[i:i + window_samples]
-            fft_data = np.abs(np.fft.fft(window))
-            freqs = np.fft.fftfreq(len(fft_data), 1/self.sample_rate)
-            
-            # Get power at 100 Hz (±10 Hz)
-            mask = (freqs > 90) & (freqs < 110)
-            power = fft_data[mask].max() if mask.any() else 0
-            powers.append(power)
+        # Step 2: Bandpass filter around 100 Hz to isolate subcarrier
+        # Use the pre-computed FIR filter (80-120 Hz)
+        from scipy.signal import filtfilt
+        try:
+            filtered = filtfilt(self._subcarrier_fir, 1.0, envelope)
+        except Exception as e:
+            logger.debug(f"BCD filter failed: {e}, using unfiltered envelope")
+            filtered = envelope
         
-        # Expand to sample-level resolution for compatibility
-        # Each power value represents 20ms = 480 samples at 24kHz
-        envelope = np.repeat(powers, window_samples)
+        # Step 3: Extract envelope of the 100 Hz component
+        # Use absolute value to get the subcarrier power
+        subcarrier_power = np.abs(filtered)
         
-        # Pad to original length if needed
-        if len(envelope) < len(audio):
-            envelope = np.concatenate([envelope, np.zeros(len(audio) - len(envelope))])
+        # Smooth with a short moving average (10ms window)
+        smooth_samples = int(0.01 * self.sample_rate)
+        if smooth_samples > 1:
+            kernel = np.ones(smooth_samples) / smooth_samples
+            subcarrier_power = np.convolve(subcarrier_power, kernel, mode='same')
         
-        return envelope[:len(audio)]
+        # Log diagnostic info
+        power_db = 10 * np.log10(np.mean(subcarrier_power**2) + 1e-10)
+        peak_db = 10 * np.log10(np.max(subcarrier_power**2) + 1e-10)
+        iq_power_db = 10 * np.log10(np.mean(np.abs(iq_samples)**2) + 1e-10)
+        envelope_power_db = 10 * np.log10(np.mean(envelope**2) + 1e-10)
+        
+        # Check spectrum of envelope to see if 100 Hz is present
+        fft_len = min(len(envelope), 4 * self.sample_rate)  # 4 seconds
+        spectrum = np.abs(np.fft.fft(envelope[:fft_len]))
+        freqs = np.fft.fftfreq(fft_len, 1/self.sample_rate)
+        
+        # Find power around 100 Hz (90-110 Hz)
+        mask_100hz = (freqs >= 90) & (freqs <= 110)
+        power_at_100hz = np.max(spectrum[mask_100hz]) if mask_100hz.any() else 0
+        power_at_100hz_db = 20 * np.log10(power_at_100hz / fft_len + 1e-10)
+        
+        # Find noise floor (200-500 Hz, away from harmonics)
+        mask_noise = (freqs >= 200) & (freqs <= 500)
+        noise_floor = np.median(spectrum[mask_noise]) if mask_noise.any() else 1
+        noise_floor_db = 20 * np.log10(noise_floor / fft_len + 1e-10)
+        
+        snr_100hz = power_at_100hz_db - noise_floor_db
+        
+        logger.info(f"[BCD] Subcarrier extraction: IQ_power={iq_power_db:.1f}dB, "
+                   f"envelope={envelope_power_db:.1f}dB, 100Hz_filtered={power_db:.1f}dB")
+        logger.info(f"[BCD] Spectrum analysis: 100Hz_peak={power_at_100hz_db:.1f}dB, "
+                   f"noise_floor={noise_floor_db:.1f}dB, SNR={snr_100hz:.1f}dB")
+        
+        return subcarrier_power
     
     def _measure_pulse_widths(self, envelope: np.ndarray) -> List[float]:
         """
@@ -226,6 +265,12 @@ class WWVBCDDecoder:
         # This ignores static crashes (spikes) while being robust to QSB
         global_max = np.percentile(envelope, 95)
         threshold = global_max * 0.4
+        
+        # Log threshold info for diagnostics
+        env_mean = np.mean(envelope)
+        env_std = np.std(envelope)
+        logger.info(f"[BCD] Pulse measurement: env_mean={env_mean:.2e}, env_std={env_std:.2e}, "
+                   f"p95={global_max:.2e}, threshold={threshold:.2e}")
         
         for second in range(60):
             start_idx = second * self.samples_per_second
@@ -460,14 +505,29 @@ class WWVBCDDecoder:
         envelope = self._extract_subcarrier(iq_samples)
         
         # Align to second boundaries
+        # NOTE: The sample retrieval code already adjusts the RTP by -400ms to account for
+        # the tone detection finding the correlation peak (middle of 800ms tone).
+        # So samples should start near second 0. We only need a small offset for the
+        # 100 Hz subcarrier rise delay (~30ms after second boundary).
+        
         if second_offset_samples is not None:
             # Use bootstrap-provided offset (more reliable than per-file coarse_sync)
             offset = second_offset_samples
-            logger.debug(f"BCD using bootstrap offset: {offset} samples ({offset/self.sample_rate*1000:.1f}ms)")
+            logger.info(f"[BCD] Using bootstrap offset: {offset} samples ({offset/self.sample_rate*1000:.1f}ms)")
         else:
-            # Fall back to coarse_sync (less reliable due to ~30ms variation)
-            offset = self.coarse_sync(envelope)
-            logger.debug(f"BCD coarse sync: offset={offset} samples ({offset/self.sample_rate*1000:.1f}ms)")
+            # Try coarse_sync first - it should find a small offset if samples are aligned
+            coarse_offset = self.coarse_sync(envelope)
+            
+            # If coarse_sync finds a reasonable offset (< 500ms), use it
+            if coarse_offset < self.sample_rate // 2:
+                offset = coarse_offset
+                logger.info(f"[BCD] Using coarse sync offset: {offset} samples ({offset/self.sample_rate*1000:.1f}ms)")
+            else:
+                # Coarse sync failed - use minimal offset (just subcarrier rise delay)
+                # The 100 Hz subcarrier rises ~30ms after second boundary
+                offset = int(0.030 * self.sample_rate)  # 30ms = 720 samples at 24kHz
+                logger.info(f"[BCD] Using minimal offset: {offset} samples ({offset/self.sample_rate*1000:.1f}ms) "
+                           f"(coarse_sync gave {coarse_offset/self.sample_rate*1000:.1f}ms)")
         
         result.coarse_sync_offset_samples = offset
         if offset > 0 and offset < len(envelope):
@@ -482,14 +542,22 @@ class WWVBCDDecoder:
         
         # Check position markers
         markers_found = 0
+        marker_details = []
         for marker_sec in POSITION_MARKERS:
-            if marker_sec < len(classifications) and classifications[marker_sec] == 'P':
-                markers_found += 1
+            if marker_sec < len(classifications):
+                cls = classifications[marker_sec]
+                width = pulse_widths[marker_sec] if marker_sec < len(pulse_widths) else 0
+                marker_details.append(f"s{marker_sec}:{cls}({width:.0f}ms)")
+                if cls == 'P':
+                    markers_found += 1
         result.markers_found = markers_found
         
-        # Need at least 4 of 7 markers to proceed
-        if markers_found < 4:
-            logger.debug(f"BCD decode: insufficient markers ({markers_found}/7)")
+        logger.info(f"[BCD] Markers: {markers_found}/7 - {', '.join(marker_details)}")
+        
+        # Need at least 3 of 7 markers to proceed (lowered from 4 for HF fading tolerance)
+        # With 3 markers we can still decode time if they're in the right positions
+        if markers_found < 3:
+            logger.info(f"[BCD] Insufficient markers ({markers_found}/7), need 3+")
             return result
         
         # Decode minute (seconds 10-13 ones, 15-17 tens)
