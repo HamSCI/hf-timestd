@@ -89,6 +89,7 @@ from .bootstrap_rolling_buffer import (
     DEFAULT_BUFFER_DURATION_SEC
 )
 from .timing_bootstrap import TimingBootstrap, BootstrapState, LockTier
+from .arrival_pattern_matrix import ArrivalPatternMatrix
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,16 @@ class BootstrapService:
         # Each channel needs its own detector with appropriate templates
         self._tone_detectors: Dict[str, Any] = {}
         
+        # Arrival Pattern Matrix for physics-based validation
+        # This provides expected arrival times based on geography + IRI-2020
+        self.arrival_matrix = ArrivalPatternMatrix(
+            receiver_lat=config.receiver_lat,
+            receiver_lon=config.receiver_lon,
+            sample_rate=config.sample_rate,
+            enable_iri=True
+        )
+        logger.info("[BOOTSTRAP_SERVICE] ArrivalPatternMatrix initialized with IRI-2020")
+        
         # State
         self.phase = BootstrapPhase.INITIALIZING
         self._lock = threading.RLock()
@@ -250,6 +261,54 @@ class BootstrapService:
             )
             logger.info(f"[BOOTSTRAP_SERVICE] Created ToneDetector for {channel_name}")
         return self._tone_detectors[channel_name]
+    
+    def validate_candidate_against_matrix(
+        self,
+        station: str,
+        frequency_mhz: float,
+        timing_error_ms: float,
+        snr_db: float
+    ) -> Tuple[bool, float, str]:
+        """
+        Validate a tone candidate against the ArrivalPatternMatrix.
+        
+        This provides physics-based validation: is this detection where
+        we expect it based on geography and ionospheric model?
+        
+        Args:
+            station: Station name (WWV, WWVH, CHU, BPM)
+            frequency_mhz: Frequency in MHz
+            timing_error_ms: Detected timing offset in ms
+            snr_db: Signal-to-noise ratio in dB
+            
+        Returns:
+            Tuple of (is_valid, confidence, reason)
+        """
+        from datetime import datetime, timezone
+        
+        # Convert timing_error_ms to sample offset
+        detected_sample = int(timing_error_ms * self.config.sample_rate / 1000)
+        
+        return self.arrival_matrix.validate_detection(
+            station=station,
+            frequency_mhz=frequency_mhz,
+            detected_sample=detected_sample,
+            snr_db=snr_db,
+            utc_time=datetime.now(timezone.utc)
+        )
+    
+    def get_search_windows_for_frequency(self, frequency_mhz: float) -> Dict[str, Tuple[int, int]]:
+        """
+        Get physics-based search windows for all stations at a frequency.
+        
+        Returns:
+            Dict mapping station name to (min_sample, max_sample) search window
+        """
+        from datetime import datetime, timezone
+        return self.arrival_matrix.get_search_windows(
+            frequency_mhz=frequency_mhz,
+            utc_time=datetime.now(timezone.utc)
+        )
     
     def add_samples(
         self,

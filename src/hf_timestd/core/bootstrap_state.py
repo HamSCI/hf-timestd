@@ -25,7 +25,8 @@ from typing import Optional, Callable
 logger = logging.getLogger(__name__)
 
 # Default state file location
-DEFAULT_STATE_FILE = Path('/var/lib/timestd/state/bootstrap_state.json')
+# NOTE: This must match the file written by bootstrap_service.py
+DEFAULT_STATE_FILE = Path('/var/lib/timestd/state/bootstrap_timing_reference.json')
 
 
 @dataclass
@@ -52,9 +53,28 @@ class BootstrapState:
     
     @classmethod
     def from_json(cls, json_str: str) -> 'BootstrapState':
-        """Deserialize from JSON."""
+        """Deserialize from JSON.
+        
+        Handles both the old bootstrap_state.json format and the new
+        bootstrap_timing_reference.json format written by bootstrap_service.py.
+        """
         data = json.loads(json_str)
-        return cls(**data)
+        
+        # Extract only the fields that BootstrapState expects
+        # The timing reference file has additional fields we don't need
+        return cls(
+            locked=data.get('locked', False),
+            lock_tier=data.get('lock_tier', 'NONE'),
+            d_clock_ms=data.get('d_clock_ms'),
+            uncertainty_ms=data.get('uncertainty_ms'),
+            lock_time=data.get('lock_time'),
+            sample_rate=data.get('sample_rate', 24000),
+            reference_rtp=data.get('reference_rtp'),
+            reference_utc=data.get('reference_utc'),
+            rtp_to_utc_offset_samples=data.get('rtp_to_utc_offset_samples'),
+            rtp_to_utc_offset_sec=data.get('rtp_to_utc_offset_sec'),
+            ntp_correction_ms=data.get('ntp_correction_ms')
+        )
     
     @classmethod
     def from_file(cls, path: Path) -> Optional['BootstrapState']:

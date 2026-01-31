@@ -269,6 +269,9 @@ EVIDENCE_PATTERNS = {
         "offset measurements": r"Collected.*offset measurements|offset measurements for refined",
         "Offset change from provisional": r"Offset change from provisional",
         "Station distribution": r"Station distribution:",
+        # v6.4 NTP-based time confirmation
+        "NTP confirmation": r"time_confirmed=True|BOOTSTRAP_REF.*time_confirmed|Wrote timing reference.*time_confirmed",
+        "time_snap": r"time_snap|system_time|start_system_time|Bootstrap offset.*ref_rtp",
     },
     "fusion": {
         "uncertainty": r"uncertainty|σ|sigma|±",

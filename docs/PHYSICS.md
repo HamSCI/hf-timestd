@@ -2,8 +2,8 @@
 
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 6.2.0  
-**Last Updated:** 2026-01-24
+**System Version:** 6.4.0 (NTP-Based Time Confirmation)  
+**Last Updated:** 2026-01-29
 
 ---
 

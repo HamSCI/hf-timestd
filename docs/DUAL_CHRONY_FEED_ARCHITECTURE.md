@@ -323,6 +323,66 @@ chronyc sources -v
 #  TSL2 (SHM 1) - L2 feed (selected with *)
 ```
 
+## ⚠️ Critical: Bootstrap vs Locked Time Authority
+
+### Understanding the Two-Phase Model
+
+| Phase | Time Authority | NTP Role |
+|-------|---------------|----------|
+| **Bootstrap** | NTP (from GPSDO) | Identifies which UTC minute we're in |
+| **Locked** | HF tone arrivals | NTP not consulted — HF is ground truth |
+
+**Key Point:** NTP is used **once** for initial orientation. After lock, the system derives time from HF signals, not NTP.
+
+### The Circular Dependency Risk
+
+If the bootstrap phase uses NTP, and chrony is configured to prefer TSL1/TSL2 over an external reference, a **circular dependency** can occur during bootstrap:
+
+```
+System Clock ← Chrony ← TSL2 ← Bootstrap ← NTP (System Clock)
+     ↑________________________________________________|
+```
+
+**Symptoms:**
+- TSL1/TSL2 show `+0ns` offset during bootstrap
+- External GPSDO shows 10-50ms offset but is marked `x` (may be in error)
+- Initial lock inherits system clock error
+
+### The Solution
+
+**If you have a GPSDO or stratum-1 server**, configure it as the preferred source:
+
+```bash
+# In /etc/chrony/chrony.conf:
+server 192.168.0.202 iburst prefer   # Your GPSDO - MUST have 'prefer'
+refclock SHM 0 refid TSL1 poll 4 precision 1e-3
+refclock SHM 1 refid TSL2 poll 4 precision 1e-4
+```
+
+This ensures:
+1. Bootstrap gets accurate initial orientation from GPSDO
+2. After lock, HF measurements refine the offset independently
+3. TSL feeds contribute to chrony as secondary sources
+
+**If TSL is your only local reference**, use remote NTP pools as a sanity check:
+
+```bash
+# Ensure pool servers are included and not marked 'noselect'
+pool pool.ntp.org iburst
+```
+
+### Verification
+
+```bash
+chronyc sources -v
+# Your GPSDO should show '*' (selected), not 'x' (may be in error)
+# TSL1/TSL2 should show '+' (combined) or '-' (not combined)
+```
+
+<!-- LOGS: fusion | filter: "chrony" -->
+
+---
+
 ## Troubleshooting
 
 ### L2 Calibration Service Not Starting

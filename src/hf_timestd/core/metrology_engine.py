@@ -36,6 +36,7 @@ from hf_timestd.models import (
 )
 from hf_timestd.core.wwvh_discrimination import WWVHDiscriminator
 from hf_timestd.core.tone_detector import MultiStationToneDetector
+from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
 # We keep discriminators as they are signal analysis, not physics modeling.
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,9 @@ class MetrologyEngine:
         
         # Initialize sub-components
         self._init_components()
+        
+        # Initialize Arrival Pattern Matrix for physics-based validation
+        self._init_arrival_matrix()
         
         # State
         self._lock = threading.Lock()
@@ -160,6 +164,34 @@ class MetrologyEngine:
             logger.error(f"Failed to initialize Metrology components: {e}")
             raise
 
+    def _init_arrival_matrix(self):
+        """
+        Initialize the Arrival Pattern Matrix for physics-based validation.
+        
+        The matrix provides expected arrival times based on:
+        - Geography (receiver and station locations)
+        - Frequency (affects ionospheric reflection height)
+        - UTC time (affects ionospheric conditions via IRI-2020)
+        
+        This replaces historical calibration with physics-based predictions.
+        """
+        self.arrival_matrix = None
+        
+        if self.precise_lat is not None and self.precise_lon is not None:
+            try:
+                self.arrival_matrix = ArrivalPatternMatrix(
+                    receiver_lat=self.precise_lat,
+                    receiver_lon=self.precise_lon,
+                    sample_rate=self.sample_rate,
+                    enable_iri=True  # Use IRI-2020 if available
+                )
+                logger.info(f"ArrivalPatternMatrix initialized for {self.channel_name}")
+            except Exception as e:
+                logger.warning(f"Could not initialize ArrivalPatternMatrix: {e}")
+                self.arrival_matrix = None
+        else:
+            logger.info(f"ArrivalPatternMatrix not initialized (no precise coordinates)")
+
     def _validate_input(self, iq_samples: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Validate and normalize input samples."""
         # Same logic as Phase2TemporalEngine
@@ -177,17 +209,42 @@ class MetrologyEngine:
             
         return iq_samples, metrics
 
-    def _predict_geometric_delay(self, station: str) -> Tuple[float, float, float]:
+    def _predict_geometric_delay(self, station: str, utc_time: Optional[float] = None) -> Tuple[float, float, float]:
         """
-        Calculate expected light-speed travel time.
-        Returns: (min_delay_ms, distance_km, uncertainty_ms)
+        Calculate expected propagation delay using ArrivalPatternMatrix.
+        
+        If ArrivalPatternMatrix is available, uses IRI-2020 ionospheric model.
+        Otherwise falls back to simple light-speed calculation.
+        
+        Returns: (expected_delay_ms, distance_km, uncertainty_ms)
         """
-        # Use centralized station coordinates from wwv_constants (single source of truth)
+        # Try ArrivalPatternMatrix first (physics-based with IRI-2020)
+        if self.arrival_matrix is not None:
+            try:
+                from datetime import datetime, timezone
+                if utc_time is not None:
+                    dt = datetime.fromtimestamp(utc_time, tz=timezone.utc)
+                else:
+                    dt = datetime.now(timezone.utc)
+                
+                arrival = self.arrival_matrix.get_expected_arrivals(dt).get_arrival(
+                    station, self.frequency_mhz
+                )
+                if arrival is not None:
+                    return (
+                        arrival.expected_delay_ms,
+                        arrival.great_circle_km,
+                        arrival.uncertainty_3sigma_ms / 3.0  # Return 1-sigma
+                    )
+            except Exception as e:
+                logger.debug(f"ArrivalPatternMatrix lookup failed: {e}")
+        
+        # Fallback to simple light-speed calculation
         from .wwv_constants import STATION_LOCATIONS
         STATIONS = {k: {'lat': v['lat'], 'lon': v['lon']} for k, v in STATION_LOCATIONS.items()}
         
         if station not in STATIONS or self.precise_lat is None or self.precise_lon is None:
-            return 0.0, 0.0, 500.0 # Blind fallback
+            return 0.0, 0.0, 500.0  # Blind fallback
             
         st = STATIONS[station]
         
@@ -202,19 +259,10 @@ class MetrologyEngine:
         
         light_time_ms = dist_km / SPEED_OF_LIGHT_KM_MS
         
-        # For HF, propagation is always longer than light time (reflection).
-        # Expected delay is roughly light_time + 10-20%.
-        # But for search window centering, light_time is a firm lower bound.
-        # Let's center the window slightly after light_time.
-        # 1-hop F-layer adds ~1-2ms extra path?
-        # Actually it's significant. 1500km path -> 5ms light time.
-        # Skywave is hypotenuse. 
-        # But this is just for search window centering. 
-        # A simple model: expected = light_time + 2.0ms?
-        # Let's say expected = light_time.
-        # Uncertainty is large because we don't know the hop.
+        # Simple ionospheric overhead estimate (~10-20% longer than light time)
+        expected_delay_ms = light_time_ms * 1.15
         
-        return light_time_ms, dist_km, 20.0 # +/- 20ms uncertainty around line-of-sight is reasonable start
+        return expected_delay_ms, dist_km, 15.0  # 15ms 1-sigma uncertainty
 
     def process_minute(
         self,
@@ -235,24 +283,28 @@ class MetrologyEngine:
         adaptive_window_ms = 500.0
         expected_offset_ms = 0.0
         
-        # Simple Geometric Prior (if available) to aid detection
-        # Determine likely station
+        # Use ArrivalPatternMatrix for physics-based search windows
         likely_station = self._station_from_channel_name()
         if likely_station != 'UNKNOWN':
-            # Use geometric delay as search center
-            geom_delay, dist, unc = self._predict_geometric_delay(likely_station)
-            if geom_delay > 0:
-                expected_offset_ms = geom_delay + 2.0 # Bias slightly for skywave
+            # Get expected delay from physics model (IRI-2020 if available)
+            expected_delay_ms, dist_km, uncertainty_ms = self._predict_geometric_delay(
+                likely_station, system_time
+            )
+            
+            if expected_delay_ms > 0:
+                expected_offset_ms = expected_delay_ms
                 
-                # CHU uses 0.5s template, so correlation peak is at tone_start + 250ms
-                # Need wider window to capture this offset from minute boundary
+                # Search window: 3-sigma from physics model, minimum 50ms
+                # CHU needs wider window due to template offset
                 if likely_station == 'CHU':
                     # CHU: correlation peak at ~250ms + propagation delay
-                    # Use 500ms window to reliably capture the peak
-                    adaptive_window_ms = 500.0
+                    adaptive_window_ms = max(100.0, uncertainty_ms * 3)
                 else:
-                    # WWV/WWVH: 0.8s template, peak at ~400ms but we search for onset
-                    adaptive_window_ms = 200.0
+                    # WWV/WWVH: tighter window from physics model
+                    adaptive_window_ms = max(50.0, uncertainty_ms * 3)
+                
+                logger.debug(f"{self.channel_name}: Physics-based search: "
+                            f"expected={expected_offset_ms:.1f}ms, window=±{adaptive_window_ms:.0f}ms")
         
         # Run detection
         # Note: We replicate _step1_tone_detection logic simplified
@@ -336,6 +388,7 @@ class MetrologyEngine:
                            f"DUT1={fsk_res.dut1_seconds}s, TAI-UTC={fsk_res.tai_utc}s")
                  
         # === Step 3: Package into L1MetrologyMeasurement ===
+        # Validate each detection against the ArrivalPatternMatrix
         results = []
         for det in detections:
             # Map station name to Enum
@@ -344,32 +397,64 @@ class MetrologyEngine:
             except KeyError:
                 station_id_enum = StationID.UNKNOWN
 
-            # Geometric check
-            geo_delay, dist_km, _ = self._predict_geometric_delay(det.station.value)
+            # Physics-based validation using ArrivalPatternMatrix
+            geo_delay, dist_km, uncertainty_ms = self._predict_geometric_delay(
+                det.station.value, system_time
+            )
             
-            # Construct L1
+            # Validate detection against physics model
+            physics_valid = True
+            physics_confidence = 1.0
+            validation_reason = "no_matrix"
+            
+            if self.arrival_matrix is not None:
+                # Convert timing_error_ms to sample offset for validation
+                detected_sample = int(det.timing_error_ms * self.sample_rate / 1000)
+                
+                is_valid, confidence, reason = self.arrival_matrix.validate_detection(
+                    station=det.station.value,
+                    frequency_mhz=self.frequency_mhz,
+                    detected_sample=detected_sample,
+                    snr_db=det.snr_db,
+                    utc_time=datetime.fromtimestamp(system_time, tz=timezone.utc)
+                )
+                
+                physics_valid = is_valid
+                physics_confidence = confidence
+                validation_reason = reason
+                
+                # Log validation result but DON'T reject - let downstream handle it
+                # The physics model may need calibration, so we flag rather than reject
+                if not is_valid:
+                    logger.info(f"{self.channel_name}: Physics validation WARNING: "
+                               f"{det.station.value} @ {det.timing_error_ms:.1f}ms - {reason}")
+                    # Reduce confidence for physics outliers but don't reject
+                    physics_confidence = 0.3
+                else:
+                    logger.debug(f"{self.channel_name}: Detection VALIDATED: "
+                                f"{det.station.value} @ {det.timing_error_ms:.1f}ms - {reason}")
+            
+            # Construct L1 measurement (only for validated detections)
             meas = L1MetrologyMeasurement(
                 timestamp_utc=datetime.fromtimestamp(buffer_mid_time, tz=timezone.utc).isoformat(),
                 minute_boundary_utc=minute_boundary,
-                rtp_timestamp=rtp_timestamp, # Base RTP
+                rtp_timestamp=rtp_timestamp,
                 station_id=station_id_enum,
                 frequency_mhz=self.frequency_mhz,
                 
-                raw_toa_ms=det.timing_error_ms, # "timing_error" is effectively TOA relative to second boundary?
-                # In Phase 2: "timing_error_ms = offset from expected second boundary"
-                # If emission is at 0, then timing_error_ms = TOA.
+                raw_toa_ms=det.timing_error_ms,
                 tone_detected=True,
                 
                 snr_db=det.snr_db,
                 doppler_hz=doppler_metrics.get(f"{det.station.value.lower()}_doppler_hz"),
                 
                 identification_method="tone_frequency",
-                identification_confidence=det.confidence,
+                identification_confidence=det.confidence * physics_confidence,
                 
                 distance_km=dist_km,
                 light_travel_time_ms=geo_delay,
                 
-                quality_flag=QualityFlag.GOOD if det.confidence > 0.5 else QualityFlag.MARGINAL
+                quality_flag=QualityFlag.GOOD if (det.confidence > 0.5 and physics_valid) else QualityFlag.MARGINAL
             )
             results.append(meas)
             

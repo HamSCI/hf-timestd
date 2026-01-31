@@ -211,6 +211,9 @@ try:
 except ImportError:
     PhysicsPropagationModel = None
 
+# Arrival Pattern Matrix for physics-based validation
+from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
+
 
 
 @dataclass
@@ -515,6 +518,16 @@ class MultiBroadcastFusion:
             receiver_lon=self.receiver_lon
         )
         self._bootstrap_offset_correction: Optional[float] = None
+
+        # Arrival Pattern Matrix (2026-01-29): Physics-based validation
+        # Validates L1/L2 measurements against expected arrivals from IRI-2020
+        self.arrival_matrix = ArrivalPatternMatrix(
+            receiver_lat=self.receiver_lat,
+            receiver_lon=self.receiver_lon,
+            sample_rate=self.sample_rate,
+            enable_iri=True
+        )
+        logger.info("ArrivalPatternMatrix initialized for physics-based validation")
 
         from .differential_time_solver import GlobalDifferentialSolver
         self.global_solver = GlobalDifferentialSolver(
@@ -2037,6 +2050,34 @@ class MultiBroadcastFusion:
                 if station == 'BPM':
                     if dt.minute in BPM_UT1_MINUTES:
                         continue
+
+                # Physics-based validation using ArrivalPatternMatrix (2026-01-29)
+                # Validate that raw_toa falls within expected bounds from IRI-2020
+                # NOTE: We flag but don't reject - the matrix may need calibration
+                physics_valid = True
+                physics_reason = "no_validation"
+                
+                if hasattr(self, 'arrival_matrix') and self.arrival_matrix is not None:
+                    # Convert raw_toa_ms to sample offset for validation
+                    detected_sample = int(raw_toa * self.sample_rate / 1000)
+                    snr_db_val = float(l1_item.get('snr_db', 0))
+                    
+                    is_valid, phys_conf, reason = self.arrival_matrix.validate_detection(
+                        station=station,
+                        frequency_mhz=freq_mhz,
+                        detected_sample=detected_sample,
+                        snr_db=snr_db_val,
+                        utc_time=dt
+                    )
+                    
+                    physics_valid = is_valid
+                    physics_reason = reason
+                    
+                    if not is_valid:
+                        logger.debug(f"Physics validation WARNING: {station}@{freq_mhz}MHz "
+                                    f"raw_toa={raw_toa:.1f}ms - {reason}")
+                        # Reduce confidence but don't reject
+                        confidence = confidence * 0.5
 
                 # Construct BroadcastMeasurement
                 m = BroadcastMeasurement(
@@ -4687,6 +4728,15 @@ def run_fusion_service(
                             discontinuity_ok = False
                     # else: First measurement after restart, allow it
                     
+                    # DIAGNOSTIC: Log gating status for debugging chrony feed issues
+                    if not (quality_ok and multi_station and consistent and discontinuity_ok):
+                        logger.info(
+                            f"Chrony feed GATED: quality_ok={quality_ok}, multi_station={multi_station}, "
+                            f"consistent={consistent}, discontinuity_ok={discontinuity_ok} "
+                            f"[grade={result.quality_grade}, n_sta={result.n_stations}, "
+                            f"flag={result.consistency_flag}, unc={result.uncertainty_ms:.1f}ms]"
+                        )
+                    
                     if quality_ok and multi_station and consistent and discontinuity_ok:
                         now = time.time()
                         system_time = now
@@ -4696,14 +4746,17 @@ def run_fusion_service(
                             if chrony_shm_l1 and result_l1:
                                 reference_time_l1 = system_time - (result_l1.d_clock_fused_ms / 1000.0)
                                 uncertainty_sec_l1 = max(0.1, result_l1.uncertainty_ms) / 1000.0
+                                # Precision = log2(seconds), more negative = better
+                                # Clamp to [-20, -4] range (1us to 62ms)
                                 raw_precision_l1 = int(np.log2(uncertainty_sec_l1))
-                                precision_l1 = min(-10, raw_precision_l1) if raw_precision_l1 > -10 else raw_precision_l1
+                                precision_l1 = max(-20, min(-4, raw_precision_l1))
                                 
                                 update_success_l1 = chrony_shm_l1.update(reference_time_l1, system_time, precision_l1)
                                 if update_success_l1:
                                     logger.debug(
                                         f"Chrony SHM L1 (unit=0) updated: D_clock={result_l1.d_clock_fused_ms:+.3f}ms, "
-                                        f"precision={precision_l1} [{result_l1.n_stations}sta, {result_l1.quality_grade}]"
+                                        f"uncertainty={result_l1.uncertainty_ms:.1f}ms, precision={precision_l1} "
+                                        f"[{result_l1.n_stations}sta, {result_l1.quality_grade}]"
                                     )
                                 else:
                                     logger.warning("Chrony SHM L1 write failed")
@@ -4712,15 +4765,17 @@ def run_fusion_service(
                             if chrony_shm_l2 and result_l2:
                                 reference_time_l2 = system_time - (result_l2.d_clock_fused_ms / 1000.0)
                                 uncertainty_sec_l2 = max(0.1, result_l2.uncertainty_ms) / 1000.0
+                                # Precision = log2(seconds), more negative = better
+                                # Clamp to [-20, -4] range (1us to 62ms)
                                 raw_precision_l2 = int(np.log2(uncertainty_sec_l2))
-                                # L2 should have better precision due to calibration
-                                precision_l2 = min(-11, raw_precision_l2) if raw_precision_l2 > -11 else raw_precision_l2
+                                precision_l2 = max(-20, min(-4, raw_precision_l2))
                                 
                                 update_success_l2 = chrony_shm_l2.update(reference_time_l2, system_time, precision_l2)
                                 if update_success_l2:
                                     logger.debug(
                                         f"Chrony SHM L2 (unit=1) updated: D_clock={result_l2.d_clock_fused_ms:+.3f}ms, "
-                                        f"precision={precision_l2} [{result_l2.n_stations}sta, {result_l2.quality_grade}]"
+                                        f"uncertainty={result_l2.uncertainty_ms:.1f}ms, precision={precision_l2} "
+                                        f"[{result_l2.n_stations}sta, {result_l2.quality_grade}]"
                                     )
                                 else:
                                     logger.warning("Chrony SHM L2 write failed")

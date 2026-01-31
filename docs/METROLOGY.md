@@ -1,8 +1,8 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 6.2.0  
-**Last Updated:** January 24, 2026  
+**System Version:** 6.4.0 (NTP-Based Time Confirmation)  
+**Last Updated:** January 29, 2026  
 **Author:** Michael James Hauan (AC0G)
 
 ---

@@ -125,13 +125,18 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 **Architecture Change (2026-01-29):** Bootstrap no longer requires BCD/FSK decode to reach LOCKED state.
 
 - **Problem:** BCD/FSK decoding is fragile under HF fading conditions, blocking the pipeline.
-- **Solution:** Use NTP-derived wallclock from GPSDO to identify UTC minute directly.
+- **Solution:** Use NTP-derived wallclock (from GPS time server) to identify UTC minute directly.
 - **Implementation:**
   - Cluster detection finds minute markers (800ms tones at second 0)
-  - `wallclock_time` from GPSDO tells us WHICH minute this is in UTC
+  - `wallclock_time` from NTP tells us WHICH minute this is in UTC
   - Bootstrap transitions to LOCKED based on NTP confirmation
   - BCD/FSK decode becomes OPTIONAL refinement for sub-second accuracy
 - **Benefit:** Pipeline proceeds to metrology within ~2 minutes instead of waiting indefinitely for decode.
+
+**Hardware Distinction (Important):**
+- **GPSDO** — Disciplines the RX888 ADC clock. Provides stable sample timing (RTP timestamps are frequency-locked). Does NOT provide absolute time.
+- **GPS Time Server** — Separate instrument on LAN (e.g., 192.168.0.202). Provides NTP for initial bootstrap orientation, PPS+UBX for gpsd, and GNSS VTEC data for ionospheric calculations.
+- **Future Option:** PPS injection into HF stream could provide absolute sample-to-UTC alignment at the ADC level.
 
 ---
 

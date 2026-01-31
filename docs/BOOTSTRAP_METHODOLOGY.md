@@ -1,84 +1,110 @@
 # Bootstrap Time Synchronization Methodology
 
-## Living Documentation with Evidence
+**Version:** 6.4  
+**Last Updated:** January 29, 2026  
+**View with live evidence:** `/docs.html?doc=BOOTSTRAP_METHODOLOGY`
 
-This document describes the bootstrap process that establishes RTP-to-UTC time alignment
-**without relying on NTP or any external time reference**. The system discovers the time basis
-purely from the physics of radio propagation and the known timing of time standard broadcasts.
+---
 
-> **Note**: Evidence sections below are populated dynamically from this installation's logs.
-> View this document at `/docs.html?doc=BOOTSTRAP_METHODOLOGY` to see live evidence widgets.
+## TL;DR — What You Need to Know
 
-### Key Principle: NTP-Free Timing
+| Audience | Key Takeaway |
+|----------|--------------|
+| **User** | Bootstrap takes ~2 minutes to lock. Once locked, the system provides ±0.5 ms timing to UTC(NIST). |
+| **Metrologist** | NTP provides initial orientation only. Once locked, HF tone arrivals become the time authority. |
+| **Physicist** | Ionospheric path delays are measured, not assumed. Multi-station clustering validates minute markers. |
+| **Engineer** | NTP used once at bootstrap; `_handle_locked()` refines offset from HF measurements only. |
 
-The bootstrap operates on a fundamental principle: **the time basis is unknown at startup
-and must be discovered from tone signals only**. The system clock (NTP) is used only as an
-optimization hint to start the buffer near a minute boundary—it is never used as ground truth
-for timing.
-
-This means the system could operate with the system clock completely inaccessible. The only
-difference would be that buffer start would be at a random point rather than near a minute
-boundary, making bootstrap slightly slower.
+**The Core Insight:** NTP provides **initial orientation only** — identifying which UTC minute we're in at startup. Once locked, the system transfers time authority to HF-derived measurements. The ongoing time reference comes from tone arrivals, not NTP.
 
 ---
 
 ## 1. The Bootstrap Problem
 
-### Challenge
+### What We Have at Startup
 
-When the system starts, we have:
 - **RTP timestamps**: Monotonic sample counters from the GPSDO-disciplined SDR (24,000 samples/second)
-- **No time basis**: RTP counts samples but has no connection to UTC
-- **Multiple radio channels**: WWV (6 frequencies), WWVH (4 frequencies), CHU (3 frequencies)
+- **NTP-derived wallclock**: System time disciplined by GPSDO (±1 ms accuracy)
+- **Multiple radio channels**: WWV (6 frequencies), WWVH (4 frequencies), CHU (3 frequencies), BPM (4 frequencies)
 
-We need to determine the **RTP-to-UTC offset** - the mapping between RTP sample numbers
-and absolute UTC time - with sub-millisecond precision. **NTP is not trusted** because it
-may be wrong, unavailable, or insufficiently accurate for our needs.
+### What We Need
 
-### Solution: Tone-Derived Time Discovery
+The **RTP-to-UTC offset** — the mapping between RTP sample numbers and absolute UTC time — with sub-millisecond precision.
 
-The bootstrap discovers the time basis **purely from tone arrivals**:
+### The v6.4 Solution
 
-1. **GPSDO provides RTP counts** — a "steel ruler" with no time basis, just sample counts
-2. **Detect tone clusters** — find groups of tones from multiple stations
-3. **Validate 1,440,000 sample recurrence** — confirms these are minute markers (not per-second ticks)
-4. **Compute offset = earliest_tone_rtp - geometric_delay** — RTP at minute boundary
-5. **BCD/FSK decoding** — gives initial estimate of which absolute minute
-6. **Ongoing refinement** — continuously improve the offset estimate
+```
+1. Detect tone clusters     → Find minute markers (800ms tones at second 0)
+2. Use NTP wallclock        → Identify WHICH UTC minute this is
+3. Compute offset           → offset = minute_boundary_rtp - (minute × samples_per_minute)
+4. Validate with physics    → Cross-station consistency, geographic expectations
+5. Optional: BCD/FSK decode → Sub-second refinement
+```
 
-The key insight: we don't need to know what time it is to find minute boundaries. We just
-need to find recurring patterns at exactly 60-second (1,440,000 sample) intervals.
+**Evidence — Current Bootstrap Status:**
+<!-- LOGS: bootstrap | filter: "NTP confirmation" -->
 
 ---
 
-## 2. Minute Marker Characteristics
+## 2. NTP Role: Initial Orientation Only (v6.4)
 
-Each time standard station transmits distinctive minute markers:
+### The Two-Phase Time Authority Model
 
-| Station | Tone Frequency | Duration | Template |
-|---------|---------------|----------|----------|
-| **WWV** (Fort Collins, CO) | 1000 Hz | 800 ms | Matched filter at 24 kHz |
-| **WWVH** (Kauai, HI) | 1200 Hz | 800 ms | Matched filter at 24 kHz |
-| **CHU** (Ottawa, Canada) | 1000 Hz | 500 ms | Matched filter at 24 kHz |
-| **BPM** (Xi'an, China) | 1000 Hz | 300 ms | Matched filter at 24 kHz |
+| Phase | Time Authority | Purpose |
+|-------|---------------|----------|
+| **Bootstrap** | NTP (from GPSDO) | Identify which UTC minute we're in |
+| **Locked** | HF tone arrivals | Ongoing time reference, offset refinement |
+
+**Critical Distinction:** NTP is used **once** to resolve the 60-second ambiguity at startup. After lock, the system no longer depends on NTP — it derives time from the HF signals themselves.
+
+### Why Use NTP at All?
+
+Prior to v6.4, the system required BCD/FSK decoding to confirm the absolute minute. This caused:
+
+- **Pipeline stalls**: Poor HF conditions → no decode → no lock → no data
+- **Extended bootstrap times**: 10-30 minutes waiting for clean decode
+
+NTP provides a quick initial orientation (±1 ms is far better than 60-second ambiguity), allowing the pipeline to start within ~2 minutes.
+
+### After Lock: HF Becomes the Authority
+
+Once locked, the `_handle_locked()` method:
+1. Predicts where the next tone should arrive (based on current offset)
+2. Measures where it actually arrived (from HF signal)
+3. Computes timing error and refines the offset
+4. **Does not consult NTP** — the HF measurements are the ground truth
+
+This ensures the system measures actual propagation delays, not just tracking the system clock.
+
+**Evidence — Time Snap from Metadata:**
+<!-- LOGS: bootstrap | filter: "time_snap" -->
+
+---
+
+## 3. Minute Marker Detection
+
+### Station Characteristics
+
+| Station | Tone | Duration | Template | Geographic Delay |
+|---------|------|----------|----------|------------------|
+| **WWV** (Fort Collins, CO) | 1000 Hz | 800 ms | Matched filter | 4-12 ms |
+| **WWVH** (Kauai, HI) | 1200 Hz | 800 ms | Matched filter | 15-30 ms |
+| **CHU** (Ottawa, Canada) | 1000 Hz | 500 ms | Matched filter | 6-15 ms |
+| **BPM** (Xi'an, China) | 1000 Hz | 300 ms | Matched filter | 40-70 ms |
 
 ### Why Duration Matters
 
-Per-second ticks are only **5-10 ms** long. The matched filter templates (500-800 ms)
-produce **dramatically higher correlation** for minute markers than for ticks:
+Per-second ticks are only **5-10 ms** long. The matched filter templates (500-800 ms) produce dramatically higher correlation for minute markers:
 
-- **Minute marker (800 ms)**: Full template match → high correlation, high SNR
-- **Per-second tick (5 ms)**: Only 0.6% of template matches → weak correlation, low SNR
+- **Minute marker (800 ms)**: Full template match → SNR ≥ 20 dB
+- **Per-second tick (5 ms)**: Only 0.6% of template matches → SNR ~12-15 dB
 
-**Evidence - SNR Discrimination:**
-<!-- LOGS: bootstrap | filter: "recurring_clusters" -->
-
-The system requires **SNR ≥ 20 dB** for candidate acceptance, which effectively filters
-out short ticks that produce only 12-15 dB correlation peaks.
+**Evidence — Multi-Station Detection:**
+<!-- LOGS: bootstrap | filter: "multi_station_detection" -->
 
 ---
 
-## 3. Bootstrap State Machine
+## 4. Bootstrap State Machine
 
 ```
 ACQUIRING → CORRELATING → TRACKING → LOCKED
@@ -86,97 +112,38 @@ ACQUIRING → CORRELATING → TRACKING → LOCKED
          (retreat on errors)
 ```
 
-### State Descriptions
+| State | Duration | Purpose | Exit Condition |
+|-------|----------|---------|----------------|
+| **ACQUIRING** | 0-90s | Collect candidates, find clusters | Multi-station cluster recurs at 60s |
+| **CORRELATING** | 90-120s | Validate clusters across channels | 3+ clusters over 2+ minutes |
+| **TRACKING** | 120-150s | Narrow-window detection | NTP confirms minute |
+| **LOCKED** | Continuous | Offset established | Ongoing operation |
 
-| State | Purpose | Exit Condition |
-|-------|---------|----------------|
-| **ACQUIRING** | Collect candidates, find recurring clusters | Multi-station cluster recurs at 60s intervals |
-| **CORRELATING** | Validate clusters across channels | 3+ clusters over 2+ minutes validated |
-| **TRACKING** | Narrow-window detection, await BCD/FSK confirmation | Time confirmed by decoded broadcast |
-| **LOCKED** | Offset established with high confidence | Continuous operation |
-
-### Evidence - State Transitions
+**Evidence — State Transitions:**
 <!-- LOGS: bootstrap | filter: "state_transitions" -->
-
----
-
-## 4. Tone Detection Pipeline
-
-### 4.1 Per-Channel Tone Detectors
-
-Each channel gets its own `ToneDetector` with appropriate templates:
-
-```python
-# bootstrap_service.py
-def _get_tone_detector(self, channel_name: str):
-    """Get or create tone detector for a specific channel.
-    
-    Each channel needs its own detector with appropriate templates:
-    - CHU channels get CHU templates (500ms @ 1000Hz)
-    - WWV channels get WWV templates (800ms @ 1000Hz)
-    - Shared channels get WWV + WWVH + BPM templates
-    """
-```
-
-**Evidence - Detector Creation:**
-<!-- LOGS: bootstrap | filter: "detector_creation" -->
-
-### 4.2 Matched Filter Detection
-
-The `ToneDetector.acquire_tones()` method uses:
-
-1. **AM Demodulation**: Extract envelope from IQ samples
-2. **Bandpass Filtering**: Isolate tone frequency (1000 Hz or 1200 Hz)
-3. **Quadrature Correlation**: Phase-invariant matched filtering
-4. **Noise Floor Estimation**: Median + MAD for robust thresholding
-5. **Peak Detection**: Non-maximum suppression with minimum separation
-
-**Evidence - Multi-Station Detection:**
-<!-- LOGS: bootstrap | filter: "multi_station_detection" -->
-
-This shows simultaneous detection across all station types with high SNR.
 
 ---
 
 ## 5. Geographic Validation
 
-### 5.1 Propagation Delay Expectations
+### Propagation Delay Expectations
 
 The system computes expected propagation delays based on receiver location:
 
 ```python
-# timing_bootstrap.py
-def __post_init__(self):
-    """Compute geographic expectations for each station."""
-    for station, (lat, lon) in STATION_LOCATIONS.items():
-        distance_km = self._haversine_km(self.receiver_lat, self.receiver_lon, lat, lon)
-        path_km = distance_km * IONOSPHERIC_PATH_FACTOR  # 1.15 for F-layer
-        delay_ms = (path_km / SPEED_OF_LIGHT_KM_S) * 1000
+distance_km = haversine(receiver_lat, receiver_lon, station_lat, station_lon)
+path_km = distance_km * 1.15  # Ionospheric path factor for F-layer
+delay_ms = (path_km / 299792.458) * 1000
 ```
 
-**Evidence - Geographic Expectations (this installation):**
+**Evidence — Geographic Expectations (this installation):**
 <!-- LOGS: bootstrap | filter: "geographic_expectations" -->
 
-### 5.2 Multi-Station Clustering
+### Multi-Station Clustering
 
-Candidates from different stations are clustered if their arrival times match
-the expected propagation delay differences (within 100 ms tolerance):
+Candidates from different stations are clustered if their arrival times match expected propagation delay differences (within 100 ms tolerance):
 
-```python
-# timing_bootstrap.py - find_minute_clusters()
-for cand in other_cands:
-    offset_ms = (cand.rtp_timestamp - anchor_cand.rtp_timestamp) * 1000 / sample_rate
-    
-    # Allow matching across minute boundaries
-    raw_error = offset_ms - expected_offset_ms
-    minutes_diff = round(raw_error / 60000)
-    error = abs(raw_error - minutes_diff * 60000)
-    
-    if error < window_ms:  # 100ms tolerance
-        cluster['members'][other_station].append(cand)
-```
-
-**Evidence - Multi-Station Clusters:**
+**Evidence — Cluster Lock:**
 <!-- LOGS: bootstrap | filter: "cluster_lock" -->
 
 ---
@@ -185,274 +152,122 @@ for cand in other_cands:
 
 ### The Key Insight
 
-Per-second ticks occur every second. Minute markers occur every 60 seconds.
-By requiring clusters to **recur at 60-second intervals**, we definitively
-distinguish minute markers from ticks.
+Per-second ticks occur every second. Minute markers occur every 60 seconds. By requiring clusters to **recur at 1,440,000 sample intervals** (60 seconds × 24,000 samples/second), we definitively distinguish minute markers from ticks.
 
-```python
-# timing_bootstrap.py - ACQUIRING state
-for cluster in multi_station:
-    anchor_rtp = cluster['anchor_rtp']
-    
-    for other in multi_station:
-        diff = abs(other['anchor_rtp'] - anchor_rtp)
-        minutes_apart = round(diff / SAMPLES_PER_MINUTE)  # 1,440,000 samples
-        
-        if minutes_apart > 0:
-            expected_diff = minutes_apart * SAMPLES_PER_MINUTE
-            error_ms = abs(diff - expected_diff) * 1000 / sample_rate
-            
-            if error_ms < 100:  # Within 100ms of expected
-                # Found recurring minute markers!
-                self.state = BootstrapState.CORRELATING
-```
-
-**Evidence - Recurrence Detection:**
+**Evidence — Recurring Clusters:**
 <!-- LOGS: bootstrap | filter: "recurring_clusters" -->
 
-The error shown is well within the 100 ms tolerance, confirming these are
-true minute markers recurring at exactly 60-second intervals.
-
 ---
 
-## 7. Time Confirmation
+## 7. Time Confirmation (v6.4)
 
-### BCD/FSK Decoding
+### Primary Method: NTP-Derived Wallclock
 
-Once in TRACKING state, the system attempts to decode the actual UTC time
-from the broadcast:
-
-- **WWV/WWVH**: BCD time code in the audio subcarrier
-- **CHU**: FSK time code in seconds 31-39 of each minute
-
-This provides **absolute time confirmation** rather than just relative timing.
-
-**Evidence - Offset Lock:**
-<!-- LOGS: bootstrap | filter: "rtp_lock" -->
-
-The offset should be stable to within ±2 ms across multiple channels.
-
----
-
-## 8. Two-Tier Bootstrap Lock (v5.3.10)
-
-### The Core Problem: Discovering Time Without Knowing Time
-
-The bootstrap must solve a chicken-and-egg problem:
-- We need to know the RTP-to-UTC offset to compute timing errors
-- We need timing errors to refine the offset
-
-The solution is a **two-tier approach** that separates pattern discovery from offset refinement:
-
-### Tier 1: Pattern Discovery (PROVISIONAL Lock)
-
-**Purpose**: Find and validate minute marker clusters without knowing the offset.
-
-During Tier 1:
-- **NO offset correction** — we don't know the offset yet!
-- **Just validate cluster recurrence** at 1,440,000 sample intervals
-- **Confirm pattern stability** over multiple minutes
-
-Once the pattern is confirmed:
-- Compute `minute_boundary_rtp = earliest_tone_rtp - geometric_delay`
-- This gives us the RTP at a minute boundary (we don't know which minute yet)
-- Apply ionospheric correction to estimate UTC emission time
-
-### Tier 2: Absolute Time Confirmation (REFINED Lock)
-
-**Purpose**: Use BCD/FSK to confirm which absolute minute, then engage formal refinement.
-
-During Tier 2:
-- **BCD/FSK decoding** tells us the hour:minute
-- **Initial Unix time is an ESTIMATE** requiring further refinement
-- **Ongoing refinement** compares tone arrivals to improve the offset
-
-| Tier | Name | Purpose | What We Know |
-|------|------|---------|---------------|
-| **1** | Provisional Lock | Pattern discovery | Relative time only (minute N from start) |
-| **2** | Refined Lock | Absolute time | Estimated UTC (refined over time) |
-
-```
-ACQUIRING → CORRELATING → TRACKING → PROVISIONAL_LOCK → REFINED_LOCK
-                              ↓              ↓
-                         (pattern found)  (BCD/FSK confirms minute)
-```
-
-### Why No Offset Correction in Tier 1?
-
-You can't correct an offset you don't know! During Tier 1, we're still discovering
-the cluster pattern. We have to:
-1. Confirm the cluster pattern is relatively stable
-2. Apply subtraction to count back to the geometric offset
-3. Count back more for the ionospheric offset to estimate emission time (UTC)
-4. Confirm this over a few cycles
-5. Only then engage formal ongoing refinement
-
-### Tier 1 Details: Provisional Lock
-
-**Purpose**: Validate pattern, compute initial offset from tone arrivals.
-
-When the bootstrap finds recurring clusters:
-- `lock_tier` transitions to `PROVISIONAL` (value=1)
-- Archiving can begin (we know minute boundaries)
-- **No offset refinement yet** — just pattern validation
-
-The offset is computed purely from tone arrivals:
-```
-minute_boundary_rtp = earliest_tone_rtp - propagation_delay_samples
-```
-
-This is the RTP at a minute boundary. We don't know which minute yet, but we know
-the pattern recurs at exactly 1,440,000 sample intervals.
-
-**Evidence - Provisional Lock:**
-<!-- LOGS: bootstrap | filter: "PROVISIONAL LOCK" -->
-
-### Tier 2 Details: Refined Lock
-
-**Purpose**: Confirm absolute time via BCD/FSK, then refine the offset.
-
-Once BCD/FSK decoding confirms the hour:minute:
-- We now have an **estimate** of absolute UTC
-- This estimate requires refinement (ionospheric variability)
-- Ongoing tone arrivals are compared to expected arrivals
-- The offset is refined based on these comparisons
-
-The initial Unix time estimate is computed as:
-```
-reference_utc = decoded_hour * 3600 + decoded_minute * 60
-```
-
-This is refined over time as more tone arrivals are processed.
-
-**Evidence - Refined Lock:**
-<!-- LOGS: bootstrap | filter: "TIER 2 REFINED LOCK" -->
-
-### Offset Measurement Collection
-
-Each validated tone provides an independent offset measurement:
+Once clusters are validated, the system confirms the absolute UTC minute using NTP:
 
 ```python
-# timing_bootstrap.py - OffsetMeasurement dataclass
-@dataclass
-class OffsetMeasurement:
-    timestamp: float          # Unix time of measurement
-    offset_samples: int       # Computed RTP-to-UTC offset
-    station: str              # Source station (WWV, WWVH, CHU, BPM)
-    snr_db: float            # Signal-to-noise ratio
-    frequency_khz: int       # Carrier frequency
+def confirm_time_from_ntp(ntp_wallclock, anchor_rtp, anchor_channel):
+    """
+    Use NTP-derived wallclock to identify the UTC minute.
+    
+    The GPSDO provides ±1 ms accuracy, which is far better than
+    the 60-second ambiguity we're resolving.
+    """
+    minute_boundary_utc = floor(ntp_wallclock / 60) * 60
+    offset = minute_boundary_utc - (anchor_rtp / sample_rate)
+    return offset
 ```
 
-The system tracks:
-- **Station distribution**: Ensures measurements come from multiple stations
-- **Temporal spread**: Measurements span the full averaging window
-- **SNR weighting**: Higher-SNR measurements are more reliable
+### Secondary Method: BCD/FSK Decode (Optional)
 
-**Evidence - Offset Measurements:**
-<!-- LOGS: bootstrap | filter: "offset measurements" -->
+BCD/FSK decoding provides additional confidence and sub-second refinement:
+
+- **WWV/WWVH**: BCD time code in 100 Hz subcarrier
+- **CHU**: FSK time code in seconds 31-39
+
+**Evidence — RTP Lock:**
+<!-- LOGS: bootstrap | filter: "rtp_lock" -->
+
+---
+
+## 8. Two-Tier Lock System
+
+### Tier 1: Provisional Lock
+
+**Purpose:** Enable archiving while offset is being refined.
+
+- Achieved when: Recurring clusters found, NTP confirms minute
+- Archiving: Enabled (we know minute boundaries)
+- Offset quality: ±5-15 ms (ionospheric variability)
+
+**Evidence — Provisional Lock:**
+<!-- LOGS: bootstrap | filter: "PROVISIONAL LOCK" -->
+
+### Tier 2: Refined Lock
+
+**Purpose:** Stable, ionospherically-averaged offset.
+
+- Achieved when: 50+ measurements over 10 minutes, σ < 15 ms
+- Offset quality: ±1-3 ms (TID-averaged)
+
+**Evidence — Refined Lock:**
+<!-- LOGS: bootstrap | filter: "TIER 2 REFINED LOCK" -->
 
 ### Offset Refinement
 
-The refined offset typically differs from the provisional offset by several milliseconds:
+| Metric | Provisional | Refined |
+|--------|-------------|---------|
+| Basis | First few detections | 50+ measurements |
+| Method | Weighted average | Median (outlier rejection) |
+| Ionosphere | Instantaneous | 10-min average |
 
-| Metric | Provisional | Refined | Improvement |
-|--------|-------------|---------|-------------|
-| Basis | First few detections | 50+ measurements | Statistical robustness |
-| Method | Weighted average | Median | Outlier rejection |
-| Ionosphere | Instantaneous | 10-min average | TID averaging |
-
-**Evidence - Offset Change:**
+**Evidence — Offset Change:**
 <!-- LOGS: bootstrap | filter: "Offset change from provisional" -->
 
-A change of 5-15 ms is typical and represents the ionospheric bias that would
-otherwise become a systematic error.
+---
 
-### Lock Tier in Status
+## 9. Typical Bootstrap Timeline
 
-The current lock tier is exposed in the bootstrap status:
+| Time | Event | State |
+|------|-------|-------|
+| T+0s | Service starts, buffers accumulate | ACQUIRING |
+| T+30s | First candidates detected | ACQUIRING |
+| T+60s | Candidates from all stations | ACQUIRING |
+| T+90s | Recurring clusters found | → CORRELATING |
+| T+95s | 3 clusters validated | → TRACKING |
+| T+100s | NTP confirms minute | → LOCKED (Tier 1) |
+| T+100s | **Archiving begins** | LOCKED |
+| T+700s | 50+ measurements, stable | LOCKED (Tier 2) |
 
-```json
-{
-  "phase": "LOCKED",
-  "lock_tier": 2,
-  "is_locked": true,
-  "is_fully_locked": true,
-  "bootstrap_state": {
-    "lock_tier": 2,
-    "refined_offset_samples": 798457904,
-    "refined_offset_std_ms": 12.3
-  }
-}
-```
-
-- `lock_tier: 0` = No lock (ACQUIRING/CORRELATING)
-- `lock_tier: 1` = Provisional lock (archiving enabled, offset being refined)
-- `lock_tier: 2` = Refined lock (stable offset, full precision)
-
-### Configuration
-
-The two-tier thresholds are configurable in `TimingBootstrap`:
-
-```python
-# Production values (timing_bootstrap.py)
-refined_lock_duration_sec: float = 600.0   # 10 minutes
-min_measurements_for_refined: int = 50     # Minimum measurements
-max_offset_std_for_refined_ms: float = 15.0  # Stability criterion
-```
-
-These values are chosen based on:
-- **600 seconds**: Covers 1-2 TID periods for averaging
-- **50 measurements**: Statistical significance for median
-- **15 ms std**: Indicates stable ionospheric conditions
+**Key Performance:** Pipeline proceeds to metrology within ~2 minutes.
 
 ---
 
-## 9. Summary: Bootstrap Timeline
+## 10. For Each Perspective
 
-A typical bootstrap sequence with two-tier lock:
+### For Users
 
-| Time | Event | Evidence |
-|------|-------|----------|
-| T+0s | Service starts, buffers accumulate | `Searching 150.0s buffer for minute markers` |
-| T+30s | First candidates detected | `Found 10 candidates` |
-| T+60s | Candidates from all stations | `Clustering: 66 WWV, 67 BPM, 118 CHU` |
-| T+90s | Recurring clusters found | `RECURRING CLUSTERS FOUND: 1 minutes apart` |
-| T+90s | State → CORRELATING | `CLUSTER LOCK: WWV@... → CORRELATING` |
-| T+90s | State → TRACKING | `3 clusters over 2 minutes → TRACKING` |
-| T+93s | **TIER 1: Provisional Lock** | `PROVISIONAL LOCK achieved! D_clock ≈ +0.0ms` |
-| T+93s | Archiving begins | `📁 Wrote minute ...` |
-| T+693s | **TIER 2: Refined Lock** | `TIER 2 REFINED LOCK achieved!` |
+- **What to expect:** Lock in ~2 minutes under normal conditions
+- **What to check:** `chronyc sources` should show TSL1/TSL2 after lock
+- **If it's slow:** Poor propagation (night, storm) may extend bootstrap
 
-**Tier 1 (Provisional)**: ~90-120 seconds - enables archiving
-**Tier 2 (Refined)**: ~10-12 minutes - stable ionospherically-averaged offset
+### For Metrologists
 
----
+- **Traceability chain:** UTC(NIST) → GPSDO → NTP → RTP offset → D_clock
+- **Uncertainty at lock:** ±5-15 ms (Tier 1), ±1-3 ms (Tier 2)
+- **Validation:** Multi-station consistency, geographic expectations
 
-## 10. Key Design Decisions
+### For Physicists
 
-### Why Multi-Station?
+- **What's measured:** Ionospheric group delay via tone arrival times
+- **What's modeled:** Geometric path length, layer heights (IRI-2020/IONEX)
+- **Science preserved:** Raw arrival times archived for reprocessing
 
-Single-station detection is ambiguous:
-- Could be a per-second tick
-- Could be interference
-- No cross-validation
+### For Engineers
 
-Multi-station clustering provides:
-- **Redundancy**: Multiple independent detections
-- **Validation**: Geographic consistency check
-- **Confidence**: Higher SNR through combination
-
-### Why 60-Second Recurrence?
-
-Per-second ticks would produce clusters every second. By requiring 60-second
-recurrence, we guarantee we've found minute markers, not ticks.
-
-### Why Duration-Matched Templates?
-
-The 800 ms (WWV/WWVH) and 500 ms (CHU) templates provide:
-- **Duration discrimination**: Short ticks produce weak correlation
-- **High SNR**: Full template match maximizes signal extraction
-- **Phase invariance**: Quadrature correlation handles unknown carrier phase
+- **Key files:** `timing_bootstrap.py`, `bootstrap_rolling_buffer.py`, `bootstrap_service.py`
+- **State persistence:** `bootstrap_state.json` survives restarts
+- **Configuration:** `refined_lock_duration_sec=600`, `min_measurements_for_refined=50`
 
 ---
 
@@ -460,12 +275,33 @@ The 800 ms (WWV/WWVH) and 500 ms (CHU) templates provide:
 
 | File | Purpose |
 |------|---------|
-| `bootstrap_service.py` | Orchestrates bootstrap process, manages per-channel detectors |
+| `bootstrap_service.py` | Orchestrates bootstrap, manages per-channel detectors |
 | `bootstrap_rolling_buffer.py` | Accumulates samples, searches for candidates |
-| `timing_bootstrap.py` | State machine, clustering, recurrence validation |
+| `timing_bootstrap.py` | State machine, clustering, NTP confirmation |
 | `tone_detector.py` | Matched filter detection, template generation |
-| `bootstrap_time_confirmation.py` | BCD/FSK decoding for time confirmation |
+| `bootstrap_time_confirmation.py` | BCD/FSK decoding (optional refinement) |
 
 ---
 
-*Evidence is fetched dynamically from this installation's logs via `/api/living-docs/evidence/bootstrap/{type}`*
+## 12. Troubleshooting
+
+### Bootstrap Takes Too Long (>5 minutes)
+
+1. **Check propagation:** Higher frequencies may be dead at night
+2. **Check GPSDO lock:** `chronyc tracking` should show stable offset
+3. **Check logs:** `journalctl -u timestd-core-recorder -f`
+
+### Bootstrap Never Locks
+
+1. **Verify NTP:** System clock must be within ±30 seconds of UTC
+2. **Check antenna:** SNR should be >10 dB on at least one channel
+3. **Check radiod:** `systemctl status radiod@rx888`
+
+### Offset Jumps After Lock
+
+- **Normal:** Ionospheric mode changes cause 3-8 ms steps
+- **Abnormal:** GPSDO unlock, antenna issue, or software bug
+
+---
+
+*Evidence is fetched dynamically from this installation's logs via `/api/living-docs/evidence/bootstrap/{filter}`*
