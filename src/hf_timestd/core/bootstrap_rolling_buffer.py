@@ -339,12 +339,14 @@ class BootstrapRollingBuffer:
         # Oldest samples are at write_pos, newest are at write_pos-1
         result = np.empty(samples_available, dtype=np.complex64)
         
-        # First part: from write_pos to end
-        first_part_len = self.buffer_size - self.write_pos
-        result[:first_part_len] = self.buffer[self.write_pos:]
+        # First part: from write_pos to end of buffer
+        first_part_len = min(self.buffer_size - self.write_pos, samples_available)
+        result[:first_part_len] = self.buffer[self.write_pos:self.write_pos + first_part_len]
         
-        # Second part: from start to write_pos
-        result[first_part_len:] = self.buffer[:self.write_pos]
+        # Second part: from start to write_pos (remaining samples)
+        second_part_len = samples_available - first_part_len
+        if second_part_len > 0:
+            result[first_part_len:] = self.buffer[:second_part_len]
         
         return result, self.buffer_start_rtp
     

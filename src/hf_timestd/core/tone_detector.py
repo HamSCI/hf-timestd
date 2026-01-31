@@ -1378,10 +1378,12 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         buffer_duration_sec = len(iq_samples) / self.sample_rate
         buffer_start_time = current_unix_time - (buffer_duration_sec / 2)
         
+        # In RTP mode (L4/L5), the buffer starts exactly on the minute boundary
+        # (start_system_time = minute_boundary). The minute marker tone is at
+        # sample 0 (plus propagation delay from the transmitter).
+        #
         # Use floor to find the minute boundary that the buffer START falls in
-        # IMPORTANT: Add small epsilon to handle floating point precision issues
-        # Without this, 1764932339.9999999 would floor to 1764932280 instead of 1764932340
-        minute_boundary = int((buffer_start_time + 0.5) / 60) * 60
+        minute_boundary = int(buffer_start_time / 60) * 60
         
         # Step 1: AM demodulation (extract envelope)
         magnitude = np.abs(iq_samples)
@@ -1600,14 +1602,27 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         search_end = min(len(correlation), expected_pos_samples + search_window)
         
         freq_str = f"{frequency}Hz" if frequency is not None else "??Hz"
-        logger.debug(f"{station_type.value} @ {freq_str}: ref=min@{reference_time}, "
-                    f"expected_offset={offset_ms:+.1f}ms, "
-                    f"expected_pos={expected_pos_samples}, window=±{window_ms:.0f}ms, search=[{search_start}:{search_end}]")
         
+        # FUSE MODE FIX (2026-01-31): When buffer is primed by wallclock but the
+        # expected minute boundary is outside the buffer, fall back to searching
+        # the entire buffer. This handles cases where:
+        # 1. Tones arrive BEFORE wallclock minute boundary (ionospheric advance)
+        # 2. Buffer start_system_time is misaligned with minute boundary
+        # 3. Clock drift between NTP and GPSDO
+        #
+        # In RTP mode, the minute boundary is derived from RTP timestamps and is
+        # reliable. In FUSE mode, we must be more tolerant.
         if search_start >= search_end:
-            logger.warning(f"{station_type.value} @ {freq_str}: Invalid search window! "
-                          f"expected_pos={expected_pos_samples}, tone_offset={tone_offset_from_start:.2f}s")
-            return None
+            # Expected position is outside buffer - search entire buffer
+            search_start = 0
+            search_end = len(correlation)
+            logger.info(f"{station_type.value} @ {freq_str}: Expected pos outside buffer "
+                       f"(expected_pos={expected_pos_samples}, tone_offset={tone_offset_from_start:.2f}s), "
+                       f"searching entire buffer [0:{search_end}]")
+        else:
+            logger.debug(f"{station_type.value} @ {freq_str}: ref=min@{reference_time}, "
+                        f"expected_offset={offset_ms:+.1f}ms, "
+                        f"expected_pos={expected_pos_samples}, window=±{window_ms:.0f}ms, search=[{search_start}:{search_end}]")
         
         # Find peak within search window
         # CRITICAL FIX (2026-01-26): When buffer starts after minute boundary,

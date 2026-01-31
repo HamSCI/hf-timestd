@@ -237,15 +237,31 @@ class BinaryArchiveWriter:
         Args:
             rtp_derived_time: Unix time derived from RTP timestamp (GPSDO-disciplined)
             rtp_timestamp: Raw RTP timestamp for metadata
+            
+        In RTP mode (L4/L5), we have GPSDO-disciplined timestamps, so we know
+        exactly where the minute boundary is. The buffer should logically start
+        at the minute boundary, and samples should be positioned based on their
+        RTP timestamp offset from that boundary.
+        
+        The start_system_time in metadata will be exactly the minute boundary,
+        and start_rtp will be the RTP timestamp corresponding to that boundary.
         """
         minute_boundary = (int(rtp_derived_time) // 60) * 60
+        
+        # Calculate the RTP timestamp that corresponds to the minute boundary
+        # offset_from_boundary = rtp_derived_time - minute_boundary (in seconds)
+        # offset_samples = offset_from_boundary * sample_rate
+        # minute_boundary_rtp = rtp_timestamp - offset_samples
+        offset_from_boundary = rtp_derived_time - minute_boundary
+        offset_samples = int(offset_from_boundary * self.config.sample_rate)
+        minute_boundary_rtp = rtp_timestamp - offset_samples
         
         buffer = MinuteBuffer(
             minute_boundary=minute_boundary,
             samples=np.zeros(self.samples_per_minute, dtype=np.complex64),
             write_pos=0,
-            start_rtp=rtp_timestamp,
-            start_system_time=rtp_derived_time,
+            start_rtp=minute_boundary_rtp,  # RTP at minute boundary
+            start_system_time=float(minute_boundary),  # Exactly on minute boundary
             timing_snapshots=[]
         )
         
@@ -784,13 +800,31 @@ class BinaryArchiveWriter:
                 # Start new minute
                 self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
             
-            # Write to buffer
+            # Write to buffer at correct position based on RTP timestamp
+            # In RTP mode, samples are positioned by their RTP offset from minute boundary
             buffer = self.current_buffer
-            samples_to_write = min(len(samples), buffer.samples_remaining)
             
-            if samples_to_write > 0:
-                buffer.samples[buffer.write_pos:buffer.write_pos + samples_to_write] = samples[:samples_to_write]
-                buffer.write_pos += samples_to_write
+            # Calculate position in buffer from RTP timestamp
+            # sample_position = (rtp_timestamp - minute_boundary_rtp) 
+            # But RTP can wrap, so use the unix time offset instead
+            offset_from_minute = sample_unix_time - buffer.minute_boundary
+            sample_position = int(offset_from_minute * self.config.sample_rate)
+            
+            # Clamp to valid range
+            if sample_position < 0:
+                # Samples before minute boundary - skip them
+                skip_count = -sample_position
+                if skip_count >= len(samples):
+                    return 0  # All samples are before the minute
+                samples = samples[skip_count:]
+                sample_position = 0
+            
+            samples_to_write = min(len(samples), self.samples_per_minute - sample_position)
+            
+            if samples_to_write > 0 and sample_position < self.samples_per_minute:
+                buffer.samples[sample_position:sample_position + samples_to_write] = samples[:samples_to_write]
+                # Update write_pos to track highest written position
+                buffer.write_pos = max(buffer.write_pos, sample_position + samples_to_write)
                 self.samples_written += samples_to_write
             
             # Track gaps

@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.12] - 2026-01-31
+
+### RTP Buffer Alignment Fix - Critical Timing Stability
+
+**Major Fix:** Buffer now starts exactly on minute boundary in RTP mode, fixing severe timing instability.
+
+#### Problem
+Despite GPSDO-locked RTP timestamps (L4/L5 accuracy), the pipeline showed:
+- D_clock offsets of -433ms to -3756ms (should be near zero)
+- Calibration sanity failures
+- Chrony SHM offsets in hundreds of milliseconds
+
+Root cause: Buffer labeled as "minute X" but `start_system_time` was 14ms after the boundary, placing the minute marker tone **before** the buffer started (negative sample position).
+
+#### Solution
+1. **Buffer alignment** (`binary_archive_writer.py`): Calculate RTP timestamp at minute boundary and set `start_system_time` exactly on boundary
+2. **Sample positioning**: Place samples at correct offset based on RTP timestamp
+3. **Tone detector** (`tone_detector.py`): Simplified minute boundary calculation
+4. **Bootstrap buffer** (`bootstrap_rolling_buffer.py`): Fixed shape mismatch in circular buffer reordering
+
+#### Results
+| Metric | Before | After |
+|--------|--------|-------|
+| `start_system_time` | 1769901060.014 | 1769902200.0 (exact) |
+| Expected tone position | -336 samples | 0 samples |
+| Chrony SHM offset | -433ms to -3756ms | -0.4ms to +2.3ms |
+| D_clock | Unstable, 100s of ms | +14ms to +32ms |
+
+#### Files Modified
+- `src/hf_timestd/core/binary_archive_writer.py` - Buffer alignment and sample positioning
+- `src/hf_timestd/core/tone_detector.py` - Simplified minute boundary calculation
+- `src/hf_timestd/core/bootstrap_rolling_buffer.py` - Shape mismatch fix
+
+See `docs/changes/SESSION_2026_01_31_RTP_BUFFER_ALIGNMENT.md` for full details.
+
 ## [5.3.11] - 2026-01-28
 
 ### RTP Wallclock Alignment for Multi-SSRC Bootstrap

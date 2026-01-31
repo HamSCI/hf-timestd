@@ -181,21 +181,27 @@ class MetrologyService:
         signal.signal(signal.SIGTERM, self._handle_signal)
         
         try:
+            logger.info("Entering main loop")
             while self.running:
                 # 1. Determine next minute to process
                 target_minute = self._get_latest_minute()
+                logger.info(f"Target minute: {target_minute}")
                 
                 # 2. Process
                 if target_minute not in self.processed_minutes:
+                    logger.info(f"Processing minute {target_minute}")
                     success = self.process_minute(target_minute)
                     if success:
                         self.processed_minutes.add(target_minute)
                         self._cleanup_processed_set()
+                        logger.info(f"Minute {target_minute} processed successfully")
                     else:
+                        logger.info(f"Minute {target_minute} failed, will retry in 1s")
                         # Wait before retry
                         time.sleep(1.0)
                 else:
                     # Up to date, wait
+                    logger.debug(f"Minute {target_minute} already processed, waiting 0.5s")
                     time.sleep(0.5)
                     
                 # 3. Validation / Health Check (Periodically?)
@@ -210,6 +216,7 @@ class MetrologyService:
         # Read IQ Data
         data = self._read_binary_minute(minute_boundary)
         if data is None:
+            logger.debug(f"No data for minute {minute_boundary}")
             return False
             
         iq_samples, system_time, rtp_timestamp = data
@@ -501,6 +508,7 @@ class MetrologyService:
                     break
         
         if not bin_path:
+            logger.info(f"No binary file found for minute {target_minute}")
             return None
             
         # 2. Read Metadata
@@ -538,7 +546,7 @@ class MetrologyService:
                 self._load_bootstrap_reference()
             
             if not self._bootstrap_ref or not self._bootstrap_ref.locked:
-                logger.debug(f"[TIMING_DIAG] Minute {target_minute}: waiting for bootstrap lock, skipping")
+                logger.info(f"Minute {target_minute}: waiting for bootstrap lock, skipping")
                 return None
             
             # Use start_system_time from metadata (NTP-derived, per-channel)
@@ -648,12 +656,17 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Setup Logging
+    # Setup Logging - force level on root logger since basicConfig may be ignored
+    # if handlers were already configured by imports
+    log_level = getattr(logging, args.log_level.upper())
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper()),
+        level=log_level,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
         datefmt='%Y-%m-%dT%H:%M:%S%z'
     )
+    # Force level on root and our module logger
+    logging.getLogger().setLevel(log_level)
+    logger.setLevel(log_level)
     
     # Config dict construction
     config = {
