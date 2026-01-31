@@ -1,23 +1,107 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-## 🚀 Current Status: Two-Tier Bootstrap (v5.3.10)
+## 🚀 Next Session: Timing-Aware Architecture Refactoring
 
-**Version**: v5.3.10 - 2026-01-27
+**Objective:** Refactor the architecture to explicitly account for timing accuracy levels. The system should gracefully support different timing sources with automatic fallback, enabling scientific measurements appropriate to the available precision.
+
+### Core Principle: GPSDO as Foundation
+
+All scenarios assume a **GPSDO-disciplined RX888 ADC**. The 27 MHz clock from the Leo Bodnar (or similar) GPSDO provides:
+- Sub-ppb frequency stability
+- GPS-traceable sample clock
+- Stable phase relationship for coherent processing
+
+The GPSDO ensures RTP timestamps have a *stable* relationship to UTC. What varies is how *accurately* we know that relationship.
+
+---
+
+## 📊 Timing Accuracy Hierarchy
+
+The system should support multiple timing sources with different accuracy levels. Each level unlocks additional ionospheric phenomena that "come into view" as timing improves.
+
+### Timing Sources (Best to Worst)
+
+| Level | Source | Typical Accuracy | RTP-to-UTC Mapping |
+|-------|--------|------------------|-------------------|
+| **L5** | GPS+PPS on radiod machine | ±100 ns | Direct PPS edge timestamps |
+| **L4** | GPS+PPS on LAN | ±1 μs | PPS via NTP/PTP, network jitter |
+| **L3** | GPS-sync (NMEA only) | ±10 ms | GPS time-of-day, no PPS |
+| **L2** | NTP-sync (stratum 1-2) | ±1-10 ms | Network time, variable latency |
+| **L1** | HF bootstrap only | ±5-50 ms | BCD/FSK decoded time, ionospheric delay |
+
+### Ionospheric Phenomena by Timing Accuracy
+
+| Phenomenon | Required Accuracy | Timing Level | Description |
+|------------|-------------------|--------------|-------------|
+| **Minute identification** | ±500 ms | L1+ | Which UTC minute are we in? |
+| **Propagation mode ID** | ±50 ms | L1+ | 1F vs 2F vs 3F hop discrimination |
+| **TEC estimation** | ±10 ms | L2+ | Multi-frequency differential delay |
+| **TID detection** | ±5 ms | L2+ | Traveling Ionospheric Disturbances |
+| **Scintillation (S4)** | ±1 ms | L3+ | Amplitude fading statistics |
+| **Group delay variation** | ±100 μs | L4+ | Fine ionospheric structure |
+| **Phase scintillation (σ_φ)** | ±10 μs | L4+ | Phase coherence measurements |
+| **Absolute ToF** | ±1 μs | L5 | True time-of-flight measurement |
+| **Multipath resolution** | ±100 ns | L5 | Separate closely-spaced arrivals |
+
+### Architecture Implications
+
+The system should:
+
+1. **Detect available timing sources** at startup and runtime
+2. **Select the best available source** with automatic fallback
+3. **Advertise current timing level** to all components
+4. **Enable/disable measurements** based on achievable accuracy
+5. **Log timing source transitions** for data quality assessment
+
+### Fallback Chain
+
+```
+L5 (PPS local) → L4 (PPS LAN) → L3 (GPS) → L2 (NTP) → L1 (HF bootstrap)
+```
+
+If a higher-accuracy source fails, the system should:
+- Fall back to the next available source
+- Continue measurements appropriate to the new accuracy level
+- Flag data with the timing source used
+- Alert operators to degraded timing
+
+### Current Implementation Gap
+
+The current system assumes L1/L2 timing (HF bootstrap + NTP). To support L4/L5:
+
+1. **PPS integration**: Read `/dev/pps0` for edge timestamps
+2. **Chrony PPS refclock**: Configure chrony to use PPS as primary
+3. **RTP timestamp calibration**: Map RTP to PPS edges during lock
+4. **Timing level API**: Expose current timing accuracy to services
+
+### Leo Bodnar GPS Setup (Target Configuration)
+
+- **27 MHz → RX888 ADC**: GPSDO-locked sample clock
+- **PPS → /dev/pps0**: Via FTDI TTL-to-USB adapter
+- **NMEA → USB**: Time-of-day for chrony
+
+This configuration enables L5 timing (±100 ns) when PPS is available, with automatic fallback to L2 (NTP) if PPS fails.
+
+---
+
+## 🔧 Current Status: v5.3.11
+
+**Version**: v5.3.11 - 2026-01-30
 **Core Philosophy**: **"Steel Ruler" Metrology**. The system treats the local GPSDO as a fixed standard (zero process noise) to measure ionospheric variance.
 
-### 🌟 Recent Accomplishments (v5.3.10)
+### Recent Changes (v5.3.11)
 
-1. **Two-Tier Bootstrap**: Implemented ionospheric averaging before refined lock.
+1. **Chrony Feed Gating Diagnostics**: Added logging to show why chrony writes are blocked
+2. **ArrivalPatternMatrix**: Physics-based arrival predictions with dynamic window narrowing
+3. **Precision Calculation Fix**: Correct max/min clamping for chrony SHM precision
+
+### Previous: Two-Tier Bootstrap (v5.3.10)
+
+1. **Two-Tier Bootstrap**: Implemented ionospheric averaging before refined lock
    - Tier 1 (Provisional): Quick lock in 2-3 min for minute alignment
    - Tier 2 (Refined): Stable lock after 10 min with median offset, std < 15ms
 2. **LockTier Enum**: Added `LockTier.NONE`, `PROVISIONAL`, `REFINED` states
 3. **Offset Measurement Tracking**: Collect measurements during provisional phase
-4. **Median-Based Offset**: Refined lock uses median for outlier robustness
-5. **Status Exposure**: `lock_tier`, `time_to_refined_sec`, `current_offset_std_ms` in status
-
-### 🔴 Next Session: Deploy and Monitor Two-Tier Bootstrap
-
-**Objective:** Deploy v5.3.10 and monitor the two-tier bootstrap behavior in production. Verify that refined lock achieves lower offset std than provisional lock.
 
 ---
 
