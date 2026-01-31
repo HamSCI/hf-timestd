@@ -90,6 +90,7 @@ from .bootstrap_rolling_buffer import (
 )
 from .timing_bootstrap import TimingBootstrap, BootstrapState, LockTier
 from .arrival_pattern_matrix import ArrivalPatternMatrix
+from ..interfaces.data_models import TimingConfig, TimingAuthority
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +129,23 @@ class BootstrapConfig:
     - Refines RTP-to-UTC offset using median of many measurements
     - Narrows detection window for operational mode
     - Requires 10-15 minutes of consistent tracking
+    
+    Timing Authority Mode (2026-01-31):
+    -----------------------------------
+    When timing.authority = "rtp" (L4/L5 with GPS+PPS), bootstrap can skip
+    the wide search phase entirely - we already know UTC from radiod's
+    GPS_TIME/RTP_TIMESNAP. Bootstrap becomes validation-only.
+    
+    When timing.authority = "fusion" (L3/L2/L1), bootstrap proceeds as normal
+    with wide search windows until lock is achieved.
     """
     receiver_lat: float
     receiver_lon: float
     sample_rate: int = DEFAULT_SAMPLE_RATE
     buffer_duration_sec: float = DEFAULT_BUFFER_DURATION_SEC
+    
+    # Timing authority configuration (from [timing] section)
+    timing_config: Optional[TimingConfig] = None
     
     # Search parameters
     search_interval_sec: float = 10.0  # How often to search buffers
@@ -155,6 +168,32 @@ class BootstrapConfig:
     # Callbacks
     on_provisional_lock: Optional[Callable[[float], None]] = None  # Called with D_clock
     on_full_lock: Optional[Callable[[float, float], None]] = None  # Called with D_clock, uncertainty
+    
+    def get_search_window_ms(self, ionospheric_uncertainty_ms: float = 10.0) -> float:
+        """
+        Get search window size based on timing authority.
+        
+        In RTP authority mode (L4/L5): Narrow window - timing is known
+        In Fusion authority mode (L3/L2/L1): Wide window until lock
+        
+        Args:
+            ionospheric_uncertainty_ms: Expected ionospheric delay variation
+            
+        Returns:
+            Search window half-width in milliseconds
+        """
+        if self.timing_config and self.timing_config.authority == TimingAuthority.RTP:
+            # RTP authority: narrow search, only ionospheric uncertainty
+            return self.timing_config.rtp_expected_accuracy_ms + ionospheric_uncertainty_ms
+        else:
+            # Fusion authority: wide search until lock
+            return 100.0  # ±100ms initial search window
+    
+    @property
+    def is_rtp_authority(self) -> bool:
+        """Check if we're in RTP authority mode (L4/L5 with GPS+PPS)."""
+        return (self.timing_config is not None and 
+                self.timing_config.authority == TimingAuthority.RTP)
 
 
 class BootstrapService:

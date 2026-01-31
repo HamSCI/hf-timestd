@@ -34,9 +34,38 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 # Constants
-# Constants
 BYTES_PER_SAMPLE = 8  # complex64 = 2 x float32
-BYTES_PER_SAMPLE = 8  # complex64 = 2 x float32
+
+
+@dataclass
+class TimingSnapshot:
+    """
+    A GPS_TIME/RTP_TIMESNAP pair from radiod status packets.
+    
+    These snapshots enable post-hoc RTP-to-UTC conversion using radiod's
+    authoritative timing (when GPS+PPS disciplined, L4/L5 accuracy).
+    
+    Capture frequency: ~2 Hz (radiod's default status update rate)
+    Metrological justification:
+    - In L4/L5: Documents stable GPS-disciplined mapping for verification
+    - In L3/L2/L1: Captures NTP slew/step events for post-hoc correction
+    
+    Attributes:
+        gps_time_ns: radiod's GPS_TIME (ns since GPS epoch, from CLOCK_REALTIME)
+        rtp_timesnap: RTP timestamp at the moment GPS_TIME was sampled
+        local_receipt_time: When hf-timestd received this status packet (Unix time)
+    """
+    gps_time_ns: int
+    rtp_timesnap: int  
+    local_receipt_time: float
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            'gps_time_ns': self.gps_time_ns,
+            'rtp_timesnap': self.rtp_timesnap,
+            'local_receipt_time': self.local_receipt_time
+        }
 
 
 @dataclass
@@ -72,6 +101,7 @@ class MinuteBuffer:
     gap_samples: int = 0  # Total gap samples
     start_rtp: Optional[int] = None
     start_system_time: Optional[float] = None
+    timing_snapshots: List[TimingSnapshot] = field(default_factory=list)  # Snapshots for this minute
     
     @property
     def is_complete(self) -> bool:
@@ -137,9 +167,53 @@ class BinaryArchiveWriter:
         self.last_rtp_timestamp: Optional[int] = None
         self.cumulative_samples: int = 0  # Total samples processed
         
+        # Timing snapshot tracking for radiod GPS_TIME/RTP_TIMESNAP pairs
+        # Deduplicated by rtp_timesnap to avoid storing duplicates
+        self._last_rtp_timesnap: Optional[int] = None
+        self._pending_snapshots: List[TimingSnapshot] = []  # Snapshots waiting for minute assignment
+        
         logger.info(f"BinaryArchiveWriter initialized for {config.channel_name}")
         logger.info(f"  Output: {self.archive_dir}")
         logger.info(f"  Format: raw complex64 binary + JSON metadata")
+    
+    def add_timing_snapshot(self, gps_time_ns: int, rtp_timesnap: int) -> bool:
+        """
+        Record a GPS_TIME/RTP_TIMESNAP pair from radiod status.
+        
+        Called at ~2 Hz (radiod's status update rate). Deduplicated by rtp_timesnap
+        to avoid storing duplicate snapshots when status hasn't changed.
+        
+        Metrological justification:
+        - In L4/L5 (GPS+PPS): Documents stable mapping for post-hoc verification
+        - In L3/L2/L1 (NTP): Captures clock slew/step events for correction
+        
+        Args:
+            gps_time_ns: radiod's GPS_TIME (ns since GPS epoch)
+            rtp_timesnap: RTP timestamp at the moment GPS_TIME was sampled
+            
+        Returns:
+            True if snapshot was stored (new), False if deduplicated
+        """
+        with self._lock:
+            # Deduplicate: only store if rtp_timesnap has changed
+            if rtp_timesnap == self._last_rtp_timesnap:
+                return False
+            
+            self._last_rtp_timesnap = rtp_timesnap
+            
+            snapshot = TimingSnapshot(
+                gps_time_ns=gps_time_ns,
+                rtp_timesnap=rtp_timesnap,
+                local_receipt_time=time.time()
+            )
+            
+            # Add to current buffer if available, otherwise to pending list
+            if self.current_buffer is not None:
+                self.current_buffer.timing_snapshots.append(snapshot)
+            else:
+                self._pending_snapshots.append(snapshot)
+            
+            return True
     
     def _sanitize_channel_name(self) -> str:
         """Convert channel name to filesystem-safe format.
@@ -171,8 +245,15 @@ class BinaryArchiveWriter:
             samples=np.zeros(self.samples_per_minute, dtype=np.complex64),
             write_pos=0,
             start_rtp=rtp_timestamp,
-            start_system_time=rtp_derived_time
+            start_system_time=rtp_derived_time,
+            timing_snapshots=[]
         )
+        
+        # Transfer any pending timing snapshots to this buffer
+        if self._pending_snapshots:
+            buffer.timing_snapshots.extend(self._pending_snapshots)
+            logger.debug(f"Transferred {len(self._pending_snapshots)} pending timing snapshots to new minute")
+            self._pending_snapshots = []
         
         logger.debug(f"Started new minute buffer: {minute_boundary}")
         return buffer
@@ -394,7 +475,10 @@ class BinaryArchiveWriter:
                 'compression': compression if compression != 'none' else None,
                 'radiod_snr_db': self.config.radiod_snr_db,  # SNR from radiod
                 'written_at': datetime.now(timezone.utc).isoformat(),
-                'station': self.config.station_config
+                'station': self.config.station_config,
+                # Timing snapshots: GPS_TIME/RTP_TIMESNAP pairs from radiod (~2 Hz)
+                # Enables post-hoc RTP-to-UTC conversion and timing validation
+                'timing_snapshots': [s.to_dict() for s in buffer.timing_snapshots]
             }
             
             # Atomic write: write to temp file, fsync, then rename

@@ -112,6 +112,29 @@ enable_metrics = true
 port = 8000
 refresh_interval = 60
 
+[timing]
+# Timing Authority Mode:
+#   "rtp"    - Trust radiod's GPS_TIME/RTP_TIMESNAP (L4/L5: GPS+PPS on radiod)
+#   "fusion" - Use HF fusion to establish RTP-to-UTC mapping (L3/L2/L1)
+#   "auto"   - Monitor discrepancy, infer best source (future)
+authority = "rtp"  # L4: radiod has LAN GPS+PPS feed from 192.168.0.202
+
+# Expected accuracy when authority = "rtp" (used for search window sizing)
+# L5 (GPS+PPS local): 0.0001 ms (100 ns)
+# L4 (GPS+PPS LAN):   0.001 ms (1 μs)
+rtp_expected_accuracy_ms = 0.001  # L4 accuracy
+
+# Validation threshold: warn if fusion disagrees with RTP by more than this
+# Catches misconfiguration (e.g., claimed L5 but radiod only has NTP)
+validation_threshold_ms = 5.0
+
+# Always run fusion for comparison (recommended for validation)
+always_run_fusion = true
+
+# Timing snapshot capture rate (Hz) - matches radiod's status update rate
+# Metrological justification: Captures all NTP slew/step events
+timing_snapshot_rate_hz = 2.0
+
 [gnss_vtec]
 enabled = true
 host = "192.168.0.202"

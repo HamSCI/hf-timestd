@@ -20,6 +20,82 @@ import numpy as np
 
 
 # ============================================================================
+# TIMING AUTHORITY CONFIGURATION
+# ============================================================================
+
+class TimingAuthority(Enum):
+    """
+    Timing authority mode - determines which source provides RTP-to-UTC mapping.
+    
+    L4/L5 (GPS+PPS): Use RTP authority - trust radiod's GPS_TIME/RTP_TIMESNAP
+    L3/L2/L1 (NTP/HF): Use Fusion authority - HF signals establish timing
+    """
+    RTP = "rtp"        # Trust radiod's GPS+PPS timing (L4/L5)
+    FUSION = "fusion"  # Use HF fusion to establish timing (L3/L2/L1)
+    AUTO = "auto"      # Monitor discrepancy, infer best source (future)
+
+
+@dataclass
+class TimingConfig:
+    """
+    Configuration for timing authority and validation.
+    
+    Loaded from [timing] section of timestd-config.toml.
+    
+    Attributes:
+        authority: Which source provides RTP-to-UTC mapping
+        rtp_expected_accuracy_ms: Expected accuracy when authority="rtp"
+        validation_threshold_ms: Warn if fusion disagrees with RTP by more than this
+        always_run_fusion: Run fusion for comparison even in RTP mode
+        timing_snapshot_rate_hz: Rate to capture GPS_TIME/RTP_TIMESNAP pairs
+    """
+    authority: TimingAuthority = TimingAuthority.FUSION
+    rtp_expected_accuracy_ms: float = 0.001  # 1 μs for L5
+    validation_threshold_ms: float = 5.0
+    always_run_fusion: bool = True
+    timing_snapshot_rate_hz: float = 2.0
+    
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'TimingConfig':
+        """Create TimingConfig from parsed TOML config dict."""
+        timing = config.get('timing', {})
+        
+        authority_str = timing.get('authority', 'fusion').lower()
+        try:
+            authority = TimingAuthority(authority_str)
+        except ValueError:
+            authority = TimingAuthority.FUSION
+        
+        return cls(
+            authority=authority,
+            rtp_expected_accuracy_ms=timing.get('rtp_expected_accuracy_ms', 0.001),
+            validation_threshold_ms=timing.get('validation_threshold_ms', 5.0),
+            always_run_fusion=timing.get('always_run_fusion', True),
+            timing_snapshot_rate_hz=timing.get('timing_snapshot_rate_hz', 2.0),
+        )
+    
+    def get_search_window_ms(self, ionospheric_uncertainty_ms: float = 10.0) -> float:
+        """
+        Get search window size based on timing authority.
+        
+        In RTP mode: Narrow window (timing uncertainty + ionospheric only)
+        In Fusion mode: Wide window until lock, then narrows
+        
+        Args:
+            ionospheric_uncertainty_ms: Expected ionospheric delay variation
+            
+        Returns:
+            Search window half-width in milliseconds
+        """
+        if self.authority == TimingAuthority.RTP:
+            # Narrow: timing is known, only ionospheric uncertainty
+            return self.rtp_expected_accuracy_ms + ionospheric_uncertainty_ms
+        else:
+            # Wide: timing uncertain until fusion lock
+            return 100.0  # ±100ms initial search window
+
+
+# ============================================================================
 # DISCONTINUITY TRACKING (Function 1 output)
 # ============================================================================
 

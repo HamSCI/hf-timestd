@@ -23,6 +23,7 @@ except ImportError:
     SYSTEMD_AVAILABLE = False
 
 from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router
+from routers.timing_validation import router as timing_validation_router
 from config import config
 
 # Configure logging
@@ -62,6 +63,7 @@ app.include_router(space_weather_router, prefix="/api")
 app.include_router(correlations_router, prefix="/api")
 app.include_router(physics_router, prefix="/api")
 app.include_router(docs_router)  # No prefix - router has its own /api/docs prefix
+app.include_router(timing_validation_router)  # No prefix - router has its own /api/timing-validation prefix
 
 # Static files directory
 static_dir = Path(__file__).parent / "static"
@@ -92,6 +94,19 @@ async def root():
             </html>
             """,
             status_code=200
+        )
+
+
+@app.get("/timing-validation", response_class=HTMLResponse)
+async def timing_validation_page():
+    """Serve timing validation dashboard."""
+    validation_path = static_dir / "timing-validation.html"
+    if validation_path.exists():
+        return FileResponse(validation_path)
+    else:
+        return HTMLResponse(
+            content="<html><body><h1>Timing Validation Dashboard not found</h1></body></html>",
+            status_code=404
         )
 
 

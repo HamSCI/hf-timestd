@@ -279,6 +279,12 @@ class StreamRecorderV2:
         self._health_check_interval = 5.0  # Check every 5 seconds (fast detection)
         self._silence_threshold = 10.0  # Recreate if silent for 10 seconds
         
+        # Timing snapshot polling (~2 Hz to match radiod's status update rate)
+        # Captures GPS_TIME/RTP_TIMESNAP pairs for post-hoc timing analysis
+        self._timing_poll_thread: Optional[threading.Thread] = None
+        self._timing_poll_interval = 0.5  # 2 Hz - matches radiod's default status rate
+        self._last_timing_poll = 0.0
+        
         # Initialize BinaryArchiveWriter for Phase 1 raw IQ storage
         # Phase 2/3 are handled by separate systemd services (6-service architecture)
         from .binary_archive_writer import BinaryArchiveWriter, BinaryArchiveConfig
@@ -333,6 +339,16 @@ class StreamRecorderV2:
             )
             self._health_monitor_thread.start()
             logger.info(f"{self.config.description}: Health monitoring started")
+            
+            # Start timing snapshot polling thread (~2 Hz)
+            # Captures GPS_TIME/RTP_TIMESNAP pairs from radiod for post-hoc timing
+            self._timing_poll_thread = threading.Thread(
+                target=self._timing_poll_loop,
+                name=f"TimingPoll-{self.config.description}",
+                daemon=True
+            )
+            self._timing_poll_thread.start()
+            logger.info(f"{self.config.description}: Timing snapshot polling started (2 Hz)")
             
             self.session_start_time = time.time()
             
@@ -434,6 +450,54 @@ class StreamRecorderV2:
             except Exception as e:
                 logger.error(f"{self.config.description}: Health monitor error: {e}")
 
+    def _timing_poll_loop(self):
+        """
+        Capture GPS_TIME/RTP_TIMESNAP pairs from channel_info.
+        
+        Metrological justification:
+        - With GPSDO, the RTP-to-UTC relationship is stable (sub-ppm drift)
+        - channel_info.gps_time/rtp_timesnap are set at channel creation
+        - We capture periodically to document the relationship
+        - Any clock steps/slew would require channel recreation anyway
+        
+        In L4/L5 (GPS+PPS): The relationship is stable to ±1μs
+        In L3/L2/L1 (NTP): Captures the NTP-derived relationship
+        
+        Storage overhead: ~120 snapshots/minute × ~50 bytes = ~6 KB/minute (negligible)
+        """
+        last_captured_rtp = None
+        
+        while self._running:
+            try:
+                time.sleep(self._timing_poll_interval)
+                
+                if not self._running:
+                    break
+                
+                # Use channel_info which has gps_time and rtp_timesnap
+                if self.channel_info is None:
+                    continue
+                
+                gps_time = getattr(self.channel_info, 'gps_time', None)
+                rtp_timesnap = getattr(self.channel_info, 'rtp_timesnap', None)
+                
+                if gps_time is not None and rtp_timesnap is not None:
+                    # Only store if rtp_timesnap changed (new status received)
+                    if rtp_timesnap != last_captured_rtp:
+                        stored = self.archive_writer.add_timing_snapshot(
+                            gps_time_ns=gps_time,
+                            rtp_timesnap=rtp_timesnap
+                        )
+                        if stored:
+                            last_captured_rtp = rtp_timesnap
+                            logger.debug(
+                                f"{self.config.description}: Timing snapshot - "
+                                f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_timesnap}"
+                            )
+                    
+            except Exception as e:
+                logger.error(f"{self.config.description}: Timing poll loop error: {e}")
+
     def stop(self) -> Optional[StreamQuality]:
         """
         Stop the stream recorder gracefully.
@@ -455,6 +519,11 @@ class StreamRecorderV2:
             if self._health_monitor_thread:
                 self._health_monitor_thread.join(timeout=2.0)
                 self._health_monitor_thread = None
+            
+            # Stop timing poll thread
+            if self._timing_poll_thread:
+                self._timing_poll_thread.join(timeout=2.0)
+                self._timing_poll_thread = None
             
             # Stop ManagedStream/RadiodStream (returns final quality/stats)
             if self.stream:

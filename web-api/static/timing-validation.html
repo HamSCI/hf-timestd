@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Timing Validation Dashboard - HF-TimeStd</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent-blue: #3b82f6;
+            --accent-green: #22c55e;
+            --accent-yellow: #eab308;
+            --accent-red: #ef4444;
+            --accent-purple: #a855f7;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--bg-tertiary);
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+        }
+        
+        .header-subtitle {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-top: 4px;
+        }
+        
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .status-ok { background: rgba(34, 197, 94, 0.2); color: var(--accent-green); }
+        .status-warning { background: rgba(234, 179, 8, 0.2); color: var(--accent-yellow); }
+        .status-error { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); }
+        .status-loading { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+        
+        .card {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid var(--bg-tertiary);
+        }
+        
+        .card-title {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .card-value {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        
+        .card-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        
+        .card-value.good { color: var(--accent-green); }
+        .card-value.warning { color: var(--accent-yellow); }
+        .card-value.bad { color: var(--accent-red); }
+        
+        .chart-container {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid var(--bg-tertiary);
+            margin-bottom: 24px;
+        }
+        
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        
+        .chart-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        
+        .chart-controls {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .chart-controls button {
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--bg-tertiary);
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        
+        .chart-controls button:hover {
+            border-color: var(--accent-blue);
+            color: var(--accent-blue);
+        }
+        
+        .chart-controls button.active {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+            color: white;
+        }
+        
+        .table-container {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--bg-tertiary);
+            overflow: hidden;
+        }
+        
+        .table-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--bg-tertiary);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .table-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--bg-tertiary);
+        }
+        
+        th {
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 500;
+        }
+        
+        td {
+            font-size: 14px;
+        }
+        
+        tr:hover {
+            background: rgba(59, 130, 246, 0.05);
+        }
+        
+        .grade-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        .grade-A { background: rgba(34, 197, 94, 0.2); color: var(--accent-green); }
+        .grade-B { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); }
+        .grade-C { background: rgba(234, 179, 8, 0.2); color: var(--accent-yellow); }
+        .grade-D { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); }
+        
+        .validation-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .validation-status.pass::before { content: '✓'; color: var(--accent-green); }
+        .validation-status.fail::before { content: '✗'; color: var(--accent-red); }
+        
+        .methodology-note {
+            background: rgba(168, 85, 247, 0.1);
+            border: 1px solid rgba(168, 85, 247, 0.3);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        
+        .methodology-note strong {
+            color: var(--accent-purple);
+        }
+        
+        .refresh-btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            background: var(--accent-blue);
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .refresh-btn:hover {
+            background: #2563eb;
+        }
+        
+        .refresh-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .last-updated {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .spinning {
+            animation: spin 1s linear infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>⏱️ Timing Validation Dashboard</h1>
+            <div class="header-subtitle">Comparing HF Fusion timing against GPS+PPS ground truth</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 16px;">
+            <span class="last-updated" id="lastUpdated">Loading...</span>
+            <button class="refresh-btn" id="refreshBtn" onclick="loadDashboard()">
+                <span id="refreshIcon">🔄</span> Refresh
+            </button>
+            <span class="status-badge status-loading" id="statusBadge">Loading...</span>
+        </div>
+    </div>
+    
+    <div class="methodology-note">
+        <strong>Living Documentation:</strong> This dashboard shows real-time validation of the HF fusion methodology 
+        against GPS+PPS ground truth (L4 timing). The radiod machine has a LAN GPS+PPS feed providing ±1μs accuracy.
+        Fusion estimates should converge to within their stated uncertainty. Large discrepancies indicate 
+        methodology issues to investigate.
+    </div>
+    
+    <!-- Statistics Cards -->
+    <div class="grid" id="statsGrid">
+        <div class="card">
+            <div class="card-title">Mean Discrepancy</div>
+            <div class="card-value" id="meanDiscrepancy">--</div>
+            <div class="card-subtitle">Fusion - GPS (ms)</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Std Deviation</div>
+            <div class="card-value" id="stdDiscrepancy">--</div>
+            <div class="card-subtitle">Discrepancy spread (ms)</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Within Uncertainty</div>
+            <div class="card-value" id="withinUncertainty">--</div>
+            <div class="card-subtitle">% of points validated</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Within 1ms</div>
+            <div class="card-value" id="within1ms">--</div>
+            <div class="card-subtitle">% of points</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Data Points</div>
+            <div class="card-value" id="nPoints">--</div>
+            <div class="card-subtitle">Validation samples</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Timing Authority</div>
+            <div class="card-value" id="timingAuthority" style="font-size: 24px;">--</div>
+            <div class="card-subtitle">GPS accuracy: <span id="gpsAccuracy">--</span></div>
+        </div>
+    </div>
+    
+    <!-- Discrepancy Chart -->
+    <div class="chart-container">
+        <div class="chart-header">
+            <div class="chart-title">Fusion vs GPS Discrepancy Over Time</div>
+            <div class="chart-controls">
+                <button class="active" onclick="setTimeRange(60)">1 Hour</button>
+                <button onclick="setTimeRange(360)">6 Hours</button>
+                <button onclick="setTimeRange(1440)">24 Hours</button>
+            </div>
+        </div>
+        <canvas id="discrepancyChart" height="300"></canvas>
+    </div>
+    
+    <!-- Quality Grade Distribution -->
+    <div class="grid" style="grid-template-columns: 1fr 1fr;">
+        <div class="chart-container">
+            <div class="chart-title" style="margin-bottom: 16px;">Quality Grade Distribution</div>
+            <canvas id="gradeChart" height="200"></canvas>
+        </div>
+        <div class="chart-container">
+            <div class="chart-title" style="margin-bottom: 16px;">Discrepancy Histogram</div>
+            <canvas id="histogramChart" height="200"></canvas>
+        </div>
+    </div>
+    
+    <!-- Recent Validations Table -->
+    <div class="table-container">
+        <div class="table-header">
+            <div class="table-title">Recent Validation Points</div>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Time (UTC)</th>
+                    <th>Fusion D_clock</th>
+                    <th>GPS D_clock</th>
+                    <th>Discrepancy</th>
+                    <th>Uncertainty</th>
+                    <th>Validated</th>
+                    <th>Grade</th>
+                    <th>Broadcasts</th>
+                </tr>
+            </thead>
+            <tbody id="validationTable">
+                <tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+    
+    <script>
+        let discrepancyChart = null;
+        let gradeChart = null;
+        let histogramChart = null;
+        let currentTimeRange = 60;
+        let dashboardData = null;
+        
+        async function loadDashboard() {
+            const refreshBtn = document.getElementById('refreshBtn');
+            const refreshIcon = document.getElementById('refreshIcon');
+            const statusBadge = document.getElementById('statusBadge');
+            
+            refreshBtn.disabled = true;
+            refreshIcon.classList.add('spinning');
+            statusBadge.className = 'status-badge status-loading';
+            statusBadge.textContent = 'Loading...';
+            
+            try {
+                const hours = Math.ceil(currentTimeRange / 60);
+                const response = await fetch(`/api/timing-validation/dashboard?hours=${hours}&points=${currentTimeRange}`);
+                const data = await response.json();
+                
+                dashboardData = data;
+                
+                if (data.status === 'ok') {
+                    statusBadge.className = 'status-badge status-ok';
+                    statusBadge.textContent = '✓ Connected';
+                    updateStatistics(data.statistics);
+                    updateCharts(data.recent_points);
+                    updateTable(data.recent_points);
+                } else if (data.status === 'no_data') {
+                    statusBadge.className = 'status-badge status-warning';
+                    statusBadge.textContent = '⚠ No Data';
+                    clearDisplay(data.message);
+                } else {
+                    statusBadge.className = 'status-badge status-error';
+                    statusBadge.textContent = '✗ Error';
+                    clearDisplay(data.message);
+                }
+                
+                document.getElementById('lastUpdated').textContent = 
+                    `Updated: ${new Date(data.last_updated).toLocaleTimeString()}`;
+                    
+            } catch (error) {
+                statusBadge.className = 'status-badge status-error';
+                statusBadge.textContent = '✗ Error';
+                clearDisplay(`Failed to load: ${error.message}`);
+            } finally {
+                refreshBtn.disabled = false;
+                refreshIcon.classList.remove('spinning');
+            }
+        }
+        
+        function clearDisplay(message) {
+            document.getElementById('meanDiscrepancy').textContent = '--';
+            document.getElementById('stdDiscrepancy').textContent = '--';
+            document.getElementById('withinUncertainty').textContent = '--';
+            document.getElementById('within1ms').textContent = '--';
+            document.getElementById('nPoints').textContent = '--';
+            document.getElementById('timingAuthority').textContent = '--';
+            document.getElementById('gpsAccuracy').textContent = '--';
+            document.getElementById('validationTable').innerHTML = 
+                `<tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">${message || 'No data'}</td></tr>`;
+        }
+        
+        function updateStatistics(stats) {
+            if (!stats) return;
+            
+            const meanEl = document.getElementById('meanDiscrepancy');
+            meanEl.textContent = stats.mean_discrepancy_ms.toFixed(3);
+            meanEl.className = 'card-value ' + getDiscrepancyClass(Math.abs(stats.mean_discrepancy_ms));
+            
+            document.getElementById('stdDiscrepancy').textContent = stats.std_discrepancy_ms.toFixed(3);
+            
+            const withinEl = document.getElementById('withinUncertainty');
+            withinEl.textContent = stats.within_uncertainty_pct.toFixed(1) + '%';
+            withinEl.className = 'card-value ' + (stats.within_uncertainty_pct >= 95 ? 'good' : stats.within_uncertainty_pct >= 80 ? 'warning' : 'bad');
+            
+            const within1msEl = document.getElementById('within1ms');
+            within1msEl.textContent = stats.within_1ms_pct.toFixed(1) + '%';
+            within1msEl.className = 'card-value ' + (stats.within_1ms_pct >= 95 ? 'good' : stats.within_1ms_pct >= 80 ? 'warning' : 'bad');
+            
+            document.getElementById('nPoints').textContent = stats.n_points;
+            document.getElementById('timingAuthority').textContent = stats.timing_authority.toUpperCase();
+            document.getElementById('gpsAccuracy').textContent = stats.gps_accuracy_ms + ' ms';
+        }
+        
+        function getDiscrepancyClass(absMs) {
+            if (absMs < 1) return 'good';
+            if (absMs < 5) return 'warning';
+            return 'bad';
+        }
+        
+        function updateCharts(points) {
+            if (!points || points.length === 0) return;
+            
+            // Discrepancy over time
+            const labels = points.map(p => {
+                const d = new Date(p.timestamp_utc);
+                return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+            });
+            
+            const discrepancies = points.map(p => p.discrepancy_ms);
+            const uncertainties = points.map(p => p.fusion_uncertainty_ms);
+            
+            if (discrepancyChart) discrepancyChart.destroy();
+            
+            const ctx = document.getElementById('discrepancyChart').getContext('2d');
+            discrepancyChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Discrepancy (ms)',
+                            data: discrepancies,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: 2
+                        },
+                        {
+                            label: '+Uncertainty',
+                            data: uncertainties,
+                            borderColor: 'rgba(34, 197, 94, 0.5)',
+                            borderDash: [5, 5],
+                            fill: false,
+                            pointRadius: 0
+                        },
+                        {
+                            label: '-Uncertainty',
+                            data: uncertainties.map(u => -u),
+                            borderColor: 'rgba(34, 197, 94, 0.5)',
+                            borderDash: [5, 5],
+                            fill: false,
+                            pointRadius: 0
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#94a3b8' }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#94a3b8', maxTicksLimit: 12 },
+                            grid: { color: 'rgba(51, 65, 85, 0.5)' }
+                        },
+                        y: {
+                            ticks: { color: '#94a3b8' },
+                            grid: { color: 'rgba(51, 65, 85, 0.5)' },
+                            title: {
+                                display: true,
+                                text: 'Discrepancy (ms)',
+                                color: '#94a3b8'
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // Grade distribution
+            if (dashboardData && dashboardData.statistics) {
+                const stats = dashboardData.statistics;
+                
+                if (gradeChart) gradeChart.destroy();
+                
+                const gradeCtx = document.getElementById('gradeChart').getContext('2d');
+                gradeChart = new Chart(gradeCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Grade A', 'Grade B', 'Grade C', 'Grade D'],
+                        datasets: [{
+                            data: [stats.grade_a_pct, stats.grade_b_pct, stats.grade_c_pct, stats.grade_d_pct],
+                            backgroundColor: [
+                                'rgba(34, 197, 94, 0.8)',
+                                'rgba(59, 130, 246, 0.8)',
+                                'rgba(234, 179, 8, 0.8)',
+                                'rgba(239, 68, 68, 0.8)'
+                            ]
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: { color: '#94a3b8' }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Histogram
+            const validDiscrepancies = discrepancies.filter(d => d !== null);
+            const bins = [-10, -5, -2, -1, -0.5, 0, 0.5, 1, 2, 5, 10];
+            const histogram = new Array(bins.length - 1).fill(0);
+            
+            validDiscrepancies.forEach(d => {
+                for (let i = 0; i < bins.length - 1; i++) {
+                    if (d >= bins[i] && d < bins[i + 1]) {
+                        histogram[i]++;
+                        break;
+                    }
+                }
+            });
+            
+            if (histogramChart) histogramChart.destroy();
+            
+            const histCtx = document.getElementById('histogramChart').getContext('2d');
+            histogramChart = new Chart(histCtx, {
+                type: 'bar',
+                data: {
+                    labels: bins.slice(0, -1).map((b, i) => `${b} to ${bins[i+1]}`),
+                    datasets: [{
+                        label: 'Count',
+                        data: histogram,
+                        backgroundColor: 'rgba(59, 130, 246, 0.8)'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#94a3b8', maxRotation: 45 },
+                            grid: { display: false }
+                        },
+                        y: {
+                            ticks: { color: '#94a3b8' },
+                            grid: { color: 'rgba(51, 65, 85, 0.5)' }
+                        }
+                    }
+                }
+            });
+        }
+        
+        function updateTable(points) {
+            const tbody = document.getElementById('validationTable');
+            
+            if (!points || points.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">No data</td></tr>';
+                return;
+            }
+            
+            // Show most recent first
+            const sorted = [...points].reverse().slice(0, 20);
+            
+            tbody.innerHTML = sorted.map(p => {
+                const time = new Date(p.timestamp_utc).toLocaleTimeString();
+                const fusionD = p.fusion_d_clock_ms?.toFixed(3) ?? '--';
+                const gpsD = p.gps_d_clock_ms?.toFixed(3) ?? '--';
+                const disc = p.discrepancy_ms?.toFixed(3) ?? '--';
+                const unc = p.fusion_uncertainty_ms?.toFixed(3) ?? '--';
+                const validated = p.within_uncertainty;
+                const grade = p.fusion_quality_grade;
+                
+                return `
+                    <tr>
+                        <td>${time}</td>
+                        <td>${fusionD} ms</td>
+                        <td>${gpsD} ms</td>
+                        <td style="color: ${getDiscrepancyColor(p.discrepancy_ms)}">${disc} ms</td>
+                        <td>±${unc} ms</td>
+                        <td><span class="validation-status ${validated ? 'pass' : 'fail'}">${validated ? 'Pass' : 'Fail'}</span></td>
+                        <td><span class="grade-badge grade-${grade}">${grade}</span></td>
+                        <td>${p.fusion_n_broadcasts}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+        
+        function getDiscrepancyColor(ms) {
+            if (ms === null) return 'var(--text-secondary)';
+            const abs = Math.abs(ms);
+            if (abs < 1) return 'var(--accent-green)';
+            if (abs < 5) return 'var(--accent-yellow)';
+            return 'var(--accent-red)';
+        }
+        
+        function setTimeRange(minutes) {
+            currentTimeRange = minutes;
+            
+            // Update button states
+            document.querySelectorAll('.chart-controls button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            loadDashboard();
+        }
+        
+        // Initial load
+        loadDashboard();
+        
+        // Auto-refresh every 60 seconds
+        setInterval(loadDashboard, 60000);
+    </script>
+</body>
+</html>
