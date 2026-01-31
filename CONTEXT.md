@@ -25,9 +25,11 @@ The system should support multiple timing sources with different accuracy levels
 |-------|--------|------------------|-------------------|
 | **L5** | GPS+PPS on radiod machine | ±100 ns | Direct PPS edge timestamps |
 | **L4** | GPS+PPS on LAN | ±1 μs | PPS via NTP/PTP, network jitter |
-| **L3** | GPS-sync (NMEA only) | ±10 ms | GPS time-of-day, no PPS |
+| **L3** | HF-timestd fusion (GPSDO + 17 broadcasts) | ±0.5 ms | Multi-broadcast Kalman fusion with ionospheric modeling |
 | **L2** | NTP-sync (stratum 1-2) | ±1-10 ms | Network time, variable latency |
-| **L1** | HF bootstrap only | ±5-50 ms | BCD/FSK decoded time, ionospheric delay |
+| **L1** | HF bootstrap only | ±5-50 ms | BCD/FSK decoded time, raw ionospheric delay |
+
+**Note on L3**: The hf-timestd system combines the GPSDO "steel ruler" (stable sample clock) with multi-broadcast fusion across 17 time standard broadcasts. By treating the GPSDO as a fixed reference and measuring ionospheric variance across multiple paths, frequencies, and stations, the system achieves ±0.5ms accuracy - significantly better than raw HF timing or NTP alone.
 
 ### Ionospheric Phenomena by Timing Accuracy
 
@@ -38,10 +40,13 @@ The system should support multiple timing sources with different accuracy levels
 | **TEC estimation** | ±10 ms | L2+ | Multi-frequency differential delay |
 | **TID detection** | ±5 ms | L2+ | Traveling Ionospheric Disturbances |
 | **Scintillation (S4)** | ±1 ms | L3+ | Amplitude fading statistics |
+| **Cross-station validation** | ±0.5 ms | L3+ | Multi-station consistency checks |
 | **Group delay variation** | ±100 μs | L4+ | Fine ionospheric structure |
 | **Phase scintillation (σ_φ)** | ±10 μs | L4+ | Phase coherence measurements |
 | **Absolute ToF** | ±1 μs | L5 | True time-of-flight measurement |
 | **Multipath resolution** | ±100 ns | L5 | Separate closely-spaced arrivals |
+
+**Current System Capability**: With GPSDO + HF-timestd fusion (L3), the system achieves ±0.5ms accuracy, enabling all phenomena through cross-station validation. Adding GPS+PPS (L4/L5) would unlock sub-millisecond measurements like fine group delay variation and phase scintillation.
 
 ### Architecture Implications
 
@@ -56,7 +61,7 @@ The system should:
 ### Fallback Chain
 
 ```
-L5 (PPS local) → L4 (PPS LAN) → L3 (GPS) → L2 (NTP) → L1 (HF bootstrap)
+L5 (PPS local) → L4 (PPS LAN) → L3 (HF-timestd fusion) → L2 (NTP) → L1 (HF bootstrap)
 ```
 
 If a higher-accuracy source fails, the system should:
