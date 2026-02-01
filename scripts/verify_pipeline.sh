@@ -218,6 +218,44 @@ if [[ -d "$RAW_BUFFER_DIR" ]]; then
             check_warn "Only found $RECENT_JSON metadata files for $RECENT_BIN binary files"
             echo "  → Critical for timing alignment (RTP-to-Unix sync)"
         fi
+        
+        # CRITICAL: Buffer alignment check (v5.3.12 fix)
+        # start_system_time MUST equal minute_boundary exactly for correct timing
+        if command -v jq &>/dev/null && [[ -d "/dev/shm/timestd/raw_buffer" ]]; then
+            # Find a recent JSON file to check alignment
+            SAMPLE_JSON=$(find /dev/shm/timestd/raw_buffer -name "*.json" -mmin -2 2>/dev/null | head -1)
+            if [[ -n "$SAMPLE_JSON" ]]; then
+                MINUTE_BOUNDARY=$(jq -r '.minute_boundary' "$SAMPLE_JSON" 2>/dev/null)
+                START_SYSTEM_TIME=$(jq -r '.start_system_time' "$SAMPLE_JSON" 2>/dev/null)
+                
+                if [[ -n "$MINUTE_BOUNDARY" ]] && [[ -n "$START_SYSTEM_TIME" ]]; then
+                    # Check if start_system_time equals minute_boundary (allow for float representation)
+                    # Convert to integers for comparison (truncate decimals)
+                    MB_INT=${MINUTE_BOUNDARY%.*}
+                    SST_INT=${START_SYSTEM_TIME%.*}
+                    
+                    if [[ "$MB_INT" == "$SST_INT" ]]; then
+                        # Check if there's a fractional offset
+                        if [[ "$START_SYSTEM_TIME" == *"."* ]] && [[ "${START_SYSTEM_TIME#*.}" != "0" ]]; then
+                            FRAC="${START_SYSTEM_TIME#*.}"
+                            # If fractional part is significant (>1ms = 0.001)
+                            if [[ "${FRAC:0:3}" != "000" ]] && [[ "${FRAC:0:3}" != "0" ]]; then
+                                check_warn "Buffer alignment: start_system_time has offset (${START_SYSTEM_TIME} vs ${MINUTE_BOUNDARY})"
+                                echo "  → May cause timing errors - consider updating to v5.3.12+"
+                            else
+                                check_pass "Buffer alignment: start_system_time = minute_boundary (exact)"
+                            fi
+                        else
+                            check_pass "Buffer alignment: start_system_time = minute_boundary (exact)"
+                        fi
+                    else
+                        check_fail "Buffer alignment BROKEN: start_system_time ($START_SYSTEM_TIME) != minute_boundary ($MINUTE_BOUNDARY)"
+                        echo "  → CRITICAL: This causes timing errors of 100s of milliseconds"
+                        echo "  → Fix: Update to v5.3.12+ and restart core-recorder"
+                    fi
+                fi
+            fi
+        fi
     else
         check_warn "No recent binary archive files (last 5 min) - recorder may not be running"
     fi
@@ -331,23 +369,59 @@ if [[ -d "$FUSION_DIR" ]]; then
         fi
         
         # Check fusion service log file for activity (production only)
-        if [[ "$MODE" == "production" ]] && [[ -f "/var/log/hf-timestd/fusion.log" ]]; then
-            LOG_MTIME=$(stat -c %Y "/var/log/hf-timestd/fusion.log" 2>/dev/null || echo "0")
-            LOG_AGE=$((NOW - LOG_MTIME))
+        # Note: Logs rotate at midnight, check both .log and .log.1
+        if [[ "$MODE" == "production" ]]; then
+            FUSION_LOG="/var/log/hf-timestd/fusion.log"
+            FUSION_LOG_1="/var/log/hf-timestd/fusion.log.1"
             
-            if [[ $LOG_AGE -gt 120 ]]; then
-                check_fail "Fusion service SILENT (log not updated in ${LOG_AGE}s)"
-                echo "  → Cause: Python crash during initialization, import error"
-                echo "  → Diagnose: sudo journalctl -u timestd-fusion -n 100"
-                echo "  → Check for: Python tracebacks, NameError, ImportError"
-                echo "  → Fix: Check /var/log/hf-timestd/fusion.log for errors"
+            # Use whichever log is more recent
+            if [[ -f "$FUSION_LOG" ]] && [[ -s "$FUSION_LOG" ]]; then
+                ACTIVE_LOG="$FUSION_LOG"
+            elif [[ -f "$FUSION_LOG_1" ]]; then
+                ACTIVE_LOG="$FUSION_LOG_1"
             else
-                # Check for recent errors in log
-                ERROR_COUNT=$(tail -50 "/var/log/hf-timestd/fusion.log" 2>/dev/null | grep -c -E "(ERROR|CRITICAL|Traceback|Exception|CRASHED)" 2>/dev/null || echo "0")
-                ERROR_COUNT=$(echo "$ERROR_COUNT" | tr -d '\n' | tr -d ' ')
-                if [[ "$ERROR_COUNT" -gt 0 ]] 2>/dev/null; then
-                    check_warn "Fusion service has $ERROR_COUNT recent errors in logs"
-                    echo "  → Check: tail -50 /var/log/hf-timestd/fusion.log | grep ERROR"
+                ACTIVE_LOG=""
+            fi
+            
+            if [[ -n "$ACTIVE_LOG" ]]; then
+                LOG_MTIME=$(stat -c %Y "$ACTIVE_LOG" 2>/dev/null || echo "0")
+                LOG_AGE=$((NOW - LOG_MTIME))
+                
+                if [[ $LOG_AGE -gt 120 ]]; then
+                    check_fail "Fusion service SILENT (log not updated in ${LOG_AGE}s)"
+                    echo "  → Cause: Python crash during initialization, import error"
+                    echo "  → Diagnose: sudo journalctl -u timestd-fusion -n 100"
+                else
+                    # Check for recent errors in log
+                    ERROR_COUNT=$(tail -50 "$ACTIVE_LOG" 2>/dev/null | grep -c -E "(ERROR|CRITICAL|Traceback|Exception|CRASHED)" 2>/dev/null || echo "0")
+                    ERROR_COUNT=$(echo "$ERROR_COUNT" | tr -d '\n' | tr -d ' ')
+                    if [[ "$ERROR_COUNT" -gt 0 ]] 2>/dev/null; then
+                        check_warn "Fusion service has $ERROR_COUNT recent errors in logs"
+                        echo "  → Check: tail -50 $ACTIVE_LOG | grep ERROR"
+                    fi
+                    
+                    # D_clock sanity check - extract recent D_clock values
+                    DCLOCK_LINE=$(grep "Fused D_clock" "$ACTIVE_LOG" 2>/dev/null | tail -1)
+                    if [[ -n "$DCLOCK_LINE" ]]; then
+                        # Extract D_clock value (e.g., "+31.952 ms" or "-1.772 ms")
+                        DCLOCK_MS=$(echo "$DCLOCK_LINE" | grep -oP 'D_clock: [+-]?\d+\.?\d*' | grep -oP '[+-]?\d+\.?\d*')
+                        if [[ -n "$DCLOCK_MS" ]]; then
+                            # Check if absolute value is reasonable (<100ms)
+                            DCLOCK_ABS=${DCLOCK_MS#-}  # Remove leading minus
+                            DCLOCK_INT=${DCLOCK_ABS%.*}  # Get integer part
+                            
+                            if [[ -n "$DCLOCK_INT" ]] && [[ "$DCLOCK_INT" -lt 100 ]]; then
+                                check_pass "D_clock sanity: ${DCLOCK_MS}ms (within ±100ms)"
+                            elif [[ -n "$DCLOCK_INT" ]] && [[ "$DCLOCK_INT" -lt 500 ]]; then
+                                check_warn "D_clock elevated: ${DCLOCK_MS}ms (expected <100ms)"
+                                echo "  → May indicate timing alignment issues"
+                            else
+                                check_fail "D_clock UNSTABLE: ${DCLOCK_MS}ms (expected <100ms)"
+                                echo "  → CRITICAL: Check buffer alignment (v5.3.12 fix)"
+                                echo "  → Diagnose: grep 'expected_marker_at_sample' /var/log/hf-timestd/phase2-*.log*"
+                            fi
+                        fi
+                    fi
                 fi
             fi
         fi
@@ -444,10 +518,39 @@ else
 fi
 
 # =============================================================================
-# Phase 5: Adaptive Calibration (Phase 5)
+# Phase 5: Adaptive Calibration (System State)
 # =============================================================================
 section "Phase 5: Adaptive Calibration (System State)"
 
+# 5a. Bootstrap Timing Reference (Critical for RTP mode)
+BOOTSTRAP_REF="${DATA_ROOT}/state/bootstrap_timing_reference.json"
+if [[ -f "$BOOTSTRAP_REF" ]]; then
+    if command -v jq &>/dev/null; then
+        LOCKED=$(jq -r '.locked' "$BOOTSTRAP_REF" 2>/dev/null)
+        LOCK_TIER=$(jq -r '.lock_tier' "$BOOTSTRAP_REF" 2>/dev/null)
+        TIME_CONFIRMED=$(jq -r '.time_confirmed' "$BOOTSTRAP_REF" 2>/dev/null)
+        UNCERTAINTY=$(jq -r '.uncertainty_ms' "$BOOTSTRAP_REF" 2>/dev/null)
+        
+        if [[ "$LOCKED" == "true" ]]; then
+            if [[ "$TIME_CONFIRMED" == "true" ]]; then
+                check_pass "Bootstrap LOCKED ($LOCK_TIER, time_confirmed, ±${UNCERTAINTY}ms)"
+            else
+                check_warn "Bootstrap LOCKED ($LOCK_TIER) but time NOT confirmed (BCD/FSK pending)"
+            fi
+        else
+            check_fail "Bootstrap NOT LOCKED - timing measurements will be unreliable"
+            echo "  → Cause: Bootstrap still searching for minute markers"
+            echo "  → Check: tail -50 /var/log/hf-timestd/core-recorder.log | grep BOOTSTRAP"
+        fi
+    else
+        check_pass "Bootstrap timing reference exists (install jq for details)"
+    fi
+else
+    check_warn "Bootstrap timing reference NOT FOUND"
+    echo "  → Core recorder may not have achieved lock yet"
+fi
+
+# 5b. Broadcast Calibration State
 CAL_STATE_FILE="${DATA_ROOT}/state/broadcast_calibration.json"
 
 if [[ -f "$CAL_STATE_FILE" ]]; then
