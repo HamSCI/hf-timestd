@@ -110,61 +110,17 @@ else
 fi
 
 # =============================================================================
-# Step 0.5: Check Configuration (Template vs Production)
+# Step 0.5: Configuration Review
 # =============================================================================
-log_info "Step 0.5: Checking configuration..."
+log_info "Step 0.5: Configuration review..."
 
-TEMPLATE_CONFIG="$PROJECT_DIR/config/timestd-config.toml.template"
-PROD_CONFIG="/etc/hf-timestd/timestd-config.toml"
+CONFIG_REVIEW_SCRIPT="$PROJECT_DIR/scripts/config-review.sh"
 
-if [[ -f "$PROD_CONFIG" ]] && [[ -f "$TEMPLATE_CONFIG" ]]; then
-    # Extract section headers from both files
-    TEMPLATE_SECTIONS=$(grep -E '^\[' "$TEMPLATE_CONFIG" | sort -u)
-    PROD_SECTIONS=$(grep -E '^\[' "$PROD_CONFIG" | sort -u)
-    
-    # Find sections in template but not in production config
-    MISSING_SECTIONS=""
-    while IFS= read -r section; do
-        if ! echo "$PROD_SECTIONS" | grep -qF "$section"; then
-            MISSING_SECTIONS="$MISSING_SECTIONS$section\n"
-        fi
-    done <<< "$TEMPLATE_SECTIONS"
-    
-    if [[ -n "$MISSING_SECTIONS" ]]; then
-        log_warn "  ⚠️  Production config missing sections from template:"
-        echo -e "$MISSING_SECTIONS" | while read -r section; do
-            [[ -n "$section" ]] && echo "       - $section"
-        done
-        echo ""
-        log_info "  To see what's new, compare:"
-        log_info "    diff $PROD_CONFIG $TEMPLATE_CONFIG"
-        echo ""
-        log_info "  Or extract missing section(s) from template:"
-        log_info "    grep -A20 '\\[timing\\]' $TEMPLATE_CONFIG"
-        echo ""
-    else
-        log_info "  ✅ Production config has all template sections"
-    fi
-    
-    # Check for critical new keys (timing.authority specifically)
-    if ! grep -q '^\[timing\]' "$PROD_CONFIG"; then
-        log_warn "  ⚠️  IMPORTANT: [timing] section missing from production config"
-        log_warn "     This section controls RTP vs Fusion mode (added in v5.4.0)"
-        echo ""
-        log_info "  Add to $PROD_CONFIG:"
-        echo ""
-        echo "     [timing]"
-        echo "     # \"rtp\" = GPS+PPS via radiod (authoritative)"
-        echo "     # \"fusion\" = NTP only, HF fusion disciplines clock"
-        echo "     authority = \"rtp\""
-        echo ""
-    fi
+if [[ -f "$CONFIG_REVIEW_SCRIPT" ]]; then
+    # Run config review (interactive by default, shows current settings)
+    bash "$CONFIG_REVIEW_SCRIPT"
 else
-    if [[ ! -f "$PROD_CONFIG" ]]; then
-        log_warn "  ⚠️  Production config not found: $PROD_CONFIG"
-        log_info "     Copy template and customize:"
-        log_info "     sudo cp $TEMPLATE_CONFIG $PROD_CONFIG"
-    fi
+    log_warn "  Config review script not found, skipping"
 fi
 
 # =============================================================================
