@@ -522,32 +522,41 @@ fi
 # =============================================================================
 section "Phase 5: Adaptive Calibration (System State)"
 
-# 5a. Bootstrap Timing Reference (Critical for RTP mode)
-BOOTSTRAP_REF="${DATA_ROOT}/state/bootstrap_timing_reference.json"
-if [[ -f "$BOOTSTRAP_REF" ]]; then
-    if command -v jq &>/dev/null; then
-        LOCKED=$(jq -r '.locked' "$BOOTSTRAP_REF" 2>/dev/null)
-        LOCK_TIER=$(jq -r '.lock_tier' "$BOOTSTRAP_REF" 2>/dev/null)
-        TIME_CONFIRMED=$(jq -r '.time_confirmed' "$BOOTSTRAP_REF" 2>/dev/null)
-        UNCERTAINTY=$(jq -r '.uncertainty_ms' "$BOOTSTRAP_REF" 2>/dev/null)
-        
-        if [[ "$LOCKED" == "true" ]]; then
-            if [[ "$TIME_CONFIRMED" == "true" ]]; then
-                check_pass "Bootstrap LOCKED ($LOCK_TIER, time_confirmed, ±${UNCERTAINTY}ms)"
-            else
-                check_warn "Bootstrap LOCKED ($LOCK_TIER) but time NOT confirmed (BCD/FSK pending)"
-            fi
-        else
-            check_fail "Bootstrap NOT LOCKED - timing measurements will be unreliable"
-            echo "  → Cause: Bootstrap still searching for minute markers"
-            echo "  → Check: tail -50 /var/log/hf-timestd/core-recorder.log | grep BOOTSTRAP"
+# 5a. Timing Authority Check
+# As of v5.4.0, bootstrap is deprecated. Check timing authority mode instead.
+CONFIG_FILE="/etc/hf-timestd/timestd-config.toml"
+TIMING_AUTHORITY="unknown"
+
+if [[ -f "$CONFIG_FILE" ]]; then
+    TIMING_AUTHORITY=$(grep -E '^authority\s*=' "$CONFIG_FILE" 2>/dev/null | sed 's/.*=\s*"\([^"]*\)".*/\1/' | head -1)
+    if [[ -z "$TIMING_AUTHORITY" ]]; then
+        TIMING_AUTHORITY="rtp"  # Default
+    fi
+fi
+
+if [[ "$TIMING_AUTHORITY" == "rtp" ]]; then
+    check_pass "Timing authority: RTP mode (GPS+PPS via radiod - authoritative)"
+    echo "  → Clock discipline via GPS+PPS, not HF fusion"
+elif [[ "$TIMING_AUTHORITY" == "fusion" ]]; then
+    # In Fusion mode, check if MetrologyEngine has achieved lock
+    # This is now internal to MetrologyEngine (FusionTimingState)
+    # We can check the metrology logs for lock status
+    FUSION_LOCKED=false
+    for logfile in /var/log/hf-timestd/phase2-*.log; do
+        if [[ -f "$logfile" ]] && grep -q "PROVISIONAL LOCK\|REFINED LOCK" "$logfile" 2>/dev/null; then
+            FUSION_LOCKED=true
+            break
         fi
+    done
+    
+    if [[ "$FUSION_LOCKED" == "true" ]]; then
+        check_pass "Timing authority: Fusion mode (timing lock achieved)"
     else
-        check_pass "Bootstrap timing reference exists (install jq for details)"
+        check_warn "Timing authority: Fusion mode (timing lock pending)"
+        echo "  → MetrologyEngine searching for timing lock"
     fi
 else
-    check_warn "Bootstrap timing reference NOT FOUND"
-    echo "  → Core recorder may not have achieved lock yet"
+    check_warn "Timing authority: $TIMING_AUTHORITY (unknown mode)"
 fi
 
 # 5b. Broadcast Calibration State
@@ -587,45 +596,72 @@ if [[ "$MODE" == "production" ]]; then
     section "Chrony Integration"
     
     if command -v chronyc &>/dev/null; then
-        # Check if TSL (Time Standard L1/L2) sources exist
-        if chronyc sources 2>/dev/null | grep -q "TSL"; then
-            # Count active TSL sources
-            TSL_COUNT=$(chronyc sources 2>/dev/null | grep "TSL" | wc -l)
-            check_pass "Chrony HF-timestd feed configured ($TSL_COUNT sources: TSL1=L1, TSL2=L2)"
+        # In RTP mode, GPS+PPS disciplines the clock, not HF-timestd
+        # HF-timestd TSL sources may still be configured but aren't primary
+        if [[ "$TIMING_AUTHORITY" == "rtp" ]]; then
+            # Check for selected time source (marked with * = selected)
+            # Could be: refclock (#*), NTP server (^*), or pool member (^*)
+            # In RTP mode, we trust radiod's GPS+PPS - chrony source is informational
+            SELECTED_REF=$(chronyc sources 2>/dev/null | grep -E "^#\*" | awk '{print $2}')
+            SELECTED_NTP=$(chronyc sources 2>/dev/null | grep -E "^\^\*" | awk '{print $2}')
             
-            # Check reachability for both sources
-            TSL1_REACH=$(chronyc sources 2>/dev/null | grep "TSL1" | awk '{print $5}')
-            TSL2_REACH=$(chronyc sources 2>/dev/null | grep "TSL2" | awk '{print $5}')
-            
-            if [[ "$TSL1_REACH" == "0" ]] && [[ "$TSL2_REACH" == "0" ]]; then
-                check_fail "TSL sources not reachable (reach: TSL1=$TSL1_REACH, TSL2=$TSL2_REACH)"
-                echo "  → Check fusion service: systemctl status timestd-fusion"
-                echo "  → Check SHM permissions: ipcs -m | grep 0x4e54503"
-            elif [[ -n "$TSL1_REACH" ]] && [[ "$TSL1_REACH" != "0" ]] || [[ -n "$TSL2_REACH" ]] && [[ "$TSL2_REACH" != "0" ]]; then
-                # Convert octal reach to decimal for display
-                TSL1_DEC=$((8#$TSL1_REACH))
-                TSL2_DEC=$((8#$TSL2_REACH))
-                check_pass "TSL sources reachable (TSL1: $TSL1_REACH/$TSL1_DEC polls, TSL2: $TSL2_REACH/$TSL2_DEC polls)"
-                
-                # Show which source chrony is using
-                # Note: SHM/refclock sources use '#' prefix, NTP servers use '^'
-                # '*' = selected, '+' = combined, '?' = unreachable/evaluating
-                SELECTED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^#\*" | awk '{print $2}')
-                if [[ -n "$SELECTED" ]]; then
-                    check_pass "Chrony using HF-timestd source: $SELECTED"
+            if [[ -n "$SELECTED_REF" ]]; then
+                check_pass "Chrony using refclock: $SELECTED_REF"
+            elif [[ -n "$SELECTED_NTP" ]]; then
+                # Check if it's a stratum 1 source (likely GPS-disciplined)
+                STRATUM=$(chronyc sources 2>/dev/null | grep -E "^\^\*" | awk '{print $3}')
+                if [[ "$STRATUM" == "1" ]]; then
+                    check_pass "Chrony using stratum-1 NTP: $SELECTED_NTP (GPS-disciplined)"
                 else
-                    # Check if any TSL source is combined (+)
-                    COMBINED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^#\+" | awk '{print $2}')
-                    if [[ -n "$COMBINED" ]]; then
-                        check_pass "Chrony combining HF-timestd source: $COMBINED"
-                    else
-                        check_warn "Chrony not yet using HF-timestd (sources still being evaluated)"
-                    fi
+                    check_pass "Chrony using NTP source: $SELECTED_NTP (stratum $STRATUM)"
                 fi
+            else
+                check_warn "Chrony has no selected time source"
+                echo "  → Check: chronyc sources"
+            fi
+            
+            echo -e "${BLUE}ℹ️  INFO${NC} RTP mode: radiod provides authoritative timing via GPS+PPS"
+            
+            # TSL sources are informational in RTP mode
+            if chronyc sources 2>/dev/null | grep -q "TSL"; then
+                echo -e "${BLUE}ℹ️  INFO${NC} HF-timestd TSL sources configured (secondary in RTP mode)"
             fi
         else
-            check_warn "Chrony HF-timestd feed not configured (TSL1/TSL2 sources missing)"
-            echo "  → Check: /etc/hf-timestd/chrony-timestd-refclocks.conf"
+            # Fusion mode - HF-timestd should discipline the clock
+            if chronyc sources 2>/dev/null | grep -q "TSL"; then
+                TSL_COUNT=$(chronyc sources 2>/dev/null | grep "TSL" | wc -l)
+                check_pass "Chrony HF-timestd feed configured ($TSL_COUNT sources: TSL1=L1, TSL2=L2)"
+                
+                # Check reachability
+                TSL1_REACH=$(chronyc sources 2>/dev/null | grep "TSL1" | awk '{print $5}')
+                TSL2_REACH=$(chronyc sources 2>/dev/null | grep "TSL2" | awk '{print $5}')
+                
+                if [[ "$TSL1_REACH" == "0" ]] && [[ "$TSL2_REACH" == "0" ]]; then
+                    check_fail "TSL sources not reachable (reach: TSL1=$TSL1_REACH, TSL2=$TSL2_REACH)"
+                    echo "  → Check fusion service: systemctl status timestd-fusion"
+                    echo "  → Check SHM permissions: ipcs -m | grep 0x4e54503"
+                elif [[ -n "$TSL1_REACH" ]] && [[ "$TSL1_REACH" != "0" ]] || [[ -n "$TSL2_REACH" ]] && [[ "$TSL2_REACH" != "0" ]]; then
+                    TSL1_DEC=$((8#$TSL1_REACH))
+                    TSL2_DEC=$((8#$TSL2_REACH))
+                    check_pass "TSL sources reachable (TSL1: $TSL1_REACH/$TSL1_DEC polls, TSL2: $TSL2_REACH/$TSL2_DEC polls)"
+                    
+                    # Check if chrony is using HF-timestd
+                    SELECTED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^#\*" | awk '{print $2}')
+                    if [[ -n "$SELECTED" ]]; then
+                        check_pass "Chrony using HF-timestd source: $SELECTED"
+                    else
+                        COMBINED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^#\+" | awk '{print $2}')
+                        if [[ -n "$COMBINED" ]]; then
+                            check_pass "Chrony combining HF-timestd source: $COMBINED"
+                        else
+                            check_warn "Chrony not yet using HF-timestd (sources still being evaluated)"
+                        fi
+                    fi
+                fi
+            else
+                check_fail "Chrony HF-timestd feed not configured (Fusion mode requires TSL sources)"
+                echo "  → Check: /etc/hf-timestd/chrony-timestd-refclocks.conf"
+            fi
         fi
     else
         check_warn "chronyd not installed"
