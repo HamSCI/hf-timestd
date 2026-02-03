@@ -52,7 +52,9 @@ from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, E
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 from .timing_calibrator import TimingCalibrator
-from .bootstrap_service import BootstrapService, BootstrapConfig
+# NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
+# The recorder now always archives immediately. MetrologyEngine's fusion_state
+# handles timing lock internally using wider search windows until locked.
 
 logger = logging.getLogger(__name__)
 
@@ -190,37 +192,10 @@ class CoreRecorderV2:
             logger.error(f"Failed to initialize TimingCalibrator: {e}")
             self.calibrator = None
         
-        # Bootstrap Service for RTP-to-UTC calibration
-        # During bootstrap, samples are fed to rolling buffers instead of being archived.
-        # Once locked, normal archiving begins with proper minute boundaries.
-        self.bootstrap_service: Optional[BootstrapService] = None
-        bootstrap_enabled = self.recorder_config.get('bootstrap_enabled', True)
-        if bootstrap_enabled:
-            try:
-                receiver_lat = float(self.station_config.get('latitude', 0.0))
-                receiver_lon = float(self.station_config.get('longitude', 0.0))
-                
-                if receiver_lat == 0.0 and receiver_lon == 0.0:
-                    # Try to get from grid square
-                    grid = self.station_config.get('grid_square', '')
-                    if grid:
-                        from .transmission_time_solver import grid_to_latlon
-                        receiver_lat, receiver_lon = grid_to_latlon(grid)
-                
-                bootstrap_config = BootstrapConfig(
-                    receiver_lat=receiver_lat,
-                    receiver_lon=receiver_lon,
-                    sample_rate=self.channel_defaults.get('sample_rate', 24000),
-                    on_provisional_lock=self._on_bootstrap_provisional_lock,
-                    on_full_lock=self._on_bootstrap_full_lock,
-                )
-                self.bootstrap_service = BootstrapService(bootstrap_config)
-                logger.info(f"Bootstrap service initialized for receiver at ({receiver_lat:.2f}, {receiver_lon:.2f})")
-            except Exception as e:
-                logger.error(f"Failed to initialize bootstrap service: {e}")
-                self.bootstrap_service = None
-        else:
-            logger.info("Bootstrap service disabled in config")
+        # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
+        # The recorder now always archives immediately. MetrologyEngine's fusion_state
+        # handles timing lock internally using wider search windows until locked.
+        # The bootstrap_enabled config option is now ignored.
         
         # Status tracking
         self.start_time = time.time()
@@ -238,11 +213,9 @@ class CoreRecorderV2:
         
         logger.info("Starting hf-timestd core recorder v2 (using ka9q-python RadiodStream)")
         
-        # Log bootstrap status
-        if self.bootstrap_service:
-            logger.info(f"Bootstrap service: ENABLED (will search for tones before archiving)")
-        else:
-            logger.info(f"Bootstrap service: DISABLED (archiving immediately)")
+        # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
+        # Recorder always archives immediately. MetrologyEngine handles timing lock.
+        logger.info("Archiving mode: IMMEDIATE (MetrologyEngine handles timing lock)")
         
         # Ensure channels exist and get ChannelInfo
         if not self._initialize_channels():
@@ -334,7 +307,6 @@ class CoreRecorderV2:
         last_status_time = 0
         last_health_check = 0
         last_quota_check = 0
-        last_bootstrap_update = 0
         
         try:
             while self.running:
@@ -364,11 +336,6 @@ class CoreRecorderV2:
                 if now - last_quota_check >= 300:
                     self._enforce_quota()
                     last_quota_check = now
-                
-                # Update bootstrap state file (every 60 seconds after lock)
-                if now - last_bootstrap_update >= 60:
-                    self._update_bootstrap_state_if_locked()
-                    last_bootstrap_update = now
         
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")
@@ -465,7 +432,7 @@ class CoreRecorderV2:
                 recorder = StreamRecorderV2(
                     config=rec_config,
                     control=self.control,
-                    bootstrap_service=self.bootstrap_service  # Share bootstrap service across all channels
+                    # NOTE (2026-02-03): bootstrap_service removed - MetrologyEngine handles timing
                 )
                 
                 self.recorders[freq] = recorder
@@ -555,168 +522,9 @@ class CoreRecorderV2:
         with self.ntp_status_lock:
             return self.ntp_status.copy()
     
-    def _on_bootstrap_provisional_lock(self, d_clock_ms: float):
-        """Handle bootstrap provisional lock event.
-        
-        Called when bootstrap has found enough corroborating evidence to
-        establish a provisional RTP-to-UTC mapping. At this point we can
-        start feeding D_clock to Chrony, but should continue validating.
-        
-        Architecture Note (2026-01-27):
-        ------------------------------
-        The Chrony SHM feed is handled by the fusion service (multi_broadcast_fusion.py),
-        not the recorder. This is intentional:
-        
-        1. Bootstrap provides initial RTP-to-UTC calibration (this callback)
-        2. Metrology service starts writing L1 measurements with proper timestamps
-        3. Fusion service reads L1/L2 data and feeds Chrony with quality-gated updates
-        
-        During the ~60s gap between bootstrap lock and first fusion output, the system
-        relies on NTP for clock discipline. This is acceptable because:
-        - NTP provides ~1ms accuracy, sufficient for this brief period
-        - Fusion provides multi-station cross-validation that bootstrap cannot
-        - Feeding Chrony directly from bootstrap would bypass quality gates
-        
-        If sub-millisecond accuracy is needed during bootstrap, implement direct
-        Chrony feed here using ChronySHM with conservative precision (-8 = ~4ms).
-        """
-        logger.info(f"[BOOTSTRAP] PROVISIONAL LOCK: D_clock ≈ {d_clock_ms:+.1f}ms")
-        logger.info("[BOOTSTRAP] Archiving enabled - fusion service will handle Chrony feed")
-        
-        # Write bootstrap state file for fusion service (inotify-based coordination)
-        self._write_bootstrap_timing_reference('PROVISIONAL', uncertainty_ms=5.0)
-    
-    def _on_bootstrap_full_lock(self, d_clock_ms: float, uncertainty_ms: float):
-        """Handle bootstrap full lock event.
-        
-        Called when bootstrap has achieved full lock with high confidence.
-        Normal archiving can now begin with proper minute boundaries.
-        
-        Architecture Note (2026-01-27):
-        ------------------------------
-        See _on_bootstrap_provisional_lock for why Chrony feed is handled by fusion.
-        At full lock, the uncertainty_ms reflects ionospheric averaging and can be
-        used to set appropriate precision if direct Chrony feed is implemented.
-        """
-        d_str = f"{d_clock_ms:+.1f}" if d_clock_ms is not None else "N/A"
-        u_str = f"{uncertainty_ms:.1f}" if uncertainty_ms is not None else "N/A"
-        logger.info(f"[BOOTSTRAP] FULL LOCK: D_clock = {d_str}ms ± {u_str}ms")
-        logger.info("[BOOTSTRAP] Transitioning to operational mode - archiving enabled")
-        
-        # Write bootstrap state file for fusion service (inotify-based coordination)
-        self._write_bootstrap_state('REFINED', d_clock_ms or 0.0, uncertainty_ms or 10.0)
-    
-    def _update_bootstrap_state_if_locked(self):
-        """Periodically update bootstrap timing reference."""
-        if not self.bootstrap_service:
-            return
-        
-        tb = self.bootstrap_service.timing_bootstrap
-        if tb.lock_tier.value >= 1:  # PROVISIONAL or higher
-            tier_name = 'PROVISIONAL' if tb.lock_tier.value == 1 else 'REFINED'
-            self._write_bootstrap_timing_reference(tier_name, uncertainty_ms=5.0)
-    
-    def _write_bootstrap_timing_reference(self, lock_tier: str, uncertainty_ms: float):
-        """
-        Write bootstrap timing reference for metrology service.
-        
-        The reference is a consistent (RTP, UTC) pair derived from the bootstrap's
-        tone-based offset.
-        
-        Strategy:
-        ---------
-        The bootstrap's rtp_to_utc_offset_samples IS the RTP at UTC minute 0,
-        derived purely from tone arrivals:
-          minute_boundary_rtp = tone_rtp - propagation_delay
-        
-        So we use that directly:
-          reference_rtp = bootstrap.rtp_to_utc_offset_samples (RTP at minute 0)
-          reference_utc = 0.0 (minute 0 in seconds)
-        
-        Or equivalently, for a specific minute N:
-          reference_rtp = offset + N * 1440000
-          reference_utc = N * 60.0
-        """
-        try:
-            from .bootstrap_timing_reference import BootstrapTimingReferenceWriter
-            
-            if not self.bootstrap_service:
-                return
-            
-            tb = self.bootstrap_service.timing_bootstrap
-            sample_rate = self.bootstrap_service.config.sample_rate
-            
-            # Get the bootstrap's tone-derived offset
-            # This is the RTP at UTC minute 0
-            if tb.rtp_to_utc_offset_samples is None:
-                logger.debug("[BOOTSTRAP_REF] No bootstrap offset available yet")
-                return
-            
-            offset_samples = tb.rtp_to_utc_offset_samples
-            
-            # The bootstrap's offset is the RTP at a minute boundary, derived purely
-            # from tone arrivals. We don't know which absolute minute yet - that
-            # requires BCD/FSK decoding.
-            #
-            # For now, write the reference with just the RTP offset.
-            # The metrology service can use this for relative timing.
-            # Absolute time will be added when BCD/FSK confirms.
-            
-            reference_rtp = offset_samples
-            
-            # Check if bootstrap has confirmed time via BCD/FSK
-            decoded_hour = getattr(tb, '_confirmed_hour', None)
-            decoded_minute = getattr(tb, '_confirmed_minute', None)
-            time_confirmed = tb._time_confirmed if hasattr(tb, '_time_confirmed') else False
-            
-            # Only compute reference_utc when BCD/FSK has confirmed the UTC minute
-            # Until then, metrology should use NTP metadata (which is accurate to a few ms)
-            #
-            # The bootstrap provides:
-            #   reference_rtp = RTP at UTC minute 0 (derived from tone arrivals)
-            #
-            # BCD/FSK provides:
-            #   decoded_hour, decoded_minute = the actual UTC time
-            #
-            # Together they form a consistent (RTP, UTC) pair:
-            #   reference_utc = decoded_hour * 3600 + decoded_minute * 60
-            #   (in Unix time, we add the date from system clock)
-            
-            # Compute reference_utc ONLY from BCD/FSK decode - NO NTP
-            reference_utc = None
-            if time_confirmed and decoded_hour is not None and decoded_minute is not None:
-                import time
-                now = time.time()
-                # Get today's midnight in Unix time (only for date, not time)
-                midnight_today = (int(now) // 86400) * 86400
-                reference_utc = float(midnight_today + decoded_hour * 3600 + decoded_minute * 60)
-                
-                logger.info(f"[BOOTSTRAP_REF] BCD/FSK confirmed: {decoded_hour:02d}:{decoded_minute:02d} UTC, "
-                           f"reference_utc={reference_utc:.0f}")
-            # NO NTP FALLBACK - time_confirmed stays False until BCD/FSK succeeds
-            
-            # Log D_clock for diagnostics
-            d_clock_ms = self.bootstrap_service._calculate_d_clock()
-            if d_clock_ms is None:
-                d_clock_ms = 0.0
-            
-            logger.info(f"[BOOTSTRAP_REF] Bootstrap offset: ref_rtp={reference_rtp}, "
-                       f"time_confirmed={time_confirmed}, D_clock={d_clock_ms:+.1f}ms")
-            
-            writer = BootstrapTimingReferenceWriter()
-            writer.write(
-                reference_rtp=reference_rtp,
-                lock_tier=lock_tier,
-                uncertainty_ms=uncertainty_ms,
-                sample_rate=sample_rate,
-                minute_offset=tb.minutes_observed,
-                decoded_hour=decoded_hour,
-                decoded_minute=decoded_minute,
-                reference_utc=reference_utc
-            )
-            
-        except Exception as e:
-            logger.warning(f"Failed to write bootstrap timing reference: {e}", exc_info=True)
+    # NOTE (2026-02-03): Bootstrap methods removed - functionality migrated to MetrologyEngine.
+    # Removed: _on_bootstrap_provisional_lock, _on_bootstrap_full_lock,
+    #          _update_bootstrap_state_if_locked, _write_bootstrap_timing_reference
     
     @staticmethod
     def _get_ntp_offset() -> Optional[float]:

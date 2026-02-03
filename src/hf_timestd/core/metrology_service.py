@@ -78,14 +78,10 @@ class MetrologyService:
         if self._is_rtp_authority:
             logger.info(f"[TIMING] RTP authority mode - using metadata start_system_time directly")
         else:
-            logger.info(f"[TIMING] FUSION authority mode - using bootstrap reference for timing")
+            logger.info(f"[TIMING] FUSION authority mode - engine handles timing lock internally")
         
-        # Bootstrap Timing Reference (only needed in FUSION mode)
-        # In RTP mode, we still load it for validation but don't gate on it
-        from .bootstrap_timing_reference import BootstrapTimingReference, DEFAULT_STATE_FILE
-        self._bootstrap_ref_file = DEFAULT_STATE_FILE
-        self._bootstrap_ref: Optional[BootstrapTimingReference] = None
-        self._bootstrap_ref_loaded = False
+        # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
+        # The engine's fusion_state handles timing lock - no external bootstrap needed.
         
         # Initialize Engine
         # Extract precise coords if available
@@ -234,11 +230,8 @@ class MetrologyService:
                 rtp_timestamp=rtp_timestamp
             )
             
-            # Continue refining the bootstrap reference based on tone arrivals
-            # Bootstrap provides initial estimate after 2-tier lock, metrology refines further
-            # NOTE (2026-02-01): Only refine in FUSION mode - in RTP mode, timing is authoritative
-            if not self._is_rtp_authority and self._bootstrap_ref and self._bootstrap_ref.is_valid():
-                self._refine_bootstrap_reference(results)
+            # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
+            # The engine's fusion_state handles timing refinement internally.
             
             # Write Results
             for res in results:
@@ -300,77 +293,6 @@ class MetrologyService:
         except Exception as e:
             logger.error(f"Error processing minute {minute_boundary}: {e}", exc_info=True)
             return False
-    
-    def _refine_bootstrap_reference(self, results: list):
-        """
-        Refine the bootstrap reference based on tone arrivals.
-        
-        The bootstrap provides an initial (RTP, UTC) estimate after 2-tier lock.
-        Metrology continues refining this based on tone timing errors.
-        
-        timing_error = raw_toa - expected_propagation_delay
-        If timing_error > 0, tones arrive later than expected → reference_rtp needs to increase
-        """
-        if not self._bootstrap_ref or not self._bootstrap_ref.is_valid():
-            return
-        
-        OFFSET_CORRECTION_ALPHA = 0.3  # 30% of error per update
-        MIN_CORRECTION_MS = 0.5  # Ignore tiny corrections
-        
-        for res in results:
-            if res.raw_toa_ms is None:
-                continue
-            
-            station = res.station_id.name if hasattr(res.station_id, 'name') else str(res.station_id)
-            
-            # Get expected propagation delay from engine
-            try:
-                expected_delay, _, _ = self.engine._predict_geometric_delay(station)
-            except Exception:
-                continue
-            
-            timing_error_ms = res.raw_toa_ms - expected_delay
-            
-            # Apply correction if error is significant but not crazy
-            if abs(timing_error_ms) > MIN_CORRECTION_MS and abs(timing_error_ms) < 100:
-                error_samples = int(timing_error_ms * self.engine.sample_rate / 1000)
-                correction_samples = int(error_samples * OFFSET_CORRECTION_ALPHA)
-                
-                if correction_samples != 0:
-                    # Adjust reference_rtp: if tones arrive late, reference_rtp should increase
-                    self._bootstrap_ref.reference_rtp += correction_samples
-                    correction_ms = correction_samples * 1000 / self.engine.sample_rate
-                    
-                    if abs(correction_ms) > 0.5:
-                        logger.info(f"[OFFSET_REFINE] {station}: {correction_ms:+.2f}ms correction "
-                                   f"(error was {timing_error_ms:+.1f}ms, raw_toa={res.raw_toa_ms:.1f}ms)")
-    
-    def _load_bootstrap_reference(self):
-        """Load bootstrap timing reference from shared state file.
-        
-        The DTO provides a consistent (RTP, UTC) pair for conversion:
-            UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
-        """
-        from .bootstrap_timing_reference import BootstrapTimingReference
-        
-        try:
-            ref = BootstrapTimingReference.from_file(self._bootstrap_ref_file)
-            if ref and ref.is_valid() and ref.reference_utc is not None:
-                self._bootstrap_ref = ref
-                self._bootstrap_ref_loaded = True
-                logger.info(
-                    f"[BOOTSTRAP_REF] Loaded: RTP={ref.reference_rtp} @ UTC={ref.reference_utc:.3f} "
-                    f"(tier={ref.lock_tier}, ±{ref.uncertainty_ms:.1f}ms)"
-                )
-            else:
-                self._bootstrap_ref = None  # Clear any stale reference
-                self._bootstrap_ref_loaded = True  # Mark as loaded even if not available
-                utc_str = f"{ref.reference_utc}" if ref and ref.reference_utc else "None"
-                logger.debug(f"[BOOTSTRAP_REF] Not available or invalid (utc={utc_str}) - using NTP fallback")
-        except Exception as e:
-            self._bootstrap_ref = None  # Clear any stale reference
-            self._bootstrap_ref_loaded = True  # Don't retry on error
-            logger.warning(f"[BOOTSTRAP_REF] Failed to load: {e} - using NTP fallback")
     
     def stop(self):
         """Stop service."""
@@ -550,15 +472,20 @@ class MetrologyService:
             # Timing Authority Check (2026-02-01):
             # - RTP mode: start_system_time from metadata IS authoritative (GPS+PPS)
             #   No need to wait for bootstrap BCD/FSK confirmation
-            # - FUSION mode: Wait for bootstrap lock before processing
-            if not self._bootstrap_ref_loaded or self.minutes_processed % 5 == 0:
-                self._load_bootstrap_reference()
-            
+            # - FUSION mode: Process immediately with wide search window, engine handles lock
+            #
+            # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
+            # The engine's fusion_state handles timing lock internally - no external
+            # bootstrap service or reference file needed. We always process; the engine
+            # uses wider search windows until lock is achieved.
             if not self._is_rtp_authority:
-                # FUSION mode: require bootstrap lock
-                if not self._bootstrap_ref or not self._bootstrap_ref.locked:
-                    logger.info(f"Minute {target_minute}: waiting for bootstrap lock, skipping")
-                    return None
+                # Log fusion state for diagnostics
+                if self.engine.fusion_state is not None:
+                    fs = self.engine.fusion_state
+                    if self.minutes_processed % 5 == 0:
+                        logger.info(f"[FUSION] lock_tier={fs.lock_tier.name}, "
+                                   f"stations={list(fs._stations_seen)}, "
+                                   f"measurements={len(fs.measurements)}")
             
             # Use start_system_time from metadata (NTP-derived, per-channel)
             if 'start_system_time' in metadata:

@@ -38,6 +38,7 @@ from hf_timestd.core.wwvh_discrimination import WWVHDiscriminator
 from hf_timestd.core.tone_detector import MultiStationToneDetector
 from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
 from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType as TickStationType
+from hf_timestd.core.fusion_timing_state import FusionTimingState, LockTier
 # We keep discriminators as they are signal analysis, not physics modeling.
 
 logger = logging.getLogger(__name__)
@@ -103,10 +104,16 @@ class MetrologyEngine:
         }
         self._load_calibration()
         
+        # Fusion mode timing state (only used when is_rtp_authority=False)
+        # This replaces the separate BootstrapService
+        self.fusion_state: Optional[FusionTimingState] = None
+        if not self.is_rtp_authority:
+            self.fusion_state = FusionTimingState(sample_rate=self.sample_rate)
+            logger.info(f"{channel_name}: Fusion mode - timing lock required before narrow search")
+        
         logger.info(
             f"MetrologyEngine initialized for {channel_name} "
-            f"({self.frequency_mhz} MHz)"
-        )
+            f"({self.frequency_mhz} MHz), mode={'RTP' if is_rtp_authority else 'FUSION'}")
 
     def _init_components(self):
         """Initialize discriminators and detectors."""
@@ -675,8 +682,13 @@ class MetrologyEngine:
             
             adaptive_window_ms = min(200.0, max(50.0, max_uncertainty_ms * 3))
             
+            # Use FusionTimingState to determine search window
+            if self.fusion_state is not None:
+                adaptive_window_ms = self.fusion_state.get_search_window_ms()
+            
             logger.info(f"{self.channel_name}: Fusion search: "
-                       f"expected_delays={expected_delays_by_station}, window=±{adaptive_window_ms:.0f}ms")
+                       f"expected_delays={expected_delays_by_station}, window=±{adaptive_window_ms:.0f}ms, "
+                       f"lock_tier={self.fusion_state.lock_tier.name if self.fusion_state else 'N/A'}")
             
             buffer_mid_time = system_time + len(iq_samples)/self.sample_rate/2
             
@@ -868,6 +880,19 @@ class MetrologyEngine:
                 quality_flag=QualityFlag.GOOD if (det.confidence > 0.5 and physics_valid) else QualityFlag.MARGINAL
             )
             results.append(meas)
+            
+            # Feed detection to FusionTimingState for lock tracking (Fusion mode only)
+            if self.fusion_state is not None and physics_valid:
+                lock_status = self.fusion_state.add_detection(
+                    station=det.station.value,
+                    timing_error_ms=det.timing_error_ms,
+                    frequency_mhz=self.frequency_mhz,
+                    snr_db=det.snr_db,
+                    confidence=det.confidence * physics_confidence,
+                    system_time=system_time
+                )
+                if lock_status:
+                    logger.info(f"{self.channel_name}: {lock_status}")
             
         with self._lock:
             self.minutes_processed += 1

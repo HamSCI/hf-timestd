@@ -30,10 +30,9 @@ from enum import Enum
 
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, ManagedStream, RadiodControl
 
-# Bootstrap service for RTP-to-UTC calibration (optional)
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .bootstrap_service import BootstrapService
+# NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
+# The recorder now always archives immediately. MetrologyEngine's fusion_state
+# handles timing lock internally using wider search windows until locked.
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +240,7 @@ class StreamRecorderV2:
         control: Optional[RadiodControl] = None,
         on_stream_dropped: Optional[Callable[[str], None]] = None,
         on_stream_restored: Optional[Callable[[ChannelInfo], None]] = None,
-        bootstrap_service: Optional['BootstrapService'] = None,
+        bootstrap_service: Optional[Any] = None,  # DEPRECATED: kept for API compat
     ):
         """
         Initialize stream recorder.
@@ -253,9 +252,7 @@ class StreamRecorderV2:
             control: Optional RadiodControl for channel creation and recovery
             on_stream_dropped: Optional callback when stream drops
             on_stream_restored: Optional callback when stream restores
-            bootstrap_service: Optional BootstrapService for RTP-to-UTC calibration
-                              During bootstrap, samples are fed to this service instead
-                              of being archived. Once locked, normal archiving begins.
+            bootstrap_service: DEPRECATED - bootstrap now handled by MetrologyEngine
         """
         self.config = config
         self.channel_info = channel_info
@@ -263,7 +260,8 @@ class StreamRecorderV2:
         self._control = control
         self._on_stream_dropped = on_stream_dropped
         self._on_stream_restored = on_stream_restored
-        self._bootstrap_service = bootstrap_service
+        # NOTE (2026-02-03): bootstrap_service parameter kept for API compatibility
+        # but is no longer used. MetrologyEngine handles timing lock internally.
         
         # State
         self.state = StreamRecorderState.IDLE
@@ -620,21 +618,10 @@ class StreamRecorderV2:
             if quality.batch_gaps:
                 batch_gap_samples = sum(gap.duration_samples for gap in quality.batch_gaps)
             
-            # Bootstrap mode: feed samples to bootstrap service instead of archiving
-            # Once locked, normal archiving begins
-            if self._bootstrap_service is not None and not self._bootstrap_service.is_locked:
-                # Feed to bootstrap service for RTP-to-UTC calibration
-                # Pass channel_info for GPS-aligned wallclock conversion (per-SSRC RTP alignment)
-                self._bootstrap_service.add_samples(
-                    channel_name=self.config.description,
-                    samples=samples,
-                    rtp_timestamp=quality.last_rtp_timestamp,
-                    channel_info=self.channel_info
-                )
-                # Periodically search for tones (rate-limited internally)
-                self._bootstrap_service.search_and_update()
-                # Don't archive during bootstrap - we don't know minute boundaries yet
-                return
+            # NOTE (2026-02-03): Bootstrap gating removed. We now always archive immediately.
+            # MetrologyEngine's fusion_state handles timing lock internally using wider
+            # search windows until locked. The archive writer uses RTP-derived minute
+            # boundaries from GPS_TIME/RTP_TIMESNAP, which works in both RTP and Fusion modes.
             
             # Write to Phase 1 archive (Phase 2/3 handled by separate services)
             self.archive_writer.write_samples(
