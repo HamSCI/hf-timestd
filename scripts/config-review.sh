@@ -211,19 +211,47 @@ echo ""
 TEMPLATE_SECTIONS=$(grep -E '^\[[a-z]' "$TEMPLATE_CONFIG" | grep -v '^\[\[' | sort -u)
 PROD_SECTIONS=$(grep -E '^\[[a-z]' "$PROD_CONFIG" | grep -v '^\[\[' | sort -u)
 
+# Check which optional features are disabled (skip their subsections)
+UPLOADER_ENABLED=$(get_toml_value "$PROD_CONFIG" "uploader" "enabled")
+GNSS_ENABLED=$(get_toml_value "$PROD_CONFIG" "gnss_vtec" "enabled")
+
+# Define optional sections that depend on parent being enabled
+declare -A OPTIONAL_SECTIONS
+OPTIONAL_SECTIONS["[uploader.sftp]"]="uploader"
+OPTIONAL_SECTIONS["[uploader.metadata]"]="uploader"
+
 MISSING_SECTIONS=()
+SKIPPED_SECTIONS=()
 while IFS= read -r section; do
     if ! echo "$PROD_SECTIONS" | grep -qF "$section"; then
-        MISSING_SECTIONS+=("$section")
+        # Check if this is an optional section for a disabled feature
+        PARENT="${OPTIONAL_SECTIONS[$section]:-}"
+        SKIP=false
+        
+        if [[ "$PARENT" == "uploader" ]] && [[ "$UPLOADER_ENABLED" != "true" ]]; then
+            SKIP=true
+            SKIPPED_SECTIONS+=("$section (uploader disabled)")
+        fi
+        
+        if [[ "$SKIP" == "false" ]]; then
+            MISSING_SECTIONS+=("$section")
+        fi
     fi
 done <<< "$TEMPLATE_SECTIONS"
 
 if [[ ${#MISSING_SECTIONS[@]} -eq 0 ]]; then
-    echo -e "  ${GREEN}✅ All template sections present${NC}"
+    echo -e "  ${GREEN}✅ All required template sections present${NC}"
 else
     echo -e "  ${YELLOW}⚠️  Missing sections:${NC}"
     for section in "${MISSING_SECTIONS[@]}"; do
         echo -e "     ${RED}- $section${NC}"
+    done
+fi
+
+if [[ ${#SKIPPED_SECTIONS[@]} -gt 0 ]]; then
+    echo -e "  ${BLUE}ℹ️  Skipped (feature disabled):${NC}"
+    for section in "${SKIPPED_SECTIONS[@]}"; do
+        echo -e "     - $section"
     done
 fi
 echo ""
