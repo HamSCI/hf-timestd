@@ -138,6 +138,20 @@ refresh_interval = 60
 
 # GNSS VTEC Monitoring (Optional)
 # Requires a GNSS receiver providing RTCM or UBX data stream
+[timing]
+# Timing Authority Mode:
+#   "rtp"    - Trust radiod's GPS_TIME/RTP_TIMESNAP (requires GPS+PPS on radiod)
+#   "fusion" - Use HF fusion to establish RTP-to-UTC mapping (NTP-only systems)
+#   "auto"   - Monitor discrepancy, infer best source (future)
+#
+# RTP mode: Radiod has GPSDO with GPS+PPS feed. Timing is authoritative.
+#           Metrology measures at known times. Clock discipline via GPS+PPS.
+#
+# Fusion mode: Radiod uses NTP only. Timing is uncertain.
+#              MetrologyEngine searches with wide window, establishes lock,
+#              then narrows window. HF-timestd disciplines Chrony via SHM.
+authority = "rtp"
+
 [gnss_vtec]
 enabled = false                         # Set to true if you have a GNSS receiver
 host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge
