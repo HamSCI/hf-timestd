@@ -37,6 +37,7 @@ from hf_timestd.models import (
 from hf_timestd.core.wwvh_discrimination import WWVHDiscriminator
 from hf_timestd.core.tone_detector import MultiStationToneDetector
 from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
+from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType as TickStationType
 # We keep discriminators as they are signal analysis, not physics modeling.
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,12 @@ class MetrologyEngine:
     """
     Metrology Engine: Pure DSP processing for Time-of-Arrival.
     Orchestrates Tone Detection and Channel Characterization.
+    
+    Two operating modes:
+    - RTP Mode: Timing is authoritative (GPSDO + GPS+PPS). We KNOW when second 0 is.
+                No searching needed - directly measure signals at known times.
+    - Fusion Mode: Timing from NTP (uncertain). Bootstrap to find UTC offset first,
+                   then operate like RTP mode.
     """
     
     def __init__(
@@ -63,7 +70,8 @@ class MetrologyEngine:
         receiver_grid: str,
         sample_rate: int = SAMPLE_RATE_FULL,
         precise_lat: Optional[float] = None,
-        precise_lon: Optional[float] = None
+        precise_lon: Optional[float] = None,
+        is_rtp_authority: bool = True  # Default to RTP mode
     ):
         self.raw_buffer_dir = Path(raw_buffer_dir)
         self.output_dir = Path(output_dir)
@@ -74,6 +82,7 @@ class MetrologyEngine:
         self.sample_rate = sample_rate
         self.precise_lat = precise_lat
         self.precise_lon = precise_lon
+        self.is_rtp_authority = is_rtp_authority
         
         # Initialize sub-components
         self._init_components()
@@ -159,6 +168,10 @@ class MetrologyEngine:
                     sample_rate=self.sample_rate,
                     channel_name=self.channel_name
                 )
+            
+            # 7. Tick Matched Filters for per-second timing (55+ estimates/minute)
+            self.tick_filters: Dict[TickStationType, TickMatchedFilter] = {}
+            self._init_tick_filters()
                 
         except ImportError as e:
             logger.error(f"Failed to initialize Metrology components: {e}")
@@ -191,6 +204,49 @@ class MetrologyEngine:
                 self.arrival_matrix = None
         else:
             logger.info(f"ArrivalPatternMatrix not initialized (no precise coordinates)")
+
+    def _init_tick_filters(self):
+        """
+        Initialize per-second tick matched filters based on channel type.
+        
+        Creates filters for stations that can be received on this channel:
+        - SHARED channels: WWV, WWVH, BPM
+        - WWV-only channels (20, 25 MHz): WWV only
+        - CHU channels: CHU only
+        """
+        channel_upper = self.channel_name.upper()
+        
+        if 'CHU' in channel_upper:
+            # CHU-only channels (3.33, 7.85, 14.67 MHz)
+            self.tick_filters[TickStationType.CHU] = TickMatchedFilter(
+                station=TickStationType.CHU,
+                sample_rate=self.sample_rate
+            )
+            logger.info(f"{self.channel_name}: CHU tick filter initialized (58 ticks/min)")
+            
+        elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
+            # WWV-only channels (20, 25 MHz)
+            self.tick_filters[TickStationType.WWV] = TickMatchedFilter(
+                station=TickStationType.WWV,
+                sample_rate=self.sample_rate
+            )
+            logger.info(f"{self.channel_name}: WWV tick filter initialized (57 ticks/min)")
+            
+        elif 'SHARED' in channel_upper:
+            # Shared channels (2.5, 5, 10, 15 MHz) - WWV, WWVH, BPM all possible
+            self.tick_filters[TickStationType.WWV] = TickMatchedFilter(
+                station=TickStationType.WWV,
+                sample_rate=self.sample_rate
+            )
+            self.tick_filters[TickStationType.WWVH] = TickMatchedFilter(
+                station=TickStationType.WWVH,
+                sample_rate=self.sample_rate
+            )
+            self.tick_filters[TickStationType.BPM] = TickMatchedFilter(
+                station=TickStationType.BPM,
+                sample_rate=self.sample_rate
+            )
+            logger.info(f"{self.channel_name}: WWV/WWVH/BPM tick filters initialized (57+57+59 ticks/min)")
 
     def _validate_input(self, iq_samples: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Validate and normalize input samples."""
@@ -264,6 +320,214 @@ class MetrologyEngine:
         
         return expected_delay_ms, dist_km, 15.0  # 15ms 1-sigma uncertainty
 
+    def _measure_tone_at_known_time(
+        self,
+        audio_signal: np.ndarray,
+        expected_delay_ms: float,
+        tone_freq_hz: float,
+        tone_duration_sec: float,
+        station_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        RTP MODE: Measure signal characteristics at a KNOWN time.
+        
+        In RTP mode, we KNOW when second 0 is (sample 0 = minute boundary).
+        We don't need to "search" for the tone - we know where it should be.
+        
+        This method:
+        1. Looks at the expected arrival window (expected_delay ± uncertainty)
+        2. Measures power at the tone frequency (1000 Hz or 1200 Hz)
+        3. Extracts precise arrival time via correlation peak
+        4. Measures phase, Doppler, and other characteristics
+        
+        Args:
+            audio_signal: AM-demodulated audio (magnitude - mean)
+            expected_delay_ms: Expected propagation delay from physics model
+            tone_freq_hz: Tone frequency (1000 or 1200 Hz)
+            tone_duration_sec: Expected tone duration (0.8s WWV, 0.5s CHU)
+            station_name: Station identifier for logging
+            
+        Returns:
+            Dict with measurement results, or None if no signal detected
+        """
+        from scipy import signal as scipy_signal
+        from scipy.fft import rfft, rfftfreq
+        
+        # Convert expected delay to sample index
+        # Buffer sample 0 = minute boundary (RTP timestamp)
+        # Tone arrives at: propagation_delay after minute boundary
+        # Leading zeros are irrelevant - they're just radiod buffering, not timing
+        expected_sample = int(expected_delay_ms * self.sample_rate / 1000)
+        
+        # Measurement window: Use first 2 seconds of buffer
+        # We need a large window for reliable noise estimation in the correlation output.
+        # With a 500ms template and 600ms window, we only get 100ms of correlation output -
+        # not enough samples for robust noise floor estimation.
+        # Using 2 seconds gives us 1500ms of correlation output for good SNR estimation.
+        # The expected arrival is still used to validate the peak location.
+        start_sample = 0
+        end_sample = min(len(audio_signal), int(2.0 * self.sample_rate))
+        
+        if end_sample <= start_sample:
+            return None
+            
+        measurement_region = audio_signal[start_sample:end_sample]
+        
+        # Step 1: Measure power at tone frequency using FFT
+        # Use a window centered on where the tone should be
+        tone_start = max(0, expected_sample - start_sample)
+        tone_end = min(len(measurement_region), tone_start + int(tone_duration_sec * self.sample_rate))
+        
+        if tone_end - tone_start < int(0.1 * self.sample_rate):  # Need at least 100ms
+            return None
+            
+        tone_segment = measurement_region[tone_start:tone_end]
+        
+        # FFT to measure power at specific frequency
+        windowed = tone_segment * scipy_signal.windows.hann(len(tone_segment))
+        fft_result = rfft(windowed)
+        freqs = rfftfreq(len(windowed), 1/self.sample_rate)
+        
+        # Find power at tone frequency
+        freq_idx = np.argmin(np.abs(freqs - tone_freq_hz))
+        tone_power = np.abs(fft_result[freq_idx])**2
+        
+        # Measure noise floor (average power in nearby bins, excluding tone)
+        noise_bins = np.concatenate([
+            np.arange(max(0, freq_idx - 50), max(0, freq_idx - 10)),
+            np.arange(min(len(fft_result), freq_idx + 10), min(len(fft_result), freq_idx + 50))
+        ])
+        if len(noise_bins) > 5:
+            noise_power = np.mean(np.abs(fft_result[noise_bins.astype(int)])**2)
+        else:
+            noise_power = np.mean(np.abs(fft_result)**2)
+        
+        # Calculate SNR
+        if noise_power > 0:
+            tone_snr_db = 10 * np.log10(tone_power / noise_power)
+        else:
+            tone_snr_db = 0.0
+        
+        # Step 2: Full-duration matched filter for DETECTION and VALIDATION
+        # Use full tone duration (800ms for WWV/WWVH, 500ms for CHU, 100ms for BPM)
+        # This provides excellent discrimination:
+        # - 800ms template has ~160x more energy than 5ms tick → much stronger correlation
+        # - Noise spikes have low correlation with long sinusoidal template
+        # - Per-second ticks (5ms) produce weak correlation peaks
+        
+        n_template = int(tone_duration_sec * self.sample_rate)
+        t = np.arange(n_template) / self.sample_rate
+        
+        # Quadrature templates for phase-invariant detection
+        window = scipy_signal.windows.tukey(n_template, alpha=0.1)
+        template_sin = np.sin(2 * np.pi * tone_freq_hz * t) * window
+        template_cos = np.cos(2 * np.pi * tone_freq_hz * t) * window
+        
+        # Normalize to unit energy
+        template_sin /= np.linalg.norm(template_sin)
+        template_cos /= np.linalg.norm(template_cos)
+        
+        # Correlate with full-duration template
+        corr_sin = scipy_signal.correlate(measurement_region, template_sin, mode='valid')
+        corr_cos = scipy_signal.correlate(measurement_region, template_cos, mode='valid')
+        correlation = np.sqrt(corr_sin**2 + corr_cos**2)
+        
+        if len(correlation) == 0:
+            return None
+        
+        # CRITICAL: Constrain search to window around expected arrival
+        # The minute marker should arrive at expected_delay_ms (propagation time)
+        # Allow ±100ms window for ionospheric variation and timing uncertainty
+        # This prevents detecting per-second ticks at 1000ms, 2000ms, etc.
+        SEARCH_WINDOW_MS = 100.0  # ±100ms around expected arrival
+        
+        expected_corr_idx = int(expected_delay_ms * self.sample_rate / 1000)
+        window_samples = int(SEARCH_WINDOW_MS * self.sample_rate / 1000)
+        
+        search_start = max(0, expected_corr_idx - window_samples)
+        search_end = min(len(correlation), expected_corr_idx + window_samples)
+        
+        if search_end <= search_start:
+            return None
+        
+        # Find peak within constrained window
+        search_region = correlation[search_start:search_end]
+        local_peak_idx = np.argmax(search_region)
+        peak_idx = search_start + local_peak_idx
+        peak_val = correlation[peak_idx]
+        
+        # Step 3: VALIDATE that this is a full-duration tone, not a tick or noise
+        # The full-duration matched filter should produce a strong peak for the minute marker
+        # but a weak peak for 5ms ticks (which have ~1/160th the energy for 800ms template)
+        #
+        # Estimate noise floor from correlation values away from the peak
+        noise_region = np.concatenate([
+            correlation[:max(0, peak_idx - 100)],
+            correlation[min(len(correlation), peak_idx + 100):]
+        ])
+        
+        if len(noise_region) > 10:
+            noise_median = np.median(noise_region)
+            noise_mad = np.median(np.abs(noise_region - noise_median))
+            noise_threshold = noise_median + 5 * 1.4826 * noise_mad  # 5-sigma threshold
+        else:
+            # Fallback when not enough noise samples
+            noise_median = np.mean(correlation) if len(correlation) > 0 else 1.0
+            noise_threshold = peak_val * 0.5
+        
+        # Calculate correlation SNR
+        if noise_median > 0:
+            corr_snr_db = 20 * np.log10(peak_val / noise_median)
+        else:
+            corr_snr_db = 0.0
+        
+        # Reject if correlation SNR is too low
+        # Use SNR as the primary criterion - it's more robust than absolute threshold
+        MIN_CORR_SNR_DB = 6.0  # Require 6dB above noise floor
+        if corr_snr_db < MIN_CORR_SNR_DB:
+            logger.debug(f"{station_name}: Correlation too weak "
+                        f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB}dB)")
+            return None
+        
+        # Sub-sample interpolation
+        sub_sample_offset = 0.0
+        if 0 < peak_idx < len(correlation) - 1:
+            y_m1 = correlation[peak_idx - 1]
+            y_0 = correlation[peak_idx]
+            y_p1 = correlation[peak_idx + 1]
+            denom = y_m1 - 2*y_0 + y_p1
+            if abs(denom) > 1e-10:
+                sub_sample_offset = 0.5 * (y_m1 - y_p1) / denom
+                sub_sample_offset = max(-0.5, min(0.5, sub_sample_offset))
+        
+        precise_peak_idx = peak_idx + sub_sample_offset
+        
+        # Convert to arrival time (ms from minute boundary)
+        # For mode='valid', peak_idx=0 means template starts at sample 0 of measurement_region
+        # The tone ONSET is at the start of the template alignment
+        arrival_sample = start_sample + precise_peak_idx
+        raw_arrival_ms = arrival_sample * 1000 / self.sample_rate
+        
+        # Timing is measured from RTP timestamp (sample 0 = minute boundary)
+        # Timing error = measured_arrival - expected_propagation_delay
+        timing_error_ms = raw_arrival_ms - expected_delay_ms
+        
+        logger.info(f"{station_name} @ {tone_freq_hz}Hz: VALIDATED arrival={raw_arrival_ms:.2f}ms "
+                   f"(expected={expected_delay_ms:.1f}ms), error={timing_error_ms:+.2f}ms, "
+                   f"corr_SNR={corr_snr_db:.1f}dB")
+        
+        return {
+            'station': station_name,
+            'frequency_hz': tone_freq_hz,
+            'arrival_ms': raw_arrival_ms,  # Arrival relative to minute boundary (RTP)
+            'expected_delay_ms': expected_delay_ms,
+            'timing_error_ms': timing_error_ms,
+            'snr_db': tone_snr_db,
+            'tone_power': tone_power,
+            'peak_correlation': peak_val,
+            'detected': True
+        }
+
     def process_minute(
         self,
         iq_samples: np.ndarray,
@@ -272,61 +536,166 @@ class MetrologyEngine:
     ) -> List[L1MetrologyMeasurement]:
         """
         Process minute: Tone Detection + Channel Char -> L1 Measurements.
+        
+        Two modes of operation:
+        - RTP Mode: Timing is authoritative. Measure signals at KNOWN times.
+        - Fusion Mode: Use tone detector to search for signals (bootstrap or post-lock).
         """
         minute_boundary = (int(system_time) // 60) * 60
         minute_number = int((system_time // 60) % 60)
         
         iq_samples, _ = self._validate_input(iq_samples)
         
-        # === Step 1: Tone Detection ===
-        # Use simpler window logic than Phase 2
-        adaptive_window_ms = 500.0
-        expected_offset_ms = 0.0
+        # Buffer mid-time for timestamp calculations (used in both RTP and Fusion modes)
+        buffer_mid_time = system_time + len(iq_samples) / self.sample_rate / 2
         
-        # Use ArrivalPatternMatrix for physics-based search windows
-        likely_station = self._station_from_channel_name()
-        if likely_station != 'UNKNOWN':
-            # Get expected delay from physics model (IRI-2020 if available)
+        # === Step 0: Carrier SNR Check ===
+        # Don't attempt detection if carrier is too weak.
+        MIN_CARRIER_SNR_DB = 4.0  # Lowered for debugging
+        
+        envelope = np.abs(iq_samples)
+        carrier_amplitude = np.mean(envelope)
+        mad = np.median(np.abs(envelope - np.median(envelope)))
+        noise_std = 1.4826 * mad
+        
+        if noise_std > 0 and carrier_amplitude > 0:
+            carrier_snr_db = 20 * np.log10(carrier_amplitude / noise_std)
+        else:
+            carrier_snr_db = -100.0
+        
+        if carrier_snr_db < MIN_CARRIER_SNR_DB:
+            logger.info(f"{self.channel_name}: Skipping - carrier SNR too low "
+                       f"({carrier_snr_db:.1f}dB < {MIN_CARRIER_SNR_DB}dB)")
+            return []
+        
+        # AM demodulation for signal analysis
+        audio_signal = envelope - np.mean(envelope)
+        
+        # LEADING ZEROS CORRECTION
+        # Due to radiod sample delivery latency, buffers often have leading zeros.
+        # Detect and measure the offset so we can correct arrival times.
+        leading_zeros_ms = 0.0
+        max_env = np.max(envelope)
+        if max_env > 0:
+            threshold = max_env * 0.05  # 5% of max
+            nonzero_indices = np.where(envelope > threshold)[0]
+            if len(nonzero_indices) > 0:
+                first_signal_sample = nonzero_indices[0]
+                leading_zeros_sec = first_signal_sample / self.sample_rate
+                if 0.005 < leading_zeros_sec < 0.100:  # 5-100ms is plausible
+                    leading_zeros_ms = leading_zeros_sec * 1000
+                    logger.debug(f"{self.channel_name}: Leading zeros = {leading_zeros_ms:.1f}ms")
+        
+        # Compute expected delays for all stations using physics model
+        expected_delays_by_station = {}
+        for station in ['WWV', 'WWVH', 'CHU', 'BPM']:
             expected_delay_ms, dist_km, uncertainty_ms = self._predict_geometric_delay(
-                likely_station, system_time
+                station, system_time
+            )
+            if expected_delay_ms > 0:
+                expected_delays_by_station[station] = expected_delay_ms
+        
+        # === RTP MODE: Direct Measurement at Known Times ===
+        # In RTP mode, timing is authoritative (GPSDO + GPS+PPS).
+        # Sample 0 = minute boundary (after leading zeros correction).
+        # No searching - just measure what's there.
+        if self.is_rtp_authority:
+            logger.debug(f"{self.channel_name}: RTP mode - measuring at known times")
+            
+            # Define what to measure based on channel type
+            measurements_to_make = []
+            channel_upper = self.channel_name.upper()
+            
+            if 'CHU' in channel_upper:
+                measurements_to_make = [('CHU', 1000, 0.5)]
+            elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
+                measurements_to_make = [('WWV', 1000, 0.8)]
+            else:
+                # Shared channels: measure both WWV (1000 Hz) and WWVH (1200 Hz)
+                measurements_to_make = [
+                    ('WWV', 1000, 0.8),
+                    ('WWVH', 1200, 0.8),
+                    ('BPM', 1000, 0.1),  # BPM has shorter ticks
+                ]
+            
+            rtp_measurements = []
+            for station_name, tone_freq, tone_duration in measurements_to_make:
+                expected_delay = expected_delays_by_station.get(station_name, 20.0)
+                
+                result = self._measure_tone_at_known_time(
+                    audio_signal=audio_signal,
+                    expected_delay_ms=expected_delay,
+                    tone_freq_hz=tone_freq,
+                    tone_duration_sec=tone_duration,
+                    station_name=station_name
+                )
+                
+                if result and result.get('detected'):
+                    rtp_measurements.append(result)
+            
+            if not rtp_measurements:
+                logger.debug(f"{self.channel_name}: No signals detected at expected times")
+                return []
+            
+            # Convert RTP measurements to ToneDetectionResult format for downstream processing
+            from ..interfaces.data_models import ToneDetectionResult, StationType
+            detections = []
+            for m in rtp_measurements:
+                station_type = StationType[m['station']] if m['station'] in StationType.__members__ else StationType.UNKNOWN
+                det = ToneDetectionResult(
+                    station=station_type,
+                    frequency_hz=m['frequency_hz'],
+                    duration_sec=0.8 if m['station'] != 'BPM' else 0.1,
+                    timestamp_utc=system_time + m['arrival_ms'] / 1000.0,
+                    timing_error_ms=m['timing_error_ms'],
+                    snr_db=m['snr_db'],
+                    confidence=min(1.0, m['snr_db'] / 20.0),
+                    use_for_time_snap=True,
+                    correlation_peak=m.get('correlation_peak', 0.0),
+                    noise_floor=0.0,
+                    tone_power_db=m['snr_db'],
+                    sample_position_original=int(m['arrival_ms'] * self.sample_rate / 1000),
+                    original_sample_rate=self.sample_rate
+                )
+                detections.append(det)
+            
+            station_names = [m['station'] for m in rtp_measurements]
+            logger.info(f"{self.channel_name}: RTP mode measured {len(detections)} signal(s): {station_names}")
+        
+        else:
+            # === FUSION MODE: Search for Signals ===
+            # Timing is uncertain (NTP-based). Need to search for tones.
+            logger.debug(f"{self.channel_name}: Fusion mode - searching for signals")
+            
+            # Use adaptive search window based on physics model
+            max_uncertainty_ms = 15.0
+            for station, delay in expected_delays_by_station.items():
+                _, _, unc = self._predict_geometric_delay(station, system_time)
+                max_uncertainty_ms = max(max_uncertainty_ms, unc)
+            
+            adaptive_window_ms = min(200.0, max(50.0, max_uncertainty_ms * 3))
+            
+            logger.info(f"{self.channel_name}: Fusion search: "
+                       f"expected_delays={expected_delays_by_station}, window=±{adaptive_window_ms:.0f}ms")
+            
+            buffer_mid_time = system_time + len(iq_samples)/self.sample_rate/2
+            
+            detections = self.tone_detector.process_samples(
+                timestamp=buffer_mid_time,
+                samples=iq_samples,
+                rtp_timestamp=rtp_timestamp,
+                original_sample_rate=self.sample_rate,
+                buffer_rtp_start=rtp_timestamp,
+                search_window_ms=adaptive_window_ms,
+                expected_delays_by_station=expected_delays_by_station
             )
             
-            if expected_delay_ms > 0:
-                expected_offset_ms = expected_delay_ms
-                
-                # Search window: 3-sigma from physics model, minimum 50ms
-                # CHU needs wider window due to template offset
-                if likely_station == 'CHU':
-                    # CHU: correlation peak at ~250ms + propagation delay
-                    adaptive_window_ms = max(100.0, uncertainty_ms * 3)
-                else:
-                    # WWV/WWVH: tighter window from physics model
-                    adaptive_window_ms = max(50.0, uncertainty_ms * 3)
-                
-                logger.debug(f"{self.channel_name}: Physics-based search: "
-                            f"expected={expected_offset_ms:.1f}ms, window=±{adaptive_window_ms:.0f}ms")
-        
-        # Run detection
-        # Note: We replicate _step1_tone_detection logic simplified
-        buffer_mid_time = system_time + len(iq_samples)/self.sample_rate/2
-        
-        detections = self.tone_detector.process_samples(
-            timestamp=buffer_mid_time,
-            samples=iq_samples,
-            rtp_timestamp=rtp_timestamp,
-            original_sample_rate=self.sample_rate,
-            buffer_rtp_start=rtp_timestamp,
-            search_window_ms=adaptive_window_ms,
-            expected_offset_ms=expected_offset_ms
-        )
-        
-        if not detections:
-             logger.debug(f"{self.channel_name}: No detections for minute {minute_boundary}")
-             return []
-        
-        # Log detected stations for multi-station debugging
-        station_names = [det.station.value for det in detections]
-        logger.info(f"{self.channel_name}: Detected {len(detections)} station(s): {station_names}")
+            if not detections:
+                logger.debug(f"{self.channel_name}: No detections for minute {minute_boundary}")
+                return []
+            
+            station_names = [det.station.value for det in detections]
+            logger.info(f"{self.channel_name}: Fusion detected {len(detections)} station(s): {station_names}")
              
         # === Step 2: Channel Characterization ===
         # We need this for Station ID and Metrics
@@ -386,6 +755,48 @@ class MetrologyEngine:
                 logger.info(f"{self.channel_name}: CHU FSK decoded - "
                            f"frames={fsk_res.frames_decoded}/9, "
                            f"DUT1={fsk_res.dut1_seconds}s, TAI-UTC={fsk_res.tai_utc}s")
+        
+        # === Step 2D: Per-Second Tick Detection (55+ estimates/minute) ===
+        tick_results = {}
+        logger.info(f"{self.channel_name}: Running tick analysis for {len(self.tick_filters)} stations")
+        for station_type, tick_filter in self.tick_filters.items():
+            try:
+                tick_analysis = tick_filter.process_minute(iq_samples, minute_number)
+                logger.info(f"{self.channel_name}: {station_type.value} tick_analysis: "
+                           f"valid_windows={tick_analysis.valid_windows if tick_analysis else 0}")
+                if tick_analysis and tick_analysis.valid_windows > 0:
+                    tick_results[station_type.value] = tick_analysis
+                    
+                    # Get expected propagation delay for this station
+                    station_name = station_type.value
+                    expected_delay_ms = expected_delays_by_station.get(station_name, 0.0)
+                    
+                    # Compute timing error = raw_toa - expected_delay
+                    # This should be near zero if timing is correct
+                    timing_error_ms = tick_analysis.mean_timing_offset_ms - expected_delay_ms
+                    
+                    # Validate: reject if timing error exceeds 3-sigma of expected uncertainty
+                    # This helps reject BPM detections that are actually WWV (both 1000 Hz)
+                    max_timing_error_ms = 50.0  # Allow up to 50ms timing error
+                    is_valid = abs(timing_error_ms) < max_timing_error_ms
+                    
+                    if is_valid:
+                        logger.info(f"{self.channel_name}: {station_name} tick analysis - "
+                                   f"{tick_analysis.valid_windows}/{tick_analysis.total_windows} windows, "
+                                   f"raw_toa={tick_analysis.mean_timing_offset_ms:+.1f}ms, "
+                                   f"expected={expected_delay_ms:.1f}ms, "
+                                   f"timing_error={timing_error_ms:+.1f}ms, "
+                                   f"std={tick_analysis.std_timing_offset_ms:.1f}ms, "
+                                   f"drift={tick_analysis.drift_rate_ms_per_sec or 0:.3f}ms/s")
+                    else:
+                        # Remove invalid result (likely wrong station due to same frequency)
+                        del tick_results[station_type.value]
+                        logger.info(f"{self.channel_name}: {station_name} tick REJECTED - "
+                                    f"timing_error={timing_error_ms:+.1f}ms exceeds ±{max_timing_error_ms}ms "
+                                    f"(raw_toa={tick_analysis.mean_timing_offset_ms:+.1f}ms, "
+                                    f"expected={expected_delay_ms:.1f}ms)")
+            except Exception as e:
+                logger.debug(f"{self.channel_name}: {station_type.value} tick detection failed: {e}")
                  
         # === Step 3: Package into L1MetrologyMeasurement ===
         # Validate each detection against the ArrivalPatternMatrix
@@ -463,6 +874,9 @@ class MetrologyEngine:
         
         # Store FSK data for caller to retrieve
         self._last_chu_fsk_data = chu_metrics if chu_metrics else None
+        
+        # Store tick analysis results for caller to retrieve
+        self._last_tick_results = tick_results if tick_results else None
             
         return results
 

@@ -150,12 +150,13 @@ class BinaryArchiveWriter:
         self.total_gaps = 0
         self.write_errors = 0
         
-        # Time reference - RTP is primary after initialization
-        # We establish a robust mapping from RTP timestamp to Unix time at startup
-        # by averaging the offset over the first N chunks to reject jitter
-        self.rtp_to_unix_offset: Optional[float] = None  # unix_time = rtp_timestamp / sample_rate + offset
-        self._initial_offsets: List[float] = []  # Accumulator for streaming mean
-        self._offset_params_locked: bool = False
+        # Time reference - GPS_TIME/RTP_TIMESNAP from radiod
+        # In RTP mode, radiod's RTP clock is GPSDO-disciplined.
+        # GPS_TIME/RTP_TIMESNAP gives us the direct mapping:
+        #   UTC = gps_time_unix + (rtp - rtp_timesnap) / sample_rate
+        self._gps_time_unix: Optional[float] = None  # GPS_TIME converted to Unix time
+        self._rtp_timesnap: Optional[int] = None     # RTP timestamp at GPS_TIME
+        self._timing_locked: bool = False
         
         # RTP clock drift detection (after offset is locked)
         # If RTP-derived time diverges from wall clock by more than this threshold,
@@ -183,9 +184,9 @@ class BinaryArchiveWriter:
         Called at ~2 Hz (radiod's status update rate). Deduplicated by rtp_timesnap
         to avoid storing duplicate snapshots when status hasn't changed.
         
-        Metrological justification:
-        - In L4/L5 (GPS+PPS): Documents stable mapping for post-hoc verification
-        - In L3/L2/L1 (NTP): Captures clock slew/step events for correction
+        CRITICAL: This is the AUTHORITATIVE time reference in RTP mode.
+        GPS_TIME comes from radiod's GPS+PPS and is the ground truth for UTC.
+        We use this to establish the RTP-to-UTC mapping, NOT local system time.
         
         Args:
             gps_time_ns: radiod's GPS_TIME (ns since GPS epoch)
@@ -201,10 +202,27 @@ class BinaryArchiveWriter:
             
             self._last_rtp_timesnap = rtp_timesnap
             
+            # Convert GPS_TIME to Unix time
+            # GPS epoch is Jan 6, 1980. GPS_TIME is ns since GPS epoch.
+            GPS_EPOCH_UNIX = 315964800  # Unix timestamp of GPS epoch
+            GPS_LEAP_SECONDS = 18  # Current leap seconds (GPS - UTC)
+            BILLION = 1_000_000_000
+            
+            gps_unix_ns = gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)
+            gps_unix_sec = gps_unix_ns / BILLION
+            
+            # Store GPS_TIME/RTP_TIMESNAP directly - no offset calculation
+            # This is the authoritative mapping: at RTP=rtp_timesnap, UTC=gps_unix_sec
+            if not self._timing_locked:
+                self._gps_time_unix = gps_unix_sec
+                self._rtp_timesnap = rtp_timesnap
+                self._timing_locked = True
+                logger.info(f"{self.config.channel_name}: RTP timing LOCKED - GPS_TIME={gps_unix_sec:.6f}, RTP_TIMESNAP={rtp_timesnap}")
+            
             snapshot = TimingSnapshot(
                 gps_time_ns=gps_time_ns,
                 rtp_timesnap=rtp_timesnap,
-                local_receipt_time=time.time()
+                local_receipt_time=time.time()  # For diagnostics only, not used for timing
             )
             
             # Add to current buffer if available, otherwise to pending list
@@ -236,25 +254,17 @@ class BinaryArchiveWriter:
         
         Args:
             rtp_derived_time: Unix time derived from RTP timestamp (GPSDO-disciplined)
-            rtp_timestamp: Raw RTP timestamp for metadata
+            rtp_timestamp: RTP timestamp of the packet that triggered this new minute
             
-        In RTP mode (L4/L5), we have GPSDO-disciplined timestamps, so we know
-        exactly where the minute boundary is. The buffer should logically start
-        at the minute boundary, and samples should be positioned based on their
-        RTP timestamp offset from that boundary.
-        
-        The start_system_time in metadata will be exactly the minute boundary,
-        and start_rtp will be the RTP timestamp corresponding to that boundary.
+        The RTP stream tells us the exact time. When a packet's RTP-derived UTC
+        crosses a minute boundary, we start a new buffer. The buffer's start_rtp
+        is simply the RTP timestamp of that packet.
         """
         minute_boundary = (int(rtp_derived_time) // 60) * 60
         
-        # Calculate the RTP timestamp that corresponds to the minute boundary
-        # offset_from_boundary = rtp_derived_time - minute_boundary (in seconds)
-        # offset_samples = offset_from_boundary * sample_rate
-        # minute_boundary_rtp = rtp_timestamp - offset_samples
-        offset_from_boundary = rtp_derived_time - minute_boundary
-        offset_samples = int(offset_from_boundary * self.config.sample_rate)
-        minute_boundary_rtp = rtp_timestamp - offset_samples
+        # The RTP timestamp that triggered this new minute IS the start
+        # No calculation needed - the RTP stream is authoritative
+        minute_boundary_rtp = rtp_timestamp
         
         buffer = MinuteBuffer(
             minute_boundary=minute_boundary,
@@ -537,15 +547,20 @@ class BinaryArchiveWriter:
     
     def _rtp_to_unix_time(self, rtp_timestamp: int) -> float:
         """
-        Convert RTP timestamp to Unix time using established reference.
+        Convert RTP timestamp to Unix time using GPS_TIME/RTP_TIMESNAP mapping.
         
-        After initialization, this derives time from RTP (GPSDO-disciplined)
-        rather than wall clock, avoiding NTP-induced jitter.
+        Formula: UTC = GPS_TIME + (rtp - RTP_TIMESNAP) / sample_rate
         """
-        if self.rtp_to_unix_offset is None:
+        if self._gps_time_unix is None or self._rtp_timesnap is None:
             # Not initialized yet - return 0 (will use system_time fallback)
             return 0.0
-        return rtp_timestamp / self.config.sample_rate + self.rtp_to_unix_offset
+        
+        # Handle 32-bit RTP wrap-around
+        rtp_delta = int((rtp_timestamp - self._rtp_timesnap) & 0xFFFFFFFF)
+        if rtp_delta > 0x7FFFFFFF:
+            rtp_delta -= 0x100000000
+        
+        return self._gps_time_unix + rtp_delta / self.config.sample_rate
     
     def _interpolate_gaps(self, samples: np.ndarray) -> np.ndarray:
         """
@@ -648,131 +663,13 @@ class BinaryArchiveWriter:
             Number of samples written
         """
         with self._lock:
-            # Establish RTP-to-Unix reference
-            # We average the offset over the first 50 chunks to reject NTP jitter
-            if not self._offset_params_locked:
-                if system_time is None:
-                    system_time = time.time()
-                
-                # Instantaneous offset: unix_time - (rtp_timestamp / sample_rate)
-                inst_offset = system_time - (rtp_timestamp / self.config.sample_rate)
-                
-                # CRITICAL FIX (2026-01-09): Clock drift protection
-                # If the system_time (RTP-derived) is way off from our OS clock,
-                # trust the OS clock for the offset calculation.
-                os_now = time.time()
-                if abs(system_time - os_now) > 3600: # 1 hour threshold
-                    logger.warning(
-                        f"BinaryArchiveWriter: System time drift detected! "
-                        f"Sys={system_time:.0f}, OS={os_now:.0f}, diff={system_time-os_now:.1f}s. "
-                        f"Using OS clock for RTP offset calibration."
-                    )
-                    inst_offset = os_now - (rtp_timestamp / self.config.sample_rate)
-
-                if self.rtp_to_unix_offset is None:
-                    # Initialize with first sample so we can write immediately
-                    # But don't "lock" it yet - it will be refined by the mean
-                    self.rtp_to_unix_offset = inst_offset
-                    logger.info(f"RTP-to-Unix reference initialized: offset={inst_offset:.3f}s")
-                elif not self._offset_params_locked:
-                    # Adaptive refinement: if current sample is significantly different from 
-                    # initial guess (due to buffering), shift the base immediately.
-                    # This prevents the first 50 chunks from being mis-attributed.
-                    diff = inst_offset - self.rtp_to_unix_offset
-                    if abs(diff) > 1.0:
-                        logger.info(f"RTP-to-Unix reference jumping by {diff:+.3f}s (initial buffering?)")
-                        self.rtp_to_unix_offset = inst_offset
-                        # Don't reset _initial_offsets, just let them be outliers or clear them?
-                        # Clearing them is safer to get a clean mean.
-                        self._initial_offsets = [inst_offset]
-                
-                # Accumulate for mean
-                self._initial_offsets.append(inst_offset)
-                
-                # Refine or lock
-                if len(self._initial_offsets) >= 50:
-                    # Calculate mean and lock
-                    mean_offset = sum(self._initial_offsets) / len(self._initial_offsets)
-                    diff = mean_offset - self.rtp_to_unix_offset
-                    
-                    # DIAGNOSTIC: Log offset statistics for restart variance investigation
-                    offsets_ms = [(o - mean_offset) * 1000 for o in self._initial_offsets]
-                    std_ms = (sum(x*x for x in offsets_ms) / len(offsets_ms)) ** 0.5
-                    min_ms, max_ms = min(offsets_ms), max(offsets_ms)
-                    logger.info(
-                        f"[OFFSET_DIAG] RTP-to-Unix calibration stats: "
-                        f"mean={mean_offset:.6f}s, std={std_ms:.3f}ms, "
-                        f"range=[{min_ms:+.3f}, {max_ms:+.3f}]ms, n={len(self._initial_offsets)}"
-                    )
-                    
-                    self.rtp_to_unix_offset = mean_offset
-                    self._offset_params_locked = True
-                    self._initial_offsets = [] # free memory
-                    logger.info(f"RTP-to-Unix reference LOCKED: offset={mean_offset:.3f}s (adjusted by {diff*1000:+.1f}ms after 50 chunks)")
-                    
-                    # VALIDATION: Check that RTP aligns to minute boundaries
-                    # If the offset is correct, RTP mod samples_per_minute should be small
-                    # when we're at a minute boundary (system_time mod 60 ≈ 0)
-                    samples_per_minute = self.config.sample_rate * 60
-                    rtp_in_minute = rtp_timestamp % samples_per_minute
-                    rtp_second_in_minute = rtp_in_minute / self.config.sample_rate
-                    system_second_in_minute = system_time % 60
-                    
-                    # The difference tells us if there's a calibration error
-                    alignment_error = rtp_second_in_minute - system_second_in_minute
-                    # Normalize to [-30, 30] range
-                    if alignment_error > 30:
-                        alignment_error -= 60
-                    elif alignment_error < -30:
-                        alignment_error += 60
-                    
-                    if abs(alignment_error) > 5.0:  # More than 5 seconds misalignment
-                        logger.warning(
-                            f"[OFFSET_VALIDATION] RTP-minute alignment error: {alignment_error:.1f}s "
-                            f"(RTP at second {rtp_second_in_minute:.1f}, system at second {system_second_in_minute:.1f}). "
-                            f"This may indicate ka9q-radio buffering delay. "
-                            f"Consider adjusting offset by {-alignment_error:.1f}s."
-                        )
-                        # Auto-correct the offset
-                        corrected_offset = mean_offset - alignment_error
-                        logger.info(f"[OFFSET_VALIDATION] Auto-correcting offset: {mean_offset:.3f}s -> {corrected_offset:.3f}s")
-                        self.rtp_to_unix_offset = corrected_offset
-            
-            # CRITICAL: RTP clock drift detection AFTER offset is locked
-            # This catches frozen/stuck RTP clocks from radiod issues
-            if self._offset_params_locked:
-                self._chunks_since_drift_check += 1
-                if self._chunks_since_drift_check >= self._rtp_drift_check_interval:
-                    self._chunks_since_drift_check = 0
-                    
-                    # Compare RTP-derived time to wall clock
-                    rtp_derived_time = self._rtp_to_unix_time(rtp_timestamp)
-                    wall_clock_time = time.time()
-                    drift = abs(rtp_derived_time - wall_clock_time)
-                    
-                    if drift > self._rtp_drift_threshold_sec:
-                        logger.error(
-                            f"CRITICAL: RTP clock drift detected! "
-                            f"RTP-derived={rtp_derived_time:.0f}, wall={wall_clock_time:.0f}, "
-                            f"drift={drift:.0f}s ({drift/3600:.1f}h). "
-                            f"Resetting RTP-to-Unix calibration to recover."
-                        )
-                        # Reset calibration state to re-establish mapping
-                        self.rtp_to_unix_offset = None
-                        self._initial_offsets = []
-                        self._offset_params_locked = False
-                        
-                        # Flush current buffer to avoid data loss
-                        if self.current_buffer and self.current_buffer.write_pos > 0:
-                            # Use wall clock time for the flush since RTP is unreliable
-                            self.current_buffer.minute_boundary = (int(wall_clock_time) // 60) * 60
-                            self._flush_minute(self.current_buffer)
-                            self.current_buffer = None
-                        
-                        # Re-initialize with wall clock as reference
-                        # The next iteration will establish a new offset
-                        if system_time is None:
-                            system_time = wall_clock_time
+            # GPS_TIME/RTP_TIMESNAP must be established before we can write
+            if self._gps_time_unix is None or self._rtp_timesnap is None:
+                # Log once per second to avoid spam
+                if not hasattr(self, '_last_waiting_log') or time.time() - self._last_waiting_log > 1.0:
+                    logger.debug("Waiting for GPS_TIME from radiod...")
+                    self._last_waiting_log = time.time()
+                return 0  # Cannot write until we have authoritative timing
             
             # Ensure complex64
             if samples.dtype != np.complex64:
@@ -804,11 +701,13 @@ class BinaryArchiveWriter:
             # In RTP mode, samples are positioned by their RTP offset from minute boundary
             buffer = self.current_buffer
             
-            # Calculate position in buffer from RTP timestamp
-            # sample_position = (rtp_timestamp - minute_boundary_rtp) 
-            # But RTP can wrap, so use the unix time offset instead
-            offset_from_minute = sample_unix_time - buffer.minute_boundary
-            sample_position = int(offset_from_minute * self.config.sample_rate)
+            # Calculate position in buffer DIRECTLY from RTP timestamp
+            # This is authoritative - RTP is GPSDO-disciplined
+            # Handle 32-bit RTP wrap-around
+            rtp_delta = int((rtp_timestamp - buffer.start_rtp) & 0xFFFFFFFF)
+            if rtp_delta > 0x7FFFFFFF:
+                rtp_delta -= 0x100000000
+            sample_position = rtp_delta
             
             # Clamp to valid range
             if sample_position < 0:
@@ -970,18 +869,9 @@ class BinaryArchiveReader:
     
     def get_latest_complete_minute(self) -> Optional[int]:
         """Get the most recent complete minute boundary."""
-        # Current minute is still being written, so go back 1
-        current_minute = (int(time.time()) // 60) * 60
-        target = current_minute - 60
-        
-        # Check if it exists
-        if self.read_minute(target) is not None:
-            return target
-        
-        # Fall back to scanning
+        # Scan available minutes and return second-to-last (last might be incomplete)
+        # This avoids using wall clock time
         minutes = self.get_available_minutes()
         if minutes:
-            # Return second-to-last (last might be incomplete)
             return minutes[-2] if len(minutes) > 1 else minutes[-1]
-        
         return None

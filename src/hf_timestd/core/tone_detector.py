@@ -1305,7 +1305,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         original_sample_rate: Optional[int] = None,
         buffer_rtp_start: Optional[int] = None,
         search_window_ms: Optional[float] = None,
-        expected_offset_ms: Optional[float] = None
+        expected_offset_ms: Optional[float] = None,
+        expected_delays_by_station: Optional[Dict[str, float]] = None
     ) -> Optional[List[ToneDetectionResult]]:
         """
         Process samples and detect tones (ToneDetector interface).
@@ -1323,6 +1324,10 @@ class MultiStationToneDetector(IMultiStationToneDetector):
                 Pass 0: Use 0 (search around minute boundary)
                 Pass 1+: Use expected propagation delay (e.g., +20ms for CHU)
                 This centers the search window at minute_boundary + expected_offset
+                DEPRECATED: Use expected_delays_by_station for per-station delays
+            expected_delays_by_station: Dict mapping station name to expected delay in ms
+                e.g., {'WWV': 4.3, 'WWVH': 25.3, 'CHU': 5.8, 'BPM': 44.1}
+                If provided, overrides expected_offset_ms for each station
             
         Returns:
             List of ToneDetectionResult objects (may contain WWV + WWVH),
@@ -1331,7 +1336,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         self.total_attempts += 1
         detections = self._detect_tones_internal(
             samples, timestamp, original_sample_rate, buffer_rtp_start, 
-            search_window_ms, expected_offset_ms
+            search_window_ms, expected_offset_ms, expected_delays_by_station
         )
         
         if detections:
@@ -1361,7 +1366,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         original_sample_rate: Optional[int] = None,
         buffer_rtp_start: Optional[int] = None,
         search_window_ms: Optional[float] = None,
-        expected_offset_ms: Optional[float] = None
+        expected_offset_ms: Optional[float] = None,
+        expected_delays_by_station: Optional[Dict[str, float]] = None
     ) -> List[ToneDetectionResult]:
         """
         Internal tone detection implementation
@@ -1369,6 +1375,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         Args:
             iq_samples: Complex IQ samples at self.sample_rate
             current_unix_time: UTC time for first sample
+            expected_delays_by_station: Per-station expected delays in ms
             
         Returns:
             List of ToneDetectionResult objects, sorted by SNR (strongest first)
@@ -1394,10 +1401,43 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         logger.debug(f"AM demod: iq_len={len(iq_samples)}, audio_rms={audio_rms:.6f}, "
                     f"mag_mean={np.mean(magnitude):.6f}")
         
+        # LEADING ZEROS CORRECTION (2026-02-01)
+        # -------------------------------------
+        # Due to radiod sample delivery latency, buffers often have leading zeros
+        # at the start. The buffer metadata says start_system_time = minute_boundary,
+        # but the actual signal doesn't begin until 20-50ms later.
+        #
+        # This causes a systematic timing bias: the correlation peak index is
+        # relative to where the signal actually starts, not the minute boundary.
+        #
+        # Fix: Detect leading zeros and adjust minute_boundary accordingly.
+        # The detected tone time = minute_boundary + leading_zeros + peak_time_in_buffer
+        leading_zeros_correction_sec = 0.0
+        max_mag = np.max(magnitude)
+        if max_mag > 0:
+            threshold = max_mag * 0.05  # 5% of max
+            nonzero_indices = np.where(magnitude > threshold)[0]
+            if len(nonzero_indices) > 0:
+                first_signal_sample = nonzero_indices[0]
+                leading_zeros_sec = first_signal_sample / self.sample_rate
+                
+                # Only apply correction if leading zeros are significant (>5ms)
+                # and not too large (< 100ms, which would indicate a problem)
+                if 0.005 < leading_zeros_sec < 0.100:
+                    leading_zeros_correction_sec = leading_zeros_sec
+                    logger.info(f"[LEADING_ZEROS] Detected {leading_zeros_sec*1000:.1f}ms of leading zeros")
+        
         detections: List[ToneDetectionResult] = []
         
         # Step 2: Correlate with each station template
         for station_type, template in self.templates.items():
+            # Get per-station expected delay if available
+            station_expected_offset_ms = expected_offset_ms  # Default fallback
+            if expected_delays_by_station is not None:
+                station_name = station_type.value  # e.g., 'WWV', 'WWVH', 'CHU', 'BPM'
+                if station_name in expected_delays_by_station:
+                    station_expected_offset_ms = expected_delays_by_station[station_name]
+            
             detection = self._correlate_with_template(
                 audio_signal,
                 station_type,
@@ -1407,7 +1447,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
                 original_sample_rate,
                 buffer_rtp_start,
                 search_window_ms,
-                expected_offset_ms
+                station_expected_offset_ms,  # Use per-station expected delay
+                leading_zeros_correction_sec  # Pass leading zeros correction
             )
             
             if detection:
@@ -1438,7 +1479,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         original_sample_rate: Optional[int] = None,
         buffer_rtp_start: Optional[int] = None,
         search_window_ms: Optional[float] = None,
-        expected_offset_ms: Optional[float] = None
+        expected_offset_ms: Optional[float] = None,
+        leading_zeros_correction_sec: float = 0.0
     ) -> Optional[ToneDetectionResult]:
         """
         Correlate audio signal with station template using quadrature matched filtering.
@@ -1574,6 +1616,12 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         #   only 10ms ticks (FSK data and voice). But second 00 has full tone.
         buffer_len_sec = len(audio_signal) / self.sample_rate
         buffer_start_time = current_unix_time - (buffer_len_sec / 2)
+        
+        # NOTE: Leading zeros correction is NOT applied to buffer_start_time.
+        # The buffer metadata says sample 0 = minute_boundary, and this is correct.
+        # Leading zeros just mean the signal is missing/weak at the start, but the
+        # timing relationship (sample index → time) is still valid.
+        # The leading_zeros_correction_sec is logged for diagnostics only.
         
         # All stations reference the minute boundary
         reference_time = minute_boundary
@@ -1761,18 +1809,27 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         onset_sample_idx = precise_peak_idx
         onset_confidence = 0.8  # Default confidence without onset refinement
         onset_time = buffer_start_time + (onset_sample_idx / self.sample_rate)
-        timing_error_sec = onset_time - reference_time
+        
+        # Raw ToA from minute boundary (for diagnostics)
+        raw_toa_sec = onset_time - reference_time
+        raw_toa_ms = raw_toa_sec * 1000
+        
+        # TIMING ERROR: Deviation from EXPECTED arrival time
+        # timing_error = raw_toa - expected_propagation_delay
+        # A positive timing_error means the tone arrived LATER than expected
+        # A negative timing_error means the tone arrived EARLIER than expected
+        expected_arrival_time = reference_time + offset_sec
+        timing_error_sec = onset_time - expected_arrival_time
         
         # DIAGNOSTIC: Log all timing components
         stage1_timing_ms = timing_error_sec * 1000
         buffer_offset_from_minute = buffer_start_time - reference_time
-        # Expected minute marker position: should be near sample 0 if buffer started at minute boundary
-        # With buffer offset, minute marker would be at negative sample (before buffer start)
-        expected_marker_sample = -buffer_offset_from_minute * self.sample_rate
+        # Expected tone position in buffer (accounting for propagation delay)
+        expected_tone_sample = (expected_arrival_time - buffer_start_time) * self.sample_rate
         logger.info(f"[TIMING_DIAG] {station_type.value}: "
                    f"peak_idx={peak_idx}, precise_peak={precise_peak_idx:.2f}, "
-                   f"buffer_offset={buffer_offset_from_minute*1000:+.1f}ms, "
-                   f"expected_marker_at_sample={expected_marker_sample:.0f} (negative=before buffer), "
+                   f"raw_toa={raw_toa_ms:+.1f}ms, expected_delay={offset_ms:+.1f}ms, "
+                   f"expected_tone_at_sample={expected_tone_sample:.0f}, "
                    f"timing_error={stage1_timing_ms:+.1f}ms, peak_val={peak_val:.2f}")
         
         # Handle wraparound

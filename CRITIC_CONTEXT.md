@@ -10,7 +10,296 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## � ACTIVE SESSION: LIVING DOCUMENTATION REVIEW
+## 🔴 ACTIVE SESSION: FUSION PRECISION GAP — WHY ISN'T 0.5ms PRECISION ACHIEVED?
+
+**Status:** 🔴 **CRITICAL** - 2026-02-01  
+**Objective:** Understand why the fusion process produces ±15-35 ms uncertainty instead of the theoretical ±0.5 ms, and determine what can be fixed.
+
+---
+
+### The Precision Gap
+
+**Theoretical Target (from METROLOGY.md):**
+- **±0.5 ms (1σ) to UTC(NIST)** with multi-broadcast fusion
+- Cramér-Rao bound at 20 dB SNR: **0.036 ms**
+- With 13 broadcasts fused + calibration: **±0.5 ms**
+
+**Actual Performance (2026-02-01 11:47-11:51 UTC):**
+```
+Fused D_clock: -62.425 ms (raw: -0.262 ms) ± 19.175 ms [10 broadcasts, grade D]
+Fused D_clock: +45.621 ms (raw: +92.706 ms) ± 2.586 ms [2 broadcasts, grade D]
+Fused D_clock: -38.656 ms (raw: +32.006 ms) ± 34.266 ms [2 broadcasts, grade D]
+```
+
+**The Gap:**
+| Metric | Theoretical | Actual | Gap Factor |
+|--------|-------------|--------|------------|
+| Uncertainty | ±0.5 ms | ±15-35 ms | **30-70x worse** |
+| D_clock stability | ~constant | swings ±100 ms | **unstable** |
+| Grade | A (30+ detections) | D (always) | **never achieves A** |
+
+---
+
+### Why This Matters: Ionospheric Science
+
+The original goal was to achieve precision sufficient to **resolve ionospheric phenomena**:
+
+1. **Ionospheric delay variations**: 1-10 ms diurnal, 0.5-2 ms short-term
+2. **Sporadic-E events**: 2-5 ms sudden changes
+3. **Traveling Ionospheric Disturbances**: 0.5-2 ms oscillations
+4. **Solar flare effects**: 1-5 ms sudden ionospheric disturbance
+
+**At ±0.5 ms precision**, these phenomena would be clearly visible.
+**At ±20 ms precision**, they are buried in noise.
+
+---
+
+### Pipeline Architecture (Current State)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PRECISION BUDGET ANALYSIS                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  L0: Raw IQ (core-recorder)                                             │
+│      └── RTP timestamps: ±0.04 ms (GPSDO-locked) ✅                     │
+│                                                                          │
+│  L1: Metrology (tone detection)                                         │
+│      ├── Cramér-Rao bound: 0.036-0.9 ms (SNR-dependent)                │
+│      ├── Multipath spread: 0.5-2.5 ms                                   │
+│      └── Actual: ??? (need to measure)                                  │
+│                                                                          │
+│  L2: Calibration (systematic offset removal)                            │
+│      ├── Per-broadcast Kalman: should converge to ±1-2 ms              │
+│      └── Actual: ??? (need to verify)                                   │
+│                                                                          │
+│  L3: Fusion (multi-broadcast WLS)                                       │
+│      ├── Theoretical: ±0.5 ms with 13 broadcasts                       │
+│      └── Actual: ±15-35 ms, Grade D ❌                                  │
+│                                                                          │
+│  Output: Chrony SHM                                                      │
+│      └── Offset: varies wildly ❌                                       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Critical Questions to Answer
+
+#### 1. Where is precision lost?
+
+**L1 Metrology:**
+- What is the actual ToA uncertainty per detection?
+- Is the matched filter working correctly?
+- Are multipath/Doppler corrections being applied?
+
+**L2 Calibration:**
+- Are per-broadcast Kalman filters converging?
+- What are the calibration offsets per station?
+- Is the calibration stable or drifting?
+
+**L3 Fusion:**
+- Why is grade always D?
+- What are the grade A/B/C criteria and why aren't they met?
+- Is the WLS weighting correct?
+
+#### 2. What does "raw" vs "fused" D_clock mean?
+
+From the logs:
+```
+Fused D_clock: -62.425 ms (raw: -0.262 ms) ± 19.175 ms
+```
+
+- **raw: -0.262 ms** — This looks reasonable!
+- **Fused: -62.425 ms** — This is 62 ms different from raw. Why?
+
+**Hypothesis:** The Kalman filter or calibration is adding a large offset. This needs investigation.
+
+#### 3. Why does broadcast count vary so much?
+
+```
+[10 broadcasts, grade D]  → then →  [2 broadcasts, grade D]
+```
+
+- Are broadcasts being rejected? Why?
+- What are the rejection criteria?
+- Is this signal-dependent or algorithm-dependent?
+
+#### 4. Is the "Steel Ruler" philosophy being violated?
+
+The GPSDO is supposed to be the absolute reference. If D_clock swings by 100+ ms, either:
+- The GPSDO is wrong (unlikely, it's GPS-locked)
+- The algorithm is introducing errors
+- The calibration is unstable
+
+---
+
+### Key Files to Review
+
+| File | Purpose | Priority |
+|------|---------|----------|
+| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion algorithm, WLS, Kalman | **CRITICAL** |
+| `src/hf_timestd/core/broadcast_kalman_filter.py` | Per-broadcast Kalman state | **CRITICAL** |
+| `src/hf_timestd/core/l2_calibration_service.py` | Calibration logic | **CRITICAL** |
+| `src/hf_timestd/core/tone_detector.py` | ToA detection, uncertainty | HIGH |
+| `src/hf_timestd/core/metrology_engine.py` | L1 measurement production | HIGH |
+| `docs/METROLOGY.md` | Theoretical precision claims | REFERENCE |
+
+---
+
+### Diagnostic Commands
+
+**1. Check L1 measurement quality:**
+```bash
+# Look at actual ToA uncertainties
+grep "uncertainty" /var/log/hf-timestd/phase2-*.log.1 | tail -20
+
+# Check detection rates
+grep "detected" /var/log/hf-timestd/phase2-*.log.1 | tail -20
+```
+
+**2. Check calibration state:**
+```bash
+# View current calibration offsets
+cat /var/lib/timestd/state/broadcast_calibration.json | jq '.'
+
+# Check if calibration is stable
+grep "calibration" /var/log/hf-timestd/fusion.log.1 | tail -20
+```
+
+**3. Check fusion internals:**
+```bash
+# Look at broadcast rejection reasons
+grep -E "(reject|discard|skip)" /var/log/hf-timestd/fusion.log.1 | tail -20
+
+# Check grade calculation
+grep "grade" /var/log/hf-timestd/fusion.log.1 | tail -20
+```
+
+**4. Compare raw vs fused:**
+```bash
+# Extract raw and fused values
+grep "Fused D_clock" /var/log/hf-timestd/fusion.log.1 | tail -50
+```
+
+---
+
+### Hypotheses to Test
+
+#### Hypothesis 1: Kalman Filter Divergence
+The Kalman filter may be diverging due to:
+- Process noise too low (doesn't adapt to ionospheric changes)
+- Measurement noise too high (over-smooths, lags reality)
+- State initialization issues
+
+**Test:** Compare raw measurements to Kalman output. If raw is stable but Kalman diverges, this is the issue.
+
+#### Hypothesis 2: Calibration Instability
+Per-broadcast calibration may be:
+- Not converging (always in learning mode)
+- Chasing ionospheric variations instead of removing systematic bias
+- Corrupted state from previous sessions
+
+**Test:** Check `broadcast_calibration.json` for reasonable values. Reset and observe.
+
+#### Hypothesis 3: Grade Criteria Too Strict
+Grade A requires:
+- 30+ detections
+- 60 min span
+- RTP variance < 50²
+- Calibrated
+- Inter-station < 1 ms
+
+**Test:** Check which criteria are failing. May need to relax or fix.
+
+#### Hypothesis 4: Multipath/Mode Mixing
+Different propagation modes arriving at different times cause:
+- Large delay spread (0.5-5 ms)
+- Biased ToA estimates
+- High uncertainty
+
+**Test:** Check multipath detection logs. If multipath is common, this limits achievable precision.
+
+#### Hypothesis 5: Ionospheric Model Errors
+IRI-2020 or IONEX corrections may be:
+- Stale (IONEX is 1-2 hours old)
+- Inaccurate for current conditions
+- Not being applied correctly
+
+**Test:** Compare predicted vs measured delays. Large discrepancy indicates model issues.
+
+---
+
+### Success Criteria
+
+After this session:
+- ⬚ Identified where precision is lost (L1, L2, or L3)
+- ⬚ Understood why raw ≈ 0 ms but fused ≈ -60 ms
+- ⬚ Determined why grade is always D
+- ⬚ Created action plan to improve precision toward ±0.5 ms target
+- ⬚ Documented findings in Living Documentation
+
+---
+
+### Recent Fixes (Context)
+
+**v5.3.12 (2026-01-31):** Fixed RTP buffer alignment
+- `start_system_time` now exactly equals `minute_boundary`
+- Tone detection now finds markers at expected positions
+- D_clock reduced from ±3700 ms to ±100 ms range
+
+**Current state:** Pipeline is functional but precision is 30-70x worse than theoretical.
+
+---
+
+## ✅ PREVIOUS SESSION: RTP BUFFER ALIGNMENT FIX (v5.3.12)
+
+**Status:** ✅ **COMPLETE** - 2026-01-31  
+**Objective:** Fix buffer timing so minute boundary is correctly identified.
+
+### What Was Fixed
+
+1. **`binary_archive_writer.py`** — Buffer now starts exactly on minute boundary
+2. **`tone_detector.py`** — Simplified minute boundary calculation
+3. **`bootstrap_rolling_buffer.py`** — Fixed shape mismatch in circular buffer
+
+### Results
+
+- `start_system_time` now equals `minute_boundary` exactly
+- Tone detection finds markers at sample 0 (not negative)
+- D_clock reduced from ±3700 ms to ±100 ms range
+- Chrony SHM offsets: sub-millisecond
+
+### Documentation
+
+See `docs/changes/SESSION_2026_01_31_RTP_BUFFER_ALIGNMENT.md`
+
+---
+
+## 📋 PREVIOUS SESSION: TIMING VALIDATION DASHBOARD (COMPLETED)
+
+**Status:** ✅ **COMPLETE** - 2026-01-31  
+**Objective:** Implement timing validation dashboard comparing fusion vs GPS ground truth.
+
+### What Was Implemented
+
+1. **`timing_validation_service.py`** — Parses JSON sidecars, compares fusion vs GPS
+2. **`timing_validation.py` router** — API endpoints for validation data
+3. **`timing-validation.html`** — Interactive Chart.js dashboard
+4. **`TIMING_AUTHORITY_ARCHITECTURE.md`** — Updated to Living Documentation v2.0
+
+### Dashboard Status
+
+The dashboard is **correctly implemented** and shows "No Data" because there's no overlap between:
+- Timing snapshots (started 12:40 UTC)
+- Fusion data (stopped 12:37 UTC)
+
+Once the fusion pipeline is fixed, the dashboard will automatically show validation data.
+
+---
+
+## 📋 PREVIOUS SESSION: LIVING DOCUMENTATION REVIEW
 
 **Status:** � **READY FOR REVIEW** - 2026-01-29  
 **Objective:** Critically review the Living Documentation system to ensure it accurately reflects the current system behavior and architecture.

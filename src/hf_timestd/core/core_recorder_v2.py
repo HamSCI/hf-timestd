@@ -598,11 +598,13 @@ class CoreRecorderV2:
         At full lock, the uncertainty_ms reflects ionospheric averaging and can be
         used to set appropriate precision if direct Chrony feed is implemented.
         """
-        logger.info(f"[BOOTSTRAP] FULL LOCK: D_clock = {d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms")
+        d_str = f"{d_clock_ms:+.1f}" if d_clock_ms is not None else "N/A"
+        u_str = f"{uncertainty_ms:.1f}" if uncertainty_ms is not None else "N/A"
+        logger.info(f"[BOOTSTRAP] FULL LOCK: D_clock = {d_str}ms ± {u_str}ms")
         logger.info("[BOOTSTRAP] Transitioning to operational mode - archiving enabled")
         
         # Write bootstrap state file for fusion service (inotify-based coordination)
-        self._write_bootstrap_state('REFINED', d_clock_ms, uncertainty_ms)
+        self._write_bootstrap_state('REFINED', d_clock_ms or 0.0, uncertainty_ms or 10.0)
     
     def _update_bootstrap_state_if_locked(self):
         """Periodically update bootstrap timing reference."""

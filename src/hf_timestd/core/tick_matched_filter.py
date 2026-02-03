@@ -480,6 +480,23 @@ class TickMatchedFilter:
         magnitude = np.abs(iq_samples)
         audio = magnitude - np.mean(magnitude)  # AC coupling
         
+        # Bandpass filter around station-specific tick frequency
+        # This is critical for WWV/WWVH discrimination on shared channels:
+        # - WWV uses 1000 Hz ticks
+        # - WWVH uses 1200 Hz ticks
+        # Without filtering, the matched filter can respond to the wrong station
+        tick_freq = self.template_config.frequency_hz
+        bandwidth = 100.0  # ±100 Hz bandwidth
+        low_freq = tick_freq - bandwidth
+        high_freq = tick_freq + bandwidth
+        
+        # Ensure frequencies are valid for the sample rate
+        nyquist = self.sample_rate / 2
+        if high_freq < nyquist and low_freq > 0:
+            from scipy.signal import butter, sosfiltfilt
+            sos = butter(4, [low_freq, high_freq], btype='band', fs=self.sample_rate, output='sos')
+            audio = sosfiltfilt(sos, audio)
+        
         # Build composite template for this window
         template_sin, template_cos, valid_seconds = self._build_composite_template(
             start_second, end_second, minute

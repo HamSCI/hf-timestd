@@ -26,6 +26,7 @@ from hf_timestd.core.metrology_engine import MetrologyEngine
 from hf_timestd.models import L1MetrologyMeasurement
 from hf_timestd.io.hdf5_writer import DataProductWriter
 from hf_timestd.data_product_registry import DataProductRegistry
+from hf_timestd.interfaces.data_models import TimingConfig, TimingAuthority
 # Needed for binary reading
 try:
     from hf_timestd.io.tiered_storage import TieredStorageManager
@@ -69,21 +70,22 @@ class MetrologyService:
         self._rtp_to_unix_offset = None
         self._offset_samples = []
         
-        # Bootstrap Timing Reference (2026-01-27): RTP-to-UTC(NIST) conversion
-        # GPSDO RTP is the steel ruler. Bootstrap derives UTC(NIST) from HF tones.
-        # NTP is only an external reference, NOT authoritative.
-        # 
-        # The DTO provides a consistent (RTP, UTC) pair:
-        #   UTC(NIST) = reference_utc + (RTP - reference_rtp) / sample_rate
+        # Timing Authority Configuration (2026-02-01)
+        # In RTP mode: start_system_time from metadata IS authoritative (GPS+PPS)
+        # In FUSION mode: bootstrap reference provides RTP-to-UTC mapping
+        self._timing_config = TimingConfig.from_config(config)
+        self._is_rtp_authority = self._timing_config.authority == TimingAuthority.RTP
+        if self._is_rtp_authority:
+            logger.info(f"[TIMING] RTP authority mode - using metadata start_system_time directly")
+        else:
+            logger.info(f"[TIMING] FUSION authority mode - using bootstrap reference for timing")
+        
+        # Bootstrap Timing Reference (only needed in FUSION mode)
+        # In RTP mode, we still load it for validation but don't gate on it
         from .bootstrap_timing_reference import BootstrapTimingReference, DEFAULT_STATE_FILE
         self._bootstrap_ref_file = DEFAULT_STATE_FILE
         self._bootstrap_ref: Optional[BootstrapTimingReference] = None
         self._bootstrap_ref_loaded = False
-        
-        # NOTE (2026-01-27): Metrology service no longer runs its own bootstrap.
-        # The core recorder establishes the RTP-to-UTC(NIST) offset and writes it
-        # to the shared state file. We read that offset and use it directly.
-        # This avoids conflicts between two independent bootstrap processes.
         
         # Initialize Engine
         # Extract precise coords if available
@@ -98,7 +100,8 @@ class MetrologyService:
             receiver_grid=self.receiver_grid,
             sample_rate=config.get('sample_rate', 24000),
             precise_lat=lat,
-            precise_lon=lon
+            precise_lon=lon,
+            is_rtp_authority=self._is_rtp_authority
         )
         
         # Initialize Writer
@@ -196,13 +199,15 @@ class MetrologyService:
                         self._cleanup_processed_set()
                         logger.info(f"Minute {target_minute} processed successfully")
                     else:
-                        logger.info(f"Minute {target_minute} failed, will retry in 1s")
-                        # Wait before retry
-                        time.sleep(1.0)
-                else:
-                    # Up to date, wait
-                    logger.debug(f"Minute {target_minute} already processed, waiting 0.5s")
-                    time.sleep(0.5)
+                        logger.debug(f"Minute {target_minute} not ready yet")
+                
+                # Wait until next minute boundary (with 5s margin)
+                # This prevents aggressive polling that hammers CPU
+                now = time.time()
+                seconds_into_minute = now % 60
+                wait_time = max(5.0, 65.0 - seconds_into_minute)  # Wait until ~5s into next minute
+                logger.debug(f"Waiting {wait_time:.1f}s for next minute")
+                time.sleep(wait_time)
                     
                 # 3. Validation / Health Check (Periodically?)
                 
@@ -231,7 +236,8 @@ class MetrologyService:
             
             # Continue refining the bootstrap reference based on tone arrivals
             # Bootstrap provides initial estimate after 2-tier lock, metrology refines further
-            if self._bootstrap_ref and self._bootstrap_ref.is_valid():
+            # NOTE (2026-02-01): Only refine in FUSION mode - in RTP mode, timing is authoritative
+            if not self._is_rtp_authority and self._bootstrap_ref and self._bootstrap_ref.is_valid():
                 self._refine_bootstrap_reference(results)
             
             # Write Results
@@ -541,13 +547,18 @@ class MetrologyService:
             # The bootstrap reference is SSRC-specific and cannot be used across
             # channels (each channel has its own RTP epoch).
             #
-            # Wait for bootstrap to be LOCKED before processing (ensures timing is valid).
+            # Timing Authority Check (2026-02-01):
+            # - RTP mode: start_system_time from metadata IS authoritative (GPS+PPS)
+            #   No need to wait for bootstrap BCD/FSK confirmation
+            # - FUSION mode: Wait for bootstrap lock before processing
             if not self._bootstrap_ref_loaded or self.minutes_processed % 5 == 0:
                 self._load_bootstrap_reference()
             
-            if not self._bootstrap_ref or not self._bootstrap_ref.locked:
-                logger.info(f"Minute {target_minute}: waiting for bootstrap lock, skipping")
-                return None
+            if not self._is_rtp_authority:
+                # FUSION mode: require bootstrap lock
+                if not self._bootstrap_ref or not self._bootstrap_ref.locked:
+                    logger.info(f"Minute {target_minute}: waiting for bootstrap lock, skipping")
+                    return None
             
             # Use start_system_time from metadata (NTP-derived, per-channel)
             if 'start_system_time' in metadata:
@@ -653,6 +664,8 @@ if __name__ == "__main__":
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument("--state-file", type=Path, help="Persistence state file")
     parser.add_argument("--use-tiered-storage", action="store_true", help="Enable tiered storage manager")
+    parser.add_argument("--config-file", type=Path, default=Path("/opt/hf-timestd/config/timestd-config.toml"),
+                        help="Path to timestd-config.toml for timing authority settings")
     
     args = parser.parse_args()
     
@@ -668,10 +681,27 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(log_level)
     logger.setLevel(log_level)
     
-    # Config dict construction
+    # Load TOML config for timing authority settings
+    toml_config = {}
+    if args.config_file and args.config_file.exists():
+        try:
+            import tomllib
+            with open(args.config_file, 'rb') as f:
+                toml_config = tomllib.load(f)
+            logger.info(f"Loaded config from {args.config_file}")
+        except ImportError:
+            import tomli as tomllib
+            with open(args.config_file, 'rb') as f:
+                toml_config = tomllib.load(f)
+            logger.info(f"Loaded config from {args.config_file}")
+        except Exception as e:
+            logger.warning(f"Could not load config file {args.config_file}: {e}")
+    
+    # Config dict construction - merge TOML timing section
     config = {
         "sample_rate": 24000, # Hardcoded for now, or could be arg/config
-        "tiered_storage": args.use_tiered_storage
+        "tiered_storage": args.use_tiered_storage,
+        "timing": toml_config.get("timing", {})  # Pass timing section for authority mode
     }
     
     station_config = {

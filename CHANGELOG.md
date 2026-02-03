@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.13] - 2026-02-03
+
+### Metrology Service Fixes - CPU Overload and False Detections
+
+**Major Fixes:** Resolved CPU overload from aggressive polling and eliminated false detections of per-second ticks.
+
+#### Problems Addressed
+
+1. **CPU Overload**: Metrology service was polling every 0.5-1s, causing massive CPU load when processing 9 channels.
+
+2. **False Detections**: Correlation was finding per-second ticks (at +1000ms, +1196ms, etc.) instead of the minute marker at second 0. Only 16% of WWV detections had correct timing.
+
+3. **Code Errors**: Several runtime errors preventing buffer processing:
+   - `ToneDetectionResult` field name mismatch
+   - `buffer_mid_time` undefined in RTP mode path
+   - Bootstrap callback failing on None values
+
+#### Solutions
+
+1. **Polling Fix** (`metrology_service.py`): Changed from aggressive 0.5-1s polling to waiting for next minute boundary. Processes once per minute per channel.
+
+2. **Search Window Constraint** (`metrology_engine.py`): Constrained correlation peak search to ±100ms around expected arrival time. Prevents detecting per-second ticks.
+
+3. **Code Fixes**:
+   - Fixed `ToneDetectionResult` instantiation with correct field names
+   - Defined `buffer_mid_time` early in `process_minute()` for both RTP and Fusion paths
+   - Handle None values in bootstrap full lock callback
+
+#### Results
+| Metric | Before | After |
+|--------|--------|-------|
+| CPU idle | ~0% (overloaded) | ~73% |
+| False detections (+1000ms errors) | 84% | 0% |
+| Good WWV timing (when detected) | -4.0ms error | -4.0ms error |
+
+#### Files Modified
+- `src/hf_timestd/core/metrology_service.py` - Minute-boundary polling
+- `src/hf_timestd/core/metrology_engine.py` - Search window constraint, field fixes
+- `src/hf_timestd/core/core_recorder_v2.py` - Bootstrap callback None handling
+- `src/hf_timestd/core/binary_archive_writer.py` - Direct GPS_TIME/RTP_TIMESNAP mapping
+
+#### Known Issue
+~60ms systematic offset remains in GPS_TIME/RTP_TIMESNAP mapping (radiod pipeline latency). When buffer timing is correct, WWV timing error is -4.0ms (excellent, matches propagation delay).
+
 ## [5.3.12] - 2026-01-31
 
 ### RTP Buffer Alignment Fix - Critical Timing Stability
