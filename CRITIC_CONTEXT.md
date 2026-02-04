@@ -10,128 +10,139 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 🔴 ACTIVE SESSION: FUSION PRECISION GAP — WHY ISN'T 0.5ms PRECISION ACHIEVED?
+## 🔴 ACTIVE SESSION: TONE DETECTION DEFICIENCIES — CHU CHANNELS
 
-**Status:** 🔴 **CRITICAL** - 2026-02-01  
-**Objective:** Understand why the fusion process produces ±15-35 ms uncertainty instead of the theoretical ±0.5 ms, and determine what can be fixed.
-
----
-
-### The Precision Gap
-
-**Theoretical Target (from METROLOGY.md):**
-- **±0.5 ms (1σ) to UTC(NIST)** with multi-broadcast fusion
-- Cramér-Rao bound at 20 dB SNR: **0.036 ms**
-- With 13 broadcasts fused + calibration: **±0.5 ms**
-
-**Actual Performance (2026-02-01 11:47-11:51 UTC):**
-```
-Fused D_clock: -62.425 ms (raw: -0.262 ms) ± 19.175 ms [10 broadcasts, grade D]
-Fused D_clock: +45.621 ms (raw: +92.706 ms) ± 2.586 ms [2 broadcasts, grade D]
-Fused D_clock: -38.656 ms (raw: +32.006 ms) ± 34.266 ms [2 broadcasts, grade D]
-```
-
-**The Gap:**
-| Metric | Theoretical | Actual | Gap Factor |
-|--------|-------------|--------|------------|
-| Uncertainty | ±0.5 ms | ±15-35 ms | **30-70x worse** |
-| D_clock stability | ~constant | swings ±100 ms | **unstable** |
-| Grade | A (30+ detections) | D (always) | **never achieves A** |
+**Status:** 🔴 **CRITICAL** - 2026-02-04  
+**Objective:** Diagnose why CHU channels with good signal strength are producing few or no valid tone detections, and fix the detection/validation pipeline.
 
 ---
 
-### Why This Matters: Ionospheric Science
+### Current Observations (2026-02-04 01:00 UTC)
 
-The original goal was to achieve precision sufficient to **resolve ionospheric phenomena**:
+**CHU Signal Status:** All three CHU channels have **good signal strength** per user report.
 
-1. **Ionospheric delay variations**: 1-10 ms diurnal, 0.5-2 ms short-term
-2. **Sporadic-E events**: 2-5 ms sudden changes
-3. **Traveling Ionospheric Disturbances**: 0.5-2 ms oscillations
-4. **Solar flare effects**: 1-5 ms sudden ionospheric disturbance
+**Detection Results (from logs):**
 
-**At ±0.5 ms precision**, these phenomena would be clearly visible.
-**At ±20 ms precision**, they are buried in noise.
+| Channel | Status | Issue |
+|---------|--------|-------|
+| CHU_3330 | ❌ **0 measurements** per minute | No detections at all |
+| CHU_7850 | ⚠️ **Intermittent** | Detects but REJECTS: `timing_error=-58.5ms exceeds ±50.0ms` |
+| CHU_14670 | ❌ **0 measurements** per minute | No detections at all |
+
+**Key Log Evidence (CHU_7850):**
+```
+CHU @ 1000Hz: VALIDATED arrival=0.00ms (expected=5.4ms), error=-5.37ms, corr_SNR=6.4dB
+CHU_7850: RTP mode measured 1 signal(s): ['CHU']
+CHU_7850: CHU tick_analysis: valid_windows=41
+CHU_7850: CHU tick REJECTED - timing_error=-58.5ms exceeds ±50.0ms (raw_toa=-53.1ms, expected=5.4ms)
+```
+
+**The Paradox:**
+- Initial validation PASSES: `error=-5.37ms` (within bounds)
+- Tick analysis finds 41 valid windows
+- But then REJECTED with `timing_error=-58.5ms`
+
+**Why the discrepancy?** The initial tone detection and the tick analysis are producing different ToA values:
+- Initial: `arrival=0.00ms` → `error=-5.37ms` ✅
+- Tick analysis: `raw_toa=-53.1ms` → `timing_error=-58.5ms` ❌
 
 ---
 
-### Pipeline Architecture (Current State)
+### Architecture Context (Post-Bootstrap Migration)
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  PRECISION BUDGET ANALYSIS                                               │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  L0: Raw IQ (core-recorder)                                             │
-│      └── RTP timestamps: ±0.04 ms (GPSDO-locked) ✅                     │
-│                                                                          │
-│  L1: Metrology (tone detection)                                         │
-│      ├── Cramér-Rao bound: 0.036-0.9 ms (SNR-dependent)                │
-│      ├── Multipath spread: 0.5-2.5 ms                                   │
-│      └── Actual: ??? (need to measure)                                  │
-│                                                                          │
-│  L2: Calibration (systematic offset removal)                            │
-│      ├── Per-broadcast Kalman: should converge to ±1-2 ms              │
-│      └── Actual: ??? (need to verify)                                   │
-│                                                                          │
-│  L3: Fusion (multi-broadcast WLS)                                       │
-│      ├── Theoretical: ±0.5 ms with 13 broadcasts                       │
-│      └── Actual: ±15-35 ms, Grade D ❌                                  │
-│                                                                          │
-│  Output: Chrony SHM                                                      │
-│      └── Offset: varies wildly ❌                                       │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+**Recent Changes (v5.4.0, 2026-02-03):**
+- Bootstrap functionality migrated into `MetrologyEngine`
+- `FusionTimingState` class now manages timing lock for Fusion mode
+- RTP mode uses authoritative GPS+PPS timing from radiod
+- Bootstrap service deprecated
+
+**Current Timing Authority:** RTP mode (GPS+PPS via radiod)
+- Timing should be authoritative
+- No wide-window search needed
+- Expected arrival times are well-defined
 
 ---
 
-### Critical Questions to Answer
+### Root Cause Hypotheses
 
-#### 1. Where is precision lost?
+#### Hypothesis 1: Tick Analysis vs Tone Detection Mismatch
+Two different ToA estimation methods are producing conflicting results:
+1. **Tone detection** (matched filter): `arrival=0.00ms`
+2. **Tick analysis** (per-second tick timing): `raw_toa=-53.1ms`
 
-**L1 Metrology:**
-- What is the actual ToA uncertainty per detection?
-- Is the matched filter working correctly?
-- Are multipath/Doppler corrections being applied?
+The tick analysis may be:
+- Using a different reference point
+- Accumulating errors across multiple ticks
+- Applying incorrect propagation delay
 
-**L2 Calibration:**
-- Are per-broadcast Kalman filters converging?
-- What are the calibration offsets per station?
-- Is the calibration stable or drifting?
+**Files to investigate:**
+- `src/hf_timestd/core/metrology_engine.py` — tick analysis logic
+- `src/hf_timestd/core/tone_detector.py` — initial tone detection
 
-**L3 Fusion:**
-- Why is grade always D?
-- What are the grade A/B/C criteria and why aren't they met?
-- Is the WLS weighting correct?
+#### Hypothesis 2: ±50ms Validation Threshold Too Strict
+The rejection threshold of ±50ms may be too tight for:
+- Ionospheric delay variations (can be 10-50ms)
+- Multipath effects
+- Mode mixing on CHU frequencies
 
-#### 2. What does "raw" vs "fused" D_clock mean?
+**Question:** Should the threshold be relaxed, or is the underlying measurement wrong?
 
-From the logs:
+#### Hypothesis 3: CHU Template Mismatch
+CHU uses 500ms tones at 1000Hz (different from WWV's 800ms tones).
+- Are CHU templates correctly configured?
+- Is the matched filter optimized for CHU's signal characteristics?
+
+**Files to investigate:**
+- `src/hf_timestd/core/tone_detector.py` — template generation
+- `src/hf_timestd/core/wwv_constants.py` — station parameters
+
+#### Hypothesis 4: Propagation Delay Calculation Error
+The expected arrival time (`expected=5.4ms`) may be incorrect:
+- Is the CHU transmitter location correct?
+- Is the receiver location correct?
+- Is the ionospheric model (IRI-2020) producing reasonable delays?
+
+**Files to investigate:**
+- `src/hf_timestd/core/arrival_pattern_matrix.py` — expected arrivals
+- `src/hf_timestd/core/wwv_constants.py` — station locations
+
+---
+
+### Diagnostic Commands
+
+**1. Check CHU detection rates:**
+```bash
+# Count detections per channel
+for ch in chu3.33 chu7.85 chu14.67; do
+  echo "=== $ch ==="
+  grep -c "measurements" /var/log/hf-timestd/phase2-$ch.log.1 | head -1
+  grep "VALIDATED\|REJECTED" /var/log/hf-timestd/phase2-$ch.log.1 | tail -10
+done
 ```
-Fused D_clock: -62.425 ms (raw: -0.262 ms) ± 19.175 ms
+
+**2. Check tick analysis details:**
+```bash
+# Look at tick analysis output
+grep -E "tick_analysis|tick REJECTED|timing_error" /var/log/hf-timestd/phase2-chu*.log.1 | tail -30
 ```
 
-- **raw: -0.262 ms** — This looks reasonable!
-- **Fused: -62.425 ms** — This is 62 ms different from raw. Why?
-
-**Hypothesis:** The Kalman filter or calibration is adding a large offset. This needs investigation.
-
-#### 3. Why does broadcast count vary so much?
-
-```
-[10 broadcasts, grade D]  → then →  [2 broadcasts, grade D]
+**3. Check expected vs measured arrivals:**
+```bash
+# Compare expected and measured
+grep -E "expected=|arrival=" /var/log/hf-timestd/phase2-chu*.log.1 | tail -20
 ```
 
-- Are broadcasts being rejected? Why?
-- What are the rejection criteria?
-- Is this signal-dependent or algorithm-dependent?
+**4. Check CHU template configuration:**
+```bash
+# Look for CHU template creation
+grep -E "CHU.*template|template.*CHU" /var/log/hf-timestd/phase2-chu*.log.1 | head -10
+```
 
-#### 4. Is the "Steel Ruler" philosophy being violated?
-
-The GPSDO is supposed to be the absolute reference. If D_clock swings by 100+ ms, either:
-- The GPSDO is wrong (unlikely, it's GPS-locked)
-- The algorithm is introducing errors
-- The calibration is unstable
+**5. Check calibration state for CHU:**
+```bash
+# View CHU calibration offsets
+cat /var/lib/timestd/state/broadcast_calibration.json | grep -A5 "CHU"
+```
 
 ---
 
@@ -139,117 +150,61 @@ The GPSDO is supposed to be the absolute reference. If D_clock swings by 100+ ms
 
 | File | Purpose | Priority |
 |------|---------|----------|
-| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion algorithm, WLS, Kalman | **CRITICAL** |
-| `src/hf_timestd/core/broadcast_kalman_filter.py` | Per-broadcast Kalman state | **CRITICAL** |
-| `src/hf_timestd/core/l2_calibration_service.py` | Calibration logic | **CRITICAL** |
-| `src/hf_timestd/core/tone_detector.py` | ToA detection, uncertainty | HIGH |
-| `src/hf_timestd/core/metrology_engine.py` | L1 measurement production | HIGH |
-| `docs/METROLOGY.md` | Theoretical precision claims | REFERENCE |
+| `src/hf_timestd/core/metrology_engine.py` | Tick analysis, validation logic | **CRITICAL** |
+| `src/hf_timestd/core/tone_detector.py` | Matched filter, template generation | **CRITICAL** |
+| `src/hf_timestd/core/arrival_pattern_matrix.py` | Expected arrival calculation | HIGH |
+| `src/hf_timestd/core/wwv_constants.py` | Station locations, signal parameters | HIGH |
+| `src/hf_timestd/core/metrology_service.py` | Service orchestration | MEDIUM |
 
 ---
 
-### Diagnostic Commands
+### Current Calibration State (2026-02-04)
 
-**1. Check L1 measurement quality:**
-```bash
-# Look at actual ToA uncertainties
-grep "uncertainty" /var/log/hf-timestd/phase2-*.log.1 | tail -20
-
-# Check detection rates
-grep "detected" /var/log/hf-timestd/phase2-*.log.1 | tail -20
+From `broadcast_calibration.json`:
+```json
+"CHU_14.7": { "offset_ms": 13.81, "uncertainty_ms": 0.24, "n_samples": 30 }
+"CHU_7.8":  { "offset_ms": 14.78, "uncertainty_ms": 0.25, "n_samples": 30 }
+"CHU_3.3":  { "offset_ms": 19.71, "uncertainty_ms": 0.31, "n_samples": 30 }
 ```
 
-**2. Check calibration state:**
-```bash
-# View current calibration offsets
-cat /var/lib/timestd/state/broadcast_calibration.json | jq '.'
-
-# Check if calibration is stable
-grep "calibration" /var/log/hf-timestd/fusion.log.1 | tail -20
-```
-
-**3. Check fusion internals:**
-```bash
-# Look at broadcast rejection reasons
-grep -E "(reject|discard|skip)" /var/log/hf-timestd/fusion.log.1 | tail -20
-
-# Check grade calculation
-grep "grade" /var/log/hf-timestd/fusion.log.1 | tail -20
-```
-
-**4. Compare raw vs fused:**
-```bash
-# Extract raw and fused values
-grep "Fused D_clock" /var/log/hf-timestd/fusion.log.1 | tail -50
-```
-
----
-
-### Hypotheses to Test
-
-#### Hypothesis 1: Kalman Filter Divergence
-The Kalman filter may be diverging due to:
-- Process noise too low (doesn't adapt to ionospheric changes)
-- Measurement noise too high (over-smooths, lags reality)
-- State initialization issues
-
-**Test:** Compare raw measurements to Kalman output. If raw is stable but Kalman diverges, this is the issue.
-
-#### Hypothesis 2: Calibration Instability
-Per-broadcast calibration may be:
-- Not converging (always in learning mode)
-- Chasing ionospheric variations instead of removing systematic bias
-- Corrupted state from previous sessions
-
-**Test:** Check `broadcast_calibration.json` for reasonable values. Reset and observe.
-
-#### Hypothesis 3: Grade Criteria Too Strict
-Grade A requires:
-- 30+ detections
-- 60 min span
-- RTP variance < 50²
-- Calibrated
-- Inter-station < 1 ms
-
-**Test:** Check which criteria are failing. May need to relax or fix.
-
-#### Hypothesis 4: Multipath/Mode Mixing
-Different propagation modes arriving at different times cause:
-- Large delay spread (0.5-5 ms)
-- Biased ToA estimates
-- High uncertainty
-
-**Test:** Check multipath detection logs. If multipath is common, this limits achievable precision.
-
-#### Hypothesis 5: Ionospheric Model Errors
-IRI-2020 or IONEX corrections may be:
-- Stale (IONEX is 1-2 hours old)
-- Inaccurate for current conditions
-- Not being applied correctly
-
-**Test:** Compare predicted vs measured delays. Large discrepancy indicates model issues.
+**Observation:** Calibration offsets are 13-20ms, which is reasonable for ionospheric delay. But if tick analysis is producing -53ms raw ToA, something is fundamentally wrong with the measurement, not just calibration.
 
 ---
 
 ### Success Criteria
 
 After this session:
-- ⬚ Identified where precision is lost (L1, L2, or L3)
-- ⬚ Understood why raw ≈ 0 ms but fused ≈ -60 ms
-- ⬚ Determined why grade is always D
-- ⬚ Created action plan to improve precision toward ±0.5 ms target
-- ⬚ Documented findings in Living Documentation
+- ⬚ Identified why tick analysis produces different ToA than initial detection
+- ⬚ Understood the -53ms vs 0ms discrepancy
+- ⬚ Fixed or relaxed the ±50ms validation threshold appropriately
+- ⬚ CHU channels producing consistent measurements
+- ⬚ All 3 CHU channels showing fresh metrology data
 
 ---
 
-### Recent Fixes (Context)
+### Related Context
 
-**v5.3.12 (2026-01-31):** Fixed RTP buffer alignment
-- `start_system_time` now exactly equals `minute_boundary`
-- Tone detection now finds markers at expected positions
-- D_clock reduced from ±3700 ms to ±100 ms range
+**Bootstrap Migration (v5.4.0):** Completed 2026-02-03
+- `FusionTimingState` now manages timing lock in Fusion mode
+- RTP mode uses authoritative timing (no bootstrap needed)
+- `verify_pipeline.sh` updated for new architecture
 
-**Current state:** Pipeline is functional but precision is 30-70x worse than theoretical.
+**Previous Precision Gap Session:** The fusion precision gap (±15-35ms vs ±0.5ms target) may be related to these detection issues. If CHU channels aren't producing valid measurements, the fusion has fewer inputs and higher uncertainty.
+
+---
+
+## ✅ PREVIOUS SESSION: BOOTSTRAP MIGRATION (v5.4.0)
+
+**Status:** ✅ **COMPLETE** - 2026-02-03  
+**Objective:** Migrate bootstrap functionality into MetrologyEngine, deprecate separate bootstrap service.
+
+### What Was Done
+1. Created `FusionTimingState` class for Fusion mode timing lock
+2. Integrated into `MetrologyEngine` for wide-window search and lock transitions
+3. Updated `MetrologyService` to use engine's internal fusion_state
+4. Removed bootstrap dependencies from `CoreRecorderV2` and `StreamRecorderV2`
+5. Updated `verify_pipeline.sh` for RTP vs Fusion mode awareness
+6. Added interactive `config-review.sh` for configuration management
 
 ---
 
