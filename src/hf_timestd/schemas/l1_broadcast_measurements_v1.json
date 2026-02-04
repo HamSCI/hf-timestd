@@ -1,0 +1,407 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L1_broadcast_measurements",
+    "description": "Broadcast-centric metrology measurements with station-specific features. Each measurement is keyed by broadcast_id (station + frequency_khz).",
+    "cadence_seconds": 60,
+    "processing_level": "L1",
+    "reference": "Raw Reception Time (System Clock + RTP)",
+    "frequency_convention": "All frequencies in kHz (integers). Example: 10000 kHz = 10 MHz",
+    "quality_flags": {
+        "GOOD": "Tone detected with high SNR (>20 dB), confident station ID, delay plausible",
+        "MARGINAL": "Tone detected with moderate SNR (10-20 dB) or uncertain attribution",
+        "BAD": "Weak detection (SNR < 10 dB), ambiguous ID, or implausible delay",
+        "MISSING": "No tone detected"
+    },
+    "fields": [
+        {
+            "name": "broadcast_id",
+            "type": "string",
+            "required": true,
+            "description": "Unique broadcast key: station_frequency_khz (e.g., 'WWV_10000', 'CHU_7850')"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "enum": ["WWV", "WWVH", "CHU", "BPM", "UNKNOWN"],
+            "description": "Station identifier"
+        },
+        {
+            "name": "frequency_khz",
+            "type": "integer",
+            "required": true,
+            "description": "Carrier frequency in kHz (integer)",
+            "units": "kHz"
+        },
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "rtp_timestamp",
+            "type": "integer",
+            "required": true,
+            "description": "RTP timestamp for provenance"
+        },
+        {
+            "name": "tone_detected",
+            "type": "boolean",
+            "required": true,
+            "description": "Was the expected tone detected?"
+        },
+        {
+            "name": "raw_toa_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Raw Time of Arrival relative to minute boundary",
+            "units": "milliseconds"
+        },
+        {
+            "name": "toa_uncertainty_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "ToA uncertainty (Cramér-Rao bound)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "snr_db",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Signal-to-Noise Ratio",
+            "units": "dB"
+        },
+        {
+            "name": "tone_duration_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Measured tone duration",
+            "units": "milliseconds"
+        },
+        {
+            "name": "expected_duration_ms",
+            "type": "float",
+            "required": true,
+            "description": "Expected duration for this broadcast",
+            "units": "milliseconds"
+        },
+        {
+            "name": "duration_match",
+            "type": "boolean",
+            "required": true,
+            "description": "Does measured duration match expected (±20%)?"
+        },
+        {
+            "name": "attribution_method",
+            "type": "string",
+            "required": true,
+            "enum": ["unique_freq", "tone_freq", "tone_duration", "prop_delay", "test_signal", "bcd_decode", "fsk_decode", "ground_truth", "fusion"],
+            "description": "How station attribution was determined"
+        },
+        {
+            "name": "attribution_confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [0, 1],
+            "description": "Confidence in station attribution"
+        },
+        {
+            "name": "attribution_ambiguous",
+            "type": "boolean",
+            "required": true,
+            "description": "True if multiple stations possible on this frequency"
+        },
+        {
+            "name": "alternative_stations",
+            "type": "array",
+            "items": "string",
+            "required": false,
+            "description": "Other possible stations if ambiguous"
+        },
+        {
+            "name": "bcd_detected",
+            "type": "boolean",
+            "required": false,
+            "station_specific": ["WWV", "WWVH"],
+            "description": "BCD time code detected (WWV/WWVH only)"
+        },
+        {
+            "name": "bcd_time_valid",
+            "type": "boolean",
+            "required": false,
+            "station_specific": ["WWV", "WWVH"],
+            "description": "BCD decoded time matches expected"
+        },
+        {
+            "name": "bcd_wwv_amplitude",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "station_specific": ["WWV", "WWVH"],
+            "description": "WWV BCD correlation amplitude"
+        },
+        {
+            "name": "bcd_wwvh_amplitude",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "station_specific": ["WWV", "WWVH"],
+            "description": "WWVH BCD correlation amplitude"
+        },
+        {
+            "name": "test_signal_detected",
+            "type": "boolean",
+            "required": false,
+            "station_specific": ["WWV", "WWVH"],
+            "description": "Test signal present (minute 8 for WWV, 44 for WWVH)"
+        },
+        {
+            "name": "tone_500_600_hz",
+            "type": "integer",
+            "required": false,
+            "enum": [500, 600, null],
+            "station_specific": ["WWV", "WWVH"],
+            "description": "500/600 Hz tone frequency if present",
+            "units": "Hz"
+        },
+        {
+            "name": "fsk_detected",
+            "type": "boolean",
+            "required": false,
+            "station_specific": ["CHU"],
+            "description": "FSK time code detected (CHU only)"
+        },
+        {
+            "name": "fsk_frames_decoded",
+            "type": "integer",
+            "required": false,
+            "valid_range": [0, 9],
+            "station_specific": ["CHU"],
+            "description": "Number of FSK frames decoded (0-9)"
+        },
+        {
+            "name": "fsk_time_valid",
+            "type": "boolean",
+            "required": false,
+            "station_specific": ["CHU"],
+            "description": "FSK decoded time matches expected"
+        },
+        {
+            "name": "fsk_timing_offset_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "station_specific": ["CHU"],
+            "description": "FSK 500ms boundary timing offset",
+            "units": "milliseconds"
+        },
+        {
+            "name": "fsk_decoded_day",
+            "type": "integer",
+            "required": false,
+            "valid_range": [1, 366],
+            "station_specific": ["CHU"],
+            "description": "Day of year from FSK"
+        },
+        {
+            "name": "fsk_decoded_hour",
+            "type": "integer",
+            "required": false,
+            "valid_range": [0, 23],
+            "station_specific": ["CHU"],
+            "description": "Hour from FSK"
+        },
+        {
+            "name": "fsk_decoded_minute",
+            "type": "integer",
+            "required": false,
+            "valid_range": [0, 59],
+            "station_specific": ["CHU"],
+            "description": "Minute from FSK"
+        },
+        {
+            "name": "tick_timing_offset_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "station_specific": ["CHU"],
+            "description": "1000 Hz tick onset timing (high precision)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "dut1_from_fsk",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "station_specific": ["CHU"],
+            "description": "DUT1 from FSK Frame B",
+            "units": "seconds"
+        },
+        {
+            "name": "dut1_from_splits",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "station_specific": ["CHU"],
+            "description": "DUT1 from split tones",
+            "units": "seconds"
+        },
+        {
+            "name": "dut1_consistent",
+            "type": "boolean",
+            "required": false,
+            "station_specific": ["CHU"],
+            "description": "FSK and split DUT1 values agree"
+        },
+        {
+            "name": "tai_utc_from_fsk",
+            "type": "integer",
+            "required": false,
+            "station_specific": ["CHU"],
+            "description": "TAI-UTC from FSK Frame B",
+            "units": "seconds"
+        },
+        {
+            "name": "ut1_tick_detected",
+            "type": "boolean",
+            "required": false,
+            "station_specific": ["BPM"],
+            "description": "100ms UT1 tick detected (BPM only)"
+        },
+        {
+            "name": "tick_count",
+            "type": "integer",
+            "required": false,
+            "description": "Number of per-second ticks detected"
+        },
+        {
+            "name": "tick_mean_offset_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Mean tick timing offset",
+            "units": "milliseconds"
+        },
+        {
+            "name": "tick_std_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Tick timing standard deviation",
+            "units": "milliseconds"
+        },
+        {
+            "name": "tick_drift_ms_per_sec",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Tick timing drift rate",
+            "units": "milliseconds/second"
+        },
+        {
+            "name": "doppler_hz",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Estimated Doppler shift",
+            "units": "Hz"
+        },
+        {
+            "name": "multipath_detected",
+            "type": "boolean",
+            "required": false,
+            "description": "Multipath signature detected"
+        },
+        {
+            "name": "multipath_delay_spread_ms",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Delay spread if multipath detected",
+            "units": "milliseconds"
+        },
+        {
+            "name": "multipath_quality",
+            "type": "float",
+            "required": false,
+            "valid_range": [0, 1],
+            "description": "Signal quality metric (1=clean, 0=severe multipath)"
+        },
+        {
+            "name": "distance_km",
+            "type": "float",
+            "required": true,
+            "description": "Great circle distance to station",
+            "units": "km"
+        },
+        {
+            "name": "light_travel_time_ms",
+            "type": "float",
+            "required": true,
+            "description": "Minimum physical delay (distance/c)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "expected_delay_min_ms",
+            "type": "float",
+            "required": true,
+            "description": "Minimum plausible propagation delay",
+            "units": "milliseconds"
+        },
+        {
+            "name": "expected_delay_max_ms",
+            "type": "float",
+            "required": true,
+            "description": "Maximum plausible propagation delay",
+            "units": "milliseconds"
+        },
+        {
+            "name": "delay_plausible",
+            "type": "boolean",
+            "required": true,
+            "description": "Is raw_toa within plausible delay range?"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": ["GOOD", "MARGINAL", "BAD", "MISSING"],
+            "description": "Overall quality assessment"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Software version that produced this measurement"
+        }
+    ],
+    "hdf5_attributes": {
+        "broadcast_id": "Unique broadcast identifier (station_frequency_khz)",
+        "station": "Station name (WWV, WWVH, CHU, BPM)",
+        "frequency_khz": "Carrier frequency in kHz",
+        "station_lat": "Station latitude (degrees)",
+        "station_lon": "Station longitude (degrees)",
+        "receiver_lat": "Receiver latitude (degrees)",
+        "receiver_lon": "Receiver longitude (degrees)",
+        "receiver_grid": "Receiver Maidenhead grid square",
+        "tone_freq_hz": "Audio frequency of timing tones (Hz)",
+        "minute_marker_duration_ms": "Expected minute marker duration (ms)",
+        "ticks_per_minute": "Expected ticks per minute",
+        "is_unique_frequency": "True if only one station on this frequency",
+        "features": "List of station-specific features (bcd, fsk, test_signal, etc.)",
+        "processing_version": "Software version",
+        "schema_version": "Schema version"
+    }
+}

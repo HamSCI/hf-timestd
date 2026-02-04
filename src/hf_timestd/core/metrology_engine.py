@@ -39,6 +39,7 @@ from hf_timestd.core.tone_detector import MultiStationToneDetector
 from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
 from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType as TickStationType
 from hf_timestd.core.fusion_timing_state import FusionTimingState, LockTier
+from hf_timestd.core.timing_consistency_validator import TimingConsistencyValidator
 # We keep discriminators as they are signal analysis, not physics modeling.
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,9 @@ class MetrologyEngine:
         
         # Initialize Arrival Pattern Matrix for physics-based validation
         self._init_arrival_matrix()
+        
+        # Initialize Timing Consistency Validator for multi-constraint validation
+        self._init_timing_validator()
         
         # State
         self._lock = threading.Lock()
@@ -211,6 +215,33 @@ class MetrologyEngine:
                 self.arrival_matrix = None
         else:
             logger.info(f"ArrivalPatternMatrix not initialized (no precise coordinates)")
+
+    def _init_timing_validator(self):
+        """
+        Initialize the Timing Consistency Validator for multi-constraint validation.
+        
+        The validator exploits multiple timing constraints:
+        - Intra-minute: arrival sequence, cross-station consistency, cross-frequency TEC
+        - Inter-minute: sample interval stability, arrival time stability
+        
+        This provides additional validation beyond the physics-based arrival matrix.
+        """
+        self.timing_validator = None
+        
+        if self.precise_lat is not None and self.precise_lon is not None:
+            try:
+                self.timing_validator = TimingConsistencyValidator(
+                    receiver_lat=self.precise_lat,
+                    receiver_lon=self.precise_lon,
+                    sample_rate=self.sample_rate,
+                    history_minutes=60  # Track 1 hour of history
+                )
+                logger.info(f"TimingConsistencyValidator initialized for {self.channel_name}")
+            except Exception as e:
+                logger.warning(f"Could not initialize TimingConsistencyValidator: {e}")
+                self.timing_validator = None
+        else:
+            logger.debug(f"TimingConsistencyValidator not initialized (no precise coordinates)")
 
     def _init_tick_filters(self):
         """
@@ -463,6 +494,18 @@ class MetrologyEngine:
         peak_idx = search_start + local_peak_idx
         peak_val = correlation[peak_idx]
         
+        # VALIDATION: Reject if peak is at edge of search window (likely noise/flat correlation)
+        # A real tone should produce a clear peak away from the edges
+        edge_margin = min(50, len(search_region) // 10)  # At least 50 samples or 10% from edge
+        if local_peak_idx < edge_margin or local_peak_idx > len(search_region) - edge_margin:
+            # Check if correlation is essentially flat (noise)
+            corr_range = np.max(search_region) - np.min(search_region)
+            corr_mean = np.mean(search_region)
+            if corr_mean > 0 and corr_range / corr_mean < 0.5:  # Less than 50% variation = flat
+                logger.debug(f"{station_name}: Correlation flat/noisy - peak at edge "
+                            f"(local_peak={local_peak_idx}, range/mean={corr_range/corr_mean:.2f})")
+                return None
+        
         # Step 3: VALIDATE that this is a full-duration tone, not a tick or noise
         # The full-duration matched filter should produce a strong peak for the minute marker
         # but a weak peak for 5ms ticks (which have ~1/160th the energy for 800ms template)
@@ -489,8 +532,10 @@ class MetrologyEngine:
             corr_snr_db = 0.0
         
         # Reject if correlation SNR is too low
-        # Use SNR as the primary criterion - it's more robust than absolute threshold
-        MIN_CORR_SNR_DB = 6.0  # Require 6dB above noise floor
+        # An 800ms matched filter with a real tone should produce SNR >> 20 dB.
+        # A 6 dB threshold allows noise peaks (2.4x ratio) to pass as false detections.
+        # Raise to 12 dB (4x ratio) to reject noise while accepting weak real signals.
+        MIN_CORR_SNR_DB = 12.0  # Require 12dB above noise floor
         if corr_snr_db < MIN_CORR_SNR_DB:
             logger.debug(f"{station_name}: Correlation too weak "
                         f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB}dB)")
@@ -519,7 +564,7 @@ class MetrologyEngine:
         # Timing error = measured_arrival - expected_propagation_delay
         timing_error_ms = raw_arrival_ms - expected_delay_ms
         
-        logger.info(f"{station_name} @ {tone_freq_hz}Hz: VALIDATED arrival={raw_arrival_ms:.2f}ms "
+        logger.info(f"{station_name} @ {tone_freq_hz}Hz: DETECTED arrival={raw_arrival_ms:.2f}ms "
                    f"(expected={expected_delay_ms:.1f}ms), error={timing_error_ms:+.2f}ms, "
                    f"corr_SNR={corr_snr_db:.1f}dB")
         
@@ -783,13 +828,15 @@ class MetrologyEngine:
                     station_name = station_type.value
                     expected_delay_ms = expected_delays_by_station.get(station_name, 0.0)
                     
-                    # Compute timing error = raw_toa - expected_delay
-                    # This should be near zero if timing is correct
-                    timing_error_ms = tick_analysis.mean_timing_offset_ms - expected_delay_ms
+                    # NOTE: tick_analysis.mean_timing_offset_ms is a RELATIVE offset from
+                    # the expected tick positions within each window, NOT an absolute ToA.
+                    # It should be near zero if ticks are arriving at expected times.
+                    # We do NOT subtract expected_delay_ms - that would double-count propagation.
+                    timing_error_ms = tick_analysis.mean_timing_offset_ms
                     
-                    # Validate: reject if timing error exceeds 3-sigma of expected uncertainty
-                    # This helps reject BPM detections that are actually WWV (both 1000 Hz)
-                    max_timing_error_ms = 50.0  # Allow up to 50ms timing error
+                    # Validate: reject if timing offset is too large
+                    # Large offset suggests wrong station or severe multipath
+                    max_timing_error_ms = 50.0  # Allow up to 50ms timing offset
                     is_valid = abs(timing_error_ms) < max_timing_error_ms
                     
                     if is_valid:
@@ -831,8 +878,9 @@ class MetrologyEngine:
             validation_reason = "no_matrix"
             
             if self.arrival_matrix is not None:
-                # Convert timing_error_ms to sample offset for validation
-                detected_sample = int(det.timing_error_ms * self.sample_rate / 1000)
+                # Use the raw sample position for validation (not timing_error which is arrival - expected)
+                # sample_position_original is the raw arrival sample from minute boundary
+                detected_sample = det.sample_position_original
                 
                 is_valid, confidence, reason = self.arrival_matrix.validate_detection(
                     station=det.station.value,
@@ -846,16 +894,18 @@ class MetrologyEngine:
                 physics_confidence = confidence
                 validation_reason = reason
                 
-                # Log validation result but DON'T reject - let downstream handle it
-                # The physics model may need calibration, so we flag rather than reject
+                # REJECT detections that fail physics validation
+                # A detection outside the physics window is likely a per-second tick,
+                # not the minute marker. The arrival matrix provides the ground truth.
                 if not is_valid:
-                    logger.info(f"{self.channel_name}: Physics validation WARNING: "
-                               f"{det.station.value} @ {det.timing_error_ms:.1f}ms - {reason}")
-                    # Reduce confidence for physics outliers but don't reject
-                    physics_confidence = 0.3
+                    detected_ms = detected_sample * 1000 / self.sample_rate
+                    logger.info(f"{self.channel_name}: Physics REJECTED: "
+                               f"{det.station.value} arrival={detected_ms:.1f}ms - {reason}")
+                    continue  # Skip this detection entirely
                 else:
-                    logger.debug(f"{self.channel_name}: Detection VALIDATED: "
-                                f"{det.station.value} @ {det.timing_error_ms:.1f}ms - {reason}")
+                    detected_ms = detected_sample * 1000 / self.sample_rate
+                    logger.debug(f"{self.channel_name}: Physics VALIDATED: "
+                                f"{det.station.value} arrival={detected_ms:.1f}ms - {reason}")
             
             # Construct L1 measurement (only for validated detections)
             meas = L1MetrologyMeasurement(
@@ -902,6 +952,49 @@ class MetrologyEngine:
         
         # Store tick analysis results for caller to retrieve
         self._last_tick_results = tick_results if tick_results else None
+        
+        # === Step 4: Multi-Constraint Timing Validation ===
+        # Validate detections using all known timing constraints:
+        # - Arrival sequence (stations at different distances)
+        # - Cross-station consistency (all transmit at UTC second 0)
+        # - Sample interval stability (1,440,000 samples between minutes)
+        # - Arrival time stability (consistent offsets across minutes)
+        if self.timing_validator is not None and results:
+            validation_detections = [
+                {
+                    'station': meas.station_id.value if hasattr(meas.station_id, 'value') else str(meas.station_id),
+                    'frequency_mhz': meas.frequency_mhz,
+                    'arrival_ms': meas.raw_toa_ms,
+                    'snr_db': meas.snr_db
+                }
+                for meas in results
+            ]
+            
+            validation_result = self.timing_validator.validate_minute(
+                minute_boundary=minute_boundary,
+                detections=validation_detections,
+                rtp_timestamp=rtp_timestamp
+            )
+            
+            # Log validation summary
+            self.timing_validator.log_validation_summary(validation_result)
+            
+            # Update history for inter-minute tracking
+            self.timing_validator.update_history(minute_boundary, validation_detections)
+            
+            # Store validation result for caller to retrieve
+            self._last_validation_result = validation_result
+            
+            # Log stability metrics periodically (every 10 minutes)
+            if self.minutes_processed % 10 == 0:
+                stability = self.timing_validator.get_stability_metrics()
+                if stability.n_minutes >= 5:
+                    logger.info(f"{self.channel_name}: Stability metrics (n={stability.n_minutes}):")
+                    for station, std in stability.arrival_std_ms.items():
+                        mean = stability.arrival_mean_ms.get(station, 0)
+                        logger.info(f"  {station}: arrival={mean:.1f}±{std:.1f}ms")
+                    if stability.sample_interval_std > 0:
+                        logger.info(f"  Sample interval: {stability.sample_interval_mean:.0f}±{stability.sample_interval_std:.1f}")
             
         return results
 

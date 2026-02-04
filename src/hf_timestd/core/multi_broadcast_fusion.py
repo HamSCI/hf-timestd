@@ -2146,6 +2146,20 @@ class MultiBroadcastFusion:
             '1E': 1.0, '1F': 0.95, '2F': 0.85, '3F': 0.7, 'GW': 1.0
         }
         
+        # STATION PRIORITY (2026-02-04): Primary timing anchors vs secondary sources
+        # CHU, WWV, WWVH are the primary timing anchors - shorter paths, better characterized
+        # BPM is maintained for scientific interest (ionospheric probing of long path)
+        # but should not dominate timing decisions due to:
+        #   - Very long path (~11,000 km) with high ionospheric variability
+        #   - Multi-hop propagation introduces more uncertainty
+        #   - UT1/UTC alternation requires careful handling
+        station_priority = {
+            'CHU': 1.0,    # Primary anchor - unique frequencies, FSK verification
+            'WWV': 1.0,    # Primary anchor - closest station, well-characterized
+            'WWVH': 0.9,   # Primary anchor - longer path but reliable
+            'BPM': 0.3,    # Secondary/scientific - long path, high uncertainty
+        }
+        
         # BOOTSTRAP PREFERENCE (2026-01-24): Prefer unambiguous channels during bootstrap
         # These channels have only ONE station transmitting, so there's no ambiguity
         # about which station is being detected. This prevents locking onto wrong timing.
@@ -2194,8 +2208,11 @@ class MultiBroadcastFusion:
             else:
                 snr_scale = 0.9  # Default if SNR unknown
             
-            # Combine: base precision × quality factors
-            w = base_weight * confidence_scale * grade_scale_factor * mode_scale_factor * snr_scale
+            # Apply station priority (primary anchors vs secondary sources)
+            station_priority_factor = station_priority.get(m.station, 0.5)
+            
+            # Combine: base precision × quality factors × station priority
+            w = base_weight * confidence_scale * grade_scale_factor * mode_scale_factor * snr_scale * station_priority_factor
             
             # BOOTSTRAP PREFERENCE (2026-01-24): Boost unambiguous channels during bootstrap
             # WWV 20/25 MHz and all CHU frequencies have no station ambiguity

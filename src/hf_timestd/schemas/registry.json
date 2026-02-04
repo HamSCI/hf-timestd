@@ -36,8 +36,15 @@
         "L1_metrology_measurements": {
             "current_version": "v1",
             "schema_file": "l1_metrology_measurements_v1.json",
-            "description": "Pure metrology measurements: Raw TOA and Signal Metrics",
+            "description": "Pure metrology measurements: Raw TOA and Signal Metrics (legacy channel-centric)",
             "replaces": []
+        },
+        "L1_broadcast_measurements": {
+            "current_version": "v1",
+            "schema_file": "l1_broadcast_measurements_v1.json",
+            "description": "Broadcast-centric metrology with station-specific features (kHz convention)",
+            "replaces": [],
+            "storage_type": "broadcast"
         },
         "L2_physics_interpretation": {
             "current_version": "v1",
