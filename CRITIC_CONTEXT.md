@@ -10,24 +10,230 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: IONOSPHERIC PRODUCTS AND BROADCAST COVERAGE AUDIT
+## 📋 NEXT SESSION: WEB-API REWORK — LIVING DOCUMENTATION + NEW HDF5 DATA MODEL
 
 **Status:** 🔲 **PENDING**  
-**Objective:** Ensure all 17 broadcasts are being accurately detected and that ionospheric products are being systematically produced.
+**Objective:** Rework the web-api to reference the new HDF5 data model (v6.5.0) and conform to the Living Documentation methodology.
 
 ---
 
+### Context: Data Model Changes (v6.5.0)
+
+The v6.5.0 release introduced significant architectural changes that the web-api doesn't yet reflect:
+
+**1. New HDF5 Data Locations:**
+
+| Data Product | Old Location | New Location |
+|--------------|--------------|---------------|
+| TEC estimates | Not archived | `/var/lib/timestd/phase2/science/tec/` |
+| Ionospheric residual (T_iono) | Not computed | `/var/lib/timestd/phase2/science/t_iono/` |
+| TID events | Not implemented | `/var/lib/timestd/phase2/science/tid/` |
+| Physics validation | N/A | Embedded in L2 HDF5 files |
+
+**2. New Core Modules:**
+
+| Module | Purpose | Web-API Impact |
+|--------|---------|----------------|
+| `tid_detector.py` | TID detection from cross-path correlation | Needs API endpoint for TID events |
+| `arrival_pattern_matrix.py` | Physics-based arrival predictions | Needs status/diagnostic endpoint |
+| `timing_consistency_validator.py` | Multi-constraint validation + TEC | Needs validation status endpoint |
+
+**3. Dual-Purpose Architecture:**
+
+The system now explicitly serves two purposes:
+- **Timing Reconstruction (Fusion Mode):** D_clock, UTC offset
+- **Ionospheric Characterization (RTP Mode):** TEC, T_iono, TID events
+
+The web-api should expose both purposes clearly.
+
+---
+
+### Living Documentation Methodology
+
+The web-api should conform to the Living Documentation pattern established in v6.2:
+
+**Core Principle:** Documentation is intimately connected to system behavior. Evidence is fetched live from the running system, not hardcoded.
+
+**Key Components:**
+
+1. **Markdown with Embedded Directives:**
+   ```markdown
+   <!-- LOGS: source | filter: "pattern" -->
+   <!-- DATA: endpoint | format: "chart" -->
+   ```
+
+2. **Evidence API Endpoints:**
+   - `/api/living-docs/evidence/{source}/{filter}` — Fetch live log evidence
+   - `/api/living-docs/data/{product}` — Fetch live data products
+
+3. **Frontend Rendering:**
+   - Parse markdown for directives
+   - Fetch evidence from API
+   - Render inline with documentation
+
+**Reference Implementation:**
+- `docs/BOOTSTRAP_METHODOLOGY.md` — Example of Living Documentation
+- `docs/IONOSPHERIC_RESOLUTION.md` — Example with data widgets
+- `web-api/routers/docs.py` — Evidence API implementation
+- `web-api/static/docs.html` — Frontend rendering
+
+---
+
+### Web-API Rework Tasks
+
+#### Phase 1: Fix Data Access (Critical)
+
+| Task | Description | Files |
+|------|-------------|-------|
+| Update HDF5 paths | Point to new L2/L3 data locations | `services/*.py` |
+| Add TEC service | Expose TEC estimates from `TimingConsistencyValidator` | `services/tec_service.py` |
+| Add TID service | Expose TID events from `tid_detector.py` | `services/tid_service.py` |
+| Add physics status | Expose `ArrivalPatternMatrix` predictions | `services/physics_service.py` |
+
+#### Phase 2: Living Documentation Integration
+
+| Task | Description | Files |
+|------|-------------|-------|
+| Create ionosphere.md | Living doc for ionospheric products | `docs/IONOSPHERE.md` |
+| Create timing.md | Living doc for timing products | `docs/TIMING.md` |
+| Update evidence API | Add new evidence sources for v6.5 modules | `routers/docs.py` |
+| Add data widgets | Chart widgets for TEC, TID, T_iono | `static/js/widgets.js` |
+
+#### Phase 3: Dashboard Modernization
+
+| Task | Description | Files |
+|------|-------------|-------|
+| Dual-purpose dashboard | Separate views for timing vs ionosphere | `static/index.html` |
+| TID event viewer | Real-time TID detection display | `static/tid.html` |
+| Physics validation view | Show arrival predictions vs observations | `static/physics.html` |
+
+---
+
+### Key Files to Review
+
+| File | Purpose | Priority |
+|------|---------|----------|
+| `web-api/services/correlation_service.py` | Current data access patterns | **CRITICAL** |
+| `web-api/services/fusion_service.py` | Fusion data access | **CRITICAL** |
+| `web-api/routers/docs.py` | Living Documentation API | HIGH |
+| `web-api/static/docs.html` | Frontend rendering | HIGH |
+| `docs/design/DUAL_PURPOSE_ARCHITECTURE.md` | Architecture reference | HIGH |
+| `src/hf_timestd/core/tid_detector.py` | TID detection implementation | MEDIUM |
+| `src/hf_timestd/core/timing_consistency_validator.py` | TEC + validation | MEDIUM |
+
+---
+
+### Data Access Patterns
+
+**Current Pattern (Broken):**
+```python
+# Old paths that no longer exist
+hdf5_path = f"/var/lib/timestd/phase2/{channel}/clock_offset/"
+```
+
+**New Pattern (v6.5.0):**
+```python
+# L2 timing data
+l2_path = f"/var/lib/timestd/phase2/{channel}/clock_offset/"
+
+# L3 science products
+tec_path = "/var/lib/timestd/phase2/science/tec/"
+t_iono_path = "/var/lib/timestd/phase2/science/t_iono/"
+tid_path = "/var/lib/timestd/phase2/science/tid/"
+
+# Fusion output
+fusion_path = "/var/lib/timestd/phase2/fusion/"
+```
+
+---
+
+### Living Documentation Evidence Sources (v6.5.0)
+
+Add these new evidence sources to the Living Documentation API:
+
+| Source | Filter Pattern | Description |
+|--------|----------------|-------------|
+| `physics` | `ArrivalPatternMatrix` | Physics-based arrival predictions |
+| `physics` | `TEC_feedback` | Real-time TEC feedback events |
+| `validation` | `TimingConsistencyValidator` | Multi-constraint validation |
+| `validation` | `VALIDATED\|REJECTED` | Detection validation decisions |
+| `tid` | `TID_detected` | TID detection events |
+| `tid` | `cross_correlation` | Cross-path correlation results |
+
+---
+
+### Success Criteria
+
+After this session:
+- ⬚ Web-api correctly reads from new HDF5 data locations
+- ⬚ TEC estimates exposed via API endpoint
+- ⬚ TID events exposed via API endpoint
+- ⬚ Physics validation status exposed via API endpoint
+- ⬚ Living Documentation updated for v6.5.0 architecture
+- ⬚ Dashboard shows dual-purpose (timing + ionosphere) views
+- ⬚ All existing functionality preserved
+
+---
+
+### Reference: Station Priority Policy (v6.5.0)
+
+| Station | Role | Weight | Rationale |
+|---------|------|--------|----------|
+| **CHU** | Reference | 100% | Unique frequencies, FSK-verified timing |
+| **WWV** | Primary | 100% | Closest station, best SNR |
+| **WWVH** | Primary | 100% | Independent path, cross-validation |
+| **BPM** | Scientific | 30% | Long path, high uncertainty, scientific interest |
+
+---
+
+## ✅ RESOLVED SESSION: v6.5.0 PHYSICS-BASED VALIDATION + TEC FEEDBACK
+
+**Status:** ✅ **COMPLETE** - 2026-02-04  
+**Objective:** Implement physics-based validation, TEC feedback, and TID detection.
+
+### What Was Implemented
+
+1. **Physics-Based Validation** (`arrival_pattern_matrix.py`)
+   - Pre-computes expected arrival times for all 17 broadcasts
+   - Validates against physics predictions, not history
+   - Real-time TEC feedback refines arrival predictions
+
+2. **Multi-Constraint Validation** (`timing_consistency_validator.py`)
+   - Arrival sequence, cross-station, cross-frequency constraints
+   - TEC callback mechanism for real-time feedback
+   - TEC estimates computed and stored in history
+
+3. **TID Detection** (`tid_detector.py`) - NEW
+   - Cross-path correlation for traveling ionospheric disturbances
+   - Estimates velocity, direction, and period
+   - Rolling buffers per propagation path
+
+4. **Physics Service Fixes** (`physics_fusion_service.py`)
+   - Fixed L2 data retry logic for delayed writes
+   - TEC and T_iono now archived to HDF5
+
+5. **Documentation Updates**
+   - METROLOGY.md, PHYSICS.md, ARCHITECTURE.md, TECHNICAL_REFERENCE.md
+   - All updated to reflect v6.5.0 architecture
+
+---
+
+## 📋 DEFERRED: IONOSPHERIC PRODUCTS AND BROADCAST COVERAGE AUDIT
+
+**Status:** 🔲 **DEFERRED** (superseded by web-api rework)  
+**Objective:** Ensure all 17 broadcasts are being accurately detected and that ionospheric products are being systematically produced.
+
 ### Remaining Opportunities (from 2026-02-04 session)
 
-1. **HF-derived TEC archival** — The TEC estimates from `TimingConsistencyValidator` should be systematically archived as L3 ionospheric products (currently computed but not persisted)
+1. **HF-derived TEC archival** — ✅ IMPLEMENTED in v6.5.0
 
-2. **Ionospheric residual products** — In RTP mode, explicitly compute and archive the ionospheric delay after removing known timing: `T_iono = T_observed - T_transmitted - T_geometric`
+2. **Ionospheric residual products** — ✅ IMPLEMENTED in v6.5.0 (T_iono)
 
-3. **Adaptive weighting** — Weight broadcasts by current SNR and ionospheric stability in fusion algorithm
+3. **Adaptive weighting** — 🔲 PENDING - Weight broadcasts by current SNR and ionospheric stability
 
-4. **Real-time TEC feedback** — Feed TEC estimates back into arrival predictions for improved validation windows
+4. **Real-time TEC feedback** — ✅ IMPLEMENTED in v6.5.0
 
-5. **Cross-path correlation** — Correlate ionospheric effects between different station paths to detect Traveling Ionospheric Disturbances (TIDs)
+5. **Cross-path correlation** — ✅ IMPLEMENTED in v6.5.0 (TID detection)
 
 ### Station Priority Policy (2026-02-04)
 
