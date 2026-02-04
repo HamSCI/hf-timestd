@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 29, 2026 (v6.4.0)
+**Last Updated:** February 4, 2026 (v6.5.0)
 
 ---
 
@@ -82,8 +82,9 @@ The system is composed of six independent systemd services, each with a specific
 
 - Computes ionospheric propagation delays using IONEX/IRI-2020 models.
 - Estimates Total Electron Content (TEC) from multi-frequency measurements.
-- Solves transmission time and validates propagation modes.
-- **Output:** Enriched L2 HDF5 files with propagation metadata
+- Computes ionospheric residual (T_iono = T_observed - T_vacuum).
+- Archives TEC and T_iono to HDF5 for scientific analysis.
+- **Output:** `/var/lib/timestd/phase2/science/tec/` (HDF5 L3)
 
 ### 6. Web UI & API (`timestd-web-api`)
 
@@ -838,6 +839,16 @@ sudo sysctl -w net.core.rmem_max=26214400
 **Version**: 6.2.0  
 **Last Updated**: January 24, 2026  
 **Purpose**: Technical reference for HF Time Standard developers
+
+**v6.5.0 Release (February 4, 2026) - Physics-Based Validation + TEC Feedback:**
+
+- **Dual-Purpose Architecture** - System serves both timing reconstruction and ionospheric characterization
+- **Physics-Based Validation** - ArrivalPatternMatrix validates detections against physics predictions, not history
+- **Multi-Constraint Validation** - TimingConsistencyValidator exploits arrival sequence, cross-station, cross-frequency constraints
+- **Real-Time TEC Feedback** - Measured TEC feeds back to refine arrival predictions using 1/f² law
+- **TID Detection** - Cross-path correlation for traveling ionospheric disturbance detection (`tid_detector.py`)
+- **Station Priority Policy** - CHU/WWV/WWVH as primary anchors, BPM at 30% weight for scientific interest
+- **T_iono Archival** - Ionospheric residual products archived to HDF5
 
 **v6.2.0 Release (January 24, 2026) - Metrological Enhancements:**
 

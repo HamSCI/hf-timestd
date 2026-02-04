@@ -380,15 +380,28 @@ class PhysicsFusionService:
                 # Align to next minute boundary processing
                 now = time.time()
                 # Process last few minutes to find enough frequencies for verification
-                # Analytics has ~2-3 minute lag, so we look back further
-                # Process last few minutes to find enough frequencies for verification
-                # Analytics has ~2-3 minute lag, so we look back further (offsets 6, 5, 4, 3)
-                # This ensures we process T-3 minutes at the earliest, giving ample buffer.
-                for offset in range(6, 2, -1):
+                # L2 calibration service has ~1-2 minute lag, so we look back 2-5 minutes
+                # We retry each minute up to 3 times to handle L2 write delays
+                for offset in range(5, 1, -1):
                     target_minute = int(now) - (int(now) % 60) - (60 * offset)
-                    if target_minute > self.last_processed_minute:
-                        self.process_minute(target_minute)
-                        self.last_processed_minute = target_minute
+                    # Track retry count per minute
+                    retry_key = f"retry_{target_minute}"
+                    retry_count = getattr(self, retry_key, 0)
+                    
+                    if target_minute > self.last_processed_minute or retry_count < 3:
+                        # Try to process this minute
+                        station_data = self._read_l2_slice(target_minute)
+                        if station_data:
+                            self.process_minute(target_minute)
+                            self.last_processed_minute = max(self.last_processed_minute, target_minute)
+                            # Clear retry counter on success
+                            if hasattr(self, retry_key):
+                                delattr(self, retry_key)
+                        else:
+                            # Increment retry counter
+                            setattr(self, retry_key, retry_count + 1)
+                            if retry_count == 0:
+                                logger.debug(f"No L2 data for minute {target_minute}, will retry")
                 
                 # Sleep until next poll or minute
                 # We process once per minute, check every second for shutdown

@@ -2,8 +2,8 @@
 
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 6.4.0 (NTP-Based Time Confirmation)  
-**Last Updated:** 2026-01-29
+**System Version:** 6.5.0 (Physics-Based Validation + TEC Feedback)  
+**Last Updated:** 2026-02-04
 
 ---
 
@@ -454,29 +454,47 @@ if is_multipath and delay_spread_ms > 0:
 - Real-time ionospheric irregularity detection
 - Channel quality assessment for timing
 
-### 4.3 Traveling Ionospheric Disturbances (TIDs) ⚠️
+### 4.3 Traveling Ionospheric Disturbances (TIDs) ✅
 
-**Status:** Doppler measured, TID detection not automated
+**Status:** Implemented (2026-02-04)
 
 **Physics:** TIDs are wave-like perturbations in the ionosphere with:
 - Periods: 10 minutes to several hours
 - Wavelengths: 100-1000 km
-- Velocities: 50-300 m/s
+- Velocities: 50-300 m/s (medium-scale) or 300-1000 m/s (large-scale)
 
-**Current Capability:**
-- Doppler shift time series available
-- Multi-frequency observations
-- Multi-path geometry
+**Implementation:** `src/hf_timestd/core/tid_detector.py`
 
-**Missing:**
-- Coherent oscillation detection across frequencies
-- Period/wavelength estimation
-- TID event cataloging
+**Detection Principle:**
+1. Each HF path (receiver → station) samples the ionosphere at different points
+2. A TID passing through creates timing perturbations that:
+   - Appear at different times on different paths (phase delay)
+   - Have similar amplitude and period on all paths
+   - Show consistent propagation direction
+3. Cross-correlation of timing residuals reveals TID signatures
 
-**Implementation Path:**
-1. FFT analysis of Doppler time series
-2. Cross-correlation between frequencies/paths
-3. Phase velocity estimation from multi-path delays
+**Capabilities:**
+- ✅ Rolling buffers of timing residuals per path
+- ✅ Cross-correlation between path pairs
+- ✅ TID velocity estimation from path geometry and lag
+- ✅ TID direction estimation from leading/lagging paths
+- ✅ Period estimation from autocorrelation
+- ✅ Confidence scoring
+
+**Outputs:**
+- `period_minutes`: Dominant oscillation period
+- `amplitude_ms`: Timing variation amplitude
+- `velocity_m_s`: Estimated TID velocity
+- `direction_deg`: Propagation azimuth
+- `correlation_coefficient`: Detection confidence
+- `leading_path`: Path that sees TID first
+- `lag_minutes`: Time delay between paths
+
+**Scientific Value:**
+- Real-time TID detection and cataloging
+- TID velocity and direction estimation
+- Correlation with geomagnetic activity
+- Medium-scale vs large-scale TID classification
 
 ### 4.4 CHU FSK Time Code Decoding ✅
 
@@ -858,6 +876,9 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 | Test Signal | `src/hf_timestd/core/wwv_test_signal.py` |
 | Discrimination | `src/hf_timestd/core/wwvh_discrimination.py` |
 | Science Aggregator | `src/hf_timestd/core/science_aggregator.py` |
+| **TID Detection** | `src/hf_timestd/core/tid_detector.py` |
+| **Physics Validation** | `src/hf_timestd/core/arrival_pattern_matrix.py` |
+| **Multi-Constraint Validation** | `src/hf_timestd/core/timing_consistency_validator.py` |
 
 ---
 

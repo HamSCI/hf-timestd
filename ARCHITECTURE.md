@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** January 29, 2026  
+**Last Updated:** February 4, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.4 (NTP-Based Time Confirmation)
+**Version:** V6.5 (Physics-Based Validation + TEC Feedback)
 
 ---
 
@@ -16,17 +16,18 @@ This document explains **WHY** the hf-timestd system is designed the way it is. 
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [Design Philosophy](#design-philosophy)
-3. [Three-Phase Architecture](#three-phase-architecture)
-4. [ka9q-python Integration](#ka9q-python-integration)
-5. [Key Design Decisions](#key-design-decisions)
-6. [Data Flow (HDF5-Native)](#data-flow-hdf5-native)
-7. [Timing Architecture](#timing-architecture)
-8. [WWV/WWVH Discrimination](#wwvwwvh-discrimination)
-9. [Directory Structure](#directory-structure)
-10. [Service Management](#service-management)
-11. [Performance & Reliability](#performance--reliability)
-12. [Failure Recovery](#failure-recovery)
+2. [Dual-Purpose Architecture](#dual-purpose-architecture)
+3. [Design Philosophy](#design-philosophy)
+4. [Three-Phase Architecture](#three-phase-architecture)
+5. [ka9q-python Integration](#ka9q-python-integration)
+6. [Key Design Decisions](#key-design-decisions)
+7. [Data Flow (HDF5-Native)](#data-flow-hdf5-native)
+8. [Timing Architecture](#timing-architecture)
+9. [WWV/WWVH Discrimination](#wwvwwvh-discrimination)
+10. [Directory Structure](#directory-structure)
+11. [Service Management](#service-management)
+12. [Performance & Reliability](#performance--reliability)
+13. [Failure Recovery](#failure-recovery)
 
 ---
 
@@ -36,12 +37,26 @@ This document explains **WHY** the hf-timestd system is designed the way it is. 
 
 ### Core Mission
 
-Extract precise timing measurements from HF time standard broadcasts:
+The system serves a **dual purpose**:
+
+**Purpose 1: Timing Reconstruction (Fusion Mode)**
+- Reconstruct local UTC precision from multiple broadcast time-of-arrival measurements
+- Correct for propagation delays (geometry + ionosphere)
+- Fuse multiple independent measurements for sub-millisecond accuracy
+
+**Purpose 2: Ionospheric Characterization (RTP Mode)**
+- Measure ionospheric effects as residuals using external authoritative timing (GPS+PPS)
+- Compute TEC from multi-frequency observations
+- Detect traveling ionospheric disturbances (TIDs)
+
+### Key Capabilities
 
 1. **D_clock extraction** - System clock offset relative to UTC(NIST)
 2. **WWV/WWVH discrimination** on 4 shared frequencies (2.5, 5, 10, 15 MHz)
 3. **Propagation mode estimation** - Ionospheric hop identification (Physics-Informed)
 4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination (HDF5 SWMR)
+5. **TEC estimation** - Total Electron Content from multi-frequency dispersion
+6. **TID detection** - Cross-path correlation for traveling ionospheric disturbances
 
 ### Channel Configuration (17 broadcasts)
 
@@ -57,6 +72,36 @@ Extract precise timing measurements from HF time standard broadcasts:
 - Minutes 0-24, 30-54: UTC timing (usable)
 - Minutes 25-29, 55-59: UT1 timing (filtered out automatically)
 - Tick duration: 10ms (UTC) vs 100ms (UT1)
+
+---
+
+## Dual-Purpose Architecture
+
+The system exploits a fundamental duality: the same observations serve both timing and ionospheric science.
+
+### The Circular Dependency (And Its Resolution)
+
+There's an apparent circularity:
+- To measure the ionosphere, we need good timing
+- To get good timing from fusion, we need to model the ionosphere
+
+**Resolution:** The system operates in two modes:
+
+| Mode | Timing Source | Ionosphere Treatment | Primary Output |
+|------|---------------|---------------------|----------------|
+| **RTP Mode** | GPS+PPS (external) | Measured as residual | TEC, TID events |
+| **Fusion Mode** | Broadcast fusion | Modeled (IRI-2020) | D_clock, UTC |
+
+### Station Priority Policy (v6.5)
+
+| Station | Role | Weight | Rationale |
+|---------|------|--------|----------|
+| **CHU** | Reference | 100% | Unique frequencies, FSK-verified timing |
+| **WWV** | Primary | 100% | Closest station, best SNR |
+| **WWVH** | Primary | 100% | Independent path, cross-validation |
+| **BPM** | Scientific | 30% | Long path, high uncertainty, scientific interest |
+
+See `docs/design/DUAL_PURPOSE_ARCHITECTURE.md` for detailed rationale.
 
 ---
 
@@ -441,7 +486,52 @@ We use a **Weighted Voting** system combining:
 
 ---
 
-**Last Updated:** January 24, 2026
+**Last Updated:** February 4, 2026
+
+## Physics-Based Validation (v6.5)
+
+The v6.5 release introduces physics-based validation that replaces historical calibration:
+
+### ArrivalPatternMatrix
+
+Pre-computes expected arrival times for all 17 broadcasts based on:
+- **Geography:** Receiver and station locations (fixed)
+- **Frequency:** Affects ionospheric reflection height  
+- **UTC time:** Affects ionospheric conditions via IRI-2020 model
+
+**Key Principle:** Validate against PHYSICS, not HISTORY.
+
+### Multi-Constraint Validation
+
+The `TimingConsistencyValidator` exploits multiple timing constraints:
+
+| Constraint Type | Description |
+|-----------------|-------------|
+| **Arrival Sequence** | Stations at different distances must arrive in order |
+| **Cross-Station** | All stations transmit at UTC second 0 |
+| **Cross-Frequency** | Ionospheric delay follows 1/f² law |
+| **Sample Interval** | Consistent 1,440,000 samples per minute |
+
+### Real-Time TEC Feedback
+
+Measured TEC feeds back to refine arrival predictions:
+
+```
+τ_correction = K × TEC_measured / f²
+```
+
+This creates a virtuous cycle: better timing → better TEC → better model → better timing.
+
+### TID Detection
+
+Cross-path correlation detects traveling ionospheric disturbances:
+- Rolling buffers of timing residuals per path
+- Cross-correlation reveals TID signatures
+- Estimates velocity, direction, and period
+
+See `src/hf_timestd/core/tid_detector.py`.
+
+---
 
 ## Metrological Enhancements (v6.2)
 

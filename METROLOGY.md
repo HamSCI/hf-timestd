@@ -3,13 +3,18 @@
 **Comprehensive guide to the metrological methodology used in hf-timestd for RTP-to-UTC calibration and time transfer.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 29, 2026 (v6.4.0)
+**Last Updated:** February 4, 2026 (v6.5.0)
 
 ---
 
 ## Overview
 
-The HF Time Standard system derives UTC from shortwave time signal broadcasts (WWV, WWVH, CHU, BPM) received via Software Defined Radio. The fundamental challenge is establishing a precise relationship between the **RTP timestamp domain** (sample counts from the SDR) and **UTC** (Coordinated Universal Time).
+The HF Time Standard system derives UTC from shortwave time signal broadcasts (WWV, WWVH, CHU, BPM) received via Software Defined Radio. The system monitors **17 broadcasts** across **9 frequencies** from **4 stations**, serving a dual purpose:
+
+1. **Timing Reconstruction (Fusion Mode):** Reconstruct local UTC precision from multiple broadcast time-of-arrival measurements
+2. **Ionospheric Characterization (RTP Mode):** Measure ionospheric effects as residuals using external authoritative timing (GPS+PPS)
+
+The fundamental challenge is establishing a precise relationship between the **RTP timestamp domain** (sample counts from the SDR) and **UTC** (Coordinated Universal Time).
 
 This document describes the **Timing Bootstrap** methodology introduced in v6.3.0, which provides a robust, broadcast-validated approach to RTP-to-UTC calibration.
 
@@ -346,6 +351,45 @@ To achieve better than ±10 ms absolute accuracy:
 
 ---
 
+## Physics-Based Validation (v6.5.0)
+
+The system validates detections against physics predictions rather than historical data:
+
+### ArrivalPatternMatrix
+
+Pre-computes expected arrival times for all 17 broadcasts based on:
+- **Geography:** Receiver and station locations (fixed)
+- **Frequency:** Affects ionospheric reflection height
+- **UTC time:** Affects ionospheric conditions via IRI-2020 model
+
+**Key Principle:** Validate against PHYSICS, not HISTORY. Each minute starts fresh from physics predictions.
+
+### Multi-Constraint Validation
+
+The `TimingConsistencyValidator` exploits multiple timing constraints:
+
+**Intra-Minute Constraints:**
+1. **Arrival Sequence:** Stations at different distances must arrive in order
+2. **Cross-Station Consistency:** All stations transmit at UTC second 0
+3. **Cross-Frequency Dispersion:** Ionospheric delay follows 1/f² law
+
+**Inter-Minute Constraints:**
+1. **Sample Interval Stability:** Consistent 1,440,000 samples per minute
+2. **Arrival Time Stability:** Gradual changes, not jumps
+
+### Real-Time TEC Feedback (v6.5.0)
+
+Measured TEC from multi-frequency observations feeds back to refine arrival predictions:
+
+```
+τ_correction = K × TEC_measured / f²
+where K ≈ 0.1345 ms/TECU/MHz²
+```
+
+This creates a virtuous cycle: better timing → better TEC measurement → better ionospheric model → better timing.
+
+---
+
 ## Operational Considerations
 
 ### Startup Behavior
@@ -396,5 +440,27 @@ Expected progression:
 
 ---
 
-**Version**: 6.3.0  
-**Last Updated**: January 25, 2026
+## Station Priority Policy (v6.5.0)
+
+Not all broadcasts are weighted equally in the fusion algorithm:
+
+### Primary Timing Anchors
+
+| Station | Role | Rationale |
+|---------|------|----------|
+| **CHU** | Reference | Unique frequencies (no discrimination needed), FSK-verified timing |
+| **WWV** | Primary | Closest station, best SNR, well-characterized |
+| **WWVH** | Primary | Independent path, good for cross-validation |
+
+### Secondary/Scientific Sources
+
+| Station | Role | Rationale |
+|---------|------|----------|
+| **BPM** | Scientific | Very long path (~11,000 km), high ionospheric variability, weight reduced to 30% |
+
+BPM is maintained for scientific interest (trans-Pacific ionospheric probing) but its high uncertainty makes it unsuitable as a primary timing anchor.
+
+---
+
+**Version**: 6.5.0  
+**Last Updated**: February 4, 2026

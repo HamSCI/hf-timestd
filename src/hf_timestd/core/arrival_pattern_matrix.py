@@ -146,7 +146,9 @@ DEFAULT_UNCERTAINTY_3SIGMA_MS = 15.0  # ±15ms covers most ionospheric variation
 
 # Bootstrap window parameters
 # Initial window is wide to account for NTP uncertainty at startup
-BOOTSTRAP_INITIAL_UNCERTAINTY_MS = 50.0  # ±50ms during initial bootstrap
+# NOTE: Temporarily widened to 600ms to handle buffer alignment issue (2026-02-04)
+# TODO: Fix buffer alignment in core recorder, then restore to 50ms
+BOOTSTRAP_INITIAL_UNCERTAINTY_MS = 600.0  # ±600ms during initial bootstrap (was 50ms)
 BOOTSTRAP_MIN_UNCERTAINTY_MS = 5.0       # Minimum window (propagation floor)
 
 # Window narrowing parameters
@@ -410,6 +412,84 @@ class ArrivalPatternMatrix:
                 )
         logger.info(f"Initialized {len(self._broadcast_windows)} broadcast windows "
                    f"(initial ±{BOOTSTRAP_INITIAL_UNCERTAINTY_MS}ms)")
+        
+        # Real-time TEC feedback state
+        # Stores measured TEC values per station for refining predictions
+        self._measured_tec: Dict[str, float] = {}  # station -> TECU
+        self._measured_tec_timestamp: Dict[str, float] = {}  # station -> unix timestamp
+        self._tec_feedback_enabled = True
+        self._tec_max_age_seconds = 300.0  # Use measured TEC for up to 5 minutes
+    
+    def update_measured_tec(self, station: str, tec_tecu: float, timestamp: Optional[float] = None):
+        """
+        Update measured TEC for a station to refine arrival predictions.
+        
+        This implements real-time TEC feedback: when multi-frequency measurements
+        yield a TEC estimate, that estimate is used to refine the ionospheric
+        delay predictions for subsequent detections.
+        
+        Args:
+            station: Station name (WWV, WWVH, CHU, BPM)
+            tec_tecu: Measured TEC in TECU (10^16 electrons/m²)
+            timestamp: Unix timestamp of measurement (default: now)
+        """
+        import time
+        if timestamp is None:
+            timestamp = time.time()
+        
+        old_tec = self._measured_tec.get(station)
+        self._measured_tec[station] = tec_tecu
+        self._measured_tec_timestamp[station] = timestamp
+        
+        if old_tec is not None:
+            delta = tec_tecu - old_tec
+            logger.debug(f"TEC feedback: {station} updated to {tec_tecu:.1f} TECU (Δ={delta:+.1f})")
+        else:
+            logger.info(f"TEC feedback: {station} initial TEC = {tec_tecu:.1f} TECU")
+    
+    def get_measured_tec(self, station: str) -> Optional[float]:
+        """
+        Get measured TEC for a station if available and fresh.
+        
+        Returns:
+            TEC in TECU if available and within max age, else None
+        """
+        import time
+        if station not in self._measured_tec:
+            return None
+        
+        age = time.time() - self._measured_tec_timestamp.get(station, 0)
+        if age > self._tec_max_age_seconds:
+            return None
+        
+        return self._measured_tec[station]
+    
+    def compute_tec_correction_ms(self, station: str, frequency_mhz: float) -> float:
+        """
+        Compute ionospheric delay correction based on measured TEC.
+        
+        Uses the 1/f² law: τ = K × TEC / f²
+        where K ≈ 40.3 / c × 10^16 ≈ 0.1345 ms/TECU/MHz²
+        
+        Args:
+            station: Station name
+            frequency_mhz: Frequency in MHz
+            
+        Returns:
+            Ionospheric delay correction in milliseconds (0 if no TEC available)
+        """
+        measured_tec = self.get_measured_tec(station)
+        if measured_tec is None or not self._tec_feedback_enabled:
+            return 0.0
+        
+        # K = 40.3 / c × 10^16 in units of ms/TECU/MHz²
+        # 40.3 / 299792.458 × 10^16 / 10^12 ≈ 0.1345
+        K_MS_PER_TECU_MHZ2 = 0.1345
+        
+        # Ionospheric delay = K × TEC / f²
+        iono_delay_ms = K_MS_PER_TECU_MHZ2 * measured_tec / (frequency_mhz ** 2)
+        
+        return iono_delay_ms
     
     def set_locked(self, locked: bool, confidence: float = 1.0):
         """
@@ -615,6 +695,13 @@ class ArrivalPatternMatrix:
                 
                 # Compute propagation delay
                 delay_ms, num_hops = self._compute_propagation_delay_ms(distance_km, height_km)
+                
+                # Apply TEC feedback correction if available
+                # This refines the ionospheric delay using measured TEC from multi-frequency observations
+                tec_correction_ms = self.compute_tec_correction_ms(station, freq_mhz)
+                if tec_correction_ms > 0:
+                    delay_ms += tec_correction_ms
+                    model_tiers_used.add('TEC-Corrected')
                 
                 # Convert to samples
                 expected_sample = int(delay_ms * self.sample_rate / 1000)

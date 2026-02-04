@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from datetime import datetime, timezone
+from typing import Callable
 import logging
 
 logger = logging.getLogger(__name__)
@@ -191,9 +192,14 @@ class TimingConsistencyValidator:
         # History for inter-minute validation
         self.arrival_history: Dict[str, List[Tuple[int, float]]] = defaultdict(list)
         self.sample_interval_history: List[int] = []
-        self.tec_history: List[Tuple[int, float]] = []
+        self.tec_history: List[Tuple[int, float]] = []  # (minute_boundary, tec_tecu)
+        self.tec_detailed_history: List[Dict] = []  # Full TEC records for archival
         self.last_rtp_timestamp: Optional[int] = None
         self.last_minute_boundary: Optional[int] = None
+        
+        # TEC feedback callback - called when TEC is estimated
+        # Signature: callback(station: str, tec_tecu: float, timestamp: float)
+        self._tec_callback: Optional[Callable[[str, float, float], None]] = None
         
         # Thresholds
         self.cross_station_threshold_ms = 5.0  # Max emission time disagreement
@@ -408,6 +414,20 @@ class TimingConsistencyValidator:
                     
                     result.tec_estimate_tecu = tec_tecu
                     
+                    # Store in history for archival
+                    self.tec_history.append((result.minute_boundary, tec_tecu))
+                    if len(self.tec_history) > self.history_minutes:
+                        self.tec_history.pop(0)
+                    
+                    # Invoke TEC feedback callback if registered and TEC is reasonable
+                    if self._tec_callback is not None and 0 < tec_tecu < 200:
+                        try:
+                            # Use the dominant station from measurements
+                            station = list(station_arrivals.keys())[0] if station_arrivals else 'UNKNOWN'
+                            self._tec_callback(station, tec_tecu, float(result.minute_boundary))
+                        except Exception as e:
+                            logger.debug(f"TEC callback failed: {e}")
+                    
                     # Check residuals
                     y_pred = slope * x + intercept
                     rms_residual = np.sqrt(np.mean((y - y_pred)**2))
@@ -553,6 +573,40 @@ class TimingConsistencyValidator:
             metrics.tec_std_tecu = np.std(tecs)
         
         return metrics
+    
+    def get_tec_estimates(self) -> List[Tuple[int, float]]:
+        """
+        Get TEC estimates for archival.
+        
+        Returns:
+            List of (minute_boundary, tec_tecu) tuples
+        """
+        return list(self.tec_history)
+    
+    def get_latest_tec(self) -> Optional[Tuple[int, float]]:
+        """
+        Get the most recent TEC estimate.
+        
+        Returns:
+            (minute_boundary, tec_tecu) or None if no estimates
+        """
+        if self.tec_history:
+            return self.tec_history[-1]
+        return None
+    
+    def set_tec_callback(self, callback: Callable[[str, float, float], None]):
+        """
+        Set callback for real-time TEC feedback.
+        
+        The callback is invoked when a valid TEC estimate is computed from
+        multi-frequency measurements. This enables the ArrivalPatternMatrix
+        to refine its ionospheric delay predictions.
+        
+        Args:
+            callback: Function(station, tec_tecu, timestamp) to call with TEC estimates
+        """
+        self._tec_callback = callback
+        logger.info("TEC feedback callback registered")
     
     def log_validation_summary(self, result: ValidationResult):
         """Log a summary of validation results."""

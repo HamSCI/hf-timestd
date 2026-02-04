@@ -236,6 +236,13 @@ class MetrologyEngine:
                     sample_rate=self.sample_rate,
                     history_minutes=60  # Track 1 hour of history
                 )
+                
+                # Wire up TEC feedback: validator -> arrival matrix
+                # When validator computes TEC, it feeds back to refine arrival predictions
+                if self.arrival_matrix is not None:
+                    self.timing_validator.set_tec_callback(self.arrival_matrix.update_measured_tec)
+                    logger.info(f"TEC feedback enabled: validator -> arrival matrix")
+                
                 logger.info(f"TimingConsistencyValidator initialized for {self.channel_name}")
             except Exception as e:
                 logger.warning(f"Could not initialize TimingConsistencyValidator: {e}")
@@ -411,42 +418,8 @@ class MetrologyEngine:
             
         measurement_region = audio_signal[start_sample:end_sample]
         
-        # Step 1: Measure power at tone frequency using FFT
-        # Use a window centered on where the tone should be
-        tone_start = max(0, expected_sample - start_sample)
-        tone_end = min(len(measurement_region), tone_start + int(tone_duration_sec * self.sample_rate))
-        
-        if tone_end - tone_start < int(0.1 * self.sample_rate):  # Need at least 100ms
-            return None
-            
-        tone_segment = measurement_region[tone_start:tone_end]
-        
-        # FFT to measure power at specific frequency
-        windowed = tone_segment * scipy_signal.windows.hann(len(tone_segment))
-        fft_result = rfft(windowed)
-        freqs = rfftfreq(len(windowed), 1/self.sample_rate)
-        
-        # Find power at tone frequency
-        freq_idx = np.argmin(np.abs(freqs - tone_freq_hz))
-        tone_power = np.abs(fft_result[freq_idx])**2
-        
-        # Measure noise floor (average power in nearby bins, excluding tone)
-        noise_bins = np.concatenate([
-            np.arange(max(0, freq_idx - 50), max(0, freq_idx - 10)),
-            np.arange(min(len(fft_result), freq_idx + 10), min(len(fft_result), freq_idx + 50))
-        ])
-        if len(noise_bins) > 5:
-            noise_power = np.mean(np.abs(fft_result[noise_bins.astype(int)])**2)
-        else:
-            noise_power = np.mean(np.abs(fft_result)**2)
-        
-        # Calculate SNR
-        if noise_power > 0:
-            tone_snr_db = 10 * np.log10(tone_power / noise_power)
-        else:
-            tone_snr_db = 0.0
-        
-        # Step 2: Full-duration matched filter for DETECTION and VALIDATION
+        # Step 1: Full-duration matched filter for DETECTION
+        # Do correlation FIRST, then measure tone SNR at the peak location
         # Use full tone duration (800ms for WWV/WWVH, 500ms for CHU, 100ms for BPM)
         # This provides excellent discrimination:
         # - 800ms template has ~160x more energy than 5ms tick → much stronger correlation
@@ -473,11 +446,12 @@ class MetrologyEngine:
         if len(correlation) == 0:
             return None
         
-        # CRITICAL: Constrain search to window around expected arrival
+        # CRITICAL: Search in wide window to handle buffer alignment uncertainty
         # The minute marker should arrive at expected_delay_ms (propagation time)
-        # Allow ±100ms window for ionospheric variation and timing uncertainty
-        # This prevents detecting per-second ticks at 1000ms, 2000ms, etc.
-        SEARCH_WINDOW_MS = 100.0  # ±100ms around expected arrival
+        # Allow ±500ms window to handle buffer alignment uncertainty
+        # The wider window is needed because raw buffers may not start exactly at minute boundary
+        # Per-second tick rejection is handled by the matched filter (500ms template vs 5ms tick)
+        SEARCH_WINDOW_MS = 500.0  # ±500ms around expected arrival
         
         expected_corr_idx = int(expected_delay_ms * self.sample_rate / 1000)
         window_samples = int(SEARCH_WINDOW_MS * self.sample_rate / 1000)
@@ -486,6 +460,7 @@ class MetrologyEngine:
         search_end = min(len(correlation), expected_corr_idx + window_samples)
         
         if search_end <= search_start:
+            logger.debug(f"{station_name}: Search window invalid - search_start={search_start}, search_end={search_end}, corr_len={len(correlation)}")
             return None
         
         # Find peak within constrained window
@@ -535,11 +510,40 @@ class MetrologyEngine:
         # An 800ms matched filter with a real tone should produce SNR >> 20 dB.
         # A 6 dB threshold allows noise peaks (2.4x ratio) to pass as false detections.
         # Raise to 12 dB (4x ratio) to reject noise while accepting weak real signals.
-        MIN_CORR_SNR_DB = 12.0  # Require 12dB above noise floor
+        MIN_CORR_SNR_DB = 8.0  # Require 8dB above noise floor (lowered from 12dB for weak signals)
         if corr_snr_db < MIN_CORR_SNR_DB:
-            logger.debug(f"{station_name}: Correlation too weak "
-                        f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB}dB)")
+            logger.info(f"{station_name}: Correlation too weak "
+                        f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB}dB, expected={expected_delay_ms:.1f}ms, "
+                        f"peak_idx={peak_idx}, peak={peak_val:.4f}, noise={noise_median:.4f})")
             return None
+        
+        # Step 2: Measure tone SNR at the DETECTED peak location (not expected location)
+        # This handles buffer alignment issues where tone arrives later than expected
+        tone_start = max(0, peak_idx)
+        tone_end = min(len(measurement_region), tone_start + int(tone_duration_sec * self.sample_rate))
+        
+        if tone_end - tone_start >= int(0.1 * self.sample_rate):
+            tone_segment = measurement_region[tone_start:tone_end]
+            windowed = tone_segment * scipy_signal.windows.hann(len(tone_segment))
+            fft_result = rfft(windowed)
+            freqs = rfftfreq(len(windowed), 1/self.sample_rate)
+            
+            freq_idx = np.argmin(np.abs(freqs - tone_freq_hz))
+            tone_power = np.abs(fft_result[freq_idx])**2
+            
+            noise_bins = np.concatenate([
+                np.arange(max(0, freq_idx - 50), max(0, freq_idx - 10)),
+                np.arange(min(len(fft_result), freq_idx + 10), min(len(fft_result), freq_idx + 50))
+            ])
+            if len(noise_bins) > 5:
+                noise_power = np.mean(np.abs(fft_result[noise_bins.astype(int)])**2)
+            else:
+                noise_power = np.mean(np.abs(fft_result)**2)
+            
+            tone_snr_db = 10 * np.log10(tone_power / noise_power) if noise_power > 0 else 0.0
+        else:
+            tone_snr_db = corr_snr_db  # Fallback to correlation SNR
+            tone_power = peak_val
         
         # Sub-sample interpolation
         sub_sample_offset = 0.0
