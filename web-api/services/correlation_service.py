@@ -58,28 +58,28 @@ class CorrelationService:
         # Get propagation timeline for this station/frequency
         timeline = self.propagation.get_mode_timeline(start, end, station=station)
         
-        if not timeline or 'channels' not in timeline:
+        if not timeline or not timeline.get('timestamps'):
             return {'error': 'No propagation data available'}
         
-        # Find matching channel
-        channel_data = None
-        for channel in timeline['channels']:
-            if (channel['station'] == station and 
-                abs(channel['frequency_mhz'] - frequency) < 0.1):
-                channel_data = channel
-                break
+        # Filter for matching frequency
+        timestamps = []
+        snr_values = []
+        for i, (ts, freq, snr) in enumerate(zip(
+            timeline.get('timestamps', []),
+            timeline.get('frequencies', []),
+            timeline.get('snr_db', [])
+        )):
+            if freq is not None and abs(freq - frequency) < 0.1:
+                timestamps.append(ts)
+                snr_values.append(snr)
         
-        if not channel_data or not channel_data.get('snr_db'):
+        if not timestamps or not snr_values:
             return {'error': f'No data for {station} {frequency} MHz'}
         
         # Calculate solar zenith angles at path midpoint
         tx_lat, tx_lon = station_coords
         rx_lat, rx_lon = rx_coords
         mid_lat, mid_lon = calculate_midpoint(rx_lat, rx_lon, tx_lat, tx_lon)
-        
-        # Align timestamps
-        timestamps = channel_data['timestamps']
-        snr_values = channel_data['snr_db']
         
         solar_elevations = []
         solar_zenith_angles = []

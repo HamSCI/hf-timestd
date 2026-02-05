@@ -167,9 +167,18 @@
             <div class="header-subtitle">Documentation with real-time data — see theory meet reality</div>
             <nav class="nav">
                 <a href="/" class="nav-link">Overview</a>
-                <a href="/static/health.html" class="nav-link">System Health</a>
-                <a href="/static/metrology.html" class="nav-link">Metrology</a>
-                <a href="/static/docs.html" class="nav-link active">Living Docs</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">⏱️ Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link">Validation</a>
+                <a href="/static/stability.html" class="nav-link">Stability</a>
+                <span class="nav-divider"></span>
+                <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
+                <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/solar-correlation.html" class="nav-link">☀️ Solar</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link active">📚 Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
             </nav>
         </div>
         
@@ -455,6 +464,18 @@
                     break;
                 case 'validation-status':
                     renderValidationStatusWidget(container, f);
+                    break;
+                case 'tec-summary':
+                    renderTecSummaryWidget(container);
+                    break;
+                case 'scintillation-status':
+                    renderScintillationWidget(container);
+                    break;
+                case 'propagation-paths':
+                    renderPropagationPathsWidget(container);
+                    break;
+                case 'ionospheric-conditions':
+                    renderIonosphericConditionsWidget(container);
                     break;
                 default:
                     container.innerHTML = `<div class="widget-title">Unknown widget: ${widgetType}</div>`;
@@ -983,6 +1004,138 @@
                         '⚠️ <strong>Some claims not yet validated.</strong> Review implementation or adjust argument.'}
                 </div>
             `;
+        }
+        
+        // Widget: TEC Summary (ionospheric measurement)
+        async function renderTecSummaryWidget(container) {
+            try {
+                const res = await fetch('/api/propagation/tec?start=-2h&end=now');
+                if (!res.ok) throw new Error('TEC data unavailable');
+                const data = await res.json();
+                
+                const paths = data.paths || {};
+                const pathHtml = Object.entries(paths).map(([station, info]) => `
+                    <div class="widget-metric">
+                        <div class="widget-metric-label">${station}</div>
+                        <div class="widget-metric-value">${info.mean_tec?.toFixed(1) ?? '—'}<span class="widget-unit">TECU</span></div>
+                        <div style="font-size: 11px; color: #64748b;">${info.n_measurements || 0} meas</div>
+                    </div>
+                `).join('');
+                
+                container.innerHTML = `
+                    <div class="widget-title">TEC by Propagation Path — Live</div>
+                    <div class="widget-grid">${pathHtml || '<div style="color:#64748b">No TEC data</div>'}</div>
+                    <div class="widget-subtitle">Total Electron Content derived from multi-frequency propagation delays</div>
+                `;
+            } catch (e) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">TEC data unavailable</div>';
+            }
+        }
+        
+        // Widget: Scintillation Status
+        async function renderScintillationWidget(container) {
+            try {
+                const res = await fetch('/api/physics/scintillation/paths');
+                if (!res.ok) throw new Error('Scintillation data unavailable');
+                const data = await res.json();
+                
+                const paths = data.paths || {};
+                const pathHtml = Object.entries(paths).map(([station, info]) => {
+                    const s4 = info.s4_mean;
+                    const severity = info.severity || 'unknown';
+                    const severityColor = severity === 'none' ? '#22c55e' : 
+                                         severity === 'weak' ? '#f59e0b' : 
+                                         severity === 'moderate' ? '#f97316' : 
+                                         severity === 'strong' ? '#ef4444' : '#64748b';
+                    return `
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">${station}</div>
+                            <div class="widget-metric-value" style="color: ${severityColor}">${s4?.toFixed(2) ?? '—'}</div>
+                            <div style="font-size: 11px; color: ${severityColor};">${severity}</div>
+                        </div>
+                    `;
+                }).join('');
+                
+                container.innerHTML = `
+                    <div class="widget-title">Scintillation Index (S4) — Live</div>
+                    <div class="widget-grid">${pathHtml || '<div style="color:#64748b">No scintillation data</div>'}</div>
+                    <div class="widget-subtitle">S4 < 0.2 = none, 0.2-0.4 = weak, 0.4-0.6 = moderate, > 0.6 = strong</div>
+                `;
+            } catch (e) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Scintillation data unavailable</div>';
+            }
+        }
+        
+        // Widget: Propagation Paths
+        async function renderPropagationPathsWidget(container) {
+            try {
+                const res = await fetch('/api/propagation/timeline?start=-1h&end=now');
+                if (!res.ok) throw new Error('Propagation data unavailable');
+                const data = await res.json();
+                
+                // Count measurements per station
+                const stationCounts = {};
+                const stationFreqs = {};
+                (data.stations || []).forEach((s, i) => {
+                    stationCounts[s] = (stationCounts[s] || 0) + 1;
+                    if (!stationFreqs[s]) stationFreqs[s] = new Set();
+                    if (data.frequencies && data.frequencies[i]) {
+                        stationFreqs[s].add(data.frequencies[i]);
+                    }
+                });
+                
+                const pathHtml = Object.entries(stationCounts).map(([station, count]) => {
+                    const freqs = stationFreqs[station] ? Array.from(stationFreqs[station]).sort((a,b) => a-b) : [];
+                    return `
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">${station}</div>
+                            <div class="widget-metric-value">${count}</div>
+                            <div style="font-size: 11px; color: #64748b;">${freqs.length} freq</div>
+                        </div>
+                    `;
+                }).join('');
+                
+                container.innerHTML = `
+                    <div class="widget-title">Active Propagation Paths — Live (1h)</div>
+                    <div class="widget-grid">${pathHtml || '<div style="color:#64748b">No propagation data</div>'}</div>
+                    <div class="widget-subtitle">Measurements per station in last hour</div>
+                `;
+            } catch (e) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Propagation data unavailable</div>';
+            }
+        }
+        
+        // Widget: Ionospheric Conditions
+        async function renderIonosphericConditionsWidget(container) {
+            try {
+                const res = await fetch('/api/physics/events/conditions');
+                if (!res.ok) throw new Error('Conditions unavailable');
+                const data = await res.json();
+                
+                const isDay = data.is_daytime;
+                const sunTimes = data.sun_times || {};
+                
+                container.innerHTML = `
+                    <div class="widget-title">Current Ionospheric Conditions — Live</div>
+                    <div class="widget-grid">
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Solar</div>
+                            <div class="widget-metric-value">${isDay ? '☀️ Day' : '🌙 Night'}</div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Sunrise</div>
+                            <div class="widget-metric-value" style="font-size: 14px;">${sunTimes.sunrise ? new Date(sunTimes.sunrise).toLocaleTimeString() : '—'}</div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Sunset</div>
+                            <div class="widget-metric-value" style="font-size: 14px;">${sunTimes.sunset ? new Date(sunTimes.sunset).toLocaleTimeString() : '—'}</div>
+                        </div>
+                    </div>
+                    <div class="widget-subtitle">Ionospheric conditions affect propagation delays and TEC</div>
+                `;
+            } catch (e) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Conditions data unavailable</div>';
+            }
         }
         
         // Render log panel - unified Living Documentation evidence system

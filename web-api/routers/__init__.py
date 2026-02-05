@@ -13,6 +13,8 @@ from .space_weather import router as space_weather_router
 from .correlations import router as correlations_router
 from .physics import router as physics_router
 from .docs import router as docs_router
+from .tec import router as tec_router
+from .tid import router as tid_router
 
 __all__ = [
     'health_router',
@@ -25,5 +27,7 @@ __all__ = [
     'space_weather_router',
     'correlations_router',
     'physics_router',
-    'docs_router'
+    'docs_router',
+    'tec_router',
+    'tid_router'
 ]

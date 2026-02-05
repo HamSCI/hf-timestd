@@ -243,13 +243,17 @@ async def get_section(doc_name: str, section_id: str):
 # =============================================================================
 
 # Evidence sources: maps source name to (log_file, service_name_for_journalctl)
+# Updated for v6.5.0 data locations and new modules
 EVIDENCE_SOURCES = {
     "bootstrap": ("/var/log/hf-timestd/core-recorder.log", "timestd-core-recorder"),
     "fusion": ("/var/log/hf-timestd/fusion.log", "timestd-fusion"),
     "physics": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
     "TEC": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
+    "TID": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
     "L1-L2": ("/var/log/hf-timestd/l2-calibration.log", "timestd-l2-calibration"),
     "metrology": ("/var/log/hf-timestd/metrology.log", "timestd-metrology"),
+    "arrival_matrix": ("/var/log/hf-timestd/core-recorder.log", "timestd-core-recorder"),
+    "consistency": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
 }
 
 # Predefined filter patterns for each source
@@ -288,6 +292,23 @@ EVIDENCE_PATTERNS = {
         "dispersion": r"dispersion|1/f|frequency|ratio",
         "vtec": r"VTEC|vertical|slant",
         "ionex": r"IONEX|map|grid",
+        "estimate": r"TEC.*estimate|estimated TEC|TECU",
+    },
+    "TID": {
+        "detection": r"TID.*detect|Traveling Ionospheric|disturbance",
+        "correlation": r"cross.*correlation|path.*correlation|TID.*correlation",
+        "velocity": r"TID.*velocity|propagation.*velocity|m/s",
+        "event": r"TID.*event|ionospheric.*event",
+    },
+    "arrival_matrix": {
+        "prediction": r"ArrivalPatternMatrix|expected.*arrival|search.*window",
+        "physics_validation": r"physics.*valid|IRI.*model|layer.*height",
+        "search_window": r"search.*window|±.*σ|sigma",
+    },
+    "consistency": {
+        "validation": r"TimingConsistencyValidator|consistency.*check|constraint",
+        "multi_constraint": r"multi.*constraint|cross.*station|emission.*time",
+        "physics_check": r"physics.*check|arrival.*sequence|TEC.*reasonable",
     },
     "L1-L2": {
         "L1-L2 difference": r"L1.*L2|difference|calibrat|offset",

@@ -17,16 +17,17 @@ router = APIRouter(prefix="/logs", tags=["logs"])
 SERVICE_MAP = {
     "web-api": "timestd-web-api",
     "core": "timestd-core-recorder",
-    "analytics": "timestd-analytics",
+    "metrology": "timestd-metrology",
     "fusion": "timestd-fusion",
     "vtec": "timestd-vtec",
-    "ionex": "timestd-ionex-download",
-    "physics": "timestd-physics"
+    "physics": "timestd-physics",
+    "l2-calibration": "timestd-l2-calibration",
+    "radiod-monitor": "timestd-radiod-monitor"
 }
 
 @router.get("/")
 async def get_logs(
-    service: str = Query(..., description="Service name (web-api, core, analytics, fusion, vtec, ionex, grape)"),
+    service: str = Query(..., description="Service name (web-api, core, metrology, fusion, vtec, physics, l2-calibration, radiod-monitor)"),
     lines: int = Query(100, ge=1, le=1000, description="Number of lines to return"),
     level: str = Query(None, description="Log level filter (INFO, WARNING, ERROR)"),
     since: str = Query("1h", description="Time range (e.g., 1h, 6h, 24h, 7d)")

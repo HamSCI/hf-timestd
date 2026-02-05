@@ -257,20 +257,27 @@ class BinaryArchiveWriter:
             rtp_timestamp: RTP timestamp of the packet that triggered this new minute
             
         The RTP stream tells us the exact time. When a packet's RTP-derived UTC
-        crosses a minute boundary, we start a new buffer. The buffer's start_rtp
-        is simply the RTP timestamp of that packet.
+        crosses a minute boundary, we start a new buffer.
+        
+        CRITICAL: We calculate the RTP timestamp that corresponds to the exact
+        minute boundary using the GPS_TIME/RTP_TIMESNAP mapping. This ensures
+        sample position 0 = minute boundary, regardless of when the first packet
+        actually arrives.
         """
         minute_boundary = (int(rtp_derived_time) // 60) * 60
         
-        # The RTP timestamp that triggered this new minute IS the start
-        # No calculation needed - the RTP stream is authoritative
-        minute_boundary_rtp = rtp_timestamp
+        # Calculate RTP timestamp at the exact minute boundary using the mapping:
+        #   UTC = GPS_TIME + (rtp - RTP_TIMESNAP) / sample_rate
+        #   rtp = RTP_TIMESNAP + (UTC - GPS_TIME) * sample_rate
+        time_delta = minute_boundary - self._gps_time_unix
+        rtp_delta = int(time_delta * self.config.sample_rate)
+        minute_boundary_rtp = (self._rtp_timesnap + rtp_delta) & 0xFFFFFFFF
         
         buffer = MinuteBuffer(
             minute_boundary=minute_boundary,
             samples=np.zeros(self.samples_per_minute, dtype=np.complex64),
             write_pos=0,
-            start_rtp=minute_boundary_rtp,  # RTP at minute boundary
+            start_rtp=minute_boundary_rtp,  # RTP at actual minute boundary
             start_system_time=float(minute_boundary),  # Exactly on minute boundary
             timing_snapshots=[]
         )

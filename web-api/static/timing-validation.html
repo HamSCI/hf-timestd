@@ -3,56 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Timing Validation Dashboard - HF-TimeStd</title>
+    <title>Timing Validation - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        :root {
-            --bg-primary: #0f172a;
-            --bg-secondary: #1e293b;
-            --bg-tertiary: #334155;
-            --text-primary: #f1f5f9;
-            --text-secondary: #94a3b8;
-            --accent-blue: #3b82f6;
-            --accent-green: #22c55e;
-            --accent-yellow: #eab308;
-            --accent-red: #ef4444;
-            --accent-purple: #a855f7;
-        }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 24px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid var(--bg-tertiary);
-        }
-        
-        .header h1 {
-            font-size: 24px;
-            font-weight: 600;
-        }
-        
-        .header-subtitle {
-            color: var(--text-secondary);
-            font-size: 14px;
-            margin-top: 4px;
-        }
-        
+        /* Page-specific styles */
         .status-badge {
             display: inline-flex;
             align-items: center;
@@ -63,26 +18,19 @@
             font-weight: 500;
         }
         
-        .status-ok { background: rgba(34, 197, 94, 0.2); color: var(--accent-green); }
-        .status-warning { background: rgba(234, 179, 8, 0.2); color: var(--accent-yellow); }
-        .status-error { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); }
-        .status-loading { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); }
+        .status-ok { background: rgba(34, 197, 94, 0.2); color: #22c55e; }
+        .status-warning { background: rgba(234, 179, 8, 0.2); color: #eab308; }
+        .status-error { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+        .status-loading { background: rgba(59, 130, 246, 0.2); color: #3b82f6; }
         
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 20px;
-            margin-bottom: 24px;
-        }
-        
-        .card {
-            background: var(--bg-secondary);
+        .validation-card {
+            background: var(--bg-surface);
             border-radius: 12px;
             padding: 20px;
-            border: 1px solid var(--bg-tertiary);
+            border: 1px solid var(--border-color);
         }
         
-        .card-title {
+        .validation-card .card-title {
             font-size: 14px;
             color: var(--text-secondary);
             margin-bottom: 8px;
@@ -90,20 +38,20 @@
             letter-spacing: 0.5px;
         }
         
-        .card-value {
+        .validation-card .card-value {
             font-size: 32px;
             font-weight: 700;
             margin-bottom: 4px;
         }
         
-        .card-subtitle {
+        .validation-card .card-subtitle {
             font-size: 12px;
             color: var(--text-secondary);
         }
         
-        .card-value.good { color: var(--accent-green); }
-        .card-value.warning { color: var(--accent-yellow); }
-        .card-value.bad { color: var(--accent-red); }
+        .card-value.good { color: #22c55e; }
+        .card-value.warning { color: #eab308; }
+        .card-value.bad { color: #ef4444; }
         
         .chart-container {
             background: var(--bg-secondary);
@@ -273,19 +221,36 @@
     </style>
 </head>
 <body>
-    <div class="header">
-        <div>
-            <h1>⏱️ Timing Validation Dashboard</h1>
+    <div class="container">
+        <div class="header">
+            <h1>⏱️ Timing Validation</h1>
             <div class="header-subtitle">Comparing HF Fusion timing against GPS+PPS ground truth</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">⏱️ Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link active">Validation</a>
+                <a href="/static/stability.html" class="nav-link">Stability</a>
+                <span class="nav-divider"></span>
+                <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
+                <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/solar-correlation.html" class="nav-link">☀️ Solar</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link">📚 Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
+            </nav>
         </div>
-        <div style="display: flex; align-items: center; gap: 16px;">
+        
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
             <span class="last-updated" id="lastUpdated">Loading...</span>
-            <button class="refresh-btn" id="refreshBtn" onclick="loadDashboard()">
-                <span id="refreshIcon">🔄</span> Refresh
-            </button>
-            <span class="status-badge status-loading" id="statusBadge">Loading...</span>
+            <div style="display: flex; align-items: center; gap: 16px;">
+                <button class="refresh-btn" id="refreshBtn" onclick="loadDashboard()">
+                    <span id="refreshIcon">🔄</span> Refresh
+                </button>
+                <span class="status-badge status-loading" id="statusBadge">Loading...</span>
+            </div>
         </div>
-    </div>
     
     <div class="methodology-note">
         <strong>Living Documentation:</strong> This dashboard shows real-time validation of the HF fusion methodology 
@@ -295,33 +260,33 @@
     </div>
     
     <!-- Statistics Cards -->
-    <div class="grid" id="statsGrid">
-        <div class="card">
+    <div class="grid grid-3" id="statsGrid">
+        <div class="validation-card">
             <div class="card-title">Mean Discrepancy</div>
             <div class="card-value" id="meanDiscrepancy">--</div>
             <div class="card-subtitle">Fusion - GPS (ms)</div>
         </div>
-        <div class="card">
+        <div class="validation-card">
             <div class="card-title">Std Deviation</div>
             <div class="card-value" id="stdDiscrepancy">--</div>
             <div class="card-subtitle">Discrepancy spread (ms)</div>
         </div>
-        <div class="card">
+        <div class="validation-card">
             <div class="card-title">Within Uncertainty</div>
             <div class="card-value" id="withinUncertainty">--</div>
             <div class="card-subtitle">% of points validated</div>
         </div>
-        <div class="card">
+        <div class="validation-card">
             <div class="card-title">Within 1ms</div>
             <div class="card-value" id="within1ms">--</div>
             <div class="card-subtitle">% of points</div>
         </div>
-        <div class="card">
+        <div class="validation-card">
             <div class="card-title">Data Points</div>
             <div class="card-value" id="nPoints">--</div>
             <div class="card-subtitle">Validation samples</div>
         </div>
-        <div class="card">
+        <div class="validation-card">
             <div class="card-title">Timing Authority</div>
             <div class="card-value" id="timingAuthority" style="font-size: 24px;">--</div>
             <div class="card-subtitle">GPS accuracy: <span id="gpsAccuracy">--</span></div>
@@ -685,5 +650,6 @@
         // Auto-refresh every 60 seconds
         setInterval(loadDashboard, 60000);
     </script>
+    </div>
 </body>
 </html>

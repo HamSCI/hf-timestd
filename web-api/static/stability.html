@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Timing Stability - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Timing Stability</h1>
+            <div class="header-subtitle">Allan deviation and long-term stability analysis</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">⏱️ Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link">Validation</a>
+                <a href="/static/stability.html" class="nav-link active">Stability</a>
+                <span class="nav-divider"></span>
+                <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
+                <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/solar-correlation.html" class="nav-link">☀️ Solar</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link">📚 Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
+            </nav>
+        </div>
+
+        <div id="error-container" style="display: none;"></div>
+
+        <!-- Time Range Controls -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Analysis Period</div>
+            </div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; padding: 0 16px 16px;">
+                <button class="time-range-btn" data-range="-6h">6 Hours</button>
+                <button class="time-range-btn" data-range="-24h">24 Hours</button>
+                <button class="time-range-btn active" data-range="-7d">7 Days</button>
+                <button class="time-range-btn" data-range="-30d">30 Days</button>
+            </div>
+        </div>
+
+        <!-- Key Metrics -->
+        <div class="grid grid-4">
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">ADEV @ 1 min</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="adev-1min">
+                        <div class="loading"></div>
+                    </div>
+                    <div class="metric-label">σ_y(τ=60s)</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">ADEV @ 1 hour</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="adev-1hr">
+                        <div class="loading"></div>
+                    </div>
+                    <div class="metric-label">σ_y(τ=3600s)</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">Dominant Noise</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="noise-type" style="font-size: 24px;">
+                        <div class="loading"></div>
+                    </div>
+                    <div class="metric-label">Noise Type</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">Data Points</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="n-points">
+                        <div class="loading"></div>
+                    </div>
+                    <div class="metric-label">Measurements</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Allan Deviation Plot -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">Allan Deviation (ADEV)</div>
+                    <div class="card-subtitle">Overlapping Allan deviation vs averaging time τ</div>
+                </div>
+                <div class="live-indicator">
+                    <div class="live-dot"></div>
+                    <span>Live</span>
+                </div>
+            </div>
+            <div id="adev-plot" style="width: 100%; height: 450px;"></div>
+        </div>
+
+        <!-- How It Works -->
+        <div class="card">
+            <div class="card-header" style="cursor: pointer;" onclick="toggleExplanation()">
+                <div>
+                    <div class="card-title">📐 Understanding Allan Deviation</div>
+                    <div class="card-subtitle">What ADEV tells us about timing stability</div>
+                </div>
+                <div id="explanation-toggle" style="font-size: 20px; color: #94a3b8;">▼</div>
+            </div>
+            <div id="explanation-content" style="padding: 16px; display: none;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #e0e0e0;">What is Allan Deviation?</h3>
+                        <p style="font-size: 13px; color: #cbd5e1; line-height: 1.6; margin-bottom: 12px;">
+                            Allan deviation (ADEV) measures the <strong>frequency stability</strong> of an oscillator or timing source
+                            as a function of averaging time τ. Unlike standard deviation, ADEV converges for common noise types
+                            found in oscillators.
+                        </p>
+                        <div style="background: rgba(30, 41, 59, 0.5); padding: 12px; border-radius: 6px; font-family: 'Courier New', monospace; font-size: 13px;">
+                            σ<sub>y</sub>(τ) = √[ ½ ⟨(ȳ<sub>n+1</sub> - ȳ<sub>n</sub>)²⟩ ]
+                        </div>
+                    </div>
+                    
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #e0e0e0;">Noise Types</h3>
+                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                            <div style="display: flex; gap: 12px; align-items: flex-start;">
+                                <span style="background: #ef4444; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap;">τ<sup>+1</sup></span>
+                                <span style="font-size: 13px; color: #cbd5e1;">Random Walk FM (drift)</span>
+                            </div>
+                            <div style="display: flex; gap: 12px; align-items: flex-start;">
+                                <span style="background: #f59e0b; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap;">τ<sup>0</sup></span>
+                                <span style="font-size: 13px; color: #cbd5e1;">Flicker FM (1/f noise)</span>
+                            </div>
+                            <div style="display: flex; gap: 12px; align-items: flex-start;">
+                                <span style="background: #10b981; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap;">τ<sup>-½</sup></span>
+                                <span style="font-size: 13px; color: #cbd5e1;">White FM (averages down)</span>
+                            </div>
+                            <div style="display: flex; gap: 12px; align-items: flex-start;">
+                                <span style="background: #3b82f6; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap;">τ<sup>-1</sup></span>
+                                <span style="font-size: 13px; color: #cbd5e1;">Flicker PM</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div>
+                        <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #e0e0e0;">Interpretation</h3>
+                        <p style="font-size: 13px; color: #cbd5e1; line-height: 1.6;">
+                            The <strong>slope</strong> of the ADEV plot on log-log axes reveals the dominant noise type.
+                            For HF timing, we expect:
+                        </p>
+                        <ul style="font-size: 13px; color: #cbd5e1; line-height: 1.8; margin-top: 8px; padding-left: 20px;">
+                            <li>Short τ: White noise from measurement</li>
+                            <li>Medium τ: Flicker noise from ionosphere</li>
+                            <li>Long τ: Possible drift or diurnal effects</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stability Summary Table -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Stability at Key Averaging Times</div>
+            </div>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>τ (seconds)</th>
+                        <th>ADEV σ_y(τ)</th>
+                        <th>Time Error (ms)</th>
+                        <th>Noise Type</th>
+                        <th>Confidence</th>
+                    </tr>
+                </thead>
+                <tbody id="stability-table">
+                    <tr>
+                        <td colspan="5" style="text-align: center;">
+                            <div class="loading"></div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script src="/static/js/common.js"></script>
+    <script>
+        let currentRange = '-7d';
+        
+        function toggleExplanation() {
+            const content = document.getElementById('explanation-content');
+            const toggle = document.getElementById('explanation-toggle');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggle.textContent = '▲';
+            } else {
+                content.style.display = 'none';
+                toggle.textContent = '▼';
+            }
+        }
+        
+        async function loadStabilityData() {
+            try {
+                clearError();
+                const data = await api.get('/stability/adev', { start: currentRange, end: 'now' });
+                
+                updateMetrics(data);
+                updatePlot(data);
+                updateTable(data);
+                
+            } catch (error) {
+                showError(`Failed to load stability data: ${error.message}`);
+                document.getElementById('adev-1min').textContent = '--';
+                document.getElementById('adev-1hr').textContent = '--';
+                document.getElementById('noise-type').textContent = '--';
+                document.getElementById('n-points').textContent = '--';
+            }
+        }
+        
+        function updateMetrics(data) {
+            // Find ADEV at specific tau values
+            const taus = data.tau_seconds || [];
+            const adevs = data.adev || [];
+            
+            // ADEV @ 1 min (60s)
+            const idx60 = findClosestIndex(taus, 60);
+            if (idx60 >= 0 && adevs[idx60]) {
+                document.getElementById('adev-1min').innerHTML = formatScientific(adevs[idx60]);
+            } else {
+                document.getElementById('adev-1min').textContent = '--';
+            }
+            
+            // ADEV @ 1 hour (3600s)
+            const idx3600 = findClosestIndex(taus, 3600);
+            if (idx3600 >= 0 && adevs[idx3600]) {
+                document.getElementById('adev-1hr').innerHTML = formatScientific(adevs[idx3600]);
+            } else {
+                document.getElementById('adev-1hr').textContent = '--';
+            }
+            
+            // Noise type
+            document.getElementById('noise-type').textContent = data.dominant_noise_type || 'Unknown';
+            
+            // Data points
+            document.getElementById('n-points').textContent = data.n_points || '--';
+        }
+        
+        function updatePlot(data) {
+            const taus = data.tau_seconds || [];
+            const adevs = data.adev || [];
+            
+            if (taus.length === 0) {
+                Plotly.newPlot('adev-plot', [], {
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    font: { color: '#94a3b8' },
+                    annotations: [{
+                        text: 'No data available',
+                        xref: 'paper',
+                        yref: 'paper',
+                        x: 0.5,
+                        y: 0.5,
+                        showarrow: false,
+                        font: { size: 16, color: '#64748b' }
+                    }]
+                });
+                return;
+            }
+            
+            // Main ADEV trace
+            const trace = {
+                x: taus,
+                y: adevs,
+                type: 'scatter',
+                mode: 'lines+markers',
+                name: 'ADEV',
+                line: { color: '#3b82f6', width: 2 },
+                marker: { size: 6 }
+            };
+            
+            // Add reference slopes
+            const traces = [trace];
+            
+            // White noise reference (τ^-0.5)
+            if (taus.length > 1) {
+                const midIdx = Math.floor(taus.length / 2);
+                const refTau = taus[midIdx];
+                const refAdev = adevs[midIdx];
+                
+                const whiteNoiseTaus = taus.filter(t => t >= refTau * 0.1 && t <= refTau * 10);
+                const whiteNoiseAdevs = whiteNoiseTaus.map(t => refAdev * Math.sqrt(refTau / t));
+                
+                traces.push({
+                    x: whiteNoiseTaus,
+                    y: whiteNoiseAdevs,
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: 'White FM (τ⁻⁰·⁵)',
+                    line: { color: '#10b981', width: 1, dash: 'dash' },
+                    opacity: 0.5
+                });
+            }
+            
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#94a3b8' },
+                xaxis: {
+                    title: 'Averaging Time τ (seconds)',
+                    type: 'log',
+                    gridcolor: '#334155',
+                    zerolinecolor: '#334155'
+                },
+                yaxis: {
+                    title: 'Allan Deviation σ_y(τ)',
+                    type: 'log',
+                    gridcolor: '#334155',
+                    zerolinecolor: '#334155'
+                },
+                margin: { t: 20, r: 20, b: 60, l: 80 },
+                showlegend: true,
+                legend: { x: 0.7, y: 0.95 }
+            };
+            
+            Plotly.newPlot('adev-plot', traces, layout, { responsive: true });
+        }
+        
+        function updateTable(data) {
+            const tbody = document.getElementById('stability-table');
+            const taus = data.tau_seconds || [];
+            const adevs = data.adev || [];
+            
+            if (taus.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #94a3b8;">No data available</td></tr>';
+                return;
+            }
+            
+            // Key tau values to display
+            const keyTaus = [1, 10, 60, 300, 600, 3600, 7200, 86400].filter(t => t <= Math.max(...taus));
+            
+            tbody.innerHTML = keyTaus.map(targetTau => {
+                const idx = findClosestIndex(taus, targetTau);
+                if (idx < 0) return '';
+                
+                const tau = taus[idx];
+                const adev = adevs[idx];
+                const timeError = adev * tau * 1000; // Convert to ms
+                const noiseType = identifyNoiseType(taus, adevs, idx);
+                
+                return `
+                    <tr>
+                        <td><strong>${formatTau(tau)}</strong></td>
+                        <td style="font-family: 'Courier New', monospace;">${formatScientific(adev)}</td>
+                        <td style="font-family: 'Courier New', monospace;">${timeError.toFixed(3)} ms</td>
+                        <td>${noiseType}</td>
+                        <td><span class="badge status-healthy">Good</span></td>
+                    </tr>
+                `;
+            }).join('');
+        }
+        
+        function findClosestIndex(arr, target) {
+            if (!arr || arr.length === 0) return -1;
+            let closest = 0;
+            let minDiff = Math.abs(Math.log10(arr[0]) - Math.log10(target));
+            
+            for (let i = 1; i < arr.length; i++) {
+                const diff = Math.abs(Math.log10(arr[i]) - Math.log10(target));
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closest = i;
+                }
+            }
+            return closest;
+        }
+        
+        function formatScientific(value) {
+            if (!value || isNaN(value)) return '--';
+            const exp = Math.floor(Math.log10(Math.abs(value)));
+            const mantissa = value / Math.pow(10, exp);
+            return `${mantissa.toFixed(2)}×10<sup>${exp}</sup>`;
+        }
+        
+        function formatTau(tau) {
+            if (tau < 60) return `${tau}s`;
+            if (tau < 3600) return `${(tau/60).toFixed(0)}m`;
+            if (tau < 86400) return `${(tau/3600).toFixed(1)}h`;
+            return `${(tau/86400).toFixed(1)}d`;
+        }
+        
+        function identifyNoiseType(taus, adevs, idx) {
+            if (idx < 1 || idx >= taus.length - 1) return 'Unknown';
+            
+            // Calculate local slope
+            const slope = (Math.log10(adevs[idx+1]) - Math.log10(adevs[idx-1])) / 
+                         (Math.log10(taus[idx+1]) - Math.log10(taus[idx-1]));
+            
+            if (slope > 0.5) return 'Random Walk FM';
+            if (slope > -0.25) return 'Flicker FM';
+            if (slope > -0.75) return 'White FM';
+            if (slope > -1.25) return 'Flicker PM';
+            return 'White PM';
+        }
+        
+        function showError(message) {
+            const container = document.getElementById('error-container');
+            container.innerHTML = `<div class="error-message">${message}</div>`;
+            container.style.display = 'block';
+        }
+        
+        function clearError() {
+            const container = document.getElementById('error-container');
+            container.style.display = 'none';
+        }
+        
+        // Time range button handlers
+        document.querySelectorAll('.time-range-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentRange = btn.dataset.range;
+                loadStabilityData();
+            });
+        });
+        
+        // Initial load
+        loadStabilityData();
+        
+        // Auto-refresh every 5 minutes
+        setInterval(loadStabilityData, 300000);
+    </script>
+</body>
+
+</html>

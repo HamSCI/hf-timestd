@@ -404,14 +404,12 @@ class MetrologyEngine:
         # Leading zeros are irrelevant - they're just radiod buffering, not timing
         expected_sample = int(expected_delay_ms * self.sample_rate / 1000)
         
-        # Measurement window: Use first 2 seconds of buffer
-        # We need a large window for reliable noise estimation in the correlation output.
-        # With a 500ms template and 600ms window, we only get 100ms of correlation output -
-        # not enough samples for robust noise floor estimation.
-        # Using 2 seconds gives us 1500ms of correlation output for good SNR estimation.
-        # The expected arrival is still used to validate the peak location.
+        # Measurement window: Use first 3 seconds of buffer
+        # CHU transmits at second 1 (not second 0), so we need a wider window.
+        # With 3 seconds, we capture the CHU tone at ~1000ms and have room for
+        # noise estimation before and after the tone.
         start_sample = 0
-        end_sample = min(len(audio_signal), int(2.0 * self.sample_rate))
+        end_sample = min(len(audio_signal), int(3.0 * self.sample_rate))
         
         if end_sample <= start_sample:
             return None
@@ -568,6 +566,26 @@ class MetrologyEngine:
         # Timing error = measured_arrival - expected_propagation_delay
         timing_error_ms = raw_arrival_ms - expected_delay_ms
         
+        # PROPAGATION BOUNDS VALIDATION (2026-02-05)
+        # Validate that the measured arrival time is within tolerance of expected.
+        # expected_delay_ms already includes tx_offset (e.g., 1000ms for CHU second 1).
+        # Allow ±100ms tolerance for ionospheric variation.
+        ARRIVAL_TOLERANCE_MS = 100.0
+        
+        if abs(timing_error_ms) > ARRIVAL_TOLERANCE_MS:
+            logger.info(f"{station_name} @ {tone_freq_hz}Hz: REJECTED - arrival={raw_arrival_ms:.2f}ms "
+                       f"error={timing_error_ms:+.1f}ms exceeds ±{ARRIVAL_TOLERANCE_MS:.0f}ms "
+                       f"(expected={expected_delay_ms:.1f}ms, corr_SNR={corr_snr_db:.1f}dB)")
+            return None
+        
+        # BPM-specific: Require higher SNR due to shorter template (more false positives)
+        if station_name == 'BPM':
+            MIN_BPM_SNR_DB = 12.0
+            if tone_snr_db < MIN_BPM_SNR_DB:
+                logger.info(f"{station_name} @ {tone_freq_hz}Hz: REJECTED - SNR={tone_snr_db:.1f}dB "
+                           f"< {MIN_BPM_SNR_DB}dB minimum for BPM")
+                return None
+        
         logger.info(f"{station_name} @ {tone_freq_hz}Hz: DETECTED arrival={raw_arrival_ms:.2f}ms "
                    f"(expected={expected_delay_ms:.1f}ms), error={timing_error_ms:+.2f}ms, "
                    f"corr_SNR={corr_snr_db:.1f}dB")
@@ -575,7 +593,7 @@ class MetrologyEngine:
         return {
             'station': station_name,
             'frequency_hz': tone_freq_hz,
-            'arrival_ms': raw_arrival_ms,  # Arrival relative to minute boundary (RTP)
+            'arrival_ms': raw_arrival_ms,  # Arrival relative to minute boundary
             'expected_delay_ms': expected_delay_ms,
             'timing_error_ms': timing_error_ms,
             'snr_db': tone_snr_db,
@@ -663,7 +681,9 @@ class MetrologyEngine:
             channel_upper = self.channel_name.upper()
             
             if 'CHU' in channel_upper:
-                measurements_to_make = [('CHU', 1000, 0.5)]
+                # CHU transmits a 500ms 1000Hz tone at second 0 (minute marker)
+                # Regular seconds have 300ms tones. Expected arrival = propagation_delay only.
+                measurements_to_make = [('CHU', 1000, 0.5)]  # 500ms minute marker at second 0
             elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
                 measurements_to_make = [('WWV', 1000, 0.8)]
             else:
@@ -675,12 +695,21 @@ class MetrologyEngine:
                 ]
             
             rtp_measurements = []
-            for station_name, tone_freq, tone_duration in measurements_to_make:
-                expected_delay = expected_delays_by_station.get(station_name, 20.0)
+            for measurement in measurements_to_make:
+                # Unpack with optional tx_offset_ms (default 0 for WWV/WWVH at second 0)
+                if len(measurement) == 4:
+                    station_name, tone_freq, tone_duration, tx_offset_ms = measurement
+                else:
+                    station_name, tone_freq, tone_duration = measurement
+                    tx_offset_ms = 0
+                
+                # Expected arrival = tx_offset + propagation_delay
+                prop_delay = expected_delays_by_station.get(station_name, 20.0)
+                expected_arrival_ms = tx_offset_ms + prop_delay
                 
                 result = self._measure_tone_at_known_time(
                     audio_signal=audio_signal,
-                    expected_delay_ms=expected_delay,
+                    expected_delay_ms=expected_arrival_ms,
                     tone_freq_hz=tone_freq,
                     tone_duration_sec=tone_duration,
                     station_name=station_name
@@ -840,7 +869,8 @@ class MetrologyEngine:
                     
                     # Validate: reject if timing offset is too large
                     # Large offset suggests wrong station or severe multipath
-                    max_timing_error_ms = 50.0  # Allow up to 50ms timing offset
+                    # Note: ~70ms systematic offset exists due to GPS_TIME/RTP_TIMESNAP latency
+                    max_timing_error_ms = 100.0  # Allow up to 100ms timing offset
                     is_valid = abs(timing_error_ms) < max_timing_error_ms
                     
                     if is_valid:

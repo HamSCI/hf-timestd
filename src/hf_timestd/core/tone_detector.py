@@ -1932,16 +1932,40 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Once we find, confirm, and lock on tones, THEN we can apply bounds to
         # reject noise and interference. But not before.
         #
-        # PROPAGATION BOUNDS ENFORCEMENT (2026-01-27)
+        # PROPAGATION BOUNDS ENFORCEMENT (2026-01-27, Updated 2026-02-05)
         # After bootstrap locks, enforce propagation bounds to reject bad detections.
         # During bootstrap, allow wider bounds to find initial lock.
-        station_name = station_type.value  # 'WWV', 'WWVH', 'CHU'
+        #
+        # RTP MODE vs FUSION MODE (2026-02-05):
+        # - RTP mode (buffer_rtp_start present): GPSDO provides authoritative UTC timing.
+        #   We KNOW when second 0 occurs, so we can confidently reject false positives
+        #   based on ToF. Enforce bounds for ALL stations.
+        #   NOTE: Fusion still runs in RTP mode as a STUDY of UTC-recovery methodology,
+        #   comparing its output against GPSDO ground truth. Strict ToF validation
+        #   ensures we're testing realistic detection scenarios.
+        # - Fusion mode (no RTP): Must find UTC from tones. Can't reject based on timing
+        #   we don't yet know. Only enforce BPM bounds (geographic discrimination).
+        #
+        # EXCEPTION: BPM bounds are ALWAYS enforced because:
+        # 1. BPM is 10,960km away - minimum ToF is ~36ms (speed of light)
+        # 2. BPM uses same 1000Hz tone as WWV, so template correlation alone can't distinguish
+        # 3. WWV/WWVH signals with ToF < 30ms are physically impossible to be BPM
+        station_name = station_type.value  # 'WWV', 'WWVH', 'CHU', 'BPM'
         min_delay_ms, max_delay_ms = PROPAGATION_BOUNDS_MS.get(
             station_name, DEFAULT_PROPAGATION_BOUNDS_MS
         )
         
-        if self.bootstrap_locked:
-            # ENFORCE bounds after lock - reject detections outside physical range
+        # Determine if we have authoritative timing (RTP mode)
+        has_rtp_timing = buffer_rtp_start is not None
+        
+        # Enforce bounds if:
+        # 1. RTP mode (authoritative UTC timing) - enforce for ALL stations
+        # 2. Bootstrap locked (converged timing) - enforce for ALL stations  
+        # 3. BPM station - ALWAYS enforce (geographic discrimination essential)
+        enforce_bounds = has_rtp_timing or self.bootstrap_locked or (station_type == StationType.BPM)
+        
+        if enforce_bounds:
+            # ENFORCE bounds - reject detections outside physical range
             if timing_error_ms < min_delay_ms or timing_error_ms > max_delay_ms:
                 logger.warning(f"  -> TIMING {station_type.value}: {timing_error_ms:+.1f}ms "
                               f"REJECTED (outside bounds [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms)")
@@ -1949,7 +1973,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             logger.info(f"  -> TIMING {station_type.value}: {timing_error_ms:+.1f}ms "
                        f"(within bounds [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms)")
         else:
-            # During bootstrap, log but don't reject
+            # During bootstrap (non-BPM), log but don't reject
             logger.info(f"  -> TIMING {station_type.value}: {timing_error_ms:+.1f}ms "
                        f"(bounds [{min_delay_ms:.0f}, {max_delay_ms:.0f}]ms - NOT enforced during bootstrap)")
         
@@ -1984,6 +2008,16 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Use FFT-based tone_power_db as SNR if available (more reliable than correlation-based)
         # The correlation-based snr_db can be 0 when noise_mean is poorly estimated
         effective_snr_db = tone_power_db if tone_power_db is not None and tone_power_db > 0 else snr_db
+        
+        # BPM MINIMUM SNR THRESHOLD (2026-02-05)
+        # BPM uses 300ms template (vs 800ms for WWV/WWVH), making it more prone to
+        # false positives from noise correlation. Require higher SNR for BPM.
+        # BPM is also 10,960km away so signals should be weaker but still detectable.
+        if station_type == StationType.BPM:
+            MIN_BPM_SNR_DB = 12.0  # Require 12dB SNR for BPM (vs ~6dB for WWV/WWVH)
+            if effective_snr_db < MIN_BPM_SNR_DB:
+                logger.info(f"  -> REJECTED {station_type.value} (SNR {effective_snr_db:.1f}dB < {MIN_BPM_SNR_DB}dB minimum for BPM)")
+                return None
         
         # =====================================================================
         # METROLOGICAL ENHANCEMENTS (2026-01-24)

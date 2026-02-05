@@ -107,6 +107,10 @@ This correction removes the systematic bias from using modeled TEC instead of me
 - Storm-time TEC enhancement detection
 - Real-time ionospheric correction for timing
 
+<!-- LIVE: tec-summary -->
+
+<!-- LIVE: ionospheric-conditions -->
+
 ### 3.2 Propagation Mode Identification ✅
 
 **Status:** Implemented (Enhanced in v6.2)
@@ -227,6 +231,8 @@ This enables:
 - MUF (Maximum Usable Frequency) estimation
 - Propagation prediction validation
 - Ionospheric research (mode transitions indicate layer changes)
+
+<!-- LIVE: propagation-paths -->
 
 ### 3.3 Ionospheric Layer Heights (hmF2, hmE) ✅
 
@@ -369,6 +375,8 @@ if is_multipath and delay_spread_ms > 0:
 - Mode mixing detection
 - Propagation quality assessment
 - **Rigorous uncertainty propagation** for timing measurements
+
+<!-- LIVE: scintillation-status -->
 
 ### 3.6 D-Layer Absorption ✅
 

@@ -3,43 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Solar-Ionosphere Correlation - HF TimeStd</title>
-    <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+    <title>Solar Correlation - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0a0e27;
-            color: #e0e0e0;
-            padding: 20px;
-        }
-
-        .header {
-            background: linear-gradient(135deg, #1a1f3a 0%, #2d3561 100%);
-            padding: 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-        }
-
-        h1 {
-            font-size: 28px;
-            margin-bottom: 10px;
-            color: #4fc3f7;
-        }
-
-        .subtitle {
-            color: #9e9e9e;
-            font-size: 14px;
-        }
-
-        .controls {
-            background: #1a1f3a;
+        /* Page-specific styles */
+        .solar-controls {
+            background: var(--bg-surface);
             padding: 15px;
             border-radius: 8px;
             margin-bottom: 20px;
@@ -47,6 +17,7 @@
             gap: 15px;
             flex-wrap: wrap;
             align-items: center;
+            border: 1px solid var(--border-color);
         }
 
         .control-group {
@@ -57,22 +28,22 @@
 
         .control-group label {
             font-size: 12px;
-            color: #9e9e9e;
+            color: var(--text-secondary);
             text-transform: uppercase;
         }
 
-        select, input {
-            background: #0a0e27;
-            color: #e0e0e0;
-            border: 1px solid #3d4466;
+        .solar-controls select, .solar-controls input {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
             padding: 8px 12px;
             border-radius: 5px;
             font-size: 14px;
         }
 
-        button {
-            background: #4fc3f7;
-            color: #0a0e27;
+        .solar-controls button {
+            background: #3b82f6;
+            color: white;
             border: none;
             padding: 10px 20px;
             border-radius: 5px;
@@ -81,8 +52,8 @@
             transition: background 0.3s;
         }
 
-        button:hover {
-            background: #29b6f6;
+        .solar-controls button:hover {
+            background: #2563eb;
         }
 
         .alert-banner {
@@ -96,52 +67,41 @@
             gap: 10px;
         }
 
-        .alert-banner.warning {
-            background: #f57c00;
-        }
+        .alert-banner.warning { background: #f57c00; }
+        .alert-banner.info { background: #1976d2; }
+        .alert-banner.show { display: flex; }
+        .alert-icon { font-size: 20px; }
 
-        .alert-banner.info {
-            background: #1976d2;
-        }
-
-        .alert-banner.show {
-            display: flex;
-        }
-
-        .alert-icon {
-            font-size: 20px;
-        }
-
-        .dashboard {
+        .solar-dashboard {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
             margin-bottom: 20px;
         }
 
-        .card {
-            background: #1a1f3a;
+        .solar-card {
+            background: var(--bg-surface);
             border-radius: 8px;
             padding: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            border: 1px solid var(--border-color);
         }
 
-        .card-title {
-            font-size: 14px;
-            color: #9e9e9e;
+        .solar-card .card-title {
+            font-size: 12px;
+            color: var(--text-secondary);
             text-transform: uppercase;
             margin-bottom: 10px;
         }
 
-        .card-value {
-            font-size: 32px;
+        .solar-card .card-value {
+            font-size: 28px;
             font-weight: 700;
-            color: #4fc3f7;
+            color: #3b82f6;
         }
 
-        .card-subtitle {
+        .solar-card .card-subtitle {
             font-size: 12px;
-            color: #757575;
+            color: var(--text-secondary);
             margin-top: 5px;
         }
 
@@ -257,17 +217,33 @@
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>☀️ Solar-Ionosphere Correlation Analysis</h1>
-        <div class="subtitle">Real-time correlation between space weather and HF propagation</div>
-    </div>
+    <div class="container">
+        <div class="header">
+            <h1>☀️ Solar-Ionosphere Correlation</h1>
+            <div class="header-subtitle">Real-time correlation between space weather and HF propagation</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">⏱️ Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link">Validation</a>
+                <a href="/static/stability.html" class="nav-link">Stability</a>
+                <span class="nav-divider"></span>
+                <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
+                <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/solar-correlation.html" class="nav-link active">☀️ Solar</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link">📚 Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
+            </nav>
+        </div>
 
     <div id="alertBanner" class="alert-banner">
         <span class="alert-icon">⚠️</span>
         <span id="alertMessage"></span>
     </div>
 
-    <div class="controls">
+    <div class="solar-controls">
         <div class="control-group">
             <label>Station</label>
             <select id="stationSelect">
@@ -302,23 +278,23 @@
         <button onclick="toggleAutoRefresh()">⏱️ Auto-Refresh: <span id="autoRefreshStatus">OFF</span></button>
     </div>
 
-    <div class="dashboard">
-        <div class="card">
+    <div class="solar-dashboard">
+        <div class="solar-card">
             <div class="card-title">Current X-ray Flux</div>
             <div class="card-value" id="xrayValue">--</div>
             <div class="card-subtitle" id="xrayTime">Loading...</div>
         </div>
-        <div class="card">
+        <div class="solar-card">
             <div class="card-title">Kp Index</div>
             <div class="card-value" id="kpValue">--</div>
             <div class="card-subtitle" id="kpTime">Loading...</div>
         </div>
-        <div class="card">
+        <div class="solar-card">
             <div class="card-title">Proton Flux</div>
             <div class="card-value" id="protonValue">--</div>
             <div class="card-subtitle">≥10 MeV</div>
         </div>
-        <div class="card">
+        <div class="solar-card">
             <div class="card-title">Active Alerts</div>
             <div class="card-value" id="alertCount">0</div>
             <div class="card-subtitle" id="alertType">No alerts</div>
@@ -706,5 +682,6 @@
         // Initial load
         refreshData();
     </script>
+    </div>
 </body>
 </html>

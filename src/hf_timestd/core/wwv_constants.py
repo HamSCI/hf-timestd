@@ -439,7 +439,8 @@ PROPAGATION_BOUNDS_MS_BOOTSTRAP = {
     'WWV': (-10.0, 80.0),    # Fort Collins: 500-3000km → 3-25ms + margin + investigation
     'WWVH': (0.0, 100.0),    # Hawaii: 4000-6000km → 15-50ms + margin + investigation
     'CHU': (-10.0, 80.0),    # Ottawa: 1000-4000km → 5-30ms + margin + investigation
-    'BPM': (10.0, 150.0),    # China: 10000-12000km → 40-100ms multi-hop + investigation
+    'BPM': (30.0, 150.0),    # China: 10960km → 36ms light + iono = 40-100ms multi-hop
+                             # FIXED 2026-02-05: Was (10.0, 150.0) which accepted WWV/WWVH signals
 }
 
 # Legacy alias for backwards compatibility (uses bootstrap bounds)

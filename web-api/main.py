@@ -22,7 +22,7 @@ try:
 except ImportError:
     SYSTEMD_AVAILABLE = False
 
-from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router
+from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router, tec_router, tid_router
 from routers.timing_validation import router as timing_validation_router
 from config import config
 
@@ -62,6 +62,8 @@ app.include_router(logs_router, prefix="/api")
 app.include_router(space_weather_router, prefix="/api")
 app.include_router(correlations_router, prefix="/api")
 app.include_router(physics_router, prefix="/api")
+app.include_router(tec_router, prefix="/api")
+app.include_router(tid_router, prefix="/api")
 app.include_router(docs_router)  # No prefix - router has its own /api/docs prefix
 app.include_router(timing_validation_router)  # No prefix - router has its own /api/timing-validation prefix
 

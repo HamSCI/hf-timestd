@@ -5,51 +5,26 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Station Dashboard - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
-        :root {
-            --bg-color: #0f172a;
-            --card-bg: #1e293b;
-            --text-primary: #f8fafc;
-            --text-secondary: #94a3b8;
-            --accent: #3b82f6;
-            --success: #22c55e;
-            --warning: #f59e0b;
-            --danger: #ef4444;
-            --border: #334155;
-        }
-
-        body {
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-primary);
-            margin: 0;
-            padding: 0;
-            line-height: 1.5;
-        }
-
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 2rem;
-        }
-
-        header {
+        /* Page-specific styles */
+        .station-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 2rem;
-            border-bottom: 1px solid var(--border);
+            margin-bottom: 1.5rem;
             padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
         }
 
-        .header-left h1 {
+        .station-header h2 {
             margin: 0;
-            font-size: 2rem;
+            font-size: 1.5rem;
             color: var(--text-primary);
         }
 
-        .header-meta {
+        .station-meta {
             color: var(--text-secondary);
             display: flex;
             gap: 1.5rem;
@@ -57,32 +32,14 @@
             font-size: 0.9rem;
         }
 
-        .nav-links a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            margin-left: 1rem;
-            transition: color 0.2s;
-        }
-
-        .nav-links a:hover {
-            color: var(--accent);
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 1.5rem;
-            margin-bottom: 2rem;
-        }
-
-        .card {
-            background-color: var(--card-bg);
+        .station-card {
+            background-color: var(--bg-surface);
             border-radius: 0.5rem;
             padding: 1.5rem;
-            border: 1px solid var(--border);
+            border: 1px solid var(--border-color);
         }
 
-        .card h3 {
+        .station-card h3 {
             margin: 0 0 1rem 0;
             color: var(--text-secondary);
             font-size: 0.875rem;
@@ -90,19 +47,19 @@
             letter-spacing: 0.05em;
         }
 
-        .metric-value {
+        .station-metric-value {
             font-size: 2rem;
             font-weight: 600;
             color: var(--text-primary);
         }
 
-        .metric-unit {
+        .station-metric-unit {
             font-size: 1rem;
             color: var(--text-secondary);
             margin-left: 0.25rem;
         }
 
-        .metric-sub {
+        .station-metric-sub {
             font-size: 0.875rem;
             color: var(--text-secondary);
             margin-top: 0.5rem;
@@ -136,17 +93,11 @@
 
         .status-active {
             background: rgba(34, 197, 94, 0.2);
-            color: var(--success);
+            color: #22c55e;
         }
 
         .status-inactive {
             background: rgba(148, 163, 184, 0.2);
-            color: var(--text-secondary);
-        }
-
-        .loading {
-            text-align: center;
-            padding: 4rem;
             color: var(--text-secondary);
         }
     </style>
@@ -154,67 +105,82 @@
 
 <body>
     <div class="container">
-        <header>
-            <div class="header-left">
+        <div class="header">
+            <h1>📡 Station Dashboard</h1>
+            <div class="header-subtitle">Per-station detailed analysis</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">⏱️ Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link">Validation</a>
+                <a href="/static/stability.html" class="nav-link">Stability</a>
+                <span class="nav-divider"></span>
+                <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
+                <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/solar-correlation.html" class="nav-link">☀️ Solar</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link">📚 Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
+            </nav>
+        </div>
+
+        <div class="station-header">
+            <div>
                 <div style="display: flex; align-items: center; gap: 1rem;">
-                    <h1 id="station-name">Loading...</h1>
+                    <h2 id="station-name">Loading...</h2>
                     <span id="activity-badge" class="status-badge status-inactive">No Signal</span>
                 </div>
-                <div class="header-meta">
+                <div class="station-meta">
                     <span id="station-location"></span>
                     <span id="station-coords"></span>
                     <span id="station-freqs"></span>
                 </div>
             </div>
-            <nav class="nav-links">
-                <a href="/">Dashboard</a>
-                <a href="/static/logs.html">Logs</a>
-                <a href="/api/docs">API</a>
-            </nav>
-        </header>
+        </div>
 
         <!-- Key Metrics -->
-        <div class="grid">
-            <div class="card">
+        <div class="grid grid-4">
+            <div class="station-card">
                 <h3>Current Mode</h3>
-                <div id="mode-val" class="metric-value">--</div>
-                <div id="mode-sub" class="metric-sub">Propagation path</div>
+                <div id="mode-val" class="station-metric-value">--</div>
+                <div id="mode-sub" class="station-metric-sub">Propagation path</div>
             </div>
-            <div class="card">
+            <div class="station-card">
                 <h3>Signal Strength (SNR)</h3>
-                <div class="metric-value"><span id="snr-val">--</span><span class="metric-unit">dB</span></div>
-                <div id="snr-sub" class="metric-sub">Average across -- frequencies</div>
+                <div class="station-metric-value"><span id="snr-val">--</span><span class="station-metric-unit">dB</span></div>
+                <div id="snr-sub" class="station-metric-sub">Average across -- frequencies</div>
             </div>
-            <div class="card">
+            <div class="station-card">
                 <h3>Clock Offset</h3>
-                <div class="metric-value"><span id="offset-val">--</span><span class="metric-unit">ms</span></div>
-                <div class="metric-sub">±<span id="uncertainty-val">--</span> ms uncertainty</div>
+                <div class="station-metric-value"><span id="offset-val">--</span><span class="station-metric-unit">ms</span></div>
+                <div class="station-metric-sub">±<span id="uncertainty-val">--</span> ms uncertainty</div>
             </div>
-            <div class="card">
+            <div class="station-card">
                 <h3>Ionosphere (TEC)</h3>
-                <div class="metric-value"><span id="tec-val">--</span><span class="metric-unit">TECU</span></div>
-                <div id="tec-sub" class="metric-sub">Path Total Electron Content</div>
+                <div class="station-metric-value"><span id="tec-val">--</span><span class="station-metric-unit">TECU</span></div>
+                <div id="tec-sub" class="station-metric-sub">Path Total Electron Content</div>
             </div>
         </div>
 
         <!-- Charts -->
         <div class="chart-row">
-            <div class="card">
+            <div class="station-card">
                 <h3>Signal Strength History (24h)</h3>
                 <div id="snr-chart" class="chart-container"></div>
             </div>
-            <div class="card">
+            <div class="station-card">
                 <h3>Propagation Modes</h3>
                 <div id="mode-chart" class="chart-container"></div>
             </div>
         </div>
 
         <div class="chart-row">
-            <div class="card">
+            <div class="station-card">
                 <h3>Total Electron Content (TEC)</h3>
                 <div id="tec-chart" class="chart-container"></div>
             </div>
-            <div class="card">
+            <div class="station-card">
                 <h3>Timing Stability</h3>
                 <div id="timing-chart" class="chart-container"></div>
             </div>
