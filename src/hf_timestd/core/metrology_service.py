@@ -16,10 +16,20 @@ import time
 import json
 import signal
 import sys
+import threading
+import queue
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, Tuple
 import numpy as np
+
+# inotify for file watching
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler, FileCreatedEvent
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
 
 # Imports
 from hf_timestd.core.metrology_engine import MetrologyEngine
@@ -34,6 +44,29 @@ except ImportError:
     TieredStorageManager = None
 
 logger = logging.getLogger(__name__)
+
+
+class MinuteFileHandler(FileSystemEventHandler):
+    """Watchdog handler that detects new minute files (.json sidecars)."""
+    
+    def __init__(self, channel_name: str, file_queue: queue.Queue):
+        super().__init__()
+        self.channel_name = channel_name
+        self.file_queue = file_queue
+    
+    def on_created(self, event):
+        """Called when a file is created."""
+        if event.is_directory:
+            return
+        
+        path = Path(event.src_path)
+        # We watch for .json files as they're written after .bin.zst
+        # This ensures the binary file is complete
+        if path.suffix == '.json' and path.stem.isdigit():
+            minute_boundary = int(path.stem)
+            logger.debug(f"{self.channel_name}: Detected new minute file: {minute_boundary}")
+            self.file_queue.put((minute_boundary, path.parent))
+
 
 class MetrologyService:
     """
@@ -122,11 +155,29 @@ class MetrologyService:
         # Tiered Storage (Hot/Cold buffer)
         self._tiered_manager = None
         if TieredStorageManager:
-            # Assume raw_buffer root from archive_dir parent logic or config
-            # archive_dir is typically .../raw_buffer/CHANNEL
-            raw_root = self.archive_dir.parent
-            self._tiered_manager = TieredStorageManager(raw_root)
-            logger.info("Tiered storage manager initialized")
+            # Import config class
+            from hf_timestd.core.tiered_storage import TieredStorageConfig
+            # archive_dir is typically /dev/shm/timestd/raw_buffer/CHANNEL
+            # We need hot_buffer_root = /dev/shm/timestd and cold_buffer_root = /var/lib/timestd
+            hot_root = self.archive_dir.parent.parent  # /dev/shm/timestd
+            cold_root = Path('/var/lib/timestd')
+            tiered_config = TieredStorageConfig(
+                hot_buffer_root=hot_root,
+                cold_buffer_root=cold_root,
+                auto_configure=False,
+                hot_minutes=5
+            )
+            self._tiered_manager = TieredStorageManager(tiered_config)
+            logger.info(f"Tiered storage manager initialized: hot={hot_root}, cold={cold_root}")
+        
+        # File watcher (inotify-based) for immediate processing
+        self._file_queue = queue.Queue()
+        self._observer = None
+        self._use_file_watcher = WATCHDOG_AVAILABLE
+        if self._use_file_watcher:
+            self._setup_file_watcher()
+        else:
+            logger.warning("watchdog not available, falling back to polling mode")
         
         # CHU FSK Writer (for CHU channels only)
         self.fsk_writer = None
@@ -170,8 +221,38 @@ class MetrologyService:
              
         logger.info(f"MetrologyService initialized for {channel_name}")
 
+    def _setup_file_watcher(self):
+        """Set up inotify-based file watcher for immediate processing."""
+        if not WATCHDOG_AVAILABLE:
+            return
+        
+        # Watch today's date directory specifically (more reliable than recursive)
+        today = datetime.now(timezone.utc).strftime('%Y%m%d')
+        watch_dir = self.archive_dir / today
+        
+        # Ensure directory exists
+        watch_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create observer and handler
+        self._observer = Observer()
+        self._file_handler = MinuteFileHandler(self.channel_name, self._file_queue)
+        self._current_watch_date = today
+        
+        # Watch the specific date directory (non-recursive is more reliable on tmpfs)
+        self._observer.schedule(self._file_handler, str(watch_dir), recursive=False)
+        self._observer.start()
+        logger.info(f"File watcher started on {watch_dir}")
+    
+    def _stop_file_watcher(self):
+        """Stop the file watcher."""
+        if self._observer:
+            self._observer.stop()
+            self._observer.join(timeout=5.0)
+            self._observer = None
+            logger.info("File watcher stopped")
+
     def run(self):
-        """Main service loop."""
+        """Main service loop with inotify-based file watching."""
         self.running = True
         logger.info("Starting MetrologyService loop")
         
@@ -180,37 +261,120 @@ class MetrologyService:
         signal.signal(signal.SIGTERM, self._handle_signal)
         
         try:
-            logger.info("Entering main loop")
-            while self.running:
-                # 1. Determine next minute to process
-                target_minute = self._get_latest_minute()
-                logger.info(f"Target minute: {target_minute}")
-                
-                # 2. Process
-                if target_minute not in self.processed_minutes:
-                    logger.info(f"Processing minute {target_minute}")
-                    success = self.process_minute(target_minute)
-                    if success:
-                        self.processed_minutes.add(target_minute)
-                        self._cleanup_processed_set()
-                        logger.info(f"Minute {target_minute} processed successfully")
-                    else:
-                        logger.debug(f"Minute {target_minute} not ready yet")
-                
-                # Wait until next minute boundary (with 5s margin)
-                # This prevents aggressive polling that hammers CPU
-                now = time.time()
-                seconds_into_minute = now % 60
-                wait_time = max(5.0, 65.0 - seconds_into_minute)  # Wait until ~5s into next minute
-                logger.debug(f"Waiting {wait_time:.1f}s for next minute")
-                time.sleep(wait_time)
-                    
-                # 3. Validation / Health Check (Periodically?)
+            if self._use_file_watcher:
+                logger.info("Entering main loop (inotify mode)")
+                self._run_inotify_mode()
+            else:
+                logger.info("Entering main loop (polling mode)")
+                self._run_polling_mode()
                 
         except Exception as e:
             logger.error(f"MetrologyService crashed: {e}", exc_info=True)
         finally:
             self.stop()
+    
+    def _run_inotify_mode(self):
+        """Run using inotify-based file watching with polling fallback."""
+        # First, catch up on any missed minutes (files already in directory)
+        self._process_backlog()
+        
+        last_poll_time = time.time()
+        poll_interval = 5.0  # Poll every 5 seconds as fallback
+        
+        while self.running:
+            try:
+                # Wait for new file notification (with short timeout)
+                minute_boundary, file_dir = self._file_queue.get(timeout=2.0)
+                
+                # Small delay to ensure file is fully written
+                time.sleep(0.5)
+                
+                if minute_boundary not in self.processed_minutes:
+                    logger.info(f"Processing minute {minute_boundary} (inotify triggered)")
+                    success = self.process_minute(minute_boundary)
+                    if success:
+                        self.processed_minutes.add(minute_boundary)
+                        self._cleanup_processed_set()
+                        logger.info(f"Minute {minute_boundary} processed successfully")
+                    else:
+                        logger.warning(f"Failed to process minute {minute_boundary}")
+                        
+            except queue.Empty:
+                # Fallback: poll for new files periodically (inotify may miss events on tmpfs)
+                now = time.time()
+                if now - last_poll_time >= poll_interval:
+                    last_poll_time = now
+                    self._poll_for_new_files()
+    
+    def _run_polling_mode(self):
+        """Fallback polling mode when watchdog is not available."""
+        while self.running:
+            # Determine next minute to process
+            target_minute = self._get_latest_minute()
+            logger.info(f"Target minute: {target_minute}")
+            
+            # Process
+            if target_minute not in self.processed_minutes:
+                logger.info(f"Processing minute {target_minute}")
+                success = self.process_minute(target_minute)
+                if success:
+                    self.processed_minutes.add(target_minute)
+                    self._cleanup_processed_set()
+                    logger.info(f"Minute {target_minute} processed successfully")
+                else:
+                    logger.debug(f"Minute {target_minute} not ready yet")
+            
+            # Wait until next minute boundary (with 5s margin)
+            now = time.time()
+            seconds_into_minute = now % 60
+            wait_time = max(5.0, 65.0 - seconds_into_minute)
+            logger.debug(f"Waiting {wait_time:.1f}s for next minute")
+            time.sleep(wait_time)
+    
+    def _poll_for_new_files(self):
+        """Poll for new files (fallback when inotify misses events)."""
+        # Check the last few minutes for any unprocessed files
+        now = time.time()
+        current_minute = (int(now) // 60) * 60
+        
+        # Check last 3 minutes (files are written at end of minute)
+        for minutes_ago in range(3, 0, -1):
+            target_minute = current_minute - (minutes_ago * 60)
+            if target_minute in self.processed_minutes:
+                continue
+            
+            # Check if file exists
+            data = self._read_binary_minute(target_minute)
+            if data is not None:
+                logger.info(f"Processing minute {target_minute} (poll detected)")
+                success = self.process_minute(target_minute)
+                if success:
+                    self.processed_minutes.add(target_minute)
+                    self._cleanup_processed_set()
+                    logger.info(f"Minute {target_minute} processed successfully")
+    
+    def _process_backlog(self):
+        """Process any files that exist but haven't been processed yet."""
+        logger.info("Checking for backlog files...")
+        
+        # Look for existing files in the archive directory
+        now = time.time()
+        current_minute = (int(now) // 60) * 60
+        
+        # Check last 10 minutes for unprocessed files
+        for minutes_ago in range(10, 0, -1):
+            target_minute = current_minute - (minutes_ago * 60)
+            if target_minute in self.processed_minutes:
+                continue
+            
+            # Check if file exists
+            data = self._read_binary_minute(target_minute)
+            if data is not None:
+                logger.info(f"Processing backlog minute {target_minute}")
+                success = self.process_minute(target_minute)
+                if success:
+                    self.processed_minutes.add(target_minute)
+                    logger.info(f"Backlog minute {target_minute} processed successfully")
 
     def process_minute(self, minute_boundary: int) -> bool:
         """Process a single minute."""
@@ -298,6 +462,7 @@ class MetrologyService:
         """Stop service."""
         logger.info("Stopping MetrologyService...")
         self.running = False
+        self._stop_file_watcher()
         if self.writer:
             self.writer.close()
         if self.fsk_writer:
@@ -400,10 +565,17 @@ class MetrologyService:
         self.stop()
 
     def _get_latest_minute(self) -> int:
-        """Get latest complete minute (wall clock - 2 min)."""
+        """Get latest complete minute (wall clock - 3 min).
+        
+        Files are written at the END of each minute by the core recorder,
+        then may be moved to cold storage. A 3-minute delay ensures:
+        - The minute has fully elapsed
+        - The file has been written (~1 min after minute start)
+        - Any tiered storage archiving has completed
+        """
         now = time.time()
-        # 2 minute delay for safety/completion
-        return ((int(now) // 60) - 2) * 60
+        # 3 minute delay for safety/completion
+        return ((int(now) // 60) - 3) * 60
 
     def _read_binary_minute(self, target_minute: int) -> Optional[Tuple[np.ndarray, float, int]]:
         """Read binary IQ data (Tiered Storage aware)."""

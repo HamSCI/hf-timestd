@@ -450,20 +450,32 @@ class StreamRecorderV2:
 
     def _timing_poll_loop(self):
         """
-        Capture GPS_TIME/RTP_TIMESNAP pairs from channel_info.
+        Capture GPS_TIME/RTP_TIMESNAP pairs by re-discovering channel status.
+        
+        IMPORTANT: ChannelInfo from ka9q-python is a SNAPSHOT from discovery time.
+        The gps_time/rtp_timesnap values do NOT update dynamically. We must
+        re-discover the channel to get fresh timing values from radiod status.
         
         Metrological justification:
         - With GPSDO, the RTP-to-UTC relationship is stable (sub-ppm drift)
-        - channel_info.gps_time/rtp_timesnap are set at channel creation
         - We capture periodically to document the relationship
-        - Any clock steps/slew would require channel recreation anyway
+        - Fresh discovery ensures we get current GPS_TIME/RTP_TIMESNAP
         
         In L4/L5 (GPS+PPS): The relationship is stable to ±1μs
         In L3/L2/L1 (NTP): Captures the NTP-derived relationship
         
         Storage overhead: ~120 snapshots/minute × ~50 bytes = ~6 KB/minute (negligible)
         """
+        from ka9q import discover_channels
+        
         last_captured_rtp = None
+        status_address = getattr(self._control, 'status_address', None) if self._control else None
+        
+        if not status_address:
+            logger.warning(f"{self.config.description}: No status_address for timing poll")
+            return
+        
+        logger.info(f"{self.config.description}: Timing poll using status_address={status_address}")
         
         while self._running:
             try:
@@ -472,12 +484,35 @@ class StreamRecorderV2:
                 if not self._running:
                     break
                 
-                # Use channel_info which has gps_time and rtp_timesnap
                 if self.channel_info is None:
                     continue
                 
-                gps_time = getattr(self.channel_info, 'gps_time', None)
-                rtp_timesnap = getattr(self.channel_info, 'rtp_timesnap', None)
+                # Re-discover to get fresh gps_time/rtp_timesnap from radiod status
+                # This is necessary because ChannelInfo is a snapshot, not live
+                try:
+                    channels = discover_channels(status_address, listen_duration=0.5)
+                    
+                    # Find our channel by SSRC
+                    our_ssrc = self.channel_info.ssrc
+                    fresh_info = channels.get(our_ssrc)
+                    
+                    if fresh_info is None:
+                        # Try finding by SSRC as string key
+                        for ssrc, info in channels.items():
+                            if ssrc == our_ssrc:
+                                fresh_info = info
+                                break
+                    
+                    if fresh_info is None:
+                        logger.debug(f"{self.config.description}: Channel SSRC {our_ssrc} not found in discovery")
+                        continue
+                    
+                    gps_time = fresh_info.gps_time
+                    rtp_timesnap = fresh_info.rtp_timesnap
+                    
+                except Exception as e:
+                    logger.debug(f"{self.config.description}: Discovery failed: {e}")
+                    continue
                 
                 if gps_time is not None and rtp_timesnap is not None:
                     # Only store if rtp_timesnap changed (new status received)
@@ -488,10 +523,12 @@ class StreamRecorderV2:
                         )
                         if stored:
                             last_captured_rtp = rtp_timesnap
-                            logger.debug(
-                                f"{self.config.description}: Timing snapshot - "
+                            logger.info(
+                                f"{self.config.description}: Timing snapshot captured - "
                                 f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_timesnap}"
                             )
+                else:
+                    logger.debug(f"{self.config.description}: No timing data - gps_time={gps_time}, rtp_timesnap={rtp_timesnap}")
                     
             except Exception as e:
                 logger.error(f"{self.config.description}: Timing poll loop error: {e}")

@@ -213,9 +213,10 @@ class BinaryArchiveWriter:
             
             # Store GPS_TIME/RTP_TIMESNAP directly - no offset calculation
             # This is the authoritative mapping: at RTP=rtp_timesnap, UTC=gps_unix_sec
+            # IMPORTANT: Update continuously to track drift, not just once at startup
+            self._gps_time_unix = gps_unix_sec
+            self._rtp_timesnap = rtp_timesnap
             if not self._timing_locked:
-                self._gps_time_unix = gps_unix_sec
-                self._rtp_timesnap = rtp_timesnap
                 self._timing_locked = True
                 logger.info(f"{self.config.channel_name}: RTP timing LOCKED - GPS_TIME={gps_unix_sec:.6f}, RTP_TIMESNAP={rtp_timesnap}")
             
@@ -554,9 +555,20 @@ class BinaryArchiveWriter:
     
     def _rtp_to_unix_time(self, rtp_timestamp: int) -> float:
         """
-        Convert RTP timestamp to Unix time using GPS_TIME/RTP_TIMESNAP mapping.
+        Convert RTP timestamp to Unix time using GPS_TIME as the authoritative reference.
+        
+        GPS_TIME is the SINGLE time reference from the frontend, shared by ALL channels.
+        All channels from the same frontend report identical GPS_TIME values (within
+        the 1-second snapshot update interval).
+        
+        RTP_TIMESNAP is channel-specific (each channel has its own RTP counter offset).
+        We use it only to compute the delta from the snapshot, not as an absolute reference.
         
         Formula: UTC = GPS_TIME + (rtp - RTP_TIMESNAP) / sample_rate
+        
+        The key insight: GPS_TIME is the common anchor. Different channels may have
+        different RTP_TIMESNAP values, but they all share the same GPS_TIME. This
+        ensures relative timing between channels is correct.
         """
         if self._gps_time_unix is None or self._rtp_timesnap is None:
             # Not initialized yet - return 0 (will use system_time fallback)
