@@ -2,17 +2,23 @@
 TEC (Total Electron Content) service for v6.5.0 data access.
 
 Provides access to HF-derived TEC estimates from the TimingConsistencyValidator
-and archived TEC data products.
+and archived TEC data products via HDF5.
 """
 
-import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import logging
-import h5py
 
 logger = logging.getLogger(__name__)
+
+# Import DataProductReader for HDF5 access
+try:
+    from hf_timestd.io.hdf5_reader import DataProductReader
+    HDF5_READER_AVAILABLE = True
+except ImportError:
+    HDF5_READER_AVAILABLE = False
+    logger.warning("DataProductReader not available, TEC service will have limited functionality")
 
 
 class TECService:
@@ -23,8 +29,7 @@ class TECService:
     ionospheric dispersion relation: Δτ = K·TEC·(1/f₁² - 1/f₂²)
     
     Data locations (v6.5.0):
-    - /var/lib/timestd/phase2/science/tec/ - Archived TEC estimates
-    - Real-time TEC from TimingConsistencyValidator callback
+    - /var/lib/timestd/phase2/science/tec/ - HDF5 TEC estimates (AGGREGATED_tec_YYYYMMDD.h5)
     """
     
     def __init__(self, data_root: Path):
@@ -36,39 +41,73 @@ class TECService:
         """
         self.data_root = Path(data_root)
         self.tec_dir = self.data_root / 'phase2' / 'science' / 'tec'
+        self._reader = None
+        
+    def _get_reader(self) -> Optional['DataProductReader']:
+        """Get or create the DataProductReader for TEC data."""
+        if not HDF5_READER_AVAILABLE:
+            return None
+        
+        if self._reader is None and self.tec_dir.exists():
+            try:
+                self._reader = DataProductReader(
+                    data_dir=self.tec_dir,
+                    product_level='L3',
+                    product_name='tec',
+                    channel='AGGREGATED'
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize TEC reader: {e}")
+                return None
+        return self._reader
         
     def get_current_tec(self) -> Optional[Dict[str, Any]]:
         """
         Get the most recent TEC estimates.
         
         Returns:
-            Dictionary with current TEC values per path, or None if no data
+            Dictionary with current TEC values per station, or None if no data
         """
         try:
-            # Find most recent TEC file
-            if not self.tec_dir.exists():
-                logger.warning(f"TEC directory does not exist: {self.tec_dir}")
+            reader = self._get_reader()
+            if not reader:
+                logger.warning("TEC reader not available")
                 return None
             
-            # TEC files are organized by date: YYYY-MM-DD/tec_HHMMSS.h5
-            today = datetime.utcnow().strftime('%Y-%m-%d')
-            today_dir = self.tec_dir / today
+            # Read last 5 minutes of data
+            now = datetime.now(timezone.utc)
+            start = now - timedelta(minutes=5)
             
-            if not today_dir.exists():
-                # Try yesterday
-                yesterday = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
-                today_dir = self.tec_dir / yesterday
-                
-            if not today_dir.exists():
+            measurements = reader.read_time_range(
+                start=start.isoformat().replace('+00:00', 'Z'),
+                end=now.isoformat().replace('+00:00', 'Z')
+            )
+            
+            if not measurements:
+                logger.debug("No recent TEC measurements found")
                 return None
             
-            # Find most recent file
-            tec_files = sorted(today_dir.glob('tec_*.h5'), reverse=True)
-            if not tec_files:
-                return None
+            # Get most recent measurement per station
+            latest_by_station = {}
+            for m in measurements:
+                station = m.get('station', 'UNKNOWN')
+                ts = m.get('unix_timestamp', 0)
+                if station not in latest_by_station or ts > latest_by_station[station]['unix_timestamp']:
+                    latest_by_station[station] = m
             
-            latest_file = tec_files[0]
-            return self._read_tec_file(latest_file)
+            return {
+                'timestamp': now.isoformat() + 'Z',
+                'stations': {
+                    station: {
+                        'tec_tecu': m.get('tec_tecu', 0),
+                        'confidence': m.get('confidence', 0),
+                        'mode': m.get('mode', 'UNKNOWN'),
+                        'unix_timestamp': m.get('unix_timestamp', 0)
+                    }
+                    for station, m in latest_by_station.items()
+                },
+                'n_stations': len(latest_by_station)
+            }
             
         except Exception as e:
             logger.error(f"Error getting current TEC: {e}")
@@ -84,17 +123,17 @@ class TECService:
         Get TEC history for a time range.
         
         Args:
-            start: Start time
-            end: End time
+            start: Start time (naive datetime assumed UTC)
+            end: End time (naive datetime assumed UTC)
             station: Optional station filter (e.g., 'WWV', 'CHU')
         
         Returns:
-            Dictionary with timestamps and TEC values per path
+            Dictionary with timestamps and TEC values per station
         """
         try:
             result = {
                 'timestamps': [],
-                'paths': {},  # path_name -> {'tec_tecu': [], 'uncertainty_tecu': []}
+                'stations': {},  # station -> {'tec_tecu': [], 'confidence': [], 'mode': []}
                 'n_points': 0,
                 'time_range': {
                     'start': start.isoformat() + 'Z',
@@ -102,31 +141,51 @@ class TECService:
                 }
             }
             
-            if not self.tec_dir.exists():
+            reader = self._get_reader()
+            if not reader:
                 return result
             
-            # Iterate through date directories
-            current_date = start.date()
-            end_date = end.date()
+            # Convert naive datetime to ISO format for reader
+            start_iso = start.isoformat() + 'Z' if start.tzinfo is None else start.isoformat().replace('+00:00', 'Z')
+            end_iso = end.isoformat() + 'Z' if end.tzinfo is None else end.isoformat().replace('+00:00', 'Z')
             
-            while current_date <= end_date:
-                date_str = current_date.strftime('%Y-%m-%d')
-                date_dir = self.tec_dir / date_str
-                
-                if date_dir.exists():
-                    for tec_file in sorted(date_dir.glob('tec_*.h5')):
-                        file_data = self._read_tec_file(tec_file)
-                        if file_data and self._in_time_range(file_data, start, end):
-                            self._merge_tec_data(result, file_data, station)
-                
-                current_date += timedelta(days=1)
+            measurements = reader.read_time_range(start=start_iso, end=end_iso)
             
-            result['n_points'] = len(result['timestamps'])
+            if not measurements:
+                return result
+            
+            # Group by station and collect time series
+            for m in measurements:
+                station_name = m.get('station', 'UNKNOWN')
+                
+                # Apply station filter if specified
+                if station and station_name != station:
+                    continue
+                
+                ts_iso = m.get('timestamp_iso', '')
+                if ts_iso and ts_iso not in result['timestamps']:
+                    result['timestamps'].append(ts_iso)
+                
+                if station_name not in result['stations']:
+                    result['stations'][station_name] = {
+                        'tec_tecu': [],
+                        'confidence': [],
+                        'mode': [],
+                        'timestamps': []
+                    }
+                
+                result['stations'][station_name]['tec_tecu'].append(m.get('tec_tecu', 0))
+                result['stations'][station_name]['confidence'].append(m.get('confidence', 0))
+                result['stations'][station_name]['mode'].append(m.get('mode', 'UNKNOWN'))
+                result['stations'][station_name]['timestamps'].append(ts_iso)
+            
+            result['timestamps'] = sorted(set(result['timestamps']))
+            result['n_points'] = sum(len(s['tec_tecu']) for s in result['stations'].values())
             return result
             
         except Exception as e:
             logger.error(f"Error getting TEC history: {e}")
-            return {'timestamps': [], 'paths': {}, 'n_points': 0, 'error': str(e)}
+            return {'timestamps': [], 'stations': {}, 'n_points': 0, 'error': str(e)}
     
     def get_tec_by_station(self, station: str, hours: int = 24) -> Dict[str, Any]:
         """
@@ -137,77 +196,8 @@ class TECService:
             hours: Number of hours of history
         
         Returns:
-            Dictionary with TEC data for all frequencies from that station
+            Dictionary with TEC data for the specified station
         """
         end = datetime.utcnow()
         start = end - timedelta(hours=hours)
         return self.get_tec_history(start, end, station=station)
-    
-    def _read_tec_file(self, filepath: Path) -> Optional[Dict[str, Any]]:
-        """Read a single TEC HDF5 file."""
-        try:
-            with h5py.File(filepath, 'r') as f:
-                data = {
-                    'timestamp': f.attrs.get('timestamp_utc', ''),
-                    'paths': {}
-                }
-                
-                # Read each path group
-                for path_name in f.keys():
-                    if path_name.startswith('_'):
-                        continue
-                    
-                    path_grp = f[path_name]
-                    data['paths'][path_name] = {
-                        'tec_tecu': float(path_grp.attrs.get('tec_tecu', 0)),
-                        'uncertainty_tecu': float(path_grp.attrs.get('uncertainty_tecu', 0)),
-                        'station': path_grp.attrs.get('station', ''),
-                        'frequency_mhz': float(path_grp.attrs.get('frequency_mhz', 0)),
-                        'quality': path_grp.attrs.get('quality', 'unknown')
-                    }
-                
-                return data
-                
-        except Exception as e:
-            logger.error(f"Error reading TEC file {filepath}: {e}")
-            return None
-    
-    def _in_time_range(self, data: Dict, start: datetime, end: datetime) -> bool:
-        """Check if data timestamp is within range."""
-        try:
-            ts_str = data.get('timestamp', '')
-            if not ts_str:
-                return False
-            ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00')).replace(tzinfo=None)
-            return start <= ts <= end
-        except:
-            return False
-    
-    def _merge_tec_data(
-        self,
-        result: Dict,
-        file_data: Dict,
-        station_filter: Optional[str]
-    ) -> None:
-        """Merge file data into result dictionary."""
-        timestamp = file_data.get('timestamp', '')
-        if timestamp:
-            result['timestamps'].append(timestamp)
-        
-        for path_name, path_data in file_data.get('paths', {}).items():
-            # Apply station filter if specified
-            if station_filter and path_data.get('station', '') != station_filter:
-                continue
-            
-            if path_name not in result['paths']:
-                result['paths'][path_name] = {
-                    'tec_tecu': [],
-                    'uncertainty_tecu': [],
-                    'station': path_data.get('station', ''),
-                    'frequency_mhz': path_data.get('frequency_mhz', 0)
-                }
-            
-            result['paths'][path_name]['tec_tecu'].append(path_data.get('tec_tecu', 0))
-            result['paths'][path_name]['uncertainty_tecu'].append(
-                path_data.get('uncertainty_tecu', 0)
-            )

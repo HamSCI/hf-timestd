@@ -85,6 +85,7 @@ class DataProductRegistry:
         ('L2', 'chu_fsk'): 'broadcast:fsk',           # CHU only
         ('L2', 'wwv_bcd'): 'broadcast:bcd',           # WWV/WWVH only
         ('L2', 'wwv_test_signal'): 'broadcast:test',  # WWV/WWVH only
+        ('L2', 'tick_timing'): 'tick_timing',         # Per-second tick timing (55+ estimates/min)
         
         # =====================================================================
         # CHANNEL-CENTRIC PRODUCTS (per receiver channel, e.g., SHARED_10000)

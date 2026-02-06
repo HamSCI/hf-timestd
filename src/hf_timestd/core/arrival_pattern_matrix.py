@@ -146,9 +146,8 @@ DEFAULT_UNCERTAINTY_3SIGMA_MS = 15.0  # ±15ms covers most ionospheric variation
 
 # Bootstrap window parameters
 # Initial window is wide to account for NTP uncertainty at startup
-# NOTE: Temporarily widened to 600ms to handle buffer alignment issue (2026-02-04)
-# TODO: Fix buffer alignment in core recorder, then restore to 50ms
-BOOTSTRAP_INITIAL_UNCERTAINTY_MS = 600.0  # ±600ms during initial bootstrap (was 50ms)
+# Restored to 50ms after radiod timestamp fix (2026-02-06)
+BOOTSTRAP_INITIAL_UNCERTAINTY_MS = 50.0  # ±50ms during initial bootstrap
 BOOTSTRAP_MIN_UNCERTAINTY_MS = 5.0       # Minimum window (propagation floor)
 
 # Window narrowing parameters
@@ -630,31 +629,91 @@ class ArrivalPatternMatrix:
         height_km: float
     ) -> Tuple[float, int]:
         """
-        Compute propagation delay for ionospheric path.
+        Compute propagation delay for ionospheric path using spherical Earth geometry.
         
+        For paths > 2000 km, flat-Earth approximation introduces ~1-3% error.
+        This implementation uses the law of cosines on a sphere to compute
+        the actual slant path through the ionosphere.
+        
+        Geometry:
+            R = Earth radius (6371 km)
+            h = ionospheric layer height
+            θ = central angle for one hop = ground_distance / (R * n_hops)
+            
+            Slant path per hop (using law of cosines):
+            slant² = R² + (R+h)² - 2*R*(R+h)*cos(θ)
+            
         Returns:
             Tuple of (delay_ms, num_hops)
         """
+        R = 6371.0  # Earth radius in km
+        
         # Determine number of hops based on distance
-        # Single hop typically covers up to ~2000 km
+        # Maximum single-hop distance depends on layer height
+        # max_1hop ≈ 2 * sqrt(2*R*h + h²) for tangent ray
+        max_1hop = 2 * math.sqrt(2 * R * height_km + height_km ** 2)
+        
         if distance_km < 500:
-            # Ground wave or single very short hop
+            # Ground wave - follows Earth surface
             path_length = distance_km
+            num_hops = 0
+        elif distance_km <= max_1hop:
+            # Single hop possible
             num_hops = 1
-        elif distance_km < 2500:
-            # Single hop
-            hop_distance = distance_km
-            path_length = 2 * math.sqrt((hop_distance / 2) ** 2 + height_km ** 2)
-            num_hops = 1
+            path_length = self._spherical_hop_path(distance_km, height_km, R)
         else:
-            # Multi-hop
-            num_hops = max(2, int(distance_km / 2000))
-            hop_distance = distance_km / num_hops
-            single_hop_path = 2 * math.sqrt((hop_distance / 2) ** 2 + height_km ** 2)
+            # Multi-hop required
+            # Choose minimum hops that keep each hop under max distance
+            num_hops = max(2, int(math.ceil(distance_km / max_1hop)))
+            hop_ground_distance = distance_km / num_hops
+            single_hop_path = self._spherical_hop_path(hop_ground_distance, height_km, R)
             path_length = num_hops * single_hop_path
         
         delay_ms = path_length / C_LIGHT_KM_MS
         return delay_ms, num_hops
+    
+    def _spherical_hop_path(
+        self,
+        ground_distance_km: float,
+        height_km: float,
+        earth_radius_km: float = 6371.0
+    ) -> float:
+        """
+        Calculate slant path length for one ionospheric hop using spherical geometry.
+        
+        Uses law of cosines: c² = a² + b² - 2ab*cos(C)
+        Where:
+            a = R (Earth radius)
+            b = R + h (radius to ionospheric layer)
+            C = θ/2 (half the central angle for this hop)
+            c = slant range (TX to reflection point, or reflection to RX)
+        
+        Total hop path = 2 * slant (up and down)
+        
+        Args:
+            ground_distance_km: Ground distance for this hop
+            height_km: Ionospheric layer height
+            earth_radius_km: Earth radius (default 6371 km)
+            
+        Returns:
+            Total path length for one hop in km
+        """
+        R = earth_radius_km
+        h = height_km
+        
+        # Central angle for this hop (radians)
+        theta = ground_distance_km / R
+        
+        # Half angle (TX to reflection point)
+        half_theta = theta / 2
+        
+        # Law of cosines for slant range
+        # slant² = R² + (R+h)² - 2*R*(R+h)*cos(half_theta)
+        slant_squared = R**2 + (R + h)**2 - 2 * R * (R + h) * math.cos(half_theta)
+        slant = math.sqrt(slant_squared)
+        
+        # Total path = 2 * slant (up to layer, down from layer)
+        return 2 * slant
     
     def compute_matrix(self, utc_time: datetime) -> ArrivalMatrix:
         """

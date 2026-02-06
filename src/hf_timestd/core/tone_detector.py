@@ -697,14 +697,18 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # before the peak (to find the exact onset) and into the tone.
         
         template_samples = int(tone_duration_sec * self.sample_rate)
-        margin_samples = int(0.050 * self.sample_rate)  # 50ms margin before
+        margin_before = int(0.020 * self.sample_rate)  # 20ms margin before peak (for edge search)
+        margin_after = int(0.050 * self.sample_rate)   # 50ms after peak (into tone for envelope)
         
-        # Search region: from slightly before the correlation peak to partway into the tone
-        # The correlation peak IS at the tone start, so we search:
-        #   - margin_samples before (to find exact rising edge)
-        #   - template_samples/2 after (into the tone for edge detection)
-        search_start = max(0, correlation_peak_idx - margin_samples)
-        search_end = min(len(audio_signal), correlation_peak_idx + template_samples // 2)
+        # Search region: small window around the correlation peak
+        # The correlation peak IS at the tone start (mode='valid'), so we search:
+        #   - margin_before samples before (to find exact rising edge)
+        #   - margin_after samples after (into the tone for edge detection)
+        # CRITICAL FIX: Use a narrow search window to avoid the noise estimation
+        # region overlapping with the tone. The old code used template_samples/2
+        # which was too large and caused the first 10% to include the tone.
+        search_start = max(0, correlation_peak_idx - margin_before)
+        search_end = min(len(audio_signal), correlation_peak_idx + margin_after)
         
         if search_end <= search_start:
             logger.warning(f"Invalid onset search region: [{search_start}:{search_end}]")
@@ -758,10 +762,12 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # The onset is where the envelope first exceeds the noise threshold.
         # Use a threshold above the noise floor but below the signal level.
         
-        # Estimate envelope noise floor from first 10% of search region
-        # (which should be before the tone onset)
-        noise_region_end = max(10, len(envelope) // 10)
-        envelope_noise = np.median(envelope[:noise_region_end])
+        # CRITICAL FIX: Estimate noise from BEFORE the search region, not within it.
+        # The search region is narrow around the correlation peak, so the first 10%
+        # may already contain the tone onset. Instead, use the passed noise_floor
+        # from Stage 1 (which was estimated from outside the detection window).
+        # Convert correlation noise_floor to envelope domain (squared signal).
+        envelope_noise = noise_floor ** 2 if noise_floor > 0 else np.median(envelope[:max(5, len(envelope)//10)])
         envelope_max = np.max(envelope)
         
         # Threshold: midpoint between noise and signal (in log domain for dB-like scaling)
@@ -770,8 +776,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             # Use geometric mean of noise and max as threshold
             threshold = np.sqrt(envelope_noise * envelope_max) * 0.5
         else:
-            # Low SNR: use noise + 2σ
-            envelope_std = np.std(envelope[:noise_region_end])
+            # Low SNR: use noise + 2σ (estimate std from first few samples)
+            envelope_std = np.std(envelope[:max(5, len(envelope)//10)])
             threshold = envelope_noise + 2 * envelope_std
         
         # Find first crossing above threshold
@@ -1797,17 +1803,28 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Call _find_precise_onset() to locate the first sample of the tone.
         # =====================================================================
         
-        # TEMPORARY FIX (2026-01-26): Bypass Stage 2 onset detection
-        # The onset detection was introducing a ~250-500ms offset because it was
-        # searching in the wrong region. For now, use the correlation peak directly
-        # since for mode='valid', the peak index IS the tone start index.
-        #
-        # TODO: Fix _find_precise_onset() to properly refine the correlation peak
-        # without introducing large offsets.
+        # STAGE 2 ONSET DETECTION (Re-enabled 2026-02-06)
+        # Fixed the search region and noise estimation issues that were causing
+        # 250-500ms offsets. Now uses a narrow window around the correlation peak
+        # and uses Stage 1 noise floor for threshold calculation.
+        onset_sample_idx, onset_confidence = self._find_precise_onset(
+            audio_signal=audio_signal,
+            correlation_peak_idx=int(precise_peak_idx),
+            tone_freq_hz=frequency,
+            tone_duration_sec=duration,
+            noise_floor=noise_mean
+        )
         
-        # Use correlation peak directly (Stage 1 only)
-        onset_sample_idx = precise_peak_idx
-        onset_confidence = 0.8  # Default confidence without onset refinement
+        # Sanity check: onset should be within ±20ms of correlation peak
+        # If Stage 2 gives a wildly different answer, fall back to Stage 1
+        onset_offset_samples = abs(onset_sample_idx - precise_peak_idx)
+        max_offset_samples = int(0.020 * self.sample_rate)  # 20ms
+        if onset_offset_samples > max_offset_samples:
+            logger.debug(f"Stage 2 onset {onset_sample_idx:.1f} too far from Stage 1 peak "
+                        f"{precise_peak_idx:.1f} ({onset_offset_samples} samples), using Stage 1")
+            onset_sample_idx = precise_peak_idx
+            onset_confidence = 0.7  # Lower confidence for fallback
+        
         onset_time = buffer_start_time + (onset_sample_idx / self.sample_rate)
         
         # Raw ToA from minute boundary (for diagnostics)
@@ -2062,7 +2079,25 @@ class MultiStationToneDetector(IMultiStationToneDetector):
                 peak_idx=peak_idx
             )
             
-            # 5. Inflate uncertainty if multipath detected
+            # 5. Phase-based sub-sample timing refinement (2026-02-06)
+            # The phase at the correlation peak provides sub-sample precision:
+            #   φ = 2π × f × Δt  →  Δt = φ / (2π × f)
+            # This achieves ~10× finer resolution than sample-based timing.
+            # Skip if multipath detected (phase is unreliable in multipath).
+            if phase_at_peak is not None and not is_multipath:
+                phase_subsample_offset = self._phase_based_subsample_refinement(
+                    phase_at_peak=phase_at_peak,
+                    tone_frequency=frequency
+                )
+                # Apply to onset time (convert samples to seconds)
+                phase_correction_sec = phase_subsample_offset / self.sample_rate
+                onset_time = onset_time + phase_correction_sec
+                # Also update timing error
+                timing_error_ms = timing_error_ms + (phase_correction_sec * 1000)
+                logger.debug(f"Phase refinement: {phase_subsample_offset:+.3f} samples "
+                            f"({phase_correction_sec*1000:+.3f}ms), phase={phase_at_peak:.3f}rad")
+            
+            # 6. Inflate uncertainty if multipath detected
             if is_multipath and delay_spread_ms > 0:
                 # Add multipath-induced uncertainty (quadrature sum)
                 multipath_uncertainty_ms = delay_spread_ms / 2.0  # Half of delay spread
@@ -2072,7 +2107,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
                 logger.debug(f"Multipath inflated uncertainty: {timing_uncertainty_ms:.3f}ms "
                             f"(base + {multipath_uncertainty_ms:.3f}ms from delay spread)")
             
-            # 6. Apply Doppler correction to timing (2026-01-24 Enhancement)
+            # 7. Apply Doppler correction to timing (2026-01-24 Enhancement)
             # Doppler shift causes systematic timing bias that can be corrected
             #
             # BUG FIX (2026-01-26): The Doppler estimation from phase slope is

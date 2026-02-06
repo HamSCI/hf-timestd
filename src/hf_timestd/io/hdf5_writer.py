@@ -86,8 +86,8 @@ class DataProductWriter:
             f"(schema v{self.schema['schema_version']})"
         )
         
-        # Current file handle (daily rotation)
-        self._current_file: Optional[h5py.File] = None
+        # Daily file tracking (no persistent file handle - crash safe)
+        self._current_path: Optional[Path] = None
         self._current_date: Optional[str] = None
         self._measurement_count = 0
     
@@ -104,149 +104,111 @@ class DataProductWriter:
         filename = f"{self.channel}_{self.product_name}_{date_str}.h5"
         return self.output_dir / filename
     
-    def _try_recover_file_lock(self, filepath: Path) -> bool:
+    def _try_recover_corrupt_file(self, hdf5_path: Path) -> None:
         """
-        Attempt to recover a file stuck in SWMR write mode using h5clear.
+        Attempt to recover a corrupt HDF5 file.
         
-        Args:
-            filepath: Path to the HDF5 file
-            
-        Returns:
-            True if recovery was attempted and succeeded, False otherwise
+        Strategy:
+        1. Try h5clear to fix stale SWMR consistency flags
+        2. Try to open the file to verify it's usable
+        3. If still broken, rename to .corrupt and recreate
         """
+        import subprocess
+        import shutil
+        
+        # Step 1: Try h5clear if available
+        h5clear_path = shutil.which('h5clear')
+        if h5clear_path:
+            logger.warning(f"Attempting h5clear recovery on {hdf5_path}")
+            try:
+                result = subprocess.run(
+                    [h5clear_path, '-s', str(hdf5_path)],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    logger.info(f"h5clear succeeded on {hdf5_path}")
+            except Exception as e:
+                logger.warning(f"h5clear failed: {e}")
+        
+        # Step 2: Verify file is usable
         try:
-            import subprocess
-            import shutil
-            
-            # Check if h5clear tool is available
-            h5clear_path = shutil.which('h5clear')
-            if not h5clear_path:
-                logger.warning("h5clear tool not found - cannot recover stale SWMR lock")
-                return False
-                
-            logger.warning(f"Attempting to clear stale SWMR lock on {filepath}")
-            
-            # Run h5clear -s (clear status flags)
-            result = subprocess.run(
-                [h5clear_path, '-s', str(filepath)],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            
-            if result.returncode == 0:
-                logger.info(f"Successfully cleared SWMR status flags on {filepath}")
-                return True
-            else:
-                logger.error(f"h5clear failed: {result.stderr}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Exception during file lock recovery: {e}")
-            return False
+            with h5py.File(hdf5_path, 'r+', libver='latest') as f:
+                _ = list(f.keys())
+            logger.info(f"File recovered successfully: {hdf5_path}")
+            return
+        except OSError:
+            pass
+        
+        # Step 3: Rename corrupt file and recreate
+        corrupt_path = hdf5_path.with_suffix('.h5.corrupt')
+        if corrupt_path.exists():
+            import time as _time
+            corrupt_path = hdf5_path.with_suffix(f'.h5.corrupt.{int(_time.time())}')
+        
+        logger.warning(f"Renaming corrupt file: {hdf5_path} -> {corrupt_path}")
+        hdf5_path.rename(corrupt_path)
+        self._create_file(hdf5_path, recreated_from=str(corrupt_path))
 
-    def _ensure_file_open(self, timestamp_utc: str) -> h5py.File:
+    def _create_file(self, hdf5_path: Path, recreated_from: Optional[str] = None) -> None:
+        """Create and initialize a new HDF5 file with all datasets."""
+        logger.info(f"Creating new HDF5 file: {hdf5_path}")
+        with h5py.File(hdf5_path, 'w', libver='latest') as f:
+            self._write_file_metadata_to_file(f)
+            self._initialize_all_datasets_in_file(f)
+            f.attrs['metadata'] = 'initialized'
+            if recreated_from:
+                f.attrs['recreated_from_corrupt'] = recreated_from
+        logger.info(f"Initialized file structure for {hdf5_path}")
+
+    def _ensure_file_exists(self, timestamp_utc: str) -> Path:
         """
-        Ensure HDF5 file is open for the given timestamp (daily rotation).
+        Ensure HDF5 file exists for the given timestamp (daily rotation).
         
-        Opens file in SWMR (Single Writer Multiple Reader) mode from the start
-        to enable concurrent read access while writing.
-        
-        CRITICAL FIX (2026-01-05): Files are now opened in SWMR write mode from
-        creation to prevent "file already open for write" errors when readers
-        try to access the file concurrently.
+        CRASH-SAFE DESIGN (2026-02-06): Files are NOT held open. Each
+        write_measurement() call opens, appends, and closes the file.
+        This eliminates SWMR dirty-flag corruption from unclean shutdowns.
+        Concurrent readers work fine with libver='latest' files.
         
         Args:
             timestamp_utc: ISO 8601 timestamp
             
         Returns:
-            Open HDF5 file handle in SWMR write mode
+            Path to the HDF5 file (guaranteed to exist and be valid)
         """
-        # Extract date from timestamp
         dt = datetime.fromisoformat(timestamp_utc.replace('Z', '+00:00'))
         date_str = dt.strftime('%Y%m%d')
         
-        # Check if we need to rotate to a new file
+        # Daily rotation
         if self._current_date != date_str:
-            # Close previous file
-            if self._current_file is not None:
-                try:
-                    self._current_file.close()
-                    logger.info(
-                        f"Closed {self._current_date} file with {self._measurement_count} measurements"
-                    )
-                except Exception as e:
-                    logger.warning(f"Error closing previous file: {e}")
-            
-            hdf5_path = self._get_hdf5_path(date_str)
-            
-            # CRITICAL FIX: Two-step process for SWMR mode
-            # Step 1: Create and initialize file structure if it doesn't exist
-            if not hdf5_path.exists():
-                logger.info(f"Creating new HDF5 file: {hdf5_path}")
-                try:
-                    # Create file with proper structure
-                    with h5py.File(hdf5_path, 'w', libver='latest') as f:
-                        # Write metadata
-                        self._write_file_metadata_to_file(f)
-                        # Initialize all datasets before SWMR mode
-                        self._initialize_all_datasets_in_file(f)
-                        # Mark as initialized
-                        f.attrs['metadata'] = 'initialized'
-                    logger.info(f"Initialized file structure for {hdf5_path}")
-                except Exception as e:
-                    logger.error(f"Failed to create HDF5 file: {e}")
-                    raise
-            
-            # Step 2: Open in SWMR write mode
-            try:
-                # Open existing file in read-write mode
-                # CRITICAL: Must open first, THEN enable SWMR mode
-                self._current_file = h5py.File(
-                    hdf5_path,
-                    'r+',  # Read-write mode (file must exist)
-                    libver='latest'
+            if self._current_date is not None:
+                logger.info(
+                    f"Daily rotation: {self._current_date} had {self._measurement_count} measurements"
                 )
-                
-                # Enable SWMR mode AFTER opening
-                # This is the correct h5py API for SWMR write mode
-                self._current_file.swmr_mode = True
-                
-                logger.info(f"Opened {hdf5_path} in SWMR write mode")
-                
-            except OSError as e:
-                # Check for "file is already open" error (HDF5 locking issue)
-                error_msg = str(e).lower()
-                if "already open" in error_msg or "swmr" in error_msg:
-                    logger.warning(f"Caught HDF5 locking error for {hdf5_path}: {e}")
-                    
-                    # Attempt recovery
-                    if self._try_recover_file_lock(hdf5_path):
-                        # Retry open in SWMR mode
-                        logger.info("Retrying file open after recovery...")
-                        self._current_file = h5py.File(
-                            hdf5_path,
-                            'r+',
-                            libver='latest'
-                        )
-                        self._current_file.swmr_mode = True
-                    else:
-                        raise  # Re-raise if recovery failed
-                else:
-                    raise  # Re-raise other errors
-            
             self._current_date = date_str
             self._measurement_count = 0
-            
-            logger.info(f"File ready: {hdf5_path} (SWMR mode active)")
         
-        return self._current_file
+        hdf5_path = self._get_hdf5_path(date_str)
+        
+        if not hdf5_path.exists():
+            self._create_file(hdf5_path)
+        else:
+            # Verify existing file is readable (may be corrupt from old SWMR crash)
+            try:
+                with h5py.File(hdf5_path, 'r', libver='latest') as f:
+                    _ = f.attrs.get('metadata')
+            except OSError as e:
+                logger.warning(f"Existing file corrupt ({hdf5_path}): {e}")
+                self._try_recover_corrupt_file(hdf5_path)
+        
+        self._current_path = hdf5_path
+        return hdf5_path
     
     def _write_file_metadata(self) -> None:
         """Write file-level metadata attributes to current file."""
-        if self._current_file is None:
+        if self._current_path is None or not self._current_path.exists():
             return
-        self._write_file_metadata_to_file(self._current_file)
+        with h5py.File(self._current_path, 'r+', libver='latest') as f:
+            self._write_file_metadata_to_file(f)
     
     def _write_file_metadata_to_file(self, f: h5py.File) -> None:
         """Write file-level metadata attributes to specified file handle."""
@@ -273,17 +235,17 @@ class DataProductWriter:
     
     def _initialize_all_datasets(self) -> None:
         """Initialize all datasets from schema in current file."""
-        if self._current_file is None:
+        if self._current_path is None or not self._current_path.exists():
             return
-        self._initialize_all_datasets_in_file(self._current_file)
+        with h5py.File(self._current_path, 'r+', libver='latest') as f:
+            self._initialize_all_datasets_in_file(f)
     
     def _initialize_all_datasets_in_file(self, f: h5py.File) -> None:
         """
         Initialize all datasets from schema in specified file handle.
         
-        This is critical to prevent "Cannot add field" errors when optional
-        fields arrive after SWMR mode is enabled. SWMR mode does not allow
-        adding new datasets, so all must be created upfront.
+        Pre-creates all datasets so schema evolution (new fields) can be
+        handled gracefully without requiring file recreation.
         """
         for field in self.schema['fields']:
             field_name = field['name']
@@ -416,6 +378,9 @@ class DataProductWriter:
         """
         Write a single measurement to HDF5 file.
         
+        CRASH-SAFE: Opens the file, appends one row, closes the file.
+        No persistent file handle means no dirty flags on unclean shutdown.
+        
         Args:
             measurement: Measurement dictionary (must match schema)
             
@@ -425,37 +390,29 @@ class DataProductWriter:
         # Validate measurement
         self.validate_measurement(measurement)
         
-        # Ensure file is open
+        # Ensure file exists (creates if needed, handles daily rotation)
         timestamp_utc = measurement['timestamp_utc']
-        hdf5_file = self._ensure_file_open(timestamp_utc)
+        hdf5_path = self._ensure_file_exists(timestamp_utc)
         
-        # Create or extend datasets
+        # Open, append, close — crash-safe write
+        with h5py.File(hdf5_path, 'r+', libver='latest') as hdf5_file:
+            self._append_measurement(hdf5_file, measurement)
+        
+        self._measurement_count += 1
+        
+        if self._measurement_count % 100 == 0:
+            logger.debug(f"Wrote {self._measurement_count} measurements to {self._current_date}")
+
+    def _append_measurement(self, hdf5_file: h5py.File, measurement: Dict[str, Any]) -> None:
+        """Append one measurement row to all datasets in an open file."""
         for field in self.schema['fields']:
             field_name = field['name']
             
             # Determine value to write
             if field_name not in measurement:
-                # Field is missing
                 if field.get('required', False):
-                    # Should be caught by validate_measurement, but safe fallback
                     continue
                 else:
-                    # Optional field missing - use default fill value based on type
-                    field_type = field.get('type')
-                    if field_type == 'float':
-                        value = np.nan
-                    elif field_type == 'integer':
-                        value = 0  # Best effort default for missing optional int
-                    elif field_type == 'string':
-                        value = ""
-                    elif field_type == 'boolean':
-                        value = False
-                    else:
-                        continue
-            else:
-                value = measurement[field_name]
-                if value is None:
-                    # Explicit None value (treated same as missing)
                     field_type = field.get('type')
                     if field_type == 'float':
                         value = np.nan
@@ -467,10 +424,20 @@ class DataProductWriter:
                         value = False
                     else:
                         continue
-            
-            # DEBUG: Log raw_arrival_time_ms processing
-            if field_name == 'raw_arrival_time_ms':
-                logger.debug(f"DEBUG TEC FIX HDF5: Processing raw_arrival_time_ms={value}, type={type(value)}")
+            else:
+                value = measurement[field_name]
+                if value is None:
+                    field_type = field.get('type')
+                    if field_type == 'float':
+                        value = np.nan
+                    elif field_type == 'integer':
+                        value = 0
+                    elif field_type == 'string':
+                        value = ""
+                    elif field_type == 'boolean':
+                        value = False
+                    else:
+                        continue
             
             # Determine HDF5 dtype
             field_type = field.get('type')
@@ -486,22 +453,8 @@ class DataProductWriter:
                 logger.warning(f"Unknown type '{field_type}' for field '{field_name}'")
                 continue
             
-            # Create dataset if it doesn't exist
+            # Create dataset if it doesn't exist (schema evolution)
             if field_name not in hdf5_file:
-                # CRITICAL: Cannot add datasets to SWMR files after initialization
-                # This prevents schema evolution issues that caused 2026-01-04 degradation
-                if hdf5_file.swmr_mode:
-                    logger.warning(
-                        f"Cannot add field '{field_name}' to SWMR file {hdf5_file.filename}. "
-                        f"Schema version mismatch detected. Field will be missing until next file rotation. "
-                        f"File schema: {hdf5_file.attrs.get('schema_version', 'unknown')}, "
-                        f"Writer schema: {self.schema['schema_version']}"
-                    )
-                    continue
-                
-                if field_name == 'raw_arrival_time_ms':
-                    logger.info(f"DEBUG TEC FIX HDF5: Creating dataset for raw_arrival_time_ms")
-                
                 hdf5_file.create_dataset(
                     field_name,
                     shape=(0,),
@@ -511,53 +464,24 @@ class DataProductWriter:
                     compression='gzip',
                     compression_opts=4
                 )
-                
-                # Add field metadata
                 hdf5_file[field_name].attrs['description'] = field.get('description', '')
                 if 'units' in field:
                     hdf5_file[field_name].attrs['units'] = field['units']
                 if 'reference' in field:
                     hdf5_file[field_name].attrs['reference'] = field['reference']
             
-            # Append value to dataset (only if dataset exists)
-            if field_name in hdf5_file:
-                dataset = hdf5_file[field_name]
-                dataset.resize((dataset.shape[0] + 1,))
-                dataset[-1] = value
-            else:
-                # Field was skipped due to SWMR constraint
-                continue
-            
-            if field_name == 'raw_arrival_time_ms':
-                logger.debug(f"DEBUG TEC FIX HDF5: Wrote value {value} to dataset, new size={dataset.shape[0]}")
-        
-        # Flush to disk and refresh SWMR metadata
-        # In SWMR mode, flush() alone isn't enough - we need to ensure
-        # the metadata is updated so readers can see the new data
-        hdf5_file.flush()
-        
-        # Force metadata refresh for SWMR readers
-        # This is critical for real-time data visibility
-        if hdf5_file.swmr_mode:
-            # Refresh all datasets to make new data visible to SWMR readers
-            for field in self.schema['fields']:
-                field_name = field['name']
-                if field_name in hdf5_file:
-                    hdf5_file[field_name].refresh()
-        
-        self._measurement_count += 1
-        
-        if self._measurement_count % 100 == 0:
-            logger.debug(f"Wrote {self._measurement_count} measurements to {self._current_date}")
+            # Append value
+            dataset = hdf5_file[field_name]
+            dataset.resize((dataset.shape[0] + 1,))
+            dataset[-1] = value
     
     def close(self) -> None:
-        """Close the current HDF5 file."""
-        if self._current_file is not None:
-            self._current_file.close()
+        """Clean up writer state. No file handle to close (crash-safe design)."""
+        if self._current_date is not None:
             logger.info(
-                f"Closed {self._current_date} file with {self._measurement_count} measurements"
+                f"Writer closing: {self._current_date} had {self._measurement_count} measurements"
             )
-            self._current_file = None
+            self._current_path = None
             self._current_date = None
             self._measurement_count = 0
     
@@ -572,21 +496,18 @@ class DataProductWriter:
         Returns:
             True if last write can be verified, False otherwise
         """
-        if self._current_file is None or self._measurement_count == 0:
+        if self._current_path is None or self._measurement_count == 0:
             return False
         
         try:
-            # Check that at least one dataset exists and has data
-            for field in self.schema['fields']:
-                field_name = field['name']
-                if field_name in self._current_file:
-                    dataset = self._current_file[field_name]
-                    if dataset.shape[0] > 0:
-                        # Successfully read last value
-                        _ = dataset[-1]
-                        return True
-            
-            # No datasets found with data
+            with h5py.File(self._current_path, 'r', libver='latest') as f:
+                for field in self.schema['fields']:
+                    field_name = field['name']
+                    if field_name in f:
+                        dataset = f[field_name]
+                        if dataset.shape[0] > 0:
+                            _ = dataset[-1]
+                            return True
             return False
             
         except Exception as e:

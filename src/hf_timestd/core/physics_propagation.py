@@ -259,6 +259,58 @@ class PhysicsPropagationModel:
         
         return EARTH_RADIUS_KM * c
     
+    def get_mode_candidates(
+        self,
+        station: str,
+        frequency_mhz: float,
+        timestamp: datetime
+    ) -> List[Dict]:
+        """
+        Get all viable propagation mode candidates with probability scores.
+        
+        This is the public interface for mode ambiguity analysis. Returns
+        all physically viable modes sorted by probability.
+        
+        Args:
+            station: Station name (WWV, WWVH, CHU, BPM)
+            frequency_mhz: Broadcast frequency in MHz
+            timestamp: UTC timestamp (for ionospheric state)
+            
+        Returns:
+            List of mode candidates, each with:
+            - mode: Mode string (e.g., '1F', '2E')
+            - n_hops: Number of ionospheric hops
+            - layer: Ionospheric layer ('E' or 'F')
+            - delay_ms: Predicted propagation delay
+            - probability: Normalized probability (0-1)
+            - uncertainty_ms: Mode-specific uncertainty
+        """
+        distance_km = self.station_distances.get(station, 0)
+        if distance_km == 0:
+            return []
+        
+        # Get layer heights from IRI or use defaults
+        hmF2_km = F_LAYER_HEIGHT_KM
+        hmE_km = E_LAYER_HEIGHT_KM
+        
+        if self._iri_model is not None:
+            try:
+                tx_lat, tx_lon = STATION_COORDS.get(station, (0, 0))
+                mid_lat = (tx_lat + self.receiver_lat) / 2
+                mid_lon = (tx_lon + self.receiver_lon) / 2
+                heights = self._iri_model.get_layer_heights(
+                    timestamp=timestamp,
+                    latitude=mid_lat,
+                    longitude=mid_lon
+                )
+                if heights:
+                    hmF2_km = heights.hmF2
+                    hmE_km = heights.hmE
+            except Exception:
+                pass
+        
+        return self._get_mode_candidates(distance_km, frequency_mhz, hmF2_km, hmE_km)
+    
     def compute_delay(
         self,
         station: str,
@@ -532,25 +584,131 @@ class PhysicsPropagationModel:
         Estimate propagation mode based on distance and ionospheric state.
         
         Returns: (n_hops, layer, mode_string)
+        
+        Note: This returns the MOST LIKELY mode. For multi-mode analysis,
+        use _get_mode_candidates() which returns all viable modes with scores.
         """
-        # Maximum single-hop distance for each layer
+        candidates = self._get_mode_candidates(distance_km, frequency_mhz, hmF2_km, hmE_km)
+        if candidates:
+            # Return the highest-scoring candidate
+            best = candidates[0]
+            return (best['n_hops'], best['layer'], best['mode'])
+        else:
+            # Fallback
+            return (1, 'F', '1F')
+    
+    def _get_mode_candidates(
+        self,
+        distance_km: float,
+        frequency_mhz: float,
+        hmF2_km: float,
+        hmE_km: float
+    ) -> List[Dict]:
+        """
+        Generate all viable propagation mode candidates with probability scores.
+        
+        MODE AMBIGUITY RESOLUTION (2026-02-06):
+        ---------------------------------------
+        Multiple ionospheric propagation modes can be viable simultaneously:
+        - 1F vs 2E (similar path lengths at certain distances)
+        - 1F vs 2F (mode mixing during disturbed conditions)
+        - E+F mixed modes (signal reflects off both layers)
+        
+        This method returns ALL viable modes with scores based on:
+        1. Geometric feasibility (is the path physically possible?)
+        2. Frequency/layer compatibility (E-layer has lower MUF)
+        3. Path efficiency (shorter paths are more likely)
+        4. Ionospheric conditions (time of day affects layer strength)
+        
+        Returns:
+            List of dicts sorted by score (highest first):
+            [{'mode': '1F', 'n_hops': 1, 'layer': 'F', 'score': 0.8, 
+              'delay_ms': 5.2, 'uncertainty_ms': 1.0}, ...]
+        """
+        candidates = []
+        
+        # Maximum single-hop distances for each layer
         max_1hop_E = 2 * math.sqrt(2 * EARTH_RADIUS_KM * hmE_km + hmE_km**2)
         max_1hop_F = 2 * math.sqrt(2 * EARTH_RADIUS_KM * hmF2_km + hmF2_km**2)
         
-        # E-layer propagation (lower frequencies, shorter distances)
-        if distance_km < max_1hop_E and frequency_mhz < 8:
-            return (1, 'E', '1E')
+        # E-layer candidates (lower frequencies, shorter distances)
+        # E-layer MUF is typically 3-5 MHz during day, lower at night
+        e_layer_viable = frequency_mhz < 10  # Conservative upper limit
         
-        # F-layer propagation
-        if distance_km < max_1hop_F:
-            return (1, 'F', '1F')
-        elif distance_km < 2 * max_1hop_F:
-            return (2, 'F', '2F')
-        elif distance_km < 3 * max_1hop_F:
-            return (3, 'F', '3F')
-        else:
-            n_hops = int(distance_km / max_1hop_F) + 1
-            return (n_hops, 'F', f'{n_hops}F')
+        if e_layer_viable:
+            for n_hops in range(1, 4):
+                if distance_km <= n_hops * max_1hop_E:
+                    # Calculate path and delay
+                    path_km = self._calculate_hop_path(distance_km, hmE_km, n_hops)
+                    delay_ms = (path_km / SPEED_OF_LIGHT_KM_S) * 1000.0
+                    
+                    # Score based on:
+                    # - Frequency (lower = better for E-layer)
+                    # - Path efficiency (fewer hops = better)
+                    # - Distance fit (closer to max = less likely)
+                    freq_score = max(0, 1.0 - (frequency_mhz - 3) / 7)  # Peak at 3 MHz
+                    hop_score = 1.0 / n_hops  # Fewer hops preferred
+                    dist_ratio = distance_km / (n_hops * max_1hop_E)
+                    dist_score = 1.0 - 0.5 * dist_ratio  # Penalize near-max distances
+                    
+                    score = freq_score * hop_score * dist_score * 0.7  # E-layer base weight
+                    
+                    # Uncertainty increases with hops
+                    uncertainty_ms = 1.0 + 0.5 * n_hops
+                    
+                    candidates.append({
+                        'mode': f'{n_hops}E',
+                        'n_hops': n_hops,
+                        'layer': 'E',
+                        'height_km': hmE_km,
+                        'score': score,
+                        'delay_ms': delay_ms,
+                        'path_km': path_km,
+                        'uncertainty_ms': uncertainty_ms
+                    })
+        
+        # F-layer candidates (all frequencies, longer distances)
+        for n_hops in range(1, 6):
+            if distance_km <= n_hops * max_1hop_F:
+                # Calculate path and delay
+                path_km = self._calculate_hop_path(distance_km, hmF2_km, n_hops)
+                delay_ms = (path_km / SPEED_OF_LIGHT_KM_S) * 1000.0
+                
+                # Score based on:
+                # - Path efficiency (fewer hops = better)
+                # - Distance fit
+                # - Frequency (higher frequencies prefer F-layer)
+                hop_score = 1.0 / n_hops
+                dist_ratio = distance_km / (n_hops * max_1hop_F)
+                dist_score = 1.0 - 0.3 * dist_ratio
+                freq_score = min(1.0, frequency_mhz / 10)  # Higher freq = better for F
+                
+                score = hop_score * dist_score * freq_score
+                
+                # Uncertainty increases with hops
+                uncertainty_ms = 0.8 + 0.4 * n_hops
+                
+                candidates.append({
+                    'mode': f'{n_hops}F',
+                    'n_hops': n_hops,
+                    'layer': 'F',
+                    'height_km': hmF2_km,
+                    'score': score,
+                    'delay_ms': delay_ms,
+                    'path_km': path_km,
+                    'uncertainty_ms': uncertainty_ms
+                })
+        
+        # Sort by score (highest first)
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Normalize scores to sum to 1.0 (probability distribution)
+        total_score = sum(c['score'] for c in candidates)
+        if total_score > 0:
+            for c in candidates:
+                c['probability'] = c['score'] / total_score
+        
+        return candidates
     
     def _calculate_hop_path(
         self,

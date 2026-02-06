@@ -218,6 +218,25 @@ class MetrologyService:
                 station_metadata=self.station_config
             )
             logger.info(f"Test signal writer initialized for {channel_name}")
+        
+        # Tick Timing Writer (for per-second timing estimates)
+        # Provides 55+ timing estimates per minute for improved precision
+        tick_output_dir = DataProductRegistry.get_data_dir(
+            channel_dir=self.output_dir,
+            product_level="L2",
+            product_name="tick_timing",
+            create=True
+        )
+        self.tick_writer = DataProductWriter(
+            output_dir=tick_output_dir,
+            product_level="L2",
+            product_name="tick_timing",
+            channel=self.channel_name,
+            version="v1",
+            processing_version="1.0.0",
+            station_metadata=self.station_config
+        )
+        logger.info(f"Tick timing writer initialized for {channel_name}")
              
         logger.info(f"MetrologyService initialized for {channel_name}")
 
@@ -442,6 +461,52 @@ class MetrologyService:
                         logger.info(f"CHU FSK data written: DUT1={fsk_data.get('dut1_seconds')}s, TAI-UTC={fsk_data.get('tai_utc')}s")
                     except Exception as fsk_err:
                         logger.warning(f"Failed to write FSK data: {fsk_err}")
+            
+            # Write tick timing data (55+ estimates per minute)
+            if self.tick_writer and hasattr(self.engine, '_last_tick_results'):
+                tick_results = self.engine._last_tick_results
+                if tick_results:
+                    for station_name, tick_analysis in tick_results.items():
+                        # Get expected delay for D_clock calculation
+                        expected_delay_ms = None
+                        d_clock_ms = None
+                        if hasattr(self.engine, '_predict_geometric_delay'):
+                            try:
+                                expected_delay_ms, _, _ = self.engine._predict_geometric_delay(
+                                    station_name, minute_boundary
+                                )
+                                # D_clock = measured_offset (already relative to expected tick positions)
+                                # The tick filter returns offset from expected positions within the buffer
+                                d_clock_ms = tick_analysis.mean_timing_offset_ms
+                            except Exception:
+                                pass
+                        
+                        tick_rec = {
+                            'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                            'minute_boundary_utc': minute_boundary,
+                            'channel': self.channel_name,
+                            'station': station_name,
+                            'frequency_mhz': self.frequency_hz / 1e6,
+                            'mean_timing_offset_ms': tick_analysis.mean_timing_offset_ms,
+                            'std_timing_offset_ms': tick_analysis.std_timing_offset_ms,
+                            'mean_snr_db': tick_analysis.mean_snr_db,
+                            'drift_rate_ms_per_sec': tick_analysis.drift_rate_ms_per_sec,
+                            'valid_windows': tick_analysis.valid_windows,
+                            'total_windows': tick_analysis.total_windows,
+                            'overall_confidence': tick_analysis.overall_confidence,
+                            'expected_delay_ms': expected_delay_ms,
+                            'd_clock_ms': d_clock_ms,
+                            'processed_at': datetime.now(timezone.utc).isoformat(),
+                            'processing_version': "1.0.0"
+                        }
+                        try:
+                            self.tick_writer.write_measurement(tick_rec)
+                            logger.info(f"Tick timing written: {station_name} "
+                                       f"offset={tick_analysis.mean_timing_offset_ms:+.2f}ms "
+                                       f"±{tick_analysis.std_timing_offset_ms:.2f}ms "
+                                       f"({tick_analysis.valid_windows}/{tick_analysis.total_windows} windows)")
+                        except Exception as tick_err:
+                            logger.warning(f"Failed to write tick data for {station_name}: {tick_err}")
                 
             # Write test signal for minutes 8 and 44 (WWV/WWVH channel sounding)
             minute_number = (minute_boundary // 60) % 60
@@ -469,6 +534,8 @@ class MetrologyService:
             self.fsk_writer.close()
         if self.test_signal_writer:
             self.test_signal_writer.close()
+        if self.tick_writer:
+            self.tick_writer.close()
     
     def _write_test_signal(self, minute_boundary: int, iq_samples: np.ndarray, minute_number: int):
         """

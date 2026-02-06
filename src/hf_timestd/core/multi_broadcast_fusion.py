@@ -132,7 +132,7 @@ The fusion produces:
     - n_broadcasts: Number of broadcasts contributing
     - quality_grade: A/B/C/D based on broadcast count and uncertainty
 
-Output is written to: phase2/fusion/fused_d_clock.csv
+Output is written to: phase2/fusion/ (HDF5 L3 products)
 
 ================================================================================
 USAGE
@@ -159,7 +159,6 @@ REVISION HISTORY
 
 import logging
 import json
-import csv
 import os
 import time
 import re
@@ -194,16 +193,17 @@ try:
     from hf_timestd.io import DataProductReader
 except ImportError:
     HDF5_AVAILABLE = False
-    logger.warning("h5py/xarray not available, using CSV fallback")
+    logger.warning("h5py/xarray not available, HDF5 reads will fail")
 
-# Disable HDF5 file locking to allow SWMR readers
-# This is required when the writer has the file locked for SWMR write
+# Disable HDF5 file locking to allow concurrent readers
+# Writer uses open-write-close pattern (no persistent handles), but
+# HDF5 library-level locking can still block concurrent reads on some systems.
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
-# HDF5 is now enabled with SWMR support
+# HDF5 is enabled
 HDF5_AVAILABLE = True
 if not HDF5_AVAILABLE:
-    logger.warning("HDF5 storage DISABLED (forced fallback to CSV)")
+    logger.warning("HDF5 storage DISABLED")
 
 # Physics Propagation for GNSS Integration
 try:
@@ -244,13 +244,29 @@ class BroadcastCalibration:
     """
     Per-broadcast calibration offset learned from data.
     
+    CALIBRATION vs PHYSICS SEPARATION (2026-02-06):
+    -----------------------------------------------
+    The total offset is decomposed into two components:
+    
+    1. hardware_offset_ms: CONSTANT systematic delays from the receiver chain.
+       - Matched filter group delay (~0.4ms for 800ms template)
+       - ADC/buffer alignment latency
+       - Detection threshold bias
+       These converge quickly and should NOT change once learned.
+       Learning rate: Very slow after convergence (α_hw → 0.01).
+    
+    2. The RESIDUAL (D_clock - hardware_offset) is the SCIENCE PRODUCT:
+       - Real ionospheric variations from climatology
+       - Propagation model errors (which should be fixed in the model)
+       - Measurement noise
+       
+    The old approach (offset_ms = -mean(D_clock)) absorbed EVERYTHING,
+    hiding physics model errors. The new approach only calibrates hardware.
+    
     Issue 3.2 Fix: Calibration is now per-broadcast (station+frequency) rather
     than per-station. This accounts for frequency-dependent ionospheric delays:
     - Different frequencies have different ionospheric delays (1/f²)
     - Same-frequency broadcasts share ionospheric conditions (correlated errors)
-    
-    Issue 4.3 Fix: No more hardcoded defaults. Initial offset is 0 with high
-    uncertainty, and the system learns from data using ground truth validation.
     
     BPM Note: BPM calibration must account for UT1/UTC alternation.
     UT1 minutes (25-29, 55-59) are excluded from calibration unless
@@ -258,11 +274,13 @@ class BroadcastCalibration:
     """
     station: str              # WWV, WWVH, CHU, BPM
     frequency_mhz: float      # Broadcast frequency (key for correlation)
-    offset_ms: float          # Calibration offset to apply
+    offset_ms: float          # Total calibration offset (backward compat)
     uncertainty_ms: float     # Uncertainty in offset
     n_samples: int            # Number of samples used
     last_updated: float       # Unix time of last update
     reference_station: str    # Station used as reference (CHU)
+    hardware_offset_ms: float = 0.0   # Hardware-only component (converges to constant)
+    hardware_converged: bool = False   # True once hardware offset has stabilized
     
     @property
     def broadcast_key(self) -> str:
@@ -604,7 +622,7 @@ class MultiBroadcastFusion:
             logger.info("Initialized HDF5 L3 fusion writer")
         except Exception as e:
             logger.warning(f"Failed to initialize HDF5 fusion writer: {e}")
-            logger.warning("Continuing with CSV-only writes")
+            logger.warning("HDF5 fusion writes disabled")
             self.hdf5_fusion_writer = None
             self.enable_hdf5_fusion_writes = False
 
@@ -1231,242 +1249,42 @@ class MultiBroadcastFusion:
                 return None
         return None
 
-    def _read_latest_tone_observations(
-        self,
-        lookback_minutes: int = 10
-    ) -> Dict[int, List[Dict]]:
-        from datetime import datetime, timezone, timedelta
-        from .wwv_constants import BPM_UT1_MINUTES
-
-        now = time.time()
-        cutoff = now - (lookback_minutes * 60)
-
-        now_dt = datetime.now(timezone.utc)
-        today_str = now_dt.strftime('%Y%m%d')
-        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
-
-        by_minute: Dict[int, List[Dict]] = defaultdict(list)
-
-        for channel in self.channels:
-            tone_dir = self.phase2_dir / channel / 'tone_detections'
-            if not tone_dir.exists():
-                continue
-
-            freq_mhz = self._extract_frequency_mhz(channel)
-            if freq_mhz is None:
-                continue
-
-            csv_files = []
-            for date_str in [today_str, yesterday_str]:
-                for csv_path in tone_dir.glob(f'*_tones_{date_str}.csv'):
-                    csv_files.append(csv_path)
-
-            for csv_path in csv_files:
-                try:
-                    with open(csv_path) as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            mb_str = row.get('minute_boundary')
-                            if not mb_str:
-                                continue
-                            try:
-                                minute_boundary = int(float(mb_str))
-                            except ValueError:
-                                continue
-
-                            if minute_boundary < cutoff:
-                                continue
-
-                            wwv_ms = row.get('wwv_timing_ms')
-                            wwvh_ms = row.get('wwvh_timing_ms')
-                            chu_ms = row.get('chu_timing_ms')
-                            bpm_ms = row.get('bpm_timing_ms')
-
-                            if wwv_ms not in (None, ''):
-                                try:
-                                    by_minute[minute_boundary].append({
-                                        'station': 'WWV',
-                                        'frequency_mhz': freq_mhz,
-                                        'timing_ms': float(wwv_ms)
-                                    })
-                                except ValueError:
-                                    pass
-
-                            if wwvh_ms not in (None, ''):
-                                try:
-                                    by_minute[minute_boundary].append({
-                                        'station': 'WWVH',
-                                        'frequency_mhz': freq_mhz,
-                                        'timing_ms': float(wwvh_ms)
-                                    })
-                                except ValueError:
-                                    pass
-
-                            if chu_ms not in (None, ''):
-                                try:
-                                    by_minute[minute_boundary].append({
-                                        'station': 'CHU',
-                                        'frequency_mhz': freq_mhz,
-                                        'timing_ms': float(chu_ms)
-                                    })
-                                except ValueError:
-                                    pass
-
-                            if bpm_ms not in (None, ''):
-                                try:
-                                    dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
-                                    if dt.minute in BPM_UT1_MINUTES:
-                                        continue
-                                    by_minute[minute_boundary].append({
-                                        'station': 'BPM',
-                                        'frequency_mhz': freq_mhz,
-                                        'timing_ms': float(bpm_ms)
-                                    })
-                                except ValueError:
-                                    pass
-                except (OSError, IOError, csv.Error) as e:
-                    logger.debug(f"Error reading CSV file: {e}")
-                    continue
-
-        return by_minute
-
     def _read_latest_tone_observations_by_channel(
         self,
         lookback_minutes: int = 10
     ) -> Dict[str, Dict[int, List[Dict]]]:
         """
-        Read latest tone observations from all channels.
-        
-        Tries HDF5 first (L1A tone detections), falls back to CSV if needed.
+        Read latest tone observations from all channels via HDF5.
         
         Returns observations from the last N minutes, grouped by channel and minute.
         """
-        # Try HDF5 first if available
-        if HDF5_AVAILABLE:
-            try:
-                return self._read_latest_tone_observations_by_channel_hdf5(lookback_minutes)
-            except Exception as e:
-                logger.warning(f"HDF5 tone detections read failed, falling back to CSV: {e}")
+        if not HDF5_AVAILABLE:
+            logger.warning("HDF5 not available for tone observations")
+            return {}
         
-        # CSV fallback (original implementation)
-        from datetime import datetime, timezone, timedelta
-        from .wwv_constants import BPM_UT1_MINUTES
-        
-        now = time.time()
-        cutoff = now - (lookback_minutes * 60)
-        
-        now_dt = datetime.now(timezone.utc)
-        today_str = now_dt.strftime('%Y%m%d')
-        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
-
-        by_channel: Dict[str, Dict[int, List[Dict]]] = {}
-
-        for channel in self.channels:
-            tone_dir = self.phase2_dir / channel / 'tone_detections'
-            if not tone_dir.exists():
-                continue
-
-            freq_mhz = self._extract_frequency_mhz(channel)
-            if freq_mhz is None:
-                continue
-
-            per_minute: Dict[int, List[Dict]] = defaultdict(list)
-
-            csv_files = []
-            for date_str in [today_str, yesterday_str]:
-                for csv_path in tone_dir.glob(f'*_tones_{date_str}.csv'):
-                    csv_files.append(csv_path)
-
-            for csv_path in csv_files:
-                try:
-                    with open(csv_path) as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            mb_str = row.get('minute_boundary')
-                            if not mb_str:
-                                continue
-                            try:
-                                minute_boundary = int(float(mb_str))
-                            except ValueError:
-                                continue
-
-                            if minute_boundary < cutoff:
-                                continue
-
-                            wwv_ms = row.get('wwv_timing_ms')
-                            wwvh_ms = row.get('wwvh_timing_ms')
-                            chu_ms = row.get('chu_timing_ms')
-                            bpm_ms = row.get('bpm_timing_ms')
-
-                            if wwv_ms not in (None, ''):
-                                try:
-                                    per_minute[minute_boundary].append({
-                                        'station': 'WWV',
-                                        'frequency_mhz': freq_mhz,
-                                        'timing_ms': float(wwv_ms)
-                                    })
-                                except ValueError:
-                                    pass
-
-                            if wwvh_ms not in (None, ''):
-                                try:
-                                    per_minute[minute_boundary].append({
-                                        'station': 'WWVH',
-                                        'frequency_mhz': freq_mhz,
-                                        'timing_ms': float(wwvh_ms)
-                                    })
-                                except ValueError:
-                                    pass
-
-                            if chu_ms not in (None, ''):
-                                try:
-                                    per_minute[minute_boundary].append({
-                                        'station': 'CHU',
-                                        'frequency_mhz': freq_mhz,
-                                        'timing_ms': float(chu_ms)
-                                    })
-                                except ValueError:
-                                    pass
-
-                            if bpm_ms not in (None, ''):
-                                try:
-                                    dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
-                                    if dt.minute in BPM_UT1_MINUTES:
-                                        continue
-                                    per_minute[minute_boundary].append({
-                                        'station': 'BPM',
-                                        'frequency_mhz': freq_mhz,
-                                        'timing_ms': float(bpm_ms)
-                                    })
-                                except ValueError:
-                                    pass
-                except (OSError, IOError, csv.Error) as e:
-                    logger.debug(f"Error reading CSV file: {e}")
-                    continue
-
-            if per_minute:
-                by_channel[channel] = per_minute
-
-        return by_channel
+        try:
+            return self._read_latest_tone_observations_by_channel_hdf5(lookback_minutes)
+        except Exception as e:
+            logger.error(f"HDF5 tone detections read failed: {e}")
+            return {}
     
     def _read_latest_tone_observations_by_channel_hdf5(
         self,
         lookback_minutes: int = 10
     ) -> Dict[str, Dict[int, List[Dict]]]:
         """
-        Read latest tone observations from HDF5 files with CSV fallback.
+        Read latest tone observations from L2 timing_measurements HDF5 files.
         
-        Reads L1A tone detections from HDF5 format, providing:
+        Reads from clock_offset/ subdirectory via DataProductRegistry, providing:
         - Quality filtering from HDF5 metadata
         - Complete metrological provenance chain
-        - Automatic CSV fallback if HDF5 not available
         
         Returns observations from the last N minutes, grouped by channel and minute.
         """
         from datetime import datetime, timezone, timedelta
         from .wwv_constants import BPM_UT1_MINUTES
         
-        # If HDF5 not available, return empty dict (CSV fallback handled at top level)
+        # If HDF5 not available, return empty dict
         if not HDF5_AVAILABLE:
             logger.debug("HDF5 not available for tone detections")
             return {}
@@ -1484,11 +1302,8 @@ class MultiBroadcastFusion:
         
         # Read from each channel
         for channel in self.channels:
-            # CRITICAL FIX: Define channel_dir before using it in DataProductReader
             channel_dir = self.phase2_dir / channel
-            
-            tone_dir = self.phase2_dir / channel / 'tone_detections'
-            if not tone_dir.exists():
+            if not channel_dir.exists():
                 continue
             
             freq_mhz = self._extract_frequency_mhz(channel)
@@ -1567,17 +1382,10 @@ class MultiBroadcastFusion:
                     by_channel[channel] = per_minute
             
             except FileNotFoundError:
-                # HDF5 file doesn't exist, try CSV fallback for this channel
-                logger.debug(f"No HDF5 tone detections found for {channel}, trying CSV fallback")
-                csv_data = self._read_tone_observations_for_channel_csv(channel, lookback_minutes)
-                if csv_data:
-                    by_channel[channel] = csv_data
+                logger.debug(f"No HDF5 timing measurements found for {channel}")
             
             except Exception as e:
-                logger.warning(f"Error reading HDF5 tone detections for {channel}: {e}, falling back to CSV")
-                csv_data = self._read_tone_observations_for_channel_csv(channel, lookback_minutes)
-                if csv_data:
-                    by_channel[channel] = csv_data
+                logger.warning(f"Error reading HDF5 timing measurements for {channel}: {e}")
         
         if by_channel:
             total_obs = sum(len(per_min) for per_min in by_channel.values() for per_min in per_min.values())
@@ -1587,111 +1395,158 @@ class MultiBroadcastFusion:
             )
         
         return by_channel
-    
-    def _read_tone_observations_for_channel_csv(
+
+    def _read_tick_timing_observations(
         self,
-        channel: str,
         lookback_minutes: int = 10
-    ) -> Dict[int, List[Dict]]:
+    ) -> Dict[str, Dict[int, List[Dict]]]:
         """
-        Read tone observations for a single channel from CSV.
+        Read per-second tick timing observations from L2 tick_timing HDF5 files.
         
-        Helper method for fallback when HDF5 is not available for a specific channel.
+        Tick timing provides 55+ timing estimates per minute, enabling improved
+        precision through averaging and drift detection.
+        
+        Returns observations grouped by channel and minute.
         """
         from datetime import datetime, timezone, timedelta
-        from .wwv_constants import BPM_UT1_MINUTES
+        
+        if not HDF5_AVAILABLE:
+            return {}
         
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
         
-        now_dt = datetime.now(timezone.utc)
-        today_str = now_dt.strftime('%Y%m%d')
-        yesterday_str = (now_dt - timedelta(days=1)).strftime('%Y%m%d')
+        start_dt = datetime.fromtimestamp(cutoff, timezone.utc)
+        end_dt = datetime.fromtimestamp(now, timezone.utc)
+        start_iso = start_dt.isoformat().replace('+00:00', 'Z')
+        end_iso = end_dt.isoformat().replace('+00:00', 'Z')
         
-        tone_dir = self.phase2_dir / channel / 'tone_detections'
-        if not tone_dir.exists():
-            return {}
+        by_channel: Dict[str, Dict[int, List[Dict]]] = {}
         
-        freq_mhz = self._extract_frequency_mhz(channel)
-        if freq_mhz is None:
-            return {}
-        
-        per_minute: Dict[int, List[Dict]] = defaultdict(list)
-        
-        csv_files = []
-        for date_str in [today_str, yesterday_str]:
-            for csv_path in tone_dir.glob(f'*_tones_{date_str}.csv'):
-                csv_files.append(csv_path)
-        
-        for csv_path in csv_files:
+        for channel in self.channels:
+            channel_dir = self.phase2_dir / channel
+            if not channel_dir.exists():
+                continue
+            
             try:
-                with open(csv_path) as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        mb_str = row.get('minute_boundary')
-                        if not mb_str:
-                            continue
-                        try:
-                            minute_boundary = int(float(mb_str))
-                        except ValueError:
-                            continue
-                        
+                reader = DataProductReader(
+                    data_dir=channel_dir,
+                    product_level='L2',
+                    product_name='tick_timing',
+                    channel=channel
+                )
+                
+                tick_measurements = reader.read_time_range(start=start_iso, end=end_iso)
+                
+                per_minute: Dict[int, List[Dict]] = defaultdict(list)
+                
+                for tick_meas in tick_measurements:
+                    try:
+                        minute_boundary = tick_meas.get('minute_boundary_utc', 0)
                         if minute_boundary < cutoff:
                             continue
                         
-                        wwv_ms = row.get('wwv_timing_ms')
-                        wwvh_ms = row.get('wwvh_timing_ms')
-                        chu_ms = row.get('chu_timing_ms')
-                        bpm_ms = row.get('bpm_timing_ms')
-                        
-                        if wwv_ms not in (None, ''):
-                            try:
-                                per_minute[minute_boundary].append({
-                                    'station': 'WWV',
-                                    'frequency_mhz': freq_mhz,
-                                    'timing_ms': float(wwv_ms)
-                                })
-                            except ValueError:
-                                pass
-                        
-                        if wwvh_ms not in (None, ''):
-                            try:
-                                per_minute[minute_boundary].append({
-                                    'station': 'WWVH',
-                                    'frequency_mhz': freq_mhz,
-                                    'timing_ms': float(wwvh_ms)
-                                })
-                            except ValueError:
-                                pass
-                        
-                        if chu_ms not in (None, ''):
-                            try:
-                                per_minute[minute_boundary].append({
-                                    'station': 'CHU',
-                                    'frequency_mhz': freq_mhz,
-                                    'timing_ms': float(chu_ms)
-                                })
-                            except ValueError:
-                                pass
-                        
-                        if bpm_ms not in (None, ''):
-                            try:
-                                dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
-                                if dt.minute in BPM_UT1_MINUTES:
-                                    continue
-                                per_minute[minute_boundary].append({
-                                    'station': 'BPM',
-                                    'frequency_mhz': freq_mhz,
-                                    'timing_ms': float(bpm_ms)
-                                })
-                            except ValueError:
-                                pass
-            except (OSError, IOError, csv.Error) as e:
-                logger.debug(f"Error reading CSV file: {e}")
-                continue
+                        # Only include high-confidence tick measurements
+                        if tick_meas.get('valid_windows', 0) >= 10:
+                            per_minute[minute_boundary].append({
+                                'station': tick_meas.get('station'),
+                                'frequency_mhz': tick_meas.get('frequency_mhz'),
+                                'timing_ms': tick_meas.get('mean_timing_offset_ms'),
+                                'std_ms': tick_meas.get('std_timing_offset_ms'),
+                                'n_windows': tick_meas.get('valid_windows'),
+                                'source': 'tick'
+                            })
+                    except (ValueError, KeyError):
+                        continue
+                
+                if per_minute:
+                    by_channel[channel] = per_minute
+                    
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logger.debug(f"Error reading tick timing for {channel}: {e}")
         
-        return per_minute
+        if by_channel:
+            total = sum(len(m) for pm in by_channel.values() for m in pm.values())
+            logger.info(f"Read {total} tick timing observations from {len(by_channel)} channels")
+        
+        return by_channel
 
+    def _read_chu_fsk_timing(
+        self,
+        lookback_minutes: int = 10
+    ) -> Dict[int, Dict]:
+        """
+        Read CHU FSK timing observations from L2 chu_fsk HDF5 files.
+        
+        CHU FSK provides precise 500ms boundary alignment - the most accurate
+        timing reference available from HF broadcasts.
+        
+        Returns FSK timing keyed by minute boundary.
+        """
+        from datetime import datetime, timezone
+        
+        if not HDF5_AVAILABLE:
+            return {}
+        
+        now = time.time()
+        cutoff = now - (lookback_minutes * 60)
+        
+        start_dt = datetime.fromtimestamp(cutoff, timezone.utc)
+        end_dt = datetime.fromtimestamp(now, timezone.utc)
+        start_iso = start_dt.isoformat().replace('+00:00', 'Z')
+        end_iso = end_dt.isoformat().replace('+00:00', 'Z')
+        
+        fsk_by_minute: Dict[int, Dict] = {}
+        
+        # Find CHU channels
+        chu_channels = [ch for ch in self.channels if 'CHU' in ch.upper()]
+        
+        for channel in chu_channels:
+            channel_dir = self.phase2_dir / channel
+            if not channel_dir.exists():
+                continue
+            
+            try:
+                reader = DataProductReader(
+                    data_dir=channel_dir,
+                    product_level='L2',
+                    product_name='chu_fsk',
+                    channel=channel
+                )
+                
+                fsk_measurements = reader.read_time_range(start=start_iso, end=end_iso)
+                
+                for fsk_meas in fsk_measurements:
+                    try:
+                        minute_boundary = fsk_meas.get('minute_boundary_utc', 0)
+                        if minute_boundary < cutoff:
+                            continue
+                        
+                        # Only use valid FSK decodes with timing
+                        if fsk_meas.get('fsk_valid') and fsk_meas.get('timing_offset_ms') is not None:
+                            fsk_by_minute[minute_boundary] = {
+                                'channel': channel,
+                                'timing_offset_ms': fsk_meas.get('timing_offset_ms'),
+                                'decode_confidence': fsk_meas.get('decode_confidence', 0),
+                                'frames_decoded': fsk_meas.get('frames_decoded', 0),
+                                'dut1_seconds': fsk_meas.get('dut1_seconds'),
+                                'tai_utc': fsk_meas.get('tai_utc'),
+                                'source': 'chu_fsk'
+                            }
+                    except (ValueError, KeyError):
+                        continue
+                        
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logger.debug(f"Error reading CHU FSK for {channel}: {e}")
+        
+        if fsk_by_minute:
+            logger.info(f"Read {len(fsk_by_minute)} CHU FSK timing observations")
+        
+        return fsk_by_minute
 
     def _run_global_differential_solve(
         self,
@@ -2109,14 +1964,6 @@ class MultiBroadcastFusion:
                 logger.debug(f"Error processing item {key}: {e}")
                 continue
 
-        if not measurements:
-            # Fallback to CSV if HDF5 failed completely?
-            # Or just return empty if we are committed to HDF5.
-            # Let's keep csv fallback for legacy read? 
-            # The previous code had a CSV fallback.
-            # If l1_map is empty, maybe try CSV.
-                    pass
-
         return measurements
     
     def _calculate_weights(
@@ -2193,7 +2040,40 @@ class MultiBroadcastFusion:
             grade_scale_factor = grade_scale.get(m.quality_grade, 0.5)
             
             # Scale by propagation mode (physical reliability)
-            mode_scale_factor = mode_scale.get(m.propagation_mode, 0.7)
+            # MODE AMBIGUITY PENALTY (2026-02-06): If the physics model reports
+            # multiple viable modes, the measurement is less reliable because we
+            # don't know which mode the signal actually took. The delay difference
+            # between modes (e.g., 1F vs 2E) can be 5-20ms.
+            base_mode = m.propagation_mode.split('+')[0] if '+' in m.propagation_mode else m.propagation_mode
+            mode_scale_factor = mode_scale.get(base_mode, 0.7)
+            
+            if hasattr(self, 'physics_model') and self.physics_model is not None and \
+               m.station not in ('GLOBAL_DIFF', 'UNKNOWN', 'TICK', 'CHU_FSK'):
+                try:
+                    from datetime import datetime, timezone as tz
+                    candidates = self.physics_model.get_mode_candidates(
+                        station=m.station,
+                        frequency_mhz=m.frequency_mhz,
+                        timestamp=datetime.fromtimestamp(m.timestamp, tz=tz.utc)
+                    )
+                    if len(candidates) > 1:
+                        # Multiple modes viable - compute ambiguity penalty
+                        # If top mode has 90%+ probability, minimal penalty
+                        # If top mode has <50% probability, significant penalty
+                        top_prob = candidates[0].get('probability', 1.0)
+                        # Delay spread between top two candidates
+                        delay_spread = abs(candidates[0]['delay_ms'] - candidates[1]['delay_ms'])
+                        
+                        if top_prob > 0.8:
+                            ambiguity_penalty = 1.0  # Dominant mode, no penalty
+                        elif top_prob > 0.5:
+                            ambiguity_penalty = 0.7 + 0.3 * top_prob  # Mild penalty
+                        else:
+                            ambiguity_penalty = 0.4  # Severe ambiguity
+                        
+                        mode_scale_factor *= ambiguity_penalty
+                except Exception:
+                    pass  # Fail silently - mode scoring is an enhancement, not critical
             
             # Scale by SNR (signal quality)
             if m.snr_db is not None:
@@ -2428,6 +2308,9 @@ class MultiBroadcastFusion:
                 self.measurement_history[broadcast_key] = history[-self.history_max_size:]
         
         # Update calibration per-BROADCAST
+        # PHYSICS-FIRST CALIBRATION (2026-02-06):
+        # Separate hardware calibration (constant) from propagation residuals (variable).
+        # Hardware offsets converge quickly then freeze. Propagation residuals are science.
         for broadcast_key, history in self.measurement_history.items():
             if len(history) < 5:
                 continue
@@ -2438,20 +2321,7 @@ class MultiBroadcastFusion:
             broadcast_mean = np.mean(d_clocks)
             broadcast_std = np.std(d_clocks)
             
-            # CRITICAL FIX (2026-01-15): Calibration targets ABSOLUTE ZERO (GPSDO reference)
-            # The GPSDO is the "steel ruler" - it defines UTC absolutely.
-            # Calibration removes systematic offsets to bring D_clock → 0ms.
-            # The Kalman filter then provides temporal smoothing of the calibrated result.
-            # 
-            # This decouples calibration from Kalman state, preventing circular dependency:
-            # - Calibration: Learns systematic offsets, targets zero
-            # - Kalman: Filters calibrated measurements for stability
-            # 
-            # Previous approach (calibration → Kalman state) created deadlock:
-            # Calibration tried to reach frozen Kalman value, Kalman rejected noisy calibration.
-            # 
-            # calibrated = raw + offset = 0
-            # offset = 0 - raw
+            # Target offset: bring D_clock toward zero
             new_offset = 0.0 - broadcast_mean
             
             # Extract station and frequency from key for logging
@@ -2462,24 +2332,32 @@ class MultiBroadcastFusion:
             
             # Exponential moving average for smooth updates
             old_cal = self.calibration.get(broadcast_key)
+            old_hw_offset = old_cal.hardware_offset_ms if old_cal else 0.0
+            hw_converged = old_cal.hardware_converged if old_cal else False
+            
             if old_cal and old_cal.n_samples > 0:
-                # Alpha range: 0.3 (fast) to 0.1 (slow)
-                base_alpha = max(0.1, min(0.3, 10.0 / old_cal.n_samples))
-                
-                # CRITICAL FIX: Bootstrap Acceleration
-                # If system is starting up, allow fast convergence even if agreement fails
                 is_bootstrap = self.calibration_update_count < 100
                 
                 if is_bootstrap:
-                    # Accelerate learning during bootstrap
-                    alpha = base_alpha  # Don't penalize during potential misalignment
-                    max_delta = 50.0    # Allow large jumps (e.g. 60ms) to find alignment
+                    # Bootstrap: fast convergence for hardware offset discovery
+                    alpha = max(0.1, min(0.3, 10.0 / old_cal.n_samples))
+                    max_delta = 50.0
+                    hw_alpha = 0.2  # Fast hardware learning during bootstrap
                     if self.calibration_update_count % 10 == 0:
                         logger.info(f"Calibration Bootstrap: Accelerating convergence for {broadcast_key} (max_delta={max_delta}ms)")
+                elif hw_converged:
+                    # PHYSICS-FIRST: Hardware converged → very slow total calibration
+                    # Only absorb truly constant offsets. Let propagation residuals
+                    # show through as the science product.
+                    alpha = 0.02 if validated else 0.005  # Very slow
+                    max_delta = 0.1  # ms per update - tight limit
+                    hw_alpha = 0.01  # Near-frozen hardware offset
                 else:
-                    # Standard operation: cautious updates
+                    # Standard operation: moderate learning rate
+                    base_alpha = max(0.1, min(0.3, 10.0 / old_cal.n_samples))
                     alpha = base_alpha if validated else base_alpha * 0.3
-                    max_delta = 0.5  # ms per update
+                    max_delta = 0.5
+                    hw_alpha = 0.05  # Moderate hardware learning
 
                 new_offset = alpha * new_offset + (1 - alpha) * old_cal.offset_ms
                 
@@ -2490,7 +2368,20 @@ class MultiBroadcastFusion:
                     new_offset = old_cal.offset_ms + np.sign(delta_offset) * max_delta
                     logger.debug(f"Calibration {broadcast_key}: rate-limited Δ={delta_offset:.3f}ms to ±{max_delta}ms")
                 
-                logger.debug(f"Calibration {broadcast_key}: alpha={alpha:.3f} (validated={validated}, bootstrap={is_bootstrap})")
+                # Update hardware offset (slow-converging constant component)
+                new_hw_offset = hw_alpha * new_offset + (1 - hw_alpha) * old_hw_offset
+                
+                # Check hardware convergence: if offset hasn't changed >0.1ms in 50+ samples
+                if old_cal.n_samples > 50 and abs(new_hw_offset - old_hw_offset) < 0.05:
+                    if not hw_converged:
+                        hw_converged = True
+                        logger.info(f"Hardware calibration CONVERGED for {broadcast_key}: "
+                                   f"hw_offset={new_hw_offset:+.2f}ms (n={old_cal.n_samples})")
+                
+                old_hw_offset = new_hw_offset
+                
+                logger.debug(f"Calibration {broadcast_key}: alpha={alpha:.3f}, hw_alpha={hw_alpha:.3f}, "
+                            f"hw_converged={hw_converged} (validated={validated}, bootstrap={is_bootstrap})")
             
             # CRITICAL FIX (2026-01-24): Sanity check calibration offset magnitude
             # Any offset larger than MAX_CALIBRATION_OFFSET_MS indicates a systematic
@@ -2522,7 +2413,9 @@ class MultiBroadcastFusion:
                 uncertainty_ms=broadcast_std / np.sqrt(len(d_clocks)),  # Standard error
                 n_samples=len(d_clocks),
                 last_updated=datetime.now(timezone.utc).isoformat(),
-                reference_station=self.reference_station
+                reference_station=self.reference_station,
+                hardware_offset_ms=old_hw_offset,
+                hardware_converged=hw_converged
             )
         
         # CRITICAL FIX (P2.1): Auto-save calibration every 10 updates
@@ -3229,6 +3122,90 @@ class MultiBroadcastFusion:
                     channel_name='FUSION'
                 )
             )
+        
+        # ====================================================================
+        # TICK TIMING INTEGRATION (55+ estimates per minute)
+        # ====================================================================
+        # Per-second tick timing provides many more timing estimates than the
+        # single minute marker. The averaged tick timing has lower uncertainty
+        # due to √N improvement from averaging.
+        try:
+            tick_observations = self._read_tick_timing_observations(lookback_minutes)
+            if tick_observations:
+                # Get the most recent minute's tick data
+                all_minutes = set()
+                for ch_data in tick_observations.values():
+                    all_minutes.update(ch_data.keys())
+                
+                if all_minutes:
+                    latest_minute = max(all_minutes)
+                    tick_count = 0
+                    
+                    for channel, per_minute in tick_observations.items():
+                        if latest_minute in per_minute:
+                            for tick_obs in per_minute[latest_minute]:
+                                # Tick timing provides d_clock directly
+                                # Weight by number of valid windows (more windows = lower uncertainty)
+                                n_windows = tick_obs.get('n_windows', 10)
+                                std_ms = tick_obs.get('std_ms', 5.0)
+                                
+                                # Confidence based on window count and std
+                                confidence = min(0.9, n_windows / 55.0) * min(1.0, 3.0 / max(0.5, std_ms))
+                                
+                                measurements.append(
+                                    BroadcastMeasurement(
+                                        timestamp=latest_minute,
+                                        station=tick_obs.get('station', 'UNKNOWN'),
+                                        frequency_mhz=tick_obs.get('frequency_mhz', 0.0),
+                                        d_clock_ms=tick_obs.get('timing_ms', 0.0),
+                                        propagation_delay_ms=0.0,
+                                        propagation_mode='TICK',
+                                        confidence=confidence,
+                                        snr_db=15.0,
+                                        quality_grade='B',
+                                        channel_name=channel
+                                    )
+                                )
+                                tick_count += 1
+                    
+                    if tick_count > 0:
+                        logger.info(f"Integrated {tick_count} tick timing measurements into fusion")
+        except Exception as e:
+            logger.debug(f"Tick timing integration failed: {e}")
+        
+        # ====================================================================
+        # CHU FSK TIMING INTEGRATION (Precise 500ms boundary)
+        # ====================================================================
+        # CHU FSK provides the most precise timing reference from HF broadcasts.
+        # The 500ms boundary is decoded from the FSK time code with ~0.1ms precision.
+        try:
+            fsk_timing = self._read_chu_fsk_timing(lookback_minutes)
+            if fsk_timing:
+                # Get the most recent FSK timing
+                latest_fsk_minute = max(fsk_timing.keys())
+                fsk_data = fsk_timing[latest_fsk_minute]
+                
+                # FSK timing is high-confidence anchor
+                confidence = min(0.95, fsk_data.get('decode_confidence', 0.5))
+                
+                measurements.append(
+                    BroadcastMeasurement(
+                        timestamp=latest_fsk_minute,
+                        station='CHU',
+                        frequency_mhz=7.85,  # Primary CHU frequency
+                        d_clock_ms=fsk_data.get('timing_offset_ms', 0.0),
+                        propagation_delay_ms=0.0,
+                        propagation_mode='FSK',
+                        confidence=confidence,
+                        snr_db=20.0,
+                        quality_grade='A',  # FSK is highest quality
+                        channel_name=fsk_data.get('channel', 'CHU')
+                    )
+                )
+                logger.info(f"Integrated CHU FSK timing: {fsk_data.get('timing_offset_ms', 0.0):+.2f}ms "
+                           f"(confidence={confidence:.2f}, frames={fsk_data.get('frames_decoded', 0)})")
+        except Exception as e:
+            logger.debug(f"CHU FSK timing integration failed: {e}")
         
         # Calculate weights
         weights = self._calculate_weights(measurements)
@@ -4198,90 +4175,63 @@ class MultiBroadcastFusion:
     
     def _read_gnss_vtec(self) -> Optional[Tuple[float, float]]:
         """
-        Read the latest GNSS VTEC from HDF5 or CSV fallback.
+        Read the latest GNSS VTEC from HDF5.
         Returns (vtec_tecu, timestamp) or None.
         """
         logger.info(">>> _read_gnss_vtec() called <<<")
         
-        # Try HDF5 first
-        if HDF5_AVAILABLE:
-            try:
-                from datetime import datetime, timezone, timedelta
-                
-                # Check both possible locations for GNSS VTEC data
-                # Primary: data_root/data/gnss_vtec (where live_vtec.py writes with relative path)
-                # Fallback: data_root/gnss_vtec (legacy location)
-                vtec_dir = self.data_root / 'data' / 'gnss_vtec'
-                if not vtec_dir.exists():
-                    vtec_dir = self.data_root / 'gnss_vtec'
-                if vtec_dir.exists():
-                    reader = DataProductReader(
-                        data_dir=vtec_dir,
-                        product_level='L3',
-                        product_name='gnss_vtec',
-                        channel='GNSS'
-                    )
-                    
-                    # Read last 5 minutes of data
-                    now = datetime.now(timezone.utc)
-                    start = now - timedelta(minutes=5)
-                    
-                    measurements = reader.read_time_range(
-                        start=start.isoformat().replace('+00:00', 'Z'),
-                        end=now.isoformat().replace('+00:00', 'Z'),
-                        quality_flags=['GOOD', 'MARGINAL']  # Accept GOOD and MARGINAL
-                    )
-                    
-                    if measurements:
-                        # Get most recent measurement
-                        latest = max(measurements, key=lambda m: m['unix_timestamp'])
-                        logger.info(
-                            f"Read VTEC from HDF5: {latest['vtec_tecu']:.2f} TECU, "
-                            f"{latest['n_satellites']} sats, quality={latest['quality_flag']}"
-                        )
-                        return latest['vtec_tecu'], latest['unix_timestamp']
-                    else:
-                        logger.debug("HDF5 VTEC query returned no measurements")
-            
-            except FileNotFoundError:
-                logger.debug("HDF5 VTEC directory not found, trying CSV fallback")
-            except Exception as e:
-                logger.debug(f"HDF5 VTEC read failed, trying CSV fallback: {e}")
-        
-        # CSV fallback (original implementation)
-        vtec_path = self.data_root / 'gnss_vtec.csv'
-        if not vtec_path.exists():
-            logger.info(f"VTEC file does not exist: {vtec_path}")
+        if not HDF5_AVAILABLE:
+            logger.warning("HDF5 not available for GNSS VTEC reads")
             return None
-            
+        
         try:
-            # Efficiently read last line using seek
-            with open(vtec_path, 'rb') as f:
-                try:
-                    f.seek(-1024, os.SEEK_END)
-                except OSError:
-                    # File too small, read from beginning
-                    pass
-                lines = f.readlines()
-                
-            if not lines:
+            from datetime import datetime, timezone, timedelta
+            
+            # Check both possible locations for GNSS VTEC data
+            # Primary: data_root/data/gnss_vtec (where live_vtec.py writes with relative path)
+            # Fallback: data_root/gnss_vtec (legacy location)
+            vtec_dir = self.data_root / 'data' / 'gnss_vtec'
+            if not vtec_dir.exists():
+                vtec_dir = self.data_root / 'gnss_vtec'
+            
+            if not vtec_dir.exists():
+                logger.warning(f"GNSS VTEC directory not found: {vtec_dir}")
                 return None
-                
-            last_line = lines[-1].decode('utf-8').strip()
-            # CSV Format: timestamp,vtec_tecu,nsats
-            parts = last_line.split(',')
-            if len(parts) >= 2:
-                # Handle potential header
-                if parts[0] == 'timestamp':
-                    return None
-                    
-                ts = float(parts[0])
-                vtec = float(parts[1])
-                logger.info(f"Read VTEC from CSV fallback: {vtec:.2f} TECU")
-                return vtec, ts
-                
+            
+            reader = DataProductReader(
+                data_dir=vtec_dir,
+                product_level='L3',
+                product_name='gnss_vtec',
+                channel='GNSS'
+            )
+            
+            # Read last 5 minutes of data
+            now = datetime.now(timezone.utc)
+            start = now - timedelta(minutes=5)
+            
+            measurements = reader.read_time_range(
+                start=start.isoformat().replace('+00:00', 'Z'),
+                end=now.isoformat().replace('+00:00', 'Z'),
+                quality_flags=['GOOD', 'MARGINAL']  # Accept GOOD and MARGINAL
+            )
+            
+            if measurements:
+                # Get most recent measurement
+                latest = max(measurements, key=lambda m: m['unix_timestamp'])
+                logger.info(
+                    f"Read VTEC from HDF5: {latest['vtec_tecu']:.2f} TECU, "
+                    f"{latest['n_satellites']} sats, quality={latest['quality_flag']}"
+                )
+                return latest['vtec_tecu'], latest['unix_timestamp']
+            else:
+                logger.debug("HDF5 VTEC query returned no measurements")
+                return None
+        
+        except FileNotFoundError:
+            logger.warning("HDF5 VTEC directory not found")
+            return None
         except Exception as e:
-            logger.debug(f"Error reading GNSS VTEC: {e}")
+            logger.error(f"HDF5 VTEC read failed: {e}")
             return None
 
     def get_current_calibration(self) -> Dict[str, float]:
@@ -4544,6 +4494,12 @@ def run_fusion_service(
     except Exception as e:
         logger.warning(f"[BOOTSTRAP] Error checking lock state: {e}. Proceeding without gate.")
     
+    # Data freshness alerting - track consecutive cycles with no measurements
+    consecutive_empty_cycles = 0
+    EMPTY_CYCLE_WARNING_THRESHOLD = 5  # Warn after 5 consecutive empty cycles
+    EMPTY_CYCLE_ERROR_THRESHOLD = 15   # Error after 15 consecutive empty cycles (~2 min at 8s interval)
+    last_successful_fusion_time = time.time()
+    
     while running:
         try:
             # BREADCRUMB: Loop start
@@ -4582,6 +4538,38 @@ def run_fusion_service(
             
             # Use L2 result for logging (primary feed)
             result = result_l2 if result_l2 else result_l1
+            
+            # ================================================================
+            # DATA FRESHNESS ALERTING (2026-02-06)
+            # ================================================================
+            # Track consecutive cycles with no measurements to detect data flow issues
+            if result is None or (result.n_broadcasts == 0):
+                consecutive_empty_cycles += 1
+                stale_duration = time.time() - last_successful_fusion_time
+                
+                if consecutive_empty_cycles == EMPTY_CYCLE_WARNING_THRESHOLD:
+                    logger.warning(
+                        f"[DATA FRESHNESS] No measurements for {consecutive_empty_cycles} consecutive cycles "
+                        f"({stale_duration:.0f}s). Check metrology service and L1/L2 HDF5 files."
+                    )
+                elif consecutive_empty_cycles == EMPTY_CYCLE_ERROR_THRESHOLD:
+                    logger.error(
+                        f"[DATA FRESHNESS] CRITICAL: No measurements for {consecutive_empty_cycles} consecutive cycles "
+                        f"({stale_duration:.0f}s). Fusion is starved - upstream data flow may be broken!"
+                    )
+                elif consecutive_empty_cycles > EMPTY_CYCLE_ERROR_THRESHOLD and consecutive_empty_cycles % 30 == 0:
+                    # Periodic reminder every ~4 minutes
+                    logger.error(
+                        f"[DATA FRESHNESS] Still no measurements after {consecutive_empty_cycles} cycles "
+                        f"({stale_duration/60:.1f} minutes). Manual intervention required."
+                    )
+            else:
+                if consecutive_empty_cycles >= EMPTY_CYCLE_WARNING_THRESHOLD:
+                    logger.info(
+                        f"[DATA FRESHNESS] Data flow restored after {consecutive_empty_cycles} empty cycles"
+                    )
+                consecutive_empty_cycles = 0
+                last_successful_fusion_time = time.time()
             
             # ================================================================
             # METROLOGICAL TRACKING: Populate L1/L2 comparison fields (v6.2)
@@ -4676,7 +4664,10 @@ def run_fusion_service(
                         calibration_converged = False
                     
                     if calibration_converged:
-                        quality_ok = result.quality_grade in ('A', 'B', 'C')
+                        # Operational: prefer A/B/C but accept D with reasonable uncertainty
+                        # Grade D with <10ms uncertainty is still useful for Chrony (better than no feed)
+                        quality_ok = result.quality_grade in ('A', 'B', 'C') or \
+                                    (result.quality_grade == 'D' and result.uncertainty_ms < 10.0)
                     else:
                         # Bootstrap: accept grade D (uncertainty <50ms is acceptable during learning/single-station)
                         # High uncertainty during bootstrap is normal due to calibration convergence

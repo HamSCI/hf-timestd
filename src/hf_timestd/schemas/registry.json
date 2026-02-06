@@ -73,6 +73,18 @@
             "schema_file": "l3_fusion_timing_v1.json",
             "description": "Multi-station UTC(NIST) fusion estimate",
             "replaces": []
+        },
+        "L2_tick_timing": {
+            "current_version": "v1",
+            "schema_file": "l2_tick_timing_v1.json",
+            "description": "Per-second tick timing measurements (55+ estimates/minute)",
+            "replaces": []
+        },
+        "L2_chu_fsk": {
+            "current_version": "v1",
+            "schema_file": "l2_chu_fsk_v1.json",
+            "description": "CHU FSK time code decode with precise 500ms timing",
+            "replaces": []
         }
     },
     "version_history": {

@@ -249,16 +249,10 @@ class TimingValidationService:
             import h5py
             import numpy as np
             
-            # Try to open with SWMR mode first (allows reading while writer has file open)
-            # Fall back to regular read if SWMR fails
             try:
-                f = h5py.File(fusion_file, 'r', swmr=True)
+                f = h5py.File(fusion_file, 'r', libver='latest')
             except OSError:
-                try:
-                    f = h5py.File(fusion_file, 'r')
-                except OSError:
-                    # File is locked and SWMR not available
-                    return None
+                return None
             
             try:
                 # HDF5 structure: each column is a separate dataset

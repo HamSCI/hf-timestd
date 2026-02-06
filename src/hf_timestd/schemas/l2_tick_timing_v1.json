@@ -1,0 +1,117 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L2_tick_timing",
+    "description": "Per-second tick timing measurements from matched filter detection. Provides 55+ timing estimates per minute for improved precision through averaging.",
+    "cadence_seconds": 60,
+    "processing_level": "L2",
+    "standards": [
+        "ITU-R TF.460-6 Standard-frequency and time-signal emissions"
+    ],
+    "reference": "Per-second timing ticks from WWV/WWVH/CHU/BPM",
+    "quality_flags": {
+        "GOOD": "High confidence tick detection with >30 valid windows",
+        "MARGINAL": "Moderate confidence with 10-30 valid windows",
+        "BAD": "Low confidence with <10 valid windows",
+        "MISSING": "No ticks detected"
+    },
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "channel",
+            "type": "string",
+            "required": true,
+            "description": "Channel name (e.g., SHARED_10000)"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "description": "Detected station (WWV, WWVH, CHU, BPM)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": false,
+            "description": "Broadcast frequency in MHz"
+        },
+        {
+            "name": "mean_timing_offset_ms",
+            "type": "float",
+            "required": true,
+            "description": "Mean timing offset across all valid windows (ms from expected)"
+        },
+        {
+            "name": "std_timing_offset_ms",
+            "type": "float",
+            "required": true,
+            "description": "Standard deviation of timing offset (ms)"
+        },
+        {
+            "name": "mean_snr_db",
+            "type": "float",
+            "required": false,
+            "description": "Mean SNR across valid windows (dB)"
+        },
+        {
+            "name": "drift_rate_ms_per_sec",
+            "type": "float",
+            "required": false,
+            "description": "Linear timing drift rate if detected (ms/s)"
+        },
+        {
+            "name": "valid_windows",
+            "type": "integer",
+            "required": true,
+            "description": "Number of windows with valid detections"
+        },
+        {
+            "name": "total_windows",
+            "type": "integer",
+            "required": true,
+            "description": "Total number of windows processed"
+        },
+        {
+            "name": "overall_confidence",
+            "type": "float",
+            "required": false,
+            "description": "Overall detection confidence (0-1)"
+        },
+        {
+            "name": "expected_delay_ms",
+            "type": "float",
+            "required": false,
+            "description": "Expected propagation delay from physics model (ms)"
+        },
+        {
+            "name": "d_clock_ms",
+            "type": "float",
+            "required": false,
+            "description": "Computed D_clock = timing_offset - expected_delay (ms)"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": false,
+            "description": "ISO 8601 timestamp when record was written"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": false,
+            "description": "Processing software version"
+        }
+    ]
+}

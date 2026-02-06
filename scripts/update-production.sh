@@ -134,10 +134,35 @@ log_info "  Cleaning stale .pyc files from venv..."
 find "$VENV_DIR/lib" -name '*.pyc' -delete 2>/dev/null || true
 find "$VENV_DIR/lib" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
-# Reinstall the package (not editable) to ensure production uses installed code
-# Force reinstall to ensure all modules are updated
-"$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet --force-reinstall --no-deps
-log_info "  ✅ Python package updated (pyc cache cleared)"
+# CRITICAL: Remove any editable (development) installs before installing.
+# Editable installs create symlinks from site-packages back to the git repo,
+# meaning production depends on the repo directory. If the repo moves, changes
+# during development, or is on a different filesystem, production breaks.
+# Production must always use a COPIED install.
+for pip_cmd in "$VENV_DIR/bin/pip" "pip3"; do
+    if $pip_cmd show hf-timestd 2>/dev/null | grep -q "Editable project location"; then
+        log_warn "  Removing editable install from $($pip_cmd --version 2>/dev/null | head -1)..."
+        $pip_cmd uninstall hf-timestd -y --quiet 2>/dev/null || true
+    fi
+done
+
+# Also clean any stale .pth or .egg-link files that editable installs leave behind
+find "$VENV_DIR/lib" -name 'hf-timestd.egg-link' -delete 2>/dev/null || true
+find "$VENV_DIR/lib" -name '__editable__.hf_timestd*' -delete 2>/dev/null || true
+find /usr/local/lib/python*/dist-packages -name 'hf-timestd.egg-link' -delete 2>/dev/null || true
+find /usr/local/lib/python*/dist-packages -name '__editable__.hf_timestd*' -delete 2>/dev/null || true
+
+# Install the package (NOT editable) to ensure production uses copied code
+# --force-reinstall ensures all modules are updated even if version unchanged
+"$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet --force-reinstall
+log_info "  ✅ Python package updated in venv (copied, not linked)"
+
+# Also update the system-wide package for services that use system Python
+# This is needed because some services may use /usr/bin/python3 instead of venv
+if command -v pip3 &> /dev/null; then
+    pip3 install "$PROJECT_DIR" --quiet --break-system-packages --force-reinstall 2>/dev/null || true
+    log_info "  ✅ System Python package also updated"
+fi
 
 # =============================================================================
 # Step 2: Copy Updated Scripts

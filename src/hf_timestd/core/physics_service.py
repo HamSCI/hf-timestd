@@ -147,7 +147,7 @@ class PhysicsService:
             # and check against a processed cache in memory (for this run).
 
             # Optimization: Only read if file mtime changed?
-            # Reader handles SWMR.
+            # Reader handles concurrent access.
 
             start_t = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}T00:00:00Z"
             end_t = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}T23:59:59Z"

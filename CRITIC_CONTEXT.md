@@ -10,176 +10,205 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: FUSION FAILURE + THEORETICAL vs ACHIEVED ACCURACY
+## 📋 NEXT SESSION: WEB-API UI REVIEW + TIMING ACCURACY CRISIS
 
-**Objective:** Diagnose why fusion has stopped producing output despite L2 measurements being generated, and critically examine why achieved timing accuracy falls far short of theoretical limits.
+**Objective:** Carefully review the web-api UI pages, especially the Timing (metrology.html) and Validation (timing-validation.html) pages. The validation page data shows the system is failing catastrophically at its core metrology objective of recovering UTC from HF time standard signals. Diagnose the root cause and propose fixes.
 
 ---
 
-## 🚨 CRITICAL ISSUE: Fusion Service Producing No Output
+## 🚨 CRITICAL: Validation Page Shows Catastrophic Failure
 
-### Current State (2026-02-06)
+### Live Data (2026-02-06 18:46 UTC)
 
-| Component | Status |
-|-----------|--------|
-| `timestd-metrology.service` | Running, producing L2 measurements |
-| `timestd-fusion.service` | Running but **no output for 10+ hours** |
-| L2 measurements (24h) | WWV: 700+, CHU: 600+, etc. ✓ |
-| L3 fusion output | **0 records in last 6 hours** |
-| `/api/metrology/fusion/latest` | `"No recent fusion data available"` |
+The `/api/timing-validation/dashboard` endpoint returns:
 
-### Questions to Investigate
+| Metric | Value | Expected |
+|--------|-------|----------|
+| **Mean discrepancy** | **-495 ms** | < 1 ms |
+| **Std deviation** | 397 ms | < 1 ms |
+| **Within 1ms** | **0.0%** | > 95% |
+| **Within 5ms** | **0.0%** | > 90% |
+| **Within uncertainty** | **0.0%** | > 68% |
+| **Grade distribution** | **100% Grade D** | Mostly A/B |
+| **fusion_d_clock_ms** | **Always 0.0** | Varies |
+| **gps_d_clock_ms** | 211–1151 ms | ~0 |
 
-1. **Why is fusion silent?** The service is running (PID active, 305MB memory) but producing nothing.
-   - Is it failing to read L2 data?
-   - Is it rejecting all measurements?
-   - Is there an exception being swallowed?
+### The Fundamental Problem
 
-2. **What are the fusion rejection criteria?** Review `multi_broadcast_fusion.py`:
-   - Minimum number of broadcasts required?
-   - Quality thresholds?
-   - Timing consistency requirements?
+The fusion reports `d_clock_ms = 0.0` for every minute. This is **by design** — the calibration model in `multi_broadcast_fusion.py` computes:
 
-3. **Is there a data flow break?** Trace the path:
-   ```
-   L2 HDF5 files → DataProductReader → FusionEngine → L3 HDF5 + Chrony SHM
-   ```
+```
+calibration_offset_station = -mean(D_clock_station)
+```
 
-### Key Files for Fusion Investigation
+This forces each station's mean D_clock to zero, which is supposed to represent UTC(NIST). But the GPS ground truth (via RTP timing snapshots from the GPSDO-locked radiod) shows the actual clock offset is **hundreds of milliseconds**, not zero.
+
+**The calibration is circular:** It assumes the mean of HF measurements IS UTC, then reports the deviation from that mean. It never anchors to an absolute time reference. The GPS/PPS data available via `timing_snapshots` (482 per minute!) provides that anchor but is not used in the fusion.
+
+### Root Cause Chain
+
+1. **Metrology layer** produces `d_clock_ms` = (detected_arrival - expected_arrival) for each broadcast
+2. **Expected arrival** = second boundary + propagation_delay (from IRI model)
+3. **Fusion calibration** zeros out the mean of these measurements per station
+4. **Result:** Fusion always reports ~0 ms offset, regardless of actual system clock error
+5. **GPS validation** compares fusion (always ~0) against GPS ground truth (real offset) → massive discrepancy
+
+### What the Validation Page Should Show (If Working)
+
+If the system were correctly recovering UTC:
+- `fusion_d_clock_ms` would track the actual clock offset (matching GPS)
+- Discrepancy (fusion - GPS) would be small (< 1ms ideally, < 5ms acceptable)
+- Quality grades would be A/B for most points
+
+---
+
+## 🔍 WEB-API UI PAGES TO REVIEW
+
+### Page Inventory (13 HTML pages)
+
+| Page | File | API Endpoints | Focus |
+|------|------|---------------|-------|
+| **Overview** | `index.html` | Various | Landing page |
+| **Health** | `health.html` | `/api/health/*` | Service status |
+| **Timing** | `metrology.html` | `/api/metrology/fusion/latest` | UTC offset display |
+| **Validation** | `timing-validation.html` | `/api/timing-validation/dashboard` | GPS comparison |
+| **Stability** | `stability.html` | `/api/stability/*` | Allan deviation |
+| **Ionosphere** | `propagation.html` | `/api/propagation/*` | Propagation paths |
+| **TEC/TID** | `physics.html` | `/api/physics/*` | Ionospheric science |
+| **Solar** | `solar-correlation.html` | `/api/correlations/*` | Solar effects |
+| **24h Dashboard** | `dashboard-24h.html` | `/api/dashboard/*` | All broadcasts |
+| **Station** | `station.html` | `/api/stations/*` | Per-station detail |
+| **Test Signal** | `test_signal.html` | Various | WWV/WWVH test signals |
+| **Docs** | `docs.html` | `/api/docs/*` | Living documentation |
+| **Logs** | `logs.html` | `/api/logs/*` | System logs |
+
+### Key Review Questions for Each Page
+
+**Timing page (metrology.html):**
+- Shows "Current UTC Offset" hero metric with `d_clock_ms` — currently always 0.0
+- Is this misleading? The "How It Works" section describes the methodology
+- Does the page clearly communicate uncertainty and quality?
+
+**Validation page (timing-validation.html):**
+- Charts: Discrepancy over time, grade distribution (doughnut), histogram
+- Table: Recent validation points with pass/fail status
+- Currently shows all-red, all-fail — is this page correctly interpreting the data?
+- Is the methodology note accurate about what's being compared?
+
+**General UI concerns:**
+- Navigation consistency across all 13 pages
+- Dark theme styling consistency
+- Auto-refresh behavior (60s intervals)
+- Error handling when APIs return no data
+- Mobile responsiveness
+
+---
+
+## 📊 Session Accomplishments (2026-02-06)
+
+### Infrastructure Fixes (This Session)
+
+1. **HDF5 Crash-Safe Writer** — Eliminated SWMR mode entirely:
+   - **Root cause:** SWMR leaves dirty consistency flags on unclean shutdown (SIGKILL, os._exit). Any service restart could corrupt HDF5 files.
+   - **Fix:** Open-write-close per measurement. No persistent file handle = no dirty flags on crash.
+   - **Files:** `src/hf_timestd/io/hdf5_writer.py` (major refactor), `src/hf_timestd/io/hdf5_reader.py` (removed swmr=True)
+   - **Verified:** All 9 metrology channels + fusion + TEC + VTEC passing in `verify_pipeline.sh`
+
+2. **SWMR References Cleaned** — Removed all SWMR usage from:
+   - `hdf5_writer.py` — No longer opens SWMR write mode
+   - `hdf5_reader.py` — No longer opens with `swmr=True`
+   - `timing_validation_service.py` — Simplified file open
+   - `multi_broadcast_fusion.py` — Updated comments
+   - `core/__init__.py`, `physics_service.py` — Updated docstrings
+
+3. **Production Deployment** — All services restarted with new code, verified clean.
+
+### Previous Session Accomplishments (Carried Forward)
+
+- **24-Hour Dashboard** — Visualization of all 17 broadcasts
+- **Editable install fix** — Production no longer symlinks to git repo
+- **HDF5 recovery logic** — h5clear + corrupt file rename (now superseded by crash-safe design)
+- **CPU affinity** — radiod confined to cache-sharing cores
+
+---
+
+## 🏗️ Architecture Reference
+
+### Data Flow
+
+```
+ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffer
+                                                                    ↓
+                                                          timestd-metrology
+                                                           ↓ (per channel)
+                                                    AM Demod → Matched Filter
+                                                           ↓
+                                                    L1 Metrology (HDF5)
+                                                           ↓
+                                                    L2 Calibrated (HDF5)
+                                                           ↓
+                                                    timestd-fusion
+                                                    ↓              ↓
+                                             L3 Fusion (HDF5)   Chrony SHM
+                                                    ↓
+                                             timestd-physics
+                                                    ↓
+                                             TEC/Science (HDF5)
+```
+
+### Key Files
 
 | File | Purpose |
 |------|---------|
-| `src/hf_timestd/core/multi_broadcast_fusion.py` | Main fusion orchestration |
-| `src/hf_timestd/core/broadcast_kalman_filter.py` | Per-broadcast state estimation |
-| `src/hf_timestd/core/global_kalman_filter.py` | Multi-broadcast fusion |
-| `src/hf_timestd/io/hdf5_reader.py` | L2 data reading |
-| `src/hf_timestd/io/hdf5_writer.py` | L3 data writing |
+| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion engine (~4900 lines) |
+| `src/hf_timestd/core/metrology_service.py` | Per-channel metrology |
+| `src/hf_timestd/core/timing_validation_service.py` | GPS comparison logic |
+| `src/hf_timestd/io/hdf5_writer.py` | Crash-safe HDF5 writer |
+| `src/hf_timestd/io/hdf5_reader.py` | HDF5 reader |
+| `web-api/routers/timing_validation.py` | Validation API |
+| `web-api/static/timing-validation.html` | Validation UI |
+| `web-api/static/metrology.html` | Timing UI |
+| `scripts/verify_pipeline.sh` | Pipeline health check |
+| `scripts/update-production.sh` | Deployment (restarts 6 of 8 services) |
+| `scripts/start-services.sh` | Full start (all 8 + timers) |
+| `scripts/stop-services.sh` | Full stop (all 8 + timers) |
 
-### Diagnostic Commands
+### Service Inventory
 
-```bash
-# Check fusion service logs
-journalctl -u timestd-fusion -f
-
-# Check if L2 data is readable
-python3 -c "from hf_timestd.io.hdf5_reader import DataProductReader; ..."
-
-# Check fusion HDF5 file (may be locked)
-h5dump -H /var/lib/timestd/phase2/fusion/global_physics_20260206.h5
-```
-
----
-
-## 🎯 CRITICAL ISSUE: Theoretical vs Achieved Accuracy Gap
-
-### The Promise
-
-The theoretical timing accuracy of this system should be **sub-millisecond** based on:
-- GPSDO-locked sample clock (L4/L5 accuracy, ~10ns)
-- 24 kHz sample rate → 42µs sample resolution
-- Matched filter detection → sub-sample interpolation possible
-- Multiple independent broadcasts → √N improvement from fusion
-
-### The Reality
-
-Current achieved accuracy is **tens of milliseconds**, orders of magnitude worse:
-- Systematic offset: +40 to +85ms (CHU), +30 to +55ms (WWV)
-- Fusion D_clock: When working, shows ±10-30ms variations
-- Allan deviation: ~15ms at τ=10s (should be <1ms)
-
-### Root Causes to Investigate
-
-1. **GPS_TIME/RTP_TIMESNAP Latency (~70ms)**
-   - radiod captures this mapping, but when?
-   - Is there pipeline latency between RTP packet and GPS time sample?
-   - This is the dominant systematic error.
-
-2. **Ionospheric Propagation Model**
-   - Are we using the correct propagation delay model?
-   - IRI-2020 gives layer heights, but are we computing path delay correctly?
-   - Is the "minimum propagation delay" (great circle / c) appropriate?
-
-3. **Detection Algorithm Bias**
-   - Matched filter finds correlation peak, but is there systematic bias?
-   - Template asymmetry? Edge effects? Interpolation errors?
-
-4. **Fusion Algorithm Issues**
-   - Kalman filter process noise tuning?
-   - Measurement noise estimation?
-   - Outlier rejection too aggressive or too lenient?
-
-### What "Success" Looks Like
-
-| Metric | Current | Target | Theoretical Limit |
-|--------|---------|--------|-------------------|
-| Systematic offset | +50ms | <1ms | ~0 (calibrated) |
-| Random error (1σ) | ~15ms | <1ms | ~0.1ms (SNR-limited) |
-| Fusion D_clock | ±30ms | ±1ms | ±0.1ms |
-| Allan deviation (τ=60s) | ~6ms | <0.5ms | ~0.05ms |
+| Service | Restarts on Update | Purpose |
+|---------|-------------------|---------|
+| `timestd-core-recorder` | ❌ (data gap risk) | RTP → raw buffer |
+| `timestd-metrology` | ✅ | IQ → L1/L2 measurements |
+| `timestd-l2-calibration` | ✅ | L2 calibration |
+| `timestd-fusion` | ✅ | Multi-broadcast fusion → Chrony |
+| `timestd-physics` | ✅ | TEC estimation |
+| `timestd-web-api` | ✅ | REST API + dashboard |
+| `timestd-radiod-monitor` | ✅ | Hardware health |
+| `timestd-vtec` | ✅ (if running) | GNSS VTEC |
 
 ---
 
-## 📊 Recent Progress (2026-02-06)
+## 🔬 Methodology Questions (Carried Forward)
 
-### Completed This Session
+1. **Circular calibration:** The fusion zeros out mean D_clock per station. This makes it impossible to measure absolute clock offset. The GPS timing snapshots provide an absolute reference — should calibration anchor to GPS instead of self-referencing?
 
-1. **24-Hour Dashboard** — New visualization showing all 17 broadcasts:
-   - Solar zenith at path midpoints
-   - SNR time series
-   - Timing error (ToA - expected)
-   - API endpoints: `/api/dashboard/broadcasts/24h`, etc.
+2. **Template matching:** CHU template is 500ms but CHU transmits a 300ms tone at most seconds. WWV template is 800ms. Are these optimal?
 
-2. **Bug Fixes**:
-   - Timing Stability panel in station.html (was empty)
-   - Navigation links to 24h dashboard on all pages
+3. **Propagation model:** IRI-2020 gives ionospheric layer heights. Is the path delay computation correct? Is "minimum propagation delay" (great circle / c) the right baseline?
 
-### L2 Data Production (Working)
+4. **GPS_TIME/RTP_TIMESNAP mapping:** radiod provides GPS↔RTP timestamp pairs. Is there pipeline latency in this mapping? The ~200-1000ms discrepancies suggest a fundamental timing reference error, not just propagation model inaccuracy.
 
-```
-WWV_2500:  706 measurements/24h
-WWV_5000:  652 measurements/24h
-WWV_10000: 622 measurements/24h
-CHU_7850:  600+ measurements/24h
-```
-
----
-
-## 🔬 Methodology Review (Carried Forward)
-
-### Detection Pipeline
-
-```
-Raw IQ Buffer (1 minute)
-    ↓
-AM Demodulation (magnitude - mean)
-    ↓
-Matched Filter Detection (500ms CHU, 800ms WWV/WWVH)
-    ↓
-Physics Validation (ArrivalPatternMatrix)
-    ↓
-L1 Metrology Measurement
-    ↓
-L2 Calibrated Timing (propagation model applied)
-    ↓
-L3 Fusion (multi-broadcast Kalman filter) ← FAILING HERE
-```
-
-### Questions Still Open
-
-1. **Circularity:** Does expected arrival time depend on measurements that depend on expected arrival time?
-
-2. **Template matching:** Are templates optimal? CHU uses 500ms but transmits 300ms at most seconds.
-
-3. **Missed opportunities:**
-   - CHU FSK timing (seconds 31-39)
+5. **Missed opportunities:**
+   - CHU FSK timing (seconds 31-39) for independent verification
    - Phase tracking for sub-sample resolution
-   - Doppler for ionospheric correction
+   - Doppler shift for ionospheric correction
 
 ---
 
 ## ✅ Success Criteria for Next Session
 
-- ⬚ **Fusion producing output again** — Identify and fix the blockage
-- ⬚ **Root cause of ~70ms systematic offset identified**
-- ⬚ **Plan to achieve sub-millisecond accuracy** — Either fix source or calibrate
-- ⬚ **Document findings** in `docs/changes/` or update architecture docs
+- ⬚ **Review all web-api UI pages** for correctness, consistency, and usability
+- ⬚ **Diagnose why fusion_d_clock_ms is always 0.0** — Is this the calibration design or a bug?
+- ⬚ **Diagnose why gps_d_clock_ms is 200-1000ms** — Is this a real offset or a timing reference error?
+- ⬚ **Propose a path to sub-millisecond accuracy** — What needs to change in the methodology?
+- ⬚ **Fix any UI bugs** found during the review

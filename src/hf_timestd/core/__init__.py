@@ -34,7 +34,7 @@ Six-service systemd pipeline:
 
 6. WebAPI (timestd-web-api)
    - REST API and web UI
-   - Reads HDF5 data products via SWMR
+   - Reads HDF5 data products
 
 Note: Phase2AnalyticsService and PipelineOrchestrator archived 2026-01-22.
 """
