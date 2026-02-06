@@ -22,7 +22,7 @@ try:
 except ImportError:
     SYSTEMD_AVAILABLE = False
 
-from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router, tec_router, tid_router
+from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router, tec_router, tid_router, dashboard_router
 from routers.timing_validation import router as timing_validation_router
 from config import config
 
@@ -66,6 +66,7 @@ app.include_router(tec_router, prefix="/api")
 app.include_router(tid_router, prefix="/api")
 app.include_router(docs_router)  # No prefix - router has its own /api/docs prefix
 app.include_router(timing_validation_router)  # No prefix - router has its own /api/timing-validation prefix
+app.include_router(dashboard_router, prefix="/api")  # 24-hour dashboard endpoints
 
 # Static files directory
 static_dir = Path(__file__).parent / "static"
@@ -96,6 +97,19 @@ async def root():
             </html>
             """,
             status_code=200
+        )
+
+
+@app.get("/dashboard-24h", response_class=HTMLResponse)
+async def dashboard_24h_page():
+    """Serve 24-hour dashboard."""
+    dashboard_path = static_dir / "dashboard-24h.html"
+    if dashboard_path.exists():
+        return FileResponse(dashboard_path)
+    else:
+        return HTMLResponse(
+            content="<html><body><h1>24-Hour Dashboard not found</h1></body></html>",
+            status_code=404
         )
 
 

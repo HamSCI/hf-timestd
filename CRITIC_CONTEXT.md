@@ -10,129 +10,176 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: SYSTEMATIC OFFSET + DETECTION METHODOLOGY REVIEW
+## 📋 NEXT SESSION: FUSION FAILURE + THEORETICAL vs ACHIEVED ACCURACY
 
-**Objective:** Address the ~70ms systematic timing offset and critically review the detection methodology for weaknesses, errors, redundancy, and improvement opportunities.
-
----
-
-### Issue 1: Systematic ~70ms Timing Offset
-
-**Observation:** CHU and WWV/WWVH detections consistently arrive 40-85ms later than expected propagation delay.
-
-**Evidence (2026-02-05):**
-- CHU_3330: ToA = +45 to +72ms (expected ~5ms)
-- CHU_7850: ToA = +42 to +67ms (expected ~5ms)
-- WWV/WWVH tick analysis: timing_error = +30 to +55ms
-
-**Verified NOT the cause:**
-- Buffer alignment is correct (start_rtp matches expected boundary RTP exactly)
-- CHU format is correct (500ms tone at second 0, not second 1)
-
-**Suspected cause:** Latency in radiod's GPS_TIME/RTP_TIMESNAP capture. When radiod reports the mapping, there may be a delay between sampling the RTP timestamp and sampling the GPS time.
-
-**Questions to investigate:**
-1. Where in radiod is GPS_TIME/RTP_TIMESNAP captured?
-2. Is there processing delay between RTP packet arrival and GPS time sampling?
-3. Can we calibrate out this systematic offset?
-4. Should we measure the offset empirically and apply a correction?
+**Objective:** Diagnose why fusion has stopped producing output despite L2 measurements being generated, and critically examine why achieved timing accuracy falls far short of theoretical limits.
 
 ---
 
-### Issue 2: Detection Methodology Critical Review
+## 🚨 CRITICAL ISSUE: Fusion Service Producing No Output
 
-**Goal:** Identify weaknesses, errors, redundancy, circularity, and missed opportunities in the current detection pipeline.
+### Current State (2026-02-06)
 
-**Current Detection Pipeline:**
+| Component | Status |
+|-----------|--------|
+| `timestd-metrology.service` | Running, producing L2 measurements |
+| `timestd-fusion.service` | Running but **no output for 10+ hours** |
+| L2 measurements (24h) | WWV: 700+, CHU: 600+, etc. ✓ |
+| L3 fusion output | **0 records in last 6 hours** |
+| `/api/metrology/fusion/latest` | `"No recent fusion data available"` |
+
+### Questions to Investigate
+
+1. **Why is fusion silent?** The service is running (PID active, 305MB memory) but producing nothing.
+   - Is it failing to read L2 data?
+   - Is it rejecting all measurements?
+   - Is there an exception being swallowed?
+
+2. **What are the fusion rejection criteria?** Review `multi_broadcast_fusion.py`:
+   - Minimum number of broadcasts required?
+   - Quality thresholds?
+   - Timing consistency requirements?
+
+3. **Is there a data flow break?** Trace the path:
+   ```
+   L2 HDF5 files → DataProductReader → FusionEngine → L3 HDF5 + Chrony SHM
+   ```
+
+### Key Files for Fusion Investigation
+
+| File | Purpose |
+|------|---------|
+| `src/hf_timestd/core/multi_broadcast_fusion.py` | Main fusion orchestration |
+| `src/hf_timestd/core/broadcast_kalman_filter.py` | Per-broadcast state estimation |
+| `src/hf_timestd/core/global_kalman_filter.py` | Multi-broadcast fusion |
+| `src/hf_timestd/io/hdf5_reader.py` | L2 data reading |
+| `src/hf_timestd/io/hdf5_writer.py` | L3 data writing |
+
+### Diagnostic Commands
+
+```bash
+# Check fusion service logs
+journalctl -u timestd-fusion -f
+
+# Check if L2 data is readable
+python3 -c "from hf_timestd.io.hdf5_reader import DataProductReader; ..."
+
+# Check fusion HDF5 file (may be locked)
+h5dump -H /var/lib/timestd/phase2/fusion/global_physics_20260206.h5
+```
+
+---
+
+## 🎯 CRITICAL ISSUE: Theoretical vs Achieved Accuracy Gap
+
+### The Promise
+
+The theoretical timing accuracy of this system should be **sub-millisecond** based on:
+- GPSDO-locked sample clock (L4/L5 accuracy, ~10ns)
+- 24 kHz sample rate → 42µs sample resolution
+- Matched filter detection → sub-sample interpolation possible
+- Multiple independent broadcasts → √N improvement from fusion
+
+### The Reality
+
+Current achieved accuracy is **tens of milliseconds**, orders of magnitude worse:
+- Systematic offset: +40 to +85ms (CHU), +30 to +55ms (WWV)
+- Fusion D_clock: When working, shows ±10-30ms variations
+- Allan deviation: ~15ms at τ=10s (should be <1ms)
+
+### Root Causes to Investigate
+
+1. **GPS_TIME/RTP_TIMESNAP Latency (~70ms)**
+   - radiod captures this mapping, but when?
+   - Is there pipeline latency between RTP packet and GPS time sample?
+   - This is the dominant systematic error.
+
+2. **Ionospheric Propagation Model**
+   - Are we using the correct propagation delay model?
+   - IRI-2020 gives layer heights, but are we computing path delay correctly?
+   - Is the "minimum propagation delay" (great circle / c) appropriate?
+
+3. **Detection Algorithm Bias**
+   - Matched filter finds correlation peak, but is there systematic bias?
+   - Template asymmetry? Edge effects? Interpolation errors?
+
+4. **Fusion Algorithm Issues**
+   - Kalman filter process noise tuning?
+   - Measurement noise estimation?
+   - Outlier rejection too aggressive or too lenient?
+
+### What "Success" Looks Like
+
+| Metric | Current | Target | Theoretical Limit |
+|--------|---------|--------|-------------------|
+| Systematic offset | +50ms | <1ms | ~0 (calibrated) |
+| Random error (1σ) | ~15ms | <1ms | ~0.1ms (SNR-limited) |
+| Fusion D_clock | ±30ms | ±1ms | ±0.1ms |
+| Allan deviation (τ=60s) | ~6ms | <0.5ms | ~0.05ms |
+
+---
+
+## 📊 Recent Progress (2026-02-06)
+
+### Completed This Session
+
+1. **24-Hour Dashboard** — New visualization showing all 17 broadcasts:
+   - Solar zenith at path midpoints
+   - SNR time series
+   - Timing error (ToA - expected)
+   - API endpoints: `/api/dashboard/broadcasts/24h`, etc.
+
+2. **Bug Fixes**:
+   - Timing Stability panel in station.html (was empty)
+   - Navigation links to 24h dashboard on all pages
+
+### L2 Data Production (Working)
+
+```
+WWV_2500:  706 measurements/24h
+WWV_5000:  652 measurements/24h
+WWV_10000: 622 measurements/24h
+CHU_7850:  600+ measurements/24h
+```
+
+---
+
+## 🔬 Methodology Review (Carried Forward)
+
+### Detection Pipeline
 
 ```
 Raw IQ Buffer (1 minute)
     ↓
 AM Demodulation (magnitude - mean)
     ↓
-┌─────────────────────────────────────────────────┐
-│ Path A: Minute Marker Detection                 │
-│   - Matched filter (500ms CHU, 800ms WWV/WWVH)  │
-│   - Correlation SNR threshold (8 dB)            │
-│   - Timing tolerance (±100ms)                   │
-└─────────────────────────────────────────────────┘
-    ↓
-┌─────────────────────────────────────────────────┐
-│ Path B: Tick Analysis (per-second ticks)        │
-│   - 55 windows per minute (skips 29, 30, 59)    │
-│   - Mean timing offset, std, drift              │
-│   - Timing tolerance (±100ms)                   │
-└─────────────────────────────────────────────────┘
+Matched Filter Detection (500ms CHU, 800ms WWV/WWVH)
     ↓
 Physics Validation (ArrivalPatternMatrix)
     ↓
-Multi-Constraint Validation (TimingConsistencyValidator)
-    ↓
 L1 Metrology Measurement
+    ↓
+L2 Calibrated Timing (propagation model applied)
+    ↓
+L3 Fusion (multi-broadcast Kalman filter) ← FAILING HERE
 ```
 
-**Questions to answer:**
+### Questions Still Open
 
-1. **Redundancy:** Are Path A and Path B redundant? Do they provide independent information or just duplicate effort?
+1. **Circularity:** Does expected arrival time depend on measurements that depend on expected arrival time?
 
-2. **Circularity:** Does the expected arrival time depend on measurements that themselves depend on expected arrival time?
+2. **Template matching:** Are templates optimal? CHU uses 500ms but transmits 300ms at most seconds.
 
-3. **Template matching:** Are the matched filter templates optimal?
-   - CHU uses 500ms template but transmits 300ms tones at most seconds
-   - Should we use different templates for minute marker vs regular ticks?
-
-4. **SNR thresholds:** Are the thresholds appropriate?
-   - 8 dB correlation SNR for detection
-   - 12 dB for BPM (higher due to shorter template)
-   - Are these empirically validated?
-
-5. **Missed opportunities:**
-   - CHU FSK decoding (seconds 31-39) — currently separate, could provide timing
-   - WWV/WWVH BCD decoding — fragile, but could provide absolute time
-   - Phase tracking — currently computed but not used for timing
-   - Doppler estimation — computed but not used for ionospheric correction
-
-6. **Edge cases:**
-   - What happens at second 29 (CHU omits), 30, 59?
-   - What happens during leap seconds?
-   - What happens when signal fades mid-minute?
+3. **Missed opportunities:**
+   - CHU FSK timing (seconds 31-39)
+   - Phase tracking for sub-sample resolution
+   - Doppler for ionospheric correction
 
 ---
 
-### Key Files for Detection Methodology Review
+## ✅ Success Criteria for Next Session
 
-| File | Purpose |
-|------|---------|
-| `src/hf_timestd/core/metrology_engine.py` | Main detection orchestration |
-| `src/hf_timestd/core/tone_detector.py` | Matched filter detection |
-| `src/hf_timestd/core/tick_matched_filter.py` | Per-second tick analysis |
-| `src/hf_timestd/core/arrival_pattern_matrix.py` | Physics-based predictions |
-| `src/hf_timestd/core/timing_consistency_validator.py` | Multi-constraint validation |
-| `src/hf_timestd/core/wwv_constants.py` | Station parameters, propagation bounds |
-
----
-
-### Recent Session Summary (2026-02-05)
-
-**Completed:**
-1. Buffer alignment fix — calculate minute boundary RTP from GPS_TIME/RTP_TIMESNAP mapping
-2. CHU detection fix — CHU transmits 500ms tone at second 0 (minute marker)
-3. Timing tolerance increase — 50ms → 100ms for tick analysis
-4. Web-API/UI improvements — broadcast-centric HDF5 data model integration
-5. Documentation — `docs/changes/SESSION_2026_02_05_CHU_DETECTION_FIX.md`
-
-**Current status:**
-- CHU_3330: 72+ measurements, SNR 37-42 dB ✓
-- CHU_7850: 66+ measurements, SNR 48-56 dB ✓
-- CHU_14670: Weak signal (~6 dB), awaiting better propagation
-- SHARED channels: WWV/WWVH/BPM detection working
-
----
-
-### Success Criteria for Next Session
-
-- ⬚ Root cause of ~70ms systematic offset identified
-- ⬚ Offset either corrected at source or calibrated out
-- ⬚ Detection methodology reviewed for weaknesses
-- ⬚ Any identified issues documented or fixed
-- ⬚ Tests added for edge cases if needed
+- ⬚ **Fusion producing output again** — Identify and fix the blockage
+- ⬚ **Root cause of ~70ms systematic offset identified**
+- ⬚ **Plan to achieve sub-millisecond accuracy** — Either fix source or calibrate
+- ⬚ **Document findings** in `docs/changes/` or update architecture docs

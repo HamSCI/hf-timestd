@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.14] - 2026-02-06
+
+### 24-Hour UTC Dashboard for Ionospheric Visualization
+
+**New Feature:** Added a comprehensive 24-hour dashboard for visualizing ionospheric behavior across all 17 HF time standard broadcasts.
+
+#### New API Endpoints (`web-api/routers/dashboard.py`)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/dashboard/broadcasts/24h` | All 17 broadcasts with solar zenith, SNR, timing error, mode |
+| `GET /api/dashboard/solar-zenith/24h` | Solar elevation at path midpoint for all 17 paths |
+| `GET /api/dashboard/timing-error/24h` | ToA - expected delay per broadcast |
+| `GET /api/dashboard/doppler/24h` | Doppler shift measurements |
+
+#### New Dashboard UI (`web-api/static/dashboard-24h.html`)
+
+- **Solar Zenith tab**: 24-hour solar elevation curves for all 17 paths with day/night shading
+- **Signal Strength tab**: SNR scatter plots by broadcast with station filtering
+- **Timing Error tab**: ToA deviation from expected propagation delay
+- **All Broadcasts tab**: Grid of mini-charts for each broadcast
+- Station filter chips (WWV, WWVH, CHU, BPM)
+- Date picker and auto-refresh (5 min)
+
+#### Bug Fixes
+
+1. **Timing Stability panel** (`station.html`): Fixed empty chart - now fetches fusion data and displays D_clock time series with ±1σ uncertainty band
+2. **Stability page** (`stability.html`): Fixed field name mismatch (`dominant_noise` vs `dominant_noise_type`)
+
+#### Navigation Updates
+
+Added "📊 24h" link to navigation bar on all 12 HTML pages.
+
+#### Files Modified
+- `web-api/routers/dashboard.py` (new)
+- `web-api/routers/__init__.py` - Added dashboard router export
+- `web-api/main.py` - Registered dashboard router, added `/dashboard-24h` route
+- `web-api/static/dashboard-24h.html` (new)
+- `web-api/static/station.html` - Fixed timing stability chart
+- `web-api/static/stability.html` - Fixed noise type field name
+- All 12 static HTML files - Added 24h nav link
+
 ## [5.3.13] - 2026-02-03
 
 ### Metrology Service Fixes - CPU Overload and False Detections

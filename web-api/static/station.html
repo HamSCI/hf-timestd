@@ -119,6 +119,7 @@
                 <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
                 <a href="/static/physics.html" class="nav-link">TEC/TID</a>
                 <a href="/static/solar-correlation.html" class="nav-link">☀️ Solar</a>
+                <a href="/static/dashboard-24h.html" class="nav-link">📊 24h</a>
                 <span class="nav-divider"></span>
                 <a href="/static/docs.html" class="nav-link">📚 Docs</a>
                 <a href="/static/logs.html" class="nav-link">Logs</a>
@@ -215,8 +216,12 @@
                 const histRes = await fetch(`/api/stations/${stationId}/history?hours=24`);
                 const history = await histRes.json();
 
+                // Fetch Fusion Timing Data
+                const fusionRes = await fetch(`/api/metrology/fusion/history?start=-24h&end=now`);
+                const fusion = await fusionRes.json();
+
                 updateUI(data);
-                updateCharts(history);
+                updateCharts(history, fusion);
             } catch (err) {
                 console.error("Error fetching data:", err);
             }
@@ -270,7 +275,7 @@
             }
         }
 
-        function updateCharts(history) {
+        function updateCharts(history, fusion) {
             if (!history.timeline) return;
 
             const tl = history.timeline;
@@ -363,6 +368,67 @@
                 Plotly.newPlot('tec-chart', [tecTrace], {
                     ...plotLayout,
                     yaxis: { ...plotLayout.yaxis, title: 'TECU' }
+                });
+            }
+
+            // 4. Timing Stability Chart
+            if (fusion && fusion.timestamps && fusion.d_clock_ms) {
+                const timingTraces = [];
+                
+                // D_clock time series
+                timingTraces.push({
+                    x: fusion.timestamps,
+                    y: fusion.d_clock_ms,
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#3b82f6', width: 1.5 },
+                    name: 'D_clock'
+                });
+                
+                // Uncertainty band
+                if (fusion.uncertainty_ms) {
+                    const upperBound = fusion.d_clock_ms.map((d, i) => 
+                        d !== null && fusion.uncertainty_ms[i] !== null ? d + fusion.uncertainty_ms[i] : null);
+                    const lowerBound = fusion.d_clock_ms.map((d, i) => 
+                        d !== null && fusion.uncertainty_ms[i] !== null ? d - fusion.uncertainty_ms[i] : null);
+                    
+                    timingTraces.push({
+                        x: fusion.timestamps,
+                        y: upperBound,
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { width: 0 },
+                        showlegend: false,
+                        hoverinfo: 'skip'
+                    });
+                    timingTraces.push({
+                        x: fusion.timestamps,
+                        y: lowerBound,
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { width: 0 },
+                        fill: 'tonexty',
+                        fillcolor: 'rgba(59, 130, 246, 0.2)',
+                        name: '±1σ',
+                        hoverinfo: 'skip'
+                    });
+                }
+                
+                Plotly.newPlot('timing-chart', timingTraces, {
+                    ...plotLayout,
+                    yaxis: { ...plotLayout.yaxis, title: 'Clock Offset (ms)' }
+                });
+            } else {
+                // Show placeholder if no data
+                Plotly.newPlot('timing-chart', [], {
+                    ...plotLayout,
+                    annotations: [{
+                        text: 'No timing data available',
+                        xref: 'paper', yref: 'paper',
+                        x: 0.5, y: 0.5,
+                        showarrow: false,
+                        font: { size: 14, color: '#64748b' }
+                    }]
                 });
             }
         }
