@@ -557,6 +557,254 @@ Chrony can combine, select, or compare these feeds using its standard source sel
 
 ---
 
+## Timing Authority Levels: Achievable Uncertainty Analysis
+
+The system's achievable timing uncertainty depends critically on the hardware configuration and timing reference chain. We define six levels (L1–L6) representing progressively better timing infrastructure, and analyze the error budget at each.
+
+### Error Source Taxonomy
+
+Every D_clock measurement passes through a chain of error sources. Each source contributes independently (RSS combination). The sources are:
+
+| # | Error Source | Symbol | Description |
+|---|-------------|--------|-------------|
+| 1 | **Transmitter timing** | σ_tx | UTC(NIST/NRC) to RF emission |
+| 2 | **Ionospheric propagation** | σ_iono | Path delay variation (dominant for HF) |
+| 3 | **Multipath/mode structure** | σ_mode | Multiple ionospheric modes arriving at different times |
+| 4 | **Detection algorithm** | σ_det | Matched filter + onset detection + sub-sample interpolation |
+| 5 | **ADC sample clock** | σ_adc | Frequency accuracy and stability of the sampling clock |
+| 6 | **RTP-to-UTC mapping** | σ_rtp | Mapping RTP timestamps to wall-clock UTC |
+| 7 | **Timing authority** | σ_auth | How well the system knows "what time is it now" |
+| 8 | **Multi-station fusion** | σ_fusion | Improvement from combining independent measurements |
+
+Sources 1–4 are **irreducible** — they depend on physics and algorithm quality, not hardware configuration. Sources 5–7 are **configuration-dependent** — they change dramatically across levels. Source 8 is a **reduction factor** that improves with more independent measurements.
+
+### Irreducible Error Sources (All Levels)
+
+**σ_tx < 0.001 ms (1 µs):** WWV/WWVH are traceable to UTC(NIST) with < 1 µs uncertainty. CHU is traceable to UTC(NRC) with similar precision. Negligible.
+
+**σ_iono = 3–15 ms per measurement:** The dominant error. One-hop F2-layer propagation at 5–15 MHz introduces path delays of 5–20 ms that vary with:
+- Time of day (diurnal): ±5 ms swing
+- Season: ±2 ms
+- Solar cycle (F10.7): ±3 ms
+- Geomagnetic activity (Kp): ±5 ms during storms
+- Frequency: Higher frequencies → lower layer heights → shorter paths → less delay
+
+**σ_mode = 1–5 ms:** Multiple propagation modes (1F2, 2F2, 1E, ground wave at close range) arrive at different times. The matched filter detects the strongest mode, which may not be the first arrival. Mode mixing creates a bimodal or multimodal distribution of arrival times.
+
+**σ_det ≈ 0.05 ms (50 µs):** The two-stage detection algorithm achieves:
+- Stage 1 (matched filter): Detects tone presence with high SNR gain (√N processing gain)
+- Stage 2 (onset detection): Bandpass filter → energy envelope → rising edge → sub-sample interpolation
+- At 20 kHz sample rate: 1 sample = 50 µs. Sub-sample interpolation achieves ~5 µs (1/10 sample)
+- Cramér-Rao lower bound at typical SNR (15–25 dB): 0.036 ms
+
+**σ_det is negligible compared to σ_iono.** The detection algorithm is not the limiting factor at any level.
+
+### Level Definitions and Error Budgets
+
+---
+
+#### L6: GPSDO-Governed RX888 + PPS Injection in HF Stream
+
+*Not yet implemented. Represents the theoretical best case.*
+
+**Configuration:** The GPSDO's PPS signal is injected directly into the RX888's ADC input (via a combiner or dedicated channel). Every sample is directly referenced to UTC via the PPS edge embedded in the digitized stream.
+
+**Error budget:**
+
+| Source | Value | Notes |
+|--------|-------|-------|
+| σ_adc | < 0.001 ms | GPSDO-locked 122.88 MHz clock, < 1 ppb |
+| σ_rtp | **0** | PPS is IN the sample stream — no RTP mapping needed |
+| σ_auth | **0** | PPS edge IS the timing reference |
+| σ_det | 0.005 ms | PPS edge detection is trivial (sharp rising edge) |
+| σ_iono | 3–15 ms | Unchanged — but now perfectly measurable |
+
+**Achievable single-measurement uncertainty:** σ_iono dominates = **3–15 ms**
+
+**But the key difference:** At L6, the ionospheric delay is a *measurement*, not an *error*. The system knows UTC to < 1 µs from the embedded PPS. Every D_clock measurement is a direct observation of the ionospheric path delay with ~5 µs precision. This is the **ionospheric characterization mode** — the system becomes a precision ionosonde.
+
+**Multi-station fusion (10 min, 4 stations):** The ionospheric component averages down as √N. With ~75 independent measurements across 4 stations: σ_fused ≈ σ_iono / √75 ≈ **0.5–1.7 ms** for the ionospheric residual. But the *clock* uncertainty is < 0.001 ms — the residual is purely ionospheric science, not timing error.
+
+**Grade A achievable?** The clock is already at Grade A (< 0.001 ms). The "uncertainty" reported would be the ionospheric measurement scatter, not clock error. **Grade A is trivially achieved for timing; the uncertainty metric needs reinterpretation as ionospheric measurement quality.**
+
+---
+
+#### L5: GPSDO-Governed RX888 + GPS+PPS Direct to Radiod Machine
+
+*Current production configuration on bee1.*
+
+**Configuration:** GPSDO provides 10 MHz reference to RX888 (sample clock locked). GPS receiver provides PPS + NMEA directly to the radiod host via serial/USB. Radiod uses PPS to discipline its RTP timestamp mapping.
+
+**Error budget:**
+
+| Source | Value | Notes |
+|--------|-------|-------|
+| σ_adc | < 0.001 ms | GPSDO-locked 122.88 MHz, < 1 ppb stability |
+| σ_rtp | 0.01–0.05 ms | RTP timestamp granularity + radiod's PPS-to-RTP alignment |
+| σ_auth | 0.001–0.01 ms | GPS+PPS on same machine, kernel PPS discipline |
+| σ_det | 0.05 ms | Standard detection chain |
+| σ_iono | 3–15 ms | Unchanged |
+
+**Achievable single-measurement uncertainty:** σ_iono dominates = **3–15 ms**
+
+**The σ_rtp term:** Radiod maps RTP sequence numbers to wall-clock time using the system clock. With PPS on the same machine, the system clock is disciplined to < 10 µs. But the RTP-to-sample mapping has quantization: RTP timestamps increment in units of 1/sample_rate. At 20 kHz output rate, 1 RTP tick = 50 µs. The mapping uncertainty is ~1 RTP tick = 0.05 ms.
+
+**Multi-station fusion (10 min, 4 stations):** σ_fused ≈ **0.5–1.7 ms** (same as L6 for the ionospheric component). The timing authority adds ~0.05 ms in quadrature — negligible.
+
+**Observed performance:** On bee1, we see D_clock uncertainty of 4–7 ms per cycle, with Kalman-converged steady state of ~2–4 ms. Cross-station disagreement of 18–36 ms (dominated by BPM's long path). Excluding BPM: ~5–10 ms inter-station.
+
+**Grade A achievable?** In principle, with long averaging and BPM excluded, the fused uncertainty could approach 0.5 ms. **Marginally achievable under ideal conditions** (nighttime, stable ionosphere, 30+ min averaging, BPM excluded). In practice, Grade B (< 1.0 ms) is the realistic steady-state target.
+
+---
+
+#### L4: GPSDO-Governed RX888 + GPS+PPS via LAN
+
+**Configuration:** GPSDO provides 10 MHz to RX888 (sample clock locked). GPS+PPS is on a *separate* machine, providing time to the radiod host via PTP (IEEE 1588) or NTP over LAN.
+
+**Error budget:**
+
+| Source | Value | Notes |
+|--------|-------|-------|
+| σ_adc | < 0.001 ms | GPSDO-locked, same as L5 |
+| σ_rtp | 0.05–0.5 ms | RTP mapping now depends on LAN-disciplined clock |
+| σ_auth | 0.01–1.0 ms | PTP: 0.01–0.1 ms. NTP over LAN: 0.1–1.0 ms |
+| σ_det | 0.05 ms | Unchanged |
+| σ_iono | 3–15 ms | Unchanged |
+
+**Key difference from L5:** The timing authority is no longer on the same machine as radiod. The LAN introduces asymmetric delay jitter. PTP (with hardware timestamping) achieves ~10–100 µs. NTP over a quiet LAN achieves ~0.1–1 ms.
+
+**Achievable single-measurement:** Still σ_iono dominated = **3–15 ms**
+
+**Multi-station fusion:** σ_fused ≈ **0.5–2 ms**. The σ_auth term (0.01–1 ms) starts to matter in the fused result. With PTP, it's negligible. With NTP, it adds ~0.5 ms in quadrature to the fused uncertainty.
+
+**Grade A achievable?** With PTP: similar to L5, marginally achievable. With NTP: **No** — the NTP jitter floor (~0.5 ms) prevents reaching < 0.5 ms even with perfect ionospheric averaging.
+
+---
+
+#### L3: GPSDO-Governed RX888 + NTP via LAN
+
+**Configuration:** GPSDO provides 10 MHz to RX888 (sample clock locked). No local GPS — timing authority is NTP from upstream servers via LAN/WAN.
+
+**Error budget:**
+
+| Source | Value | Notes |
+|--------|-------|-------|
+| σ_adc | < 0.001 ms | GPSDO-locked, same as L5 |
+| σ_rtp | 0.5–5 ms | RTP mapping depends on NTP-disciplined clock |
+| σ_auth | 1–10 ms | NTP over WAN: 1–10 ms. LAN to stratum-1: 0.5–2 ms |
+| σ_det | 0.05 ms | Unchanged |
+| σ_iono | 3–15 ms | Unchanged |
+
+**Key insight:** The GPSDO still provides a perfect "ruler" (stable sample clock), but the ruler's zero-point is set by NTP. The sample-to-sample timing is sub-ppb, but the absolute time reference has 1–10 ms uncertainty.
+
+**This is the "Steel Ruler" scenario:** The ruler is rigid but floating. The HF measurements can *improve* the NTP-derived zero-point because the ionospheric average converges faster than NTP wanders.
+
+**Achievable single-measurement:** max(σ_iono, σ_auth) = **3–15 ms**
+
+**Multi-station fusion:** σ_fused ≈ **1–3 ms**. The σ_auth term (1–10 ms) is comparable to σ_iono, so both contribute. The Kalman filter tracks the NTP offset as a slowly-varying bias.
+
+**Grade A achievable?** **No.** NTP jitter prevents it. Grade B (< 1 ms) is possible with a good stratum-1 NTP source on LAN and long averaging.
+
+---
+
+#### L2: RX888 (No GPSDO) + NTP via LAN
+
+**Configuration:** RX888 runs on its internal TCXO (1–2 ppm typical). No GPSDO. Timing authority is NTP.
+
+**Error budget:**
+
+| Source | Value | Notes |
+|--------|-------|-------|
+| σ_adc | 0.05–0.5 ms/min | TCXO drift: 1–2 ppm = 0.06–0.12 ms/min accumulated |
+| σ_rtp | 0.5–5 ms | NTP-disciplined clock, same as L3 |
+| σ_auth | 1–10 ms | NTP, same as L3 |
+| σ_det | 0.05–0.5 ms | Degraded by frequency offset (tone not at expected freq) |
+| σ_iono | 3–15 ms | Unchanged |
+
+**Key difference from L3:** The sample clock drifts. At 2 ppm, the clock accumulates 0.12 ms/min of drift. Over a 10-minute fusion window, that's 1.2 ms of sample clock wander *within the window*. The Kalman filter must track both the ionospheric variation AND the oscillator drift simultaneously.
+
+**σ_det degradation:** At 2 ppm on a 10 MHz carrier, the received tone is offset by 20 Hz from the expected frequency. The matched filter bandwidth (~50 Hz) still captures this. At 50 ppm (cheap crystal), the offset is 500 Hz — outside the filter bandwidth, requiring frequency search.
+
+**Achievable single-measurement:** max(σ_iono, σ_auth) = **3–15 ms** (same floor as L3)
+
+**Multi-station fusion:** σ_fused ≈ **2–5 ms**. The oscillator drift adds a correlated error across all measurements in a window, limiting the √N improvement. The Kalman's drift state must converge before the ionospheric averaging becomes effective.
+
+**Time to lock:** 2–5 minutes (TCXO). The Kalman needs to separate oscillator drift from ionospheric variation, which requires multiple cycles.
+
+**Grade A achievable?** **No.** Grade C (< 2 ms) is the realistic target. Grade B possible with a good TCXO and long averaging.
+
+---
+
+#### L1: RX888 (No GPSDO) + No NTP
+
+**Configuration:** RX888 on internal oscillator. No external timing reference at all. Cold start — the system must determine UTC from HF signals alone.
+
+**Error budget:**
+
+| Source | Value | Notes |
+|--------|-------|-------|
+| σ_adc | 0.05–0.5 ms/min | Same TCXO drift as L2 |
+| σ_rtp | N/A | No external clock to map against |
+| σ_auth | **200+ ms initially** | Must identify the minute from HF signal decoding |
+| σ_det | 0.05–0.5 ms | Same as L2 |
+| σ_iono | 3–15 ms | Unchanged |
+
+**The bootstrap problem:** Without NTP, the system doesn't know what minute it is. The CHU FSK decoder can identify the minute from the BCD time code (takes 1–2 minutes of clean reception). WWV's 100 Hz subcarrier BCD provides the same. Until minute identification succeeds, σ_auth = ±200 ms (the UNLOCKED search window).
+
+**After bootstrap:** Once the minute is identified, σ_auth drops to ~σ_iono (the HF measurements become the authority). The system is now self-referential — the same HF signals provide both the timing reference and the measurements.
+
+**Achievable single-measurement:** σ_iono = **3–15 ms** (after bootstrap)
+
+**Multi-station fusion:** σ_fused ≈ **2–5 ms** (same as L2 after convergence). The oscillator drift is the same problem as L2.
+
+**Holdover:** If all HF signals fade (solar storm, D-layer absorption), the system coasts on the Kalman state. With a TCXO at 2 ppm, drift accumulates at 0.12 ms/min = 7.2 ms/hour. After 1 hour of holdover, uncertainty grows to ~10 ms. After 24 hours: ~170 ms.
+
+**Grade A achievable?** **No.** Same ceiling as L2 — Grade C is the realistic target.
+
+---
+
+### Summary Table
+
+| Level | Sample Clock | Timing Authority | Single Meas. | Fused (10 min) | Fused (1 hr) | Best Grade | Primary Limiter |
+|-------|-------------|-----------------|-------------|----------------|--------------|------------|-----------------|
+| **L6** | GPSDO (< 1 ppb) | PPS in stream | 3–15 ms | 0.3–1.0 ms | 0.1–0.5 ms | **A** | Ionospheric scatter |
+| **L5** | GPSDO (< 1 ppb) | GPS+PPS local | 3–15 ms | 0.5–1.7 ms | 0.2–0.7 ms | **A–B** | RTP mapping + iono |
+| **L4** | GPSDO (< 1 ppb) | PTP/NTP via LAN | 3–15 ms | 0.5–2.0 ms | 0.3–1.0 ms | **B** | LAN timing jitter |
+| **L3** | GPSDO (< 1 ppb) | NTP via WAN | 3–15 ms | 1–3 ms | 0.5–1.5 ms | **B–C** | NTP wander |
+| **L2** | TCXO (1–2 ppm) | NTP via LAN | 3–15 ms | 2–5 ms | 1–3 ms | **C** | Oscillator drift + NTP |
+| **L1** | TCXO (1–2 ppm) | HF self-derived | 3–15 ms* | 2–5 ms | 1–3 ms | **C** | Oscillator drift + bootstrap |
+
+*L1 single measurement: 200+ ms during bootstrap, 3–15 ms after lock.
+
+### Key Insights
+
+1. **The ionosphere is always the dominant single-measurement error** (3–15 ms). No hardware improvement changes this. The only way to reduce it is multi-station fusion over time (√N averaging).
+
+2. **Grade A (< 0.5 ms) requires L5 or L6** — you need sub-µs timing authority AND long averaging to push the ionospheric scatter below 0.5 ms. L6 (PPS in stream) is the cleanest path because it eliminates the RTP mapping uncertainty entirely.
+
+3. **The GPSDO matters for the ruler, not the zero-point.** At L3–L6, the GPSDO ensures the sample clock doesn't drift, so measurements within a fusion window are coherent. Without it (L1–L2), the Kalman must track oscillator drift simultaneously with ionospheric variation, limiting the effective averaging depth.
+
+4. **NTP is the ceiling for L2–L4.** NTP jitter (0.5–10 ms) sets a floor on the timing authority that multi-station fusion cannot average below. PTP (L4 with hardware timestamping) breaks through this floor.
+
+5. **L1 and L2 converge to the same steady-state** after bootstrap. The NTP in L2 only helps with faster initial lock — once the Kalman converges, the HF measurements dominate the timing estimate in both cases.
+
+6. **The current system operates at L5** and achieves 2–5 ms fused uncertainty. The gap to Grade A is primarily the ionospheric averaging depth — longer windows and BPM exclusion would help, but the RTP mapping uncertainty (~0.05 ms) may also need attention for the final push below 0.5 ms.
+
+### Implications for Grade Thresholds
+
+The current grade thresholds were designed with L6 in mind (the aspirational target). For the current L5 configuration:
+
+| Grade | Current Threshold | Achievable at L5? | Recommended L5 Threshold |
+|-------|-------------------|-------------------|--------------------------|
+| **A** | < 0.5 ms | Marginal (long avg) | < 1.0 ms |
+| **B** | < 1.0 ms | Yes (converged) | < 2.0 ms |
+| **C** | < 2.0 ms | Yes (typical) | < 5.0 ms |
+| **D** | ≥ 2.0 ms | Default | ≥ 5.0 ms |
+
+A level-aware grading system could report grades relative to the configured timing authority level, making the grades meaningful at every configuration.
+
+---
+
 ## Station Priority Policy (v6.5.0)
 
 Not all broadcasts are weighted equally in the fusion algorithm:
