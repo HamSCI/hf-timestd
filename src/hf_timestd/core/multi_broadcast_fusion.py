@@ -3132,6 +3132,18 @@ class MultiBroadcastFusion:
         measurements = self._read_latest_measurements(lookback_minutes, force_l1_only=force_l1_only)
         
         # ====================================================================
+        # BPM EXCLUSION (2026-02-07): Remove BPM from fusion pipeline
+        # ====================================================================
+        # BPM's 11,000 km trans-Pacific path introduces 18-36 ms cross-station
+        # disagreement that dominates uncertainty and prevents grade improvement.
+        # BPM data is still collected by per-broadcast Kalmans and logged for
+        # ionospheric science, but excluded from the timing fusion.
+        n_bpm = sum(1 for m in measurements if m.station == 'BPM')
+        if n_bpm > 0:
+            measurements = [m for m in measurements if m.station != 'BPM']
+            logger.debug(f"BPM exclusion: removed {n_bpm} BPM measurements from fusion (kept for science)")
+        
+        # ====================================================================
         # BOOTSTRAP VALIDATION (2026-01-24): Multi-station correlation
         # ====================================================================
         # Feed measurements to bootstrap validator for cross-station agreement.
