@@ -254,7 +254,10 @@ SERVICES=(
 )
 
 for service in "${SERVICES[@]}"; do
-    if systemctl is-active --quiet "$service"; then
+    if systemctl is-enabled --quiet "$service" 2>/dev/null; then
+        if ! systemctl is-active --quiet "$service"; then
+            log_warn "  $service was not running (may have died during pip reinstall)"
+        fi
         systemctl restart "$service"
         log_info "  Restarted: $service"
     fi
