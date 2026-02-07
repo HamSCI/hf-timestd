@@ -561,10 +561,10 @@
             
             const uncertainty = data.uncertainty_ms || 99;
             
-            // Define criteria matching backend grade logic:
-            //   A: 8+ broadcasts, uncertainty < 0.5ms
-            //   B: 5+ broadcasts, uncertainty < 1.0ms
-            //   C: 3+ broadcasts, uncertainty < 2.0ms
+            // Level-aware grade thresholds (L5: GPSDO + GPS+PPS local)
+            // See METROLOGY.md "Timing Authority Levels" for derivation
+            // BPM excluded from fusion and inter-station spread
+            const timingLevel = 'L5';
             const criteria = [
                 {
                     name: '8+ broadcasts',
@@ -585,20 +585,20 @@
                     required: 'B'
                 },
                 {
-                    name: 'Uncertainty < 0.5 ms',
-                    met: uncertainty < 0.5,
+                    name: 'Uncertainty < 1.0 ms',
+                    met: uncertainty < 1.0,
                     value: `${formatNumber(uncertainty, 3)} ms`,
                     required: 'A'
                 },
                 {
-                    name: 'Uncertainty < 1.0 ms',
-                    met: uncertainty < 1.0,
+                    name: 'Uncertainty < 2.0 ms',
+                    met: uncertainty < 2.0,
                     value: `${formatNumber(uncertainty, 3)} ms`,
                     required: 'B'
                 },
                 {
-                    name: 'Inter-station < 1 ms',
-                    met: interStationSpread < 1.0,
+                    name: 'Inter-station < 2 ms',
+                    met: interStationSpread < 2.0,
                     value: `${formatNumber(interStationSpread, 3)} ms`,
                     required: 'A'
                 },
@@ -625,10 +625,10 @@
             };
             
             const gradeDescriptions = {
-                'A': '±0.5 ms — Full metrological quality',
-                'B': '±1.0 ms — Good quality, provisional phase',
-                'C': '±2.0 ms — Bootstrap phase, limited validation',
-                'D': '> 2.0 ms — Insufficient data',
+                'A': '< 1.0 ms — Full metrological quality (L5)',
+                'B': '< 2.0 ms — Good quality, converging',
+                'C': '< 5.0 ms — Bootstrap phase, limited validation',
+                'D': '≥ 5.0 ms — Insufficient data or convergence',
                 'F': 'Failed — Validation failures'
             };
             
@@ -666,11 +666,11 @@
                 
                 <div style="margin-top: 16px; padding: 12px; background: rgba(59, 130, 246, 0.1); border-left: 3px solid #3b82f6; border-radius: 4px;">
                     <div style="font-size: 12px; color: #94a3b8;">
-                        <strong style="color: #3b82f6;">Grade Requirements:</strong>
-                        <strong>A</strong> requires 8+ broadcasts, uncertainty &lt; 0.5 ms, inter-station &lt; 1 ms. 
-                        <strong>B</strong> requires 5+ broadcasts, 2+ stations, uncertainty &lt; 1.0 ms. 
-                        <strong>C</strong> requires 3+ broadcasts, uncertainty &lt; 2.0 ms. 
-                        <strong>D/F</strong> indicates insufficient data or validation failures.
+                        <strong style="color: #3b82f6;">Grade Requirements (L5):</strong>
+                        <strong>A</strong> requires 8+ broadcasts, uncertainty &lt; 1.0 ms, inter-station &lt; 2.0 ms, Kalman LOCKED. 
+                        <strong>B</strong> requires 5+ broadcasts, 2+ stations, uncertainty &lt; 2.0 ms. 
+                        <strong>C</strong> requires 3+ broadcasts, uncertainty &lt; 5.0 ms. 
+                        <strong>D</strong> indicates insufficient data or convergence. BPM excluded from fusion.
                     </div>
                 </div>
             `;

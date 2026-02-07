@@ -495,6 +495,17 @@ class MultiBroadcastFusion:
     # These are now replaced by learned values from ground truth validation.
     DEFAULT_CALIBRATION = {}  # Empty - all calibration is learned
     
+    # Level-aware grade thresholds (uncertainty_ms, inter_station_ms)
+    # See METROLOGY.md "Timing Authority Levels" for derivation
+    GRADE_THRESHOLDS = {
+        'L6': {'A': (1.0, 2.0), 'B': (2.0, 4.0), 'C': (5.0, 10.0)},
+        'L5': {'A': (1.0, 2.0), 'B': (2.0, 4.0), 'C': (5.0, 10.0)},
+        'L4': {'A': (1.5, 3.0), 'B': (3.0, 6.0), 'C': (7.0, 15.0)},
+        'L3': {'A': (2.0, 4.0), 'B': (4.0, 8.0), 'C': (8.0, 20.0)},
+        'L2': {'A': (3.0, 5.0), 'B': (5.0, 10.0), 'C': (10.0, 25.0)},
+        'L1': {'A': (3.0, 5.0), 'B': (5.0, 10.0), 'C': (10.0, 25.0)},
+    }
+    
     def __init__(
         self,
         data_root: Path,
@@ -503,7 +514,8 @@ class MultiBroadcastFusion:
         reference_station: str = 'CHU',
         receiver_lat: Optional[float] = None,
         receiver_lon: Optional[float] = None,
-        sample_rate: Optional[int] = None
+        sample_rate: Optional[int] = None,
+        timing_authority_level: str = 'L5'
     ):
         """
         Initialize multi-broadcast fusion engine.
@@ -513,8 +525,13 @@ class MultiBroadcastFusion:
             calibration_file: Optional file to persist calibration
             auto_calibrate: Whether to learn calibration from data
             reference_station: Station to use as timing reference
+            timing_authority_level: Hardware timing level (L1-L6), affects grade thresholds
         """
         self.data_root = Path(data_root)
+        self.timing_authority_level = timing_authority_level.upper()
+        if self.timing_authority_level not in self.GRADE_THRESHOLDS:
+            logger.warning(f"Unknown timing authority level '{timing_authority_level}', defaulting to L5")
+            self.timing_authority_level = 'L5'
         self.phase2_dir = self.data_root / 'phase2'
         self.calibration: Dict[str, BroadcastCalibration] = {}
         self.calibration_update_count = 0  # Track updates for auto-save
@@ -2044,18 +2061,19 @@ class MultiBroadcastFusion:
             '1E': 1.0, '1F': 0.95, '2F': 0.85, '3F': 0.7, 'GW': 1.0
         }
         
-        # STATION PRIORITY (2026-02-04): Primary timing anchors vs secondary sources
+        # STATION PRIORITY (2026-02-07): Primary timing anchors only
         # CHU, WWV, WWVH are the primary timing anchors - shorter paths, better characterized
-        # BPM is maintained for scientific interest (ionospheric probing of long path)
-        # but should not dominate timing decisions due to:
-        #   - Very long path (~11,000 km) with high ionospheric variability
-        #   - Multi-hop propagation introduces more uncertainty
+        # BPM is EXCLUDED from fusion (weight=0) due to:
+        #   - Very long path (~11,000 km) with 18-36 ms cross-station disagreement
+        #   - Multi-hop propagation introduces unmodeled uncertainty
         #   - UT1/UTC alternation requires careful handling
+        #   - Dominates inter-station spread, preventing grade improvement
+        # BPM data is still collected and logged for ionospheric science.
         station_priority = {
             'CHU': 1.0,    # Primary anchor - unique frequencies, FSK verification
             'WWV': 1.0,    # Primary anchor - closest station, well-characterized
             'WWVH': 0.9,   # Primary anchor - longer path but reliable
-            'BPM': 0.3,    # Secondary/scientific - long path, high uncertainty
+            'BPM': 0.0,    # EXCLUDED from fusion - kept for ionospheric science only
         }
         
         # BOOTSTRAP PREFERENCE (2026-01-24): Prefer unambiguous channels during bootstrap
@@ -2975,10 +2993,13 @@ class MultiBroadcastFusion:
                 - reason: Explanation of validation result
                 - n_outliers: Number of outlier stations detected
         """
-        # Group by station (exclude GLOBAL_DIFF synthetic measurements)
+        # Group by station (exclude GLOBAL_DIFF synthetic measurements and BPM)
+        # BPM is excluded from fusion (weight=0) due to 18-36ms cross-station
+        # disagreement from its 11,000km path. Including it in cross-validation
+        # would always trigger INTER_ANOMALY.
         station_groups = defaultdict(list)
         for m, cal_val in zip(measurements, calibrated):
-            if m.station != 'GLOBAL_DIFF':
+            if m.station not in ('GLOBAL_DIFF', 'BPM'):
                 station_groups[m.station].append(cal_val)
         
         # Need at least 2 stations for cross-validation
@@ -3090,7 +3111,7 @@ class MultiBroadcastFusion:
         
         return True, reason, 0
     
-    def fuse(self, lookback_minutes: int = 10, force_l1_only: bool = False, skip_write: bool = False) -> Optional[FusedResult]:
+    def fuse(self, lookback_minutes: int = 30, force_l1_only: bool = False, skip_write: bool = False) -> Optional[FusedResult]:
         """
         Perform multi-broadcast fusion.
         
@@ -3966,15 +3987,21 @@ class MultiBroadcastFusion:
         bpm_intra_std = np.std(bpm_cal) if len(bpm_cal) > 1 else None
         
         # Inter-station spread (difference between station means)
+        # BPM is EXCLUDED from inter-station spread (weight=0 in fusion)
+        # but still tracked in station_means_all for reporting
         station_means = {}
+        station_means_all = {}  # Including BPM, for reporting only
         if wwv_cal:
             station_means['WWV'] = np.mean(wwv_cal)
+            station_means_all['WWV'] = station_means['WWV']
         if wwvh_cal:
             station_means['WWVH'] = np.mean(wwvh_cal)
+            station_means_all['WWVH'] = station_means['WWVH']
         if chu_cal:
             station_means['CHU'] = np.mean(chu_cal)
+            station_means_all['CHU'] = station_means['CHU']
         if bpm_cal:
-            station_means['BPM'] = np.mean(bpm_cal)
+            station_means_all['BPM'] = np.mean(bpm_cal)  # Report only, not in spread
         inter_station_spread = (max(station_means.values()) - min(station_means.values())) if len(station_means) > 1 else None
         
         
@@ -4072,12 +4099,22 @@ class MultiBroadcastFusion:
                 f"Scientific data quality is UNVALIDATED."
             )
         
-        # Quality grade based on number of broadcasts and uncertainty
-        if len(measurements) >= 8 and uncertainty < 0.5:
+        # Level-aware quality grade based on timing authority level
+        # Thresholds are (uncertainty_ms, inter_station_ms) per level
+        thresholds = self.GRADE_THRESHOLDS[self.timing_authority_level]
+        unc_a, inter_a = thresholds['A']
+        unc_b, inter_b = thresholds['B']
+        unc_c, inter_c = thresholds['C']
+        
+        # Inter-station check uses the spread we computed (BPM excluded)
+        inter_ok_a = (inter_station_spread is not None and inter_station_spread < inter_a) or inter_station_spread is None
+        inter_ok_b = (inter_station_spread is not None and inter_station_spread < inter_b) or inter_station_spread is None
+        
+        if len(measurements) >= 8 and uncertainty < unc_a and inter_ok_a and not single_station_mode:
             grade = 'A'
-        elif len(measurements) >= 5 and uncertainty < 1.0:
+        elif len(measurements) >= 5 and uncertainty < unc_b and inter_ok_b:
             grade = 'B'
-        elif len(measurements) >= 3 and uncertainty < 2.0:
+        elif len(measurements) >= 3 and uncertainty < unc_c:
             grade = 'C'
         else:
             grade = 'D'
@@ -4541,9 +4578,10 @@ def run_fusion_service(
     data_root: Path, 
     interval_sec: float = 60.0, 
     enable_chrony: bool = True,
-    lookback_minutes: int = 10,
+    lookback_minutes: int = 30,
     receiver_lat: Optional[float] = None,
-    receiver_lon: Optional[float] = None
+    receiver_lon: Optional[float] = None,
+    timing_authority_level: str = 'L5'
 ):
     """
     Run continuous fusion service that aggregates Phase 2 timing measurements.
@@ -4562,11 +4600,13 @@ def run_fusion_service(
         lookback_minutes: Number of minutes to look back for measurements
         receiver_lat: Receiver latitude (from config)
         receiver_lon: Receiver longitude (from config)
+        timing_authority_level: Hardware timing level (L1-L6)
     """
     fusion = MultiBroadcastFusion(
         data_root,
         receiver_lat=receiver_lat,
-        receiver_lon=receiver_lon
+        receiver_lon=receiver_lon,
+        timing_authority_level=timing_authority_level
     )
     
     # Initialize dual Chrony SHM outputs if enabled
@@ -4605,7 +4645,10 @@ def run_fusion_service(
     logger.info(f"  Chrony SHM L2: {'enabled' if chrony_shm_l2 else 'disabled'}")
     
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
-    logger.info(f"Fusion interval: {interval_sec}s")
+    logger.info(f"Fusion interval: {interval_sec}s, lookback: {lookback_minutes}m")
+    logger.info(f"Timing authority level: {fusion.timing_authority_level}")
+    thresholds = fusion.GRADE_THRESHOLDS[fusion.timing_authority_level]
+    logger.info(f"Grade thresholds: A=<{thresholds['A'][0]}ms, B=<{thresholds['B'][0]}ms, C=<{thresholds['C'][0]}ms")
     
     # CRITICAL FIX (2026-01-20): Handle SIGTERM for clean shutdown with calibration save
     running = True
@@ -5039,7 +5082,9 @@ if __name__ == '__main__':
     parser.add_argument('--data-root', type=Path, default=Path('data'), required=False) # Configured default for simpler running
     parser.add_argument('--config', type=Path, help='Configuration file') # Added config support
     parser.add_argument('--interval', type=float, default=60.0)
-    parser.add_argument('--lookback', type=int, default=10, help='Lookback window in minutes')
+    parser.add_argument('--lookback', type=int, default=30, help='Lookback window in minutes')
+    parser.add_argument('--timing-level', default='L5', choices=['L1', 'L2', 'L3', 'L4', 'L5', 'L6'],
+                        help='Timing authority level (L1-L6, default: L5)')
     parser.add_argument('--log-level', default='INFO')
     parser.add_argument('--enable-chrony', action='store_true', default=True,
                         help='Enable Chrony SHM refclock output (default: enabled)')
@@ -5069,6 +5114,17 @@ if __name__ == '__main__':
         except Exception as e:
             logger.warning(f"Failed to read config file: {e}")
     
+    # Read timing level from config if not overridden on CLI
+    timing_level = args.timing_level
+    if args.config and args.config.exists():
+        try:
+            cfg_level = config.get('fusion', {}).get('timing_authority_level')
+            if cfg_level and args.timing_level == 'L5':  # Only use config if CLI is default
+                timing_level = cfg_level
+                logger.info(f"Using timing authority level from config: {timing_level}")
+        except Exception:
+            pass
+    
     enable_chrony = args.enable_chrony and not args.disable_chrony
     run_fusion_service(
         args.data_root, 
@@ -5076,5 +5132,6 @@ if __name__ == '__main__':
         enable_chrony=enable_chrony,
         lookback_minutes=args.lookback,
         receiver_lat=receiver_lat,
-        receiver_lon=receiver_lon
+        receiver_lon=receiver_lon,
+        timing_authority_level=timing_level
     )
