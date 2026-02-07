@@ -4286,6 +4286,11 @@ class MultiBroadcastFusion:
         """
         Read the latest GNSS VTEC from HDF5.
         Returns (vtec_tecu, timestamp) or None.
+        
+        PERFORMANCE: Reads only the last N rows from the HDF5 file instead of
+        loading the entire dataset through the generic reader. The VTEC file
+        grows ~560 MB/day at 1 Hz; a full table scan every 8s fusion cycle
+        causes intermittent timeouts and VTEC data starvation.
         """
         logger.info(">>> _read_gnss_vtec() called <<<")
         
@@ -4294,7 +4299,8 @@ class MultiBroadcastFusion:
             return None
         
         try:
-            from datetime import datetime, timezone, timedelta
+            from datetime import datetime, timezone
+            import h5py as _h5py
             
             # Check both possible locations for GNSS VTEC data
             # Primary: data_root/data/gnss_vtec (where live_vtec.py writes with relative path)
@@ -4307,37 +4313,90 @@ class MultiBroadcastFusion:
                 logger.warning(f"GNSS VTEC directory not found: {vtec_dir}")
                 return None
             
-            reader = DataProductReader(
-                data_dir=vtec_dir,
-                product_level='L3',
-                product_name='gnss_vtec',
-                channel='GNSS'
-            )
-            
-            # Read last 5 minutes of data
+            # Find today's file (most recent)
             now = datetime.now(timezone.utc)
-            start = now - timedelta(minutes=5)
+            date_str = now.strftime('%Y%m%d')
+            hdf5_path = vtec_dir / f'GNSS_gnss_vtec_{date_str}.h5'
             
-            measurements = reader.read_time_range(
-                start=start.isoformat().replace('+00:00', 'Z'),
-                end=now.isoformat().replace('+00:00', 'Z'),
-                quality_flags=['GOOD', 'MARGINAL']  # Accept GOOD and MARGINAL
-            )
+            if not hdf5_path.exists():
+                logger.debug(f"Today's VTEC file not found: {hdf5_path}")
+                return None
             
-            if measurements:
-                # Get most recent measurement
-                latest = max(measurements, key=lambda m: m['unix_timestamp'])
+            # Fast tail read: only read the last 10 rows instead of entire file
+            TAIL_SIZE = 10
+            MAX_AGE_SECONDS = 300  # 5 minutes
+            
+            with _h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
+                if 'unix_timestamp' not in f or 'vtec_tecu' not in f:
+                    logger.warning(f"Missing required datasets in {hdf5_path}")
+                    return None
+                
+                n_total = len(f['unix_timestamp'])
+                if n_total == 0:
+                    logger.debug("VTEC file is empty")
+                    return None
+                
+                # Read only the tail
+                start_idx = max(0, n_total - TAIL_SIZE)
+                timestamps = f['unix_timestamp'][start_idx:]
+                vtec_values = f['vtec_tecu'][start_idx:]
+                
+                # Optional: read quality flags if present
+                quality_flags = None
+                if 'quality_flag' in f:
+                    quality_flags = f['quality_flag'][start_idx:]
+                
+                n_sats = None
+                if 'n_satellites' in f:
+                    n_sats = f['n_satellites'][start_idx:]
+            
+            # Find the most recent GOOD/MARGINAL measurement within age limit
+            current_time = time.time()
+            best_idx = None
+            best_ts = 0
+            
+            for i in range(len(timestamps) - 1, -1, -1):
+                ts = float(timestamps[i])
+                age = current_time - ts
+                
+                if age > MAX_AGE_SECONDS:
+                    break  # Timestamps are ordered, older ones follow
+                
+                # Check quality if available
+                if quality_flags is not None:
+                    flag = quality_flags[i]
+                    if isinstance(flag, bytes):
+                        flag = flag.decode('utf-8')
+                    if flag not in ('GOOD', 'MARGINAL'):
+                        continue
+                
+                if ts > best_ts:
+                    best_idx = i
+                    best_ts = ts
+                    break  # Most recent valid entry found
+            
+            if best_idx is not None:
+                vtec = float(vtec_values[best_idx])
+                sats = int(n_sats[best_idx]) if n_sats is not None else 0
+                qflag = ''
+                if quality_flags is not None:
+                    qflag = quality_flags[best_idx]
+                    if isinstance(qflag, bytes):
+                        qflag = qflag.decode('utf-8')
+                
+                age = current_time - best_ts
                 logger.info(
-                    f"Read VTEC from HDF5: {latest['vtec_tecu']:.2f} TECU, "
-                    f"{latest['n_satellites']} sats, quality={latest['quality_flag']}"
+                    f"Read VTEC from HDF5: {vtec:.2f} TECU, "
+                    f"{sats} sats, quality={qflag} (age: {age:.1f}s, "
+                    f"tail read {min(TAIL_SIZE, n_total)} of {n_total} rows)"
                 )
-                return latest['vtec_tecu'], latest['unix_timestamp']
+                return vtec, best_ts
             else:
-                logger.debug("HDF5 VTEC query returned no measurements")
+                logger.debug(f"No fresh VTEC in last {MAX_AGE_SECONDS}s (file has {n_total} rows)")
                 return None
         
         except FileNotFoundError:
-            logger.warning("HDF5 VTEC directory not found")
+            logger.warning("HDF5 VTEC file not found")
             return None
         except Exception as e:
             logger.error(f"HDF5 VTEC read failed: {e}")
