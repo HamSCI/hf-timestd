@@ -1398,13 +1398,21 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Use floor to find the minute boundary that the buffer START falls in
         minute_boundary = int(buffer_start_time / 60) * 60
         
-        # Step 1: AM demodulation (extract envelope)
-        magnitude = np.abs(iq_samples)
-        audio_signal = magnitude - np.mean(magnitude)  # AC coupling
+        # Step 1: Demodulation
+        # CHU uses DSB suppressed carrier — AM demod (|IQ|) doesn't recover the
+        # 1000Hz tone. Use real part of IQ for CHU, AM envelope for others.
+        if self.is_chu_channel:
+            audio_signal = np.real(iq_samples).copy()
+            audio_signal -= np.mean(audio_signal)
+            magnitude = np.abs(iq_samples)  # Still needed for leading zeros check
+        else:
+            magnitude = np.abs(iq_samples)
+            audio_signal = magnitude - np.mean(magnitude)  # AC coupling
         
         # Diagnostic: Check signal energy
         audio_rms = np.sqrt(np.mean(audio_signal**2))
-        logger.debug(f"AM demod: iq_len={len(iq_samples)}, audio_rms={audio_rms:.6f}, "
+        logger.debug(f"Demod ({'DSB-SC' if self.is_chu_channel else 'AM'}): "
+                    f"iq_len={len(iq_samples)}, audio_rms={audio_rms:.6f}, "
                     f"mag_mean={np.mean(magnitude):.6f}")
         
         # LEADING ZEROS CORRECTION (2026-02-01)
@@ -2374,9 +2382,13 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             'discrimination_confidence': 0.0
         }
         
-        # Convert to audio (envelope detection)
-        audio_signal = np.abs(iq_samples)
-        audio_signal = audio_signal - np.mean(audio_signal)  # Remove DC
+        # Convert to audio: CHU uses DSB-SC, others use AM
+        if self.is_chu_channel:
+            audio_signal = np.real(iq_samples).copy()
+            audio_signal -= np.mean(audio_signal)
+        else:
+            audio_signal = np.abs(iq_samples)
+            audio_signal = audio_signal - np.mean(audio_signal)  # Remove DC
         
         # Extended tone frequencies to analyze
         extended_tones = {
@@ -2520,9 +2532,13 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         """
         from ..interfaces.data_models import ToneAcquisitionResult
         
-        # AM demodulation
-        magnitude = np.abs(samples)
-        audio_signal = magnitude - np.mean(magnitude)
+        # Demodulation: CHU uses DSB-SC, others use AM
+        if self.is_chu_channel:
+            audio_signal = np.real(samples).copy()
+            audio_signal -= np.mean(audio_signal)
+        else:
+            magnitude = np.abs(samples)
+            audio_signal = magnitude - np.mean(magnitude)
         
         candidates: List[ToneAcquisitionResult] = []
         

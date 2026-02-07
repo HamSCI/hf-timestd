@@ -3,7 +3,7 @@
 **Comprehensive guide to the metrological methodology used in hf-timestd for RTP-to-UTC calibration and time transfer.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 4, 2026 (v6.5.0)
+**Last Updated:** February 7, 2026 (v6.5.1)
 
 ---
 
@@ -440,6 +440,123 @@ Expected progression:
 
 ---
 
+## FUSION Mode Accuracy Analysis
+
+### Motivating Rationale
+
+The system serves a dual purpose. In **RTP mode** (with GPSDO), the authoritative timing comes from GPS+PPS via radiod, and the metrology pipeline functions as a testbed for refining detection algorithms, calibration models, and ionospheric corrections against a known-good reference. This refinement directly serves the second purpose: **FUSION mode**, where GPS, GPSDO, or even network access may be unavailable, and the system must derive UTC solely from HF time standard receptions.
+
+FUSION mode addresses real operational scenarios:
+- **Remote/off-grid installations** without GPS coverage (deep valleys, underground, indoor)
+- **Disaster/emergency situations** where GPS and network infrastructure are disrupted
+- **Intentional GPS denial** (jamming, spoofing) in contested environments
+- **Backup timing** when primary GNSS disciplining fails
+- **Scientific stations** in locations where only HF propagation is available
+
+The accuracy achieved in FUSION mode depends on the error budget of the entire chain from transmitter to receiver.
+
+### Error Budget
+
+In FUSION mode, the timing chain is:
+
+```
+UTC(NIST/NRC) → HF transmitter → Ionosphere → Receiver → ADC → Detection → D_clock
+```
+
+Each layer contributes uncertainty:
+
+| Source | Magnitude | Notes |
+|--------|-----------|-------|
+| **Transmitter timing** | < 1 µs | WWV/WWVH/CHU traceable to UTC(NIST)/UTC(NRC) |
+| **Ionospheric propagation** | 3-15 ms variation | Dominant error. 1-hop F2 at 5-15 MHz. Diurnal, seasonal, solar cycle |
+| **Multipath/mode structure** | 1-5 ms | Multiple ionospheric modes (1F2, 2F2, E-layer) arrive at different times |
+| **ADC clock accuracy** | 0.1-10 ppm | Typical TCXO: 1-2 ppm. Cheap crystal: 10-50 ppm |
+| **ADC clock stability** | 0.01-1 ppm/hour drift | TCXO: ~0.1 ppm/°C. Oven-controlled: 0.01 ppm |
+| **Matched filter detection** | 0.1-0.5 ms | Sub-sample interpolation gives ~1/10 sample precision at 12 kHz |
+| **NTP initial sync** | 1-50 ms | Depends on network path. Typical LAN: 1-5 ms |
+
+### Operational Scenarios
+
+#### Scenario 1: Good SDR (TCXO, 1-2 ppm) + NTP Available
+
+*Typical: RTL-SDR V4, Airspy, most modern SDRs*
+
+- NTP provides initial minute identification (±5 ms) — enough to find the first tone
+- FUSION bootstrap: 2-3 minutes to lock using multi-station correlation
+- **Steady-state accuracy:**
+  - Single station: **±5-15 ms** (ionospheric variation dominates)
+  - Multi-station fusion (WWV + WWVH + CHU): **±2-5 ms** after calibration convergence
+- **Drift:** At 2 ppm, the oscillator drifts ~7.2 ms/hour. The Kalman tracks this easily. Over 24 hours without any external reference, accumulated drift would be ~170 ms — but continuous HF reception corrects this every minute
+- **Allan deviation:** Expect σ_y(60s) ≈ 10⁻⁷ to 10⁻⁸ from HF measurements alone
+
+#### Scenario 2: Cheap SDR (crystal, 10-50 ppm) + NTP Available
+
+*Typical: RTL-SDR V3, generic dongles*
+
+- NTP still provides minute identification
+- FUSION bootstrap: 5-10 minutes due to wider search window
+- **Steady-state:** Same ionospheric limit once locked — **±5-15 ms single station, ±2-5 ms multi-station**
+- **Risk:** Large frequency error means the matched filter's tone frequency is slightly wrong. At 50 ppm on a 10 MHz carrier, that's 500 Hz offset — the matched filter bandwidth (~100 Hz) would miss it
+- **Mitigation:** The metrology engine searches across frequency bins. The `ARRIVAL_TOLERANCE_MS = 100ms` window handles timing uncertainty. The real challenge is frequency, not time
+
+#### Scenario 3: Good SDR + No Network (Island/Remote/Disaster)
+
+*The hardest case — no NTP, no GPS, cold start*
+
+- **Minute identification:** Must come from HF signal decoding alone. CHU FSK decoder identifies the minute from BCD time code. WWV identifies the minute from the 100 Hz subcarrier BCD. This takes 1-2 minutes of clean reception
+- **Initial UTC uncertainty:** ±200 ms (the FUSION `UNLOCKED` search window)
+- **Convergence:** PROVISIONAL lock in 2-3 minutes, REFINED in 10+ minutes
+- **Steady-state:** Same as Scenario 1 once locked — **±2-5 ms multi-station**
+- **Risk:** If the oscillator has drifted significantly since last calibration (hours/days off), the initial search window may not be wide enough. The `ArrivalPatternMatrix` physics-based predictions help here — they predict where the tone should be regardless of clock state
+
+### Observed Performance (RTP Mode Baseline)
+
+From production data on the development station (RTP mode, GPSDO-locked):
+
+| Metric | Observed Value | Significance |
+|--------|---------------|--------------|
+| D_clock raw range | +27 to +48 ms cycle-to-cycle | Ionospheric variation |
+| L1-L2 difference | 0.2 to 9.3 ms | Physics model correction magnitude |
+| Per-cycle uncertainty | 6-10 ms | Ionospheric floor per measurement |
+| Cross-station disagreement | ~65 ms | Multi-path mode mixing (grade D) |
+| Hardware calibration bias | ~40 ms mean offset | Matched filter delay + ADC pipeline |
+
+The ~40 ms mean offset is the hardware calibration bias (matched filter delay, ADC pipeline). In FUSION mode, this same calibration is learned from the HF signals themselves, just more slowly.
+
+The 6-10 ms per-cycle uncertainty is the ionospheric floor — no amount of better oscillator improves this. Multi-station averaging over 10+ minutes brings this down to ~2-3 ms.
+
+### Expected FUSION Mode Accuracy Summary
+
+| Configuration | Expected Accuracy | Time to Lock |
+|--------------|-------------------|--------------|
+| Multi-station + TCXO + NTP | **±2-5 ms** steady-state | 2-3 min |
+| Multi-station + TCXO, no network | **±2-5 ms** steady-state | 5-10 min |
+| Single station + TCXO | **±5-15 ms** | 2-3 min |
+| Multi-station + cheap crystal | **±2-5 ms** (if freq lock works) | 5-10 min |
+
+The ionosphere is the dominant error in all cases. Oscillator quality affects **time to lock** and **holdover during outages**, but not steady-state accuracy once locked. The multi-station fusion architecture averages out ionospheric path differences — that is where the real accuracy gain comes from.
+
+### Dual Chrony Feed Architecture (v6.5.1)
+
+The fusion service provides two independent timing feeds to chrony via shared memory:
+
+| Feed | SHM Unit | Source | Purpose |
+|------|----------|--------|---------|
+| **TSL1** | 0 | L1 Kalman (geometric fallback) | Raw metrology fusion — no ionospheric model |
+| **TSL2** | 1 | L2 Kalman (physics model) | Full ionospheric correction via propagation model |
+
+Each feed has its own independent Kalman filter state, so chrony receives genuinely different estimates. TSL2 should show lower jitter and better accuracy as the ionospheric correction model removes systematic propagation biases that TSL1 cannot account for.
+
+Chrony can combine, select, or compare these feeds using its standard source selection algorithm. In FUSION mode, TSL2 is expected to be the primary timing source.
+
+### Remaining Engineering Work
+
+- **Bootstrap hardening:** Wider initial search window, CHU/WWV time code decoding for minute identification without NTP
+- **Frequency tracking:** For cheap oscillators with large ppm offset, adaptive matched filter center frequency
+- **Holdover model:** How long the system can coast on Kalman state when all HF signals fade (e.g., during a solar storm or D-layer absorption event)
+
+---
+
 ## Station Priority Policy (v6.5.0)
 
 Not all broadcasts are weighted equally in the fusion algorithm:
@@ -462,5 +579,5 @@ BPM is maintained for scientific interest (trans-Pacific ionospheric probing) bu
 
 ---
 
-**Version**: 6.5.0  
-**Last Updated**: February 4, 2026
+**Version**: 6.5.1  
+**Last Updated**: February 7, 2026

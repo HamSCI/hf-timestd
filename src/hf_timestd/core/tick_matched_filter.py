@@ -476,9 +476,16 @@ class TickMatchedFilter:
         Returns:
             TickDetectionResult or None if detection failed
         """
-        # AM demodulation
-        magnitude = np.abs(iq_samples)
-        audio = magnitude - np.mean(magnitude)  # AC coupling
+        # Demodulation: CHU uses DSB suppressed carrier, not AM.
+        # AM demod (|IQ|) doesn't recover the 1000Hz tone for DSB-SC signals.
+        # For CHU: use real part of IQ (baseband audio).
+        # For WWV/WWVH/BPM: use AM envelope (|IQ| - DC).
+        if self.station == StationType.CHU:
+            audio = np.real(iq_samples).copy()
+            audio -= np.mean(audio)
+        else:
+            magnitude = np.abs(iq_samples)
+            audio = magnitude - np.mean(magnitude)  # AC coupling
         
         # Bandpass filter around station-specific tick frequency
         # This is critical for WWV/WWVH discrimination on shared channels:

@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.5.1] - 2026-02-07
+
+### Dual Kalman Architecture & Chrony Feed Fixes
+
+**Major Fixes:** Resolved Chrony SHM reachability permanently stuck at 0, implemented independent L1/L2 Kalman filters for genuinely different TSL1/TSL2 chrony feeds, and eliminated silent HDF5 read failures that caused fusion data starvation.
+
+#### Dual Kalman Filters (TSL1/TSL2 Independence)
+
+- **Problem**: Both TSL1 (L1 geometric) and TSL2 (L2 physics-corrected) chrony feeds shared a single Kalman filter state. The L2 ionospheric correction was computed in `d_clock_raw_ms` but discarded when both feeds read `d_clock_fused_ms` from the same Kalman output.
+- **Fix**: Added independent L2 Kalman state (`kalman_state_l2`, `kalman_P_l2`, etc.). Refactored `_kalman_update()` to accept `use_l2` parameter. `fuse()` passes `use_l2=not force_l1_only` so each feed tracks its own estimate. Save/load calibration persists both states.
+- **Result**: TSL1 and TSL2 now carry genuinely different D_clock estimates. TSL2 shows lower jitter from ionospheric correction.
+
+#### Chrony SHM Reachability Fix (Discontinuity Filter Latch)
+
+- **Problem**: The discontinuity filter used a fixed 10ms threshold, but D_clock varies ±45ms cycle-to-cycle (normal HF ionospheric variation). Every update was rejected, `last_chrony_d_clock` never advanced (only updated on successful writes), so the delta grew larger each cycle — a permanent latch. The 5-minute reset allowed exactly 1 sample through before re-latching.
+- **Fix**: (1) Scaled threshold from fixed 10ms to `max(10.0, 3.0 * uncertainty_ms)` to adapt to measurement quality. (2) Always advance `last_chrony_d_clock` even on rejected updates so the reference tracks the signal.
+- **Result**: Chrony `Reach` climbs steadily, both TSL1 and TSL2 receiving samples.
+
+#### HDF5 File Lock Contention Fix
+
+- **Problem**: `HDF5_USE_FILE_LOCKING=FALSE` was set AFTER `h5py` was imported, rendering it ineffective on HDF5 ≥ 1.14 which reads the setting at library init time. This caused `errno=11` (Resource temporarily unavailable) when multiple services accessed HDF5 files concurrently.
+- **Fix**: (1) Moved `os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"` before the h5py import in `multi_broadcast_fusion.py`. (2) Added `locking=False` to all `h5py.File()` calls in `hdf5_reader.py` (3 calls), `hdf5_writer.py` (7 calls), and `timing_validation_service.py` (1 call).
+
+#### Silent Exception Cascade Fix
+
+- **Problem**: `_read_l1_metrology()` and `_read_l2_physics()` caught all exceptions at DEBUG level, invisible in production INFO-level logs. When HDF5 file lock errors occurred, the fusion service silently returned 0 measurements every cycle — permanently starved with no visible error.
+- **Fix**: Upgraded exception logging from DEBUG to WARNING. Added summary INFO log lines (`L1 metrology read: N entries from M channels`).
+
+#### Documentation
+
+- **METROLOGY.md**: Added comprehensive FUSION Mode Accuracy Analysis section with error budget, three operational scenarios, observed performance data, expected accuracy summary, and dual chrony feed architecture description.
+- **README.md**: Added "Why HF Time Standards?" rationale section, updated capabilities to v6.5.1, added v6.5.1 release notes.
+
+#### Files Modified
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - Dual Kalman, discontinuity fix, env var ordering, error logging
+- `src/hf_timestd/io/hdf5_reader.py` - `locking=False` on 3 h5py.File calls
+- `src/hf_timestd/io/hdf5_writer.py` - `locking=False` on 7 h5py.File calls
+- `src/hf_timestd/core/timing_validation_service.py` - `locking=False` on 1 h5py.File call
+- `METROLOGY.md` - FUSION mode accuracy analysis
+- `README.md` - Rationale, v6.5.1 notes
+- `CHANGELOG.md` - This entry
+
 ## [5.3.14] - 2026-02-06
 
 ### 24-Hour UTC Dashboard for Ionospheric Visualization

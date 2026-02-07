@@ -163,7 +163,7 @@ class DataProductReader:
         if not hdf5_path.exists():
             raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
         
-        with h5py.File(hdf5_path, 'r', libver='latest') as f:
+        with h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
             metadata = dict(f.attrs)
         
         return metadata
@@ -209,7 +209,7 @@ class DataProductReader:
                 continue
             
             try:
-                with h5py.File(hdf5_path, 'r', libver='latest') as f:
+                with h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
                     # Get number of measurements
                     if 'timestamp_utc' not in f:
                         logger.warning(f"No timestamp_utc dataset in {hdf5_path}")
@@ -324,7 +324,7 @@ class DataProductReader:
         if not hdf5_path.exists():
             raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
         
-        with h5py.File(hdf5_path, 'r', libver='latest') as f:
+        with h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
             # Get datasets
             quality_grades = f.get('quality_grade', None)
             quality_flags = f.get('quality_flag', None)

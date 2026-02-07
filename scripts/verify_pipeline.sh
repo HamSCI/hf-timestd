@@ -68,6 +68,7 @@ if [[ "$MODE" == "production" ]]; then
     CORE_SERVICES=(
         "timestd-core-recorder.service"
         "timestd-metrology.service"
+        "timestd-l2-calibration.service"
         "timestd-fusion.service"
         "timestd-physics.service"
         "timestd-web-api.service"

@@ -145,8 +145,8 @@ STATION_FREQUENCIES = {
 DEFAULT_UNCERTAINTY_3SIGMA_MS = 15.0  # ±15ms covers most ionospheric variation
 
 # Bootstrap window parameters
-# Initial window is wide to account for NTP uncertainty at startup
-# Restored to 50ms after radiod timestamp fix (2026-02-06)
+# Initial window must be wide enough for uncalibrated hardware offsets (~60-90ms)
+# to pass through so calibration can learn. Narrows automatically with observations.
 BOOTSTRAP_INITIAL_UNCERTAINTY_MS = 50.0  # ±50ms during initial bootstrap
 BOOTSTRAP_MIN_UNCERTAINTY_MS = 5.0       # Minimum window (propagation floor)
 

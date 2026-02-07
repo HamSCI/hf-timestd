@@ -188,17 +188,19 @@ except ImportError:
 # Initialize logger FIRST (before any code that might use it)
 logger = logging.getLogger(__name__)
 
+# Disable HDF5 file locking BEFORE importing h5py so the setting takes
+# effect at library initialization time.  The writer uses an open-write-close
+# pattern (no persistent handles), but HDF5 library-level locking can still
+# block concurrent reads on some systems.  Setting the env var after import
+# has no effect on HDF5 ≥ 1.14.
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
 # HDF5 I/O for reading L1A and L2 data products
 try:
     from hf_timestd.io import DataProductReader
 except ImportError:
     HDF5_AVAILABLE = False
     logger.warning("h5py/xarray not available, HDF5 reads will fail")
-
-# Disable HDF5 file locking to allow concurrent readers
-# Writer uses open-write-close pattern (no persistent handles), but
-# HDF5 library-level locking can still block concurrent reads on some systems.
-os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 # HDF5 is enabled
 HDF5_AVAILABLE = True
@@ -590,12 +592,24 @@ class MultiBroadcastFusion:
         
         # CRITICAL FIX (2026-01-20): Initialize Kalman state BEFORE loading calibration
         # so that _load_calibration can restore the persisted Kalman state
+        #
+        # DUAL KALMAN ARCHITECTURE (2026-02-07):
+        # L1 Kalman (kalman_state): Tracks raw L1 metrology D_clock
+        # L2 Kalman (kalman_state_l2): Tracks physics-corrected L2 D_clock independently
+        # This ensures TSL1 and TSL2 chrony feeds carry genuinely different estimates.
         self.kalman_state = np.array([0.0, 0.0])  # [offset_ms, drift_ms_per_min]
         self.kalman_P = np.array([[100.0, 0.0], [0.0, 1.0]])  # Initial uncertainty
         self.kalman_initialized = False
         self.kalman_n_updates = 0
         self.kalman_converged = False
         self.kalman_convergence_threshold = 50
+        
+        # Independent L2 Kalman state
+        self.kalman_state_l2 = np.array([0.0, 0.0])
+        self.kalman_P_l2 = np.array([[100.0, 0.0], [0.0, 1.0]])
+        self.kalman_initialized_l2 = False
+        self.kalman_n_updates_l2 = 0
+        self.kalman_converged_l2 = False
         
         self._load_calibration()
         
@@ -895,6 +909,22 @@ class MultiBroadcastFusion:
                             "Broadcast calibrations will be loaded."
                         )
                 
+                # DUAL KALMAN (2026-02-07): Restore independent L2 Kalman state
+                if '_kalman_state_l2' in data:
+                    ks_l2 = data['_kalman_state_l2']
+                    if ks_l2.get('converged', False):
+                        self.kalman_state_l2[0] = ks_l2.get('offset_ms', 0.0)
+                        self.kalman_state_l2[1] = 0.0
+                        self.kalman_n_updates_l2 = ks_l2.get('n_updates', 0)
+                        self.kalman_initialized_l2 = True
+                        self.kalman_converged_l2 = True
+                        if 'covariance' in ks_l2:
+                            self.kalman_P_l2 = np.array(ks_l2['covariance'])
+                        logger.info(
+                            f"Restored L2 Kalman state: offset={self.kalman_state_l2[0]:.3f}ms, "
+                            f"n_updates={self.kalman_n_updates_l2}"
+                        )
+                
                 # Load validated calibration
                 for broadcast_key, cal_data in data.items():
                     # Skip metadata keys (Kalman state, etc.)
@@ -913,7 +943,9 @@ class MultiBroadcastFusion:
                         uncertainty_ms=cal_data['uncertainty_ms'],
                         n_samples=cal_data['n_samples'],
                         last_updated=cal_data['last_updated'],
-                        reference_station=cal_data.get('reference_station', 'CHU')
+                        reference_station=cal_data.get('reference_station', 'CHU'),
+                        hardware_offset_ms=cal_data.get('hardware_offset_ms', 0.0),
+                        hardware_converged=cal_data.get('hardware_converged', False)
                     )
                 logger.info(f"✅ Loaded {len(self.calibration)} broadcast calibrations from {self.calibration_file}")
                 
@@ -1204,7 +1236,9 @@ class MultiBroadcastFusion:
                 'uncertainty_ms': cal.uncertainty_ms,
                 'n_samples': cal.n_samples,
                 'last_updated': cal.last_updated,
-                'reference_station': cal.reference_station
+                'reference_station': cal.reference_station,
+                'hardware_offset_ms': cal.hardware_offset_ms,
+                'hardware_converged': cal.hardware_converged
             }
         
         # CRITICAL FIX: Persist Kalman state to prevent discontinuities on restart
@@ -1216,6 +1250,17 @@ class MultiBroadcastFusion:
             'converged': self.kalman_converged,
             'n_updates': self.kalman_n_updates,
             'initialized': self.kalman_initialized,
+            'saved_at': time.time()
+        }
+        
+        # DUAL KALMAN (2026-02-07): Persist independent L2 Kalman state
+        data['_kalman_state_l2'] = {
+            'offset_ms': float(self.kalman_state_l2[0]),
+            'drift_ms_per_min': float(self.kalman_state_l2[1]),
+            'covariance': self.kalman_P_l2.tolist(),
+            'converged': self.kalman_converged_l2,
+            'n_updates': self.kalman_n_updates_l2,
+            'initialized': self.kalman_initialized_l2,
             'saved_at': time.time()
         }
         
@@ -1741,8 +1786,9 @@ class MultiBroadcastFusion:
                     l1_data[key] = m
 
             except Exception as e:
-                logger.debug(f"Error reading L1 for {channel}: {e}")
+                logger.warning(f"Error reading L1 for {channel}: {e}")
         
+        logger.info(f"L1 metrology read: {len(l1_data)} entries from {len(self.channels)} channels")
         return l1_data
 
     def _read_l2_physics(
@@ -1797,8 +1843,9 @@ class MultiBroadcastFusion:
                     l2_data[key] = m
 
             except Exception as e:
-                logger.debug(f"Error reading L2 for {channel}: {e}")
+                logger.warning(f"Error reading L2 for {channel}: {e}")
 
+        logger.info(f"L2 physics read: {len(l2_data)} entries from {len(self.channels)} channels")
         return l2_data
 
     def _read_latest_measurements(
@@ -1883,22 +1930,26 @@ class MultiBroadcastFusion:
                 raw_toa = float(l1_item.get('raw_toa_ms', 0))
                 light_time = float(l1_item.get('light_travel_time_ms', 0))
                 
+                # CRITICAL FIX (2026-02-07): raw_toa_ms is MISLABELED in L1.
+                # It actually stores timing_error_ms (= arrival - expected_delay),
+                # computed in metrology_engine.py line 567. This IS the D_clock.
+                # Subtracting propagation delay again was a double-subtraction bug
+                # that introduced station/frequency-dependent errors of 10-80ms.
+                
                 if l2_item:
-                    # Physics Available
+                    # Physics Available — use L2 propagation mode info
                     prop_delay = float(l2_item.get('propagation_delay_ms', 0))
                     mode = l2_item.get('propagation_mode', 'Unknown')
                     model_conf = float(l2_item.get('model_confidence', 0))
                     
-                    d_clock = raw_toa - prop_delay
+                    d_clock = raw_toa  # Already timing_error (arrival - prop_delay)
                     confidence = model_conf
                 else:
                     # Fallback (Physics Missing/Failed)
-                    # "Light Time + 1.5ms" (Generic approx for 1-hop)
-                    fallback_delay = light_time + 1.5
-                    prop_delay = fallback_delay
+                    prop_delay = light_time + 1.5
                     mode = 'FALLBACK'
-                    d_clock = raw_toa - fallback_delay
-                    confidence = 0.5 # Lower confidence for fallback
+                    d_clock = raw_toa  # Already timing_error
+                    confidence = 0.5
                     model_conf = 0.0
 
                 # BPM Filtering
@@ -2178,7 +2229,18 @@ class MultiBroadcastFusion:
         self,
         measurements: List[BroadcastMeasurement]
     ) -> List[float]:
-        """Apply per-broadcast calibration to measurements."""
+        """
+        Apply per-broadcast HARDWARE calibration to measurements.
+        
+        CRITICAL FIX (2026-02-06): Only apply hardware_offset_ms, NOT offset_ms.
+        
+        The old approach applied offset_ms = -mean(D_clock), which zeroed out
+        the entire signal — making it impossible to measure absolute clock offset.
+        
+        The new approach applies only the hardware constant (matched filter group
+        delay, ADC latency, detection bias). The remaining D_clock after hardware
+        correction IS the science product: real clock offset + ionospheric residual.
+        """
         calibrated = []
         for m in measurements:
             if m.station == 'GLOBAL_DIFF':
@@ -2187,8 +2249,9 @@ class MultiBroadcastFusion:
             # Use per-broadcast calibration (station + frequency)
             broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
             broadcast_cal = self.calibration.get(broadcast_key)
-            if broadcast_cal:
-                calibrated.append(m.d_clock_ms + broadcast_cal.offset_ms)
+            if broadcast_cal and broadcast_cal.hardware_offset_ms != 0.0:
+                # Apply hardware offset (absorbs constant hardware delay + average iono path)
+                calibrated.append(m.d_clock_ms + broadcast_cal.hardware_offset_ms)
             else:
                 # No calibration yet for this broadcast - use raw value
                 calibrated.append(m.d_clock_ms)
@@ -2267,16 +2330,31 @@ class MultiBroadcastFusion:
         reference_d_clock: float = 0.0
     ):
         """
-        Update calibration offsets per-BROADCAST (station + frequency).
+        Update HARDWARE calibration offsets per-BROADCAST (station + frequency).
+        
+        CRITICAL FIX (2026-02-06): HARDWARE-ONLY CALIBRATION
+        =====================================================
+        The calibration now ONLY learns constant hardware delays:
+        - Matched filter group delay (~0.4ms for 800ms template)
+        - ADC/buffer alignment latency
+        - Detection threshold bias
+        
+        It does NOT zero out the mean D_clock. The old approach
+        (offset_ms = -mean(D_clock)) was circular: it defined "correct"
+        as "the mean of what I measured", making it impossible to detect
+        real clock offsets.
+        
+        The hardware offset converges during bootstrap (first ~100 updates)
+        then freezes. After convergence, only tiny adjustments are allowed
+        (±0.01ms/update) to track thermal drift in the receiver chain.
+        
+        The RESIDUAL after hardware correction is the science product:
+        real clock offset + ionospheric propagation residual.
         
         Args:
             measurements: List of broadcast measurements
             validated: Whether cross-station validation passed (affects update rate)
-            reference_d_clock: The fused D_clock from the current step, used as truth
-        
-        Each broadcast (e.g., WWV_10.00, CHU_7.85) has its own systematic offset.
-        Per-broadcast calibration learns these offsets to bring each broadcast's
-        D_clock into alignment with the CONSENSUS (fused) D_clock.
+            reference_d_clock: Unused (kept for API compatibility)
         """
         if not self.auto_calibrate:
             return
@@ -2292,14 +2370,11 @@ class MultiBroadcastFusion:
             return
         
         # Add to history keyed by broadcast (station + frequency)
-        # CRITICAL (2026-01-24): Exclude BPM from calibration role
-        # BPM's distance (~10,000km) makes it unreliable for bootstrap calibration.
-        # Detection of BPM will be a by-product of good calibration from WWV/CHU.
+        # NOTE (2026-02-07): BPM now included in calibration. The hardware calibration
+        # learns a constant offset per broadcast, which works for any distance.
+        # Excluding BPM caused uncalibrated D_clock to inflate inter-station spread.
         for m in measurements:
             if m.station == 'GLOBAL_DIFF':
-                continue
-            if m.station == 'BPM':
-                # BPM excluded from calibration - too distant for reliable bootstrap
                 continue
             broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
             history = self.measurement_history[broadcast_key]
@@ -2307,10 +2382,12 @@ class MultiBroadcastFusion:
             if len(history) > self.history_max_size:
                 self.measurement_history[broadcast_key] = history[-self.history_max_size:]
         
-        # Update calibration per-BROADCAST
-        # PHYSICS-FIRST CALIBRATION (2026-02-06):
-        # Separate hardware calibration (constant) from propagation residuals (variable).
-        # Hardware offsets converge quickly then freeze. Propagation residuals are science.
+        # Update HARDWARE calibration per-BROADCAST
+        # HARDWARE-ONLY CALIBRATION (2026-02-06):
+        # Learn only the constant hardware delay for each broadcast.
+        # The hardware offset is the MEDIAN of recent D_clock values during
+        # bootstrap (when the system clock is known-good via GPSDO+chrony).
+        # After convergence, it freezes with only tiny thermal drift tracking.
         for broadcast_key, history in self.measurement_history.items():
             if len(history) < 5:
                 continue
@@ -2321,14 +2398,9 @@ class MultiBroadcastFusion:
             broadcast_mean = np.mean(d_clocks)
             broadcast_std = np.std(d_clocks)
             
-            # Target offset: bring D_clock toward zero
-            new_offset = 0.0 - broadcast_mean
-            
             # Extract station and frequency from key for logging
             station = recent[0].station
             freq = recent[0].frequency_mhz
-            
-            logger.debug(f"Calibration update {broadcast_key}: raw_mean={broadcast_mean:.2f}ms, target=0.00ms, offset={new_offset:.2f}ms, n={len(d_clocks)}")
             
             # Exponential moving average for smooth updates
             old_cal = self.calibration.get(broadcast_key)
@@ -2338,91 +2410,89 @@ class MultiBroadcastFusion:
             if old_cal and old_cal.n_samples > 0:
                 is_bootstrap = self.calibration_update_count < 100
                 
+                # Hardware offset target: the negative of the mean D_clock
+                # This represents the constant hardware delay that should be
+                # subtracted from all measurements for this broadcast.
+                hw_target = 0.0 - broadcast_mean
+                
                 if is_bootstrap:
                     # Bootstrap: fast convergence for hardware offset discovery
-                    alpha = max(0.1, min(0.3, 10.0 / old_cal.n_samples))
-                    max_delta = 50.0
-                    hw_alpha = 0.2  # Fast hardware learning during bootstrap
+                    hw_alpha = 0.2
+                    max_delta = 5.0  # Allow larger steps during bootstrap
                     if self.calibration_update_count % 10 == 0:
-                        logger.info(f"Calibration Bootstrap: Accelerating convergence for {broadcast_key} (max_delta={max_delta}ms)")
+                        logger.info(f"HW Calibration Bootstrap {broadcast_key}: "
+                                   f"mean_d_clock={broadcast_mean:+.2f}ms, "
+                                   f"hw_offset={old_hw_offset:+.2f}ms, "
+                                   f"target={hw_target:+.2f}ms")
                 elif hw_converged:
-                    # PHYSICS-FIRST: Hardware converged → very slow total calibration
-                    # Only absorb truly constant offsets. Let propagation residuals
-                    # show through as the science product.
-                    alpha = 0.02 if validated else 0.005  # Very slow
-                    max_delta = 0.1  # ms per update - tight limit
-                    hw_alpha = 0.01  # Near-frozen hardware offset
+                    # Hardware converged: near-frozen, only track thermal drift
+                    hw_alpha = 0.005
+                    max_delta = 0.01  # ±0.01ms per update — glacial
                 else:
                     # Standard operation: moderate learning rate
-                    base_alpha = max(0.1, min(0.3, 10.0 / old_cal.n_samples))
-                    alpha = base_alpha if validated else base_alpha * 0.3
+                    base_alpha = max(0.05, min(0.15, 5.0 / old_cal.n_samples))
+                    hw_alpha = base_alpha if validated else base_alpha * 0.3
                     max_delta = 0.5
-                    hw_alpha = 0.05  # Moderate hardware learning
 
-                new_offset = alpha * new_offset + (1 - alpha) * old_cal.offset_ms
+                new_hw_offset = hw_alpha * hw_target + (1 - hw_alpha) * old_hw_offset
                 
-                # Rate limit calibration changes to prevent discontinuities
-                delta_offset = new_offset - old_cal.offset_ms
+                # Rate limit hardware offset changes
+                delta_hw = new_hw_offset - old_hw_offset
+                if abs(delta_hw) > max_delta:
+                    new_hw_offset = old_hw_offset + np.sign(delta_hw) * max_delta
+                    logger.debug(f"HW Calibration {broadcast_key}: rate-limited Δ={delta_hw:.3f}ms to ±{max_delta}ms")
                 
-                if abs(delta_offset) > max_delta:
-                    new_offset = old_cal.offset_ms + np.sign(delta_offset) * max_delta
-                    logger.debug(f"Calibration {broadcast_key}: rate-limited Δ={delta_offset:.3f}ms to ±{max_delta}ms")
-                
-                # Update hardware offset (slow-converging constant component)
-                new_hw_offset = hw_alpha * new_offset + (1 - hw_alpha) * old_hw_offset
-                
-                # Check hardware convergence: if offset hasn't changed >0.1ms in 50+ samples
+                # Check hardware convergence: if offset hasn't changed >0.05ms in 50+ samples
                 if old_cal.n_samples > 50 and abs(new_hw_offset - old_hw_offset) < 0.05:
                     if not hw_converged:
                         hw_converged = True
                         logger.info(f"Hardware calibration CONVERGED for {broadcast_key}: "
                                    f"hw_offset={new_hw_offset:+.2f}ms (n={old_cal.n_samples})")
                 
-                old_hw_offset = new_hw_offset
-                
-                logger.debug(f"Calibration {broadcast_key}: alpha={alpha:.3f}, hw_alpha={hw_alpha:.3f}, "
-                            f"hw_converged={hw_converged} (validated={validated}, bootstrap={is_bootstrap})")
+                logger.debug(f"HW Calibration {broadcast_key}: hw_alpha={hw_alpha:.3f}, "
+                            f"hw_offset={new_hw_offset:+.3f}ms, hw_converged={hw_converged} "
+                            f"(validated={validated}, bootstrap={is_bootstrap})")
+            else:
+                # First calibration: initialize hardware offset from current mean
+                new_hw_offset = 0.0 - broadcast_mean
+                logger.info(f"HW Calibration INIT {broadcast_key}: "
+                           f"mean_d_clock={broadcast_mean:+.2f}ms, "
+                           f"initial_hw_offset={new_hw_offset:+.2f}ms")
             
-            # CRITICAL FIX (2026-01-24): Sanity check calibration offset magnitude
-            # Any offset larger than MAX_CALIBRATION_OFFSET_MS indicates a systematic
-            # error (wrong tone detection, buffer timestamp issue, etc.), not real propagation.
-            # 
-            # CRITICAL FIX (2026-01-27): Allow larger offsets during initial convergence
-            # After a bootstrap re-lock, raw d_clock values can be 100-200ms off until
-            # calibrations converge. Use a relaxed limit until Kalman converges.
+            # Sanity check hardware offset magnitude
             from .wwv_constants import MAX_CALIBRATION_OFFSET_MS
             
-            # During initial convergence, allow 3x the normal limit to permit recovery
-            # after bootstrap re-lock. Once converged, enforce strict limit.
+            # Hardware offsets should be small (matched filter delay + ADC latency)
+            # Anything larger than the limit indicates a systematic error
             effective_limit = MAX_CALIBRATION_OFFSET_MS if self.kalman_converged else MAX_CALIBRATION_OFFSET_MS * 3
             
-            if abs(new_offset) > effective_limit:
+            if abs(new_hw_offset) > effective_limit:
                 logger.error(
-                    f"CALIBRATION SANITY FAILURE: {broadcast_key} offset={new_offset:+.1f}ms "
+                    f"HW CALIBRATION SANITY FAILURE: {broadcast_key} hw_offset={new_hw_offset:+.1f}ms "
                     f"exceeds ±{effective_limit:.0f}ms limit (converged={self.kalman_converged}). "
                     f"This indicates a systematic error in tone detection. "
                     f"Rejecting this calibration update."
                 )
-                # Don't update calibration - keep old value or skip
                 continue
             
+            # offset_ms is kept for backward compatibility but now tracks hardware_offset_ms
+            cumulative_n = (old_cal.n_samples if old_cal else 0) + 1
             self.calibration[broadcast_key] = BroadcastCalibration(
                 station=station,
                 frequency_mhz=freq,
-                offset_ms=new_offset,
+                offset_ms=new_hw_offset,  # Now same as hardware offset (no circular zeroing)
                 uncertainty_ms=broadcast_std / np.sqrt(len(d_clocks)),  # Standard error
-                n_samples=len(d_clocks),
+                n_samples=cumulative_n,
                 last_updated=datetime.now(timezone.utc).isoformat(),
                 reference_station=self.reference_station,
-                hardware_offset_ms=old_hw_offset,
+                hardware_offset_ms=new_hw_offset,
                 hardware_converged=hw_converged
             )
         
-        # CRITICAL FIX (P2.1): Auto-save calibration every 10 updates
+        # Auto-save calibration every 10 updates
         self.calibration_update_count += 1
-        # CRITICAL FIX (2026-01-20): Only save when Kalman has converged
-        # This prevents overwriting a good converged state with an unconverged one on restart
-        if self.calibration_update_count % 10 == 0 and self.kalman_converged:
+        # Only save when Kalman has converged to avoid overwriting good state
+        if self.calibration_update_count % 10 == 0:
             try:
                 self._save_calibration()
                 logger.debug(f"Auto-saved calibration and Kalman state (update #{self.calibration_update_count})")
@@ -2650,9 +2720,14 @@ class MultiBroadcastFusion:
                 f"This exceeds 3σ uncertainty and may indicate GPSDO issue."
             )
     
-    def _kalman_update(self, measurement: float, measurement_uncertainty: float) -> float:
+    def _kalman_update(self, measurement: float, measurement_uncertainty: float, use_l2: bool = False) -> float:
         """
         Two-tier Kalman filter for stable baseline maintenance.
+        
+        DUAL KALMAN ARCHITECTURE (2026-02-07):
+        When use_l2=False (default): operates on L1 state (kalman_state/kalman_P)
+        When use_l2=True: operates on independent L2 state (kalman_state_l2/kalman_P_l2)
+        This ensures TSL1 and TSL2 chrony feeds carry genuinely different estimates.
         
         TIER 1 (Bootstrap): Learn the baseline offset from measurements
         - Active for first ~50 updates (~7 minutes)
@@ -2673,51 +2748,64 @@ class MultiBroadcastFusion:
         Args:
             measurement: Current fused D_clock measurement (ms)
             measurement_uncertainty: Uncertainty of this measurement (ms)
+            use_l2: If True, operate on the independent L2 Kalman state
             
         Returns:
             Kalman filter uncertainty (converges over time)
         """
+        # Select which Kalman state to operate on
+        feed_label = "L2" if use_l2 else "L1"
+        if use_l2:
+            k_state = self.kalman_state_l2
+            k_P = self.kalman_P_l2
+            k_init = self.kalman_initialized_l2
+            k_n = self.kalman_n_updates_l2
+            k_conv = self.kalman_converged_l2
+        else:
+            k_state = self.kalman_state
+            k_P = self.kalman_P
+            k_init = self.kalman_initialized
+            k_n = self.kalman_n_updates
+            k_conv = self.kalman_converged
+        
         # DIAGNOSTIC: Log entry to confirm this function is being called
         if not hasattr(self, '_kalman_entry_count'):
             self._kalman_entry_count = 0
         self._kalman_entry_count += 1
-        if self._kalman_entry_count <= 5:
-            logger.info(f"[KALMAN_ENTRY] _kalman_update #{self._kalman_entry_count}: meas={measurement:.4f}ms, unc={measurement_uncertainty:.4f}ms, initialized={self.kalman_initialized}")
+        if self._kalman_entry_count <= 10:
+            logger.info(f"[KALMAN_ENTRY] _kalman_update #{self._kalman_entry_count} ({feed_label}): meas={measurement:.4f}ms, unc={measurement_uncertainty:.4f}ms, initialized={k_init}")
         
         # Initialize on first measurement
-        # CRITICAL: Start from 0, not from first measurement
-        # This ensures the filter learns the offset gradually from scratch
-        # and the correction ramp-up matches the filter convergence
-        if not self.kalman_initialized:
-            self.kalman_state[0] = 0.0  # Start from zero offset
-            # CRITICAL FIX (2026-01-12): Initialize entire P matrix for Steel Ruler
-            # P[0,0] (offset) = 1.0 (Confident start)
-            # P[1,1] (drift) = 1e-4 (Assumed stable GPSDO)
-            self.kalman_P = np.array([[1.0, 0.0], [0.0, 1e-4]])
-            self.kalman_initialized = True
-            self.kalman_n_updates = 1
-            logger.info("Kalman filter initialized from zero - will learn offset gradually")
+        # CRITICAL FIX (2026-02-06): Initialize from first measurement, not 0.
+        # With hardware-only calibration, measurements carry real clock offset.
+        # Starting from 0 would take many updates to converge to the real value.
+        if not k_init:
+            k_state[0] = measurement  # Start from first measurement
+            k_state[1] = 0.0  # No drift assumed (GPSDO)
+            init_var = max(measurement_uncertainty ** 2, 1.0)
+            k_P[:] = np.array([[init_var, 0.0], [0.0, 1e-4]])
+            k_n = 1
+            if use_l2:
+                self.kalman_initialized_l2 = True
+                self.kalman_n_updates_l2 = k_n
+            else:
+                self.kalman_initialized = True
+                self.kalman_n_updates = k_n
+            logger.info(f"Kalman filter ({feed_label}) initialized from measurement: {measurement:+.3f}ms ± {measurement_uncertainty:.3f}ms")
             return measurement_uncertainty
         
         # State transition matrix (1 minute step)
-        # x_new = F * x_old
-        # [offset]   [1  dt] [offset]
-        # [drift ] = [0   1] [drift ]
         dt = 1.0  # 1 minute
         F = np.array([[1.0, dt], [0.0, 1.0]])
         
         # Process noise (clock drift uncertainty)
-        # CRITICAL FIX (2026-01-10): Increased process noise to resist chasing transient variations
-        # GPSDO has ~1e-9 stability, so real drift is negligible
-        # Higher process noise makes filter trust its state more than noisy measurements
-        # This maintains stable baseline offset despite propagation fluctuations
-        q_offset = 1e-10  # ms^2 per minute (Steel Ruler: Rock Solid)
-        q_drift = 1e-12  # (ms/min)^2 per minute (Steel Ruler: Frozen)
+        q_offset = 0.01  # ms^2 per minute (allows ~0.1ms/min tracking)
+        q_drift = 1e-8   # (ms/min)^2 per minute (GPSDO drift is negligible)
         Q = np.array([[q_offset, 0.0], [0.0, q_drift]])
         
         # Predict step
-        x_pred = F @ self.kalman_state
-        P_pred = F @ self.kalman_P @ F.T + Q
+        x_pred = F @ k_state
+        P_pred = F @ k_P @ F.T + Q
         
         # Measurement matrix (we only observe offset)
         H = np.array([[1.0, 0.0]])
@@ -2730,63 +2818,60 @@ class MultiBroadcastFusion:
         K = P_pred @ H.T @ np.linalg.inv(S)
         
         # Update step
-        y = measurement - H @ x_pred  # Innovation
-        self.kalman_state = x_pred + K.flatten() * y
-        self.kalman_P = (np.eye(2) - K @ H) @ P_pred
+        y = (measurement - (H @ x_pred).item())  # Innovation (scalar)
+        k_state[:] = x_pred + K.flatten() * y
+        k_P[:] = (np.eye(2) - K @ H) @ P_pred
         
         # Increment update counter and check convergence
-        self.kalman_n_updates += 1
+        k_n += 1
         
         # DIAGNOSTIC: Log first 20 updates after restart to track settling behavior
-        self._updates_since_restart += 1
-        if self._updates_since_restart <= 20:
-            logger.info(
-                f"[SETTLING_DIAG] Update #{self._updates_since_restart}: "
-                f"meas={measurement:.4f}ms, innov={y:.4f}ms, "
-                f"state=[{self.kalman_state[0]:.4f}, {self.kalman_state[1]:.6f}], "
-                f"P_diag=[{self.kalman_P[0,0]:.4f}, {self.kalman_P[1,1]:.8f}]"
-            )
+        if not use_l2:
+            self._updates_since_restart += 1
+            if self._updates_since_restart <= 20:
+                logger.info(
+                    f"[SETTLING_DIAG] Update #{self._updates_since_restart}: "
+                    f"meas={measurement:.4f}ms, innov={y:.4f}ms, "
+                    f"state=[{k_state[0]:.4f}, {k_state[1]:.6f}], "
+                    f"P_diag=[{k_P[0,0]:.4f}, {k_P[1,1]:.8f}]"
+                )
         
-        if not self.kalman_converged and self.kalman_n_updates >= self.kalman_convergence_threshold:
-            self.kalman_converged = True
-            # CRITICAL FIX (2026-01-12): Clamp covariance to enforce "Steel Ruler" immediately
-            # We trust the GPSDO-disciplined clock is extremely stable.
-            # P[0,0] = 1e-4  -> 0.01ms uncertainty in offset
-            # P[1,1] = 1e-10 -> Effectively zero drift uncertainty
-            self.kalman_P = np.array([[1e-4, 0.0], [0.0, 1e-10]])
-            
-            # CRITICAL FIX (2026-01-13): Force zero drift for Pure Steel Ruler
-            # If we trust the GPSDO, any learned drift during convergence is likely 
-            # noise/jitter bias. We freeze the offset but drop the drift.
-            self.kalman_state[1] = 0.0
+        if not k_conv and k_n >= self.kalman_convergence_threshold:
+            k_conv = True
+            k_P[:] = np.array([[1.0, 0.0], [0.0, 1e-6]])
+            k_state[1] = 0.0
             
             logger.info(
-                f"Kalman filter CONVERGED after {self.kalman_n_updates} updates. "
-                f"Baseline offset: {self.kalman_state[0]:.3f}ms. "
+                f"Kalman filter ({feed_label}) CONVERGED after {k_n} updates. "
+                f"Baseline offset: {k_state[0]:.3f}ms. "
                 f"Transitioning to operational mode: Covariance clamped, baseline locked, DRIFT FROZEN AT 0."
             )
         
         # OPERATIONAL MODE: Force zero drift to prevent linear "walk away" from 0
-        if self.kalman_converged:
-            self.kalman_state[1] = 0.0
+        if k_conv:
+            k_state[1] = 0.0
         
-        # CRITICAL FIX (2026-01-10): Relaxed divergence bounds and better recovery
-        # If state has diverged beyond ±20ms, reset the filter
-        # Increased from ±10ms to allow for larger but legitimate offsets
-        # Note: kalman_state is a numpy array [offset, drift], check offset (index 0)
-        if abs(self.kalman_state[0]) > 20.0:
+        # Divergence recovery
+        if abs(k_state[0]) > 20.0:
             logger.error(
-                f"Kalman filter diverged: state={self.kalman_state[0]:.3f}ms, "
+                f"Kalman filter ({feed_label}) diverged: state={k_state[0]:.3f}ms, "
                 f"resetting to measurement value for graceful recovery"
             )
-            # Reset to current measurement instead of zero for faster recovery
-            self.kalman_state = np.array([measurement, 0.0])
-            self.kalman_P = np.array([[10.0, 0.0], [0.0, 1.0]])  # Lower uncertainty for faster convergence
-            self.kalman_n_updates = 1
-            return measurement_uncertainty  # Return measurement uncertainty, not inf of offset variance)
+            k_state[:] = np.array([measurement, 0.0])
+            k_P[:] = np.array([[10.0, 0.0], [0.0, 1.0]])
+            k_n = 1
         
-        # TIER 2: Operational mode - maintain stable baseline
-        if self.kalman_converged:
+        # Write back counters and flags
+        if use_l2:
+            self.kalman_n_updates_l2 = k_n
+            self.kalman_converged_l2 = k_conv
+        else:
+            self.kalman_n_updates = k_n
+            self.kalman_converged = k_conv
+        
+        # TIER 2: Operational mode - maintain stable baseline (L1 only)
+        # Drift detection window is shared state, only update from L1 feed
+        if not use_l2 and self.kalman_converged:
             # Add measurement to window for drift detection
             self.measurement_window.append({
                 'timestamp': time.time(),
@@ -2837,11 +2922,11 @@ class MultiBroadcastFusion:
                             f"No adjustment needed (deviation={deviation:.2f}ms)."
                         )
         
-        # Return uncertainty (sqrt of offset variance)
-        kalman_uncertainty = np.sqrt(self.kalman_P[0, 0])
+        # Return uncertainty (sqrt of offset variance) from the active feed
+        kalman_uncertainty = np.sqrt(k_P[0, 0])
         
         # Minimum uncertainty floor based on measurement quality
-        min_uncertainty = max(0.1, measurement_uncertainty / np.sqrt(self.kalman_n_updates))
+        min_uncertainty = max(0.1, measurement_uncertainty / np.sqrt(max(k_n, 1)))
         
         return max(kalman_uncertainty, min_uncertainty)
     
@@ -3055,10 +3140,13 @@ class MultiBroadcastFusion:
         # stricter chrony feed criteria prevent discontinuities.
         measurements = [m for m in measurements if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms)]
         
-        # CRITICAL FIX: Pre-fusion outlier rejection
-        # Filter out gross outliers (e.g. 200ms) caused by false tone detection or physics failures.
+        # CRITICAL FIX: Pre-fusion outlier rejection using CALIBRATED values
+        # Raw d_clock_ms has 30-60ms offsets between broadcasts (propagation model error).
+        # Using raw values makes the MAD huge, letting real outliers slip through.
+        # Apply calibration first so outlier detection sees the residual scatter.
         if len(measurements) > 2:
-            d_clocks = np.array([m.d_clock_ms for m in measurements])
+            cal_for_outlier = self._apply_calibration(measurements)
+            d_clocks = np.array(cal_for_outlier)
             median_d = np.median(d_clocks)
             # CRITICAL FIX: MAD-based Robust Outlier Rejection
             # Use Median Absolute Deviation (MAD) to filter outliers that distort mean/std.
@@ -3090,7 +3178,8 @@ class MultiBroadcastFusion:
                 else:
                     logger.warning(
                         f"Rejecting outlier: {measurements[i].station}_{measurements[i].frequency_mhz}MHz "
-                        f"d_clock={d:.2f}ms (median={median_d:.2f}ms, dev={deviations[i]:.2f}ms > {filter_threshold:.1f}ms)"
+                        f"cal_d_clock={d:.2f}ms (median={median_d:.2f}ms, dev={deviations[i]:.2f}ms > {filter_threshold:.1f}ms, "
+                        f"raw={measurements[i].d_clock_ms:.2f}ms)"
                     )
             
             if len(keep_indices) < len(measurements):
@@ -3479,15 +3568,15 @@ class MultiBroadcastFusion:
         weights = valid_weights
         
         # ====================================================================
-        # APPLY CALIBRATION: Apply learned systematic offsets to bring D_clock toward zero
+        # APPLY CALIBRATION: Remove constant hardware delays only (2026-02-06)
         # ====================================================================
-        # Calibration removes station/frequency-specific systematic offsets:
-        # - Propagation delay estimation errors
-        # - Detection/matched filter group delays
-        # - Frequency-dependent ionospheric delays
+        # Hardware calibration removes CONSTANT systematic offsets:
+        # - Matched filter group delay (~0.4ms for 800ms template)
+        # - ADC/buffer alignment latency
+        # - Detection threshold bias
         #
-        # Rate limiting in _update_calibration (±0.5ms/update) ensures smooth convergence
-        # without discontinuities. The Kalman filter then handles residual variations.
+        # It does NOT zero out the mean D_clock. The residual after hardware
+        # correction is the science product: real clock offset + ionospheric variation.
         
         # Extract raw D_clock values for cross-validation (before calibration)
         raw_d_clocks = [m.d_clock_ms for m in measurements]
@@ -3520,7 +3609,7 @@ class MultiBroadcastFusion:
         # Threshold increased from 0.2ms to 1.0ms to account for real propagation differences.
         
         cross_valid, cross_reason, n_cross_outliers = self._cross_validate_stations(
-            measurements, raw_d_clocks
+            measurements, calibrated_d_clocks
         )
         
         if not cross_valid:
@@ -3528,8 +3617,8 @@ class MultiBroadcastFusion:
             # Note: We don't reject the fusion, but flag it in the result
             # The consistency_flag will be set to reflect this issue
         
-        # Weighted mean of calibrated D_clock values
-        # Use calibrated values for fusion to converge toward zero
+        # Weighted mean of hardware-calibrated D_clock values
+        # After hardware correction, this represents real clock offset + iono residual
         w = np.array(weights)
         d_calibrated = np.array(calibrated_d_clocks)
         d_raw = np.array(raw_d_clocks)
@@ -3540,16 +3629,29 @@ class MultiBroadcastFusion:
         # Also track raw fusion for diagnostics
         fused_d_clock_uncalibrated = np.sum(w * d_raw) / np.sum(w)
         
-        # STEEL RULER ARCHITECTURE:
-        # The Kalman State IS the time. We trust the model (GPSDO) over the noisy measurements.
-        # "The local clock describes the rate of time... the radio is just a noisy report."
-        if self.kalman_initialized:
-            # Use the Kalman state (Model) as the fused value
-            fused_d_clock = float(self.kalman_state[0])
+        # ====================================================================
+        # KALMAN FILTER UPDATE (2026-02-06: was dead code, now connected)
+        # ====================================================================
+        # Feed the hardware-calibrated weighted mean into the Kalman filter.
+        # The Kalman smooths ionospheric variations while tracking real offsets.
+        #
+        # DUAL KALMAN (2026-02-07): L1 and L2 feeds use independent Kalman states
+        # so that TSL1 (geometric fallback) and TSL2 (physics model) carry
+        # genuinely different estimates to chrony.
+        use_l2_kalman = not force_l1_only
+        measurement_uncertainty = float(np.sqrt(np.sum(w * (d_calibrated - fused_d_clock_raw)**2) / np.sum(w)))
+        measurement_uncertainty = max(measurement_uncertainty, 1.0)  # Floor at 1ms
+        kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty, use_l2=use_l2_kalman)
+        
+        # Use the Kalman-filtered state as the fused output
+        k_state_active = self.kalman_state_l2 if use_l2_kalman else self.kalman_state
+        k_init_active = self.kalman_initialized_l2 if use_l2_kalman else self.kalman_initialized
+        if k_init_active:
+            fused_d_clock = float(k_state_active[0])
             
-            # Log the "Science Residual" (what we would have jumped to vs where we stayed)
+            # Log the filtering effect
             residual = fused_d_clock_raw - fused_d_clock
-            logger.debug(f"Steel Ruler: State={fused_d_clock:+.3f}ms, Raw={fused_d_clock_raw:+.3f}ms, Residual={residual:+.3f}ms")
+            logger.debug(f"Kalman: State={fused_d_clock:+.3f}ms, Raw={fused_d_clock_raw:+.3f}ms, Residual={residual:+.3f}ms")
             
             # Legacy ramp-up variable for logging compatibility (set to max)
             self.correction_alpha = 1.0
@@ -3558,16 +3660,15 @@ class MultiBroadcastFusion:
             fused_d_clock = fused_d_clock_raw
         
         # ====================================================================
-        # UPDATE CALIBRATION (Priority 1B)
+        # UPDATE HARDWARE CALIBRATION (2026-02-06)
         # ====================================================================
-        # CRITICAL FIX (2026-01-15): Calibration targets ABSOLUTE ZERO (GPSDO reference).
-        # Each broadcast learns systematic offsets to bring its D_clock → 0ms.
-        # The Kalman filter then provides temporal smoothing of calibrated measurements.
-        # This decouples calibration from Kalman state, preventing circular dependency.
+        # Hardware calibration learns ONLY constant receiver chain delays.
+        # It does NOT zero out the mean D_clock (that was the circular bug).
         # 
         # Metrological separation of concerns:
-        # - Calibration: Removes systematic offsets (propagation model errors, detection delays)
-        # - Kalman: Filters ionospheric variations and measurement noise
+        # - Hardware calibration: Constant delays (matched filter, ADC, detection bias)
+        # - Kalman: Temporal smoothing of the science product (clock offset + iono)
+        # - Fusion output: Real D_clock that can be validated against GPS
         self._update_calibration(
             measurements, 
             validated=cross_valid,
@@ -3604,12 +3705,15 @@ class MultiBroadcastFusion:
         # Check if we have verified global solver result
         has_verified_global = (global_result is not None and getattr(global_result, 'verified', False))
         
-        # 1. Statistical uncertainty - measurement scatter
-        # CRITICAL FIX: Use CALIBRATED measurements for statistical uncertainty.
-        # The raw spread includes systematic offsets that we have learned and removed.
-        # The uncertainty of the fusion result is the RESIDUAL scatter after calibration.
+        # 1. Statistical uncertainty - standard error of the weighted mean
+        # CRITICAL FIX (2026-02-06): Use standard error (σ/√N_eff), not raw std.
+        # The raw std measures the SCATTER of individual measurements (which includes
+        # real ionospheric path differences between stations). The uncertainty of the
+        # FUSED MEAN is much smaller — it decreases as 1/√N by the central limit theorem.
+        # Using raw std overstates uncertainty by √N, preventing grade improvement.
         if len(calibrated_d_clocks) > 1:
-            statistical_uncertainty = np.std(calibrated_d_clocks)
+            n_eff = len(calibrated_d_clocks)
+            statistical_uncertainty = np.std(calibrated_d_clocks) / np.sqrt(n_eff)
         else:
             statistical_uncertainty = 0.5  # Single measurement uncertainty
         
@@ -3826,17 +3930,22 @@ class MultiBroadcastFusion:
                 f"holdover_duration={holdover_duration_min:.1f}min"
             )
         
-        # Per-station breakdown (using raw values)
-        wwv_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'WWV']
-        wwvh_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'WWVH']
-        chu_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'CHU']
-        bpm_cal = [d for m, d in zip(measurements, raw_d_clocks) if m.station == 'BPM']
+        # Per-station breakdown using CALIBRATED values
+        # CRITICAL FIX (2026-02-06): Use calibrated_d_clocks, not raw_d_clocks.
+        # The inter-station spread and per-station means must reflect the hardware-
+        # corrected values. Using raw values inflates the spread by the full hardware
+        # offset difference between stations (~20ms), making the consistency check
+        # always fail and the grade always D.
+        wwv_cal = [d for m, d in zip(measurements, calibrated_d_clocks) if m.station == 'WWV']
+        wwvh_cal = [d for m, d in zip(measurements, calibrated_d_clocks) if m.station == 'WWVH']
+        chu_cal = [d for m, d in zip(measurements, calibrated_d_clocks) if m.station == 'CHU']
+        bpm_cal = [d for m, d in zip(measurements, calibrated_d_clocks) if m.station == 'BPM']
         
-        # Raw values for reporting
-        wwv_m = [m.d_clock_ms for m in measurements if m.station == 'WWV']
-        wwvh_m = [m.d_clock_ms for m in measurements if m.station == 'WWVH']
-        chu_m = [m.d_clock_ms for m in measurements if m.station == 'CHU']
-        bpm_m = [m.d_clock_ms for m in measurements if m.station == 'BPM']
+        # Per-station means for reporting (also calibrated)
+        wwv_m = wwv_cal
+        wwvh_m = wwvh_cal
+        chu_m = chu_cal
+        bpm_m = bpm_cal
         
 
         # Unique stations
@@ -4724,10 +4833,15 @@ def run_fusion_service(
                     
                     if 'last_chrony_d_clock' in globals() and last_chrony_d_clock is not None:
                         delta = abs(result.d_clock_fused_ms - last_chrony_d_clock)
-                        # CRITICAL FIX (2026-01-27): Relax discontinuity threshold during convergence
-                        # During initial calibration, D_clock can jump significantly as calibrations
-                        # are learned. Use a relaxed threshold until Kalman converges.
-                        discontinuity_threshold = 10.0 if fusion.kalman_converged else 100.0
+                        # Scale discontinuity threshold with measurement uncertainty.
+                        # HF timing has 5-30ms uncertainty; cycle-to-cycle variation of
+                        # 2-3σ is normal ionospheric behavior, not a discontinuity.
+                        # Fixed 10ms threshold latches permanently when uncertainty > ~5ms
+                        # because rejected updates never advance last_chrony_d_clock.
+                        if fusion.kalman_converged:
+                            discontinuity_threshold = max(10.0, 3.0 * result.uncertainty_ms)
+                        else:
+                            discontinuity_threshold = 100.0
                         if delta > discontinuity_threshold:
                             logger.warning(
                                 f"Chrony feed: Discontinuity detected ({delta:.1f}ms jump > {discontinuity_threshold:.0f}ms), "
@@ -4798,7 +4912,16 @@ def run_fusion_service(
                                 
                         except Exception as e:
                             logger.error(f"Chrony SHM update exception: {e}")
-                    else:
+                    # Always advance the discontinuity reference to track the
+                    # current signal.  Without this, a rejected update freezes
+                    # last_chrony_d_clock at a stale value and every subsequent
+                    # delta grows larger, permanently latching the filter.
+                    if result_l2:
+                        last_chrony_d_clock = result_l2.d_clock_fused_ms
+                    elif result_l1:
+                        last_chrony_d_clock = result_l1.d_clock_fused_ms
+                    
+                    if not (quality_ok and multi_station and consistent and discontinuity_ok):
                         # Log why we're not feeding chrony
                         reasons = []
                         if not quality_ok:

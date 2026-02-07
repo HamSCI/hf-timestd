@@ -559,18 +559,23 @@
             const kalmanState = data.kalman_state || 'UNKNOWN';
             const consistencyFlag = data.consistency_flag || 'UNKNOWN';
             
-            // Define criteria for each grade
+            const uncertainty = data.uncertainty_ms || 99;
+            
+            // Define criteria matching backend grade logic:
+            //   A: 8+ broadcasts, uncertainty < 0.5ms
+            //   B: 5+ broadcasts, uncertainty < 1.0ms
+            //   C: 3+ broadcasts, uncertainty < 2.0ms
             const criteria = [
                 {
-                    name: '30+ detections',
-                    met: nBroadcasts >= 30,
-                    value: `${nBroadcasts} detections`,
+                    name: '8+ broadcasts',
+                    met: nBroadcasts >= 8,
+                    value: `${nBroadcasts} broadcasts`,
                     required: 'A'
                 },
                 {
-                    name: '10+ detections',
-                    met: nBroadcasts >= 10,
-                    value: `${nBroadcasts} detections`,
+                    name: '5+ broadcasts',
+                    met: nBroadcasts >= 5,
+                    value: `${nBroadcasts} broadcasts`,
                     required: 'B'
                 },
                 {
@@ -580,15 +585,21 @@
                     required: 'B'
                 },
                 {
-                    name: 'Inter-station < 1 ms',
-                    met: interStationSpread < 1.0,
-                    value: `${formatNumber(interStationSpread, 3)} ms`,
+                    name: 'Uncertainty < 0.5 ms',
+                    met: uncertainty < 0.5,
+                    value: `${formatNumber(uncertainty, 3)} ms`,
                     required: 'A'
                 },
                 {
-                    name: 'Calibration applied',
-                    met: calibrationApplied === true,
-                    value: calibrationApplied ? 'Yes' : 'No',
+                    name: 'Uncertainty < 1.0 ms',
+                    met: uncertainty < 1.0,
+                    value: `${formatNumber(uncertainty, 3)} ms`,
+                    required: 'B'
+                },
+                {
+                    name: 'Inter-station < 1 ms',
+                    met: interStationSpread < 1.0,
+                    value: `${formatNumber(interStationSpread, 3)} ms`,
                     required: 'A'
                 },
                 {
@@ -656,9 +667,9 @@
                 <div style="margin-top: 16px; padding: 12px; background: rgba(59, 130, 246, 0.1); border-left: 3px solid #3b82f6; border-radius: 4px;">
                     <div style="font-size: 12px; color: #94a3b8;">
                         <strong style="color: #3b82f6;">Grade Requirements:</strong>
-                        <strong>A</strong> requires all criteria met. 
-                        <strong>B</strong> requires 10+ detections and 2+ stations. 
-                        <strong>C</strong> is bootstrap phase. 
+                        <strong>A</strong> requires 8+ broadcasts, uncertainty &lt; 0.5 ms, inter-station &lt; 1 ms. 
+                        <strong>B</strong> requires 5+ broadcasts, 2+ stations, uncertainty &lt; 1.0 ms. 
+                        <strong>C</strong> requires 3+ broadcasts, uncertainty &lt; 2.0 ms. 
                         <strong>D/F</strong> indicates insufficient data or validation failures.
                     </div>
                 </div>

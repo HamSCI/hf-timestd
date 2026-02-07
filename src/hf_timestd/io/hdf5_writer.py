@@ -132,7 +132,7 @@ class DataProductWriter:
         
         # Step 2: Verify file is usable
         try:
-            with h5py.File(hdf5_path, 'r+', libver='latest') as f:
+            with h5py.File(hdf5_path, 'r+', libver='latest', locking=False) as f:
                 _ = list(f.keys())
             logger.info(f"File recovered successfully: {hdf5_path}")
             return
@@ -152,7 +152,7 @@ class DataProductWriter:
     def _create_file(self, hdf5_path: Path, recreated_from: Optional[str] = None) -> None:
         """Create and initialize a new HDF5 file with all datasets."""
         logger.info(f"Creating new HDF5 file: {hdf5_path}")
-        with h5py.File(hdf5_path, 'w', libver='latest') as f:
+        with h5py.File(hdf5_path, 'w', libver='latest', locking=False) as f:
             self._write_file_metadata_to_file(f)
             self._initialize_all_datasets_in_file(f)
             f.attrs['metadata'] = 'initialized'
@@ -194,7 +194,7 @@ class DataProductWriter:
         else:
             # Verify existing file is readable (may be corrupt from old SWMR crash)
             try:
-                with h5py.File(hdf5_path, 'r', libver='latest') as f:
+                with h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
                     _ = f.attrs.get('metadata')
             except OSError as e:
                 logger.warning(f"Existing file corrupt ({hdf5_path}): {e}")
@@ -207,7 +207,7 @@ class DataProductWriter:
         """Write file-level metadata attributes to current file."""
         if self._current_path is None or not self._current_path.exists():
             return
-        with h5py.File(self._current_path, 'r+', libver='latest') as f:
+        with h5py.File(self._current_path, 'r+', libver='latest', locking=False) as f:
             self._write_file_metadata_to_file(f)
     
     def _write_file_metadata_to_file(self, f: h5py.File) -> None:
@@ -237,7 +237,7 @@ class DataProductWriter:
         """Initialize all datasets from schema in current file."""
         if self._current_path is None or not self._current_path.exists():
             return
-        with h5py.File(self._current_path, 'r+', libver='latest') as f:
+        with h5py.File(self._current_path, 'r+', libver='latest', locking=False) as f:
             self._initialize_all_datasets_in_file(f)
     
     def _initialize_all_datasets_in_file(self, f: h5py.File) -> None:
@@ -395,7 +395,7 @@ class DataProductWriter:
         hdf5_path = self._ensure_file_exists(timestamp_utc)
         
         # Open, append, close — crash-safe write
-        with h5py.File(hdf5_path, 'r+', libver='latest') as hdf5_file:
+        with h5py.File(hdf5_path, 'r+', libver='latest', locking=False) as hdf5_file:
             self._append_measurement(hdf5_file, measurement)
         
         self._measurement_count += 1
@@ -500,7 +500,7 @@ class DataProductWriter:
             return False
         
         try:
-            with h5py.File(self._current_path, 'r', libver='latest') as f:
+            with h5py.File(self._current_path, 'r', libver='latest', locking=False) as f:
                 for field in self.schema['fields']:
                     field_name = field['name']
                     if field_name in f:

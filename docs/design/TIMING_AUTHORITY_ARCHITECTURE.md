@@ -20,6 +20,63 @@ The system supports two timing authority modes:
 
 Both modes record the same data; they differ only in how that data is interpreted.
 
+## What RTP Timestamps Mean in Each Mode
+
+The fundamental distinction between the two modes is **what the RTP timestamps tell you**:
+
+### RTP Mode: "These samples were measured at XXXX UTC"
+
+In RTP mode, the radiod machine has both GPS+PPS time governance **and** alignment of
+sampling. The GPSDO disciplines the ADC clock; GPS+PPS disciplines the system clock via
+chrony. radiod's assignment of a timestamp to the RTP stream accurately means:
+
+> "These samples were measured at XXXX UTC."
+
+The RTP-to-UTC mapping is authoritative. There is **no timing offset to discover** — we
+already have it. The metrology engine measures signals at **known** times and goes
+straight to physics (ionospheric delay, TEC, propagation mode).
+
+The only plumbing needed is a one-time **counter-space reconciliation** in the
+core-recorder: radiod's `RTP_TIMESNAP` is based on the ADC input sample counter, but
+packet RTP timestamps come from the filter output sample counter. These differ by the
+filter pipeline depth — a fixed constant for the session, not a timing offset to
+discover. The core-recorder measures this once at startup using `time.time()` as a
+cross-check and adjusts `RTP_TIMESNAP` to the packet counter space.
+
+### FUSION Mode: "These samples were taken at the same time XXXX"
+
+In FUSION mode (NTP-only, no GPS+PPS), all we can say about the RTP timestamps is:
+
+> "These samples were taken at the same time XXXX."
+
+The RTP timestamps are **coherent** (all channels share the same GPSDO-disciplined
+sample clock) but **not anchored to UTC**. The system must figure out the offset to UTC
+by applying everything it knows about the signals, given the assumption that they all
+align accurately with UTC at the time of emission.
+
+This is a fundamentally different problem: the metrology engine must **discover** UTC
+through signal analysis (BCD decode, FSK time codes, tone correlation, multi-station
+fusion) before it can do physics. The `FusionTimingState` manages a progressive lock:
+`UNLOCKED → PROVISIONAL → REFINED`, widening or narrowing search windows as confidence
+grows.
+
+### Separation of Concerns
+
+| Concern | RTP Mode | FUSION Mode |
+|---------|----------|-------------|
+| **Timing authority** | GPSDO + GPS+PPS via radiod | HF signal analysis |
+| **UTC known at startup?** | Yes | No — must be discovered |
+| **Core-recorder's job** | Counter-space reconciliation, raw IQ storage | Same |
+| **Metrology's job** | Measure physics at known times | Discover UTC, then measure physics |
+| **Search windows** | Narrow (±10ms, ionospheric uncertainty only) | Wide initially (±200ms), narrow after lock |
+| **FusionTimingState** | Not instantiated | Manages lock progression |
+
+The core-recorder's role is identical in both modes: packet handling, RTP metadata,
+buffer alignment, and raw IQ storage. It never does signal analysis. The distinction
+between modes lives entirely in the metrology layer.
+
+---
+
 ## Background
 
 ### The RTP Timestamp Foundation

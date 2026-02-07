@@ -85,6 +85,7 @@ class MetrologyEngine:
         self.precise_lat = precise_lat
         self.precise_lon = precise_lon
         self.is_rtp_authority = is_rtp_authority
+        self.is_chu_channel = 'CHU' in channel_name.upper()
         
         # Initialize sub-components
         self._init_components()
@@ -405,9 +406,8 @@ class MetrologyEngine:
         expected_sample = int(expected_delay_ms * self.sample_rate / 1000)
         
         # Measurement window: Use first 3 seconds of buffer
-        # CHU transmits at second 1 (not second 0), so we need a wider window.
-        # With 3 seconds, we capture the CHU tone at ~1000ms and have room for
-        # noise estimation before and after the tone.
+        # Tone at second 0 arrives within first ~1s (propagation delay).
+        # 3 seconds gives room for noise estimation.
         start_sample = 0
         end_sample = min(len(audio_signal), int(3.0 * self.sample_rate))
         
@@ -642,8 +642,15 @@ class MetrologyEngine:
                        f"({carrier_snr_db:.1f}dB < {MIN_CARRIER_SNR_DB}dB)")
             return []
         
-        # AM demodulation for signal analysis
-        audio_signal = envelope - np.mean(envelope)
+        # Demodulation: CHU uses DSB suppressed carrier, not AM.
+        # AM demod (|IQ|) doesn't recover the 1000Hz tone for DSB-SC signals.
+        # For CHU: use real part of IQ (baseband audio).
+        # For WWV/WWVH/BPM: use AM envelope (|IQ| - DC).
+        if self.is_chu_channel:
+            audio_signal = np.real(iq_samples).copy()
+            audio_signal -= np.mean(audio_signal)
+        else:
+            audio_signal = envelope - np.mean(envelope)
         
         # LEADING ZEROS CORRECTION
         # Due to radiod sample delivery latency, buffers often have leading zeros.
@@ -681,9 +688,8 @@ class MetrologyEngine:
             channel_upper = self.channel_name.upper()
             
             if 'CHU' in channel_upper:
-                # CHU transmits a 500ms 1000Hz tone at second 0 (minute marker)
-                # Regular seconds have 300ms tones. Expected arrival = propagation_delay only.
-                measurements_to_make = [('CHU', 1000, 0.5)]  # 500ms minute marker at second 0
+                # CHU: 500ms 1000Hz tone at second 0 (minute marker)
+                measurements_to_make = [('CHU', 1000, 0.5)]
             elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
                 measurements_to_make = [('WWV', 1000, 0.8)]
             else:

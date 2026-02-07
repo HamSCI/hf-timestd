@@ -151,12 +151,21 @@ class BinaryArchiveWriter:
         self.write_errors = 0
         
         # Time reference - GPS_TIME/RTP_TIMESNAP from radiod
-        # In RTP mode, radiod's RTP clock is GPSDO-disciplined.
-        # GPS_TIME/RTP_TIMESNAP gives us the direct mapping:
+        # In RTP mode, the GPSDO-disciplined RTP clock IS the timing authority.
+        # GPS_TIME/RTP_TIMESNAP gives us UTC directly:
         #   UTC = gps_time_unix + (rtp - rtp_timesnap) / sample_rate
+        # There is no timing offset to discover — we already have it.
+        #
+        # Counter-space mismatch fix: radiod's RTP_TIMESNAP is based on
+        # frontend->samples (ADC input counter) / decimation, but packet RTP
+        # timestamps come from filter.out.sample_index / decimation (filter
+        # output counter). These differ by the filter pipeline depth, which is
+        # constant for a given session. We reconcile the two counter spaces once
+        # at startup using the chrony-disciplined wall clock as a cross-check.
         self._gps_time_unix: Optional[float] = None  # GPS_TIME converted to Unix time
-        self._rtp_timesnap: Optional[int] = None     # RTP timestamp at GPS_TIME
+        self._rtp_timesnap: Optional[int] = None     # RTP timestamp at GPS_TIME (corrected)
         self._timing_locked: bool = False
+        self._pipeline_offset_samples: Optional[int] = None  # Counter-space correction (samples)
         
         # RTP clock drift detection (after offset is locked)
         # If RTP-derived time diverges from wall clock by more than this threshold,
@@ -211,11 +220,13 @@ class BinaryArchiveWriter:
             gps_unix_ns = gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)
             gps_unix_sec = gps_unix_ns / BILLION
             
-            # Store GPS_TIME/RTP_TIMESNAP directly - no offset calculation
-            # This is the authoritative mapping: at RTP=rtp_timesnap, UTC=gps_unix_sec
-            # IMPORTANT: Update continuously to track drift, not just once at startup
+            # Store GPS_TIME/RTP_TIMESNAP mapping.
+            # Apply counter-space correction if calibrated (input vs output counter).
             self._gps_time_unix = gps_unix_sec
-            self._rtp_timesnap = rtp_timesnap
+            if self._pipeline_offset_samples is not None:
+                self._rtp_timesnap = (rtp_timesnap + self._pipeline_offset_samples) & 0xFFFFFFFF
+            else:
+                self._rtp_timesnap = rtp_timesnap
             if not self._timing_locked:
                 self._timing_locked = True
                 logger.info(f"{self.config.channel_name}: RTP timing LOCKED - GPS_TIME={gps_unix_sec:.6f}, RTP_TIMESNAP={rtp_timesnap}")
@@ -270,6 +281,8 @@ class BinaryArchiveWriter:
         # Calculate RTP timestamp at the exact minute boundary using the mapping:
         #   UTC = GPS_TIME + (rtp - RTP_TIMESNAP) / sample_rate
         #   rtp = RTP_TIMESNAP + (UTC - GPS_TIME) * sample_rate
+        # Note: _rtp_timesnap is already in packet counter space
+        # (see counter-space reconciliation in write_samples).
         time_delta = minute_boundary - self._gps_time_unix
         rtp_delta = int(time_delta * self.config.sample_rate)
         minute_boundary_rtp = (self._rtp_timesnap + rtp_delta) & 0xFFFFFFFF
@@ -555,20 +568,13 @@ class BinaryArchiveWriter:
     
     def _rtp_to_unix_time(self, rtp_timestamp: int) -> float:
         """
-        Convert RTP timestamp to Unix time using GPS_TIME as the authoritative reference.
+        Convert RTP timestamp to Unix time. In RTP mode the GPSDO provides UTC
+        directly via GPS_TIME/RTP_TIMESNAP — no offset discovery needed.
         
-        GPS_TIME is the SINGLE time reference from the frontend, shared by ALL channels.
-        All channels from the same frontend report identical GPS_TIME values (within
-        the 1-second snapshot update interval).
-        
-        RTP_TIMESNAP is channel-specific (each channel has its own RTP counter offset).
-        We use it only to compute the delta from the snapshot, not as an absolute reference.
+        RTP_TIMESNAP has been corrected to the packet counter space (see
+        counter-space reconciliation in write_samples).
         
         Formula: UTC = GPS_TIME + (rtp - RTP_TIMESNAP) / sample_rate
-        
-        The key insight: GPS_TIME is the common anchor. Different channels may have
-        different RTP_TIMESNAP values, but they all share the same GPS_TIME. This
-        ensures relative timing between channels is correct.
         """
         if self._gps_time_unix is None or self._rtp_timesnap is None:
             # Not initialized yet - return 0 (will use system_time fallback)
@@ -689,6 +695,37 @@ class BinaryArchiveWriter:
                     logger.debug("Waiting for GPS_TIME from radiod...")
                     self._last_waiting_log = time.time()
                 return 0  # Cannot write until we have authoritative timing
+            
+            # Reconcile radiod's two counter spaces on first packet.
+            # RTP_TIMESNAP uses the ADC input counter; packet RTP timestamps use
+            # the filter output counter. The difference is the filter pipeline
+            # depth — a fixed constant for the session, not a timing offset to
+            # discover. We cross-check against time.time() (chrony-disciplined,
+            # NOT system_time which comes from the same RTP mapping).
+            if self._pipeline_offset_samples is None:
+                rtp_delta_raw = int((rtp_timestamp - self._rtp_timesnap) & 0xFFFFFFFF)
+                if rtp_delta_raw > 0x7FFFFFFF:
+                    rtp_delta_raw -= 0x100000000
+                raw_rtp_time = self._gps_time_unix + rtp_delta_raw / self.config.sample_rate
+                wall_clock = time.time()
+                offset_sec = raw_rtp_time - wall_clock
+                if abs(offset_sec) > 0.1 and abs(offset_sec) < 30.0:
+                    self._pipeline_offset_samples = int(offset_sec * self.config.sample_rate)
+                    self._rtp_timesnap = (self._rtp_timesnap + self._pipeline_offset_samples) & 0xFFFFFFFF
+                    logger.info(
+                        f"{self.config.channel_name}: Counter-space correction: "
+                        f"{offset_sec:.3f}s ({self._pipeline_offset_samples} samples)"
+                    )
+                elif abs(offset_sec) <= 0.1:
+                    self._pipeline_offset_samples = 0
+                    logger.info(
+                        f"{self.config.channel_name}: Counter-space offset negligible: {offset_sec:.3f}s"
+                    )
+                else:
+                    logger.warning(
+                        f"{self.config.channel_name}: Counter-space offset {offset_sec:.3f}s outside "
+                        f"expected range (0.1-30s), will retry next packet"
+                    )
             
             # Ensure complex64
             if samples.dtype != np.complex64:

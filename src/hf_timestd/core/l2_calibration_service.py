@@ -319,16 +319,25 @@ class L2CalibrationService:
                 logger.warning(f"{channel}: No propagation modes for {station_id}")
                 return None
             
-            # Identify most likely mode based on raw TOA
+            # CRITICAL FIX (2026-02-07): raw_toa_ms is MISLABELED in L1.
+            # It actually stores timing_error_ms (= arrival - expected_delay),
+            # computed in metrology_engine.py line 567. This IS already D_clock.
+            # To identify the propagation mode, we need the actual arrival time.
+            # Reconstruct: arrival ≈ timing_error + expected_delay.
+            # Since timing_error is small (~0ms), use the lowest-hop mode's delay
+            # as the initial estimate, then let identify_mode refine.
+            best_mode = min(modes, key=lambda m: m.n_hops)
+            estimated_arrival_ms = raw_toa_ms + best_mode.total_delay_ms
+            
             mode_result = self.prop_solver.identify_mode(
                 station=station_id,
-                measured_delay_ms=raw_toa_ms,
+                measured_delay_ms=estimated_arrival_ms,
                 frequency_mhz=frequency_mhz
             )
             
-            # Calculate D_clock
+            # D_clock is raw_toa_ms directly (already timing_error)
             propagation_delay_ms = mode_result.calculated_delay_ms
-            d_clock_ms = raw_toa_ms - propagation_delay_ms
+            d_clock_ms = raw_toa_ms
             
             # Calculate uncertainty budget (ISO GUM)
             uncertainty_budget = self._calculate_uncertainty(

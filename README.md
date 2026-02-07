@@ -8,7 +8,7 @@
 
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
-**Key Capabilities (V6.4):**
+**Key Capabilities (V6.5.1):**
 
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **Digital RF (HDF5)** format.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
@@ -18,8 +18,30 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
 - 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path TEC visualization.
-- ⏰ **Chrony integration** - SHM refclock for system clock discipline.
+- ⏰ **Dual Chrony feeds** - Independent L1 (geometric) and L2 (physics-corrected) SHM refclocks with separate Kalman filters.
 - 📊 **Metrological Rigor (v6.2)** - Cramér-Rao uncertainty, multipath detection, Doppler correction, adaptive thresholds.
+
+---
+
+## Why HF Time Standards?
+
+The system serves a dual purpose:
+
+1. **RTP Mode (with GPSDO):** GPS+PPS provides authoritative timing. The metrology pipeline tests and refines detection algorithms, calibration models, and ionospheric corrections against a known-good reference.
+
+2. **FUSION Mode (without GPSDO):** When GPS, GPSDO, or network access is unavailable, the system derives UTC solely from HF time standard receptions.
+
+FUSION mode addresses real operational scenarios: remote/off-grid installations, disaster situations where GPS and network infrastructure are disrupted, intentional GPS denial, backup timing when GNSS fails, and scientific stations where only HF propagation is available.
+
+**Expected FUSION mode accuracy** (multi-station, typical SDR with TCXO):
+
+| Configuration | Accuracy | Time to Lock |
+|--------------|----------|-------------|
+| Multi-station + NTP available | ±2-5 ms | 2-3 min |
+| Multi-station, no network | ±2-5 ms | 5-10 min |
+| Single station | ±5-15 ms | 2-3 min |
+
+The ionosphere is the dominant error in all cases. Oscillator quality affects time-to-lock and holdover, but not steady-state accuracy once locked. See **[METROLOGY.md](METROLOGY.md)** for the full error budget and analysis.
 
 ---
 
@@ -129,14 +151,7 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Status
 
-**Testing (V6.3)** - Active development and field testing in progress.
-
-### V5.0 Capabilities (December 2025)
-
-- **Digital RF Storage:** Replaced custom binary format with standard Digital RF.
-- **HDF5-Native Analytics:** All intermediate data (L1/L2/L3) uses HDF5 for performance and metadata richness.
-- **Physics-Informed Propagation:** Integration of **IONEX** maps allows for precise path delay estimation beyond simple geometric or IRI models.
-- **Global Differential Fusion:** Solves for ionospheric consistency across all 9 channels simultaneously.
+**Testing (V6.5.1)** - Active development and field testing in progress.
 
 ## Credits & Support
 
@@ -145,6 +160,14 @@ The system is composed of eight independent services that form a pipeline:
 **License:** MIT - See [LICENSE](LICENSE)
 
 ### Recent Updates
+
+**v6.5.1 (February 7, 2026) - Dual Kalman & Chrony Feed Fixes**
+
+- ✅ **Dual Kalman architecture** - Independent L1 and L2 Kalman filters so TSL1 and TSL2 carry genuinely different estimates to chrony
+- ✅ **Chrony SHM reachability fix** - Discontinuity filter no longer permanently latches; threshold scales with measurement uncertainty
+- ✅ **HDF5 file lock fix** - Moved `HDF5_USE_FILE_LOCKING=FALSE` before h5py import; added `locking=False` to all h5py.File() calls
+- ✅ **Silent exception fix** - Upgraded HDF5 read error logging from DEBUG to WARNING to prevent invisible data starvation
+- ✅ **FUSION mode documentation** - Comprehensive accuracy analysis and error budget in METROLOGY.md
 
 **v6.3.0 (January 25, 2026) - Timing Bootstrap System**
 
