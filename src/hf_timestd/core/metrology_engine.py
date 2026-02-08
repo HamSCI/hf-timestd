@@ -655,6 +655,7 @@ class MetrologyEngine:
         # LEADING ZEROS CORRECTION
         # Due to radiod sample delivery latency, buffers often have leading zeros.
         # Detect and measure the offset so we can correct arrival times.
+        # Observed offsets: 60-928ms depending on channel and RTP packet timing.
         leading_zeros_ms = 0.0
         max_env = np.max(envelope)
         if max_env > 0:
@@ -663,9 +664,12 @@ class MetrologyEngine:
             if len(nonzero_indices) > 0:
                 first_signal_sample = nonzero_indices[0]
                 leading_zeros_sec = first_signal_sample / self.sample_rate
-                if 0.005 < leading_zeros_sec < 0.100:  # 5-100ms is plausible
+                if 0.005 < leading_zeros_sec < 2.0:  # 5-2000ms covers radiod buffering
                     leading_zeros_ms = leading_zeros_sec * 1000
-                    logger.debug(f"{self.channel_name}: Leading zeros = {leading_zeros_ms:.1f}ms")
+                    if leading_zeros_ms > 50:
+                        logger.info(f"{self.channel_name}: Leading zeros = {leading_zeros_ms:.1f}ms")
+                    else:
+                        logger.debug(f"{self.channel_name}: Leading zeros = {leading_zeros_ms:.1f}ms")
         
         # Compute expected delays for all stations using physics model
         expected_delays_by_station = {}
@@ -733,6 +737,12 @@ class MetrologyEngine:
             detections = []
             for m in rtp_measurements:
                 station_type = StationType[m['station']] if m['station'] in StationType.__members__ else StationType.UNKNOWN
+                # Correct sample_position for leading zeros offset.
+                # The raw arrival_ms is relative to buffer sample 0, but the buffer
+                # has leading zeros (60-928ms) before real RTP data arrives.
+                # The physics validator expects arrival relative to minute boundary
+                # (when signal actually starts), so subtract the leading zeros.
+                corrected_arrival_ms = m['arrival_ms'] - leading_zeros_ms
                 det = ToneDetectionResult(
                     station=station_type,
                     frequency_hz=m['frequency_hz'],
@@ -745,7 +755,7 @@ class MetrologyEngine:
                     correlation_peak=m.get('correlation_peak', 0.0),
                     noise_floor=0.0,
                     tone_power_db=m['snr_db'],
-                    sample_position_original=int(m['arrival_ms'] * self.sample_rate / 1000),
+                    sample_position_original=int(corrected_arrival_ms * self.sample_rate / 1000),
                     original_sample_rate=self.sample_rate
                 )
                 detections.append(det)
