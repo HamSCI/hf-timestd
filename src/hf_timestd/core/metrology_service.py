@@ -403,14 +403,19 @@ class MetrologyService:
             logger.debug(f"No data for minute {minute_boundary}")
             return False
             
-        iq_samples, system_time, rtp_timestamp = data
+        iq_samples, system_time, rtp_timestamp, metadata = data
+        
+        # Build buffer timing solution from metadata snapshots
+        from hf_timestd.core.buffer_timing import resolve_buffer_timing
+        buffer_timing = resolve_buffer_timing(metadata, sample_rate=self.engine.sample_rate)
         
         # Run Engine
         try:
             results = self.engine.process_minute(
                 iq_samples=iq_samples,
                 system_time=system_time,
-                rtp_timestamp=rtp_timestamp
+                rtp_timestamp=rtp_timestamp,
+                buffer_timing=buffer_timing
             )
             
             # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
@@ -743,14 +748,10 @@ class MetrologyService:
                 logger.warning(f"No timing info in metadata for {target_minute}, skipping")
                 return None
 
-            # Pad/Clip
-            expected_len = self.engine.sample_rate * 60
-            if len(iq_samples) < expected_len:
-                padded = np.zeros(expected_len, dtype=np.complex64)
-                padded[:len(iq_samples)] = iq_samples
-                iq_samples = padded
+            # No padding — the buffer is whatever size it is.
+            # BufferTiming handles the sample-to-UTC mapping regardless of size.
                  
-            return iq_samples, system_time, rtp_timestamp
+            return iq_samples, system_time, rtp_timestamp, metadata
             
         except Exception as e:
             logger.error(f"Read error: {e}")

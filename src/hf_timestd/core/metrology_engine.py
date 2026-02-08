@@ -375,20 +375,18 @@ class MetrologyEngine:
         station_name: str
     ) -> Optional[Dict[str, Any]]:
         """
-        RTP MODE: Measure signal characteristics at a KNOWN time.
+        Measure a tone at a KNOWN position in the buffer.
         
-        In RTP mode, we KNOW when second 0 is (sample 0 = minute boundary).
-        We don't need to "search" for the tone - we know where it should be.
+        expected_delay_ms is the expected arrival time in milliseconds from
+        buffer sample 0. This can be anywhere in the buffer — the caller
+        (process_minute) uses BufferTiming to compute the correct position.
         
-        This method:
-        1. Looks at the expected arrival window (expected_delay ± uncertainty)
-        2. Measures power at the tone frequency (1000 Hz or 1200 Hz)
-        3. Extracts precise arrival time via correlation peak
-        4. Measures phase, Doppler, and other characteristics
+        Returns arrival_ms relative to buffer sample 0 (not minute boundary).
+        The caller converts to minute-boundary-relative using BufferTiming.
         
         Args:
             audio_signal: AM-demodulated audio (magnitude - mean)
-            expected_delay_ms: Expected propagation delay from physics model
+            expected_delay_ms: Expected arrival time from buffer start (ms)
             tone_freq_hz: Tone frequency (1000 or 1200 Hz)
             tone_duration_sec: Expected tone duration (0.8s WWV, 0.5s CHU)
             station_name: Station identifier for logging
@@ -399,17 +397,14 @@ class MetrologyEngine:
         from scipy import signal as scipy_signal
         from scipy.fft import rfft, rfftfreq
         
-        # Convert expected delay to sample index
-        # Buffer sample 0 = minute boundary (RTP timestamp)
-        # Tone arrives at: propagation_delay after minute boundary
-        # Leading zeros are irrelevant - they're just radiod buffering, not timing
         expected_sample = int(expected_delay_ms * self.sample_rate / 1000)
         
-        # Measurement window: Use first 3 seconds of buffer
-        # Tone at second 0 arrives within first ~1s (propagation delay).
-        # 3 seconds gives room for noise estimation.
-        start_sample = 0
-        end_sample = min(len(audio_signal), int(3.0 * self.sample_rate))
+        # Measurement window: ±1.5 seconds around expected position
+        # Gives room for correlation + noise estimation
+        window_sec = 1.5
+        window_samples = int(window_sec * self.sample_rate)
+        start_sample = max(0, expected_sample - window_samples)
+        end_sample = min(len(audio_signal), expected_sample + window_samples)
         
         if end_sample <= start_sample:
             return None
@@ -444,14 +439,13 @@ class MetrologyEngine:
         if len(correlation) == 0:
             return None
         
-        # CRITICAL: Search in wide window to handle buffer alignment uncertainty
-        # The minute marker should arrive at expected_delay_ms (propagation time)
-        # Allow ±500ms window to handle buffer alignment uncertainty
-        # The wider window is needed because raw buffers may not start exactly at minute boundary
-        # Per-second tick rejection is handled by the matched filter (500ms template vs 5ms tick)
-        SEARCH_WINDOW_MS = 500.0  # ±500ms around expected arrival
+        # Search within ±500ms of expected position (within the measurement region)
+        # With BufferTiming, expected_delay_ms is precise, but ionospheric variation
+        # can shift arrivals by tens of ms, so keep a reasonable window.
+        SEARCH_WINDOW_MS = 500.0
         
-        expected_corr_idx = int(expected_delay_ms * self.sample_rate / 1000)
+        # expected_corr_idx is relative to measurement_region (which starts at start_sample)
+        expected_corr_idx = expected_sample - start_sample
         window_samples = int(SEARCH_WINDOW_MS * self.sample_rate / 1000)
         
         search_start = max(0, expected_corr_idx - window_samples)
@@ -606,7 +600,8 @@ class MetrologyEngine:
         self,
         iq_samples: np.ndarray,
         system_time: float,
-        rtp_timestamp: int
+        rtp_timestamp: int,
+        buffer_timing=None
     ) -> List[L1MetrologyMeasurement]:
         """
         Process minute: Tone Detection + Channel Char -> L1 Measurements.
@@ -614,14 +609,24 @@ class MetrologyEngine:
         Two modes of operation:
         - RTP Mode: Timing is authoritative. Measure signals at KNOWN times.
         - Fusion Mode: Use tone detector to search for signals (bootstrap or post-lock).
+        
+        Args:
+            iq_samples: Raw IQ buffer (complex64)
+            system_time: UTC timestamp (from metadata, may be inaccurate)
+            rtp_timestamp: RTP counter at buffer start
+            buffer_timing: BufferTiming object mapping samples to UTC.
+                          If provided, overrides system_time for all timing.
         """
         minute_boundary = (int(system_time) // 60) * 60
         minute_number = int((system_time // 60) % 60)
         
         iq_samples, _ = self._validate_input(iq_samples)
         
-        # Buffer mid-time for timestamp calculations (used in both RTP and Fusion modes)
-        buffer_mid_time = system_time + len(iq_samples) / self.sample_rate / 2
+        # Buffer mid-time for timestamp calculations
+        if buffer_timing is not None:
+            buffer_mid_time = buffer_timing.sample_to_utc(len(iq_samples) / 2)
+        else:
+            buffer_mid_time = system_time + len(iq_samples) / self.sample_rate / 2
         
         # === Step 0: Carrier SNR Check ===
         # Don't attempt detection if carrier is too weak.
@@ -652,25 +657,6 @@ class MetrologyEngine:
         else:
             audio_signal = envelope - np.mean(envelope)
         
-        # LEADING ZEROS CORRECTION
-        # Due to radiod sample delivery latency, buffers often have leading zeros.
-        # Detect and measure the offset so we can correct arrival times.
-        # Observed offsets: 60-928ms depending on channel and RTP packet timing.
-        leading_zeros_ms = 0.0
-        max_env = np.max(envelope)
-        if max_env > 0:
-            threshold = max_env * 0.05  # 5% of max
-            nonzero_indices = np.where(envelope > threshold)[0]
-            if len(nonzero_indices) > 0:
-                first_signal_sample = nonzero_indices[0]
-                leading_zeros_sec = first_signal_sample / self.sample_rate
-                if 0.005 < leading_zeros_sec < 2.0:  # 5-2000ms covers radiod buffering
-                    leading_zeros_ms = leading_zeros_sec * 1000
-                    if leading_zeros_ms > 50:
-                        logger.info(f"{self.channel_name}: Leading zeros = {leading_zeros_ms:.1f}ms")
-                    else:
-                        logger.debug(f"{self.channel_name}: Leading zeros = {leading_zeros_ms:.1f}ms")
-        
         # Compute expected delays for all stations using physics model
         expected_delays_by_station = {}
         for station in ['WWV', 'WWVH', 'CHU', 'BPM']:
@@ -682,72 +668,139 @@ class MetrologyEngine:
         
         # === RTP MODE: Direct Measurement at Known Times ===
         # In RTP mode, timing is authoritative (GPSDO + GPS+PPS).
-        # Sample 0 = minute boundary (after leading zeros correction).
-        # No searching - just measure what's there.
+        # BufferTiming tells us the exact UTC time of every sample.
+        # We find which seconds are in the buffer and measure tones there.
         if self.is_rtp_authority:
             logger.debug(f"{self.channel_name}: RTP mode - measuring at known times")
             
-            # Define what to measure based on channel type
-            measurements_to_make = []
+            # Define station templates based on channel type
             channel_upper = self.channel_name.upper()
-            
             if 'CHU' in channel_upper:
-                # CHU: 500ms 1000Hz tone at second 0 (minute marker)
-                measurements_to_make = [('CHU', 1000, 0.5)]
+                station_templates = [('CHU', 1000, 0.5)]
             elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
-                measurements_to_make = [('WWV', 1000, 0.8)]
+                station_templates = [('WWV', 1000, 0.8)]
             else:
-                # Shared channels: measure both WWV (1000 Hz) and WWVH (1200 Hz)
-                measurements_to_make = [
+                station_templates = [
                     ('WWV', 1000, 0.8),
                     ('WWVH', 1200, 0.8),
-                    ('BPM', 1000, 0.1),  # BPM has shorter ticks
+                    ('BPM', 1000, 0.1),
                 ]
             
             rtp_measurements = []
-            for measurement in measurements_to_make:
-                # Unpack with optional tx_offset_ms (default 0 for WWV/WWVH at second 0)
-                if len(measurement) == 4:
-                    station_name, tone_freq, tone_duration, tx_offset_ms = measurement
-                else:
-                    station_name, tone_freq, tone_duration = measurement
-                    tx_offset_ms = 0
+            
+            if buffer_timing is not None and buffer_timing.source != 'metadata_fallback':
+                # We know the UTC time of every sample.  Find which UTC
+                # seconds fall within this buffer and measure tones there.
+                n_samples = len(audio_signal)
+                buf_start_utc = buffer_timing.sample0_utc
+                buf_end_utc = buffer_timing.sample_to_utc(n_samples)
                 
-                # Expected arrival = tx_offset + propagation_delay
-                prop_delay = expected_delays_by_station.get(station_name, 20.0)
-                expected_arrival_ms = tx_offset_ms + prop_delay
+                for station_name, tone_freq, tone_duration in station_templates:
+                    prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
+                    prop_delay_sec = prop_delay_ms / 1000.0
+                    
+                    # Margin: need tone_duration + 0.5s of signal after onset
+                    margin_sec = tone_duration + 0.5
+                    
+                    # Find UTC seconds whose tone arrival falls in the buffer.
+                    # A tick transmitted at UTC second T arrives at T + prop_delay.
+                    # We need samples from T + prop_delay through T + prop_delay + margin.
+                    first_utc_sec = int(buf_start_utc) - 1
+                    last_utc_sec = int(buf_end_utc) + 1
+                    
+                    measurable = []
+                    for utc_sec in range(first_utc_sec, last_utc_sec + 1):
+                        sec_in_minute = utc_sec % 60
+                        # Skip silent seconds
+                        if station_name == 'CHU' and sec_in_minute == 29:
+                            continue
+                        if station_name in ('WWV', 'WWVH') and sec_in_minute in (29, 59):
+                            continue
+                        
+                        tone_arrival_utc = utc_sec + prop_delay_sec
+                        tone_end_utc = tone_arrival_utc + margin_sec
+                        
+                        onset_sample = buffer_timing.utc_to_sample(tone_arrival_utc)
+                        end_sample = buffer_timing.utc_to_sample(tone_end_utc)
+                        
+                        if onset_sample >= 0 and end_sample < n_samples:
+                            measurable.append((utc_sec, onset_sample))
+                    
+                    if not measurable:
+                        logger.debug(f"{self.channel_name}: No {station_name} tones in buffer "
+                                    f"(buf UTC {buf_start_utc:.1f}–{buf_end_utc:.1f})")
+                        continue
+                    
+                    # Measure up to 5 ticks per station
+                    for utc_sec, onset_sample in measurable[:5]:
+                        expected_ms_from_buf_start = onset_sample * 1000 / self.sample_rate
+                        
+                        result = self._measure_tone_at_known_time(
+                            audio_signal=audio_signal,
+                            expected_delay_ms=expected_ms_from_buf_start,
+                            tone_freq_hz=tone_freq,
+                            tone_duration_sec=tone_duration,
+                            station_name=station_name
+                        )
+                        
+                        if result and result.get('detected'):
+                            # arrival_ms is from buffer start.  Convert to UTC.
+                            arrival_utc = buffer_timing.sample_to_utc(
+                                result['arrival_ms'] * self.sample_rate / 1000
+                            )
+                            # Expected arrival UTC = utc_sec + prop_delay
+                            expected_utc = utc_sec + prop_delay_sec
+                            result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
+                            result['arrival_utc'] = arrival_utc
+                            result['utc_second'] = utc_sec
+                            rtp_measurements.append(result)
+                            break  # One good measurement per station is enough
                 
-                result = self._measure_tone_at_known_time(
-                    audio_signal=audio_signal,
-                    expected_delay_ms=expected_arrival_ms,
-                    tone_freq_hz=tone_freq,
-                    tone_duration_sec=tone_duration,
-                    station_name=station_name
-                )
-                
-                if result and result.get('detected'):
-                    rtp_measurements.append(result)
+                if rtp_measurements:
+                    secs = [m['utc_second'] % 60 for m in rtp_measurements]
+                    logger.info(f"{self.channel_name}: RTP mode measured "
+                               f"{len(rtp_measurements)} signal(s) at seconds {secs}")
+            else:
+                # No BufferTiming — fall back to legacy method
+                for station_name, tone_freq, tone_duration in station_templates:
+                    prop_delay = expected_delays_by_station.get(station_name, 20.0)
+                    result = self._measure_tone_at_known_time(
+                        audio_signal=audio_signal,
+                        expected_delay_ms=prop_delay,
+                        tone_freq_hz=tone_freq,
+                        tone_duration_sec=tone_duration,
+                        station_name=station_name
+                    )
+                    if result and result.get('detected'):
+                        rtp_measurements.append(result)
             
             if not rtp_measurements:
                 logger.debug(f"{self.channel_name}: No signals detected at expected times")
                 return []
             
-            # Convert RTP measurements to ToneDetectionResult format for downstream processing
+            # Convert RTP measurements to ToneDetectionResult format for downstream
             from ..interfaces.data_models import ToneDetectionResult, StationType
             detections = []
             for m in rtp_measurements:
                 station_type = StationType[m['station']] if m['station'] in StationType.__members__ else StationType.UNKNOWN
-                # Correct sample_position for leading zeros offset.
-                # The raw arrival_ms is relative to buffer sample 0, but the buffer
-                # has leading zeros (60-928ms) before real RTP data arrives.
-                # The physics validator expects arrival relative to minute boundary
-                # (when signal actually starts), so subtract the leading zeros.
-                corrected_arrival_ms = m['arrival_ms'] - leading_zeros_ms
+                
+                if buffer_timing is not None and 'arrival_utc' in m:
+                    arrival_utc = m['arrival_utc']
+                    # sample_position_original for physics validator:
+                    # the fractional-second part of the arrival, in samples.
+                    # This represents the propagation delay from the UTC second.
+                    frac_sec = arrival_utc - int(arrival_utc)
+                    sample_pos = int(frac_sec * self.sample_rate)
+                    timestamp_utc_val = arrival_utc
+                else:
+                    sample_pos = int(m['arrival_ms'] * self.sample_rate / 1000)
+                    timestamp_utc_val = system_time + m['arrival_ms'] / 1000.0
+                
                 det = ToneDetectionResult(
                     station=station_type,
                     frequency_hz=m['frequency_hz'],
-                    duration_sec=0.8 if m['station'] != 'BPM' else 0.1,
-                    timestamp_utc=system_time + m['arrival_ms'] / 1000.0,
+                    duration_sec=tone_duration,
+                    timestamp_utc=timestamp_utc_val,
                     timing_error_ms=m['timing_error_ms'],
                     snr_db=m['snr_db'],
                     confidence=min(1.0, m['snr_db'] / 20.0),
@@ -755,7 +808,7 @@ class MetrologyEngine:
                     correlation_peak=m.get('correlation_peak', 0.0),
                     noise_floor=0.0,
                     tone_power_db=m['snr_db'],
-                    sample_position_original=int(corrected_arrival_ms * self.sample_rate / 1000),
+                    sample_position_original=sample_pos,
                     original_sample_rate=self.sample_rate
                 )
                 detections.append(det)
