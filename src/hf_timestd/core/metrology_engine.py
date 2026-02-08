@@ -399,9 +399,10 @@ class MetrologyEngine:
         
         expected_sample = int(expected_delay_ms * self.sample_rate / 1000)
         
-        # Measurement window: ±1.5 seconds around expected position
-        # Gives room for correlation + noise estimation
-        window_sec = 1.5
+        # Measurement window: ±0.4 seconds around expected position.
+        # Per-second ticks are 1s apart; ±0.4s ensures only the target tick
+        # is in the window (with room for ionospheric variation).
+        window_sec = 0.4
         window_samples = int(window_sec * self.sample_rate)
         start_sample = max(0, expected_sample - window_samples)
         end_sample = min(len(audio_signal), expected_sample + window_samples)
