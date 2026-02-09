@@ -561,12 +561,12 @@ class MetrologyEngine:
         # Timing error = measured_arrival - expected_propagation_delay
         timing_error_ms = raw_arrival_ms - expected_delay_ms
         
-        # PROPAGATION BOUNDS VALIDATION (2026-02-05, updated 2026-02-08)
+        # PROPAGATION BOUNDS VALIDATION (2026-02-05, updated 2026-02-09)
         # Validate that the measured arrival time is within tolerance of expected.
         # expected_delay_ms already includes tx_offset (e.g., 1000ms for CHU second 1).
-        # Allow ±200ms: ~85ms systematic bias from writer's wall-clock calibration
-        # plus ~30ms ionospheric variation plus margin.
-        ARRIVAL_TOLERANCE_MS = 200.0
+        # RTP timestamps are authoritative (no wall-clock calibration bias).
+        # Allow ±100ms for ionospheric variation (~30ms typical) plus margin.
+        ARRIVAL_TOLERANCE_MS = 100.0
         
         if abs(timing_error_ms) > ARRIVAL_TOLERANCE_MS:
             logger.info(f"{station_name} @ {tone_freq_hz}Hz: REJECTED - arrival={raw_arrival_ms:.2f}ms "

@@ -154,25 +154,12 @@ class BinaryArchiveWriter:
         # In RTP mode, the GPSDO-disciplined RTP clock IS the timing authority.
         # GPS_TIME/RTP_TIMESNAP gives us UTC directly:
         #   UTC = gps_time_unix + (rtp - rtp_timesnap) / sample_rate
-        # There is no timing offset to discover — we already have it.
-        #
-        # Counter-space mismatch fix: radiod's RTP_TIMESNAP is based on
-        # frontend->samples (ADC input counter) / decimation, but packet RTP
-        # timestamps come from filter.out.sample_index / decimation (filter
-        # output counter). These differ by the filter pipeline depth, which is
-        # constant for a given session. We reconcile the two counter spaces once
-        # at startup using the chrony-disciplined wall clock as a cross-check.
+        # Both RTP_TIMESNAP and packet RTP timestamps are in the same
+        # counter space (input_sample_index / decimation). No pipeline
+        # offset correction is needed — the timestamps are authoritative.
         self._gps_time_unix: Optional[float] = None  # GPS_TIME converted to Unix time
-        self._rtp_timesnap: Optional[int] = None     # RTP timestamp at GPS_TIME (corrected)
+        self._rtp_timesnap: Optional[int] = None     # RTP timestamp at GPS_TIME
         self._timing_locked: bool = False
-        self._pipeline_offset_samples: Optional[int] = None  # Counter-space correction (samples)
-        
-        # RTP clock drift detection (after offset is locked)
-        # If RTP-derived time diverges from wall clock by more than this threshold,
-        # we reset the offset calibration to recover from frozen/drifted RTP clocks
-        self._rtp_drift_threshold_sec: float = 300.0  # 5 minutes
-        self._rtp_drift_check_interval: int = 100  # Check every N chunks
-        self._chunks_since_drift_check: int = 0
         
         self.last_rtp_timestamp: Optional[int] = None
         self.cumulative_samples: int = 0  # Total samples processed
@@ -220,13 +207,9 @@ class BinaryArchiveWriter:
             gps_unix_ns = gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)
             gps_unix_sec = gps_unix_ns / BILLION
             
-            # Store GPS_TIME/RTP_TIMESNAP mapping.
-            # Apply counter-space correction if calibrated (input vs output counter).
+            # Store GPS_TIME/RTP_TIMESNAP mapping directly — no correction needed.
             self._gps_time_unix = gps_unix_sec
-            if self._pipeline_offset_samples is not None:
-                self._rtp_timesnap = (rtp_timesnap + self._pipeline_offset_samples) & 0xFFFFFFFF
-            else:
-                self._rtp_timesnap = rtp_timesnap
+            self._rtp_timesnap = rtp_timesnap
             if not self._timing_locked:
                 self._timing_locked = True
                 logger.info(f"{self.config.channel_name}: RTP timing LOCKED - GPS_TIME={gps_unix_sec:.6f}, RTP_TIMESNAP={rtp_timesnap}")
@@ -524,11 +507,10 @@ class BinaryArchiveWriter:
                 'written_at': datetime.now(timezone.utc).isoformat(),
                 'station': self.config.station_config,
                 # Counter-space correction: timing_snapshots[].rtp_timesnap is in
-                # radiod status counter space, but start_rtp_timestamp is in packet
-                # counter space. They differ by the filter pipeline depth (constant
-                # per session). Add this offset to rtp_timesnap before comparing
-                # with start_rtp_timestamp.
-                'pipeline_offset_samples': self._pipeline_offset_samples or 0,
+                # RTP_TIMESNAP and packet RTP timestamps are in the same counter
+                # space (both derived from input_sample_index / decimation).
+                # No pipeline offset correction is needed.
+                'pipeline_offset_samples': 0,
                 # Timing snapshots: GPS_TIME/RTP_TIMESNAP pairs from radiod (~2 Hz)
                 # Enables post-hoc RTP-to-UTC conversion and timing validation
                 'timing_snapshots': [s.to_dict() for s in buffer.timing_snapshots]
@@ -702,107 +684,85 @@ class BinaryArchiveWriter:
                     self._last_waiting_log = time.time()
                 return 0  # Cannot write until we have authoritative timing
             
-            # Reconcile radiod's two counter spaces on first packet.
-            # RTP_TIMESNAP uses the ADC input counter; packet RTP timestamps use
-            # the filter output counter. The difference is the filter pipeline
-            # depth — a fixed constant for the session, not a timing offset to
-            # discover. We cross-check against time.time() (chrony-disciplined,
-            # NOT system_time which comes from the same RTP mapping).
-            if self._pipeline_offset_samples is None:
-                rtp_delta_raw = int((rtp_timestamp - self._rtp_timesnap) & 0xFFFFFFFF)
-                if rtp_delta_raw > 0x7FFFFFFF:
-                    rtp_delta_raw -= 0x100000000
-                raw_rtp_time = self._gps_time_unix + rtp_delta_raw / self.config.sample_rate
-                wall_clock = time.time()
-                offset_sec = raw_rtp_time - wall_clock
-                if abs(offset_sec) > 0.1 and abs(offset_sec) < 30.0:
-                    self._pipeline_offset_samples = int(offset_sec * self.config.sample_rate)
-                    self._rtp_timesnap = (self._rtp_timesnap + self._pipeline_offset_samples) & 0xFFFFFFFF
-                    logger.info(
-                        f"{self.config.channel_name}: Counter-space correction: "
-                        f"{offset_sec:.3f}s ({self._pipeline_offset_samples} samples)"
-                    )
-                elif abs(offset_sec) <= 0.1:
-                    self._pipeline_offset_samples = 0
-                    logger.info(
-                        f"{self.config.channel_name}: Counter-space offset negligible: {offset_sec:.3f}s"
-                    )
-                else:
-                    logger.warning(
-                        f"{self.config.channel_name}: Counter-space offset {offset_sec:.3f}s outside "
-                        f"expected range (0.1-30s), will retry next packet"
-                    )
-            
-            # Ensure complex64
-            if samples.dtype != np.complex64:
-                samples = samples.astype(np.complex64)
-            
-            # Phase-preserving gap interpolation
-            # ka9q-python fills gaps with zeros which breaks phase continuity
-            # Replace zeros with phase-continuous interpolation from surrounding samples
-            # Always check for zeros, not just when gap_samples is explicitly set
-            samples = self._interpolate_gaps(samples)
-            
-            # Determine which minute this belongs to FROM RTP TIMESTAMP (GPSDO-disciplined)
-            # This avoids wall clock jitter from NTP/chrony adjustments
-            sample_unix_time = self._rtp_to_unix_time(rtp_timestamp)
-            sample_minute = (int(sample_unix_time) // 60) * 60
-            
-            # Start new buffer if needed
-            if self.current_buffer is None:
-                self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
-            
-            # Check if we've crossed into a new minute
-            if sample_minute > self.current_buffer.minute_boundary:
-                # Flush current minute
-                self._flush_minute(self.current_buffer)
-                # Start new minute
-                self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
-            
-            # Write to buffer at correct position based on RTP timestamp
-            # In RTP mode, samples are positioned by their RTP offset from minute boundary
-            buffer = self.current_buffer
-            
-            # Calculate position in buffer DIRECTLY from RTP timestamp
-            # This is authoritative - RTP is GPSDO-disciplined
-            # Handle 32-bit RTP wrap-around
-            rtp_delta = int((rtp_timestamp - buffer.start_rtp) & 0xFFFFFFFF)
-            if rtp_delta > 0x7FFFFFFF:
-                rtp_delta -= 0x100000000
-            sample_position = rtp_delta
-            
-            # Clamp to valid range
-            if sample_position < 0:
-                # Samples before minute boundary - skip them
-                skip_count = -sample_position
-                if skip_count >= len(samples):
-                    return 0  # All samples are before the minute
-                samples = samples[skip_count:]
-                sample_position = 0
-            
-            samples_to_write = min(len(samples), self.samples_per_minute - sample_position)
-            
-            if samples_to_write > 0 and sample_position < self.samples_per_minute:
-                buffer.samples[sample_position:sample_position + samples_to_write] = samples[:samples_to_write]
-                # Update write_pos to track highest written position
-                buffer.write_pos = max(buffer.write_pos, sample_position + samples_to_write)
-                self.samples_written += samples_to_write
-            
-            # Track gaps
-            if gap_samples > 0:
-                buffer.gap_count += 1
-                buffer.gap_samples += gap_samples
-                self.total_gaps += 1
-            
-            # Update time reference
-            self.last_rtp_timestamp = rtp_timestamp
-            
-            # Check if minute is complete
-            if buffer.is_complete:
-                self._flush_minute(buffer)
-                self.current_buffer = None
-            
-            return samples_to_write
+            return self._write_samples_inner(samples, rtp_timestamp, gap_samples)
+    
+    def _write_samples_inner(
+        self,
+        samples: np.ndarray,
+        rtp_timestamp: int,
+        gap_samples: int = 0
+    ) -> int:
+        """Write samples to the buffer (called with lock held, offset calibrated)."""
+        # Ensure complex64
+        if samples.dtype != np.complex64:
+            samples = samples.astype(np.complex64)
+        
+        # Phase-preserving gap interpolation
+        # ka9q-python fills gaps with zeros which breaks phase continuity
+        # Replace zeros with phase-continuous interpolation from surrounding samples
+        # Always check for zeros, not just when gap_samples is explicitly set
+        samples = self._interpolate_gaps(samples)
+        
+        # Determine which minute this belongs to FROM RTP TIMESTAMP (GPSDO-disciplined)
+        # This avoids wall clock jitter from NTP/chrony adjustments
+        sample_unix_time = self._rtp_to_unix_time(rtp_timestamp)
+        sample_minute = (int(sample_unix_time) // 60) * 60
+        
+        # Start new buffer if needed
+        if self.current_buffer is None:
+            self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
+        
+        # Check if we've crossed into a new minute
+        if sample_minute > self.current_buffer.minute_boundary:
+            # Flush current minute
+            self._flush_minute(self.current_buffer)
+            # Start new minute
+            self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
+        
+        # Write to buffer at correct position based on RTP timestamp
+        # In RTP mode, samples are positioned by their RTP offset from minute boundary
+        buffer = self.current_buffer
+        
+        # Calculate position in buffer DIRECTLY from RTP timestamp
+        # This is authoritative - RTP is GPSDO-disciplined
+        # Handle 32-bit RTP wrap-around
+        rtp_delta = int((rtp_timestamp - buffer.start_rtp) & 0xFFFFFFFF)
+        if rtp_delta > 0x7FFFFFFF:
+            rtp_delta -= 0x100000000
+        sample_position = rtp_delta
+        
+        # Clamp to valid range
+        if sample_position < 0:
+            # Samples before minute boundary - skip them
+            skip_count = -sample_position
+            if skip_count >= len(samples):
+                return 0  # All samples are before the minute
+            samples = samples[skip_count:]
+            sample_position = 0
+        
+        samples_to_write = min(len(samples), self.samples_per_minute - sample_position)
+        
+        if samples_to_write > 0 and sample_position < self.samples_per_minute:
+            buffer.samples[sample_position:sample_position + samples_to_write] = samples[:samples_to_write]
+            # Update write_pos to track highest written position
+            buffer.write_pos = max(buffer.write_pos, sample_position + samples_to_write)
+            self.samples_written += samples_to_write
+        
+        # Track gaps
+        if gap_samples > 0:
+            buffer.gap_count += 1
+            buffer.gap_samples += gap_samples
+            self.total_gaps += 1
+        
+        # Update time reference
+        self.last_rtp_timestamp = rtp_timestamp
+        
+        # Check if minute is complete
+        if buffer.is_complete:
+            self._flush_minute(buffer)
+            self.current_buffer = None
+        
+        return samples_to_write
     
     def flush(self):
         """Flush any pending data to disk."""

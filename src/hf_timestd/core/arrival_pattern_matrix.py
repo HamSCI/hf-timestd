@@ -145,10 +145,10 @@ STATION_FREQUENCIES = {
 DEFAULT_UNCERTAINTY_3SIGMA_MS = 15.0  # ±15ms covers most ionospheric variation
 
 # Bootstrap window parameters
-# Initial window must be wide enough for the writer's wall-clock calibration
-# bias (~85ms from time.time() vs true UTC) plus ionospheric variation (~30ms).
+# RTP timestamps are authoritative (no wall-clock calibration bias).
+# Window only needs to cover ionospheric variation (~30ms) plus margin.
 # Narrows automatically with observations.
-BOOTSTRAP_INITIAL_UNCERTAINTY_MS = 150.0  # ±150ms during initial bootstrap
+BOOTSTRAP_INITIAL_UNCERTAINTY_MS = 50.0  # ±50ms during initial bootstrap
 BOOTSTRAP_MIN_UNCERTAINTY_MS = 5.0       # Minimum window (propagation floor)
 
 # Window narrowing parameters
