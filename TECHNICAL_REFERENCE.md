@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 4, 2026 (v6.5.0)
+**Last Updated:** February 9, 2026 (v6.6.0)
 
 ---
 
@@ -46,14 +46,14 @@ The system is composed of six independent systemd services, each with a specific
 - Polls for new Digital RF files.
 - Performs tone detection (1000/1200 Hz), BCD decoding, and WWV/WWVH discrimination.
 - Calculates `D_clock` (System - UTC) using physics propagation models.
-- **Timing (v6.4):** Uses `start_system_time` from raw buffer metadata (NTP-derived, per-channel).
+- **Timing (v6.6):** Uses authoritative RTP timestamps from GPS+PPS via radiod (no pipeline offset correction needed).
 - **Output:** `/var/lib/timestd/phase2/{CHANNEL}/` (HDF5 L1/L2)
 
 ### 3. Fusion (`timestd-fusion`)
 
 **Responsibility:** Multi-Broadcast Synthesis (v6.1 Architecture)
 
-- Reads L2 HDF5 measurements from all 9 channels via **SWMR** (low latency).
+- Reads L2 HDF5 measurements from all 9 channels (crash-safe open-write-close pattern).
 - **Per-broadcast Kalman filtering** — tracks ionospheric path dynamics for each of 17 broadcasts.
 - **GNSS VTEC correction** — applies real-time ionospheric correction when local GNSS available.
 - **Weighted Least Squares fusion** — optimal linear combination without temporal smoothing.
@@ -253,13 +253,13 @@ For complete methodology, see `METROLOGY.md`.
 
 ## Critical Design Principles
 
-### 1. RTP Timestamp is Primary Reference
+### 1. RTP Timestamp is Authoritative Reference
 
-**Not wall clock.** System time is derived from RTP via `time_snap`.
+**Not wall clock.** System time is derived from RTP timestamps. radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index / decimation` (same counter space). No pipeline offset correction is needed.
 
 ```python
-# Precise time reconstruction:
-utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
+# Authoritative time reconstruction (~50 μs accuracy):
+utc = gps_time_unix + (rtp_ts - rtp_timesnap) / sample_rate
 ```
 
 ### 2. Sample Count Integrity
@@ -269,13 +269,13 @@ utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
 - Gaps filled with zeros.
 - Sample count never adjusted.
 
-### 3. HDF5 SWMR (Single Writer, Multiple Reader)
+### 3. HDF5 Crash-Safe Writes
 
-To achieve low latency while maintaining archival integrity, we use HDF5's SWMR feature.
+To achieve reliability while maintaining archival integrity, we use a crash-safe open-write-close pattern.
 
-- **Analytics** creates the file and switches to SWMR mode.
-- **Fusion** opens the file in SWMR read mode.
-- Analytics periodically calls `.flush()` and `.refresh()` to make new rows visible to Fusion within milliseconds.
+- **Analytics** opens the HDF5 file, appends measurements, and closes it per write cycle.
+- **Fusion** reads the file after Analytics closes it.
+- No persistent file handles means no dirty HDF5 consistency flags on unclean shutdown (SIGKILL, crash, etc.).
 
 ---
 
@@ -836,9 +836,17 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ---
 
-**Version**: 6.2.0  
-**Last Updated**: January 24, 2026  
+**Version**: 6.6.0  
+**Last Updated**: February 9, 2026  
 **Purpose**: Technical reference for HF Time Standard developers
+
+**v6.6.0 Release (February 9, 2026) - Authoritative RTP Timestamps:**
+
+- **Pipeline offset calibration removed** — radiod's RTP timestamps are authoritative (GPS+PPS, ~50 μs). No wall-clock calibration needed.
+- **Tightened tolerances** — Arrival tolerance: ±200ms → ±100ms. Bootstrap window: ±150ms → ±50ms.
+- **CPU affinity** — All timestd Python services pinned to CPUs 0-7; radiod on CPUs 8-15 for uncontested L3 cache.
+- **Crash-safe HDF5** — SWMR eliminated; open-write-close per measurement prevents dirty flags on crash.
+- **Dual-purpose framing** — RTP Mode (physics/ionospheric science) vs Fusion Mode (timing recovery).
 
 **v6.5.0 Release (February 4, 2026) - Physics-Based Validation + TEC Feedback:**
 

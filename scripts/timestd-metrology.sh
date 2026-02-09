@@ -109,7 +109,7 @@ start)
         freq_khz=$(echo "$freq_hz / 1000" | bc)
         channel_dir="SHARED_${freq_khz}"
         
-        nohup $PYTHON -m hf_timestd.core.metrology_service \
+        nohup taskset 0x00ff $PYTHON -m hf_timestd.core.metrology_service \
           --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \
@@ -134,7 +134,7 @@ start)
         freq_khz=$(echo "$freq_hz / 1000" | bc)
         channel_dir="WWV_${freq_khz}"
         
-        nohup $PYTHON -m hf_timestd.core.metrology_service \
+        nohup taskset 0x00ff $PYTHON -m hf_timestd.core.metrology_service \
           --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \
@@ -159,7 +159,7 @@ start)
         freq_khz=$(echo "$freq_hz / 1000" | bc)
         channel_dir="CHU_${freq_khz}"
         
-        nohup $PYTHON -m hf_timestd.core.metrology_service \
+        nohup taskset 0x00ff $PYTHON -m hf_timestd.core.metrology_service \
           --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
           --output-dir "$DATA_ROOT/phase2/$channel_dir" \
           --channel-name "$channel_dir" \

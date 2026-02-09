@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** February 4, 2026  
+**Last Updated:** February 9, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.5 (Physics-Based Validation + TEC Feedback)
+**Version:** V6.6 (Authoritative RTP Timestamps + Dual-Purpose Architecture)
 
 ---
 
@@ -33,7 +33,7 @@ This document explains **WHY** the hf-timestd system is designed the way it is. 
 
 ## Executive Summary
 
-**hf-timestd** is a precision HF monitoring system for receiving and analyzing time standard broadcasts from WWV, WWVH, CHU, and BPM. Using a GPSDO-disciplined SDR receiver, the system extracts **D_clock = T_system - T_UTC** measurements with sub-millisecond accuracy for ionospheric propagation studies and time transfer.
+**hf-timestd** is a dual-purpose HF monitoring system for receiving and analyzing time standard broadcasts from WWV, WWVH, CHU, and BPM. Using a GPSDO-disciplined SDR receiver with GPS+PPS authoritative timing (~50 μs via radiod RTP timestamps), the system operates in two modes: **RTP Mode** uses the known-accurate timestamps to study ionospheric propagation, while **Fusion Mode** attempts to recover UTC from the broadcasts alone. The system extracts **D_clock = T_system - T_UTC** measurements for both ionospheric science and time transfer research.
 
 ### Core Mission
 
@@ -45,16 +45,17 @@ The system serves a **dual purpose**:
 - Fuse multiple independent measurements for sub-millisecond accuracy
 
 **Purpose 2: Ionospheric Characterization (RTP Mode)**
-- Measure ionospheric effects as residuals using external authoritative timing (GPS+PPS)
+- Measure ionospheric effects as residuals using authoritative RTP timestamps (GPS+PPS, ~50 μs)
 - Compute TEC from multi-frequency observations
 - Detect traveling ionospheric disturbances (TIDs)
+- The timing accuracy enables precision ionospheric science — propagation delays are the measurement, not the error
 
 ### Key Capabilities
 
 1. **D_clock extraction** - System clock offset relative to UTC(NIST)
 2. **WWV/WWVH discrimination** on 4 shared frequencies (2.5, 5, 10, 15 MHz)
 3. **Propagation mode estimation** - Ionospheric hop identification (Physics-Informed)
-4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination (HDF5 SWMR)
+4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination (HDF5)
 5. **TEC estimation** - Total Electron Content from multi-frequency dispersion
 6. **TID detection** - Cross-path correlation for traveling ionospheric disturbances
 
@@ -113,7 +114,7 @@ See `docs/design/DUAL_PURPOSE_ARCHITECTURE.md` for detailed rationale.
 Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
   Raw Recording              Timing Analysis              Global Synthesis
   Immutable archive          Derived products             System discipline
-  Code changes <5/yr         Can restart freely           HDF5 SWMR consumer
+  Code changes <5/yr         Can restart freely           HDF5 consumer
 ```
 
 **Why?**
@@ -122,15 +123,16 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 - **Reprocessability:** Improve algorithms without re-recording
 - **Independent Testing:** Test analytics on archived data
 
-### 2. RTP Timestamp as Primary Reference
+### 2. RTP Timestamp as Authoritative Reference
 
-**Decision:** Wall clock time is **DERIVED** from RTP timestamps, not vice versa.
+**Decision:** Wall clock time is **DERIVED** from RTP timestamps, not vice versa. RTP timestamps are **authoritative** — radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index / decimation` (same counter space). No pipeline offset correction is needed.
 
 **Why?**
 
 - **Sample Count Integrity:** Gaps are unambiguous (RTP timestamp jumps)
-- **Precise Reconstruction:** `utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate`
+- **Authoritative Timing:** `utc = gps_time_unix + (rtp_ts - rtp_timesnap) / sample_rate` (~50 μs accuracy)
 - **No Time Stretching:** Never adjust sample count to fit wall clock
+- **No Calibration Needed:** GPS+PPS time follows samples through the decimation pipeline
 - **KA9Q Compatibility:** Follows Phil Karn's timing architecture
 
 ### 3. Binary Archive for Raw Data
@@ -146,14 +148,14 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 
 ### 4. HDF5-Native Pipeline (v5.0)
 
-**Decision:** Use HDF5 with Single Writer Multiple Reader (SWMR) for all inter-service data exchange (Phase 2 -> Phase 3).
+**Decision:** Use HDF5 with crash-safe open-write-close pattern for all inter-service data exchange (Phase 2 -> Phase 3).
 
 **Why?**
 
 - **Performance:** Binary format is 10x-100x faster than CSV parsing
-- **Low Latency:** SWMR allows Fusion to read data milliseconds after Analytics writes it
+- **Crash safety:** Open-write-close per measurement means no dirty HDF5 flags on unclean shutdown
 - **Structure:** Hierarchical data storage matches the signal complexity
-- **Low Latency:** SWMR allows Fusion to read data milliseconds after Analytics writes it
+- **Low Latency:** Fusion polls for new data within seconds of Analytics writing it
 
 ### 5. "Steel Ruler" Metrology (v5.3)
 
@@ -218,7 +220,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 │    3. WWV/WWVH Discrimination (8 voting methods)               │
 │    4. D_clock Computation (propagation mode estimation)        │
 │                                                                 │
-│  Outputs (HDF5 SWMR):                                           │
+│  Outputs (HDF5):                                                 │
 │  • L1A: Tone Detections (feature extraction)                   │
 │  • L2:  Timing Measurements (fully solved D_clock)             │
 │  • Metadata: HDF5 attributes (processing version, etc.)        │
@@ -227,9 +229,9 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 │  ✅ All derived timing products                                 │
 │  ✅ Can restart/update independently                            │
 │  ✅ Processes backlog automatically                             │
-│  ✅ SWMR Writer for Fusion consumption                          │
+│  ✅ Crash-safe HDF5 writer for Fusion consumption               │
 └─────────────────────────────────────────────────────────────────┘
-                              ↓ (HDF5 SWMR)
+                              ↓ (HDF5)
 ┌─────────────────────────────────────────────────────────────────┐
 │                    PHASE 3: FUSION SERVICE (v6.1)               │
 │           (Hierarchical Estimation with GNSS TEC Correction)    │
@@ -295,7 +297,7 @@ The recording layer uses **ka9q-python** directly for all RTP reception and chan
 
 **Advantages:**
 
-- **SWMR:** Allows Fusion to read data *while* Analytics is still writing it, enabling near-real-time updates.
+- **Crash-safe writes:** Open-write-close per measurement eliminates dirty HDF5 flags on crash.
 - **Precision:** Binary float64 storage eliminates ASCII truncation errors.
 - **Metadata:** Attributes store schema versions, processing flags, and processing time inside the file.
 - **Compression:** HDF5 internal compression reduces disk usage vs CSV.
@@ -331,10 +333,10 @@ raw_buffer/{CHANNEL}/{YYYYMMDD}/{minute}.bin
 raw_buffer/{CHANNEL}/{YYYYMMDD}/{minute}.json
      ↓
 Phase 2: Analytics Service (polls for new files)
-     ↓ (HDF5 Writer in SWMR Mode)
+     ↓ (HDF5 crash-safe writes)
 ├─→ phase2/{CHANNEL}/tone_detections/{date}.h5 (L1A)
 └─→ phase2/{CHANNEL}/timing_measurements/{date}.h5 (L2)
-     ↓ (SWMR Read)
+     ↓ (HDF5 read)
 Phase 3: Fusion Service
      ↓ (Kalman Filter + Physics Model)
 ├─→ Chrony SHM (system clock discipline)
@@ -456,6 +458,10 @@ We use a **Weighted Voting** system combining:
 | `timestd-web-api.service` | Web monitoring UI (FastAPI) |
 | `timestd-radiod-monitor.service` | Hardware health monitoring |
 
+### CPU Affinity
+
+All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd units, `taskset 0x00ff` in metrology shell script). radiod runs on CPUs 8-15 (`ff00`). This ensures radiod has uncontested L3 cache access for real-time USB/FFT processing.
+
 ### Resilience
 
 - **Watchdogs:** All Python services integrate `systemd-python` to send heartbeat `WATCHDOG=1` notifications. If a service hangs, systemd restarts it automatically.
@@ -486,7 +492,7 @@ We use a **Weighted Voting** system combining:
 
 ---
 
-**Last Updated:** February 4, 2026
+**Last Updated:** February 9, 2026
 
 ## Physics-Based Validation (v6.5)
 

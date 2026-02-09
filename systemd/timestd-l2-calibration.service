@@ -24,6 +24,10 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_serv
     --poll-interval 60.0 \
     --log-level INFO
 
+# Resource limits - yield to radiod which handles real-time USB/FFT
+Nice=5
+CPUAffinity=0-7
+
 Restart=always
 RestartSec=30
 

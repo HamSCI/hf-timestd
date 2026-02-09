@@ -1,23 +1,29 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 6.4.0 (NTP-Based Time Confirmation)  
-**Last Updated:** January 29, 2026  
+**System Version:** 6.6.0 (Authoritative RTP Timestamps + Dual-Purpose Architecture)  
+**Last Updated:** February 9, 2026  
 **Author:** Michael James Hauan (AC0G)
 
 ---
 
 ## 1. Executive Summary
 
-**hf-timestd** is an HF time transfer system that achieves **±0.5 ms (1σ) accuracy to UTC(NIST)** through multi-broadcast fusion of WWV/WWVH/CHU/BPM time signals. The system demonstrates metrological rigor through:
+**hf-timestd** is a dual-purpose HF time transfer and ionospheric measurement system. It receives WWV/WWVH/CHU/BPM time signal broadcasts via a GPSDO-disciplined SDR and operates in two complementary modes:
 
+**RTP Mode (Physics Pathway):** With GPS+PPS providing authoritative timing (~50 μs accuracy via radiod's RTP timestamps), the system uses the known transmission times and measured arrival times to **study the ionosphere**. The propagation delay residuals reveal Total Electron Content (TEC), traveling ionospheric disturbances (TIDs), and space weather effects.
+
+**Fusion Mode (Metrology Pathway):** The system attempts to **recover UTC from the HF broadcasts alone**, using multi-broadcast fusion to solve for the local clock offset. This pathway demonstrates how closely tone analysis can reconstruct the timing authority that RTP mode provides directly. Current accuracy: ±5-100 ms depending on ionospheric conditions (vs ±0.05 ms from RTP).
+
+The system demonstrates metrological rigor through:
+
+- **Authoritative RTP timestamps** from GPS+PPS-disciplined radiod (no pipeline offset correction needed)
 - **ISO GUM-compliant uncertainty budgets** with full traceability
-- **GPSDO-disciplined sampling** (RTP timestamps as primary reference)
 - **Physics-informed propagation modeling** (IONEX VTEC + IRI-2020)
 - **Kalman-filtered fusion** with inverse variance weighting
 - **Chrony SHM integration** for system clock discipline
 
-**The Core Value Proposition:** Unlike typical implementations that require expensive atomic oscillators for holdover, this system leverages the short-term frequency stability of a standard GPSDO and fuses it with multi-station HF broadcasts to synthesize a UTC-traceable time standard. In essence, it uses software complexity and ionospheric physics to upgrade a GPSDO into a precision time standard—without the cost of a Cesium beam.
+**The Core Value Proposition:** The system serves dual purposes. In RTP mode, the ~50 μs timing accuracy from GPS+PPS enables precision ionospheric science — the HF propagation delays become the measurement, not the error. In fusion mode, the system demonstrates HF time transfer capability, using software complexity and ionospheric physics to recover UTC from broadcast signals alone.
 
 This system treats timing as a **measurement problem** with proper uncertainty quantification, systematic error correction, and validation against physical constraints.
 
@@ -159,21 +165,24 @@ Phase 3: Fusion (Multi-Broadcast Synthesis)
 - **Phase 1 never drops data** during Phase 2 updates
 - **Reprocessability**: Improve algorithms without re-recording
 - **Independent validation**: Test analytics on archived data
-- **HDF5 SWMR**: Fusion reads data milliseconds after Analytics writes it
+- **HDF5 crash-safe writes**: Open-write-close per measurement (no dirty flags on crash)
 
-### 4.3 RTP Timestamp as Primary Reference
+### 4.3 RTP Timestamp as Authoritative Reference
 
 **Critical Design Decision:** System time is **derived from RTP timestamps**, not vice versa.
 
 ```python
-utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
+utc = gps_time_unix + (rtp_ts - rtp_timesnap) / sample_rate
 ```
+
+radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index / decimation` — they are in the same counter space. No pipeline offset correction is needed. The timestamps are authoritative, providing ~50 μs accuracy to UTC via GPS+PPS.
 
 **Why this matters:**
 
 - **Sample count integrity**: Gaps are unambiguous (RTP timestamp jumps)
 - **No time stretching**: Never adjust sample count to fit wall clock
-- **Traceable to GPSDO**: RTP timestamps from ka9q-radio are GPSDO-disciplined
+- **Authoritative timing**: RTP timestamps from ka9q-radio carry GPS+PPS time through the decimation pipeline
+- **No calibration needed**: GPS_TIME/RTP_TIMESNAP mapping is direct — no wall-clock calibration bias
 - **Reprocessable**: Raw data can be reanalyzed with improved algorithms
 
 ### 4.4 Data Levels
@@ -210,10 +219,10 @@ utc = time_snap_utc + (rtp_ts - time_snap_rtp) / sample_rate
 
 **Primary Timing Tones:**
 
-- **WWV**: 1000 Hz (800 ms duration at minute mark)
-- **WWVH**: 1200 Hz (800 ms duration at minute mark)
-- **CHU**: 1000 Hz (500 ms duration at minute mark, 10 ms ticks per second)
-- **BPM**: 1000 Hz (10 ms UTC, 100 ms UT1)
+- **WWV**: 1000 Hz (5 ms per-second ticks; matched filter template: 20 ms)
+- **WWVH**: 1200 Hz (5 ms per-second ticks; matched filter template: 20 ms)
+- **CHU**: 1000 Hz (~300 ms pulse at most seconds; matched filter template: 100 ms)
+- **BPM**: 1000 Hz (10 ms UTC ticks, 100 ms UT1 ticks)
 
 **Detection Method (v6.2 Enhancement - January 2026):**
 
@@ -341,9 +350,11 @@ Delays outside bounds have plausibility reduced by 70%.
 
 | Phase | Window | Criteria |
 |-------|--------|----------|
-| **Bootstrap** | ±500 ms | Initial, no prior knowledge |
+| **Bootstrap** | ±50 ms | Initial (RTP timestamps are authoritative, no wall-clock bias) |
 | **Provisional** | ±5-15 ms | 10+ detections, 2+ stations, D_clock σ < 1 ms |
 | **Calibrated** | ±2-5 ms | 30+ detections, 60 min span, RTP variance < 50² |
+
+**Arrival Tolerance:** ±100 ms (validates detected tone arrivals against expected propagation delay)
 
 **Key Insight:** GPSDO is the foundation. Stations are periodic calibration checks, not the primary reference.
 
@@ -382,7 +393,7 @@ d_clock_fused = Σ(w_i × d_clock_i) / Σ(w_i)
 |-----------|-------|-------------|
 | **Initial P (Offset)** | 5.0 ms | Moderate initial trust |
 | **Initial P (Drift)** | 1e-7 ms/min | High trust in factory calibration |
-| **Q (Offset)** | 1e-10 ms | Effectively zero process noise |
+| **Q (Offset)** | 0.01 ms | Allows tracking real offsets (updated 2026-02-06) |
 | **Q (Drift)** | 1e-12 ms/min | The clock does not wander |
 | **R (Measurement)** | 30.0 ms | High measurement noise (ionospheric) |
 

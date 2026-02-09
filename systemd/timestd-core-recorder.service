@@ -49,6 +49,7 @@ SyslogIdentifier=timestd-core-recorder
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
+CPUAffinity=0-7
 MemoryMax=4G
 
 # Security hardening

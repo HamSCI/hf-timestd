@@ -10,46 +10,101 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: WEB-API UI REVIEW + REMAINING ACCURACY WORK
+## 📋 NEXT SESSION: WWV/WWVH HOURLY TEST SIGNAL ANALYSIS + WEB-API-UI
 
-**Objective:** Review web-api UI pages for correctness, consistency, and usability. Monitor hardware calibration convergence and Kalman settling. Investigate the ~5-15ms raw D_clock offset to determine if it's a propagation model error or a real systematic delay.
-
----
-
-## ✅ RESOLVED: Timing Accuracy Crisis (2026-02-06 Session)
-
-### Root Causes Found and Fixed
-
-**Four bugs** were identified and fixed in this session:
-
-1. **Circular calibration** (`multi_broadcast_fusion.py:2325`): `offset_ms = -mean(D_clock)` zeroed out the entire signal. **Fix:** Hardware-only calibration that learns constant receiver chain delays (matched filter group delay, ADC latency) and freezes after convergence.
-
-2. **Broken GPS ground truth** (`timing_validation_service.py:compute_gps_d_clock`): Used `local_receipt_time` (a diagnostic field with ~120ms/s drift from discovery poll latency) instead of the GPS/RTP mapping. **Fix:** Validate RTP/GPS mapping consistency and report 0.0 as ground truth (chrony tracks GPSDO at sub-μs).
-
-3. **Dead Kalman filter** (`multi_broadcast_fusion.py`): `_kalman_update()` was defined but never called. The "Steel Ruler" architecture read `kalman_state[0]` (always 0.0) as the fused output. **Fix:** Connected the Kalman update to the fusion pipeline, initialized from first measurement instead of 0, increased process noise from 1e-10 to 0.01 to allow tracking real offsets.
-
-4. **Missing serialization** (`_save_calibration`/`_load_calibration`): `hardware_offset_ms` and `hardware_converged` were not saved/loaded, causing hardware calibration to reset to 0.0 on every restart. **Fix:** Added both fields to save/load.
-
-### Results After Fix (2026-02-06 20:06 UTC)
-
-| Metric | Before | After |
-|--------|--------|-------|
-| **fusion_d_clock_ms** | Always 0.0 | -0.3ms (real, tracking) |
-| **gps_d_clock_ms** | 211–1151ms (broken) | 0.0ms (correct) |
-| **Mean discrepancy** | -495ms | ~1ms |
-| **Within 1ms** | 0.0% | ~83% |
-| **Chrony TSL offset** | +4800μs | +34μs to +316μs |
-| **Kalman state** | Frozen at 0.0 | -0.249ms, converged |
-
-### Remaining Work
-
-- Hardware calibration is learning but not yet converged (needs ~50+ updates per broadcast)
-- Raw D_clock values show ~5-15ms offset — investigate if this is propagation model error or real systematic delay
-- Quality grades still "D" — likely due to high cross-station disagreement (65ms between WWV and CHU), which may improve as hardware calibration converges
+**Objective:** Maximize the scientific value extracted from the WWV (minute :08) and WWVH (minute :44) hourly test signals. Ensure the test signal analysis pipeline is working correctly and that results are exposed effectively in the web-api-ui. Review all web-api UI pages for correctness and usability.
 
 ---
 
-## 🔍 WEB-API UI PAGES TO REVIEW
+## 🎯 FUNDAMENTAL ARCHITECTURE UNDERSTANDING
+
+### The Dual-Purpose System
+
+This system operates in two complementary modes. Understanding this duality is essential:
+
+**RTP Mode (Physics Pathway) — The Primary Value:**
+- radiod provides **authoritative RTP timestamps** from GPS+PPS (~50 μs accuracy to UTC)
+- `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index / decimation` — same counter space, no pipeline offset correction needed
+- With timing accuracy on the order of 50 microseconds, we can do **precision ionospheric science**
+- The propagation delay residuals (T_arrival - T_expected) ARE the ionospheric measurement
+- This is where the test signal analysis lives — we know WHEN the signal arrived, so we can study WHAT the ionosphere did to it
+
+**Fusion Mode (Metrology Pathway) — The Recovery Exercise:**
+- Attempts to recover UTC from HF broadcasts alone (no GPS)
+- Current accuracy: ±5-100 ms depending on ionospheric conditions
+- This has NOT yet reached the accuracy we hoped for
+- The comparison between fusion-recovered timing and RTP-authoritative timing reveals how well tone analysis can reconstruct the time authority
+- This is a research pathway, not the primary operational mode
+
+### Key Implication for This Session
+
+Since RTP mode gives us ~50 μs timing, the test signal analysis can exploit this to:
+1. **Precisely time-align** the 45-second test signal structure
+2. **Measure ionospheric channel characteristics** (delay spread, coherence, scintillation)
+3. **Compare propagation** between WWV (:08) and WWVH (:44) paths
+4. **Detect anomalies** (solar flares, sporadic E, TIDs) with high confidence
+
+---
+
+## 📡 WWV/WWVH TEST SIGNAL STRUCTURE
+
+Per [Zenodo 5182323](https://zenodo.org/records/5182323), the 45-second test signal (starting at second 0 of the test minute):
+
+| Time (sec) | Content | Scientific Purpose |
+|------------|---------|-------------------|
+| 0-10 | Voice announcement | Synchronization |
+| 10-12 | White noise #1 | Wideband coherence, timing |
+| 12-13 | Blank | — |
+| 13-23 | Multi-tone (2,3,4,5 kHz) | Frequency selectivity, scintillation |
+| 23-24 | Blank | — |
+| 24-32 | Chirp sequences | Delay spread via pulse compression |
+| 32-34 | Blank | — |
+| 34-36 | Single-cycle bursts | High-precision timing |
+| 36-37 | Blank | — |
+| 37-39 | White noise #2 | Transient detection |
+| 39-42 | Blank | — |
+
+**Schedule:** WWV transmits at minute :08, WWVH at minute :44 of each hour.
+
+---
+
+## 🔍 TEST SIGNAL ANALYSIS — CURRENT STATE
+
+### Existing Implementation
+
+| Component | Location | Status |
+|-----------|----------|--------|
+| `WWVTestSignalDetector` | `src/hf_timestd/core/wwv_test_signal.py` | Implemented |
+| `MetrologyService` integration | `src/hf_timestd/core/metrology_service.py` | Triggers at :08/:44 |
+| `TestSignalService` API | `web-api/services/test_signal_service.py` | Implemented |
+| `test_signal.html` | `web-api/static/test_signal.html` | Basic UI exists |
+| `physics.html` Channels tab | `web-api/static/physics.html` | Shows per-freq results |
+| HDF5 schema | `src/hf_timestd/schemas/l2_test_signal_v1.json` | Defined |
+| HDF5 output | `phase2/{CHANNEL}/L2/test_signal/` | Writing |
+
+### What the Detector Measures
+
+- **S4 scintillation index** per frequency (2, 3, 4, 5 kHz)
+- **S4 frequency slope** (D-layer vs F-layer discrimination)
+- **Delay spread** from chirp matched filter
+- **Coherence time** from multi-tone analysis
+- **Channel quality** grade (excellent/good/fair/poor)
+- **Anomaly detection** (sudden amplitude drops, rapid fading)
+- **ToA offset** from burst/chirp/multitone/noise (priority order)
+- **Field strength** and stability
+
+### Key Questions for Review
+
+1. **Is the detector actually running?** Check logs for test signal detections at :08 and :44
+2. **Are HDF5 files being written?** Check `phase2/{CHANNEL}/L2/test_signal/`
+3. **Is the web UI showing results?** Check `test_signal.html` and `physics.html`
+4. **Are the detection thresholds appropriate?** Combined threshold is 0.20 — is this too low/high?
+5. **Is the white noise correlation working?** The PRNG sequence differs from Python's random — this is a known limitation
+6. **Are we exploiting the authoritative RTP timing?** The ~50 μs accuracy should enable sub-sample alignment of the test signal structure
+
+---
+
+## 🌐 WEB-API UI PAGES TO REVIEW
 
 ### Page Inventory (13 HTML pages)
 
@@ -69,53 +124,28 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 | **Docs** | `docs.html` | `/api/docs/*` | Living documentation |
 | **Logs** | `logs.html` | `/api/logs/*` | System logs |
 
-### Key Review Questions for Each Page
+### Priority Review: Test Signal Pages
 
-**Timing page (metrology.html):**
-- Shows "Current UTC Offset" hero metric with `d_clock_ms` — currently always 0.0
-- Is this misleading? The "How It Works" section describes the methodology
-- Does the page clearly communicate uncertainty and quality?
+**`test_signal.html`:**
+- Does it show hourly detection results for all 9 channels?
+- Does it display S4 scintillation, delay spread, coherence time?
+- Does it show 24-hour trends (which hours have detections)?
+- Can you compare WWV (:08) vs WWVH (:44) side by side?
+- Does it expose the channel quality grades?
 
-**Validation page (timing-validation.html):**
-- Charts: Discrepancy over time, grade distribution (doughnut), histogram
-- Table: Recent validation points with pass/fail status
-- Currently shows all-red, all-fail — is this page correctly interpreting the data?
-- Is the methodology note accurate about what's being compared?
+**`physics.html` Channels tab:**
+- Does it show per-frequency test signal metrics?
+- Is the S4 color coding working (green <0.3, yellow 0.3-0.6, red >0.6)?
+- Does it show the S4 frequency slope (D-layer vs F-layer)?
 
-**General UI concerns:**
+### General UI Review
+
 - Navigation consistency across all 13 pages
 - Dark theme styling consistency
 - Auto-refresh behavior (60s intervals)
 - Error handling when APIs return no data
-- Mobile responsiveness
-
----
-
-## 📊 Session Accomplishments (2026-02-06)
-
-### Infrastructure Fixes (This Session)
-
-1. **HDF5 Crash-Safe Writer** — Eliminated SWMR mode entirely:
-   - **Root cause:** SWMR leaves dirty consistency flags on unclean shutdown (SIGKILL, os._exit). Any service restart could corrupt HDF5 files.
-   - **Fix:** Open-write-close per measurement. No persistent file handle = no dirty flags on crash.
-   - **Files:** `src/hf_timestd/io/hdf5_writer.py` (major refactor), `src/hf_timestd/io/hdf5_reader.py` (removed swmr=True)
-   - **Verified:** All 9 metrology channels + fusion + TEC + VTEC passing in `verify_pipeline.sh`
-
-2. **SWMR References Cleaned** — Removed all SWMR usage from:
-   - `hdf5_writer.py` — No longer opens SWMR write mode
-   - `hdf5_reader.py` — No longer opens with `swmr=True`
-   - `timing_validation_service.py` — Simplified file open
-   - `multi_broadcast_fusion.py` — Updated comments
-   - `core/__init__.py`, `physics_service.py` — Updated docstrings
-
-3. **Production Deployment** — All services restarted with new code, verified clean.
-
-### Previous Session Accomplishments (Carried Forward)
-
-- **24-Hour Dashboard** — Visualization of all 17 broadcasts
-- **Editable install fix** — Production no longer symlinks to git repo
-- **HDF5 recovery logic** — h5clear + corrupt file rename (now superseded by crash-safe design)
-- **CPU affinity** — radiod confined to cache-sharing cores
+- Does each page correctly reflect the dual-purpose architecture?
+- Are uncertainty and quality clearly communicated?
 
 ---
 
@@ -125,14 +155,14 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ```
 ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffer
-                                                                    ↓
+   (GPS+PPS, ~50μs)                                               ↓
                                                           timestd-metrology
                                                            ↓ (per channel)
                                                     AM Demod → Matched Filter
+                                                    Test Signal Detection (:08/:44)
                                                            ↓
                                                     L1 Metrology (HDF5)
-                                                           ↓
-                                                    L2 Calibrated (HDF5)
+                                                    L2 Test Signal (HDF5)
                                                            ↓
                                                     timestd-fusion
                                                     ↓              ↓
@@ -143,63 +173,85 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
                                              TEC/Science (HDF5)
 ```
 
-### Key Files
+### Key Files for This Session
 
 | File | Purpose |
 |------|---------|
-| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion engine (~4900 lines) |
-| `src/hf_timestd/core/metrology_service.py` | Per-channel metrology |
-| `src/hf_timestd/core/timing_validation_service.py` | GPS comparison logic |
-| `src/hf_timestd/io/hdf5_writer.py` | Crash-safe HDF5 writer |
-| `src/hf_timestd/io/hdf5_reader.py` | HDF5 reader |
-| `web-api/routers/timing_validation.py` | Validation API |
-| `web-api/static/timing-validation.html` | Validation UI |
+| `src/hf_timestd/core/wwv_test_signal.py` | Test signal detector |
+| `src/hf_timestd/core/metrology_service.py` | Triggers test signal detection |
+| `src/hf_timestd/schemas/l2_test_signal_v1.json` | HDF5 schema |
+| `web-api/services/test_signal_service.py` | Test signal API service |
+| `web-api/routers/propagation.py` | Propagation/test signal API routes |
+| `web-api/routers/physics.py` | Physics API routes |
+| `web-api/static/test_signal.html` | Test signal UI |
+| `web-api/static/physics.html` | Physics UI (Channels tab) |
 | `web-api/static/metrology.html` | Timing UI |
-| `scripts/verify_pipeline.sh` | Pipeline health check |
-| `scripts/update-production.sh` | Deployment (restarts 6 of 8 services) |
-| `scripts/start-services.sh` | Full start (all 8 + timers) |
-| `scripts/stop-services.sh` | Full stop (all 8 + timers) |
+| `web-api/static/dashboard-24h.html` | 24-hour dashboard |
+| `src/hf_timestd/core/binary_archive_writer.py` | RTP timestamp handling (authoritative, no pipeline offset) |
+| `src/hf_timestd/core/arrival_pattern_matrix.py` | Physics-based arrival predictions (±50ms bootstrap, ±100ms tolerance) |
 
 ### Service Inventory
 
-| Service | Restarts on Update | Purpose |
-|---------|-------------------|---------|
-| `timestd-core-recorder` | ❌ (data gap risk) | RTP → raw buffer |
-| `timestd-metrology` | ✅ | IQ → L1/L2 measurements |
-| `timestd-l2-calibration` | ✅ | L2 calibration |
-| `timestd-fusion` | ✅ | Multi-broadcast fusion → Chrony |
-| `timestd-physics` | ✅ | TEC estimation |
-| `timestd-web-api` | ✅ | REST API + dashboard |
-| `timestd-radiod-monitor` | ✅ | Hardware health |
-| `timestd-vtec` | ✅ (if running) | GNSS VTEC |
+| Service | CPUAffinity | Purpose |
+|---------|-------------|---------|
+| `timestd-core-recorder` | 0-7 | RTP → raw buffer (authoritative timestamps) |
+| `timestd-metrology` | 0-7 (taskset) | IQ → L1/L2 measurements + test signal detection |
+| `timestd-l2-calibration` | 0-7 | L2 calibration |
+| `timestd-fusion` | 0-7 | Multi-broadcast fusion → Chrony |
+| `timestd-physics` | 0-7 | TEC estimation |
+| `timestd-web-api` | 0-7 | REST API + dashboard (FastAPI, port 8000) |
+| `timestd-radiod-monitor` | — | Hardware health monitoring |
+| `timestd-vtec` | — | GNSS VTEC (if running) |
+| **radiod** | **8-15** | **Real-time USB/FFT (uncontested L3 cache)** |
 
 ---
 
-## 🔬 Methodology Questions (Updated 2026-02-06)
+## ✅ RESOLVED IN PREVIOUS SESSIONS
 
-1. ~~**Circular calibration:**~~ **RESOLVED.** Hardware-only calibration now learns constant delays and freezes. The fusion output tracks real clock offset.
+### Timing Accuracy (2026-02-06)
+- Four bugs fixed: circular calibration, broken GPS ground truth, dead Kalman filter, missing serialization
+- Mean discrepancy reduced from -495ms to ~1ms
 
-2. **Template matching:** CHU template is 500ms but CHU transmits a 300ms tone at most seconds. WWV template is 800ms. Are these optimal?
+### Pipeline Offset Calibration (2026-02-09)
+- **Removed entirely** — radiod's RTP timestamps are authoritative
+- `GPS_TIME` and `RTP_TIMESNAP` are in the same counter space (both from `input_sample_index / decimation`)
+- No wall-clock calibration bias — timestamps carry GPS+PPS time through the decimation pipeline
+- Verified: CHU_3330 error=-0.31ms, CHU_7850 error=-3.01ms at 39.5dB SNR
 
-3. **Propagation model:** IRI-2020 gives ionospheric layer heights. Is the path delay computation correct? Raw D_clock values show ~5-15ms offset across all broadcasts — this may indicate a systematic propagation model error.
+### Tolerances Tightened (2026-02-09)
+- `ARRIVAL_TOLERANCE_MS`: 200ms → 100ms (`metrology_engine.py`)
+- `BOOTSTRAP_INITIAL_UNCERTAINTY_MS`: 150ms → 50ms (`arrival_pattern_matrix.py`)
 
-4. ~~**GPS_TIME/RTP_TIMESNAP mapping:**~~ **RESOLVED.** The mapping is accurate (±0.025ms). The ~200-1000ms discrepancies were caused by using `local_receipt_time` (diagnostic field with poll latency) instead of the RTP/GPS mapping.
+### CPU Affinity (2026-02-09)
+- All timestd Python services pinned to CPUs 0-7
+- radiod on CPUs 8-15 for uncontested L3 cache access
 
-5. **Cross-station disagreement:** WWV and CHU disagree by ~65ms. This is likely due to propagation model errors (different paths, different ionospheric conditions). Hardware calibration should absorb the constant component, but the variable component needs better ionospheric modeling.
+### HDF5 Crash Safety (2026-02-06)
+- SWMR eliminated — open-write-close per measurement
+- No dirty HDF5 flags on crash/SIGKILL
 
-6. **Missed opportunities:**
-   - CHU FSK timing (seconds 31-39) for independent verification
-   - Phase tracking for sub-sample resolution
-   - Doppler shift for ionospheric correction
+---
+
+## 🔬 OPEN QUESTIONS
+
+1. **Tone analysis accuracy gap:** Best channels show ±0.3-3ms error, but many show ±30-100ms. The ionospheric scatter dominates. Can the test signal's chirp/burst components provide better timing than the 1000/1200 Hz tones?
+
+2. **Cross-station disagreement:** WWV and CHU can disagree by ~65ms. Is this purely ionospheric, or is there a propagation model error?
+
+3. **Template durations:** CHU template is 100ms, WWV/WWVH template is 20ms. Are these optimal for the actual signal structure?
+
+4. **Test signal white noise:** The PRNG sequence differs from Python's random generator. The [wwv-h-characterization-signal-ports](https://github.com/aidanmontare-edu/wwv-h-characterization-signal-ports) repo has the actual sequence — should we integrate it?
+
+5. **Memory leak:** CHU metrology services grow to 2.5GB RSS over 12+ hours. Root cause unknown.
 
 ---
 
 ## ✅ Success Criteria for Next Session
 
-- ✅ **Diagnose why fusion_d_clock_ms is always 0.0** — Four bugs found and fixed
-- ✅ **Diagnose why gps_d_clock_ms is 200-1000ms** — `local_receipt_time` bug
-- ✅ **Fix the timing accuracy crisis** — Mean discrepancy reduced from -495ms to ~1ms
-- ⬚ **Review all web-api UI pages** for correctness, consistency, and usability
-- ⬚ **Monitor hardware calibration convergence** — Needs ~50+ updates per broadcast
-- ⬚ **Investigate raw D_clock ~5-15ms offset** — Propagation model error?
-- ⬚ **Improve quality grades** — Currently all "D" due to cross-station disagreement
+- ⬚ **Verify test signal detection is running** on all 9 channels at :08 and :44
+- ⬚ **Review test_signal.html** — ensure it shows useful hourly results
+- ⬚ **Review physics.html** — ensure Channels tab shows S4, delay spread, coherence
+- ⬚ **Expose 24-hour test signal trends** — which hours have detections, S4 evolution
+- ⬚ **Compare WWV vs WWVH** test signal results side by side
+- ⬚ **Review all 13 web-api UI pages** for correctness, consistency, and usability
+- ⬚ **Investigate memory leak** in CHU metrology services (2.5GB RSS)
