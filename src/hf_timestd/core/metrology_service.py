@@ -765,14 +765,22 @@ class MetrologyService:
                 with open(path, 'rb') as f:
                     dctx = zstd.ZstdDecompressor()
                     data = dctx.decompress(f.read())
-                    return np.frombuffer(data, dtype=np.complex64)
+                    # .copy() so the array owns its memory; without it the
+                    # numpy array holds a reference to the bytes object,
+                    # preventing GC of the large decompressed buffer.
+                    return np.frombuffer(data, dtype=np.complex64).copy()
             elif path.suffix == '.lz4':
                 import lz4.frame
                 with open(path, 'rb') as f:
                     data = lz4.frame.decompress(f.read())
-                    return np.frombuffer(data, dtype=np.complex64)
+                    return np.frombuffer(data, dtype=np.complex64).copy()
             else:
-                return np.memmap(path, dtype=np.complex64, mode='r')
+                # np.memmap keeps the file descriptor open and pages mapped.
+                # Read into a regular array so the fd is released promptly.
+                mm = np.memmap(path, dtype=np.complex64, mode='r')
+                arr = np.array(mm)
+                del mm
+                return arr
         except ImportError:
             logger.error("Compression library missing")
             return None

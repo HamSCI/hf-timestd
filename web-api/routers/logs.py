@@ -66,8 +66,18 @@ async def get_logs(
         process = subprocess.run(cmd, capture_output=True, text=True)
         
         if process.returncode != 0:
-            logger.error(f"journalctl failed: {process.stderr}")
-            raise HTTPException(status_code=500, detail="Failed to fetch logs")
+            logger.warning(f"journalctl failed (rc={process.returncode}): {process.stderr.strip()}")
+            # Return empty result with explanation instead of 500
+            hint = "journalctl access denied — add the web-api user to the 'systemd-journal' group"
+            if "No journal files" in process.stderr or "not seeing messages" in process.stderr:
+                hint = "No journal entries visible — user may need 'systemd-journal' group membership"
+            return {
+                "service": service,
+                "unit": unit_name,
+                "count": 0,
+                "logs": [],
+                "error": hint
+            }
             
         logs = process.stdout.splitlines()
         

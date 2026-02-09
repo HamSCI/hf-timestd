@@ -228,7 +228,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>� Test Signal Analysis</h1>
+            <h1>📡 Test Signal Analysis</h1>
             <div class="header-subtitle">WWV/WWVH scientific test signal (minutes 8 & 44)</div>
             <nav class="nav">
                 <a href="/" class="nav-link">Overview</a>
@@ -240,6 +240,7 @@
                 <span class="nav-divider"></span>
                 <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
                 <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/test_signal.html" class="nav-link active">📡 Test Signal</a>
                 <a href="/static/solar-correlation.html" class="nav-link">☀️ Solar</a>
                 <a href="/static/dashboard-24h.html" class="nav-link">📊 24h</a>
                 <span class="nav-divider"></span>
@@ -1066,36 +1067,51 @@
                 hovermode: 'closest'
             }, { responsive: true });
 
+            // Build flat measurements array for the selected frequency
+            const allMeasurements = [
+                ...(data.by_station?.WWV || []),
+                ...(data.by_station?.WWVH || [])
+            ].filter(m => m.frequency_mhz === selectedFrequency);
+
             // Multi-frequency S4 tones
-            plotS4Tones(measurements);
+            plotS4Tones(allMeasurements);
             
-            // S4 frequency slope
-            plotS4Slope(measurements);
+            // S4 frequency slope — show ALL frequencies so the slope over time is meaningful
+            const allFreqMeasurements = [
+                ...(data.by_station?.WWV || []),
+                ...(data.by_station?.WWVH || [])
+            ];
+            plotS4Slope(allFreqMeasurements);
         }
 
         function plotS4Tones(measurements) {
             const container = document.getElementById('chart-freq-s4-tones');
             
-            // Get latest measurement with S4 tone data
-            const latest = measurements.find(m => m.s4_2khz !== null);
+            const withTones = measurements.filter(m => m.s4_2khz !== null && m.s4_2khz !== undefined);
             
-            if (!latest) {
+            if (!withTones.length) {
                 container.innerHTML = '<div style="padding: 40px; text-align: center; color: #64748b;">No multi-frequency S4 data</div>';
                 return;
             }
 
-            const tones = [2, 3, 4, 5];
-            const s4Values = [latest.s4_2khz, latest.s4_3khz, latest.s4_4khz, latest.s4_5khz];
+            // Average per-tone S4 across all measurements for this frequency
+            const toneKeys = ['s4_2khz', 's4_3khz', 's4_4khz', 's4_5khz'];
+            const toneLabels = ['2 kHz', '3 kHz', '4 kHz', '5 kHz'];
+            const s4Values = toneKeys.map(key => {
+                const vals = withTones.map(m => m[key]).filter(v => v !== null && v !== undefined);
+                return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+            });
 
             const trace = {
-                x: tones.map(t => t + ' kHz'),
+                x: toneLabels,
                 y: s4Values,
                 type: 'bar',
                 marker: {
-                    color: s4Values.map(v => v < 0.3 ? '#10b981' : v < 0.6 ? '#f59e0b' : '#ef4444')
+                    color: s4Values.map(v => v === null ? '#64748b' : v < 0.3 ? '#10b981' : v < 0.6 ? '#f59e0b' : '#ef4444')
                 },
                 text: s4Values.map(v => v !== null ? v.toFixed(2) : '-'),
-                textposition: 'outside'
+                textposition: 'outside',
+                textfont: { color: '#cbd5e1' }
             };
 
             Plotly.newPlot(container, [trace], {
@@ -1103,9 +1119,9 @@
                 plot_bgcolor: 'transparent',
                 font: { color: '#94a3b8' },
                 margin: { t: 40, r: 20, b: 60, l: 50 },
-                title: { text: `S4 by Tone Frequency (${latest.station} @ ${formatTime(latest.timestamp)})`, font: { size: 14 } },
+                title: { text: `Avg S4 by Tone (${selectedFrequency} MHz, n=${withTones.length})`, font: { size: 14 } },
                 xaxis: { title: 'Tone Frequency', gridcolor: 'rgba(148, 163, 184, 0.1)' },
-                yaxis: { title: 'S4 Index', gridcolor: 'rgba(148, 163, 184, 0.1)' },
+                yaxis: { title: 'S4 Index', gridcolor: 'rgba(148, 163, 184, 0.1)', range: [0, Math.max(1, ...s4Values.filter(v => v !== null)) * 1.2] },
                 showlegend: false
             }, { responsive: true });
         }

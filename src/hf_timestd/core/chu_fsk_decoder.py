@@ -742,13 +742,22 @@ class CHUFSKDecoder:
             logger.debug(f"CHU tick detected: offset={tick_timing_offset_ms:+.3f}ms, "
                         f"confidence={tick_confidence:.2f}")
         
-        # FSK demodulate
-        soft_decision = self._fsk_demodulate(audio)
+        # FSK demodulate — only the relevant ~1.1s slice, not the full 60s buffer.
+        # hilbert() on 1.44M samples creates ~23MB complex128 temporaries per call;
+        # doing that 9× per minute fragments glibc malloc arenas, causing RSS to
+        # grow monotonically (~2GB after 12h).  Slicing to ~1.1s reduces peak
+        # allocation to ~0.4MB, eliminating the fragmentation pressure.
+        slice_start = max(0, second_start_sample - int(0.05 * self.sample_rate))  # 50ms margin before
+        slice_end = min(len(audio), second_start_sample + int(1.05 * self.sample_rate))  # 1.05s after
+        audio_slice = audio[slice_start:slice_end]
+        slice_offset = slice_start  # to convert local indices back to global
+        
+        soft_decision = self._fsk_demodulate(audio_slice)
         
         # Find the first start bit by searching for expected pattern
-        # Search from ~50ms to ~200ms into the second
-        search_start = second_start_sample + int(50 * self.sample_rate / 1000)
-        search_end = second_start_sample + int(200 * self.sample_rate / 1000)
+        # Search from ~50ms to ~200ms into the second (indices relative to slice)
+        search_start = (second_start_sample - slice_offset) + int(50 * self.sample_rate / 1000)
+        search_end = (second_start_sample - slice_offset) + int(200 * self.sample_rate / 1000)
         
         # Frame A (seconds 32-39) starts with 0x06, Frame B (second 31) has variable first byte
         expected_byte = 0x06 if second_number != 31 else None
@@ -758,7 +767,7 @@ class CHUFSKDecoder:
         if data_start_sample is None:
             # Fallback to fixed offset if start bit not found
             delay_samples = int(time_delay_ms * self.sample_rate / 1000)
-            data_start_sample = second_start_sample + int(DATA_START_MS * self.sample_rate / 1000) + delay_samples
+            data_start_sample = (second_start_sample - slice_offset) + int(DATA_START_MS * self.sample_rate / 1000) + delay_samples
         
         # Extract bits
         bits, bit_confidence = self._extract_bits(soft_decision, data_start_sample, BITS_PER_FRAME)
@@ -782,7 +791,7 @@ class CHUFSKDecoder:
         # Measure timing offset from 500ms boundary (SECONDARY timing reference)
         # The last stop bit should end at exactly 500ms
         # Find where the mark tone ends (transition to silence)
-        expected_end_sample = second_start_sample + int(DATA_END_MS * self.sample_rate / 1000)
+        expected_end_sample = (second_start_sample - slice_offset) + int(DATA_END_MS * self.sample_rate / 1000)
         
         # Look for mark-to-silence transition near expected end
         search_window = int(10 * self.sample_rate / 1000)  # ±10ms

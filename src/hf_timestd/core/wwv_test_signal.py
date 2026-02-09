@@ -522,8 +522,12 @@ class WWVTestSignalDetector:
         # Single-cycle burst detection (highest precision timing)
         burst_score, burst_toa_offset_ms = self._detect_single_cycle_bursts(audio_signal)
         
-        # Combined confidence: multi-tone is most reliable, noise confirms timing
-        confidence = 0.5 * multitone_score + 0.3 * noise_score + 0.2 * chirp_score
+        # Combined confidence: multi-tone is the most reliable detector on HF.
+        # Old formula (0.5*mt + 0.3*noise + 0.2*chirp) capped at 0.5 from
+        # multitone alone, making quality always MARGINAL/BAD.  Reweight so
+        # strong multitone detection alone can reach GOOD quality, with noise
+        # and chirp as confirmatory bonuses.
+        confidence = 0.7 * multitone_score + 0.15 * noise_score + 0.15 * chirp_score
         detected = confidence >= self.combined_threshold
         
         # === STAGE 2: Timing (high-precision ToA) ===
@@ -913,15 +917,22 @@ class WWVTestSignalDetector:
         
         noise_segment = audio_signal[noise_start:noise_end]
         
-        # Compare to adjacent segments for relative energy
-        pre_start = int((self.NOISE1_START - 2.0) * self.sample_rate)
-        pre_segment = audio_signal[max(0, pre_start):noise_start]
+        # Compare to a blank/silent segment for relative energy.
+        # The blank at 12-13s (between noise1 and multitone) is a true silence
+        # reference. Using the voice segment (8-10s) gives ratio ~1 since voice
+        # has comparable energy to noise, making detection unreliable.
+        blank_start = int(12.0 * self.sample_rate)
+        blank_end = int(13.0 * self.sample_rate)
+        if blank_end <= len(audio_signal):
+            ref_segment = audio_signal[blank_start:blank_end]
+        else:
+            ref_segment = audio_signal[max(0, noise_start - int(2.0 * self.sample_rate)):noise_start]
         
         noise_power = np.mean(noise_segment**2)
-        pre_power = np.mean(pre_segment**2) if len(pre_segment) > 0 else 1e-10
+        ref_power = np.mean(ref_segment**2) if len(ref_segment) > 0 else 1e-10
         
-        # Energy ratio (noise should be louder than voice gap before it)
-        energy_ratio = noise_power / (pre_power + 1e-10)
+        # Energy ratio (noise should be much louder than blank segment)
+        energy_ratio = noise_power / (ref_power + 1e-10)
         
         # Spectral flatness: ratio of geometric to arithmetic mean of spectrum
         # White noise ≈ 1.0, tonal signals << 1.0
@@ -1073,16 +1084,36 @@ class WWVTestSignalDetector:
         long_corr_up = signal.correlate(search_segment, self.long_chirp_up, mode='valid')
         long_corr_down = signal.correlate(search_segment, self.long_chirp_down, mode='valid')
         
-        # Normalize correlations
+        # Normalize correlations to proper correlation coefficients (0-1)
+        # Correlation coefficient = Rxy / sqrt(Ex * Ey)
         short_energy = np.sum(self.short_chirp_up**2)
         long_energy = np.sum(self.long_chirp_up**2)
         
-        # Peak detection for each type
-        short_max = max(np.max(np.abs(short_corr_up)), np.max(np.abs(short_corr_down)))
-        long_max = max(np.max(np.abs(long_corr_up)), np.max(np.abs(long_corr_down)))
+        # Estimate local signal energy for normalization
+        short_len = len(self.short_chirp_up)
+        long_len = len(self.long_chirp_up)
         
-        short_score = np.clip(short_max / (short_energy + 1e-10), 0.0, 1.0)
-        long_score = np.clip(long_max / (long_energy + 1e-10), 0.0, 1.0)
+        def _normalized_peak(corr, template_energy, template_len, segment):
+            peak_idx = np.argmax(np.abs(corr))
+            peak_val = np.abs(corr[peak_idx])
+            # Signal energy in the window aligned with the peak
+            win_start = peak_idx
+            win_end = min(win_start + template_len, len(segment))
+            if win_end > win_start:
+                sig_energy = np.sum(segment[win_start:win_end]**2)
+            else:
+                sig_energy = 1e-10
+            denom = np.sqrt(template_energy * sig_energy)
+            return np.clip(peak_val / (denom + 1e-10), 0.0, 1.0)
+        
+        # Peak detection for each type (properly normalized)
+        short_score_up = _normalized_peak(short_corr_up, short_energy, short_len, search_segment)
+        short_score_dn = _normalized_peak(short_corr_down, short_energy, short_len, search_segment)
+        long_score_up = _normalized_peak(long_corr_up, long_energy, long_len, search_segment)
+        long_score_dn = _normalized_peak(long_corr_down, long_energy, long_len, search_segment)
+        
+        short_score = max(short_score_up, short_score_dn)
+        long_score = max(long_score_up, long_score_dn)
         
         # Combined score - weight long chirps higher (more processing gain)
         score = 0.3 * short_score + 0.7 * long_score
@@ -1171,32 +1202,33 @@ class WWVTestSignalDetector:
         
         tone_powers = np.array(tone_powers)
         
-        # Expected pattern: 3dB attenuation per second (factor of √2)
-        # Normalize by expected attenuation to isolate fading
-        expected_atten = np.array([1.0 / (2**(i/2)) for i in range(len(tone_powers))])
+        # Only use the first 5 windows (0-12 dB designed attenuation)
+        # where tone SNR is sufficient.  Later windows are noise-dominated
+        # and inflate variance, causing coherence_time to always hit 0.1s.
+        n_use = min(5, len(tone_powers))
+        tp = tone_powers[:n_use]
         
-        # Detrend by expected pattern
-        with np.errstate(divide='ignore', invalid='ignore'):
-            normalized = tone_powers / (expected_atten * tone_powers[0] + 1e-10)
-            normalized = np.nan_to_num(normalized, nan=1.0)
+        # Convert to dB for detrending
+        tp_db = 20.0 * np.log10(tp + 1e-10)
+        expected_atten_db = np.array([-3.0 * i for i in range(n_use)])
         
-        # Estimate coherence time from autocorrelation of fading
-        # Fast fading → short coherence time
-        if len(normalized) > 2:
-            # Compute variance of normalized power fluctuations
-            variance = np.var(normalized)
-            
-            # Simple model: coherence time inversely related to variance
-            # Scale factor empirically calibrated
-            if variance > 0.01:
-                coherence_time = 1.0 / (variance * 10)  # Rough estimate
-                coherence_time = np.clip(coherence_time, 0.1, 10.0)
-            else:
-                coherence_time = 10.0  # Stable channel
-            
-            return float(coherence_time)
+        # LS-fit detrend (robust to single outlier)
+        p0_fit = np.mean(tp_db - expected_atten_db)
+        detrended_db = tp_db - (p0_fit + expected_atten_db)
         
-        return None
+        # Estimate coherence time from variance of detrended fading (in dB)
+        # Fast fading → high variance → short coherence time
+        variance_db = np.var(detrended_db)
+        
+        if variance_db > 0.5:  # >0.7 dB RMS fading
+            # Empirical model: coherence_time ≈ 5 / variance_db
+            # Calibrated so that 5 dB² variance → 1s, 1 dB² → 5s
+            coherence_time = 5.0 / variance_db
+            coherence_time = np.clip(coherence_time, 0.1, 30.0)
+        else:
+            coherence_time = 10.0  # Stable channel
+        
+        return float(coherence_time)
     
     def _estimate_snr_with_gain(self, audio_signal: np.ndarray, 
                                  noise_score: float, chirp_score: float) -> float:
@@ -1214,23 +1246,45 @@ class WWVTestSignalDetector:
         Returns:
             SNR in dB (with processing gain consideration)
         """
-        # Base SNR from signal-to-noise in multitone region
+        # Spectral SNR: measure tone peak power vs adjacent noise floor.
+        # Broadband power ratio is ~0dB because the narrowband tones barely
+        # affect the total wideband power.  Spectral SNR is meaningful.
+        from scipy.fft import rfft, rfftfreq
+        
         start_idx = int(self.MULTITONE_START * self.sample_rate)
-        end_idx = int(self.MULTITONE_END * self.sample_rate)
+        # Use the first 1-second window (strongest tones, before attenuation)
+        end_idx = start_idx + self.sample_rate
         
         if end_idx > len(audio_signal):
             end_idx = len(audio_signal)
         
-        signal_segment = audio_signal[start_idx:end_idx]
-        signal_power = np.mean(signal_segment**2)
+        window = audio_signal[start_idx:end_idx]
+        fft_mag = np.abs(rfft(window))
+        freqs = rfftfreq(len(window), 1.0 / self.sample_rate)
+        freq_res = freqs[1] - freqs[0] if len(freqs) > 1 else 1.0
         
-        # Noise from voice segment (0-10s, before test signal content)
-        noise_end = int(8.0 * self.sample_rate)  # Use 0-8s for noise estimate
-        noise_segment = audio_signal[:noise_end]
-        noise_power = np.mean(noise_segment**2) if len(noise_segment) > 0 else 1e-10
+        # Measure peak power at each tone and adjacent noise floor
+        tone_snrs = []
+        for tone_freq in self.TONE_FREQUENCIES:
+            idx = np.argmin(np.abs(freqs - tone_freq))
+            # Tone peak: max within ±5 bins
+            peak_range = slice(max(0, idx - 5), min(len(fft_mag), idx + 6))
+            tone_peak = np.max(fft_mag[peak_range]**2)
+            # Noise floor: median of bins 50-200 Hz away from tone
+            noise_bins = np.concatenate([
+                fft_mag[max(0, idx - int(200/freq_res)):max(0, idx - int(50/freq_res))]**2,
+                fft_mag[min(len(fft_mag), idx + int(50/freq_res)):min(len(fft_mag), idx + int(200/freq_res))]**2
+            ])
+            if len(noise_bins) > 0:
+                noise_floor = np.median(noise_bins)
+                if noise_floor > 0:
+                    tone_snrs.append(10 * np.log10(tone_peak / noise_floor))
         
-        # Base SNR
-        base_snr_db = 10 * np.log10(signal_power / (noise_power + 1e-10))
+        # Base SNR: average spectral SNR across tones
+        if tone_snrs:
+            base_snr_db = float(np.mean(tone_snrs))
+        else:
+            base_snr_db = 0.0
         
         # Processing gain from matched filters
         # White noise: BT ≈ 10000 → 40 dB gain (but score < 1 means less coherent)
@@ -1437,12 +1491,16 @@ class WWVTestSignalDetector:
             
             return 0.5 * energy_score + 0.5 * flatness_score
         
-        # Pre-segments for comparison (2s before each noise segment)
-        pre1_start = max(0, n1_start - 2 * self.sample_rate)
-        pre1 = audio_signal[pre1_start:n1_start]
+        # Reference segments: use adjacent blank/silent segments, not voice.
+        # Noise1 (10-12s): use blank at 12-13s as reference
+        # Noise2 (37-39s): use blank at 36-37s as reference
+        blank1_start = int(12.0 * self.sample_rate)
+        blank1_end = int(13.0 * self.sample_rate)
+        pre1 = audio_signal[blank1_start:blank1_end] if blank1_end <= len(audio_signal) else audio_signal[max(0, n1_start - self.sample_rate):n1_start]
         
-        pre2_start = max(0, n2_start - 2 * self.sample_rate)
-        pre2 = audio_signal[pre2_start:n2_start]
+        blank2_start = int(36.0 * self.sample_rate)
+        blank2_end = int(37.0 * self.sample_rate)
+        pre2 = audio_signal[blank2_start:blank2_end] if blank2_end <= len(audio_signal) else audio_signal[max(0, n2_start - self.sample_rate):n2_start]
         
         noise1_score = analyze_noise_segment(noise1, pre1)
         noise2_score = analyze_noise_segment(noise2, pre2)
@@ -1481,7 +1539,7 @@ class WWVTestSignalDetector:
         end_idx = int(self.MULTITONE_END * self.sample_rate)
         
         if end_idx > len(audio_signal):
-            return {}, None, None
+            return {}, None, None, {}, None
         
         multitone_segment = audio_signal[start_idx:end_idx]
         
@@ -1519,16 +1577,45 @@ class WWVTestSignalDetector:
         s4_frequency_slope = None
         
         # Compute S4 for each frequency
+        # S4 is only meaningful when the tone is well above the noise floor;
+        # at low SNR the FFT peak is noise-dominated and power variance is
+        # driven by noise statistics, not ionospheric scintillation.
         for freq, powers in tone_power_timeseries.items():
             if len(powers) >= 5:
                 powers_arr = np.array(powers)
+                n_pts = len(powers_arr)
+                
+                # Check tone SNR: use first 3 windows (strongest signal)
+                # compared to noise floor.  Skip S4 if tone SNR < 6 dB.
+                first3_mean_db = np.mean(powers_arr[:3])
+                # Noise floor estimate: use the last 3 windows where the
+                # designed attenuation has reduced the tone by 21-27 dB.
+                # At that level the measurement is noise-dominated, giving
+                # a reasonable noise floor estimate.
+                last3_mean_db = np.mean(powers_arr[-3:])
+                # Expected attenuation over 7-9 seconds: 21-27 dB
+                expected_drop_db = 3.0 * (n_pts - 2)  # midpoint of last 3
+                tone_snr_db = first3_mean_db - last3_mean_db - expected_drop_db
+                
+                if tone_snr_db < 6.0:
+                    # Tone is too weak relative to noise for reliable S4
+                    logger.debug(f"S4 skipped at {freq}Hz: tone_snr={tone_snr_db:.1f}dB < 6dB")
+                    continue
                 
                 # Expected attenuation pattern: -3dB per second
-                expected_atten_db = np.array([-3.0 * i for i in range(len(powers_arr))])
+                expected_atten_db = np.array([-3.0 * i for i in range(n_pts)])
                 
-                # Detrend: remove expected attenuation before computing S4
-                # This isolates ionospheric fading from designed signal structure
-                detrended_db = powers_arr - (powers_arr[0] + expected_atten_db)
+                # Detrend: fit the expected -3dB/sec slope to the data via
+                # least-squares to find the best reference level.  Anchoring
+                # to powers_arr[0] made S4 sensitive to a single outlier;
+                # the LS fit is robust to individual faded windows.
+                # Model: powers_arr ≈ P0 + expected_atten_db
+                # Solve for P0 = mean(powers_arr - expected_atten_db)
+                p0_fit = np.mean(powers_arr - expected_atten_db)
+                detrended_db = powers_arr - (p0_fit + expected_atten_db)
+                
+                # Clamp to ±15 dB to prevent extreme values from dominating
+                detrended_db = np.clip(detrended_db, -15.0, 15.0)
                 
                 # Convert detrended dB to linear intensity for S4 calculation
                 # S4 = σ(I) / μ(I) where I is intensity (not dB)
@@ -1538,7 +1625,8 @@ class WWVTestSignalDetector:
                     s4 = float(np.std(intensity) / np.mean(intensity))
                     s4_by_frequency[freq] = s4
                     
-                    # Log warning for strong scintillation (S4 > 1.0 is valid)
+                    # Log warning for strong scintillation (S4 > 1.0 is valid
+                    # but rare on HF except during geomagnetic storms)
                     if s4 > 1.0:
                         logger.warning(f"Strong scintillation at {freq}Hz: S4={s4:.2f}")
         
@@ -1561,7 +1649,8 @@ class WWVTestSignalDetector:
         if len(tone_power_timeseries.get(2000, [])) >= 5:
             powers_2k = np.array(tone_power_timeseries[2000])
             expected_atten_db = np.array([-3.0 * i for i in range(len(powers_2k))])
-            detrended = powers_2k - (powers_2k[0] + expected_atten_db)
+            p0_2k = np.mean(powers_2k - expected_atten_db)
+            detrended = powers_2k - (p0_2k + expected_atten_db)
             fading_variance = float(np.var(detrended))
         
         return tone_power_timeseries, fading_variance, scintillation_index, s4_by_frequency, s4_frequency_slope
@@ -1595,26 +1684,37 @@ class WWVTestSignalDetector:
         if len(powers_2k) < 5:
             return False, None, None
         
-        # Check for sudden amplitude drop (solar flare signature)
-        # Look for >10 dB drop in <3 seconds
-        for i in range(len(powers_2k) - 2):
-            drop = powers_2k[i] - powers_2k[i+2]
-            if drop > 10.0:  # >10 dB drop in 2 seconds
-                return True, "sudden_amplitude_drop", 0.8
+        # Guard: check tone SNR before anomaly detection.
+        # At low SNR the power measurements are noise-dominated and
+        # fluctuations reflect noise statistics, not ionospheric events.
+        first3 = np.mean(powers_2k[:3])
+        last3 = np.mean(powers_2k[-3:])
+        expected_drop = 3.0 * (len(powers_2k) - 2)
+        tone_snr = first3 - last3 - expected_drop
+        if tone_snr < 6.0:
+            return False, None, None
         
-        # Check for sudden amplitude increase (sporadic E)
-        # Look for >8 dB increase in <3 seconds
-        for i in range(len(powers_2k) - 2):
-            increase = powers_2k[i+2] - powers_2k[i]
-            if increase > 8.0:  # >8 dB increase in 2 seconds
-                return True, "sudden_amplitude_increase", 0.7
-        
-        # Check for rapid fading (severe scintillation)
-        # High variance in detrended signal
+        # Detrend first: remove expected -3dB/sec attenuation pattern
         expected_atten_db = np.array([-3.0 * i for i in range(len(powers_2k))])
         detrended = powers_2k - (powers_2k[0] + expected_atten_db)
         
-        if np.std(detrended) > 5.0:  # >5 dB RMS fluctuation
+        # Check for sudden amplitude drop (solar flare signature)
+        # Must exceed the expected -6dB/2sec attenuation by a large margin
+        for i in range(len(detrended) - 2):
+            drop = detrended[i] - detrended[i+2]
+            if drop > 12.0:  # >12 dB EXTRA drop beyond expected attenuation
+                return True, "sudden_amplitude_drop", 0.8
+        
+        # Check for sudden amplitude increase (sporadic E)
+        # Signal should be monotonically decreasing; any large increase is anomalous
+        for i in range(len(detrended) - 2):
+            increase = detrended[i+2] - detrended[i]
+            if increase > 10.0:  # >10 dB increase in detrended signal
+                return True, "sudden_amplitude_increase", 0.7
+        
+        # Check for rapid fading (severe scintillation)
+        # Normal HF channels have 3-6 dB RMS fluctuation; only flag truly severe cases
+        if np.std(detrended) > 8.0:  # >8 dB RMS fluctuation (was 5.0, too sensitive)
             return True, "rapid_fading", 0.6
         
         # Check for frequency-selective fade
@@ -1697,21 +1797,21 @@ class WWVTestSignalDetector:
         Returns:
             Quality grade string
         """
-        # Default values for missing metrics (neutral)
+        # Default values for missing metrics (neutral — don't penalize)
         snr = snr_db if snr_db is not None else 10.0
         delay = delay_spread_ms if delay_spread_ms is not None else 1.0
-        coherence = coherence_time_sec if coherence_time_sec is not None else 2.0
+        coherence = coherence_time_sec if coherence_time_sec is not None else 5.0
         
-        # Excellent channel
+        # Excellent channel (rare on HF — very strong, stable signal)
         if snr > 20 and delay < 0.5 and coherence > 5.0:
             return "excellent"
         
-        # Good channel
-        if snr > 10 and delay < 2.0 and coherence > 2.0:
+        # Good channel (typical daytime on well-propagated frequencies)
+        if snr > 8 and delay < 2.0 and coherence > 2.0:
             return "good"
         
-        # Fair channel
-        if snr > 5 and delay < 5.0 and coherence > 1.0:
+        # Fair channel (marginal propagation, still usable)
+        if snr > 3 and delay < 5.0 and coherence > 0.5:
             return "fair"
         
         # Poor channel

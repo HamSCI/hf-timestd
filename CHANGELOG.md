@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.6.0] - 2026-02-09
+
+### Web-API UI Review & Test Signal Pipeline Fixes
+
+Pre-demo review of all 13 web-API UI pages for HamSCI-WWV working group presentation.
+
+#### Test Signal Metric Fixes (wwv_test_signal.py)
+- **SNR estimator**: Replaced broadband power ratio (~0 dB for narrowband tones) with spectral SNR measuring tone peak vs adjacent noise floor in FFT domain
+- **Coherence time estimator**: Limited to first 5 windows where tone SNR is sufficient; switched to least-squares detrending
+- **Channel quality thresholds**: Adjusted to HF-realistic values (spectral SNR typically 5–15 dB)
+
+#### Memory Leak Fixes
+- **chu_fsk_decoder.py**: Extract 1.1s audio slice before demodulation instead of full 60s buffer; reduces hilbert() allocation from 23 MB to 0.4 MB per call
+- **metrology_service.py**: Copy numpy arrays from decompressed buffers and release memmap file descriptors promptly
+
+#### Web-API Backend
+- **logs.py**: Graceful fallback when journalctl fails (returns hint instead of HTTP 500); added timestd user to systemd-journal group
+- **correlations.py**: 15s async timeout wrapper on all 5 endpoints to prevent hanging on slow HDF5 reads
+
+#### Web-API Frontend
+- **test_signal.html**: Fixed Frequency Analysis tab — S4 tones and slope charts were referencing undefined variable; now builds measurement array from API response correctly
+- **logs.html**: Shows helpful error message with fix command when journalctl access denied
+- **All pages**: Added 📡 Test Signal nav link; fixed missing 📊 24h link on solar-correlation page; fixed corrupted emoji
+
+#### Files Modified
+- `src/hf_timestd/core/wwv_test_signal.py` - SNR, coherence time, channel quality fixes
+- `src/hf_timestd/core/chu_fsk_decoder.py` - Memory leak fix
+- `src/hf_timestd/core/metrology_service.py` - Memory leak fix
+- `web-api/routers/correlations.py` - Timeout wrapper
+- `web-api/routers/logs.py` - Graceful journalctl fallback
+- `web-api/static/*.html` - 13 pages: nav consistency, test_signal fix, logs error handling
+
 ## [6.5.1] - 2026-02-07
 
 ### Dual Kalman Architecture & Chrony Feed Fixes

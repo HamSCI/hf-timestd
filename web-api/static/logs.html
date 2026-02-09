@@ -124,6 +124,7 @@
                 <span class="nav-divider"></span>
                 <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
                 <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/test_signal.html" class="nav-link">📡 Test Signal</a>
                 <a href="/static/solar-correlation.html" class="nav-link">☀️ Solar</a>
                 <a href="/static/dashboard-24h.html" class="nav-link">📊 24h</a>
                 <span class="nav-divider"></span>
@@ -221,6 +222,16 @@
                 if (level) params.append('level', level);
 
                 const data = await api.get(`/logs/?${params.toString()}`);
+
+                // Check for backend error (e.g., journalctl permission denied)
+                if (data.error) {
+                    logDisplay.innerHTML = `<div style="padding: 20px; text-align: center; color: #f59e0b;">
+                        <div style="font-size: 16px; margin-bottom: 8px;">⚠️ ${escapeHtml(data.error)}</div>
+                        <div style="font-size: 12px; color: #64748b;">Run: <code>sudo usermod -aG systemd-journal timestd</code> then restart the web-api service</div>
+                    </div>`;
+                    document.getElementById('log-count').textContent = 0;
+                    return;
+                }
 
                 // Filter client-side for search (journalctl search is limited via grep)
                 let logs = data.logs;

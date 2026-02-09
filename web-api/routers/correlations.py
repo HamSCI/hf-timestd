@@ -8,6 +8,9 @@ from fastapi import APIRouter, Query, HTTPException
 from datetime import datetime, timedelta
 from typing import Optional
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from services.correlation_service import CorrelationService
 from config import config
@@ -18,6 +21,25 @@ router = APIRouter(prefix="/correlations", tags=["correlations"])
 
 # Initialize service
 correlation_service = CorrelationService(config.data_root)
+
+# Thread pool for running sync correlation functions with timeout
+_executor = ThreadPoolExecutor(max_workers=2)
+CORRELATION_TIMEOUT_S = 15
+
+
+async def _run_with_timeout(func, *args, **kwargs):
+    """Run a sync function in a thread pool with a timeout."""
+    loop = asyncio.get_event_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_executor, partial(func, *args, **kwargs)),
+            timeout=CORRELATION_TIMEOUT_S
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Correlation analysis timed out after {CORRELATION_TIMEOUT_S}s — try a shorter time range"
+        )
 
 # Station coordinates (from stations router)
 STATION_COORDS = {
@@ -55,7 +77,8 @@ async def get_snr_solar_correlation(
         rx_coords = (config.station_metadata['latitude'], config.station_metadata['longitude'])
         tx_coords = STATION_COORDS[station]
         
-        result = correlation_service.analyze_snr_solar_zenith(
+        result = await _run_with_timeout(
+            correlation_service.analyze_snr_solar_zenith,
             station=station,
             frequency=frequency,
             start=start,
@@ -93,7 +116,9 @@ async def get_sid_correlation(
         end = datetime.utcnow()
         start = end - timedelta(hours=hours)
         
-        result = correlation_service.detect_sid_correlation(start, end)
+        result = await _run_with_timeout(
+            correlation_service.detect_sid_correlation, start, end
+        )
         
         if 'error' in result:
             raise HTTPException(status_code=404, detail=result['error'])
@@ -126,7 +151,8 @@ async def get_tec_f107_correlation(
         if station not in STATION_COORDS:
             raise HTTPException(status_code=400, detail=f"Invalid station: {station}")
         
-        result = correlation_service.analyze_tec_f107_correlation(
+        result = await _run_with_timeout(
+            correlation_service.analyze_tec_f107_correlation,
             station=station,
             days=days
         )
@@ -162,7 +188,9 @@ async def get_propagation_kp_correlation(
         end = datetime.utcnow()
         start = end - timedelta(hours=hours)
         
-        result = correlation_service.analyze_propagation_mode_kp(start, end)
+        result = await _run_with_timeout(
+            correlation_service.analyze_propagation_mode_kp, start, end
+        )
         
         if 'error' in result:
             raise HTTPException(status_code=404, detail=result['error'])
@@ -197,10 +225,14 @@ async def get_correlation_summary(
         start = end - timedelta(hours=hours)
         
         # Get SID correlation
-        sid_result = correlation_service.detect_sid_correlation(start, end)
+        sid_result = await _run_with_timeout(
+            correlation_service.detect_sid_correlation, start, end
+        )
         
         # Get propagation-Kp correlation
-        kp_result = correlation_service.analyze_propagation_mode_kp(start, end)
+        kp_result = await _run_with_timeout(
+            correlation_service.analyze_propagation_mode_kp, start, end
+        )
         
         summary = {
             'timestamp': datetime.utcnow().isoformat() + 'Z',
