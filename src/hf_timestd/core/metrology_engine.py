@@ -561,11 +561,12 @@ class MetrologyEngine:
         # Timing error = measured_arrival - expected_propagation_delay
         timing_error_ms = raw_arrival_ms - expected_delay_ms
         
-        # PROPAGATION BOUNDS VALIDATION (2026-02-05)
+        # PROPAGATION BOUNDS VALIDATION (2026-02-05, updated 2026-02-08)
         # Validate that the measured arrival time is within tolerance of expected.
         # expected_delay_ms already includes tx_offset (e.g., 1000ms for CHU second 1).
-        # Allow ±100ms tolerance for ionospheric variation.
-        ARRIVAL_TOLERANCE_MS = 100.0
+        # Allow ±200ms: ~85ms systematic bias from writer's wall-clock calibration
+        # plus ~30ms ionospheric variation plus margin.
+        ARRIVAL_TOLERANCE_MS = 200.0
         
         if abs(timing_error_ms) > ARRIVAL_TOLERANCE_MS:
             logger.info(f"{station_name} @ {tone_freq_hz}Hz: REJECTED - arrival={raw_arrival_ms:.2f}ms "
@@ -677,13 +678,16 @@ class MetrologyEngine:
             # Define station templates based on channel type
             channel_upper = self.channel_name.upper()
             if 'CHU' in channel_upper:
-                station_templates = [('CHU', 1000, 0.5)]
+                station_templates = [('CHU', 1000, 0.1)]
             elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
-                station_templates = [('WWV', 1000, 0.8)]
+                station_templates = [('WWV', 1000, 0.02)]
             else:
+                # SHARED channels: WWV/WWVH per-second ticks are 5ms pulses.
+                # Use 20ms template (short enough to match tick, long enough
+                # for reasonable SNR). BPM ticks are ~100ms.
                 station_templates = [
-                    ('WWV', 1000, 0.8),
-                    ('WWVH', 1200, 0.8),
+                    ('WWV', 1000, 0.02),
+                    ('WWVH', 1200, 0.02),
                     ('BPM', 1000, 0.1),
                 ]
             

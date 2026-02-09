@@ -523,6 +523,12 @@ class BinaryArchiveWriter:
                 'radiod_snr_db': self.config.radiod_snr_db,  # SNR from radiod
                 'written_at': datetime.now(timezone.utc).isoformat(),
                 'station': self.config.station_config,
+                # Counter-space correction: timing_snapshots[].rtp_timesnap is in
+                # radiod status counter space, but start_rtp_timestamp is in packet
+                # counter space. They differ by the filter pipeline depth (constant
+                # per session). Add this offset to rtp_timesnap before comparing
+                # with start_rtp_timestamp.
+                'pipeline_offset_samples': self._pipeline_offset_samples or 0,
                 # Timing snapshots: GPS_TIME/RTP_TIMESNAP pairs from radiod (~2 Hz)
                 # Enables post-hoc RTP-to-UTC conversion and timing validation
                 'timing_snapshots': [s.to_dict() for s in buffer.timing_snapshots]
