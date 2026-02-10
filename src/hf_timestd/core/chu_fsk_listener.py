@@ -261,14 +261,37 @@ class CHUFSKListener:
 
     def _decode_loop(self):
         """Run FSK decode at the top of each minute."""
+        from datetime import datetime, timezone
         from hf_timestd.core.chu_fsk_decoder import CHUFSKDecoder
+        from hf_timestd.io.hdf5_writer import DataProductWriter
+        from hf_timestd.data_product_registry import DataProductRegistry
 
-        # Create decoders
+        # Create decoders and HDF5 writers
+        hdf5_writers: Dict[int, DataProductWriter] = {}
         for freq, ch in self.channels.items():
             self._decoders[freq] = CHUFSKDecoder(
                 sample_rate=ch.sample_rate,
                 channel_name=ch.description,
             )
+            try:
+                data_root = Path('/var/lib/timestd/phase2') / ch.iq_channel
+                fsk_dir = DataProductRegistry.get_data_dir(
+                    channel_dir=data_root,
+                    product_level='L2',
+                    product_name='chu_fsk',
+                    create=True,
+                )
+                hdf5_writers[freq] = DataProductWriter(
+                    output_dir=fsk_dir,
+                    product_level='L2',
+                    product_name='chu_fsk',
+                    channel=ch.iq_channel,
+                    version='v1',
+                    processing_version='1.0.0',
+                )
+                logger.info(f"{ch.description}: HDF5 writer -> {fsk_dir}")
+            except Exception as e:
+                logger.error(f"{ch.description}: Failed to init HDF5 writer: {e}")
 
         # Wait for first full minute of data
         time.sleep(5)
@@ -319,8 +342,14 @@ class CHUFSKListener:
                         with self._results_lock:
                             self._results[ch.iq_channel] = result
 
-                        # Write to shared JSON for metrology service
+                        # Write to shared JSON for real-time dashboard
                         self._write_result_json(ch.iq_channel, result, minute_boundary)
+
+                        # Write to HDF5 for persistent history
+                        self._write_result_hdf5(
+                            hdf5_writers.get(freq), ch.iq_channel,
+                            result, minute_boundary
+                        )
 
                     except Exception as e:
                         logger.error(f"{ch.description}: FSK decode error: {e}",
@@ -329,6 +358,35 @@ class CHUFSKListener:
             except Exception as e:
                 logger.error(f"CHU FSK decode loop error: {e}", exc_info=True)
                 time.sleep(10)
+
+    def _write_result_hdf5(self, writer, iq_channel: str, result, minute_boundary: int):
+        """Write FSK result to HDF5 for persistent history."""
+        if writer is None:
+            return
+        try:
+            from datetime import datetime, timezone
+            rec = {
+                'timestamp_utc': datetime.fromtimestamp(
+                    minute_boundary, tz=timezone.utc
+                ).isoformat(),
+                'minute_boundary_utc': minute_boundary,
+                'channel': iq_channel,
+                'fsk_valid': result.detected,
+                'frames_decoded': result.frames_decoded,
+                'decode_confidence': result.decode_confidence,
+                'decoded_day': result.decoded_day,
+                'decoded_hour': result.decoded_hour,
+                'decoded_minute': result.decoded_minute,
+                'dut1_seconds': result.dut1_seconds,
+                'tai_utc': result.tai_utc,
+                'year': result.year,
+                'timing_offset_ms': result.timing_offset_ms,
+                'processed_at': datetime.now(timezone.utc).isoformat(),
+                'processing_version': '1.0.0',
+            }
+            writer.write_measurement(rec)
+        except Exception as e:
+            logger.warning(f"Failed to write FSK HDF5 for {iq_channel}: {e}")
 
     def _write_result_json(self, iq_channel: str, result, minute_boundary: int):
         """Write FSK result to shared JSON for metrology service."""

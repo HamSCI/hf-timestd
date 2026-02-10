@@ -193,28 +193,46 @@ class CHUFSKService:
         end: datetime
     ) -> Dict[str, Any]:
         """
-        Get CHU FSK history.
+        Get CHU FSK history from HDF5 files.
         
-        Note: Currently only returns the latest result per channel since
-        FSK results are stored as single JSON files (not time series).
-        Historical HDF5 storage is not yet implemented.
+        Reads L2/chu_fsk HDF5 products written by the FSK listener.
         """
-        # Only current snapshots available from JSON
-        channels = self.get_all_channels()
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
+        from hf_timestd.io.hdf5_reader import DataProductReader
+
         timestamps = []
         dut1_values = []
         timing_offsets = []
         confidences = []
         channel_names = []
-        
-        for ch_name, ch_data in channels.items():
-            if ch_data.get('available') and ch_data.get('detected'):
-                timestamps.append(ch_data.get('last_decode'))
-                dut1_values.append(None)  # DUT1 not always available
-                timing_offsets.append(ch_data.get('timing_offset_ms'))
-                confidences.append(ch_data.get('decode_confidence'))
-                channel_names.append(ch_name)
-        
+
+        phase2_dir = self.data_root / 'phase2'
+
+        for channel in self.chu_channels:
+            channel_dir = phase2_dir / channel
+            if not channel_dir.exists():
+                continue
+            try:
+                reader = DataProductReader(
+                    data_dir=channel_dir,
+                    product_level='L2',
+                    product_name='chu_fsk',
+                    channel=channel,
+                )
+                measurements = reader.read_time_range(
+                    start=start.isoformat() + 'Z',
+                    end=end.isoformat() + 'Z',
+                )
+                for m in measurements:
+                    timestamps.append(m.get('timestamp_utc'))
+                    dut1_values.append(m.get('dut1_seconds'))
+                    timing_offsets.append(m.get('timing_offset_ms'))
+                    confidences.append(m.get('decode_confidence'))
+                    channel_names.append(channel)
+            except Exception as e:
+                logger.debug(f"Could not read FSK history from {channel}: {e}")
+
         return {
             'timestamps': timestamps,
             'dut1_seconds': dut1_values,
