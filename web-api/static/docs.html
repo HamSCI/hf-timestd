@@ -479,6 +479,9 @@
                 case 'ionospheric-conditions':
                     renderIonosphericConditionsWidget(container);
                     break;
+                case 'reanalysis-summary':
+                    renderReanalysisSummaryWidget(container);
+                    break;
                 default:
                     container.innerHTML = `<div class="widget-title">Unknown widget: ${widgetType}</div>`;
             }
@@ -1137,6 +1140,63 @@
                 `;
             } catch (e) {
                 container.innerHTML = '<div style="color: #64748b; padding: 12px;">Conditions data unavailable</div>';
+            }
+        }
+        
+        // Widget: Ionospheric Reanalysis Summary
+        async function renderReanalysisSummaryWidget(container) {
+            try {
+                const res = await fetch('/api/propagation/conditions');
+                if (!res.ok) throw new Error('Propagation data unavailable');
+                const data = await res.json();
+                
+                const mufRT = data.muf_realtime_mhz;
+                const mufRA = data.muf_reanalyzed_mhz;
+                const mufBest = data.muf_estimate_mhz;
+                const nMeas = data.n_measurements || 0;
+                
+                // Determine if reanalysis improved the estimate
+                const hasReanalysis = mufRA !== null && mufRA !== undefined;
+                const improved = hasReanalysis && mufRT && Math.abs(mufRA - mufRT) > 0.5;
+                const correction = hasReanalysis && mufRT ? (mufRT - mufRA).toFixed(1) : null;
+                
+                const mufStatus = hasReanalysis ? 'status-good' : 'status-warn';
+                const sourceLabel = hasReanalysis ? 'Physics-validated' : 'Real-time only';
+                
+                container.innerHTML = `
+                    <div class="widget-title">Ionospheric Reanalysis — Live</div>
+                    <div class="widget-grid">
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">MUF (Best Estimate)</div>
+                            <div class="widget-metric-value ${mufStatus}">${mufBest ? mufBest.toFixed(1) : '—'}<span class="widget-unit">MHz</span></div>
+                            <div style="font-size: 11px; color: #64748b;">${sourceLabel}</div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Real-time MUF</div>
+                            <div class="widget-metric-value" style="color: ${improved ? '#f59e0b' : '#94a3b8'}">${mufRT ? mufRT.toFixed(1) : '—'}<span class="widget-unit">MHz</span></div>
+                            <div style="font-size: 11px; color: #64748b;">Naive (no physics)</div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Reanalyzed MUF</div>
+                            <div class="widget-metric-value" style="color: ${hasReanalysis ? '#22c55e' : '#64748b'}">${mufRA ? mufRA.toFixed(1) : '—'}<span class="widget-unit">MHz</span></div>
+                            <div style="font-size: 11px; color: #64748b;">foF2 + oblique MUF</div>
+                        </div>
+                        <div class="widget-metric">
+                            <div class="widget-metric-label">Correction</div>
+                            <div class="widget-metric-value">${correction ? correction : '—'}<span class="widget-unit">MHz</span></div>
+                            <div style="font-size: 11px; color: #64748b;">${improved ? 'Noise removed' : 'No change'}</div>
+                        </div>
+                    </div>
+                    <div class="widget-subtitle">
+                        ${hasReanalysis ? 
+                            (improved ? 
+                                '⚠️ Real-time MUF was inflated by ' + correction + ' MHz due to noise-floor detections misclassified as F-layer modes. Reanalysis corrected this using solar zenith angle and Chapman layer foF2 estimation.' :
+                                '✅ Real-time and reanalyzed MUF agree — mode assignments are physically consistent.') :
+                            'ℹ️ Reanalysis data not yet available for this hour. The service runs at :05 past each hour.'}
+                    </div>
+                `;
+            } catch (e) {
+                container.innerHTML = '<div style="color: #64748b; padding: 12px;">Reanalysis data unavailable</div>';
             }
         }
         

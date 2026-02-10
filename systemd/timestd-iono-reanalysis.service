@@ -1,0 +1,34 @@
+[Unit]
+Description=HF-TimeStd Ionospheric Reanalysis
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network.target
+
+[Service]
+Type=oneshot
+User=timestd
+Group=timestd
+
+# Run at lowest priority to avoid interfering with real-time services
+Nice=19
+IOSchedulingClass=idle
+
+# Ensure output directories exist with correct permissions
+ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/science/propagation_stats
+ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/science/tec_reanalyzed
+ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/science
+
+ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.ionospheric_reanalysis \
+    --data-root /var/lib/timestd \
+    --grid EM38ww \
+    --hours 1
+
+# Timeout: should complete well within 5 minutes
+TimeoutStartSec=300
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-iono-reanalysis
+
+[Install]
+WantedBy=multi-user.target

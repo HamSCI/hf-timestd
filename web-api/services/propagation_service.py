@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from collections import Counter
 import logging
+import re
 
 from hf_timestd.io.hdf5_reader import DataProductReader
 
@@ -163,8 +164,6 @@ class PropagationService:
             
             # Analyze per-broadcast (station + frequency)
             broadcast_stats = {}
-            f_layer_freqs = []  # For MUF calculation
-            all_freqs = []  # For fallback MUF
             
             for m in all_measurements:
                 station = m.get('station', 'UNKNOWN')
@@ -172,10 +171,6 @@ class PropagationService:
                 mode = m.get('propagation_mode', 'UNKNOWN')
                 snr = m.get('snr_db')
                 timestamp = m.get('timestamp_utc')
-                
-                # Track all frequencies for MUF fallback
-                if freq > 0:
-                    all_freqs.append(freq)
                 
                 # Validate station/frequency combination
                 if not self._is_valid_broadcast(station, freq):
@@ -200,12 +195,6 @@ class PropagationService:
                 if snr is not None:
                     broadcast_stats[broadcast_key]['snr_values'].append(snr)
                 
-                # Track F-layer frequencies for MUF (more robust matching)
-                if mode and freq > 0:
-                    mode_upper = mode.upper()
-                    # Match any F-layer mode: 1F, 2F, 3F, etc.
-                    if 'F' in mode_upper and mode_upper != 'UNKNOWN':
-                        f_layer_freqs.append(freq)
             
             # Calculate per-broadcast statistics
             broadcasts = []
@@ -229,21 +218,40 @@ class PropagationService:
             # Sort by frequency
             broadcasts.sort(key=lambda x: x['frequency_mhz'])
             
-            # Estimate current MUF (Maximum Usable Frequency)
+            # Estimate current MUF from per-broadcast aggregated stats.
+            # Require: (1) dominant mode is F-layer (regex: digit + F),
+            #          (2) avg SNR >= 15 dB (real signal, not noise),
+            #          (3) at least 3 measurements (not a fluke).
+            f_layer_pattern = re.compile(r'^\d+F')
+            f_layer_freqs = []
+            for b in broadcasts:
+                dom = b.get('dominant_mode', '')
+                if (f_layer_pattern.match(dom)
+                        and (b.get('avg_snr_db') or 0) >= 15.0
+                        and b.get('n_measurements', 0) >= 3):
+                    f_layer_freqs.append(b['frequency_mhz'])
+            
             muf_estimate = None
             if f_layer_freqs:
-                # MUF ≈ 1.15 × highest observed F-layer frequency
+                # MUF ≈ 1.15 × highest credible F-layer frequency
                 muf_estimate = self._sanitize_value(max(f_layer_freqs) * 1.15)
-            elif all_freqs:
-                # Fallback: Use highest observed frequency × 1.3
-                muf_estimate = self._sanitize_value(max(all_freqs) * 1.3)
+            
+            # Check for reanalyzed MUF from ionospheric reanalysis service.
+            # The reanalysis applies physics-based mode validation (foF2,
+            # oblique MUF, SNR gating) and produces a more reliable estimate.
+            reanalyzed_muf = self._get_reanalyzed_muf(start_time, end_time)
+            
+            # Prefer reanalyzed MUF when available
+            best_muf = reanalyzed_muf if reanalyzed_muf is not None else muf_estimate
             
             result = self._deep_sanitize({
                 'timestamp': end_time.isoformat() + 'Z',
                 'time_span_hours': 1.0,
                 'n_measurements': len(all_measurements),
                 'broadcasts': broadcasts,
-                'muf_estimate_mhz': muf_estimate,
+                'muf_estimate_mhz': best_muf,
+                'muf_realtime_mhz': muf_estimate,
+                'muf_reanalyzed_mhz': reanalyzed_muf,
                 'n_broadcasts': len(broadcasts)
             })
             
@@ -253,6 +261,56 @@ class PropagationService:
             logger.error(f"Error getting current conditions: {e}", exc_info=True)
             return None
     
+    def _get_reanalyzed_muf(
+        self,
+        start_time: datetime,
+        end_time: datetime
+    ) -> Optional[float]:
+        """
+        Read the most recent reanalyzed MUF from L3C propagation stats.
+
+        The ionospheric reanalysis service writes hourly L3C records with
+        physics-validated MUF estimates. Returns the highest non-null MUF
+        from the most recent reanalysis hour, or None if unavailable.
+        """
+        try:
+            reanalysis_dir = self.phase2_dir / 'science' / 'propagation_stats'
+            if not reanalysis_dir.exists():
+                return None
+
+            reader = DataProductReader(
+                data_dir=reanalysis_dir,
+                product_level='L3C',
+                product_name='propagation_stats',
+                channel='REANALYSIS',
+                use_registry=False
+            )
+
+            records = reader.read_time_range(
+                start=start_time.isoformat() + 'Z',
+                end=end_time.isoformat() + 'Z'
+            )
+
+            if not records:
+                return None
+
+            # Collect all non-null MUF estimates from the reanalysis period
+            muf_values = []
+            for r in records:
+                muf = r.get('estimated_muf_mhz')
+                if muf is not None and muf > 0:
+                    muf_values.append(float(muf))
+
+            if not muf_values:
+                return None
+
+            # Return the maximum reanalyzed MUF
+            return self._sanitize_value(max(muf_values))
+
+        except Exception as e:
+            logger.debug(f"Reanalyzed MUF not available: {e}")
+            return None
+
     def get_mode_timeline(
         self,
         start: datetime,

@@ -33,6 +33,7 @@ AVAILABLE_DOCS = {
     "IONOSPHERIC_RESOLUTION": "IONOSPHERIC_RESOLUTION.md",
     "DUAL_CHRONY_FEED_ARCHITECTURE": "DUAL_CHRONY_FEED_ARCHITECTURE.md",
     "BOOTSTRAP_METHODOLOGY": "BOOTSTRAP_METHODOLOGY.md",
+    "IONOSPHERIC_REANALYSIS": "IONOSPHERIC_REANALYSIS.md",
     "TECHNICAL_REFERENCE": "../TECHNICAL_REFERENCE.md",
 }
 
@@ -254,6 +255,7 @@ EVIDENCE_SOURCES = {
     "metrology": ("/var/log/hf-timestd/metrology.log", "timestd-metrology"),
     "arrival_matrix": ("/var/log/hf-timestd/core-recorder.log", "timestd-core-recorder"),
     "consistency": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
+    "reanalysis": (None, "timestd-iono-reanalysis"),
 }
 
 # Predefined filter patterns for each source
@@ -317,6 +319,13 @@ EVIDENCE_PATTERNS = {
     "metrology": {
         "detection": r"detect|tone|signal",
         "measurement": r"measure|D_clock|timing",
+    },
+    "reanalysis": {
+        "mode_validation": r"rejected|reclassified|Reanalysis:|mode_physically_valid",
+        "muf_estimate": r"MUF|oblique_muf|fof2|foF2|estimated_muf",
+        "tec_reanalysis": r"TEC.*TECU|Negative slope|Physical Inconsistency|tec_tecu",
+        "solar_physics": r"solar_elev|fof2|Chapman|solar zenith",
+        "hourly_summary": r"Reanalysis complete|Hour \\d+:00",
     },
 }
 

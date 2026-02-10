@@ -1,0 +1,17 @@
+[Unit]
+Description=HF-TimeStd Ionospheric Reanalysis Timer (Hourly)
+Documentation=https://github.com/mijahauan/hf-timestd
+Requires=timestd-iono-reanalysis.service
+
+[Timer]
+# Run at 5 minutes past each hour (allow real-time pipeline to finish writing)
+OnCalendar=*-*-* *:05:00
+
+# Add randomized delay to avoid load spikes
+RandomizedDelaySec=60
+
+# Run on boot if missed
+Persistent=true
+
+[Install]
+WantedBy=timers.target
