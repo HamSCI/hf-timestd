@@ -484,12 +484,12 @@ processor = "grape"
 ```bash
 # Test mode (development)
 ./scripts/install.sh --mode test
-./scripts/timestd-all.sh -start
+source venv/bin/activate
+python -m hf_timestd --config config/timestd-config.toml
 
 # Production mode (24/7 operation)
-sudo ./scripts/install.sh --mode production --user $USER
-sudo systemctl start timestd-core-recorder timestd-metrology timestd-web-api
-sudo systemctl enable timestd-core-recorder timestd-metrology timestd-web-api
+sudo ./scripts/install.sh --mode production
+sudo ./scripts/start-services.sh
 ```
 
 ### Manual Startup (Development)
@@ -664,8 +664,9 @@ python3 -c "from grape_recorder.grape.time_snap_reference import TimeSnapReferen
 ### Test Recorder
 
 ```bash
-./scripts/timestd-all.sh -start
-# Should see: channel connections, NPZ file writes
+source venv/bin/activate
+python -m hf_timestd --config config/timestd-config.toml
+# Should see: channel connections, raw_buffer file writes
 ```
 
 ### Verify Output Files

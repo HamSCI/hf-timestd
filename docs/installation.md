@@ -56,11 +56,11 @@ Start in test mode first:
 
 ---
 
-## Run (test scripts)
+## Run (test mode)
 
 ```bash
-./scripts/timestd-all.sh -start
-./scripts/timestd-all.sh -status
+source venv/bin/activate
+python -m hf_timestd --config config/timestd-config.toml
 ```
 
 ---

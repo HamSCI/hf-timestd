@@ -68,7 +68,7 @@ fi
 TIMERS=(
     "timestd-ionex-download.timer"
     "timestd-chrony-monitor.timer"
-    "timestd-upload-daily.timer"
+    "timestd-iono-reanalysis.timer"
     "grape-daily.timer"
 )
 

@@ -74,11 +74,12 @@ For temporary capability testing or development.
 # 2. Edit local configuration
 nano config/timestd-config.toml
 
-# 3. Start services (interactive scripts)
-./scripts/timestd-all.sh -start
+# 3. Start core recorder
+source venv/bin/activate
+python -m hf_timestd --config config/timestd-config.toml
 
-# 4. Check status
-./scripts/timestd-all.sh -status
+# 4. In another terminal, start web API
+cd web-api && ../venv/bin/python main.py
 ```
 
 ### Test Paths
