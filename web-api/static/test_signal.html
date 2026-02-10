@@ -543,7 +543,8 @@
 
     function solarY2Axis() {
         return {
-            title: 'Solar Elevation (°)', overlaying: 'y', side: 'right',
+            title: 'Solar Elev. (°)', overlaying: 'y', side: 'right',
+            anchor: 'x',
             gridcolor: 'rgba(148,163,184,0.05)', zeroline: true,
             zerolinecolor: 'rgba(245,158,11,0.3)', zerolinewidth: 1,
             range: [-90, 90], showgrid: false,
@@ -1001,7 +1002,7 @@
     function tecY3Axis() {
         return {
             title: 'TEC (TECU)', overlaying: 'y', side: 'right',
-            anchor: 'free', position: 1.0,
+            anchor: 'free', position: 1.06,
             gridcolor: 'rgba(148,163,184,0.03)', showgrid: false,
             titlefont: { size: 11, color: '#64748b' },
             tickfont: { size: 10, color: '#475569' },
@@ -1135,7 +1136,7 @@
             };
             if (hasTEC) {
                 layout.yaxis3 = tecY3Axis();
-                layout.margin = { t: 30, r: 100, b: 50, l: 60 };
+                layout.margin = { t: 30, r: 130, b: 50, l: 60 };
             }
 
             Plotly.newPlot(container, traces, pLayout(layout), { responsive: true });
