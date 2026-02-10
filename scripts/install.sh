@@ -15,7 +15,7 @@
 set -euo pipefail
 
 # Default values
-MODE="test"
+MODE=""
 INSTALL_USER="${USER}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --mode test|production  Installation mode (default: test)"
+            echo "  --mode test|production  Installation mode (prompts if omitted)"
             echo "  --user <username>       User to run services as (default: current user)"
             echo "  --verbose, -v           Verbose output"
             echo "  --help, -h              Show this help"
@@ -68,8 +68,8 @@ while [[ $# -gt 0 ]]; do
             echo "  - Data stored in /var/lib/timestd"
             echo "  - Configuration in /etc/hf-timestd"
             echo "  - Systemd services for auto-start and recovery"
-            echo "  - Web UI (FastAPI) on port 8080"
-            echo "  - Daily upload timer enabled"
+            echo "  - Web API (FastAPI) on port 8000"
+            echo "  - Periodic timers and cron jobs enabled"
             exit 0
             ;;
         *)
@@ -78,6 +78,37 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Interactive mode selection if --mode not specified
+if [[ -z "$MODE" ]]; then
+    echo ""
+    echo "=============================================="
+    echo "  TimeStd Recorder Installation"
+    echo "=============================================="
+    echo ""
+    echo "  Select installation mode:"
+    echo ""
+    echo "    1) test"
+    echo "       - Data in /tmp/timestd-test"
+    echo "       - Manual startup, no systemd services"
+    echo "       - For development and testing"
+    echo ""
+    echo "    2) production"
+    echo "       - Data in /var/lib/timestd"
+    echo "       - Systemd services with auto-start"
+    echo "       - Web API on port 8000"
+    echo "       - Requires sudo"
+    echo ""
+    while true; do
+        read -rp "  Enter choice [1/2]: " choice
+        case "$choice" in
+            1|test)       MODE="test"; break ;;
+            2|production) MODE="production"; break ;;
+            *)            echo "  Invalid choice. Enter 1 or 2." ;;
+        esac
+    done
+    echo ""
+fi
 
 # Validate mode
 if [[ "$MODE" != "test" && "$MODE" != "production" ]]; then
