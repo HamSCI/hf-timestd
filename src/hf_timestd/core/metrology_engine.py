@@ -888,37 +888,12 @@ class MetrologyEngine:
             doppler_metrics = doppler_info
             
         # 2C. CHU FSK Time Code Decoding
+        # FSK tones (2025/2225 Hz) are attenuated by the IQ decimation filter,
+        # so decoding is done by separate USB sidecar channels (CHUFSKListener).
+        # Results are read from shared JSON in /dev/shm/timestd/fsk_results/.
         chu_metrics = {}
-        if hasattr(self, 'chu_fsk_decoder'):
-            fsk_res = self.chu_fsk_decoder.decode_minute(iq_samples, system_time)
-            logger.debug(f"{self.channel_name}: FSK decode result: detected={fsk_res.detected}, "
-                        f"frames={fsk_res.frames_decoded}/9, confidence={fsk_res.decode_confidence:.2f}")
-            if fsk_res.detected:
-                chu_metrics['fsk_valid'] = True
-                chu_metrics['fsk_frames_decoded'] = fsk_res.frames_decoded
-                chu_metrics['fsk_confidence'] = fsk_res.decode_confidence
-                
-                # Decoded time verification
-                if fsk_res.decoded_day is not None:
-                    chu_metrics['decoded_day'] = fsk_res.decoded_day
-                    chu_metrics['decoded_hour'] = fsk_res.decoded_hour
-                    chu_metrics['decoded_minute'] = fsk_res.decoded_minute
-                
-                # Auxiliary data from Frame B
-                if fsk_res.dut1_seconds is not None:
-                    chu_metrics['dut1_seconds'] = fsk_res.dut1_seconds
-                if fsk_res.tai_utc is not None:
-                    chu_metrics['tai_utc'] = fsk_res.tai_utc
-                if fsk_res.year is not None:
-                    chu_metrics['year'] = fsk_res.year
-                
-                # Timing precision
-                if fsk_res.timing_offset_ms is not None:
-                    chu_metrics['timing_offset_ms'] = fsk_res.timing_offset_ms
-                
-                logger.info(f"{self.channel_name}: CHU FSK decoded - "
-                           f"frames={fsk_res.frames_decoded}/9, "
-                           f"DUT1={fsk_res.dut1_seconds}s, TAI-UTC={fsk_res.tai_utc}s")
+        if self.is_chu_channel:
+            chu_metrics = self._read_fsk_result(minute_boundary)
         
         # === Step 2D: Per-Second Tick Detection (55+ estimates/minute) ===
         tick_results = {}
@@ -1105,6 +1080,49 @@ class MetrologyEngine:
                         logger.info(f"  Sample interval: {stability.sample_interval_mean:.0f}±{stability.sample_interval_std:.1f}")
             
         return results
+
+    def _read_fsk_result(self, minute_boundary: int) -> dict:
+        """Read CHU FSK result from shared JSON (written by CHUFSKListener)."""
+        from pathlib import Path
+        fsk_path = Path('/dev/shm/timestd/fsk_results') / f'{self.channel_name}.json'
+        try:
+            if not fsk_path.exists():
+                return {}
+            with open(fsk_path, 'r') as f:
+                data = json.load(f)
+            # Only use if reasonably fresh (within 2 minutes)
+            age = time.time() - data.get('written_at', 0)
+            if age > 120:
+                logger.debug(f"{self.channel_name}: FSK result stale ({age:.0f}s old)")
+                return {}
+            if not data.get('detected'):
+                logger.debug(f"{self.channel_name}: FSK result: not detected")
+                return {}
+            chu_metrics = {
+                'fsk_valid': True,
+                'fsk_frames_decoded': data.get('frames_decoded', 0),
+                'fsk_confidence': data.get('decode_confidence', 0.0),
+            }
+            if data.get('decoded_day') is not None:
+                chu_metrics['decoded_day'] = data['decoded_day']
+                chu_metrics['decoded_hour'] = data.get('decoded_hour')
+                chu_metrics['decoded_minute'] = data.get('decoded_minute')
+            if data.get('dut1_seconds') is not None:
+                chu_metrics['dut1_seconds'] = data['dut1_seconds']
+            if data.get('tai_utc') is not None:
+                chu_metrics['tai_utc'] = data['tai_utc']
+            if data.get('year') is not None:
+                chu_metrics['year'] = data['year']
+            if data.get('timing_offset_ms') is not None:
+                chu_metrics['timing_offset_ms'] = data['timing_offset_ms']
+            logger.info(f"{self.channel_name}: CHU FSK from USB sidecar - "
+                       f"frames={data.get('frames_decoded', 0)}/9, "
+                       f"DUT1={data.get('dut1_seconds')}s, "
+                       f"TAI-UTC={data.get('tai_utc')}s")
+            return chu_metrics
+        except Exception as e:
+            logger.debug(f"{self.channel_name}: Failed to read FSK result: {e}")
+            return {}
 
     def _station_from_channel_name(self) -> str:
         """Helper to guess station from name."""

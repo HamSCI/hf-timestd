@@ -51,7 +51,8 @@ class RobustManagedStream:
                  destination: Optional[str] = None, ssrc: Optional[int] = None,
                  on_samples=None, on_stream_dropped=None, on_stream_restored=None,
                  drop_timeout_sec: float = 3.0, restore_interval_sec: float = 1.0,
-                 samples_per_packet: int = 320, resequence_buffer_size: int = 64):
+                 samples_per_packet: int = 320, resequence_buffer_size: int = 64,
+                 low_edge: Optional[float] = None, high_edge: Optional[float] = None):
         self.control = control
         self.config = {
             'frequency_hz': frequency_hz,
@@ -61,7 +62,9 @@ class RobustManagedStream:
             'gain': gain,
             'encoding': encoding,
             'destination': destination,
-            'ssrc': ssrc
+            'ssrc': ssrc,
+            'low_edge': low_edge,
+            'high_edge': high_edge,
         }
         self.callbacks = {
             'on_samples': on_samples,
@@ -124,6 +127,8 @@ class RobustManagedStream:
             )
             
             if self.channel_info:
+                # Set filter edges if configured (widens passband for FSK etc.)
+                self._set_filter_edges(self.channel_info.ssrc)
                 # Start RadiodStream
                 self.stream = RadiodStream(
                     channel=self.channel_info,
@@ -141,6 +146,35 @@ class RobustManagedStream:
             logger.debug(f"RobustManagedStream: ensure failed: {e}")
             
         return False
+
+    def _set_filter_edges(self, ssrc: int):
+        """Send filter edge commands to radiod if configured."""
+        low = self.config.get('low_edge')
+        high = self.config.get('high_edge')
+        if low is None and high is None:
+            return
+        
+        try:
+            import secrets
+            from ka9q.types import StatusType
+            from ka9q.control import encode_int, encode_double, encode_eol, CMD
+            
+            cmdbuffer = bytearray()
+            cmdbuffer.append(CMD)
+            encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
+            encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
+            
+            if low is not None:
+                encode_double(cmdbuffer, StatusType.LOW_EDGE, float(low))
+            if high is not None:
+                encode_double(cmdbuffer, StatusType.HIGH_EDGE, float(high))
+            
+            encode_eol(cmdbuffer)
+            self.control.send_command(cmdbuffer)
+            
+            logger.info(f"Set filter edges for SSRC {ssrc}: low={low}, high={high}")
+        except Exception as e:
+            logger.warning(f"Failed to set filter edges: {e}")
 
     def get_quality(self) -> Optional[StreamQuality]:
         """Get current stream quality metrics."""
@@ -188,6 +222,11 @@ class StreamRecorderConfig:
     
     # RTP Destination
     destination: Optional[str] = None
+    
+    # Filter edges (Hz) — sent to radiod to control passband width
+    # Default None = use radiod's preset defaults
+    low_edge: Optional[float] = None
+    high_edge: Optional[float] = None
     
     # Tiered storage: hot buffer in /dev/shm, cold storage on disk
     tiered_storage: bool = False
@@ -391,6 +430,9 @@ class StreamRecorderV2:
         # Update config with SSRC from ka9q-python
         self.config.ssrc = self.channel_info.ssrc
         
+        # Set filter edges if configured (widens passband for FSK etc.)
+        self._set_filter_edges(self.channel_info.ssrc)
+        
         logger.info(f"{self.config.description}: Channel ready SSRC {self.channel_info.ssrc:08x} "
                    f"at {self.channel_info.multicast_address}:{getattr(self.channel_info, 'port', 5004)}")
         
@@ -415,6 +457,35 @@ class StreamRecorderV2:
         self._last_sample_time = time.time()  # Reset silence timer
         logger.info(f"{self.config.description}: RadiodStream started")
     
+    def _set_filter_edges(self, ssrc: int):
+        """Send filter edge commands to radiod if configured."""
+        low = self.config.low_edge
+        high = self.config.high_edge
+        if low is None and high is None:
+            return
+        
+        try:
+            import secrets
+            from ka9q.types import StatusType
+            from ka9q.control import encode_int, encode_double, encode_eol, CMD
+            
+            cmdbuffer = bytearray()
+            cmdbuffer.append(CMD)
+            encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
+            encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
+            
+            if low is not None:
+                encode_double(cmdbuffer, StatusType.LOW_EDGE, float(low))
+            if high is not None:
+                encode_double(cmdbuffer, StatusType.HIGH_EDGE, float(high))
+            
+            encode_eol(cmdbuffer)
+            self._control.send_command(cmdbuffer)
+            
+            logger.info(f"{self.config.description}: Set filter edges: low={low}, high={high}")
+        except Exception as e:
+            logger.warning(f"{self.config.description}: Failed to set filter edges: {e}")
+
     def _health_monitor_loop(self):
         """Monitor stream health and recreate channel if needed (e.g., after radiod restart)."""
         while self._running:

@@ -202,6 +202,17 @@ class CoreRecorderV2:
         self.status_file = self.output_dir / 'status' / 'core-recorder-status.json'
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
         
+        # CHU FSK Listener (USB channels for FSK decode, no archive)
+        self.fsk_listener = None
+        fsk_cfg = self.recorder_config.get('chu_fsk', {})
+        if fsk_cfg.get('channels'):
+            try:
+                from .chu_fsk_listener import CHUFSKListener
+                self.fsk_listener = CHUFSKListener(self.recorder_config, self.control)
+                logger.info(f"CHU FSK listener configured: {len(fsk_cfg['channels'])} channels")
+            except Exception as e:
+                logger.error(f"Failed to init CHU FSK listener: {e}", exc_info=True)
+        
         # Graceful shutdown
         self.running = False
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -277,6 +288,14 @@ class CoreRecorderV2:
                 except Exception as e:
                     logger.warning(f"Failed to register SSRC for {freq}: {e}")
         
+        # Start CHU FSK listener (USB channels, no archive)
+        if self.fsk_listener:
+            try:
+                self.fsk_listener.start()
+                logger.info("CHU FSK listener started")
+            except Exception as e:
+                logger.error(f"Failed to start CHU FSK listener: {e}", exc_info=True)
+        
         logger.info("Core recorder running. Press Ctrl+C to stop.")
         
         # Notify systemd we're ready
@@ -347,6 +366,8 @@ class CoreRecorderV2:
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
+        if self.fsk_listener:
+            self.fsk_listener.stop()
     
     def _initialize_channels(self) -> bool:
         """
@@ -372,7 +393,7 @@ class CoreRecorderV2:
                 
                 # Defaults are merged with channel-specific config
                 preset = ch_spec.get('preset', self.channel_defaults.get('preset', 'iq'))
-                sample_rate = self.channel_defaults.get('sample_rate')
+                sample_rate = ch_spec.get('sample_rate', self.channel_defaults.get('sample_rate'))
                 if sample_rate is None:
                      raise ValueError(f"No sample_rate configured for {freq} and no default provided")
                 encoding_val = ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
@@ -396,6 +417,10 @@ class CoreRecorderV2:
                 
                 # Create config - let StreamRecorderV2/RobustManagedStream call ensure_channel()
                 # with these parameters. The library will handle discovery and reuse.
+                # Filter edges: per-channel override, then channel_defaults
+                low_edge = ch_spec.get('low_edge', self.channel_defaults.get('low_edge'))
+                high_edge = ch_spec.get('high_edge', self.channel_defaults.get('high_edge'))
+                
                 rec_config = StreamRecorderConfig(
                     ssrc=None,  # Let ka9q-python compute the SSRC
                     frequency_hz=freq,
@@ -425,7 +450,11 @@ class CoreRecorderV2:
                     
                     # CRITICAL: Use None to let radiod assign destination consistently
                     # This ensures the same SSRC is computed every time
-                    destination=None
+                    destination=None,
+                    
+                    # Filter edges (Hz) for radiod passband control
+                    low_edge=float(low_edge) if low_edge is not None else None,
+                    high_edge=float(high_edge) if high_edge is not None else None,
                 )
                 
                 # Create recorder - it will call ensure_channel() which handles everything
