@@ -27,8 +27,25 @@ logger = logging.getLogger(__name__)
 FSK_RESULTS_DIR = Path('/dev/shm/timestd/fsk_results')
 
 
+# GPS epoch: 1980-01-06 00:00:00 UTC as Unix timestamp
+GPS_EPOCH_UNIX = 315964800
+GPS_LEAP_SECONDS = 18
+BILLION = 1_000_000_000
+
+
 class CHUFSKChannel:
-    """One USB channel accumulating audio for FSK decode."""
+    """One USB channel accumulating audio for FSK decode.
+
+    Uses RTP timestamps from radiod's GPS-locked clock for sample-accurate
+    minute alignment.
+
+    Timing model:
+      - GPS mapping (from ChannelInfo): UTC = gps_unix + (rtp - rtp_snap) / sr
+      - Each callback updates (_head_rtp, _write_pos): the RTP timestamp of
+        the last sample written and its ring-buffer position.
+      - To extract audio at a given UTC: convert UTC→RTP, compute how many
+        samples back from head, read from ring buffer.
+    """
 
     def __init__(self, frequency_hz: int, description: str, iq_channel: str,
                  sample_rate: int = 12000):
@@ -44,13 +61,33 @@ class CHUFSKChannel:
         self._total_samples = 0
         self._lock = threading.Lock()
 
-        # Wall-clock tracking: time.time() when the latest sample was written
-        self._latest_wall_time = 0.0
+        # RTP-to-UTC mapping (set from ChannelInfo after channel creation)
+        self._gps_time_unix: Optional[float] = None  # UTC at RTP_TIMESNAP
+        self._rtp_timesnap: Optional[int] = None      # RTP counter at GPS_TIME
+
+        # Updated every callback: RTP timestamp of the last written sample
+        self._head_rtp: Optional[int] = None
 
         # Stream objects (set after channel creation)
         self.channel_info = None
         self.stream = None
         self.ssrc = None
+
+    def set_timing(self, gps_time_ns: int, rtp_timesnap: int):
+        """Set the authoritative RTP-to-UTC mapping from ChannelInfo."""
+        self._gps_time_unix = (
+            gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)
+        ) / BILLION
+        self._rtp_timesnap = rtp_timesnap
+        logger.debug(f"{self.description}: RTP timing set - "
+                     f"GPS_UTC={self._gps_time_unix:.6f}, "
+                     f"RTP_SNAP={rtp_timesnap}")
+
+    def _utc_to_rtp(self, utc: float) -> int:
+        """Convert a UTC timestamp to an RTP timestamp."""
+        return self._rtp_timesnap + int(
+            (utc - self._gps_time_unix) * self.sample_rate
+        )
 
     # -- called from RadiodStream callback thread --
     def on_samples(self, samples: np.ndarray, quality):
@@ -67,40 +104,44 @@ class CHUFSKChannel:
                 self._buf[:n - first] = real[first:]
             self._write_pos = end % self._buf_len
             self._total_samples += n
-            self._latest_wall_time = time.time()
+
+            # RTP timestamp of the sample just past the last one written.
+            # first_rtp_timestamp is the RTP of the very first delivered
+            # sample; total_samples_delivered counts all samples so far.
+            self._head_rtp = quality.first_rtp_timestamp + quality.total_samples_delivered
 
     def get_aligned_minute(self, minute_boundary: float) -> Optional[np.ndarray]:
         """Return 60s of audio aligned to a UTC minute boundary.
 
-        Uses wall-clock time of the most recent sample to compute which
-        ring-buffer region corresponds to [minute_boundary, minute_boundary+60).
+        Uses the RTP-to-UTC mapping from radiod's GPS-locked clock for
+        sample-accurate alignment.
 
-        Returns None if the buffer doesn't cover the full minute.
+        Returns None if the buffer doesn't cover the full minute or if
+        the RTP timing has not been established.
         """
         needed = self.sample_rate * 60
         with self._lock:
-            if self._total_samples < needed or self._latest_wall_time == 0:
+            if (self._total_samples < needed
+                    or self._gps_time_unix is None
+                    or self._head_rtp is None):
                 return None
 
-            # The most recent sample in the buffer corresponds to _latest_wall_time.
-            # Work backwards to find where minute_boundary falls.
-            latest_sample_idx = self._total_samples  # absolute index
-            age_sec = self._latest_wall_time - minute_boundary
-            if age_sec < 0:
-                return None  # minute hasn't started yet
+            # How many samples back from the head is the minute boundary?
+            target_rtp = self._utc_to_rtp(minute_boundary)
+            samples_back = self._head_rtp - target_rtp
 
-            # Absolute index of the sample at minute_boundary
-            start_abs = int(latest_sample_idx - age_sec * self.sample_rate)
-            end_abs = start_abs + needed
+            # The end of the minute is 60s later
+            end_back = samples_back - needed
 
-            # Check the buffer still holds these samples
-            oldest_abs = self._total_samples - self._buf_len
-            if start_abs < oldest_abs or end_abs > self._total_samples:
-                return None  # data has been overwritten or not yet received
+            # Sanity: both must be within the buffer
+            if samples_back < 0 or samples_back > self._total_samples:
+                return None
+            if end_back < 0 and abs(end_back) > (self._total_samples - self._buf_len):
+                return None  # data overwritten
 
-            # Map to ring buffer positions
-            start_ring = start_abs % self._buf_len
-            end_ring = end_abs % self._buf_len
+            # Map to ring-buffer positions (head is at _write_pos)
+            start_ring = (self._write_pos - samples_back) % self._buf_len
+            end_ring = (start_ring + needed) % self._buf_len
             if start_ring < end_ring:
                 return self._buf[start_ring:end_ring].copy()
             else:
@@ -182,6 +223,7 @@ class CHUFSKListener:
                 )
                 ch.channel_info = info
                 ch.ssrc = info.ssrc
+                ch.set_timing(info.gps_time, info.rtp_timesnap)
 
                 stream = RadiodStream(info, on_samples=ch.on_samples)
                 stream.start()

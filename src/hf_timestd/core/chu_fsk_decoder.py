@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 # FSK Constants
 MARK_FREQ = 2225.0  # Hz - logic 1
 SPACE_FREQ = 2025.0  # Hz - logic 0
+CENTER_FREQ = 2125.0  # Hz - midpoint of mark/space
 BAUD_RATE = 300  # bits per second
 BIT_DURATION_MS = 1000.0 / BAUD_RATE  # 3.333... ms
 
@@ -141,24 +142,15 @@ class CHUFSKDecoder:
         # Samples per bit (keep as int for backward compatibility, use float in critical paths)
         self.samples_per_bit = int(sample_rate / BAUD_RATE)
         
-        # Pre-compute mixing oscillator for IQ-direct FSK demodulation (-2125 Hz)
+        # Pre-compute mixing oscillator for quadrature demodulation (-2125 Hz)
         # Create 1.2 second buffer to handle full second plus margin
         t = np.arange(int(sample_rate * 1.2)) / sample_rate
-        self._mixing_oscillator = np.exp(-2j * np.pi * 2125 * t).astype(np.complex64)
+        self._mixing_oscillator = np.exp(-2j * np.pi * CENTER_FREQ * t)
         
-        # Pre-compute LPF coefficients for IQ-direct FSK filtering
-        from scipy.signal import firwin, butter
+        # Pre-compute LPF for baseband FSK (200 Hz cutoff covers ±100 Hz deviation + margin)
+        from scipy.signal import butter
         nyq = sample_rate / 2
-        self._lpf_coeffs = firwin(101, 300 / nyq)
-        
-        # Pre-compute dual bandpass filters for audio FSK discriminator
-        # Mark tone: 2225 Hz ± 75 Hz
-        self._mark_b, self._mark_a = butter(4, [2150 / nyq, 2300 / nyq], btype='band')
-        # Space tone: 2025 Hz ± 75 Hz
-        self._space_b, self._space_a = butter(4, [1950 / nyq, 2100 / nyq], btype='band')
-        
-        # Pre-compute BPF for Hilbert discriminator (500 Hz centered on 2125 Hz)
-        self._fsk_bpf_b, self._fsk_bpf_a = butter(6, [1875 / nyq, 2375 / nyq], btype='band')
+        self._baseband_lpf_b, self._baseband_lpf_a = butter(4, 200 / nyq, btype='low')
         
         # Pre-compute tick detection filter (bandpass 900-1100 Hz)
         low = 900 / nyq
@@ -169,54 +161,51 @@ class CHUFSKDecoder:
     
     def _fsk_demodulate_audio(self, audio: np.ndarray) -> np.ndarray:
         """
-        FSK demodulation from USB-demodulated audio using Hilbert
-        frequency discriminator.
+        Standard quadrature FSK demodulation (delay-line discriminator).
         
-        CHU FSK Signal Structure:
-        - Audio tones at 2025 Hz (space/0) and 2225 Hz (mark/1)
-        - 300 baud, so each bit is ~3.33ms
-        - Center frequency: 2125 Hz, deviation: ±100 Hz
+        This is the same approach used by fldigi, multimon-ng, and GNU Radio.
+        It is robust to:
+        - Zero-filled RTP gaps (baseband LPF doesn't spread zeros like a
+          passband BPF does)
+        - Ionospheric phase shifts (only phase *changes* matter)
+        - Frequency errors up to ~50 Hz (just shifts DC level)
         
-        DSP approach:
-        1. Bandpass filter around 2125 Hz (500 Hz wide)
-        2. Hilbert transform to get analytic signal
-        3. Instantaneous frequency via phase derivative
-        4. Normalize: mark (+100 Hz) -> +1, space (-100 Hz) -> -1
-        
-        This approach works on USB-demodulated audio where the FSK
-        tones are at their natural frequencies. Proven to achieve
-        5/5 redundancy on live CHU signals.
+        DSP chain:
+        1. Hilbert transform -> analytic signal
+        2. Mix with -2125 Hz oscillator -> baseband (mark at +100, space at -100)
+        3. Low-pass filter at 200 Hz -> remove noise
+        4. Phase difference x[n]*conj(x[n-1]) -> instantaneous frequency
+        5. Normalize by expected phase step -> ±1 soft decisions
         
         Returns:
             Soft decision array: positive = mark (1), negative = space (0)
         """
         from scipy.signal import filtfilt, hilbert
         
-        # Step 1: Bandpass filter around FSK center (1875-2375 Hz)
-        filtered = filtfilt(self._fsk_bpf_b, self._fsk_bpf_a, audio.astype(np.float64))
+        audio_f = audio.astype(np.float64)
         
-        # Step 2: Analytic signal via Hilbert transform
-        analytic = hilbert(filtered)
+        # Step 1: Analytic signal (real -> complex)
+        analytic = hilbert(audio_f)
         
-        # Step 3: Instantaneous frequency discriminator
-        dp = np.angle(analytic[1:] * np.conj(analytic[:-1]))
-        inst_freq = dp * self.sample_rate / (2 * np.pi)
+        # Step 2: Mix to baseband (shift 2125 Hz center -> DC)
+        n = len(analytic)
+        if n <= len(self._mixing_oscillator):
+            mixer = self._mixing_oscillator[:n]
+        else:
+            t = np.arange(n) / self.sample_rate
+            mixer = np.exp(-2j * np.pi * CENTER_FREQ * t)
+        baseband = analytic * mixer
         
-        # Step 4: Normalize around center frequency
-        # inst_freq is ~2125 Hz for idle, ~2225 for mark, ~2025 for space
-        soft_decision = (inst_freq - 2125.0) / 100.0
+        # Step 3: Low-pass filter (200 Hz cutoff)
+        filtered = filtfilt(self._baseband_lpf_b, self._baseband_lpf_a, baseband)
         
-        # Step 5: Clip outliers from phase discontinuities at low-amplitude regions
-        # Expected range is ±1 (mark/space), clip to ±3 to remove spikes
-        soft_decision = np.clip(soft_decision, -3.0, 3.0)
-        
-        # Step 6: Smooth with moving average (~1/4 bit period) to reduce noise
-        smooth_len = max(1, int(self.sample_rate / BAUD_RATE / 4))
-        kernel = np.ones(smooth_len) / smooth_len
-        soft_decision = np.convolve(soft_decision, kernel, mode='same')
+        # Step 4: Discriminator — angle(x[n] * conj(x[n-1]))
+        # Output is in radians: +0.052 for mark, -0.052 for space at 12 kHz.
+        # No normalization needed — bit slicer only uses sign.
+        discriminator = np.angle(filtered[1:] * np.conj(filtered[:-1]))
         
         # Pad to match input length
-        soft_decision = np.concatenate([[soft_decision[0]], soft_decision])
+        soft_decision = np.concatenate(([discriminator[0]], discriminator))
         
         return soft_decision
     
@@ -269,11 +258,11 @@ class CHUFSKDecoder:
             shift = self._mixing_oscillator[:n_samples]
         else:
             t = np.arange(n_samples) / self.sample_rate
-            shift = np.exp(-2j * np.pi * 2125 * t).astype(np.complex64)
+            shift = np.exp(-2j * np.pi * CENTER_FREQ * t)
         
-        baseband = iq_slice.astype(np.complex64) * shift
+        baseband = iq_slice.astype(np.complex128) * shift
         
-        filtered = filtfilt(self._lpf_coeffs, 1.0, baseband)
+        filtered = filtfilt(self._baseband_lpf_b, self._baseband_lpf_a, baseband)
         
         delta_phase = np.angle(filtered[1:] * np.conj(filtered[:-1]))
         delta_phase = np.concatenate([[0], delta_phase])
@@ -342,13 +331,16 @@ class CHUFSKDecoder:
         
         # --- STRATEGY 2: Edge Detection (Frame B) ---
         else:
-            # Look for transition from Mark (>0.2) to Space (<-0.2)
+            # Look for transition from Mark (positive) to Space (negative)
             check_len = int(samples_per_bit_float / 2)
+            # Adaptive threshold: use a fraction of the signal's std dev
+            sd_std = np.std(soft_decision[search_start:search_end]) if search_end > search_start else 0.01
+            edge_thresh = max(0.005, sd_std * 0.3)
             
             for i in range(search_start + 1, min(search_end, len(soft_decision) - check_len)):
-                if soft_decision[i-1] > 0.2 and soft_decision[i] < -0.2:
+                if soft_decision[i-1] > edge_thresh and soft_decision[i] < -edge_thresh:
                     # Verify it stays low for at least half a bit
-                    if np.mean(soft_decision[i:i+check_len]) < -0.2:
+                    if np.mean(soft_decision[i:i+check_len]) < -edge_thresh:
                         return i
             return None
     
@@ -836,7 +828,7 @@ class CHUFSKDecoder:
         raw_bytes = self._bits_to_bytes(bits)
         
         logger.info(f"{self.channel_name} FSK sec {second_number}: "
-                    f"start_found={found_start}, bytes={raw_bytes[:4].hex() if len(raw_bytes)>=4 else 'short'}, "
+                    f"start_found={found_start}, bytes={bytes(raw_bytes[:4]).hex() if len(raw_bytes)>=4 else 'short'}, "
                     f"n_bits={len(bits)}, conf={bit_confidence:.2f}")
         
         if len(raw_bytes) < 10:
