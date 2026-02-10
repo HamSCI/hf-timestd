@@ -59,6 +59,13 @@
         .tab-btn { padding: 6px 14px; background: var(--card-bg); border: 1px solid rgba(148,163,184,0.15); border-radius: 8px; color: var(--text-secondary); cursor: pointer; font-size: 13px; transition: all 0.15s; }
         .tab-btn:hover { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.3); }
         .tab-btn.active { background: rgba(59,130,246,0.25); border-color: var(--wwv-color); color: var(--text-primary); }
+        .time-range-bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: var(--card-bg); border: 1px solid rgba(148,163,184,0.15); border-radius: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+        .time-range-bar .range-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-right: 4px; }
+        .range-btn { padding: 6px 16px; background: transparent; border: 1px solid rgba(148,163,184,0.2); border-radius: 6px; color: var(--text-secondary); cursor: pointer; font-size: 13px; font-weight: 600; font-family: inherit; transition: all 0.15s; }
+        .range-btn:hover { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.3); color: var(--text-primary); }
+        .range-btn.active { background: rgba(59,130,246,0.25); border-color: var(--wwv-color); color: var(--text-primary); }
+        .time-range-bar .range-sep { width: 1px; height: 24px; background: rgba(148,163,184,0.2); margin: 0 4px; }
+        .time-range-bar .range-info { font-size: 11px; color: var(--text-muted); margin-left: auto; }
     </style>
 </head>
 <body>
@@ -86,6 +93,18 @@
         </div>
 
         <div id="error-container" style="display:none;"></div>
+
+        <!-- Global Time Range Selector -->
+        <div class="time-range-bar" id="time-range-bar">
+            <span class="range-label">Time Range</span>
+            <button class="range-btn" data-hours="6" onclick="setTimeRange(6)">6h</button>
+            <button class="range-btn active" data-hours="24" onclick="setTimeRange(24)">24h</button>
+            <button class="range-btn" data-hours="48" onclick="setTimeRange(48)">48h</button>
+            <button class="range-btn" data-hours="168" onclick="setTimeRange(168)">7d</button>
+            <div class="range-sep"></div>
+            <input type="date" id="date-picker-global" onchange="onGlobalDatePicked(this.value)" title="Jump to a specific UTC date">
+            <span class="range-info" id="range-info">Last 24 hours UTC</span>
+        </div>
 
         <!-- View Tabs -->
         <div class="view-tabs">
@@ -399,8 +418,11 @@
     // ====================================================================
     let currentView = 'overview';
     let currentDate = new Date();
+    let currentHours = 24;
+    let useHoursMode = true;
     let cachedDaily = null;
     let cachedTEC = null;
+    let cachedKey = null;
     let compFreq = null;
     let toneFreq = null;
     let s4toneFreq = null;
@@ -423,6 +445,58 @@
     function gridAxis(title) { return { title: title, gridcolor: 'rgba(148,163,184,0.1)', zeroline: false }; }
 
     // ====================================================================
+    // TIME RANGE CONTROL
+    // ====================================================================
+    function setTimeRange(hours) {
+        currentHours = hours;
+        useHoursMode = true;
+        cachedDaily = null;
+        cachedTEC = null;
+        cachedKey = null;
+        // Update button states
+        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+        const btn = document.querySelector(`.range-btn[data-hours="${hours}"]`);
+        if (btn) btn.classList.add('active');
+        // Update info label
+        const labels = { 6: 'Last 6 hours UTC', 24: 'Last 24 hours UTC', 48: 'Last 48 hours UTC', 168: 'Last 7 days UTC' };
+        document.getElementById('range-info').textContent = labels[hours] || `Last ${hours}h UTC`;
+        // Clear date picker highlight
+        document.getElementById('date-picker-global').value = '';
+        reloadCurrentView();
+    }
+    function onGlobalDatePicked(val) {
+        if (!val) return;
+        currentDate = new Date(val + 'T12:00:00Z');
+        useHoursMode = false;
+        cachedDaily = null;
+        cachedTEC = null;
+        cachedKey = null;
+        // Deactivate range buttons
+        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('range-info').textContent = val + ' UTC';
+        reloadCurrentView();
+    }
+    function syncDatePickers() {
+        if (!useHoursMode) {
+            const ds = currentDate.toISOString().split('T')[0];
+            document.getElementById('date-picker-global').value = ds;
+        }
+    }
+    function onDatePicked(val) { onGlobalDatePicked(val); }
+    function setToday() { setTimeRange(24); }
+    function changeDate(delta) {
+        if (useHoursMode) {
+            // Switch to date mode at today + delta
+            const d = new Date();
+            d.setDate(d.getDate() + delta);
+            onGlobalDatePicked(d.toISOString().split('T')[0]);
+        } else {
+            currentDate.setDate(currentDate.getDate() + delta);
+            onGlobalDatePicked(currentDate.toISOString().split('T')[0]);
+        }
+    }
+
+    // ====================================================================
     // VIEW TAB HANDLING
     // ====================================================================
     document.querySelectorAll('.view-tab').forEach(tab => {
@@ -433,7 +507,6 @@
             document.querySelectorAll('.view-content').forEach(v => v.classList.remove('active'));
             document.getElementById('view-' + view).classList.add('active');
             currentView = view;
-            syncDatePickers();
             if (view === 'overview') loadOverview();
             else if (view === 'heatmap') loadHeatmapData();
             else if (view === 'evolution') loadEvolutionData();
@@ -444,32 +517,6 @@
         });
     });
 
-    function syncDatePickers() {
-        const ds = currentDate.toISOString().split('T')[0];
-        document.querySelectorAll('input[type="date"]').forEach(el => el.value = ds);
-    }
-    function onDatePicked(val) {
-        if (!val) return;
-        currentDate = new Date(val + 'T12:00:00Z');
-        syncDatePickers();
-        cachedDaily = null;
-        cachedTEC = null;
-        reloadCurrentView();
-    }
-    function setToday() {
-        currentDate = new Date();
-        syncDatePickers();
-        cachedDaily = null;
-        cachedTEC = null;
-        reloadCurrentView();
-    }
-    function changeDate(delta) {
-        currentDate.setDate(currentDate.getDate() + delta);
-        syncDatePickers();
-        cachedDaily = null;
-        cachedTEC = null;
-        reloadCurrentView();
-    }
     function reloadCurrentView() {
         if (currentView === 'heatmap') loadHeatmapData();
         else if (currentView === 'evolution') loadEvolutionData();
@@ -481,10 +528,15 @@
     }
 
     async function fetchDaily() {
-        const ds = currentDate.toISOString().split('T')[0];
-        if (cachedDaily && cachedDaily._date === ds) return cachedDaily;
-        cachedDaily = await api.get('/physics/channels/daily', { date: ds });
-        cachedDaily._date = ds;
+        const key = useHoursMode ? `hours_${currentHours}` : `date_${currentDate.toISOString().split('T')[0]}`;
+        if (cachedDaily && cachedKey === key) return cachedDaily;
+        if (useHoursMode) {
+            cachedDaily = await api.get('/physics/channels/daily', { hours: currentHours });
+        } else {
+            const ds = currentDate.toISOString().split('T')[0];
+            cachedDaily = await api.get('/physics/channels/daily', { date: ds });
+        }
+        cachedKey = key;
         return cachedDaily;
     }
 
@@ -967,21 +1019,30 @@
     // PATH ANALYSIS (with TEC + solar overlay)
     // ====================================================================
     async function fetchTEC() {
-        const ds = currentDate.toISOString().split('T')[0];
-        if (cachedTEC && cachedTEC._date === ds) return cachedTEC;
+        const key = useHoursMode ? `hours_${currentHours}` : `date_${currentDate.toISOString().split('T')[0]}`;
+        if (cachedTEC && cachedTEC._key === key) return cachedTEC;
         try {
-            const startISO = ds + 'T00:00:00Z';
-            const endISO = ds + 'T23:59:59Z';
+            let startISO, endISO;
+            if (useHoursMode) {
+                const now = new Date();
+                const start = new Date(now.getTime() - currentHours * 3600000);
+                startISO = start.toISOString();
+                endISO = now.toISOString();
+            } else {
+                const ds = currentDate.toISOString().split('T')[0];
+                startISO = ds + 'T00:00:00Z';
+                endISO = ds + 'T23:59:59Z';
+            }
             const data = await api.get('/propagation/tec', { start: startISO, end: endISO });
             if (data && data.paths) {
                 cachedTEC = data;
-                cachedTEC._date = ds;
+                cachedTEC._key = key;
             } else {
-                cachedTEC = { paths: {}, _date: ds };
+                cachedTEC = { paths: {}, _key: key };
             }
         } catch(e) {
             console.warn('TEC fetch failed:', e);
-            cachedTEC = { paths: {}, _date: ds };
+            cachedTEC = { paths: {}, _key: key };
         }
         return cachedTEC;
     }
@@ -1221,7 +1282,6 @@
     // ====================================================================
     // INIT
     // ====================================================================
-    syncDatePickers();
     loadOverview();
     setInterval(() => { if (currentView === 'overview') loadOverview(); }, 120000);
     </script>

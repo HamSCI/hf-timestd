@@ -164,7 +164,8 @@ async def get_channel_history(
 
 @router.get("/channels/daily")
 async def get_channel_daily_comparison(
-    date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format (defaults to today)")
+    date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format (defaults to today)"),
+    hours: Optional[int] = Query(None, description="Hours of data to return (overrides date, counts back from now)", ge=1, le=336)
 ):
     """
     Get test signal data organized for daily comparison.
@@ -173,6 +174,9 @@ async def get_channel_daily_comparison(
     - WWV vs WWVH comparison at same frequencies
     - Same station across different frequencies  
     - Evolution over the UTC day
+    
+    If 'hours' is specified, returns that many hours of data ending at now,
+    ignoring the 'date' parameter.
     """
     try:
         date_dt = None
@@ -180,7 +184,7 @@ async def get_channel_daily_comparison(
             date_dt = datetime.strptime(date, '%Y-%m-%d')
         
         service = TestSignalService(data_root=config.data_root)
-        return service.get_daily_comparison(date=date_dt)
+        return service.get_daily_comparison(date=date_dt, hours=hours)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

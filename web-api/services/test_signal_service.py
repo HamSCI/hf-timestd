@@ -386,7 +386,7 @@ class TestSignalService:
             logger.warning(f"Failed to compute solar zenith: {e}")
             return None
     
-    def get_daily_comparison(self, date: Optional[datetime] = None) -> Dict[str, Any]:
+    def get_daily_comparison(self, date: Optional[datetime] = None, hours: Optional[int] = None) -> Dict[str, Any]:
         """
         Get test signal data organized for daily comparison views.
         
@@ -397,23 +397,28 @@ class TestSignalService:
         
         Args:
             date: Date to analyze (defaults to today, falls back to most recent data)
+            hours: If specified, return this many hours of data ending at now
             
         Returns:
             Structured comparison data
         """
         try:
-            if date is None:
-                date = datetime.utcnow()
-            
-            # Get full day of data
-            start = datetime(date.year, date.month, date.day, 0, 0, 0)
-            end = start + timedelta(days=1)
+            if hours is not None:
+                end = datetime.utcnow()
+                start = end - timedelta(hours=hours)
+            else:
+                if date is None:
+                    date = datetime.utcnow()
+                
+                # Get full day of data
+                start = datetime(date.year, date.month, date.day, 0, 0, 0)
+                end = start + timedelta(days=1)
             
             history = self.get_history(start=start, end=end)
             measurements = history.get('measurements', [])
             
             # If no data for requested date, try to find most recent data (up to 14 days back)
-            if not measurements and date.date() == datetime.utcnow().date():
+            if not measurements and hours is None and date.date() == datetime.utcnow().date():
                 for days_back in range(1, 15):
                     fallback_date = datetime.utcnow() - timedelta(days=days_back)
                     start = datetime(fallback_date.year, fallback_date.month, fallback_date.day, 0, 0, 0)
