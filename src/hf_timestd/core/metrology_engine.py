@@ -499,11 +499,16 @@ class MetrologyEngine:
         else:
             corr_snr_db = 0.0
         
-        # Reject if correlation SNR is too low
-        # An 800ms matched filter with a real tone should produce SNR >> 20 dB.
-        # A 6 dB threshold allows noise peaks (2.4x ratio) to pass as false detections.
-        # Raise to 12 dB (4x ratio) to reject noise while accepting weak real signals.
-        MIN_CORR_SNR_DB = 8.0  # Require 8dB above noise floor (lowered from 12dB for weak signals)
+        # Reject if correlation SNR is too low.
+        # Scale threshold by template duration so that all stations have equivalent
+        # sensitivity at the physical signal level.  A longer template provides more
+        # processing gain (≈10·log10(duration/ref) dB), so a shorter template produces
+        # lower correlation SNR for the same signal and needs a lower threshold.
+        # Reference: 100 ms template → 8 dB threshold.
+        REFERENCE_DURATION_SEC = 0.1
+        BASE_CORR_SNR_DB = 8.0
+        duration_gain_db = 10 * np.log10(tone_duration_sec / REFERENCE_DURATION_SEC) if tone_duration_sec > 0 else 0.0
+        MIN_CORR_SNR_DB = max(1.0, BASE_CORR_SNR_DB + duration_gain_db)
         if corr_snr_db < MIN_CORR_SNR_DB:
             logger.info(f"{station_name}: Correlation too weak "
                         f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB}dB, expected={expected_delay_ms:.1f}ms, "

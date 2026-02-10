@@ -18,6 +18,12 @@ import math
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
 from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.core.solar_zenith_calculator import (
+    solar_position, calculate_midpoint
+)
+from hf_timestd.core.wwv_constants import (
+    WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON
+)
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +305,12 @@ class TestSignalService:
                                 'burst_score': self._clean_value(m.get('burst_score')),
                                 'detection_confidence': self._clean_value(m.get('detection_confidence')),
                                 'anomaly_detected': m.get('anomaly_detected'),
-                                'anomaly_type': m.get('anomaly_type')
+                                'anomaly_type': m.get('anomaly_type'),
+                                'tone_power_2khz_db': self._clean_value(m.get('tone_power_2khz_db')),
+                                'tone_power_3khz_db': self._clean_value(m.get('tone_power_3khz_db')),
+                                'tone_power_4khz_db': self._clean_value(m.get('tone_power_4khz_db')),
+                                'tone_power_5khz_db': self._clean_value(m.get('tone_power_5khz_db')),
+                                'field_strength_db': self._clean_value(m.get('field_strength_db'))
                             }
                             # Filter out invalid station/frequency combinations
                             if self._is_valid_measurement(record):
@@ -319,6 +330,61 @@ class TestSignalService:
         except Exception as e:
             logger.error(f"Error getting test signal history: {e}")
             return {'measurements': [], 'count': 0, 'error': str(e)}
+    
+    def _compute_solar_zenith(
+        self, start: datetime, end: datetime, interval_minutes: int = 15
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Compute solar elevation at WWV and WWVH path midpoints.
+        
+        Uses receiver lat/lon from config and transmitter coordinates
+        from wwv_constants to find the path midpoint, then computes
+        solar elevation every interval_minutes.
+        
+        Returns:
+            Dict with timestamps, wwv_elevation_deg, wwvh_elevation_deg,
+            or None on error.
+        """
+        try:
+            from config import config
+            rx_lat = config.station_metadata.get('latitude', 0.0)
+            rx_lon = config.station_metadata.get('longitude', 0.0)
+            if rx_lat == 0.0 and rx_lon == 0.0:
+                return None
+            
+            wwv_mid = calculate_midpoint(rx_lat, rx_lon, WWV_LAT, WWV_LON)
+            wwvh_mid = calculate_midpoint(rx_lat, rx_lon, WWVH_LAT, WWVH_LON)
+            
+            timestamps = []
+            wwv_elev = []
+            wwvh_elev = []
+            
+            curr = start
+            while curr < end:
+                timestamps.append(curr.strftime('%Y-%m-%dT%H:%M:%SZ'))
+                _, el_wwv = solar_position(curr, wwv_mid[0], wwv_mid[1])
+                _, el_wwvh = solar_position(curr, wwvh_mid[0], wwvh_mid[1])
+                wwv_elev.append(round(el_wwv, 2))
+                wwvh_elev.append(round(el_wwvh, 2))
+                curr += timedelta(minutes=interval_minutes)
+            
+            return {
+                'timestamps': timestamps,
+                'wwv_elevation_deg': wwv_elev,
+                'wwvh_elevation_deg': wwvh_elev,
+                'wwv_midpoint': {
+                    'lat': round(wwv_mid[0], 4),
+                    'lon': round(wwv_mid[1], 4)
+                },
+                'wwvh_midpoint': {
+                    'lat': round(wwvh_mid[0], 4),
+                    'lon': round(wwvh_mid[1], 4)
+                },
+                'interval_minutes': interval_minutes
+            }
+        except Exception as e:
+            logger.warning(f"Failed to compute solar zenith: {e}")
+            return None
     
     def get_daily_comparison(self, date: Optional[datetime] = None) -> Dict[str, Any]:
         """
@@ -429,6 +495,9 @@ class TestSignalService:
                 }
             }
             
+            # Compute solar zenith angles at WWV and WWVH path midpoints
+            solar = self._compute_solar_zenith(start, end)
+            
             return self._convert_to_native({
                 'date': start.strftime('%Y-%m-%d'),
                 'by_station': by_station,
@@ -436,7 +505,8 @@ class TestSignalService:
                 'wwv_wwvh_pairs': wwv_wwvh_pairs,
                 'frequencies': frequencies,
                 'stats': stats,
-                'total_measurements': len(measurements)
+                'total_measurements': len(measurements),
+                'solar': solar
             })
             
         except Exception as e:
