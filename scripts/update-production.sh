@@ -209,6 +209,21 @@ if [[ -d "$PROJECT_DIR/docs" ]]; then
 fi
 
 # =============================================================================
+# Step 2d: Sync Cron Jobs
+# =============================================================================
+log_info "Step 2d: Syncing cron jobs..."
+
+if [[ -f "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" ]]; then
+    if ! diff -q "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" /etc/cron.d/timestd-freshness-monitor > /dev/null 2>&1; then
+        cp "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" /etc/cron.d/timestd-freshness-monitor
+        chmod 644 /etc/cron.d/timestd-freshness-monitor
+        log_info "  ✅ Updated freshness monitor cron job"
+    else
+        log_info "  ✅ Cron jobs unchanged"
+    fi
+fi
+
+# =============================================================================
 # Step 3: Update Systemd Service Files (if changed)
 # =============================================================================
 log_info "Step 3: Checking systemd service files..."

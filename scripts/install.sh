@@ -347,6 +347,14 @@ create_dir "$DATA_ROOT/phase2"        # Phase 2: Analytical engine outputs
 create_dir "$DATA_ROOT/products"      # Phase 3: Derived products (decimated, spectrograms)
 create_dir "$DATA_ROOT/state"         # Global state files
 create_dir "$DATA_ROOT/status"        # System status files
+create_dir "$DATA_ROOT/drf"           # Digital RF (L0) output
+create_dir "$DATA_ROOT/grape"         # GRAPE format exports
+create_dir "$DATA_ROOT/upload"        # Upload queue for GRAPE/external
+create_dir "$DATA_ROOT/audio_buffers" # Audio buffer scratch space
+create_dir "$DATA_ROOT/raw_archive"   # Long-term raw archive
+create_dir "$DATA_ROOT/processed"     # Processed data products
+create_dir "$DATA_ROOT/data"          # General data directory
+create_dir "$DATA_ROOT/space_weather_cache" # Cached space weather indices
 create_dir "$LOG_DIR"
 
 # Shared memory directory for hot buffer (tiered storage)
@@ -539,6 +547,8 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-ionex-download.timer"
         "timestd-chrony-monitor.service"
         "timestd-chrony-monitor.timer"
+        "timestd-iono-reanalysis.service"
+        "timestd-iono-reanalysis.timer"
         "grape-daily.service"
         "grape-daily.timer"
     )
@@ -637,6 +647,12 @@ EOF
     sudo systemctl enable timestd-ionex-download.timer
     sudo systemctl enable timestd-chrony-monitor.timer
     
+    # Enable iono-reanalysis timer if service file exists
+    if [[ -f "$SYSTEMD_DIR/timestd-iono-reanalysis.timer" ]]; then
+        sudo systemctl enable timestd-iono-reanalysis.timer
+        log_info "  ✅ timestd-iono-reanalysis.timer enabled (hourly)"
+    fi
+    
     # Enable grape-daily timer if service file exists
     if [[ -f "$SYSTEMD_DIR/grape-daily.timer" ]]; then
         sudo systemctl enable grape-daily.timer
@@ -663,6 +679,13 @@ $LOG_DIR/*.log {
 }
 EOF
     log_info "  Created logrotate configuration"
+    
+    # Install freshness monitor cron job
+    if [[ -f "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" ]]; then
+        sudo cp "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" /etc/cron.d/timestd-freshness-monitor
+        sudo chmod 644 /etc/cron.d/timestd-freshness-monitor
+        log_info "  ✅ Installed freshness monitor cron job (/etc/cron.d/timestd-freshness-monitor)"
+    fi
     
     # =============================================================================
     # Initial IONEX Download
