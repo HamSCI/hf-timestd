@@ -50,6 +50,93 @@ class CHUFSKService:
             logger.debug(f"Could not read {path}: {e}")
             return None
 
+    def _get_latest_from_hdf5(self) -> Optional[Dict[str, Any]]:
+        """Fall back to HDF5 for the most recent successful decode (last 24h)."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
+
+        try:
+            import h5py
+        except ImportError:
+            return None
+
+        phase2_dir = self.data_root / 'phase2'
+        best = None
+        best_ts = ''
+        best_channel = None
+
+        for channel in self.chu_channels:
+            # Find today's HDF5 file
+            today = datetime.utcnow().strftime('%Y%m%d')
+            h5_path = phase2_dir / channel / 'broadcast:fsk' / f'{channel}_chu_fsk_{today}.h5'
+            if not h5_path.exists():
+                continue
+            try:
+                with h5py.File(str(h5_path), 'r', locking=False) as f:
+                    n = f['timestamp_utc'].shape[0]
+                    if n == 0:
+                        continue
+                    # Scan last 30 rows for a successful decode
+                    start = max(0, n - 30)
+                    valid_arr = f['fsk_valid'][start:]
+                    for i in range(len(valid_arr) - 1, -1, -1):
+                        if valid_arr[i]:
+                            idx = start + i
+                            ts = f['timestamp_utc'][idx]
+                            if isinstance(ts, bytes):
+                                ts = ts.decode()
+                            if ts > best_ts:
+                                best_ts = ts
+                                best_channel = channel
+                                import math
+
+                                def _float_or_none(ds, i):
+                                    v = float(ds[i])
+                                    return None if math.isnan(v) else v
+
+                                def _int_or_none(ds, i):
+                                    v = int(ds[i])
+                                    return None if v == 0 else v
+
+                                best = {
+                                    'timestamp_utc': ts,
+                                    'frames_decoded': int(f['frames_decoded'][idx]),
+                                    'decode_confidence': float(f['decode_confidence'][idx]),
+                                    'decoded_day': _int_or_none(f['decoded_day'], idx) if 'decoded_day' in f else None,
+                                    'decoded_hour': _int_or_none(f['decoded_hour'], idx) if 'decoded_hour' in f else None,
+                                    'decoded_minute': int(f['decoded_minute'][idx]) if 'decoded_minute' in f else None,
+                                    'dut1_seconds': _float_or_none(f['dut1_seconds'], idx) if 'dut1_seconds' in f else None,
+                                    'tai_utc': _int_or_none(f['tai_utc'], idx) if 'tai_utc' in f else None,
+                                    'timing_offset_ms': _float_or_none(f['timing_offset_ms'], idx) if 'timing_offset_ms' in f else None,
+                                }
+                            break
+            except Exception as e:
+                logger.debug(f"Could not read HDF5 for {channel}: {e}")
+
+        if best is None:
+            return None
+
+        return {
+            'available': True,
+            'channel': best_channel,
+            'dut1_seconds': best.get('dut1_seconds'),
+            'tai_utc': best.get('tai_utc'),
+            'year': None,
+            'timing_offset_ms': best.get('timing_offset_ms'),
+            'tick_timing_offset_ms': None,
+            'tick_timing_count': 0,
+            'decode_confidence': best.get('decode_confidence'),
+            'frames_decoded': best.get('frames_decoded'),
+            'frames_total': 9,
+            'snr_db': None,
+            'decoded_day': best.get('decoded_day'),
+            'decoded_hour': best.get('decoded_hour'),
+            'decoded_minute': best.get('decoded_minute'),
+            'last_decode': best_ts,
+            'minute_boundary': None,
+            'frame_results': [],
+        }
+
     def get_latest(self) -> Optional[Dict[str, Any]]:
         """
         Get latest CHU FSK decoded data from all channels.
@@ -86,7 +173,12 @@ class CHUFSKService:
                     best_channel = channel
             
             if best is None or not best.get('detected'):
-                # Return all channel summaries even if not detected
+                # Fall back to HDF5 for most recent successful decode
+                hdf5_result = self._get_latest_from_hdf5()
+                if hdf5_result:
+                    return hdf5_result
+
+                # No HDF5 data either — return channel status summary
                 channel_status = []
                 for channel in self.chu_channels:
                     data = self._read_json(channel)
@@ -101,7 +193,7 @@ class CHUFSKService:
                 
                 return {
                     'available': False,
-                    'message': 'No CHU FSK decode in last 5 minutes',
+                    'message': 'No CHU FSK data available in last 24 hours',
                     'channel_status': channel_status,
                     'dut1_seconds': None,
                     'tai_utc': None,
