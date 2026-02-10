@@ -100,6 +100,32 @@ description = "CHU_7850"
 frequency_hz = 14670000
 description = "CHU_14670"
 
+# === CHU FSK Decode Channels ===
+# USB preset for FSK tone demodulation
+# These are not archived - only used for real-time FSK decode + timing correlation
+# with the corresponding IQ archive channels above.
+[recorder.chu_fsk]
+preset = "usb"
+sample_rate = 12000
+agc = 0
+gain = 0
+encoding = "F32"
+
+[[recorder.chu_fsk.channels]]
+frequency_hz = 3330000
+description = "CHU_3330_FSK"
+iq_channel = "CHU_3330"
+
+[[recorder.chu_fsk.channels]]
+frequency_hz = 7850000
+description = "CHU_7850_FSK"
+iq_channel = "CHU_7850"
+
+[[recorder.chu_fsk.channels]]
+frequency_hz = 14670000
+description = "CHU_14670_FSK"
+iq_channel = "CHU_14670"
+
 [uploader]
 enabled = false
 protocol = "sftp"
