@@ -98,7 +98,7 @@ if [[ "$MODE" == "production" ]]; then
     DATA_ROOT="/var/lib/timestd"
     CONFIG_DIR="/etc/hf-timestd"
     VENV_DIR="/opt/hf-timestd/venv"
-    WEBUI_DIR="/opt/hf-timestd/web-ui"
+    WEBUI_DIR="/opt/hf-timestd/web-api"
     LOG_DIR="/var/log/hf-timestd"
     INSTALL_USER="timestd"
 else
@@ -127,6 +127,7 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-radiod-monitor.service"
         "timestd-chrony-monitor.service"
         "timestd-ionex-download.service"
+        "timestd-iono-reanalysis.service"
         "grape-daily.service"
         # Legacy services
         "timestd-analytics.service"
@@ -147,6 +148,7 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-upload-daily.timer"
         "timestd-ionex-download.timer"
         "timestd-chrony-monitor.timer"
+        "timestd-iono-reanalysis.timer"
         "grape-daily.timer"
     )
     
@@ -182,6 +184,8 @@ if [[ "$MODE" == "production" ]]; then
         "/etc/systemd/system/timestd-upload-daily.service"
         "/etc/systemd/system/timestd-upload-daily.timer"
         "/etc/systemd/system/timestd-alert@.service"
+        "/etc/systemd/system/timestd-iono-reanalysis.service"
+        "/etc/systemd/system/timestd-iono-reanalysis.timer"
         "/etc/systemd/system/grape-daily.service"
         "/etc/systemd/system/grape-daily.timer"
         # Legacy services (no longer used)
@@ -279,6 +283,12 @@ if [[ "$MODE" == "production" ]]; then
         log_info "  Removed: /etc/logrotate.d/hf-timestd"
     fi
     
+    # Remove cron jobs
+    if [[ -f "/etc/cron.d/timestd-freshness-monitor" ]]; then
+        sudo rm -f "/etc/cron.d/timestd-freshness-monitor"
+        log_info "  Removed: /etc/cron.d/timestd-freshness-monitor"
+    fi
+    
     # Remove shared memory directory
     if [[ -d "/dev/shm/timestd" ]]; then
         sudo rm -rf "/dev/shm/timestd"
@@ -300,6 +310,13 @@ if [[ -d "$VENV_DIR" ]]; then
     log_info "  Removed: $VENV_DIR"
 else
     log_info "  ℹ️  Virtual environment not found: $VENV_DIR"
+fi
+
+# Remove system-wide pip package (installed by install.sh for services using system Python)
+if pip3 show hf-timestd &>/dev/null; then
+    log_info "  Removing system pip package..."
+    sudo pip3 uninstall hf-timestd -y --quiet --break-system-packages 2>/dev/null || true
+    log_info "  ✅ Removed system pip package"
 fi
 
 # =============================================================================
