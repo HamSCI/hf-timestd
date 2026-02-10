@@ -133,11 +133,18 @@ class CHUFSKChannel:
             # The end of the minute is 60s later
             end_back = samples_back - needed
 
+            logger.debug(
+                f"{self.description}: align samples_back={samples_back} "
+                f"({samples_back/self.sample_rate:.1f}s)"
+            )
+
             # Sanity: both must be within the buffer
             if samples_back < 0 or samples_back > self._total_samples:
+                logger.warning(f"{self.description}: samples_back={samples_back} out of range")
                 return None
             if end_back < 0 and abs(end_back) > (self._total_samples - self._buf_len):
-                return None  # data overwritten
+                logger.warning(f"{self.description}: data overwritten")
+                return None
 
             # Map to ring-buffer positions (head is at _write_pos)
             start_ring = (self._write_pos - samples_back) % self._buf_len
@@ -279,7 +286,7 @@ class CHUFSKListener:
                 if not self._running:
                     break
 
-                minute_boundary = (int(time.time()) // 60) * 60
+                minute_boundary = (int(time.time()) // 60) * 60 - 60
 
                 for freq, ch in self.channels.items():
                     audio = ch.get_aligned_minute(float(minute_boundary))
