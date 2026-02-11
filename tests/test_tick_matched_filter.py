@@ -307,6 +307,116 @@ class TestOverlappingWindows(unittest.TestCase):
             self.assertEqual(first.window_end_second, 6)
 
 
+class TestPhaseContinuity(unittest.TestCase):
+    """
+    Regression test for phase continuity across overlapping windows.
+    
+    Before the fix, the IQ mixer used window-relative time (t starting at 0),
+    causing ~1.7 rad phase jumps between consecutive windows. After the fix,
+    the mixer uses absolute time within the minute, so consecutive windows
+    should produce smoothly varying carrier_phase_rad.
+    """
+    
+    def test_carrier_phase_continuity(self):
+        """Consecutive windows should have smooth carrier phase (σ < 0.3 rad)"""
+        sample_rate = 20000
+        tone_freq = 1000.0
+        carrier_phase = 0.7  # Known carrier phase offset
+        
+        # Generate 60s of IQ with a carrier at DC and tone at +1000 Hz,
+        # both with a known constant phase. This simulates a stable
+        # ionospheric path (no Doppler).
+        n_samples = 60 * sample_rate
+        t = np.arange(n_samples) / sample_rate
+        
+        # Carrier (DC component in baseband IQ)
+        carrier = 1.0 * np.exp(1j * carrier_phase)
+        
+        # Tone modulation: 5ms ticks at each second
+        tick_duration = int(0.005 * sample_rate)  # 100 samples
+        tone_signal = np.zeros(n_samples, dtype=np.complex128)
+        for sec in range(60):
+            if sec in {0, 29, 59}:
+                continue
+            start = sec * sample_rate
+            t_tick = np.arange(tick_duration) / sample_rate
+            # Tone as AM sidebands on the carrier
+            tone_signal[start:start + tick_duration] = 0.5 * np.exp(
+                1j * (2 * np.pi * tone_freq * (sec + t_tick) + carrier_phase)
+            )
+        
+        # IQ = carrier + tone + noise
+        noise_level = 0.02
+        iq = (carrier + tone_signal + 
+              noise_level * (np.random.randn(n_samples) + 1j * np.random.randn(n_samples)))
+        iq = iq.astype(np.complex64)
+        
+        f = create_tick_filter('WWV', sample_rate=sample_rate)
+        result = f.process_minute(iq, minute_number=0, min_snr_db=3.0)
+        
+        # Need enough windows for a meaningful test
+        self.assertGreater(result.valid_windows, 20,
+                          f"Only {result.valid_windows} valid windows — need >20 for phase test")
+        
+        # Extract carrier phases from consecutive windows
+        phases = [r.carrier_phase_rad for r in result.window_results]
+        
+        # Phase differences between consecutive windows
+        phase_diffs = np.diff(phases)
+        # Wrap to [-π, π]
+        phase_diffs = np.arctan2(np.sin(phase_diffs), np.cos(phase_diffs))
+        
+        std_phase_diff = float(np.std(phase_diffs))
+        
+        # Before fix: σ ≈ 1.5-2.0 rad (near uniform random)
+        # After fix: σ should be < 0.3 rad for a stable carrier
+        self.assertLess(std_phase_diff, 0.3,
+                       f"Phase discontinuity too large: σ={std_phase_diff:.3f} rad "
+                       f"(should be < 0.3 for stable carrier)")
+    
+    def test_dc_carrier_phase_stability(self):
+        """DC carrier phase should be stable on unambiguous channels"""
+        sample_rate = 20000
+        carrier_phase = 1.2
+        
+        n_samples = 60 * sample_rate
+        
+        # Pure carrier with ticks (CHU-like: USB with preserved carrier)
+        carrier = 1.0 * np.exp(1j * carrier_phase)
+        tick_duration = int(0.300 * sample_rate)  # 300ms CHU ticks
+        tone_signal = np.zeros(n_samples, dtype=np.complex128)
+        for sec in range(60):
+            if sec in {0, 29}:
+                continue
+            if sec in range(31, 40) or sec in range(50, 60):
+                continue  # FSK/voice seconds — short ticks, skip for simplicity
+            start = sec * sample_rate
+            t_tick = np.arange(min(tick_duration, sample_rate)) / sample_rate
+            tone_signal[start:start + len(t_tick)] = 0.3 * np.exp(
+                1j * (2 * np.pi * 1000.0 * (sec + t_tick) + carrier_phase)
+            )
+        
+        noise_level = 0.02
+        iq = (carrier + tone_signal +
+              noise_level * (np.random.randn(n_samples) + 1j * np.random.randn(n_samples)))
+        iq = iq.astype(np.complex64)
+        
+        f = create_tick_filter('CHU', sample_rate=sample_rate)
+        result = f.process_minute(iq, minute_number=0, min_snr_db=3.0)
+        
+        if result.valid_windows < 10:
+            self.skipTest(f"Only {result.valid_windows} valid windows")
+        
+        dc_phases = [r.dc_carrier_phase_rad for r in result.window_results]
+        dc_diffs = np.diff(dc_phases)
+        dc_diffs = np.arctan2(np.sin(dc_diffs), np.cos(dc_diffs))
+        std_dc = float(np.std(dc_diffs))
+        
+        # DC carrier phase should be very stable for constant carrier
+        self.assertLess(std_dc, 0.3,
+                       f"DC phase discontinuity too large: σ={std_dc:.3f} rad")
+
+
 class TestBPMUT1Handling(unittest.TestCase):
     """Test BPM UT1/UTC minute handling"""
     

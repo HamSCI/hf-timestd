@@ -16,6 +16,7 @@ from .docs import router as docs_router
 from .tec import router as tec_router
 from .tid import router as tid_router
 from .dashboard import router as dashboard_router
+from .phase import router as phase_router
 
 __all__ = [
     'health_router',
@@ -31,5 +32,6 @@ __all__ = [
     'docs_router',
     'tec_router',
     'tid_router',
-    'dashboard_router'
+    'dashboard_router',
+    'phase_router'
 ]

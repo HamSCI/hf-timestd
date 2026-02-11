@@ -374,8 +374,10 @@ class TickMatchedFilter:
         template_cos: np.ndarray,
         search_range_ms: float = 100.0,
         iq_samples: np.ndarray = None,
-        tone_freq_hz: float = 0.0
-    ) -> Tuple[float, float, float, float, float]:
+        tone_freq_hz: float = 0.0,
+        start_second: int = 0,
+        valid_seconds: List[int] = None
+    ) -> Tuple[float, float, float, float, float, float]:
         """
         Perform quadrature correlation and find peak.
         
@@ -386,9 +388,11 @@ class TickMatchedFilter:
             search_range_ms: Search range around expected position (±ms)
             iq_samples: Optional raw complex IQ for RF carrier phase extraction
             tone_freq_hz: Tone frequency for IQ mix-down (required if iq_samples given)
+            start_second: First second of this window within the minute (for absolute time)
+            valid_seconds: List of seconds containing ticks (for per-tick phase extraction)
             
         Returns:
-            Tuple of (offset_ms, snr_db, peak_value, phase_rad, carrier_phase_rad)
+            Tuple of (offset_ms, snr_db, peak_value, phase_rad, carrier_phase_rad, dc_carrier_phase_rad)
         """
         # Correlate with both templates
         corr_sin = correlate(audio, template_sin, mode='same')
@@ -406,7 +410,7 @@ class TickMatchedFilter:
         search_region = envelope[search_start:search_end]
         
         if len(search_region) == 0:
-            return 0.0, -100.0, 0.0, 0.0
+            return 0.0, -100.0, 0.0, 0.0, 0.0, 0.0
         
         # Find peak
         peak_idx_local = np.argmax(search_region)
@@ -454,36 +458,73 @@ class TickMatchedFilter:
         else:
             phase_rad = 0.0
         
-        # Extract RF carrier phase from IQ at the detected peak location.
-        # The IQ samples are baseband (centered on carrier). The tone at
-        # tone_freq_hz appears as a complex sinusoid at +tone_freq_hz offset.
-        # Mix down: iq * exp(-j*2π*f_tone*t), then average over tick duration
-        # to get a complex phasor whose angle is the RF carrier phase.
-        # This phase changes with ionospheric path length (TEC).
+        # Extract RF carrier phase from IQ using BUFFER-RELATIVE time and
+        # PER-TICK extraction.
+        #
+        # KEY INSIGHT: The IQ mixer exp(-j·2π·f·t) must use a time axis that
+        # maps each IQ sample to a unique, consistent value regardless of which
+        # overlapping window contains it.  We use buffer-relative time
+        # (sample_index / sample_rate), which is independent of any external
+        # timing authority (RTP, GPS, NTP) and works identically in both RTP
+        # and FUSION modes.  Before this fix, t started at 0 per tick, so the
+        # mixer phase depended on the tick's position within the window —
+        # causing ~1.7 rad phase jumps between consecutive windows.
+        #
+        # We extract phase from each individual tick separately (not the whole
+        # 5-second window), then combine phasors coherently. Between ticks the
+        # signal is noise, which would dilute the phase estimate.
         carrier_phase_rad = 0.0
         dc_carrier_phase_rad = 0.0
-        if iq_samples is not None and tone_freq_hz > 0:
-            # peak_idx from mode='same' correlation corresponds to the center
-            # of the template alignment. The tick onset is at this sample.
-            tick_samples = len(template_sin)
-            tick_start = max(0, peak_idx - tick_samples // 2)
-            tick_end = min(len(iq_samples), tick_start + tick_samples)
-            if tick_end > tick_start:
-                iq_tick = iq_samples[tick_start:tick_end]
+        if iq_samples is not None and tone_freq_hz > 0 and valid_seconds:
+            carrier_phasors = []
+            dc_phasors = []
+            
+            for sec in valid_seconds:
+                # Tick position within this window's IQ buffer
+                tick_offset = (sec - start_second) * self.sample_rate
+                duration_ms = self._get_tick_duration_ms(sec)
+                if duration_ms not in self._templates:
+                    continue
+                tick_len = len(self._templates[duration_ms][0])
+                
+                # Apply the timing offset from the composite correlation peak.
+                # offset_samples tells us how much the ticks are shifted from
+                # their expected positions (propagation delay, clock error).
+                adjusted_start = int(tick_offset + offset_samples)
+                adjusted_end = adjusted_start + tick_len
+                
+                if adjusted_start < 0 or adjusted_end > len(iq_samples):
+                    continue
+                
+                iq_tick = iq_samples[adjusted_start:adjusted_end]
                 n_tick = len(iq_tick)
-                t_tick = np.arange(n_tick) / self.sample_rate
-                # Mix down to baseband at tone frequency
-                mixer = np.exp(-1j * 2 * np.pi * tone_freq_hz * t_tick)
+                if n_tick == 0:
+                    continue
+                
+                # Time axis: seconds from start of the 60-second IQ buffer.
+                # This is buffer-relative (sample_index / sample_rate), NOT tied
+                # to any external timing authority (RTP, GPS, NTP).  The critical
+                # property is that the same IQ sample always gets the same mixer
+                # value regardless of which overlapping window contains it.
+                # Before this fix, t started at 0 per tick, causing window-
+                # dependent phase offsets of 2π·f·(tick_position/sample_rate).
+                t_abs = (start_second + (adjusted_start / self.sample_rate)) + np.arange(n_tick) / self.sample_rate
+                
+                # Mix down to baseband at tone frequency using absolute time
+                mixer = np.exp(-1j * 2 * np.pi * tone_freq_hz * t_abs)
                 mixed = iq_tick * mixer
-                # Average phasor (coherent integration over tick duration)
-                phasor = np.mean(mixed)
-                carrier_phase_rad = float(np.angle(phasor))
-                # DC carrier phasor: mean(IQ) over the tick duration.
-                # On unambiguous channels (CHU-only, WWV 20/25 MHz) this is the
-                # bare RF carrier phase — available continuously, independent of
-                # tone detection. On shared channels it's a mix of carriers.
-                dc_phasor = np.mean(iq_tick)
-                dc_carrier_phase_rad = float(np.angle(dc_phasor))
+                carrier_phasors.append(np.mean(mixed))
+                
+                # DC carrier phasor (mean IQ over tick — no mixer needed)
+                dc_phasors.append(np.mean(iq_tick))
+            
+            if carrier_phasors:
+                # Coherent combination: sum phasors (amplitude-weighted by nature)
+                combined_carrier = np.sum(carrier_phasors)
+                carrier_phase_rad = float(np.angle(combined_carrier))
+                
+                combined_dc = np.sum(dc_phasors)
+                dc_carrier_phase_rad = float(np.angle(combined_dc))
         
         # Normalize peak value (0-1)
         max_possible = np.sqrt(np.sum(audio**2)) * np.sqrt(np.sum(template_sin**2))
@@ -563,7 +604,9 @@ class TickMatchedFilter:
         offset_ms, snr_db, peak_value, phase_rad, carrier_phase_rad, dc_carrier_phase_rad = self._correlate_window(
             audio, template_sin, template_cos,
             iq_samples=iq_samples,
-            tone_freq_hz=self.template_config.frequency_hz
+            tone_freq_hz=self.template_config.frequency_hz,
+            start_second=start_second,
+            valid_seconds=valid_seconds
         )
         
         # Estimate uncertainty based on SNR

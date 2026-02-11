@@ -214,7 +214,14 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
 
-### Phase Extraction & Cross-Talk Fix (2026-02-11)
+### Phase Continuity Fix + Doppler UI (2026-02-11, session 2)
+- **Phase continuity bug fixed**: IQ mixer used window-relative time (t=0 per tick), causing ~1.7 rad phase jumps. Fixed: buffer-relative time (sample_index/sample_rate), independent of RTP/GPS/NTP timing authority.
+- **Per-tick phase extraction**: Phase now extracted from individual ticks (not whole 5-second window), phasors combined coherently. Eliminates inter-tick noise dilution.
+- **Regression tests**: `test_carrier_phase_continuity` and `test_dc_carrier_phase_stability` verify σ < 0.3 rad.
+- **Phase/Doppler web dashboard**: 4 API endpoints (timeseries, doppler, scintillation, summary) + visualization page with carrier phase, Doppler, σ_φ, and DC carrier phase plots.
+- See: `docs/changes/SESSION_2026_02_11_PHASE_CONTINUITY_AND_DOPPLER_UI.md`
+
+### Phase Extraction & Cross-Talk Fix (2026-02-11, session 1)
 - Three-tier phase extraction implemented: audio phase, IQ carrier phase, DC carrier phasor
 - Cross-frequency discrimination gate: 3 dB advantage required between 1000↔1200 Hz
 - WWV/WWVH detection rates now distinct on shared channels (72% vs 55%)
@@ -239,21 +246,33 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
 
 ---
 
-## ✅ Success Criteria for Next Session
+## ✅ Success Criteria — This Session (2026-02-11, session 2)
 
 ### Part 1: Methodology Review
-- ⬚ **Verify IQ mix-down correctness** — sign convention, time reference, frequency accuracy
-- ⬚ **Diagnose phase continuity problem** — why σ_φ ≈ 1.7 rad between consecutive windows
-- ⬚ **Verify DC phasor on unambiguous channels** — CHU carrier phase should be smooth and track Doppler
-- ⬚ **Consistency check** — carrier_phase_rad and dc_carrier_phase_rad should differ by a predictable offset on unambiguous channels
-- ⬚ **Quantify phase noise floor** — σ_φ vs SNR, compare with theoretical 1/(SNR_linear × √N)
-- ⬚ **Fix any bugs found** — especially the suspected time-reference issue in the IQ mixer
+- ✅ **Verify IQ mix-down correctness** — Found and fixed: mixer used window-relative time. Now uses buffer-relative (sample_index/sample_rate), independent of RTP/GPS/NTP.
+- ✅ **Diagnose phase continuity problem** — Root cause: t_tick started at 0 per tick + phase extracted over whole 5s window. Fixed: per-tick extraction with buffer-relative time.
+- ✅ **Verify DC phasor on unambiguous channels** — Regression test confirms σ < 0.3 rad for stable carrier.
+- ⬚ **Consistency check** — carrier_phase_rad vs dc_carrier_phase_rad offset verification (needs production data after restart)
+- ⬚ **Quantify phase noise floor** — σ_φ vs SNR (needs production data after restart)
+- ✅ **Fix any bugs found** — Buffer-relative time mixer, per-tick extraction, type hint fix, regression tests added.
 
 ### Part 2: Web-API-UI Visualization
-- ⬚ **Phase time series plot** — per-channel, per-station, unwrapped, 24h
-- ⬚ **Doppler shift derivation and display** — from phase rate, with appropriate smoothing
-- ⬚ **Multi-frequency comparison** — verify dispersive scaling (Δφ ∝ 1/f)
-- ⬚ **Phase scintillation index** — σ_φ time series
-- ⬚ **Mode transition annotations** — phase jumps flagged on plots
-- ⬚ **DC carrier phase on unambiguous channels** — the cleanest ionospheric observable
-- ⬚ **Correlation with propagation mode** — do phase patterns match expected 1F, 2F, sporadic E signatures?
+- ✅ **Phase time series plot** — per-channel, per-station, unwrapped, with time range controls
+- ✅ **Doppler shift derivation and display** — from phase rate, with configurable smoothing
+- ⬚ **Multi-frequency comparison** — verify dispersive scaling (needs production data)
+- ✅ **Phase scintillation index** — σ_φ time series with 0.3 rad threshold line
+- ⬚ **Mode transition annotations** — phase jumps flagged on plots (deferred to next session)
+- ✅ **DC carrier phase on unambiguous channels** — dedicated plot for CHU + WWV 20/25 MHz
+- ⬚ **Correlation with propagation mode** — needs production data to validate
+
+## 📋 NEXT SESSION: PRODUCTION VALIDATION + MODE DETECTION
+
+**Objective:** After restarting metrology services with the phase continuity fix:
+
+1. **Validate phase continuity in production** — Confirm σ_φ drops from ~1.7 rad to < 0.3 rad on real data
+2. **Carrier vs DC phase consistency** — On CHU channels, verify carrier_phase_rad and dc_carrier_phase_rad differ by a predictable constant
+3. **Phase noise floor** — Measure σ_φ vs SNR across channels, compare with theoretical 1/(SNR_linear × √N)
+4. **Multi-frequency dispersive check** — Same station on multiple frequencies: Δφ ∝ TEC/f
+5. **Mode transition detection** — Implement automatic detection of phase jumps > 1 rad in < 10s, annotate on plots
+6. **Diurnal Doppler signatures** — Verify sunrise/sunset produce expected smooth Doppler ramps
+7. **Threshold calibration** — Use detection_attempts data to calibrate BASE_CORR_SNR_DB and MIN_BPM_SNR_DB

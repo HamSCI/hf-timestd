@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phase &amp; Doppler Dashboard - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="/static/js/common.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>&#x1F4E1; Phase &amp; Doppler Dashboard</h1>
+            <div class="header-subtitle">Ionospheric dynamics from carrier phase tracking</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link">Validation</a>
+                <a href="/static/stability.html" class="nav-link">Stability</a>
+                <span class="nav-divider"></span>
+                <a href="/static/propagation.html" class="nav-link">Ionosphere</a>
+                <a href="/static/phase.html" class="nav-link active">&#x1F4E1; Phase</a>
+                <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/test_signal.html" class="nav-link">Test Signal</a>
+                <a href="/static/solar-correlation.html" class="nav-link">Solar</a>
+                <a href="/static/dashboard-24h.html" class="nav-link">24h</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link">Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
+            </nav>
+        </div>
+
+        <div id="error-container" style="display: none;"></div>
+
+        <!-- Controls -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg); display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center;">
+            <div>
+                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Time Range</label>
+                <div style="display: flex; gap: 4px;">
+                    <button class="time-btn" data-range="-15m" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">15m</button>
+                    <button class="time-btn active" data-range="-1h" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">1h</button>
+                    <button class="time-btn" data-range="-6h" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">6h</button>
+                    <button class="time-btn" data-range="-24h" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">24h</button>
+                </div>
+            </div>
+            <div>
+                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Phase Type</label>
+                <select id="phase-type-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
+                    <option value="carrier_phase_rad" selected>Carrier Phase (IQ mix-down)</option>
+                    <option value="dc_carrier_phase_rad">DC Carrier Phase (unambiguous only)</option>
+                    <option value="phase_rad">Audio Modulation Phase</option>
+                </select>
+            </div>
+            <div>
+                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Channel Filter</label>
+                <select id="channel-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
+                    <option value="">All Channels</option>
+                </select>
+            </div>
+            <div>
+                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Station Filter</label>
+                <select id="station-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
+                    <option value="">All Stations</option>
+                    <option value="WWV">WWV</option>
+                    <option value="WWVH">WWVH</option>
+                    <option value="CHU">CHU</option>
+                    <option value="BPM">BPM</option>
+                </select>
+            </div>
+            <div style="margin-left: auto;">
+                <div class="live-indicator" id="live-indicator" style="display: none;">
+                    <div class="live-dot"></div>
+                    <span>Live</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary Cards -->
+        <div id="summary-cards" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <div style="text-align: center; color: var(--text-secondary); padding: 20px;">Loading summary...</div>
+        </div>
+
+        <!-- Phase Time Series Plot -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h3 style="color: var(--text-primary); margin-bottom: var(--spacing-sm);">Carrier Phase vs Time</h3>
+            <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: var(--spacing-sm);">
+                Unwrapped phase tracks ionospheric path length. Ramps = Doppler drift. Jumps = mode changes.
+            </div>
+            <div id="phase-plot" style="width: 100%; height: 400px;"></div>
+        </div>
+
+        <!-- Doppler Shift Plot -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h3 style="color: var(--text-primary); margin-bottom: var(--spacing-sm);">Doppler Shift vs Time</h3>
+            <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: var(--spacing-sm);">
+                f<sub>D</sub> = -(1/2&pi;) d&phi;/dt. Positive = ionosphere descending. Sunrise/sunset produce characteristic signatures.
+            </div>
+            <div id="doppler-plot" style="width: 100%; height: 350px;"></div>
+        </div>
+
+        <!-- Scintillation Index Plot -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h3 style="color: var(--text-primary); margin-bottom: var(--spacing-sm);">Phase Scintillation Index (&sigma;<sub>&phi;</sub>)</h3>
+            <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: var(--spacing-sm);">
+                Standard deviation of detrended phase over 60s windows. High &sigma;<sub>&phi;</sub> (&gt; 0.3 rad) = ionospheric irregularities.
+            </div>
+            <div id="scintillation-plot" style="width: 100%; height: 300px;"></div>
+        </div>
+
+        <!-- DC Carrier Phase (Unambiguous Channels) -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h3 style="color: var(--text-primary); margin-bottom: var(--spacing-sm);">DC Carrier Phase (Unambiguous Channels)</h3>
+            <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: var(--spacing-sm);">
+                CHU (3.33/7.85/14.67 MHz) and WWV (20/25 MHz): bare carrier phase, independent of tone detection. Cleanest ionospheric observable.
+            </div>
+            <div id="dc-phase-plot" style="width: 100%; height: 350px;"></div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let currentRange = '-1h';
+        let refreshTimer = null;
+
+        // Plotly dark theme layout
+        const darkLayout = {
+            paper_bgcolor: '#1e293b',
+            plot_bgcolor: '#0f172a',
+            font: { color: '#e0e0e0', size: 12 },
+            xaxis: {
+                gridcolor: '#334155',
+                linecolor: '#475569',
+                tickformat: '%H:%M',
+            },
+            yaxis: {
+                gridcolor: '#334155',
+                linecolor: '#475569',
+            },
+            margin: { l: 60, r: 30, t: 10, b: 40 },
+            legend: {
+                bgcolor: 'rgba(30,41,59,0.8)',
+                font: { color: '#e0e0e0' },
+            },
+            hovermode: 'x unified',
+        };
+
+        const plotConfig = { responsive: true, displayModeBar: false };
+
+        // Populate channel dropdown from summary
+        async function populateChannels() {
+            try {
+                const data = await api.get('/phase/summary');
+                const select = document.getElementById('channel-select');
+                const channels = new Set();
+                (data.channels || []).forEach(c => channels.add(c.channel));
+                channels.forEach(ch => {
+                    const opt = document.createElement('option');
+                    opt.value = ch;
+                    opt.textContent = ch;
+                    select.appendChild(opt);
+                });
+            } catch (e) {
+                console.warn('Could not populate channels:', e);
+            }
+        }
+
+        // Get current filter params
+        function getParams() {
+            const params = { start: currentRange, end: 'now' };
+            const ch = document.getElementById('channel-select').value;
+            const stn = document.getElementById('station-select').value;
+            if (ch) params.channel = ch;
+            if (stn) params.station = stn;
+            return params;
+        }
+
+        // Update summary cards
+        async function updateSummary() {
+            try {
+                const data = await api.get('/phase/summary');
+                const container = document.getElementById('summary-cards');
+
+                if (!data.channels || data.channels.length === 0) {
+                    container.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 20px; grid-column: 1/-1;">No phase data available yet. Waiting for tick_phase HDF5 data...</div>';
+                    return;
+                }
+
+                container.innerHTML = data.channels.map(ch => `
+                    <div style="background: var(--bg-primary); border-radius: var(--radius-md); padding: var(--spacing-md); border-left: 3px solid ${ch.color};">
+                        <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">
+                            ${ch.channel} / ${ch.station}
+                            ${ch.dc_meaningful ? '<span style="color: #10b981; font-size: 11px;" title="DC carrier phase available"> &#x2713; DC</span>' : ''}
+                        </div>
+                        <div style="font-size: 20px; font-weight: 600; color: ${ch.color}; margin-bottom: 8px;">
+                            ${ch.doppler_hz.toFixed(3)} Hz
+                        </div>
+                        <div style="display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary);">
+                            <span>&sigma;<sub>&phi;</sub> = ${ch.sigma_phi_rad.toFixed(3)} rad</span>
+                            <span>SNR ${ch.mean_snr_db.toFixed(1)} dB</span>
+                        </div>
+                        <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                            ${ch.n_points} pts &middot; ${ch.last_update ? timeAgo(ch.last_update) : 'N/A'}
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.warn('Summary error:', e);
+            }
+        }
+
+        // Update phase plot
+        async function updatePhasePlot() {
+            try {
+                const params = getParams();
+                params.phase_type = document.getElementById('phase-type-select').value;
+                params.unwrap = true;
+
+                const data = await api.get('/phase/timeseries', params);
+                const traces = (data.series || []).map(s => ({
+                    x: s.timestamps,
+                    y: s.phase_rad,
+                    name: `${s.channel} / ${s.station}`,
+                    type: 'scattergl',
+                    mode: 'lines',
+                    line: { color: s.color, width: 1.5 },
+                    hovertemplate: '%{y:.3f} rad<extra>%{fullData.name}</extra>',
+                }));
+
+                const layout = {
+                    ...darkLayout,
+                    yaxis: { ...darkLayout.yaxis, title: 'Phase (rad)' },
+                    showlegend: true,
+                };
+
+                if (traces.length === 0) {
+                    document.getElementById('phase-plot').innerHTML =
+                        '<div style="text-align: center; color: var(--text-secondary); padding: 60px;">No phase data in selected range</div>';
+                    return;
+                }
+
+                Plotly.react('phase-plot', traces, layout, plotConfig);
+            } catch (e) {
+                console.error('Phase plot error:', e);
+            }
+        }
+
+        // Update Doppler plot
+        async function updateDopplerPlot() {
+            try {
+                const params = getParams();
+                params.smoothing = 30;
+
+                const data = await api.get('/phase/doppler', params);
+                const traces = (data.series || []).map(s => ({
+                    x: s.timestamps,
+                    y: s.doppler_hz,
+                    name: `${s.channel} / ${s.station}`,
+                    type: 'scattergl',
+                    mode: 'lines',
+                    line: { color: s.color, width: 1.5 },
+                    hovertemplate: '%{y:.4f} Hz<extra>%{fullData.name}</extra>',
+                }));
+
+                // Add zero line
+                const layout = {
+                    ...darkLayout,
+                    yaxis: { ...darkLayout.yaxis, title: 'Doppler (Hz)', zeroline: true, zerolinecolor: '#475569' },
+                    showlegend: true,
+                };
+
+                if (traces.length === 0) {
+                    document.getElementById('doppler-plot').innerHTML =
+                        '<div style="text-align: center; color: var(--text-secondary); padding: 60px;">No Doppler data in selected range</div>';
+                    return;
+                }
+
+                Plotly.react('doppler-plot', traces, layout, plotConfig);
+            } catch (e) {
+                console.error('Doppler plot error:', e);
+            }
+        }
+
+        // Update scintillation plot
+        async function updateScintillationPlot() {
+            try {
+                const params = getParams();
+                params.window = 60;
+
+                const data = await api.get('/phase/scintillation', params);
+                const traces = (data.series || []).map(s => ({
+                    x: s.timestamps,
+                    y: s.sigma_phi_rad,
+                    name: `${s.channel} / ${s.station}`,
+                    type: 'scattergl',
+                    mode: 'lines',
+                    line: { color: s.color, width: 1.5 },
+                    hovertemplate: '&sigma;<sub>&phi;</sub> = %{y:.3f} rad<extra>%{fullData.name}</extra>',
+                }));
+
+                // Add threshold line at 0.3 rad
+                if (traces.length > 0) {
+                    traces.push({
+                        x: [traces[0].x[0], traces[0].x[traces[0].x.length - 1]],
+                        y: [0.3, 0.3],
+                        name: 'Irregularity threshold',
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { color: '#ef4444', width: 1, dash: 'dash' },
+                        showlegend: true,
+                    });
+                }
+
+                const layout = {
+                    ...darkLayout,
+                    yaxis: { ...darkLayout.yaxis, title: '&sigma;<sub>&phi;</sub> (rad)', rangemode: 'tozero' },
+                    showlegend: true,
+                };
+
+                if (traces.length === 0) {
+                    document.getElementById('scintillation-plot').innerHTML =
+                        '<div style="text-align: center; color: var(--text-secondary); padding: 60px;">No scintillation data in selected range</div>';
+                    return;
+                }
+
+                Plotly.react('scintillation-plot', traces, layout, plotConfig);
+            } catch (e) {
+                console.error('Scintillation plot error:', e);
+            }
+        }
+
+        // Update DC carrier phase plot (unambiguous channels only)
+        async function updateDCPhasePlot() {
+            try {
+                const params = getParams();
+                params.phase_type = 'dc_carrier_phase_rad';
+                params.unwrap = true;
+                // Don't filter by channel here - we want all unambiguous channels
+
+                const data = await api.get('/phase/timeseries', params);
+
+                // Filter to only unambiguous channels
+                const unambiguous = new Set([
+                    'CHU_3330', 'CHU_7850', 'CHU_14670', 'WWV_20000', 'WWV_25000'
+                ]);
+                const filtered = (data.series || []).filter(s => unambiguous.has(s.channel));
+
+                const traces = filtered.map(s => ({
+                    x: s.timestamps,
+                    y: s.phase_rad,
+                    name: `${s.channel} / ${s.station}`,
+                    type: 'scattergl',
+                    mode: 'lines',
+                    line: { color: s.color, width: 1.5 },
+                    hovertemplate: '%{y:.3f} rad<extra>%{fullData.name}</extra>',
+                }));
+
+                const layout = {
+                    ...darkLayout,
+                    yaxis: { ...darkLayout.yaxis, title: 'DC Carrier Phase (rad)' },
+                    showlegend: true,
+                };
+
+                if (traces.length === 0) {
+                    document.getElementById('dc-phase-plot').innerHTML =
+                        '<div style="text-align: center; color: var(--text-secondary); padding: 60px;">No DC carrier phase data (requires CHU or WWV 20/25 MHz channels)</div>';
+                    return;
+                }
+
+                Plotly.react('dc-phase-plot', traces, layout, plotConfig);
+            } catch (e) {
+                console.error('DC phase plot error:', e);
+            }
+        }
+
+        // Refresh all plots
+        async function refreshAll() {
+            document.getElementById('live-indicator').style.display = 'flex';
+            await Promise.all([
+                updateSummary(),
+                updatePhasePlot(),
+                updateDopplerPlot(),
+                updateScintillationPlot(),
+                updateDCPhasePlot(),
+            ]);
+        }
+
+        // Time range buttons
+        document.querySelectorAll('.time-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.time-btn').forEach(b => {
+                    b.style.background = 'var(--bg-surface)';
+                    b.style.borderColor = 'var(--border-color)';
+                });
+                btn.style.background = '#3b82f6';
+                btn.style.borderColor = '#3b82f6';
+                currentRange = btn.dataset.range;
+                refreshAll();
+            });
+        });
+
+        // Highlight default button
+        document.querySelector('.time-btn[data-range="-1h"]').style.background = '#3b82f6';
+        document.querySelector('.time-btn[data-range="-1h"]').style.borderColor = '#3b82f6';
+
+        // Filter change handlers
+        document.getElementById('phase-type-select').addEventListener('change', () => {
+            updatePhasePlot();
+        });
+        document.getElementById('channel-select').addEventListener('change', refreshAll);
+        document.getElementById('station-select').addEventListener('change', refreshAll);
+
+        // Initial load
+        populateChannels();
+        refreshAll();
+
+        // Auto-refresh every 60 seconds
+        refreshTimer = setInterval(refreshAll, 60000);
+    </script>
+</body>
+
+</html>

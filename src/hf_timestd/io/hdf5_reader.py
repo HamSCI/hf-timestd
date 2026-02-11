@@ -215,12 +215,49 @@ class DataProductReader:
                         logger.warning(f"No timestamp_utc dataset in {hdf5_path}")
                         continue
                     
-                    # Read all datasets
+                    # Read all datasets, handling corrupt trailing chunks.
+                    # gzip-compressed HDF5 datasets can have a truncated final
+                    # chunk if the writer was killed mid-write.  When that
+                    # happens, f[name][:] raises OSError.  We binary-search
+                    # for the last readable row and truncate all fields there.
                     data = {}
+                    truncate_to = None
                     for field in self.schema['fields']:
                         field_name = field['name']
                         if field_name in f:
-                            data[field_name] = f[field_name][:]
+                            try:
+                                data[field_name] = f[field_name][:]
+                            except OSError as read_err:
+                                # Corrupt chunk — find last good row
+                                ds = f[field_name]
+                                n = ds.shape[0]
+                                lo, hi = 0, n
+                                while lo < hi:
+                                    mid = (lo + hi) // 2
+                                    try:
+                                        _ = ds[mid]
+                                        lo = mid + 1
+                                    except OSError:
+                                        hi = mid
+                                safe_n = lo
+                                logger.warning(
+                                    f"Corrupt chunk in {hdf5_path.name}/{field_name} "
+                                    f"at row {safe_n}/{n} — truncating read "
+                                    f"({read_err})"
+                                )
+                                if safe_n > 0:
+                                    data[field_name] = ds[:safe_n]
+                                    if truncate_to is None or safe_n < truncate_to:
+                                        truncate_to = safe_n
+                                else:
+                                    data[field_name] = np.empty(0, dtype=ds.dtype)
+                                    truncate_to = 0
+                    
+                    # If any field was truncated, trim all fields to the same length
+                    if truncate_to is not None and truncate_to > 0:
+                        for field_name in data:
+                            if len(data[field_name]) > truncate_to:
+                                data[field_name] = data[field_name][:truncate_to]
                     
                     # Use timestamp_utc length as the canonical measurement count
                     # Other datasets may be empty if optional fields were never written
