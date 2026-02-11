@@ -39,6 +39,7 @@ from hf_timestd.core.tone_detector import MultiStationToneDetector
 from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
 from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType as TickStationType
 from hf_timestd.core.fusion_timing_state import FusionTimingState, LockTier
+from hf_timestd.core.bootstrap_state import BootstrapStateWriter
 from hf_timestd.core.timing_consistency_validator import TimingConsistencyValidator
 # We keep discriminators as they are signal analysis, not physics modeling.
 
@@ -112,8 +113,10 @@ class MetrologyEngine:
         # Fusion mode timing state (only used when is_rtp_authority=False)
         # This replaces the separate BootstrapService
         self.fusion_state: Optional[FusionTimingState] = None
+        self._bootstrap_state_writer: Optional[BootstrapStateWriter] = None
         if not self.is_rtp_authority:
             self.fusion_state = FusionTimingState(sample_rate=self.sample_rate)
+            self._bootstrap_state_writer = BootstrapStateWriter()
             logger.info(f"{channel_name}: Fusion mode - timing lock required before narrow search")
         
         logger.info(
@@ -1031,6 +1034,7 @@ class MetrologyEngine:
                 )
                 if lock_status:
                     logger.info(f"{self.channel_name}: {lock_status}")
+                    self._write_bootstrap_state_on_lock()
             
         with self._lock:
             self.minutes_processed += 1
@@ -1085,6 +1089,38 @@ class MetrologyEngine:
                         logger.info(f"  Sample interval: {stability.sample_interval_mean:.0f}±{stability.sample_interval_std:.1f}")
             
         return results
+
+    def _write_bootstrap_state_on_lock(self):
+        """Write bootstrap state file when FusionTimingState achieves lock.
+        
+        This unblocks the fusion service which waits for bootstrap_state.json
+        before starting its main loop. Called on PROVISIONAL and REFINED lock
+        transitions.
+        """
+        if self._bootstrap_state_writer is None or self.fusion_state is None:
+            return
+        
+        if not self.fusion_state.is_locked:
+            return
+        
+        try:
+            offset_stats = self.fusion_state._compute_offset_stats()
+            lock_tier = self.fusion_state.lock_tier.name
+            d_clock_ms = offset_stats.get('median_ms', 0.0)
+            uncertainty_ms = offset_stats.get('std_ms', 50.0)
+            
+            self._bootstrap_state_writer.write_locked(
+                lock_tier=lock_tier,
+                d_clock_ms=d_clock_ms,
+                uncertainty_ms=uncertainty_ms,
+                sample_rate=self.sample_rate
+            )
+            logger.info(
+                f"{self.channel_name}: Bootstrap state written: {lock_tier}, "
+                f"D_clock={d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms"
+            )
+        except Exception as e:
+            logger.error(f"{self.channel_name}: Failed to write bootstrap state: {e}")
 
     def _read_fsk_result(self, minute_boundary: int) -> dict:
         """Read CHU FSK result from shared JSON (written by CHUFSKListener)."""

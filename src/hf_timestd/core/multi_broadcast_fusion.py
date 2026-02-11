@@ -4684,38 +4684,56 @@ def run_fusion_service(
     # Fusion should not run until bootstrap has established the RTP-to-UTC
     # correspondence. Without this, D_clock calculations are meaningless.
     #
-    # We use inotify-based file watching for efficient coordination with
-    # the core recorder, which writes bootstrap_state.json on lock.
+    # In RTP authority mode (GPS+PPS), timing is already authoritative
+    # so bootstrap lock is not needed - skip the gate entirely.
+    #
+    # In fusion authority mode, MetrologyEngine writes bootstrap_state.json
+    # when FusionTimingState achieves PROVISIONAL or REFINED lock.
+    _skip_bootstrap_gate = False
     try:
-        from .bootstrap_state import BootstrapStateWatcher
-        bootstrap_watcher = BootstrapStateWatcher()
-        
-        # Check if already locked (e.g., service restart after lock)
-        if not bootstrap_watcher.is_locked():
-            logger.info("[BOOTSTRAP] Waiting for bootstrap lock before starting fusion...")
-            # Wait indefinitely for bootstrap lock (with watchdog keepalive)
-            while running and not bootstrap_watcher.is_locked():
-                if SYSTEMD_AVAILABLE:
-                    systemd_daemon.notify('WATCHDOG=1')
-                time.sleep(1.0)
-            
-            if not running:
-                logger.info("[BOOTSTRAP] Shutdown requested while waiting for lock")
-                return
-        
-        state = bootstrap_watcher.get_state()
-        if state:
-            logger.info(
-                f"[BOOTSTRAP] Lock confirmed: {state.lock_tier}, "
-                f"D_clock={state.d_clock_ms:+.1f}ms ± {state.uncertainty_ms:.1f}ms"
-            )
-        else:
-            logger.info("[BOOTSTRAP] Lock detected (state file exists)")
-            
-    except ImportError as e:
-        logger.warning(f"[BOOTSTRAP] State watcher not available: {e}. Proceeding without gate.")
+        import toml as _toml
+        _config_path = Path('/etc/hf-timestd/timestd-config.toml')
+        if _config_path.exists():
+            with open(_config_path, 'r') as _f:
+                _cfg = _toml.load(_f)
+            _authority = _cfg.get('timing', {}).get('authority', 'rtp')
+            if _authority == 'rtp':
+                logger.info("[BOOTSTRAP] RTP authority mode (GPS+PPS) - skipping bootstrap gate")
+                _skip_bootstrap_gate = True
     except Exception as e:
-        logger.warning(f"[BOOTSTRAP] Error checking lock state: {e}. Proceeding without gate.")
+        logger.warning(f"[BOOTSTRAP] Could not read config to check authority: {e}")
+    
+    if not _skip_bootstrap_gate:
+        try:
+            from .bootstrap_state import BootstrapStateWatcher
+            bootstrap_watcher = BootstrapStateWatcher()
+            
+            # Check if already locked (e.g., service restart after lock)
+            if not bootstrap_watcher.is_locked():
+                logger.info("[BOOTSTRAP] Waiting for bootstrap lock before starting fusion...")
+                # Wait indefinitely for bootstrap lock (with watchdog keepalive)
+                while running and not bootstrap_watcher.is_locked():
+                    if SYSTEMD_AVAILABLE:
+                        systemd_daemon.notify('WATCHDOG=1')
+                    time.sleep(1.0)
+                
+                if not running:
+                    logger.info("[BOOTSTRAP] Shutdown requested while waiting for lock")
+                    return
+            
+            state = bootstrap_watcher.get_state()
+            if state:
+                logger.info(
+                    f"[BOOTSTRAP] Lock confirmed: {state.lock_tier}, "
+                    f"D_clock={state.d_clock_ms:+.1f}ms ± {state.uncertainty_ms:.1f}ms"
+                )
+            else:
+                logger.info("[BOOTSTRAP] Lock detected (state file exists)")
+                
+        except ImportError as e:
+            logger.warning(f"[BOOTSTRAP] State watcher not available: {e}. Proceeding without gate.")
+        except Exception as e:
+            logger.warning(f"[BOOTSTRAP] Error checking lock state: {e}. Proceeding without gate.")
     
     # Data freshness alerting - track consecutive cycles with no measurements
     consecutive_empty_cycles = 0
