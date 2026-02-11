@@ -221,7 +221,7 @@
                 params.unwrap = true;
 
                 const data = await api.get('/phase/timeseries', params);
-                const traces = (data.series || []).map(s => ({
+                const traces = (data.series || []).map((s, i) => ({
                     x: s.timestamps,
                     y: s.phase_rad,
                     name: `${s.channel} / ${s.station}`,
@@ -229,6 +229,7 @@
                     mode: 'lines',
                     line: { color: s.color, width: 1.5 },
                     hovertemplate: '%{y:.3f} rad<extra>%{fullData.name}</extra>',
+                    visible: i === 0 ? true : 'legendonly',
                 }));
 
                 const layout = {
@@ -256,7 +257,7 @@
                 params.smoothing = 30;
 
                 const data = await api.get('/phase/doppler', params);
-                const traces = (data.series || []).map(s => ({
+                const traces = (data.series || []).map((s, i) => ({
                     x: s.timestamps,
                     y: s.doppler_hz,
                     name: `${s.channel} / ${s.station}`,
@@ -264,6 +265,7 @@
                     mode: 'lines',
                     line: { color: s.color, width: 1.5 },
                     hovertemplate: '%{y:.4f} Hz<extra>%{fullData.name}</extra>',
+                    visible: i === 0 ? true : 'legendonly',
                 }));
 
                 // Add zero line
@@ -292,7 +294,7 @@
                 params.window = 60;
 
                 const data = await api.get('/phase/scintillation', params);
-                const traces = (data.series || []).map(s => ({
+                const traces = (data.series || []).map((s, i) => ({
                     x: s.timestamps,
                     y: s.sigma_phi_rad,
                     name: `${s.channel} / ${s.station}`,
@@ -300,6 +302,7 @@
                     mode: 'lines',
                     line: { color: s.color, width: 1.5 },
                     hovertemplate: '&sigma;<sub>&phi;</sub> = %{y:.3f} rad<extra>%{fullData.name}</extra>',
+                    visible: i === 0 ? true : 'legendonly',
                 }));
 
                 // Add threshold line at 0.3 rad
@@ -349,7 +352,7 @@
                 ]);
                 const filtered = (data.series || []).filter(s => unambiguous.has(s.channel));
 
-                const traces = filtered.map(s => ({
+                const traces = filtered.map((s, i) => ({
                     x: s.timestamps,
                     y: s.phase_rad,
                     name: `${s.channel} / ${s.station}`,
@@ -357,6 +360,7 @@
                     mode: 'lines',
                     line: { color: s.color, width: 1.5 },
                     hovertemplate: '%{y:.3f} rad<extra>%{fullData.name}</extra>',
+                    visible: i === 0 ? true : 'legendonly',
                 }));
 
                 const layout = {
