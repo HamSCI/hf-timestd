@@ -10,205 +10,192 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: PHASE & DOPPLER METHODOLOGY REVIEW + WEB-API-UI EXPOSURE
+## 📋 NEXT SESSION: DEBUG TICK MATCHED FILTER — ±50ms TIMING SCATTER
 
-**Objective:** Two-part session:
+**Objective:** The tick matched filter (`tick_matched_filter.py`) produces timing offsets with **σ = 50–77ms** across its 55 overlapping 5-second windows per minute. This scatter is visible on the 24-hour dashboard across **all 3 stations (bee1, B3-1, B4-1)** and **all channels** simultaneously. The expected σ for a working matched filter at these SNR levels (10–40 dB) is < 1ms. The ±50ms scatter is the dominant error source in the entire system and must be fixed before any downstream product (timing, phase, Doppler) can be trusted.
 
-1. **Critically review the phase and Doppler shift extraction methodology** for weaknesses, errors, and missed opportunities. The system now extracts three distinct phase measurements per tick window from IQ samples. These must be verified for correctness, physical meaning, and consistency before being exposed to users.
-
-2. **Expose phase and Doppler data through the web-api-ui** with visualizations that reveal ionospheric dynamics. Phase drift → Doppler shift. Phase jumps → propagation mode changes. Scintillation patterns → ionospheric irregularities. The data should correlate with mode of propagation (1-hop F, 2-hop F, sporadic E, etc.).
+**This is NOT a regression from the 2026-02-11 phase continuity fix.** Log analysis confirms the same σ = 50–77ms was present on 2026-02-10 (before any changes). The phase continuity fix (buffer-relative time for IQ mixer) was correct for its purpose but does not address this separate, pre-existing problem.
 
 ---
 
-## 🎯 FOUR PERSPECTIVES ON PHASE/DOPPLER
+## 🚨 THE PROBLEM IN DETAIL
 
-### 1. The User Perspective
-- **"What is the ionosphere doing right now?"** — Phase drift rate (Doppler) as a real-time indicator of ionospheric motion
-- **"When did the propagation mode change?"** — Phase discontinuities mark mode transitions (e.g., 1F→2F, F→sporadic E)
-- **"Which path is more stable?"** — Compare WWV vs WWVH phase stability on the same frequency
+### What the dashboards show (2026-02-11, all 3 machines)
 
-### 2. The Metrologist Perspective
-- **Phase measurement validity** — Is `carrier_phase_rad` actually tracking the RF carrier, or is it an artifact of the processing? What is the measurement noise floor?
-- **Ambiguity** — Phase wraps at ±π. Unwrapping is needed for Doppler extraction but introduces errors at discontinuities. How robust is the unwrapping?
-- **Consistency** — Do the three phase measurements (audio, carrier, DC) agree where they should? On unambiguous channels, `dc_carrier_phase_rad` and `carrier_phase_rad` should differ by a constant (the tone frequency's contribution).
-- **Uncertainty** — What is the phase measurement uncertainty as a function of SNR? At 10 dB SNR, phase noise is ~18° (0.3 rad). At 20 dB, ~6° (0.1 rad).
+The 24-hour dashboard (`dashboard-24h.html`) plots `timing_error_ms` = `raw_toa_ms - expected_propagation_delay_ms` for each broadcast. The data comes from two sources:
+1. **`L2/timing_measurements`** — individual RTP-based single-tick detections (sparse dots)
+2. **`L2/tick_timing`** — tick matched filter aggregate per minute (dense scatter, `mean_timing_offset_ms`)
 
-### 3. The Ionospheric Scientist Perspective
-- **Doppler from phase rate** — `f_Doppler = -(1/2π) × dφ/dt`. For 10 MHz carrier, 1 rad/s phase drift = 0.16 Hz Doppler = 4.8 m/s ionospheric motion.
-- **Mode identification** — Different propagation modes have different path lengths → different absolute phases. Mode transitions cause phase jumps of known magnitudes (calculable from geometry).
-- **Multipath** — When two modes are present simultaneously, the phase oscillates (beating). The beat frequency reveals the path length difference.
-- **Diurnal signatures** — Sunrise/sunset cause systematic Doppler shifts as the ionosphere rises/descends. These should be visible as smooth phase ramps.
-- **Scintillation** — Rapid phase fluctuations (S4 > 0.3) indicate small-scale ionospheric irregularities. Phase scintillation index (σ_φ) is a standard metric.
-- **Correlation across frequencies** — Phase changes should scale with frequency (dispersive ionosphere). 15 MHz should show 1.5× the phase change of 10 MHz for the same TEC change.
+The dense scatter shows D_err bouncing ±50ms around zero for ALL stations on ALL channels. The scatter does NOT correlate with SNR (it's just as bad at 40 dB as at 10 dB). It does NOT follow the smooth diurnal ionospheric curve expected. It appears on all 3 independent receivers simultaneously, ruling out local hardware issues.
 
-### 4. The Programmer Perspective
-- **Is the IQ mix-down correct?** — The `exp(-j·2π·f_tone·t)` mixer must use the correct `t` (time relative to window start, not absolute). Sign convention matters.
-- **Is the DC phasor meaningful?** — `mean(IQ)` over a tick duration (~5ms at 20 kHz = 100 samples) — is this enough samples for a stable phasor estimate?
-- **Window-to-window continuity** — Overlapping 5-second windows should produce smoothly varying phase. If phase jumps ~1.7 rad between windows (as currently observed), something is wrong.
-- **Template artifact** — The composite template sums multiple tick positions. If the template phase reference shifts between windows, the extracted phase will jump even if the signal phase is continuous.
-- **HDF5 data volume** — ~55 rows/station/minute × 3 stations × 9 channels = ~1485 rows/minute. At ~200 bytes/row, that's ~430 MB/day. Is this sustainable?
+### Production log evidence (bee1, SHARED_10000, 2026-02-11 18:30 UTC)
 
----
+```
+WWV tick analysis  - 48/55 windows, raw_toa=-0.6ms,  std=76.7ms, drift=-0.594ms/s
+WWVH tick analysis - 55/55 windows, raw_toa=+8.2ms,  std=56.6ms, drift=0.818ms/s
+BPM tick analysis  - 47/55 windows, raw_toa=-23.3ms, std=53.7ms, drift=0.663ms/s
+```
 
-## 📡 PHASE EXTRACTION ARCHITECTURE (Implemented 2026-02-11)
+- **`std=76.7ms`** — the correlation peak position varies by ±77ms across 55 overlapping windows that share 4/5 of their data
+- **`drift=-0.594ms/s`** — apparent drift of 0.6ms/s is physically impossible (would require km/s ionospheric motion)
+- **Physics REJECTED**: arrivals at 955–999ms (near end of second, not beginning)
+- **Cross-station timing INVALID**: WWV arriving after WWVH (impossible given distances)
+- **Stability metrics over 60 minutes**: WWV arrival=25.1±17.2ms, WWVH=17.0±23.7ms, BPM=-10.1±30.1ms
 
-### Three Phase Measurements
+### Same problem on 2026-02-10 (before any code changes)
 
-| Field | Method | Physical Meaning | Best Channel Type |
-|-------|--------|-----------------|-------------------|
-| `phase_rad` | `atan2(corr_sin, corr_cos)` on AM envelope | Audio modulation phase of the tone | All (but least informative) |
-| `carrier_phase_rad` | `IQ × exp(-j·2π·f_tone·t)` → `angle(mean)` | RF carrier phase at tone frequency | All (primary ionospheric observable) |
-| `dc_carrier_phase_rad` | `angle(mean(IQ))` over tick duration | Bare RF carrier phase (DC phasor) | **Unambiguous only** (CHU, WWV 20/25) |
+```
+WWV tick analysis  - 45/55 windows, raw_toa=-32.4ms, std=59.0ms, drift=0.474ms/s
+WWVH tick analysis - 54/55 windows, raw_toa=-8.4ms,  std=64.8ms, drift=-0.370ms/s
+BPM tick analysis  - 45/55 windows, raw_toa=-19.2ms, std=65.7ms, drift=-0.733ms/s
+```
 
-### Unambiguous vs Shared Channels
-
-| Channel | Station(s) | DC Carrier Meaningful? | Notes |
-|---------|-----------|----------------------|-------|
-| CHU_3330 | CHU only | **Yes** — USB preserved carrier | Strongest DC phasor |
-| CHU_7850 | CHU only | **Yes** — USB preserved carrier | Strongest DC phasor |
-| CHU_14670 | CHU only | **Yes** — USB preserved carrier | Strongest DC phasor |
-| WWV_20000 | WWV only | **Yes** — AM carrier | Clean single-station |
-| WWV_25000 | WWV only | **Yes** — AM carrier | Clean single-station |
-| SHARED_2500 | WWV+WWVH+BPM | No — mixed carriers | Use `carrier_phase_rad` per station |
-| SHARED_5000 | WWV+WWVH+BPM | No — mixed carriers | Use `carrier_phase_rad` per station |
-| SHARED_10000 | WWV+WWVH+BPM | No — mixed carriers | Use `carrier_phase_rad` per station |
-| SHARED_15000 | WWV+WWVH+BPM | No — mixed carriers | Use `carrier_phase_rad` per station |
-
-### Modulation Types
-
-- **CHU**: USB with preserved carrier. IQ baseband has strong DC (carrier) + 1000 Hz sideband (tone). `Re(IQ)` recovers audio. DC phasor is the carrier phase directly.
-- **WWV/WWVH**: Conventional AM. IQ baseband has DC (carrier) + ±1000/1200 Hz sidebands. `|IQ| - DC` recovers envelope. On shared channels, DC is a mix of multiple AM carriers.
-- **BPM**: Conventional AM at 1000 Hz, similar to WWV.
-
-### Early Results (2026-02-11, first hour of data)
-
-| Channel | Type | audio σ_φ | carrier σ_φ | dc σ_φ | dc stability gain |
-|---------|------|-----------|-------------|--------|-------------------|
-| CHU_14670 | Unambiguous | 2.01 rad | 1.79 rad | **1.55 rad** | **1.30×** |
-| CHU_7850 | Unambiguous | 1.88 rad | 1.82 rad | **1.68 rad** | **1.12×** |
-| WWV_25000 | Unambiguous | 1.58 rad | 1.63 rad | **1.46 rad** | **1.08×** |
-| WWV_20000 | Unambiguous | 1.54 rad | 1.60 rad | 1.83 rad | 0.84× |
-| SHARED_10000 | Mixed | 1.67 rad | 1.99 rad | 1.80 rad | 0.93× |
-| SHARED_5000 | Mixed | 1.66 rad | 1.78 rad | 1.78 rad | 0.94× |
-
-**Concern:** All σ_φ values are ~1.5–2.0 rad (approaching uniform random on [-π,π] which has σ=1.81 rad). This suggests the phase is not being tracked coherently across windows. Possible causes:
-1. Composite template phase reference shifts between windows
-2. Window overlap not accounting for phase continuity
-3. The 5ms tick (100 samples at 20 kHz) provides too few cycles for stable phase
-4. Bandpass filter in tick_matched_filter introduces phase shifts that vary with window position
+This confirms the problem is pre-existing, not a regression.
 
 ---
 
-## 🔍 KNOWN ISSUES TO INVESTIGATE
+## 🔍 ROOT CAUSE HYPOTHESES (ranked by likelihood)
 
-### 1. Phase Continuity Problem (HIGH PRIORITY)
-All phase measurements show σ ≈ 1.5–2.0 rad across consecutive windows. For a stable carrier, consecutive 5-second windows should show phase changes of order `2π × f_Doppler × Δt` — typically < 0.1 rad for sub-Hz Doppler. The observed ~1.7 rad jumps are 10–100× too large.
+### Hypothesis 1: Correlation envelope has multiple peaks of similar height (MOST LIKELY)
 
-**Hypotheses to test:**
-- **Template phase reference:** The composite template in `_build_composite_template()` sums tick templates at different positions within the window. If the template's phase reference changes between windows (e.g., because different seconds are valid), the correlation phase will jump.
-- **Bandpass filter phase:** `sosfiltfilt` is zero-phase, but the filter is applied per-window. Edge effects at window boundaries could introduce phase artifacts.
-- **IQ mix-down time reference:** The `t_tick` array in `_correlate_window` starts at 0 for each tick. If the tick's absolute time within the minute matters for the mixer phase, this introduces a window-dependent phase offset. **This is likely the primary bug** — the mixer should use absolute time, not tick-relative time.
-- **Sample count:** 5ms × 20 kHz = 100 samples. At 1000 Hz, that's 5 cycles. Phase estimation from 5 cycles has σ ≈ 1/(SNR_linear × √N) — at 10 dB SNR, σ ≈ 0.1 rad. So the noise floor is NOT the problem; the jumps are systematic.
+The composite template (`_build_composite_template()`) places 5 tick templates at 1-second intervals within a 5-second window. The correlation of this composite against the audio signal produces an envelope with peaks at each tick position. If the ticks have similar amplitude, the envelope has **5 peaks of similar height** separated by 1 second (20,000 samples). The `search_range_ms=100` parameter limits the search to ±100ms around center — but "center" is `len(envelope) // 2`, which is the middle of the 5-second window. This means:
 
-### 2. Cross-Frequency Discrimination (RESOLVED 2026-02-11)
-5ms template had 33% cross-response between 1000↔1200 Hz. Fixed with cross-frequency gate requiring 3 dB advantage. WWV/WWVH now show distinct detection rates on shared channels.
+- The search region is ±100ms around the center of the correlation output
+- But the correlation peak for a composite template should be at the point where ALL ticks align simultaneously
+- If the composite correlation has sidelobes within ±100ms (from partial tick alignment), noise selects different sidelobes in different windows
 
-### 3. Threshold Calibration (ONGOING)
-`BASE_CORR_SNR_DB = 8.0` is the dominant rejection reason. `L2/detection_attempts` HDF5 product collects all attempts (detected + rejected) with rejection reasons for offline analysis.
+**Key question:** Is `correlate(audio, template, mode='same')` the right approach for a composite template? The composite template is 5 seconds long (100,000 samples). The correlation output is also 100,000 samples. The peak should be near the center (sample 50,000) when ticks are at expected positions. But the ±100ms search (±2,000 samples) around center may contain multiple sidelobes from the composite structure.
 
-### 4. Memory Leak
-CHU metrology services grow to 2.5GB RSS over 12+ hours. Root cause unknown.
+**Diagnostic:** Plot the full correlation envelope for one window. Count peaks within ±100ms of center. Measure their relative heights.
+
+### Hypothesis 2: Template-signal mismatch due to bandpass filter
+
+`process_window()` applies a 4th-order Butterworth bandpass (±100 Hz around tick frequency) via `sosfiltfilt`. The template is generated without this filter. If the filter alters the tick waveform shape (e.g., ringing, envelope distortion), the correlation peak broadens and the peak position becomes noise-sensitive.
+
+**Diagnostic:** Compare correlation SNR with and without the bandpass filter. Check if the filter's impulse response duration (~10ms for 100 Hz bandwidth) is comparable to the tick duration (5ms for WWV).
+
+### Hypothesis 3: AM demodulation artifacts on shared channels
+
+For WWV/WWVH/BPM (AM stations), audio is extracted as `|IQ| - mean(|IQ|)`. On shared channels, multiple AM carriers are present. The envelope detector produces intermodulation products (beat frequencies between carriers). These beats can create spurious correlation peaks.
+
+**Diagnostic:** Compare tick filter std on unambiguous channels (CHU_3330, WWV_20000) vs shared channels (SHARED_10000). If unambiguous channels have lower std, intermodulation is a factor.
+
+### Hypothesis 4: The composite template approach is fundamentally flawed
+
+Correlating a 5-second composite template against a 5-second audio window using `scipy.signal.correlate(mode='same')` produces a 5-second output. The peak position represents the **average** timing offset across all ticks in the window. But if individual ticks have different offsets (e.g., due to multipath, interference, or the tick at second 29 being absent), the composite peak position is pulled by the dominant tick, not the true timing.
+
+**Alternative approach:** Correlate each tick individually (single-tick template against 1-second audio slice), then combine the offsets. This would give per-tick timing and reveal which ticks are reliable.
+
+### Hypothesis 5: The `offset_samples = peak_idx_refined - center` calculation is wrong
+
+The correlation output center (`len(envelope) // 2`) assumes the template is centered in the window. But `_build_composite_template()` places ticks at positions `(sec - start_second) * sample_rate` within the window — the first tick is at position 0, not at the center. This means the correlation peak is NOT at the center when ticks are at expected positions. The offset calculation would be systematically biased.
+
+**Diagnostic:** For a window starting at second 10, the first tick is at sample 0, last at sample 80,000. The template "center of mass" is at sample 40,000. The correlation center is at sample 50,000. This 10,000-sample (500ms) discrepancy could explain the large offsets.
 
 ---
 
 ## 🏗️ ARCHITECTURE REFERENCE
 
-### Data Flow for Phase Measurements
+### Data Flow
 
 ```
-ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffer
+ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffer (60s, /dev/shm)
    (GPS+PPS, ~50μs)                                               ↓
-                                                          timestd-metrology
-                                                           ↓ (per channel)
+                                                          timestd-metrology (9 channels)
+                                                           ↓ (per channel, per station)
                                                     TickMatchedFilter.process_minute()
-                                                      ↓ overlapping 5-sec windows
-                                                    _correlate_window()
-                                                      ├─ AM envelope → quadrature corr → phase_rad
-                                                      ├─ IQ × exp(-j2πft) → mean → carrier_phase_rad
+                                                      ↓ 55 overlapping 5-sec windows (1s step)
+                                                    process_window() → _correlate_window()
+                                                      ├─ AM demod → bandpass → composite template correlation
+                                                      ├─ Peak finding → timing_offset_ms  ← THE PROBLEM
+                                                      ├─ IQ × exp(-j2πft) → carrier_phase_rad
                                                       └─ mean(IQ) → dc_carrier_phase_rad
                                                            ↓
                                                     TickDetectionResult (per window)
                                                            ↓
-                                                    MetrologyService → L2/tick_phase (HDF5)
+                                                    MinuteTickAnalysis (aggregate: mean, std, drift)
                                                            ↓
-                                                    timestd-web-api (FastAPI)
+                                                    MetrologyEngine._process_minute_rtp()
+                                                      ├─ tick_analysis.mean_timing_offset_ms → timing_error_ms
+                                                      ├─ ArrivalPatternMatrix validation
+                                                      └─ L1MetrologyMeasurement → fusion
                                                            ↓
-                                                    [NEW] Phase/Doppler visualization
+                                                    HDF5: L2/tick_timing, L2/tick_phase, L2/timing_measurements
+                                                           ↓
+                                                    web-api dashboard-24h.html (plots D_err scatter)
 ```
 
-### Key Files for This Session
+### Key Files
 
 | File | Purpose | Priority |
 |------|---------|----------|
-| `src/hf_timestd/core/tick_matched_filter.py` | **Phase extraction code** — review `_correlate_window()` and `_build_composite_template()` | **Critical** |
-| `src/hf_timestd/core/metrology_engine.py` | Cross-freq gate, RTP measurement loop, tick filter invocation | High |
-| `src/hf_timestd/core/metrology_service.py` | tick_phase_writer, persists all 3 phase fields to HDF5 | High |
-| `src/hf_timestd/schemas/l2_tick_phase_v1.json` | Schema: phase_rad, carrier_phase_rad, dc_carrier_phase_rad | Reference |
-| `web-api/routers/stability.py` | Existing stability/ADEV API — model for new phase API | Reference |
-| `web-api/static/metrology.html` | Existing metrology dashboard — model for phase UI | Reference |
-| `web-api/static/css/styles.css` | Dark theme styles | Reference |
-| `web-api/static/js/common.js` | Shared JS utilities | Reference |
+| `src/hf_timestd/core/tick_matched_filter.py` | **THE BUG IS HERE** — `_correlate_window()`, `_build_composite_template()`, `process_window()`, `process_minute()` | **Critical** |
+| `src/hf_timestd/core/metrology_engine.py` | Calls tick filter, validates results, feeds fusion. Lines 1150-1182: tick analysis → timing_error_ms | High |
+| `src/hf_timestd/core/metrology_service.py` | Orchestrates per-channel processing, writes HDF5 | Medium |
+| `web-api/routers/dashboard.py` | Lines 213-258: reads `L2/tick_timing` and plots `mean_timing_offset_ms` as D_err | Reference |
+| `tests/test_tick_matched_filter.py` | Existing tests — extend with timing accuracy tests | High |
+
+### Key Parameters in tick_matched_filter.py
+
+| Parameter | Value | Concern |
+|-----------|-------|---------|
+| `window_seconds` | 5 | 5-second windows with 5 ticks each |
+| `overlap_seconds` | 1 | 1-second step → 55 windows per minute |
+| `search_range_ms` | 100.0 | ±100ms search around center — may contain sidelobes |
+| `sample_rate` | 20,000 | 20 kHz IQ sample rate |
+| `bandpass` | ±100 Hz around tick freq | 4th-order Butterworth, sosfiltfilt |
+| `min_snr_db` | 3.0 | Very low threshold — may admit noise peaks |
 
 ### HDF5 Data Products
 
-| Product | Path | Rate | Fields |
-|---------|------|------|--------|
-| `L2/tick_phase` | `phase2/{CH}/tick_phase/` | ~55 rows/station/min | phase_rad, carrier_phase_rad, dc_carrier_phase_rad, timing_offset_ms, snr_db, coherence_quality, window position |
-| `L2/tick_timing` | `phase2/{CH}/tick_timing/` | ~1 row/station/min | Aggregate timing from tick filter |
-| `L2/detection_attempts` | `phase2/{CH}/detection_attempts/` | ~45 rows/min | All RTP measurement attempts with rejection reasons |
-| `L2/timing_measurements` | `phase2/{CH}/timing_measurements/` | ~1-15 rows/min | Accepted timing measurements |
+| Product | Path | Rate | Key Fields |
+|---------|------|------|------------|
+| `L2/tick_timing` | `phase2/{CH}/tick_timing/` | ~1 row/station/min | `mean_timing_offset_ms`, `std_timing_offset_ms`, `valid_windows`, `mean_snr_db` |
+| `L2/tick_phase` | `phase2/{CH}/tick_phase/` | ~55 rows/station/min | `timing_offset_ms`, `carrier_phase_rad`, `dc_carrier_phase_rad`, `snr_db` |
+| `L2/timing_measurements` | `phase2/{CH}/timing_measurements/` | ~1-15 rows/min | `raw_toa_ms`, `snr_db`, `station`, `frequency_mhz` |
+| `L2/detection_attempts` | `phase2/{CH}/detection_attempts/` | ~45 rows/min | All attempts with rejection reasons |
 
 ### Service Inventory
 
-| Service | CPUAffinity | Purpose |
-|---------|-------------|--------|
-| `timestd-core-recorder` | 0-7 | RTP → raw buffer (authoritative timestamps) |
-| `timestd-metrology` | 0-7 (taskset) | IQ → L1/L2 measurements + tick phase extraction |
-| `timestd-fusion` | 0-7 | Multi-broadcast fusion → Chrony |
-| `timestd-web-api` | 0-7 | REST API + dashboard (FastAPI, port 8000) |
-| **radiod** | **8-15** | **Real-time USB/FFT (uncontested L3 cache)** |
+| Service | Purpose | Logs |
+|---------|---------|------|
+| `timestd-core-recorder` | RTP → raw buffer (authoritative timestamps) | journalctl |
+| `timestd-metrology` | IQ → L1/L2 measurements + tick phase extraction | `/var/log/hf-timestd/phase2-*.log` |
+| `timestd-fusion` | Multi-broadcast fusion → Chrony | journalctl |
+| `timestd-web-api` | REST API + dashboard (FastAPI, port 8000) | journalctl |
+| **radiod** | Real-time USB/FFT (CPU 8-15, uncontested L3 cache) | journalctl |
+
+### Deployment
+
+- **Git repo**: `/home/mjh/git/hf-timestd/`
+- **Production install**: `/opt/hf-timestd/` (copied, not symlinked)
+- **Update**: `sudo scripts/update-production.sh --pull` (git pull → pip install → rsync web-api → restart services)
+- **3 machines**: bee1 (primary), B3-1, B4-1 — all show same problem
 
 ---
 
-## 🎨 PHASE/DOPPLER VISUALIZATION GOALS
+## 🎯 FOUR PERSPECTIVES ON THE TICK FILTER PROBLEM
 
-### What to Show
+### 1. The User Perspective
+- **"The dashboard shows garbage timing data"** — D_err scatter of ±50ms makes the 24h dashboard useless for seeing ionospheric delay variations (which are typically 1-5ms diurnal)
+- **"Fusion quality is degraded"** — The fusion Kalman filter receives timing_error_ms with std=50ms, so it either rejects most measurements or produces poor estimates
+- **"All 3 stations show the same problem"** — This is not a local issue; it's a systematic algorithm failure
 
-1. **Phase vs Time** — Per-channel, per-station phase time series (unwrapped). 24h plot reveals diurnal ionospheric cycle. Phase ramps = Doppler. Jumps = mode changes.
+### 2. The Metrologist Perspective
+- **Measurement uncertainty is 50-100× worse than achievable** — At 20 dB SNR with 5 ticks per window, timing precision should be ~0.1ms, not 50ms
+- **The mean is also wrong** — `raw_toa` values of -46ms to +31ms are far from the expected ~4ms (WWV) or ~22ms (WWVH) propagation delays
+- **Drift rate is unphysical** — 0.5-3 ms/s drift implies ionospheric velocity of km/s, which is impossible
 
-2. **Doppler Shift vs Time** — Derived from phase rate: `f_D = -(1/2π) dφ/dt`. Shows ionospheric vertical motion. Sunrise/sunset produce characteristic Doppler signatures.
+### 3. The Ionospheric Scientist Perspective
+- **The diurnal curve is buried in noise** — The smooth ionospheric delay variation (±2ms over 24h) is invisible under ±50ms scatter
+- **Mode transitions are undetectable** — A 1F→2F mode change adds ~2ms delay; this is lost in the noise
+- **Phase/Doppler products are downstream of this** — If timing is wrong by 50ms, the carrier phase extraction (which uses `offset_samples` to locate ticks in IQ) is also wrong
 
-3. **Multi-Frequency Phase Comparison** — Same station on multiple frequencies. Ionospheric phase is dispersive: Δφ ∝ TEC/f. If 10 MHz shows X rad drift, 15 MHz should show ~0.67X. Deviations indicate multipath or mode changes.
-
-4. **Phase Scintillation Index (σ_φ)** — Standard deviation of detrended phase over sliding windows. High σ_φ = ionospheric irregularities. Compare with S4 amplitude scintillation.
-
-5. **DC Carrier Phase (Unambiguous Channels)** — CHU and WWV 20/25 MHz: the bare carrier phase, independent of tone detection. This is the cleanest ionospheric observable. Show alongside tone-derived carrier phase for consistency check.
-
-6. **Mode Transition Detection** — Phase jumps exceeding a threshold (e.g., > 1 rad in < 10s) flagged as mode transitions. Annotate on the phase plot.
-
-### Visual Design
-- **Station colors:** WWV=blue, WWVH=amber, CHU=green, BPM=red
-- **Phase plots:** Unwrapped phase on left y-axis, Doppler on right y-axis
-- **Time axis:** UTC, 24h default with zoom capability
-- **Frequency panels:** Stacked vertically, shared time axis, for multi-frequency comparison
-- **Dark theme:** Consistent with existing dashboard
-
-### API Endpoints Needed
-
-- `GET /api/phase/timeseries?channel=...&station=...&start=...&end=...` — Phase time series from L2/tick_phase
-- `GET /api/phase/doppler?channel=...&station=...&start=...&end=...` — Derived Doppler (compute server-side from phase rate)
-- `GET /api/phase/scintillation?channel=...&station=...&start=...&end=...` — σ_φ time series
-- `GET /api/phase/summary` — Current phase/Doppler state across all channels
+### 4. The Programmer Perspective
+- **The composite correlation approach needs rethinking** — `scipy.signal.correlate(mode='same')` with a 100,000-sample template against 100,000-sample audio is computationally expensive and may not be the right tool
+- **Per-tick correlation would be simpler and more robust** — Correlate a single-tick template against each 1-second slice, get per-tick offsets, then combine
+- **The search_range_ms=100 may be too narrow or too wide** — Need to understand the correlation envelope structure
+- **The bandpass filter may be hurting more than helping** — Its impulse response (~10ms) is comparable to the tick duration (5ms), potentially distorting the correlation peak
 
 ---
 
@@ -218,7 +205,8 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
 - **Phase continuity bug fixed**: IQ mixer used window-relative time (t=0 per tick), causing ~1.7 rad phase jumps. Fixed: buffer-relative time (sample_index/sample_rate), independent of RTP/GPS/NTP timing authority.
 - **Per-tick phase extraction**: Phase now extracted from individual ticks (not whole 5-second window), phasors combined coherently. Eliminates inter-tick noise dilution.
 - **Regression tests**: `test_carrier_phase_continuity` and `test_dc_carrier_phase_stability` verify σ < 0.3 rad.
-- **Phase/Doppler web dashboard**: 4 API endpoints (timeseries, doppler, scintillation, summary) + visualization page with carrier phase, Doppler, σ_φ, and DC carrier phase plots.
+- **Phase/Doppler web dashboard**: 4 API endpoints + visualization page. Default: single trace visible, click legend to add more.
+- **HDF5 corrupt chunk recovery**: `hdf5_reader.py` binary-searches for last good row when gzip chunk is truncated.
 - See: `docs/changes/SESSION_2026_02_11_PHASE_CONTINUITY_AND_DOPPLER_UI.md`
 
 ### Phase Extraction & Cross-Talk Fix (2026-02-11, session 1)
@@ -226,12 +214,9 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
 - Cross-frequency discrimination gate: 3 dB advantage required between 1000↔1200 Hz
 - WWV/WWVH detection rates now distinct on shared channels (72% vs 55%)
 - CHU modulation comments corrected: USB with preserved carrier, not DSB-SC
-- Allan deviation UI: standard time range buttons
-- See: `docs/changes/SESSION_2026_02_11_PHASE_EXTRACTION_AND_CROSSTALK.md`
 
 ### CHU FSK Decoder — USB Sidecar Channels (2026-02-10)
 - Dedicated USB-preset sidecar channels for FSK decoding
-- See: `docs/SESSION_2026-02-10_CHU_FSK_USB_SIDECAR.md`
 
 ### Timing Accuracy (2026-02-06)
 - Four bugs fixed: circular calibration, broken GPS ground truth, dead Kalman filter, missing serialization
@@ -244,35 +229,21 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
 ### HDF5 Crash Safety (2026-02-06)
 - SWMR eliminated — open-write-close per measurement
 
+### CHU Memory Leak (2026-01-02)
+- CHU FSK decoder passed full 60s buffer through hilbert()/filtfilt() for each of 9 FSK seconds
+- Fixed: extract ~1.1s audio slice before demodulation
+
+### HDF5 File Lock Contention (recurring)
+- Multiple services accessing same HDF5 files caused errno=11 stalls
+- Fixed: `locking=False` on all h5py.File() calls, env var before import
+
 ---
 
-## ✅ Success Criteria — This Session (2026-02-11, session 2)
+## ✅ Success Criteria — Next Session
 
-### Part 1: Methodology Review
-- ✅ **Verify IQ mix-down correctness** — Found and fixed: mixer used window-relative time. Now uses buffer-relative (sample_index/sample_rate), independent of RTP/GPS/NTP.
-- ✅ **Diagnose phase continuity problem** — Root cause: t_tick started at 0 per tick + phase extracted over whole 5s window. Fixed: per-tick extraction with buffer-relative time.
-- ✅ **Verify DC phasor on unambiguous channels** — Regression test confirms σ < 0.3 rad for stable carrier.
-- ⬚ **Consistency check** — carrier_phase_rad vs dc_carrier_phase_rad offset verification (needs production data after restart)
-- ⬚ **Quantify phase noise floor** — σ_φ vs SNR (needs production data after restart)
-- ✅ **Fix any bugs found** — Buffer-relative time mixer, per-tick extraction, type hint fix, regression tests added.
-
-### Part 2: Web-API-UI Visualization
-- ✅ **Phase time series plot** — per-channel, per-station, unwrapped, with time range controls
-- ✅ **Doppler shift derivation and display** — from phase rate, with configurable smoothing
-- ⬚ **Multi-frequency comparison** — verify dispersive scaling (needs production data)
-- ✅ **Phase scintillation index** — σ_φ time series with 0.3 rad threshold line
-- ⬚ **Mode transition annotations** — phase jumps flagged on plots (deferred to next session)
-- ✅ **DC carrier phase on unambiguous channels** — dedicated plot for CHU + WWV 20/25 MHz
-- ⬚ **Correlation with propagation mode** — needs production data to validate
-
-## 📋 NEXT SESSION: PRODUCTION VALIDATION + MODE DETECTION
-
-**Objective:** After restarting metrology services with the phase continuity fix:
-
-1. **Validate phase continuity in production** — Confirm σ_φ drops from ~1.7 rad to < 0.3 rad on real data
-2. **Carrier vs DC phase consistency** — On CHU channels, verify carrier_phase_rad and dc_carrier_phase_rad differ by a predictable constant
-3. **Phase noise floor** — Measure σ_φ vs SNR across channels, compare with theoretical 1/(SNR_linear × √N)
-4. **Multi-frequency dispersive check** — Same station on multiple frequencies: Δφ ∝ TEC/f
-5. **Mode transition detection** — Implement automatic detection of phase jumps > 1 rad in < 10s, annotate on plots
-6. **Diurnal Doppler signatures** — Verify sunrise/sunset produce expected smooth Doppler ramps
-7. **Threshold calibration** — Use detection_attempts data to calibrate BASE_CORR_SNR_DB and MIN_BPM_SNR_DB
+1. **Diagnose the correlation envelope** — Plot the full envelope for one window, identify why the peak position varies by ±50ms between overlapping windows
+2. **Fix the tick matched filter** — Achieve timing std < 2ms across windows (100× improvement over current 50-77ms)
+3. **Verify on production data** — All 3 machines should show tight D_err scatter on the 24h dashboard
+4. **Per-tick timing** — If the composite approach is abandoned, implement per-tick correlation and verify per-tick offsets are consistent
+5. **Regression tests** — Add tests that verify timing precision, not just phase continuity
+6. **Dashboard should show clean diurnal curves** — D_err should follow the smooth ionospheric delay pattern, not scatter randomly
