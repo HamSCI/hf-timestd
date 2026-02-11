@@ -237,6 +237,46 @@ class MetrologyService:
             station_metadata=self.station_config
         )
         logger.info(f"Tick timing writer initialized for {channel_name}")
+        
+        # Detection Attempts Writer (every measurement attempt, detected or rejected)
+        # Records rejection reasons and SNR values for threshold calibration.
+        # The evidence that keeps us honest: we can ask "were those rejections correct?"
+        attempts_output_dir = DataProductRegistry.get_data_dir(
+            channel_dir=self.output_dir,
+            product_level="L2",
+            product_name="detection_attempts",
+            create=True
+        )
+        self.attempts_writer = DataProductWriter(
+            output_dir=attempts_output_dir,
+            product_level="L2",
+            product_name="detection_attempts",
+            channel=self.channel_name,
+            version="v1",
+            processing_version="1.0.0",
+            station_metadata=self.station_config
+        )
+        logger.info(f"Detection attempts writer initialized for {channel_name}")
+        
+        # Tick Phase Writer (per-window phase from overlapping tick correlator)
+        # ~55 rows per station per minute: 1 Hz phase time series for ionospheric analysis.
+        # Phase drift → Doppler, phase jumps → mode changes, scintillation → irregularities.
+        tick_phase_output_dir = DataProductRegistry.get_data_dir(
+            channel_dir=self.output_dir,
+            product_level="L2",
+            product_name="tick_phase",
+            create=True
+        )
+        self.tick_phase_writer = DataProductWriter(
+            output_dir=tick_phase_output_dir,
+            product_level="L2",
+            product_name="tick_phase",
+            channel=self.channel_name,
+            version="v1",
+            processing_version="1.0.0",
+            station_metadata=self.station_config
+        )
+        logger.info(f"Tick phase writer initialized for {channel_name}")
              
         logger.info(f"MetrologyService initialized for {channel_name}")
 
@@ -513,6 +553,80 @@ class MetrologyService:
                         except Exception as tick_err:
                             logger.warning(f"Failed to write tick data for {station_name}: {tick_err}")
                 
+            # Write per-window tick phase data (~55 rows per station per minute)
+            # Each row is one overlapping correlation window with phase_rad, giving
+            # a 1 Hz phase time series for ionospheric dynamics analysis.
+            if self.tick_phase_writer and hasattr(self.engine, '_last_tick_results'):
+                tick_results = self.engine._last_tick_results
+                if tick_results:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    n_phase_written = 0
+                    for station_name, tick_analysis in tick_results.items():
+                        for wr in tick_analysis.window_results:
+                            phase_rec = {
+                                'timestamp_utc': now_iso,
+                                'minute_boundary_utc': minute_boundary,
+                                'channel': self.channel_name,
+                                'station': station_name,
+                                'frequency_mhz': self.frequency_hz / 1e6,
+                                'window_start_second': wr.window_start_second,
+                                'window_end_second': wr.window_end_second,
+                                'window_center_second': (wr.window_start_second + wr.window_end_second) / 2.0,
+                                'phase_rad': wr.phase_rad,
+                                'carrier_phase_rad': getattr(wr, 'carrier_phase_rad', 0.0),
+                                'dc_carrier_phase_rad': getattr(wr, 'dc_carrier_phase_rad', 0.0),
+                                'timing_offset_ms': wr.timing_offset_ms,
+                                'timing_uncertainty_ms': wr.timing_uncertainty_ms,
+                                'snr_db': wr.snr_db,
+                                'correlation_peak': wr.correlation_peak,
+                                'coherence_quality': wr.coherence_quality,
+                                'valid_ticks': wr.valid_ticks,
+                                'processed_at': now_iso,
+                                'processing_version': "1.0.0"
+                            }
+                            try:
+                                self.tick_phase_writer.write_measurement(phase_rec)
+                                n_phase_written += 1
+                            except Exception as ph_err:
+                                logger.debug(f"Failed to write tick phase: {ph_err}")
+                    if n_phase_written > 0:
+                        logger.debug(f"Tick phase written: {n_phase_written} windows")
+
+            # Write detection attempts (every measurement attempt for threshold calibration)
+            if self.attempts_writer and hasattr(self.engine, '_last_rtp_attempts'):
+                rtp_attempts = self.engine._last_rtp_attempts
+                if rtp_attempts:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    for attempt in rtp_attempts:
+                        attempt_rec = {
+                            'timestamp_utc': now_iso,
+                            'minute_boundary_utc': minute_boundary,
+                            'channel': self.channel_name,
+                            'station': attempt.get('station', ''),
+                            'frequency_hz': attempt.get('frequency_hz', 0),
+                            'frequency_mhz': self.frequency_hz / 1e6,
+                            'utc_second': attempt.get('utc_second', 0),
+                            'tone_duration_sec': attempt.get('tone_duration_sec', 0),
+                            'detected': attempt.get('detected', False),
+                            'rejection_reason': attempt.get('rejection_reason', ''),
+                            'arrival_ms': attempt.get('arrival_ms', 0),
+                            'expected_delay_ms': attempt.get('expected_delay_ms', 0),
+                            'timing_error_ms': attempt.get('timing_error_ms', 0),
+                            'snr_db': attempt.get('snr_db', -99),
+                            'corr_snr_db': attempt.get('corr_snr_db', -99),
+                            'peak_correlation': attempt.get('peak_correlation', 0),
+                            'processed_at': now_iso,
+                            'processing_version': "1.0.0"
+                        }
+                        try:
+                            self.attempts_writer.write_measurement(attempt_rec)
+                        except Exception as att_err:
+                            logger.debug(f"Failed to write attempt record: {att_err}")
+                    
+                    n_det = sum(1 for a in rtp_attempts if a.get('detected'))
+                    logger.debug(f"Detection attempts written: {len(rtp_attempts)} total, "
+                                f"{n_det} detected, {len(rtp_attempts) - n_det} rejected")
+            
             # Write test signal for minutes 8 and 44 (WWV/WWVH channel sounding)
             minute_number = (minute_boundary // 60) % 60
             if minute_number in [8, 44] and self.test_signal_writer:
@@ -541,6 +655,10 @@ class MetrologyService:
             self.test_signal_writer.close()
         if self.tick_writer:
             self.tick_writer.close()
+        if self.attempts_writer:
+            self.attempts_writer.close()
+        if self.tick_phase_writer:
+            self.tick_phase_writer.close()
     
     def _write_test_signal(self, minute_boundary: int, iq_samples: np.ndarray, minute_number: int):
         """

@@ -369,6 +369,59 @@ class MetrologyEngine:
         
         return expected_delay_ms, dist_km, 15.0  # 15ms 1-sigma uncertainty
 
+    @staticmethod
+    def _get_tone_duration(station_name: str, sec_in_minute: int, minute_in_hour: int = 0) -> float:
+        """
+        Return the correct tone duration (seconds) for a given station and second.
+        
+        This ensures the matched filter template matches the actual signal duration,
+        maximizing processing gain.  Key durations:
+        
+        WWV/WWVH:
+            Second 0:  0.800s  (minute marker — 160× more energy than a tick)
+            Others:    0.005s  (5ms per-second tick)
+            
+        CHU:
+            Second 0:  0.500s  (minute marker, 1.0s at top of hour)
+            Seconds 1-28, 30, 40-49: 0.300s  (regular 300ms tones)
+            Seconds 31-39: 0.010s  (FSK seconds — short ticks only)
+            Seconds 50-59: 0.010s  (voice seconds — short ticks only)
+            
+        BPM:
+            Second 0:  0.300s  (minute marker)
+            UTC minutes: 0.010s  (10ms ticks)
+            UT1 minutes (25-29, 55-59): 0.100s  (100ms ticks)
+        """
+        if station_name in ('WWV', 'WWVH'):
+            if sec_in_minute == 0:
+                return 0.800  # Minute marker
+            elif sec_in_minute in (29, 59):
+                return 0.0    # Silent — no tick on seconds 29 and 59
+            else:
+                return 0.005  # 5ms per-second tick
+        
+        elif station_name == 'CHU':
+            if sec_in_minute == 0:
+                return 0.500  # Minute marker (1.0s at top of hour, but 0.5 is safe)
+            elif sec_in_minute in range(31, 40):
+                return 0.010  # FSK seconds
+            elif sec_in_minute in range(50, 60):
+                return 0.010  # Voice seconds
+            else:
+                return 0.300  # Regular 300ms tones
+        
+        elif station_name == 'BPM':
+            if sec_in_minute == 0:
+                return 0.300  # Minute marker
+            # UT1 minutes: 25-29, 55-59
+            elif minute_in_hour in (25, 26, 27, 28, 29, 55, 56, 57, 58, 59):
+                return 0.100  # 100ms UT1 ticks
+            else:
+                return 0.010  # 10ms UTC ticks
+        
+        else:
+            return 0.020  # Conservative fallback
+
     def _measure_tone_at_known_time(
         self,
         audio_signal: np.ndarray,
@@ -387,6 +440,11 @@ class MetrologyEngine:
         Returns arrival_ms relative to buffer sample 0 (not minute boundary).
         The caller converts to minute-boundary-relative using BufferTiming.
         
+        ALWAYS returns a measurement dict (never None) so that rejected
+        attempts are recorded for threshold calibration.  The 'detected'
+        flag indicates whether the measurement passed all quality gates.
+        'rejection_reason' explains why it was rejected (None if accepted).
+        
         Args:
             audio_signal: AM-demodulated audio (magnitude - mean)
             expected_delay_ms: Expected arrival time from buffer start (ms)
@@ -395,23 +453,43 @@ class MetrologyEngine:
             station_name: Station identifier for logging
             
         Returns:
-            Dict with measurement results, or None if no signal detected
+            Dict with measurement results.  'detected' is True only if all
+            quality gates passed.  Always contains at least station, frequency,
+            expected_delay_ms, and whatever metrics could be computed.
         """
+        # Base result returned on early exits when no correlation is possible
+        base_result = {
+            'station': station_name,
+            'frequency_hz': tone_freq_hz,
+            'expected_delay_ms': expected_delay_ms,
+            'arrival_ms': expected_delay_ms,
+            'timing_error_ms': 0.0,
+            'snr_db': -99.0,
+            'corr_snr_db': -99.0,
+            'tone_power': 0.0,
+            'peak_correlation': 0.0,
+            'detected': False,
+            'rejection_reason': None,
+        }
         from scipy import signal as scipy_signal
         from scipy.fft import rfft, rfftfreq
         
         expected_sample = int(expected_delay_ms * self.sample_rate / 1000)
         
-        # Measurement window: ±0.4 seconds around expected position.
-        # Per-second ticks are 1s apart; ±0.4s ensures only the target tick
-        # is in the window (with room for ionospheric variation).
-        window_sec = 0.4
+        # Measurement window must be large enough for the template + search margin.
+        # mode='valid' correlation requires len(signal) > len(template), and we need
+        # room on both sides for the search window.
+        # For 5ms ticks: ±0.4s is plenty.
+        # For 800ms minute markers: need at least 0.8s template + 0.5s search = ±0.9s.
+        search_margin_sec = 0.5  # ±500ms for ionospheric variation
+        window_sec = max(0.4, tone_duration_sec + search_margin_sec)
         window_samples = int(window_sec * self.sample_rate)
         start_sample = max(0, expected_sample - window_samples)
         end_sample = min(len(audio_signal), expected_sample + window_samples)
         
         if end_sample <= start_sample:
-            return None
+            base_result['rejection_reason'] = 'window_invalid'
+            return base_result
             
         measurement_region = audio_signal[start_sample:end_sample]
         
@@ -441,12 +519,20 @@ class MetrologyEngine:
         correlation = np.sqrt(corr_sin**2 + corr_cos**2)
         
         if len(correlation) == 0:
-            return None
+            base_result['rejection_reason'] = 'correlation_empty'
+            return base_result
         
-        # Search within ±500ms of expected position (within the measurement region)
-        # With BufferTiming, expected_delay_ms is precise, but ionospheric variation
-        # can shift arrivals by tens of ms, so keep a reasonable window.
-        SEARCH_WINDOW_MS = 500.0
+        # Search window scaled by template duration.
+        # Evidence from 20K+ measurements (2026-02-11) showed that a fixed ±500ms
+        # window with 5ms tick templates causes the matched filter to lock onto
+        # adjacent-second ticks or sidelobes at -185ms, rejecting 89% of attempts.
+        # Short templates have poor temporal discrimination — constrain the search.
+        # Long templates (800ms minute marker) need wider windows for ionospheric
+        # variation and buffer alignment uncertainty.
+        #   5ms tick:   ±50ms  (ionospheric variation ~30ms, no adjacent-tick ambiguity)
+        #   100ms tone: ±150ms
+        #   800ms marker: ±500ms
+        SEARCH_WINDOW_MS = max(50.0, min(500.0, tone_duration_sec * 625))
         
         # expected_corr_idx is relative to measurement_region (which starts at start_sample)
         expected_corr_idx = expected_sample - start_sample
@@ -457,7 +543,8 @@ class MetrologyEngine:
         
         if search_end <= search_start:
             logger.debug(f"{station_name}: Search window invalid - search_start={search_start}, search_end={search_end}, corr_len={len(correlation)}")
-            return None
+            base_result['rejection_reason'] = 'search_window_invalid'
+            return base_result
         
         # Find peak within constrained window
         search_region = correlation[search_start:search_end]
@@ -475,7 +562,10 @@ class MetrologyEngine:
             if corr_mean > 0 and corr_range / corr_mean < 0.5:  # Less than 50% variation = flat
                 logger.debug(f"{station_name}: Correlation flat/noisy - peak at edge "
                             f"(local_peak={local_peak_idx}, range/mean={corr_range/corr_mean:.2f})")
-                return None
+                base_result['rejection_reason'] = 'correlation_flat'
+                base_result['peak_correlation'] = float(peak_val)
+                base_result['corr_snr_db'] = 0.0
+                return base_result
         
         # Step 3: VALIDATE that this is a full-duration tone, not a tick or noise
         # The full-duration matched filter should produce a strong peak for the minute marker
@@ -514,9 +604,70 @@ class MetrologyEngine:
         MIN_CORR_SNR_DB = max(1.0, BASE_CORR_SNR_DB + duration_gain_db)
         if corr_snr_db < MIN_CORR_SNR_DB:
             logger.info(f"{station_name}: Correlation too weak "
-                        f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB}dB, expected={expected_delay_ms:.1f}ms, "
+                        f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB:.1f}dB, expected={expected_delay_ms:.1f}ms, "
                         f"peak_idx={peak_idx}, peak={peak_val:.4f}, noise={noise_median:.4f})")
-            return None
+            # Still compute arrival so the rejection is a complete record
+            arrival_sample_rej = start_sample + peak_idx
+            raw_arrival_ms_rej = arrival_sample_rej * 1000 / self.sample_rate
+            base_result['rejection_reason'] = 'corr_snr_low'
+            base_result['corr_snr_db'] = float(corr_snr_db)
+            base_result['snr_db'] = float(corr_snr_db)
+            base_result['peak_correlation'] = float(peak_val)
+            base_result['arrival_ms'] = float(raw_arrival_ms_rej)
+            base_result['timing_error_ms'] = float(raw_arrival_ms_rej - expected_delay_ms)
+            base_result['corr_snr_threshold_db'] = float(MIN_CORR_SNR_DB)
+            return base_result
+        
+        # Cross-frequency discrimination gate (WWV 1000Hz vs WWVH 1200Hz).
+        # A 5ms template has 33% cross-response between 1000↔1200 Hz, so a strong
+        # WWV tick produces a correlation peak on the WWVH template (and vice versa).
+        # Fix: correlate the same region at the competing frequency and reject if
+        # the claimed frequency doesn't dominate.
+        CROSS_FREQ_PAIRS = {1000: 1200, 1200: 1000}  # WWV↔WWVH
+        cross_freq = CROSS_FREQ_PAIRS.get(int(tone_freq_hz))
+        if cross_freq is not None:
+            # Build cross-frequency template (same duration, different freq)
+            cross_sin = np.sin(2 * np.pi * cross_freq * t) * window
+            cross_cos = np.cos(2 * np.pi * cross_freq * t) * window
+            cross_sin /= np.linalg.norm(cross_sin)
+            cross_cos /= np.linalg.norm(cross_cos)
+            
+            # Correlate at the same peak location
+            cross_corr_sin = scipy_signal.correlate(measurement_region, cross_sin, mode='valid')
+            cross_corr_cos = scipy_signal.correlate(measurement_region, cross_cos, mode='valid')
+            cross_env = np.sqrt(cross_corr_sin**2 + cross_corr_cos**2)
+            
+            # Compare at the same peak index
+            if peak_idx < len(cross_env):
+                cross_peak = cross_env[peak_idx]
+                if cross_peak > 0:
+                    freq_advantage_db = 20 * np.log10(peak_val / cross_peak)
+                else:
+                    freq_advantage_db = 40.0
+                
+                # Require claimed frequency to be at least 3 dB stronger than cross-freq.
+                # Clean single-frequency signal: ~10 dB advantage.
+                # Cross-talk from other station: ~0 dB or negative.
+                MIN_FREQ_ADVANTAGE_DB = 3.0
+                if freq_advantage_db < MIN_FREQ_ADVANTAGE_DB:
+                    arrival_sample_rej = start_sample + peak_idx
+                    raw_arrival_ms_rej = arrival_sample_rej * 1000 / self.sample_rate
+                    logger.debug(f"{station_name} @ {tone_freq_hz}Hz: REJECTED cross-talk "
+                                f"(advantage={freq_advantage_db:+.1f}dB < {MIN_FREQ_ADVANTAGE_DB}dB, "
+                                f"peak={peak_val:.4f}, cross={cross_peak:.4f})")
+                    return {
+                        'station': station_name,
+                        'frequency_hz': tone_freq_hz,
+                        'arrival_ms': float(raw_arrival_ms_rej),
+                        'expected_delay_ms': expected_delay_ms,
+                        'timing_error_ms': float(raw_arrival_ms_rej - expected_delay_ms),
+                        'snr_db': float(corr_snr_db),
+                        'corr_snr_db': float(corr_snr_db),
+                        'tone_power': 0.0,
+                        'peak_correlation': float(peak_val),
+                        'detected': False,
+                        'rejection_reason': 'cross_freq',
+                    }
         
         # Step 2: Measure tone SNR at the DETECTED peak location (not expected location)
         # This handles buffer alignment issues where tone arrives later than expected
@@ -580,7 +731,19 @@ class MetrologyEngine:
             logger.info(f"{station_name} @ {tone_freq_hz}Hz: REJECTED - arrival={raw_arrival_ms:.2f}ms "
                        f"error={timing_error_ms:+.1f}ms exceeds ±{ARRIVAL_TOLERANCE_MS:.0f}ms "
                        f"(expected={expected_delay_ms:.1f}ms, corr_SNR={corr_snr_db:.1f}dB)")
-            return None
+            return {
+                'station': station_name,
+                'frequency_hz': tone_freq_hz,
+                'arrival_ms': raw_arrival_ms,
+                'expected_delay_ms': expected_delay_ms,
+                'timing_error_ms': timing_error_ms,
+                'snr_db': tone_snr_db,
+                'corr_snr_db': float(corr_snr_db),
+                'tone_power': tone_power,
+                'peak_correlation': float(peak_val),
+                'detected': False,
+                'rejection_reason': 'arrival_tolerance',
+            }
         
         # BPM-specific: Require higher SNR due to shorter template (more false positives)
         if station_name == 'BPM':
@@ -588,7 +751,19 @@ class MetrologyEngine:
             if tone_snr_db < MIN_BPM_SNR_DB:
                 logger.info(f"{station_name} @ {tone_freq_hz}Hz: REJECTED - SNR={tone_snr_db:.1f}dB "
                            f"< {MIN_BPM_SNR_DB}dB minimum for BPM")
-                return None
+                return {
+                    'station': station_name,
+                    'frequency_hz': tone_freq_hz,
+                    'arrival_ms': raw_arrival_ms,
+                    'expected_delay_ms': expected_delay_ms,
+                    'timing_error_ms': timing_error_ms,
+                    'snr_db': tone_snr_db,
+                    'corr_snr_db': float(corr_snr_db),
+                    'tone_power': tone_power,
+                    'peak_correlation': float(peak_val),
+                    'detected': False,
+                    'rejection_reason': 'bpm_snr_low',
+                }
         
         logger.info(f"{station_name} @ {tone_freq_hz}Hz: DETECTED arrival={raw_arrival_ms:.2f}ms "
                    f"(expected={expected_delay_ms:.1f}ms), error={timing_error_ms:+.2f}ms, "
@@ -601,9 +776,11 @@ class MetrologyEngine:
             'expected_delay_ms': expected_delay_ms,
             'timing_error_ms': timing_error_ms,
             'snr_db': tone_snr_db,
+            'corr_snr_db': float(corr_snr_db),
             'tone_power': tone_power,
-            'peak_correlation': peak_val,
-            'detected': True
+            'peak_correlation': float(peak_val),
+            'detected': True,
+            'rejection_reason': None,
         }
 
     def process_minute(
@@ -640,8 +817,6 @@ class MetrologyEngine:
         
         # === Step 0: Carrier SNR Check ===
         # Don't attempt detection if carrier is too weak.
-        MIN_CARRIER_SNR_DB = 4.0  # Lowered for debugging
-        
         envelope = np.abs(iq_samples)
         carrier_amplitude = np.mean(envelope)
         mad = np.median(np.abs(envelope - np.median(envelope)))
@@ -652,15 +827,19 @@ class MetrologyEngine:
         else:
             carrier_snr_db = -100.0
         
-        if carrier_snr_db < MIN_CARRIER_SNR_DB:
-            logger.info(f"{self.channel_name}: Skipping - carrier SNR too low "
-                       f"({carrier_snr_db:.1f}dB < {MIN_CARRIER_SNR_DB}dB)")
-            return []
+        # Log carrier SNR but don't gate on it — the matched filter can detect
+        # signals well below the carrier noise floor.  That's its whole purpose.
+        if carrier_snr_db < 2.0:
+            logger.info(f"{self.channel_name}: Carrier SNR very low "
+                       f"({carrier_snr_db:.1f}dB) — matched filter may still detect")
         
-        # Demodulation: CHU uses DSB suppressed carrier, not AM.
-        # AM demod (|IQ|) doesn't recover the 1000Hz tone for DSB-SC signals.
-        # For CHU: use real part of IQ (baseband audio).
-        # For WWV/WWVH/BPM: use AM envelope (|IQ| - DC).
+        # Demodulation:
+        # CHU transmits USB with preserved carrier. The IQ baseband has a
+        # strong DC carrier component plus the 1000 Hz tone as a sideband.
+        # On CHU-only channels the carrier is unambiguous and high-power,
+        # available for direct phase/Doppler analysis (see tick_matched_filter).
+        # Re(IQ) recovers the audio (carrier + sidebands projected to real axis).
+        # WWV/WWVH/BPM use conventional AM: |IQ| - DC recovers the envelope.
         if self.is_chu_channel:
             audio_signal = np.real(iq_samples).copy()
             audio_signal -= np.mean(audio_signal)
@@ -683,23 +862,23 @@ class MetrologyEngine:
         if self.is_rtp_authority:
             logger.debug(f"{self.channel_name}: RTP mode - measuring at known times")
             
-            # Define station templates based on channel type
+            # Define station templates based on channel type.
+            # Tone frequency is per-station; duration is per-second (set in loop).
             channel_upper = self.channel_name.upper()
             if 'CHU' in channel_upper:
-                station_templates = [('CHU', 1000, 0.1)]
+                station_tone_freqs = [('CHU', 1000)]
             elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
-                station_templates = [('WWV', 1000, 0.02)]
+                station_tone_freqs = [('WWV', 1000)]
             else:
-                # SHARED channels: WWV/WWVH per-second ticks are 5ms pulses.
-                # Use 20ms template (short enough to match tick, long enough
-                # for reasonable SNR). BPM ticks are ~100ms.
-                station_templates = [
-                    ('WWV', 1000, 0.02),
-                    ('WWVH', 1200, 0.02),
-                    ('BPM', 1000, 0.1),
+                # SHARED channels: try all stations
+                station_tone_freqs = [
+                    ('WWV', 1000),
+                    ('WWVH', 1200),
+                    ('BPM', 1000),
                 ]
             
             rtp_measurements = []
+            rtp_all_attempts = []
             
             if buffer_timing is not None and buffer_timing.source != 'metadata_fallback':
                 # We know the UTC time of every sample.  Find which UTC
@@ -708,12 +887,13 @@ class MetrologyEngine:
                 buf_start_utc = buffer_timing.sample0_utc
                 buf_end_utc = buffer_timing.sample_to_utc(n_samples)
                 
-                for station_name, tone_freq, tone_duration in station_templates:
+                for station_name, tone_freq in station_tone_freqs:
                     prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
                     prop_delay_sec = prop_delay_ms / 1000.0
                     
-                    # Margin: need tone_duration + 0.5s of signal after onset
-                    margin_sec = tone_duration + 0.5
+                    # Use the longest possible tone (minute marker) for margin calc
+                    max_tone_duration = 1.0  # 1s covers all minute markers
+                    margin_sec = max_tone_duration + 0.5
                     
                     # Find UTC seconds whose tone arrival falls in the buffer.
                     # A tick transmitted at UTC second T arrives at T + prop_delay.
@@ -744,8 +924,19 @@ class MetrologyEngine:
                                     f"(buf UTC {buf_start_utc:.1f}–{buf_end_utc:.1f})")
                         continue
                     
-                    # Measure up to 5 ticks per station
-                    for utc_sec, onset_sample in measurable[:5]:
+                    # Prioritize: minute marker (sec 0) first, then other seconds.
+                    # Sort so second 0 comes first for maximum detection probability.
+                    measurable.sort(key=lambda x: (x[0] % 60 != 0, x[0]))
+                    
+                    # Try up to 15 seconds per station (was 5)
+                    for utc_sec, onset_sample in measurable[:15]:
+                        sec_in_minute = utc_sec % 60
+                        tone_duration = self._get_tone_duration(
+                            station_name, sec_in_minute, minute_number
+                        )
+                        if tone_duration <= 0:
+                            continue  # Silent second — no tone to detect
+                        
                         expected_ms_from_buf_start = onset_sample * 1000 / self.sample_rate
                         
                         result = self._measure_tone_at_known_time(
@@ -756,7 +947,12 @@ class MetrologyEngine:
                             station_name=station_name
                         )
                         
-                        if result and result.get('detected'):
+                        # Record every attempt for diagnostic summary
+                        result['utc_second'] = utc_sec
+                        result['tone_duration_sec'] = tone_duration
+                        rtp_all_attempts.append(result)
+                        
+                        if result.get('detected'):
                             # arrival_ms is from buffer start.  Convert to UTC.
                             arrival_utc = buffer_timing.sample_to_utc(
                                 result['arrival_ms'] * self.sample_rate / 1000
@@ -765,23 +961,45 @@ class MetrologyEngine:
                             expected_utc = utc_sec + prop_delay_sec
                             result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
                             result['arrival_utc'] = arrival_utc
-                            result['utc_second'] = utc_sec
                             rtp_measurements.append(result)
-                            break  # One good measurement per station is enough
                 
-                if rtp_measurements:
-                    secs = [m['utc_second'] % 60 for m in rtp_measurements]
-                    logger.info(f"{self.channel_name}: RTP mode measured "
-                               f"{len(rtp_measurements)} signal(s) at seconds {secs}")
+                # Per-minute diagnostic: what did we attempt, what passed, what failed and why?
+                if rtp_all_attempts:
+                    n_detected = sum(1 for a in rtp_all_attempts if a.get('detected'))
+                    n_rejected = len(rtp_all_attempts) - n_detected
+                    # Count rejection reasons
+                    reasons = {}
+                    rejected_snrs = []
+                    for a in rtp_all_attempts:
+                        reason = a.get('rejection_reason')
+                        if reason:
+                            reasons[reason] = reasons.get(reason, 0) + 1
+                            if a.get('corr_snr_db', -99) > -99:
+                                rejected_snrs.append(a['corr_snr_db'])
+                    
+                    reason_str = ', '.join(f"{r}={c}" for r, c in sorted(reasons.items()))
+                    snr_str = ''
+                    if rejected_snrs:
+                        snr_str = f", rejected SNRs: {min(rejected_snrs):.1f}–{max(rejected_snrs):.1f}dB"
+                    
+                    logger.info(f"{self.channel_name}: RTP attempts={len(rtp_all_attempts)} "
+                               f"detected={n_detected} rejected={n_rejected} "
+                               f"[{reason_str}]{snr_str}")
+                    
+                    if rtp_measurements:
+                        secs = [m['utc_second'] % 60 for m in rtp_measurements]
+                        logger.info(f"{self.channel_name}: RTP detected at seconds {secs}")
             else:
-                # No BufferTiming — fall back to legacy method
-                for station_name, tone_freq, tone_duration in station_templates:
+                # No BufferTiming — fall back to legacy method.
+                # Without BufferTiming we don't know which second we're at,
+                # so use a conservative 20ms template as before.
+                for station_name, tone_freq in station_tone_freqs:
                     prop_delay = expected_delays_by_station.get(station_name, 20.0)
                     result = self._measure_tone_at_known_time(
                         audio_signal=audio_signal,
                         expected_delay_ms=prop_delay,
                         tone_freq_hz=tone_freq,
-                        tone_duration_sec=tone_duration,
+                        tone_duration_sec=0.02,
                         station_name=station_name
                     )
                     if result and result.get('detected'):
@@ -791,11 +1009,26 @@ class MetrologyEngine:
                 logger.debug(f"{self.channel_name}: No signals detected at expected times")
                 return []
             
+            # Select best measurement per station (highest SNR) for timing use.
+            # All measurements become detections for SNR reporting, but only the
+            # best per station gets use_for_time_snap=True to avoid confusing
+            # downstream fusion with redundant timing from the same station.
+            best_per_station = {}
+            for m in rtp_measurements:
+                stn = m['station']
+                if stn not in best_per_station or m['snr_db'] > best_per_station[stn]['snr_db']:
+                    best_per_station[stn] = m
+            
+            best_keys = set()
+            for m in best_per_station.values():
+                best_keys.add((m['station'], m.get('utc_second', 0)))
+            
             # Convert RTP measurements to ToneDetectionResult format for downstream
             from ..interfaces.data_models import ToneDetectionResult, StationType
             detections = []
             for m in rtp_measurements:
                 station_type = StationType[m['station']] if m['station'] in StationType.__members__ else StationType.UNKNOWN
+                is_best = (m['station'], m.get('utc_second', 0)) in best_keys
                 
                 if buffer_timing is not None and 'arrival_utc' in m:
                     arrival_utc = m['arrival_utc']
@@ -812,12 +1045,12 @@ class MetrologyEngine:
                 det = ToneDetectionResult(
                     station=station_type,
                     frequency_hz=m['frequency_hz'],
-                    duration_sec=tone_duration,
+                    duration_sec=m.get('tone_duration_sec', 0.02),
                     timestamp_utc=timestamp_utc_val,
                     timing_error_ms=m['timing_error_ms'],
                     snr_db=m['snr_db'],
                     confidence=min(1.0, m['snr_db'] / 20.0),
-                    use_for_time_snap=True,
+                    use_for_time_snap=is_best,
                     correlation_peak=m.get('correlation_peak', 0.0),
                     noise_floor=0.0,
                     tone_power_db=m['snr_db'],
@@ -826,8 +1059,10 @@ class MetrologyEngine:
                 )
                 detections.append(det)
             
+            n_best = len(best_per_station)
             station_names = [m['station'] for m in rtp_measurements]
-            logger.info(f"{self.channel_name}: RTP mode measured {len(detections)} signal(s): {station_names}")
+            logger.info(f"{self.channel_name}: RTP mode measured {len(detections)} signal(s) "
+                       f"({n_best} best for timing): {station_names}")
         
         else:
             # === FUSION MODE: Search for Signals ===
@@ -949,7 +1184,10 @@ class MetrologyEngine:
                 logger.debug(f"{self.channel_name}: {station_type.value} tick detection failed: {e}")
                  
         # === Step 3: Package into L1MetrologyMeasurement ===
-        # Validate each detection against the ArrivalPatternMatrix
+        # Validate each detection against the ArrivalPatternMatrix.
+        # Only the best detection per station (use_for_time_snap=True) creates
+        # an L1 timing measurement and feeds the fusion state.  All detections
+        # contribute SNR data points to the HDF5 for dashboard plotting.
         results = []
         for det in detections:
             # Map station name to Enum
@@ -1022,8 +1260,10 @@ class MetrologyEngine:
             )
             results.append(meas)
             
-            # Feed detection to FusionTimingState for lock tracking (Fusion mode only)
-            if self.fusion_state is not None and physics_valid:
+            # Feed ONLY the best detection per station to FusionTimingState.
+            # Multiple timing measurements from the same station would confuse
+            # the Kalman filter with correlated noise.
+            if self.fusion_state is not None and physics_valid and det.use_for_time_snap:
                 lock_status = self.fusion_state.add_detection(
                     station=det.station.value,
                     timing_error_ms=det.timing_error_ms,
@@ -1044,6 +1284,11 @@ class MetrologyEngine:
         
         # Store tick analysis results for caller to retrieve
         self._last_tick_results = tick_results if tick_results else None
+        
+        # Store ALL measurement attempts (detected + rejected) for threshold calibration.
+        # This is the evidence that keeps us honest: by recording what we reject and why,
+        # we can later ask whether our thresholds are correctly calibrated.
+        self._last_rtp_attempts = rtp_all_attempts if self.is_rtp_authority else None
         
         # === Step 4: Multi-Constraint Timing Validation ===
         # Validate detections using all known timing constraints:

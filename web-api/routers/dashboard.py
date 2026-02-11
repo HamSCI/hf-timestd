@@ -210,6 +210,53 @@ async def get_24h_broadcast_data(
                 logger.debug(f"Could not read {channel_dir.name}: {e}")
                 continue
         
+        # Second pass: supplement with tick timing data (55+ points/minute)
+        # The tick matched filter provides per-minute SNR estimates even when
+        # the single-tick RTP measurement fails.
+        for channel_dir in phase2_dir.iterdir():
+            if not channel_dir.is_dir() or channel_dir.name in ['fusion', 'science']:
+                continue
+            
+            try:
+                tick_reader = DataProductReader(
+                    data_dir=channel_dir,
+                    product_level='L2',
+                    product_name='tick_timing',
+                    channel=channel_dir.name
+                )
+                
+                tick_measurements = tick_reader.read_time_range(
+                    start=start_time.isoformat() + 'Z',
+                    end=end_time.isoformat() + 'Z'
+                )
+                
+                for m in tick_measurements:
+                    station = m.get('station', 'UNKNOWN')
+                    freq_mhz = m.get('frequency_mhz', 0)
+                    freq_khz = int(round(freq_mhz * 1000))
+                    broadcast_id = f"{station}_{freq_khz}"
+                    
+                    if broadcast_id not in broadcasts_data:
+                        continue
+                    
+                    # Only add tick data if it has reasonable quality
+                    tick_snr = m.get('mean_snr_db')
+                    valid_windows = m.get('valid_windows', 0)
+                    if tick_snr is None or valid_windows < 3:
+                        continue
+                    
+                    timestamp = m.get('timestamp_utc', '')
+                    
+                    bd = broadcasts_data[broadcast_id]['measurements']
+                    bd['timestamps'].append(timestamp)
+                    bd['snr_db'].append(sanitize_value(tick_snr))
+                    bd['timing_error_ms'].append(sanitize_value(m.get('mean_timing_offset_ms')))
+                    bd['propagation_mode'].append('TICK_FILTER')
+                
+            except Exception as e:
+                logger.debug(f"Could not read tick_timing from {channel_dir.name}: {e}")
+                continue
+        
         # Calculate detection counts per interval
         for broadcast_id, data in broadcasts_data.items():
             timestamps = data['measurements']['timestamps']

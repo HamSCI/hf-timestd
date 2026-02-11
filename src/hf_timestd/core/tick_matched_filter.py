@@ -179,7 +179,9 @@ class TickDetectionResult:
     timing_uncertainty_ms: float     # Estimated uncertainty
     snr_db: float                    # Signal-to-noise ratio
     correlation_peak: float          # Normalized correlation peak (0-1)
-    phase_rad: float                 # Carrier phase at detection
+    phase_rad: float                 # Audio-domain modulation phase (from AM envelope correlator)
+    carrier_phase_rad: float         # RF carrier phase at tone freq (from IQ mix-down)
+    dc_carrier_phase_rad: float      # Bare carrier phase from mean(IQ) DC phasor
     coherence_quality: float         # Phase stability metric (0-1)
     valid_ticks: int                 # Number of ticks in window
     station: StationType
@@ -370,8 +372,10 @@ class TickMatchedFilter:
         audio: np.ndarray,
         template_sin: np.ndarray,
         template_cos: np.ndarray,
-        search_range_ms: float = 100.0
-    ) -> Tuple[float, float, float, float]:
+        search_range_ms: float = 100.0,
+        iq_samples: np.ndarray = None,
+        tone_freq_hz: float = 0.0
+    ) -> Tuple[float, float, float, float, float]:
         """
         Perform quadrature correlation and find peak.
         
@@ -380,9 +384,11 @@ class TickMatchedFilter:
             template_sin: In-phase template
             template_cos: Quadrature template
             search_range_ms: Search range around expected position (±ms)
+            iq_samples: Optional raw complex IQ for RF carrier phase extraction
+            tone_freq_hz: Tone frequency for IQ mix-down (required if iq_samples given)
             
         Returns:
-            Tuple of (offset_ms, snr_db, peak_value, phase_rad)
+            Tuple of (offset_ms, snr_db, peak_value, phase_rad, carrier_phase_rad)
         """
         # Correlate with both templates
         corr_sin = correlate(audio, template_sin, mode='same')
@@ -442,11 +448,42 @@ class TickMatchedFilter:
         else:
             snr_db = 0.0
         
-        # Extract phase at peak
+        # Extract audio-domain phase at peak (modulation phase)
         if peak_idx < len(corr_sin):
             phase_rad = np.arctan2(corr_sin[peak_idx], corr_cos[peak_idx])
         else:
             phase_rad = 0.0
+        
+        # Extract RF carrier phase from IQ at the detected peak location.
+        # The IQ samples are baseband (centered on carrier). The tone at
+        # tone_freq_hz appears as a complex sinusoid at +tone_freq_hz offset.
+        # Mix down: iq * exp(-j*2π*f_tone*t), then average over tick duration
+        # to get a complex phasor whose angle is the RF carrier phase.
+        # This phase changes with ionospheric path length (TEC).
+        carrier_phase_rad = 0.0
+        dc_carrier_phase_rad = 0.0
+        if iq_samples is not None and tone_freq_hz > 0:
+            # peak_idx from mode='same' correlation corresponds to the center
+            # of the template alignment. The tick onset is at this sample.
+            tick_samples = len(template_sin)
+            tick_start = max(0, peak_idx - tick_samples // 2)
+            tick_end = min(len(iq_samples), tick_start + tick_samples)
+            if tick_end > tick_start:
+                iq_tick = iq_samples[tick_start:tick_end]
+                n_tick = len(iq_tick)
+                t_tick = np.arange(n_tick) / self.sample_rate
+                # Mix down to baseband at tone frequency
+                mixer = np.exp(-1j * 2 * np.pi * tone_freq_hz * t_tick)
+                mixed = iq_tick * mixer
+                # Average phasor (coherent integration over tick duration)
+                phasor = np.mean(mixed)
+                carrier_phase_rad = float(np.angle(phasor))
+                # DC carrier phasor: mean(IQ) over the tick duration.
+                # On unambiguous channels (CHU-only, WWV 20/25 MHz) this is the
+                # bare RF carrier phase — available continuously, independent of
+                # tone detection. On shared channels it's a mix of carriers.
+                dc_phasor = np.mean(iq_tick)
+                dc_carrier_phase_rad = float(np.angle(dc_phasor))
         
         # Normalize peak value (0-1)
         max_possible = np.sqrt(np.sum(audio**2)) * np.sqrt(np.sum(template_sin**2))
@@ -455,7 +492,7 @@ class TickMatchedFilter:
         else:
             peak_normalized = 0.0
         
-        return offset_ms, snr_db, peak_normalized, phase_rad
+        return offset_ms, snr_db, peak_normalized, phase_rad, carrier_phase_rad, dc_carrier_phase_rad
     
     def process_window(
         self,
@@ -476,10 +513,12 @@ class TickMatchedFilter:
         Returns:
             TickDetectionResult or None if detection failed
         """
-        # Demodulation: CHU uses DSB suppressed carrier, not AM.
-        # AM demod (|IQ|) doesn't recover the 1000Hz tone for DSB-SC signals.
-        # For CHU: use real part of IQ (baseband audio).
-        # For WWV/WWVH/BPM: use AM envelope (|IQ| - DC).
+        # Demodulation:
+        # CHU transmits USB with preserved carrier. The IQ baseband has a
+        # strong DC carrier component plus the 1000 Hz tone as a sideband.
+        # Re(IQ) recovers the audio. On CHU-only channels the unambiguous
+        # high-power carrier is available for direct phase/Doppler analysis.
+        # WWV/WWVH/BPM use conventional AM: |IQ| - DC recovers the envelope.
         if self.station == StationType.CHU:
             audio = np.real(iq_samples).copy()
             audio -= np.mean(audio)
@@ -520,9 +559,11 @@ class TickMatchedFilter:
         elif len(audio) > expected_samples:
             audio = audio[:expected_samples]
         
-        # Correlate
-        offset_ms, snr_db, peak_value, phase_rad = self._correlate_window(
-            audio, template_sin, template_cos
+        # Correlate (pass raw IQ for carrier phase extraction)
+        offset_ms, snr_db, peak_value, phase_rad, carrier_phase_rad, dc_carrier_phase_rad = self._correlate_window(
+            audio, template_sin, template_cos,
+            iq_samples=iq_samples,
+            tone_freq_hz=self.template_config.frequency_hz
         )
         
         # Estimate uncertainty based on SNR
@@ -544,6 +585,8 @@ class TickMatchedFilter:
             snr_db=snr_db,
             correlation_peak=peak_value,
             phase_rad=phase_rad,
+            carrier_phase_rad=carrier_phase_rad,
+            dc_carrier_phase_rad=dc_carrier_phase_rad,
             coherence_quality=min(1.0, peak_value * 2),  # Rough estimate
             valid_ticks=len(valid_seconds),
             station=self.station,

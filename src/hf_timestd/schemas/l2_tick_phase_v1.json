@@ -1,0 +1,129 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L2_tick_phase",
+    "description": "Per-window tick phase measurements from overlapping matched filter. Each row is one 5-second composite correlation window (1-second step), providing ~55 phase samples per minute per station. The phase_rad field tracks carrier phase evolution across the minute, revealing ionospheric dynamics: drift (Doppler), jumps (mode changes), and scintillation (irregularities).",
+    "cadence_seconds": 1,
+    "processing_level": "L2",
+    "standards": [
+        "ITU-R TF.460-6 Standard-frequency and time-signal emissions"
+    ],
+    "reference": "Quadrature correlation phase extraction from per-second timing ticks",
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "channel",
+            "type": "string",
+            "required": true,
+            "description": "Channel name (e.g., SHARED_10000)"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "description": "Detected station (WWV, WWVH, CHU, BPM)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": false,
+            "description": "Broadcast frequency in MHz"
+        },
+        {
+            "name": "window_start_second",
+            "type": "integer",
+            "required": true,
+            "description": "First second of the correlation window (1-57 typical)"
+        },
+        {
+            "name": "window_end_second",
+            "type": "integer",
+            "required": true,
+            "description": "Last second of the correlation window (exclusive)"
+        },
+        {
+            "name": "window_center_second",
+            "type": "float",
+            "required": true,
+            "description": "Center time of window in seconds from minute boundary"
+        },
+        {
+            "name": "phase_rad",
+            "type": "float",
+            "required": true,
+            "description": "Audio-domain modulation phase (radians, from atan2 of AM envelope quadrature correlator)"
+        },
+        {
+            "name": "carrier_phase_rad",
+            "type": "float",
+            "required": false,
+            "description": "RF carrier phase at tone frequency (radians, from IQ mix-down and coherent averaging). Tracks ionospheric path length changes."
+        },
+        {
+            "name": "dc_carrier_phase_rad",
+            "type": "float",
+            "required": false,
+            "description": "Bare carrier phase from mean(IQ) DC phasor (radians). Unambiguous on single-station channels (CHU 3.33/7.85/14.67, WWV 20/25 MHz). On shared channels this is a mix of carriers."
+        },
+        {
+            "name": "timing_offset_ms",
+            "type": "float",
+            "required": true,
+            "description": "Timing offset from expected tick position (ms)"
+        },
+        {
+            "name": "timing_uncertainty_ms",
+            "type": "float",
+            "required": false,
+            "description": "Estimated timing uncertainty based on SNR (ms)"
+        },
+        {
+            "name": "snr_db",
+            "type": "float",
+            "required": true,
+            "description": "Window SNR (dB)"
+        },
+        {
+            "name": "correlation_peak",
+            "type": "float",
+            "required": false,
+            "description": "Normalized correlation peak value (0-1)"
+        },
+        {
+            "name": "coherence_quality",
+            "type": "float",
+            "required": false,
+            "description": "Phase stability metric (0-1)"
+        },
+        {
+            "name": "valid_ticks",
+            "type": "integer",
+            "required": false,
+            "description": "Number of ticks in this window that contributed to the composite template"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": false,
+            "description": "ISO 8601 timestamp when record was written"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": false,
+            "description": "Processing software version"
+        }
+    ]
+}

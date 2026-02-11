@@ -10,205 +10,220 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: BEST GRAPHICAL PRESENTATION OF WWV/WWVH TEST SIGNAL DATA
+## 📋 NEXT SESSION: PHASE & DOPPLER METHODOLOGY REVIEW + WEB-API-UI EXPOSURE
 
-**Objective:** Create the best possible graphical presentation of the WWV (minute :08) and WWVH (minute :44) hourly test signal data. This is not just a dashboard — it should be a compelling, scientifically rigorous visualization that serves four audiences simultaneously: a general user who wants to understand what the system is measuring, a metrologist who cares about precision and traceability, a physicist who wants to extract ionospheric science, and a programmer who needs to verify the pipeline is working correctly.
+**Objective:** Two-part session:
 
-The test signal is a unique scientific instrument — a 45-second structured waveform broadcast hourly by NIST, designed specifically for HF channel characterization. Our system captures it on up to 6 frequencies from two stations (WWV in Colorado, WWVH in Hawaii), giving us simultaneous multi-path, multi-frequency ionospheric sounding. The graphical presentation should make this extraordinary dataset accessible and beautiful.
+1. **Critically review the phase and Doppler shift extraction methodology** for weaknesses, errors, and missed opportunities. The system now extracts three distinct phase measurements per tick window from IQ samples. These must be verified for correctness, physical meaning, and consistency before being exposed to users.
+
+2. **Expose phase and Doppler data through the web-api-ui** with visualizations that reveal ionospheric dynamics. Phase drift → Doppler shift. Phase jumps → propagation mode changes. Scintillation patterns → ionospheric irregularities. The data should correlate with mode of propagation (1-hop F, 2-hop F, sporadic E, etc.).
 
 ---
 
-## 🎯 FOUR PERSPECTIVES ON THE PRESENTATION
+## 🎯 FOUR PERSPECTIVES ON PHASE/DOPPLER
 
 ### 1. The User Perspective
-- **"What is this system doing right now?"** — At a glance, which frequencies are open, which stations are being received, how good is the channel?
-- **"Is it working?"** — Clear detection counts, confidence indicators, freshness timestamps
-- **"What's interesting?"** — Anomaly highlights, unusual propagation, solar events
-- The user wants clarity, not clutter. Color coding should be intuitive (green=good, red=poor). Numbers should have units. Trends should be obvious.
+- **"What is the ionosphere doing right now?"** — Phase drift rate (Doppler) as a real-time indicator of ionospheric motion
+- **"When did the propagation mode change?"** — Phase discontinuities mark mode transitions (e.g., 1F→2F, F→sporadic E)
+- **"Which path is more stable?"** — Compare WWV vs WWVH phase stability on the same frequency
 
 ### 2. The Metrologist Perspective
-- **Precision and uncertainty** — Every measurement should carry its uncertainty. SNR, S4, delay spread, ToA offset — all should show confidence intervals or quality grades.
-- **Traceability** — The chain from RF antenna → radiod → IQ buffer → metrology → test signal detection → HDF5 → API → display must be auditable. Timestamps must be UTC with stated accuracy (~50 μs from GPS+PPS via RTP).
-- **Calibration status** — Are the detection thresholds appropriate? Is the white noise correlation template correct? What is the false positive rate?
-- **Comparison** — WWV vs WWVH on the same frequency reveals systematic vs random error. Multi-frequency comparison reveals frequency-dependent effects.
+- **Phase measurement validity** — Is `carrier_phase_rad` actually tracking the RF carrier, or is it an artifact of the processing? What is the measurement noise floor?
+- **Ambiguity** — Phase wraps at ±π. Unwrapping is needed for Doppler extraction but introduces errors at discontinuities. How robust is the unwrapping?
+- **Consistency** — Do the three phase measurements (audio, carrier, DC) agree where they should? On unambiguous channels, `dc_carrier_phase_rad` and `carrier_phase_rad` should differ by a constant (the tone frequency's contribution).
+- **Uncertainty** — What is the phase measurement uncertainty as a function of SNR? At 10 dB SNR, phase noise is ~18° (0.3 rad). At 20 dB, ~6° (0.1 rad).
 
-### 3. The Physicist Perspective
-- **Ionospheric channel characterization** — The test signal's multi-tone segment (2, 3, 4, 5 kHz) directly measures frequency selectivity. The S4 scintillation index at each tone frequency discriminates D-layer absorption (S4 increases with frequency) from F-layer scintillation (S4 roughly constant).
-- **Delay spread** — The chirp segment enables pulse compression to measure multipath delay spread. This is the ionospheric impulse response.
-- **Coherence time** — How long does the channel remain stable? This determines the integration time limit for any HF measurement.
-- **Diurnal variation** — 24-hour plots of S4, delay spread, and coherence time reveal the ionospheric lifecycle: sunrise enhancement, daytime stability, sunset disturbance, nighttime sporadic E.
-- **Path comparison** — WWV (midcontinent, ~1500 km) vs WWVH (transpacific, ~5000 km) on the same frequency at the same time reveals path-dependent ionospheric structure.
-- **Anomaly science** — Sudden ionospheric disturbances (SIDs) from solar flares, traveling ionospheric disturbances (TIDs), sporadic E events — all should be detectable and highlighted.
+### 3. The Ionospheric Scientist Perspective
+- **Doppler from phase rate** — `f_Doppler = -(1/2π) × dφ/dt`. For 10 MHz carrier, 1 rad/s phase drift = 0.16 Hz Doppler = 4.8 m/s ionospheric motion.
+- **Mode identification** — Different propagation modes have different path lengths → different absolute phases. Mode transitions cause phase jumps of known magnitudes (calculable from geometry).
+- **Multipath** — When two modes are present simultaneously, the phase oscillates (beating). The beat frequency reveals the path length difference.
+- **Diurnal signatures** — Sunrise/sunset cause systematic Doppler shifts as the ionosphere rises/descends. These should be visible as smooth phase ramps.
+- **Scintillation** — Rapid phase fluctuations (S4 > 0.3) indicate small-scale ionospheric irregularities. Phase scintillation index (σ_φ) is a standard metric.
+- **Correlation across frequencies** — Phase changes should scale with frequency (dispersive ionosphere). 15 MHz should show 1.5× the phase change of 10 MHz for the same TEC change.
 
 ### 4. The Programmer Perspective
-- **Pipeline verification** — Is the detector running? Are HDF5 files being written? Are the API endpoints returning data? Are there error states?
-- **Data quality** — Are there NaN/Inf values leaking through? Are numpy types properly serialized? Are timestamps consistent?
-- **Performance** — The `DataProductReader.read_time_range()` does a full table scan of HDF5 files. For 24-hour plots with hourly data this is fine (max 48 rows), but the pattern should not be extended to high-frequency data without optimization.
-- **Code quality** — Is the test signal detector's DSP chain correct? Are the matched filter templates accurate? Is the detection threshold well-calibrated?
+- **Is the IQ mix-down correct?** — The `exp(-j·2π·f_tone·t)` mixer must use the correct `t` (time relative to window start, not absolute). Sign convention matters.
+- **Is the DC phasor meaningful?** — `mean(IQ)` over a tick duration (~5ms at 20 kHz = 100 samples) — is this enough samples for a stable phasor estimate?
+- **Window-to-window continuity** — Overlapping 5-second windows should produce smoothly varying phase. If phase jumps ~1.7 rad between windows (as currently observed), something is wrong.
+- **Template artifact** — The composite template sums multiple tick positions. If the template phase reference shifts between windows, the extracted phase will jump even if the signal phase is continuous.
+- **HDF5 data volume** — ~55 rows/station/minute × 3 stations × 9 channels = ~1485 rows/minute. At ~200 bytes/row, that's ~430 MB/day. Is this sustainable?
 
 ---
 
-## 📡 WWV/WWVH TEST SIGNAL STRUCTURE
+## 📡 PHASE EXTRACTION ARCHITECTURE (Implemented 2026-02-11)
 
-Per [Zenodo 5182323](https://zenodo.org/records/5182323), the 45-second test signal (starting at second 0 of the test minute):
+### Three Phase Measurements
 
-| Time (sec) | Content | Scientific Purpose |
-|------------|---------|-------------------|
-| 0-10 | Voice announcement | Synchronization |
-| 10-12 | White noise #1 | Wideband coherence, timing |
-| 12-13 | Blank | — |
-| 13-23 | Multi-tone (2,3,4,5 kHz) | Frequency selectivity, scintillation |
-| 23-24 | Blank | — |
-| 24-32 | Chirp sequences | Delay spread via pulse compression |
-| 32-34 | Blank | — |
-| 34-36 | Single-cycle bursts | High-precision timing |
-| 36-37 | Blank | — |
-| 37-39 | White noise #2 | Transient detection |
-| 39-42 | Blank | — |
+| Field | Method | Physical Meaning | Best Channel Type |
+|-------|--------|-----------------|-------------------|
+| `phase_rad` | `atan2(corr_sin, corr_cos)` on AM envelope | Audio modulation phase of the tone | All (but least informative) |
+| `carrier_phase_rad` | `IQ × exp(-j·2π·f_tone·t)` → `angle(mean)` | RF carrier phase at tone frequency | All (primary ionospheric observable) |
+| `dc_carrier_phase_rad` | `angle(mean(IQ))` over tick duration | Bare RF carrier phase (DC phasor) | **Unambiguous only** (CHU, WWV 20/25) |
 
-**Schedule:** WWV transmits at minute :08, WWVH at minute :44 of each hour.
+### Unambiguous vs Shared Channels
 
-**Receiver:** AC0G at EM38ww (Kansas), RX888 SDR with 160m dipole, GPSDO-locked.
+| Channel | Station(s) | DC Carrier Meaningful? | Notes |
+|---------|-----------|----------------------|-------|
+| CHU_3330 | CHU only | **Yes** — USB preserved carrier | Strongest DC phasor |
+| CHU_7850 | CHU only | **Yes** — USB preserved carrier | Strongest DC phasor |
+| CHU_14670 | CHU only | **Yes** — USB preserved carrier | Strongest DC phasor |
+| WWV_20000 | WWV only | **Yes** — AM carrier | Clean single-station |
+| WWV_25000 | WWV only | **Yes** — AM carrier | Clean single-station |
+| SHARED_2500 | WWV+WWVH+BPM | No — mixed carriers | Use `carrier_phase_rad` per station |
+| SHARED_5000 | WWV+WWVH+BPM | No — mixed carriers | Use `carrier_phase_rad` per station |
+| SHARED_10000 | WWV+WWVH+BPM | No — mixed carriers | Use `carrier_phase_rad` per station |
+| SHARED_15000 | WWV+WWVH+BPM | No — mixed carriers | Use `carrier_phase_rad` per station |
 
-**Channels monitored:** SHARED_2500, SHARED_5000, SHARED_10000, SHARED_15000 (both stations), WWV_20000, WWV_25000 (WWV only — WWVH does not broadcast on 20/25 MHz).
+### Modulation Types
 
----
+- **CHU**: USB with preserved carrier. IQ baseband has strong DC (carrier) + 1000 Hz sideband (tone). `Re(IQ)` recovers audio. DC phasor is the carrier phase directly.
+- **WWV/WWVH**: Conventional AM. IQ baseband has DC (carrier) + ±1000/1200 Hz sidebands. `|IQ| - DC` recovers envelope. On shared channels, DC is a mix of multiple AM carriers.
+- **BPM**: Conventional AM at 1000 Hz, similar to WWV.
 
-## 🔍 EXISTING IMPLEMENTATION
+### Early Results (2026-02-11, first hour of data)
 
-### Backend Pipeline
+| Channel | Type | audio σ_φ | carrier σ_φ | dc σ_φ | dc stability gain |
+|---------|------|-----------|-------------|--------|-------------------|
+| CHU_14670 | Unambiguous | 2.01 rad | 1.79 rad | **1.55 rad** | **1.30×** |
+| CHU_7850 | Unambiguous | 1.88 rad | 1.82 rad | **1.68 rad** | **1.12×** |
+| WWV_25000 | Unambiguous | 1.58 rad | 1.63 rad | **1.46 rad** | **1.08×** |
+| WWV_20000 | Unambiguous | 1.54 rad | 1.60 rad | 1.83 rad | 0.84× |
+| SHARED_10000 | Mixed | 1.67 rad | 1.99 rad | 1.80 rad | 0.93× |
+| SHARED_5000 | Mixed | 1.66 rad | 1.78 rad | 1.78 rad | 0.94× |
 
-| Component | Location | Status |
-|-----------|----------|--------|
-| `WWVTestSignalDetector` | `src/hf_timestd/core/wwv_test_signal.py` | Implemented, 1840 lines |
-| `MetrologyService` integration | `src/hf_timestd/core/metrology_service.py` | Triggers at :08/:44 |
-| `TestSignalService` API | `web-api/services/test_signal_service.py` | Reads HDF5, serves JSON |
-| HDF5 schema | `src/hf_timestd/schemas/l2_test_signal_v1.json` | Defined |
-| HDF5 output | `phase2/{CHANNEL}/L2/test_signal/` | Writing |
-
-### What the Detector Measures (per detection)
-
-- **S4 scintillation index** per frequency (2, 3, 4, 5 kHz) — `s4_2khz`, `s4_3khz`, `s4_4khz`, `s4_5khz`
-- **S4 frequency slope** — positive = D-layer absorption, near-zero = F-layer scintillation
-- **Delay spread** (ms) from chirp matched filter
-- **Coherence time** (sec) from multi-tone analysis
-- **Channel quality** grade: excellent/good/fair/poor
-- **Anomaly detection** — sudden amplitude drops, rapid fading
-- **ToA offset** (ms) from burst/chirp/multitone/noise (priority order)
-- **Field strength** (dB) and stability
-- **Tone powers** at 2, 3, 4, 5 kHz (dB) — individual and as time series
-- **Frequency selectivity** (dB) — `10*log10((P_2kHz + P_3kHz) / (P_4kHz + P_5kHz))`
-- **White noise correlation** peak and ToA
-- **Multipath detected** flag
-- **Transient detected** flag (noise1 vs noise2 coherence difference)
-
-### Existing Frontend (`test_signal.html`)
-
-The current page has 4 tabs:
-1. **Overview** — Hero stats (detection count, avg SNR, avg S4), latest results grid by frequency, 24h S4 chart
-2. **Daily Evolution** — Date picker, SNR/S4/ToA time series (Plotly)
-3. **WWV vs WWVH** — Side-by-side station comparison, SNR and S4 comparison charts
-4. **Frequency Analysis** — Multi-frequency SNR, per-tone S4, S4 frequency slope
-
-Uses Plotly.js for charts, dark theme, auto-refresh.
-
-### API Endpoints
-
-- `GET /api/physics/channels/latest` — Latest detection per frequency
-- `GET /api/physics/channels/daily` — 24h summary with stats
-- `GET /api/physics/channels/history?start=...&end=...` — Full time series
+**Concern:** All σ_φ values are ~1.5–2.0 rad (approaching uniform random on [-π,π] which has σ=1.81 rad). This suggests the phase is not being tracked coherently across windows. Possible causes:
+1. Composite template phase reference shifts between windows
+2. Window overlap not accounting for phase continuity
+3. The 5ms tick (100 samples at 20 kHz) provides too few cycles for stable phase
+4. Bandpass filter in tick_matched_filter introduces phase shifts that vary with window position
 
 ---
 
-## 🎨 GRAPHICAL PRESENTATION GOALS
+## 🔍 KNOWN ISSUES TO INVESTIGATE
 
-The session should produce the **best possible visualization** of this data. Consider:
+### 1. Phase Continuity Problem (HIGH PRIORITY)
+All phase measurements show σ ≈ 1.5–2.0 rad across consecutive windows. For a stable carrier, consecutive 5-second windows should show phase changes of order `2π × f_Doppler × Δt` — typically < 0.1 rad for sub-Hz Doppler. The observed ~1.7 rad jumps are 10–100× too large.
 
-### Visual Design Principles
-- **Information density without clutter** — Every pixel should earn its place
-- **Consistent color language** — Station colors (WWV=blue, WWVH=amber), quality colors (green/yellow/red), frequency colors (consistent palette across all charts)
-- **Time as the primary axis** — Most charts should show 24-hour evolution with UTC time
-- **Responsive layout** — Works on both wide monitors and laptops
-- **Print-friendly** — A scientist should be able to screenshot a chart for a paper
+**Hypotheses to test:**
+- **Template phase reference:** The composite template in `_build_composite_template()` sums tick templates at different positions within the window. If the template's phase reference changes between windows (e.g., because different seconds are valid), the correlation phase will jump.
+- **Bandpass filter phase:** `sosfiltfilt` is zero-phase, but the filter is applied per-window. Edge effects at window boundaries could introduce phase artifacts.
+- **IQ mix-down time reference:** The `t_tick` array in `_correlate_window` starts at 0 for each tick. If the tick's absolute time within the minute matters for the mixer phase, this introduces a window-dependent phase offset. **This is likely the primary bug** — the mixer should use absolute time, not tick-relative time.
+- **Sample count:** 5ms × 20 kHz = 100 samples. At 1000 Hz, that's 5 cycles. Phase estimation from 5 cycles has σ ≈ 1/(SNR_linear × √N) — at 10 dB SNR, σ ≈ 0.1 rad. So the noise floor is NOT the problem; the jumps are systematic.
 
-### Specific Visualization Ideas
+### 2. Cross-Frequency Discrimination (RESOLVED 2026-02-11)
+5ms template had 33% cross-response between 1000↔1200 Hz. Fixed with cross-frequency gate requiring 3 dB advantage. WWV/WWVH now show distinct detection rates on shared channels.
 
-1. **Ionospheric Heatmap** — 24h × frequency grid showing channel quality or S4, with WWV and WWVH as separate panels. This is the "money shot" — it shows the ionosphere's diurnal cycle at a glance.
+### 3. Threshold Calibration (ONGOING)
+`BASE_CORR_SNR_DB = 8.0` is the dominant rejection reason. `L2/detection_attempts` HDF5 product collects all attempts (detected + rejected) with rejection reasons for offline analysis.
 
-2. **Multi-tone Power Waterfall** — For each detection, show the 4 tone powers (2,3,4,5 kHz) as a stacked bar or radar chart. The attenuation pattern is the ionospheric fingerprint.
-
-3. **Path Comparison Panel** — WWV and WWVH on the same frequency, same time axis. Overlay or side-by-side. The difference is pure ionospheric path effect.
-
-4. **Delay Spread Timeline** — Shows multipath evolution. Spikes indicate sporadic E or other layering events.
-
-5. **S4 Frequency Slope Indicator** — A simple visual: positive slope (D-layer) vs flat (F-layer). Could be a color-coded timeline or a scatter plot.
-
-6. **Detection Coverage Matrix** — Which hours had detections on which frequencies? A simple grid shows propagation availability.
-
-7. **Anomaly Timeline** — Flagged events (SIDs, sudden fading) on a 24h strip.
-
-### What NOT to Do
-- Don't just dump numbers in a table — that's what HDF5 is for
-- Don't use 3D charts — they obscure more than they reveal
-- Don't auto-refresh so aggressively that charts flicker
-- Don't show raw API JSON — always interpret for the audience
+### 4. Memory Leak
+CHU metrology services grow to 2.5GB RSS over 12+ hours. Root cause unknown.
 
 ---
 
-## 🏗️ Architecture Reference
+## 🏗️ ARCHITECTURE REFERENCE
 
-### Data Flow
+### Data Flow for Phase Measurements
 
 ```
 ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffer
    (GPS+PPS, ~50μs)                                               ↓
                                                           timestd-metrology
                                                            ↓ (per channel)
-                                                    AM Demod → Matched Filter
-                                                    Test Signal Detection (:08/:44)
+                                                    TickMatchedFilter.process_minute()
+                                                      ↓ overlapping 5-sec windows
+                                                    _correlate_window()
+                                                      ├─ AM envelope → quadrature corr → phase_rad
+                                                      ├─ IQ × exp(-j2πft) → mean → carrier_phase_rad
+                                                      └─ mean(IQ) → dc_carrier_phase_rad
                                                            ↓
-                                                    L1 Metrology (HDF5)
-                                                    L2 Test Signal (HDF5)
+                                                    TickDetectionResult (per window)
+                                                           ↓
+                                                    MetrologyService → L2/tick_phase (HDF5)
                                                            ↓
                                                     timestd-web-api (FastAPI)
                                                            ↓
-                                                    test_signal.html (Plotly.js)
+                                                    [NEW] Phase/Doppler visualization
 ```
 
 ### Key Files for This Session
 
-| File | Purpose |
-|------|--------|
-| `src/hf_timestd/core/wwv_test_signal.py` | Test signal detector (1840 lines) |
-| `src/hf_timestd/core/metrology_service.py` | Triggers test signal detection at :08/:44 |
-| `src/hf_timestd/schemas/l2_test_signal_v1.json` | HDF5 schema for test signal data |
-| `web-api/services/test_signal_service.py` | Test signal API service (445 lines) |
-| `web-api/routers/physics.py` | Physics API routes (includes test signal endpoints) |
-| `web-api/static/test_signal.html` | **Primary target** — Test signal visualization (1209 lines) |
-| `web-api/static/physics.html` | Physics UI (Channels tab shows test signal metrics) |
-| `web-api/static/css/styles.css` | Shared dark theme styles |
-| `web-api/static/js/common.js` | Shared JS utilities (API wrapper, formatting) |
+| File | Purpose | Priority |
+|------|---------|----------|
+| `src/hf_timestd/core/tick_matched_filter.py` | **Phase extraction code** — review `_correlate_window()` and `_build_composite_template()` | **Critical** |
+| `src/hf_timestd/core/metrology_engine.py` | Cross-freq gate, RTP measurement loop, tick filter invocation | High |
+| `src/hf_timestd/core/metrology_service.py` | tick_phase_writer, persists all 3 phase fields to HDF5 | High |
+| `src/hf_timestd/schemas/l2_tick_phase_v1.json` | Schema: phase_rad, carrier_phase_rad, dc_carrier_phase_rad | Reference |
+| `web-api/routers/stability.py` | Existing stability/ADEV API — model for new phase API | Reference |
+| `web-api/static/metrology.html` | Existing metrology dashboard — model for phase UI | Reference |
+| `web-api/static/css/styles.css` | Dark theme styles | Reference |
+| `web-api/static/js/common.js` | Shared JS utilities | Reference |
+
+### HDF5 Data Products
+
+| Product | Path | Rate | Fields |
+|---------|------|------|--------|
+| `L2/tick_phase` | `phase2/{CH}/tick_phase/` | ~55 rows/station/min | phase_rad, carrier_phase_rad, dc_carrier_phase_rad, timing_offset_ms, snr_db, coherence_quality, window position |
+| `L2/tick_timing` | `phase2/{CH}/tick_timing/` | ~1 row/station/min | Aggregate timing from tick filter |
+| `L2/detection_attempts` | `phase2/{CH}/detection_attempts/` | ~45 rows/min | All RTP measurement attempts with rejection reasons |
+| `L2/timing_measurements` | `phase2/{CH}/timing_measurements/` | ~1-15 rows/min | Accepted timing measurements |
 
 ### Service Inventory
 
 | Service | CPUAffinity | Purpose |
 |---------|-------------|--------|
 | `timestd-core-recorder` | 0-7 | RTP → raw buffer (authoritative timestamps) |
-| `timestd-metrology` | 0-7 (taskset) | IQ → L1/L2 measurements + test signal detection |
+| `timestd-metrology` | 0-7 (taskset) | IQ → L1/L2 measurements + tick phase extraction |
 | `timestd-fusion` | 0-7 | Multi-broadcast fusion → Chrony |
 | `timestd-web-api` | 0-7 | REST API + dashboard (FastAPI, port 8000) |
 | **radiod** | **8-15** | **Real-time USB/FFT (uncontested L3 cache)** |
 
 ---
 
+## 🎨 PHASE/DOPPLER VISUALIZATION GOALS
+
+### What to Show
+
+1. **Phase vs Time** — Per-channel, per-station phase time series (unwrapped). 24h plot reveals diurnal ionospheric cycle. Phase ramps = Doppler. Jumps = mode changes.
+
+2. **Doppler Shift vs Time** — Derived from phase rate: `f_D = -(1/2π) dφ/dt`. Shows ionospheric vertical motion. Sunrise/sunset produce characteristic Doppler signatures.
+
+3. **Multi-Frequency Phase Comparison** — Same station on multiple frequencies. Ionospheric phase is dispersive: Δφ ∝ TEC/f. If 10 MHz shows X rad drift, 15 MHz should show ~0.67X. Deviations indicate multipath or mode changes.
+
+4. **Phase Scintillation Index (σ_φ)** — Standard deviation of detrended phase over sliding windows. High σ_φ = ionospheric irregularities. Compare with S4 amplitude scintillation.
+
+5. **DC Carrier Phase (Unambiguous Channels)** — CHU and WWV 20/25 MHz: the bare carrier phase, independent of tone detection. This is the cleanest ionospheric observable. Show alongside tone-derived carrier phase for consistency check.
+
+6. **Mode Transition Detection** — Phase jumps exceeding a threshold (e.g., > 1 rad in < 10s) flagged as mode transitions. Annotate on the phase plot.
+
+### Visual Design
+- **Station colors:** WWV=blue, WWVH=amber, CHU=green, BPM=red
+- **Phase plots:** Unwrapped phase on left y-axis, Doppler on right y-axis
+- **Time axis:** UTC, 24h default with zoom capability
+- **Frequency panels:** Stacked vertically, shared time axis, for multi-frequency comparison
+- **Dark theme:** Consistent with existing dashboard
+
+### API Endpoints Needed
+
+- `GET /api/phase/timeseries?channel=...&station=...&start=...&end=...` — Phase time series from L2/tick_phase
+- `GET /api/phase/doppler?channel=...&station=...&start=...&end=...` — Derived Doppler (compute server-side from phase rate)
+- `GET /api/phase/scintillation?channel=...&station=...&start=...&end=...` — σ_φ time series
+- `GET /api/phase/summary` — Current phase/Doppler state across all channels
+
+---
+
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
 
+### Phase Extraction & Cross-Talk Fix (2026-02-11)
+- Three-tier phase extraction implemented: audio phase, IQ carrier phase, DC carrier phasor
+- Cross-frequency discrimination gate: 3 dB advantage required between 1000↔1200 Hz
+- WWV/WWVH detection rates now distinct on shared channels (72% vs 55%)
+- CHU modulation comments corrected: USB with preserved carrier, not DSB-SC
+- Allan deviation UI: standard time range buttons
+- See: `docs/changes/SESSION_2026_02_11_PHASE_EXTRACTION_AND_CROSSTALK.md`
+
 ### CHU FSK Decoder — USB Sidecar Channels (2026-02-10)
-- **Root cause found:** radiod's IQ decimation filter attenuates FSK tones at +2025/+2225 Hz by ~43 dB. Combined with the tones being 32 dB below carrier, they are 75 dB below carrier in IQ output — unrecoverable.
-- **The filter roll-off:** The `[global] mode=usb` setting in `radiod.conf` applies USB filter edges (+50 to +3000 Hz) before the `[iq]` preset overrides them. The effective IQ filter has steep roll-off above ~1.5 kHz. Increasing sample rate to 48 kHz and sending `HIGH_EDGE` commands did NOT widen the filter — the shape is set by the preset at channel creation.
-- **Solution:** Added 3 dedicated USB-preset sidecar channels (12 kHz, no disk archive) for FSK decoding. IQ channels remain at 24 kHz for archiving. New `CHUFSKListener` class manages USB channels, ring buffers, and minute-boundary-aligned FSK decode.
-- **Demodulator:** Replaced Bell 103 frequency-translate chain with Hilbert transform + BPF frequency discriminator. Proven 5/5 byte redundancy on live CHU 7850 kHz during good propagation.
-- **Status:** Pipeline running, awaiting daytime propagation for full verification. Decoder refinement still needed (adaptive thresholds, edge-effect mitigation).
+- Dedicated USB-preset sidecar channels for FSK decoding
 - See: `docs/SESSION_2026-02-10_CHU_FSK_USB_SIDECAR.md`
 
 ### Timing Accuracy (2026-02-06)
@@ -216,47 +231,29 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
 - Mean discrepancy reduced from -495ms to ~1ms
 
 ### Pipeline Offset Calibration (2026-02-09)
-- **Removed entirely** — radiod's RTP timestamps are authoritative
-- `GPS_TIME` and `RTP_TIMESNAP` are in the same counter space (both from `input_sample_index / decimation`)
-- No wall-clock calibration bias — timestamps carry GPS+PPS time through the decimation pipeline
+- Removed entirely — radiod's RTP timestamps are authoritative
 - Verified: CHU_3330 error=-0.31ms, CHU_7850 error=-3.01ms at 39.5dB SNR
-
-### Tolerances Tightened (2026-02-09)
-- `ARRIVAL_TOLERANCE_MS`: 200ms → 100ms (`metrology_engine.py`)
-- `BOOTSTRAP_INITIAL_UNCERTAINTY_MS`: 150ms → 50ms (`arrival_pattern_matrix.py`)
-
-### CPU Affinity (2026-02-09)
-- All timestd Python services pinned to CPUs 0-7
-- radiod on CPUs 8-15 for uncontested L3 cache access
 
 ### HDF5 Crash Safety (2026-02-06)
 - SWMR eliminated — open-write-close per measurement
-- No dirty HDF5 flags on crash/SIGKILL
-
----
-
-## 🔬 OPEN QUESTIONS
-
-1. **Is the detector actually running and producing data?** Check logs for test signal detections at :08 and :44. Check `phase2/{CHANNEL}/L2/test_signal/` for HDF5 files. If no data, the visualization work is blocked until the pipeline is verified.
-
-2. **Detection threshold calibration:** Combined threshold is 0.20 — is this producing false positives (WWVH on 20/25 MHz was one such case, now filtered) or missing real detections?
-
-3. **White noise template accuracy:** The PRNG sequence in our generator differs from the actual WWV/WWVH transmitter. The [wwv-h-characterization-signal-ports](https://github.com/aidanmontare-edu/wwv-h-characterization-signal-ports) repo has the actual sequence. This affects noise correlation ToA precision.
-
-4. **Tone analysis accuracy gap:** Best channels show ±0.3-3ms error, but many show ±30-100ms. Can the test signal's chirp/burst components provide better timing than the 1000/1200 Hz tones?
-
-5. **Memory leak:** CHU metrology services grow to 2.5GB RSS over 12+ hours. Root cause unknown.
 
 ---
 
 ## ✅ Success Criteria for Next Session
 
-- ⬚ **Verify test signal pipeline is producing data** — detections at :08 and :44, HDF5 files present
-- ⬚ **Create compelling ionospheric heatmap** — 24h × frequency, WWV vs WWVH panels
-- ⬚ **Multi-tone power visualization** — show the 2/3/4/5 kHz attenuation pattern per detection
-- ⬚ **WWV vs WWVH path comparison** — same frequency, same time, different paths
-- ⬚ **S4 frequency slope visualization** — D-layer vs F-layer discrimination
-- ⬚ **Detection coverage matrix** — which hours/frequencies have data
-- ⬚ **Delay spread and coherence time trends** — 24h evolution
-- ⬚ **Clean, publication-quality charts** — suitable for scientific presentation
-- ⬚ **All four perspectives satisfied** — user sees clarity, metrologist sees precision, physicist sees science, programmer sees correctness
+### Part 1: Methodology Review
+- ⬚ **Verify IQ mix-down correctness** — sign convention, time reference, frequency accuracy
+- ⬚ **Diagnose phase continuity problem** — why σ_φ ≈ 1.7 rad between consecutive windows
+- ⬚ **Verify DC phasor on unambiguous channels** — CHU carrier phase should be smooth and track Doppler
+- ⬚ **Consistency check** — carrier_phase_rad and dc_carrier_phase_rad should differ by a predictable offset on unambiguous channels
+- ⬚ **Quantify phase noise floor** — σ_φ vs SNR, compare with theoretical 1/(SNR_linear × √N)
+- ⬚ **Fix any bugs found** — especially the suspected time-reference issue in the IQ mixer
+
+### Part 2: Web-API-UI Visualization
+- ⬚ **Phase time series plot** — per-channel, per-station, unwrapped, 24h
+- ⬚ **Doppler shift derivation and display** — from phase rate, with appropriate smoothing
+- ⬚ **Multi-frequency comparison** — verify dispersive scaling (Δφ ∝ 1/f)
+- ⬚ **Phase scintillation index** — σ_φ time series
+- ⬚ **Mode transition annotations** — phase jumps flagged on plots
+- ⬚ **DC carrier phase on unambiguous channels** — the cleanest ionospheric observable
+- ⬚ **Correlation with propagation mode** — do phase patterns match expected 1F, 2F, sporadic E signatures?

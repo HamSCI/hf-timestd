@@ -1,0 +1,127 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L2_detection_attempts",
+    "description": "Every RTP measurement attempt (detected and rejected) with rejection reasons and quality metrics. Enables offline threshold calibration by preserving evidence that would otherwise be discarded.",
+    "cadence_seconds": 60,
+    "processing_level": "L2",
+    "standards": [
+        "ITU-R TF.460-6 Standard-frequency and time-signal emissions"
+    ],
+    "reference": "Matched filter measurement attempts against known tone positions",
+    "quality_flags": {
+        "DETECTED": "Measurement passed all quality gates",
+        "REJECTED": "Measurement failed one or more quality gates (see rejection_reason)"
+    },
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "channel",
+            "type": "string",
+            "required": true,
+            "description": "Channel name (e.g., SHARED_10000)"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "description": "Target station (WWV, WWVH, CHU, BPM)"
+        },
+        {
+            "name": "frequency_hz",
+            "type": "integer",
+            "required": false,
+            "description": "Tone frequency in Hz (1000 or 1200)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": false,
+            "description": "Broadcast frequency in MHz"
+        },
+        {
+            "name": "utc_second",
+            "type": "integer",
+            "required": false,
+            "description": "UTC second being measured"
+        },
+        {
+            "name": "tone_duration_sec",
+            "type": "float",
+            "required": false,
+            "description": "Expected tone duration used for template (seconds)"
+        },
+        {
+            "name": "detected",
+            "type": "boolean",
+            "required": true,
+            "description": "True if measurement passed all quality gates"
+        },
+        {
+            "name": "rejection_reason",
+            "type": "string",
+            "required": false,
+            "description": "Why the measurement was rejected: corr_snr_low, arrival_tolerance, bpm_snr_low, correlation_flat, window_invalid, search_window_invalid, correlation_empty"
+        },
+        {
+            "name": "arrival_ms",
+            "type": "float",
+            "required": false,
+            "description": "Measured arrival time from buffer start (ms)"
+        },
+        {
+            "name": "expected_delay_ms",
+            "type": "float",
+            "required": false,
+            "description": "Expected arrival time from buffer start (ms)"
+        },
+        {
+            "name": "timing_error_ms",
+            "type": "float",
+            "required": false,
+            "description": "Timing error: arrival_ms - expected_delay_ms (ms)"
+        },
+        {
+            "name": "snr_db",
+            "type": "float",
+            "required": false,
+            "description": "Tone SNR from FFT measurement (dB)"
+        },
+        {
+            "name": "corr_snr_db",
+            "type": "float",
+            "required": false,
+            "description": "Correlation SNR from matched filter (dB)"
+        },
+        {
+            "name": "peak_correlation",
+            "type": "float",
+            "required": false,
+            "description": "Peak correlation value (unitless)"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": false,
+            "description": "ISO 8601 timestamp when record was written"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": false,
+            "description": "Processing software version"
+        }
+    ]
+}

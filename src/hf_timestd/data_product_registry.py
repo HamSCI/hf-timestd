@@ -86,6 +86,8 @@ class DataProductRegistry:
         ('L2', 'wwv_bcd'): 'broadcast:bcd',           # WWV/WWVH only
         ('L2', 'wwv_test_signal'): 'broadcast:test',  # WWV/WWVH only
         ('L2', 'tick_timing'): 'tick_timing',         # Per-second tick timing (55+ estimates/min)
+        ('L2', 'detection_attempts'): 'detection_attempts',  # All measurement attempts (detected + rejected)
+        ('L2', 'tick_phase'): 'tick_phase',              # Per-window phase from tick correlator (~55/min)
         
         # =====================================================================
         # CHANNEL-CENTRIC PRODUCTS (per receiver channel, e.g., SHARED_10000)
