@@ -711,13 +711,24 @@
                 </div>
             `).join('');
             
+            // Compute global SNR range across all broadcasts for normalized Y-axes
+            let globalSnrMax = 0;
+            for (const [bid, broadcast] of sortedBroadcasts) {
+                const snrs = (broadcast.measurements?.snr_db || []).filter(v => v !== null);
+                if (snrs.length > 0) {
+                    globalSnrMax = Math.max(globalSnrMax, ...snrs);
+                }
+            }
+            // Round up to nearest 10 for a clean axis, minimum 50
+            globalSnrMax = Math.max(50, Math.ceil(globalSnrMax / 10) * 10);
+            
             // Render mini charts for each broadcast
             for (const [bid, broadcast] of sortedBroadcasts) {
-                renderMiniChart(bid, broadcast);
+                renderMiniChart(bid, broadcast, globalSnrMax);
             }
         }
 
-        function renderMiniChart(bid, broadcast) {
+        function renderMiniChart(bid, broadcast, snrMax) {
             const solar = broadcast.solar;
             const measurements = broadcast.measurements;
             
@@ -771,7 +782,8 @@
                 yaxis: { 
                     gridcolor: '#3d4466',
                     title: 'SNR',
-                    titlefont: { size: 9 }
+                    titlefont: { size: 9 },
+                    range: [0, snrMax || 50]
                 },
                 yaxis2: {
                     overlaying: 'y',
