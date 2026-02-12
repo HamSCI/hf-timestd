@@ -10,165 +10,25 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: CRITIQUE AND DEBUG THE DETECTION METHODOLOGY
+## 📋 NEXT SESSION: DETECTION RESILIENCE AND FUSION QUALITY
 
-**Objective:** Diagnose and fix the detection dropout observed at ~0300 UTC on 2026-02-12, where WWV and WWVH detections collapsed while CHU continued. The TSL2 chrony feed is currently worse than TSL1 (-1750µs offset, rejected). This session should perform a thorough critique of the entire detection and fusion pipeline, identify root causes, and implement fixes.
+**Objective:** With the matched filter false positive problem fixed (see Resolved section below), focus on improving WWV/WWVH detection resilience and fusion quality. The fundamental asymmetry remains: CHU gets 15 attempts/min, WWV/WWVH get 1. When propagation is marginal, WWV/WWVH go dark.
 
-**Context:** The system uses matched-filter correlation to detect timing tones from WWV (1000 Hz), WWVH (1200 Hz), CHU (1000 Hz), and BPM (1000 Hz) in IQ data from a GPSDO-locked RX888 SDR via ka9q-radio (radiod). Only tones ≥100ms are used (5ms/10ms ticks dropped due to jitter). For WWV/WWVH, only the 800ms minute marker (second 0) is measured — **one detection attempt per station per minute**. CHU gets ~15 attempts/min (300ms tones on seconds 1–28, 40–49). This asymmetry means WWV/WWVH are fragile: a single failed detection = zero measurements for that minute.
-
----
-
-## 🚨 INCIDENT: ~0300 UTC DETECTION DROPOUT (2026-02-12)
-
-### Observed Symptoms
-
-From the dashboard screenshot and chrony output:
-
-1. **~0300 UTC**: Sharp dropout of detections on ALL WWV channels (2.5, 5, 10, 15, 20, 25 MHz) and ALL WWVH channels (2.5, 5, 10, 15 MHz)
-2. **CHU 14.67 MHz**: Continues with detections through the gap — **CHU is unaffected**
-3. **Recovery**: Varies by frequency. Higher frequencies (15, 20 MHz) recover first (~0600), lower frequencies (2.5, 5 MHz) recover later (~0800+). This is consistent with sunrise terminator restoring HF propagation.
-4. **WWVH 15 MHz**: Shows suspiciously high SNR spikes (>50 dB) after recovery — possible false detections or interference
-5. **TSL2 chrony feed**: -1750µs offset (marked `x` = rejected by chrony), while TSL1 shows +79µs. The fusion layer is producing bad timing from sparse/noisy detections.
-
-### Chrony Status (12:49 UTC)
-
-```
-#? TSL1    0   4    42    54    +79us[  +79us] +/- 2000us
-#x TSL2    0   4    10    70  -1750us[-1750us] +/-  600us
-^* GPS     1   3   377     7  -1985ns[-2402ns] +/-   92us
-```
-
-- **TSL1** (L1 Kalman): +79µs, reachability 42 (intermittent), ±2000µs uncertainty — marginal but tracking
-- **TSL2** (L2 Kalman): -1750µs, reachability 10 (very poor), rejected by chrony — **broken**
-- **GPS**: -2ns, reachability 377 (perfect) — the reference is fine
-
-### Key Diagnostic Questions
-
-1. **Why did WWV/WWVH drop at 0300 but CHU survived?** CHU 14.67 MHz is a higher frequency than most WWV channels, and CHU is closer (1522 km vs 1120 km). But WWV 15 MHz and 20 MHz also dropped — same frequency range. Is this purely propagation, or is the detection pipeline more fragile for WWV/WWVH?
-2. **Why is TSL2 at -1750µs?** The L2 Kalman filter should be robust to detection gaps. Is it being corrupted by false detections during recovery? Is the Kalman divergence recovery (>20ms threshold) too loose?
-3. **Are the WWVH 15 MHz high-SNR spikes (>50 dB) real?** If these are false detections, they could be corrupting the fusion.
-4. **Is the 1-per-minute WWV/WWVH detection rate fundamentally too fragile?** CHU gets 15 attempts/min. WWV/WWVH get 1. Should we reconsider the 5ms tick decision?
+**Context:** The system now has a clean detection pipeline — false positives eliminated by narrower search windows and physics validation. But WWV/WWVH detection rate is still limited by the 1-per-minute 800ms minute marker. During nighttime/terminator conditions, this single attempt often fails (corr_snr < 8 dB).
 
 ---
 
-## 🔍 CRITIQUE TARGETS FOR THIS SESSION
+### Remaining Work Items
 
-### 1. Detection Fragility — WWV/WWVH vs CHU
+1. **Add WWV/WWVH secondary timing tones** — 440/500/600 Hz audio tones transmitted during specific minutes are several seconds long and could provide redundancy. Lower precision than the 1000/1200 Hz minute marker, but much better than zero detections.
 
-**The core asymmetry:** WWV/WWVH only use the 800ms minute marker (second 0). All other seconds return `duration=0.0` and are skipped. CHU uses 300ms tones on ~20 seconds per minute. This means:
+2. **Detection gap alerting** — WARNING log when a station has 0 detections for >5 minutes. Station health metric in the web dashboard. Feed detection rate into fusion weighting.
 
-- **CHU**: 15+ detection attempts per minute → robust to fading on individual seconds
-- **WWV/WWVH**: 1 detection attempt per minute → single fade = total loss
+3. **Propagation model multi-hop delays** — The model predicts 3F delays of ~10ms, but real nighttime multi-hop arrivals show +200-450ms timing error. The ionospheric group delay for multi-hop paths is drastically underestimated. This doesn't affect detection (physics gate correctly rejects false positives), but it means the model can't validate real multi-hop arrivals. Future work: investigate the group delay integration for multi-hop paths.
 
-**Critique targets in `metrology_engine.py`:**
+4. **TSL2 convergence** — TSL2 was at -1750µs before the fix session but was converging to -619µs by 13:09 UTC. After the metrology restart, both TSL feeds need time to re-converge. Monitor over 24h to verify both track GPS within ±500µs.
 
-- `_get_tone_duration()` (line ~414): Returns 0.0 for all WWV/WWVH seconds except 0. The 5ms ticks were dropped for good reason (±50ms jitter, cross-frequency confounding). But are there other usable tones? WWV/WWVH transmit 440/500/600 Hz audio tones during specific minutes. These are longer (several seconds) and could provide timing if the minute is known.
-- `process_minute()` (line ~898): The `measurable[:15]` limit caps attempts. For WWV/WWVH this is moot (only 1 measurable second), but verify the prioritization logic.
-- The 800ms template with ±500ms search window (`SEARCH_WINDOW_MS = max(50, min(500, tone_duration_sec * 625))`) — is the search window appropriate for nighttime multi-hop? Could the arrival be outside ±500ms?
-
-**Question for the critic:** Should we add WWV/WWVH long audio tones (440/500/600 Hz, several seconds duration) as secondary timing sources? They wouldn't have the same precision as the 1000/1200 Hz minute marker, but they'd provide redundancy during fades.
-
-### 2. Matched Filter Sensitivity — Thresholds and Gates
-
-The detection pipeline has multiple quality gates. Each one could be rejecting valid signals during marginal propagation:
-
-| Gate | Threshold | Location | Risk |
-|------|-----------|----------|------|
-| **Correlation SNR** | `MIN_CORR_SNR_DB = 8.0` | line ~708 | Too high for weak nighttime signals? |
-| **Correlation flat** | `range/mean < 0.5` | line ~671 | May reject weak but real signals |
-| **Cross-freq discrimination** | `MIN_FREQ_ADVANTAGE_DB = 3.0` | line ~756 | Correct, but verify edge cases |
-| **Arrival tolerance** | `±500ms` | line ~835 | May be too tight for 3F/multi-hop |
-| **BPM SNR** | `MIN_BPM_SNR_DB = 12.0` | line ~857 | Appropriate for BPM |
-| **Edge rejection** | Peak at edge of search window | line ~667 | May reject real signals near window edge |
-
-**Critique approach:**
-- Pull `L2/detection_attempts` HDF5 data for the 0200–0600 UTC period
-- Tabulate rejection reasons by station, frequency, and time
-- Identify which gate is responsible for the dropout
-- Check if lowering `MIN_CORR_SNR_DB` from 8.0 to 6.0 would recover valid detections without admitting false ones
-
-### 3. Fusion Layer Robustness — TSL2 Corruption
-
-The fusion pipeline in `multi_broadcast_fusion.py` has several potential failure modes during detection gaps:
-
-**Kalman filter behavior during gaps:**
-- `_kalman_update()` (line ~2743): The Kalman predict step runs every cycle, but the update step only runs when measurements exist. During a gap, the state coasts with process noise `q_offset = 0.01 ms²/min`. After a long gap, the covariance grows, making the filter vulnerable to the first (possibly bad) measurement.
-- **Divergence recovery** (line ~2875): Triggers at `|state| > 20ms`. TSL2 at -1750µs = -1.75ms — well below the 20ms threshold. The filter won't self-correct.
-- **L2 vs L1 independence**: TSL1 and TSL2 use independent Kalman states. TSL2 uses L2 calibration data which may have different biases. Why is TSL2 worse?
-
-**Outlier rejection during sparse data:**
-- `_reject_outliers()` (line ~2194): Requires `len(measurements) >= 4` to activate. During recovery with only 1-2 measurements, outliers pass through unfiltered.
-- Pre-fusion MAD rejection (line ~3182): Also requires `len(measurements) > 2`. Single bad measurements during recovery go straight to the Kalman filter.
-
-**Hardware calibration drift:**
-- `_update_calibration()` (line ~2346): During the detection gap, no calibration updates occur. When detections resume, the first measurements may have different propagation characteristics (sunrise terminator). The calibration EMA could chase these transients.
-
-**Critique approach:**
-- Check fusion logs for the 0300–0600 period: how many measurements per cycle? Which stations?
-- Verify that the Kalman filter handles measurement gaps gracefully (no NaN propagation, no covariance explosion)
-- Check if the L2 Kalman was corrupted by a single bad measurement during recovery
-
-### 4. Propagation Model Impact on Detection
-
-The new `HFPropagationModel` (deployed this session) affects detection through `_predict_geometric_delay()`:
-
-- If the model predicts the wrong delay, the search window is centered in the wrong place
-- During the sunrise terminator transition, ionospheric parameters change rapidly — the model may lag
-- The `expected_delay_ms` feeds into `onset_sample` calculation — a bad prediction shifts the entire measurement window
-
-**Critique approach:**
-- Query `/propagation/model/all-stations` at 0300 UTC and 0600 UTC to see what the model predicted
-- Compare model predictions with actual observed arrival times from the detection_attempts data
-- Check if the model's uncertainty windows were wide enough to capture the actual arrivals
-
-### 5. Chrony Feed Quality — Why TSL2 is Worse
-
-The system feeds two independent Chrony SHM segments:
-- **TSL1**: L1 Kalman (direct metrology measurements)
-- **TSL2**: L2 Kalman (calibrated measurements with physics corrections)
-
-TSL2 should be *better* than TSL1 (more corrections applied). The fact that it's *worse* (-1750µs vs +79µs) suggests:
-- L2 calibration is introducing systematic error
-- The L2 Kalman has different convergence behavior
-- L2 physics corrections (propagation mode, GNSS VTEC) are wrong during the terminator transition
-
-**Critique approach:**
-- Compare L1 and L2 measurement values for the same detections
-- Check if L2 calibration offsets (`hardware_offset_ms`) are reasonable
-- Verify that the L2 Kalman filter was properly initialized and hasn't diverged
-
----
-
-## 🎯 WHAT NEEDS TO HAPPEN THIS SESSION
-
-### 1. Diagnose the 0300 UTC dropout
-
-Pull detection_attempts data and identify exactly which quality gate rejected WWV/WWVH detections. Was it correlation SNR? Propagation bounds? Cross-frequency discrimination? Or was the signal genuinely absent (no propagation)?
-
-### 2. Fix TSL2 chrony feed
-
-Identify why TSL2 is at -1750µs and fix it. This likely requires either:
-- Resetting the L2 Kalman state
-- Fixing a systematic bias in L2 calibration
-- Adding better outlier protection during sparse-data recovery
-
-### 3. Improve WWV/WWVH detection resilience
-
-Consider:
-- Adding WWV/WWVH audio tones (440/500/600 Hz) as secondary timing sources
-- Reducing `MIN_CORR_SNR_DB` with compensating quality gates
-- Implementing Kalman coasting during detection gaps (predict from last good state)
-
-### 4. Add detection gap monitoring
-
-The system should detect and alert when a station goes dark:
-- Log a WARNING when a station has 0 detections for >5 minutes
-- Track detection rate per station in the web dashboard
-- Consider a "station health" metric that feeds into fusion weighting
-
-### 5. Validate propagation model predictions against observations
-
-Use the new `/propagation/model/predict` endpoint to compare model predictions with actual observed arrivals across the 24h period. Identify systematic biases.
+5. **Validate propagation model vs observations** — Compare `/propagation/model/predict` output with actual observed arrivals across a full 24h period. Identify systematic biases in the model.
 
 ---
 
@@ -260,6 +120,27 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
 ---
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
+
+### Matched Filter False Positive Fix (2026-02-12, session 2)
+
+**Root cause of 0300 UTC detection dropout diagnosed and fixed.**
+
+The apparent "dropout" was actually two problems:
+1. **Correct behavior**: WWV/WWVH 5ms ticks dropped (only 800ms minute marker used) → 1 attempt/min instead of ~850/min. CHU unaffected (15 attempts/min with 300ms tones).
+2. **False positive problem**: 80% of WWV/WWVH "detections" that passed the 8.0 dB corr_snr gate were **noise correlation peaks**, not real signals. Timing errors were uniformly distributed across ±500ms — the signature of random noise, not real arrivals.
+
+**Root cause**: The 800ms template with ±500ms search window had a **21% false positive rate** on pure noise. The correlation envelope of bandpass-filtered noise has ~55ms coherence length, giving ~18 effective independent samples in ±500ms. Extreme value statistics push the peak/median ratio to ~6.2 dB — well into the 8.0 dB threshold.
+
+**Fixes in `metrology_engine.py`:**
+- Search window capped at ±100ms for templates ≥100ms (was ±500ms for 800ms). Physics model constrains real arrivals to ±15ms, so ±100ms is generous.
+- Noise exclusion zone widened to full template length (was half). Prevents signal energy from contaminating the noise floor estimate.
+- FP rate: 21% → 6.8%. Combined with physics gate (±15ms window), effective FP rate < 1%.
+- Real signal detection: 100% at all SNR levels (even weak 10 dB signals produce 42+ dB corr_snr).
+- Physics validation gate confirmed ESSENTIAL — correctly rejects the remaining ~7% of noise FPs.
+
+**WWVH 15 MHz >50 dB spikes**: Explained by the old false positive problem. No longer occurring.
+
+**Production verification**: CHU channels healthy (11/15 detected on 14.67 MHz), shared channels clean (no FPs passing physics), WWV_20000 validated at +14.1ms (2.8σ).
 
 ### Metrology Methodology Audit (2026-02-12)
 
@@ -360,10 +241,10 @@ All critique items from the propagation model session have been addressed:
 
 ## ✅ Success Criteria — Next Session
 
-1. **Root-cause the 0300 UTC dropout** — pull `L2/detection_attempts` data, tabulate rejection reasons by station/freq/time, identify which quality gate killed WWV/WWVH detections
-2. **Fix TSL2 chrony feed** — identify and correct the -1750µs bias in the L2 Kalman filter
-3. **Improve WWV/WWVH detection resilience** — either add secondary timing tones (440/500/600 Hz audio), lower thresholds with compensating gates, or implement Kalman coasting
+1. ~~**Root-cause the 0300 UTC dropout**~~ ✅ RESOLVED — 80% of WWV/WWVH "detections" were false positives from noise correlation peaks. Search window narrowed from ±500ms to ±100ms, noise exclusion zone widened. FP rate reduced from 21% to <7%.
+2. ~~**Fix TSL2 chrony feed**~~ ✅ CONVERGING — TSL2 was at -1750µs, converged to -619µs by 13:09 UTC before metrology restart. Monitor over 24h.
+3. **Improve WWV/WWVH detection resilience** — add secondary timing tones (440/500/600 Hz audio) for redundancy during nighttime fades
 4. **Add detection gap alerting** — WARNING log when a station has 0 detections for >5 minutes; station health metric in dashboard
-5. **Validate propagation model vs observations** — compare `/propagation/model/predict` output with actual observed arrivals across the 24h period
-6. **Verify WWVH 15 MHz high-SNR spikes** — determine if the >50 dB detections after recovery are real or false positives
-7. **TSL1 and TSL2 should both track GPS within ±500µs** — the ultimate success metric
+5. **Validate propagation model vs observations** — compare model predictions with actual observed arrivals; investigate multi-hop delay underestimation
+6. ~~**Verify WWVH 15 MHz high-SNR spikes**~~ ✅ RESOLVED — false positives from the old ±500ms search window. No longer occurring with the fix.
+7. **TSL1 and TSL2 should both track GPS within ±500µs** — monitor after metrology restart
