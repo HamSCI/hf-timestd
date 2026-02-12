@@ -503,6 +503,10 @@ class MetrologyEngine:
             if len(chunk) < self.sample_rate // 4:
                 return False
             
+            # AM demodulate: tick frequencies (1000/1200 Hz) are modulation
+            # tones that exist in the envelope, not in the baseband IQ.
+            envelope = np.abs(chunk)
+            
             # Check each tick frequency used on this channel
             channel_upper = self.channel_name.upper()
             if 'CHU' in channel_upper:
@@ -513,7 +517,7 @@ class MetrologyEngine:
                 freqs = [1000]
             
             nyquist = self.sample_rate / 2
-            noise_power = float(np.mean(np.abs(chunk)**2))
+            noise_power = float(np.mean(envelope**2))
             if noise_power <= 0:
                 return False
             
@@ -523,8 +527,8 @@ class MetrologyEngine:
                 if low <= 0 or high >= nyquist:
                     continue
                 sos = butter(4, [low, high], btype='band', fs=self.sample_rate, output='sos')
-                filtered = sosfiltfilt(sos, chunk)
-                band_power = float(np.mean(np.abs(filtered)**2))
+                filtered = sosfiltfilt(sos, envelope)
+                band_power = float(np.mean(filtered**2))
                 
                 # Band power relative to total power — if the tone is present,
                 # the 200 Hz band should contain a meaningful fraction of energy.
@@ -1383,12 +1387,15 @@ class MetrologyEngine:
         # contribute to timing — _measure_tone_at_known_time() handles that
         # via the arrival pattern matrix with proper buffer timing.
         #
-        # Signal presence gating: skip tick analysis on silent minutes
-        # (station ID periods, minutes 29/59 area) to avoid correlating noise.
-        # Check for energy at the primary tick frequency (1000 Hz for WWV/BPM,
-        # 1200 Hz for WWVH) in a 1-second sample from mid-buffer.
+        # Signal presence gating: use edge_results from Step 1 (already ran).
+        # The old _check_signal_presence() band-energy test always fails for
+        # WWV/WWVH 5ms ticks (0.5% duty cycle → band power ≈ noise floor).
+        # Edge ensemble detection of ≥5 ticks is a reliable signal indicator.
         tick_results = {}
-        signal_present = self._check_signal_presence(iq_samples)
+        signal_present = (
+            bool(edge_results)
+            or self._check_signal_presence(iq_samples)
+        )
         
         if signal_present and self.tick_filters:
             logger.debug(f"{self.channel_name}: Running tick phase extraction for "
