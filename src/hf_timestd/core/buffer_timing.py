@@ -8,20 +8,22 @@ sample rate (exactly 24000 Hz).  This module answers one question:
 
     What UTC time does sample N correspond to?
 
-The answer is trivial:
+The answer comes from the RTP timestamp chain — the sole timing authority:
 
-    utc(sample) = start_system_time + sample / sample_rate
+    sample0_utc = GPS_TIME_unix + (start_rtp - RTP_TIMESNAP) / sample_rate
 
-The recorder (BinaryArchiveWriter) already reconciled radiod's counter
-spaces at runtime.  It timestamps samples at USB callback time, and the
-decimation from raw ADC samples to RTP packets is deterministic arithmetic.
-The writer used the GPS_TIME/RTP_TIMESNAP mapping (with counter-space
-correction) to compute start_rtp_timestamp in packet space and set
-start_system_time to the exact UTC of sample 0.
+Every buffer's metadata contains:
+  - start_rtp_timestamp: RTP timestamp of sample 0
+  - timing_snapshots[]: GPS_TIME / RTP_TIMESNAP pairs from radiod
 
-GPS timing snapshots in the metadata are available for cross-checking
-but are NOT needed as the primary timing source — the writer already
-did that work.
+GPS_TIME is the GPSDO-disciplined ground truth.  RTP_TIMESNAP is the
+RTP counter value at the moment GPS_TIME was sampled.  Both are in the
+same counter space (input_sample_index / decimation).  The formula above
+gives the exact UTC of any RTP timestamp.
+
+start_system_time is NEVER used for timing.  It is logged for diagnostics
+only.  The writer computes it from its own (possibly stale) GPS/RTP
+mapping, which can be wrong by seconds or more after a radiod restart.
 """
 
 import logging
@@ -35,6 +37,8 @@ GPS_EPOCH_UNIX = 315964800
 
 # GPS-UTC leap seconds as of 2026
 GPS_LEAP_SECONDS = 18
+
+BILLION = 1_000_000_000
 
 
 @dataclass
@@ -58,11 +62,11 @@ class BufferTiming:
     sample_rate: int
 
     # Which timing source produced sample0_utc
-    source: str  # 'writer', 'local_snapshots', 'metadata_fallback'
+    source: str  # 'rtp_gps' or 'no_timing'
 
     # Quality metrics
     n_snapshots_used: int
-    jitter_ms: float  # 0.0 when using writer's start_system_time
+    jitter_ms: float
 
     def sample_to_utc(self, sample_index: float) -> float:
         """Convert a sample index to a UTC timestamp."""
@@ -79,14 +83,12 @@ def resolve_buffer_timing(
 ) -> BufferTiming:
     """Determine the sample-to-UTC mapping for a buffer.
 
-    Primary path:
-      The writer set start_system_time to the exact UTC of sample 0,
-      using the GPS_TIME/RTP_TIMESNAP mapping with counter-space
-      correction already applied.  We trust it directly.
+    The RTP stream is the sole timing authority.  We compute sample0_utc
+    from start_rtp_timestamp and the GPS_TIME / RTP_TIMESNAP snapshots.
 
-    Fallback (no GPS timing in writer):
-      Use local_receipt_time snapshots for an approximate mapping
-      (~10-300ms accuracy, suitable as Fusion mode seed).
+    If snapshots span a radiod restart (different RTP counter spaces),
+    we use the most recent snapshot — that's the counter space the
+    buffer's start_rtp_timestamp was computed in.
 
     Args:
         metadata: Buffer metadata dict (from the JSON sidecar file)
@@ -95,55 +97,20 @@ def resolve_buffer_timing(
     Returns:
         BufferTiming mapping for this buffer
     """
-    sst = float(metadata.get('start_system_time', 0))
+    start_rtp = metadata.get('start_rtp_timestamp')
     snapshots = metadata.get('timing_snapshots', [])
 
-    # Primary: start_system_time from the writer.
-    # When the writer has GPS timing, it sets start_system_time to the
-    # minute boundary (= exact UTC of sample 0).  We detect this by
-    # checking that sst is a round minute (integer divisible by 60).
-    if sst > 0 and sst == int(sst) and int(sst) % 60 == 0:
-        logger.debug(
-            f"BufferTiming (writer): sample0_utc={sst:.1f}"
-        )
+    if start_rtp is None or not snapshots:
+        logger.error("No RTP timing in metadata — cannot determine buffer timing")
         return BufferTiming(
-            sample0_utc=sst,
+            sample0_utc=0.0,
             sample_rate=sample_rate,
-            source='writer',
-            n_snapshots_used=0,
-            jitter_ms=0.0
-        )
-
-    # Fallback: local_receipt_time snapshots (Fusion mode seed)
-    if snapshots and 'local_receipt_time' in snapshots[0]:
-        timing = _from_local_snapshots(
-            snapshots, int(metadata.get('start_rtp_timestamp', 0)),
-            sample_rate
-        )
-        if timing is not None:
-            return timing
-
-    # Last resort
-    if sst > 0:
-        logger.warning(
-            f"No GPS-locked timing — using start_system_time ({sst:.3f})"
-        )
-        return BufferTiming(
-            sample0_utc=sst,
-            sample_rate=sample_rate,
-            source='metadata_fallback',
+            source='no_timing',
             n_snapshots_used=0,
             jitter_ms=float('inf')
         )
 
-    logger.error("No timing information in metadata")
-    return BufferTiming(
-        sample0_utc=0.0,
-        sample_rate=sample_rate,
-        source='metadata_fallback',
-        n_snapshots_used=0,
-        jitter_ms=float('inf')
-    )
+    return _from_rtp_gps(int(start_rtp), snapshots, sample_rate, metadata)
 
 
 # ── internal helpers ─────────────────────────────────────────────────
@@ -156,50 +123,71 @@ def _rtp_delta_signed(rtp: int, rtp_start: int) -> int:
     return delta
 
 
-def _median_and_mad(values: List[float]):
-    """Return (median, MAD-based sigma) of a list of floats."""
-    values = sorted(values)
-    n = len(values)
-    median = values[n // 2]
-    deviations = sorted(abs(v - median) for v in values)
-    mad = deviations[n // 2]
-    sigma = mad * 1.4826  # MAD -> Gaussian sigma
-    return median, sigma
 
-
-def _from_local_snapshots(
-    snapshots: List[Dict],
-    rtp_start: int,
-    sample_rate: int
-) -> Optional[BufferTiming]:
-    """Compute sample0_utc from local_receipt_time snapshots.
-
-    Lower accuracy than GPS (~10-300ms jitter from kernel scheduling
-    and network buffering).  Usable as an initial estimate in Fusion mode.
-    """
-    estimates = []
-    for s in snapshots:
-        local = s.get('local_receipt_time')
-        rtp = s.get('rtp_timesnap')
-        if local is None or rtp is None:
-            continue
-        delta = _rtp_delta_signed(rtp, rtp_start)
-        estimates.append(local - delta / sample_rate)
-
-    if len(estimates) < 3:
+def _gps_snapshot_to_utc(snapshot: Dict) -> Optional[float]:
+    """Convert a GPS_TIME snapshot to Unix UTC seconds."""
+    gps_ns = snapshot.get('gps_time_ns')
+    if gps_ns is None:
         return None
+    return gps_ns / BILLION + GPS_EPOCH_UNIX - GPS_LEAP_SECONDS
 
-    median_utc0, jitter = _median_and_mad(estimates)
-    jitter_ms = jitter * 1000
 
-    logger.info(
-        f"BufferTiming (local): sample0_utc={median_utc0:.6f}, "
-        f"jitter={jitter_ms:.1f}ms, snapshots={len(estimates)}"
+def _from_rtp_gps(
+    start_rtp: int,
+    snapshots: List[Dict],
+    sample_rate: int,
+    metadata: Dict[str, Any],
+) -> BufferTiming:
+    """Compute sample0_utc from start_rtp_timestamp and GPS snapshots.
+
+    Use the most recent snapshot.  It is always in the same RTP counter
+    as start_rtp_timestamp because the writer updates its mapping on
+    every new GPS_TIME/RTP_TIMESNAP pair from radiod.
+
+        sample0_utc = gps_utc + (start_rtp - rtp_timesnap) / sample_rate
+    """
+    # Find the most recent snapshot (highest gps_time_ns)
+    best = None
+    for s in snapshots:
+        gps_utc = _gps_snapshot_to_utc(s)
+        rtp_snap = s.get('rtp_timesnap')
+        gps_ns = s.get('gps_time_ns', 0)
+        if gps_utc is None or rtp_snap is None:
+            continue
+        if best is None or gps_ns > best[0]:
+            best = (gps_ns, gps_utc, rtp_snap)
+
+    if best is None:
+        logger.error("No valid GPS snapshots in metadata")
+        return BufferTiming(
+            sample0_utc=0.0,
+            sample_rate=sample_rate,
+            source='no_timing',
+            n_snapshots_used=0,
+            jitter_ms=float('inf')
+        )
+
+    _, gps_utc, rtp_snap = best
+    delta = _rtp_delta_signed(start_rtp, rtp_snap)
+    sample0_utc = gps_utc + delta / sample_rate
+
+    # Diagnostic: log if this disagrees with start_system_time
+    sst = float(metadata.get('start_system_time', 0))
+    if sst > 0:
+        diff_s = sample0_utc - sst
+        if abs(diff_s) > 1.0:
+            logger.warning(
+                f"BufferTiming: RTP authority gives sample0_utc={sample0_utc:.3f}, "
+                f"writer's start_system_time={sst:.3f} (off by {diff_s:+.1f}s)"
+            )
+
+    logger.debug(
+        f"BufferTiming (rtp_gps): sample0_utc={sample0_utc:.6f}"
     )
     return BufferTiming(
-        sample0_utc=median_utc0,
+        sample0_utc=sample0_utc,
         sample_rate=sample_rate,
-        source='local_snapshots',
-        n_snapshots_used=len(estimates),
-        jitter_ms=jitter_ms
+        source='rtp_gps',
+        n_snapshots_used=1,
+        jitter_ms=0.0
     )

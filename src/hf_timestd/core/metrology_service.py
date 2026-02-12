@@ -541,15 +541,23 @@ class MetrologyService:
                             'overall_confidence': tick_analysis.overall_confidence,
                             'expected_delay_ms': expected_delay_ms,
                             'd_clock_ms': d_clock_ms,
+                            'marker_detected': tick_analysis.marker_detected,
+                            'marker_timing_offset_ms': tick_analysis.marker_timing_offset_ms,
+                            'marker_snr_db': tick_analysis.marker_snr_db,
+                            'marker_uncertainty_ms': tick_analysis.marker_uncertainty_ms,
+                            'tick_mean_offset_ms': tick_analysis.tick_mean_offset_ms,
+                            'tick_std_offset_ms': tick_analysis.tick_std_offset_ms,
+                            'tick_valid_windows': tick_analysis.tick_valid_windows,
                             'processed_at': datetime.now(timezone.utc).isoformat(),
-                            'processing_version': "1.0.0"
+                            'processing_version': "2.0.0"
                         }
                         try:
                             self.tick_writer.write_measurement(tick_rec)
-                            logger.info(f"Tick timing written: {station_name} "
-                                       f"offset={tick_analysis.mean_timing_offset_ms:+.2f}ms "
-                                       f"±{tick_analysis.std_timing_offset_ms:.2f}ms "
-                                       f"({tick_analysis.valid_windows}/{tick_analysis.total_windows} windows)")
+                            logger.info(f"Tick phase written: {station_name} "
+                                       f"tick_offset={tick_analysis.tick_mean_offset_ms:+.2f}ms "
+                                       f"±{tick_analysis.tick_std_offset_ms:.2f}ms "
+                                       f"({tick_analysis.tick_valid_windows} tick windows, "
+                                       f"marker={'YES' if tick_analysis.marker_detected else 'no'})")
                         except Exception as tick_err:
                             logger.warning(f"Failed to write tick data for {station_name}: {tick_err}")
                 
@@ -849,22 +857,20 @@ class MetrologyService:
                                    f"stations={list(fs._stations_seen)}, "
                                    f"measurements={len(fs.measurements)}")
             
-            # Use start_system_time from metadata (NTP-derived, per-channel)
-            if 'start_system_time' in metadata:
-                system_time = float(metadata['start_system_time'])
-                rtp_timestamp = int(metadata.get('start_rtp_timestamp', 0))
-                timing_source = "metadata"
-                logger.info(
-                    f"[TIMING_DIAG] Minute {target_minute}: source={timing_source}, "
-                    f"system_time={system_time:.6f}"
-                )
-            elif 'start_rtp_timestamp' in metadata:
-                # Fallback: no system_time, skip (shouldn't happen with current recorder)
-                logger.warning(f"No start_system_time in metadata for {target_minute}, skipping")
+            # Derive system_time from the RTP timestamp chain — the sole
+            # timing authority.  start_system_time is NOT trusted because
+            # the writer may have computed it from a stale GPS/RTP mapping.
+            from .buffer_timing import resolve_buffer_timing
+            buffer_timing = resolve_buffer_timing(metadata)
+            if buffer_timing.source == 'no_timing':
+                logger.warning(f"No RTP timing in metadata for {target_minute}, skipping")
                 return None
-            else:
-                logger.warning(f"No timing info in metadata for {target_minute}, skipping")
-                return None
+            system_time = buffer_timing.sample0_utc
+            rtp_timestamp = int(metadata.get('start_rtp_timestamp', 0))
+            logger.info(
+                f"[TIMING_DIAG] Minute {target_minute}: source={buffer_timing.source}, "
+                f"system_time={system_time:.6f}"
+            )
 
             # No padding — the buffer is whatever size it is.
             # BufferTiming handles the sample-to-UTC mapping regardless of size.

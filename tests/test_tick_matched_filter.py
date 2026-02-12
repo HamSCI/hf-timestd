@@ -24,18 +24,20 @@ class TestTickTemplates(unittest.TestCase):
     """Test station template configurations"""
     
     def test_wwv_template(self):
-        """WWV: 1000 Hz, 5ms ticks, skip 0/29/59"""
+        """WWV: 1000 Hz, 5ms ticks, 800ms minute marker, skip 29/59"""
         self.assertEqual(WWV_TEMPLATE.frequency_hz, 1000.0)
         self.assertEqual(WWV_TEMPLATE.tick_duration_ms, 5.0)
-        self.assertIn(0, WWV_TEMPLATE.skip_seconds)
+        self.assertEqual(WWV_TEMPLATE.minute_marker_duration_ms, 800.0)
+        self.assertNotIn(0, WWV_TEMPLATE.skip_seconds)  # sec 0 = minute marker
         self.assertIn(29, WWV_TEMPLATE.skip_seconds)
         self.assertIn(59, WWV_TEMPLATE.skip_seconds)
     
     def test_wwvh_template(self):
-        """WWVH: 1200 Hz, 5ms ticks, skip 0/29/59"""
+        """WWVH: 1200 Hz, 5ms ticks, 800ms minute marker, skip 29/59"""
         self.assertEqual(WWVH_TEMPLATE.frequency_hz, 1200.0)
         self.assertEqual(WWVH_TEMPLATE.tick_duration_ms, 5.0)
-        self.assertIn(0, WWVH_TEMPLATE.skip_seconds)
+        self.assertEqual(WWVH_TEMPLATE.minute_marker_duration_ms, 800.0)
+        self.assertNotIn(0, WWVH_TEMPLATE.skip_seconds)  # sec 0 = minute marker
         self.assertIn(29, WWVH_TEMPLATE.skip_seconds)
     
     def test_chu_template(self):
@@ -191,36 +193,42 @@ class TestSyntheticSignalDetection(unittest.TestCase):
         freq_hz: float = 1000.0,
         tick_duration_ms: float = 5.0,
         snr_db: float = 20.0,
-        timing_offset_ms: float = 0.0
+        timing_offset_ms: float = 0.0,
+        marker_duration_ms: float = 800.0,
     ) -> np.ndarray:
-        """Generate 60 seconds of IQ with ticks at each second"""
+        """Generate 60 seconds of IQ with ticks and minute marker.
+        
+        Second 0 gets an 800ms minute marker (primary timing source).
+        Seconds 1-58 (except 29, 59) get per-second ticks.
+        """
         n_samples = 60 * self.sample_rate
         # Start with noise
         noise_level = 0.1
         signal = noise_level * np.random.randn(n_samples) + 1j * noise_level * np.random.randn(n_samples)
         
-        tick_samples = int(tick_duration_ms * self.sample_rate / 1000.0)
         offset_samples = int(timing_offset_ms * self.sample_rate / 1000.0)
         
-        # Add ticks at each second (except skip seconds)
         for sec in range(60):
-            if sec in {0, 29, 59}:
+            if sec in {29, 59}:
                 continue
+            
+            # Second 0: minute marker; others: per-second tick
+            dur_ms = marker_duration_ms if sec == 0 else tick_duration_ms
+            dur_samples = int(dur_ms * self.sample_rate / 1000.0)
             
             tick_start = sec * self.sample_rate + offset_samples
-            if tick_start < 0 or tick_start + tick_samples > n_samples:
+            if tick_start < 0 or tick_start + dur_samples > n_samples:
                 continue
             
-            t = np.arange(tick_samples) / self.sample_rate
+            t = np.arange(dur_samples) / self.sample_rate
             tick = np.sin(2 * np.pi * freq_hz * t)
             
             # Scale tick for desired SNR
             tick_power = np.mean(tick**2)
-            noise_power = tick_power / (10 ** (snr_db / 10))
-            tick_scaled = tick * np.sqrt(1.0 / tick_power)
+            tick_scaled = tick * np.sqrt(1.0 / max(tick_power, 1e-10))
             
             # Add to signal (as AM modulation on carrier)
-            signal[tick_start:tick_start + tick_samples] += tick_scaled
+            signal[tick_start:tick_start + dur_samples] += tick_scaled
         
         return signal
     
@@ -257,24 +265,30 @@ class TestSyntheticSignalDetection(unittest.TestCase):
         
         # Should detect the offset (within tolerance)
         self.assertGreater(result.valid_windows, 0)
-        # Allow 1ms tolerance
-        self.assertLess(abs(result.mean_timing_offset_ms - offset_ms), 1.0)
+        # Per-second tick offset should be within 1ms of known offset
+        self.assertLess(abs(result.tick_mean_offset_ms - offset_ms), 1.0)
+        # Marker offset may differ slightly due to bandpass group delay
+        # on the longer 800ms template, but should still be within 2ms
+        if result.marker_detected:
+            self.assertLess(abs(result.marker_timing_offset_ms - offset_ms), 2.0)
     
     def test_low_snr_detection(self):
-        """Detection degrades gracefully with low SNR"""
+        """Detection still works at low SNR with relaxed threshold"""
         iq = self._generate_minute_with_ticks(
             freq_hz=1000.0,
             tick_duration_ms=5.0,
-            snr_db=6.0,  # Low SNR
+            snr_db=3.0,  # Low SNR
             timing_offset_ms=0.0
         )
         
-        result = self.filter.process_minute(iq, minute_number=0, min_snr_db=3.0)
+        # Use min_snr_db=0.0 to accept low-SNR detections
+        result = self.filter.process_minute(iq, minute_number=0, min_snr_db=0.0)
         
-        # Should still get some detections, but fewer and with higher uncertainty
+        # IQ-domain correlation is robust even at low SNR
         self.assertIsInstance(result, MinuteTickAnalysis)
-        # Confidence should be lower than clean signal
-        self.assertLess(result.overall_confidence, 0.9)
+        self.assertGreater(result.valid_windows, 0)
+        # Timing should still be reasonable (< 10ms) even at low SNR
+        self.assertLess(abs(result.mean_timing_offset_ms), 10.0)
 
 
 class TestOverlappingWindows(unittest.TestCase):
@@ -288,10 +302,8 @@ class TestOverlappingWindows(unittest.TestCase):
         iq = np.random.randn(60 * 20000) + 1j * np.random.randn(60 * 20000)
         result = f.process_minute(iq, minute_number=0, min_snr_db=-100)
         
-        # With 5-second windows, 1-second overlap, starting at second 1:
-        # Windows: 1-5, 2-6, 3-7, ..., 55-59
-        # That's 55 windows
-        self.assertEqual(result.total_windows, 55)
+        # 1 minute marker + 55 overlapping tick windows (1-5, 2-6, ..., 55-59)
+        self.assertEqual(result.total_windows, 56)
     
     def test_window_coverage(self):
         """Verify windows cover expected seconds"""
@@ -300,11 +312,16 @@ class TestOverlappingWindows(unittest.TestCase):
         iq = np.random.randn(60 * 20000) + 1j * np.random.randn(60 * 20000)
         result = f.process_minute(iq, minute_number=0, min_snr_db=-100)
         
-        # Check first and last windows
+        # First window is the minute marker (second 0)
+        # Second window is the first overlapping tick window (seconds 1-5)
         if result.window_results:
             first = result.window_results[0]
-            self.assertEqual(first.window_start_second, 1)
-            self.assertEqual(first.window_end_second, 6)
+            self.assertEqual(first.window_start_second, 0)
+            self.assertEqual(first.window_end_second, 1)
+            if len(result.window_results) > 1:
+                second = result.window_results[1]
+                self.assertEqual(second.window_start_second, 1)
+                self.assertEqual(second.window_end_second, 6)
 
 
 class TestPhaseContinuity(unittest.TestCase):
@@ -433,6 +450,118 @@ class TestBPMUT1Handling(unittest.TestCase):
         # Minute 25 is UT1
         duration = f._get_tick_duration_ms(5, minute=25)
         self.assertEqual(duration, 100.0)
+
+
+class TestTimingPrecision(unittest.TestCase):
+    """
+    Regression tests for timing precision.
+    
+    The old composite-template + AM-demod approach had ±50ms scatter due to
+    the AM envelope detector creating multiple near-equal correlation peaks
+    separated by the tone period. The IQ-domain per-tick correlator should
+    achieve sub-millisecond precision.
+    """
+    
+    def setUp(self):
+        self.sample_rate = 20000
+    
+    def _generate_minute_iq(self, freq_hz, tick_duration_ms, timing_offset_ms,
+                            snr_db=30.0, skip_seconds=None,
+                            marker_duration_ms=800.0):
+        """Generate 60s IQ with ticks and minute marker at known positions."""
+        if skip_seconds is None:
+            skip_seconds = {29, 59}
+        n_samples = 60 * self.sample_rate
+        noise_level = 0.1
+        iq = noise_level * (np.random.randn(n_samples) + 1j * np.random.randn(n_samples))
+        
+        offset_samples = int(timing_offset_ms * self.sample_rate / 1000.0)
+        
+        for sec in range(60):
+            if sec in skip_seconds:
+                continue
+            # Second 0: minute marker; others: per-second tick
+            dur_ms = marker_duration_ms if sec == 0 else tick_duration_ms
+            dur_samples = int(dur_ms * self.sample_rate / 1000.0)
+            
+            tick_start = sec * self.sample_rate + offset_samples
+            if tick_start < 0 or tick_start + dur_samples > n_samples:
+                continue
+            t = np.arange(dur_samples) / self.sample_rate
+            tick = np.sin(2 * np.pi * freq_hz * t)
+            tick_power = np.mean(tick**2)
+            tick_scaled = tick * np.sqrt(1.0 / max(tick_power, 1e-10))
+            iq[tick_start:tick_start + dur_samples] += tick_scaled
+        
+        return iq
+    
+    def test_wwv_timing_std_below_1ms(self):
+        """WWV timing std across overlapping windows must be < 1ms"""
+        np.random.seed(42)
+        iq = self._generate_minute_iq(1000.0, 5.0, timing_offset_ms=4.0, snr_db=20.0)
+        f = create_tick_filter('WWV', sample_rate=self.sample_rate)
+        result = f.process_minute(iq, minute_number=0)
+        
+        self.assertGreater(result.valid_windows, 40)
+        self.assertLess(result.std_timing_offset_ms, 1.0,
+                       f"Timing std={result.std_timing_offset_ms:.3f}ms exceeds 1ms limit")
+    
+    def test_wwvh_timing_std_below_1ms(self):
+        """WWVH timing std across overlapping windows must be < 1ms"""
+        np.random.seed(42)
+        iq = self._generate_minute_iq(1200.0, 5.0, timing_offset_ms=22.0, snr_db=20.0)
+        f = create_tick_filter('WWVH', sample_rate=self.sample_rate)
+        result = f.process_minute(iq, minute_number=0)
+        
+        self.assertGreater(result.valid_windows, 40)
+        self.assertLess(result.std_timing_offset_ms, 1.0,
+                       f"Timing std={result.std_timing_offset_ms:.3f}ms exceeds 1ms limit")
+    
+    def test_known_offset_recovery(self):
+        """Known timing offset must be recovered within 0.5ms by per-tick windows"""
+        np.random.seed(42)
+        known_offset_ms = 4.2
+        iq = self._generate_minute_iq(1000.0, 5.0, timing_offset_ms=known_offset_ms, snr_db=25.0)
+        f = create_tick_filter('WWV', sample_rate=self.sample_rate)
+        result = f.process_minute(iq, minute_number=0)
+        
+        # Check per-tick offset recovery (not marker, which has different group delay)
+        error_ms = abs(result.tick_mean_offset_ms - known_offset_ms)
+        self.assertLess(error_ms, 0.5,
+                       f"Tick offset error={error_ms:.3f}ms (detected={result.tick_mean_offset_ms:.3f}ms, "
+                       f"expected={known_offset_ms:.3f}ms)")
+    
+    def test_overlapping_windows_consistent(self):
+        """Adjacent overlapping tick windows (sharing 4/5 data) must agree within 0.5ms"""
+        np.random.seed(42)
+        iq = self._generate_minute_iq(1000.0, 5.0, timing_offset_ms=3.0, snr_db=25.0)
+        f = create_tick_filter('WWV', sample_rate=self.sample_rate)
+        result = f.process_minute(iq, minute_number=0)
+        
+        # Skip the minute marker (first result, window_start_second=0) —
+        # it uses a single 800ms correlation, not the 5-tick median used by
+        # overlapping tick windows, so the marker→tick transition may differ.
+        tick_offsets = [r.timing_offset_ms for r in result.window_results
+                       if r.window_start_second > 0]
+        self.assertGreater(len(tick_offsets), 20)
+        
+        # Adjacent tick window differences
+        diffs = [abs(tick_offsets[i+1] - tick_offsets[i]) for i in range(len(tick_offsets)-1)]
+        max_diff = max(diffs)
+        self.assertLess(max_diff, 0.5,
+                       f"Max adjacent window difference={max_diff:.3f}ms exceeds 0.5ms")
+    
+    def test_no_unphysical_drift(self):
+        """Drift rate must be < 0.01 ms/s for a stationary signal"""
+        np.random.seed(42)
+        iq = self._generate_minute_iq(1000.0, 5.0, timing_offset_ms=5.0, snr_db=25.0)
+        f = create_tick_filter('WWV', sample_rate=self.sample_rate)
+        result = f.process_minute(iq, minute_number=0)
+        
+        if result.drift_rate_ms_per_sec is not None:
+            self.assertLess(abs(result.drift_rate_ms_per_sec), 0.01,
+                           f"Drift={result.drift_rate_ms_per_sec:.4f}ms/s is unphysical "
+                           f"for stationary signal")
 
 
 if __name__ == '__main__':

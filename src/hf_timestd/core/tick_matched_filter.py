@@ -1,38 +1,46 @@
 #!/usr/bin/env python3
 """
-Tick Matched Filter - Station-Specific Per-Second Tick Detection
+Tick Matched Filter - Station-Specific Timing and Phase Extraction
 
 ================================================================================
 PURPOSE
 ================================================================================
-Detect per-second timing ticks from WWV/WWVH/CHU/BPM using matched filtering
-with station-specific templates. Uses overlapping 5-second windows to balance
-SNR improvement against ionospheric Doppler decorrelation.
+Extract timing and carrier phase from WWV/WWVH/CHU/BPM using IQ-domain
+matched filtering with station-specific templates.
 
-This complements the minute marker detection (800ms tones) by providing:
-- 55+ timing estimates per minute (vs 1 from minute marker)
-- Tracking of timing drift within the minute
-- Robustness to single-tick dropouts
-- Detection of Doppler-induced phase drift
+Two-tier detection hierarchy:
+
+1. MINUTE MARKER (primary timing):
+   - WWV/WWVH: 800ms tone at second 0 (1000/1200 Hz)
+   - CHU: 500ms tone at second 0
+   - BPM: 300ms tone at second 0
+   - 160× more energy than 5ms ticks → robust under fading
+   - Single high-SNR timing anchor per minute
+
+2. PER-SECOND TICKS (phase extraction, augments timing when present):
+   - WWV/WWVH: 5ms ticks (1000/1200 Hz)
+   - CHU: 300ms regular, 10ms FSK/voice
+   - BPM: 10ms UTC, 100ms UT1
+   - Primary value: carrier phase time series for ionospheric analysis
+   - Timing augmentation only when SNR > 8 dB
 
 ================================================================================
-THEORY: MATCHED FILTERING FOR SHORT TICKS
+SIGNAL ENVIRONMENT
 ================================================================================
-The per-second ticks are much shorter than minute markers:
-    WWV/WWVH: 5ms (100 samples at 20 kHz)
-    CHU: 10ms (FSK periods) or 300ms (regular)
-    BPM: 10ms (UTC) or 100ms (UT1)
+WWV/WWVH broadcast multiple simultaneous tones on shared channels:
+   - 100 Hz BCD time code modulation (continuous)
+   - 440/500/600 Hz audio tones (schedule-dependent, continuous)
+   - 1000 Hz per-second ticks (5ms) and minute marker (800ms)
+   - 1200 Hz WWVH ticks (5ms) and minute marker (800ms)
 
-Matched filtering remains optimal for detecting known signals in noise:
-    SNR_out = 2E/N₀
+The 5ms ticks have only 0.5% duty cycle per second and are buried under
+the continuous tones. A bandpass filter in the IQ domain is essential to
+isolate the tick frequency before correlation.
 
-For a 5ms tick at 20 kHz: E ∝ 100 samples
-For an 800ms tone: E ∝ 16000 samples
-Ratio: 160× less energy → 22 dB lower SNR per tick
-
-SOLUTION: Integrate multiple ticks coherently
-    5 ticks coherent: √5 × SNR improvement (+3.5 dB)
-    5 ticks + matched filter: Recovers ~7 dB vs single FFT bin
+All correlation uses complex IQ templates (exp(j2πft)) rather than
+AM-demodulated audio. This avoids the timing ambiguity inherent in
+envelope detection, where |IQ| creates multiple near-equal correlation
+peaks separated by the tone period.
 
 ================================================================================
 OVERLAPPING WINDOW STRATEGY
@@ -41,41 +49,38 @@ Using 5-second windows with 1-second overlap:
 
     Window 0: seconds 1-5   (5 ticks)
     Window 1: seconds 2-6   (5 ticks, shares 4 with Window 0)
-    Window 2: seconds 3-7   (5 ticks, shares 4 with Window 1)
     ...
     Window 54: seconds 55-59 (5 ticks)
 
 Benefits:
-- 55 independent timing estimates per minute
-- Adjacent windows highly correlated → smooth tracking
+- 55 independent phase estimates per minute
+- Adjacent windows highly correlated → smooth phase tracking
 - Robust to single-tick dropouts
-- Can detect timing drift (Doppler) across minute
+- Can detect Doppler-induced phase drift across minute
 
 ================================================================================
 STATION-SPECIFIC PATTERNS
 ================================================================================
-Each station has unique tick characteristics that affect template design:
-
 WWV (Fort Collins, CO):
-    - 1000 Hz, 5ms duration
-    - Skip: second 0 (800ms marker), 29, 59 (silent)
-    
+    - 1000 Hz, 5ms per-second ticks, 800ms minute marker
+    - Silent: seconds 29, 59
+
 WWVH (Kauai, HI):
-    - 1200 Hz, 5ms duration  
-    - Skip: second 0 (800ms marker), 29, 59 (silent)
+    - 1200 Hz, 5ms per-second ticks, 800ms minute marker
+    - Silent: seconds 29, 59
 
 CHU (Ottawa, Canada):
     - 1000 Hz, variable duration
     - Regular seconds: 300ms tones
     - FSK seconds (31-39): 10ms ticks
     - Voice seconds (50-59): 10ms ticks
-    - Skip: second 0 (500ms marker), 29 (always silent)
+    - Second 0: 500ms marker; second 29: silent
 
 BPM (China):
     - 1000 Hz, minute-dependent duration
     - UTC minutes: 10ms ticks
     - UT1 minutes (25-29, 55-59): 100ms ticks
-    - Skip: second 0 (300ms marker)
+    - Second 0: 300ms marker
 
 ================================================================================
 Author: HF Time Standard Team
@@ -88,7 +93,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Set
 from enum import Enum
 from scipy import signal as scipy_signal
-from scipy.signal import correlate
+from scipy.signal import correlate, butter, sosfiltfilt
 from scipy.signal.windows import tukey
 
 logger = logging.getLogger(__name__)
@@ -107,12 +112,15 @@ class TickTemplate:
     """
     Station-specific tick template configuration.
     
-    Defines the characteristics of per-second ticks for matched filtering.
+    Defines the characteristics of per-second ticks and minute markers.
     """
     station: StationType
     frequency_hz: float
     tick_duration_ms: float
     skip_seconds: Set[int] = field(default_factory=set)
+    
+    # Minute marker at second 0 (primary timing source)
+    minute_marker_duration_ms: float = 800.0
     
     # CHU-specific: variable duration by second
     fsk_seconds: Set[int] = field(default_factory=set)
@@ -127,25 +135,31 @@ class TickTemplate:
 
 
 # Pre-defined station templates
+# NOTE: second 0 is NOT in skip_seconds — it carries the minute marker,
+# our primary timing source (800ms for WWV/WWVH, 500ms CHU, 300ms BPM).
+# Only truly silent seconds are skipped.
 WWV_TEMPLATE = TickTemplate(
     station=StationType.WWV,
     frequency_hz=1000.0,
     tick_duration_ms=5.0,
-    skip_seconds={0, 29, 59},
+    skip_seconds={29, 59},
+    minute_marker_duration_ms=800.0,
 )
 
 WWVH_TEMPLATE = TickTemplate(
     station=StationType.WWVH,
     frequency_hz=1200.0,
     tick_duration_ms=5.0,
-    skip_seconds={0, 29, 59},
+    skip_seconds={29, 59},
+    minute_marker_duration_ms=800.0,
 )
 
 CHU_TEMPLATE = TickTemplate(
     station=StationType.CHU,
     frequency_hz=1000.0,
     tick_duration_ms=300.0,  # Default for regular seconds
-    skip_seconds={0, 29},
+    skip_seconds={29},
+    minute_marker_duration_ms=500.0,
     fsk_seconds=set(range(31, 40)),
     fsk_duration_ms=10.0,
     voice_seconds=set(range(50, 60)),
@@ -157,7 +171,8 @@ BPM_TEMPLATE = TickTemplate(
     station=StationType.BPM,
     frequency_hz=1000.0,
     tick_duration_ms=10.0,  # UTC minutes
-    skip_seconds={0},
+    skip_seconds=set(),
+    minute_marker_duration_ms=300.0,
     ut1_minutes={25, 26, 27, 28, 29, 55, 56, 57, 58, 59},
     ut1_tick_duration_ms=100.0,
 )
@@ -189,12 +204,20 @@ class TickDetectionResult:
 
 @dataclass 
 class MinuteTickAnalysis:
-    """Complete tick analysis for one minute of data"""
+    """Complete tick analysis for one minute of data.
+    
+    Two-tier structure:
+    - Minute marker (primary timing): single high-SNR detection at second 0
+    - Per-second ticks (phase extraction): overlapping windows for Doppler/phase
+    
+    When the minute marker is detected, mean_timing_offset_ms uses the marker
+    value. Per-second tick windows augment timing only when the marker is absent.
+    """
     station: StationType
     minute_number: int
     window_results: List[TickDetectionResult]
     
-    # Aggregate statistics
+    # Aggregate statistics (marker-primary when available)
     mean_timing_offset_ms: float
     std_timing_offset_ms: float
     mean_snr_db: float
@@ -204,6 +227,17 @@ class MinuteTickAnalysis:
     valid_windows: int
     total_windows: int
     overall_confidence: float
+    
+    # Minute marker (primary timing source)
+    marker_detected: bool = False
+    marker_timing_offset_ms: float = 0.0
+    marker_snr_db: float = -100.0
+    marker_uncertainty_ms: float = 999.0
+    
+    # Per-second tick aggregate (phase extraction, secondary timing)
+    tick_mean_offset_ms: float = 0.0
+    tick_std_offset_ms: float = 0.0
+    tick_valid_windows: int = 0
 
 
 class TickMatchedFilter:
@@ -244,9 +278,26 @@ class TickMatchedFilter:
         self.window_seconds = window_seconds
         self.overlap_seconds = overlap_seconds
         
-        # Pre-compute base templates (quadrature pair)
+        # Pre-compute base templates (quadrature pair for AM, complex for IQ)
         self._templates: Dict[float, Tuple[np.ndarray, np.ndarray]] = {}
+        self._iq_templates: Dict[float, np.ndarray] = {}  # Complex IQ templates
         self._build_templates()
+        self._build_iq_templates()
+        
+        # IQ-domain bandpass filter to isolate tick frequency.
+        # Rejects continuous 100 Hz BCD, 440/500/600 Hz audio tones.
+        # ±100 Hz bandwidth around the station tone frequency.
+        freq = self.template_config.frequency_hz
+        bw = 100.0  # ±100 Hz
+        low = freq - bw
+        high = freq + bw
+        nyquist = self.sample_rate / 2
+        if low > 0 and high < nyquist:
+            self._bandpass_sos = butter(
+                4, [low, high], btype='band', fs=self.sample_rate, output='sos'
+            )
+        else:
+            self._bandpass_sos = None
     
     def _build_templates(self) -> None:
         """Build quadrature matched filter templates for each tick duration."""
@@ -288,17 +339,71 @@ class TickMatchedFilter:
             
             self._templates[duration_ms] = (template_sin, template_cos)
     
+    def _build_iq_templates(self) -> None:
+        """Build complex IQ-domain templates for correlation.
+        
+        Templates are complex exponentials at the tick frequency, windowed
+        with a Tukey window. Includes both per-second tick durations and
+        the minute marker duration.
+        
+        Correlating complex IQ directly against these templates avoids the
+        AM demodulation step, which introduces timing ambiguity (multiple
+        near-equal correlation peaks separated by the tone period).
+        """
+        durations_ms = {self.template_config.tick_duration_ms}
+        
+        # Minute marker (primary timing source)
+        durations_ms.add(self.template_config.minute_marker_duration_ms)
+        
+        if self.station == StationType.CHU:
+            durations_ms.add(self.template_config.fsk_duration_ms)
+            durations_ms.add(self.template_config.voice_duration_ms)
+            durations_ms.add(self.template_config.regular_duration_ms)
+        
+        if self.station == StationType.BPM:
+            durations_ms.add(self.template_config.ut1_tick_duration_ms)
+        
+        freq = self.template_config.frequency_hz
+        
+        for duration_ms in durations_ms:
+            duration_sec = duration_ms / 1000.0
+            n_samples = int(duration_sec * self.sample_rate)
+            
+            if n_samples < 2:
+                continue
+            
+            t = np.arange(n_samples) / self.sample_rate
+            # Shorter taper for long templates (minute marker), wider for short ticks
+            alpha = 0.05 if duration_ms >= 100.0 else 0.1
+            window = tukey(n_samples, alpha=alpha)
+            
+            # Complex exponential at tone frequency
+            template = np.exp(1j * 2 * np.pi * freq * t) * window
+            
+            # Normalize to unit energy
+            energy = np.sqrt(np.sum(np.abs(template)**2))
+            if energy > 0:
+                template /= energy
+            
+            self._iq_templates[duration_ms] = template
+    
     def _get_tick_duration_ms(self, second: int, minute: int = 0) -> float:
         """
-        Get tick duration for a specific second (station-dependent).
+        Get tick/marker duration for a specific second (station-dependent).
+        
+        Second 0 returns the minute marker duration (primary timing source).
         
         Args:
             second: Second within minute (0-59)
             minute: Minute within hour (for BPM UT1/UTC)
             
         Returns:
-            Tick duration in milliseconds
+            Tick or marker duration in milliseconds
         """
+        # Second 0: minute marker (primary timing source)
+        if second == 0:
+            return self.template_config.minute_marker_duration_ms
+        
         if self.station == StationType.CHU:
             if second in self.template_config.fsk_seconds:
                 return self.template_config.fsk_duration_ms
@@ -367,65 +472,47 @@ class TickMatchedFilter:
         
         return template_sin, template_cos, valid_seconds
     
-    def _correlate_window(
+    def _correlate_tick_iq(
         self,
-        audio: np.ndarray,
-        template_sin: np.ndarray,
-        template_cos: np.ndarray,
-        search_range_ms: float = 100.0,
-        iq_samples: np.ndarray = None,
-        tone_freq_hz: float = 0.0,
-        start_second: int = 0,
-        valid_seconds: List[int] = None
-    ) -> Tuple[float, float, float, float, float, float]:
+        iq_slice: np.ndarray,
+        template: np.ndarray,
+        search_samples: int
+    ) -> Tuple[float, float, float]:
         """
-        Perform quadrature correlation and find peak.
+        Correlate a single tick's IQ template against an IQ slice.
+        
+        Uses complex IQ-domain correlation which produces a single sharp
+        peak, unlike AM-domain correlation which has multiple ambiguous
+        peaks separated by the tone period.
         
         Args:
-            audio: Audio signal (AM demodulated)
-            template_sin: In-phase template
-            template_cos: Quadrature template
-            search_range_ms: Search range around expected position (±ms)
-            iq_samples: Optional raw complex IQ for RF carrier phase extraction
-            tone_freq_hz: Tone frequency for IQ mix-down (required if iq_samples given)
-            start_second: First second of this window within the minute (for absolute time)
-            valid_seconds: List of seconds containing ticks (for per-tick phase extraction)
+            iq_slice: Complex IQ samples around expected tick position.
+                      Length = search_samples + tick_len + search_samples.
+            template: Complex IQ template (from _iq_templates).
+            search_samples: Number of samples in the search margin on each side.
             
         Returns:
-            Tuple of (offset_ms, snr_db, peak_value, phase_rad, carrier_phase_rad, dc_carrier_phase_rad)
+            Tuple of (offset_samples, peak_value, snr_db) where offset_samples
+            is the sub-sample refined offset from the expected tick position.
         """
-        # Correlate with both templates
-        corr_sin = correlate(audio, template_sin, mode='same')
-        corr_cos = correlate(audio, template_cos, mode='same')
+        corr = correlate(iq_slice, template, mode='valid')
+        envelope = np.abs(corr)
         
-        # Phase-invariant envelope
-        envelope = np.sqrt(corr_sin**2 + corr_cos**2)
+        if len(envelope) == 0:
+            return 0.0, 0.0, -100.0
         
-        # Search around center (expected position)
-        center = len(envelope) // 2
-        search_samples = int(search_range_ms * self.sample_rate / 1000.0)
-        search_start = max(0, center - search_samples)
-        search_end = min(len(envelope), center + search_samples)
-        
-        search_region = envelope[search_start:search_end]
-        
-        if len(search_region) == 0:
-            return 0.0, -100.0, 0.0, 0.0, 0.0, 0.0
-        
-        # Find peak
-        peak_idx_local = np.argmax(search_region)
-        peak_idx = search_start + peak_idx_local
+        peak_idx = int(np.argmax(envelope))
         peak_value = envelope[peak_idx]
         
-        # Sub-sample interpolation (parabolic)
-        if 0 < peak_idx_local < len(search_region) - 1:
-            y0 = search_region[peak_idx_local - 1]
-            y1 = search_region[peak_idx_local]
-            y2 = search_region[peak_idx_local + 1]
+        # Sub-sample interpolation (parabolic on magnitude envelope)
+        if 0 < peak_idx < len(envelope) - 1:
+            y0 = envelope[peak_idx - 1]
+            y1 = envelope[peak_idx]
+            y2 = envelope[peak_idx + 1]
             
             denom = 2 * (y0 - 2*y1 + y2)
             if abs(denom) > 1e-10:
-                delta = (y0 - y2) / denom
+                delta = float((y0 - y2) / denom)
                 delta = np.clip(delta, -0.5, 0.5)
                 peak_idx_refined = peak_idx + delta
             else:
@@ -433,189 +520,213 @@ class TickMatchedFilter:
         else:
             peak_idx_refined = float(peak_idx)
         
-        # Convert to timing offset (ms from center)
-        offset_samples = peak_idx_refined - center
-        offset_ms = (offset_samples / self.sample_rate) * 1000.0
+        # Offset from expected position (center of search region)
+        offset_samples = peak_idx_refined - search_samples
         
-        # Estimate SNR
+        # SNR: peak vs noise floor.
+        # Exclude a zone around the peak for noise estimation.
+        # For short templates (5ms tick), exclude ±tick_len.
+        # For long templates (800ms marker), the correlation output may be
+        # shorter than 2×tick_len, so cap the exclusion to ≤25% of the
+        # envelope on each side (guaranteeing ≥50% for noise).
+        tick_len = len(template)
+        max_exclusion = max(10, len(envelope) // 4)
+        exclusion = min(tick_len, max_exclusion)
+        peak_start = max(0, peak_idx - exclusion)
+        peak_end = min(len(envelope), peak_idx + exclusion)
         noise_region = np.concatenate([
-            envelope[:search_start],
-            envelope[search_end:]
+            envelope[:peak_start],
+            envelope[peak_end:]
         ])
-        if len(noise_region) > 0:
+        if len(noise_region) > 10:
             noise_std = np.std(noise_region)
             if noise_std > 0:
                 snr_linear = peak_value / noise_std
-                snr_db = 20 * np.log10(snr_linear) if snr_linear > 0 else -100.0
+                snr_db = 20 * np.log10(max(snr_linear, 1e-10))
             else:
-                snr_db = 40.0  # Very clean signal
+                snr_db = 40.0
         else:
             snr_db = 0.0
         
-        # Extract audio-domain phase at peak (modulation phase)
-        if peak_idx < len(corr_sin):
-            phase_rad = np.arctan2(corr_sin[peak_idx], corr_cos[peak_idx])
-        else:
-            phase_rad = 0.0
+        return offset_samples, float(peak_value), snr_db
+    
+    def _bandpass_iq(self, iq_samples: np.ndarray) -> np.ndarray:
+        """Apply IQ-domain bandpass filter to isolate tick frequency.
         
-        # Extract RF carrier phase from IQ using BUFFER-RELATIVE time and
-        # PER-TICK extraction.
-        #
-        # KEY INSIGHT: The IQ mixer exp(-j·2π·f·t) must use a time axis that
-        # maps each IQ sample to a unique, consistent value regardless of which
-        # overlapping window contains it.  We use buffer-relative time
-        # (sample_index / sample_rate), which is independent of any external
-        # timing authority (RTP, GPS, NTP) and works identically in both RTP
-        # and FUSION modes.  Before this fix, t started at 0 per tick, so the
-        # mixer phase depended on the tick's position within the window —
-        # causing ~1.7 rad phase jumps between consecutive windows.
-        #
-        # We extract phase from each individual tick separately (not the whole
-        # 5-second window), then combine phasors coherently. Between ticks the
-        # signal is noise, which would dilute the phase estimate.
-        carrier_phase_rad = 0.0
-        dc_carrier_phase_rad = 0.0
-        if iq_samples is not None and tone_freq_hz > 0 and valid_seconds:
-            carrier_phasors = []
-            dc_phasors = []
+        Rejects continuous 100 Hz BCD modulation, 440/500/600 Hz audio tones,
+        and other out-of-band energy that would otherwise dominate the
+        correlation for short (5ms) ticks.
+        
+        Args:
+            iq_samples: Complex IQ samples
             
-            for sec in valid_seconds:
-                # Tick position within this window's IQ buffer
-                tick_offset = (sec - start_second) * self.sample_rate
-                duration_ms = self._get_tick_duration_ms(sec)
-                if duration_ms not in self._templates:
-                    continue
-                tick_len = len(self._templates[duration_ms][0])
-                
-                # Apply the timing offset from the composite correlation peak.
-                # offset_samples tells us how much the ticks are shifted from
-                # their expected positions (propagation delay, clock error).
-                adjusted_start = int(tick_offset + offset_samples)
-                adjusted_end = adjusted_start + tick_len
-                
-                if adjusted_start < 0 or adjusted_end > len(iq_samples):
-                    continue
-                
-                iq_tick = iq_samples[adjusted_start:adjusted_end]
-                n_tick = len(iq_tick)
-                if n_tick == 0:
-                    continue
-                
-                # Time axis: seconds from start of the 60-second IQ buffer.
-                # This is buffer-relative (sample_index / sample_rate), NOT tied
-                # to any external timing authority (RTP, GPS, NTP).  The critical
-                # property is that the same IQ sample always gets the same mixer
-                # value regardless of which overlapping window contains it.
-                # Before this fix, t started at 0 per tick, causing window-
-                # dependent phase offsets of 2π·f·(tick_position/sample_rate).
-                t_abs = (start_second + (adjusted_start / self.sample_rate)) + np.arange(n_tick) / self.sample_rate
-                
-                # Mix down to baseband at tone frequency using absolute time
-                mixer = np.exp(-1j * 2 * np.pi * tone_freq_hz * t_abs)
-                mixed = iq_tick * mixer
-                carrier_phasors.append(np.mean(mixed))
-                
-                # DC carrier phasor (mean IQ over tick — no mixer needed)
-                dc_phasors.append(np.mean(iq_tick))
-            
-            if carrier_phasors:
-                # Coherent combination: sum phasors (amplitude-weighted by nature)
-                combined_carrier = np.sum(carrier_phasors)
-                carrier_phase_rad = float(np.angle(combined_carrier))
-                
-                combined_dc = np.sum(dc_phasors)
-                dc_carrier_phase_rad = float(np.angle(combined_dc))
-        
-        # Normalize peak value (0-1)
-        max_possible = np.sqrt(np.sum(audio**2)) * np.sqrt(np.sum(template_sin**2))
-        if max_possible > 0:
-            peak_normalized = peak_value / max_possible
-        else:
-            peak_normalized = 0.0
-        
-        return offset_ms, snr_db, peak_normalized, phase_rad, carrier_phase_rad, dc_carrier_phase_rad
+        Returns:
+            Bandpass-filtered complex IQ samples
+        """
+        if self._bandpass_sos is None:
+            return iq_samples
+        return sosfiltfilt(self._bandpass_sos, iq_samples)
     
     def process_window(
         self,
         iq_samples: np.ndarray,
         start_second: int,
         end_second: int,
-        minute: int = 0
+        minute: int = 0,
+        iq_filtered: np.ndarray = None,
+        iq_unfiltered: np.ndarray = None,
     ) -> Optional[TickDetectionResult]:
         """
-        Process a single window of IQ samples.
+        Process a single window of IQ samples using per-tick IQ-domain correlation.
+        
+        Bandpass-filtered IQ is used for timing correlation (rejects continuous
+        tones). Unfiltered IQ is used for carrier phase extraction (preserves
+        full signal for phase measurement).
+        
+        Per-tick offsets are combined with the median for robustness against
+        individual tick dropouts or interference.
         
         Args:
-            iq_samples: Complex IQ samples for the window
+            iq_samples: Complex IQ samples for the window (used if filtered/unfiltered not provided)
             start_second: First second in window
             end_second: Last second in window (exclusive)
             minute: Minute number (for BPM)
+            iq_filtered: Pre-filtered IQ for correlation (optional, avoids re-filtering)
+            iq_unfiltered: Unfiltered IQ for phase extraction (optional)
             
         Returns:
             TickDetectionResult or None if detection failed
         """
-        # Demodulation:
-        # CHU transmits USB with preserved carrier. The IQ baseband has a
-        # strong DC carrier component plus the 1000 Hz tone as a sideband.
-        # Re(IQ) recovers the audio. On CHU-only channels the unambiguous
-        # high-power carrier is available for direct phase/Doppler analysis.
-        # WWV/WWVH/BPM use conventional AM: |IQ| - DC recovers the envelope.
-        if self.station == StationType.CHU:
-            audio = np.real(iq_samples).copy()
-            audio -= np.mean(audio)
+        tone_freq_hz = self.template_config.frequency_hz
+        search_range_ms = 100.0  # ±100ms search per tick
+        search_samples = int(search_range_ms * self.sample_rate / 1000.0)
+        
+        # Use pre-filtered IQ if provided, otherwise filter now
+        if iq_filtered is not None:
+            iq_for_corr = iq_filtered
         else:
-            magnitude = np.abs(iq_samples)
-            audio = magnitude - np.mean(magnitude)  # AC coupling
+            iq_for_corr = self._bandpass_iq(iq_samples)
         
-        # Bandpass filter around station-specific tick frequency
-        # This is critical for WWV/WWVH discrimination on shared channels:
-        # - WWV uses 1000 Hz ticks
-        # - WWVH uses 1200 Hz ticks
-        # Without filtering, the matched filter can respond to the wrong station
-        tick_freq = self.template_config.frequency_hz
-        bandwidth = 100.0  # ±100 Hz bandwidth
-        low_freq = tick_freq - bandwidth
-        high_freq = tick_freq + bandwidth
+        # Unfiltered IQ for phase extraction
+        if iq_unfiltered is not None:
+            iq_for_phase = iq_unfiltered
+        else:
+            iq_for_phase = iq_samples
         
-        # Ensure frequencies are valid for the sample rate
-        nyquist = self.sample_rate / 2
-        if high_freq < nyquist and low_freq > 0:
-            from scipy.signal import butter, sosfiltfilt
-            sos = butter(4, [low_freq, high_freq], btype='band', fs=self.sample_rate, output='sos')
-            audio = sosfiltfilt(sos, audio)
-        
-        # Build composite template for this window
-        template_sin, template_cos, valid_seconds = self._build_composite_template(
-            start_second, end_second, minute
-        )
+        # Determine which seconds have ticks in this window
+        valid_seconds = []
+        for sec in range(start_second, end_second):
+            if sec in self.template_config.skip_seconds:
+                continue
+            valid_seconds.append(sec)
         
         if len(valid_seconds) == 0:
             return None
         
-        # Ensure audio and template are same length
-        expected_samples = (end_second - start_second) * self.sample_rate
-        if len(audio) < expected_samples:
-            # Pad if needed
-            audio = np.pad(audio, (0, expected_samples - len(audio)))
-        elif len(audio) > expected_samples:
-            audio = audio[:expected_samples]
+        # Per-tick IQ-domain correlation on bandpass-filtered signal
+        tick_offsets = []      # offset in samples from expected position
+        tick_snrs = []         # SNR per tick
+        tick_peaks = []        # correlation peak value per tick
+        carrier_phasors = []   # carrier phase phasors for coherent combination
+        dc_phasors = []        # DC carrier phasors
         
-        # Correlate (pass raw IQ for carrier phase extraction)
-        offset_ms, snr_db, peak_value, phase_rad, carrier_phase_rad, dc_carrier_phase_rad = self._correlate_window(
-            audio, template_sin, template_cos,
-            iq_samples=iq_samples,
-            tone_freq_hz=self.template_config.frequency_hz,
-            start_second=start_second,
-            valid_seconds=valid_seconds
-        )
+        for sec in valid_seconds:
+            duration_ms = self._get_tick_duration_ms(sec, minute)
+            if duration_ms not in self._iq_templates:
+                continue
+            
+            template = self._iq_templates[duration_ms]
+            tick_len = len(template)
+            
+            # Tick expected at start of each second within this window
+            tick_offset_in_window = (sec - start_second) * self.sample_rate
+            
+            # Search range scales with template duration:
+            # 800ms marker needs wider search (±500ms for ionospheric variation)
+            # 5ms tick uses ±100ms
+            if duration_ms >= 100.0:
+                tick_search_ms = min(500.0, max(100.0, duration_ms * 0.625))
+            else:
+                tick_search_ms = search_range_ms
+            tick_search_samples = int(tick_search_ms * self.sample_rate / 1000.0)
+            
+            # Extract IQ slice: search before + tick + search after
+            slice_start = tick_offset_in_window - tick_search_samples
+            slice_end = tick_offset_in_window + tick_len + tick_search_samples
+            
+            if slice_start < 0 or slice_end > len(iq_for_corr):
+                continue
+            
+            iq_slice = iq_for_corr[slice_start:slice_end]
+            
+            # Correlate this tick
+            offset_samp, peak_val, snr_db = self._correlate_tick_iq(
+                iq_slice, template, tick_search_samples
+            )
+            
+            tick_offsets.append(offset_samp)
+            tick_snrs.append(snr_db)
+            tick_peaks.append(peak_val)
+            
+            # Extract carrier phase at the detected tick position using
+            # BUFFER-RELATIVE time for phase continuity across windows.
+            # Use UNFILTERED IQ for phase (bandpass distorts phase).
+            adjusted_start = int(tick_offset_in_window + offset_samp)
+            adjusted_end = adjusted_start + tick_len
+            
+            if 0 <= adjusted_start and adjusted_end <= len(iq_for_phase):
+                iq_tick = iq_for_phase[adjusted_start:adjusted_end]
+                n_tick = len(iq_tick)
+                if n_tick > 0:
+                    # Buffer-relative time (seconds from start of 60s buffer)
+                    t_abs = (start_second + adjusted_start / self.sample_rate) + np.arange(n_tick) / self.sample_rate
+                    
+                    # Mix down to baseband at tone frequency
+                    mixer = np.exp(-1j * 2 * np.pi * tone_freq_hz * t_abs)
+                    mixed = iq_tick * mixer
+                    carrier_phasors.append(np.mean(mixed))
+                    
+                    # DC carrier phasor (mean IQ over tick — no mixer needed)
+                    dc_phasors.append(np.mean(iq_tick))
+        
+        if len(tick_offsets) == 0:
+            return None
+        
+        tick_offsets = np.array(tick_offsets)
+        tick_snrs = np.array(tick_snrs)
+        tick_peaks = np.array(tick_peaks)
+        
+        # Combine per-tick offsets: use median for robustness
+        median_offset_samples = float(np.median(tick_offsets))
+        offset_ms = (median_offset_samples / self.sample_rate) * 1000.0
+        
+        # Aggregate SNR (mean of per-tick SNRs in dB)
+        mean_snr_db = float(np.mean(tick_snrs))
+        
+        # Aggregate peak value (mean, normalized to 0-1 range)
+        mean_peak = float(np.mean(tick_peaks))
+        max_peak = float(np.max(tick_peaks)) if len(tick_peaks) > 0 else 0.0
+        peak_normalized = min(1.0, mean_peak / (max_peak + 1e-10)) if max_peak > 0 else 0.0
+        
+        # Audio-domain phase from the IQ correlation at the median offset
+        phase_rad = 0.0
+        
+        # Carrier phase: coherent combination of per-tick phasors
+        carrier_phase_rad = 0.0
+        dc_carrier_phase_rad = 0.0
+        if carrier_phasors:
+            combined_carrier = np.sum(carrier_phasors)
+            carrier_phase_rad = float(np.angle(combined_carrier))
+            
+            combined_dc = np.sum(dc_phasors)
+            dc_carrier_phase_rad = float(np.angle(combined_dc))
         
         # Estimate uncertainty based on SNR
-        # Higher SNR → lower uncertainty
-        if snr_db > 20:
-            uncertainty_ms = 0.05  # ~1 sample at 20 kHz
-        elif snr_db > 10:
+        if mean_snr_db > 20:
+            uncertainty_ms = 0.05
+        elif mean_snr_db > 10:
             uncertainty_ms = 0.2
-        elif snr_db > 6:
+        elif mean_snr_db > 6:
             uncertainty_ms = 0.5
         else:
             uncertainty_ms = 1.0
@@ -625,13 +736,103 @@ class TickMatchedFilter:
             window_end_second=end_second,
             timing_offset_ms=offset_ms,
             timing_uncertainty_ms=uncertainty_ms,
-            snr_db=snr_db,
-            correlation_peak=peak_value,
+            snr_db=mean_snr_db,
+            correlation_peak=peak_normalized,
             phase_rad=phase_rad,
             carrier_phase_rad=carrier_phase_rad,
             dc_carrier_phase_rad=dc_carrier_phase_rad,
-            coherence_quality=min(1.0, peak_value * 2),  # Rough estimate
-            valid_ticks=len(valid_seconds),
+            coherence_quality=min(1.0, peak_normalized * 2),
+            valid_ticks=len(tick_offsets),
+            station=self.station,
+        )
+    
+    def _detect_minute_marker(
+        self,
+        iq_filtered: np.ndarray,
+        iq_unfiltered: np.ndarray,
+    ) -> Optional[TickDetectionResult]:
+        """
+        Detect the 800ms minute marker at second 0 (primary timing source).
+        
+        The minute marker has 160× more energy than a 5ms tick, making it
+        detectable under fading conditions where per-second ticks are lost.
+        
+        Args:
+            iq_filtered: Bandpass-filtered IQ (full minute)
+            iq_unfiltered: Unfiltered IQ (full minute, for phase extraction)
+            
+        Returns:
+            TickDetectionResult for the minute marker, or None
+        """
+        marker_ms = self.template_config.minute_marker_duration_ms
+        if marker_ms not in self._iq_templates:
+            return None
+        
+        template = self._iq_templates[marker_ms]
+        tick_len = len(template)
+        
+        # Search ±500ms around second 0 for the minute marker
+        search_ms = 500.0
+        search_samples = int(search_ms * self.sample_rate / 1000.0)
+        
+        # Extract region: we need search_samples before second 0 (may not exist
+        # at buffer start) through tick_len + search_samples after
+        slice_start = max(0, -search_samples)  # Can't go before buffer start
+        slice_end = tick_len + search_samples
+        
+        if slice_end > len(iq_filtered):
+            return None
+        
+        iq_slice = iq_filtered[slice_start:slice_end]
+        
+        # Adjust search_samples for the actual slice start
+        actual_search_before = 0 - slice_start  # How many search samples we actually have before sec 0
+        
+        offset_samp, peak_val, snr_db = self._correlate_tick_iq(
+            iq_slice, template, actual_search_before
+        )
+        
+        offset_ms = (offset_samp / self.sample_rate) * 1000.0
+        
+        # Extract carrier phase from unfiltered IQ at detected position
+        carrier_phase_rad = 0.0
+        dc_carrier_phase_rad = 0.0
+        adjusted_start = int(offset_samp)
+        adjusted_end = adjusted_start + tick_len
+        
+        if 0 <= adjusted_start and adjusted_end <= len(iq_unfiltered):
+            iq_tick = iq_unfiltered[adjusted_start:adjusted_end]
+            n_tick = len(iq_tick)
+            if n_tick > 0:
+                tone_freq_hz = self.template_config.frequency_hz
+                t_abs = (adjusted_start / self.sample_rate) + np.arange(n_tick) / self.sample_rate
+                mixer = np.exp(-1j * 2 * np.pi * tone_freq_hz * t_abs)
+                mixed = iq_tick * mixer
+                carrier_phase_rad = float(np.angle(np.mean(mixed)))
+                dc_carrier_phase_rad = float(np.angle(np.mean(iq_tick)))
+        
+        # Uncertainty scales with marker duration (longer = more precise)
+        if snr_db > 20:
+            uncertainty_ms = 0.02
+        elif snr_db > 10:
+            uncertainty_ms = 0.1
+        elif snr_db > 6:
+            uncertainty_ms = 0.3
+        else:
+            uncertainty_ms = 1.0
+        
+        return TickDetectionResult(
+            window_start_second=0,
+            window_end_second=1,
+            timing_offset_ms=offset_ms,
+            timing_uncertainty_ms=uncertainty_ms,
+            snr_db=snr_db,
+            correlation_peak=min(1.0, peak_val),
+            phase_rad=0.0,
+            carrier_phase_rad=carrier_phase_rad,
+            dc_carrier_phase_rad=dc_carrier_phase_rad,
+            coherence_quality=min(1.0, snr_db / 20.0),
+            valid_ticks=1,
             station=self.station,
         )
     
@@ -639,15 +840,22 @@ class TickMatchedFilter:
         self,
         iq_samples: np.ndarray,
         minute_number: int = 0,
-        min_snr_db: float = 3.0
+        min_snr_db: float = 8.0
     ) -> MinuteTickAnalysis:
         """
-        Process a full minute of IQ samples with overlapping windows.
+        Process a full minute of IQ samples.
+        
+        Two-tier detection:
+        1. Minute marker at second 0 (primary timing, 800ms, high SNR)
+        2. Per-second ticks in overlapping windows (phase extraction, timing augmentation)
+        
+        The IQ is bandpass-filtered around the station tone frequency to reject
+        continuous 100 Hz BCD, 440/500/600 Hz audio tones before correlation.
         
         Args:
             iq_samples: Complex IQ samples (60 seconds at sample_rate)
             minute_number: Minute within hour (for BPM UT1/UTC)
-            min_snr_db: Minimum SNR to consider a valid detection
+            min_snr_db: Minimum SNR to accept a detection (default 8.0 dB)
             
         Returns:
             MinuteTickAnalysis with all window results
@@ -656,61 +864,108 @@ class TickMatchedFilter:
         if len(iq_samples) < expected_samples:
             logger.warning(f"Incomplete minute: {len(iq_samples)} < {expected_samples} samples")
         
+        # Bandpass filter the full minute once (avoids per-window re-filtering)
+        iq_filtered = self._bandpass_iq(iq_samples)
+        
         window_results: List[TickDetectionResult] = []
         
-        # Generate overlapping windows
-        # Start at second 1 (skip minute marker at second 0)
+        # === Tier 1: Minute marker at second 0 (primary timing) ===
+        marker_result = self._detect_minute_marker(iq_filtered, iq_samples)
+        if marker_result is not None and marker_result.snr_db >= min_snr_db:
+            window_results.append(marker_result)
+            logger.info(f"{self.station.value} minute marker DETECTED: "
+                       f"offset={marker_result.timing_offset_ms:+.3f}ms, "
+                       f"SNR={marker_result.snr_db:.1f}dB, "
+                       f"uncertainty={marker_result.timing_uncertainty_ms:.3f}ms")
+        elif marker_result is not None:
+            logger.info(f"{self.station.value} minute marker below SNR gate: "
+                       f"SNR={marker_result.snr_db:.1f}dB < {min_snr_db:.1f}dB")
+        
+        # === Tier 2: Per-second ticks in overlapping windows ===
         step = self.overlap_seconds
         
         for start_sec in range(1, 60 - self.window_seconds + 1, step):
             end_sec = start_sec + self.window_seconds
             
-            # Extract window samples
+            # Extract window samples from both filtered and unfiltered
             start_sample = start_sec * self.sample_rate
             end_sample = end_sec * self.sample_rate
             
             if end_sample > len(iq_samples):
                 break
             
-            window_iq = iq_samples[start_sample:end_sample]
+            window_filtered = iq_filtered[start_sample:end_sample]
+            window_unfiltered = iq_samples[start_sample:end_sample]
             
-            result = self.process_window(window_iq, start_sec, end_sec, minute_number)
+            result = self.process_window(
+                iq_samples=window_unfiltered,
+                start_second=start_sec,
+                end_second=end_sec,
+                minute=minute_number,
+                iq_filtered=window_filtered,
+                iq_unfiltered=window_unfiltered,
+            )
             
             if result is not None and result.snr_db >= min_snr_db:
                 window_results.append(result)
         
-        # Compute aggregate statistics
-        if window_results:
-            offsets = [r.timing_offset_ms for r in window_results]
-            snrs = [r.snr_db for r in window_results]
-            
-            mean_offset = float(np.mean(offsets))
-            std_offset = float(np.std(offsets))
-            mean_snr = float(np.mean(snrs))
-            
-            # Estimate linear drift if enough windows
-            drift_rate = None
-            if len(window_results) >= 5:
-                # Linear regression: offset vs window center time
-                times = [(r.window_start_second + r.window_end_second) / 2 
-                        for r in window_results]
-                if np.std(times) > 0:
-                    slope, _ = np.polyfit(times, offsets, 1)
-                    drift_rate = float(slope)  # ms per second
-            
-            # Overall confidence based on consistency and SNR
-            consistency = 1.0 / (1.0 + std_offset)  # Lower std → higher confidence
-            snr_factor = min(1.0, mean_snr / 20.0)
-            coverage = len(window_results) / 55.0  # Expected ~55 windows
-            overall_confidence = consistency * snr_factor * coverage
+        # === Separate marker and tick results ===
+        marker_ok = (marker_result is not None and marker_result.snr_db >= min_snr_db)
+        
+        # Tick-only results (exclude minute marker)
+        tick_results = [r for r in window_results if r.window_start_second > 0]
+        
+        # Per-second tick aggregate
+        tick_mean = 0.0
+        tick_std = 0.0
+        tick_valid = len(tick_results)
+        if tick_results:
+            tick_offsets = [r.timing_offset_ms for r in tick_results]
+            tick_mean = float(np.mean(tick_offsets))
+            tick_std = float(np.std(tick_offsets))
+        
+        # Estimate linear drift from tick windows (need temporal spread)
+        drift_rate = None
+        if len(tick_results) >= 5:
+            times = [(r.window_start_second + r.window_end_second) / 2
+                    for r in tick_results]
+            tick_offsets_list = [r.timing_offset_ms for r in tick_results]
+            if np.std(times) > 0:
+                slope, _ = np.polyfit(times, tick_offsets_list, 1)
+                drift_rate = float(slope)  # ms per second
+        
+        # === Primary timing: marker when available, tick median as fallback ===
+        if marker_ok:
+            mean_offset = marker_result.timing_offset_ms
+            std_offset = marker_result.timing_uncertainty_ms
+            mean_snr = marker_result.snr_db
+        elif tick_results:
+            # Fallback: use median of tick windows (more robust than mean)
+            tick_offsets_arr = np.array([r.timing_offset_ms for r in tick_results])
+            mean_offset = float(np.median(tick_offsets_arr))
+            std_offset = tick_std
+            mean_snr = float(np.mean([r.snr_db for r in tick_results]))
         else:
             mean_offset = 0.0
             std_offset = 0.0
             mean_snr = -100.0
-            drift_rate = None
+        
+        # Overall confidence
+        if window_results:
+            all_snrs = [r.snr_db for r in window_results]
+            snr_factor = min(1.0, float(np.mean(all_snrs)) / 20.0)
+            coverage = len(window_results) / 56.0
+            if marker_ok:
+                # High confidence when marker detected
+                consistency = 1.0 / (1.0 + marker_result.timing_uncertainty_ms)
+            else:
+                consistency = 1.0 / (1.0 + tick_std)
+            overall_confidence = consistency * snr_factor * coverage
+        else:
             overall_confidence = 0.0
         
-        total_windows = (60 - self.window_seconds) // self.overlap_seconds
+        # +1 for minute marker window
+        total_windows = 1 + (60 - self.window_seconds) // self.overlap_seconds
         
         return MinuteTickAnalysis(
             station=self.station,
@@ -723,6 +978,13 @@ class TickMatchedFilter:
             valid_windows=len(window_results),
             total_windows=total_windows,
             overall_confidence=overall_confidence,
+            marker_detected=marker_ok,
+            marker_timing_offset_ms=marker_result.timing_offset_ms if marker_ok else 0.0,
+            marker_snr_db=marker_result.snr_db if marker_ok else -100.0,
+            marker_uncertainty_ms=marker_result.timing_uncertainty_ms if marker_ok else 999.0,
+            tick_mean_offset_ms=tick_mean,
+            tick_std_offset_ms=tick_std,
+            tick_valid_windows=tick_valid,
         )
 
 

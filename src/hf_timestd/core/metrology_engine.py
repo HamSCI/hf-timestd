@@ -377,50 +377,109 @@ class MetrologyEngine:
         This ensures the matched filter template matches the actual signal duration,
         maximizing processing gain.  Key durations:
         
-        WWV/WWVH:
-            Second 0:  0.800s  (minute marker — 160× more energy than a tick)
-            Others:    0.005s  (5ms per-second tick)
+        WWV/WWVH (shared channels):
+            Second 0:  0.800s  (minute marker — PRIMARY timing anchor)
+            Others:    0.0     (5ms ticks DROPPED: ±50ms jitter, confounded
+                                by 2nd harmonics of 500/600 Hz tones)
             
-        CHU:
-            Second 0:  0.500s  (minute marker, 1.0s at top of hour)
-            Seconds 1-28, 30, 40-49: 0.300s  (regular 300ms tones)
-            Seconds 31-39: 0.010s  (FSK seconds — short ticks only)
-            Seconds 50-59: 0.010s  (voice seconds — short ticks only)
+        CHU (unique channels):
+            Second 0:  0.500s  (minute marker — PRIMARY timing anchor)
+            Seconds 1-28, 30, 40-49: 0.300s  (300ms tones — excellent)
+            Seconds 31-39: 0.0  (FSK seconds — no tone)
+            Seconds 50-59: 0.0  (voice seconds — no tone)
             
         BPM:
             Second 0:  0.300s  (minute marker)
-            UTC minutes: 0.010s  (10ms ticks)
-            UT1 minutes (25-29, 55-59): 0.100s  (100ms ticks)
+            UT1 minutes (25-29, 55-59): 0.100s  (100ms ticks — usable)
+            UTC minutes: 0.0   (10ms ticks DROPPED: same jitter problem)
         """
         if station_name in ('WWV', 'WWVH'):
             if sec_in_minute == 0:
-                return 0.800  # Minute marker
-            elif sec_in_minute in (29, 59):
-                return 0.0    # Silent — no tick on seconds 29 and 59
+                return 0.800  # Minute marker — PRIMARY timing anchor
             else:
-                return 0.005  # 5ms per-second tick
+                return 0.0    # Drop 5ms ticks: ±50ms jitter, confounded by
+                              # 2nd harmonics of 500/600 Hz tones on shared channels
         
         elif station_name == 'CHU':
             if sec_in_minute == 0:
-                return 0.500  # Minute marker (1.0s at top of hour, but 0.5 is safe)
+                return 0.500  # Minute marker — PRIMARY timing anchor
             elif sec_in_minute in range(31, 40):
-                return 0.010  # FSK seconds
+                return 0.0    # FSK seconds — no tone to correlate
             elif sec_in_minute in range(50, 60):
-                return 0.010  # Voice seconds
+                return 0.0    # Voice seconds — no tone to correlate
             else:
-                return 0.300  # Regular 300ms tones
+                return 0.300  # 300ms tones — excellent timing source
         
         elif station_name == 'BPM':
             if sec_in_minute == 0:
                 return 0.300  # Minute marker
-            # UT1 minutes: 25-29, 55-59
             elif minute_in_hour in (25, 26, 27, 28, 29, 55, 56, 57, 58, 59):
-                return 0.100  # 100ms UT1 ticks
+                return 0.100  # 100ms UT1 ticks — usable
             else:
-                return 0.010  # 10ms UTC ticks
+                return 0.0    # Drop 10ms UTC ticks: same jitter problem as WWV 5ms
         
         else:
-            return 0.020  # Conservative fallback
+            return 0.0  # Unknown station — skip
+
+    def _check_signal_presence(self, iq_samples: np.ndarray) -> bool:
+        """Check whether any tick-frequency energy is present in this buffer.
+        
+        Examines a 1-second slice from mid-buffer at the primary tick
+        frequencies (1000 Hz for WWV/BPM, 1200 Hz for WWVH).  If no
+        energy is found, the minute is likely a station ID / silent
+        period and tick phase extraction would correlate pure noise.
+        
+        Returns:
+            True if signal energy detected at any tick frequency.
+        """
+        try:
+            from scipy.signal import butter, sosfiltfilt
+            
+            # Sample 1 second from the middle of the buffer
+            mid = len(iq_samples) // 2
+            half_sec = self.sample_rate // 2
+            start = max(0, mid - half_sec)
+            end = min(len(iq_samples), mid + half_sec)
+            chunk = iq_samples[start:end]
+            
+            if len(chunk) < self.sample_rate // 4:
+                return False
+            
+            # Check each tick frequency used on this channel
+            channel_upper = self.channel_name.upper()
+            if 'CHU' in channel_upper:
+                freqs = [1000]
+            elif 'SHARED' in channel_upper:
+                freqs = [1000, 1200]  # WWV + WWVH
+            else:
+                freqs = [1000]
+            
+            nyquist = self.sample_rate / 2
+            noise_power = float(np.mean(np.abs(chunk)**2))
+            if noise_power <= 0:
+                return False
+            
+            for freq in freqs:
+                bw = 100.0  # ±100 Hz
+                low, high = freq - bw, freq + bw
+                if low <= 0 or high >= nyquist:
+                    continue
+                sos = butter(4, [low, high], btype='band', fs=self.sample_rate, output='sos')
+                filtered = sosfiltfilt(sos, chunk)
+                band_power = float(np.mean(np.abs(filtered)**2))
+                
+                # Band power relative to total power — if the tone is present,
+                # the 200 Hz band should contain a meaningful fraction of energy.
+                # Threshold: -80 dB absolute or 10× above expected noise floor
+                # in a 200 Hz band (noise_power * 200/nyquist).
+                expected_noise_in_band = noise_power * (200.0 / nyquist)
+                if expected_noise_in_band > 0 and band_power > 3.0 * expected_noise_in_band:
+                    return True
+            
+            return False
+        except Exception as e:
+            logger.debug(f"Signal presence check failed: {e}")
+            return True  # Fail open — run tick filter if check fails
 
     def _measure_tone_at_known_time(
         self,
@@ -476,13 +535,15 @@ class MetrologyEngine:
         
         expected_sample = int(expected_delay_ms * self.sample_rate / 1000)
         
-        # Measurement window must be large enough for the template + search margin.
-        # mode='valid' correlation requires len(signal) > len(template), and we need
-        # room on both sides for the search window.
-        # For 5ms ticks: ±0.4s is plenty.
-        # For 800ms minute markers: need at least 0.8s template + 0.5s search = ±0.9s.
-        search_margin_sec = 0.5  # ±500ms for ionospheric variation
-        window_sec = max(0.4, tone_duration_sec + search_margin_sec)
+        # Measurement window must be large enough for the template + search margin
+        # AND enough extra for a clean noise floor estimate in the correlation output.
+        # mode='valid' correlation output length = len(region) - len(template) + 1.
+        # We want at least 2× template length of correlation output so there's
+        # ample noise-only region on both sides of the peak for SNR estimation.
+        # For 800ms template: need ±(0.8 + 0.8 + 0.5) = ±2.1s → 50k region → 31k corr samples.
+        search_margin_sec = 0.5
+        noise_margin_sec = tone_duration_sec  # extra room for noise floor estimation
+        window_sec = max(0.4, tone_duration_sec + noise_margin_sec + search_margin_sec)
         window_samples = int(window_sec * self.sample_rate)
         start_sample = max(0, expected_sample - window_samples)
         end_sample = min(len(audio_signal), expected_sample + window_samples)
@@ -493,13 +554,20 @@ class MetrologyEngine:
             
         measurement_region = audio_signal[start_sample:end_sample]
         
-        # Step 1: Full-duration matched filter for DETECTION
-        # Do correlation FIRST, then measure tone SNR at the peak location
-        # Use full tone duration (800ms for WWV/WWVH, 500ms for CHU, 100ms for BPM)
-        # This provides excellent discrimination:
-        # - 800ms template has ~160x more energy than 5ms tick → much stronger correlation
-        # - Noise spikes have low correlation with long sinusoidal template
-        # - Per-second ticks (5ms) produce weak correlation peaks
+        # Bandpass filter the measurement region to isolate the tone frequency.
+        # On shared channels, competing stations (WWV 1000Hz vs WWVH 1200Hz)
+        # and broadband noise corrupt the correlation, especially for long
+        # templates (800ms) where out-of-band energy accumulates.
+        # ±50 Hz bandwidth is narrow enough to reject the competing tone
+        # (200 Hz away) while wide enough to preserve the tone onset/offset.
+        nyquist = self.sample_rate / 2
+        bw = 50.0  # ±50 Hz
+        low_hz = max(1.0, tone_freq_hz - bw)
+        high_hz = min(nyquist - 1.0, tone_freq_hz + bw)
+        if high_hz > low_hz and len(measurement_region) > 100:
+            sos = scipy_signal.butter(4, [low_hz, high_hz], btype='band',
+                                      fs=self.sample_rate, output='sos')
+            measurement_region = scipy_signal.sosfiltfilt(sos, measurement_region)
         
         n_template = int(tone_duration_sec * self.sample_rate)
         t = np.arange(n_template) / self.sample_rate
@@ -567,24 +635,23 @@ class MetrologyEngine:
                 base_result['corr_snr_db'] = 0.0
                 return base_result
         
-        # Step 3: VALIDATE that this is a full-duration tone, not a tick or noise
-        # The full-duration matched filter should produce a strong peak for the minute marker
-        # but a weak peak for 5ms ticks (which have ~1/160th the energy for 800ms template)
-        #
-        # Estimate noise floor from correlation values away from the peak
+        # Step 3: VALIDATE correlation quality
+        # Estimate noise floor from correlation values well away from the peak.
+        # For long templates the signal can fill most of the correlation output,
+        # so exclude a region proportional to the template length to avoid
+        # contaminating the noise estimate with signal energy.
+        exclusion = max(100, n_template // 2)
         noise_region = np.concatenate([
-            correlation[:max(0, peak_idx - 100)],
-            correlation[min(len(correlation), peak_idx + 100):]
+            correlation[:max(0, peak_idx - exclusion)],
+            correlation[min(len(correlation), peak_idx + exclusion):]
         ])
         
         if len(noise_region) > 10:
             noise_median = np.median(noise_region)
-            noise_mad = np.median(np.abs(noise_region - noise_median))
-            noise_threshold = noise_median + 5 * 1.4826 * noise_mad  # 5-sigma threshold
         else:
-            # Fallback when not enough noise samples
-            noise_median = np.mean(correlation) if len(correlation) > 0 else 1.0
-            noise_threshold = peak_val * 0.5
+            # Not enough noise-only samples — use 25th percentile of full
+            # correlation as a conservative noise estimate.
+            noise_median = np.percentile(correlation, 25) if len(correlation) > 0 else 1.0
         
         # Calculate correlation SNR
         if noise_median > 0:
@@ -592,16 +659,12 @@ class MetrologyEngine:
         else:
             corr_snr_db = 0.0
         
-        # Reject if correlation SNR is too low.
-        # Scale threshold by template duration so that all stations have equivalent
-        # sensitivity at the physical signal level.  A longer template provides more
-        # processing gain (≈10·log10(duration/ref) dB), so a shorter template produces
-        # lower correlation SNR for the same signal and needs a lower threshold.
-        # Reference: 100 ms template → 8 dB threshold.
-        REFERENCE_DURATION_SEC = 0.1
-        BASE_CORR_SNR_DB = 8.0
-        duration_gain_db = 10 * np.log10(tone_duration_sec / REFERENCE_DURATION_SEC) if tone_duration_sec > 0 else 0.0
-        MIN_CORR_SNR_DB = max(1.0, BASE_CORR_SNR_DB + duration_gain_db)
+        # Fixed correlation SNR threshold for all tone durations.
+        # Templates are normalized to unit energy, so peak height does NOT
+        # scale with duration.  The old duration-scaled threshold (8 + 10*log10(dur/0.1))
+        # was killing the 800ms minute marker (required 17 dB, measured 2.6 dB)
+        # because the noise floor was contaminated by the signal itself.
+        MIN_CORR_SNR_DB = 8.0
         if corr_snr_db < MIN_CORR_SNR_DB:
             logger.info(f"{station_name}: Correlation too weak "
                         f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB:.1f}dB, expected={expected_delay_ms:.1f}ms, "
@@ -724,8 +787,11 @@ class MetrologyEngine:
         # Validate that the measured arrival time is within tolerance of expected.
         # expected_delay_ms already includes tx_offset (e.g., 1000ms for CHU second 1).
         # RTP timestamps are authoritative (no wall-clock calibration bias).
-        # Allow ±100ms for ionospheric variation (~30ms typical) plus margin.
-        ARRIVAL_TOLERANCE_MS = 100.0
+        # Allow ±500ms to accommodate multi-hop ionospheric paths on lower
+        # frequencies.  The physics validation downstream (arrival matrix with
+        # ±50ms window) is the real quality gate.  This gate only prevents
+        # obviously wrong detections (e.g., locking onto an adjacent second).
+        ARRIVAL_TOLERANCE_MS = 500.0
         
         if abs(timing_error_ms) > ARRIVAL_TOLERANCE_MS:
             logger.info(f"{station_name} @ {tone_freq_hz}Hz: REJECTED - arrival={raw_arrival_ms:.2f}ms "
@@ -804,8 +870,8 @@ class MetrologyEngine:
             buffer_timing: BufferTiming object mapping samples to UTC.
                           If provided, overrides system_time for all timing.
         """
-        minute_boundary = (int(system_time) // 60) * 60
-        minute_number = int((system_time // 60) % 60)
+        minute_boundary = round(system_time / 60) * 60
+        minute_number = int((minute_boundary // 60) % 60)
         
         iq_samples, _ = self._validate_input(iq_samples)
         
@@ -1031,16 +1097,10 @@ class MetrologyEngine:
                 is_best = (m['station'], m.get('utc_second', 0)) in best_keys
                 
                 if buffer_timing is not None and 'arrival_utc' in m:
-                    arrival_utc = m['arrival_utc']
-                    # sample_position_original for physics validator:
-                    # the fractional-second part of the arrival, in samples.
-                    # This represents the propagation delay from the UTC second.
-                    frac_sec = arrival_utc - int(arrival_utc)
-                    sample_pos = int(frac_sec * self.sample_rate)
-                    timestamp_utc_val = arrival_utc
+                    timestamp_utc_val = m['arrival_utc']
                 else:
-                    sample_pos = int(m['arrival_ms'] * self.sample_rate / 1000)
                     timestamp_utc_val = system_time + m['arrival_ms'] / 1000.0
+                sample_pos = int(m['arrival_ms'] * self.sample_rate / 1000)
                 
                 det = ToneDetectionResult(
                     station=station_type,
@@ -1138,50 +1198,35 @@ class MetrologyEngine:
         if self.is_chu_channel:
             chu_metrics = self._read_fsk_result(minute_boundary)
         
-        # === Step 2D: Per-Second Tick Detection (55+ estimates/minute) ===
+        # === Step 2D: Per-Second Tick Phase Extraction (deferred physics) ===
+        # The tick filter extracts carrier phase from per-second ticks for
+        # ionospheric analysis (Doppler, TEC, scintillation). It does NOT
+        # contribute to timing — _measure_tone_at_known_time() handles that
+        # via the arrival pattern matrix with proper buffer timing.
+        #
+        # Signal presence gating: skip tick analysis on silent minutes
+        # (station ID periods, minutes 29/59 area) to avoid correlating noise.
+        # Check for energy at the primary tick frequency (1000 Hz for WWV/BPM,
+        # 1200 Hz for WWVH) in a 1-second sample from mid-buffer.
         tick_results = {}
-        logger.info(f"{self.channel_name}: Running tick analysis for {len(self.tick_filters)} stations")
-        for station_type, tick_filter in self.tick_filters.items():
-            try:
-                tick_analysis = tick_filter.process_minute(iq_samples, minute_number)
-                logger.info(f"{self.channel_name}: {station_type.value} tick_analysis: "
-                           f"valid_windows={tick_analysis.valid_windows if tick_analysis else 0}")
-                if tick_analysis and tick_analysis.valid_windows > 0:
-                    tick_results[station_type.value] = tick_analysis
-                    
-                    # Get expected propagation delay for this station
-                    station_name = station_type.value
-                    expected_delay_ms = expected_delays_by_station.get(station_name, 0.0)
-                    
-                    # NOTE: tick_analysis.mean_timing_offset_ms is a RELATIVE offset from
-                    # the expected tick positions within each window, NOT an absolute ToA.
-                    # It should be near zero if ticks are arriving at expected times.
-                    # We do NOT subtract expected_delay_ms - that would double-count propagation.
-                    timing_error_ms = tick_analysis.mean_timing_offset_ms
-                    
-                    # Validate: reject if timing offset is too large
-                    # Large offset suggests wrong station or severe multipath
-                    # Note: ~70ms systematic offset exists due to GPS_TIME/RTP_TIMESNAP latency
-                    max_timing_error_ms = 100.0  # Allow up to 100ms timing offset
-                    is_valid = abs(timing_error_ms) < max_timing_error_ms
-                    
-                    if is_valid:
-                        logger.info(f"{self.channel_name}: {station_name} tick analysis - "
-                                   f"{tick_analysis.valid_windows}/{tick_analysis.total_windows} windows, "
-                                   f"raw_toa={tick_analysis.mean_timing_offset_ms:+.1f}ms, "
-                                   f"expected={expected_delay_ms:.1f}ms, "
-                                   f"timing_error={timing_error_ms:+.1f}ms, "
-                                   f"std={tick_analysis.std_timing_offset_ms:.1f}ms, "
-                                   f"drift={tick_analysis.drift_rate_ms_per_sec or 0:.3f}ms/s")
-                    else:
-                        # Remove invalid result (likely wrong station due to same frequency)
-                        del tick_results[station_type.value]
-                        logger.info(f"{self.channel_name}: {station_name} tick REJECTED - "
-                                    f"timing_error={timing_error_ms:+.1f}ms exceeds ±{max_timing_error_ms}ms "
-                                    f"(raw_toa={tick_analysis.mean_timing_offset_ms:+.1f}ms, "
-                                    f"expected={expected_delay_ms:.1f}ms)")
-            except Exception as e:
-                logger.debug(f"{self.channel_name}: {station_type.value} tick detection failed: {e}")
+        signal_present = self._check_signal_presence(iq_samples)
+        
+        if signal_present and self.tick_filters:
+            logger.debug(f"{self.channel_name}: Running tick phase extraction for "
+                        f"{len(self.tick_filters)} stations (physics, not timing)")
+            for station_type, tick_filter in self.tick_filters.items():
+                try:
+                    tick_analysis = tick_filter.process_minute(iq_samples, minute_number)
+                    if tick_analysis and tick_analysis.valid_windows > 0:
+                        tick_results[station_type.value] = tick_analysis
+                        logger.debug(f"{self.channel_name}: {station_type.value} tick phase: "
+                                    f"{tick_analysis.valid_windows}/{tick_analysis.total_windows} windows, "
+                                    f"tick_std={tick_analysis.tick_std_offset_ms:.1f}ms")
+                except Exception as e:
+                    logger.debug(f"{self.channel_name}: {station_type.value} tick extraction failed: {e}")
+        elif not signal_present:
+            logger.info(f"{self.channel_name}: No signal at tick frequency — "
+                       f"skipping tick phase extraction (silent minute?)")
                  
         # === Step 3: Package into L1MetrologyMeasurement ===
         # Validate each detection against the ArrivalPatternMatrix.
@@ -1207,34 +1252,39 @@ class MetrologyEngine:
             validation_reason = "no_matrix"
             
             if self.arrival_matrix is not None:
-                # Use the raw sample position for validation (not timing_error which is arrival - expected)
-                # sample_position_original is the raw arrival sample from minute boundary
-                detected_sample = det.sample_position_original
-                
-                is_valid, confidence, reason = self.arrival_matrix.validate_detection(
-                    station=det.station.value,
-                    frequency_mhz=self.frequency_mhz,
-                    detected_sample=detected_sample,
-                    snr_db=det.snr_db,
-                    utc_time=datetime.fromtimestamp(system_time, tz=timezone.utc)
+                # arrival_utc IS the ToA (from RTP timestamp of the tone sample).
+                # timing_error_ms = (arrival_utc - expected_utc) * 1000, already
+                # computed from the RTP timestamp.  Just check if it's within
+                # the arrival matrix's uncertainty window.
+                matrix = self.arrival_matrix.get_expected_arrivals(
+                    datetime.fromtimestamp(system_time, tz=timezone.utc)
                 )
+                arrival_info = matrix.get_arrival(det.station.value, self.frequency_mhz)
                 
-                physics_valid = is_valid
-                physics_confidence = confidence
-                validation_reason = reason
-                
-                # REJECT detections that fail physics validation
-                # A detection outside the physics window is likely a per-second tick,
-                # not the minute marker. The arrival matrix provides the ground truth.
-                if not is_valid:
-                    detected_ms = detected_sample * 1000 / self.sample_rate
-                    logger.info(f"{self.channel_name}: Physics REJECTED: "
-                               f"{det.station.value} arrival={detected_ms:.1f}ms - {reason}")
-                    continue  # Skip this detection entirely
-                else:
-                    detected_ms = detected_sample * 1000 / self.sample_rate
-                    logger.debug(f"{self.channel_name}: Physics VALIDATED: "
-                                f"{det.station.value} arrival={detected_ms:.1f}ms - {reason}")
+                if arrival_info is not None:
+                    window_ms = arrival_info.uncertainty_3sigma_ms
+                    timing_err = det.timing_error_ms
+                    sigma_ms = window_ms / 3.0
+                    deviation_sigma = abs(timing_err) / sigma_ms if sigma_ms > 0 else float('inf')
+                    
+                    if abs(timing_err) > window_ms:
+                        physics_valid = False
+                        physics_confidence = 0.0
+                        validation_reason = (f"Outside ±{window_ms:.0f}ms window: "
+                                           f"{deviation_sigma:.1f}σ deviation")
+                        logger.info(f"{self.channel_name}: Physics REJECTED: "
+                                   f"{det.station.value} timing_err={timing_err:+.1f}ms - "
+                                   f"{validation_reason}")
+                        continue  # Skip this detection entirely
+                    else:
+                        physics_valid = True
+                        deviation_factor = max(0.0, 1.0 - deviation_sigma / 3.0)
+                        snr_factor = 1.0 / (1.0 + math.exp(-(det.snr_db - 10.0) / 5.0))
+                        physics_confidence = deviation_factor * snr_factor
+                        validation_reason = (f"timing_err={timing_err:+.1f}ms "
+                                           f"({deviation_sigma:.1f}σ)")
+                        logger.info(f"{self.channel_name}: Physics VALIDATED: "
+                                   f"{det.station.value} {validation_reason}")
             
             # Construct L1 measurement (only for validated detections)
             meas = L1MetrologyMeasurement(

@@ -207,6 +207,26 @@ class BinaryArchiveWriter:
             gps_unix_ns = gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)
             gps_unix_sec = gps_unix_ns / BILLION
             
+            # Detect RTP counter space change (radiod restart).
+            # If the old and new mappings disagree on the UTC of the same
+            # RTP timestamp by more than 1 second, the counter space changed.
+            if self._gps_time_unix is not None and self._rtp_timesnap is not None:
+                # What UTC does the OLD mapping give for the NEW rtp_timesnap?
+                old_delta = int((rtp_timesnap - self._rtp_timesnap) & 0xFFFFFFFF)
+                if old_delta > 0x7FFFFFFF:
+                    old_delta -= 0x100000000
+                old_utc = self._gps_time_unix + old_delta / self.config.sample_rate
+                if abs(old_utc - gps_unix_sec) > 1.0:
+                    logger.warning(
+                        f"{self.config.channel_name}: RTP counter space CHANGED — "
+                        f"old mapping gives UTC={old_utc:.3f} but new GPS_TIME={gps_unix_sec:.3f} "
+                        f"(diff={old_utc - gps_unix_sec:+.1f}s). Flushing current buffer."
+                    )
+                    # Flush current buffer before switching to new mapping
+                    if self.current_buffer is not None:
+                        self._flush_minute(self.current_buffer)
+                        self.current_buffer = None
+            
             # Store GPS_TIME/RTP_TIMESNAP mapping directly — no correction needed.
             self._gps_time_unix = gps_unix_sec
             self._rtp_timesnap = rtp_timesnap
