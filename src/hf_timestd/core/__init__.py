@@ -60,7 +60,8 @@ from .tone_detector import ToneDetector
 # Analytics and discrimination
 from .wwvh_discrimination import WWVHDiscriminator
 from .bpm_discriminator import BPMDiscriminator, BPMTimingMode, BPMDiscriminationResult
-from .physics_propagation import PhysicsPropagationModel, PropagationResult, PropagationModelTier
+from .physics_propagation import PhysicsPropagationModel, PropagationResult, PropagationModelTier  # deprecated
+from .propagation_model import HFPropagationModel, PropagationPrediction, ModeArrival
 from .wwv_test_signal import WWVTestSignalDetector
 from .metrology_service import MetrologyService, MetrologyEngine
 # Phase2AnalyticsService archived 2026-01-22 - replaced by MetrologyService

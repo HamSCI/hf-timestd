@@ -149,6 +149,8 @@ The `HFPropagationModel` class (`propagation_model.py`) computes frequency-depen
   - GIRO ionosonde corrections provide ground-truth hmF2/foF2 at path midpoints.
   - Numerically integrates group delay through Chapman electron density profiles.
   - Evaluates 4 propagation modes (1F, 2F, 3F, 1E) with MUF and geometry checks.
+  - Great-circle path TEC sampling via `_gc_intermediate()` (spherical trigonometry, not linear lat/lon).
+  - Altitude-dependent obliquity mapping: `M(h) = 1/sqrt(1 - (R·cos(e)/(R+h))²)` replaces `1/sin(e)`.
   - Group delay formula: `Δτ = 40.3 × sTEC / (c × f²)`
 
 - **Tier 1: IONEX (Global Ionosphere Maps):**
@@ -194,6 +196,29 @@ Uncertainty adapts based on data source quality and observed variance:
 - IRI-2020: ±4.5 ms (3σ)
 - Parametric: ±9.0 ms (3σ)
 - Blended with tracked observational variance, floored at ±5 ms (3σ)
+
+### 5. Full Pipeline Integration (v6.7.1)
+
+The `HFPropagationModel` is now the sole propagation model throughout the pipeline:
+
+| Consumer | Usage | Previous |
+|----------|-------|----------|
+| `MetrologyEngine._predict_geometric_delay()` | Centers detection search window | `ArrivalPatternMatrix` (unchanged) |
+| `MultiBroadcastFusion` | Mode ambiguity scoring, GNSS VTEC correction | `PhysicsPropagationModel` (migrated) |
+| `BootstrapValidator._get_expected_delay()` | Physics-based expected delay | Static `EXPECTED_DELAYS_MS` dict (replaced) |
+| `ArrivalPatternMatrix` | Self-consistency check, multi-mode windows | Already integrated |
+
+**Deprecated:** `PhysicsPropagationModel` in `physics_propagation.py` is retained for backward compatibility but all callers have been migrated.
+
+### 6. Web API Propagation Endpoints (v6.7.1)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/model/predict` | GET | Single station/frequency delay prediction with all feasible modes |
+| `/model/all-stations` | GET | Predictions for all 17 broadcasts at current UTC |
+| `/model/iono-status` | GET | `IonoDataService` health: data source, cache age, last fetch status |
+
+These endpoints use a lazy-initialized `HFPropagationModel` with receiver coordinates from config.
 
 ---
 
@@ -869,6 +894,15 @@ sudo sysctl -w net.core.rmem_max=26214400
 **Version**: 6.7.0  
 **Last Updated**: February 12, 2026  
 **Purpose**: Technical reference for HF Time Standard developers
+
+**v6.7.1 Release (February 12, 2026) - Propagation Model Full Integration:**
+
+- **Full pipeline migration** — `multi_broadcast_fusion.py` and `bootstrap_validator.py` migrated from `PhysicsPropagationModel` to `HFPropagationModel`.
+- **Great-circle TEC sampling** — `IonoDataService._gc_intermediate()` uses spherical trigonometry for accurate path TEC.
+- **Altitude-dependent obliquity** — Thin-shell mapping `M(h) = 1/sqrt(1-(R·cos(e)/(R+h))²)` replaces `1/sin(e)`.
+- **Web API endpoints** — `/model/predict`, `/model/all-stations`, `/model/iono-status` for live model observability.
+- **Self-consistency check wired** — `HFPropagationModel.self_consistency_check()` integrated into `ArrivalPatternMatrix`.
+- **Deprecated** — `physics_propagation.py` (`PhysicsPropagationModel`) retained for backward compatibility only.
 
 **v6.7.0 Release (February 12, 2026) - Real-Time Ionospheric Propagation Model:**
 

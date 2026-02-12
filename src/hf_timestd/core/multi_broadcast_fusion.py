@@ -207,11 +207,11 @@ HDF5_AVAILABLE = True
 if not HDF5_AVAILABLE:
     logger.warning("HDF5 storage DISABLED")
 
-# Physics Propagation for GNSS Integration
+# Physics Propagation for GNSS Integration (migrated to HFPropagationModel)
 try:
-    from hf_timestd.core.physics_propagation import PhysicsPropagationModel
+    from hf_timestd.core.propagation_model import HFPropagationModel as _HFPropModel
 except ImportError:
-    PhysicsPropagationModel = None
+    _HFPropModel = None
 
 # Arrival Pattern Matrix for physics-based validation
 from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
@@ -588,18 +588,20 @@ class MultiBroadcastFusion:
         self.broadcast_kalman_state_dir.mkdir(parents=True, exist_ok=True)
         self._load_broadcast_kalman_states()
         
-        # Initialize Physics Propagation Model (for GNSS VTEC integration)
-        if PhysicsPropagationModel:
-            self.physics_model = PhysicsPropagationModel(
-                receiver_lat=self.receiver_lat,
-                receiver_lon=self.receiver_lon,
-                enable_pylap=False, # We just want Tier 2/3 for geometric/empirical baseline
-                enable_iri=False,   # We just want the empirical baseline to correct against
-                ionex_dir=Path('/var/lib/timestd/ionex')  # Enable IONEX VTEC
-            )
+        # Initialize HF Propagation Model (for GNSS VTEC integration + mode scoring)
+        if _HFPropModel:
+            try:
+                self.physics_model = _HFPropModel(
+                    receiver_lat=self.receiver_lat,
+                    receiver_lon=self.receiver_lon,
+                    enable_realtime=True
+                )
+            except Exception as e:
+                self.physics_model = None
+                logger.warning(f"HFPropagationModel init failed: {e} - GNSS VTEC integration disabled")
         else:
             self.physics_model = None
-            logger.warning("PhysicsPropagationModel not available - GNSS VTEC integration disabled")
+            logger.warning("HFPropagationModel not available - GNSS VTEC integration disabled")
         
         # Calibration state
         self.calibration_file = calibration_file or (
@@ -2120,23 +2122,23 @@ class MultiBroadcastFusion:
                m.station not in ('GLOBAL_DIFF', 'UNKNOWN', 'TICK', 'CHU_FSK'):
                 try:
                     from datetime import datetime, timezone as tz
-                    candidates = self.physics_model.get_mode_candidates(
+                    prediction = self.physics_model.predict(
                         station=m.station,
                         frequency_mhz=m.frequency_mhz,
-                        timestamp=datetime.fromtimestamp(m.timestamp, tz=tz.utc)
+                        utc_time=datetime.fromtimestamp(m.timestamp, tz=tz.utc)
                     )
-                    if len(candidates) > 1:
+                    feasible = prediction.get_feasible_arrivals()
+                    if len(feasible) > 1:
                         # Multiple modes viable - compute ambiguity penalty
-                        # If top mode has 90%+ probability, minimal penalty
-                        # If top mode has <50% probability, significant penalty
-                        top_prob = candidates[0].get('probability', 1.0)
-                        # Delay spread between top two candidates
-                        delay_spread = abs(candidates[0]['delay_ms'] - candidates[1]['delay_ms'])
+                        # Use delay spread between top two feasible modes
+                        delay_spread = abs(feasible[0].delay_ms - feasible[1].delay_ms)
                         
-                        if top_prob > 0.8:
-                            ambiguity_penalty = 1.0  # Dominant mode, no penalty
-                        elif top_prob > 0.5:
-                            ambiguity_penalty = 0.7 + 0.3 * top_prob  # Mild penalty
+                        # Heuristic: if delay spread is small (<2ms), modes are
+                        # nearly degenerate and ambiguity is less harmful
+                        if delay_spread < 2.0:
+                            ambiguity_penalty = 0.9
+                        elif delay_spread < 5.0:
+                            ambiguity_penalty = 0.7
                         else:
                             ambiguity_penalty = 0.4  # Severe ambiguity
                         
@@ -3379,18 +3381,18 @@ class MultiBroadcastFusion:
                     if m.station == 'GLOBAL_DIFF' or m.station == 'UNKNOWN':
                         continue
                         
-                    # Compute baseline delay (what the system used)
-                    baseline = self.physics_model.compute_delay(
+                    # Compute baseline prediction (what the model predicts)
+                    prediction = self.physics_model.predict(
                         station=m.station,
                         frequency_mhz=m.frequency_mhz,
-                        observed_arrival_ms=0,
-                        timestamp=datetime.fromtimestamp(m.timestamp, tz=timezone.utc).replace(tzinfo=None)
+                        utc_time=datetime.fromtimestamp(m.timestamp, tz=timezone.utc)
                     )
+                    primary = prediction.get_primary_arrival()
                     
-                    if baseline and baseline.n_hops > 0:
+                    if primary and primary.mode.n_hops > 0:
                         # Extract model TEC (what was used to compute D_clock)
-                        model_tec = baseline.tec_tecu if baseline.tec_tecu else 20.0
-                        n_hops = baseline.n_hops
+                        model_tec = primary.slant_tec_tecu if primary.slant_tec_tecu else 20.0
+                        n_hops = primary.mode.n_hops
                         
                         # Calculate TEC difference
                         tec_diff = model_tec - vtec_tecu  # Positive if model overestimated
@@ -3414,7 +3416,7 @@ class MultiBroadcastFusion:
                         # Apply correction only if significant (> 0.1 ms)
                         if abs(delta_iono_ms) > 0.1:
                             m.d_clock_ms = original_d_clock + delta_iono_ms
-                            m.propagation_mode = f"{baseline.propagation_mode}+GNSS_TEC"
+                            m.propagation_mode = f"{prediction.primary_mode}+GNSS_TEC"
                             m.confidence = min(1.0, m.confidence * 1.2)  # Boost confidence
                             corrections_applied += 1
                             
@@ -3425,7 +3427,7 @@ class MultiBroadcastFusion:
                             )
                         else:
                             # Small correction - just validate
-                            m.propagation_mode = f"{baseline.propagation_mode}+GNSS_VALIDATED"
+                            m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
                             m.confidence = min(1.0, m.confidence * 1.1)
                             logger.debug(
                                 f"  {m.station} {m.frequency_mhz}MHz: TEC validated "

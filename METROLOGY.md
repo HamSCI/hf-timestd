@@ -298,6 +298,20 @@ where:
 
 For a vertical TEC of 20 TECU at 10 MHz, the excess delay is ~0.27 ms. At 5 MHz, it's ~1.07 ms (4× larger). At oblique incidence, the slant factor increases the effective TEC.
 
+#### Great-Circle Path TEC Sampling (v6.7.1)
+
+TEC is sampled along the great-circle path between transmitter and receiver (not a linear lat/lon interpolation). The `IonoDataService._gc_intermediate()` method computes intermediate points on the great circle using spherical trigonometry, ensuring accurate TEC integration for long paths (e.g., BPM at 11,504 km).
+
+#### Altitude-Dependent Obliquity Mapping (v6.7.1)
+
+The vertical-to-slant TEC conversion uses a thin-shell mapping function that accounts for reflection height:
+
+```
+M(h) = 1 / sqrt(1 - (R·cos(e) / (R + h))²)
+```
+
+where R is the Earth's radius, e is the elevation angle, and h is the reflection height. This replaces the simpler `1/sin(e)` approximation, which diverges at low elevations and ignores the altitude of the ionospheric shell.
+
 ### Multi-Mode Predictions
 
 For each (station, frequency) pair, the model evaluates four propagation modes:
@@ -344,9 +358,12 @@ If the observed differential delay between two frequencies on the same station p
 
 | File | Purpose |
 |------|---------|
-| `src/hf_timestd/core/propagation_model.py` | `HFPropagationModel` — delay prediction, multi-mode, self-consistency |
-| `src/hf_timestd/core/iono_data_service.py` | `IonoDataService` — WAM-IPE/GIRO fetch, cache, interpolation, fallback |
-| `src/hf_timestd/core/arrival_pattern_matrix.py` | `ArrivalPatternMatrix` — integrates model into arrival predictions |
+| `src/hf_timestd/core/propagation_model.py` | `HFPropagationModel` — delay prediction, multi-mode, self-consistency, altitude-dependent obliquity |
+| `src/hf_timestd/core/iono_data_service.py` | `IonoDataService` — WAM-IPE/GIRO fetch, cache, great-circle TEC sampling, fallback |
+| `src/hf_timestd/core/arrival_pattern_matrix.py` | `ArrivalPatternMatrix` — integrates model into arrival predictions, self-consistency check |
+| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion pipeline — migrated to `HFPropagationModel` for mode scoring and GNSS VTEC correction |
+| `src/hf_timestd/core/bootstrap_validator.py` | Bootstrap — uses `HFPropagationModel` for physics-based expected delay (replaces static bounds) |
+| `web-api/routers/propagation.py` | Web API — `/model/predict`, `/model/all-stations`, `/model/iono-status` endpoints |
 | `tests/test_propagation_model.py` | 23 tests covering all components |
 
 ---

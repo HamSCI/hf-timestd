@@ -8,7 +8,7 @@
 
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
-**Key Capabilities (V6.7.0):**
+**Key Capabilities (V6.7.1):**
 
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **Digital RF (HDF5)** format.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
@@ -152,7 +152,7 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Status
 
-**Testing (V6.7.0)** - Active development and field testing in progress.
+**Testing (V6.7.1)** - Active development and field testing in progress.
 
 ## Credits & Support
 
@@ -161,6 +161,15 @@ The system is composed of eight independent services that form a pipeline:
 **License:** MIT - See [LICENSE](LICENSE)
 
 ### Recent Updates
+
+**v6.7.1 (February 12, 2026) - Propagation Model Full Integration**
+
+- ✅ **Full pipeline migration** - `multi_broadcast_fusion.py` and `bootstrap_validator.py` migrated from `PhysicsPropagationModel` to `HFPropagationModel`
+- ✅ **Great-circle TEC sampling** - `IonoDataService._gc_intermediate()` uses spherical trigonometry for accurate path TEC
+- ✅ **Altitude-dependent obliquity** - Thin-shell mapping `M(h)` replaces `1/sin(e)` for low-elevation accuracy
+- ✅ **Web API endpoints** - `/model/predict`, `/model/all-stations`, `/model/iono-status` for live model observability
+- ✅ **Self-consistency check wired** - `HFPropagationModel.self_consistency_check()` integrated into `ArrivalPatternMatrix`
+- ✅ **Deprecated** - `physics_propagation.py` retained for backward compatibility; all callers migrated
 
 **v6.7.0 (February 12, 2026) - Real-Time Ionospheric Propagation Model**
 

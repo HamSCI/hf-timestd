@@ -1155,6 +1155,48 @@ class ArrivalPatternMatrix:
             for a in arrivals
         }
     
+    def check_model_consistency(
+        self,
+        station: str,
+        observed_delays: Dict[float, float],
+        utc_time: Optional[datetime] = None
+    ) -> Optional[Dict]:
+        """
+        Check self-consistency between model and multi-frequency observations.
+        
+        Delegates to HFPropagationModel.self_consistency_check() when available.
+        Should be called by the fusion service when it has observed delays from
+        multiple channels for the same station.
+        
+        Args:
+            station: Station name (e.g., 'WWV')
+            observed_delays: Dict mapping frequency_mhz → observed_delay_ms
+            utc_time: UTC time of observations
+            
+        Returns:
+            Dict with consistency metrics, or None if check unavailable
+        """
+        if self._prop_model is None or len(observed_delays) < 2:
+            return None
+        
+        if utc_time is None:
+            utc_time = datetime.now(timezone.utc)
+        
+        try:
+            result = self._prop_model.self_consistency_check(
+                station, observed_delays, utc_time
+            )
+            if not result.get('consistent', True):
+                logger.warning(
+                    f"Model inconsistency for {station}: "
+                    f"RMS residual={result.get('rms_residual_ms', 0):.2f} ms "
+                    f"across {result.get('n_frequencies', 0)} frequencies"
+                )
+            return result
+        except Exception as e:
+            logger.debug(f"Consistency check failed: {e}")
+            return None
+
     def log_matrix_summary(self, utc_time: Optional[datetime] = None):
         """Log a summary of the current arrival matrix."""
         matrix = self.get_expected_arrivals(utc_time)

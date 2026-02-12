@@ -521,9 +521,36 @@ class BootstrapValidator:
         return self.validated_offset_sec
     
     def _get_expected_delay(self, station: str, frequency_mhz: float) -> float:
-        """Get expected propagation delay for a station."""
+        """Get expected propagation delay for a station.
+        
+        Uses HFPropagationModel when available for physics-based prediction.
+        Falls back to static midpoint of geographic bounds.
+        """
+        if not hasattr(self, '_prop_model'):
+            self._prop_model = None
+            try:
+                from .propagation_model import HFPropagationModel
+                self._prop_model = HFPropagationModel(
+                    receiver_lat=self.receiver_lat,
+                    receiver_lon=self.receiver_lon,
+                    enable_realtime=False  # Don't need real-time during bootstrap
+                )
+            except Exception:
+                pass
+        
+        if self._prop_model is not None:
+            try:
+                from datetime import datetime, timezone
+                prediction = self._prop_model.predict(
+                    station, frequency_mhz, datetime.now(timezone.utc)
+                )
+                if prediction.primary_delay_ms > 0:
+                    return prediction.primary_delay_ms
+            except Exception:
+                pass
+        
+        # Static fallback
         bounds = self.EXPECTED_DELAYS_MS.get(station, (10, 50))
-        # Return midpoint as estimate
         return (bounds[0] + bounds[1]) / 2
     
     def get_offset_correction(self) -> Optional[float]:

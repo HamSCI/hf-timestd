@@ -325,6 +325,9 @@ class MetrologyEngine:
         3. Simple light-speed calculation with ionospheric overhead (last resort)
         
         Returns: (expected_delay_ms, distance_km, uncertainty_1sigma_ms)
+        
+        Side effect: populates self._last_prediction_meta with model metadata
+        for traceability (data_source, model_confidence, propagation_mode).
         """
         from datetime import datetime, timezone
         if utc_time is not None:
@@ -339,6 +342,11 @@ class MetrologyEngine:
                     station, self.frequency_mhz
                 )
                 if arrival is not None:
+                    self._last_prediction_meta = {
+                        'data_source': getattr(arrival, 'data_source', 'matrix'),
+                        'model_confidence': getattr(arrival, 'model_confidence', 0.0),
+                        'propagation_mode': getattr(arrival, 'propagation_mode', '1F'),
+                    }
                     return (
                         arrival.expected_delay_ms,
                         arrival.great_circle_km,
@@ -347,17 +355,23 @@ class MetrologyEngine:
             except Exception as e:
                 logger.debug(f"ArrivalPatternMatrix lookup failed: {e}")
         
-        # Try HFPropagationModel directly
+        # Try HFPropagationModel directly (cached instance)
         if self.precise_lat is not None and self.precise_lon is not None:
             try:
-                from .propagation_model import HFPropagationModel
-                prop_model = HFPropagationModel(
-                    receiver_lat=self.precise_lat,
-                    receiver_lon=self.precise_lon,
-                    enable_realtime=True
-                )
-                prediction = prop_model.predict(station, self.frequency_mhz, dt)
+                if not hasattr(self, '_prop_model_fallback') or self._prop_model_fallback is None:
+                    from .propagation_model import HFPropagationModel
+                    self._prop_model_fallback = HFPropagationModel(
+                        receiver_lat=self.precise_lat,
+                        receiver_lon=self.precise_lon,
+                        enable_realtime=True
+                    )
+                prediction = self._prop_model_fallback.predict(station, self.frequency_mhz, dt)
                 if prediction.primary_delay_ms > 0:
+                    self._last_prediction_meta = {
+                        'data_source': prediction.data_source,
+                        'model_confidence': prediction.model_confidence,
+                        'propagation_mode': prediction.primary_mode,
+                    }
                     return (
                         prediction.primary_delay_ms,
                         prediction.distance_km,
@@ -389,6 +403,11 @@ class MetrologyEngine:
         # Simple ionospheric overhead estimate (~10-20% longer than light time)
         expected_delay_ms = light_time_ms * 1.15
         
+        self._last_prediction_meta = {
+            'data_source': 'vacuum_fallback',
+            'model_confidence': 0.0,
+            'propagation_mode': 'vacuum',
+        }
         return expected_delay_ms, dist_km, 15.0  # 15ms 1-sigma uncertainty
 
     @staticmethod
@@ -857,6 +876,8 @@ class MetrologyEngine:
                    f"(expected={expected_delay_ms:.1f}ms), error={timing_error_ms:+.2f}ms, "
                    f"corr_SNR={corr_snr_db:.1f}dB")
         
+        # Include model metadata for traceability (M4)
+        meta = getattr(self, '_last_prediction_meta', {})
         return {
             'station': station_name,
             'frequency_hz': tone_freq_hz,
@@ -869,6 +890,9 @@ class MetrologyEngine:
             'peak_correlation': float(peak_val),
             'detected': True,
             'rejection_reason': None,
+            'model_data_source': meta.get('data_source', ''),
+            'model_confidence': meta.get('model_confidence', 0.0),
+            'propagation_mode': meta.get('propagation_mode', ''),
         }
 
     def process_minute(

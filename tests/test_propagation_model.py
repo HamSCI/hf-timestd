@@ -398,10 +398,11 @@ class TestNumericalIntegration:
         
         model = HFPropagationModel(38.92, -92.13, enable_realtime=False)
         
-        # Known: 40.3 * TEC / (c * f²)
-        # For TEC=20 TECU, f=10 MHz, vertical:
-        # delay = 40.3 * 20e16 / (3e8 * (10e6)²) = 40.3 * 2e17 / (3e8 * 1e14)
-        #       = 8.06e18 / 3e22 = 2.687e-4 s = 0.269 ms
+        # Known: 40.3 * sTEC / (c * f²) per one-way pass
+        # Each hop traverses the ionosphere twice (up and down), so total = 2× one-way.
+        # For TEC=20 TECU, f=10 MHz, vertical (1 hop):
+        # one_way = 40.3 * 20e16 / (3e8 * (10e6)²) = 0.269 ms
+        # round_trip = 2 * 0.269 = 0.537 ms
         
         delay = model._tec_group_delay(
             tec_tecu=20.0,
@@ -410,7 +411,8 @@ class TestNumericalIntegration:
             elevation_deg=90.0  # Vertical
         )
         
-        expected = 40.3 * 20e16 / (3e8 * (10e6)**2) * 1000  # ms
+        one_way = 40.3 * 20e16 / (3e8 * (10e6)**2) * 1000  # ms
+        expected = 2.0 * one_way  # Round-trip through ionosphere per hop
         # Should be close (within 1% due to using exact c)
         assert abs(delay - expected) / expected < 0.01
     

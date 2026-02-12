@@ -128,10 +128,79 @@ The uncertainty window now adapts based on:
 23 new tests, all passing. 76 existing tests pass with no regressions.
 3 pre-existing failures unrelated to this change.
 
+## Critique & Fixes (same session)
+
+Full critique documented in `SESSION_2026_02_12_PROPAGATION_MODEL_CRITIQUE.md`.
+
+### Must-Fix (all completed)
+
+| # | Issue | Fix |
+|---|-------|-----|
+| B3 | TEC fallback missing ×2 factor — iono delay underestimated 2× | `propagation_model.py`: `delay_s * 2.0 * n_hops` |
+| B1 | HFPropagationModel instantiated per-call in metrology_engine | Cached on `self._prop_model_fallback` |
+| P1 | Midpoint iono for multi-hop — wrong params for 2F/3F | New `_get_mode_iono_params()` + `_intermediate_point()` for great-circle sampling |
+| U1 | IonoDataService never started — v6.7 dead on arrival | Wired `start()`/`stop()` into `metrology_service.py` lifecycle |
+
+### Should-Fix (all completed)
+
+| # | Issue | Fix |
+|---|-------|-----|
+| B2 | Singleton re-parameterization silent | Warning logged when params differ |
+| B4 | `import requests` inline in 5 places | Module-level `_requests` with fallback |
+| B5 | Cache dir PermissionError crashes init | try/except with tempdir fallback |
+| B6 | GIRO station list never refreshed | Hourly refresh via `_giro_stations_fetched` timestamp |
+| P3 | Chapman scale height fixed at 60 km | Dynamic `H = 0.22 * hmF2`, clamped [40, 90] |
+| P4 | E-layer NmE=10% of NmF2 at night | cos² solar taper: 0 at night, 1 at noon |
+| Q1 | Three independent parametric fallbacks | `_parametric_iono()` delegates to `IonoDataService._climatological_fallback()` |
+| Q2 | Station coords hardcoded in propagation_model.py | Import from `wwv_constants.STATION_LOCATIONS` |
+
+### Test update
+
+- `test_tec_group_delay` updated to expect round-trip (×2) delay
+- All 23 tests pass after fixes
+
+### Nice-to-have / Remaining (all completed)
+
+| # | Issue | Fix |
+|---|-------|-----|
+| M1+M4 | No model traceability in L1 measurements | `_predict_geometric_delay` populates `_last_prediction_meta`; detection dicts include `model_data_source`, `model_confidence`, `propagation_mode` |
+| M3 | Self-consistency check not wired | `ArrivalPatternMatrix.check_model_consistency()` delegates to `HFPropagationModel.self_consistency_check()` |
+| P5 | Path TEC sampling used linear lat/lon interpolation | `_gc_intermediate()` great-circle interpolation in `iono_data_service.py` |
+| P6 | Constant obliquity factor 1/sin(e) | Altitude-dependent thin-shell mapping M(h) = 1/√(1-(R·cos(e)/(R+h))²) |
+| U2 | No web-api model endpoint | `/propagation/model/predict`, `/model/all-stations`, `/model/iono-status` |
+| Zombie | `multi_broadcast_fusion.py` used deprecated `PhysicsPropagationModel` | Migrated to `HFPropagationModel` (import, init, mode scoring, GNSS VTEC) |
+| Zombie | `bootstrap_validator._get_expected_delay()` used static bounds | Now uses `HFPropagationModel.predict()` with static fallback |
+| Zombie | `physics_propagation.py` not marked deprecated | Added deprecation notice; exported `HFPropagationModel` from `__init__.py` |
+
+## Files Modified This Session
+
+- `src/hf_timestd/core/propagation_model.py` — B3, P1, Q1, Q2, P6 fixes
+- `src/hf_timestd/core/iono_data_service.py` — B2, B4, B5, B6, P3, P4, P5 fixes
+- `src/hf_timestd/core/metrology_engine.py` — B1, M1+M4 fixes
+- `src/hf_timestd/core/metrology_service.py` — U1 fix (IonoDataService lifecycle)
+- `src/hf_timestd/core/arrival_pattern_matrix.py` — M3 (consistency check method)
+- `src/hf_timestd/core/multi_broadcast_fusion.py` — Zombie migration to HFPropagationModel
+- `src/hf_timestd/core/bootstrap_validator.py` — Zombie: HFPropagationModel in `_get_expected_delay`
+- `src/hf_timestd/core/physics_propagation.py` — Deprecation notice
+- `src/hf_timestd/core/__init__.py` — Export HFPropagationModel
+- `web-api/routers/propagation.py` — U2: live model prediction endpoints
+- `tests/test_propagation_model.py` — updated TEC test for ×2 factor
+- `docs/changes/SESSION_2026_02_12_PROPAGATION_MODEL_CRITIQUE.md` — new (full critique)
+
+## Documentation Updated
+
+- `METROLOGY.md` — Great-circle TEC sampling, altitude-dependent obliquity, expanded key files table
+- `ARCHITECTURE.md` — Full pipeline data flow (fusion, bootstrap, web-api), deprecated modules table, version bump to v6.7.1
+- `TECHNICAL_REFERENCE.md` — Full pipeline integration section, web-API endpoints table, v6.7.1 release notes
+- `README.md` — v6.7.1 release notes, version bump
+- `CRITIC_CONTEXT.md` — Rewritten for detection methodology critique (0300 UTC dropout incident)
+
 ## Next Steps
 
-- Install `netCDF4` and `boto3` on production for WAM-IPE ingestion
-- Start `IonoDataService` in the metrology service lifecycle
+- Diagnose 0300 UTC detection dropout on WWV/WWVH (see CRITIC_CONTEXT.md)
+- Fix TSL2 chrony feed (-1750µs offset)
+- Install `requests` (and optionally `netCDF4`, `boto3`) on production for WAM-IPE ingestion
+- Deploy updated code to /opt/hf-timestd and restart services
 - Validate multi-hop predictions against observed CHU 7.85 MHz arrivals
-- Expose propagation model diagnostics via web-api
-- Compare model TEC with GNSS VTEC measurements
+- Compare model TEC with GNSS VTEC measurements via `/propagation/model/iono-status`
+- Remove `physics_propagation.py` once no external consumers remain

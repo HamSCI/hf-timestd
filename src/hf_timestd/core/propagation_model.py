@@ -216,12 +216,10 @@ class HFPropagationModel:
         self.receiver_lon = receiver_lon
         self.enable_realtime = enable_realtime
         
-        # Station locations (from wwv_constants)
+        # Station locations (canonical source: wwv_constants)
+        from .wwv_constants import STATION_LOCATIONS as _SL
         self.station_locations = {
-            'WWV': (40.6781, -105.0469),
-            'WWVH': (21.9886, -159.7642),
-            'CHU': (45.2950, -75.7533),
-            'BPM': (34.9500, 109.5500),
+            k: (v['lat'], v['lon']) for k, v in _SL.items()
         }
         
         # Pre-compute great circle distances
@@ -305,16 +303,19 @@ class HFPropagationModel:
                 timestamp=utc_time, distance_km=0.0
             )
         
-        # Get ionospheric parameters along the path
+        # Get station coordinates
         station_lat, station_lon = self.station_locations[station]
-        midpoint_lat = (self.receiver_lat + station_lat) / 2
-        midpoint_lon = (self.receiver_lon + station_lon) / 2
         
-        iono_params = self._get_iono_params(midpoint_lat, midpoint_lon, utc_time)
-        
-        # Evaluate each propagation mode
+        # Evaluate each propagation mode with per-mode iono params
+        # sampled at the actual reflection points along the great circle
         arrivals = []
         for mode in modes:
+            iono_params = self._get_mode_iono_params(
+                n_hops=mode.n_hops,
+                station_lat=station_lat,
+                station_lon=station_lon,
+                utc_time=utc_time
+            )
             arrival = self._evaluate_mode(
                 mode=mode,
                 distance_km=distance_km,
@@ -441,30 +442,42 @@ class HFPropagationModel:
         lon: float,
         utc_time: datetime
     ) -> Dict:
-        """Parametric ionospheric model fallback."""
-        # Local solar time
-        lst = utc_time.hour + utc_time.minute / 60.0 + lon / 15.0
-        lst = lst % 24.0
+        """Parametric ionospheric model fallback.
         
-        # Diurnal hmF2
-        diurnal_phase = (lst - 14.0) / 24.0 * 2 * math.pi
-        hmF2 = 300.0 - 50.0 * math.cos(diurnal_phase)
-        
-        # Diurnal foF2
-        foF2 = 5.5 + 2.5 * math.cos(diurnal_phase)
-        
-        NmF2 = 1.24e10 * foF2 ** 2
-        TEC = 5.0 + 35.0 * (1 + math.cos(diurnal_phase)) / 2.0
-        
-        return {
-            'hmF2_km': hmF2,
-            'hmE_km': 110.0,
-            'NmF2_m3': NmF2,
-            'foF2_MHz': foF2,
-            'TEC_TECU': TEC,
-            'source': 'parametric',
-            'confidence': 0.2,
-        }
+        Delegates to IonoDataService._climatological_fallback() for the canonical
+        parametric model (includes seasonal, equatorial anomaly, and latitude terms).
+        Falls back to a minimal inline model only if IonoDataService is unavailable.
+        """
+        try:
+            from .iono_data_service import IonoDataService
+            point = IonoDataService._climatological_fallback(lat, lon, utc_time)
+            return {
+                'hmF2_km': point.hmF2_km,
+                'hmE_km': point.hmE_km,
+                'NmF2_m3': point.NmF2_m3,
+                'foF2_MHz': point.foF2_MHz,
+                'TEC_TECU': point.TEC_TECU,
+                'source': 'parametric',
+                'confidence': 0.2,
+            }
+        except Exception:
+            # Minimal inline fallback if IonoDataService import fails
+            lst = utc_time.hour + utc_time.minute / 60.0 + lon / 15.0
+            lst = lst % 24.0
+            diurnal_phase = (lst - 14.0) / 24.0 * 2 * math.pi
+            hmF2 = 300.0 - 50.0 * math.cos(diurnal_phase)
+            foF2 = 5.5 + 2.5 * math.cos(diurnal_phase)
+            NmF2 = 1.24e10 * foF2 ** 2
+            TEC = 5.0 + 35.0 * (1 + math.cos(diurnal_phase)) / 2.0
+            return {
+                'hmF2_km': hmF2,
+                'hmE_km': 110.0,
+                'NmF2_m3': NmF2,
+                'foF2_MHz': foF2,
+                'TEC_TECU': TEC,
+                'source': 'parametric',
+                'confidence': 0.2,
+            }
     
     def _evaluate_mode(
         self,
@@ -575,12 +588,18 @@ class HFPropagationModel:
         # Ionospheric group delay
         # Method: numerical integration through electron density profile if available,
         # otherwise use TEC-based approximation
+        # Use the first reflection point for Ne profile lookup
+        first_reflect_frac = 1.0 / (2.0 * n_hops)
+        reflect_lat, reflect_lon = self._intermediate_point(
+            self.receiver_lat, self.receiver_lon,
+            station_lat, station_lon, first_reflect_frac
+        )
         iono_delay_ms = self._compute_iono_delay(
             frequency_mhz=frequency_mhz,
             n_hops=n_hops,
             iono_params=iono_params,
-            midpoint_lat=(self.receiver_lat + station_lat) / 2,
-            midpoint_lon=(self.receiver_lon + station_lon) / 2,
+            midpoint_lat=reflect_lat,
+            midpoint_lon=reflect_lon,
             utc_time=utc_time,
             elevation_deg=elevation_deg
         )
@@ -688,17 +707,13 @@ class HFPropagationModel:
         freq_hz = frequency_mhz * 1e6
         freq_sq = freq_hz ** 2
         
-        # Obliquity factor (secant of zenith angle at ionosphere)
-        # For a curved Earth, this varies with altitude, but we use a
-        # simplified constant factor based on the launch elevation
-        if elevation_deg > 1.0:
-            obliquity = 1.0 / math.sin(math.radians(elevation_deg))
-        else:
-            obliquity = 10.0  # Cap at very low elevations
-        
         # Integrate (n_g - 1) * ds through the profile
         # n_g - 1 ≈ 0.5 * f_p² / f² = 0.5 * Ne * e² / (4π²ε₀mₑ * f²)
         #         = 40.3 * Ne / f²  (with Ne in m^-3, f in Hz)
+        
+        elev_rad = math.radians(max(1.0, elevation_deg))
+        cos_elev = math.cos(elev_rad)
+        R = EARTH_RADIUS_KM
         
         delay_s = 0.0
         for i in range(len(altitudes_km) - 1):
@@ -726,6 +741,13 @@ class HFPropagationModel:
             else:
                 # Full expression (near reflection)
                 dn_g = 1.0 / math.sqrt(1.0 - ratio) - 1.0
+            
+            # Altitude-dependent obliquity (thin-shell mapping function)
+            # M(h) = 1 / sqrt(1 - (R*cos(e)/(R+h))²)
+            # More accurate than constant 1/sin(e), especially at low elevations
+            h_mid = (altitudes_km[i] + altitudes_km[i + 1]) / 2.0
+            sin_sq = 1.0 - (R * cos_elev / (R + h_mid)) ** 2
+            obliquity = 1.0 / math.sqrt(max(0.01, sin_sq))
             
             # Path through this layer (oblique)
             ds_m = dh_m * obliquity
@@ -779,8 +801,8 @@ class HFPropagationModel:
         # Group delay = 40.3 * sTEC / (c * f²)
         delay_s = K_GROUP_DELAY * stec / (C_LIGHT_M_S * freq_hz ** 2)
         
-        # Each hop traverses the ionosphere
-        delay_ms = delay_s * n_hops * 1000.0
+        # Each hop traverses the ionosphere twice (up and down)
+        delay_ms = delay_s * 2.0 * n_hops * 1000.0
         
         return delay_ms
     
@@ -969,3 +991,95 @@ class HFPropagationModel:
         c = 2 * math.asin(math.sqrt(a))
         
         return EARTH_RADIUS_KM * c
+
+    @staticmethod
+    def _intermediate_point(
+        lat1: float, lon1: float, lat2: float, lon2: float, fraction: float
+    ) -> Tuple[float, float]:
+        """
+        Compute an intermediate point along the great circle at a given fraction.
+
+        Uses the spherical interpolation formula so that multi-hop reflection
+        points are placed correctly on the great circle rather than using
+        simple linear lat/lon averaging.
+
+        Args:
+            lat1, lon1: Start point (degrees)
+            lat2, lon2: End point (degrees)
+            fraction: 0.0 = start, 1.0 = end
+
+        Returns:
+            (lat, lon) in degrees
+        """
+        lat1_r = math.radians(lat1)
+        lon1_r = math.radians(lon1)
+        lat2_r = math.radians(lat2)
+        lon2_r = math.radians(lon2)
+
+        d = 2 * math.asin(math.sqrt(
+            math.sin((lat2_r - lat1_r) / 2) ** 2 +
+            math.cos(lat1_r) * math.cos(lat2_r) *
+            math.sin((lon2_r - lon1_r) / 2) ** 2
+        ))
+
+        if d < 1e-12:
+            return lat1, lon1
+
+        a = math.sin((1 - fraction) * d) / math.sin(d)
+        b = math.sin(fraction * d) / math.sin(d)
+
+        x = a * math.cos(lat1_r) * math.cos(lon1_r) + b * math.cos(lat2_r) * math.cos(lon2_r)
+        y = a * math.cos(lat1_r) * math.sin(lon1_r) + b * math.cos(lat2_r) * math.sin(lon2_r)
+        z = a * math.sin(lat1_r) + b * math.sin(lat2_r)
+
+        lat = math.degrees(math.atan2(z, math.sqrt(x ** 2 + y ** 2)))
+        lon = math.degrees(math.atan2(y, x))
+        return lat, lon
+
+    def _get_mode_iono_params(
+        self,
+        n_hops: int,
+        station_lat: float,
+        station_lon: float,
+        utc_time: datetime
+    ) -> Dict:
+        """
+        Get ionospheric parameters averaged over the actual reflection points
+        for a given number of hops.
+
+        For 1-hop: single midpoint (fraction 0.5).
+        For N-hop: reflection points at fractions 1/(2N), 3/(2N), ..., (2N-1)/(2N).
+
+        This avoids the error of using the path midpoint for multi-hop modes
+        where the ionospheric pierce points are distributed along the path.
+        """
+        if n_hops <= 1:
+            # Single hop — midpoint is correct
+            mid_lat, mid_lon = self._intermediate_point(
+                self.receiver_lat, self.receiver_lon,
+                station_lat, station_lon, 0.5
+            )
+            return self._get_iono_params(mid_lat, mid_lon, utc_time)
+
+        # Multi-hop: sample at each reflection point and average
+        params_list = []
+        for i in range(n_hops):
+            frac = (2 * i + 1) / (2 * n_hops)
+            pt_lat, pt_lon = self._intermediate_point(
+                self.receiver_lat, self.receiver_lon,
+                station_lat, station_lon, frac
+            )
+            params_list.append(self._get_iono_params(pt_lat, pt_lon, utc_time))
+
+        # Average the numeric parameters, keep metadata from first point
+        avg = dict(params_list[0])
+        for key in ('hmF2_km', 'hmE_km', 'NmF2_m3', 'foF2_MHz', 'TEC_TECU'):
+            vals = [p.get(key, 0.0) for p in params_list if key in p]
+            if vals:
+                avg[key] = sum(vals) / len(vals)
+
+        # Confidence is the minimum across all points (weakest link)
+        confidences = [p.get('confidence', 0.0) for p in params_list]
+        avg['confidence'] = min(confidences) if confidences else 0.0
+
+        return avg

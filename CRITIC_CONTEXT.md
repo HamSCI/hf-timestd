@@ -10,115 +10,165 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: DEPLOY, VALIDATE, AND CRITIQUE THE NEW PROPAGATION MODEL
+## 📋 NEXT SESSION: CRITIQUE AND DEBUG THE DETECTION METHODOLOGY
 
-**Objective:** Deploy the v6.7 real-time ionospheric propagation model to production, validate it against live data, and perform a thorough critique looking for bugs, missed opportunities, and architectural weaknesses.
+**Objective:** Diagnose and fix the detection dropout observed at ~0300 UTC on 2026-02-12, where WWV and WWVH detections collapsed while CHU continued. The TSL2 chrony feed is currently worse than TSL1 (-1750µs offset, rejected). This session should perform a thorough critique of the entire detection and fusion pipeline, identify root causes, and implement fixes.
 
-**Context:** The propagation model has been implemented and tested offline (23 tests passing). It replaces the static vacuum × 1.15 delay model with frequency-dependent, time-varying group delay predictions using real-time WAM-IPE and GIRO ionospheric data. Multi-hop arrivals (1F, 2F, 3F, 1E) are now predicted with adaptive uncertainty windows. The model needs production deployment and validation against live HF observations.
+**Context:** The system uses matched-filter correlation to detect timing tones from WWV (1000 Hz), WWVH (1200 Hz), CHU (1000 Hz), and BPM (1000 Hz) in IQ data from a GPSDO-locked RX888 SDR via ka9q-radio (radiod). Only tones ≥100ms are used (5ms/10ms ticks dropped due to jitter). For WWV/WWVH, only the 800ms minute marker (second 0) is measured — **one detection attempt per station per minute**. CHU gets ~15 attempts/min (300ms tones on seconds 1–28, 40–49). This asymmetry means WWV/WWVH are fragile: a single failed detection = zero measurements for that minute.
 
 ---
 
-## 🚨 CRITIQUE TARGETS FOR THIS SESSION
+## 🚨 INCIDENT: ~0300 UTC DETECTION DROPOUT (2026-02-12)
 
-### 1. Deployment Integration — Wire IonoDataService into Production
+### Observed Symptoms
 
-The `IonoDataService` singleton exists but is NOT yet started in the metrology service lifecycle. Critique:
+From the dashboard screenshot and chrony output:
 
-- **`metrology_service.py`**: Does NOT call `IonoDataService.get_instance().start()`. The background fetch thread never runs in production.
-- **Cache directory**: `/var/lib/timestd/iono_cache/` may not exist. No systemd `ExecStartPre` creates it.
-- **Optional dependencies**: `netCDF4` and `boto3` are in `[iono]` extras but not in the base install. If missing, does the import fail gracefully?
-- **Network access**: WAM-IPE fetch requires outbound HTTPS to AWS S3 and NOMADS. Production machines may have restricted egress. Does the service degrade gracefully?
+1. **~0300 UTC**: Sharp dropout of detections on ALL WWV channels (2.5, 5, 10, 15, 20, 25 MHz) and ALL WWVH channels (2.5, 5, 10, 15 MHz)
+2. **CHU 14.67 MHz**: Continues with detections through the gap — **CHU is unaffected**
+3. **Recovery**: Varies by frequency. Higher frequencies (15, 20 MHz) recover first (~0600), lower frequencies (2.5, 5 MHz) recover later (~0800+). This is consistent with sunrise terminator restoring HF propagation.
+4. **WWVH 15 MHz**: Shows suspiciously high SNR spikes (>50 dB) after recovery — possible false detections or interference
+5. **TSL2 chrony feed**: -1750µs offset (marked `x` = rejected by chrony), while TSL1 shows +79µs. The fusion layer is producing bad timing from sparse/noisy detections.
 
-### 2. Code Quality — New Modules Need Scrutiny
+### Chrony Status (12:49 UTC)
 
-Review `propagation_model.py` and `iono_data_service.py` for:
+```
+#? TSL1    0   4    42    54    +79us[  +79us] +/- 2000us
+#x TSL2    0   4    10    70  -1750us[-1750us] +/-  600us
+^* GPS     1   3   377     7  -1985ns[-2402ns] +/-   92us
+```
 
-- **Thread safety**: `IonoDataService` uses a background thread with `threading.Lock`. Are all shared state accesses properly guarded?
-- **Error handling**: What happens when WAM-IPE fetch fails? GIRO returns malformed data? Network timeout?
-- **Resource leaks**: Does the background thread stop cleanly on service shutdown? Is there a `stop()` method?
-- **Memory**: WAM-IPE grids can be large. Is the cache bounded? Old files cleaned up?
-- **Singleton pattern**: `IonoDataService.get_instance()` — is it truly safe across multiple threads/processes?
+- **TSL1** (L1 Kalman): +79µs, reachability 42 (intermittent), ±2000µs uncertainty — marginal but tracking
+- **TSL2** (L2 Kalman): -1750µs, reachability 10 (very poor), rejected by chrony — **broken**
+- **GPS**: -2ns, reachability 377 (perfect) — the reference is fine
 
-### 3. Physics Correctness — Verify the Ionospheric Model
+### Key Diagnostic Questions
 
-An ionospheric scientist should verify:
+1. **Why did WWV/WWVH drop at 0300 but CHU survived?** CHU 14.67 MHz is a higher frequency than most WWV channels, and CHU is closer (1522 km vs 1120 km). But WWV 15 MHz and 20 MHz also dropped — same frequency range. Is this purely propagation, or is the detection pipeline more fragile for WWV/WWVH?
+2. **Why is TSL2 at -1750µs?** The L2 Kalman filter should be robust to detection gaps. Is it being corrupted by false detections during recovery? Is the Kalman divergence recovery (>20ms threshold) too loose?
+3. **Are the WWVH 15 MHz high-SNR spikes (>50 dB) real?** If these are false detections, they could be corrupting the fusion.
+4. **Is the 1-per-minute WWV/WWVH detection rate fundamentally too fragile?** CHU gets 15 attempts/min. WWV/WWVH get 1. Should we reconsider the 5ms tick decision?
 
-- **Chapman profile**: Is the scale height (H) calculation correct? Does it produce realistic Ne(h) profiles?
-- **Group delay integration**: Is the numerical integration through Ne(h) correctly computing excess group delay? The formula `Δτ = 40.3 × sTEC / (c × f²)` should agree with the numerical integration to within ~5%.
-- **MUF calculation**: Is `foF2 × sec(i)` the correct MUF formula for oblique incidence? (It's the secant law — correct for flat Earth, approximate for spherical.)
-- **Slant factor**: How is vertical TEC converted to slant TEC? The mapping function matters at low elevation angles.
-- **Climatological fallback**: Are the diurnal/seasonal/latitudinal parametric formulas for hmF2 and foF2 reasonable? Compare against IRI-2020 for a few test cases.
+---
 
-### 4. Metrological Concerns
+## 🔍 CRITIQUE TARGETS FOR THIS SESSION
 
-A metrologist should verify:
+### 1. Detection Fragility — WWV/WWVH vs CHU
 
-- **Uncertainty propagation**: The adaptive uncertainty blends model confidence with tracked variance. Is this statistically rigorous? Are the confidence values (0.0–0.8) calibrated or arbitrary?
-- **Bias vs. variance**: The model predicts a delay and an uncertainty. But is the delay itself biased? The climatological fallback may have systematic errors that the uncertainty doesn't capture.
-- **Traceability**: Can the delay prediction be traced back to its data source? The `data_source` field exists but is it logged/archived with each measurement?
-- **Self-consistency check**: The `self_consistency_check()` method compares differential delay vs model TEC. What happens when it fails? Is the failure logged? Does it trigger any corrective action?
+**The core asymmetry:** WWV/WWVH only use the 800ms minute marker (second 0). All other seconds return `duration=0.0` and are skipped. CHU uses 300ms tones on ~20 seconds per minute. This means:
 
-### 5. Missed Opportunities
+- **CHU**: 15+ detection attempts per minute → robust to fading on individual seconds
+- **WWV/WWVH**: 1 detection attempt per minute → single fade = total loss
 
-Look for things that SHOULD have been done but weren't:
+**Critique targets in `metrology_engine.py`:**
 
-- **IRTAM integration**: GIRO provides IRTAM coefficients that correct IRI-2020 in real-time. The current implementation fetches raw ionosonde data but doesn't use IRTAM deviation maps.
-- **Doppler feedback**: The system measures Doppler shift on carrier signals. Doppler is the time derivative of group delay. This could predict delay changes before they happen.
-- **IONEX integration**: The existing `ionospheric_model.py` already has IONEX/IRI support. Is the new `iono_data_service.py` duplicating functionality? Should they be merged?
-- **Observation feedback loop**: The model predicts delays, but observed delays don't feed back to correct the model in real-time. A Kalman filter on the model parameters could close this loop.
-- **Web API exposure**: No `/api/propagation/matrix` endpoint exists yet. The model's predictions are invisible to the user.
-- **HFPropagationModel instantiation in metrology_engine.py**: `_predict_geometric_delay()` creates a NEW `HFPropagationModel` on every call when `ArrivalPatternMatrix` is unavailable. This is wasteful — the model should be cached.
+- `_get_tone_duration()` (line ~414): Returns 0.0 for all WWV/WWVH seconds except 0. The 5ms ticks were dropped for good reason (±50ms jitter, cross-frequency confounding). But are there other usable tones? WWV/WWVH transmit 440/500/600 Hz audio tones during specific minutes. These are longer (several seconds) and could provide timing if the minute is known.
+- `process_minute()` (line ~898): The `measurable[:15]` limit caps attempts. For WWV/WWVH this is moot (only 1 measurable second), but verify the prioritization logic.
+- The 800ms template with ±500ms search window (`SEARCH_WINDOW_MS = max(50, min(500, tone_duration_sec * 625))`) — is the search window appropriate for nighttime multi-hop? Could the arrival be outside ±500ms?
+
+**Question for the critic:** Should we add WWV/WWVH long audio tones (440/500/600 Hz, several seconds duration) as secondary timing sources? They wouldn't have the same precision as the 1000/1200 Hz minute marker, but they'd provide redundancy during fades.
+
+### 2. Matched Filter Sensitivity — Thresholds and Gates
+
+The detection pipeline has multiple quality gates. Each one could be rejecting valid signals during marginal propagation:
+
+| Gate | Threshold | Location | Risk |
+|------|-----------|----------|------|
+| **Correlation SNR** | `MIN_CORR_SNR_DB = 8.0` | line ~708 | Too high for weak nighttime signals? |
+| **Correlation flat** | `range/mean < 0.5` | line ~671 | May reject weak but real signals |
+| **Cross-freq discrimination** | `MIN_FREQ_ADVANTAGE_DB = 3.0` | line ~756 | Correct, but verify edge cases |
+| **Arrival tolerance** | `±500ms` | line ~835 | May be too tight for 3F/multi-hop |
+| **BPM SNR** | `MIN_BPM_SNR_DB = 12.0` | line ~857 | Appropriate for BPM |
+| **Edge rejection** | Peak at edge of search window | line ~667 | May reject real signals near window edge |
+
+**Critique approach:**
+- Pull `L2/detection_attempts` HDF5 data for the 0200–0600 UTC period
+- Tabulate rejection reasons by station, frequency, and time
+- Identify which gate is responsible for the dropout
+- Check if lowering `MIN_CORR_SNR_DB` from 8.0 to 6.0 would recover valid detections without admitting false ones
+
+### 3. Fusion Layer Robustness — TSL2 Corruption
+
+The fusion pipeline in `multi_broadcast_fusion.py` has several potential failure modes during detection gaps:
+
+**Kalman filter behavior during gaps:**
+- `_kalman_update()` (line ~2743): The Kalman predict step runs every cycle, but the update step only runs when measurements exist. During a gap, the state coasts with process noise `q_offset = 0.01 ms²/min`. After a long gap, the covariance grows, making the filter vulnerable to the first (possibly bad) measurement.
+- **Divergence recovery** (line ~2875): Triggers at `|state| > 20ms`. TSL2 at -1750µs = -1.75ms — well below the 20ms threshold. The filter won't self-correct.
+- **L2 vs L1 independence**: TSL1 and TSL2 use independent Kalman states. TSL2 uses L2 calibration data which may have different biases. Why is TSL2 worse?
+
+**Outlier rejection during sparse data:**
+- `_reject_outliers()` (line ~2194): Requires `len(measurements) >= 4` to activate. During recovery with only 1-2 measurements, outliers pass through unfiltered.
+- Pre-fusion MAD rejection (line ~3182): Also requires `len(measurements) > 2`. Single bad measurements during recovery go straight to the Kalman filter.
+
+**Hardware calibration drift:**
+- `_update_calibration()` (line ~2346): During the detection gap, no calibration updates occur. When detections resume, the first measurements may have different propagation characteristics (sunrise terminator). The calibration EMA could chase these transients.
+
+**Critique approach:**
+- Check fusion logs for the 0300–0600 period: how many measurements per cycle? Which stations?
+- Verify that the Kalman filter handles measurement gaps gracefully (no NaN propagation, no covariance explosion)
+- Check if the L2 Kalman was corrupted by a single bad measurement during recovery
+
+### 4. Propagation Model Impact on Detection
+
+The new `HFPropagationModel` (deployed this session) affects detection through `_predict_geometric_delay()`:
+
+- If the model predicts the wrong delay, the search window is centered in the wrong place
+- During the sunrise terminator transition, ionospheric parameters change rapidly — the model may lag
+- The `expected_delay_ms` feeds into `onset_sample` calculation — a bad prediction shifts the entire measurement window
+
+**Critique approach:**
+- Query `/propagation/model/all-stations` at 0300 UTC and 0600 UTC to see what the model predicted
+- Compare model predictions with actual observed arrival times from the detection_attempts data
+- Check if the model's uncertainty windows were wide enough to capture the actual arrivals
+
+### 5. Chrony Feed Quality — Why TSL2 is Worse
+
+The system feeds two independent Chrony SHM segments:
+- **TSL1**: L1 Kalman (direct metrology measurements)
+- **TSL2**: L2 Kalman (calibrated measurements with physics corrections)
+
+TSL2 should be *better* than TSL1 (more corrections applied). The fact that it's *worse* (-1750µs vs +79µs) suggests:
+- L2 calibration is introducing systematic error
+- The L2 Kalman has different convergence behavior
+- L2 physics corrections (propagation mode, GNSS VTEC) are wrong during the terminator transition
+
+**Critique approach:**
+- Compare L1 and L2 measurement values for the same detections
+- Check if L2 calibration offsets (`hardware_offset_ms`) are reasonable
+- Verify that the L2 Kalman filter was properly initialized and hasn't diverged
 
 ---
 
 ## 🎯 WHAT NEEDS TO HAPPEN THIS SESSION
 
-### 1. Wire IonoDataService into metrology_service.py startup
+### 1. Diagnose the 0300 UTC dropout
 
-Add `IonoDataService.get_instance().start()` to the metrology service initialization. Ensure the background thread starts, fetches WAM-IPE data, and the `HFPropagationModel` receives real-time ionospheric parameters.
+Pull detection_attempts data and identify exactly which quality gate rejected WWV/WWVH detections. Was it correlation SNR? Propagation bounds? Cross-frequency discrimination? Or was the signal genuinely absent (no propagation)?
 
-### 2. Validate CHU 7.85 MHz multi-hop acceptance
+### 2. Fix TSL2 chrony feed
 
-With the new model deployed, nighttime 2F/3F arrivals on CHU 7.85 MHz (timing errors +110 to +312 ms) should now be **accepted** by the multi-mode arrival windows instead of rejected by the old ±50 ms window.
+Identify why TSL2 is at -1750µs and fix it. This likely requires either:
+- Resetting the L2 Kalman state
+- Fixing a systematic bias in L2 calibration
+- Adding better outlier protection during sparse-data recovery
 
-### 3. Add `/api/propagation/matrix` web-api endpoint
+### 3. Improve WWV/WWVH detection resilience
 
-Expose the current arrival predictions, modes, uncertainties, and data source for each station/frequency via the web API so the model's behavior is observable.
+Consider:
+- Adding WWV/WWVH audio tones (440/500/600 Hz) as secondary timing sources
+- Reducing `MIN_CORR_SNR_DB` with compensating quality gates
+- Implementing Kalman coasting during detection gaps (predict from last good state)
 
-### 4. Compare model TEC with GNSS VTEC
+### 4. Add detection gap monitoring
 
-Cross-check the propagation model's TEC predictions against the existing GNSS VTEC measurements in `L2/gnss_vtec` HDF5 to validate the ionospheric model.
+The system should detect and alert when a station goes dark:
+- Log a WARNING when a station has 0 detections for >5 minutes
+- Track detection rate per station in the web dashboard
+- Consider a "station health" metric that feeds into fusion weighting
 
-### 5. Tune adaptive uncertainty
+### 5. Validate propagation model predictions against observations
 
-Observe production behavior and adjust the uncertainty blending (model vs tracked variance) to optimize the acceptance rate without admitting false detections.
-
----
-
-## 🛰️ EXTERNAL DATA SOURCES (IMPLEMENTED IN v6.7)
-
-The following data sources are now integrated in `iono_data_service.py`:
-
-| Source | Status | Access | Cadence |
-|--------|--------|--------|---------|
-| **WAM-IPE** | ✅ Implemented | AWS S3 `noaa-nws-wam-ipe-pds` + NOMADS | Hourly |
-| **GIRO DIDBase** | ✅ Implemented | `lgdc.uml.edu` REST API | 15 min |
-| **Climatological fallback** | ✅ Implemented | Built-in parametric model | Always available |
-| **IRTAM** | ❌ Not yet | GAMBIT database | 15 min |
-| **IONEX** | ⚠️ Separate module | `ionospheric_model.py` (not integrated with new service) | 1-2 hr |
-| **Madrigal GNSS TEC** | ❌ Not yet | MIT Haystack API | 5-15 min |
-
-**Critique opportunity:** The existing `ionospheric_model.py` already has IONEX and IRI-2020 support. The new `iono_data_service.py` has its own climatological fallback. These should potentially be unified to avoid divergent ionospheric models in the same codebase.
-
-### Zombie Code Check
-
-The following modules may have overlapping or obsolete functionality now that v6.7 is in place:
-
-| File | Concern |
-|------|---------|
-| `src/hf_timestd/core/ionospheric_model.py` | Has IRI-2020 + IONEX + parametric fallback. Overlaps with `iono_data_service.py` climatological fallback. Merge or deprecate? |
-| `src/hf_timestd/core/physics_propagation.py` | Has `PhysicsPropagationModel` with TIER 1/2/3 hierarchy. Overlaps with `HFPropagationModel`. Which is authoritative? |
-| `src/hf_timestd/core/bootstrap_validator.py` | Has `_get_expected_delay()` returning static values from `EXPECTED_DELAYS_MS` dict. Should this use `HFPropagationModel`? |
+Use the new `/propagation/model/predict` endpoint to compare model predictions with actual observed arrivals across the 24h period. Identify systematic biases.
 
 ---
 
@@ -166,21 +216,29 @@ ka9q-radio (radiod) → RTP multicast → timestd-core-recorder → Raw IQ Buffe
 - On shared channels, 2nd harmonics of 500 Hz or 600 Hz tones broadcast by WWV or WWVH appear at 1000 or 1200 Hz, confounding the tick correlator
 - The 300ms+ tones provide 10–100× better timing precision
 
-### Key Files
+### Key Files (Detection & Fusion Focus)
 
 | File | Purpose | Priority |
 |------|---------|----------|
-| `src/hf_timestd/core/propagation_model.py` | **NEW v6.7** — HFPropagationModel, multi-mode delay prediction | **Critical** |
-| `src/hf_timestd/core/iono_data_service.py` | **NEW v6.7** — WAM-IPE/GIRO data fetch, cache, interpolation | **Critical** |
-| `src/hf_timestd/core/metrology_engine.py` | Tone detection, matched filtering, physics validation | **Critical** |
-| `src/hf_timestd/core/arrival_pattern_matrix.py` | Expected arrival windows, multi-mode physics validation | **Critical** |
-| `src/hf_timestd/core/metrology_service.py` | Orchestrates per-channel processing — **wire IonoDataService here** | **Critical** |
+| `src/hf_timestd/core/metrology_engine.py` | **PRIMARY TARGET** — `_measure_tone_at_known_time()`, `_get_tone_duration()`, `process_minute()`, all quality gates | **Critical** |
+| `src/hf_timestd/core/multi_broadcast_fusion.py` | **PRIMARY TARGET** — `_kalman_update()`, `_reject_outliers()`, `_cross_validate_stations()`, `fuse()`, Chrony SHM output | **Critical** |
+| `src/hf_timestd/core/metrology_service.py` | Orchestrates per-channel processing, writes detection_attempts HDF5 | **Critical** |
+| `src/hf_timestd/core/propagation_model.py` | HFPropagationModel — `_predict_geometric_delay()` centers the search window | High |
+| `src/hf_timestd/core/arrival_pattern_matrix.py` | Expected arrival windows, multi-mode physics validation | High |
 | `src/hf_timestd/core/buffer_timing.py` | RTP → UTC sample mapping (steel ruler) | High |
-| `src/hf_timestd/core/multi_broadcast_fusion.py` | Multi-station/frequency fusion → Chrony | High |
-| `src/hf_timestd/core/ionospheric_model.py` | **REVIEW** — overlaps with iono_data_service.py? | Medium |
-| `src/hf_timestd/core/physics_propagation.py` | **REVIEW** — overlaps with propagation_model.py? | Medium |
-| `src/hf_timestd/core/tick_matched_filter.py` | Carrier phase/Doppler extraction | Medium |
-| `tests/test_propagation_model.py` | 23 tests for new propagation model | High |
+| `src/hf_timestd/core/l2_calibration_service.py` | L2 physics corrections — may be source of TSL2 bias | High |
+| `src/hf_timestd/core/tick_matched_filter.py` | Per-second tick phase extraction (CHU gets ~15/min from this) | Medium |
+| `web-api/routers/propagation.py` | New `/model/predict`, `/model/all-stations`, `/model/iono-status` endpoints | Medium |
+| `tests/test_propagation_model.py` | 23 tests for propagation model | Medium |
+
+### Key HDF5 Data Products for Diagnosis
+
+| Product | Path | Contents |
+|---------|------|----------|
+| `L2/detection_attempts` | `phase2/<channel>/L2/detection_attempts/` | Every detection attempt with rejection reason, corr_snr, timing_error |
+| `L2/timing_measurements` | `phase2/<channel>/L2/timing_measurements/` | Accepted detections only |
+| `L2/tick_timing` | `phase2/<channel>/L2/tick_timing/` | Per-second tick phase and timing |
+| `L3/fusion` | `phase2/fusion/L3/fusion/` | Fused D_clock, weights, station counts |
 
 ### Service Inventory
 
@@ -282,28 +340,30 @@ Major overhaul of the measurement chain. All changes in `src/hf_timestd/core/met
 
 ## ✅ RESOLVED: Propagation Delay Modeling (2026-02-12)
 
-All 7 success criteria from the previous session have been met:
+All critique items from the propagation model session have been addressed:
 
-1. ✅ **WAM-IPE ingestion** — `iono_data_service.py` fetches 2D products (TEC, NmF2, HmF2) from `s3://noaa-nws-wam-ipe-pds/` and NOMADS, with GIRO corrections and climatological fallback
-2. ✅ **Ray-tracing** — `propagation_model.py` numerically integrates group delay through Ne(h) Chapman profiles, with TEC-based fallback
-3. ✅ **Model-based delay** — `_predict_geometric_delay()` now uses HFPropagationModel (frequency-dependent, time-varying) instead of vacuum × 1.15
-4. ✅ **Multi-hop arrivals** — `ArrivalMatrix.multi_mode_arrivals` dict supports 1F, 2F, 3F, 1E modes with separate windows per (station, freq, mode)
-5. ⏳ **CHU 7.85 MHz validation** — model infrastructure is in place; needs production deployment to verify
-6. ✅ **Adaptive uncertainty** — windows adapt based on data source quality (WAM-IPE ±1.5ms → parametric ±9ms) blended with tracked variance
-7. ✅ **Self-consistency check** — `HFPropagationModel.self_consistency_check()` compares multi-freq differential delay vs model TEC
+- ✅ **WAM-IPE ingestion** — `iono_data_service.py` fetches from S3/NOMADS with GIRO corrections and climatological fallback
+- ✅ **Ray-tracing** — numerical integration through Ne(h) Chapman profiles with TEC-based fallback
+- ✅ **Model-based delay** — `_predict_geometric_delay()` uses HFPropagationModel (frequency-dependent, time-varying)
+- ✅ **Multi-hop arrivals** — 1F, 2F, 3F, 1E modes with separate windows per (station, freq, mode)
+- ✅ **Adaptive uncertainty** — windows adapt based on data source quality blended with tracked variance
+- ✅ **Self-consistency check** — `HFPropagationModel.self_consistency_check()` wired into `ArrivalPatternMatrix`
+- ✅ **Model traceability** — `model_data_source`, `model_confidence`, `propagation_mode` in L1 measurement dicts
+- ✅ **Great-circle TEC sampling** — `_gc_intermediate()` replaces linear lat/lon interpolation
+- ✅ **Altitude-dependent obliquity** — thin-shell mapping M(h) replaces constant 1/sin(e)
+- ✅ **Web-api endpoints** — `/propagation/model/predict`, `/model/all-stations`, `/model/iono-status`
+- ✅ **Zombie cleanup** — `physics_propagation.py` deprecated, `multi_broadcast_fusion.py` migrated to `HFPropagationModel`, `bootstrap_validator._get_expected_delay()` wired to model
 
-**23 new tests, all passing. 76 existing tests pass, 0 regressions.**
-
-See: `docs/changes/SESSION_2026_02_12_PROPAGATION_MODEL.md`
+**23 propagation tests passing. See: `docs/changes/SESSION_2026_02_12_PROPAGATION_MODEL.md`**
 
 ---
 
 ## ✅ Success Criteria — Next Session
 
-1. **Deploy to production** — install `netCDF4` and `boto3` (`pip install hf-timestd[iono]`), restart metrology services, verify IonoDataService starts and fetches WAM-IPE data
-2. **Start IonoDataService in metrology lifecycle** — wire `IonoDataService.get_instance().start()` into `metrology_service.py` startup so real-time data flows to the propagation model
-3. **Validate CHU 7.85 MHz multi-hop** — with the new model deployed, verify that nighttime 2F/3F arrivals on CHU 7.85 MHz are accepted (not rejected by the ±50ms window)
-4. **Compare model TEC with GNSS VTEC** — cross-check the propagation model's TEC predictions against the existing GNSS VTEC measurements in L2/gnss_vtec HDF5
-5. **Expose propagation diagnostics via web-api** — add `/api/propagation/matrix` endpoint showing current arrival predictions, modes, uncertainties, and data source for each station/frequency
-6. **Daytime verification** — confirm WWV/WWVH 800ms minute markers are detected and validated during daytime propagation on shared channels (2.5/5/10/15 MHz)
-7. **Tune adaptive uncertainty** — observe production behavior and adjust the uncertainty blending (model vs tracked variance) to optimize the acceptance rate without admitting false detections
+1. **Root-cause the 0300 UTC dropout** — pull `L2/detection_attempts` data, tabulate rejection reasons by station/freq/time, identify which quality gate killed WWV/WWVH detections
+2. **Fix TSL2 chrony feed** — identify and correct the -1750µs bias in the L2 Kalman filter
+3. **Improve WWV/WWVH detection resilience** — either add secondary timing tones (440/500/600 Hz audio), lower thresholds with compensating gates, or implement Kalman coasting
+4. **Add detection gap alerting** — WARNING log when a station has 0 detections for >5 minutes; station health metric in dashboard
+5. **Validate propagation model vs observations** — compare `/propagation/model/predict` output with actual observed arrivals across the 24h period
+6. **Verify WWVH 15 MHz high-SNR spikes** — determine if the >50 dB detections after recovery are real or false positives
+7. **TSL1 and TSL2 should both track GPS within ±500µs** — the ultimate success metric

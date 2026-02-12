@@ -277,6 +277,18 @@ class MetrologyService:
             station_metadata=self.station_config
         )
         logger.info(f"Tick phase writer initialized for {channel_name}")
+        
+        # Start IonoDataService background fetcher (singleton, safe to call multiple times)
+        # This enables real-time WAM-IPE and GIRO ionospheric data for the propagation model.
+        self._iono_service = None
+        if lat is not None and lon is not None:
+            try:
+                from .iono_data_service import IonoDataService
+                self._iono_service = IonoDataService.get_instance()
+                self._iono_service.start()
+                logger.info("IonoDataService background fetcher started")
+            except Exception as e:
+                logger.warning(f"IonoDataService not available: {e}")
              
         logger.info(f"MetrologyService initialized for {channel_name}")
 
@@ -667,6 +679,11 @@ class MetrologyService:
             self.attempts_writer.close()
         if self.tick_phase_writer:
             self.tick_phase_writer.close()
+        if self._iono_service is not None:
+            try:
+                self._iono_service.stop()
+            except Exception:
+                pass
     
     def _write_test_signal(self, minute_boundary: int, iq_samples: np.ndarray, minute_number: int):
         """

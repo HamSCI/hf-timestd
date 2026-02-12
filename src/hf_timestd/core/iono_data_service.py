@@ -60,6 +60,7 @@ ARCHITECTURE
 """
 
 import logging
+import math
 import os
 import time
 import threading
@@ -70,7 +71,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+try:
+    import requests as _requests
+except ImportError:  # pragma: no cover - optional dependency
+    _requests = None
+
 logger = logging.getLogger(__name__)
+
+if _requests is None:
+    logger.warning("requests library not installed — IonoDataService network fetching disabled")
 
 # =============================================================================
 # CONSTANTS
@@ -296,7 +305,11 @@ class IonoDataService:
         enable_wamipe: bool = True,
         enable_giro: bool = True
     ) -> 'IonoDataService':
-        """Get or create the singleton instance."""
+        """Get or create the singleton instance.
+        
+        Warning: The first caller's parameters win. Subsequent calls with
+        different parameters will log a warning but return the existing instance.
+        """
         with cls._lock:
             if cls._instance is None:
                 cls._instance = cls(
@@ -304,6 +317,18 @@ class IonoDataService:
                     enable_wamipe=enable_wamipe,
                     enable_giro=enable_giro
                 )
+            else:
+                # Warn if parameters differ from existing instance
+                inst = cls._instance
+                if (str(inst.cache_dir) != str(Path(cache_dir)) or
+                        inst.enable_wamipe != enable_wamipe or
+                        inst.enable_giro != enable_giro):
+                    logger.warning(
+                        f"IonoDataService.get_instance() called with different params "
+                        f"(wamipe={enable_wamipe}, giro={enable_giro}) than existing "
+                        f"instance (wamipe={inst.enable_wamipe}, giro={inst.enable_giro}). "
+                        f"Returning existing instance."
+                    )
             return cls._instance
     
     def __init__(
@@ -343,7 +368,17 @@ class IonoDataService:
         }
         
         # Ensure cache directory exists
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            import tempfile
+            fallback = Path(tempfile.gettempdir()) / "timestd_iono_cache"
+            fallback.mkdir(parents=True, exist_ok=True)
+            logger.warning(
+                f"Cannot create cache dir {self.cache_dir} (permission denied), "
+                f"falling back to {fallback}"
+            )
+            self.cache_dir = fallback
         
         logger.info(f"IonoDataService initialized (cache={self.cache_dir}, "
                     f"wamipe={enable_wamipe}, giro={enable_giro})")
@@ -406,7 +441,9 @@ class IonoDataService:
         2. Fall back to S3 bucket
         3. Fall back to cached data
         """
-        import requests
+        if _requests is None:
+            return
+        requests = _requests
         
         now = datetime.now(timezone.utc)
         
@@ -480,7 +517,9 @@ class IonoDataService:
     
     def _download_and_parse_wamipe(self, url: str) -> Optional[IonoGrid]:
         """Download a WAM-IPE NetCDF file and parse into IonoGrid."""
-        import requests
+        if _requests is None:
+            return None
+        requests = _requests
         
         try:
             resp = requests.get(url, timeout=30, stream=True)
@@ -652,14 +691,20 @@ class IonoDataService:
         GIRO provides real-time autoscaled ionosonde data that can correct
         WAM-IPE systematic biases, especially for hmF2.
         """
-        import requests
+        if _requests is None:
+            return
+        requests = _requests
         
         now = datetime.now(timezone.utc)
         
         try:
-            # Fetch station list if not cached
-            if not self._giro_stations:
+            # Fetch station list if not cached, or refresh hourly
+            if not self._giro_stations or (
+                hasattr(self, '_giro_stations_fetched') and
+                (now - self._giro_stations_fetched).total_seconds() > 3600
+            ):
                 self._fetch_giro_stations()
+                self._giro_stations_fetched = now
             
             # Fetch latest measurements from nearby stations
             # For now, fetch from all stations and let the caller pick the nearest
@@ -687,7 +732,9 @@ class IonoDataService:
     
     def _fetch_giro_stations(self):
         """Fetch GIRO station list."""
-        import requests
+        if _requests is None:
+            return
+        requests = _requests
         
         try:
             resp = requests.get(GIRO_DIDBASE_URL, timeout=15)
@@ -718,7 +765,9 @@ class IonoDataService:
     
     def _fetch_giro_station_data(self, station_code: str) -> Optional[GiroMeasurement]:
         """Fetch latest ionosonde measurement for a station."""
-        import requests
+        if _requests is None:
+            return None
+        requests = _requests
         
         now = datetime.now(timezone.utc)
         # Request last 30 minutes of data
@@ -881,12 +930,36 @@ class IonoDataService:
         tec_sum = 0.0
         for i in range(n_points):
             frac = (i + 0.5) / n_points
-            lat = lat1 + frac * (lat2 - lat1)
-            lon = lon1 + frac * (lon2 - lon1)
+            lat, lon = self._gc_intermediate(lat1, lon1, lat2, lon2, frac)
             point = self.get_iono_params(lat, lon, utc_time)
             tec_sum += point.TEC_TECU
         
         return tec_sum / n_points
+    
+    @staticmethod
+    def _gc_intermediate(
+        lat1: float, lon1: float, lat2: float, lon2: float, frac: float
+    ) -> Tuple[float, float]:
+        """Intermediate point on the great circle at given fraction (0-1)."""
+        lat1_r = math.radians(lat1)
+        lon1_r = math.radians(lon1)
+        lat2_r = math.radians(lat2)
+        lon2_r = math.radians(lon2)
+
+        d = 2 * math.asin(math.sqrt(
+            math.sin((lat2_r - lat1_r) / 2) ** 2 +
+            math.cos(lat1_r) * math.cos(lat2_r) *
+            math.sin((lon2_r - lon1_r) / 2) ** 2
+        ))
+        if d < 1e-12:
+            return lat1, lon1
+
+        a = math.sin((1 - frac) * d) / math.sin(d)
+        b = math.sin(frac * d) / math.sin(d)
+        x = a * math.cos(lat1_r) * math.cos(lon1_r) + b * math.cos(lat2_r) * math.cos(lon2_r)
+        y = a * math.cos(lat1_r) * math.sin(lon1_r) + b * math.cos(lat2_r) * math.sin(lon2_r)
+        z = a * math.sin(lat1_r) + b * math.sin(lat2_r)
+        return math.degrees(math.atan2(z, math.sqrt(x**2 + y**2))), math.degrees(math.atan2(y, x))
     
     def _get_giro_correction(
         self,
@@ -1046,7 +1119,9 @@ class IonoDataService:
         # F2 layer (Chapman)
         hmF2 = point.hmF2_km
         NmF2 = point.NmF2_m3
-        H_F2 = 60.0  # Scale height in km (typical for F2)
+        # Dynamic scale height: empirically H ≈ 0.22 * hmF2 (40-90 km range)
+        # Clamped to physically reasonable bounds
+        H_F2 = max(40.0, min(90.0, 0.22 * hmF2))
         
         z_F2 = (altitudes - hmF2) / H_F2
         # Clip to avoid overflow
@@ -1054,9 +1129,18 @@ class IonoDataService:
         Ne_F2 = NmF2 * np.exp(0.5 * (1 - z_F2 - np.exp(-z_F2)))
         
         # E layer (Chapman, smaller)
+        # E-layer is solar-produced and essentially disappears at night.
+        # Use timestamp to estimate solar zenith angle (simplified).
         hmE = point.hmE_km
-        NmE = NmF2 * 0.1  # E layer is ~10% of F2
         H_E = 10.0  # Scale height for E layer
+        
+        # Estimate local solar time to scale E-layer density
+        lst = point.timestamp.hour + point.timestamp.minute / 60.0 + point.longitude / 15.0
+        lst = lst % 24.0
+        # Smooth day/night transition: cos² taper, peak at local noon (12h)
+        solar_phase = math.pi * (lst - 12.0) / 12.0
+        e_layer_factor = max(0.0, math.cos(solar_phase)) ** 2  # 0 at night, 1 at noon
+        NmE = NmF2 * 0.1 * e_layer_factor
         
         z_E = (altitudes - hmE) / H_E
         z_E = np.clip(z_E, -10, 10)

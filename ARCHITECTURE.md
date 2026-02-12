@@ -3,7 +3,7 @@
 **Last Updated:** February 12, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.7 (Real-Time Ionospheric Propagation Model)
+**Version:** V6.7.1 (Propagation Model Full Integration)
 
 ---
 
@@ -464,7 +464,7 @@ We use a **Weighted Voting** system combining:
 | `timestd-l2-calibration.service` | Phase 2: L2 calibrated timing |
 | `timestd-fusion.service` | Phase 3: Multi-broadcast fusion & Chrony feed |
 | `timestd-physics.service` | Phase 3: TEC estimation |
-| `timestd-iono.service` | Ionospheric data ingestion (WAM-IPE, GIRO) — *planned* |
+| `timestd-iono.service` | Ionospheric data ingestion (WAM-IPE, GIRO) — runs as `IonoDataService` background thread within metrology |
 | `timestd-web-api.service` | Web monitoring UI (FastAPI) |
 | `timestd-radiod-monitor.service` | Hardware health monitoring |
 
@@ -535,6 +535,17 @@ ArrivalPatternMatrix.compute_matrix()
          ↓
 MetrologyEngine._predict_geometric_delay()
     └── Uses model predictions for physics validation
+         ↓
+MultiBroadcastFusion.fuse()
+    ├── Mode ambiguity scoring via HFPropagationModel.predict()
+    ├── GNSS VTEC correction using model TEC + n_hops
+    └── Chrony SHM (TSL1/TSL2)
+         ↓
+BootstrapValidator._get_expected_delay()
+    └── Physics-based delay prediction (replaces static bounds)
+         ↓
+Web API (/model/predict, /model/all-stations, /model/iono-status)
+    └── Live model observability
 ```
 
 ### Multi-Mode Arrival Support
@@ -546,6 +557,15 @@ The `ArrivalMatrix` now supports multiple propagation modes per (station, freque
 - `get_all_mode_arrivals(station, freq)` — returns all modes sorted by delay
 
 This enables the system to accept multi-hop arrivals (e.g., CHU 7.85 MHz 2F at night) that were previously rejected by the fixed ±50 ms window.
+
+### Deprecated Modules
+
+| Module | Status | Replacement |
+|--------|--------|-------------|
+| `physics_propagation.py` | **Deprecated v6.7** | `propagation_model.HFPropagationModel` |
+| `PhysicsPropagationModel` | **Deprecated v6.7** | `HFPropagationModel` (exported from `core/__init__.py`) |
+
+The old `PhysicsPropagationModel` used a static TIER 1/2/3 hierarchy without real-time data. All callers (`multi_broadcast_fusion.py`, `bootstrap_validator.py`, `arrival_pattern_matrix.py`) have been migrated to `HFPropagationModel`.
 
 ---
 

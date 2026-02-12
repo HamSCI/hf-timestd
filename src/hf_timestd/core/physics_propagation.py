@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """
-Physics-Informed Propagation Model
+Physics-Informed Propagation Model  [DEPRECATED]
+
+.. deprecated:: 6.7
+    This module is superseded by ``propagation_model.HFPropagationModel`` which
+    provides real-time ionospheric data (WAM-IPE + GIRO), multi-hop reflection-
+    point sampling, altitude-dependent obliquity, and dynamic Chapman profiles.
+    All new code should use ``HFPropagationModel``.  This file is retained for
+    backward compatibility but will be removed in a future release.
 
 ================================================================================
 PURPOSE
