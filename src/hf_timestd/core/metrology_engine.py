@@ -38,6 +38,7 @@ from hf_timestd.core.wwvh_discrimination import WWVHDiscriminator
 from hf_timestd.core.tone_detector import MultiStationToneDetector
 from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
 from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType as TickStationType
+from hf_timestd.core.tick_edge_detector import TickEdgeDetector
 from hf_timestd.core.fusion_timing_state import FusionTimingState, LockTier
 from hf_timestd.core.bootstrap_state import BootstrapStateWriter
 from hf_timestd.core.timing_consistency_validator import TimingConsistencyValidator
@@ -100,6 +101,16 @@ class MetrologyEngine:
         # State
         self._lock = threading.Lock()
         self.minutes_processed = 0
+        
+        # Detection gap tracking: last physics-validated detection time per station.
+        # Used to emit WARNING when a station goes dark for >5 minutes.
+        self._last_validated_detection: Dict[str, float] = {}  # station -> unix time
+        self._gap_warning_emitted: Dict[str, float] = {}  # station -> last warning time
+        self._DETECTION_GAP_THRESHOLD_S = 300.0  # 5 minutes
+        self._GAP_WARNING_INTERVAL_S = 300.0  # Don't spam: one warning per 5 min
+        
+        # Edge detection results (per-second onset timing)
+        self._last_edge_results: Dict[str, Any] = {}
         
         # Calibration state (Learned RTP offsets, etc.)
         self.bpm_calibration = {
@@ -187,6 +198,12 @@ class MetrologyEngine:
             # 7. Tick Matched Filters for per-second timing (55+ estimates/minute)
             self.tick_filters: Dict[TickStationType, TickMatchedFilter] = {}
             self._init_tick_filters()
+            
+            # 8. Tick Edge Detector for per-second onset timing (57 edges/minute)
+            # Detects the onset step of each tick via differential envelope,
+            # overcoming the intermod and low-processing-gain problems that
+            # prevented use of 5ms WWV/WWVH ticks in the matched filter.
+            self.edge_detector = TickEdgeDetector(sample_rate=self.sample_rate)
                 
         except ImportError as e:
             logger.error(f"Failed to initialize Metrology components: {e}")
@@ -1120,6 +1137,103 @@ class MetrologyEngine:
                     if rtp_measurements:
                         secs = [m['utc_second'] % 60 for m in rtp_measurements]
                         logger.info(f"{self.channel_name}: RTP detected at seconds {secs}")
+                
+                # === Per-Second Edge Detection (Tier 1) ===
+                # Run differential edge detector on all per-second ticks.
+                # This provides up to 57 independent timing measurements per
+                # minute from the tick onset edges, even when the minute marker
+                # correlation fails (low SNR, fading, etc.).
+                #
+                # The edge ensemble augments timing for stations that had NO
+                # successful minute marker correlation this minute.
+                is_dedicated = ('WWV_20' in channel_upper or 'WWV_25' in channel_upper)
+                stations_with_corr = {m['station'] for m in rtp_measurements}
+                edge_results = {}
+                
+                for station_name, tone_freq in station_tone_freqs:
+                    prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
+                    prop_delay_sec = prop_delay_ms / 1000.0
+                    
+                    try:
+                        edge_result = self.edge_detector.detect_edges(
+                            audio_signal=audio_signal,
+                            station=station_name,
+                            minute_number=minute_number,
+                            buffer_timing=buffer_timing,
+                            expected_delay_sec=prop_delay_sec,
+                            is_dedicated_channel=is_dedicated,
+                        )
+                    except Exception as e:
+                        logger.debug(f"{self.channel_name}: Edge detection failed for "
+                                    f"{station_name}: {e}")
+                        edge_result = None
+                    
+                    if edge_result is not None:
+                        edge_results[station_name] = edge_result
+                        
+                        # If this station had NO correlation detection but the
+                        # edge ensemble has sufficient confidence, create a
+                        # synthetic measurement from the ensemble.
+                        if (station_name not in stations_with_corr
+                                and edge_result.confidence >= 0.3
+                                and edge_result.ensemble_n_edges >= 5):
+                            
+                            # The ensemble timing_error is relative to expected
+                            # propagation delay.  Convert to arrival_ms from
+                            # buffer start, matching the correlation output format.
+                            # Use the middle of the buffer as reference point.
+                            mid_utc = (buf_start_utc + buf_end_utc) / 2.0
+                            mid_sec = int(mid_utc)
+                            # Synthetic arrival = expected + ensemble offset
+                            synth_arrival_utc = mid_sec + prop_delay_sec + edge_result.ensemble_timing_error_ms / 1000.0
+                            synth_arrival_sample = buffer_timing.utc_to_sample(synth_arrival_utc)
+                            synth_arrival_ms = synth_arrival_sample * 1000 / self.sample_rate
+                            
+                            synth_measurement = {
+                                'station': station_name,
+                                'frequency_hz': tone_freq,
+                                'arrival_ms': synth_arrival_ms,
+                                'expected_delay_ms': prop_delay_ms,
+                                'timing_error_ms': edge_result.ensemble_timing_error_ms,
+                                'snr_db': edge_result.mean_edge_snr_db,
+                                'corr_snr_db': edge_result.mean_edge_snr_db,
+                                'tone_power': 0.0,
+                                'peak_correlation': 0.0,
+                                'detected': True,
+                                'rejection_reason': None,
+                                'utc_second': mid_sec,
+                                'tone_duration_sec': 0.005,
+                                'arrival_utc': synth_arrival_utc,
+                                'detection_method': 'edge_ensemble',
+                                'edge_n': edge_result.ensemble_n_edges,
+                                'edge_uncertainty_ms': edge_result.ensemble_uncertainty_ms,
+                                'edge_confidence': edge_result.confidence,
+                            }
+                            rtp_measurements.append(synth_measurement)
+                            logger.info(
+                                f"{self.channel_name}: {station_name} EDGE ENSEMBLE "
+                                f"recovery: {edge_result.ensemble_n_edges} edges, "
+                                f"timing={edge_result.ensemble_timing_error_ms:+.3f}"
+                                f"±{edge_result.ensemble_uncertainty_ms:.3f}ms, "
+                                f"conf={edge_result.confidence:.2f}")
+                        
+                        elif station_name in stations_with_corr and edge_result.ensemble_n_edges >= 5:
+                            # Station already has correlation detection.
+                            # Log the edge ensemble as a cross-check.
+                            corr_err = [m['timing_error_ms'] for m in rtp_measurements 
+                                       if m['station'] == station_name]
+                            if corr_err:
+                                delta = edge_result.ensemble_timing_error_ms - corr_err[0]
+                                logger.info(
+                                    f"{self.channel_name}: {station_name} edge cross-check: "
+                                    f"corr={corr_err[0]:+.3f}ms, "
+                                    f"edge={edge_result.ensemble_timing_error_ms:+.3f}ms, "
+                                    f"Δ={delta:+.3f}ms "
+                                    f"({edge_result.ensemble_n_edges} edges)")
+                
+                # Store edge results for caller to retrieve
+                self._last_edge_results = edge_results
+                
             else:
                 # No BufferTiming — fall back to legacy method.
                 # Without BufferTiming we don't know which second we're at,
@@ -1457,6 +1571,45 @@ class MetrologyEngine:
                     if stability.sample_interval_std > 0:
                         logger.info(f"  Sample interval: {stability.sample_interval_mean:.0f}±{stability.sample_interval_std:.1f}")
             
+        # === Detection Gap Alerting ===
+        # Track last physics-validated detection per station.
+        # Emit WARNING when a station goes dark for >5 minutes.
+        now = system_time
+        validated_stations = set()
+        for meas in results:
+            stn = meas.station_id.value if hasattr(meas.station_id, 'value') else str(meas.station_id)
+            self._last_validated_detection[stn] = now
+            validated_stations.add(stn)
+        
+        # Check all stations we expect on this channel for gaps.
+        # Derive from channel name (works in both RTP and fusion modes).
+        channel_upper = self.channel_name.upper()
+        if 'CHU' in channel_upper:
+            expected_stations = ['CHU']
+        elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
+            expected_stations = ['WWV']
+        else:
+            expected_stations = ['WWV', 'WWVH', 'BPM']
+        for stn in expected_stations:
+            last_det = self._last_validated_detection.get(stn)
+            if last_det is None:
+                # Never detected — only warn after we've processed enough minutes
+                if self.minutes_processed >= 5:
+                    last_warn = self._gap_warning_emitted.get(stn, 0)
+                    if now - last_warn >= self._GAP_WARNING_INTERVAL_S:
+                        logger.warning(f"{self.channel_name}: {stn} NEVER DETECTED "
+                                      f"after {self.minutes_processed} minutes")
+                        self._gap_warning_emitted[stn] = now
+            else:
+                gap_s = now - last_det
+                if gap_s >= self._DETECTION_GAP_THRESHOLD_S:
+                    last_warn = self._gap_warning_emitted.get(stn, 0)
+                    if now - last_warn >= self._GAP_WARNING_INTERVAL_S:
+                        gap_min = gap_s / 60.0
+                        logger.warning(f"{self.channel_name}: {stn} DETECTION GAP "
+                                      f"{gap_min:.1f}min (last validated {gap_min:.0f}min ago)")
+                        self._gap_warning_emitted[stn] = now
+        
         return results
 
     def _write_bootstrap_state_on_lock(self):
