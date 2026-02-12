@@ -8,11 +8,12 @@
 
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
-**Key Capabilities (V6.5.1):**
+**Key Capabilities (V6.7.0):**
 
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **Digital RF (HDF5)** format.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
-- 🔗 **HDF5-Native Pipeline** - High-performance SWMR (Single Writer Multiple Reader) data exchange.
+- 🌐 **Real-time ionospheric model (v6.7)** - WAM-IPE + GIRO data for frequency-dependent, time-varying group delay predictions with multi-hop support (1F, 2F, 3F).
+- 🔗 **HDF5-Native Pipeline** - High-performance crash-safe data exchange.
 - 🌍 **Real-time GNSS VTEC Correction** - Local dual-frequency GPS provides direct ionospheric correction.
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
 - ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
@@ -151,7 +152,7 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Status
 
-**Testing (V6.5.1)** - Active development and field testing in progress.
+**Testing (V6.7.0)** - Active development and field testing in progress.
 
 ## Credits & Support
 
@@ -160,6 +161,15 @@ The system is composed of eight independent services that form a pipeline:
 **License:** MIT - See [LICENSE](LICENSE)
 
 ### Recent Updates
+
+**v6.7.0 (February 12, 2026) - Real-Time Ionospheric Propagation Model**
+
+- ✅ **Real-time ionospheric data** - `IonoDataService` fetches WAM-IPE grids from NOAA S3 and GIRO ionosonde data for real-time hmF2/foF2 corrections
+- ✅ **Physics-based group delay** - `HFPropagationModel` computes frequency-dependent ionospheric delay via numerical Ne(h) integration
+- ✅ **Multi-mode predictions** - Evaluates 1F, 2F, 3F, 1E propagation modes with MUF checks and geometric feasibility
+- ✅ **Adaptive uncertainty** - Windows adapt from ±1.5 ms (WAM-IPE+GIRO) to ±15 ms (no model), blended with tracked variance
+- ✅ **Self-consistency check** - Multi-frequency differential delay validates model TEC predictions
+- ✅ **23 new tests** - All passing, 0 regressions in existing test suite
 
 **v6.5.1 (February 7, 2026) - Dual Kalman & Chrony Feed Fixes**
 

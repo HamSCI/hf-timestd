@@ -1,8 +1,113 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-## 🎯 Next Session Goal: 24-Hour UTC Visualization Dashboard
+## 🎯 Next Session Goal: Deploy & Validate Real-Time Ionospheric Propagation Model
 
-Build 24-hour UTC graphs showing features from all 17 broadcasts, revealing ionospheric behavior between each transmitter and the receiver.
+Deploy the new v6.7 propagation model to production, wire `IonoDataService` into the metrology lifecycle, and validate that multi-hop arrivals (CHU 7.85 MHz 2F/3F at night) are now accepted instead of rejected.
+
+---
+
+## 📋 What Was Built (v6.7.0, February 12, 2026)
+
+### New Modules
+
+| File | Purpose |
+|------|---------|
+| `src/hf_timestd/core/propagation_model.py` | `HFPropagationModel` — multi-mode delay prediction, Ne(h) integration, self-consistency |
+| `src/hf_timestd/core/iono_data_service.py` | `IonoDataService` — WAM-IPE/GIRO fetch, cache, interpolation, climatological fallback |
+| `tests/test_propagation_model.py` | 23 tests, all passing |
+
+### Modified Modules
+
+| File | Change |
+|------|--------|
+| `arrival_pattern_matrix.py` | Multi-mode arrivals, adaptive uncertainty, `HFPropagationModel` integration |
+| `metrology_engine.py` | `_predict_geometric_delay()` uses `HFPropagationModel` as tier-2 fallback |
+| `pyproject.toml` | Added `[iono]` optional deps: `netCDF4>=1.6.0`, `boto3>=1.28.0` |
+
+### Architecture
+
+```
+MetrologyEngine._predict_geometric_delay()
+    ├── ArrivalPatternMatrix.get_expected_arrivals()
+    │       └── HFPropagationModel.predict()
+    │               ├── IonoDataService.get_iono_params()
+    │               │       ├── WAM-IPE grid (NOAA S3/NOMADS)
+    │               │       ├── GIRO corrections
+    │               │       └── Climatological fallback
+    │               ├── _evaluate_mode() × [1F, 2F, 3F, 1E]
+    │               └── _estimate_uncertainty()
+    ├── HFPropagationModel.predict() (direct fallback)
+    └── Vacuum × 1.15 (last resort)
+```
+
+---
+
+## 🚀 Deployment Steps
+
+### 1. Install optional dependencies on production
+
+```bash
+sudo /opt/hf-timestd/venv/bin/pip install netCDF4>=1.6.0 boto3>=1.28.0
+# Or: sudo /opt/hf-timestd/venv/bin/pip install -e /home/mjh/git/hf-timestd[iono]
+```
+
+### 2. Sync code to production
+
+```bash
+sudo /opt/hf-timestd/venv/bin/pip install -e /home/mjh/git/hf-timestd
+```
+
+### 3. Create iono cache directory
+
+```bash
+sudo mkdir -p /var/lib/timestd/iono_cache
+sudo chown timestd:timestd /var/lib/timestd/iono_cache
+```
+
+### 4. Wire IonoDataService into metrology startup
+
+In `metrology_service.py`, add to the startup sequence:
+```python
+from hf_timestd.core.iono_data_service import IonoDataService
+iono_svc = IonoDataService.get_instance()
+iono_svc.start()  # Starts background fetch thread
+```
+
+### 5. Restart services
+
+```bash
+sudo systemctl restart timestd-metrology.service
+sudo systemctl restart timestd-fusion.service
+```
+
+### 6. Verify
+
+```bash
+# Check IonoDataService started
+journalctl -u timestd-metrology --since "5 min ago" | grep -i "iono"
+
+# Check WAM-IPE data fetched
+ls -la /var/lib/timestd/iono_cache/
+
+# Check propagation model predictions in logs
+journalctl -u timestd-metrology --since "5 min ago" | grep "HFPropagationModel\|propagation_mode\|multi_mode"
+```
+
+---
+
+## ✅ Validation Checklist
+
+| Test | How to Verify | Expected |
+|------|--------------|----------|
+| IonoDataService starts | `journalctl` grep for "IonoDataService" | Background thread running |
+| WAM-IPE data fetched | `ls /var/lib/timestd/iono_cache/` | NetCDF files present |
+| Climatological fallback works | Model produces predictions even without WAM-IPE | Delays > 0, uncertainty > 0 |
+| CHU 3.33 MHz single-hop | Timing errors +0.3 to +20 ms | Validated (same as before) |
+| CHU 7.85 MHz multi-hop (night) | Timing errors +110 to +312 ms | **Now validated** (was rejected) |
+| Frequency dependence | 5 MHz delay > 10 MHz delay (same station) | 1/f² scaling visible |
+| Multi-mode arrivals | `get_all_mode_arrivals()` returns >1 mode | 2F/3F modes present for long paths |
+| Adaptive uncertainty | Window narrows with WAM-IPE data | < ±5 ms with good data |
+| Self-consistency | Differential delay matches model TEC | RMS < 1 ms |
 
 ---
 
@@ -20,142 +125,34 @@ Build 24-hour UTC graphs showing features from all 17 broadcasts, revealing iono
 
 ---
 
-## 📊 Features to Visualize (Per Broadcast, 24-hr UTC)
+## � Key Files
 
-### 1. Solar Zenith Angle Overlay
-- Compute for **midpoint of each propagation path** (not receiver location)
-- Shows day/night transition along the path
-- Critical for understanding MUF/LUF variations
-- Different for each of 17 broadcasts (different paths)
-
-### 2. Carrier Power / Signal Strength
-- Already measured: SNR from tone detection
-- Need: Absolute or relative carrier power estimate
-- Shows: Fadeouts, enhancements, D-layer absorption
-
-### 3. Timing Error (ToA - Expected)
-- Already measured: `raw_toa` from tick analysis
-- Shows: Ionospheric delay variations, mode changes
-- Expected: Diurnal pattern following solar zenith
-
-### 4. Doppler Shift
-- Need to implement: Carrier frequency offset measurement
-- Shows: Ionospheric motion, TID signatures
-- Typical: ±0.1-1 Hz at HF
-
-### 5. Test Signal Detection (WWV/WWVH only)
-- WWV: Minute 8 of each hour
-- WWVH: Minute 44 of each hour
-- Confirms station identity on shared frequencies
-- Shows: Which station is receivable at each hour
-
-### 6. TEC (Total Electron Content)
-- Derived from: Multi-frequency timing differences
-- Formula: TEC ∝ (delay_f1 - delay_f2) / (1/f1² - 1/f2²)
-- Requires: Same station on multiple frequencies
-- Best candidates: WWV (6 freqs), WWVH (4 freqs)
-
-### 7. Station-Specific Features
-- **CHU FSK**: Decode timing from Bell 103 FSK (seconds 31-39)
-- **CHU DUT1**: Split-second encoding (seconds 1-16)
-- **BPM UT1**: 100ms ticks (seconds 25-29, 55-59)
-- **WWV/WWVH BCD**: Time code decoding
-
----
-
-## 🌍 Propagation Path Midpoints
-
-For solar zenith calculation, use path midpoint (not receiver):
-
-| Broadcast | TX Location | RX (AC0G) | Midpoint (approx) |
-|-----------|-------------|-----------|-------------------|
-| WWV | 40.68°N, 105.04°W | 38.92°N, 92.13°W | 39.8°N, 98.6°W |
-| WWVH | 21.99°N, 159.76°W | 38.92°N, 92.13°W | 30.5°N, 126.0°W |
-| CHU | 45.30°N, 75.75°W | 38.92°N, 92.13°W | 42.1°N, 83.9°W |
-| BPM | 34.95°N, 109.54°E | 38.92°N, 92.13°W | 36.9°N, 171.3°W |
-
----
-
-## 📈 Visualization Approach
-
-### Panel Layout (per broadcast)
-```
-┌─────────────────────────────────────────────────────────┐
-│ WWV_10000 - Fort Collins to AC0G (1300 km)              │
-├─────────────────────────────────────────────────────────┤
-│ [Solar Zenith Angle - shaded day/night]                 │
-│ ████████░░░░░░░░░░░░░░░░████████████████████████████   │
-├─────────────────────────────────────────────────────────┤
-│ [Signal Strength / SNR]                                 │
-│ ▁▂▃▅▇█████▇▅▃▂▁▁▁▁▁▁▁▁▁▁▁▂▃▅▇████▇▅▃▂▁                │
-├─────────────────────────────────────────────────────────┤
-│ [Timing Error (ms)]                                     │
-│ ─────────╱╲────────────────────────╱╲─────────         │
-├─────────────────────────────────────────────────────────┤
-│ [Doppler Shift (Hz)]                                    │
-│ ───────╱──────────────────────────╲───────────         │
-├─────────────────────────────────────────────────────────┤
-│ [Test Signal Detected] (WWV/WWVH only)                  │
-│ ● ● ● ● ● ● ● ● ○ ○ ○ ○ ○ ○ ○ ○ ● ● ● ● ● ● ● ●       │
-└─────────────────────────────────────────────────────────┘
-     00  02  04  06  08  10  12  14  16  18  20  22  24 UTC
-```
-
-### Multi-Broadcast Comparison View
-- Stack same-frequency broadcasts (WWV vs WWVH vs BPM on 10 MHz)
-- Overlay same-station broadcasts (WWV on 5/10/15/20/25 MHz)
-- TEC panel derived from multi-frequency timing
-
----
-
-## 🔧 Implementation Components
-
-### Data Sources
-| Data | Source | Status |
-|------|--------|--------|
-| ToA / timing error | `L1TickAnalysis` | ✅ Available |
-| SNR | `ToneDetectionResult` | ✅ Available |
-| Carrier power | Need to extract from IQ | ⚠️ To implement |
-| Doppler | Need carrier tracking | ⚠️ To implement |
-| Test signal | Minute 8/44 detection | ⚠️ To implement |
-| TEC | Multi-freq timing fusion | ⚠️ To implement |
-| Solar zenith | `astropy` or `pvlib` | ⚠️ To implement |
-
-### Key Files
 | File | Purpose |
 |------|---------|
-| `src/hf_timestd/core/broadcast_specs.py` | 17 broadcast definitions |
-| `src/hf_timestd/models/broadcast_measurement.py` | L1/L2/L3 data models |
-| `src/hf_timestd/core/metrology_engine.py` | DSP and detection |
-| `web-api/` | FastAPI backend for dashboard |
+| `src/hf_timestd/core/propagation_model.py` | `HFPropagationModel` — multi-mode delay prediction |
+| `src/hf_timestd/core/iono_data_service.py` | `IonoDataService` — WAM-IPE/GIRO data service |
+| `src/hf_timestd/core/arrival_pattern_matrix.py` | `ArrivalPatternMatrix` — physics validation with multi-mode |
+| `src/hf_timestd/core/metrology_engine.py` | DSP, detection, `_predict_geometric_delay()` |
+| `src/hf_timestd/core/metrology_service.py` | Service lifecycle — **wire IonoDataService here** |
+| `src/hf_timestd/core/multi_broadcast_fusion.py` | Multi-station fusion → Chrony |
+| `src/hf_timestd/core/wwv_constants.py` | Station locations, frequencies, physical constants |
+| `web-api/` | FastAPI backend — add `/api/propagation/matrix` endpoint |
+| `tests/test_propagation_model.py` | 23 tests for new model |
 
 ---
 
-## ✅ Completed: Radiod Timing Fix (2026-02-05)
-
-Fixed ~70ms systematic timing offset in radiod GPS_TIME/RTP_TIMESNAP mapping.
-
-**Changes (ka9q-radio branch `fix-gps-rtp-timing-alignment`):**
-1. `radio.h`: Added `gps_time_snapshot`, `samples_at_snapshot` to frontend
-2. All frontend drivers: Capture atomic GPS time snapshot every second
-3. `radio_status.c`: Report uniform (GPS_TIME, RTP_TIMESNAP) for all channels
-4. `linear.c`: Initialize RTP from `filter.out.sample_index / decimation`
-
-**Results:**
-- GPS_TIME spread across channels: **0.0ms** (all identical)
-- Between-channel timing consistency: **<2ms**
-- WWV consistently arrives before WWVH ✅
-
----
-
-## � Current Timing Architecture
+## 🏗 Current Timing Architecture
 
 ```
 radiod (GPS+PPS) → GPS_TIME/RTP_TIMESNAP → BinaryArchiveWriter
                    (uniform across channels)        ↓
                                               MetrologyService
                                                     ↓
-                                              L1 Measurements
+                                              MetrologyEngine
+                                              ├── ArrivalPatternMatrix
+                                              │   └── HFPropagationModel (v6.7)
+                                              │       └── IonoDataService
+                                              └── L1 Measurements → Fusion → Chrony
 ```
 
 **RTP Mode**: Trust GPS_TIME, measure tones at known times
@@ -179,6 +176,9 @@ grep "tick analysis" /var/log/hf-timestd/phase2-shared10.log | tail -10
 sudo /opt/hf-timestd/venv/bin/pip install -e /home/mjh/git/hf-timestd
 sudo systemctl restart timestd-metrology
 
+# Run propagation model tests
+/home/mjh/git/hf-timestd/venv/bin/python -m pytest tests/test_propagation_model.py -v
+
 # Check between-channel consistency
 python3 -c "from ka9q import discover_channels; print(discover_channels('bee1-status.local'))"
 ```
@@ -189,8 +189,9 @@ python3 -c "from ka9q import discover_channels; print(discover_channels('bee1-st
 
 | Document | Purpose |
 |----------|---------|
-| `src/hf_timestd/core/broadcast_specs.py` | 17 broadcast definitions |
-| `docs/design/TIMING_AUTHORITY_ARCHITECTURE.md` | RTP vs Fusion modes |
+| `METROLOGY.md` | Propagation model physics, uncertainty analysis |
+| `ARCHITECTURE.md` | System design, data flow, service inventory |
+| `TECHNICAL_REFERENCE.md` | Algorithms, data formats, release notes |
+| `docs/changes/SESSION_2026_02_12_PROPAGATION_MODEL.md` | This session's changes |
 | `docs/design/ARRIVAL_PATTERN_MATRIX_ARCHITECTURE.md` | Physics-based validation |
-| `docs/changes/SESSION_2026_02_05_TIMING_FIX.md` | Timing fix details |
-| `GPS_TIME_TIMING_FIX.md` (ka9q-radio) | Radiod patch documentation |
+| `CRITIC_CONTEXT.md` | Next session critique focus |

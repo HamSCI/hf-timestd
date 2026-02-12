@@ -64,6 +64,10 @@ gnss = [
     "pyserial>=3.5",
     "pyubx2>=1.2.0",
 ]
+iono = [
+    "netCDF4>=1.6.0",
+    "boto3>=1.28.0",
+]
 
 [project.scripts]
 hf-timestd = "hf_timestd.cli:main"

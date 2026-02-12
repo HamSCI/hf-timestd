@@ -316,22 +316,25 @@ class MetrologyEngine:
 
     def _predict_geometric_delay(self, station: str, utc_time: Optional[float] = None) -> Tuple[float, float, float]:
         """
-        Calculate expected propagation delay using ArrivalPatternMatrix.
+        Calculate expected propagation delay using physics-based models.
         
-        If ArrivalPatternMatrix is available, uses IRI-2020 ionospheric model.
-        Otherwise falls back to simple light-speed calculation.
+        Priority:
+        1. ArrivalPatternMatrix (uses HFPropagationModel internally — multi-mode,
+           frequency-dependent ionospheric delay, adaptive uncertainty)
+        2. HFPropagationModel directly (if matrix not available)
+        3. Simple light-speed calculation with ionospheric overhead (last resort)
         
-        Returns: (expected_delay_ms, distance_km, uncertainty_ms)
+        Returns: (expected_delay_ms, distance_km, uncertainty_1sigma_ms)
         """
-        # Try ArrivalPatternMatrix first (physics-based with IRI-2020)
+        from datetime import datetime, timezone
+        if utc_time is not None:
+            dt = datetime.fromtimestamp(utc_time, tz=timezone.utc)
+        else:
+            dt = datetime.now(timezone.utc)
+        
+        # Try ArrivalPatternMatrix first (physics-based, may use HFPropagationModel)
         if self.arrival_matrix is not None:
             try:
-                from datetime import datetime, timezone
-                if utc_time is not None:
-                    dt = datetime.fromtimestamp(utc_time, tz=timezone.utc)
-                else:
-                    dt = datetime.now(timezone.utc)
-                
                 arrival = self.arrival_matrix.get_expected_arrivals(dt).get_arrival(
                     station, self.frequency_mhz
                 )
@@ -344,7 +347,26 @@ class MetrologyEngine:
             except Exception as e:
                 logger.debug(f"ArrivalPatternMatrix lookup failed: {e}")
         
-        # Fallback to simple light-speed calculation
+        # Try HFPropagationModel directly
+        if self.precise_lat is not None and self.precise_lon is not None:
+            try:
+                from .propagation_model import HFPropagationModel
+                prop_model = HFPropagationModel(
+                    receiver_lat=self.precise_lat,
+                    receiver_lon=self.precise_lon,
+                    enable_realtime=True
+                )
+                prediction = prop_model.predict(station, self.frequency_mhz, dt)
+                if prediction.primary_delay_ms > 0:
+                    return (
+                        prediction.primary_delay_ms,
+                        prediction.distance_km,
+                        prediction.primary_uncertainty_ms  # Already 1-sigma
+                    )
+            except Exception as e:
+                logger.debug(f"HFPropagationModel fallback failed: {e}")
+        
+        # Last resort: simple light-speed calculation
         from .wwv_constants import STATION_LOCATIONS
         STATIONS = {k: {'lat': v['lat'], 'lon': v['lon']} for k, v in STATION_LOCATIONS.items()}
         

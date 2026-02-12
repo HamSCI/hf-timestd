@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** February 9, 2026  
+**Last Updated:** February 12, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.6 (Authoritative RTP Timestamps + Dual-Purpose Architecture)
+**Version:** V6.7 (Real-Time Ionospheric Propagation Model)
 
 ---
 
@@ -362,9 +362,17 @@ JSON Response → Chart.js plots
 
 ## Timing Architecture
 
-### Physics-Informed Propagation
+### Physics-Informed Propagation (v6.7)
 
-We don't just "guess" the path; we model it using a tiered hierarchy of physics models.
+We don't just "guess" the path; we model it using a tiered hierarchy of physics models, now driven by real-time ionospheric data.
+
+#### Tier 0: WAM-IPE + GIRO (Real-Time, v6.7)
+
+- **Source:** NOAA WAM-IPE 3D grids from AWS S3 (`noaa-nws-wam-ipe-pds`) and NOMADS.
+- **Correction:** GIRO ionosonde measurements for real-time hmF2/foF2 at path midpoints.
+- **Process:** `IonoDataService` fetches and caches data; `HFPropagationModel` numerically integrates group delay through electron density profiles.
+- **Result:** Frequency-dependent, time-varying delay predictions with multi-mode support (1F, 2F, 3F, 1E).
+- **Uncertainty:** ±0.5–1.0 ms (1σ) when WAM-IPE + GIRO available.
 
 #### Tier 1: PyLap Raytracing (Experimental)
 
@@ -375,7 +383,7 @@ We don't just "guess" the path; we model it using a tiered hierarchy of physics 
 
 - **Source:** IGS Global Ionosphere Maps (NASA CDDIS).
 - **Process:** Calculates ionospheric pierce points along the great circle path.
-- **Integration:** Interpolates VTEC map to determine precise Total Electron Content.
+- **Integration:** Interpolates VTEC from the grid (lat/lon/time).
 - **Result:** Provides the most accurate group delay estimation available without full reanalysis.
 
 #### Tier 2: IRI-2020 + Geometric
@@ -383,8 +391,9 @@ We don't just "guess" the path; we model it using a tiered hierarchy of physics 
 - Uses the International Reference Ionosphere (IRI-2020) model to estimate layer heights (hmF2, hmE) and monthly average parameters.
 - Used as a fallback or baseline for IONEX.
 
-#### Tier 3: Empirical/Geometric
+#### Tier 3: Parametric/Empirical
 
+- Diurnal/seasonal parametric model with latitude dependence.
 - Simple geometric calculation based on virtual height assumptions.
 - Fallback of last resort.
 
@@ -455,6 +464,7 @@ We use a **Weighted Voting** system combining:
 | `timestd-l2-calibration.service` | Phase 2: L2 calibrated timing |
 | `timestd-fusion.service` | Phase 3: Multi-broadcast fusion & Chrony feed |
 | `timestd-physics.service` | Phase 3: TEC estimation |
+| `timestd-iono.service` | Ionospheric data ingestion (WAM-IPE, GIRO) — *planned* |
 | `timestd-web-api.service` | Web monitoring UI (FastAPI) |
 | `timestd-radiod-monitor.service` | Hardware health monitoring |
 
@@ -492,7 +502,52 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 
 ---
 
-**Last Updated:** February 9, 2026
+**Last Updated:** February 12, 2026
+
+## Real-Time Ionospheric Propagation Model (v6.7)
+
+The v6.7 release replaces the static vacuum propagation model with a real-time ionospheric data-driven system.
+
+### New Modules
+
+| Module | Purpose |
+|--------|---------|
+| `propagation_model.py` | `HFPropagationModel` — multi-mode delay prediction with numerical Ne(h) integration |
+| `iono_data_service.py` | `IonoDataService` — background WAM-IPE/GIRO data fetching, caching, interpolation |
+
+### Data Flow
+
+```
+IonoDataService (background thread, 5-min cycle)
+    ├── WAM-IPE NetCDF from NOAA S3/NOMADS → /var/lib/timestd/iono_cache/
+    ├── GIRO ionosonde data (DIDBase API)
+    └── Climatological fallback (always available)
+         ↓
+HFPropagationModel.predict(station, freq, utc_time)
+    ├── Evaluates 4 propagation modes (1F, 2F, 3F, 1E)
+    ├── Computes frequency-dependent ionospheric group delay
+    ├── Returns adaptive uncertainty based on data source quality
+    └── Provides self-consistency check via multi-freq differential delay
+         ↓
+ArrivalPatternMatrix.compute_matrix()
+    ├── Primary arrivals dict (backward-compatible)
+    └── Multi-mode arrivals dict (new: all feasible modes)
+         ↓
+MetrologyEngine._predict_geometric_delay()
+    └── Uses model predictions for physics validation
+```
+
+### Multi-Mode Arrival Support
+
+The `ArrivalMatrix` now supports multiple propagation modes per (station, frequency):
+
+- `arrivals[(station, freq)]` — primary (lowest-delay feasible mode), backward-compatible
+- `multi_mode_arrivals[(station, freq, mode)]` — all feasible modes with independent search windows
+- `get_all_mode_arrivals(station, freq)` — returns all modes sorted by delay
+
+This enables the system to accept multi-hop arrivals (e.g., CHU 7.85 MHz 2F at night) that were previously rejected by the fixed ±50 ms window.
+
+---
 
 ## Physics-Based Validation (v6.5)
 

@@ -3,7 +3,7 @@
 **Comprehensive guide to the metrological methodology used in hf-timestd for RTP-to-UTC calibration and time transfer.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 7, 2026 (v6.5.1)
+**Last Updated:** February 12, 2026 (v6.7.0)
 
 ---
 
@@ -224,7 +224,9 @@ The system computes expected propagation delays based on:
 1. **Transmitter locations** (known precisely)
 2. **Receiver location** (from configuration)
 3. **Great circle distance**
-4. **Ionospheric path factor** (1.15× for typical skywave)
+4. **Ionospheric reflection height** (from real-time model or IRI-2020)
+5. **Frequency-dependent ionospheric group delay** (1/f² scaling)
+6. **Multi-hop path geometry** (1F, 2F, 3F modes)
 
 ### Transmitter Coordinates
 
@@ -243,6 +245,109 @@ The system computes expected propagation delays based on:
 | WWV | 1120 km | 4.3 ms | 3.4-6.4 ms |
 | WWVH | 6600 km | 25.3 ms | 20.3-38.0 ms |
 | BPM | 11504 km | 44.1 ms | 35.3-66.2 ms |
+
+**Note:** These are representative single-hop values. The actual delay is frequency-dependent (lower frequencies experience more ionospheric group delay) and time-varying (diurnal ionospheric changes). The `HFPropagationModel` (v6.7) computes these dynamically. See the [Real-Time Ionospheric Propagation Model](#real-time-ionospheric-propagation-model-v670) section below.
+
+---
+
+## Real-Time Ionospheric Propagation Model (v6.7.0)
+
+### Motivation
+
+The previous propagation model used a static vacuum speed-of-light calculation with a fixed 15% ionospheric overhead (`delay = distance / c × 1.15`). This ignored:
+
+1. **Frequency-dependent group delay** — ionospheric excess delay scales as 1/f², so 5 MHz has 4× more delay than 10 MHz
+2. **Diurnal variation** — hmF2 varies from ~250 km (day) to ~350 km (night), changing path geometry
+3. **Multi-hop propagation** — at night, lower frequencies take 2F or 3F paths with 100–300 ms additional delay
+4. **Geomagnetic disturbances** — storm-time delays can change by 50–100% within minutes
+
+### Architecture
+
+The new model uses a three-tier data hierarchy:
+
+```
+HFPropagationModel.predict(station, frequency, utc_time)
+    ├── IonoDataService.get_iono_params()
+    │       ├── WAM-IPE grid (NOAA S3/NOMADS)     ← Tier 1: Real-time 3D model
+    │       ├── GIRO ionosonde corrections          ← Tier 1.5: Ground-truth hmF2/foF2
+    │       ├── IRI-2020 climatology                ← Tier 2: Monthly median model
+    │       └── Parametric fallback                 ← Tier 3: Diurnal/seasonal formula
+    ├── _evaluate_mode() × [1F, 2F, 3F, 1E]
+    │       ├── Geometric feasibility check
+    │       ├── MUF check (freq vs foF2/sec(i))
+    │       ├── Spherical Earth path length
+    │       └── Ionospheric group delay
+    │               ├── Ne(h) numerical integration  ← When profile available
+    │               └── TEC-based: 40.3·sTEC/(c·f²)  ← Fallback
+    └── _estimate_uncertainty()
+```
+
+### Ionospheric Group Delay Physics
+
+The excess group delay through the ionosphere is:
+
+```
+Δτ = (40.3 / c) × ∫ Ne(s) ds / f²  =  40.3 × sTEC / (c × f²)
+```
+
+where:
+- `Ne(s)` is the electron density along the signal path (m⁻³)
+- `sTEC` is the slant Total Electron Content (el/m²)
+- `f` is the signal frequency (Hz)
+- `c` is the speed of light (m/s)
+
+For a vertical TEC of 20 TECU at 10 MHz, the excess delay is ~0.27 ms. At 5 MHz, it's ~1.07 ms (4× larger). At oblique incidence, the slant factor increases the effective TEC.
+
+### Multi-Mode Predictions
+
+For each (station, frequency) pair, the model evaluates four propagation modes:
+
+| Mode | Description | Typical Distance |
+|------|-------------|-----------------|
+| **1F** | Single F-layer hop | < 3000 km |
+| **2F** | Two F-layer hops | 3000–6000 km |
+| **3F** | Three F-layer hops | > 6000 km |
+| **1E** | Single E-layer hop (daytime) | < 2000 km |
+
+Each mode is checked for:
+- **Geometric feasibility** — can the signal reach the reflection point?
+- **MUF constraint** — is the frequency below the Maximum Usable Frequency?
+- **Minimum elevation** — below 3° is unreliable for single-hop
+
+The `ArrivalMatrix` now contains both a primary arrival (backward-compatible) and a `multi_mode_arrivals` dict with all feasible modes.
+
+### Adaptive Uncertainty
+
+The uncertainty window adapts based on data source quality:
+
+| Data Source | 3σ Uncertainty | Confidence |
+|-------------|---------------|------------|
+| WAM-IPE + GIRO | ±1.5 ms | 0.8 |
+| WAM-IPE alone | ±3.0 ms | 0.6 |
+| IRI-2020 | ±4.5 ms | 0.5 |
+| Parametric fallback | ±9.0 ms | 0.2 |
+| No model | ±15.0 ms | 0.0 |
+
+The final window blends model uncertainty with tracked observational variance (exponential smoothing of residuals), using the tighter of the two, floored at ±5 ms (3σ).
+
+### Self-Consistency Check
+
+The model provides a self-consistency check using multi-frequency differential delay:
+
+```
+Δτ(f1,f2) = τ(f1) - τ(f2) = 40.3 × sTEC × (1/f1² - 1/f2²) / c
+```
+
+If the observed differential delay between two frequencies on the same station path disagrees with the model's predicted differential delay by more than 1 ms RMS, the model flags an inconsistency — indicating either a model error or a mode misidentification.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/hf_timestd/core/propagation_model.py` | `HFPropagationModel` — delay prediction, multi-mode, self-consistency |
+| `src/hf_timestd/core/iono_data_service.py` | `IonoDataService` — WAM-IPE/GIRO fetch, cache, interpolation, fallback |
+| `src/hf_timestd/core/arrival_pattern_matrix.py` | `ArrivalPatternMatrix` — integrates model into arrival predictions |
+| `tests/test_propagation_model.py` | 23 tests covering all components |
 
 ---
 
@@ -827,5 +932,5 @@ BPM is maintained for scientific interest (trans-Pacific ionospheric probing) bu
 
 ---
 
-**Version**: 6.5.1  
-**Last Updated**: February 7, 2026
+**Version**: 6.7.0  
+**Last Updated**: February 12, 2026

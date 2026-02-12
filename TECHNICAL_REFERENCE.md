@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 9, 2026 (v6.6.0)
+**Last Updated:** February 12, 2026 (v6.7.0)
 
 ---
 
@@ -136,13 +136,20 @@ Phase 3 fusion results.
 
 ---
 
-## Physics & Propagation Modeling (V5.0)
+## Physics & Propagation Modeling (V6.7)
 
 To convert "Arrival Time" to "Emission Time", we must rigorously model the flight path.
 
-### 1. Integrated Ionospheric Model
+### 1. Real-Time Ionospheric Model (v6.7)
 
-The `PhysicsPropagationModel` class integrates three tiers of data:
+The `HFPropagationModel` class (`propagation_model.py`) computes frequency-dependent, time-varying group delay predictions using real-time ionospheric data:
+
+- **Tier 0: WAM-IPE + GIRO (Real-Time):**
+  - `IonoDataService` fetches WAM-IPE 2D products (TEC, NmF2, HmF2) from NOAA AWS S3 (`noaa-nws-wam-ipe-pds`) and NOMADS.
+  - GIRO ionosonde corrections provide ground-truth hmF2/foF2 at path midpoints.
+  - Numerically integrates group delay through Chapman electron density profiles.
+  - Evaluates 4 propagation modes (1F, 2F, 3F, 1E) with MUF and geometry checks.
+  - Group delay formula: `Δτ = 40.3 × sTEC / (c × f²)`
 
 - **Tier 1: IONEX (Global Ionosphere Maps):**
   - Uses `.i` files from IGS/NASA.
@@ -151,10 +158,11 @@ The `PhysicsPropagationModel` class integrates three tiers of data:
   - Converts VTEC to Group Delay: $\tau_{iono} \propto \frac{TEC}{f^2}$
 
 - **Tier 2: IRI-2020:**
-  - Uses the International Reference Ionosphere model when IONEX is unavailable.
+  - Uses the International Reference Ionosphere model when real-time data is unavailable.
   - Estimates `hmF2` (layer height) and statistical monthly VTEC.
 
-- **Tier 3: Geometric/Empirical:**
+- **Tier 3: Parametric/Empirical:**
+  - Diurnal/seasonal parametric model with latitude dependence.
   - Fallback model based on path distance and solar zenith angle.
 
 ### 2. Path Mid-Point Correction
@@ -164,7 +172,28 @@ Ionospheric delay is determined by the electron density at the **reflection poin
 - **Algorithm:**
     1. Calculate Great Circle path.
     2. Determine path midpoint (for 1-hop) or reflection points (for N-hop).
-    3. Query IONEX/IRI at those specific coordinates.
+    3. Query WAM-IPE/GIRO/IONEX/IRI at those specific coordinates.
+
+### 3. Multi-Mode Arrival Prediction (v6.7)
+
+The `ArrivalPatternMatrix` now predicts multiple propagation modes per (station, frequency):
+
+| Mode | Layer | Typical Distance | Example |
+|------|-------|------------------|---------|
+| 1F | F2 | < 3000 km | CHU→AC0G (1522 km) |
+| 2F | F2 | 3000–6000 km | WWVH→AC0G (6600 km) |
+| 3F | F2 | > 6000 km | BPM→AC0G (11504 km) |
+| 1E | E | < 2000 km | Daytime, lower frequencies |
+
+Each mode has independent delay, uncertainty, and search window. The primary arrival (lowest delay) is backward-compatible with existing callers.
+
+### 4. Adaptive Uncertainty (v6.7)
+
+Uncertainty adapts based on data source quality and observed variance:
+- WAM-IPE + GIRO: ±1.5 ms (3σ)
+- IRI-2020: ±4.5 ms (3σ)
+- Parametric: ±9.0 ms (3σ)
+- Blended with tracked observational variance, floored at ±5 ms (3σ)
 
 ---
 
@@ -837,9 +866,19 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ---
 
-**Version**: 6.6.0  
-**Last Updated**: February 9, 2026  
+**Version**: 6.7.0  
+**Last Updated**: February 12, 2026  
 **Purpose**: Technical reference for HF Time Standard developers
+
+**v6.7.0 Release (February 12, 2026) - Real-Time Ionospheric Propagation Model:**
+
+- **Real-time ionospheric data** — `IonoDataService` fetches WAM-IPE grids from NOAA S3 and GIRO ionosonde data for real-time hmF2/foF2 corrections.
+- **Physics-based group delay** — `HFPropagationModel` computes frequency-dependent ionospheric delay via numerical Ne(h) integration or TEC-based formula (40.3×sTEC/(c×f²)).
+- **Multi-mode predictions** — Evaluates 1F, 2F, 3F, 1E propagation modes with MUF checks and geometric feasibility.
+- **Adaptive uncertainty** — Windows adapt from ±1.5 ms (WAM-IPE+GIRO) to ±15 ms (no model), blended with tracked variance.
+- **Self-consistency check** — Multi-frequency differential delay validates model TEC predictions.
+- **Backward compatible** — `ArrivalMatrix.arrivals` dict unchanged; new `multi_mode_arrivals` dict adds multi-hop support.
+- **23 new tests** — All passing, 0 regressions in existing test suite.
 
 **v6.6.0 Release (February 9, 2026) - Authoritative RTP Timestamps:**
 

@@ -243,7 +243,7 @@ class BroadcastWindowState:
 
 @dataclass
 class ExpectedArrival:
-    """Expected arrival parameters for a single (station, frequency) pair."""
+    """Expected arrival parameters for a single (station, frequency, mode) tuple."""
     station: str
     frequency_mhz: float
     
@@ -265,6 +265,14 @@ class ExpectedArrival:
     num_hops: int = 1
     model_tier: str = 'Static'  # 'IRI-2020', 'Parametric', 'Static'
     
+    # Propagation mode metadata (new: multi-hop support)
+    propagation_mode: str = '1F'           # '1F', '2F', '3F', '1E', 'vacuum_fallback'
+    geometric_delay_ms: float = 0.0        # Vacuum path delay component
+    iono_delay_ms: float = 0.0             # Ionospheric excess group delay component
+    elevation_angle_deg: float = 0.0       # Launch elevation angle
+    data_source: str = 'static'            # 'wamipe', 'wamipe+giro', 'iri', 'parametric', 'static'
+    model_confidence: float = 0.0          # 0-1, from propagation model
+    
     def contains_sample(self, sample: int) -> bool:
         """Check if a sample falls within the search window."""
         return self.min_search_sample <= sample <= self.max_search_sample
@@ -279,29 +287,47 @@ class ExpectedArrival:
 
 @dataclass
 class ArrivalMatrix:
-    """Complete arrival pattern matrix for all stations and frequencies."""
+    """Complete arrival pattern matrix for all stations, frequencies, and modes."""
     timestamp: datetime
     receiver_lat: float
     receiver_lon: float
     sample_rate: int
     
-    # Arrivals indexed by (station, frequency_mhz)
+    # Primary arrivals indexed by (station, frequency_mhz) — backward compatible
     arrivals: Dict[Tuple[str, float], ExpectedArrival] = field(default_factory=dict)
+    
+    # Multi-mode arrivals indexed by (station, frequency_mhz, mode_label)
+    # Contains ALL feasible modes, not just the primary
+    multi_mode_arrivals: Dict[Tuple[str, float, str], ExpectedArrival] = field(default_factory=dict)
     
     # Model metadata
     ionospheric_model_tier: str = 'Static'
     solar_flux_f107: Optional[float] = None
+    data_source: str = 'static'       # Best data source used
+    model_confidence: float = 0.0     # Overall model confidence
     
     def get_arrival(self, station: str, frequency_mhz: float) -> Optional[ExpectedArrival]:
-        """Get expected arrival for a specific station/frequency."""
+        """Get primary expected arrival for a specific station/frequency."""
         return self.arrivals.get((station, frequency_mhz))
     
+    def get_mode_arrival(self, station: str, frequency_mhz: float, mode: str) -> Optional[ExpectedArrival]:
+        """Get expected arrival for a specific station/frequency/mode."""
+        return self.multi_mode_arrivals.get((station, frequency_mhz, mode))
+    
+    def get_all_mode_arrivals(self, station: str, frequency_mhz: float) -> List[ExpectedArrival]:
+        """Get all feasible mode arrivals for a station/frequency, sorted by delay."""
+        arrivals = [
+            a for (s, f, m), a in self.multi_mode_arrivals.items()
+            if s == station and abs(f - frequency_mhz) < 0.01
+        ]
+        return sorted(arrivals, key=lambda a: a.expected_delay_ms)
+    
     def get_station_arrivals(self, station: str) -> List[ExpectedArrival]:
-        """Get all expected arrivals for a station (all frequencies)."""
+        """Get all primary expected arrivals for a station (all frequencies)."""
         return [a for (s, f), a in self.arrivals.items() if s == station]
     
     def get_frequency_arrivals(self, frequency_mhz: float, tolerance_mhz: float = 0.1) -> List[ExpectedArrival]:
-        """Get all expected arrivals for a frequency (all stations)."""
+        """Get all primary expected arrivals for a frequency (all stations)."""
         return [a for (s, f), a in self.arrivals.items() 
                 if abs(f - frequency_mhz) < tolerance_mhz]
 
@@ -372,6 +398,19 @@ class ArrivalPatternMatrix:
                 logger.info("ArrivalPatternMatrix: IRI-2020 ionospheric model available")
             except ImportError:
                 logger.warning("ArrivalPatternMatrix: IonosphericModel not available, using parametric fallback")
+        
+        # Initialize HF Propagation Model for physics-based delay predictions
+        self._prop_model = None
+        try:
+            from .propagation_model import HFPropagationModel
+            self._prop_model = HFPropagationModel(
+                receiver_lat=receiver_lat,
+                receiver_lon=receiver_lon,
+                enable_realtime=enable_iri  # Use real-time data if IRI is enabled
+            )
+            logger.info("ArrivalPatternMatrix: HFPropagationModel initialized")
+        except ImportError:
+            logger.warning("ArrivalPatternMatrix: HFPropagationModel not available, using legacy computation")
         
         # Current matrix (recomputed each minute)
         self._current_matrix: Optional[ArrivalMatrix] = None
@@ -723,6 +762,10 @@ class ArrivalPatternMatrix:
         This is the core method that produces physics-based predictions
         for where each tone should appear.
         
+        If HFPropagationModel is available, uses it for multi-mode predictions
+        with frequency-dependent ionospheric group delay and adaptive uncertainty.
+        Otherwise falls back to the legacy single-mode computation.
+        
         Args:
             utc_time: UTC time for ionospheric model
             
@@ -736,61 +779,263 @@ class ArrivalPatternMatrix:
             sample_rate=self.sample_rate
         )
         
+        # Use HFPropagationModel if available
+        if self._prop_model is not None:
+            self._compute_matrix_with_prop_model(matrix, utc_time)
+        else:
+            self._compute_matrix_legacy(matrix, utc_time)
+        
+        self._current_matrix = matrix
+        return matrix
+    
+    def _compute_matrix_with_prop_model(
+        self, matrix: ArrivalMatrix, utc_time: datetime
+    ):
+        """
+        Compute matrix using HFPropagationModel — multi-mode, frequency-dependent.
+        
+        For each (station, frequency) pair:
+        1. Get all feasible propagation modes from the model
+        2. Create an ExpectedArrival for each feasible mode
+        3. Set the primary arrival (lowest delay feasible mode)
+        4. Compute adaptive uncertainty from model confidence
+        """
+        best_source = 'static'
+        max_confidence = 0.0
         model_tiers_used = set()
         
         for station, frequencies in STATION_FREQUENCIES.items():
-            station_lat, station_lon = STATION_LOCATIONS[station]
             distance_km = self.great_circle_distances[station]
             
-            # Midpoint for ionospheric model
-            midpoint_lat = (self.receiver_lat + station_lat) / 2
-            midpoint_lon = (self.receiver_lon + station_lon) / 2
-            
             for freq_mhz in frequencies:
-                # Get ionospheric height
-                height_km, model_tier = self._get_ionospheric_height_km(
-                    freq_mhz, utc_time, midpoint_lat, midpoint_lon
-                )
-                model_tiers_used.add(model_tier)
+                try:
+                    prediction = self._prop_model.predict(
+                        station=station,
+                        frequency_mhz=freq_mhz,
+                        utc_time=utc_time
+                    )
+                except Exception as e:
+                    logger.debug(f"PropModel predict failed for {station}@{freq_mhz}MHz: {e}")
+                    # Fall back to legacy for this pair
+                    self._compute_single_legacy(matrix, station, freq_mhz, distance_km, utc_time)
+                    continue
                 
-                # Compute propagation delay
-                delay_ms, num_hops = self._compute_propagation_delay_ms(distance_km, height_km)
+                # Track best data source
+                if prediction.model_confidence > max_confidence:
+                    max_confidence = prediction.model_confidence
+                    best_source = prediction.data_source
                 
-                # Apply TEC feedback correction if available
-                # This refines the ionospheric delay using measured TEC from multi-frequency observations
+                feasible = prediction.get_feasible_arrivals()
+                
+                if not feasible:
+                    # No feasible mode — use vacuum fallback from prediction
+                    self._add_arrival_to_matrix(
+                        matrix=matrix,
+                        station=station,
+                        freq_mhz=freq_mhz,
+                        delay_ms=prediction.primary_delay_ms,
+                        geometric_delay_ms=prediction.primary_delay_ms,
+                        iono_delay_ms=0.0,
+                        num_hops=1,
+                        height_km=300.0,
+                        elevation_deg=0.0,
+                        mode_label='vacuum_fallback',
+                        model_tier='Fallback',
+                        data_source=prediction.data_source,
+                        model_confidence=prediction.model_confidence,
+                        distance_km=distance_km,
+                        model_uncertainty_ms=prediction.primary_uncertainty_ms,
+                        is_primary=True
+                    )
+                    continue
+                
+                # Add each feasible mode as a multi-mode arrival
+                for i, mode_arrival in enumerate(feasible):
+                    is_primary = (i == 0)  # First (lowest delay) is primary
+                    
+                    model_tier_str = prediction.data_source
+                    if 'wamipe' in model_tier_str:
+                        model_tiers_used.add('WAM-IPE')
+                    elif 'iri' in model_tier_str:
+                        model_tiers_used.add('IRI-2020')
+                    else:
+                        model_tiers_used.add('Parametric')
+                    
+                    # Adaptive uncertainty: use model's uncertainty estimate,
+                    # but respect the dynamic window tracking
+                    model_3sigma_ms = mode_arrival.uncertainty_ms * 3.0
+                    
+                    self._add_arrival_to_matrix(
+                        matrix=matrix,
+                        station=station,
+                        freq_mhz=freq_mhz,
+                        delay_ms=mode_arrival.delay_ms,
+                        geometric_delay_ms=mode_arrival.geometric_delay_ms,
+                        iono_delay_ms=mode_arrival.iono_delay_ms,
+                        num_hops=mode_arrival.mode.n_hops,
+                        height_km=mode_arrival.reflection_height_km,
+                        elevation_deg=mode_arrival.elevation_angle_deg,
+                        mode_label=mode_arrival.mode.label,
+                        model_tier=model_tier_str,
+                        data_source=prediction.data_source,
+                        model_confidence=prediction.model_confidence,
+                        distance_km=distance_km,
+                        model_uncertainty_ms=model_3sigma_ms,
+                        is_primary=is_primary
+                    )
+                
+                # Apply TEC feedback correction to primary arrival
                 tec_correction_ms = self.compute_tec_correction_ms(station, freq_mhz)
                 if tec_correction_ms > 0:
-                    delay_ms += tec_correction_ms
-                    model_tiers_used.add('TEC-Corrected')
+                    primary = matrix.arrivals.get((station, freq_mhz))
+                    if primary is not None:
+                        primary.expected_delay_ms += tec_correction_ms
+                        primary.iono_delay_ms += tec_correction_ms
+                        primary.expected_sample = int(primary.expected_delay_ms * self.sample_rate / 1000)
+                        # Recompute search window
+                        unc_samples = int(primary.uncertainty_3sigma_ms * self.sample_rate / 1000)
+                        primary.min_search_sample = max(0, primary.expected_sample - unc_samples)
+                        primary.max_search_sample = primary.expected_sample + unc_samples
+                        model_tiers_used.add('TEC-Corrected')
+        
+        # Set overall model tier
+        if 'WAM-IPE' in model_tiers_used:
+            matrix.ionospheric_model_tier = 'WAM-IPE'
+        elif 'IRI-2020' in model_tiers_used:
+            matrix.ionospheric_model_tier = 'IRI-2020'
+        elif 'Parametric' in model_tiers_used:
+            matrix.ionospheric_model_tier = 'Parametric'
+        else:
+            matrix.ionospheric_model_tier = 'Static'
+        
+        matrix.data_source = best_source
+        matrix.model_confidence = max_confidence
+    
+    def _add_arrival_to_matrix(
+        self,
+        matrix: ArrivalMatrix,
+        station: str,
+        freq_mhz: float,
+        delay_ms: float,
+        geometric_delay_ms: float,
+        iono_delay_ms: float,
+        num_hops: int,
+        height_km: float,
+        elevation_deg: float,
+        mode_label: str,
+        model_tier: str,
+        data_source: str,
+        model_confidence: float,
+        distance_km: float,
+        model_uncertainty_ms: float,
+        is_primary: bool
+    ):
+        """Add an arrival entry to the matrix (both primary and multi-mode dicts)."""
+        # Get dynamic window width — blend model uncertainty with tracked variance
+        tracked_uncertainty_ms = self.get_current_uncertainty_ms(station, freq_mhz)
+        
+        # Adaptive uncertainty: use the TIGHTER of model and tracked,
+        # but never go below BOOTSTRAP_MIN_UNCERTAINTY_MS
+        if model_uncertainty_ms > 0 and model_confidence > 0.3:
+            # Model is somewhat confident — use model uncertainty as a floor,
+            # but let tracked variance narrow it further if observations support it
+            adaptive_3sigma_ms = min(tracked_uncertainty_ms, max(model_uncertainty_ms, BOOTSTRAP_MIN_UNCERTAINTY_MS * 3))
+        else:
+            # Low confidence — use tracked or bootstrap uncertainty
+            adaptive_3sigma_ms = tracked_uncertainty_ms
+        
+        # Convert to samples
+        expected_sample = int(delay_ms * self.sample_rate / 1000)
+        uncertainty_samples = int(adaptive_3sigma_ms * self.sample_rate / 1000)
+        min_sample = max(0, expected_sample - uncertainty_samples)
+        max_sample = expected_sample + uncertainty_samples
+        
+        arrival = ExpectedArrival(
+            station=station,
+            frequency_mhz=freq_mhz,
+            expected_sample=expected_sample,
+            expected_delay_ms=delay_ms,
+            uncertainty_3sigma_ms=adaptive_3sigma_ms,
+            min_search_sample=min_sample,
+            max_search_sample=max_sample,
+            initial_uncertainty_ms=BOOTSTRAP_INITIAL_UNCERTAINTY_MS,
+            great_circle_km=distance_km,
+            ionospheric_height_km=height_km,
+            num_hops=num_hops,
+            model_tier=model_tier,
+            propagation_mode=mode_label,
+            geometric_delay_ms=geometric_delay_ms,
+            iono_delay_ms=iono_delay_ms,
+            elevation_angle_deg=elevation_deg,
+            data_source=data_source,
+            model_confidence=model_confidence,
+        )
+        
+        # Always add to multi-mode dict
+        matrix.multi_mode_arrivals[(station, freq_mhz, mode_label)] = arrival
+        
+        # Primary arrival goes in the backward-compatible dict
+        if is_primary:
+            matrix.arrivals[(station, freq_mhz)] = arrival
+    
+    def _compute_single_legacy(
+        self,
+        matrix: ArrivalMatrix,
+        station: str,
+        freq_mhz: float,
+        distance_km: float,
+        utc_time: datetime
+    ):
+        """Legacy single-mode computation for one (station, frequency) pair."""
+        station_lat, station_lon = STATION_LOCATIONS[station]
+        midpoint_lat = (self.receiver_lat + station_lat) / 2
+        midpoint_lon = (self.receiver_lon + station_lon) / 2
+        
+        height_km, model_tier = self._get_ionospheric_height_km(
+            freq_mhz, utc_time, midpoint_lat, midpoint_lon
+        )
+        delay_ms, num_hops = self._compute_propagation_delay_ms(distance_km, height_km)
+        
+        tec_correction_ms = self.compute_tec_correction_ms(station, freq_mhz)
+        if tec_correction_ms > 0:
+            delay_ms += tec_correction_ms
+        
+        self._add_arrival_to_matrix(
+            matrix=matrix,
+            station=station,
+            freq_mhz=freq_mhz,
+            delay_ms=delay_ms,
+            geometric_delay_ms=delay_ms,
+            iono_delay_ms=0.0,
+            num_hops=num_hops,
+            height_km=height_km,
+            elevation_deg=0.0,
+            mode_label=f'{num_hops}F',
+            model_tier=model_tier,
+            data_source='legacy',
+            model_confidence=0.0,
+            distance_km=distance_km,
+            model_uncertainty_ms=0.0,
+            is_primary=True
+        )
+    
+    def _compute_matrix_legacy(self, matrix: ArrivalMatrix, utc_time: datetime):
+        """
+        Legacy matrix computation — single-mode, no propagation model.
+        
+        Used when HFPropagationModel is not available.
+        """
+        model_tiers_used = set()
+        
+        for station, frequencies in STATION_FREQUENCIES.items():
+            distance_km = self.great_circle_distances[station]
+            
+            for freq_mhz in frequencies:
+                self._compute_single_legacy(matrix, station, freq_mhz, distance_km, utc_time)
                 
-                # Convert to samples
-                expected_sample = int(delay_ms * self.sample_rate / 1000)
-                
-                # Get dynamic window width for this broadcast
-                # Uses tracked variance if available, otherwise initial width
-                current_uncertainty_ms = self.get_current_uncertainty_ms(station, freq_mhz)
-                
-                # Search window (dynamic bounds based on observed variance)
-                uncertainty_samples = int(current_uncertainty_ms * self.sample_rate / 1000)
-                min_sample = max(0, expected_sample - uncertainty_samples)
-                max_sample = expected_sample + uncertainty_samples
-                
-                arrival = ExpectedArrival(
-                    station=station,
-                    frequency_mhz=freq_mhz,
-                    expected_sample=expected_sample,
-                    expected_delay_ms=delay_ms,
-                    uncertainty_3sigma_ms=current_uncertainty_ms,
-                    min_search_sample=min_sample,
-                    max_search_sample=max_sample,
-                    initial_uncertainty_ms=BOOTSTRAP_INITIAL_UNCERTAINTY_MS,
-                    great_circle_km=distance_km,
-                    ionospheric_height_km=height_km,
-                    num_hops=num_hops,
-                    model_tier=model_tier
-                )
-                
-                matrix.arrivals[(station, freq_mhz)] = arrival
+                arrival = matrix.arrivals.get((station, freq_mhz))
+                if arrival is not None:
+                    model_tiers_used.add(arrival.model_tier)
         
         # Set overall model tier (use highest available)
         if 'IRI-2020' in model_tiers_used:
@@ -799,9 +1044,6 @@ class ArrivalPatternMatrix:
             matrix.ionospheric_model_tier = 'Parametric'
         else:
             matrix.ionospheric_model_tier = 'Static'
-        
-        self._current_matrix = matrix
-        return matrix
     
     def get_expected_arrivals(self, utc_time: Optional[datetime] = None) -> ArrivalMatrix:
         """
@@ -919,10 +1161,25 @@ class ArrivalPatternMatrix:
         
         logger.info(f"Arrival Pattern Matrix @ {matrix.timestamp.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         logger.info(f"  Receiver: ({matrix.receiver_lat:.4f}, {matrix.receiver_lon:.4f})")
-        logger.info(f"  Model: {matrix.ionospheric_model_tier}")
+        logger.info(f"  Model: {matrix.ionospheric_model_tier} | Source: {matrix.data_source} | Confidence: {matrix.model_confidence:.2f}")
         
         for station in ['WWV', 'WWVH', 'CHU', 'BPM']:
             arrivals = matrix.get_station_arrivals(station)
             if arrivals:
-                delays = [f"{a.frequency_mhz:.1f}MHz:{a.expected_delay_ms:.1f}ms" for a in arrivals]
-                logger.info(f"  {station}: {', '.join(delays)}")
+                parts = []
+                for a in arrivals:
+                    # Show primary mode and delay
+                    mode_str = f"{a.frequency_mhz:.1f}MHz:{a.expected_delay_ms:.1f}ms({a.propagation_mode})"
+                    # Show ionospheric delay component if nonzero
+                    if a.iono_delay_ms > 0.01:
+                        mode_str += f"[iono={a.iono_delay_ms:.2f}ms]"
+                    parts.append(mode_str)
+                logger.info(f"  {station}: {', '.join(parts)}")
+                
+                # Log additional modes if present
+                for a in arrivals:
+                    all_modes = matrix.get_all_mode_arrivals(station, a.frequency_mhz)
+                    if len(all_modes) > 1:
+                        mode_strs = [f"{m.propagation_mode}:{m.expected_delay_ms:.1f}ms±{m.uncertainty_3sigma_ms:.0f}" 
+                                    for m in all_modes]
+                        logger.debug(f"    {station}@{a.frequency_mhz:.1f}MHz modes: {', '.join(mode_strs)}")
