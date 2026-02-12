@@ -712,15 +712,18 @@
             `).join('');
             
             // Compute global SNR range across all broadcasts for normalized Y-axes
-            let globalSnrMax = 0;
+            // Use 95th percentile to avoid outliers pulling the axis to 250+
+            let allSnrs = [];
             for (const [bid, broadcast] of sortedBroadcasts) {
                 const snrs = (broadcast.measurements?.snr_db || []).filter(v => v !== null);
-                if (snrs.length > 0) {
-                    globalSnrMax = Math.max(globalSnrMax, ...snrs);
-                }
+                allSnrs.push(...snrs);
             }
-            // Round up to nearest 10 for a clean axis, minimum 50
-            globalSnrMax = Math.max(50, Math.ceil(globalSnrMax / 10) * 10);
+            allSnrs.sort((a, b) => a - b);
+            let globalSnrMax = 50;
+            if (allSnrs.length > 0) {
+                const p95 = allSnrs[Math.floor(allSnrs.length * 0.95)];
+                globalSnrMax = Math.max(50, Math.ceil(p95 / 10) * 10);
+            }
             
             // Render mini charts for each broadcast
             for (const [bid, broadcast] of sortedBroadcasts) {
