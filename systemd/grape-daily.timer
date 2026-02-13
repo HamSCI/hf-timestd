@@ -4,9 +4,8 @@ Documentation=https://github.com/mijahauan/hf-timestd
 Requires=grape-daily.service
 
 [Timer]
-# Run daily at 1:00 AM
-OnCalendar=daily
-OnCalendar=01:00
+# Run daily at 01:00 UTC (after midnight, yesterday's data is complete)
+OnCalendar=*-*-* 01:00:00
 
 # Add randomized delay to avoid load spikes
 RandomizedDelaySec=300

@@ -137,6 +137,10 @@ class DecimatedBuffer:
         self.buffer_dir = self.data_root / 'products' / self.channel_dir / 'decimated'
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
         
+        # In-memory metadata cache to avoid per-minute JSON I/O
+        self._metadata_cache: Dict[str, DayMetadata] = {}
+        self._metadata_dirty: set = set()
+        
         logger.debug(f"DecimatedBuffer initialized: {self.buffer_dir}")
     
     def _get_paths(self, date_str: str) -> Tuple[Path, Path]:
@@ -230,8 +234,10 @@ class DecimatedBuffer:
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             
-            # Update metadata
-            metadata = self._load_metadata(date_str)
+            # Update metadata (cached in memory, flushed by flush_metadata())
+            if date_str not in self._metadata_cache:
+                self._metadata_cache[date_str] = self._load_metadata(date_str)
+            metadata = self._metadata_cache[date_str]
             metadata.minutes[str(minute_index)] = MinuteMetadata(
                 minute_index=minute_index,
                 utc_timestamp=minute_utc,
@@ -241,7 +247,7 @@ class DecimatedBuffer:
                 gap_samples=gap_samples,
                 valid=True
             ).to_dict()
-            self._save_metadata(date_str, metadata)
+            self._metadata_dirty.add(date_str)
             
             logger.debug(f"Wrote minute {minute_index} for {date_str} ({self.channel_name})")
             return True
@@ -392,6 +398,15 @@ class DecimatedBuffer:
             return data.get('summary', {})
         except Exception:
             return None
+
+
+    def flush_metadata(self):
+        """Flush all dirty metadata to disk. Call after a batch of write_minute() calls."""
+        for date_str in list(self._metadata_dirty):
+            if date_str in self._metadata_cache:
+                self._save_metadata(date_str, self._metadata_cache[date_str])
+        self._metadata_dirty.clear()
+        logger.debug(f"Flushed metadata for {len(self._metadata_cache)} dates")
 
 
 def get_decimated_buffer(data_root: Path, channel_name: str) -> DecimatedBuffer:

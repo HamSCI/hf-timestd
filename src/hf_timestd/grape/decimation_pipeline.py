@@ -120,10 +120,10 @@ class DecimationPipeline:
                 
                 # Pad incomplete minutes to maintain sample alignment
                 if len(samples) < expected_raw_samples:
+                    gap_info = expected_raw_samples - len(samples)
                     padded = np.zeros(expected_raw_samples, dtype=np.complex64)
                     padded[:len(samples)] = samples
                     samples = padded
-                    gap_info = expected_raw_samples - len(samples)
                 elif len(samples) > expected_raw_samples:
                     samples = samples[:expected_raw_samples]
                 
@@ -159,5 +159,8 @@ class DecimationPipeline:
                 if success:
                     minutes_processed += 1
                     samples_generated += len(decimated_chunk)
+        
+        # Flush accumulated metadata to disk (single JSON write instead of 1440)
+        output_buffer.flush_metadata()
         
         logger.info(f"  Completed {channel_name}: {minutes_processed} minutes, {samples_generated} samples")

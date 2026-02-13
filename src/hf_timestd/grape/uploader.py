@@ -4,6 +4,7 @@ Upload manager module
 Handles reliable upload of processed datasets to remote repositories.
 """
 
+import os
 import subprocess
 import logging
 import time
@@ -308,56 +309,41 @@ class SFTPUpload(UploadProtocol):
         instrument_id = metadata.get('instrument_id', '172')
         
         # Create trigger directory name (wsprdaemon format)
-        timestamp = datetime.now(timezone.utc).strftime('%Y-%m%dT%H-%M')
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M')
         trigger_dir = f"c{dataset_name}_#{instrument_id}_#{timestamp}"
         
         logger.info(f"Trigger directory: {trigger_dir}")
         
         try:
-            # Use scp for recursive upload (more reliable than sftp batch)
-            cmd = [
-                "scp", "-r", "-q",
+            # Build sftp batch commands for recursive upload
+            # PSWS server is sftp-only (no scp/ssh shell)
+            batch_cmds = self._build_sftp_put_commands(local_path, dataset_name)
+            batch_cmds.append(f"mkdir \"{trigger_dir}\"")
+            batch_cmds.append("quit")
+            batch_input = "\n".join(batch_cmds) + "\n"
+            
+            sftp_cmd = [
+                "sftp", "-q",
                 "-i", str(self.ssh_key),
                 "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=accept-new",
-                str(local_path),
-                f"{self.user}@{self.psws_server_url}:"
+                f"{self.user}@{self.psws_server_url}"
             ]
             
-            logger.info(f"Running scp upload to {self.user}@{self.psws_server_url}")
+            logger.info(f"Running sftp upload to {self.user}@{self.psws_server_url} "
+                        f"({len(batch_cmds)} commands)")
             
             result = subprocess.run(
-                cmd,
+                sftp_cmd,
+                input=batch_input,
                 capture_output=True,
                 text=True,
                 timeout=3600
             )
             
             if result.returncode != 0:
-                logger.error(f"scp failed (exit {result.returncode}): {result.stderr}")
+                logger.error(f"sftp failed (exit {result.returncode}): {result.stderr}")
                 return False
-            
-            logger.info(f"scp complete, creating trigger directory via sftp")
-            
-            # Create trigger directory via sftp (single command, won't hang)
-            trigger_cmd = [
-                "sftp", "-q",
-                "-i", str(self.ssh_key),
-                "-o", "BatchMode=yes",
-                f"{self.user}@{self.psws_server_url}"
-            ]
-            
-            # Use stdin to send the mkdir command
-            trigger_result = subprocess.run(
-                trigger_cmd,
-                input=f"mkdir {trigger_dir}\nquit\n",
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            
-            if trigger_result.returncode != 0:
-                logger.warning(f"Trigger mkdir may have failed: {trigger_result.stderr}")
             
             logger.info(f"Upload successful: {local_path}")
             return True
@@ -368,6 +354,38 @@ class SFTPUpload(UploadProtocol):
         except Exception as e:
             logger.error(f"Upload error: {e}")
             return False
+    
+    def _build_sftp_put_commands(self, local_path: Path, remote_name: str) -> List[str]:
+        """
+        Build sftp batch commands to recursively upload a directory.
+        
+        Args:
+            local_path: Local directory to upload
+            remote_name: Remote directory name (top-level)
+            
+        Returns:
+            List of sftp commands (mkdir, put, cd, lcd)
+        """
+        cmds = []
+        cmds.append(f"mkdir {remote_name}")
+        
+        for root, dirs, files in os.walk(local_path):
+            rel = os.path.relpath(root, local_path)
+            if rel == '.':
+                remote_dir = remote_name
+            else:
+                remote_dir = f"{remote_name}/{rel}"
+            
+            # Create subdirectories
+            for d in sorted(dirs):
+                cmds.append(f"mkdir {remote_dir}/{d}")
+            
+            # Upload files
+            for f in sorted(files):
+                local_file = os.path.join(root, f)
+                cmds.append(f"put {local_file} {remote_dir}/{f}")
+        
+        return cmds
     
     def _upload_sftp_fallback(self, local_path: Path, trigger_dir: str, sftp_cmds_file: str) -> bool:
         """Fallback SFTP upload using rsync over SSH"""

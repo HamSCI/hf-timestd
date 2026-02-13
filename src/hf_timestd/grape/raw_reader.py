@@ -116,7 +116,7 @@ class RawBinaryReader:
                     with open(zst_path, 'rb') as f:
                         dctx = zstd.ZstdDecompressor()
                         data = dctx.decompress(f.read())
-                        samples = np.frombuffer(data, dtype=np.complex64)
+                        samples = np.frombuffer(data, dtype=np.complex64).copy()
                 except ImportError:
                     logger.warning("zstandard module not installed - cannot read .zst files")
                 except Exception as e:
@@ -130,7 +130,7 @@ class RawBinaryReader:
                     import lz4.frame
                     with open(lz4_path, 'rb') as f:
                         data = lz4.frame.decompress(f.read())
-                        samples = np.frombuffer(data, dtype=np.complex64)
+                        samples = np.frombuffer(data, dtype=np.complex64).copy()
                 except ImportError:
                     logger.warning("lz4 module not installed - cannot read .lz4 files")
                 except Exception as e:

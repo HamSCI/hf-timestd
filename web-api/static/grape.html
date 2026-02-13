@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GRAPE Dashboard - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="/static/js/common.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>&#x1F347; GRAPE Dashboard</h1>
+            <div class="header-subtitle">Decimation, spectrograms, packaging &amp; PSWS uploads</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link">Validation</a>
+                <a href="/static/stability.html" class="nav-link">Stability</a>
+                <span class="nav-divider"></span>
+                <a href="/static/propagation.html" class="nav-link">Ionosphere</a>
+                <a href="/static/phase.html" class="nav-link">Phase</a>
+                <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/test_signal.html" class="nav-link">Test Signal</a>
+                <a href="/static/solar-correlation.html" class="nav-link">Solar</a>
+                <a href="/static/dashboard-24h.html" class="nav-link">24h</a>
+                <a href="/static/grape.html" class="nav-link active">&#x1F347; GRAPE</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link">Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
+            </nav>
+        </div>
+
+        <div id="error-container" style="display: none;"></div>
+
+        <!-- Summary Cards -->
+        <div id="summary-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <div class="card" style="padding: var(--spacing-md);">
+                <div style="color: var(--text-secondary); font-size: 12px; text-transform: uppercase; letter-spacing: 1px;">Channels</div>
+                <div id="stat-channels" style="font-size: 28px; font-weight: 700; color: var(--text-accent);">-</div>
+            </div>
+            <div class="card" style="padding: var(--spacing-md);">
+                <div style="color: var(--text-secondary); font-size: 12px; text-transform: uppercase; letter-spacing: 1px;">Uploads Completed</div>
+                <div id="stat-uploads" style="font-size: 28px; font-weight: 700; color: var(--quality-a);">-</div>
+            </div>
+            <div class="card" style="padding: var(--spacing-md);">
+                <div style="color: var(--text-secondary); font-size: 12px; text-transform: uppercase; letter-spacing: 1px;">Pending</div>
+                <div id="stat-pending" style="font-size: 28px; font-weight: 700; color: var(--quality-c);">-</div>
+            </div>
+            <div class="card" style="padding: var(--spacing-md);">
+                <div style="color: var(--text-secondary); font-size: 12px; text-transform: uppercase; letter-spacing: 1px;">Failed</div>
+                <div id="stat-failed" style="font-size: 28px; font-weight: 700; color: var(--quality-d);">-</div>
+            </div>
+        </div>
+
+        <!-- Decimation Status -->
+        <div class="card" style="padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h2 style="margin-bottom: var(--spacing-md); font-size: 16px;">Decimation Status</h2>
+            <div id="decimation-table" style="overflow-x: auto;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid var(--border-color);">
+                            <th style="text-align: left; padding: 8px; color: var(--text-secondary);">Channel</th>
+                            <th style="text-align: right; padding: 8px; color: var(--text-secondary);">Days</th>
+                            <th style="text-align: left; padding: 8px; color: var(--text-secondary);">Latest</th>
+                            <th style="text-align: right; padding: 8px; color: var(--text-secondary);">Completeness</th>
+                            <th style="text-align: right; padding: 8px; color: var(--text-secondary);">Valid Min</th>
+                        </tr>
+                    </thead>
+                    <tbody id="decimation-body">
+                        <tr><td colspan="5" style="padding: 16px; text-align: center; color: var(--text-secondary);">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Spectrogram Viewer -->
+        <div class="card" style="padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h2 style="margin-bottom: var(--spacing-md); font-size: 16px;">Spectrograms</h2>
+            <div style="display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center; margin-bottom: var(--spacing-md);">
+                <div>
+                    <label style="color: var(--text-secondary); font-size: 12px; display: block; margin-bottom: 4px;">Channel</label>
+                    <select id="spec-channel" style="padding: 6px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); min-width: 160px;">
+                        <option value="">Select channel...</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="color: var(--text-secondary); font-size: 12px; display: block; margin-bottom: 4px;">Date</label>
+                    <select id="spec-date" style="padding: 6px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); min-width: 140px;">
+                        <option value="">Select date...</option>
+                    </select>
+                </div>
+                <div style="display: flex; gap: 4px; align-self: flex-end;">
+                    <button id="btn-prev" style="padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">&larr; Prev</button>
+                    <button id="btn-next" style="padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">Next &rarr;</button>
+                </div>
+            </div>
+            <div id="spectrogram-container" style="text-align: center; min-height: 200px; display: flex; align-items: center; justify-content: center;">
+                <div style="color: var(--text-secondary);">Select a channel and date to view spectrogram</div>
+            </div>
+        </div>
+
+        <!-- Upload History -->
+        <div class="card" style="padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h2 style="margin-bottom: var(--spacing-md); font-size: 16px;">Upload History</h2>
+            <div id="upload-table" style="overflow-x: auto;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid var(--border-color);">
+                            <th style="text-align: left; padding: 8px; color: var(--text-secondary);">Date</th>
+                            <th style="text-align: left; padding: 8px; color: var(--text-secondary);">Status</th>
+                            <th style="text-align: right; padding: 8px; color: var(--text-secondary);">Attempts</th>
+                            <th style="text-align: left; padding: 8px; color: var(--text-secondary);">Last Attempt</th>
+                            <th style="text-align: left; padding: 8px; color: var(--text-secondary);">Error</th>
+                        </tr>
+                    </thead>
+                    <tbody id="upload-body">
+                        <tr><td colspan="5" style="padding: 16px; text-align: center; color: var(--text-secondary);">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div style="text-align: center; color: var(--text-secondary); font-size: 12px; padding: var(--spacing-md);">
+            Last updated: <span id="last-updated">-</span>
+        </div>
+    </div>
+
+    <script>
+        let allDates = [];
+        let currentDateIdx = -1;
+
+        async function loadSummary() {
+            try {
+                const resp = await fetch('/api/grape/summary');
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+
+                // Summary cards
+                document.getElementById('stat-channels').textContent = data.channels || 0;
+                document.getElementById('stat-uploads').textContent = data.uploads?.completed || 0;
+                document.getElementById('stat-pending').textContent = data.uploads?.pending || 0;
+                document.getElementById('stat-failed').textContent = data.uploads?.failed || 0;
+
+                // Decimation table
+                const tbody = document.getElementById('decimation-body');
+                const dec = data.decimation || {};
+                if (Object.keys(dec).length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="padding: 16px; text-align: center; color: var(--text-secondary);">No decimated data found</td></tr>';
+                } else {
+                    tbody.innerHTML = Object.entries(dec).sort().map(([ch, info]) => {
+                        const pct = info.completeness_pct || 0;
+                        const pctColor = pct >= 95 ? 'var(--quality-a)' : pct >= 80 ? 'var(--quality-b)' : pct >= 50 ? 'var(--quality-c)' : 'var(--quality-d)';
+                        return `<tr style="border-bottom: 1px solid var(--border-color);">
+                            <td style="padding: 8px; font-family: monospace;">${ch}</td>
+                            <td style="padding: 8px; text-align: right;">${info.dates_available || 0}</td>
+                            <td style="padding: 8px;">${info.latest_date || '-'}</td>
+                            <td style="padding: 8px; text-align: right; color: ${pctColor}; font-weight: 600;">${pct.toFixed(1)}%</td>
+                            <td style="padding: 8px; text-align: right;">${info.valid_minutes || 0}</td>
+                        </tr>`;
+                    }).join('');
+                }
+
+                // Channel selector
+                const channelSelect = document.getElementById('spec-channel');
+                const currentVal = channelSelect.value;
+                channelSelect.innerHTML = '<option value="">Select channel...</option>';
+                (data.channel_list || []).forEach(ch => {
+                    const opt = document.createElement('option');
+                    opt.value = ch;
+                    opt.textContent = ch.replace(/_/g, ' ');
+                    channelSelect.appendChild(opt);
+                });
+                if (currentVal) channelSelect.value = currentVal;
+
+                // Upload history
+                const uploadBody = document.getElementById('upload-body');
+                const history = data.uploads?.history || [];
+                if (history.length === 0) {
+                    uploadBody.innerHTML = '<tr><td colspan="5" style="padding: 16px; text-align: center; color: var(--text-secondary);">No uploads recorded</td></tr>';
+                } else {
+                    uploadBody.innerHTML = history.map(u => {
+                        const statusColor = u.status === 'completed' ? 'var(--quality-a)' :
+                                           u.status === 'failed' ? 'var(--quality-d)' : 'var(--quality-c)';
+                        const statusIcon = u.status === 'completed' ? '&#x2705;' :
+                                          u.status === 'failed' ? '&#x274C;' : '&#x23F3;';
+                        const lastAttempt = u.last_attempt ? new Date(u.last_attempt).toLocaleString() : '-';
+                        return `<tr style="border-bottom: 1px solid var(--border-color);">
+                            <td style="padding: 8px; font-family: monospace;">${u.metadata?.date || '-'}</td>
+                            <td style="padding: 8px; color: ${statusColor}; font-weight: 600;">${statusIcon} ${u.status}</td>
+                            <td style="padding: 8px; text-align: right;">${u.attempts || 0}</td>
+                            <td style="padding: 8px; font-size: 12px;">${lastAttempt}</td>
+                            <td style="padding: 8px; font-size: 12px; color: var(--quality-d);">${u.error_message || ''}</td>
+                        </tr>`;
+                    }).join('');
+                }
+
+                document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+            } catch (err) {
+                console.error('Failed to load GRAPE summary:', err);
+            }
+        }
+
+        async function loadSpectrogramDates() {
+            const channel = document.getElementById('spec-channel').value;
+            const dateSelect = document.getElementById('spec-date');
+            dateSelect.innerHTML = '<option value="">Select date...</option>';
+            allDates = [];
+            currentDateIdx = -1;
+
+            if (!channel) return;
+
+            try {
+                const resp = await fetch(`/api/grape/spectrograms/${channel}`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                allDates = (data.dates || []).reverse(); // newest first
+                allDates.forEach(d => {
+                    const opt = document.createElement('option');
+                    opt.value = d;
+                    opt.textContent = `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}`;
+                    dateSelect.appendChild(opt);
+                });
+                // Auto-select latest
+                if (allDates.length > 0) {
+                    dateSelect.value = allDates[0];
+                    currentDateIdx = 0;
+                    loadSpectrogram();
+                }
+            } catch (err) {
+                console.error('Failed to load spectrogram dates:', err);
+            }
+        }
+
+        function loadSpectrogram() {
+            const channel = document.getElementById('spec-channel').value;
+            const date = document.getElementById('spec-date').value;
+            const container = document.getElementById('spectrogram-container');
+
+            if (!channel || !date) {
+                container.innerHTML = '<div style="color: var(--text-secondary);">Select a channel and date to view spectrogram</div>';
+                return;
+            }
+
+            currentDateIdx = allDates.indexOf(date);
+            container.innerHTML = `<div style="width: 100%;"><img src="/api/grape/spectrograms/${channel}/${date}" style="max-width: 100%; border-radius: var(--radius-md); border: 1px solid var(--border-color);" onerror="this.parentElement.innerHTML='<div style=\\'color: var(--text-secondary); padding: 32px;\\'>No spectrogram available for this date</div>'" /></div>`;
+        }
+
+        function navigateDate(delta) {
+            const newIdx = currentDateIdx + delta;
+            if (newIdx >= 0 && newIdx < allDates.length) {
+                currentDateIdx = newIdx;
+                document.getElementById('spec-date').value = allDates[newIdx];
+                loadSpectrogram();
+            }
+        }
+
+        // Event listeners
+        document.getElementById('spec-channel').addEventListener('change', loadSpectrogramDates);
+        document.getElementById('spec-date').addEventListener('change', loadSpectrogram);
+        document.getElementById('btn-prev').addEventListener('click', () => navigateDate(1));  // older
+        document.getElementById('btn-next').addEventListener('click', () => navigateDate(-1)); // newer
+
+        // Initial load
+        loadSummary();
+
+        // Auto-refresh every 60s
+        setInterval(loadSummary, 60000);
+    </script>
+</body>
+
+</html>

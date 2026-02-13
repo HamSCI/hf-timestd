@@ -128,7 +128,7 @@ def main():
     # GRAPE package
     grape_package_parser = grape_subparsers.add_parser('package', help='Package as Digital RF for upload')
     grape_package_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
-    grape_package_parser.add_argument('--date', required=True, help='Date to package')
+    grape_package_parser.add_argument('--date', help='Date to package (default: yesterday)')
     grape_package_parser.add_argument('--callsign', required=True, help='Station callsign')
     grape_package_parser.add_argument('--grid', required=True, help='Grid square')
     grape_package_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
@@ -315,14 +315,16 @@ def main():
         
         data_root = Path(args.data_root)
         
+        def resolve_date(date_arg):
+            """Resolve date argument to YYYYMMDD string."""
+            if not date_arg or date_arg.lower() == 'yesterday':
+                return (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+            return date_arg.replace('-', '')
+        
         if args.grape_command == 'decimate':
             from .grape.decimation_pipeline import DecimationPipeline
             
-            # Handle date format
-            if args.date:
-                date_str = args.date.replace('-', '')
-            else:
-                date_str = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+            date_str = resolve_date(args.date)
             
             pipeline = DecimationPipeline(data_root)
             
@@ -379,7 +381,7 @@ def main():
         elif args.grape_command == 'package':
             from .grape.packager import DailyDRFPackager, StationConfig
             
-            date_str = args.date.replace('-', '')
+            date_str = resolve_date(args.date)
             station_config = StationConfig(
                 callsign=args.callsign,
                 grid_square=args.grid
@@ -394,10 +396,7 @@ def main():
             from .grape.uploader import UploadManager, SFTPUpload
             import toml
             
-            if args.date:
-                date_str = args.date.replace('-', '')
-            else:
-                date_str = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+            date_str = resolve_date(args.date)
             
             # Load config for station info
             config_path = Path('/etc/hf-timestd/timestd-config.toml')

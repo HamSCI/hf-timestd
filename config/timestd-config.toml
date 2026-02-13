@@ -113,7 +113,7 @@ description = "CHU_14670_FSK"
 iq_channel = "CHU_14670"
 
 [uploader]
-enabled = false
+enabled = true
 protocol = "sftp"
 upload_time = "00:30"
 upload_timezone = "UTC"
@@ -121,6 +121,12 @@ max_retries = 5
 retry_delay_seconds = 300
 exponential_backoff = true
 max_queue_size_gb = 100
+
+[uploader.sftp]
+host = "pswsnetwork.eng.ua.edu"
+user = "S000171"
+ssh_key = "/home/timestd/.ssh/id_rsa_psws"
+bandwidth_limit_kbps = 500
 
 [uploader.metadata]
 include_extended_metadata = false
