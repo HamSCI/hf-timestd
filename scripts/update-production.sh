@@ -224,6 +224,21 @@ if [[ -f "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" ]]; then
 fi
 
 # =============================================================================
+# Step 2e: Sync logrotate configuration
+# =============================================================================
+log_info "Step 2e: Syncing logrotate config..."
+
+if [[ -f "$PROJECT_DIR/config/logrotate-timestd" ]]; then
+    if ! diff -q "$PROJECT_DIR/config/logrotate-timestd" /etc/logrotate.d/hf-timestd > /dev/null 2>&1; then
+        cp "$PROJECT_DIR/config/logrotate-timestd" /etc/logrotate.d/hf-timestd
+        chmod 644 /etc/logrotate.d/hf-timestd
+        log_info "  ✅ Updated /etc/logrotate.d/hf-timestd"
+    else
+        log_info "  ✅ Logrotate config unchanged"
+    fi
+fi
+
+# =============================================================================
 # Step 3: Update Systemd Service Files (if changed)
 # =============================================================================
 log_info "Step 3: Checking systemd service files..."

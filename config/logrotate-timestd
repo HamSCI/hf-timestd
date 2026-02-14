@@ -16,21 +16,15 @@
     missingok
     notifempty
     
-    # Create new log file with correct permissions
-    create 0644 timestd timestd
+    # Long-running services keep file descriptors open (StandardOutput=append).
+    # copytruncate keeps the same inode so logs continue in *.log after rotate.
+    copytruncate
     
     # Use date extension instead of numbers
     dateext
     dateformat -%Y%m%d
     
-    # Shared scripts for all logs
-    sharedscripts
-    
-    # Reload services after rotation (if needed)
-    postrotate
-        # Services write to logs continuously, no reload needed
-        # systemd handles log file reopening automatically
-    endscript
+    # Shared scripts block intentionally omitted: no daemon signal needed with copytruncate.
 }
 
 # Separate config for data retention log (less frequent rotation)

@@ -123,5 +123,40 @@ class TestPhysicsFusionService(unittest.TestCase):
         self.assertEqual(len(record['stations_used']), 0) # No successful TEC stations
         self.assertFalse(record['utc_consistency_flag'])
 
+    def test_process_minute_uses_prefetched_station_data(self):
+        """process_minute should not re-read L2 when station_data is supplied."""
+        self.service._read_l2_slice = MagicMock(side_effect=RuntimeError("Should not be called"))
+        self.service._check_upstream_freshness = MagicMock(return_value=(True, 0.0))
+        self.service._write_physics_summary = MagicMock()
+        self.service._write_tec_records = MagicMock()
+
+        station_data = {
+            ('WWV', '1F'): [
+                {'frequency_hz': 10e6, 'toa_ms': 10.5, 'uncertainty_ms': 0.1, 'mode': '1F'},
+                {'frequency_hz': 20e6, 'toa_ms': 10.2, 'uncertainty_ms': 0.1, 'mode': '1F'},
+            ]
+        }
+
+        self.service.process_minute(1000, station_data=station_data)
+
+        self.service._read_l2_slice.assert_not_called()
+        self.service._write_physics_summary.assert_called_once()
+        self.service._write_tec_records.assert_called_once()
+
+    def test_prune_retry_counters_bounds_state(self):
+        """Retry tracking must remain bounded over long runtimes."""
+        now = int(time.time())
+        # Add stale entries older than 12h and recent entries that should remain
+        for i in range(10):
+            self.service._minute_retry_counts[now - (13 * 3600) - i] = 1
+        for i in range(self.service._max_retry_history + 20):
+            self.service._minute_retry_counts[now - i] = 1
+
+        self.service._prune_retry_counters(now)
+
+        self.assertLessEqual(len(self.service._minute_retry_counts), self.service._max_retry_history)
+        oldest_kept = min(self.service._minute_retry_counts)
+        self.assertGreaterEqual(oldest_kept, now - (12 * 3600))
+
 if __name__ == '__main__':
     unittest.main()

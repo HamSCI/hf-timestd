@@ -10,7 +10,9 @@ set -e
 # Configuration
 DATA_ROOT="/var/lib/timestd"
 HOT_BUFFER="/dev/shm/timestd/raw_buffer"
-MAX_STALE_SECONDS=600  # 10 minutes - alert if data older than this
+MAX_RAW_STALE_SECONDS=600      # raw buffer freshness (core-recorder)
+MAX_FUSION_STALE_SECONDS=300   # fusion writes every ~8s to 60s cadence
+MAX_PHYSICS_STALE_SECONDS=900  # physics products update roughly every minute
 ALERT_FILE="/var/lib/timestd/state/freshness_alert_sent"
 ALERT_COOLDOWN=3600  # Only send one alert per hour to avoid spam
 
@@ -22,6 +24,48 @@ LOG_FILE="/var/log/hf-timestd/freshness-monitor.log"
 
 log() {
     echo "$(date -Iseconds) $1" >> "$LOG_FILE" 2>/dev/null || echo "$(date -Iseconds) $1"
+}
+
+check_output_freshness() {
+    local label="$1"
+    local search_dir="$2"
+    local pattern="$3"
+    local max_age="$4"
+
+    if [ ! -d "$search_dir" ]; then
+        send_alert "$label output directory missing" \
+            "$label expected output directory not found: $search_dir"
+        return 1
+    fi
+
+    local latest_file
+    latest_file=$(find "$search_dir" -name "$pattern" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    if [ -z "$latest_file" ]; then
+        send_alert "No $label output files found" \
+            "No files matching '$pattern' found in $search_dir"
+        return 1
+    fi
+
+    local file_mtime now age
+    file_mtime=$(stat -c %Y "$latest_file")
+    now=$(date +%s)
+    age=$((now - file_mtime))
+
+    if [ "$age" -gt "$max_age" ]; then
+        local fusion_status physics_status
+        fusion_status=$(systemctl is-active timestd-fusion 2>/dev/null || echo "unknown")
+        physics_status=$(systemctl is-active timestd-physics 2>/dev/null || echo "unknown")
+
+        send_alert "$label output stale - ${age}s" \
+            "$label output is stale (${age}s old, threshold ${max_age}s).
+File: $latest_file
+Fusion service: $fusion_status
+Physics service: $physics_status"
+        return 1
+    fi
+
+    log "OK: $label output fresh (${age}s old, threshold ${max_age}s)"
+    return 0
 }
 
 send_alert() {
@@ -93,7 +137,7 @@ FILE_MTIME=$(stat -c %Y "$LATEST_FILE")
 NOW=$(date +%s)
 FILE_AGE=$((NOW - FILE_MTIME))
 
-if [ "$FILE_AGE" -gt "$MAX_STALE_SECONDS" ]; then
+if [ "$FILE_AGE" -gt "$MAX_RAW_STALE_SECONDS" ]; then
     # Get service status for context
     CORE_STATUS=$(systemctl is-active timestd-core-recorder 2>/dev/null || echo "unknown")
     FUSION_STATUS=$(systemctl is-active timestd-fusion 2>/dev/null || echo "unknown")
@@ -103,7 +147,7 @@ if [ "$FILE_AGE" -gt "$MAX_STALE_SECONDS" ]; then
 File: $LATEST_FILE
 Core recorder: $CORE_STATUS
 Fusion: $FUSION_STATUS
-Threshold: ${MAX_STALE_SECONDS}s
+Threshold: ${MAX_RAW_STALE_SECONDS}s
 
 Possible causes:
 - RTP clock drift from radiod
@@ -113,10 +157,19 @@ Possible causes:
 
 Check: sudo journalctl -u timestd-core-recorder -n 50"
     exit 1
-else
-    # Data is fresh - clear any previous alert
-    clear_alert
-    log "OK: Data fresh (${FILE_AGE}s old, threshold ${MAX_STALE_SECONDS}s)"
 fi
+
+log "OK: Raw buffer fresh (${FILE_AGE}s old, threshold ${MAX_RAW_STALE_SECONDS}s)"
+
+FAILED=false
+check_output_freshness "Fusion" "$DATA_ROOT/phase2/fusion" "*fusion_timing_*.h5" "$MAX_FUSION_STALE_SECONDS" || FAILED=true
+check_output_freshness "Physics" "$DATA_ROOT/phase2/science/tec" "*tec_*.h5" "$MAX_PHYSICS_STALE_SECONDS" || FAILED=true
+
+if [ "$FAILED" = true ]; then
+    exit 1
+fi
+
+# All freshness checks pass - clear any previous alert state
+clear_alert
 
 exit 0

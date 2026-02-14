@@ -12,7 +12,7 @@ if [ ! -d "$DATA_ROOT" ]; then
     DATA_ROOT="/tmp/timestd-test"
 fi
 
-TEC_DIR="$DATA_ROOT/phase2/fusion"
+TEC_DIR="$DATA_ROOT/phase2/science/tec"
 TODAY=$(date +%Y%m%d)
 
 # Check if TEC directory exists
@@ -21,8 +21,8 @@ if [ ! -d "$TEC_DIR" ]; then
     exit 1
 fi
 
-# Find most recent Physics/TEC file (HDF5)
-LATEST_HDF5=$(find "$TEC_DIR" -name "global_physics_${TODAY}*.h5" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+# Find most recent TEC product file (HDF5)
+LATEST_HDF5=$(find "$TEC_DIR" -name "*tec_${TODAY}*.h5" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 
 LATEST_FILE=""
 if [ -n "$LATEST_HDF5" ]; then

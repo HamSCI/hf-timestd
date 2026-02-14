@@ -70,6 +70,12 @@ sudo systemctl enable --now timestd-fusion
 sudo systemctl enable --now timestd-web-api
 ```
 
+### Production Updates (Repo -> Live System)
+
+- Use **`sudo scripts/update-production.sh [--pull]`** for production updates.
+- This script syncs package code, scripts, web-api assets, systemd units, cron freshness monitor, and logrotate config.
+- Follow **[docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md](docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md)** after each update to verify correspondence and freshness gates.
+
 ### Service Control
 
 | Service | Command |

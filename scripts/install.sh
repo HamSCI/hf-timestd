@@ -706,7 +706,7 @@ $LOG_DIR/*.log {
     delaycompress
     missingok
     notifempty
-    create 0644 $INSTALL_USER $INSTALL_USER
+    copytruncate
 }
 EOF
     log_info "  Created logrotate configuration"

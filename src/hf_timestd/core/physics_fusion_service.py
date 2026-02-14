@@ -103,12 +103,50 @@ class PhysicsFusionService:
         self.running = False
         self.last_processed_minute = 0
         self.channels = self._discover_channels()
+        self._reader_cache: Dict[str, DataProductReader] = {}
+        self._minute_retry_counts: Dict[int, int] = {}
+        self._max_retry_history = 720  # Keep at most 12h of minute retry state
         
         # Data freshness tracking for upstream starvation detection
         self.upstream_stale_warning_issued = False
         self.max_upstream_age_seconds = 300.0  # 5 minutes - warn if L2 data older than this
         
         logger.info(f"PhysicsFusionService initialized with {len(self.channels)} channels")
+
+    def _get_reader(self, channel: str) -> DataProductReader:
+        """Get (or create) a cached reader for a channel."""
+        reader = self._reader_cache.get(channel)
+        if reader is not None:
+            return reader
+
+        channel_dir = self.data_root / 'phase2' / channel
+
+        # Check for clock_offset subdir (where L2 timing measurements live)
+        if (channel_dir / 'clock_offset').exists():
+            reader_dir = channel_dir / 'clock_offset'
+        else:
+            reader_dir = channel_dir
+
+        reader = DataProductReader(
+            data_dir=reader_dir,
+            product_level='L2',
+            product_name='timing_measurements',
+            channel=channel,
+            use_registry=False
+        )
+        self._reader_cache[channel] = reader
+        return reader
+
+    def _prune_retry_counters(self, now_epoch: float) -> None:
+        """Keep retry tracking bounded to avoid unbounded state growth."""
+        cutoff = int(now_epoch) - (12 * 3600)
+        stale_minutes = [minute for minute in self._minute_retry_counts if minute < cutoff]
+        for minute in stale_minutes:
+            del self._minute_retry_counts[minute]
+
+        if len(self._minute_retry_counts) > self._max_retry_history:
+            for minute in sorted(self._minute_retry_counts)[:-self._max_retry_history]:
+                del self._minute_retry_counts[minute]
 
     def _discover_channels(self) -> List[str]:
         """Discover available L2 broadcast channels."""
@@ -159,22 +197,7 @@ class PhysicsFusionService:
         
         for channel in self.channels:
             try:
-                # Resolve directory - assuming standard structure data_root/phase2/{channel}
-                channel_dir = self.data_root / 'phase2' / channel
-                
-                # Check for clock_offset subdir (where L2 timing measurements live)
-                if (channel_dir / 'clock_offset').exists():
-                    reader_dir = channel_dir / 'clock_offset'
-                else:
-                    reader_dir = channel_dir
-
-                reader = DataProductReader(
-                    data_dir=reader_dir,
-                    product_level='L2',
-                    product_name='timing_measurements',
-                    channel=channel,
-                    use_registry=False
-                )
+                reader = self._get_reader(channel)
 
                 items = reader.read_time_range(
                     start=start_iso, 
@@ -227,7 +250,7 @@ class PhysicsFusionService:
                 
         return measurements_grouped
 
-    def process_minute(self, minute_timestamp: int):
+    def process_minute(self, minute_timestamp: int, station_data: Optional[Dict[tuple, List[Dict]]] = None):
         """Process a single minute of data."""
         logger.info(f"Processing minute {minute_timestamp} ({datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)})")
         
@@ -247,8 +270,9 @@ class PhysicsFusionService:
                 logger.info(f"Upstream L2 data is fresh again ({age_seconds:.0f}s old)")
                 self.upstream_stale_warning_issued = False
         
-        # 1. Read Data
-        station_data = self._read_l2_slice(minute_timestamp)
+        # 1. Read Data (allow pre-fetched station_data from run loop)
+        if station_data is None:
+            station_data = self._read_l2_slice(minute_timestamp)
         
         if not station_data:
             logger.warning(f"No valid L2 data found for minute {minute_timestamp}")
@@ -384,24 +408,23 @@ class PhysicsFusionService:
                 # We retry each minute up to 3 times to handle L2 write delays
                 for offset in range(5, 1, -1):
                     target_minute = int(now) - (int(now) % 60) - (60 * offset)
-                    # Track retry count per minute
-                    retry_key = f"retry_{target_minute}"
-                    retry_count = getattr(self, retry_key, 0)
+                    retry_count = self._minute_retry_counts.get(target_minute, 0)
                     
                     if target_minute > self.last_processed_minute or retry_count < 3:
                         # Try to process this minute
                         station_data = self._read_l2_slice(target_minute)
                         if station_data:
-                            self.process_minute(target_minute)
+                            self.process_minute(target_minute, station_data=station_data)
                             self.last_processed_minute = max(self.last_processed_minute, target_minute)
                             # Clear retry counter on success
-                            if hasattr(self, retry_key):
-                                delattr(self, retry_key)
+                            self._minute_retry_counts.pop(target_minute, None)
                         else:
                             # Increment retry counter
-                            setattr(self, retry_key, retry_count + 1)
+                            self._minute_retry_counts[target_minute] = retry_count + 1
                             if retry_count == 0:
                                 logger.debug(f"No L2 data for minute {target_minute}, will retry")
+
+                self._prune_retry_counters(now)
                 
                 # Sleep until next poll or minute
                 # We process once per minute, check every second for shutdown
