@@ -134,6 +134,12 @@ class DecimationPipeline:
                 if meta and 'gap_samples' in meta:
                     gap_info = max(gap_info, meta.get('gap_samples', 0))
                 
+                # Convert gap_info from raw sample space to decimated sample space
+                # so it's comparable with SAMPLES_PER_MINUTE (600 at 10 Hz)
+                decimation_ratio = input_rate // 10
+                if decimation_ratio > 0:
+                    gap_info = gap_info // decimation_ratio
+                
                 prev_minute_ts = minute_ts
             
             if decimated_chunk is not None and len(decimated_chunk) > 0:
