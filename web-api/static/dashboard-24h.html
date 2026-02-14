@@ -738,7 +738,7 @@
             
             const traces = [];
             
-            // Solar elevation (background)
+            // Solar elevation (background fill)
             if (solar && solar.timestamps) {
                 traces.push({
                     x: solar.timestamps,
@@ -747,13 +747,36 @@
                     type: 'scatter',
                     mode: 'lines',
                     fill: 'tozeroy',
-                    fillcolor: 'rgba(255,193,7,0.1)',
+                    fillcolor: 'rgba(255,193,7,0.08)',
                     line: { color: '#ffc107', width: 1 },
                     yaxis: 'y2'
                 });
             }
             
-            // SNR (primary)
+            // Timing error (primary — shows ionospheric delay variation)
+            let hasTimingError = false;
+            if (measurements && measurements.timestamps && measurements.timing_error_ms) {
+                const validIndices = measurements.timing_error_ms
+                    .map((v, i) => v !== null ? i : -1)
+                    .filter(i => i >= 0);
+                
+                if (validIndices.length > 0) {
+                    hasTimingError = true;
+                    traces.push({
+                        x: validIndices.map(i => measurements.timestamps[i]),
+                        y: validIndices.map(i => measurements.timing_error_ms[i]),
+                        name: 'Timing Error',
+                        type: 'scatter',
+                        mode: 'markers',
+                        marker: { 
+                            color: stationColors[broadcast.station] || '#4fc3f7',
+                            size: 3
+                        }
+                    });
+                }
+            }
+            
+            // SNR (secondary — on right axis y3, or primary if no timing error)
             if (measurements && measurements.timestamps && measurements.snr_db) {
                 const validIndices = measurements.snr_db
                     .map((v, i) => v !== null ? i : -1)
@@ -767,10 +790,25 @@
                         type: 'scatter',
                         mode: 'markers',
                         marker: { 
-                            color: stationColors[broadcast.station] || '#4fc3f7',
-                            size: 3
-                        }
+                            color: hasTimingError ? 'rgba(100,180,255,0.3)' : (stationColors[broadcast.station] || '#4fc3f7'),
+                            size: 2
+                        },
+                        yaxis: hasTimingError ? 'y3' : 'y'
                     });
+                }
+            }
+            
+            // Compute timing error range for y-axis
+            let teMin = -20, teMax = 20;
+            if (measurements && measurements.timing_error_ms) {
+                const validTE = measurements.timing_error_ms.filter(v => v !== null);
+                if (validTE.length > 0) {
+                    validTE.sort((a, b) => a - b);
+                    const p5 = validTE[Math.floor(validTE.length * 0.02)];
+                    const p95 = validTE[Math.floor(validTE.length * 0.98)];
+                    const margin = Math.max(2, (p95 - p5) * 0.15);
+                    teMin = Math.floor(p5 - margin);
+                    teMax = Math.ceil(p95 + margin);
                 }
             }
             
@@ -778,16 +816,16 @@
                 paper_bgcolor: 'transparent',
                 plot_bgcolor: 'rgba(10,14,39,0.5)',
                 font: { color: '#e0e0e0', size: 9 },
-                margin: { t: 5, r: 40, b: 25, l: 35 },
+                margin: { t: 5, r: 60, b: 25, l: 40 },
                 xaxis: { 
                     gridcolor: '#3d4466',
                     tickformat: '%H:%M'
                 },
                 yaxis: { 
                     gridcolor: '#3d4466',
-                    title: 'SNR',
+                    title: hasTimingError ? 'ΔT ms' : 'SNR',
                     titlefont: { size: 9 },
-                    range: [0, snrMax || 50]
+                    range: hasTimingError ? [teMin, teMax] : [0, snrMax || 50]
                 },
                 yaxis2: {
                     overlaying: 'y',
@@ -796,6 +834,13 @@
                     showgrid: false,
                     title: 'Solar',
                     titlefont: { size: 9 }
+                },
+                yaxis3: {
+                    overlaying: 'y',
+                    side: 'right',
+                    range: [0, snrMax || 50],
+                    showgrid: false,
+                    visible: false
                 },
                 showlegend: false
             };

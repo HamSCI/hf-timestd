@@ -10,127 +10,32 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: DIAGNOSE FLAT/ANOMALOUS D_CLOCK ON 24-HOUR DASHBOARD
+## 📋 NEXT SESSION: FIX TICK_TIMING REFERENCE FRAME + TEC QUALITY
 
-**Objective:** The 24-hour broadcast dashboard (`http://bee1:8000/static/dashboard-24h.html`) shows that most channels have **flat or bizarre D_clock/timing-error patterns** that do not track the expected diurnal ionospheric variation. This is a critical data quality problem — if the underlying measurements are wrong, all downstream calculations (TEC, tomography, VTEC maps) are unreliable. Diagnose the root cause and fix it.
+**Objective:** Two issues discovered during the dashboard fix session need attention:
 
-### 🔍 THE PROBLEM (Observed 2026-02-14)
+### Issue 1: tick_timing `mean_timing_offset_ms` is buffer-relative, not D_clock
 
-The dashboard "All Broadcasts" grid tab shows per-channel SNR scatter plots with a solar elevation overlay (yellow curve). The expected behavior is that timing error (and SNR) should show clear diurnal variation correlated with the solar curve — ionospheric delay increases during the day and decreases at night. Instead:
+The `TickMatchedFilter._detect_minute_marker()` computes `offset_ms` as the sample position of the correlation peak relative to buffer start (0–500ms range), NOT as D_clock. When `marker_ok=True`, this buffer-relative value becomes `mean_timing_offset_ms` in the tick_timing HDF5 product. The per-second tick offsets ARE relative to expected positions (small values), but the minute marker contaminates the aggregate.
 
-- **WWV 5, 15, 20, 25 MHz**: SNR dots are essentially **flat lines** clustered around a constant value. No diurnal variation visible.
-- **WWV 2.5 MHz**: Shows some scatter/variation (expected — lowest freq has largest ionospheric delay and is most affected by D-layer absorption).
-- **WWV 10 MHz**: Shows variation but with a suspicious **step-function** pattern — abrupt transitions rather than smooth diurnal curves.
-- **CHU 14.67 MHz**: Shows step-like transitions — not the smooth diurnal curve expected from ionospheric variation.
-- **CHU 3.33, 7.85 MHz**: Show orange blocks with abrupt transitions.
-- **WWVH channels**: Show scattered blue dots with some variation but noisy/incoherent patterns.
+**Impact:** `metrology_service.py:537` uses `d_clock_ms = tick_analysis.mean_timing_offset_ms` — this feeds wrong values into fusion when tick_timing is the source. The dashboard now correctly excludes tick_timing timing_error, but the underlying data product is still wrong.
 
-### 🎯 INVESTIGATION PLAN
+**Fix needed in `tick_matched_filter.py`:** The minute marker's `actual_search_before` is 0 when `slice_start = max(0, -search_samples) = 0`. The correlation returns `peak_idx - 0 = peak_idx` (absolute position). Need to subtract the expected marker position to get a proper offset.
 
-The problem could be at multiple levels. Investigate from bottom up:
+### Issue 2: TEC outliers (max 3930 TECU)
 
-#### Level 1: Raw L2 Data Quality
-
-**Question:** Are the L2 HDF5 timing measurements themselves flat, or is the dashboard misreading them?
+The TEC pipeline produces physically unreasonable values. Today's data: 35.9% in 1–100 TECU range, high-confidence subset includes values up to 3662 TECU. CHU shows good diurnal pattern (26→93 TECU), but WWV/WWVH/BPM have frequent negative-slope rejections (mode mixing).
 
 **Actions:**
-- Read the actual L2 HDF5 files directly with h5py and plot D_clock, raw_arrival_time_ms, and tof_kalman_ms for several channels over 24h
-- Check if the fields the dashboard reads (`raw_toa_ms`) actually exist — the dashboard code at `web-api/routers/dashboard.py:197` does `m.get('raw_toa_ms')` but the L2 schema may use a different field name (e.g., `raw_arrival_time_ms`)
-- Check if timing_error is always None because the field name is wrong, causing the dashboard to show only SNR (which may appear flat if signal is constant)
+- Add TEC validation bounds (cap at 200 TECU for mid-latitude)
+- Investigate mode mixing: shared-frequency D_clock values may combine 1F and 2F arrivals
+- Check if `propagation_mode` field is being used to gate TEC inputs
 
-**Key files:**
-- `/var/lib/timestd/phase2/SHARED_10000/clock_offset/` — L2 timing measurements
-- `/var/lib/timestd/phase2/WWV_20000/clock_offset/` — unique WWV channel
-- `/var/lib/timestd/phase2/CHU_14670/clock_offset/` — unique CHU channel
+### Issue 3: L2 schema vs data inconsistency
 
-#### Level 2: Dashboard Data Pipeline
-
-**Question:** Is the dashboard correctly reading and displaying the data?
-
-**Actions:**
-- Check `web-api/routers/dashboard.py` field name mapping — `raw_toa_ms` vs `raw_arrival_time_ms` mismatch?
-- Check if `timing_error_ms` is being computed correctly: `raw_toa - expected_delay`
-- Check if the grid panels are plotting SNR (which may look flat) vs timing error (which should show diurnal variation)
-- Verify the `min_propagation_ms` baseline used for timing error computation
-- Check the tick_timing second pass — `mean_timing_offset_ms` field availability
-
-**Key files:**
-- `web-api/routers/dashboard.py` — lines 158–258 (data fetching), lines 382–481 (timing-error endpoint)
-- `web-api/static/dashboard-24h.html` — lines 684–822 (grid rendering, `renderMiniChart()`)
-
-#### Level 3: Tone Detection / Matched Filter
-
-**Question:** Is the tone detection algorithm correctly identifying tick onsets across all frequencies?
-
-**Actions:**
-- Check if `TickMatchedFilter` is producing valid detections on all channels
-- Check detection rates per channel — are some channels producing far fewer detections?
-- Examine the matched filter template for each broadcast — are the tone frequencies and durations correct in `broadcast_specs.py`?
-- Check if the signal presence gate (`_check_signal_presence()`) is incorrectly rejecting valid signals
-- Verify that shared-frequency discrimination (WWV vs WWVH on 2.5/5/10/15 MHz) is working — could misattribution cause flat patterns?
-
-**Key files:**
-- `src/hf_timestd/core/tick_matched_filter.py` — 1015 lines, IQ matched filter
-- `src/hf_timestd/core/tick_edge_detector.py` — 572 lines, per-second onset detection
-- `src/hf_timestd/core/broadcast_specs.py` — 622 lines, tone schedules and templates
-- `src/hf_timestd/core/wwvh_discrimination.py` — 3917 lines, WWV/WWVH separation on shared freqs
-- `src/hf_timestd/core/bpm_discriminator.py` — 952 lines, BPM detection
-
-#### Level 4: Metrology Engine / Calibration
-
-**Question:** Is the metrology engine correctly computing D_clock from the detected ticks?
-
-**Actions:**
-- Check `metrology_engine.py` `process_minute()` — how does it convert tick detections to L2 measurements?
-- Check if the L2 calibration service is over-correcting, flattening the ionospheric signal
-- Check if the hardware calibration (`timing_calibrator.py`) has converged to wrong offsets
-- Examine calibration state files in `/var/lib/timestd/state/`
-
-**Key files:**
-- `src/hf_timestd/core/metrology_engine.py` — 1724 lines, core measurement pipeline
-- `src/hf_timestd/core/l2_calibration_service.py` — 591 lines, adaptive calibration
-- `src/hf_timestd/core/timing_calibrator.py` — 2037 lines, hardware offset learning
-- `src/hf_timestd/core/multi_broadcast_fusion.py` — 5169 lines, fusion + Kalman
-
-#### Level 5: Upstream Signal Chain
-
-**Question:** Is radiod delivering valid IQ data on all channels?
-
-**Actions:**
-- Check radiod status for all channels — are all decoders active?
-- Check RTP packet flow — are packets arriving for all channels?
-- Check if some channels have very low SNR (below detection threshold)
-- Check system logs for errors
-
-**Key commands:**
-```bash
-journalctl -u timestd-metrology --since "1 hour ago" | grep -i error
-journalctl -u timestd-fusion --since "1 hour ago" | grep -i error
-cat /var/lib/timestd/phase2/*/status.json | python3 -m json.tool
-```
-
-### 🔑 LIKELY ROOT CAUSES (Hypotheses)
-
-1. **Dashboard field name mismatch** (most likely quick fix): `dashboard.py:197` reads `raw_toa_ms` but L2 schema uses `raw_arrival_time_ms`. If this field is always None, timing_error is always None, and the grid shows only SNR — which may appear flat on strong channels.
-
-2. **Calibration over-correction**: The hardware calibration or L2 calibration service may have learned offsets that absorb the ionospheric variation, flattening D_clock to near-zero.
-
-3. **Tone detection failure on some channels**: The matched filter may not be detecting ticks reliably on certain frequencies, producing sparse or constant-offset measurements.
-
-4. **Shared-frequency discrimination errors**: On 2.5/5/10/15 MHz, WWV and WWVH overlap. If the discriminator is misattributing signals, the timing measurements could be incoherent.
-
-5. **Kalman filter over-smoothing**: The broadcast Kalman filter may be smoothing out the ionospheric variation, and the dashboard may be reading the smoothed state rather than raw measurements.
-
-### ⚠️ IMPACT ON TEC PIPELINE
-
-The TEC enhancements implemented in the previous session (2026-02-14) depend on valid multi-frequency timing measurements:
-
-- **TECEstimator** needs frequency-dependent D_clock variation (1/f² dispersion) — if D_clock is flat across frequencies, TEC estimation produces zero or noise
-- **CarrierTECEstimator** needs valid carrier phase — this may be unaffected if the phase extraction is working even when timing is flat
-- **IonoTomography** needs valid sTEC from multiple paths — garbage in, garbage out
-- **VTECMapper** needs valid sTEC — same concern
-
-**Do NOT revert the TEC enhancements.** The algorithms are correct; the problem is upstream in the measurement pipeline. Fix the measurements and the TEC pipeline will produce valid results.
+The L2 schema says `clock_offset_ms = raw_arrival_time_ms - propagation_delay_ms`, but `l2_calibration_service.py:340` writes `d_clock_ms = raw_toa_ms` (which IS already D_clock from L1) to `clock_offset_ms`, and the same value to `raw_arrival_time_ms`. Both fields are identical in the HDF5 data. Either:
+- Fix the L2 writer to store actual raw arrival time in `raw_arrival_time_ms` and computed D_clock in `clock_offset_ms`
+- Or update the schema documentation to reflect reality
 
 ### Service Inventory
 
@@ -160,6 +65,19 @@ The TEC enhancements implemented in the previous session (2026-02-14) depend on 
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
 
+### Dashboard Flat D_clock Fix (2026-02-14, late session)
+
+**Root cause:** Three bugs in the dashboard data pipeline, NOT in the measurement pipeline:
+
+1. **Field name mismatch** (`dashboard.py:197,442`): Read `m.get('raw_toa_ms')` but L2 HDF5 field is `raw_arrival_time_ms`. Result: `timing_error` always `None`, grid panels showed only SNR (flat on strong channels).
+2. **Double subtraction** (`dashboard.py:200`): Subtracted `min_propagation_ms` from `raw_arrival_time_ms`, but that field already IS D_clock (observed − expected). The L2 calibration service writes D_clock to both `raw_arrival_time_ms` and `clock_offset_ms` (see Issue 3 in next session).
+3. **Incompatible reference frame** (`dashboard.py:249`): tick_timing second pass injected `mean_timing_offset_ms` (buffer-relative, 0–500ms) into the same `timing_error_ms` array as clock_offset D_clock (±15ms). Fixed: tick_timing contributes only SNR, not timing error.
+4. **Missing chart trace** (`dashboard-24h.html:renderMiniChart`): Only plotted SNR on y-axis. Added timing error as primary trace with auto-scaled y-axis, SNR demoted to faint secondary on y3.
+
+**Verification:** 17/17 broadcasts now have timing error data. CHU shows clear diurnal pattern (26→93 TECU via TEC). Fusion healthy (grade B, ±1.3ms). IONEX files being generated (59 today).
+
+**Files modified:** `web-api/routers/dashboard.py`, `web-api/static/dashboard-24h.html`
+
 ### TEC Pipeline Audit & Enhancement (2026-02-14, evening session)
 
 Complete audit of 17 concerns across 5 files. Four new modules implemented and wired into `physics_fusion_service.py`:
@@ -171,7 +89,7 @@ Complete audit of 17 concerns across 5 files. Four new modules implemented and w
 
 Also fixed: inverted uncertainty weighting in fusion (concern #9), too-narrow TEC validation window 5-100→1-200 TECU (concern #10). 19/19 tests passing. Full details: `docs/changes/SESSION_2026_02_14_TEC_PIPELINE_AUDIT.md`.
 
-**⚠️ NOTE:** These TEC modules are algorithmically correct but depend on valid upstream measurements. The dashboard anomaly discovered at the end of this session suggests the input data may be flat/invalid on most channels. The TEC pipeline will produce meaningful results only after the measurement pipeline is fixed.
+**Validated:** Upstream measurements confirmed to contain real ionospheric variation. TEC pipeline producing diurnal patterns (CHU: 26 TECU night → 93 TECU afternoon). Remaining issue: TEC outliers up to 3930 TECU from mode mixing (see next session Issue 2).
 
 ### HamSCI 2026 Workshop Abstract (2026-02-14)
 

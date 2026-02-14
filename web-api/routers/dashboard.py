@@ -192,12 +192,8 @@ async def get_24h_broadcast_data(
                     snr = m.get('snr_db')
                     mode = m.get('propagation_mode', 'UNKNOWN')
                     
-                    # Calculate timing error if we have raw_toa
-                    timing_error = None
-                    raw_toa = m.get('raw_toa_ms')
-                    expected_delay = broadcasts_data[broadcast_id]['min_propagation_ms']
-                    if raw_toa is not None and expected_delay is not None:
-                        timing_error = raw_toa - expected_delay
+                    # raw_arrival_time_ms is already D_clock = observed_toa - expected_delay
+                    timing_error = m.get('raw_arrival_time_ms')
                     
                     # Append to measurements
                     bd = broadcasts_data[broadcast_id]['measurements']
@@ -250,7 +246,7 @@ async def get_24h_broadcast_data(
                     bd = broadcasts_data[broadcast_id]['measurements']
                     bd['timestamps'].append(timestamp)
                     bd['snr_db'].append(sanitize_value(tick_snr))
-                    bd['timing_error_ms'].append(sanitize_value(m.get('mean_timing_offset_ms')))
+                    bd['timing_error_ms'].append(None)
                     bd['propagation_mode'].append('TICK_FILTER')
                 
             except Exception as e:
@@ -439,11 +435,10 @@ async def get_24h_timing_error(
                     else:
                         continue
                     
-                    raw_toa = m.get('raw_toa_ms')
-                    if raw_toa is None:
+                    # raw_arrival_time_ms is already D_clock = observed_toa - expected_delay
+                    timing_error = m.get('raw_arrival_time_ms')
+                    if timing_error is None:
                         continue
-                    
-                    timing_error = raw_toa - expected_ms
                     
                     timing_data[bid]['timestamps'].append(m.get('timestamp_utc', ''))
                     timing_data[bid]['timing_error_ms'].append(sanitize_value(timing_error))
