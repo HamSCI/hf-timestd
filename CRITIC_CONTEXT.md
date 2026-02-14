@@ -10,42 +10,50 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: GRAPE MODULE AND PSWS UPLOADS
+## 📋 NEXT SESSION: PHYSICS SERVICE MEMORY LEAK + OPERATIONAL RESILIENCE
 
-**Objective:** Confirm end-to-end functionality of the GRAPE (GRAPE Recorder and Processor Engine) module — the Phase 3 pipeline that decimates 24 kHz IQ data to 10 Hz, packages it as Digital RF, and uploads to the HamSCI PSWS repository. The system should produce daily uploads automatically via the `grape-daily.timer`.
+**Objective:** Investigate and fix the `timestd-physics` memory leak that causes OOM kills, and address operational resilience issues (logrotate, service recovery) that allow silent failures to persist for hours.
 
-**Context:** The grape module exists and has run successfully at least once (2026-01-20 upload completed to PSWS). However, the `grape-daily.service` produces no journalctl entries despite the timer being active and firing daily. Decimation IS running (latest decimated files are from 2026-02-10/11), but no uploads have occurred since Jan 20. The pipeline needs end-to-end verification and likely has configuration or wiring issues preventing daily uploads.
+**Context:** The physics service (`physics_fusion_service.py`) was OOM-killed on 2026-02-13 at 11:01 UTC after consuming 16h 25min of CPU time. After restart, it grew to 2.9 GB RSS (10% of 30 GB RAM) within 13 hours. The fusion service also stalled silently — it ran for 10+ hours producing `0 entries from 11 channels` every 8-second cycle due to missing schema files (stale process from before a production update). Both failures were invisible because logrotate truncated the log files without signaling the services, so `.log` was 0 bytes while output went to `.log.1`.
 
 ---
 
-### Known State (as of 2026-02-12)
+### Known State (as of 2026-02-14)
 
-**What works:**
-- `grape-daily.timer` is active, fires daily at ~01:00 UTC
-- Decimation produces daily `.bin` + `_meta.json` files in `products/<CHANNEL>/decimated/` (latest: 20260210/20260211)
-- DRF packaging worked once (2026-01-20, output in `upload/20260120/`)
-- SFTP upload to PSWS completed once (queue.json shows `status: completed` for 2026-01-20)
-- Raw archive has continuous data (`raw_archive/<CHANNEL>/<YYYYMMDD>/` with ~2866 minute files/day)
-- CLI commands exist: `grape decimate`, `grape spectrogram`, `grape package`, `grape upload`, `grape status`
+**What works (after `update-production.sh` run at 12:07 UTC):**
+- All services running, `verify_pipeline.sh` shows 32 PASS, 0 FAIL
+- Fusion reading 547 tick timing observations from 9 channels per cycle
+- Physics producing TEC estimates (fresh within seconds)
+- GRAPE daily pipeline fully operational with validation gates (see Resolved section)
+- `update-production.sh` correctly removes editable installs and does non-editable `pip install`
 
-**What's broken or missing:**
-- `grape-daily.service` produces **no journal entries** — the service may be failing silently or the Python path may be wrong (`/usr/bin/python3` vs `/opt/hf-timestd/venv/bin/python3`)
-- No `[uploader.sftp]` section in config — no host, user, or SSH key configured. CLI falls back to defaults (`pswsnetwork.eng.ua.edu`, `~/.ssh/psws_key`)
-- No SSH key found at `~/.ssh/psws_key` or `/home/timestd/.ssh/`
-- Only 1 upload in history (Jan 20) despite 3+ weeks of data available
-- `grape package` in the systemd service is missing `--date` argument (required per CLI definition)
-- The service uses `/usr/bin/python3` but the project is installed in `/opt/hf-timestd/venv/`
+**What needs investigation:**
+
+1. **Physics service memory leak** — grows unbounded, OOM-killed after ~19 hours
+   - PID 92947: 2.9 GB RSS after 13h, was OOM-killed previous day at 16h 25min CPU
+   - Likely cause: accumulating data structures in `PhysicsFusionService` main loop
+   - Key file: `src/hf_timestd/core/physics_fusion_service.py`
+   - Related: `src/hf_timestd/core/tec_estimator.py`, `src/hf_timestd/io/hdf5_reader.py`
+   - The service re-initializes `DataProductReader` objects every cycle (line-level investigation needed)
+
+2. **Logrotate misconfiguration** — services write to stale file descriptors after rotation
+   - Config: `/etc/logrotate.d/hf-timestd` uses `create` mode (rename old → create new)
+   - Problem: long-running services keep the old FD open, write to `.log.1` while `.log` stays 0 bytes
+   - Fix options: (a) `copytruncate` instead of `create`, or (b) add `postrotate` block to send SIGHUP/restart
+   - Affects: `fusion.log`, `physics.log`, `phase2-*.log`
+
+3. **Silent failure pattern** — services can run for hours producing nothing with no alert
+   - Fusion ran 10+ hours reading 0 measurements every 8s — no alarm triggered
+   - The watchdog (`WatchdogSec=120`) only checks if the process is alive, not if it's productive
+   - Consider: a "productivity watchdog" that checks output freshness (e.g., HDF5 mtime)
 
 ### Verification Steps for This Session
 
-1. **Run `grape decimate` manually** for yesterday's data and confirm output
-2. **Run `grape spectrogram` manually** for one channel and confirm PNG output
-3. **Run `grape package` manually** for a recent date and confirm DRF output
-4. **Run `grape upload --dry-run`** to verify config and path resolution
-5. **Fix `grape-daily.service`** — correct Python path, add missing `--date` arg, verify journal output
-6. **Configure SFTP** — add `[uploader.sftp]` section with host, user, SSH key path
-7. **Test actual upload** to PSWS for one day's data
-8. **Verify on PSWS** that the uploaded data appears correctly
+1. **Profile physics memory** — add `tracemalloc` or monitor RSS growth over time, identify the leaking data structure
+2. **Fix the leak** — likely need to bound or clear accumulated state in the main loop
+3. **Fix logrotate** — switch to `copytruncate` or add `postrotate` signal handling
+4. **Consider MemoryMax** — add `MemoryMax=4G` to `timestd-physics.service` as a safety net
+5. **Consider output freshness monitoring** — extend `verify_pipeline.sh` or add a cron-based freshness check that alerts on stale outputs
 
 ---
 
@@ -129,23 +137,20 @@ Raw IQ Buffer (60s, 24 kHz) → DecimationPipeline → DecimatedBuffer (10 Hz da
 
 **TickMatchedFilter** (separate from edge ensemble): Extracts carrier phase from per-second ticks for ionospheric analysis (Doppler, TEC, scintillation). Gated by `edge_results` presence (fixed 2026-02-12 — was broken by `_check_signal_presence()` failing on 0.5% duty cycle ticks). Now produces 56 windows/min with 15–26 dB SNR on shared channels.
 
-### Key Files (GRAPE Focus)
+### Key Files (This Session Focus)
 
 | File | Purpose | Priority |
 |------|---------|----------|
-| `src/hf_timestd/grape/decimation.py` | CIC + compensation FIR decimation (24 kHz → 10 Hz) | **Critical** |
-| `src/hf_timestd/grape/decimation_pipeline.py` | Orchestrates read → decimate → write per channel/day | **Critical** |
-| `src/hf_timestd/grape/decimated_buffer.py` | Binary 10 Hz IQ storage with gap/timing metadata | **Critical** |
-| `src/hf_timestd/grape/raw_reader.py` | Reads raw_archive `.bin.zst` minute files | **Critical** |
-| `src/hf_timestd/grape/packager.py` | `DailyDRFPackager` — multi-subchannel Digital RF output | **Critical** |
-| `src/hf_timestd/grape/uploader.py` | `UploadManager`, `SFTPUpload`, `SSHRsyncUpload` — PSWS upload | **Critical** |
-| `src/hf_timestd/grape/spectrogram.py` | `CarrierSpectrogramGenerator` — daily/rolling PNG spectrograms | High |
-| `src/hf_timestd/cli.py` | CLI entry point — `grape` subcommand group (lines 307–511) | High |
-| `systemd/grape-daily.service` | Systemd oneshot — decimate + spectrogram + package + upload | **Critical** |
-| `systemd/grape-daily.timer` | Daily timer at 01:00 UTC | High |
-| `config/timestd-config.toml` | `[uploader]` and `[station]` sections | High |
+| `src/hf_timestd/core/physics_fusion_service.py` | Physics daemon — TEC estimation, main loop with suspected leak | **Critical** |
+| `src/hf_timestd/core/tec_estimator.py` | TEC math — may accumulate state | **Critical** |
+| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion daemon — Dual Kalman → Chrony SHM | High |
+| `src/hf_timestd/io/hdf5_reader.py` | `DataProductReader` — re-initialized every cycle in physics | High |
+| `systemd/timestd-physics.service` | Physics systemd unit — needs `MemoryMax`? | High |
+| `systemd/timestd-fusion.service` | Fusion systemd unit — `WatchdogSec=120`, `Type=notify` | High |
+| `/etc/logrotate.d/hf-timestd` | Logrotate config — needs `copytruncate` or `postrotate` | High |
+| `scripts/update-production.sh` | Canonical deploy script — non-editable install + restart | Reference |
 
-### Key Files (Detection & Fusion — for reference)
+### Key Files (Detection & GRAPE — for reference)
 
 | File | Purpose |
 |------|---------|
@@ -154,6 +159,10 @@ Raw IQ Buffer (60s, 24 kHz) → DecimationPipeline → DecimatedBuffer (10 Hz da
 | `src/hf_timestd/core/tick_matched_filter.py` | Per-second tick phase extraction |
 | `src/hf_timestd/core/multi_broadcast_fusion.py` | Dual Kalman fusion → Chrony SHM |
 | `src/hf_timestd/core/propagation_model.py` | HFPropagationModel — ionospheric delay prediction |
+| `src/hf_timestd/grape/decimation_pipeline.py` | Orchestrates read → decimate → write per channel/day |
+| `src/hf_timestd/grape/packager.py` | `DailyDRFPackager` — multi-subchannel Digital RF output |
+| `src/hf_timestd/grape/uploader.py` | `UploadManager`, `SFTPUpload` — PSWS upload |
+| `src/hf_timestd/cli.py` | CLI entry point — `grape daily` orchestrated pipeline |
 
 ### Key Data Products
 
@@ -174,10 +183,14 @@ Raw IQ Buffer (60s, 24 kHz) → DecimationPipeline → DecimatedBuffer (10 Hz da
 |---------|---------|------|
 | `timestd-core-recorder` | RTP → raw buffer (authoritative timestamps) | journalctl |
 | `timestd-metrology` | IQ → L1/L2 measurements + tick phase extraction | `/var/log/hf-timestd/phase2-*.log` |
-| `timestd-fusion` | Multi-broadcast fusion → Chrony | journalctl |
+| `timestd-fusion` | Multi-broadcast fusion → Chrony (WatchdogSec=120) | `/var/log/hf-timestd/fusion.log` |
+| `timestd-physics` | TEC estimation, L3 physics products (**leaks memory**) | `/var/log/hf-timestd/physics.log` |
+| `timestd-l2-calibration` | L2 adaptive calibration | journalctl |
 | `timestd-web-api` | REST API + dashboard (FastAPI, port 8000) | journalctl |
+| `timestd-vtec` | GNSS VTEC estimation (optional) | journalctl |
 | `grape-daily.timer` | Daily GRAPE processing trigger (01:00 UTC) | journalctl |
-| `grape-daily.service` | Decimate + spectrogram + package + upload | journalctl (currently empty!) |
+| `grape-daily.service` | `grape daily` — orchestrated pipeline with validation gates | journalctl |
+| `timestd-radiod-monitor` | Radiod health monitoring (optional) | journalctl |
 | **radiod** | Real-time USB/FFT (CPU 8-15, uncontested L3 cache) | journalctl |
 
 ### Station Configuration
@@ -194,8 +207,9 @@ Raw IQ Buffer (60s, 24 kHz) → DecimationPipeline → DecimatedBuffer (10 Hz da
 ### Deployment
 
 - **Git repo**: `/home/mjh/git/hf-timestd/`
-- **Production install**: `/opt/hf-timestd/` (venv with `pip install -e`)
-- **Production copy shortcut**: `sudo cp <src> /opt/hf-timestd/...` + `sudo systemctl restart <service>`
+- **Production install**: `/opt/hf-timestd/` (venv with non-editable `pip install`)
+- **Deploy script**: `sudo scripts/update-production.sh [--pull]` — removes editable installs, copies package, syncs web-api/scripts/docs, updates systemd, restarts services, verifies
+- **NEVER use `pip install -e`** in production — editable installs make the git repo live production code
 - **Config**: `/etc/hf-timestd/timestd-config.toml`
 - **Data root**: `/var/lib/timestd/`
 - **3 machines**: bee1 (primary), B3-1, B4-1
@@ -203,6 +217,21 @@ Raw IQ Buffer (60s, 24 kHz) → DecimationPipeline → DecimatedBuffer (10 Hz da
 ---
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
+
+### GRAPE Pipeline + PSWS Uploads (2026-02-14)
+
+**Full GRAPE pipeline now operational.** New `grape daily` CLI command orchestrates: decimate all 9 channels → validate all decimated → generate 9 spectrograms → validate all spectrograms → package Digital RF → upload to PSWS. Three validation gates abort the pipeline if any stage is incomplete, preventing partial uploads.
+
+- `grape-daily.service` simplified to single `ExecStart` calling `grape daily`
+- Fixed `gap_samples` unit mismatch in `decimation_pipeline.py` — was storing raw 24kHz sample counts but `update_summary()` compared against 10Hz `SAMPLES_PER_MINUTE` (600), producing -2600% completeness. Now divides by decimation ratio before writing metadata.
+- Fixed 97 existing metadata files in-place.
+- Verified: 20260213 processed 9/9 channels, 9/9 spectrograms, uploaded to PSWS in 63 minutes.
+
+### Fusion Schema Stall (2026-02-14)
+
+**Root cause:** Running fusion/physics processes loaded module paths from a stale (pre-editable-install) Python environment. Schema files resolved to `/opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/schemas/` which no longer existed after editable install pointed imports to the git repo. Result: `Available schemas: {}`, 0 measurements read every cycle for 10+ hours.
+
+**Fix:** Ran `update-production.sh` which removed the editable install, did a proper non-editable `pip install`, and restarted all services. Schemas now resolve correctly from the venv's copied package.
 
 ### Signal Presence Gate Fix (2026-02-12, session 3)
 
@@ -262,9 +291,8 @@ IQ mixer phase jump fixed. Three-tier phase extraction. Cross-frequency discrimi
 
 ## ✅ Success Criteria — This Session
 
-1. **`grape decimate` produces output** — run manually for yesterday, confirm `.bin` + `_meta.json` in `products/<CH>/decimated/`
-2. **`grape spectrogram` produces PNG** — run for one channel, confirm output in `products/<CH>/spectrograms/`
-3. **`grape package` produces Digital RF** — run for a recent date, confirm DRF structure in `upload/<YYYYMMDD>/`
-4. **`grape upload` succeeds** — configure SFTP (SSH key, `[uploader.sftp]` in config), upload one day to PSWS
-5. **`grape-daily.service` runs end-to-end** — fix Python path, fix missing `--date` arg, confirm journal output
-6. **Verify on PSWS** — uploaded data visible at pswsnetwork.eng.ua.edu for station S000171
+1. **Physics memory leak identified and fixed** — RSS stays bounded over 24+ hours, no OOM kill
+2. **Logrotate fixed** — services write to the current `.log` file after rotation, not `.log.1`
+3. **`MemoryMax` safety net** — physics service has a systemd memory limit to prevent OOM-killing other services
+4. **Output freshness monitoring** — some mechanism alerts when fusion/physics stop producing useful output
+5. **`verify_pipeline.sh` stays at 0 FAIL** after 24 hours of operation
