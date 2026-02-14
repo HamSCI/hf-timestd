@@ -148,7 +148,7 @@ refresh_interval = 60
 #   "rtp"    - Trust radiod's GPS_TIME/RTP_TIMESNAP (L4/L5: GPS+PPS on radiod)
 #   "fusion" - Use HF fusion to establish RTP-to-UTC mapping (L3/L2/L1)
 #   "auto"   - Monitor discrepancy, infer best source (future)
-authority = "rtp"  # L4: radiod has LAN GPS+PPS feed from 192.168.0.202
+authority = "rtp"  # L4: radiod has LAN GPS+PPS feed from 192.168.0.203
 
 # Expected accuracy when authority = "rtp" (used for search window sizing)
 # L5 (GPS+PPS local): 0.0001 ms (100 ns)
@@ -167,8 +167,10 @@ always_run_fusion = true
 timing_snapshot_rate_hz = 2.0
 
 [gnss_vtec]
+# If a local source of VTEC measurement present.
+# See ZED_F9P_VTEC_CONFIGURATION.md
 enabled = true
-host = "192.168.0.202"
+host = "192.168.0.203"
 port = 9000
 save_csv = true
 csv_path = "data/gnss_vtec.csv"
