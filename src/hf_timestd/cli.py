@@ -108,6 +108,13 @@ def main():
     grape_parser = subparsers.add_parser('grape', help='GRAPE data products (decimation, spectrograms, packaging)')
     grape_subparsers = grape_parser.add_subparsers(dest='grape_command', help='GRAPE command')
     
+    # GRAPE daily (full orchestrated pipeline)
+    grape_daily_parser = grape_subparsers.add_parser('daily', help='Run full daily pipeline: decimate → spectrogram → package → upload')
+    grape_daily_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
+    grape_daily_parser.add_argument('--config', '-c', default='/etc/hf-timestd/timestd-config.toml', help='Config file')
+    grape_daily_parser.add_argument('--date', help='Date (YYYY-MM-DD or YYYYMMDD, default: yesterday)')
+    grape_daily_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
+
     # GRAPE decimate
     grape_decimate_parser = grape_subparsers.add_parser('decimate', help='Decimate 24/20 kHz IQ to 10 Hz')
     grape_decimate_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
@@ -321,7 +328,172 @@ def main():
                 return (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
             return date_arg.replace('-', '')
         
-        if args.grape_command == 'decimate':
+        if args.grape_command == 'daily':
+            from .grape.decimation_pipeline import DecimationPipeline
+            from .grape.spectrogram import CarrierSpectrogramGenerator
+            from .grape.packager import DailyDRFPackager, StationConfig
+            from .grape.uploader import UploadManager
+            import toml
+            import os
+
+            date_str = resolve_date(args.date)
+
+            # Load config
+            config_path = Path(args.config)
+            if not config_path.exists():
+                print(f"❌ Config not found: {config_path}")
+                sys.exit(1)
+            with open(config_path, 'r') as f:
+                config = toml.load(f)
+
+            station = config.get('station', {})
+            callsign = station.get('callsign', 'AC0G')
+            grid = station.get('grid_square', 'EM38ww')
+
+            # Discover all channels from raw_archive
+            channels_dir = data_root / 'raw_archive'
+            if not channels_dir.exists():
+                print(f"❌ No raw_archive found at {channels_dir}")
+                sys.exit(1)
+
+            all_channels = sorted([
+                d.name.replace('_', ' ')
+                for d in channels_dir.iterdir()
+                if d.is_dir()
+            ])
+            expected_count = len(all_channels)
+            print(f"📡 GRAPE daily pipeline for {date_str}")
+            print(f"   Channels: {expected_count} ({', '.join(all_channels)})")
+
+            # === Stage 1: Decimate all channels ===
+            print(f"\n━━━ Stage 1: Decimation ({expected_count} channels) ━━━")
+            pipeline = DecimationPipeline(data_root)
+            decimated = []
+            failed_decimate = []
+
+            for ch in all_channels:
+                try:
+                    print(f"   [{len(decimated)+len(failed_decimate)+1}/{expected_count}] {ch}...")
+                    pipeline.process_day(date_str, ch)
+                    # Verify output exists
+                    ch_dir = ch.replace(' ', '_')
+                    dec_file = data_root / 'products' / ch_dir / 'decimated' / f'{date_str}.bin'
+                    if dec_file.exists() and dec_file.stat().st_size > 0:
+                        decimated.append(ch)
+                    else:
+                        failed_decimate.append(ch)
+                        print(f"   ⚠️  {ch}: decimation produced no output")
+                except Exception as e:
+                    failed_decimate.append(ch)
+                    print(f"   ❌ {ch}: {e}")
+
+            print(f"\n   Decimation: {len(decimated)}/{expected_count} channels")
+
+            # === Gate 1: All channels must be decimated ===
+            if len(decimated) < expected_count:
+                print(f"   ❌ GATE FAILED: {len(failed_decimate)} channels missing: {', '.join(failed_decimate)}")
+                print(f"   Aborting — will not package/upload incomplete data")
+                sys.exit(1)
+            print(f"   ✅ GATE PASSED: all {expected_count} channels decimated")
+
+            # === Stage 2: Generate spectrograms ===
+            print(f"\n━━━ Stage 2: Spectrograms ({expected_count} channels) ━━━")
+            spectrograms = []
+            failed_spec = []
+
+            for ch in all_channels:
+                try:
+                    gen = CarrierSpectrogramGenerator(
+                        data_root=data_root,
+                        channel_name=ch,
+                        receiver_grid=grid
+                    )
+                    result = gen.generate_daily(date_str)
+                    if result and result.exists():
+                        spectrograms.append(ch)
+                        print(f"   ✅ {ch}: {result.name}")
+                    else:
+                        failed_spec.append(ch)
+                        print(f"   ⚠️  {ch}: no spectrogram generated")
+                except Exception as e:
+                    failed_spec.append(ch)
+                    print(f"   ❌ {ch}: {e}")
+
+            print(f"\n   Spectrograms: {len(spectrograms)}/{expected_count} channels")
+
+            # === Gate 2: All spectrograms must exist ===
+            if len(spectrograms) < expected_count:
+                print(f"   ❌ GATE FAILED: {len(failed_spec)} spectrograms missing: {', '.join(failed_spec)}")
+                print(f"   Aborting — will not package/upload without complete spectrograms")
+                sys.exit(1)
+            print(f"   ✅ GATE PASSED: all {expected_count} spectrograms generated")
+
+            # === Stage 3: Package into Digital RF ===
+            print(f"\n━━━ Stage 3: Package ━━━")
+            try:
+                station_config = StationConfig(callsign=callsign, grid_square=grid)
+                packager = DailyDRFPackager(data_root=data_root, station_config=station_config)
+                packager.package_day(date_str)
+                print(f"   ✅ Package complete")
+            except Exception as e:
+                print(f"   ❌ Package failed: {e}")
+                print(f"   Aborting — will not upload without valid package")
+                sys.exit(1)
+
+            # === Gate 3: Verify OBS directory exists ===
+            upload_dir = data_root / 'upload' / date_str
+            obs_dirs = list(upload_dir.rglob('OBS*')) if upload_dir.exists() else []
+            if not obs_dirs:
+                print(f"   ❌ GATE FAILED: no OBS directory in {upload_dir}")
+                sys.exit(1)
+            print(f"   ✅ GATE PASSED: {len(obs_dirs)} dataset(s) ready")
+
+            # === Stage 4: Upload to PSWS ===
+            print(f"\n━━━ Stage 4: Upload ━━━")
+            uploader_config = config.get('uploader', {})
+            sftp_config = uploader_config.get('sftp', {})
+            ssh_key = os.path.expanduser(sftp_config.get('ssh_key', '~/.ssh/psws_key'))
+
+            upload_config = {
+                'protocol': uploader_config.get('protocol', 'sftp'),
+                'host': sftp_config.get('host', 'pswsnetwork.eng.ua.edu'),
+                'user': sftp_config.get('user', station.get('id', '')),
+                'ssh': {'key_file': ssh_key},
+                'bandwidth_limit_kbps': sftp_config.get('bandwidth_limit_kbps', 100),
+                'max_retries': uploader_config.get('max_retries', 5),
+                'queue_file': data_root / 'upload' / 'queue.json'
+            }
+
+            manager = UploadManager(upload_config)
+
+            for obs_dir in obs_dirs:
+                metadata = {
+                    'date': f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}",
+                    'callsign': callsign,
+                    'grid_square': grid,
+                    'station_id': station.get('id', 'S000171'),
+                    'instrument_id': station.get('instrument_id', '172')
+                }
+                manager.enqueue(obs_dir, metadata)
+
+            manager.process_queue()
+
+            status = manager.get_status()
+            print(f"   Queue: {status['completed']} completed, {status['pending']} pending, {status['failed']} failed")
+
+            report_file = manager.write_upload_report()
+            print(f"   Report: {report_file}")
+
+            if status['failed'] > 0:
+                print(f"\n❌ Upload had failures")
+                sys.exit(1)
+
+            print(f"\n✅ GRAPE daily pipeline complete for {date_str}")
+            print(f"   {len(decimated)} channels decimated")
+            print(f"   {len(spectrograms)} spectrograms generated")
+            print(f"   {status['completed']} dataset(s) uploaded to PSWS")
+
+        elif args.grape_command == 'decimate':
             from .grape.decimation_pipeline import DecimationPipeline
             
             date_str = resolve_date(args.date)

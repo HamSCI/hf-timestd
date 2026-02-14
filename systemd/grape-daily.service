@@ -10,23 +10,9 @@ Group=timestd
 WorkingDirectory=/var/lib/timestd
 Environment=PATH=/opt/hf-timestd/venv/bin:/usr/bin:/bin
 
-# Decimate all channels from yesterday
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape decimate --all-channels
-
-# Generate spectrograms for all 9 channels
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "SHARED 2500"
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "SHARED 5000"
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "SHARED 10000"
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "SHARED 15000"
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWV 20000"
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "WWV 25000"
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "CHU 3330"
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "CHU 7850"
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape spectrogram --channel "CHU 14670"
-
-# Package yesterday's data and upload to PSWS
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape package --date yesterday --callsign AC0G --grid EM38ww
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape upload
+# Full orchestrated pipeline: decimate → spectrogram → package → upload
+# Gates enforce: all 9 channels decimated + all 9 spectrograms generated before upload
+ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape daily
 
 # Logging
 StandardOutput=journal
