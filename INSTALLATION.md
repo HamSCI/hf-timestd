@@ -1,7 +1,7 @@
 # HF Time Standard Analysis (hf-timestd) - Installation Guide
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** January 20, 2026
+**Last Updated:** February 14, 2026
 
 This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, CHU, WWV, WWVH).
 
@@ -53,6 +53,7 @@ sudo systemctl enable --now timestd-vtec                    # GNSS VTEC (if enab
 sudo systemctl enable --now timestd-ionex-download.timer    # Daily IONEX downloads
 sudo systemctl enable --now timestd-chrony-monitor.timer    # Chrony health monitoring
 sudo systemctl enable --now timestd-radiod-monitor          # Radiod health monitoring
+sudo systemctl enable --now grape-daily.timer                # Daily GRAPE processing + PSWS upload
 ```
 
 ### Production Paths
@@ -145,7 +146,7 @@ See [docs/ZED_F9P_TEC_CONFIGURATION.md](docs/ZED_F9P_TEC_CONFIGURATION.md) for r
 - **`timestd-ionex-download.timer`** - Daily download of global IONEX maps from NASA CDDIS
 - **`timestd-chrony-monitor.timer`** - Monitors Chrony reachability and alerts on issues
 - **`timestd-radiod-monitor`** - Monitors radiod health and restarts channels if needed
-- **`grape-daily.timer`** - Daily GRAPE processing: decimation, spectrograms, packaging
+- **`grape-daily.timer`** - Daily GRAPE processing: decimation, spectrograms, DRF packaging, PSWS upload (01:00 UTC)
 
 ---
 

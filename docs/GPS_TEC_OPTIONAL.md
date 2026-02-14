@@ -26,13 +26,13 @@ GPS validation is **entirely optional** and only needed if you want to validate 
 - ✅ **Station comparisons**: Compare TEC across different propagation paths
 - ✅ **Event detection**: Identify Traveling Ionospheric Disturbances (TIDs), solar flares
 - ✅ **Propagation monitoring**: Real-time HF propagation conditions
-- ✅ **Historical analysis**: CSV data for long-term studies
+- ✅ **Historical analysis**: HDF5 data for long-term studies
 
 **Data Output**:
 
 ```
-/var/lib/timestd/phase2/science/tec/tec_YYYYMMDD.csv
-- Timestamp, station, TEC (TECU), confidence, frequencies used
+/var/lib/timestd/phase2/science/tec/tec_YYYYMMDD.h5
+- HDF5 format with timestamp, station, TEC (TECU), confidence, frequencies used
 - Multi-frequency group delays
 - Quality metrics (residuals, uncertainty)
 ```
@@ -116,11 +116,11 @@ GPS validation is **entirely optional** and only needed if you want to validate 
 - Automatic obliquity factor corrections
 - Data output: `/var/lib/timestd/phase2/science/tec/`
 
-✅ **Science Aggregator Service**
+✅ **Physics Service**
 
-- Runs automatically via `timestd-science-aggregator.service`
+- Runs automatically via `timestd-physics.service`
 - Aggregates timing data across all frequencies
-- Generates TEC estimates every 5 minutes
+- Generates TEC estimates from multi-frequency measurements
 - No GPS dependencies
 
 ✅ **Multi-station Analysis**
@@ -133,12 +133,11 @@ GPS validation is **entirely optional** and only needed if you want to validate 
 ### Verification (No GPS)
 
 ```bash
-# Check TEC data is generating
+# Check TEC data is generating (HDF5 format)
 ls -lh /var/lib/timestd/phase2/science/tec/
-tail /var/lib/timestd/phase2/science/tec/tec_$(date +%Y%m%d).csv
 
 # Check service status
-sudo systemctl status timestd-science-aggregator
+sudo systemctl status timestd-physics
 ```
 
 ---
@@ -432,7 +431,5 @@ HF TEC Measurements + Local GPS TEC → Real-time Validation
 ## References
 
 - **ZED-F9P Documentation**: `docs/ZED_F9P_TEC_CONFIGURATION.md`
-- **Validation Methodology**: `docs/TEC_VALIDATION_METHODOLOGY.md`
-- **Deployment Guide**: `docs/TEC_VALIDATION_DEPLOYMENT.md`
 - **UBX Protocol**: u-blox Interface Description (UBX-NAV-SAT)
 - **IONEX Format**: ftp://igs.org/pub/data/format/ionex1.pdf

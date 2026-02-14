@@ -3,7 +3,7 @@
 **Comprehensive guide to the metrological methodology used in hf-timestd for RTP-to-UTC calibration and time transfer.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 12, 2026 (v6.7.0)
+**Last Updated:** February 14, 2026
 
 ---
 
@@ -535,7 +535,7 @@ If the RTP stream restarts (e.g., radiod restart):
 Check bootstrap status in logs:
 
 ```bash
-grep "BOOTSTRAP" /var/log/hf-timestd/phase2-*.log
+grep "BOOTSTRAP" /var/log/hf-timestd/metrology.log
 ```
 
 Expected progression:
@@ -558,7 +558,7 @@ Expected progression:
 
 - `TECHNICAL_REFERENCE.md` - System architecture and algorithms
 - `ARCHITECTURE.md` - Design philosophy
-- `docs/METROLOGIST_DESCRIPTION.md` - Detailed metrological analysis
+- `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md` - Production deployment and verification gates
 
 ---
 
@@ -949,5 +949,5 @@ BPM is maintained for scientific interest (trans-Pacific ionospheric probing) bu
 
 ---
 
-**Version**: 6.7.0  
-**Last Updated**: February 12, 2026
+**Version**: 6.7.1+  
+**Last Updated**: February 14, 2026

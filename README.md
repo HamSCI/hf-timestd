@@ -8,9 +8,9 @@
 
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
-**Key Capabilities (V6.7.1):**
+**Key Capabilities:**
 
-- 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **Digital RF (HDF5)** format.
+- 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **binary IQ archive** format with JSON metadata sidecars.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
 - 🌐 **Real-time ionospheric model (v6.7)** - WAM-IPE + GIRO data for frequency-dependent, time-varying group delay predictions with multi-hop support (1F, 2F, 3F).
 - 🔗 **HDF5-Native Pipeline** - High-performance crash-safe data exchange.
@@ -114,24 +114,24 @@ The system is composed of eight independent services that form a pipeline:
 [ka9q-radio] (RTP Multicast)
      ↓
 1. CORE RECORDER (timestd-core-recorder)
-   • Writes Binary IQ + JSON sidecars (Reliable Capture)
+   • Writes Binary IQ (.bin.zst) + JSON sidecars (Reliable Capture)
      ↓
 2. METROLOGY (timestd-metrology)
-   • Reads Raw IQ -> Detects Tones -> L1 Measurements
+   • Reads Raw IQ -> Detects Tones -> L1/L2 Measurements (HDF5)
      ↓
 3. L2 CALIBRATION (timestd-l2-calibration)
    • Applies geometric + TEC corrections -> L2 Timing
      ↓
 4. FUSION (timestd-fusion) <------- 5. VTEC (timestd-vtec)
-   • Reads L2 HDF5 (SWMR)           • Downloads IONEX Maps
-   • Kalman filtering               • GNSS Observables
+   • Reads L2 HDF5 (crash-safe)     • GNSS VTEC monitoring
+   • Dual Kalman filtering          • (optional, requires GNSS)
    • Feeds Chrony SHM (TSL1/TSL2)
      ↓
 6. PHYSICS (timestd-physics)
    • TEC Estimation from multi-frequency
      ↓
 7. WEB API (timestd-web-api)
-   • FastAPI dashboard & REST API
+   • FastAPI dashboard & REST API (port 8000)
      ↓
 8. RADIOD MONITOR (timestd-radiod-monitor)
    • Hardware health monitoring
@@ -139,8 +139,8 @@ The system is composed of eight independent services that form a pipeline:
 
 ### Key Technologies
 
-- **Digital RF:** Efficient HDF5-based format for continuous IQ recording (MIT Haystack).
-- **HDF5 SWMR:** Allows Fusion to read analytics results milliseconds after they are written, enabling real-time clock discipline.
+- **Binary IQ Archive:** Compressed `.bin.zst` files with JSON metadata sidecars for raw 24 kHz IQ recording. Digital RF (MIT Haystack) is used for GRAPE packaging/upload only.
+- **HDF5 Crash-Safe Pipeline:** Open-write-close pattern with `locking=False` for all inter-service data exchange. No SWMR — crash-safe by design.
 - **IONEX VTEC:** Incorporates global ionospheric maps (NASA/IGS) to correct for group delay ($\tau_{iono} \propto TEC/f^2$).
 
 ---
@@ -151,7 +151,7 @@ The system is composed of eight independent services that form a pipeline:
 - **[TECHNICAL_REFERENCE.md](TECHNICAL_REFERENCE.md)** - Deep dive into algorithms, data formats, and physics models.
 - **[METROLOGY.md](METROLOGY.md)** - RTP-to-UTC calibration methodology and timing bootstrap.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design philosophy ("The Why").
-- **[DIRECTORY_STRUCTURE.md](DIRECTORY_STRUCTURE.md)** - File layout specification.
+- **[docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md](docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md)** - Production deployment and verification gates.
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mijahauan/hf-timestd)
 
 ---

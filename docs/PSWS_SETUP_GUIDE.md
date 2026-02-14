@@ -11,7 +11,7 @@ The HamSCI PSWS (Personal Space Weather Station) network requires SSH key-based 
 | **SITE_ID** | Your PSWS station identifier | `S000171` |
 | **TOKEN** | Password for initial SSH key upload | (from PSWS admin page) |
 | **INSTRUMENT_ID** | Instrument number within your site | `172` |
-| **SSH Key** | Private key for authentication | `~/.ssh/psws_key` |
+| **SSH Key** | Private key for authentication | `/home/timestd/.ssh/id_rsa_psws` |
 
 ## PSWS Server Details
 
@@ -60,17 +60,19 @@ Generate a dedicated SSH key for PSWS uploads:
 
 ```bash
 # Generate SSH key pair for PSWS (as the timestd user)
-sudo -u timestd ssh-keygen -t ed25519 -f /home/timestd/.ssh/psws_key -N "" -C "PSWS upload key"
+sudo -u timestd ssh-keygen -t rsa -b 4096 -f /home/timestd/.ssh/id_rsa_psws -N "" -C "PSWS upload key"
 
 # Set correct permissions
-sudo chmod 600 /home/timestd/.ssh/psws_key
-sudo chmod 644 /home/timestd/.ssh/psws_key.pub
-sudo chown timestd:timestd /home/timestd/.ssh/psws_key*
+sudo chmod 600 /home/timestd/.ssh/id_rsa_psws
+sudo chmod 644 /home/timestd/.ssh/id_rsa_psws.pub
+sudo chown timestd:timestd /home/timestd/.ssh/id_rsa_psws*
 ```
 
 This creates:
-- Private key: `/home/timestd/.ssh/psws_key`
-- Public key: `/home/timestd/.ssh/psws_key.pub`
+- Private key: `/home/timestd/.ssh/id_rsa_psws`
+- Public key: `/home/timestd/.ssh/id_rsa_psws.pub`
+
+> **Note:** RSA keys are recommended for PSWS compatibility. Do NOT overwrite this key with a general-purpose key.
 
 ### Step 5: Upload Public Key to PSWS
 
@@ -78,12 +80,14 @@ Copy your SSH public key to the PSWS server using your SITE_ID and TOKEN:
 
 ```bash
 # Replace S000171 with your actual SITE_ID
-sudo -u timestd ssh-copy-id -i /home/timestd/.ssh/psws_key.pub S000171@pswsnetwork.eng.ua.edu
+sudo -u timestd ssh-copy-id -i /home/timestd/.ssh/id_rsa_psws.pub S000171@pswsnetwork.eng.ua.edu
 ```
 
 When prompted for password, enter your **TOKEN** from the PSWS admin page.
 
 You should see: `Number of key(s) added: 1`
+
+> **Important:** The PSWS server is **sftp-only** — it rejects interactive SSH and SCP shell connections. If `ssh-copy-id` fails, you may need to upload the public key via the PSWS web portal instead.
 
 ### Step 6: Test Authentication
 
@@ -91,7 +95,7 @@ Verify SSH key authentication is working:
 
 ```bash
 # Test SFTP connection (should connect without password)
-sudo -u timestd sftp -i /home/timestd/.ssh/psws_key -o BatchMode=yes S000171@pswsnetwork.eng.ua.edu <<< "quit"
+sudo -u timestd sftp -i /home/timestd/.ssh/id_rsa_psws -o BatchMode=yes S000171@pswsnetwork.eng.ua.edu <<< "quit"
 ```
 
 If it asks for a password, authentication setup failed - check your TOKEN and try Step 5 again.
@@ -114,7 +118,7 @@ protocol = "sftp"
 [uploader.sftp]
 host = "pswsnetwork.eng.ua.edu"
 user = "YOUR_SITE_ID"                # Same as station.id
-ssh_key = "/home/timestd/.ssh/psws_key"
+ssh_key = "/home/timestd/.ssh/id_rsa_psws"
 bandwidth_limit_kbps = 100           # Optional: limit upload speed
 ```
 
@@ -156,8 +160,8 @@ sudo -u timestd hf-timestd grape upload --date 2026-01-20
 
 **Solutions**:
 1. Verify key path is correct in config
-2. Check key permissions: `ls -la /home/timestd/.ssh/psws_key`
-3. Test with verbose output: `sftp -v -i /home/timestd/.ssh/psws_key S000171@pswsnetwork.eng.ua.edu`
+2. Check key permissions: `ls -la /home/timestd/.ssh/id_rsa_psws`
+3. Test with verbose output: `sftp -v -i /home/timestd/.ssh/id_rsa_psws S000171@pswsnetwork.eng.ua.edu`
 
 ### Upload Issues
 

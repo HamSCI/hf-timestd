@@ -1,15 +1,15 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** February 12, 2026  
+**Last Updated:** February 14, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.7.1 (Propagation Model Full Integration)
+**Version:** V6.7.1+
 
 ---
 
 ## Document Purpose
 
-This document explains **WHY** the hf-timestd system is designed the way it is. For **WHERE** data goes, see `DIRECTORY_STRUCTURE.md`. For **WHAT** functions exist, see `docs/API_REFERENCE.md`.
+This document explains **WHY** the hf-timestd system is designed the way it is. For **WHAT** functions exist, see `TECHNICAL_REFERENCE.md`. For **HOW** to deploy, see `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md`.
 
 ---
 
@@ -163,7 +163,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 
 - **Concept:** We treat the GPSDO as a "Steel Ruler" (fixed, zero drift) measuring a "Rubber Sheet" (ionosphere).
 - **Implementation:**
-  - **Process Noise:** Extremely low Q (1e-10) for clock drift. We trust the GPSDO hardware spec (sub-ppb).
+  - **Process Noise:** Low Q (0.01) for clock drift. Increased from 1e-10 to allow the filter to track real measurements while still trusting the GPSDO hardware spec (sub-ppb).
   - **Drift Clamping:** `drift_ms_per_min` is hard-clamped to 0.0 after convergence.
   - **Jitter Rejection:** High measurement noise covariance (R=30ms) forces the Kalman filter to reject ionospheric turbulence rather than chasing it.
 
@@ -217,7 +217,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 │  Process:                                                       │
 │    1. Tone Detection (WWV/WWVH/CHU @ 1000/1200 Hz)             │
 │    2. Time_snap Management (GPS-quality timestamp anchors)     │
-│    3. WWV/WWVH Discrimination (8 voting methods)               │
+│    3. WWV/WWVH Discrimination (cross-freq gate + voting)       │
 │    4. D_clock Computation (propagation mode estimation)        │
 │                                                                 │
 │  Outputs (HDF5):                                                 │
@@ -332,16 +332,16 @@ Phase 1: Core Recorder
 raw_buffer/{CHANNEL}/{YYYYMMDD}/{minute}.bin
 raw_buffer/{CHANNEL}/{YYYYMMDD}/{minute}.json
      ↓
-Phase 2: Analytics Service (polls for new files)
+Phase 2: Metrology Service (polls for new files)
      ↓ (HDF5 crash-safe writes)
-├─→ phase2/{CHANNEL}/tone_detections/{date}.h5 (L1A)
-└─→ phase2/{CHANNEL}/timing_measurements/{date}.h5 (L2)
+├─→ phase2/{CHANNEL}/metrology/{date}_metrology_measurements.h5 (L1/L2)
+├─→ phase2/{CHANNEL}/tick_timing/{date}_tick_timing.h5
+└─→ phase2/{CHANNEL}/detection_attempts/{date}_detection_attempts.h5
      ↓ (HDF5 read)
 Phase 3: Fusion Service
-     ↓ (Kalman Filter + Physics Model)
-├─→ Chrony SHM (system clock discipline)
-├─→ phase2/fusion/fusion_timing_{date}.h5 (L3)
-└─→ phase2/fusion/fused_d_clock.csv (Legacy UI Support)
+     ↓ (Dual Kalman Filter + Physics Model)
+├─→ Chrony SHM (TSL1=L1 geometric, TSL2=L2 physics-corrected)
+└─→ phase2/fusion/fusion_timing_{date}.h5 (L3)
 ```
 
 ### Web UI Visualization
@@ -349,11 +349,12 @@ Phase 3: Fusion Service
 ```
 Web Browser
      ↓
-FastAPI Monitoring Server (Python)
+FastAPI Monitoring Server (Python, port 8000)
      ↓ (reads HDF5 + Status JSON)
-├─→ phase2/{CHANNEL}/timing_measurements/*.h5
+├─→ phase2/{CHANNEL}/metrology/*.h5
+├─→ phase2/{CHANNEL}/tick_timing/*.h5
 ├─→ phase2/fusion/fusion_timing_*.h5
-└─→ phase2/{CHANNEL}/status/*.json
+└─→ phase2/{CHANNEL}/state/*.json
      ↓
 JSON Response → Chart.js plots
 ```
@@ -431,24 +432,25 @@ We use a **Weighted Voting** system combining:
 
 ## Directory Structure
 
-**Key Changes in V5.0:** Usage of `phase2` HDF5 subdirectories.
-
 ```
 {data_root}/
 ├── raw_buffer/{CHANNEL}/{YYYYMMDD}/   # Phase 1: Binary IQ + JSON
-│   ├── {minute}.bin[.zst|.lz4]
+│   ├── {minute}.bin.zst
 │   └── {minute}.json
-├── phase2/{CHANNEL}/                   # Phase 2: Analytics HDF5
-│   ├── timing_measurements/            # L2 HDF5 files (Primary Output)
-│   ├── tone_detections/                # L1A HDF5 files
-│   ├── clock_offset/                   # Legacy CSV (Deprecated)
-│   ├── discrimination/                 # Legacy CSV (Deprecated)
-│   └── status/                         # Service state JSON
+├── phase2/{CHANNEL}/                   # Phase 2: Metrology HDF5
+│   ├── metrology/                      # L1/L2 HDF5 (primary output)
+│   ├── tick_timing/                    # Per-second tick timing HDF5
+│   ├── detection_attempts/             # Detection attempts HDF5
+│   └── state/                          # Service state JSON
 ├── phase2/fusion/                      # Phase 3: Fusion Output
-│   ├── fusion_timing_{date}.h5         # L3 HDF5
-│   ├── fused_d_clock.csv               # Quick-look CSV
-│   └── tec_estimates.csv               # Science product
+│   └── fusion_timing_{date}.h5         # L3 HDF5
+├── phase2/science/tec/                 # TEC estimates (HDF5)
+├── products/{CHANNEL}/                 # GRAPE products
+│   ├── spectrograms/
+│   └── decimated/
 └── state/                              # Global state files
+    ├── broadcast_kalman_state.json
+    └── broadcast_calibration.json
 ```
 
 ---
@@ -464,7 +466,7 @@ We use a **Weighted Voting** system combining:
 | `timestd-l2-calibration.service` | Phase 2: L2 calibrated timing |
 | `timestd-fusion.service` | Phase 3: Multi-broadcast fusion & Chrony feed |
 | `timestd-physics.service` | Phase 3: TEC estimation |
-| `timestd-iono.service` | Ionospheric data ingestion (WAM-IPE, GIRO) — runs as `IonoDataService` background thread within metrology |
+| *(IonoDataService)* | Ionospheric data ingestion (WAM-IPE, GIRO) — runs as a **background thread** within metrology, not a separate service |
 | `timestd-web-api.service` | Web monitoring UI (FastAPI) |
 | `timestd-radiod-monitor.service` | Hardware health monitoring |
 
@@ -495,14 +497,14 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 
 ## Related Documentation
 
-- **`CONTEXT.md`** - Project context and quick reference
-- **`CANONICAL_CONTRACTS.md`** - Overview of project standards
-- **`DIRECTORY_STRUCTURE.md`** - Complete path specifications
 - **`TECHNICAL_REFERENCE.md`** - API and algorithm details
+- **`METROLOGY.md`** - RTP-to-UTC calibration and timing bootstrap methodology
+- **`docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md`** - Production deployment and verification gates
+- **`INSTALLATION.md`** - Setup and service configuration
 
 ---
 
-**Last Updated:** February 12, 2026
+**Last Updated:** February 14, 2026
 
 ## Real-Time Ionospheric Propagation Model (v6.7)
 

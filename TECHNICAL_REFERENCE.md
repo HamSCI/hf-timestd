@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 12, 2026 (v6.7.0)
+**Last Updated:** February 14, 2026
 
 ---
 
@@ -17,8 +17,8 @@
 
 **Data products generated**:
 
-1. **24 kHz Digital RF (HDF5)** - Phase 1 immutable raw archive (`raw_archive/{CHANNEL}/`)
-2. **Phase 2 Analytics (HDF5)** - L1 Tone Detections & L2 Timing Measurements (`phase2/{CHANNEL}/`)
+1. **24 kHz Binary IQ Archive** - Phase 1 raw recording as `.bin.zst` + JSON sidecars (`raw_buffer/{CHANNEL}/`)
+2. **Phase 2 Analytics (HDF5)** - L1/L2 Metrology, Tick Timing, Detection Attempts (`phase2/{CHANNEL}/`)
 3. **Phase 3 Fusion (HDF5)** - L3 Fused Timing & Global Science Products (`phase2/fusion/`)
 4. **Spectrograms** - Visualizations with solar zenith (`products/{CHANNEL}/spectrograms/`)
 
@@ -26,16 +26,16 @@
 
 ---
 
-## System Architecture: The Six Services
+## System Architecture: The Eight Services
 
-The system is composed of six independent systemd services, each with a specific responsibility in the data pipeline.
+The system is composed of eight independent systemd services, each with a specific responsibility in the data pipeline.
 
 ### 1. Core Recorder (`timestd-core-recorder`)
 
 **Responsibility:** Reliable Data Capture
 
 - Consumes RTP multicast streams from `ka9q-radio`.
-- Writes **Digital RF** formatted HDF5 files (`.h5`).
+- Writes **binary IQ archive** files (`.bin.zst`) with JSON metadata sidecars.
 - Maintains sample count integrity (gap filling).
 - **Output:** `/var/lib/timestd/raw_buffer/`
 
@@ -43,7 +43,7 @@ The system is composed of six independent systemd services, each with a specific
 
 **Responsibility:** Signal Processing & Timing Extraction
 
-- Polls for new Digital RF files.
+- Polls for new binary IQ files from raw_buffer.
 - Performs tone detection (1000/1200 Hz), BCD decoding, and WWV/WWVH discrimination.
 - Calculates `D_clock` (System - UTC) using physics propagation models.
 - **Timing (v6.6):** Uses authoritative RTP timestamps from GPS+PPS via radiod (no pipeline offset correction needed).
@@ -102,15 +102,17 @@ The system is composed of six independent systemd services, each with a specific
 
 ## Data Formats
 
-### 1. Raw Archive: Digital RF (HDF5)
+### 1. Raw Archive: Binary IQ + JSON
 
-We use the **Digital RF** standard (MIT Haystack) for storing raw IQ data.
+Raw IQ data is stored as compressed binary files with JSON metadata sidecars.
 
-- **Format:** HDF5 with `drf_properties` attribute.
+- **Format:** `.bin.zst` (zstd-compressed binary) + `.json` sidecar.
 - **Structure:**
-  - `/rf_data`: Dataset containing complex64 IQ samples.
-  - `/rf_data_index`: Index mapping sample ranges to timestamps.
-- **Metadata:** Global start time, sample rate (24 kHz), center frequency.
+  - Binary file: 1,440,000 complex64 IQ samples per minute.
+  - JSON sidecar: RTP timestamps, gap info, system time, quality metrics.
+- **Metadata:** Start RTP timestamp, start system time, sample rate (24 kHz), center frequency, gap count.
+
+> **Note:** Digital RF (MIT Haystack) is used only for GRAPE DRF packaging/upload, not for raw recording.
 
 ### 2. Analytics Output: HDF5 L1/L2
 
@@ -238,7 +240,7 @@ The system implements a three-layer metrological architecture that distinguishes
 
 **Key Insight**: The combined regression of 17 broadcasts doesn't just average noise — it **solves the geometry** of the ionosphere to find the true UTC origin point.
 
-For detailed metrological description, see `METROLOGY.md` and `docs/METROLOGIST_DESCRIPTION.md`.
+For detailed metrological description, see `METROLOGY.md`.
 
 ---
 
@@ -341,8 +343,8 @@ To achieve reliability while maintaining archival integrity, we use a crash-safe
 | **Config** | `/etc/hf-timestd/` |
 | **Logs** | `/var/log/hf-timestd/` |
 | **Data Root** | `/var/lib/timestd/` |
-| **Raw Data** | `/var/lib/timestd/raw_archive/` |
-| **L2 Data** | `/var/lib/timestd/phase2/{CHANNEL}/timing_measurements/` |
+| **Raw Data** | `/var/lib/timestd/raw_buffer/` |
+| **L2 Data** | `/var/lib/timestd/phase2/{CHANNEL}/metrology/` |
 | **L3 Data** | `/var/lib/timestd/phase2/fusion/` |
 | **IONEX** | `/var/lib/timestd/ionex/` |
 
@@ -454,31 +456,19 @@ CHU broadcasts key corrections needed for scientific timing:
 
 ---
 
-## File Paths: Python/JavaScript Sync
+## Path Management
 
-**Problem**: Dual-language system needs identical paths.
-
-**Solution**: Centralized APIs
-
-**Python** (`src/grape_recorder/paths.py`):
+All file paths are derived from the data root (`/var/lib/timestd/` in production, `/tmp/timestd-test/` in test mode) using consistent conventions:
 
 ```python
-class GRAPEPaths:
-    def get_quality_csv_path(self, channel):
-        return self.analytics_dir / channel / "quality" / f"{channel}_quality.csv"
+# Path construction follows a simple pattern:
+data_root / "raw_buffer" / channel / date_str / f"{minute}.bin.zst"
+data_root / "phase2" / channel / "metrology" / f"{date}_metrology_measurements.h5"
+data_root / "phase2" / "fusion" / f"fusion_timing_{date}.h5"
+data_root / "products" / channel / "spectrograms" / f"{date}_spectrogram.png"
 ```
 
-**JavaScript** (`web-ui/grape-paths.js`):
-
-```javascript
-class GRAPEPaths {
-    getQualityCSVPath(channel) {
-        return path.join(this.analyticsDir, channel, 'quality', `${channel}_quality.csv`);
-    }
-}
-```
-
-**Validation**: `./scripts/validate-paths-sync.sh`
+The web API (FastAPI/Python) reads the same HDF5 files directly — no path synchronization needed since both the core library and web API are Python.
 
 ---
 
@@ -495,11 +485,10 @@ class GRAPEPaths {
 
 ```bash
 # Production environment file
-GRAPE_MODE=production
-GRAPE_DATA_ROOT=/var/lib/timestd
-GRAPE_LOG_DIR=/var/log/grape-recorder
-GRAPE_CONFIG=/etc/hf-timestd/timestd-config.toml
-GRAPE_VENV=/opt/grape-recorder/venv
+TIMESTD_MODE=production
+TIMESTD_DATA_ROOT=/var/lib/timestd
+TIMESTD_LOG_DIR=/var/log/hf-timestd
+TIMESTD_CONFIG=/etc/hf-timestd/timestd-config.toml
 ```
 
 ### Config File
@@ -543,31 +532,30 @@ python -m hf_timestd --config config/timestd-config.toml
 
 # Production mode (24/7 operation)
 sudo ./scripts/install.sh --mode production
-sudo ./scripts/start-services.sh
-```
-
-### Manual Startup (Development)
-
-```bash
-cd ~/grape-recorder
-source venv/bin/activate
-python -m grape_recorder.grape.core_recorder --config config/timestd-config.toml
 ```
 
 ### Production (systemd)
 
 ```bash
-# Service control
-sudo systemctl start|stop|status timestd-core-recorder
-sudo systemctl start|stop|status timestd-metrology
-sudo systemctl start|stop|status timestd-web-api
+# Enable and start all core services
+sudo systemctl enable --now timestd-core-recorder
+sudo systemctl enable --now timestd-metrology
+sudo systemctl enable --now timestd-l2-calibration
+sudo systemctl enable --now timestd-fusion
+sudo systemctl enable --now timestd-physics
+sudo systemctl enable --now timestd-web-api
+
+# Optional services
+sudo systemctl enable --now timestd-vtec
+sudo systemctl enable --now timestd-radiod-monitor
+sudo systemctl enable --now grape-daily.timer
 
 # View logs
 journalctl -u timestd-core-recorder -f
 journalctl -u timestd-metrology -f
 
-# Enable daily uploads
-sudo systemctl enable --now grape-upload.timer
+# Deploy updates from git repo
+sudo ./scripts/update-production.sh
 ```
 
 ### Directory Structure
@@ -575,7 +563,7 @@ sudo systemctl enable --now grape-upload.timer
 | Mode | Data | Logs | Config |
 |------|------|------|--------|
 | Test | `/tmp/timestd-test/` | `/tmp/timestd-test/logs/` | `config/` |
-| Production | `/var/lib/timestd/` | `/var/log/grape-recorder/` | `/etc/hf-timestd/` |
+| Production | `/var/lib/timestd/` | `/var/log/hf-timestd/` | `/etc/hf-timestd/` |
 
 ---
 
@@ -584,116 +572,116 @@ sudo systemctl enable --now grape-upload.timer
 ```
 ka9q-radio (radiod)
     ↓ RTP multicast (mDNS discovery via ka9q-python)
-PHASE 1: Core Recorder (core_recorder.py)
-    ↓ 24 kHz DRF archive
-    ↓ {data_root}/raw_archive/{channel}/
-    ↓ {data_root}/raw_buffer/{channel}/ (binary minute buffers)
-PHASE 2: Analytics Service (per channel)
-    ├→ D_clock: phase2/{channel}/clock_offset/
-    ├→ Discrimination: phase2/{channel}/discrimination/
-    ├→ BCD correlation: phase2/{channel}/bcd_correlation/
-    ├→ Carrier analysis: phase2/{channel}/carrier_analysis/
+PHASE 1: Core Recorder (binary_archive_writer.py)
+    ↓ 24 kHz binary IQ (.bin.zst) + JSON sidecars
+    ↓ {data_root}/raw_buffer/{channel}/{YYYYMMDD}/
+PHASE 2: Metrology Service (per channel)
+    ├→ Metrology: phase2/{channel}/metrology/ (HDF5 L1/L2)
+    ├→ Tick timing: phase2/{channel}/tick_timing/ (HDF5)
+    ├→ Detection attempts: phase2/{channel}/detection_attempts/ (HDF5)
     └→ State: phase2/{channel}/state/
-PHASE 3: Derived Products
-    ├→ Decimated 10 Hz: products/{channel}/decimated/
-    ├→ Spectrograms: products/{channel}/spectrograms/
-    └→ SFTP upload to PSWS
+PHASE 3: Fusion + Science
+    ├→ Fusion: phase2/fusion/ (HDF5 L3, Chrony SHM)
+    ├→ TEC: phase2/science/tec/ (HDF5)
+    └→ GRAPE: products/ (DRF packaging, spectrograms, PSWS upload)
 ```
 
 ---
 
 ## Key Modules
 
-### Core Infrastructure (`src/grape_recorder/core/`)
+The current package is `hf_timestd` under `src/hf_timestd/`.
 
-- `recording_session.py` - Generic RTP→segments session manager
-- `rtp_receiver.py` - Multi-SSRC RTP demultiplexer
-- `packet_resequencer.py` - RTP packet ordering & gap detection
+### Phase 1: Recording (`src/hf_timestd/core/`)
 
-### Stream API (`src/grape_recorder/stream/`)
+| Module | Class/Function | Purpose |
+|--------|---------------|--------|
+| `core_recorder.py` | `CoreRecorder` | Top-level orchestration: channel discovery, per-channel recording via ka9q-python `RadiodStream` |
+| `binary_archive_writer.py` | `BinaryArchiveWriter` | Writes `.bin.zst` + `.json` sidecars per minute. Gap filling, RTP timestamp preservation |
+| `audio_stream.py` | `AudioStream` | Per-channel RTP reception wrapper around ka9q-python |
 
-- `stream_api.py` - `subscribe_stream()` and convenience functions
-- `stream_manager.py` - SSRC allocation, lifecycle, stream sharing
-- `stream_spec.py` - Content-based stream identity
-- `stream_handle.py` - Opaque handle returned to applications
+### Phase 2: Metrology (`src/hf_timestd/core/`)
 
-### GRAPE Application (`src/grape_recorder/grape/`)
+| Module | Class/Function | Purpose |
+|--------|---------------|--------|
+| `metrology_service.py` | `MetrologyService` | Polls raw_buffer for new files, dispatches to MetrologyEngine, writes HDF5 products |
+| `metrology_engine.py` | `MetrologyEngine` | Per-minute processing: tone detection, D_clock extraction, tick edge ensemble, cross-freq discrimination |
+| `tone_detector.py` | `ToneDetector` | 1000/1200 Hz matched filter detection with Cramér-Rao uncertainty, multipath detection, Doppler correction |
+| `tick_matched_filter.py` | `TickMatchedFilter` | Per-second tick detection + three-tier phase extraction (audio, carrier, DC carrier) |
+| `tick_edge_detector.py` | `TickEdgeDetector` | SNR-weighted robust median ensemble of up to 57 ticks/minute (inspired by ntpd refclock_wwv.c) |
+| `timing_bootstrap.py` | `TimingBootstrap` | RTP-to-UTC offset establishment via metadata + NTP confirmation |
+| `arrival_pattern_matrix.py` | `ArrivalPatternMatrix` | Physics-based expected arrival predictions using IRI-2020/HFPropagationModel |
+| `chu_fsk_decoder.py` | `CHUFSKDecoder` | Bell 103 AFSK demodulation for CHU time code (seconds 31-39) |
 
-**Core Recording:**
+### Phase 2: Propagation Modeling (`src/hf_timestd/core/`)
 
-- `grape_recorder.py` - Two-phase recorder (startup → recording)
-- `grape_npz_writer.py` - SegmentWriter for NPZ output
-- `core_recorder.py` - Top-level GRAPE orchestration
-- `analytics_service.py` - NPZ watcher, 12-method processor
+| Module | Class/Function | Purpose |
+|--------|---------------|--------|
+| `propagation_model.py` | `HFPropagationModel` | Multi-mode delay prediction (1F/2F/3F/1E) with numerical Ne(h) integration, adaptive uncertainty |
+| `iono_data_service.py` | `IonoDataService` | Background thread: WAM-IPE/GIRO data fetching, caching, great-circle TEC sampling |
 
-**Timing (Advanced):**
+### Phase 3: Fusion (`src/hf_timestd/core/`)
 
-- `time_snap_reference.py` - Immutable timing anchor with PPM correction
-- `ppm_estimator.py` - ADC clock drift measurement, exponential smoothing
-- `tone_detector.py` - 1000/1200 Hz timing tones with sub-sample peak detection
-- `startup_tone_detector.py` - Initial time_snap establishment
-- `global_station_voter.py` - Cross-channel anchor tracking
-- `station_lock_coordinator.py` - Three-phase coherent detection
-- `propagation_mode_solver.py` - N-hop geometry, mode identification
-- `primary_time_standard.py` - UTC(NIST) back-calculation
+| Module | Class/Function | Purpose |
+|--------|---------------|--------|
+| `multi_broadcast_fusion.py` | `MultiBroadcastFusion` | Dual Kalman filtering (L1 geometric + L2 physics), WLS fusion, Chrony SHM feed (TSL1/TSL2) |
+| `physics_fusion_service.py` | `PhysicsFusionService` | TEC estimation from multi-frequency measurements, T_iono archival |
+| `l2_calibration_service.py` | `L2CalibrationService` | Applies geometric + TEC corrections to produce L2 calibrated timing |
+| `timing_validation_service.py` | `TimingValidationService` | GPS ground-truth validation (RTP mode only) |
 
-**Discrimination:**
+### I/O Layer (`src/hf_timestd/io/`)
 
-- `wwvh_discrimination.py` - 12 voting methods, cross-validation
-- `discrimination_csv_writers.py` - Per-method CSV output
-- `bcd_discriminator.py` - 100 Hz time code dual-peak detection
-- `tick_analyzer.py` - 5ms tick coherent/incoherent analysis
-- `test_signal_analyzer.py` - Minutes :08/:44 channel sounding
+| Module | Class/Function | Purpose |
+|--------|---------------|--------|
+| `hdf5_writer.py` | `HDF5Writer` | Schema-validated crash-safe HDF5 writes with `locking=False` |
+| `hdf5_reader.py` | `HDF5Reader` | Time-range queries on HDF5 datasets |
+| `data_product_registry.py` | `DataProductRegistry` | Schema registry for L1/L2/L3 HDF5 products |
 
-**Processing:**
+### GRAPE Pipeline (`src/hf_timestd/grape/`)
 
-- `decimation.py` - 24 kHz → 10 Hz (multi-stage CIC+FIR)
-- `doppler_estimator.py` - Per-tick frequency shift measurement
+| Module | Purpose |
+|--------|--------|
+| `grape_daily.py` | Daily processing: 24kHz→10Hz decimation, spectrogram generation, DRF packaging |
+| `drf_writer.py` | Digital RF HDF5 packaging for PSWS upload |
+| `psws_uploader.py` | SFTP upload to HamSCI PSWS network |
 
-### WSPR Application (`src/grape_recorder/wspr/`)
+### Web API (`web-api/`)
 
-- `wspr_recorder.py` - Simple recorder for WSPR
-- `wspr_wav_writer.py` - SegmentWriter for 16-bit WAV output
-
-### DRF & Upload
-
-- `drf_batch_writer.py` - 10 Hz NPZ → Digital RF HDF5
-- Wsprdaemon-compatible multi-subchannel format
-
-### Infrastructure
-
-- `paths.py` - Centralized path management (GRAPEPaths API)
-- `channel_manager.py` - Channel configuration
-
-### Web UI (`web-ui/`)
-
-- `monitoring-server-v3.js` - Express API server
-- `grape-paths.js` - JavaScript path management (synced with Python)
+| Component | Purpose |
+|-----------|--------|
+| `main.py` | FastAPI application with uvicorn, systemd watchdog integration |
+| `routers/` | REST API endpoints: dashboard, metrology, phase, propagation, logs, correlations |
+| `services/` | Data access layer: reads HDF5 products, computes derived views |
+| `static/` | HTML dashboards: metrology, phase/Doppler, ionosphere, Allan deviation, logs |
 
 ---
 
 ## Dependencies
 
-**Python 3.10+** (installed via `install.sh` or `pip install -e .`):
+**Python 3.11+** (installed via `install.sh` or `pip install -e .`):
 
+**Core:**
 - `ka9q-python` - Interface to ka9q-radio (from github.com/mijahauan/ka9q-python)
 - `numpy>=1.24.0` - Array operations
-- `scipy>=1.10.0` - Signal processing, decimation
-- `digital_rf>=2.6.0` - Digital RF HDF5 format
-- `zeroconf` - mDNS discovery for radiod
+- `scipy>=1.10.0` - Signal processing, matched filtering
+- `h5py>=3.8.0` - HDF5 read/write (all inter-service data exchange)
 - `toml` - Configuration parsing
-- `soundfile` - Audio file I/O (compatibility)
+- `zstandard` - Zstd compression for binary IQ archives
 
-**Node.js 18+** (for web-ui):
+**Web API:**
+- `fastapi` - REST API framework
+- `uvicorn` - ASGI server with systemd watchdog support
+- `jinja2` - HTML template rendering
 
-- `express` - API server
-- `ws` - WebSocket support
-- See `web-ui/package.json` for full list
+**Optional (GRAPE/ionospheric):**
+- `digital_rf` - Digital RF HDF5 packaging (GRAPE upload only)
+- `netCDF4` / `boto3` - WAM-IPE data fetching from NOAA S3
+- `xarray` - WAM-IPE grid parsing
 
-**System**:
-
-- `avahi-utils` - mDNS resolution
-- `libhdf5-dev` - Required for digital_rf
+**System:**
+- `avahi-utils` - mDNS resolution for radiod discovery
+- `libhdf5-dev` - HDF5 C library (required by h5py)
+- `systemd-python` - Watchdog heartbeat integration
 
 **Installation** (automated):
 
@@ -709,10 +697,10 @@ sudo ./scripts/install.sh --mode production --user $USER  # Production
 ### Verify Installation
 
 ```bash
-source venv/bin/activate  # or /opt/grape-recorder/venv/bin/activate
-python3 -c "import digital_rf; print('Digital RF OK')"
+source venv/bin/activate  # or /opt/hf-timestd/venv/bin/activate
 python3 -c "from ka9q import discover_channels; print('ka9q-python OK')"
-python3 -c "from grape_recorder.grape.time_snap_reference import TimeSnapReference; print('TimeSnapReference OK')"
+python3 -c "import h5py; print('h5py OK')"
+python3 -c "from hf_timestd.core.metrology_engine import MetrologyEngine; print('MetrologyEngine OK')"
 ```
 
 ### Test Recorder
@@ -726,49 +714,65 @@ python -m hf_timestd --config config/timestd-config.toml
 ### Verify Output Files
 
 ```bash
-ls /tmp/timestd-test/archives/WWV_10_MHz/*.npz
-# Should show timestamped NPZ files
+# Raw IQ archives (Phase 1)
+ls /var/lib/timestd/raw_buffer/SHARED_10000/$(date +%Y%m%d)/
+# Should show .bin.zst + .json files per minute
+
+# HDF5 metrology products (Phase 2)
+ls /var/lib/timestd/phase2/SHARED_10000/metrology/
+# Should show dated HDF5 files
 ```
 
-### Verify Timing
+### Verify Pipeline Health
 
 ```bash
-python3 -c "
-import numpy as np
-from pathlib import Path
-f = sorted(Path('/tmp/timestd-test/archives/WWV_10_MHz/').glob('*.npz'))[-1]
-d = np.load(f, allow_pickle=True)
-print(f'Time_snap source: {d[\"time_snap_source\"]}')
-print(f'PPM: {d.get(\"ppm\", \"N/A\")}')
-print(f'Clock ratio: {d.get(\"clock_ratio\", \"N/A\")}')
-"
+# Comprehensive pipeline check
+sudo ./scripts/verify_pipeline.sh
+
+# Freshness monitoring
+sudo ./scripts/check-freshness-alert.sh
 ```
 
 ---
 
 ## Debugging
 
-### Check NPZ Contents
+### Check HDF5 Contents
 
 ```bash
 python3 -c "
-import numpy as np
+import h5py
 from pathlib import Path
-f = sorted(Path('/tmp/timestd-test/archives/WWV_10_MHz/').glob('*.npz'))[-1]
-d = np.load(f, allow_pickle=True)
-print(f'File: {f.name}')
-print(f'Samples: {len(d[\"iq\"])}')
-print(f'Gaps: {d[\"gaps_count\"]}')
-print(f'Completeness: {100*(1 - d[\"gaps_filled\"]/len(d[\"iq\"])):.1f}%')
-print(f'Time_snap source: {d[\"time_snap_source\"]}')
-print(f'1000 Hz power: {d[\"tone_power_1000_hz_db\"]:.1f} dB')
+files = sorted(Path('/var/lib/timestd/phase2/SHARED_10000/metrology/').glob('*.h5'))
+if files:
+    with h5py.File(files[-1], 'r', locking=False) as f:
+        for key in f.keys():
+            print(f'{key}: {f[key].shape} {f[key].dtype}')
+        print(f'Rows: {f[list(f.keys())[0]].shape[0]}')
+else:
+    print('No HDF5 files found')
 "
 ```
 
-### Check Web UI API
+### Check Raw Buffer Metadata
 
 ```bash
-curl http://localhost:3000/api/v1/summary | jq
+# View latest JSON sidecar
+cat $(ls -t /var/lib/timestd/raw_buffer/SHARED_10000/$(date +%Y%m%d)/*.json | head -1) | python3 -m json.tool
+```
+
+### Check Web API
+
+```bash
+curl http://localhost:8000/api/health | python3 -m json.tool
+curl http://localhost:8000/api/dashboard/summary | python3 -m json.tool
+```
+
+### Check Service Logs
+
+```bash
+journalctl -u timestd-fusion --since '5 min ago' --no-pager
+journalctl -u timestd-metrology --since '5 min ago' --no-pager
 ```
 
 ---
@@ -816,14 +820,26 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ### Issue: Timing quality degraded
 
-**Symptom**: time_snap_source shows "ntp" instead of "wwv_startup"
+**Symptom**: Bootstrap stuck in ACQUIRING or CORRELATING state
 
 **Causes**:
 
 1. Poor propagation (no WWV/CHU signal)
-2. Startup tone detection failed
+2. radiod not providing GPS+PPS timestamps
+3. NTP not synchronized on the host
 
-**Fix**: Normal during poor propagation. System falls back to NTP timing (±10ms vs ±1ms).
+**Fix**: Check `journalctl -u timestd-metrology` for bootstrap state transitions. Normal during poor propagation — system will lock when signals return.
+
+### Issue: HDF5 file lock errors
+
+**Symptom**: `OSError: [Errno 11] Unable to synchronously open file (unable to lock file)`
+
+**Causes**:
+
+1. `HDF5_USE_FILE_LOCKING=FALSE` not set before h5py import
+2. Missing `locking=False` on `h5py.File()` calls
+
+**Fix**: Ensure `os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"` is set BEFORE `import h5py`. All `h5py.File()` calls must use `locking=False`.
 
 ---
 
@@ -833,41 +849,47 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 - CPU: <5% per channel
 - Memory: ~100 MB total
-- Disk write: ~2 MB/min per channel (compressed NPZ)
+- Disk write: ~2-3 MB/min per channel (zstd-compressed binary IQ)
 - Latency: <100 ms (RTP → disk)
 
-### Analytics
+### Metrology
 
-- CPU: Variable (batch processing)
-- Processing: Can lag behind real-time
-- 6 discrimination methods per minute per channel
+- CPU: Variable (batch processing, per-minute)
+- Processing: Can lag behind real-time; processes backlog on restart
+- Per-minute: tone detection (up to 57 ticks), D_clock extraction, tick edge ensemble
+
+### Fusion
+
+- Cycle interval: 8 seconds (configurable via `--interval`)
+- Reads L2 HDF5 from all 9 channels per cycle
+- Dual Kalman update + WLS fusion + Chrony SHM write
 
 ---
 
 ## Quality Metrics
 
-### Timing Quality Levels
+### Bootstrap State Progression
 
-| Level | Accuracy | Source | Description |
-|-------|----------|--------|-------------|
-| **TONE_LOCKED** | ±25 μs | WWV/CHU tone + PPM | Sub-sample peak detection with ADC drift correction |
-| **TONE_LOCKED** | ±1 ms | WWV/CHU tone | Standard tone detection without PPM |
-| **NTP_SYNCED** | ±10 ms | System NTP | NTP fallback when no tone detected |
-| **INTERPOLATED** | ±1 ms/hr | Aged time_snap | Drifts ~1 ms/hour without refresh |
-| **WALL_CLOCK** | ±seconds | System clock | Unsynchronized, mark for reprocessing |
+| State | Description | Typical Time |
+|-------|-------------|-------------|
+| **ACQUIRING** | Searching for tone clusters | 0-1 min |
+| **CORRELATING** | Validating cluster consistency at 60s intervals | 1-2 min |
+| **TRACKING** | Clusters validated, awaiting NTP confirmation | 2 min |
+| **LOCKED** | Time confirmed, offset stable, continuous validation | 2+ min |
 
-### Cross-Channel Timing Quality
+### Fusion Quality Grades
 
-| Metric | Target | Description |
-|--------|--------|-------------|
-| **Station Lock** | >90% channels | High-confidence tone detection across array |
-| **Anchor Consensus** | <1 ms spread | All channels agree on station arrival time |
-| **PPM Consistency** | <10 ppm | ADC drift should be stable across session |
+| Grade | Fused Uncertainty | Description |
+|-------|-------------------|-------------|
+| **A** | < 0.5 ms | Excellent — requires L5/L6 hardware + long averaging |
+| **B** | < 1.0 ms | Good — achievable with GPSDO + multi-station fusion |
+| **C** | < 2.0 ms | Typical — standard operation |
+| **D** | ≥ 2.0 ms | Degraded — limited stations or high ionospheric activity |
 
 ### Data Completeness
 
 - **Target:** >99% samples received
-- **Gaps:** Zero-filled, logged in NPZ metadata
+- **Gaps:** Zero-filled, logged in JSON sidecar metadata
 - **Packet loss:** <1% healthy
 - **Completeness colors:** 🟢 ≥99% | 🟡 95-99% | 🔴 <95%
 
@@ -878,10 +900,10 @@ sudo sysctl -w net.core.rmem_max=26214400
 ### Key Documents
 
 - `ARCHITECTURE.md` - System design decisions
-- `DIRECTORY_STRUCTURE.md` - Path conventions
-- `CANONICAL_CONTRACTS.md` - API standards
+- `METROLOGY.md` - RTP-to-UTC calibration and timing bootstrap methodology
 - `INSTALLATION.md` - Setup guide
-- `docs/PRODUCTION.md` - Production deployment with systemd
+- `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md` - Production deployment and verification gates
+- `docs/GPS_TEC_OPTIONAL.md` - Optional GNSS TEC validation
 
 ### External
 
@@ -891,8 +913,8 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ---
 
-**Version**: 6.7.0  
-**Last Updated**: February 12, 2026  
+**Version**: 6.7.1+  
+**Last Updated**: February 14, 2026  
 **Purpose**: Technical reference for HF Time Standard developers
 
 **v6.7.1 Release (February 12, 2026) - Propagation Model Full Integration:**
@@ -945,7 +967,7 @@ sudo sysctl -w net.core.rmem_max=26214400
 **v2.2.0 Release (Dec 2, 2025):**
 
 - **Unified Install Script** - `install.sh` for test/production modes
-- **FHS-Compliant Paths** - `/var/lib/timestd/`, `/var/log/grape-recorder/`
+- **FHS-Compliant Paths** - `/var/lib/timestd/`, `/var/log/hf-timestd/`
 - **systemd Services** - Production-ready 24/7 operation
 - **Cross-Channel Coherent Timing** - Global Station Lock, ensemble anchor selection
 - **Primary Time Standard** - UTC(NIST) back-calculation from arrival time
@@ -1007,7 +1029,7 @@ To model a GPSDO-disciplined clock, we use extreme parameters that effectively "
 |-----------|-------|-------------|
 | **Initial P (Offset)** | 5.0 ms | Moderate initial trust (was 100ms) |
 | **Initial P (Drift)** | 1e-7 ms/min | Very high initial trust in factory calibration |
-| **Q (Offset)** | 1e-10 ms | "Steel Ruler" - effectively zero process noise |
+| **Q (Offset)** | 0.01 ms | Allows filter to track real measurements (increased from 1e-10 to fix dead Kalman filter, 2026-02-06) |
 | **Q (Drift)** | 1e-12 ms/min | The clock does not wander |
 | **R (Measurement)** | 30.0 ms | High measurement noise to reject ionospheric turbulence |
 

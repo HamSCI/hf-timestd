@@ -1064,7 +1064,7 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 - **METROLOGY.md** — Time transfer methodology and uncertainty budgets
 - **TECHNICAL_REFERENCE.md** — System architecture and configuration
 - **SCIENTIFIC_CAPABILITIES.md** — Detailed feature validation status
-- **CHANNEL_CHARACTERIZATION.md** — HF channel measurement details
+- **CARRIER_DOPPLER_INTERPRETATION.md** — HF channel and Doppler measurement details
 
 ---
 
