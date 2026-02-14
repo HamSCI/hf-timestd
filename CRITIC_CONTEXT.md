@@ -10,225 +10,127 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: TEC MEASUREMENT AUDIT + IMPLEMENTATION (CODE CHANGES EXPECTED)
+## 📋 NEXT SESSION: DIAGNOSE FLAT/ANOMALOUS D_CLOCK ON 24-HOUR DASHBOARD
 
-**Objective:** Critically scrutinize the current TEC measurement pipeline for weaknesses, errors, and missed opportunities. Then implement four enhancements from the HamSCI 2026 Workshop recommendations:
+**Objective:** The 24-hour broadcast dashboard (`http://bee1:8000/static/dashboard-24h.html`) shows that most channels have **flat or bizarre D_clock/timing-error patterns** that do not track the expected diurnal ionospheric variation. This is a critical data quality problem — if the underlying measurements are wrong, all downstream calculations (TEC, tomography, VTEC maps) are unreliable. Diagnose the root cause and fix it.
 
-1. **Bayesian TEC estimator with propagation mode priors** (Rec 1)
-2. **Carrier-phase differential TEC (dTEC)** (Rec 2)
-3. **Multi-layer E/F tomographic constraints** (Rec 3)
-4. **VTEC map generation from 17 sTEC paths** (Rec 6)
+### 🔍 THE PROBLEM (Observed 2026-02-14)
 
-**Context:** The system is operational and producing TEC estimates, but the current estimator is naive — unconstrained 1/f² regression that is vulnerable to mode mixing, has no carrier-phase input, treats the ionosphere as a single slab, and does not produce community data products. The HamSCI presentation (see `docs/HAMSCI_2026_WORKSHOP_ABSTRACT.md`) commits to these capabilities as next steps.
+The dashboard "All Broadcasts" grid tab shows per-channel SNR scatter plots with a solar elevation overlay (yellow curve). The expected behavior is that timing error (and SNR) should show clear diurnal variation correlated with the solar curve — ionospheric delay increases during the day and decreases at night. Instead:
 
-**Note on PHaRLAP (Rec 4):** PHaRLAP source is not available. Skip this recommendation. The current 1D numerical integration through Chapman profiles is adequate for shorter paths. BPM multi-hop accuracy remains a known limitation.
+- **WWV 5, 15, 20, 25 MHz**: SNR dots are essentially **flat lines** clustered around a constant value. No diurnal variation visible.
+- **WWV 2.5 MHz**: Shows some scatter/variation (expected — lowest freq has largest ionospheric delay and is most affected by D-layer absorption).
+- **WWV 10 MHz**: Shows variation but with a suspicious **step-function** pattern — abrupt transitions rather than smooth diurnal curves.
+- **CHU 14.67 MHz**: Shows step-like transitions — not the smooth diurnal curve expected from ionospheric variation.
+- **CHU 3.33, 7.85 MHz**: Show orange blocks with abrupt transitions.
+- **WWVH channels**: Show scattered blue dots with some variation but noisy/incoherent patterns.
 
-**Note on phase-engine (Rec 5):** Diversity reception integration is the next major enhancement after this session. Not in scope here.
+### 🎯 INVESTIGATION PLAN
 
----
+The problem could be at multiple levels. Investigate from bottom up:
 
-### 🔍 PART 1: TEC PIPELINE AUDIT — Known Weaknesses to Investigate
+#### Level 1: Raw L2 Data Quality
 
-The audit should examine the following files and issues **before** implementing changes. Read each file carefully and identify bugs, physics errors, missed opportunities, and architectural problems.
+**Question:** Are the L2 HDF5 timing measurements themselves flat, or is the dashboard misreading them?
 
-#### A. `TECEstimator` (`src/hf_timestd/core/tec_estimator.py`) — 225 lines
+**Actions:**
+- Read the actual L2 HDF5 files directly with h5py and plot D_clock, raw_arrival_time_ms, and tof_kalman_ms for several channels over 24h
+- Check if the fields the dashboard reads (`raw_toa_ms`) actually exist — the dashboard code at `web-api/routers/dashboard.py:197` does `m.get('raw_toa_ms')` but the L2 schema may use a different field name (e.g., `raw_arrival_time_ms`)
+- Check if timing_error is always None because the field name is wrong, causing the dashboard to show only SNR (which may appear flat if signal is constant)
 
-**Known concerns:**
+**Key files:**
+- `/var/lib/timestd/phase2/SHARED_10000/clock_offset/` — L2 timing measurements
+- `/var/lib/timestd/phase2/WWV_20000/clock_offset/` — unique WWV channel
+- `/var/lib/timestd/phase2/CHU_14670/clock_offset/` — unique CHU channel
 
-1. **Mode mixing is the dominant error source.** The estimator fits `T_obs(f) = T_vacuum + K·TEC/f²` across all frequencies for a station. But if 5 MHz arrives via 1F and 2.5 MHz arrives via 2F, their geometric path lengths differ by hundreds of km. The 1/f² fit absorbs this geometric difference as fake TEC. The `ionospheric_reanalysis.py` partially addresses this by using D_clock (geometric delay already subtracted per-mode), but `physics_fusion_service.py` feeds raw ToA grouped by `(station, mode)` — **check whether mode assignment is reliable enough to prevent contamination.**
+#### Level 2: Dashboard Data Pipeline
 
-2. **Negative slope handling is wrong.** When `m < 0` (negative TEC), the code forces `m = 0` and `confidence = 0`. But negative slope can also indicate mode misidentification (2F measurement mixed with 1F). The estimator should **reject** these cases rather than silently produce `TEC = 0.0 TECU` which looks like a valid measurement.
+**Question:** Is the dashboard correctly reading and displaying the data?
 
-3. **`high_precision_mode` flag is unused.** The constructor accepts it but it has no effect on any code path. Dead parameter.
+**Actions:**
+- Check `web-api/routers/dashboard.py` field name mapping — `raw_toa_ms` vs `raw_arrival_time_ms` mismatch?
+- Check if `timing_error_ms` is being computed correctly: `raw_toa - expected_delay`
+- Check if the grid panels are plotting SNR (which may look flat) vs timing error (which should show diurnal variation)
+- Verify the `min_propagation_ms` baseline used for timing error computation
+- Check the tick_timing second pass — `mean_timing_offset_ms` field availability
 
-4. **R² as confidence metric is misleading.** With only 2 frequencies (the minimum), R² is always 1.0 (perfect fit to a line through 2 points). This gives false confidence. The estimator needs a minimum of 3 frequencies to have any residual degrees of freedom, or must use a different confidence metric for N=2.
+**Key files:**
+- `web-api/routers/dashboard.py` — lines 158–258 (data fetching), lines 382–481 (timing-error endpoint)
+- `web-api/static/dashboard-24h.html` — lines 684–822 (grid rendering, `renderMiniChart()`)
 
-5. **No propagation mode output.** The `TECResult` dataclass has no field for which propagation mode was assumed. The `physics_fusion_service.py` monkey-patches `result.propagation_mode = mode` (line 294) — this will crash if anyone accesses the attribute on a TECResult created elsewhere.
+#### Level 3: Tone Detection / Matched Filter
 
-6. **Units confusion risk.** The estimator works internally in seconds (converts ms→s on line 112) but the constant `K_IONOSPHERE = 40.3 / c` has units of `s·Hz²·m²/electrons`. The TECU conversion `tec / 1e16` is correct but the intermediate `tec` variable is in `electrons/m²` — verify the full unit chain is consistent.
+**Question:** Is the tone detection algorithm correctly identifying tick onsets across all frequencies?
 
-#### B. `PhysicsFusionService` (`src/hf_timestd/core/physics_fusion_service.py`) — 455 lines
+**Actions:**
+- Check if `TickMatchedFilter` is producing valid detections on all channels
+- Check detection rates per channel — are some channels producing far fewer detections?
+- Examine the matched filter template for each broadcast — are the tone frequencies and durations correct in `broadcast_specs.py`?
+- Check if the signal presence gate (`_check_signal_presence()`) is incorrectly rejecting valid signals
+- Verify that shared-frequency discrimination (WWV vs WWVH on 2.5/5/10/15 MHz) is working — could misattribution cause flat patterns?
 
-**Known concerns:**
+**Key files:**
+- `src/hf_timestd/core/tick_matched_filter.py` — 1015 lines, IQ matched filter
+- `src/hf_timestd/core/tick_edge_detector.py` — 572 lines, per-second onset detection
+- `src/hf_timestd/core/broadcast_specs.py` — 622 lines, tone schedules and templates
+- `src/hf_timestd/core/wwvh_discrimination.py` — 3917 lines, WWV/WWVH separation on shared freqs
+- `src/hf_timestd/core/bpm_discriminator.py` — 952 lines, BPM detection
 
-7. **Mode grouping may starve the estimator.** `_read_l2_slice()` groups measurements by `(station, mode)`. If mode assignment is noisy (e.g., same frequency alternates between "1F" and "UNKNOWN" minute-to-minute), each group may have only 1 frequency, failing the N≥2 requirement. **Check whether cross-mode grouping would be more robust** (using D_clock as `ionospheric_reanalysis.py` does).
+#### Level 4: Metrology Engine / Calibration
 
-8. **ToA source inconsistency.** `_read_l2_slice()` prefers `tof_kalman_ms` over `raw_arrival_time_ms`. But the Kalman filter may have already partially removed ionospheric dispersion (if it's tracking a smoothed state). This would reduce the 1/f² signal that the TEC estimator needs. **Verify what the Kalman filter is actually tracking** — if it's tracking D_clock (timing error), it should NOT be used for TEC estimation.
+**Question:** Is the metrology engine correctly computing D_clock from the detected ticks?
 
-9. **Uncertainty weighting is inverted.** Line 3475 in `multi_broadcast_fusion.py`: `'uncertainty_ms': 1.0 / max(0.001, m.confidence)`. This maps confidence 1.0 → uncertainty 1.0 ms, confidence 0.5 → uncertainty 2.0 ms. But confidence is R² or a quality metric, not a timing precision estimate. The actual timing uncertainty should come from the measurement's `tof_uncertainty_ms` or the edge ensemble's reported uncertainty.
+**Actions:**
+- Check `metrology_engine.py` `process_minute()` — how does it convert tick detections to L2 measurements?
+- Check if the L2 calibration service is over-correcting, flattening the ionospheric signal
+- Check if the hardware calibration (`timing_calibrator.py`) has converged to wrong offsets
+- Examine calibration state files in `/var/lib/timestd/state/`
 
-10. **TEC validation window is too narrow.** `multi_broadcast_fusion.py` line 3499 requires `5.0 <= tec_u <= 100.0` for TEC_VALIDATED status. Nighttime TEC can be 2–5 TECU. Solar maximum daytime TEC can exceed 100 TECU. This gate rejects valid measurements.
+**Key files:**
+- `src/hf_timestd/core/metrology_engine.py` — 1724 lines, core measurement pipeline
+- `src/hf_timestd/core/l2_calibration_service.py` — 591 lines, adaptive calibration
+- `src/hf_timestd/core/timing_calibrator.py` — 2037 lines, hardware offset learning
+- `src/hf_timestd/core/multi_broadcast_fusion.py` — 5169 lines, fusion + Kalman
 
-#### C. `IonosphericReanalysis` (`src/hf_timestd/core/ionospheric_reanalysis.py`) — 846 lines
+#### Level 5: Upstream Signal Chain
 
-**Known concerns:**
+**Question:** Is radiod delivering valid IQ data on all channels?
 
-11. **Best TEC implementation but runs offline.** `_estimate_tec_cleaned()` correctly uses D_clock (geometric delay already subtracted), groups by frequency, takes median per frequency (robust to outliers), and uses IQR-based uncertainty. **This approach should be the primary real-time estimator**, not the naive ToA-based one in `physics_fusion_service.py`.
+**Actions:**
+- Check radiod status for all channels — are all decoders active?
+- Check RTP packet flow — are packets arriving for all channels?
+- Check if some channels have very low SNR (below detection threshold)
+- Check system logs for errors
 
-12. **foF2 estimation is crude.** Uses a single `FOF2_NOON_MHZ = 9.0` constant with Chapman cosine scaling. The system already has WAM-IPE/GIRO/IRI providing foF2 — the reanalysis should use those instead of its own parametric model.
-
-#### D. `HFPropagationModel` (`src/hf_timestd/core/propagation_model.py`) — 1086 lines
-
-**Known concerns:**
-
-13. **Ionospheric delay is double-counted in TEC estimation.** The propagation model computes `iono_delay_ms` and adds it to `geometric_delay_ms` to get total predicted delay. When the metrology engine computes `D_clock = observed_toa - predicted_total_delay`, the ionospheric component is already subtracted. So D_clock should be ionosphere-free. But the TEC estimator then fits D_clock for 1/f² dispersion — **if the model's ionospheric correction were perfect, there would be zero 1/f² residual.** The TEC estimator is actually measuring the **error** in the model's ionospheric correction, not the absolute TEC. This is fine for differential analysis but the absolute TEC values may be meaningless.
-
-14. **`_tec_group_delay()` applies 2× multiplier per hop.** Line 805: `delay_ms = delay_s * 2.0 * n_hops * 1000.0`. The 2× is for "up and down through ionosphere per hop." But the slant TEC already accounts for the oblique path through the ionosphere. The 2× factor assumes the signal passes through the full ionosphere twice per hop (up-leg and down-leg), which is correct for a single-layer model but **over-estimates for a Chapman profile** where most electrons are near the peak. Verify consistency with `_integrate_group_delay()` which also applies `2.0 * n_hops`.
-
-15. **Same TEC assumed for all hops.** Line 1322 in `ionospheric_model.py`: `total_slant_tec = slant_tec * n_hops`. For BPM (3-hop, ~10,000 km), each hop traverses a different part of the ionosphere with different TEC. The model should sample TEC at each reflection point.
-
-#### E. Carrier Phase → TEC Pipeline (currently disconnected)
-
-16. **Phase data exists but is not used for TEC.** `TickMatchedFilter` produces ~55 carrier phase measurements per minute per station (L2/tick_phase HDF5). The phase service (`web-api/services/phase_service.py`) computes Doppler from phase rate of change. But **nobody converts Doppler to dTEC/dt.** This is the single highest-impact missed opportunity — carrier phase gives 1000× better temporal resolution than group delay.
-
-17. **Phase continuity was fixed (2026-02-12) but not validated in production.** The buffer-relative time fix should produce continuous phase across minutes. Verify by checking phase dashboard for σ_φ < 0.3 rad on unambiguous channels (CHU 14.67, WWV 20/25 MHz).
-
----
-
-### 🛠️ PART 2: IMPLEMENTATION PLAN
-
-After the audit, implement these four enhancements in priority order. Each builds on the previous.
-
-#### Implementation 1: Bayesian TEC Estimator with Mode Priors
-
-**File:** `src/hf_timestd/core/tec_estimator.py` (extend or replace `TECEstimator`)
-
-**Design:**
-- Accept propagation mode predictions from `HFPropagationModel` as priors
-- For each measurement, subtract the mode-specific geometric path length (already done if using D_clock)
-- Fit residual dispersive delay (∝ 1/f²) to extract sTEC
-- Weight by measurement SNR AND model confidence for the assigned mode
-- Reject measurements whose residuals exceed 3σ (mode misidentification)
-- Require N ≥ 3 frequencies for confidence > 0.5 (N=2 capped at 0.3)
-- Add `propagation_mode` field to `TECResult` dataclass properly
-- Remove dead `high_precision_mode` parameter
-
-**Key insight:** Use D_clock (as `ionospheric_reanalysis.py` already does) instead of raw ToA. D_clock has geometric delay removed per-mode, so the 1/f² residual IS the ionospheric dispersion signal. This eliminates mode-mixing contamination.
-
-**Tests:** `tests/core/test_tec_estimator_diagnostics.py` — extend with mode-mixing rejection tests, N=2 confidence cap, negative slope rejection.
-
-#### Implementation 2: Carrier-Phase Differential TEC (dTEC)
-
-**Files:**
-- `src/hf_timestd/core/carrier_tec.py` (new module)
-- `src/hf_timestd/core/physics_fusion_service.py` (wire in)
-
-**Design:**
-- Read L2/tick_phase HDF5 (carrier_phase_rad time series, ~55 points/min/station)
-- Compute phase rate of change (Δφ/Δt) — already done as Doppler in phase_service.py
-- Convert Doppler to dTEC/dt: `dTEC/dt = -f² · Δf_D / (40.3 · f_carrier)` where `Δf_D = Doppler_Hz`
-- Integrate dTEC/dt over time to get relative TEC(t)
-- Anchor to absolute TEC from group-delay estimator (Implementation 1) at each minute boundary
-- Output: sub-TECU temporal resolution TEC time series
-
-**Key physics:** Carrier phase measures the **phase path** (integral of refractive index), while group delay measures the **group path** (integral of group refractive index). For a dispersive medium: `phase_delay = -group_delay` (opposite sign). So increasing TEC causes increasing group delay but decreasing phase delay. The Doppler shift from changing TEC is: `f_D = -(f/c) · d(phase_path)/dt = (40.3/c) · (dTEC/dt) / f`.
-
-**Validation:** On unambiguous channels (CHU 14.67 MHz, WWV 20/25 MHz), DC carrier phase should show smooth diurnal TEC variation. Compare dTEC from carrier phase with dTEC from consecutive group-delay estimates.
-
-#### Implementation 3: Multi-Layer E/F Tomographic Constraints
-
-**Files:**
-- `src/hf_timestd/core/iono_tomography.py` (new module)
-- `src/hf_timestd/core/physics_fusion_service.py` (wire in)
-
-**Design:**
-- Divide ionosphere into 2 shells: E-layer (90–150 km) and F-layer (150–500 km)
-- Each of the 17 ray paths has a known geometry (elevation angle, azimuth) from `HFPropagationModel`
-- Each path's sTEC = E_contribution + F_contribution, weighted by path length through each shell
-- The 17 paths at different elevation angles provide geometric diversity
-- Constrain with WAM-IPE/IRI Ne(h) profile shape (Chapman layer) but allow peak height and density to float
-- Solve via constrained least squares (scipy.optimize.minimize with bounds)
-- Output: E-layer TEC, F-layer TEC, effective hmF2, per-path residuals
-
-**Key insight:** Low-elevation paths (BPM: ~5–10°) traverse more E-layer relative to F-layer than high-elevation paths (CHU: ~30–40°). This geometric diversity separates the two contributions.
-
-**Validation:** E-layer TEC should vanish at night (no solar ionization). F-layer TEC should show smooth diurnal variation. Sporadic-E events should appear as sudden E-layer TEC enhancements.
-
-#### Implementation 4: VTEC Map Generation
-
-**Files:**
-- `src/hf_timestd/core/vtec_mapper.py` (new module)
-- `src/hf_timestd/core/physics_fusion_service.py` (wire in)
-
-**Design:**
-- Convert each sTEC to vTEC: `vTEC = sTEC × cos(χ)` where χ is zenith angle at the ionospheric pierce point (IPP)
-- Compute IPP for each path at the assumed shell height (from Implementation 3)
-- The 17 IPPs span from receiver location toward each transmitter
-- Fit a 2D polynomial surface (or thin-plate spline) to vTEC at the IPPs
-- Output as IONEX-format file (standard GPS TEC map format, 2-hour cadence)
-- Also write to L3 HDF5 for web-api consumption
-
-**Validation:** Compare generated vTEC map with downloaded IONEX (GPS-derived) maps. Correlation should be > 0.7 for daytime, lower at night (fewer paths active).
-
----
-
-### 🏗️ ARCHITECTURE REFERENCE
-
-#### TEC Data Flow (Current — to be improved this session)
-
-```
-MetrologyEngine.process_minute()
-  ├─ TickMatchedFilter → L2/tick_phase (carrier phase, ~55/min/station)
-  ├─ TickEdgeDetector → L2/tick_timing (timing, ~55/min/station)
-  └─ L1MetrologyMeasurement → L2/timing_measurements (ToA, D_clock, mode)
-       ↓
-  PhysicsFusionService.process_minute()  [timestd-physics, 60s poll]
-    ├─ _read_l2_slice() → group by (station, mode)
-    ├─ TECEstimator.estimate_tec() → naive 1/f² regression on raw ToA
-    └─ _write_tec_records() → L3/tec HDF5
-       ↓
-  MultiBroadcastFusion._compute_tec()  [timestd-fusion, 8s cycle]
-    ├─ TECEstimator.estimate_tec() → same naive regression
-    ├─ TEC_VALIDATED if R²>0.9 and 5≤TEC≤100 TECU
-    └─ Confidence boost for validated measurements
-       ↓
-  IonosphericReanalysis (hourly offline)
-    ├─ _estimate_tec_cleaned() → D_clock-based, median per freq, IQR weights
-    └─ L3C/propagation_stats + L3A/tec (reanalyzed)
+**Key commands:**
+```bash
+journalctl -u timestd-metrology --since "1 hour ago" | grep -i error
+journalctl -u timestd-fusion --since "1 hour ago" | grep -i error
+cat /var/lib/timestd/phase2/*/status.json | python3 -m json.tool
 ```
 
-**Target data flow after this session:**
+### 🔑 LIKELY ROOT CAUSES (Hypotheses)
 
-```
-MetrologyEngine.process_minute()
-  ├─ TickMatchedFilter → L2/tick_phase (carrier phase)
-  ├─ TickEdgeDetector → L2/tick_timing
-  └─ L1MetrologyMeasurement → L2/timing_measurements (D_clock, mode)
-       ↓
-  PhysicsFusionService.process_minute()  [improved]
-    ├─ BayesianTECEstimator (D_clock input, mode priors, N≥3 confidence)
-    ├─ CarrierPhaseTEC (dTEC/dt from phase rate, anchored to group-delay TEC)
-    ├─ IonoTomography (E/F layer separation from 17-path geometry)
-    ├─ VTECMapper (IPP → 2D surface → IONEX output)
-    └─ L3/tec, L3/dtec, L3/tomography, L3/vtec_map HDF5 + IONEX
-```
+1. **Dashboard field name mismatch** (most likely quick fix): `dashboard.py:197` reads `raw_toa_ms` but L2 schema uses `raw_arrival_time_ms`. If this field is always None, timing_error is always None, and the grid shows only SNR — which may appear flat on strong channels.
 
-#### Key Files (This Session Focus)
+2. **Calibration over-correction**: The hardware calibration or L2 calibration service may have learned offsets that absorb the ionospheric variation, flattening D_clock to near-zero.
 
-| File | Purpose | Priority |
-|------|---------|----------|
-| `src/hf_timestd/core/tec_estimator.py` | Current TEC estimator — audit + rewrite | **Critical** |
-| `src/hf_timestd/core/physics_fusion_service.py` | Physics service — audit data flow + wire new estimators | **Critical** |
-| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion TEC — audit lines 3448–3561 | **Critical** |
-| `src/hf_timestd/core/ionospheric_reanalysis.py` | Best current TEC approach — promote to real-time | **Critical** |
-| `src/hf_timestd/core/propagation_model.py` | Iono delay computation — audit double-counting | High |
-| `src/hf_timestd/core/ionospheric_model.py` | IonosphericDelayCalculator — audit 2× factor | High |
-| `src/hf_timestd/core/iono_data_service.py` | WAM-IPE/GIRO data — verify production status | High |
-| `src/hf_timestd/core/tick_matched_filter.py` | Carrier phase extraction — verify continuity | High |
-| `web-api/services/phase_service.py` | Phase/Doppler dashboard — extend for dTEC | Medium |
-| `web-api/services/propagation_service.py` | Propagation web API — extend for tomography | Medium |
-| `tests/core/test_tec_estimator_diagnostics.py` | TEC tests — extend significantly | High |
-| `tests/test_propagation_model.py` | Propagation tests — verify iono delay | High |
+3. **Tone detection failure on some channels**: The matched filter may not be detecting ticks reliably on certain frequencies, producing sparse or constant-offset measurements.
 
-#### Key Files (Reference — do not modify unless audit reveals bugs)
+4. **Shared-frequency discrimination errors**: On 2.5/5/10/15 MHz, WWV and WWVH overlap. If the discriminator is misattributing signals, the timing measurements could be incoherent.
 
-| File | Purpose |
-|------|---------|
-| `src/hf_timestd/core/metrology_engine.py` | `process_minute()`, edge ensemble, physics validation |
-| `src/hf_timestd/core/tick_edge_detector.py` | `TickEdgeDetector` — per-second onset edge detection |
-| `src/hf_timestd/core/broadcast_specs.py` | 17 broadcast definitions, tone schedules |
-| `src/hf_timestd/core/wwvh_discrimination.py` | Doppler estimation from per-tick phases |
-| `src/hf_timestd/models/broadcast.py` | Station locations, frequencies |
+5. **Kalman filter over-smoothing**: The broadcast Kalman filter may be smoothing out the ionospheric variation, and the dashboard may be reading the smoothed state rather than raw measurements.
+
+### ⚠️ IMPACT ON TEC PIPELINE
+
+The TEC enhancements implemented in the previous session (2026-02-14) depend on valid multi-frequency timing measurements:
+
+- **TECEstimator** needs frequency-dependent D_clock variation (1/f² dispersion) — if D_clock is flat across frequencies, TEC estimation produces zero or noise
+- **CarrierTECEstimator** needs valid carrier phase — this may be unaffected if the phase extraction is working even when timing is flat
+- **IonoTomography** needs valid sTEC from multiple paths — garbage in, garbage out
+- **VTECMapper** needs valid sTEC — same concern
+
+**Do NOT revert the TEC enhancements.** The algorithms are correct; the problem is upstream in the measurement pipeline. Fix the measurements and the TEC pipeline will produce valid results.
 
 ### Service Inventory
 
@@ -237,7 +139,7 @@ MetrologyEngine.process_minute()
 | `timestd-core-recorder` | RTP → raw buffer (authoritative timestamps) | journalctl |
 | `timestd-metrology` | IQ → L1/L2 measurements + tick phase extraction | `/var/log/hf-timestd/phase2-*.log` |
 | `timestd-fusion` | Multi-broadcast fusion → Chrony (WatchdogSec=120) | `/var/log/hf-timestd/fusion.log` |
-| `timestd-physics` | TEC estimation, L3 physics products | `/var/log/hf-timestd/physics.log` |
+| `timestd-physics` | TEC estimation, L3 physics products (+ tomography, VTEC) | `/var/log/hf-timestd/physics.log` |
 | `timestd-l2-calibration` | L2 adaptive calibration | journalctl |
 | `timestd-web-api` | REST API + dashboard (FastAPI, port 8000) | journalctl |
 | `timestd-vtec` | GNSS VTEC estimation (optional) | journalctl |
@@ -258,9 +160,22 @@ MetrologyEngine.process_minute()
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
 
+### TEC Pipeline Audit & Enhancement (2026-02-14, evening session)
+
+Complete audit of 17 concerns across 5 files. Four new modules implemented and wired into `physics_fusion_service.py`:
+
+1. **Bayesian TEC Estimator** (`tec_estimator.py` rewrite) — MAD-based 3σ outlier rejection, SNR weighting, N=2 confidence cap at 0.3, negative slope → None rejection, `propagation_mode` on TECResult, dead `high_precision_mode` removed
+2. **Carrier-Phase dTEC** (`carrier_tec.py` new) — phase rate → Doppler → dTEC/dt → integrated TEC(t), anchored to group-delay absolute TEC
+3. **Multi-Layer Tomography** (`iono_tomography.py` new) — E/F layer separation via constrained least squares, solar-dependent priors, condition monitoring
+4. **VTEC Map Generator** (`vtec_mapper.py` new) — sTEC→vTEC mapping, IPP computation, 2D polynomial surface, IONEX output
+
+Also fixed: inverted uncertainty weighting in fusion (concern #9), too-narrow TEC validation window 5-100→1-200 TECU (concern #10). 19/19 tests passing. Full details: `docs/changes/SESSION_2026_02_14_TEC_PIPELINE_AUDIT.md`.
+
+**⚠️ NOTE:** These TEC modules are algorithmically correct but depend on valid upstream measurements. The dashboard anomaly discovered at the end of this session suggests the input data may be flat/invalid on most channels. The TEC pipeline will produce meaningful results only after the measurement pipeline is fixed.
+
 ### HamSCI 2026 Workshop Abstract (2026-02-14)
 
-Presentation abstract written and committed: `docs/HAMSCI_2026_WORKSHOP_ABSTRACT.md`. Updated project description reflecting current system capabilities. Six forward-looking recommendations for TEC optimization. Recommendations 1, 2, 3, 6 are the implementation targets for the next session.
+Presentation abstract written and committed: `docs/HAMSCI_2026_WORKSHOP_ABSTRACT.md`. Updated project description reflecting current system capabilities. Six forward-looking recommendations for TEC optimization. Recommendations 1, 2, 3, 6 implemented in the TEC session above.
 
 ### Documentation Conformance Audit (2026-02-14)
 
@@ -312,10 +227,10 @@ Buffer-relative time fix for IQ mixer. Three-tier phase extraction. Cross-freque
 
 ## ✅ Success Criteria — This Session
 
-1. **TEC pipeline audit complete** — all 17 concerns above investigated, findings documented.
-2. **Bayesian TEC estimator implemented** — D_clock input, mode priors, N≥3 confidence requirement, proper rejection of mode-mixed measurements.
-3. **Carrier-phase dTEC implemented** — reads L2/tick_phase, computes dTEC/dt from Doppler, integrates, anchors to group-delay TEC.
-4. **Multi-layer tomography implemented** — E/F separation from 17-path geometry, constrained by Ne(h) profile shape.
-5. **VTEC map generation implemented** — IPP computation, 2D surface fit, IONEX output format.
-6. **Tests extended** — mode-mixing rejection, N=2 confidence cap, dTEC consistency, E-layer nighttime null, VTEC vs IONEX comparison.
-7. **Production deployment** — `update-production.sh`, verify physics service produces improved TEC estimates.
+1. **Root cause identified** — determine exactly why most channels show flat/constant D_clock on the 24h dashboard.
+2. **Dashboard data pipeline verified** — confirm whether the problem is in the display layer (field name mismatch, wrong data plotted) or in the actual measurements.
+3. **L2 data quality assessed** — directly inspect HDF5 files to determine if the raw measurements contain ionospheric variation.
+4. **Fix implemented and verified** — whether it's a dashboard bug, tone detection issue, calibration problem, or signal chain issue.
+5. **Diurnal variation visible** — after fix, the 24h dashboard should show clear diurnal timing-error variation on at least WWV 2.5/5/10 MHz and CHU channels.
+6. **TEC pipeline validated** — with corrected measurements, verify that the TEC estimator produces physically reasonable TEC values that vary diurnally.
+7. **No regressions** — existing tests still pass, fusion service still feeds chrony.

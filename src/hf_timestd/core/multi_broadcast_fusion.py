@@ -3472,7 +3472,7 @@ class MultiBroadcastFusion:
                             tec_input.append({
                                 'frequency_hz': m.frequency_mhz * 1e6,
                                 'toa_ms': toa_ms,
-                                'uncertainty_ms': 1.0 / max(0.001, m.confidence) # Inverse confidence weighting
+                                'uncertainty_ms': getattr(m, 'tof_uncertainty_ms', None) or max(0.1, 1.0 / max(0.001, m.confidence))
                             })
                     
                     # DIAGNOSTIC: Log the raw inputs to the TEC estimator to trace "0.0 TEC" issue
@@ -3496,8 +3496,8 @@ class MultiBroadcastFusion:
                         # Validate TEC result is not NaN
                         if np.isnan(tec_result.tec_u) or np.isnan(tec_result.confidence):
                             logger.warning(f"TEC solver produced NaN for {station} (tec={tec_result.tec_u}, conf={tec_result.confidence}) - skipping")
-                        elif tec_result.confidence > 0.9 and 5.0 <= tec_result.tec_u <= 100.0:
-                            # TEC is physically reasonable (5-100 TECU) and well-fit
+                        elif tec_result.confidence > 0.5 and 1.0 <= tec_result.tec_u <= 200.0:
+                            # TEC is physically reasonable (1-200 TECU) and well-fit
                             # Use t_vacuum_error_ms to compute ionosphere-free D_clock
                             logger.info(
                                 f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}), "

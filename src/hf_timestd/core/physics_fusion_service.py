@@ -39,6 +39,9 @@ from datetime import datetime, timezone
 import numpy as np
 
 from hf_timestd.core.tec_estimator import TECEstimator, TECResult
+from hf_timestd.core.carrier_tec import CarrierTECEstimator
+from hf_timestd.core.iono_tomography import IonoTomography, RayPath
+from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
 from hf_timestd.io import DataProductReader, DataProductWriter
 
 # Systemd watchdog support
@@ -75,7 +78,18 @@ class PhysicsFusionService:
         self.lookback_minutes = lookback_minutes
         
         # Initialize TEC Estimator
-        self.tec_estimator = TECEstimator(high_precision_mode=True)
+        self.tec_estimator = TECEstimator()
+        
+        # Initialize carrier-phase dTEC estimator
+        self.carrier_tec = CarrierTECEstimator(data_root=self.data_root)
+        
+        # Initialize E/F layer tomography
+        self.tomography = IonoTomography()
+        
+        # Initialize VTEC mapper
+        self.vtec_mapper = VTECMapper()
+        self.ionex_dir = self.data_root / 'phase2' / 'ionex'
+        self.ionex_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize L3 Writers
         self.l3_writer = DataProductWriter(
@@ -297,27 +311,118 @@ class PhysicsFusionService:
             else:
                  logger.debug(f"TEC estimation failed for {station} ({mode})")
 
-        # 3. UTC Consistency Check
-        # If we had T_vacuum from TEC solver, T_vac = Dist/c + dt
-        # dt = T_vac - Dist/c
-        # We need distance.
+        # 3. E/F Layer Tomography
+        tomo_result = None
+        if len(tec_estimates) >= 2:
+            try:
+                paths = self.tomography.build_paths_from_tec_results(tec_estimates)
+                if len(paths) >= 2:
+                    tomo_result = self.tomography.solve(paths)
+                    if tomo_result:
+                        tomo_result.timestamp = float(minute_timestamp)
+                        logger.info(
+                            f"Tomography: E={tomo_result.tec_e_tecu:.1f} F={tomo_result.tec_f_tecu:.1f} TECU "
+                            f"(ratio={tomo_result.e_f_ratio:.2f}, conf={tomo_result.confidence:.2f})"
+                        )
+            except Exception as e:
+                logger.warning(f"Tomography failed: {e}")
+
+        # 4. VTEC Map Generation
+        vtec_result = None
+        if len(tec_estimates) >= 3:
+            try:
+                ipp_measurements = self._build_ipp_measurements(tec_estimates)
+                if len(ipp_measurements) >= 3:
+                    vtec_result = self.vtec_mapper.generate_map(
+                        ipp_measurements, timestamp=float(minute_timestamp)
+                    )
+                    if vtec_result:
+                        logger.info(
+                            f"VTEC map: {vtec_result.n_ipps} IPPs, "
+                            f"RMS={vtec_result.rms_residual_tecu:.2f} TECU, "
+                            f"conf={vtec_result.confidence:.2f}"
+                        )
+                        # Write IONEX file
+                        ts = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)
+                        ionex_path = self.ionex_dir / f"hftd_{ts.strftime('%Y%m%d_%H%M')}.ionex"
+                        self.vtec_mapper.write_ionex(vtec_result, ionex_path)
+            except Exception as e:
+                logger.warning(f"VTEC map generation failed: {e}")
+
+        # 5. UTC Consistency Check
+        utc_consistent = len(tec_estimates) > 0
         
-        # Simple UTC validation: check if residuals are consistent across stations
-        # (This is a placeholder for the full geometric solver next session)
-        utc_consistent = len(tec_estimates) > 0 # At least we got physics
-        
-        # 4. Write L3
+        # 6. Write L3
         self._write_physics_summary(
             minute_timestamp, 
             tec_estimates, 
             utc_consistent
         )
         
-        # 5. Write per-station TEC records
+        # 7. Write per-station TEC records
         self._write_tec_records(
             minute_timestamp,
             tec_estimates
         )
+
+    def _build_ipp_measurements(
+        self,
+        tec_estimates: Dict[tuple, TECResult],
+    ) -> List[IPPMeasurement]:
+        """
+        Build IPP measurements from TEC estimates for VTEC mapping.
+        
+        Computes ionospheric pierce points at the great-circle midpoint
+        between receiver and transmitter, and converts sTEC to vTEC.
+        """
+        # Known station coordinates (lat, lon)
+        STATION_COORDS = {
+            'WWV': (40.68, -105.04),
+            'WWVH': (21.99, -159.76),
+            'CHU': (45.29, -75.75),
+            'BPM': (34.95, 109.51),
+        }
+        
+        ipp_list = []
+        for (station, mode), result in tec_estimates.items():
+            if result.tec_u <= 0 or result.confidence < 0.3:
+                continue
+            
+            # Look up station coordinates
+            station_base = station.split('_')[0] if '_' in station else station
+            coords = STATION_COORDS.get(station_base)
+            if coords is None:
+                continue
+            
+            station_lat, station_lon = coords
+            
+            # Compute IPP at midpoint
+            ipp_lat, ipp_lon = self.vtec_mapper.compute_ipp(
+                station_lat, station_lon
+            )
+            
+            # Estimate elevation angle from frequency (rough heuristic)
+            # Higher frequencies tend to use higher elevation paths
+            for f_mhz in result.group_delay_ms.keys():
+                elevation = 30.0  # Default mid-elevation
+                
+                vtec, mf = self.vtec_mapper.stec_to_vtec(result.tec_u, elevation)
+                uncertainty = max(1.0, result.tec_u * (1.0 - result.confidence))
+                
+                ipp_list.append(IPPMeasurement(
+                    station=station,
+                    frequency_mhz=f_mhz,
+                    ipp_lat=ipp_lat,
+                    ipp_lon=ipp_lon,
+                    stec_tecu=result.tec_u,
+                    vtec_tecu=vtec,
+                    mapping_factor=mf,
+                    elevation_deg=elevation,
+                    uncertainty_tecu=uncertainty / mf,
+                    propagation_mode=mode,
+                ))
+        
+        return ipp_list
 
     def _write_physics_summary(
         self, 

@@ -275,7 +275,7 @@ class IonosphericReanalysis:
                 self.rx_lat, self.rx_lon, slat, slon
             )
 
-        self.tec_estimator = TECEstimator(high_precision_mode=True)
+        self.tec_estimator = TECEstimator()
 
         # L3C writer for propagation stats
         self.stats_dir = self.phase2_dir / 'science' / 'propagation_stats'
