@@ -10,50 +10,60 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: PHYSICS SERVICE MEMORY LEAK + OPERATIONAL RESILIENCE
+## 📋 NEXT SESSION: DOCUMENTATION CONFORMANCE AUDIT (NO CODE CHANGES)
 
-**Objective:** Investigate and fix the `timestd-physics` memory leak that causes OOM kills, and address operational resilience issues (logrotate, service recovery) that allow silent failures to persist for hours.
+**Objective:** Bring project documentation into alignment with the currently operating code and deployment workflow. Identify obsolete or superseded documents, revise inaccurate docs, and archive historical docs that no longer describe present behavior.
 
-**Context:** The physics service (`physics_fusion_service.py`) was OOM-killed on 2026-02-13 at 11:01 UTC after consuming 16h 25min of CPU time. After restart, it grew to 2.9 GB RSS (10% of 30 GB RAM) within 13 hours. The fusion service also stalled silently — it ran for 10+ hours producing `0 entries from 11 channels` every 8-second cycle due to missing schema files (stale process from before a production update). Both failures were invisible because logrotate truncated the log files without signaling the services, so `.log` was 0 bytes while output went to `.log.1`.
+**Hard Constraint:** The next session is documentation-only. Do **not** modify application code, tests, service logic, or runtime behavior. Use code strictly as evidence for documentation truth.
+
+**Context:** Recent sessions fixed critical operational issues (physics memory growth mitigation, logrotate behavior, freshness monitoring, deployment correspondence process) and introduced updated deployment documentation. The docs now likely contain mixed-era guidance (legacy service names, outdated paths, stale assumptions, or superseded workflows). The next session should resolve this drift.
 
 ---
 
-### Known State (as of 2026-02-14)
+### Known State to Anchor Documentation (as of 2026-02-14)
 
-**What works (after `update-production.sh` run at 12:07 UTC):**
-- All services running, `verify_pipeline.sh` shows 32 PASS, 0 FAIL
-- Fusion reading 547 tick timing observations from 9 channels per cycle
-- Physics producing TEC estimates (fresh within seconds)
-- GRAPE daily pipeline fully operational with validation gates (see Resolved section)
-- `update-production.sh` correctly removes editable installs and does non-editable `pip install`
+Use these as baseline truths unless contradicted by direct code evidence:
 
-**What needs investigation:**
+1. Production deploy path is `sudo scripts/update-production.sh [--pull]` (non-editable install model).
+2. Physics service has memory guardrails (`MemoryHigh`/`MemoryMax`) and loop-side memory growth mitigation.
+3. Logrotate behavior for active service logs is based on `copytruncate`.
+4. Freshness monitoring checks raw buffer plus fusion/physics output freshness.
+5. Deployment correspondence docs now exist and should be reflected in top-level docs:
+   - `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md`
+   - README production update pointer.
 
-1. **Physics service memory leak** — grows unbounded, OOM-killed after ~19 hours
-   - PID 92947: 2.9 GB RSS after 13h, was OOM-killed previous day at 16h 25min CPU
-   - Likely cause: accumulating data structures in `PhysicsFusionService` main loop
-   - Key file: `src/hf_timestd/core/physics_fusion_service.py`
-   - Related: `src/hf_timestd/core/tec_estimator.py`, `src/hf_timestd/io/hdf5_reader.py`
-   - The service re-initializes `DataProductReader` objects every cycle (line-level investigation needed)
+### Documentation Session Mission
 
-2. **Logrotate misconfiguration** — services write to stale file descriptors after rotation
-   - Config: `/etc/logrotate.d/hf-timestd` uses `create` mode (rename old → create new)
-   - Problem: long-running services keep the old FD open, write to `.log.1` while `.log` stays 0 bytes
-   - Fix options: (a) `copytruncate` instead of `create`, or (b) add `postrotate` block to send SIGHUP/restart
-   - Affects: `fusion.log`, `physics.log`, `phase2-*.log`
+Produce a coherent, trustworthy doc set that answers:
 
-3. **Silent failure pattern** — services can run for hours producing nothing with no alert
-   - Fusion ran 10+ hours reading 0 measurements every 8s — no alarm triggered
-   - The watchdog (`WatchdogSec=120`) only checks if the process is alive, not if it's productive
-   - Consider: a "productivity watchdog" that checks output freshness (e.g., HDF5 mtime)
+- **User:** "What works today, what should I run, where are outputs, and how do I know it is healthy?"
+- **Metrologist:** "What are timing authorities, uncertainty assumptions, and traceability boundaries?"
+- **Ionospheric scientist:** "What physics products exist, at what cadence/quality, and what is validated vs provisional?"
+- **Software engineer:** "What is current architecture, deployment path, operational contract, and deprecation status?"
 
-### Verification Steps for This Session
+### Hard Rules for Next Session
 
-1. **Profile physics memory** — add `tracemalloc` or monitor RSS growth over time, identify the leaking data structure
-2. **Fix the leak** — likely need to bound or clear accumulated state in the main loop
-3. **Fix logrotate** — switch to `copytruncate` or add `postrotate` signal handling
-4. **Consider MemoryMax** — add `MemoryMax=4G` to `timestd-physics.service` as a safety net
-5. **Consider output freshness monitoring** — extend `verify_pipeline.sh` or add a cron-based freshness check that alerts on stale outputs
+1. **No code edits.** Documentation and archival decisions only.
+2. **Code is ground truth.** If docs conflict with code, docs must change (or be archived).
+3. **Do not silently delete historical material.** Move superseded docs to archive or mark clearly as historical.
+4. **Every major claim in docs must map to at least one verifiable source** (code path, service file, script, schema, or observed output path).
+
+### Required Deliverables (Next Session)
+
+1. **Mismatch Matrix** (doc claim vs code reality) with severity:
+   - Critical: could cause bad operation or wrong scientific interpretation
+   - Major: significant drift/confusion
+   - Minor: wording/staleness
+2. **Doc Action Plan** per file:
+   - Keep and revise
+   - Keep as-is
+   - Archive (with replacement link)
+3. **Audience Coverage Check** showing each of the four perspectives is satisfied.
+4. **Updated navigation path** so operators can discover:
+   - install path
+   - update/deploy path
+   - health/freshness checks
+   - scientific caveats and validation status
 
 ---
 
@@ -141,14 +151,17 @@ Raw IQ Buffer (60s, 24 kHz) → DecimationPipeline → DecimatedBuffer (10 Hz da
 
 | File | Purpose | Priority |
 |------|---------|----------|
-| `src/hf_timestd/core/physics_fusion_service.py` | Physics daemon — TEC estimation, main loop with suspected leak | **Critical** |
-| `src/hf_timestd/core/tec_estimator.py` | TEC math — may accumulate state | **Critical** |
-| `src/hf_timestd/core/multi_broadcast_fusion.py` | Fusion daemon — Dual Kalman → Chrony SHM | High |
-| `src/hf_timestd/io/hdf5_reader.py` | `DataProductReader` — re-initialized every cycle in physics | High |
-| `systemd/timestd-physics.service` | Physics systemd unit — needs `MemoryMax`? | High |
-| `systemd/timestd-fusion.service` | Fusion systemd unit — `WatchdogSec=120`, `Type=notify` | High |
-| `/etc/logrotate.d/hf-timestd` | Logrotate config — needs `copytruncate` or `postrotate` | High |
-| `scripts/update-production.sh` | Canonical deploy script — non-editable install + restart | Reference |
+| `README.md` | Front-door guidance; must reflect current deploy/update/monitoring reality | **Critical** |
+| `INSTALLATION.md` | Installation and production workflow reference | **Critical** |
+| `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md` | Current correspondence method; must be linked and consistent | **Critical** |
+| `docs/DEPLOYMENT_CHECKLIST.md` | Likely historical/legacy content; evaluate for archive | High |
+| `docs/DEPLOYMENT_REVIEW.md` | Older deployment review; likely stale assumptions | High |
+| `docs/GPS_TEC_OPTIONAL.md` | Scientific framing of optional GPS/VTEC usage; verify against code paths | High |
+| `docs/PSWS_SETUP_GUIDE.md` | GRAPE/PSWS operational instructions; verify trigger/upload details | High |
+| `scripts/update-production.sh` | Deploy source of truth for what is actually synced/restarted | **Critical** |
+| `scripts/verify_pipeline.sh` | Operational truth for health and freshness checks | **Critical** |
+| `scripts/check-freshness-alert.sh` | Freshness-monitoring behavior and alert semantics | High |
+| `systemd/*.service` | Runtime contracts, restarts, resource limits, logging behavior | High |
 
 ### Key Files (Detection & GRAPE — for reference)
 
@@ -214,6 +227,29 @@ Raw IQ Buffer (60s, 24 kHz) → DecimationPipeline → DecimatedBuffer (10 Hz da
 - **Data root**: `/var/lib/timestd/`
 - **3 machines**: bee1 (primary), B3-1, B4-1
 
+### Documentation Audit Method (Next Session)
+
+1. **Inventory docs by function**
+   - Operator runbooks
+   - Scientific/method docs
+   - Architecture/design docs
+   - Historical change logs
+2. **For each doc, classify status**
+   - Current authoritative
+   - Current but needs revision
+   - Historical (archive)
+   - Ambiguous (needs verification)
+3. **Cross-check claims against implementation**
+   - Service names, paths, cadence, outputs, commands
+   - Timing authority model (RTP vs fusion)
+   - Physics/TEC claims and validation caveats
+4. **Apply consistent labeling**
+   - "Current" docs: no historical ambiguity
+   - "Historical" docs: explicit banner/date/context
+5. **Minimize duplication**
+   - One canonical source per operational topic
+   - Other docs should link, not fork procedures
+
 ---
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
@@ -232,6 +268,14 @@ Raw IQ Buffer (60s, 24 kHz) → DecimationPipeline → DecimatedBuffer (10 Hz da
 **Root cause:** Running fusion/physics processes loaded module paths from a stale (pre-editable-install) Python environment. Schema files resolved to `/opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/schemas/` which no longer existed after editable install pointed imports to the git repo. Result: `Available schemas: {}`, 0 measurements read every cycle for 10+ hours.
 
 **Fix:** Ran `update-production.sh` which removed the editable install, did a proper non-editable `pip install`, and restarted all services. Schemas now resolve correctly from the venv's copied package.
+
+### Physics Memory + Operational Resilience Hardening (2026-02-14)
+
+- Physics service now caches readers and bounds retry state to reduce memory growth risk.
+- Physics systemd unit includes memory safety limits.
+- Logrotate uses `copytruncate` for active append-mode service logs.
+- Freshness monitor covers raw buffer + fusion + physics outputs.
+- Deployment correspondence checklist added and linked from README.
 
 ### Signal Presence Gate Fix (2026-02-12, session 3)
 
@@ -291,8 +335,8 @@ IQ mixer phase jump fixed. Three-tier phase extraction. Cross-frequency discrimi
 
 ## ✅ Success Criteria — This Session
 
-1. **Physics memory leak identified and fixed** — RSS stays bounded over 24+ hours, no OOM kill
-2. **Logrotate fixed** — services write to the current `.log` file after rotation, not `.log.1`
-3. **`MemoryMax` safety net** — physics service has a systemd memory limit to prevent OOM-killing other services
-4. **Output freshness monitoring** — some mechanism alerts when fusion/physics stop producing useful output
-5. **`verify_pipeline.sh` stays at 0 FAIL** after 24 hours of operation
+1. **Documentation/code alignment matrix produced** with explicit claim-level evidence.
+2. **Obsolete/superseded docs identified** and either revised or archived.
+3. **No-code-change discipline maintained** (docs-only session).
+4. **All 4 audiences covered** with clear navigation to authoritative docs.
+5. **Operational procedures consistent** across README/install/deploy/checklist docs.
