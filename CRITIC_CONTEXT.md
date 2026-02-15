@@ -10,19 +10,11 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: FIX TICK_TIMING REFERENCE FRAME + TEC QUALITY
+## 📋 NEXT SESSION: TEC QUALITY + L2 SCHEMA
 
-**Objective:** Two issues discovered during the dashboard fix session need attention:
+**Objective:** Two issues remain from the dashboard/tick_timing investigation:
 
-### Issue 1: tick_timing `mean_timing_offset_ms` is buffer-relative, not D_clock
-
-The `TickMatchedFilter._detect_minute_marker()` computes `offset_ms` as the sample position of the correlation peak relative to buffer start (0–500ms range), NOT as D_clock. When `marker_ok=True`, this buffer-relative value becomes `mean_timing_offset_ms` in the tick_timing HDF5 product. The per-second tick offsets ARE relative to expected positions (small values), but the minute marker contaminates the aggregate.
-
-**Impact:** `metrology_service.py:537` uses `d_clock_ms = tick_analysis.mean_timing_offset_ms` — this feeds wrong values into fusion when tick_timing is the source. The dashboard now correctly excludes tick_timing timing_error, but the underlying data product is still wrong.
-
-**Fix needed in `tick_matched_filter.py`:** The minute marker's `actual_search_before` is 0 when `slice_start = max(0, -search_samples) = 0`. The correlation returns `peak_idx - 0 = peak_idx` (absolute position). Need to subtract the expected marker position to get a proper offset.
-
-### Issue 2: TEC outliers (max 3930 TECU)
+### Issue 1: TEC outliers (max 3930 TECU)
 
 The TEC pipeline produces physically unreasonable values. Today's data: 35.9% in 1–100 TECU range, high-confidence subset includes values up to 3662 TECU. CHU shows good diurnal pattern (26→93 TECU), but WWV/WWVH/BPM have frequent negative-slope rejections (mode mixing).
 
@@ -31,7 +23,7 @@ The TEC pipeline produces physically unreasonable values. Today's data: 35.9% in
 - Investigate mode mixing: shared-frequency D_clock values may combine 1F and 2F arrivals
 - Check if `propagation_mode` field is being used to gate TEC inputs
 
-### Issue 3: L2 schema vs data inconsistency
+### Issue 2: L2 schema vs data inconsistency
 
 The L2 schema says `clock_offset_ms = raw_arrival_time_ms - propagation_delay_ms`, but `l2_calibration_service.py:340` writes `d_clock_ms = raw_toa_ms` (which IS already D_clock from L1) to `clock_offset_ms`, and the same value to `raw_arrival_time_ms`. Both fields are identical in the HDF5 data. Either:
 - Fix the L2 writer to store actual raw arrival time in `raw_arrival_time_ms` and computed D_clock in `clock_offset_ms`
@@ -64,6 +56,16 @@ The L2 schema says `clock_offset_ms = raw_arrival_time_ms - propagation_delay_ms
 ---
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
+
+### Tick Timing Reference Frame Fix (2026-02-15)
+
+**Root cause:** `tick_matched_filter.py` computed timing offsets relative to buffer start (sample 0), not UTC. The `_detect_minute_marker()` had no access to `buffer_timing` and assumed sample 0 = second 0. The buffer start is arbitrary, so `mean_timing_offset_ms` was a buffer-relative position (0–500ms), not D_clock.
+
+**Fix:** Plumbed `buffer_timing` and `minute_boundary` through from `metrology_engine.py` → `tick_matched_filter.process_minute()` → `_detect_minute_marker()`. Minute marker search now uses `buffer_timing.utc_to_sample(minute_boundary)` to locate second 0, searches forward 100ms (covers all HF skywave ToF). D_clock computed via `sample_to_utc()`. Added `d_clock_ms` field to `MinuteTickAnalysis`. Updated `metrology_service.py` and `multi_broadcast_fusion.py` to use `d_clock_ms` instead of buffer-relative `mean_timing_offset_ms`.
+
+**Key insight:** The primary timing path (ntpd-style edge detector → L1 → L2 `clock_offset/`) was correct all along. The tick_matched_filter is a secondary IQ-domain module for carrier phase/Doppler — its D_clock is supplementary. Dashboard reads from the primary path.
+
+**Files modified:** `tick_matched_filter.py`, `metrology_engine.py`, `metrology_service.py`, `multi_broadcast_fusion.py`
 
 ### Dashboard Flat D_clock Fix (2026-02-14, late session)
 
@@ -143,12 +145,8 @@ Buffer-relative time fix for IQ mixer. Three-tier phase extraction. Cross-freque
 
 ---
 
-## ✅ Success Criteria — This Session
+## ✅ Success Criteria — Next Session
 
-1. **Root cause identified** — determine exactly why most channels show flat/constant D_clock on the 24h dashboard.
-2. **Dashboard data pipeline verified** — confirm whether the problem is in the display layer (field name mismatch, wrong data plotted) or in the actual measurements.
-3. **L2 data quality assessed** — directly inspect HDF5 files to determine if the raw measurements contain ionospheric variation.
-4. **Fix implemented and verified** — whether it's a dashboard bug, tone detection issue, calibration problem, or signal chain issue.
-5. **Diurnal variation visible** — after fix, the 24h dashboard should show clear diurnal timing-error variation on at least WWV 2.5/5/10 MHz and CHU channels.
-6. **TEC pipeline validated** — with corrected measurements, verify that the TEC estimator produces physically reasonable TEC values that vary diurnally.
-7. **No regressions** — existing tests still pass, fusion service still feeds chrony.
+1. **TEC outliers bounded** — cap at 200 TECU for mid-latitude, investigate mode mixing
+2. **L2 schema consistent** — `raw_arrival_time_ms` and `clock_offset_ms` have distinct, documented meanings
+3. **No regressions** — existing tests still pass, fusion service still feeds chrony

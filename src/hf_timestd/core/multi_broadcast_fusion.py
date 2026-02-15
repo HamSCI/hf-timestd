@@ -1510,12 +1510,13 @@ class MultiBroadcastFusion:
                         if minute_boundary < cutoff:
                             continue
                         
-                        # Only include high-confidence tick measurements
-                        if tick_meas.get('valid_windows', 0) >= 10:
+                        # Only include high-confidence tick measurements with valid D_clock
+                        d_clock = tick_meas.get('d_clock_ms')
+                        if tick_meas.get('valid_windows', 0) >= 10 and d_clock is not None:
                             per_minute[minute_boundary].append({
                                 'station': tick_meas.get('station'),
                                 'frequency_mhz': tick_meas.get('frequency_mhz'),
-                                'timing_ms': tick_meas.get('mean_timing_offset_ms'),
+                                'timing_ms': d_clock,
                                 'std_ms': tick_meas.get('std_timing_offset_ms'),
                                 'n_windows': tick_meas.get('valid_windows'),
                                 'source': 'tick'

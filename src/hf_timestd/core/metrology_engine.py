@@ -1402,7 +1402,11 @@ class MetrologyEngine:
                         f"{len(self.tick_filters)} stations (physics, not timing)")
             for station_type, tick_filter in self.tick_filters.items():
                 try:
-                    tick_analysis = tick_filter.process_minute(iq_samples, minute_number)
+                    tick_analysis = tick_filter.process_minute(
+                        iq_samples, minute_number,
+                        buffer_timing=buffer_timing,
+                        minute_boundary=minute_boundary
+                    )
                     if tick_analysis and tick_analysis.valid_windows > 0:
                         tick_results[station_type.value] = tick_analysis
                         logger.debug(f"{self.channel_name}: {station_type.value} tick phase: "

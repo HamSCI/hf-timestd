@@ -238,6 +238,12 @@ class MinuteTickAnalysis:
     tick_mean_offset_ms: float = 0.0
     tick_std_offset_ms: float = 0.0
     tick_valid_windows: int = 0
+    
+    # D_clock: proper timing error computed via timing authority (buffer_timing).
+    # None if buffer_timing was not provided (no timing authority available).
+    # mean_timing_offset_ms is buffer-relative and must NOT be used as D_clock.
+    d_clock_ms: Optional[float] = None
+    d_clock_uncertainty_ms: Optional[float] = None
 
 
 class TickMatchedFilter:
@@ -750,16 +756,24 @@ class TickMatchedFilter:
         self,
         iq_filtered: np.ndarray,
         iq_unfiltered: np.ndarray,
+        buffer_timing=None,
+        minute_boundary: int = 0,
     ) -> Optional[TickDetectionResult]:
         """
-        Detect the 800ms minute marker at second 0 (primary timing source).
+        Detect the minute marker at second 0 (primary timing source).
         
         The minute marker has 160× more energy than a 5ms tick, making it
         detectable under fading conditions where per-second ticks are lost.
         
+        The marker tone arrives at second_0_UTC + geometric_delay (a few ms).
+        We use buffer_timing to find where second 0 falls in the buffer,
+        then search forward from there.
+        
         Args:
             iq_filtered: Bandpass-filtered IQ (full minute)
             iq_unfiltered: Unfiltered IQ (full minute, for phase extraction)
+            buffer_timing: BufferTiming mapping sample indices to UTC.
+            minute_boundary: Unix timestamp of the minute boundary.
             
         Returns:
             TickDetectionResult for the minute marker, or None
@@ -771,41 +785,59 @@ class TickMatchedFilter:
         template = self._iq_templates[marker_ms]
         tick_len = len(template)
         
-        # Search ±500ms around second 0 for the minute marker
-        search_ms = 500.0
-        search_samples = int(search_ms * self.sample_rate / 1000.0)
+        # Find where second 0 falls in the buffer using the timing authority.
+        # The marker tone arrives at sec0 + geometric_delay (HF skywave:
+        # typically 3–40ms, up to ~80ms for long multi-hop nighttime paths).
+        if buffer_timing is not None and minute_boundary > 0:
+            sec0_sample = buffer_timing.utc_to_sample(float(minute_boundary))
+        else:
+            # Fallback: assume buffer starts at minute boundary
+            sec0_sample = 0.0
         
-        # Extract region: we need search_samples before second 0 (may not exist
-        # at buffer start) through tick_len + search_samples after
-        slice_start = max(0, -search_samples)  # Can't go before buffer start
-        slice_end = tick_len + search_samples
+        expected_sample = int(max(0, sec0_sample))
+        
+        # Search window: from a few ms before sec0 (buffer jitter) through
+        # 100ms after (covers all realistic HF propagation delays).
+        # Safe because the marker template is long enough that the
+        # correlation won't false-match the shorter next-second tick.
+        search_before_ms = 5.0
+        search_after_ms = 100.0
+        search_before_samp = int(search_before_ms * self.sample_rate / 1000.0)
+        search_after_samp = int(search_after_ms * self.sample_rate / 1000.0)
+        
+        slice_start = max(0, expected_sample - search_before_samp)
+        slice_end = expected_sample + search_after_samp + tick_len
         
         if slice_end > len(iq_filtered):
             return None
         
         iq_slice = iq_filtered[slice_start:slice_end]
         
-        # Adjust search_samples for the actual slice start
-        actual_search_before = 0 - slice_start  # How many search samples we actually have before sec 0
+        # The expected position within the slice is where sec0 falls.
+        # _correlate_tick_iq returns offset relative to this position.
+        expected_pos_in_slice = expected_sample - slice_start
         
         offset_samp, peak_val, snr_db = self._correlate_tick_iq(
-            iq_slice, template, actual_search_before
+            iq_slice, template, expected_pos_in_slice
         )
         
+        # offset_samp is relative to expected_sample.  The detected sample
+        # in the full buffer is expected_sample + offset_samp.
+        detected_sample = expected_sample + offset_samp
         offset_ms = (offset_samp / self.sample_rate) * 1000.0
         
         # Extract carrier phase from unfiltered IQ at detected position
         carrier_phase_rad = 0.0
         dc_carrier_phase_rad = 0.0
-        adjusted_start = int(offset_samp)
-        adjusted_end = adjusted_start + tick_len
+        det_start = int(detected_sample)
+        det_end = det_start + tick_len
         
-        if 0 <= adjusted_start and adjusted_end <= len(iq_unfiltered):
-            iq_tick = iq_unfiltered[adjusted_start:adjusted_end]
+        if 0 <= det_start and det_end <= len(iq_unfiltered):
+            iq_tick = iq_unfiltered[det_start:det_end]
             n_tick = len(iq_tick)
             if n_tick > 0:
                 tone_freq_hz = self.template_config.frequency_hz
-                t_abs = (adjusted_start / self.sample_rate) + np.arange(n_tick) / self.sample_rate
+                t_abs = (det_start / self.sample_rate) + np.arange(n_tick) / self.sample_rate
                 mixer = np.exp(-1j * 2 * np.pi * tone_freq_hz * t_abs)
                 mixed = iq_tick * mixer
                 carrier_phase_rad = float(np.angle(np.mean(mixed)))
@@ -821,6 +853,8 @@ class TickMatchedFilter:
         else:
             uncertainty_ms = 1.0
         
+        # timing_offset_ms: offset from expected position (sec0) in ms.
+        # This is now a proper arrival offset, not a buffer-relative position.
         return TickDetectionResult(
             window_start_second=0,
             window_end_second=1,
@@ -840,7 +874,9 @@ class TickMatchedFilter:
         self,
         iq_samples: np.ndarray,
         minute_number: int = 0,
-        min_snr_db: float = 8.0
+        min_snr_db: float = 8.0,
+        buffer_timing=None,
+        minute_boundary: int = 0
     ) -> MinuteTickAnalysis:
         """
         Process a full minute of IQ samples.
@@ -856,6 +892,11 @@ class TickMatchedFilter:
             iq_samples: Complex IQ samples (60 seconds at sample_rate)
             minute_number: Minute within hour (for BPM UT1/UTC)
             min_snr_db: Minimum SNR to accept a detection (default 8.0 dB)
+            buffer_timing: BufferTiming object mapping sample indices to UTC.
+                          Required for proper D_clock computation. Without it,
+                          d_clock_ms will be None.
+            minute_boundary: Unix timestamp of the minute boundary (integer seconds).
+                            Required for D_clock computation.
             
         Returns:
             MinuteTickAnalysis with all window results
@@ -870,7 +911,11 @@ class TickMatchedFilter:
         window_results: List[TickDetectionResult] = []
         
         # === Tier 1: Minute marker at second 0 (primary timing) ===
-        marker_result = self._detect_minute_marker(iq_filtered, iq_samples)
+        marker_result = self._detect_minute_marker(
+            iq_filtered, iq_samples,
+            buffer_timing=buffer_timing,
+            minute_boundary=minute_boundary
+        )
         if marker_result is not None and marker_result.snr_db >= min_snr_db:
             window_results.append(marker_result)
             logger.info(f"{self.station.value} minute marker DETECTED: "
@@ -967,6 +1012,51 @@ class TickMatchedFilter:
         # +1 for minute marker window
         total_windows = 1 + (60 - self.window_seconds) // self.overlap_seconds
         
+        # === Compute D_clock via timing authority ===
+        # Convert each detection's sample position to UTC, then compute
+        # D_clock = detected_UTC - expected_UTC (the integer second boundary).
+        d_clock_val = None
+        d_clock_unc = None
+        
+        if buffer_timing is not None and minute_boundary > 0:
+            d_clock_estimates = []
+            
+            for r in window_results:
+                # Both marker and per-second ticks: timing_offset_ms is the
+                # offset from the expected tick position.  For the marker,
+                # the expected position is sec0_sample (set by buffer_timing
+                # in _detect_minute_marker).  For per-second ticks, the
+                # expected position is at ref_second * sample_rate (buffer-
+                # relative, assuming buffer ≈ minute boundary).
+                ref_second = r.window_start_second
+                expected_utc = float(minute_boundary + ref_second)
+                
+                # Detected sample in full buffer
+                expected_sample = buffer_timing.utc_to_sample(expected_utc)
+                detected_sample = expected_sample + (
+                    r.timing_offset_ms * self.sample_rate / 1000.0
+                )
+                
+                detected_utc = buffer_timing.sample_to_utc(detected_sample)
+                d_clock_ms_i = (detected_utc - expected_utc) * 1000.0
+                d_clock_estimates.append((d_clock_ms_i, r.snr_db, r.timing_uncertainty_ms))
+            
+            if d_clock_estimates:
+                vals = [e[0] for e in d_clock_estimates]
+                
+                if marker_ok:
+                    # Minute marker is primary — find its D_clock estimate
+                    for i, r in enumerate(window_results):
+                        if r.window_start_second == 0:
+                            d_clock_val = d_clock_estimates[i][0]
+                            d_clock_unc = d_clock_estimates[i][2]
+                            break
+                
+                if d_clock_val is None:
+                    # No marker or marker not found — use median of tick estimates
+                    d_clock_val = float(np.median(vals))
+                    d_clock_unc = float(np.std(vals)) if len(vals) > 1 else std_offset
+        
         return MinuteTickAnalysis(
             station=self.station,
             minute_number=minute_number,
@@ -985,6 +1075,8 @@ class TickMatchedFilter:
             tick_mean_offset_ms=tick_mean,
             tick_std_offset_ms=tick_std,
             tick_valid_windows=tick_valid,
+            d_clock_ms=d_clock_val,
+            d_clock_uncertainty_ms=d_clock_unc,
         )
 
 

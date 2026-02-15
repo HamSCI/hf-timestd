@@ -524,19 +524,20 @@ class MetrologyService:
                 tick_results = self.engine._last_tick_results
                 if tick_results:
                     for station_name, tick_analysis in tick_results.items():
-                        # Get expected delay for D_clock calculation
+                        # Get expected delay for the HDF5 record (informational)
                         expected_delay_ms = None
-                        d_clock_ms = None
                         if hasattr(self.engine, '_predict_geometric_delay'):
                             try:
                                 expected_delay_ms, _, _ = self.engine._predict_geometric_delay(
                                     station_name, minute_boundary
                                 )
-                                # D_clock = measured_offset (already relative to expected tick positions)
-                                # The tick filter returns offset from expected positions within the buffer
-                                d_clock_ms = tick_analysis.mean_timing_offset_ms
                             except Exception:
                                 pass
+                        
+                        # D_clock is computed by the tick filter using the timing
+                        # authority (buffer_timing).  It is None if no timing
+                        # authority was available (Fusion mode before lock).
+                        d_clock_ms = tick_analysis.d_clock_ms
                         
                         tick_rec = {
                             'timestamp_utc': datetime.now(timezone.utc).isoformat(),
