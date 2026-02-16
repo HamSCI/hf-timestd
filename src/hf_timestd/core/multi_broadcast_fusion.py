@@ -3456,6 +3456,37 @@ class MultiBroadcastFusion:
                 
             for station, station_meas in by_station.items():
                 if len(station_meas) >= 2:
+                    # Gate TEC inputs by dominant propagation mode to avoid
+                    # mixing incompatible path families (e.g., 1F and 2F).
+                    mode_groups = defaultdict(list)
+                    invalid_modes = {
+                        '', 'UNKNOWN', 'FALLBACK', 'TICK', 'FSK', 'CHU_FSK',
+                        'TEC_VALIDATED', 'TEC_UNREALISTIC', 'TEC_POOR_FIT'
+                    }
+                    for m in station_meas:
+                        base_mode = (m.propagation_mode or '').split('+')[0].strip().upper()
+                        if base_mode in invalid_modes:
+                            continue
+                        mode_groups[base_mode].append(m)
+
+                    if mode_groups:
+                        dominant_mode, dominant_meas = max(
+                            mode_groups.items(),
+                            key=lambda kv: len(kv[1])
+                        )
+                        if len(dominant_meas) >= 2:
+                            station_meas = dominant_meas
+                            logger.debug(
+                                f"TEC mode gate for {station}: using {len(station_meas)} "
+                                f"measurements from dominant mode {dominant_mode}"
+                            )
+                        else:
+                            logger.info(
+                                f"Skipping TEC for {station}: no dominant propagation mode "
+                                f"with >=2 measurements"
+                            )
+                            continue
+
                     # Prepare input for estimator
                     tec_input = []
                     for m in station_meas:
@@ -3473,7 +3504,8 @@ class MultiBroadcastFusion:
                             tec_input.append({
                                 'frequency_hz': m.frequency_mhz * 1e6,
                                 'toa_ms': toa_ms,
-                                'uncertainty_ms': getattr(m, 'tof_uncertainty_ms', None) or max(0.1, 1.0 / max(0.001, m.confidence))
+                                'uncertainty_ms': getattr(m, 'tof_uncertainty_ms', None) or max(0.1, 1.0 / max(0.001, m.confidence)),
+                                'mode_confidence': m.l2_model_confidence,
                             })
                     
                     # DIAGNOSTIC: Log the raw inputs to the TEC estimator to trace "0.0 TEC" issue

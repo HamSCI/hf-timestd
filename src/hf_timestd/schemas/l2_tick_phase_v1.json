@@ -125,5 +125,11 @@
             "required": false,
             "description": "Processing software version"
         }
-    ]
+    ],
+    "quality_flags": {
+        "GOOD": "High-SNR coherent phase window with stable correlation peak",
+        "MARGINAL": "Usable phase window with reduced SNR or coherence",
+        "BAD": "Low-quality phase window likely affected by noise or interference",
+        "MISSING": "No valid phase estimate available for the window"
+    }
 }

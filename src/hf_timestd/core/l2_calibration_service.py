@@ -335,9 +335,12 @@ class L2CalibrationService:
                 frequency_mhz=frequency_mhz
             )
             
-            # D_clock is raw_toa_ms directly (already timing_error)
+            # L1 raw_toa_ms currently carries timing error (D_clock), not absolute ToA.
+            # Reconstruct an absolute arrival time for L2 schema consistency:
+            #   raw_arrival_time_ms = d_clock_ms + propagation_delay_ms
             propagation_delay_ms = mode_result.calculated_delay_ms
             d_clock_ms = raw_toa_ms
+            raw_arrival_time_ms = d_clock_ms + propagation_delay_ms
             
             # Calculate uncertainty budget (ISO GUM)
             uncertainty_budget = self._calculate_uncertainty(
@@ -369,7 +372,7 @@ class L2CalibrationService:
                 
                 # Timing
                 tone_detected=True,
-                raw_arrival_time_ms=raw_toa_ms,
+                raw_arrival_time_ms=raw_arrival_time_ms,
                 clock_offset_ms=d_clock_ms,
                 
                 # Uncertainty (ISO GUM)

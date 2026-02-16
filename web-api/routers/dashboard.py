@@ -192,8 +192,8 @@ async def get_24h_broadcast_data(
                     snr = m.get('snr_db')
                     mode = m.get('propagation_mode', 'UNKNOWN')
                     
-                    # raw_arrival_time_ms is already D_clock = observed_toa - expected_delay
-                    timing_error = m.get('raw_arrival_time_ms')
+                    # L2 timing error observable is clock_offset_ms (D_clock)
+                    timing_error = m.get('clock_offset_ms')
                     
                     # Append to measurements
                     bd = broadcasts_data[broadcast_id]['measurements']
@@ -435,8 +435,8 @@ async def get_24h_timing_error(
                     else:
                         continue
                     
-                    # raw_arrival_time_ms is already D_clock = observed_toa - expected_delay
-                    timing_error = m.get('raw_arrival_time_ms')
+                    # L2 timing error observable is clock_offset_ms (D_clock)
+                    timing_error = m.get('clock_offset_ms')
                     if timing_error is None:
                         continue
                     

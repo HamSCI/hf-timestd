@@ -304,6 +304,12 @@ class PhysicsFusionService:
             result = self.tec_estimator.estimate_tec(observations, station, minute_timestamp)
             
             if result:
+                if not (0.0 < result.tec_u <= 200.0):
+                    logger.warning(
+                        f"TEC out of bounds for {station} ({mode}): {result.tec_u:.2f} TECU - skipping"
+                    )
+                    continue
+
                 # Attach mode to result for writing
                 result.propagation_mode = mode
                 tec_estimates[(station, mode)] = result
