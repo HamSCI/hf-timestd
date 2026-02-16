@@ -10,24 +10,107 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: TEC QUALITY + L2 SCHEMA
+## 📋 NEXT SESSION: METROLOGY SERVICE ACCURACY SCRUTINY
 
-**Objective:** Two issues remain from the dashboard/tick_timing investigation:
+**Objective:** Achieve sub-millisecond UTC accuracy (0.5–1 ms target) through systematic metrology service review.
 
-### Issue 1: TEC outliers (max 3930 TECU)
+### Background
 
-The TEC pipeline produces physically unreasonable values. Today's data: 35.9% in 1–100 TECU range, high-confidence subset includes values up to 3662 TECU. CHU shows good diurnal pattern (26→93 TECU), but WWV/WWVH/BPM have frequent negative-slope rejections (mode mixing).
+The system operates at **Timing Authority Level L5** (GPSDO-governed RX888 + GPS+PPS local). Theoretical error budget predicts **0.5–1.7 ms fused uncertainty** (10 min, 4 stations), but observed performance shows **2–5 ms** with cross-station disagreement of 18–36 ms (5–10 ms excluding BPM).
 
-**Actions:**
-- Add TEC validation bounds (cap at 200 TECU for mid-latitude)
-- Investigate mode mixing: shared-frequency D_clock values may combine 1F and 2F arrivals
-- Check if `propagation_mode` field is being used to gate TEC inputs
+### Gap Analysis
 
-### Issue 2: L2 schema vs data inconsistency
+The ~2–4× gap between theoretical and observed accuracy suggests systematic issues in the measurement chain:
 
-The L2 schema says `clock_offset_ms = raw_arrival_time_ms - propagation_delay_ms`, but `l2_calibration_service.py:340` writes `d_clock_ms = raw_toa_ms` (which IS already D_clock from L1) to `clock_offset_ms`, and the same value to `raw_arrival_time_ms`. Both fields are identical in the HDF5 data. Either:
-- Fix the L2 writer to store actual raw arrival time in `raw_arrival_time_ms` and computed D_clock in `clock_offset_ms`
-- Or update the schema documentation to reflect reality
+| Component | Theoretical | Observed | Gap |
+|-----------|-------------|----------|-----|
+| Single measurement | 3–15 ms (σ_iono) | 4–7 ms per cycle | ✓ Within bounds |
+| Fused (10 min) | 0.5–1.7 ms | 2–4 ms | **2–4× worse** |
+| Cross-station | Should cancel | 5–10 ms (excl. BPM) | **Systematic bias** |
+| Hardware calibration | Should converge | ~40 ms learned offset | **Large constant** |
+
+### Diagnostic Priorities
+
+**Priority 1: Timing Error Definition Audit**
+- `metrology_engine.py:865`: `timing_error_ms = raw_arrival_ms - expected_delay_ms`
+- Verify `expected_delay_ms` includes ALL systematic delays:
+  - Transmitter offset (e.g., CHU second 1 = +1000ms)
+  - Matched filter group delay (~0.4ms for 800ms template)
+  - ADC pipeline latency
+  - Ionospheric model prediction
+- Check if `raw_arrival_ms` is truly "raw" or already has corrections applied
+- Trace through L1→L2→Fusion to confirm D_clock semantics are consistent
+
+**Priority 2: RTP-to-UTC Mapping Precision**
+- `METROLOGY.md:772` notes RTP quantization: 1 tick = 50 µs at 20 kHz
+- Radiod's PPS-to-RTP alignment may introduce 0.01–0.05 ms jitter
+- Verify `buffer_timing.sample_to_utc()` and `utc_to_sample()` are inverses
+- Check for off-by-one errors in sample indexing (common source of ~50 µs bias)
+
+**Priority 3: Matched Filter Group Delay**
+- 800ms WWV/WWVH template → ~400ms center → group delay bias?
+- Onset detection: does it find the rising edge or the template center?
+- Sub-sample interpolation: parabolic fit assumes symmetric peak (valid?)
+- Cross-check: tick ensemble (55 edges/min) vs minute marker correlation
+
+**Priority 4: Hardware Calibration Convergence**
+- `multi_broadcast_fusion.py`: `hardware_offset_ms` learns constant receiver delays
+- Observed ~40ms mean offset — is this physical or algorithmic?
+- Check if calibration is per-station or per-broadcast (should be per-broadcast for frequency-dependent delays)
+- Verify calibration doesn't absorb ionospheric signal (circular calibration bug was fixed 2026-02-06, but check for regressions)
+
+**Priority 5: Ionospheric Model Accuracy**
+- `HFPropagationModel` predicts delays, but are predictions accurate?
+- Compare predicted vs observed delays for each station/frequency
+- Check if multi-hop mode predictions match reality (2F/3F at night)
+- Verify TEC-based correction is applied correctly (40.3·sTEC/(c·f²))
+
+**Priority 6: Multi-Station Fusion Weights**
+- Are weights truly inverse-variance? Check `_calculate_weights()` in fusion
+- Verify mode confidence is propagated correctly
+- Check if BPM weight reduction (30%) is appropriate or too aggressive
+- Confirm Kalman filter process noise isn't too large (was 1e-10, increased to 0.01 in 2026-02-06 fix)
+
+**Priority 7: Cross-Station Systematic Bias**
+- 5–10 ms disagreement between CHU/WWV/WWVH suggests path-dependent bias
+- Could be unmodeled ionospheric tilt (E-W gradient)
+- Could be station-specific transmitter delays (not in NIST spec but may exist)
+- Could be receiver antenna pattern (directional gain/phase)
+
+### Theoretical Foundation Review
+
+**Key Equation:** For a single HF timing measurement:
+```
+σ_total² = σ_tx² + σ_iono² + σ_mode² + σ_det² + σ_adc² + σ_rtp² + σ_auth²
+         ≈ 0² + (3–15)² + (1–5)² + 0.05² + 0.001² + 0.05² + 0.01²
+         ≈ σ_iono² + σ_mode²  (other terms negligible)
+```
+
+**Multi-station fusion:** With N independent measurements:
+```
+σ_fused = σ_single / √N
+```
+For 4 stations × 10 min × ~2 meas/min = ~75 measurements:
+```
+σ_fused ≈ 10 ms / √75 ≈ 1.15 ms
+```
+
+**But:** This assumes measurements are truly independent and unbiased. Systematic errors (calibration bias, mode mixing, RTP quantization) do NOT average down.
+
+**Achievable Target:** At L5, with perfect implementation:
+- Single measurement: 3–15 ms (ionospheric floor)
+- Fused (10 min, 4 stations): **0.5–1.7 ms** (theory)
+- Fused (1 hour, 4 stations): **0.2–0.7 ms** (theory)
+
+**Observed Gap:** The 2–5 ms observed suggests ~1–4 ms of systematic error is present.
+
+### Methodology
+
+1. **Trace a single measurement end-to-end** — Pick one CHU detection, follow it through metrology_engine → L1 → L2 → fusion → chrony. Verify every timestamp conversion.
+2. **Compare theory vs observation** — For each error source in the budget, measure the actual contribution from production data.
+3. **Isolate systematic vs random** — Plot D_clock vs time for each station. Systematic bias shows as offset; random shows as scatter.
+4. **Cross-validate with tick ensemble** — The 55-edge/min tick timing is independent of minute marker correlation. Disagreement reveals algorithmic issues.
+5. **Simplify to find the bug** — If theory says 0.5 ms is achievable but we see 2 ms, something is wrong. Remove complexity until the discrepancy disappears.
 
 ### Service Inventory
 
@@ -56,6 +139,23 @@ The L2 schema says `clock_offset_ms = raw_arrival_time_ms - propagation_delay_ms
 ---
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
+
+### TEC Outliers + L2 Schema Alignment (2026-02-15)
+
+**Root causes:**
+1. **TEC mode mixing:** Shared-frequency measurements combined 1F and 2F arrivals, corrupting 1/f² fit
+2. **L2 field semantics:** Both `raw_arrival_time_ms` and `clock_offset_ms` written with same value (D_clock)
+
+**Fixes:**
+- Added dominant-mode gating in fusion TEC solver (only use measurements from same propagation mode)
+- Added hard TEC bounds (0 < TEC ≤ 200 TECU) in physics service
+- L2 writer now reconstructs absolute `raw_arrival_time_ms = d_clock + propagation_delay`
+- Dashboard switched to read `clock_offset_ms` for D_clock (not `raw_arrival_time_ms`)
+- Added missing `quality_flags` to `l2_tick_phase_v1.json` schema
+
+**Validation:** 28/28 targeted tests passing. TEC outliers now bounded. L2 schema consistent with documentation.
+
+## ✅ RESOLVED IN PREVIOUS SESSIONS (EARLIER)
 
 ### Tick Timing Reference Frame Fix (2026-02-15)
 
