@@ -10,107 +10,112 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: METROLOGY SERVICE ACCURACY SCRUTINY
+## 📋 NEXT SESSION: GRAPE MODULE DEBUGGING
 
-**Objective:** Achieve sub-millisecond UTC accuracy (0.5–1 ms target) through systematic metrology service review.
+**Objective:** Restore GRAPE daily processing pipeline — last successful upload was 2026-02-13.
+
+### Problem Statement
+
+The GRAPE (Global Radio Archive for Propagation Experiments) module has stopped producing spectrograms and uploading data to PSWS (Propagation Studies Web Server). Last successful processing was for 2026-02-13. The pipeline should run daily at 01:00 UTC via `grape-daily.timer`.
 
 ### Background
 
-The system operates at **Timing Authority Level L5** (GPSDO-governed RX888 + GPS+PPS local). Theoretical error budget predicts **0.5–1.7 ms fused uncertainty** (10 min, 4 stations), but observed performance shows **2–5 ms** with cross-station disagreement of 18–36 ms (5–10 ms excluding BPM).
+**GRAPE Pipeline Overview:**
+```
+grape daily → orchestrated pipeline with validation gates:
+  1. Decimate raw buffers (24 kHz → 10 Hz)
+  2. Validate decimated files (gap detection, continuity)
+  3. Generate spectrograms (9 channels: CHU_3330, CHU_7850, CHU_14670, SHARED_5000, SHARED_10000, SHARED_15000, WWV_20000, WWV_25000, BPM_5000)
+  4. Validate spectrograms (file existence, size checks)
+  5. Package for upload (tar.gz with metadata)
+  6. Upload to PSWS server
+```
 
-### Gap Analysis
+**Key Files:**
+- **Main module**: `src/hf_timestd/grape/` (daily.py, decimate.py, spectrogram.py, upload.py, validate.py)
+- **CLI entry**: `src/hf_timestd/__main__.py` → `grape daily` command
+- **Systemd**: `systemd/grape-daily.service` + `systemd/grape-daily.timer`
+- **Documentation**: `docs/GRAPE_DAILY_PROCESSING.md`
 
-The ~2–4× gap between theoretical and observed accuracy suggests systematic issues in the measurement chain:
-
-| Component | Theoretical | Observed | Gap |
-|-----------|-------------|----------|-----|
-| Single measurement | 3–15 ms (σ_iono) | 4–7 ms per cycle | ✓ Within bounds |
-| Fused (10 min) | 0.5–1.7 ms | 2–4 ms | **2–4× worse** |
-| Cross-station | Should cancel | 5–10 ms (excl. BPM) | **Systematic bias** |
-| Hardware calibration | Should converge | ~40 ms learned offset | **Large constant** |
+**Data Paths:**
+- Raw buffers: `/var/lib/timestd/raw/YYYY/MM/DD/`
+- Decimated: `/var/lib/timestd/grape/decimated/YYYY/MM/DD/`
+- Spectrograms: `/var/lib/timestd/grape/spectrograms/YYYY/MM/DD/`
+- Packages: `/var/lib/timestd/grape/packages/YYYY/MM/DD/`
 
 ### Diagnostic Priorities
 
-**Priority 1: Timing Error Definition Audit**
-- `metrology_engine.py:865`: `timing_error_ms = raw_arrival_ms - expected_delay_ms`
-- Verify `expected_delay_ms` includes ALL systematic delays:
-  - Transmitter offset (e.g., CHU second 1 = +1000ms)
-  - Matched filter group delay (~0.4ms for 800ms template)
-  - ADC pipeline latency
-  - Ionospheric model prediction
-- Check if `raw_arrival_ms` is truly "raw" or already has corrections applied
-- Trace through L1→L2→Fusion to confirm D_clock semantics are consistent
+**Priority 1: Service Execution Status**
+- Check if `grape-daily.timer` is active and triggering
+- Review `journalctl -u grape-daily.service` for recent runs
+- Verify timer schedule (should be 01:00 UTC daily)
+- Check for service failures or timeouts
 
-**Priority 2: RTP-to-UTC Mapping Precision**
-- `METROLOGY.md:772` notes RTP quantization: 1 tick = 50 µs at 20 kHz
-- Radiod's PPS-to-RTP alignment may introduce 0.01–0.05 ms jitter
-- Verify `buffer_timing.sample_to_utc()` and `utc_to_sample()` are inverses
-- Check for off-by-one errors in sample indexing (common source of ~50 µs bias)
+**Priority 2: Pipeline Stage Failures**
+- Identify which stage is failing (decimate, spectrogram, validate, upload)
+- Check for error messages in service logs
+- Verify input data exists (raw buffers for recent dates)
+- Check output directories for partial results
 
-**Priority 3: Matched Filter Group Delay**
-- 800ms WWV/WWVH template → ~400ms center → group delay bias?
-- Onset detection: does it find the rising edge or the template center?
-- Sub-sample interpolation: parabolic fit assumes symmetric peak (valid?)
-- Cross-check: tick ensemble (55 edges/min) vs minute marker correlation
+**Priority 3: File System Issues**
+- Verify `/var/lib/timestd/grape/` directory structure exists
+- Check disk space availability
+- Verify permissions (timestd user must have write access)
+- Look for orphaned lock files or incomplete writes
 
-**Priority 4: Hardware Calibration Convergence**
-- `multi_broadcast_fusion.py`: `hardware_offset_ms` learns constant receiver delays
-- Observed ~40ms mean offset — is this physical or algorithmic?
-- Check if calibration is per-station or per-broadcast (should be per-broadcast for frequency-dependent delays)
-- Verify calibration doesn't absorb ionospheric signal (circular calibration bug was fixed 2026-02-06, but check for regressions)
+**Priority 4: Dependency Failures**
+- Verify required Python packages (numpy, scipy, matplotlib, h5py)
+- Check for missing system dependencies
+- Verify network connectivity for PSWS uploads
+- Check PSWS credentials/authentication
 
-**Priority 5: Ionospheric Model Accuracy**
-- `HFPropagationModel` predicts delays, but are predictions accurate?
-- Compare predicted vs observed delays for each station/frequency
-- Check if multi-hop mode predictions match reality (2F/3F at night)
-- Verify TEC-based correction is applied correctly (40.3·sTEC/(c·f²))
+**Priority 5: Data Validation Gates**
+- Review validation criteria in `validate.py`
+- Check if validation is too strict (rejecting valid data)
+- Look for gap detection false positives
+- Verify continuity checks aren't failing on legitimate data
 
-**Priority 6: Multi-Station Fusion Weights**
-- Are weights truly inverse-variance? Check `_calculate_weights()` in fusion
-- Verify mode confidence is propagated correctly
-- Check if BPM weight reduction (30%) is appropriate or too aggressive
-- Confirm Kalman filter process noise isn't too large (was 1e-10, increased to 0.01 in 2026-02-06 fix)
+**Priority 6: Spectrogram Generation**
+- Check matplotlib backend configuration
+- Verify spectrogram parameters (FFT size, overlap, colormap)
+- Look for memory issues during processing
+- Check for corrupted decimated input files
 
-**Priority 7: Cross-Station Systematic Bias**
-- 5–10 ms disagreement between CHU/WWV/WWVH suggests path-dependent bias
-- Could be unmodeled ionospheric tilt (E-W gradient)
-- Could be station-specific transmitter delays (not in NIST spec but may exist)
-- Could be receiver antenna pattern (directional gain/phase)
+**Priority 7: Upload Mechanism**
+- Verify PSWS server endpoint is reachable
+- Check authentication credentials
+- Review upload protocol (HTTP POST, FTP, rsync?)
+- Look for network timeouts or rate limiting
 
-### Theoretical Foundation Review
+### Known Issues from Previous Sessions
 
-**Key Equation:** For a single HF timing measurement:
-```
-σ_total² = σ_tx² + σ_iono² + σ_mode² + σ_det² + σ_adc² + σ_rtp² + σ_auth²
-         ≈ 0² + (3–15)² + (1–5)² + 0.05² + 0.001² + 0.05² + 0.01²
-         ≈ σ_iono² + σ_mode²  (other terms negligible)
-```
+**Gap Samples Unit Mismatch (Fixed 2026-02-14):**
+- `gap_samples` was in audio samples but compared against 10 Hz decimated samples
+- Fixed in validation logic
+- Should not be recurring, but verify fix is deployed
 
-**Multi-station fusion:** With N independent measurements:
-```
-σ_fused = σ_single / √N
-```
-For 4 stations × 10 min × ~2 meas/min = ~75 measurements:
-```
-σ_fused ≈ 10 ms / √75 ≈ 1.15 ms
-```
+**9/9 Channels Verified (2026-02-14):**
+- All channels were processing and uploading successfully
+- This confirms the pipeline was working recently
+- Something changed between 2026-02-14 and now
 
-**But:** This assumes measurements are truly independent and unbiased. Systematic errors (calibration bias, mode mixing, RTP quantization) do NOT average down.
+### Investigation Strategy
 
-**Achievable Target:** At L5, with perfect implementation:
-- Single measurement: 3–15 ms (ionospheric floor)
-- Fused (10 min, 4 stations): **0.5–1.7 ms** (theory)
-- Fused (1 hour, 4 stations): **0.2–0.7 ms** (theory)
+1. **Check timer status**: `systemctl status grape-daily.timer` — is it running?
+2. **Review recent logs**: `journalctl -u grape-daily.service --since "2026-02-14"` — what errors appear?
+3. **Manual test run**: `sudo -u timestd /opt/hf-timestd/venv/bin/python -m hf_timestd grape daily --date 2026-02-14` — does it work manually?
+4. **Check data availability**: `ls -lh /var/lib/timestd/raw/2026/02/15/` — are raw buffers being written?
+5. **Verify decimation**: Check if decimated files exist for recent dates
+6. **Test spectrogram**: Try generating one spectrogram manually to isolate the failure point
+7. **Check upload logs**: Look for PSWS server errors or authentication failures
 
-**Observed Gap:** The 2–5 ms observed suggests ~1–4 ms of systematic error is present.
+### Success Criteria
 
-### Methodology
-
-1. **Trace a single measurement end-to-end** — Pick one CHU detection, follow it through metrology_engine → L1 → L2 → fusion → chrony. Verify every timestamp conversion.
-2. **Compare theory vs observation** — For each error source in the budget, measure the actual contribution from production data.
-3. **Isolate systematic vs random** — Plot D_clock vs time for each station. Systematic bias shows as offset; random shows as scatter.
-4. **Cross-validate with tick ensemble** — The 55-edge/min tick timing is independent of minute marker correlation. Disagreement reveals algorithmic issues.
-5. **Simplify to find the bug** — If theory says 0.5 ms is achievable but we see 2 ms, something is wrong. Remove complexity until the discrepancy disappears.
+1. **Pipeline runs successfully** — `grape daily` completes without errors for recent dates
+2. **Spectrograms generated** — All 9 channels produce valid PNG files
+3. **Data uploaded** — PSWS server receives and acknowledges uploads
+4. **Timer operational** — Daily processing resumes automatically at 01:00 UTC
+5. **Validation passes** — No false positives rejecting valid data
 
 ### Service Inventory
 
@@ -139,6 +144,30 @@ For 4 stations × 10 min × ~2 meas/min = ~75 measurements:
 ---
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS
+
+### A/B Decoder Comparison System (2026-02-17)
+
+**Root causes:**
+1. **Critical indentation bug** in `tick_matched_filter.py`: Result handling was outside the for loop, causing only the last window to be processed instead of all 55+ windows per minute. This made `valid_windows` always 0 or 1.
+2. **Missing `TickPLLDecoder` class**: The PLL decoder file had implementation classes but was missing the wrapper class that `metrology_engine.py` expected.
+3. **Parameter signature mismatch**: `TickPLLDecoder.__init__()` needed `alpha` and `max_missed` parameters.
+4. **Missing `d_clock_ms` field**: `MinutePLLAnalysis` dataclass lacked the field needed for comparison tracking.
+
+**Fixes:**
+- Fixed indentation in `tick_matched_filter.py` (lines 944-962) — moved result handling inside the for loop
+- Created `TickPLLDecoder` wrapper class with proper interface matching `metrology_engine.py` expectations
+- Added `d_clock_ms` field to `MinutePLLAnalysis` dataclass
+- Added decoder comparison API endpoint (`/decoder-comparison/status`) and UI
+- Created `DecoderConfig` singleton for shared state between API and metrology service
+
+**Validation:** Both decoders now operational and detecting ticks:
+- **Matched Filter**: 50+ windows/min, SNR 16-34 dB (WWV: 33.8dB, WWVH: 30.2dB)
+- **PLL Flywheel**: Successfully locking onto WWV (1000 Hz) and WWVH (1200 Hz) signals
+- A/B testing enabled, comparison metrics will populate as data accumulates
+
+**Files modified:** `tick_matched_filter.py`, `tick_pll_decoder.py`, `metrology_engine.py`, `decoder_config.py` (new), `decoder_comparison.py` (new), `decoder-comparison.html` (new)
+
+**Technical insight:** The indentation bug was particularly insidious because no exceptions were raised, the code appeared to run normally, and debug logs weren't visible at INFO level in production. The last window often had valid detections, so `valid_windows=1` seemed plausible.
 
 ### TEC Outliers + L2 Schema Alignment (2026-02-15)
 
