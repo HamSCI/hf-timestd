@@ -102,6 +102,9 @@ class DecimationPipeline:
         samples_generated = 0
         prev_minute_ts = None
         
+        # Import gc for aggressive memory management
+        import gc
+        
         # Process minute by minute, but with continuous decimator state
         for minute_ts, samples, meta in reader.read_day(date_str):
             decimated_chunk = None
@@ -165,8 +168,26 @@ class DecimationPipeline:
                 if success:
                     minutes_processed += 1
                     samples_generated += len(decimated_chunk)
+            
+            # Explicitly delete sample arrays to free memory immediately
+            del samples
+            del decimated_chunk
+            
+            # Force garbage collection after EVERY minute to prevent memory accumulation
+            # from decompressed buffers. This is aggressive but necessary for compressed data.
+            # Python's GC cannot keep up with 400 minutes of decompression otherwise.
+            gc.collect()
         
         # Flush accumulated metadata to disk (single JSON write instead of 1440)
         output_buffer.flush_metadata()
+        
+        # Explicitly clean up to prevent memory accumulation across channels
+        del reader
+        del output_buffer
+        del decimator
+        
+        # Force garbage collection to release memory before next channel
+        import gc
+        gc.collect()
         
         logger.info(f"  Completed {channel_name}: {minutes_processed} minutes, {samples_generated} samples")

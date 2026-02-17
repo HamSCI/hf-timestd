@@ -102,8 +102,10 @@ class RawBinaryReader:
         bin_path = day_dir / f"{base_name}.bin"
         if bin_path.exists():
             try:
-                # Use memmap for efficiency with uncompressed files
-                samples = np.memmap(bin_path, dtype=np.complex64, mode='r')
+                # Use memmap for efficient reading, but copy to avoid memory accumulation
+                mm = np.memmap(bin_path, dtype=np.complex64, mode='r')
+                samples = np.array(mm, dtype=np.complex64)
+                del mm  # Explicitly release memmap to prevent memory leak
             except Exception as e:
                 logger.error(f"Error reading {bin_path}: {e}")
 
@@ -117,6 +119,7 @@ class RawBinaryReader:
                         dctx = zstd.ZstdDecompressor()
                         data = dctx.decompress(f.read())
                         samples = np.frombuffer(data, dtype=np.complex64).copy()
+                        del data  # Immediately release decompressed buffer
                 except ImportError:
                     logger.warning("zstandard module not installed - cannot read .zst files")
                 except Exception as e:
@@ -131,6 +134,7 @@ class RawBinaryReader:
                     with open(lz4_path, 'rb') as f:
                         data = lz4.frame.decompress(f.read())
                         samples = np.frombuffer(data, dtype=np.complex64).copy()
+                        del data  # Immediately release decompressed buffer
                 except ImportError:
                     logger.warning("lz4 module not installed - cannot read .lz4 files")
                 except Exception as e:
