@@ -10,254 +10,231 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: GRAPE MODULE DEBUGGING
+## 📋 NEXT SESSION: PHYSICS MODULE CRITICAL REVIEW
 
-**Objective:** Restore GRAPE daily processing pipeline — last successful upload was 2026-02-13.
+**Objective:** Critically review the physics module of hf-timestd. The physics dashboard and API endpoints currently lack focus — they display many metrics but do not clearly answer the fundamental question: *"Does this instrument produce scientifically useful ionospheric measurements?"* The review should simplify and focus on **at most 4 high-yield demonstrations** of the instrument's utility as an ionospheric physics tool.
 
-### Problem Statement
+### The Two Concerns of hf-timestd
 
-The GRAPE (Global Radio Archive for Propagation Experiments) module has stopped producing spectrograms and uploading data to PSWS (Propagation Studies Web Server). Last successful processing was for 2026-02-13. The pipeline should run daily at 01:00 UTC via `grape-daily.timer`.
+1. **UTC Reconstruction (Fusion mode):** Reconstruct UTC as accurately as possible when GPS+PPS is lost. This is an ongoing implementation effort — not the focus of this session.
+2. **Ionospheric Physics (RTP mode):** While GPS+PPS provides sub-microsecond UTC accuracy (Lock Tiers L4–L6), use that precision to make interesting physics observations about the ionosphere. **This is the focus of this session.**
 
-### Background
+### System Context
 
-**GRAPE Pipeline Overview:**
-```
-grape daily → orchestrated pipeline with validation gates:
-  1. Decimate raw buffers (24 kHz → 10 Hz)
-  2. Validate decimated files (gap detection, continuity)
-  3. Generate spectrograms (9 channels: CHU_3330, CHU_7850, CHU_14670, SHARED_5000, SHARED_10000, SHARED_15000, WWV_20000, WWV_25000, BPM_5000)
-  4. Validate spectrograms (file existence, size checks)
-  5. Package for upload (tar.gz with metadata)
-  6. Upload to PSWS server
-```
+- **Receiver:** GPSDO-locked RX888 SDR via KA9Q-radio (`radiod`), RTP-timestamped IQ at 24 kHz/channel
+- **Stations:** WWV (2.5–25 MHz), WWVH (2.5–15 MHz), CHU (3.33, 7.85, 14.67 MHz), BPM (2.5–15 MHz)
+- **Geometry:** 17 broadcasts × 9 frequencies × 4 stations = multi-path, multi-frequency ionospheric sounding
+- **Location:** EM38 (central Missouri, ~38.9°N, ~92.1°W)
+- **Timing authority:** GPS+PPS via radiod RTP chain (Lock Tier L6 — authoritative)
 
-**Key Files:**
-- **Main module**: `src/hf_timestd/grape/` (daily.py, decimate.py, spectrogram.py, upload.py, validate.py)
-- **CLI entry**: `src/hf_timestd/__main__.py` → `grape daily` command
-- **Systemd**: `systemd/grape-daily.service` + `systemd/grape-daily.timer`
-- **Documentation**: `docs/GRAPE_DAILY_PROCESSING.md`
+### What the Instrument Actually Produces (Verified 2026-02-17)
 
-**Data Paths:**
-- Raw buffers: `/var/lib/timestd/raw/YYYY/MM/DD/`
-- Decimated: `/var/lib/timestd/grape/decimated/YYYY/MM/DD/`
-- Spectrograms: `/var/lib/timestd/grape/spectrograms/YYYY/MM/DD/`
-- Packages: `/var/lib/timestd/grape/packages/YYYY/MM/DD/`
+| Data Product | Status | Evidence |
+|---|---|---|
+| **Raw timing measurements** | ✅ 15K/day, 4 stations, 7 freqs | `/api/propagation/timeline` returns 14,953 measurements/24h |
+| **SNR per broadcast** | ✅ Real, varies with conditions | Plotted on physics dashboard |
+| **Propagation mode labels** | ⚠️ Noisy — phantom 4F2 at night | BPM 2.5 MHz labeled "4F2" at 07:00 UTC (nighttime) |
+| **Mode change events** | ✅ Detected, logged | `/api/physics/events/recent` shows mode transitions |
+| **TEC (L3 science HDF5)** | ❌ Broken — alternates between 2 constants | `tec_tecu` = {86.18, 34.51} repeating; `frequencies_mhz` = "0.00,0.00,0.00" |
+| **TEC (API)** | ❌ Returns "no_data" or stale model values | `/api/tec/current` → `"status": "no_data"` |
+| **Scintillation (S4, σ_φ)** | ❌ All nulls | `/api/physics/scintillation/paths` → `s4_mean: null` for all stations |
+| **Physics `/latest`** | ❌ Empty | `utc_offset_ms: null`, `stations_used: ""` |
+| **Reanalysis** | ❌ Stale | Last ran 2026-02-13, propagation_stats 4 days old |
+| **Doppler** | ❓ Untested | HDF5 dirs exist under `doppler/` but not exposed via API |
+| **D_clock (timing residuals)** | ✅ Real, sub-ms | Edge ensemble: ±3ms, PLL: ±1ms (A/B comparison verified) |
+| **GRAPE spectrograms** | ✅ Operational | 9/9 channels, daily upload to PSWS |
 
-### Diagnostic Priorities
+### The Core Problem
 
-**Priority 1: Service Execution Status**
-- Check if `grape-daily.timer` is active and triggering
-- Review `journalctl -u grape-daily.service` for recent runs
-- Verify timer schedule (should be 01:00 UTC daily)
-- Check for service failures or timeouts
+The physics module has many implemented *code paths* but few produce *validated, interpretable output*. The dashboard shows SNR scatter plots and empty cards. The TEC pipeline writes 93K records to HDF5 but the values are model constants, not measurements. Scintillation indices are all null. The physics `/latest` endpoint returns empty fields.
 
-**Priority 2: Pipeline Stage Failures**
-- Identify which stage is failing (decimate, spectrogram, validate, upload)
-- Check for error messages in service logs
-- Verify input data exists (raw buffers for recent dates)
-- Check output directories for partial results
+**PHYSICS.md** (1074 lines) documents 10+ capabilities with ✅ markers, but the live system contradicts many of these claims. The HamSCI abstract (`docs/HAMSCI_2026_WORKSHOP_ABSTRACT.md`) promises capabilities that need honest validation.
 
-**Priority 3: File System Issues**
-- Verify `/var/lib/timestd/grape/` directory structure exists
-- Check disk space availability
-- Verify permissions (timestd user must have write access)
-- Look for orphaned lock files or incomplete writes
+The goal of this review is NOT to fix everything, but to identify the **4 highest-yield demonstrations** that would prove the instrument works as a physics tool, determine what's blocking each one, and focus implementation effort there.
 
-**Priority 4: Dependency Failures**
-- Verify required Python packages (numpy, scipy, matplotlib, h5py)
-- Check for missing system dependencies
-- Verify network connectivity for PSWS uploads
-- Check PSWS credentials/authentication
+---
 
-**Priority 5: Data Validation Gates**
-- Review validation criteria in `validate.py`
-- Check if validation is too strict (rejecting valid data)
-- Look for gap detection false positives
-- Verify continuity checks aren't failing on legitimate data
+## 🎯 THE 4 HIGH-YIELD DEMONSTRATIONS
 
-**Priority 6: Spectrogram Generation**
-- Check matplotlib backend configuration
-- Verify spectrogram parameters (FFT size, overlap, colormap)
-- Look for memory issues during processing
-- Check for corrupted decimated input files
+Each demonstration should be achievable with data the instrument already collects. The question is whether the processing pipeline and visualization correctly extract and present the physics.
 
-**Priority 7: Upload Mechanism**
-- Verify PSWS server endpoint is reachable
-- Check authentication credentials
-- Review upload protocol (HTTP POST, FTP, rsync?)
-- Look for network timeouts or rate limiting
+### Demo 1: Diurnal D_clock Variation (The Raw Observable)
 
-### Known Issues from Previous Sessions
+**What it proves:** The instrument measures real ionospheric group delay, not noise.
 
-**Gap Samples Unit Mismatch (Fixed 2026-02-14):**
-- `gap_samples` was in audio samples but compared against 10 Hz decimated samples
-- Fixed in validation logic
-- Should not be recurring, but verify fix is deployed
+**The physics:** D_clock = observed_ToA − expected_geometric_delay. During daytime, ionospheric electron density increases, adding group delay (D_clock increases). At night, it decreases. This diurnal pattern is the most basic proof that the instrument sees the ionosphere.
 
-**9/9 Channels Verified (2026-02-14):**
-- All channels were processing and uploading successfully
-- This confirms the pipeline was working recently
-- Something changed between 2026-02-14 and now
+**What should be visible:** A 24-hour time series of D_clock for a single station (e.g., WWV 10 MHz) should show:
+- Smooth increase after sunrise (~12:00–14:00 UTC for Missouri)
+- Peak in afternoon (~18:00–20:00 UTC)
+- Decrease after sunset (~00:00–02:00 UTC)
+- Amplitude: ~2–10 ms variation (depending on frequency and path)
 
-### Investigation Strategy
+**Current state:** D_clock is computed correctly in the primary timing path (edge detector → L1 → L2 `clock_offset/`). The A/B decoder comparison shows edge ensemble at ±3ms and PLL at ±1ms — both physically plausible. But the physics dashboard does NOT plot D_clock vs time. The "Measurement History" plot shows only SNR.
 
-1. **Check timer status**: `systemctl status grape-daily.timer` — is it running?
-2. **Review recent logs**: `journalctl -u grape-daily.service --since "2026-02-14"` — what errors appear?
-3. **Manual test run**: `sudo -u timestd /opt/hf-timestd/venv/bin/python -m hf_timestd grape daily --date 2026-02-14` — does it work manually?
-4. **Check data availability**: `ls -lh /var/lib/timestd/raw/2026/02/15/` — are raw buffers being written?
-5. **Verify decimation**: Check if decimated files exist for recent dates
-6. **Test spectrogram**: Try generating one spectrogram manually to isolate the failure point
-7. **Check upload logs**: Look for PSWS server errors or authentication failures
+**Investigation targets:**
+- `web-api/routers/physics.py` — does any endpoint serve D_clock time series?
+- `web-api/routers/dashboard.py` — the 24h dashboard was fixed to show timing_error; does the physics page use the same data?
+- L2 HDF5 `clock_offset/` directories — do they contain real D_clock values?
+- `/api/propagation/timeline` — returns timestamps, modes, stations, frequencies, snr_db but **no timing_error or d_clock field**
 
-### Success Criteria
+**Key files:**
+- `web-api/routers/physics.py` (API endpoints)
+- `web-api/routers/propagation.py` (timeline endpoint)
+- `web-api/static/physics.html` (dashboard)
+- `src/hf_timestd/core/physics_fusion_service.py` (L3 aggregation)
 
-1. **Pipeline runs successfully** — `grape daily` completes without errors for recent dates
-2. **Spectrograms generated** — All 9 channels produce valid PNG files
-3. **Data uploaded** — PSWS server receives and acknowledges uploads
-4. **Timer operational** — Daily processing resumes automatically at 01:00 UTC
-5. **Validation passes** — No false positives rejecting valid data
+### Demo 2: Multi-Frequency Dispersion → TEC
 
-### Service Inventory
+**What it proves:** The instrument can extract Total Electron Content from the 1/f² dispersion relation.
+
+**The physics:** Ionospheric group delay follows τ = 1.344 × TEC / f². If we plot D_clock vs 1/f² for multiple frequencies from the same station at the same time, the slope gives TEC in TECU. This is the instrument's primary scientific measurement.
+
+**What should be visible:** A scatter plot of D_clock vs 1/f² for WWV (6 frequencies: 2.5, 5, 10, 15, 20, 25 MHz) at a single time instant, showing a linear relationship. The slope = 1.344 × TEC. Daytime TEC should be 20–80 TECU; nighttime 5–20 TECU.
+
+**Current state:** BROKEN. The TEC HDF5 (`AGGREGATED_tec_20260217.h5`) has 93K records but:
+- `frequencies_mhz` field contains `"0.00,0.00,0.00"` for all records — metadata is not being written
+- `tec_tecu` alternates between exactly 2 values (86.18 and 34.51 TECU) — these are model constants, not fitted values
+- `/api/tec/current` returns `"status": "no_data"`
+- The physics dashboard has no TEC plot
+
+**Investigation targets:**
+- `src/hf_timestd/core/tec_estimator.py` — is the 1/f² fit actually running on real D_clock data?
+- `src/hf_timestd/core/physics_fusion_service.py` — how does it aggregate per-channel D_clock into multi-frequency TEC?
+- Why is `frequencies_mhz` always "0.00,0.00,0.00"? This suggests the frequency metadata is not being passed to the TEC writer.
+- Why do TEC values alternate between exactly 2 constants? This suggests the estimator is returning model fallback values, not fitted values.
+- `web-api/routers/propagation.py` (`/api/propagation/tec`) — returns data but all timestamps are identical (`2026-02-16T13:28:00`) — stale
+
+**Key files:**
+- `src/hf_timestd/core/tec_estimator.py` (1/f² fit)
+- `src/hf_timestd/core/physics_fusion_service.py` (orchestration)
+- `src/hf_timestd/io/hdf5_writer.py` (TEC HDF5 writer)
+- `web-api/routers/propagation.py` (TEC API)
+
+### Demo 3: Frequency-Dependent SNR → D-Layer Absorption
+
+**What it proves:** The instrument observes real ionospheric absorption, not just propagation.
+
+**The physics:** The D-layer (60–90 km) absorbs HF energy proportional to 1/f². Lower frequencies are absorbed more. During daytime, the D-layer is ionized by solar UV; at night it disappears. So:
+- **Daytime:** 2.5 MHz SNR drops sharply, 15 MHz SNR stays high → steep frequency slope
+- **Nighttime:** All frequencies have similar SNR (no D-layer) → flat frequency slope
+- **Sunrise/sunset:** Rapid SNR transitions mark the solar terminator crossing the path midpoint
+
+**What should be visible:** A multi-frequency SNR time series for one station (e.g., WWV) over 24 hours, with clear frequency-dependent diurnal variation. The 2.5 MHz trace should show the deepest daytime absorption dip.
+
+**Current state:** PARTIALLY WORKING. The physics dashboard plots SNR vs time with station-colored markers, but:
+- All frequencies from the same station use the same color — you can't see frequency-dependent absorption
+- No sunrise/sunset markers (the code exists but `conditions.sun_times` may not be populated)
+- The plot is labeled "Measurement History" with subtitle "Signal-to-noise ratio by station over time" — generic, not focused on the physics story
+
+**Investigation targets:**
+- `web-api/static/physics.html` — the SNR plot groups by station, not by frequency. Recolor by frequency to show absorption.
+- `/api/physics/events/conditions` — does it return `sun_times`? The dashboard code checks for it.
+- Can we compute a "D-layer absorption index" = SNR(15 MHz) − SNR(2.5 MHz) and plot it vs time? This would be a single clean curve showing D-layer ionization.
+
+**Key files:**
+- `web-api/static/physics.html` (SNR plot, lines 485–581)
+- `web-api/routers/physics.py` (events/conditions endpoint)
+
+### Demo 4: Day/Night MUF Boundary in Mode Assignments
+
+**What it proves:** The instrument tracks the Maximum Usable Frequency and its diurnal variation.
+
+**The physics:** The MUF is the highest frequency that can propagate via F-layer reflection. During daytime, foF2 ≈ 8–12 MHz, so MUF (oblique) can reach 20–30 MHz. At night, foF2 drops to 3–5 MHz, and higher frequencies lose F-layer propagation. This should be visible as:
+- **Daytime:** 15, 20, 25 MHz show F-layer modes (1F2, 2F2)
+- **Nighttime:** Only 2.5, 5 MHz show F-layer modes; higher frequencies show E-layer or no detection
+- **Transition:** Mode assignments change at sunrise/sunset
+
+**Current state:** PARTIALLY WORKING but NOISY. The mode identification assigns modes, but:
+- Phantom modes at night: BPM 2.5 MHz labeled "4F2" at 07:00 UTC (nighttime in Missouri). 4-hop F2 at 2.5 MHz is geometrically possible but physically implausible when foF2 < 5 MHz.
+- The reanalysis service (which applies physics-based MUF constraints) last ran 2026-02-13 — 4 days stale.
+- `/api/propagation/conditions` returns mode distributions but no MUF estimate or time series.
+- The physics dashboard has no MUF plot.
+
+**Investigation targets:**
+- `src/hf_timestd/core/ionospheric_reanalysis.py` — why hasn't it run since Feb 13? Check systemd timer.
+- `src/hf_timestd/core/propagation_mode_solver.py` — does it apply any physics constraints in real-time, or is it purely geometric?
+- Can we derive an empirical MUF from the mode assignments? MUF ≈ highest frequency where F-layer mode is detected with SNR > threshold.
+- The reanalysis was designed specifically to fix the phantom-mode problem. If it's not running, the mode assignments are unreliable.
+
+**Key files:**
+- `src/hf_timestd/core/ionospheric_reanalysis.py` (offline physics validation)
+- `src/hf_timestd/core/propagation_mode_solver.py` (real-time mode ID)
+- `systemd/timestd-reanalysis.timer` (if it exists)
+- `web-api/routers/propagation.py` (conditions endpoint)
+
+---
+
+## 🔍 CROSS-CUTTING CONCERNS
+
+These issues affect multiple demonstrations and should be examined during the review:
+
+### Concern A: physics_fusion_service.py — Is It Actually Running?
+
+The physics service (`timestd-physics`) is supposed to aggregate per-channel L2 measurements into L3 science products (TEC, scintillation, events). But `/api/physics/latest` returns `utc_offset_ms: null` and `stations_used: ""`. Either the service is crashing, starved of input data, or writing empty results.
+
+- Check: `systemctl status timestd-physics`
+- Check: `journalctl -u timestd-physics --since "1 hour ago"`
+- Check: `/var/log/hf-timestd/physics.log`
+
+### Concern B: L2 → L3 Data Flow
+
+The L2 HDF5 files (per-channel `clock_offset/`, `doppler/`, `tick_phase/`) are the input to L3 science products. If the L3 service can't read them (HDF5 locking, schema mismatch, empty files), all downstream products fail silently.
+
+- Check: Do `clock_offset/` HDF5 files contain recent D_clock values?
+- Check: Does the physics service log how many L2 records it reads per cycle?
+
+### Concern C: PHYSICS.md Accuracy
+
+`docs/PHYSICS.md` (1074 lines) claims ✅ status for many capabilities. The review should verify each claim against the live system and downgrade to ⚠️ or ❌ where appropriate. Specific concerns:
+- Section 3.1 (TEC): Claims "Fully implemented" but API returns no data
+- Section 4.2 (Scintillation): Claims "Implemented" but all indices are null
+- Section 4.3 (TIDs): Claims "Implemented" but no TID events detected
+- Section 7 (Test Signal): Claims all features implemented — verify
+
+### Concern D: Dashboard Focus
+
+The physics dashboard (`physics.html`) has 3 tabs (Paths, Channels, Events) with many cards and metrics, but none clearly answer the 4 demonstration questions above. The review should recommend simplification: fewer metrics, clearer plots, focused on the physics story.
+
+---
+
+## 📂 KEY FILES FOR REVIEW
+
+| File | Purpose | Priority |
+|------|---------|----------|
+| `src/hf_timestd/core/physics_fusion_service.py` | L3 science product orchestration | **HIGH** — is it running? |
+| `src/hf_timestd/core/tec_estimator.py` | 1/f² TEC fit | **HIGH** — why broken? |
+| `src/hf_timestd/core/ionospheric_reanalysis.py` | Offline mode validation | **HIGH** — why stale? |
+| `src/hf_timestd/core/propagation_mode_solver.py` | Real-time mode ID | **MEDIUM** — phantom modes |
+| `web-api/static/physics.html` | Physics dashboard | **MEDIUM** — needs focus |
+| `web-api/routers/physics.py` | Physics API endpoints | **MEDIUM** — missing D_clock |
+| `web-api/routers/propagation.py` | Propagation/TEC API | **MEDIUM** — stale TEC |
+| `src/hf_timestd/core/advanced_signal_analysis.py` | Scintillation, multipath | **LOW** — all nulls |
+| `docs/PHYSICS.md` | Physics documentation | **LOW** — accuracy audit |
+| `docs/HAMSCI_2026_WORKSHOP_ABSTRACT.md` | Public claims | **LOW** — honest check |
+
+---
+
+## 🏗️ SERVICE INVENTORY
 
 | Service | Purpose | Logs |
 |---------|---------|------|
 | `timestd-core-recorder` | RTP → raw buffer (authoritative timestamps) | journalctl |
 | `timestd-metrology` | IQ → L1/L2 measurements + tick phase extraction | `/var/log/hf-timestd/phase2-*.log` |
 | `timestd-fusion` | Multi-broadcast fusion → Chrony (WatchdogSec=120) | `/var/log/hf-timestd/fusion.log` |
-| `timestd-physics` | TEC estimation, L3 physics products (+ tomography, VTEC) | `/var/log/hf-timestd/physics.log` |
+| `timestd-physics` | TEC estimation, L3 physics products | `/var/log/hf-timestd/physics.log` |
 | `timestd-l2-calibration` | L2 adaptive calibration | journalctl |
 | `timestd-web-api` | REST API + dashboard (FastAPI, port 8000) | journalctl |
 | `timestd-vtec` | GNSS VTEC estimation (optional) | journalctl |
-| `grape-daily.timer` | Daily GRAPE processing trigger (01:00 UTC) | journalctl |
-| `grape-daily.service` | `grape daily` — orchestrated pipeline with validation gates | journalctl |
 | **radiod** | Real-time USB/FFT (CPU 8-15, uncontested L3 cache) | journalctl |
 
 ### Deployment
 
 - **Git repo**: `/home/mjh/git/hf-timestd/`
 - **Production install**: `/opt/hf-timestd/` (venv with non-editable `pip install`)
-- **Deploy script**: `sudo scripts/update-production.sh [--pull]` — removes editable installs, copies package, syncs web-api/scripts/docs, updates systemd, restarts services, verifies
-- **NEVER use `pip install -e`** in production — editable installs make the git repo live production code
+- **Deploy script**: `sudo scripts/update-production.sh [--pull]`
 - **Config**: `/etc/hf-timestd/timestd-config.toml`
 - **Data root**: `/var/lib/timestd/`
-
----
-
-## ✅ RESOLVED IN PREVIOUS SESSIONS
-
-### A/B Decoder Comparison System (2026-02-17)
-
-**Root causes:**
-1. **Critical indentation bug** in `tick_matched_filter.py`: Result handling was outside the for loop, causing only the last window to be processed instead of all 55+ windows per minute. This made `valid_windows` always 0 or 1.
-2. **Missing `TickPLLDecoder` class**: The PLL decoder file had implementation classes but was missing the wrapper class that `metrology_engine.py` expected.
-3. **Parameter signature mismatch**: `TickPLLDecoder.__init__()` needed `alpha` and `max_missed` parameters.
-4. **Missing `d_clock_ms` field**: `MinutePLLAnalysis` dataclass lacked the field needed for comparison tracking.
-
-**Fixes:**
-- Fixed indentation in `tick_matched_filter.py` (lines 944-962) — moved result handling inside the for loop
-- Created `TickPLLDecoder` wrapper class with proper interface matching `metrology_engine.py` expectations
-- Added `d_clock_ms` field to `MinutePLLAnalysis` dataclass
-- Added decoder comparison API endpoint (`/decoder-comparison/status`) and UI
-- Created `DecoderConfig` singleton for shared state between API and metrology service
-
-**Validation:** Both decoders now operational and detecting ticks:
-- **Matched Filter**: 50+ windows/min, SNR 16-34 dB (WWV: 33.8dB, WWVH: 30.2dB)
-- **PLL Flywheel**: Successfully locking onto WWV (1000 Hz) and WWVH (1200 Hz) signals
-- A/B testing enabled, comparison metrics will populate as data accumulates
-
-**Files modified:** `tick_matched_filter.py`, `tick_pll_decoder.py`, `metrology_engine.py`, `decoder_config.py` (new), `decoder_comparison.py` (new), `decoder-comparison.html` (new)
-
-**Technical insight:** The indentation bug was particularly insidious because no exceptions were raised, the code appeared to run normally, and debug logs weren't visible at INFO level in production. The last window often had valid detections, so `valid_windows=1` seemed plausible.
-
-### TEC Outliers + L2 Schema Alignment (2026-02-15)
-
-**Root causes:**
-1. **TEC mode mixing:** Shared-frequency measurements combined 1F and 2F arrivals, corrupting 1/f² fit
-2. **L2 field semantics:** Both `raw_arrival_time_ms` and `clock_offset_ms` written with same value (D_clock)
-
-**Fixes:**
-- Added dominant-mode gating in fusion TEC solver (only use measurements from same propagation mode)
-- Added hard TEC bounds (0 < TEC ≤ 200 TECU) in physics service
-- L2 writer now reconstructs absolute `raw_arrival_time_ms = d_clock + propagation_delay`
-- Dashboard switched to read `clock_offset_ms` for D_clock (not `raw_arrival_time_ms`)
-- Added missing `quality_flags` to `l2_tick_phase_v1.json` schema
-
-**Validation:** 28/28 targeted tests passing. TEC outliers now bounded. L2 schema consistent with documentation.
-
-## ✅ RESOLVED IN PREVIOUS SESSIONS (EARLIER)
-
-### Tick Timing Reference Frame Fix (2026-02-15)
-
-**Root cause:** `tick_matched_filter.py` computed timing offsets relative to buffer start (sample 0), not UTC. The `_detect_minute_marker()` had no access to `buffer_timing` and assumed sample 0 = second 0. The buffer start is arbitrary, so `mean_timing_offset_ms` was a buffer-relative position (0–500ms), not D_clock.
-
-**Fix:** Plumbed `buffer_timing` and `minute_boundary` through from `metrology_engine.py` → `tick_matched_filter.process_minute()` → `_detect_minute_marker()`. Minute marker search now uses `buffer_timing.utc_to_sample(minute_boundary)` to locate second 0, searches forward 100ms (covers all HF skywave ToF). D_clock computed via `sample_to_utc()`. Added `d_clock_ms` field to `MinuteTickAnalysis`. Updated `metrology_service.py` and `multi_broadcast_fusion.py` to use `d_clock_ms` instead of buffer-relative `mean_timing_offset_ms`.
-
-**Key insight:** The primary timing path (ntpd-style edge detector → L1 → L2 `clock_offset/`) was correct all along. The tick_matched_filter is a secondary IQ-domain module for carrier phase/Doppler — its D_clock is supplementary. Dashboard reads from the primary path.
-
-**Files modified:** `tick_matched_filter.py`, `metrology_engine.py`, `metrology_service.py`, `multi_broadcast_fusion.py`
-
-### Dashboard Flat D_clock Fix (2026-02-14, late session)
-
-**Root cause:** Three bugs in the dashboard data pipeline, NOT in the measurement pipeline:
-
-1. **Field name mismatch** (`dashboard.py:197,442`): Read `m.get('raw_toa_ms')` but L2 HDF5 field is `raw_arrival_time_ms`. Result: `timing_error` always `None`, grid panels showed only SNR (flat on strong channels).
-2. **Double subtraction** (`dashboard.py:200`): Subtracted `min_propagation_ms` from `raw_arrival_time_ms`, but that field already IS D_clock (observed − expected). The L2 calibration service writes D_clock to both `raw_arrival_time_ms` and `clock_offset_ms` (see Issue 3 in next session).
-3. **Incompatible reference frame** (`dashboard.py:249`): tick_timing second pass injected `mean_timing_offset_ms` (buffer-relative, 0–500ms) into the same `timing_error_ms` array as clock_offset D_clock (±15ms). Fixed: tick_timing contributes only SNR, not timing error.
-4. **Missing chart trace** (`dashboard-24h.html:renderMiniChart`): Only plotted SNR on y-axis. Added timing error as primary trace with auto-scaled y-axis, SNR demoted to faint secondary on y3.
-
-**Verification:** 17/17 broadcasts now have timing error data. CHU shows clear diurnal pattern (26→93 TECU via TEC). Fusion healthy (grade B, ±1.3ms). IONEX files being generated (59 today).
-
-**Files modified:** `web-api/routers/dashboard.py`, `web-api/static/dashboard-24h.html`
-
-### TEC Pipeline Audit & Enhancement (2026-02-14, evening session)
-
-Complete audit of 17 concerns across 5 files. Four new modules implemented and wired into `physics_fusion_service.py`:
-
-1. **Bayesian TEC Estimator** (`tec_estimator.py` rewrite) — MAD-based 3σ outlier rejection, SNR weighting, N=2 confidence cap at 0.3, negative slope → None rejection, `propagation_mode` on TECResult, dead `high_precision_mode` removed
-2. **Carrier-Phase dTEC** (`carrier_tec.py` new) — phase rate → Doppler → dTEC/dt → integrated TEC(t), anchored to group-delay absolute TEC
-3. **Multi-Layer Tomography** (`iono_tomography.py` new) — E/F layer separation via constrained least squares, solar-dependent priors, condition monitoring
-4. **VTEC Map Generator** (`vtec_mapper.py` new) — sTEC→vTEC mapping, IPP computation, 2D polynomial surface, IONEX output
-
-Also fixed: inverted uncertainty weighting in fusion (concern #9), too-narrow TEC validation window 5-100→1-200 TECU (concern #10). 19/19 tests passing. Full details: `docs/changes/SESSION_2026_02_14_TEC_PIPELINE_AUDIT.md`.
-
-**Validated:** Upstream measurements confirmed to contain real ionospheric variation. TEC pipeline producing diurnal patterns (CHU: 26 TECU night → 93 TECU afternoon). Remaining issue: TEC outliers up to 3930 TECU from mode mixing (see next session Issue 2).
-
-### HamSCI 2026 Workshop Abstract (2026-02-14)
-
-Presentation abstract written and committed: `docs/HAMSCI_2026_WORKSHOP_ABSTRACT.md`. Updated project description reflecting current system capabilities. Six forward-looking recommendations for TEC optimization. Recommendations 1, 2, 3, 6 implemented in the TEC session above.
-
-### Documentation Conformance Audit (2026-02-14)
-
-Broken links fixed in `docs/PHYSICS.md` and `docs/STATION_SETUP_GUIDE.md`. Audit execution status updated in `docs/DOCUMENTATION_AUDIT_2026_02_14.md`. Bulk archival of superseded docs completed.
-
-### GRAPE Pipeline + PSWS Uploads (2026-02-14)
-
-Full GRAPE pipeline operational. `grape daily` orchestrates: decimate → validate → spectrogram → validate → package → upload. Fixed `gap_samples` unit mismatch. Verified 9/9 channels processed and uploaded.
-
-### Physics Memory + Operational Resilience (2026-02-14)
-
-Physics service caches readers, bounds retry state. Memory safety limits in systemd. Logrotate `copytruncate`. Freshness monitoring. Deployment correspondence checklist.
-
-### Signal Presence Gate Fix (2026-02-12)
-
-`_check_signal_presence()` failed on shared channels (0.5% duty cycle). Fixed: use `edge_results` as primary signal presence indicator. tick_timing now writing 56 windows/min.
-
-### Edge Ensemble (2026-02-12)
-
-`TickEdgeDetector`: 50–57 ticks/min, ±2ms uncertainty. Recovery when minute marker fails.
-
-### Phase Continuity + Doppler UI (2026-02-11)
-
-Buffer-relative time fix for IQ mixer. Three-tier phase extraction. Cross-frequency discrimination gate. Phase/Doppler web dashboard.
-
-### Earlier Fixes
-
-- **CHU FSK Decoder** (2026-02-10): USB sidecar, quadrature demod, ring buffer timing
-- **Pipeline Offset Calibration** (2026-02-09): Removed — radiod RTP timestamps authoritative
-- **Timing Accuracy** (2026-02-06): Circular calibration, GPS ground truth, Kalman filter
-- **HDF5 Crash Safety** (2026-02-06): SWMR eliminated — open-write-close
-- **CHU Memory Leak** (2026-01-02): Extract 1.1s slice before demodulation
-- **HDF5 File Lock Contention** (recurring): `locking=False` on all h5py.File() calls
 
 ---
 
@@ -265,17 +242,41 @@ Buffer-relative time fix for IQ mixer. Three-tier phase extraction. Cross-freque
 
 1. **The GPSDO is a steel ruler.** Every sample has a known UTC timestamp via the RTP chain. The buffer exists only to find the tone. Once found, read the timestamp. That's the ToA.
 2. **The ionosphere is the unknown.** Multi-frequency, multi-station geometry solves it — with or without GPS. GPS just removes one unknown (clock error).
-3. **D_clock is the observable for TEC.** D_clock = observed_toa − predicted_geometric_delay. Any residual 1/f² pattern in D_clock across frequencies IS the ionospheric dispersion signal. Use D_clock, not raw ToA.
+3. **D_clock is the observable for TEC.** D_clock = observed_toa − predicted_geometric_delay. Any residual 1/f² pattern in D_clock across frequencies IS the ionospheric dispersion signal.
 4. **Carrier phase gives dTEC; group delay gives absolute TEC.** Phase is 1000× more precise but ambiguous. Anchor phase-derived dTEC to group-delay absolute TEC at minute boundaries.
 5. **Mode priors prevent contamination.** A 2F measurement mixed with 1F measurements corrupts the 1/f² fit. Use the propagation model's mode predictions to gate which measurements enter the estimator.
-6. **17 paths = geometric diversity.** Different elevation angles and azimuths separate E-layer from F-layer contributions. Low-angle paths (BPM) are E-layer sensitive; high-angle paths (CHU) are F-layer dominated.
-7. **Bandpass before correlate.** On shared channels, competing stations corrupt long-template correlations.
-8. **Edge results are the signal presence indicator.** If the edge detector found ticks, signal is present.
+6. **17 paths = geometric diversity.** Different elevation angles and azimuths separate E-layer from F-layer contributions.
+7. **Edge results are the signal presence indicator.** If the edge detector found ticks, signal is present.
 
 ---
 
-## ✅ Success Criteria — Next Session
+## ✅ Success Criteria — This Session
 
-1. **TEC outliers bounded** — cap at 200 TECU for mid-latitude, investigate mode mixing
-2. **L2 schema consistent** — `raw_arrival_time_ms` and `clock_offset_ms` have distinct, documented meanings
-3. **No regressions** — existing tests still pass, fusion service still feeds chrony
+1. **Demo 1 works:** D_clock time series visible on dashboard, showing diurnal variation
+2. **Demo 2 diagnosed:** Root cause of broken TEC identified; fix implemented or path to fix documented
+3. **Demo 3 works:** SNR plot recolored by frequency, showing D-layer absorption pattern
+4. **Demo 4 diagnosed:** Reanalysis service running, phantom modes reduced
+5. **PHYSICS.md honest:** Status markers reflect actual system state, not aspirational state
+6. **Dashboard focused:** Physics page simplified to clearly present the 4 demonstrations
+
+---
+
+## ✅ RESOLVED IN PREVIOUS SESSIONS (Reference Only)
+
+### A/B Decoder Comparison (2026-02-17)
+Edge ensemble (57 ticks/min, ±3ms) vs PLL carrier phase (±1ms). MF baseline fixed to use edge ensemble instead of broken TickMatchedFilter.d_clock_ms. Deployed, verified, committed (d016ddc).
+
+### TEC Outliers + L2 Schema (2026-02-15)
+Mode-gated TEC, hard bounds 0–200 TECU, L2 field semantics fixed.
+
+### Tick Timing Reference Frame (2026-02-15)
+Plumbed buffer_timing through to tick_matched_filter. Primary timing path was correct all along.
+
+### Dashboard D_clock Fix (2026-02-14)
+Field name mismatch, double subtraction, incompatible reference frames — all fixed in dashboard.py.
+
+### TEC Pipeline Audit (2026-02-14)
+Bayesian TEC estimator, carrier-phase dTEC, multi-layer tomography, VTEC mapper — all implemented. 19/19 tests passing.
+
+### Earlier: Edge Ensemble, CHU FSK, HDF5 Locking, Signal Presence Gate, Phase Continuity
+See git log for details.
