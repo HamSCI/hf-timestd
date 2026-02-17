@@ -65,3 +65,34 @@ TIMESTD_LOG_LEVEL=INFO
 # TIMESTD_STATION_ID=S000171
 
 # ===========================================================================
+# DECODER CONFIGURATION (A/B Testing for PLL vs Matched Filter)
+# ===========================================================================
+# Primary decoder selection: matched_filter, pll, or both
+#   matched_filter: Use existing tick_matched_filter.py (default)
+#   pll: Use new tick_pll_decoder.py flywheel decoder
+#   both: Run both in parallel for A/B comparison
+TIMESTD_DECODER_VARIANT=matched_filter
+
+# Enable A/B comparison metrics collection
+TIMESTD_ENABLE_AB_COMPARISON=true
+
+# Duration of A/B test before auto-selection (days)
+TIMESTD_AB_TEST_DURATION_DAYS=7
+
+# Auto-promote PLL if it demonstrates superior accuracy
+TIMESTD_AUTO_PROMOTE_PLL=false
+
+# Superiority threshold (PLL must be X% better to be promoted)
+TIMESTD_PLL_SUPERIORITY_THRESHOLD=0.7
+
+# PLL Tuning Parameters
+# Gating window width in milliseconds (narrower = less noise, more fragile)
+TIMESTD_PLL_WINDOW_MS=40.0
+
+# Loop filter gain (0.0-1.0, higher = faster lock, more jitter)
+TIMESTD_PLL_ALPHA=0.1
+
+# Maximum missed ticks before declaring lost lock
+TIMESTD_PLL_MAX_MISSED=5
+
+# ===========================================================================

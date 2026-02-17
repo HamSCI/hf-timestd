@@ -1,0 +1,165 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L2_decoder_comparison",
+    "description": "A/B comparison metrics between matched filter and PLL decoder variants. Enables objective evaluation of decoder performance for accuracy, robustness, and convergence time.",
+    "cadence_seconds": 60,
+    "processing_level": "L2",
+    "standards": [
+        "A/B testing methodology for timing decoder evaluation"
+    ],
+    "reference": "Parallel decoder comparison for hf-timestd accuracy optimization",
+    "quality_flags": {
+        "PLL_SUPERIOR": "PLL decoder shows significantly better accuracy",
+        "MATCHED_FILTER_SUPERIOR": "Matched filter shows better accuracy",
+        "EQUIVALENT": "Both decoders within measurement uncertainty",
+        "INCONCLUSIVE": "Insufficient data for comparison"
+    },
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Measurement timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "channel",
+            "type": "string",
+            "required": true,
+            "description": "Channel name (e.g., SHARED_10000)"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "description": "Station being compared (WWV, WWVH, CHU, BPM)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": false,
+            "description": "Broadcast frequency in MHz"
+        },
+        {
+            "name": "mf_d_clock_ms",
+            "type": "float",
+            "required": false,
+            "description": "D_clock from matched filter decoder (ms)"
+        },
+        {
+            "name": "pll_d_clock_ms",
+            "type": "float",
+            "required": false,
+            "description": "D_clock from PLL decoder (ms)"
+        },
+        {
+            "name": "delta_d_clock_ms",
+            "type": "float",
+            "required": false,
+            "description": "Difference between decoders (pll - mf) in ms"
+        },
+        {
+            "name": "mf_timing_offset_ms",
+            "type": "float",
+            "required": false,
+            "description": "Matched filter mean timing offset (ms)"
+        },
+        {
+            "name": "pll_timing_offset_ms",
+            "type": "float",
+            "required": false,
+            "description": "PLL mean timing offset (ms)"
+        },
+        {
+            "name": "mf_std_ms",
+            "type": "float",
+            "required": false,
+            "description": "Matched filter standard deviation (ms)"
+        },
+        {
+            "name": "pll_std_ms",
+            "type": "float",
+            "required": false,
+            "description": "PLL standard deviation (ms)"
+        },
+        {
+            "name": "mf_n_ticks",
+            "type": "integer",
+            "required": false,
+            "description": "Number of ticks detected by matched filter"
+        },
+        {
+            "name": "pll_n_ticks",
+            "type": "integer",
+            "required": false,
+            "description": "Number of ticks detected by PLL"
+        },
+        {
+            "name": "pll_lock_quality",
+            "type": "float",
+            "required": false,
+            "description": "PLL lock quality (0-1)"
+        },
+        {
+            "name": "pll_lock_duration_sec",
+            "type": "float",
+            "required": false,
+            "description": "How long PLL maintained lock (seconds)"
+        },
+        {
+            "name": "winner",
+            "type": "string",
+            "required": false,
+            "description": "Which decoder performed better: MF, PLL, TIE, or NONE"
+        },
+        {
+            "name": "winner_confidence",
+            "type": "float",
+            "required": false,
+            "description": "Confidence in winner determination (0-1)"
+        },
+        {
+            "name": "gps_reference_d_clock_ms",
+            "type": "float",
+            "required": false,
+            "description": "GPS ground truth D_clock if available (ms)"
+        },
+        {
+            "name": "mf_gps_error_ms",
+            "type": "float",
+            "required": false,
+            "description": "Matched filter error vs GPS (ms)"
+        },
+        {
+            "name": "pll_gps_error_ms",
+            "type": "float",
+            "required": false,
+            "description": "PLL error vs GPS (ms)"
+        },
+        {
+            "name": "comparison_quality",
+            "type": "string",
+            "required": false,
+            "description": "Overall comparison quality flag"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": false,
+            "description": "ISO 8601 timestamp when record was written"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": false,
+            "description": "Processing software version"
+        }
+    ]
+}

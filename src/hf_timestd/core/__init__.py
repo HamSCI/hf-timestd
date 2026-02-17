@@ -64,6 +64,7 @@ from .physics_propagation import PhysicsPropagationModel, PropagationResult, Pro
 from .propagation_model import HFPropagationModel, PropagationPrediction, ModeArrival
 from .wwv_test_signal import WWVTestSignalDetector
 from .metrology_service import MetrologyService, MetrologyEngine
+from .decoder_config import DecoderConfig, DecoderVariant, ComparisonMetrics, get_decoder_config
 # Phase2AnalyticsService archived 2026-01-22 - replaced by MetrologyService
 
 # Supporting components
@@ -254,7 +255,11 @@ __all__ = [
     # Metrology Service
     "MetrologyService",
     "MetrologyEngine",
-    # Physics Propagation Model
+    # Decoder Config
+    "DecoderConfig",
+    "DecoderVariant",
+    "ComparisonMetrics",
+    "get_decoder_config",
     "PhysicsPropagationModel",
     "PropagationResult",
     "PropagationModelTier",

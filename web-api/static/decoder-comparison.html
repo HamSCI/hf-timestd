@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Decoder A/B Comparison - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .status-active { background: #10b981; color: white; }
+        .status-inactive { background: #6b7280; color: white; }
+        .status-pending { background: #f59e0b; color: white; }
+        .winner-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 16px;
+            font-size: 0.875rem;
+            font-weight: 700;
+        }
+        .winner-mf { background: #3b82f6; color: white; }
+        .winner-pll { background: #8b5cf6; color: white; }
+        .winner-tie { background: #6b7280; color: white; }
+        .progress-bar {
+            width: 100%;
+            height: 24px;
+            background: rgba(30, 41, 59, 0.5);
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid #334155;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+            border-radius: 12px;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .metric-card {
+            background: rgba(30, 41, 59, 0.5);
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-align: center;
+        }
+        .metric-value-lg {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #e2e8f0;
+        }
+        .metric-label-sm {
+            font-size: 0.875rem;
+            color: #94a3b8;
+            margin-top: 0.5rem;
+        }
+        .decoder-card {
+            background: rgba(30, 41, 59, 0.5);
+            border: 2px solid #334155;
+            border-radius: 8px;
+            padding: 1.5rem;
+        }
+        .decoder-card.active {
+            border-color: #10b981;
+        }
+        .decoder-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+        }
+        .decoder-mf .decoder-title { color: #3b82f6; }
+        .decoder-pll .decoder-title { color: #8b5cf6; }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔗 Decoder A/B Comparison</h1>
+            <div class="header-subtitle">PLL vs Matched Filter Performance Analysis</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">⏱️ Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link">Validation</a>
+                <a href="/static/stability.html" class="nav-link">Stability</a>
+                <a href="/static/decoder-comparison.html" class="nav-link active">🔗 A/B Test</a>
+                <span class="nav-divider"></span>
+                <a href="/static/propagation.html" class="nav-link">🌐 Ionosphere</a>
+                <a href="/static/phase.html" class="nav-link">📡 Phase</a>
+                <a href="/static/physics.html" class="nav-link">TEC/TID</a>
+                <a href="/static/test_signal.html" class="nav-link">📡 Test Signal</a>
+                <a href="/static/solar-correlation.html" class="nav-link">☀️ Solar</a>
+                <a href="/static/dashboard-24h.html" class="nav-link">📊 24h</a>
+                <a href="/static/grape.html" class="nav-link">GRAPE</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link">📚 Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
+            </nav>
+        </div>
+
+        <div id="error-container" style="display: none;"></div>
+
+        <!-- Status Overview -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">A/B Test Status</div>
+                    <div class="card-subtitle">Current decoder configuration and test progress</div>
+                </div>
+                <div id="refresh-indicator" style="display: none;" class="loading"></div>
+            </div>
+            <div class="grid grid-3" style="padding: 1rem; gap: 1rem;">
+                <div class="metric-card">
+                    <div class="metric-value-lg" id="primary-decoder">-</div>
+                    <div class="metric-label-sm">Primary Decoder</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value-lg" id="test-progress">-</div>
+                    <div class="metric-label-sm">Test Progress</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value-lg" id="current-winner">-</div>
+                    <div class="metric-label-sm">Current Winner</div>
+                </div>
+            </div>
+            <div style="padding: 1rem;">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-bar" style="width: 0%;">0%</div>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; font-size: 0.875rem; color: #94a3b8;">
+                    <span id="days-elapsed">0 days elapsed</span>
+                    <span id="days-remaining">7 days remaining</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Decoder Comparison -->
+        <div class="grid grid-2">
+            <div class="decoder-card decoder-mf" id="mf-card">
+                <div class="decoder-title">🎯 Matched Filter</div>
+                <div style="margin-bottom: 1rem;">
+                    <span class="status-badge" id="mf-status">Unknown</span>
+                </div>
+                <div class="metric" style="margin-bottom: 1rem;">
+                    <div class="metric-value" id="mf-accuracy">-</div>
+                    <div class="metric-label">Accuracy (std dev)</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="mf-ticks">-</div>
+                    <div class="metric-label">Ticks Detected</div>
+                </div>
+            </div>
+            <div class="decoder-card decoder-pll" id="pll-card">
+                <div class="decoder-title">🔧 PLL Flywheel</div>
+                <div style="margin-bottom: 1rem;">
+                    <span class="status-badge" id="pll-status">Unknown</span>
+                </div>
+                <div class="metric" style="margin-bottom: 1rem;">
+                    <div class="metric-value" id="pll-accuracy">-</div>
+                    <div class="metric-label">Accuracy (std dev)</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="pll-ticks">-</div>
+                    <div class="metric-label">Ticks Detected</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Auto-Promotion -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">Auto-Promotion Status</div>
+                    <div class="card-subtitle">Automatic decoder selection criteria</div>
+                </div>
+            </div>
+            <div style="padding: 1rem;">
+                <div class="grid grid-3" style="gap: 1rem; margin-bottom: 1rem;">
+                    <div class="metric-card">
+                        <div class="metric-value-lg" id="auto-promote-status">-</div>
+                        <div class="metric-label-sm">Auto-Promote</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value-lg" id="superiority-threshold">-</div>
+                        <div class="metric-label-sm">Superiority Threshold</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value-lg" id="can-promote">-</div>
+                        <div class="metric-label-sm">Can Promote</div>
+                    </div>
+                </div>
+                <div id="recommendation-box" style="display: none; background: rgba(139, 92, 246, 0.1); border: 2px solid #8b5cf6; border-radius: 8px; padding: 1rem; margin-top: 1rem;">
+                    <div style="font-weight: 700; color: #8b5cf6; margin-bottom: 0.5rem;">📋 Recommendation</div>
+                    <div id="recommendation-text">No recommendation available yet.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- API Links -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">API Endpoints</div>
+            </div>
+            <div style="padding: 1rem;">
+                <div style="background: rgba(30, 41, 59, 0.5); border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.875rem;">
+                    <div style="margin-bottom: 0.5rem;"><a href="/decoder-comparison/status" style="color: #60a5fa;">GET /decoder-comparison/status</a></div>
+                    <div style="margin-bottom: 0.5rem;"><a href="/decoder-comparison/metrics" style="color: #60a5fa;">GET /decoder-comparison/metrics</a></div>
+                    <div style="margin-bottom: 0.5rem;"><a href="/decoder-comparison/recommendation" style="color: #60a5fa;">GET /decoder-comparison/recommendation</a></div>
+                    <div><a href="/api/docs" style="color: #60a5fa;">View API Documentation →</a></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/decoder-comparison';
+        let refreshInterval;
+
+        async function fetchStatus() {
+            try {
+                document.getElementById('refresh-indicator').style.display = 'block';
+                const response = await fetch(`${API_BASE}/status`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                updateUI(data);
+            } catch (error) {
+                showError(`Failed to fetch status: ${error.message}`);
+            } finally {
+                document.getElementById('refresh-indicator').style.display = 'none';
+            }
+        }
+
+        function updateUI(data) {
+            // Primary decoder
+            document.getElementById('primary-decoder').textContent = data.primary_decoder?.toUpperCase() || '-';
+            
+            // Running decoders status
+            const running = data.running_decoders || [];
+            const mfActive = running.includes('matched_filter');
+            const pllActive = running.includes('pll');
+            
+            document.getElementById('mf-status').textContent = mfActive ? 'Running' : 'Inactive';
+            document.getElementById('mf-status').className = `status-badge ${mfActive ? 'status-active' : 'status-inactive'}`;
+            document.getElementById('mf-card').classList.toggle('active', mfActive);
+            
+            document.getElementById('pll-status').textContent = pllActive ? 'Running' : 'Inactive';
+            document.getElementById('pll-status').className = `status-badge ${pllActive ? 'status-active' : 'status-inactive'}`;
+            document.getElementById('pll-card').classList.toggle('active', pllActive);
+            
+            // Test progress
+            const progress = data.ab_test_progress || {};
+            const percent = Math.round(progress.percent_complete || 0);
+            document.getElementById('test-progress').textContent = `${percent}%`;
+            document.getElementById('progress-bar').style.width = `${percent}%`;
+            document.getElementById('progress-bar').textContent = `${percent}%`;
+            document.getElementById('days-elapsed').textContent = `${progress.days_elapsed?.toFixed(1) || 0} days elapsed`;
+            document.getElementById('days-remaining').textContent = `${progress.days_remaining?.toFixed(1) || 7} days remaining`;
+            
+            // Current winner
+            const winner = data.current_winner || 'NONE';
+            const winnerEl = document.getElementById('current-winner');
+            winnerEl.textContent = winner === 'NONE' ? '-' : winner;
+            winnerEl.className = `metric-value-lg ${winner === 'PLL' ? 'winner-pll' : winner === 'MF' ? 'winner-mf' : ''}`;
+            
+            // Latest comparison metrics
+            const metrics = data.latest_comparison;
+            if (metrics) {
+                document.getElementById('mf-accuracy').textContent = 
+                    metrics.matched_filter_accuracy?.toFixed(2) + ' ms' || '-';
+                document.getElementById('mf-ticks').textContent = metrics.matched_filter_ticks || '-';
+                document.getElementById('pll-accuracy').textContent = 
+                    metrics.pll_accuracy?.toFixed(2) + ' ms' || '-';
+                document.getElementById('pll-ticks').textContent = metrics.pll_ticks || '-';
+            }
+            
+            // Auto-promotion
+            document.getElementById('auto-promote-status').textContent = data.auto_promote_pll ? 'ON' : 'OFF';
+            document.getElementById('superiority-threshold').textContent = 
+                `${Math.round((data.superiority_threshold || 0.7) * 100)}%`;
+            document.getElementById('can-promote').textContent = data.can_auto_promote ? '✅' : '❌';
+            
+            // Recommendation
+            if (data.recommendation) {
+                const recBox = document.getElementById('recommendation-box');
+                const recText = document.getElementById('recommendation-text');
+                recBox.style.display = 'block';
+                recText.innerHTML = `
+                    <strong>Winner:</strong> ${data.recommendation}<br>
+                    <strong>Improvement:</strong> ${metrics?.accuracy_improvement_pct?.toFixed(1) || 0}% better accuracy
+                `;
+            }
+        }
+
+        function showError(message) {
+            const container = document.getElementById('error-container');
+            container.innerHTML = `<div class="error">${message}</div>`;
+            container.style.display = 'block';
+            setTimeout(() => { container.style.display = 'none'; }, 5000);
+        }
+
+        // Initial load
+        fetchStatus();
+        
+        // Auto-refresh every 30 seconds
+        refreshInterval = setInterval(fetchStatus, 30000);
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            clearInterval(refreshInterval);
+        });
+    </script>
+</body>
+
+</html>

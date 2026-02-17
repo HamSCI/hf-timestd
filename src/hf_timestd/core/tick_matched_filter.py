@@ -953,6 +953,13 @@ class TickMatchedFilter:
             
             if result is not None and result.snr_db >= min_snr_db:
                 window_results.append(result)
+                logger.info(f"{self.station.value} tick window {start_sec}-{end_sec}: DETECTED, "
+                           f"SNR={result.snr_db:.1f}dB, offset={result.timing_offset_ms:+.3f}ms")
+            elif result is not None:
+                logger.debug(f"{self.station.value} tick window {start_sec}-{end_sec}: below SNR gate "
+                            f"({result.snr_db:.1f}dB < {min_snr_db:.1f}dB)")
+            else:
+                logger.debug(f"{self.station.value} tick window {start_sec}-{end_sec}: no result")
         
         # === Separate marker and tick results ===
         marker_ok = (marker_result is not None and marker_result.snr_db >= min_snr_db)

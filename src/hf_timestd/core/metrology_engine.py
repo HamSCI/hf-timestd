@@ -37,7 +37,8 @@ from hf_timestd.models import (
 from hf_timestd.core.wwvh_discrimination import WWVHDiscriminator
 from hf_timestd.core.tone_detector import MultiStationToneDetector
 from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
-from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType as TickStationType
+from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType
+from hf_timestd.core.decoder_config import get_decoder_config, DecoderConfig, DecoderComparisonTracker
 from hf_timestd.core.tick_edge_detector import TickEdgeDetector
 from hf_timestd.core.fusion_timing_state import FusionTimingState, LockTier
 from hf_timestd.core.bootstrap_state import BootstrapStateWriter
@@ -196,7 +197,7 @@ class MetrologyEngine:
                 )
             
             # 7. Tick Matched Filters for per-second timing (55+ estimates/minute)
-            self.tick_filters: Dict[TickStationType, TickMatchedFilter] = {}
+            self.tick_filters: Dict[StationType, TickMatchedFilter] = {}
             self._init_tick_filters()
             
             # 8. Tick Edge Detector for per-second onset timing (57 edges/minute)
@@ -204,6 +205,25 @@ class MetrologyEngine:
             # overcoming the intermod and low-processing-gain problems that
             # prevented use of 5ms WWV/WWVH ticks in the matched filter.
             self.edge_detector = TickEdgeDetector(sample_rate=self.sample_rate)
+            
+            # 9. Decoder config and A/B comparison tracker
+            self.decoder_config = get_decoder_config()
+            self.pll_decoders = {}  # PLL flywheel decoders for A/B comparison
+            if self.decoder_config.enable_ab_comparison:
+                self.comparison_tracker = DecoderComparisonTracker(self.decoder_config)
+                # Initialize PLL decoders for each station type
+                from hf_timestd.core.tick_pll_decoder import TickPLLDecoder
+                for station_type in self.tick_filters.keys():
+                    self.pll_decoders[station_type] = TickPLLDecoder(
+                        sample_rate=self.sample_rate,
+                        station_type=station_type.value,
+                        window_ms=self.decoder_config.pll_window_ms,
+                        alpha=self.decoder_config.pll_alpha,
+                        max_missed=self.decoder_config.pll_max_missed
+                    )
+                logger.info(f"{self.channel_name}: A/B comparison enabled - MF + PLL decoders running")
+            else:
+                self.comparison_tracker = None
                 
         except ImportError as e:
             logger.error(f"Failed to initialize Metrology components: {e}")
@@ -284,32 +304,32 @@ class MetrologyEngine:
         
         if 'CHU' in channel_upper:
             # CHU-only channels (3.33, 7.85, 14.67 MHz)
-            self.tick_filters[TickStationType.CHU] = TickMatchedFilter(
-                station=TickStationType.CHU,
+            self.tick_filters[StationType.CHU] = TickMatchedFilter(
+                station=StationType.CHU,
                 sample_rate=self.sample_rate
             )
             logger.info(f"{self.channel_name}: CHU tick filter initialized (58 ticks/min)")
             
         elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
             # WWV-only channels (20, 25 MHz)
-            self.tick_filters[TickStationType.WWV] = TickMatchedFilter(
-                station=TickStationType.WWV,
+            self.tick_filters[StationType.WWV] = TickMatchedFilter(
+                station=StationType.WWV,
                 sample_rate=self.sample_rate
             )
             logger.info(f"{self.channel_name}: WWV tick filter initialized (57 ticks/min)")
             
         elif 'SHARED' in channel_upper:
             # Shared channels (2.5, 5, 10, 15 MHz) - WWV, WWVH, BPM all possible
-            self.tick_filters[TickStationType.WWV] = TickMatchedFilter(
-                station=TickStationType.WWV,
+            self.tick_filters[StationType.WWV] = TickMatchedFilter(
+                station=StationType.WWV,
                 sample_rate=self.sample_rate
             )
-            self.tick_filters[TickStationType.WWVH] = TickMatchedFilter(
-                station=TickStationType.WWVH,
+            self.tick_filters[StationType.WWVH] = TickMatchedFilter(
+                station=StationType.WWVH,
                 sample_rate=self.sample_rate
             )
-            self.tick_filters[TickStationType.BPM] = TickMatchedFilter(
-                station=TickStationType.BPM,
+            self.tick_filters[StationType.BPM] = TickMatchedFilter(
+                station=StationType.BPM,
                 sample_rate=self.sample_rate
             )
             logger.info(f"{self.channel_name}: WWV/WWVH/BPM tick filters initialized (57+57+59 ticks/min)")
@@ -853,6 +873,18 @@ class MetrologyEngine:
                 sub_sample_offset = max(-0.5, min(0.5, sub_sample_offset))
         
         precise_peak_idx = peak_idx + sub_sample_offset
+        
+        # Leading edge back-calculation for minute markers (ntpd-inspired)
+        # The correlation peak corresponds to the CENTER of the tone template.
+        # The on-time marker is the START (leading edge) of the tone.
+        # For long tones (minute markers), subtract half the template length
+        # to recover the precise leading edge position.
+        half_template_samples = n_template / 2.0
+        if tone_duration_sec >= 0.3:  # Minute markers: 0.8s (WWV), 0.5s (CHU), 0.3s (BPM)
+            leading_edge_idx = precise_peak_idx - half_template_samples
+            precise_peak_idx = leading_edge_idx
+            logger.debug(f"{station_name}: Leading edge correction applied "
+                        f"(-{half_template_samples/self.sample_rate*1000:.1f}ms for {tone_duration_sec*1000:.0f}ms tone)")
         
         # Convert to arrival time (ms from minute boundary)
         # For mode='valid', peak_idx=0 means template starts at sample 0 of measurement_region
@@ -1412,8 +1444,39 @@ class MetrologyEngine:
                         logger.debug(f"{self.channel_name}: {station_type.value} tick phase: "
                                     f"{tick_analysis.valid_windows}/{tick_analysis.total_windows} windows, "
                                     f"tick_std={tick_analysis.tick_std_offset_ms:.1f}ms")
+                        
+                        # A/B Comparison: Also run PLL decoder if enabled
+                        if self.comparison_tracker and station_type in self.pll_decoders:
+                            try:
+                                pll_decoder = self.pll_decoders[station_type]
+                                pll_result = pll_decoder.process_minute(
+                                    iq_samples, minute_number,
+                                    buffer_timing=buffer_timing,
+                                    minute_boundary=minute_boundary
+                                )
+                                
+                                # Feed comparison into tracker
+                                comparison = self.comparison_tracker.add_comparison(
+                                    timestamp=system_time,
+                                    mf_d_clock=tick_analysis.d_clock_ms,
+                                    pll_d_clock=pll_result.d_clock_ms if pll_result else None,
+                                    mf_n_ticks=tick_analysis.n_ticks_detected,
+                                    pll_n_ticks=pll_result.n_ticks_detected if pll_result else 0
+                                )
+                                
+                                logger.debug(f"{self.channel_name}: A/B comparison - "
+                                            f"MF: {tick_analysis.n_ticks_detected} ticks, "
+                                            f"PLL: {pll_result.n_ticks_detected if pll_result else 0} ticks, "
+                                            f"winner: {comparison.get('winner', 'NONE')}")
+                            except Exception as e:
+                                logger.debug(f"{self.channel_name}: PLL comparison failed: {e}")
                 except Exception as e:
                     logger.debug(f"{self.channel_name}: {station_type.value} tick extraction failed: {e}")
+            
+            # Periodically update comparison metrics for API exposure (every 10 minutes)
+            if self.comparison_tracker and self.minutes_processed % 10 == 0:
+                self.decoder_config.update_comparison_metrics(self.comparison_tracker)
+                logger.debug(f"{self.channel_name}: Updated comparison metrics for API")
         elif not signal_present:
             logger.info(f"{self.channel_name}: No signal at tick frequency — "
                        f"skipping tick phase extraction (silent minute?)")

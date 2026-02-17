@@ -24,6 +24,7 @@ except ImportError:
 
 from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router, tec_router, tid_router, dashboard_router, phase_router, grape_router
 from routers.timing_validation import router as timing_validation_router
+from routers.decoder_comparison import router as decoder_comparison_router
 from config import config
 
 # Configure logging
@@ -66,6 +67,7 @@ app.include_router(tec_router, prefix="/api")
 app.include_router(tid_router, prefix="/api")
 app.include_router(docs_router)  # No prefix - router has its own /api/docs prefix
 app.include_router(timing_validation_router)  # No prefix - router has its own /api/timing-validation prefix
+app.include_router(decoder_comparison_router)  # No prefix - router has its own /api/decoder-comparison prefix
 app.include_router(dashboard_router, prefix="/api")  # 24-hour dashboard endpoints
 app.include_router(phase_router, prefix="/api")  # Phase/Doppler analysis endpoints
 app.include_router(grape_router, prefix="/api")  # GRAPE spectrograms and upload status

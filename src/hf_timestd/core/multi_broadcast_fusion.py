@@ -366,6 +366,9 @@ class FusedResult:
     propagation_modes_used: Optional[str] = None       # Comma-separated modes
     dominant_propagation_mode: Optional[str] = None    # Most common mode
     
+    # Kalman filter state (UI expects 'LOCKED', 'ACQUIRING', or 'REACQUIRING')
+    kalman_state: Optional[str] = None               # Kalman convergence state
+    
     # Allan deviation (stability metrics)
     adev_60s: Optional[float] = None                   # ADEV at tau=60s
     adev_1000s: Optional[float] = None                 # ADEV at tau=1000s
@@ -3114,6 +3117,96 @@ class MultiBroadcastFusion:
         
         return True, reason, 0
     
+    def _validate_cross_frequency_d_clock(
+        self,
+        measurements: List[BroadcastMeasurement]
+    ) -> Tuple[bool, str, Dict[str, float]]:
+        """
+        Cross-validate raw D_clock across frequencies for the same station.
+        
+        If the physics model is correct, D_clock should be frequency-independent
+        (the 1/f² ionospheric term cancels out in D_clock = raw_toa - expected_delay).
+        
+        Systematic trends with frequency indicate:
+        - Propagation model error (wrong mode, wrong TEC)
+        - Unmodeled ionospheric dispersion
+        - Hardware/frequency-dependent biases
+        
+        This is a powerful validation of the physics model quality.
+        
+        Args:
+            measurements: List of broadcast measurements
+            
+        Returns:
+            Tuple of (is_valid, reason, station_deviations):
+                - is_valid: True if all stations show frequency-independent D_clock
+                - reason: Explanation of validation result
+                - station_deviations: Dict of station->max_frequency_deviation_ms
+        """
+        # Group measurements by station
+        station_freq_groups = defaultdict(lambda: defaultdict(list))
+        for m in measurements:
+            if m.station in ('GLOBAL_DIFF', 'BPM', 'UNKNOWN'):
+                continue
+            if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms):
+                station_freq_groups[m.station][m.frequency_mhz].append(m.d_clock_ms)
+        
+        station_deviations = {}
+        all_valid = True
+        reasons = []
+        
+        for station, freq_groups in station_freq_groups.items():
+            # Need at least 2 frequencies for comparison
+            if len(freq_groups) < 2:
+                continue
+            
+            # Calculate mean D_clock per frequency
+            freq_means = {}
+            for freq, d_clocks in freq_groups.items():
+                freq_means[freq] = np.mean(d_clocks)
+            
+            # Check if D_clock is frequency-independent
+            # The 1/f² ionospheric term should cancel out in D_clock calculation
+            # so all frequencies should agree within measurement noise (~2-5ms)
+            mean_values = list(freq_means.values())
+            if len(mean_values) >= 2:
+                max_diff = max(mean_values) - min(mean_values)
+                station_deviations[station] = max_diff
+                
+                # Threshold: 5ms tolerance for frequency independence
+                # Physics says D_clock should be identical across frequencies
+                # after the 1/f² ionospheric correction
+                CROSS_FREQ_THRESHOLD_MS = 5.0
+                
+                if max_diff > CROSS_FREQ_THRESHOLD_MS:
+                    all_valid = False
+                    freq_info = ', '.join([f"{f}MHz={v:+.2f}ms" for f, v in sorted(freq_means.items())])
+                    reasons.append(
+                        f"{station}: {max_diff:.2f}ms spread across frequencies "
+                        f"(threshold: {CROSS_FREQ_THRESHOLD_MS}ms). [{freq_info}]"
+                    )
+                    logger.warning(
+                        f"Cross-frequency validation FAILED for {station}: "
+                        f"{max_diff:.2f}ms max deviation. Physics model error suspected. "
+                        f"Frequencies: {freq_info}"
+                    )
+                else:
+                    logger.debug(
+                        f"Cross-frequency validation OK for {station}: "
+                        f"{max_diff:.2f}ms max deviation across {len(freq_means)} frequencies"
+                    )
+        
+        if all_valid:
+            if station_deviations:
+                avg_dev = np.mean(list(station_deviations.values()))
+                reason = f"All {len(station_deviations)} stations show frequency-independent D_clock (avg deviation: {avg_dev:.2f}ms)"
+            else:
+                reason = "No multi-frequency data available for validation"
+        else:
+            reason = '; '.join(reasons)
+        
+        return all_valid, reason, station_deviations
+    
     def fuse(self, lookback_minutes: int = 30, force_l1_only: bool = False, skip_write: bool = False) -> Optional[FusedResult]:
         """
         Perform multi-broadcast fusion.
@@ -3685,6 +3778,26 @@ class MultiBroadcastFusion:
             # Note: We don't reject the fusion, but flag it in the result
             # The consistency_flag will be set to reflect this issue
         
+        # ====================================================================
+        # CROSS-FREQUENCY VALIDATION (2026-02-16)
+        # ====================================================================
+        # Validate that raw D_clock is frequency-independent for each station.
+        # If the physics model is correct, D_clock should be the same across
+        # all frequencies (the 1/f² ionospheric term cancels out).
+        # Systematic trends indicate propagation model errors.
+        
+        freq_valid, freq_reason, freq_deviations = self._validate_cross_frequency_d_clock(
+            measurements
+        )
+        
+        if not freq_valid:
+            logger.warning(f"Cross-frequency validation failed: {freq_reason}")
+            # Flag in consistency if physics model is suspect
+            if cross_valid:  # Don't overwrite cross-station failure
+                cross_reason = f"PHYSICS_MODEL_SUSPECT: {freq_reason}"
+        else:
+            logger.debug(f"Cross-frequency validation OK: {freq_reason}")
+        
         # Weighted mean of hardware-calibrated D_clock values
         # After hardware correction, this represents real clock offset + iono residual
         w = np.array(weights)
@@ -3926,7 +4039,7 @@ class MultiBroadcastFusion:
             
             # Track convergence based on measurement quality (not Kalman state)
             # We consider converged when we have good multi-station coverage
-            if not self.kalman_converged and n_stations_now >= 3 and wls_uncertainty < 2.0:
+            if not self.kalman_converged and n_stations_now >= 3 and wls_uncertainty < 3.0:
                 self.kalman_converged = True
                 logger.info(
                     f"WLS fusion CONVERGED: {n_stations_now} stations, "
@@ -4218,7 +4331,9 @@ class MultiBroadcastFusion:
             single_station_mode=single_station_mode,
             # Propagation mode tracking (v6.2)
             propagation_modes_used=propagation_modes_used,
-            dominant_propagation_mode=dominant_propagation_mode
+            dominant_propagation_mode=dominant_propagation_mode,
+            # Kalman filter state (2026-02-16: fix UI bug)
+            kalman_state='LOCKED' if self.kalman_converged else 'ACQUIRING' if self.kalman_n_updates >= 10 else 'REACQUIRING'
         )
         
         # Track measurement for Allan deviation calculation
