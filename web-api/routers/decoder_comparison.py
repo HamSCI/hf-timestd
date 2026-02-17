@@ -24,6 +24,29 @@ router = APIRouter(prefix="/decoder-comparison", tags=["decoder-comparison"])
 logger = logging.getLogger(__name__)
 
 
+def _safe_float(val) -> Optional[float]:
+    """Convert numpy/other numeric to Python float, NaN to None."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if f != f:  # NaN check
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(val) -> Optional[int]:
+    """Convert numpy/other numeric to Python int."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
 @router.get("/status")
 async def get_decoder_status():
     """
@@ -34,6 +57,7 @@ async def get_decoder_status():
     - Current "winner" based on accuracy
     - Days remaining in A/B test period
     - Auto-promotion settings
+    - Summary metrics computed from HDF5 data (last 1 hour)
     """
     try:
         cfg = get_decoder_config()
@@ -48,20 +72,15 @@ async def get_decoder_status():
             days_remaining = cfg.ab_test_duration_days
             percent_complete = 0
         
-        # Get latest metrics if available
+        # Compute summary metrics from HDF5 data (last 1 hour)
+        # The web API runs in a separate process from the metrology service,
+        # so in-memory ComparisonMetrics are never populated here. Read from disk.
         latest_metrics = None
         winner = None
-        if cfg.comparison_metrics:
-            latest_metrics = {
-                'matched_filter_accuracy': cfg.comparison_metrics.matched_filter_accuracy,
-                'pll_accuracy': cfg.comparison_metrics.pll_accuracy,
-                'accuracy_improvement_pct': cfg.comparison_metrics.accuracy_improvement_pct,
-                'matched_filter_ticks': cfg.comparison_metrics.matched_filter_ticks,
-                'pll_ticks': cfg.comparison_metrics.pll_ticks,
-                'pll_lock_quality': cfg.comparison_metrics.pll_lock_quality,
-                'samples_since': cfg.comparison_metrics.samples_since.isoformat() if cfg.comparison_metrics.samples_since else None,
-            }
-            winner = cfg.comparison_metrics.winner.value
+        try:
+            latest_metrics, winner = _compute_summary_from_hdf5(hours=1)
+        except Exception as e:
+            logger.debug(f"Could not compute HDF5 summary: {e}")
         
         return {
             'primary_decoder': cfg.primary_decoder.value,
@@ -84,6 +103,104 @@ async def get_decoder_status():
     except Exception as e:
         logger.error(f"Error getting decoder status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _compute_summary_from_hdf5(hours: int = 1):
+    """
+    Compute summary comparison metrics from HDF5 decoder_comparison data.
+    
+    Returns:
+        (latest_metrics_dict, winner_string) or (None, None)
+    """
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(hours=hours)
+    
+    mf_stds = []
+    pll_stds = []
+    mf_total_ticks = 0
+    pll_total_ticks = 0
+    pll_lock_qualities = []
+    winners = []
+    n_records = 0
+    earliest_ts = None
+    
+    phase2_dir = config.data_root / 'phase2'
+    if not phase2_dir.exists():
+        return None, None
+    
+    # Known non-channel directories to skip
+    skip_dirs = {'fusion', 'science', 'ionex', 'phase2'}
+    
+    for channel_dir in phase2_dir.iterdir():
+        if not channel_dir.is_dir() or channel_dir.name in skip_dirs:
+            continue
+        try:
+            reader = DataProductReader(
+                data_dir=channel_dir,
+                product_level='L2',
+                product_name='decoder_comparison',
+                channel=channel_dir.name
+            )
+            measurements = reader.read_time_range(
+                start=start_time.isoformat() + 'Z',
+                end=end_time.isoformat() + 'Z'
+            )
+            for m in measurements:
+                n_records += 1
+                ts = m.get('timestamp_utc')
+                if ts and (earliest_ts is None or ts < earliest_ts):
+                    earliest_ts = ts
+                
+                mf_std = m.get('mf_std_ms')
+                pll_std = m.get('pll_std_ms')
+                if mf_std is not None:
+                    mf_stds.append(float(mf_std))
+                if pll_std is not None:
+                    pll_stds.append(float(pll_std))
+                
+                mf_total_ticks += int(m.get('mf_n_ticks') or 0)
+                pll_total_ticks += int(m.get('pll_n_ticks') or 0)
+                
+                lq = m.get('pll_lock_quality')
+                if lq is not None:
+                    pll_lock_qualities.append(float(lq))
+                
+                w = m.get('winner')
+                if w:
+                    winners.append(str(w))
+        except Exception as e:
+            logger.warning(f"HDF5 summary: {channel_dir.name} failed: {e}")
+            continue
+    
+    if n_records == 0:
+        return None, None
+    
+    avg_mf_std = sum(mf_stds) / len(mf_stds) if mf_stds else None
+    avg_pll_std = sum(pll_stds) / len(pll_stds) if pll_stds else None
+    avg_pll_lock = sum(pll_lock_qualities) / len(pll_lock_qualities) if pll_lock_qualities else None
+    
+    improvement_pct = None
+    if avg_mf_std and avg_pll_std and avg_mf_std > 0:
+        improvement_pct = ((avg_mf_std - avg_pll_std) / avg_mf_std) * 100
+    
+    # Determine winner by majority vote
+    winner_counts = {}
+    for w in winners:
+        winner_counts[w] = winner_counts.get(w, 0) + 1
+    dominant_winner = max(winner_counts, key=winner_counts.get) if winner_counts else None
+    
+    latest_metrics = {
+        'matched_filter_accuracy': avg_mf_std,
+        'pll_accuracy': avg_pll_std,
+        'accuracy_improvement_pct': improvement_pct,
+        'matched_filter_ticks': mf_total_ticks,
+        'pll_ticks': pll_total_ticks,
+        'pll_lock_quality': avg_pll_lock,
+        'samples_since': earliest_ts,
+        'n_records': n_records,
+    }
+    
+    return latest_metrics, dominant_winner
 
 
 @router.get("/metrics")
@@ -109,8 +226,11 @@ async def get_comparison_metrics(
         # Read from decoder_comparison data product
         phase2_dir = config.data_root / 'phase2'
         
+        # Known non-channel directories to skip
+        skip_dirs = {'fusion', 'science', 'ionex', 'phase2'}
+        
         for channel_dir in phase2_dir.iterdir():
-            if not channel_dir.is_dir() or channel_dir.name in ['fusion', 'science']:
+            if not channel_dir.is_dir() or channel_dir.name in skip_dirs:
                 continue
             
             try:
@@ -129,30 +249,41 @@ async def get_comparison_metrics(
                 for m in measurements:
                     # Filter by broadcast_id if specified
                     if broadcast_id:
-                        station = m.get('station', '')
-                        freq_mhz = m.get('frequency_mhz', 0)
+                        station = str(m.get('station', ''))
+                        freq_mhz = float(m.get('frequency_mhz', 0))
                         freq_khz = int(round(freq_mhz * 1000))
                         if f"{station}_{freq_khz}" != broadcast_id:
                             continue
                     
+                    # Build broadcast_id from station + frequency
+                    station = str(m.get('station', ''))
+                    freq_mhz = float(m.get('frequency_mhz', 0))
+                    freq_khz = int(round(freq_mhz * 1000)) if freq_mhz else 0
+                    bid = f"{station}_{freq_khz}" if station else None
+                    
                     metrics_data.append({
-                        'timestamp': m.get('timestamp_utc'),
-                        'broadcast_id': m.get('broadcast_id'),
-                        'station': m.get('station'),
-                        'frequency_mhz': m.get('frequency_mhz'),
-                        'matched_filter_accuracy': m.get('matched_filter_accuracy_ms'),
-                        'pll_accuracy': m.get('pll_accuracy_ms'),
-                        'accuracy_improvement_pct': m.get('accuracy_improvement_pct'),
-                        'matched_filter_ticks': m.get('matched_filter_ticks'),
-                        'pll_ticks': m.get('pll_ticks'),
-                        'pll_lock_quality': m.get('pll_lock_quality'),
-                        'winner': m.get('winner'),
-                        'gps_error_matched_filter': m.get('gps_error_matched_filter_ms'),
-                        'gps_error_pll': m.get('gps_error_pll_ms'),
+                        'timestamp': str(m.get('timestamp_utc', '')),
+                        'broadcast_id': bid,
+                        'station': station,
+                        'frequency_mhz': freq_mhz,
+                        'matched_filter_accuracy': _safe_float(m.get('mf_std_ms')),
+                        'pll_accuracy': _safe_float(m.get('pll_std_ms')),
+                        'matched_filter_offset': _safe_float(m.get('mf_timing_offset_ms')),
+                        'pll_offset': _safe_float(m.get('pll_timing_offset_ms')),
+                        'matched_filter_ticks': _safe_int(m.get('mf_n_ticks')),
+                        'pll_ticks': _safe_int(m.get('pll_n_ticks')),
+                        'pll_lock_quality': _safe_float(m.get('pll_lock_quality')),
+                        'winner': str(m.get('winner', '')),
+                        'winner_confidence': _safe_float(m.get('winner_confidence')),
+                        'mf_d_clock_ms': _safe_float(m.get('mf_d_clock_ms')),
+                        'pll_d_clock_ms': _safe_float(m.get('pll_d_clock_ms')),
+                        'delta_d_clock_ms': _safe_float(m.get('delta_d_clock_ms')),
+                        'gps_error_matched_filter': _safe_float(m.get('mf_gps_error_ms')),
+                        'gps_error_pll': _safe_float(m.get('pll_gps_error_ms')),
                     })
                 
             except Exception as e:
-                logger.debug(f"Could not read decoder_comparison from {channel_dir.name}: {e}")
+                logger.warning(f"Could not read decoder_comparison from {channel_dir.name}: {e}")
                 continue
         
         # Aggregate by timestamp
@@ -309,12 +440,14 @@ async def get_broadcast_comparison(
                     if station == target_station and freq_khz == target_freq_khz:
                         metrics.append({
                             'timestamp': m.get('timestamp_utc'),
-                            'matched_filter_mean_offset': m.get('matched_filter_mean_timing_offset_ms'),
-                            'pll_mean_offset': m.get('pll_mean_timing_offset_ms'),
-                            'matched_filter_std': m.get('matched_filter_std_timing_ms'),
-                            'pll_std': m.get('pll_std_timing_ms'),
+                            'matched_filter_mean_offset': m.get('mf_timing_offset_ms'),
+                            'pll_mean_offset': m.get('pll_timing_offset_ms'),
+                            'matched_filter_std': m.get('mf_std_ms'),
+                            'pll_std': m.get('pll_std_ms'),
+                            'mf_d_clock_ms': m.get('mf_d_clock_ms'),
+                            'pll_d_clock_ms': m.get('pll_d_clock_ms'),
                             'winner': m.get('winner'),
-                            'pll_state': m.get('pll_state'),
+                            'pll_lock_quality': m.get('pll_lock_quality'),
                         })
                 
             except Exception as e:

@@ -1424,6 +1424,7 @@ class MetrologyEngine:
         # WWV/WWVH 5ms ticks (0.5% duty cycle → band power ≈ noise floor).
         # Edge ensemble detection of ≥5 ticks is a reliable signal indicator.
         tick_results = {}
+        comparison_records = []  # A/B comparison records for HDF5 persistence
         signal_present = (
             bool(edge_results)
             or self._check_signal_presence(iq_samples)
@@ -1445,8 +1446,19 @@ class MetrologyEngine:
                                     f"{tick_analysis.valid_windows}/{tick_analysis.total_windows} windows, "
                                     f"tick_std={tick_analysis.tick_std_offset_ms:.1f}ms")
                         
-                        # A/B Comparison: Also run PLL decoder if enabled
-                        if self.comparison_tracker and station_type in self.pll_decoders:
+                        # A/B Comparison: Only valid for WWV/WWVH (continuous 1000/1200 Hz tones)
+                        # CHU uses FSK, BPM has different tone pattern — PLL is meaningless for those
+                        #
+                        # MF baseline uses the EDGE ENSEMBLE (robust median of ~57 per-second
+                        # tick front-edge detections) rather than TickMatchedFilter.d_clock_ms,
+                        # which reports correlation peak position within the ±100ms search
+                        # window — not a valid timing residual.
+                        station_name = station_type.value
+                        edge_result = edge_results.get(station_name)
+                        if (self.comparison_tracker and station_type in self.pll_decoders
+                                and station_name in ('WWV', 'WWVH')
+                                and edge_result is not None
+                                and edge_result.ensemble_n_edges >= 5):
                             try:
                                 pll_decoder = self.pll_decoders[station_type]
                                 pll_result = pll_decoder.process_minute(
@@ -1455,18 +1467,49 @@ class MetrologyEngine:
                                     minute_boundary=minute_boundary
                                 )
                                 
+                                # MF side: edge ensemble (per-second tick front-edge timing)
+                                mf_d_clock = edge_result.ensemble_timing_error_ms
+                                mf_std = edge_result.ensemble_uncertainty_ms
+                                mf_ticks = edge_result.ensemble_n_edges
+                                
+                                # PLL side: continuous carrier phase tracking
+                                pll_ticks = pll_result.n_ticks_detected if pll_result else 0
+                                
                                 # Feed comparison into tracker
                                 comparison = self.comparison_tracker.add_comparison(
                                     timestamp=system_time,
-                                    mf_d_clock=tick_analysis.d_clock_ms,
+                                    mf_d_clock=mf_d_clock,
                                     pll_d_clock=pll_result.d_clock_ms if pll_result else None,
-                                    mf_n_ticks=tick_analysis.n_ticks_detected,
-                                    pll_n_ticks=pll_result.n_ticks_detected if pll_result else 0
+                                    mf_n_ticks=mf_ticks,
+                                    pll_n_ticks=pll_ticks
                                 )
                                 
-                                logger.debug(f"{self.channel_name}: A/B comparison - "
-                                            f"MF: {tick_analysis.n_ticks_detected} ticks, "
-                                            f"PLL: {pll_result.n_ticks_detected if pll_result else 0} ticks, "
+                                # Build comparison record for HDF5 persistence
+                                comparison_records.append({
+                                    'station': station_name,
+                                    'frequency_mhz': self.frequency_mhz,
+                                    'mf_d_clock_ms': mf_d_clock,
+                                    'pll_d_clock_ms': pll_result.d_clock_ms if pll_result else None,
+                                    'delta_ms': comparison.get('delta_ms'),
+                                    'mf_timing_offset_ms': mf_d_clock,
+                                    'pll_timing_offset_ms': pll_result.mean_timing_offset_ms if pll_result else None,
+                                    'mf_std_ms': mf_std,
+                                    'pll_std_ms': pll_result.std_timing_offset_ms if pll_result else None,
+                                    'mf_n_ticks': mf_ticks,
+                                    'pll_n_ticks': pll_ticks,
+                                    'pll_lock_quality': pll_result.lock_quality if pll_result else 0.0,
+                                    'pll_lock_duration_sec': None,
+                                    'winner': comparison.get('winner', 'NONE'),
+                                    'winner_confidence': comparison.get('winner_confidence', 0.0),
+                                    'gps_reference': comparison.get('gps_reference'),
+                                    'mf_gps_error_ms': comparison.get('mf_gps_error_ms'),
+                                    'pll_gps_error_ms': comparison.get('pll_gps_error_ms'),
+                                    'quality': 'GOOD' if (mf_ticks > 0 and pll_ticks > 0) else 'PARTIAL',
+                                })
+                                
+                                logger.debug(f"{self.channel_name}: A/B comparison {station_name} - "
+                                            f"Edge: {mf_d_clock:+.3f}±{mf_std:.3f}ms ({mf_ticks} edges), "
+                                            f"PLL: {pll_ticks} ticks, "
                                             f"winner: {comparison.get('winner', 'NONE')}")
                             except Exception as e:
                                 logger.debug(f"{self.channel_name}: PLL comparison failed: {e}")
@@ -1596,6 +1639,9 @@ class MetrologyEngine:
         
         # Store tick analysis results for caller to retrieve
         self._last_tick_results = tick_results if tick_results else None
+        
+        # Store decoder comparison data for HDF5 persistence
+        self._decoder_comparison_data = comparison_records if comparison_records else None
         
         # Store ALL measurement attempts (detected + rejected) for threshold calibration.
         # This is the evidence that keeps us honest: by recording what we reject and why,

@@ -278,6 +278,29 @@ class MetrologyService:
         )
         logger.info(f"Tick phase writer initialized for {channel_name}")
         
+        # Decoder Comparison Writer (A/B testing metrics for matched filter vs PLL)
+        # Only initialized if A/B testing is enabled
+        self.decoder_comparison_writer = None
+        from hf_timestd.core.decoder_config import get_decoder_config
+        decoder_cfg = get_decoder_config()
+        if decoder_cfg.enable_ab_comparison:
+            comparison_output_dir = DataProductRegistry.get_data_dir(
+                channel_dir=self.output_dir,
+                product_level="L2",
+                product_name="decoder_comparison",
+                create=True
+            )
+            self.decoder_comparison_writer = DataProductWriter(
+                output_dir=comparison_output_dir,
+                product_level="L2",
+                product_name="decoder_comparison",
+                channel=self.channel_name,
+                version="v1",
+                processing_version="1.0.0",
+                station_metadata=self.station_config
+            )
+            logger.info(f"Decoder comparison writer initialized for {channel_name} (A/B testing enabled)")
+        
         # Start IonoDataService background fetcher (singleton, safe to call multiple times)
         # This enables real-time WAM-IPE and GIRO ionospheric data for the propagation model.
         self._iono_service = None
@@ -648,6 +671,45 @@ class MetrologyService:
                     logger.debug(f"Detection attempts written: {len(rtp_attempts)} total, "
                                 f"{n_det} detected, {len(rtp_attempts) - n_det} rejected")
             
+            # Write decoder comparison metrics (A/B testing)
+            if self.decoder_comparison_writer and hasattr(self.engine, '_decoder_comparison_data'):
+                comparison_data = self.engine._decoder_comparison_data
+                if comparison_data:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    for comp in comparison_data:
+                        comp_rec = {
+                            'timestamp_utc': now_iso,
+                            'minute_boundary_utc': minute_boundary,
+                            'channel': self.channel_name,
+                            'station': comp.get('station', ''),
+                            'frequency_mhz': comp.get('frequency_mhz', 0),
+                            'mf_d_clock_ms': comp.get('mf_d_clock_ms'),
+                            'pll_d_clock_ms': comp.get('pll_d_clock_ms'),
+                            'delta_d_clock_ms': comp.get('delta_ms'),
+                            'mf_timing_offset_ms': comp.get('mf_timing_offset_ms'),
+                            'pll_timing_offset_ms': comp.get('pll_timing_offset_ms'),
+                            'mf_std_ms': comp.get('mf_std_ms'),
+                            'pll_std_ms': comp.get('pll_std_ms'),
+                            'mf_n_ticks': comp.get('mf_n_ticks', 0),
+                            'pll_n_ticks': comp.get('pll_n_ticks', 0),
+                            'pll_lock_quality': comp.get('pll_lock_quality'),
+                            'pll_lock_duration_sec': comp.get('pll_lock_duration_sec'),
+                            'winner': comp.get('winner', 'NONE'),
+                            'winner_confidence': comp.get('winner_confidence', 0.0),
+                            'gps_reference_d_clock_ms': comp.get('gps_reference'),
+                            'mf_gps_error_ms': comp.get('mf_gps_error_ms'),
+                            'pll_gps_error_ms': comp.get('pll_gps_error_ms'),
+                            'comparison_quality': comp.get('quality', 'UNKNOWN'),
+                            'processed_at': now_iso,
+                            'processing_version': "1.0.0"
+                        }
+                        try:
+                            self.decoder_comparison_writer.write_measurement(comp_rec)
+                        except Exception as comp_err:
+                            logger.debug(f"Failed to write decoder comparison: {comp_err}")
+                    
+                    logger.debug(f"Decoder comparison written: {len(comparison_data)} measurements")
+            
             # Write test signal for minutes 8 and 44 (WWV/WWVH channel sounding)
             minute_number = (minute_boundary // 60) % 60
             if minute_number in [8, 44] and self.test_signal_writer:
@@ -680,6 +742,8 @@ class MetrologyService:
             self.attempts_writer.close()
         if self.tick_phase_writer:
             self.tick_phase_writer.close()
+        if self.decoder_comparison_writer:
+            self.decoder_comparison_writer.close()
         if self._iono_service is not None:
             try:
                 self._iono_service.stop()

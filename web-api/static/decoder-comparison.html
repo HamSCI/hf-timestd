@@ -208,6 +208,38 @@
             </div>
         </div>
 
+        <!-- Recent Comparisons Table -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">Recent Comparisons</div>
+                    <div class="card-subtitle">Per-minute decoder comparison results (last 1 hour)</div>
+                </div>
+                <div>
+                    <span id="metrics-count" style="font-size: 0.875rem; color: #94a3b8;">0 records</span>
+                </div>
+            </div>
+            <div style="padding: 1rem; overflow-x: auto;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 0.875rem;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid #334155; color: #94a3b8;">
+                            <th style="padding: 0.5rem; text-align: left;">Time</th>
+                            <th style="padding: 0.5rem; text-align: left;">Station</th>
+                            <th style="padding: 0.5rem; text-align: right;">MF σ (ms)</th>
+                            <th style="padding: 0.5rem; text-align: right;">PLL σ (ms)</th>
+                            <th style="padding: 0.5rem; text-align: right;">MF Ticks</th>
+                            <th style="padding: 0.5rem; text-align: right;">PLL Ticks</th>
+                            <th style="padding: 0.5rem; text-align: right;">PLL Lock</th>
+                            <th style="padding: 0.5rem; text-align: center;">Winner</th>
+                        </tr>
+                    </thead>
+                    <tbody id="metrics-table-body">
+                        <tr><td colspan="8" style="padding: 2rem; text-align: center; color: #64748b;">No comparison data yet. Waiting for decoder metrics...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- API Links -->
         <div class="card">
             <div class="card-header">
@@ -216,7 +248,7 @@
             <div style="padding: 1rem;">
                 <div style="background: rgba(30, 41, 59, 0.5); border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.875rem;">
                     <div style="margin-bottom: 0.5rem;"><a href="/decoder-comparison/status" style="color: #60a5fa;">GET /decoder-comparison/status</a></div>
-                    <div style="margin-bottom: 0.5rem;"><a href="/decoder-comparison/metrics" style="color: #60a5fa;">GET /decoder-comparison/metrics</a></div>
+                    <div style="margin-bottom: 0.5rem;"><a href="/decoder-comparison/metrics?hours=1" style="color: #60a5fa;">GET /decoder-comparison/metrics?hours=1</a></div>
                     <div style="margin-bottom: 0.5rem;"><a href="/decoder-comparison/recommendation" style="color: #60a5fa;">GET /decoder-comparison/recommendation</a></div>
                     <div><a href="/api/docs" style="color: #60a5fa;">View API Documentation →</a></div>
                 </div>
@@ -228,21 +260,29 @@
         const API_BASE = '/decoder-comparison';
         let refreshInterval;
 
-        async function fetchStatus() {
+        async function fetchAll() {
             try {
                 document.getElementById('refresh-indicator').style.display = 'block';
-                const response = await fetch(`${API_BASE}/status`);
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const data = await response.json();
-                updateUI(data);
+                const [statusRes, metricsRes] = await Promise.all([
+                    fetch(`${API_BASE}/status`),
+                    fetch(`${API_BASE}/metrics?hours=1`)
+                ]);
+                if (!statusRes.ok) throw new Error(`Status: HTTP ${statusRes.status}`);
+                const statusData = await statusRes.json();
+                updateStatusUI(statusData);
+                
+                if (metricsRes.ok) {
+                    const metricsData = await metricsRes.json();
+                    updateMetricsTable(metricsData);
+                }
             } catch (error) {
-                showError(`Failed to fetch status: ${error.message}`);
+                showError(`Failed to fetch data: ${error.message}`);
             } finally {
                 document.getElementById('refresh-indicator').style.display = 'none';
             }
         }
 
-        function updateUI(data) {
+        function updateStatusUI(data) {
             // Primary decoder
             document.getElementById('primary-decoder').textContent = data.primary_decoder?.toUpperCase() || '-';
             
@@ -274,15 +314,17 @@
             winnerEl.textContent = winner === 'NONE' ? '-' : winner;
             winnerEl.className = `metric-value-lg ${winner === 'PLL' ? 'winner-pll' : winner === 'MF' ? 'winner-mf' : ''}`;
             
-            // Latest comparison metrics
+            // Latest comparison metrics (from HDF5 summary)
             const metrics = data.latest_comparison;
             if (metrics) {
                 document.getElementById('mf-accuracy').textContent = 
-                    metrics.matched_filter_accuracy?.toFixed(2) + ' ms' || '-';
-                document.getElementById('mf-ticks').textContent = metrics.matched_filter_ticks || '-';
+                    metrics.matched_filter_accuracy != null ? metrics.matched_filter_accuracy.toFixed(2) + ' ms' : '-';
+                document.getElementById('mf-ticks').textContent = 
+                    metrics.matched_filter_ticks != null ? metrics.matched_filter_ticks.toLocaleString() : '-';
                 document.getElementById('pll-accuracy').textContent = 
-                    metrics.pll_accuracy?.toFixed(2) + ' ms' || '-';
-                document.getElementById('pll-ticks').textContent = metrics.pll_ticks || '-';
+                    metrics.pll_accuracy != null ? metrics.pll_accuracy.toFixed(2) + ' ms' : '-';
+                document.getElementById('pll-ticks').textContent = 
+                    metrics.pll_ticks != null ? metrics.pll_ticks.toLocaleString() : '-';
             }
             
             // Auto-promotion
@@ -303,6 +345,44 @@
             }
         }
 
+        function updateMetricsTable(data) {
+            const tbody = document.getElementById('metrics-table-body');
+            const countEl = document.getElementById('metrics-count');
+            const raw = data.raw_metrics || [];
+            
+            countEl.textContent = `${raw.length} records`;
+            
+            if (raw.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="padding: 2rem; text-align: center; color: #64748b;">No comparison data yet. Waiting for decoder metrics...</td></tr>';
+                return;
+            }
+            
+            // Show most recent 50 records, newest first
+            const sorted = [...raw].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || '')).slice(0, 50);
+            
+            tbody.innerHTML = sorted.map(m => {
+                const ts = m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : '-';
+                const mfStd = m.matched_filter_accuracy != null ? m.matched_filter_accuracy.toFixed(2) : '-';
+                const pllStd = m.pll_accuracy != null ? m.pll_accuracy.toFixed(2) : '-';
+                const mfTicks = m.matched_filter_ticks ?? '-';
+                const pllTicks = m.pll_ticks ?? '-';
+                const lockQ = m.pll_lock_quality != null ? (m.pll_lock_quality * 100).toFixed(0) + '%' : '-';
+                const winner = m.winner || '-';
+                const winnerColor = winner === 'PLL' ? '#8b5cf6' : winner === 'MF' ? '#3b82f6' : winner === 'TIE' ? '#6b7280' : '#64748b';
+                
+                return `<tr style="border-bottom: 1px solid #1e293b;">
+                    <td style="padding: 0.4rem 0.5rem; color: #94a3b8;">${ts}</td>
+                    <td style="padding: 0.4rem 0.5rem;">${m.station || '-'}</td>
+                    <td style="padding: 0.4rem 0.5rem; text-align: right; color: #3b82f6;">${mfStd}</td>
+                    <td style="padding: 0.4rem 0.5rem; text-align: right; color: #8b5cf6;">${pllStd}</td>
+                    <td style="padding: 0.4rem 0.5rem; text-align: right; color: #3b82f6;">${mfTicks}</td>
+                    <td style="padding: 0.4rem 0.5rem; text-align: right; color: #8b5cf6;">${pllTicks}</td>
+                    <td style="padding: 0.4rem 0.5rem; text-align: right;">${lockQ}</td>
+                    <td style="padding: 0.4rem 0.5rem; text-align: center;"><span style="color: ${winnerColor}; font-weight: 600;">${winner}</span></td>
+                </tr>`;
+            }).join('');
+        }
+
         function showError(message) {
             const container = document.getElementById('error-container');
             container.innerHTML = `<div class="error">${message}</div>`;
@@ -311,10 +391,10 @@
         }
 
         // Initial load
-        fetchStatus();
+        fetchAll();
         
         // Auto-refresh every 30 seconds
-        refreshInterval = setInterval(fetchStatus, 30000);
+        refreshInterval = setInterval(fetchAll, 30000);
         
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
