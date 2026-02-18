@@ -102,18 +102,6 @@ async def root():
         )
 
 
-@app.get("/dashboard-24h", response_class=HTMLResponse)
-async def dashboard_24h_page():
-    """Serve 24-hour dashboard."""
-    dashboard_path = static_dir / "dashboard-24h.html"
-    if dashboard_path.exists():
-        return FileResponse(dashboard_path)
-    else:
-        return HTMLResponse(
-            content="<html><body><h1>24-Hour Dashboard not found</h1></body></html>",
-            status_code=404
-        )
-
 
 @app.get("/phase", response_class=HTMLResponse)
 async def phase_page():
