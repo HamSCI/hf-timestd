@@ -42,7 +42,7 @@ FUSION mode addresses real operational scenarios: remote/off-grid installations,
 | Multi-station, no network | ±2-5 ms | 5-10 min |
 | Single station | ±5-15 ms | 2-3 min |
 
-The ionosphere is the dominant error in all cases. Oscillator quality affects time-to-lock and holdover, but not steady-state accuracy once locked. See **[METROLOGY.md](METROLOGY.md)** for the full error budget and analysis.
+The ionosphere is the dominant error in all cases. Oscillator quality affects time-to-lock and holdover, but not steady-state accuracy once locked. See **[METROLOGY.md](docs/METROLOGY.md)** for the full error budget and analysis.
 
 ---
 
@@ -148,9 +148,9 @@ The system is composed of eight independent services that form a pipeline:
 ## Detailed Documentation
 
 - **[INSTALLATION.md](INSTALLATION.md)** - Detailed setup guide.
-- **[TECHNICAL_REFERENCE.md](TECHNICAL_REFERENCE.md)** - Deep dive into algorithms, data formats, and physics models.
-- **[METROLOGY.md](METROLOGY.md)** - RTP-to-UTC calibration methodology and timing bootstrap.
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design philosophy ("The Why").
+- **[TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)** - Deep dive into algorithms, data formats, and physics models.
+- **[METROLOGY.md](docs/METROLOGY.md)** - RTP-to-UTC calibration methodology and timing bootstrap.
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System design philosophy ("The Why").
 - **[docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md](docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md)** - Production deployment and verification gates.
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mijahauan/hf-timestd)
 
@@ -192,7 +192,7 @@ The system is composed of eight independent services that form a pipeline:
 - ✅ **Chrony SHM reachability fix** - Discontinuity filter no longer permanently latches; threshold scales with measurement uncertainty
 - ✅ **HDF5 file lock fix** - Moved `HDF5_USE_FILE_LOCKING=FALSE` before h5py import; added `locking=False` to all h5py.File() calls
 - ✅ **Silent exception fix** - Upgraded HDF5 read error logging from DEBUG to WARNING to prevent invisible data starvation
-- ✅ **FUSION mode documentation** - Comprehensive accuracy analysis and error budget in METROLOGY.md
+- ✅ **FUSION mode documentation** - Comprehensive accuracy analysis and error budget in docs/METROLOGY.md
 
 **v6.3.0 (January 25, 2026) - Timing Bootstrap System**
 
