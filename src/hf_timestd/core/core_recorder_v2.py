@@ -134,6 +134,50 @@ class CoreRecorderV2:
         if not self.status_address:
             raise ValueError("Configuration missing 'status_address' in [ka9q] section")
 
+        # Try to resolve status address, falling back to discovery if needed
+        from ka9q.utils import resolve_multicast_address
+        try:
+            # Check if address resolves
+            resolve_multicast_address(self.status_address, timeout=2.0)
+        except Exception:
+            logger.warning(f"Failed to resolve configured address '{self.status_address}', attempting auto-discovery...")
+            from ka9q.discovery import discover_radiod_services
+            
+            # Discover services
+            services = discover_radiod_services(timeout=5.0)
+            if not services:
+                logger.error("Discovery failed: No radiod services found!")
+                # processing will likely fail at RadiodControl init, but we let it proceed to raise the error there
+            else:
+                logger.info(f"Discovered {len(services)} radiod services: {[s['name'] for s in services]}")
+                
+                # Simple selection logic:
+                # 1. Look for a service matching the configured hostname (loose match)
+                # 2. Look for "B3" since user mentioned it
+                # 3. Default to the first one
+                selected = None
+                
+                # Try 1: configured name in service name?
+                for s in services:
+                    if self.status_address.replace('.local', '') in s['name'] or self.status_address in s['name']:
+                        selected = s
+                        break
+                
+                # Try 2: "B3" tag?
+                if not selected:
+                    for s in services:
+                        if "B3" in s['name']:
+                            selected = s
+                            break
+                            
+                # Try 3: First available
+                if not selected:
+                    selected = services[0]
+                
+                if selected:
+                    logger.warning(f"Redirecting to discovered service: '{selected['name']}' at {selected['address']}")
+                    self.status_address = selected['address']
+
         self.control = RadiodControl(self.status_address)
         
         # Station config
