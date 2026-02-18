@@ -4039,7 +4039,8 @@ class MultiBroadcastFusion:
             
             # Track convergence based on measurement quality (not Kalman state)
             # We consider converged when we have good multi-station coverage
-            if not self.kalman_converged and n_stations_now >= 3 and wls_uncertainty < 3.0:
+            # 2 stations is the normal operating condition (WWV + WWVH)
+            if not self.kalman_converged and n_stations_now >= 2 and wls_uncertainty < 3.0:
                 self.kalman_converged = True
                 logger.info(
                     f"WLS fusion CONVERGED: {n_stations_now} stations, "
@@ -4295,6 +4296,9 @@ class MultiBroadcastFusion:
         else:
             dominant_propagation_mode = None
         
+        # Compute Kalman state string
+        _kalman_state_str = 'LOCKED' if self.kalman_converged else ('ACQUIRING' if self.kalman_n_updates >= 10 else 'REACQUIRING')
+        
         result = FusedResult(
             timestamp=time.time(),
             d_clock_fused_ms=fused_d_clock,
@@ -4332,8 +4336,8 @@ class MultiBroadcastFusion:
             # Propagation mode tracking (v6.2)
             propagation_modes_used=propagation_modes_used,
             dominant_propagation_mode=dominant_propagation_mode,
-            # Kalman filter state (2026-02-16: fix UI bug)
-            kalman_state='LOCKED' if self.kalman_converged else 'ACQUIRING' if self.kalman_n_updates >= 10 else 'REACQUIRING'
+            # Kalman filter state (2026-02-18: fix convergence threshold 3→2 stations)
+            kalman_state=_kalman_state_str
         )
         
         # Track measurement for Allan deviation calculation
@@ -4393,14 +4397,8 @@ class MultiBroadcastFusion:
                 stations.append('BPM')
             stations_used = ','.join(stations) if stations else 'NONE'
             
-            # Determine Kalman state (simplified - fusion uses weighted averaging, not Kalman)
-            # Map convergence state to Kalman-like states for schema compatibility
-            if result.n_broadcasts >= 10 and result.uncertainty_ms < 1.0:
-                kalman_state = 'LOCKED'
-            elif result.n_broadcasts >= 5:
-                kalman_state = 'ACQUIRING'
-            else:
-                kalman_state = 'REACQUIRING'
+            # Use the kalman_state from the FusedResult (set by fuse() from self.kalman_converged)
+            kalman_state = result.kalman_state
             
             # Build measurement dictionary
             
