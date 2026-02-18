@@ -241,9 +241,16 @@ class MinuteTickAnalysis:
     
     # D_clock: proper timing error computed via timing authority (buffer_timing).
     # None if buffer_timing was not provided (no timing authority available).
-    # mean_timing_offset_ms is buffer-relative and must NOT be used as D_clock.
+    # When buffer_timing IS provided, mean_timing_offset_ms is already a true
+    # ToA residual from the UTC second boundary, and d_clock_ms equals it.
     d_clock_ms: Optional[float] = None
     d_clock_uncertainty_ms: Optional[float] = None
+    
+    # Doppler shift derived from carrier phase slope across per-second ticks.
+    # Positive = approaching (frequency increase), negative = receding.
+    # None if insufficient phase data or poor fit quality.
+    doppler_hz: Optional[float] = None
+    doppler_uncertainty_hz: Optional[float] = None
 
 
 class TickMatchedFilter:
@@ -287,8 +294,10 @@ class TickMatchedFilter:
         # Pre-compute base templates (quadrature pair for AM, complex for IQ)
         self._templates: Dict[float, Tuple[np.ndarray, np.ndarray]] = {}
         self._iq_templates: Dict[float, np.ndarray] = {}  # Complex IQ templates
+        self._am_templates: Dict[float, np.ndarray] = {}  # AM envelope templates
         self._build_templates()
         self._build_iq_templates()
+        self._build_am_templates()
         
         # IQ-domain bandpass filter to isolate tick frequency.
         # Rejects continuous 100 Hz BCD, 440/500/600 Hz audio tones.
@@ -345,16 +354,64 @@ class TickMatchedFilter:
             
             self._templates[duration_ms] = (template_sin, template_cos)
     
+    def _build_am_templates(self) -> None:
+        """Build AM envelope templates for timing correlation.
+        
+        After AM demodulation (|IQ| - DC), the tick signal is a rectified
+        tone burst: a Tukey-windowed pulse at the tone frequency.  The
+        correlation template is the *envelope* of that burst — a smooth
+        rectangular pulse with tapered edges.
+        
+        Unlike IQ-domain correlation (which is flat on a continuous carrier),
+        AM-domain correlation produces a sharp peak at the tone onset because
+        the information is in the amplitude keying, not the carrier phase.
+        """
+        durations_ms = {self.template_config.tick_duration_ms}
+        durations_ms.add(self.template_config.minute_marker_duration_ms)
+        
+        if self.station == StationType.CHU:
+            durations_ms.add(self.template_config.fsk_duration_ms)
+            durations_ms.add(self.template_config.voice_duration_ms)
+            durations_ms.add(self.template_config.regular_duration_ms)
+        
+        if self.station == StationType.BPM:
+            durations_ms.add(self.template_config.ut1_tick_duration_ms)
+        
+        freq = self.template_config.frequency_hz
+        
+        for duration_ms in durations_ms:
+            duration_sec = duration_ms / 1000.0
+            n_samples = int(duration_sec * self.sample_rate)
+            
+            if n_samples < 2:
+                continue
+            
+            t = np.arange(n_samples) / self.sample_rate
+            alpha = 0.05 if duration_ms >= 100.0 else 0.1
+            window = tukey(n_samples, alpha=alpha)
+            
+            # AM envelope template: what |IQ| looks like during a tone burst.
+            # After AM demod, the tone burst is a rectified sinusoid shaped
+            # by the Tukey window.  We use the RMS envelope (smooth pulse).
+            tone = np.sin(2 * np.pi * freq * t) * window
+            # Rectified envelope (half-wave, then smooth)
+            # For matched filtering, the envelope shape is what matters.
+            # A simple Tukey pulse works well as the template.
+            template = window.copy()
+            
+            # Normalize to unit energy
+            energy = np.sqrt(np.sum(template**2))
+            if energy > 0:
+                template /= energy
+            
+            self._am_templates[duration_ms] = template
+    
     def _build_iq_templates(self) -> None:
-        """Build complex IQ-domain templates for correlation.
+        """Build complex IQ-domain templates for carrier phase extraction.
         
         Templates are complex exponentials at the tick frequency, windowed
-        with a Tukey window. Includes both per-second tick durations and
-        the minute marker duration.
-        
-        Correlating complex IQ directly against these templates avoids the
-        AM demodulation step, which introduces timing ambiguity (multiple
-        near-equal correlation peaks separated by the tone period).
+        with a Tukey window. Used for carrier phase measurement (Doppler),
+        NOT for timing — IQ correlation is flat on a continuous AM carrier.
         """
         durations_ms = {self.template_config.tick_duration_ms}
         
@@ -573,6 +630,99 @@ class TickMatchedFilter:
             return iq_samples
         return sosfiltfilt(self._bandpass_sos, iq_samples)
     
+    def _am_demodulate(self, iq_samples: np.ndarray) -> np.ndarray:
+        """AM demodulation bridge: IQ → audio envelope.
+        
+        WWV/WWVH/CHU/BPM use standard AM (DSB).  The timing information
+        (tick on/off keying) is encoded in the magnitude of the carrier.
+        
+        Two-stage envelope process:
+          1. RF envelope (this method): |IQ| - DC → real-valued audio
+          2. Audio envelope (done by correlation): template match on pulse shape
+        
+        Args:
+            iq_samples: Complex IQ samples (bandpass-filtered or raw)
+            
+        Returns:
+            Real-valued AM-demodulated audio (DC-blocked)
+        """
+        # Magnitude extraction: sqrt(I² + Q²)
+        rf_envelope = np.abs(iq_samples)
+        # DC block: remove the static carrier power, leaving AC audio
+        audio = rf_envelope - np.mean(rf_envelope)
+        return audio
+    
+    def _correlate_tick_am(
+        self,
+        audio_slice: np.ndarray,
+        template: np.ndarray,
+        search_samples: int
+    ) -> Tuple[float, float, float]:
+        """Correlate an AM envelope template against demodulated audio.
+        
+        Unlike IQ-domain correlation (which is flat on a continuous carrier),
+        AM-domain correlation produces a sharp peak at the tone onset because
+        the information is in the amplitude keying.
+        
+        Args:
+            audio_slice: Real-valued AM-demodulated audio around expected tick.
+                         Length ≈ search_samples + tick_len + search_samples.
+            template: Real-valued AM envelope template (from _am_templates).
+            search_samples: Samples in the search margin on each side.
+            
+        Returns:
+            Tuple of (offset_samples, peak_value, snr_db) where offset_samples
+            is the sub-sample refined offset from the expected tick position.
+        """
+        corr = correlate(audio_slice, template, mode='valid')
+        
+        if len(corr) == 0:
+            return 0.0, 0.0, -100.0
+        
+        peak_idx = int(np.argmax(corr))
+        peak_value = corr[peak_idx]
+        
+        # Sub-sample interpolation (parabolic)
+        if 0 < peak_idx < len(corr) - 1:
+            y0 = corr[peak_idx - 1]
+            y1 = corr[peak_idx]
+            y2 = corr[peak_idx + 1]
+            
+            denom = 2 * (y0 - 2*y1 + y2)
+            if abs(denom) > 1e-10:
+                delta = float((y0 - y2) / denom)
+                delta = np.clip(delta, -0.5, 0.5)
+                peak_idx_refined = peak_idx + delta
+            else:
+                peak_idx_refined = float(peak_idx)
+        else:
+            peak_idx_refined = float(peak_idx)
+        
+        # Offset from expected position (center of search region)
+        offset_samples = peak_idx_refined - search_samples
+        
+        # SNR: peak vs noise floor
+        tick_len = len(template)
+        max_exclusion = max(10, len(corr) // 4)
+        exclusion = min(tick_len, max_exclusion)
+        peak_start = max(0, peak_idx - exclusion)
+        peak_end = min(len(corr), peak_idx + exclusion)
+        noise_region = np.concatenate([
+            corr[:peak_start],
+            corr[peak_end:]
+        ])
+        if len(noise_region) > 10:
+            noise_std = np.std(noise_region)
+            if noise_std > 0:
+                snr_linear = peak_value / noise_std
+                snr_db = 20 * np.log10(max(snr_linear, 1e-10))
+            else:
+                snr_db = 40.0
+        else:
+            snr_db = 0.0
+        
+        return offset_samples, float(peak_value), snr_db
+    
     def process_window(
         self,
         iq_samples: np.ndarray,
@@ -581,13 +731,19 @@ class TickMatchedFilter:
         minute: int = 0,
         iq_filtered: np.ndarray = None,
         iq_unfiltered: np.ndarray = None,
+        buffer_timing=None,
+        minute_boundary: int = 0,
     ) -> Optional[TickDetectionResult]:
         """
-        Process a single window of IQ samples using per-tick IQ-domain correlation.
+        Process a single window of IQ samples for timing and phase.
         
-        Bandpass-filtered IQ is used for timing correlation (rejects continuous
-        tones). Unfiltered IQ is used for carrier phase extraction (preserves
-        full signal for phase measurement).
+        Timing: AM-demodulated envelope correlated against pulse templates.
+        Phase:  Unfiltered IQ mixed down at tone frequency for Doppler.
+        
+        The AM demodulation bridge (|IQ| - DC) is essential because WWV/WWVH
+        use standard AM: timing is in the amplitude keying, not the carrier
+        phase.  IQ-domain correlation is flat on a continuous carrier and
+        cannot resolve tick onset times.
         
         Per-tick offsets are combined with the median for robustness against
         individual tick dropouts or interference.
@@ -599,6 +755,11 @@ class TickMatchedFilter:
             minute: Minute number (for BPM)
             iq_filtered: Pre-filtered IQ for correlation (optional, avoids re-filtering)
             iq_unfiltered: Unfiltered IQ for phase extraction (optional)
+            buffer_timing: BufferTiming object for UTC↔sample conversion.
+                          When provided, timing_offset_ms is a true ToA residual
+                          from the UTC second boundary. Without it, falls back to
+                          buffer-relative offsets.
+            minute_boundary: Unix timestamp of the minute boundary (integer seconds).
             
         Returns:
             TickDetectionResult or None if detection failed
@@ -612,6 +773,11 @@ class TickMatchedFilter:
             iq_for_corr = iq_filtered
         else:
             iq_for_corr = self._bandpass_iq(iq_samples)
+        
+        # AM demodulation bridge: IQ → audio envelope for timing
+        # The bandpass filter isolates the tick frequency; AM demod then
+        # extracts the pulse shape (on/off keying) that carries timing.
+        am_audio = self._am_demodulate(iq_for_corr)
         
         # Unfiltered IQ for phase extraction
         if iq_unfiltered is not None:
@@ -629,7 +795,7 @@ class TickMatchedFilter:
         if len(valid_seconds) == 0:
             return None
         
-        # Per-tick IQ-domain correlation on bandpass-filtered signal
+        # Per-tick AM-domain correlation for timing, IQ for phase
         tick_offsets = []      # offset in samples from expected position
         tick_snrs = []         # SNR per tick
         tick_peaks = []        # correlation peak value per tick
@@ -638,14 +804,31 @@ class TickMatchedFilter:
         
         for sec in valid_seconds:
             duration_ms = self._get_tick_duration_ms(sec, minute)
-            if duration_ms not in self._iq_templates:
+            if duration_ms not in self._am_templates:
                 continue
             
-            template = self._iq_templates[duration_ms]
-            tick_len = len(template)
+            am_template = self._am_templates[duration_ms]
+            tick_len = len(am_template)
             
-            # Tick expected at start of each second within this window
-            tick_offset_in_window = (sec - start_second) * self.sample_rate
+            # Tick expected position within this window.
+            # When buffer_timing is available, compute from absolute UTC so
+            # that timing_offset_ms is a true ToA residual from the UTC
+            # second boundary — independent of where the buffer starts.
+            # Without buffer_timing, fall back to buffer-relative position.
+            if buffer_timing is not None and minute_boundary > 0:
+                # Absolute UTC time of this tick's second boundary
+                tick_utc = float(minute_boundary + sec)
+                # Expected sample in the FULL buffer
+                tick_sample_full = buffer_timing.utc_to_sample(tick_utc)
+                # Window starts at start_second in the full buffer
+                window_start_sample_full = buffer_timing.utc_to_sample(
+                    float(minute_boundary + start_second)
+                )
+                tick_offset_in_window = int(round(
+                    tick_sample_full - window_start_sample_full
+                ))
+            else:
+                tick_offset_in_window = (sec - start_second) * self.sample_rate
             
             # Search range scales with template duration:
             # 800ms marker needs wider search (±500ms for ionospheric variation)
@@ -656,18 +839,18 @@ class TickMatchedFilter:
                 tick_search_ms = search_range_ms
             tick_search_samples = int(tick_search_ms * self.sample_rate / 1000.0)
             
-            # Extract IQ slice: search before + tick + search after
+            # Extract AM audio slice: search before + tick + search after
             slice_start = tick_offset_in_window - tick_search_samples
             slice_end = tick_offset_in_window + tick_len + tick_search_samples
             
-            if slice_start < 0 or slice_end > len(iq_for_corr):
+            if slice_start < 0 or slice_end > len(am_audio):
                 continue
             
-            iq_slice = iq_for_corr[slice_start:slice_end]
+            audio_slice = am_audio[slice_start:slice_end]
             
-            # Correlate this tick
-            offset_samp, peak_val, snr_db = self._correlate_tick_iq(
-                iq_slice, template, tick_search_samples
+            # AM-domain correlation for timing
+            offset_samp, peak_val, snr_db = self._correlate_tick_am(
+                audio_slice, am_template, tick_search_samples
             )
             
             tick_offsets.append(offset_samp)
@@ -779,11 +962,14 @@ class TickMatchedFilter:
             TickDetectionResult for the minute marker, or None
         """
         marker_ms = self.template_config.minute_marker_duration_ms
-        if marker_ms not in self._iq_templates:
+        if marker_ms not in self._am_templates:
             return None
         
-        template = self._iq_templates[marker_ms]
-        tick_len = len(template)
+        am_template = self._am_templates[marker_ms]
+        tick_len = len(am_template)
+        
+        # AM demodulation bridge: IQ → audio envelope for timing
+        am_audio = self._am_demodulate(iq_filtered)
         
         # Find where second 0 falls in the buffer using the timing authority.
         # The marker tone arrives at sec0 + geometric_delay (HF skywave:
@@ -798,8 +984,6 @@ class TickMatchedFilter:
         
         # Search window: from a few ms before sec0 (buffer jitter) through
         # 100ms after (covers all realistic HF propagation delays).
-        # Safe because the marker template is long enough that the
-        # correlation won't false-match the shorter next-second tick.
         search_before_ms = 5.0
         search_after_ms = 100.0
         search_before_samp = int(search_before_ms * self.sample_rate / 1000.0)
@@ -808,17 +992,17 @@ class TickMatchedFilter:
         slice_start = max(0, expected_sample - search_before_samp)
         slice_end = expected_sample + search_after_samp + tick_len
         
-        if slice_end > len(iq_filtered):
+        if slice_end > len(am_audio):
             return None
         
-        iq_slice = iq_filtered[slice_start:slice_end]
+        audio_slice = am_audio[slice_start:slice_end]
         
         # The expected position within the slice is where sec0 falls.
-        # _correlate_tick_iq returns offset relative to this position.
+        # _correlate_tick_am returns offset relative to this position.
         expected_pos_in_slice = expected_sample - slice_start
         
-        offset_samp, peak_val, snr_db = self._correlate_tick_iq(
-            iq_slice, template, expected_pos_in_slice
+        offset_samp, peak_val, snr_db = self._correlate_tick_am(
+            audio_slice, am_template, expected_pos_in_slice
         )
         
         # offset_samp is relative to expected_sample.  The detected sample
@@ -949,6 +1133,8 @@ class TickMatchedFilter:
                 minute=minute_number,
                 iq_filtered=window_filtered,
                 iq_unfiltered=window_unfiltered,
+                buffer_timing=buffer_timing,
+                minute_boundary=minute_boundary,
             )
             
             if result is not None and result.snr_db >= min_snr_db:
@@ -1019,50 +1205,81 @@ class TickMatchedFilter:
         # +1 for minute marker window
         total_windows = 1 + (60 - self.window_seconds) // self.overlap_seconds
         
-        # === Compute D_clock via timing authority ===
-        # Convert each detection's sample position to UTC, then compute
-        # D_clock = detected_UTC - expected_UTC (the integer second boundary).
+        # === Compute D_clock ===
+        # With buffer_timing, both the minute marker and per-second tick
+        # timing_offset_ms are true ToA residuals from the UTC second
+        # boundary (computed via buffer_timing.utc_to_sample in both
+        # _detect_minute_marker and process_window).  D_clock is simply
+        # the primary timing estimate — no conversion needed.
+        #
+        # Without buffer_timing, timing_offset_ms is buffer-relative and
+        # D_clock is meaningless, so we leave it None.
         d_clock_val = None
         d_clock_unc = None
         
         if buffer_timing is not None and minute_boundary > 0:
-            d_clock_estimates = []
+            # timing_offset_ms is already a true ToA residual
+            d_clock_val = mean_offset
+            d_clock_unc = std_offset
+        
+        # === Derive Doppler from carrier phase slope ===
+        # Each per-second tick window has a carrier_phase_rad measured by
+        # mixing the IQ signal at the tone frequency.  The phase progression
+        # across the minute reflects the Doppler shift:
+        #   Δφ/Δt = 2π × f_doppler
+        #   f_doppler = (1/2π) × dφ/dt
+        #
+        # We fit a linear slope to the unwrapped carrier phase vs time
+        # across all detected tick windows.
+        doppler_val = None
+        doppler_unc = None
+        
+        if len(tick_results) >= 5:
+            # Use the center time of each window (seconds from minute start)
+            phase_times = []
+            phase_values = []
+            for r in tick_results:
+                t_center = (r.window_start_second + r.window_end_second) / 2.0
+                phase_times.append(t_center)
+                phase_values.append(r.carrier_phase_rad)
             
-            for r in window_results:
-                # Both marker and per-second ticks: timing_offset_ms is the
-                # offset from the expected tick position.  For the marker,
-                # the expected position is sec0_sample (set by buffer_timing
-                # in _detect_minute_marker).  For per-second ticks, the
-                # expected position is at ref_second * sample_rate (buffer-
-                # relative, assuming buffer ≈ minute boundary).
-                ref_second = r.window_start_second
-                expected_utc = float(minute_boundary + ref_second)
-                
-                # Detected sample in full buffer
-                expected_sample = buffer_timing.utc_to_sample(expected_utc)
-                detected_sample = expected_sample + (
-                    r.timing_offset_ms * self.sample_rate / 1000.0
-                )
-                
-                detected_utc = buffer_timing.sample_to_utc(detected_sample)
-                d_clock_ms_i = (detected_utc - expected_utc) * 1000.0
-                d_clock_estimates.append((d_clock_ms_i, r.snr_db, r.timing_uncertainty_ms))
+            phase_times = np.array(phase_times)
+            phase_values = np.array(phase_values)
             
-            if d_clock_estimates:
-                vals = [e[0] for e in d_clock_estimates]
-                
-                if marker_ok:
-                    # Minute marker is primary — find its D_clock estimate
-                    for i, r in enumerate(window_results):
-                        if r.window_start_second == 0:
-                            d_clock_val = d_clock_estimates[i][0]
-                            d_clock_unc = d_clock_estimates[i][2]
-                            break
-                
-                if d_clock_val is None:
-                    # No marker or marker not found — use median of tick estimates
-                    d_clock_val = float(np.median(vals))
-                    d_clock_unc = float(np.std(vals)) if len(vals) > 1 else std_offset
+            # Unwrap phase to remove 2π discontinuities
+            phase_unwrapped = np.unwrap(phase_values)
+            
+            # Linear fit: phase = slope * t + intercept
+            # slope = dφ/dt in rad/s → Doppler = slope / (2π) Hz
+            if np.std(phase_times) > 0:
+                try:
+                    coeffs = np.polyfit(phase_times, phase_unwrapped, 1)
+                    slope_rad_per_sec = coeffs[0]
+                    doppler_val = float(slope_rad_per_sec / (2.0 * np.pi))
+                    
+                    # Residuals for uncertainty estimate
+                    fitted = np.polyval(coeffs, phase_times)
+                    residuals = phase_unwrapped - fitted
+                    phase_std = float(np.std(residuals))
+                    # Uncertainty in slope → uncertainty in Doppler
+                    t_range = float(np.max(phase_times) - np.min(phase_times))
+                    if t_range > 0:
+                        slope_unc = phase_std / (t_range * np.sqrt(len(phase_times) / 12.0))
+                        doppler_unc = float(slope_unc / (2.0 * np.pi))
+                    
+                    # Sanity check: HF Doppler should be < 5 Hz typically
+                    # (ionospheric motion ~50 m/s at 10 MHz → ~1.7 Hz)
+                    if abs(doppler_val) > 10.0:
+                        logger.warning(f"{self.station.value}: Doppler {doppler_val:.3f} Hz "
+                                      f"exceeds 10 Hz sanity limit, discarding")
+                        doppler_val = None
+                        doppler_unc = None
+                    else:
+                        logger.info(f"{self.station.value}: Doppler from phase slope: "
+                                   f"{doppler_val:+.4f} Hz "
+                                   f"(±{doppler_unc:.4f} Hz, {len(tick_results)} windows)")
+                except (np.linalg.LinAlgError, ValueError) as e:
+                    logger.debug(f"{self.station.value}: Doppler fit failed: {e}")
         
         return MinuteTickAnalysis(
             station=self.station,
@@ -1084,6 +1301,8 @@ class TickMatchedFilter:
             tick_valid_windows=tick_valid,
             d_clock_ms=d_clock_val,
             d_clock_uncertainty_ms=d_clock_unc,
+            doppler_hz=doppler_val,
+            doppler_uncertainty_hz=doppler_unc,
         )
 
 

@@ -156,6 +156,7 @@ class TickDetection:
     detected: bool               # Passed SNR threshold
     is_clean_minute: bool        # No intermod contamination
     is_doubled_tick: bool        # UT1 doubled tick (seconds 1-16)
+    carrier_phase_rad: float = 0.0  # Carrier phase at tick (from IQ mixing)
 
 
 @dataclass
@@ -178,6 +179,10 @@ class EdgeEnsembleResult:
     # Quality
     mean_edge_snr_db: float            # Mean SNR of detected ticks
     confidence: float                  # 0-1 quality metric
+    
+    # Doppler from carrier phase slope across the minute
+    doppler_hz: Optional[float] = None
+    doppler_uncertainty_hz: Optional[float] = None
     
     # Per-second details (for diagnostics)
     edges: List[TickDetection] = field(default_factory=list)
@@ -328,6 +333,7 @@ class TickEdgeDetector:
         buffer_timing,  # BufferTiming object
         expected_delay_sec: float,
         is_dedicated_channel: bool = False,
+        iq_samples: np.ndarray = None,
     ) -> Optional[EdgeEnsembleResult]:
         """
         Detect tick onsets for all seconds in the buffer.
@@ -339,6 +345,10 @@ class TickEdgeDetector:
             buffer_timing: BufferTiming object for UTC↔sample conversion
             expected_delay_sec: Expected propagation delay in seconds
             is_dedicated_channel: True for WWV_20000/WWV_25000 (no WWVH intermod)
+            iq_samples: Raw complex IQ samples (optional). When provided,
+                       carrier phase is extracted at each detected tick by
+                       mixing down at the tone frequency. Phase slope across
+                       the minute gives Doppler shift.
             
         Returns:
             EdgeEnsembleResult with combined timing estimate, or None if
@@ -483,6 +493,21 @@ class TickEdgeDetector:
                         else self.MIN_TICK_SNR_DB)
             detected = (corr_snr_db >= threshold)
             
+            # Carrier phase extraction from raw IQ at the detected tick.
+            # Mix the IQ at the tone frequency over the tick duration,
+            # then take the angle of the mean phasor.  This gives the
+            # carrier phase at this tick — the progression across the
+            # minute encodes Doppler shift.
+            carrier_phase = 0.0
+            if iq_samples is not None and detected:
+                tick_start = int(round(front_edge_sample))
+                tick_end = tick_start + n_template
+                if 0 <= tick_start and tick_end <= len(iq_samples):
+                    iq_tick = iq_samples[tick_start:tick_end]
+                    t_tick = (tick_start + np.arange(n_template)) / self.sample_rate
+                    mixer = np.exp(-1j * 2 * np.pi * tick_freq * t_tick)
+                    carrier_phase = float(np.angle(np.mean(iq_tick * mixer)))
+            
             ticks.append(TickDetection(
                 utc_second=utc_sec,
                 sec_in_minute=sec_in_minute,
@@ -494,6 +519,7 @@ class TickEdgeDetector:
                 detected=detected,
                 is_clean_minute=clean,
                 is_doubled_tick=doubled,
+                carrier_phase_rad=carrier_phase,
             ))
         
         # --- Ensemble combination ---
@@ -541,9 +567,31 @@ class TickEdgeDetector:
         clean_factor = 0.5 + 0.5 * (n_clean / max(1, n_detected))
         confidence = n_factor * snr_factor * clean_factor
         
+        # --- Doppler from carrier phase slope ---
+        # Fit unwrapped phase vs time across the minute.
+        # Slope (rad/s) / (2π) = Doppler frequency shift (Hz).
+        doppler_hz = None
+        doppler_uncertainty_hz = None
+        if iq_samples is not None and n_detected >= 5:
+            phase_times = np.array([t.sec_in_minute for t in detected_ticks], dtype=float)
+            phase_vals = np.array([t.carrier_phase_rad for t in detected_ticks])
+            phase_unwrapped = np.unwrap(phase_vals)
+            
+            if len(phase_times) >= 5 and (phase_times[-1] - phase_times[0]) > 5.0:
+                try:
+                    coeffs, cov = np.polyfit(phase_times, phase_unwrapped, 1, cov=True)
+                    slope_rad_per_sec = coeffs[0]
+                    doppler_hz = slope_rad_per_sec / (2.0 * np.pi)
+                    slope_std = np.sqrt(cov[0, 0])
+                    doppler_uncertainty_hz = slope_std / (2.0 * np.pi)
+                except (np.linalg.LinAlgError, ValueError):
+                    pass
+        
+        dop_str = f", doppler={doppler_hz:+.4f}Hz" if doppler_hz is not None else ""
         logger.info(f"{station}: Tick MF ensemble: {n_detected}/{len(ticks)} ticks, "
                     f"timing={ensemble_error:+.3f}±{ensemble_uncertainty:.3f}ms, "
-                    f"SNR={mean_snr:.1f}dB, clean={n_clean}, conf={confidence:.2f}")
+                    f"SNR={mean_snr:.1f}dB, clean={n_clean}, conf={confidence:.2f}"
+                    f"{dop_str}")
         
         return EdgeEnsembleResult(
             station=station,
@@ -557,6 +605,8 @@ class TickEdgeDetector:
             n_clean=n_clean,
             mean_edge_snr_db=mean_snr,
             confidence=float(confidence),
+            doppler_hz=doppler_hz,
+            doppler_uncertainty_hz=doppler_uncertainty_hz,
             edges=ticks,
         )
     

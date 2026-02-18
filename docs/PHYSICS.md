@@ -2,8 +2,8 @@
 
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 6.6.0 (Ionospheric Reanalysis + Physics-Based Mode Validation)  
-**Last Updated:** 2026-02-10
+**System Version:** 6.7.1+ (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model)  
+**Last Updated:** 2026-02-17
 
 ---
 
@@ -266,9 +266,9 @@ Plus **calibration layer** that learns from actual propagation measurements.
 - Model validation against actual propagation
 - Storm-time layer height changes
 
-### 3.4 Doppler Shift Measurement ✅
+### 3.4 Doppler Shift Measurement 
 
-**Status:** Implemented (Enhanced in v6.2)
+**Status:** Implemented (Unified in TickEdgeDetector, v6.8+)
 
 **Physics:** Ionospheric motion causes Doppler shifts:
 
@@ -278,47 +278,42 @@ Plus **calibration layer** that learns from actual propagation measurements.
 
 Where v_iono is the effective ionospheric velocity along the propagation path.
 
-**Implementation:** 
-- `src/hf_timestd/core/wwvh_discrimination.py` (estimate_doppler_shift)
-- `src/hf_timestd/core/tone_detector.py` (_estimate_doppler_from_phase_slope) — **NEW in v6.2**
+**Implementation:** `src/hf_timestd/core/tick_edge_detector.py`
 
-**v6.2 Enhancement: Phase-Based Doppler Estimation**
+**TickEdgeDetector Carrier Phase Doppler (v6.8+):**
 
-The tone detector now estimates Doppler directly from the complex correlation phase slope:
+The `TickEdgeDetector` extracts Doppler from carrier phase progression across the minute:
+
+1. At each detected tick, mix raw IQ samples at the tone frequency over the tick duration
+2. Take the angle of the mean phasor → carrier phase at that tick
+3. Unwrap phase across all detected ticks in the minute
+4. Linear fit: slope (rad/s) / (2π) = Doppler frequency shift (Hz)
 
 ```python
-# Extract phase around correlation peak
-phase_window = corr_phase[peak_idx - N : peak_idx + N]
-# Unwrap phase and fit linear slope
-phase_unwrapped = np.unwrap(phase_window)
-slope = np.polyfit(t, phase_unwrapped, 1)[0]  # rad/sample
-doppler_hz = slope × sample_rate / (2π)
+# Carrier phase at each tick
+iq_tick = iq_samples[tick_start:tick_end]
+mixer = np.exp(-1j * 2π * tick_freq * t_tick)
+carrier_phase = np.angle(np.mean(iq_tick * mixer))
+
+# Doppler from phase slope across minute
+phase_unwrapped = np.unwrap(phase_vals)
+coeffs, cov = np.polyfit(phase_times, phase_unwrapped, 1, cov=True)
+doppler_hz = coeffs[0] / (2π)
 ```
 
-**Doppler Timing Correction (v6.2):**
+Requires ≥5 detected ticks spanning ≥5 seconds for a meaningful fit.
 
-Doppler shift causes systematic timing bias that is now corrected:
-
-```
-Δt_bias ≈ (f_doppler / f_tone) × (T_tone / 2)
-```
-
-For typical HF Doppler (±1-5 Hz) on 1000 Hz tone over 800 ms:
-- Δt_bias ≈ (5 / 1000) × 0.4 = **2 ms** (worst case)
-
-**Outputs:**
-- `doppler_hz`: Measured Doppler shift (±0.01-0.1 Hz precision)
-- `doppler_std_hz`: Doppler spread (variability)
-- `max_coherent_window_sec`: Maximum coherent integration time
-- `timing_error_ms`: Now Doppler-corrected (v6.2)
+**Outputs (in tick_timing HDF5 product):**
+- `doppler_hz`: Carrier Doppler shift from phase slope (Hz)
+- `doppler_uncertainty_hz`: Uncertainty from linear fit covariance (Hz)
 
 **Scientific Value:**
 - Ionospheric velocity estimation
 - TID (Traveling Ionospheric Disturbance) detection
 - Channel stability assessment
-- **Improved timing accuracy** via Doppler correction
+- Diurnal Doppler signature tracks ionospheric layer motion
 
-### 3.5 Multipath and Delay Spread ✅
+### 3.5 Multipath and Delay Spread 
 
 **Status:** Implemented (Enhanced in v6.2)
 
@@ -329,7 +324,7 @@ For typical HF Doppler (±1-5 Hz) on 1000 Hz tone over 800 ms:
 
 **Implementation:** 
 - `src/hf_timestd/core/advanced_signal_analysis.py`
-- `src/hf_timestd/core/tone_detector.py` (_detect_multipath_from_correlation) — **NEW in v6.2**
+- `src/hf_timestd/core/tone_detector.py` (_detect_multipath_from_correlation)
 
 **v6.2 Enhancement: Integrated Multipath Detection**
 
@@ -1041,10 +1036,12 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 
 | Capability | Primary File |
 |------------|--------------|
+| **Tick Timing (D_clock, Doppler, SNR)** | `src/hf_timestd/core/tick_edge_detector.py` |
+| **Propagation Model** | `src/hf_timestd/core/propagation_model.py` |
+| **Ionospheric Data** | `src/hf_timestd/core/iono_data_service.py` |
 | TEC Estimation | `src/hf_timestd/core/tec_estimator.py` |
 | Ionospheric Model | `src/hf_timestd/core/ionospheric_model.py` |
 | Propagation Modes | `src/hf_timestd/core/propagation_mode_solver.py` |
-| Physics Propagation | `src/hf_timestd/core/physics_propagation.py` |
 | Doppler/Multipath | `src/hf_timestd/core/advanced_signal_analysis.py` |
 | Scintillation (S4, σ_φ) | `src/hf_timestd/core/advanced_signal_analysis.py` |
 | Sporadic-E Detection | `src/hf_timestd/core/propagation_mode_solver.py` |
@@ -1052,19 +1049,19 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 | Test Signal | `src/hf_timestd/core/wwv_test_signal.py` |
 | Discrimination | `src/hf_timestd/core/wwvh_discrimination.py` |
 | Science Aggregator | `src/hf_timestd/core/science_aggregator.py` |
-| **TID Detection** | `src/hf_timestd/core/tid_detector.py` |
-| **Physics Validation** | `src/hf_timestd/core/arrival_pattern_matrix.py` |
-| **Multi-Constraint Validation** | `src/hf_timestd/core/timing_consistency_validator.py` |
-| **Ionospheric Reanalysis** | `src/hf_timestd/core/ionospheric_reanalysis.py` |
+| TID Detection | `src/hf_timestd/core/tid_detector.py` |
+| Physics Validation | `src/hf_timestd/core/arrival_pattern_matrix.py` |
+| Multi-Constraint Validation | `src/hf_timestd/core/timing_consistency_validator.py` |
+| Ionospheric Reanalysis | `src/hf_timestd/core/ionospheric_reanalysis.py` |
 
 ---
 
 ## Appendix C: Related Documentation
 
-- **METROLOGY.md** — Time transfer methodology and uncertainty budgets
-- **TECHNICAL_REFERENCE.md** — System architecture and configuration
-- **SCIENTIFIC_CAPABILITIES.md** — Detailed feature validation status
-- **CARRIER_DOPPLER_INTERPRETATION.md** — HF channel and Doppler measurement details
+- **docs/METROLOGY.md** — Time transfer methodology and uncertainty budgets
+- **docs/TECHNICAL_REFERENCE.md** — System architecture and configuration
+- **docs/ARCHITECTURE.md** — Design philosophy and system architecture
+- **docs/CARRIER_DOPPLER_INTERPRETATION.md** — HF channel and Doppler measurement details
 
 ---
 

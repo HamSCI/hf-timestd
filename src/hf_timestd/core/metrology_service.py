@@ -278,29 +278,6 @@ class MetrologyService:
         )
         logger.info(f"Tick phase writer initialized for {channel_name}")
         
-        # Decoder Comparison Writer (A/B testing metrics for matched filter vs PLL)
-        # Only initialized if A/B testing is enabled
-        self.decoder_comparison_writer = None
-        from hf_timestd.core.decoder_config import get_decoder_config
-        decoder_cfg = get_decoder_config()
-        if decoder_cfg.enable_ab_comparison:
-            comparison_output_dir = DataProductRegistry.get_data_dir(
-                channel_dir=self.output_dir,
-                product_level="L2",
-                product_name="decoder_comparison",
-                create=True
-            )
-            self.decoder_comparison_writer = DataProductWriter(
-                output_dir=comparison_output_dir,
-                product_level="L2",
-                product_name="decoder_comparison",
-                channel=self.channel_name,
-                version="v1",
-                processing_version="1.0.0",
-                station_metadata=self.station_config
-            )
-            logger.info(f"Decoder comparison writer initialized for {channel_name} (A/B testing enabled)")
-        
         # Start IonoDataService background fetcher (singleton, safe to call multiple times)
         # This enables real-time WAM-IPE and GIRO ionospheric data for the propagation model.
         self._iono_service = None
@@ -542,60 +519,62 @@ class MetrologyService:
                     except Exception as fsk_err:
                         logger.warning(f"Failed to write FSK data: {fsk_err}")
             
-            # Write tick timing data (55+ estimates per minute)
-            if self.tick_writer and hasattr(self.engine, '_last_tick_results'):
-                tick_results = self.engine._last_tick_results
-                if tick_results:
-                    for station_name, tick_analysis in tick_results.items():
-                        # Get expected delay for the HDF5 record (informational)
-                        expected_delay_ms = None
-                        if hasattr(self.engine, '_predict_geometric_delay'):
-                            try:
-                                expected_delay_ms, _, _ = self.engine._predict_geometric_delay(
-                                    station_name, minute_boundary
-                                )
-                            except Exception:
-                                pass
-                        
-                        # D_clock is computed by the tick filter using the timing
-                        # authority (buffer_timing).  It is None if no timing
-                        # authority was available (Fusion mode before lock).
-                        d_clock_ms = tick_analysis.d_clock_ms
-                        
-                        tick_rec = {
-                            'timestamp_utc': datetime.now(timezone.utc).isoformat(),
-                            'minute_boundary_utc': minute_boundary,
-                            'channel': self.channel_name,
-                            'station': station_name,
-                            'frequency_mhz': self.frequency_hz / 1e6,
-                            'mean_timing_offset_ms': tick_analysis.mean_timing_offset_ms,
-                            'std_timing_offset_ms': tick_analysis.std_timing_offset_ms,
-                            'mean_snr_db': tick_analysis.mean_snr_db,
-                            'drift_rate_ms_per_sec': tick_analysis.drift_rate_ms_per_sec,
-                            'valid_windows': tick_analysis.valid_windows,
-                            'total_windows': tick_analysis.total_windows,
-                            'overall_confidence': tick_analysis.overall_confidence,
-                            'expected_delay_ms': expected_delay_ms,
-                            'd_clock_ms': d_clock_ms,
-                            'marker_detected': tick_analysis.marker_detected,
-                            'marker_timing_offset_ms': tick_analysis.marker_timing_offset_ms,
-                            'marker_snr_db': tick_analysis.marker_snr_db,
-                            'marker_uncertainty_ms': tick_analysis.marker_uncertainty_ms,
-                            'tick_mean_offset_ms': tick_analysis.tick_mean_offset_ms,
-                            'tick_std_offset_ms': tick_analysis.tick_std_offset_ms,
-                            'tick_valid_windows': tick_analysis.tick_valid_windows,
-                            'processed_at': datetime.now(timezone.utc).isoformat(),
-                            'processing_version': "2.0.0"
-                        }
+            # Write tick timing data from TickEdgeDetector — the single source
+            # for all three observables:
+            #   - d_clock_ms: front-edge ensemble timing (AM-domain, UTC-referenced)
+            #   - doppler_hz: carrier phase slope across the minute (IQ-domain)
+            #   - mean_snr_db: per-tick matched filter SNR
+            edge_results = getattr(self.engine, '_last_edge_results', None) or {}
+            
+            if self.tick_writer and edge_results:
+                for station_name, edge_result in edge_results.items():
+                    if edge_result.ensemble_n_edges < 3:
+                        continue
+                    
+                    # Get expected delay for the HDF5 record (informational)
+                    expected_delay_ms = None
+                    if hasattr(self.engine, '_predict_geometric_delay'):
                         try:
-                            self.tick_writer.write_measurement(tick_rec)
-                            logger.info(f"Tick phase written: {station_name} "
-                                       f"tick_offset={tick_analysis.tick_mean_offset_ms:+.2f}ms "
-                                       f"±{tick_analysis.tick_std_offset_ms:.2f}ms "
-                                       f"({tick_analysis.tick_valid_windows} tick windows, "
-                                       f"marker={'YES' if tick_analysis.marker_detected else 'no'})")
-                        except Exception as tick_err:
-                            logger.warning(f"Failed to write tick data for {station_name}: {tick_err}")
+                            expected_delay_ms, _, _ = self.engine._predict_geometric_delay(
+                                station_name, minute_boundary
+                            )
+                        except Exception:
+                            pass
+                    
+                    d_clock_ms = edge_result.ensemble_timing_error_ms if edge_result.ensemble_n_edges >= 5 else None
+                    d_clock_uncertainty_ms = edge_result.ensemble_uncertainty_ms if d_clock_ms is not None else None
+                    
+                    tick_rec = {
+                        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                        'minute_boundary_utc': minute_boundary,
+                        'channel': self.channel_name,
+                        'station': station_name,
+                        'frequency_mhz': self.frequency_hz / 1e6,
+                        'mean_snr_db': edge_result.mean_edge_snr_db,
+                        'valid_windows': edge_result.n_detected,
+                        'total_windows': edge_result.n_attempted,
+                        'overall_confidence': edge_result.confidence,
+                        'expected_delay_ms': expected_delay_ms,
+                        'd_clock_ms': d_clock_ms,
+                        'd_clock_uncertainty_ms': d_clock_uncertainty_ms,
+                        'd_clock_source': 'edge_ensemble',
+                        'doppler_hz': edge_result.doppler_hz,
+                        'doppler_uncertainty_hz': edge_result.doppler_uncertainty_hz,
+                        'ensemble_n_edges': edge_result.ensemble_n_edges,
+                        'n_clean': edge_result.n_clean,
+                        'processed_at': datetime.now(timezone.utc).isoformat(),
+                        'processing_version': "5.0.0"
+                    }
+                    try:
+                        self.tick_writer.write_measurement(tick_rec)
+                        dc_str = f"d_clock={d_clock_ms:+.2f}ms" if d_clock_ms is not None else "d_clock=None"
+                        dop_str = f"doppler={edge_result.doppler_hz:+.4f}Hz" if edge_result.doppler_hz is not None else "doppler=None"
+                        logger.info(f"Tick timing written: {station_name} "
+                                   f"{dc_str}, {dop_str}, "
+                                   f"SNR={edge_result.mean_edge_snr_db:.1f}dB, "
+                                   f"{edge_result.ensemble_n_edges} edges")
+                    except Exception as tick_err:
+                        logger.warning(f"Failed to write tick data for {station_name}: {tick_err}")
                 
             # Write per-window tick phase data (~55 rows per station per minute)
             # Each row is one overlapping correlation window with phase_rad, giving
@@ -671,45 +650,6 @@ class MetrologyService:
                     logger.debug(f"Detection attempts written: {len(rtp_attempts)} total, "
                                 f"{n_det} detected, {len(rtp_attempts) - n_det} rejected")
             
-            # Write decoder comparison metrics (A/B testing)
-            if self.decoder_comparison_writer and hasattr(self.engine, '_decoder_comparison_data'):
-                comparison_data = self.engine._decoder_comparison_data
-                if comparison_data:
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    for comp in comparison_data:
-                        comp_rec = {
-                            'timestamp_utc': now_iso,
-                            'minute_boundary_utc': minute_boundary,
-                            'channel': self.channel_name,
-                            'station': comp.get('station', ''),
-                            'frequency_mhz': comp.get('frequency_mhz', 0),
-                            'mf_d_clock_ms': comp.get('mf_d_clock_ms'),
-                            'pll_d_clock_ms': comp.get('pll_d_clock_ms'),
-                            'delta_d_clock_ms': comp.get('delta_ms'),
-                            'mf_timing_offset_ms': comp.get('mf_timing_offset_ms'),
-                            'pll_timing_offset_ms': comp.get('pll_timing_offset_ms'),
-                            'mf_std_ms': comp.get('mf_std_ms'),
-                            'pll_std_ms': comp.get('pll_std_ms'),
-                            'mf_n_ticks': comp.get('mf_n_ticks', 0),
-                            'pll_n_ticks': comp.get('pll_n_ticks', 0),
-                            'pll_lock_quality': comp.get('pll_lock_quality'),
-                            'pll_lock_duration_sec': comp.get('pll_lock_duration_sec'),
-                            'winner': comp.get('winner', 'NONE'),
-                            'winner_confidence': comp.get('winner_confidence', 0.0),
-                            'gps_reference_d_clock_ms': comp.get('gps_reference'),
-                            'mf_gps_error_ms': comp.get('mf_gps_error_ms'),
-                            'pll_gps_error_ms': comp.get('pll_gps_error_ms'),
-                            'comparison_quality': comp.get('quality', 'UNKNOWN'),
-                            'processed_at': now_iso,
-                            'processing_version': "1.0.0"
-                        }
-                        try:
-                            self.decoder_comparison_writer.write_measurement(comp_rec)
-                        except Exception as comp_err:
-                            logger.debug(f"Failed to write decoder comparison: {comp_err}")
-                    
-                    logger.debug(f"Decoder comparison written: {len(comparison_data)} measurements")
-            
             # Write test signal for minutes 8 and 44 (WWV/WWVH channel sounding)
             minute_number = (minute_boundary // 60) % 60
             if minute_number in [8, 44] and self.test_signal_writer:
@@ -742,8 +682,6 @@ class MetrologyService:
             self.attempts_writer.close()
         if self.tick_phase_writer:
             self.tick_phase_writer.close()
-        if self.decoder_comparison_writer:
-            self.decoder_comparison_writer.close()
         if self._iono_service is not None:
             try:
                 self._iono_service.stop()

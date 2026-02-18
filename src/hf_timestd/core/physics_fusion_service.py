@@ -113,6 +113,21 @@ class PhysicsFusionService:
             station_metadata={'description': 'Physics-Based Fusion TEC Output'}
         )
         
+        # Third writer for carrier-phase dTEC records
+        self.dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
+        self.dtec_dir.mkdir(parents=True, exist_ok=True)
+        self.dtec_writer = DataProductWriter(
+            output_dir=self.dtec_dir,
+            product_level='L3',
+            product_name='dtec',
+            channel='AGGREGATED',
+            processing_version='5.0.0',
+            station_metadata={'description': 'Carrier-Phase dTEC Output'}
+        )
+        
+        # Tick-phase reader cache (separate from clock_offset readers)
+        self._tick_phase_reader_cache: Dict[str, DataProductReader] = {}
+        
         # State tracking
         self.running = False
         self.last_processed_minute = 0
@@ -197,17 +212,20 @@ class PhysicsFusionService:
         age_seconds = time.time() - newest_mtime
         return age_seconds < self.max_upstream_age_seconds, age_seconds
         
-    def _read_l2_slice(self, minute_timestamp: int) -> Dict[tuple, List[Dict]]:
+    def _read_l2_slice(self, minute_timestamp: int) -> Dict[str, List[Dict]]:
         """
         Read L2 measurements for a specific minute across all channels.
         
         Returns:
-            Dict mapping (Station, Mode) -> List of measurements
+            Dict mapping station -> List of measurements (all modes combined).
+            Each measurement has frequency_hz, toa_ms, uncertainty_ms, snr_db, mode.
+            Multiple same-frequency measurements are median-aggregated.
         """
         start_iso = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
         end_iso = datetime.fromtimestamp(minute_timestamp + 59.999, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
         
-        measurements_grouped = defaultdict(list)
+        # Collect raw measurements grouped by (station, frequency_mhz)
+        raw_by_station_freq: Dict[tuple, List[Dict]] = defaultdict(list)
         
         for channel in self.channels:
             try:
@@ -220,20 +238,13 @@ class PhysicsFusionService:
                 
                 for item in items:
                     station = item.get('station')
-                    # The following 'if station:' block was incomplete and causing indentation issues.
-                    # The logic below should apply to all items with a station.
                     if not station:
                         continue
                         
-                    # Ensure frequency is present (critical for TEC)
-                    # Reader should return all fields including 'frequency_mhz'
-                    # but L2 schema has 'frequency_mhz'.
-                    # Renaming or mapping might be needed if schema differs.
                     if 'frequency_mhz' not in item:
                         continue
 
-                    # Resolve TOA
-                    # Prefer Kalman if available and valid, fallback to raw
+                    # Resolve TOA: prefer Kalman if available, fallback to raw
                     toa = item.get('tof_kalman_ms')
                     if toa is None or np.isnan(toa):
                         toa = item.get('raw_arrival_time_ms')
@@ -242,27 +253,51 @@ class PhysicsFusionService:
                     if uncertainty is None or np.isnan(uncertainty):
                         uncertainty = item.get('uncertainty_ms', 10.0)
 
-                    # Resolve Mode
-                    mode = item.get('propagation_mode', 'UNKNOWN')
+                    if toa is None or np.isnan(toa):
+                        continue
 
-                    obs = {
-                        'frequency_hz': item['frequency_mhz'] * 1e6,
+                    mode = item.get('propagation_mode', 'UNKNOWN')
+                    snr = item.get('snr_db', 0.0)
+
+                    freq_mhz = float(item['frequency_mhz'])
+                    raw_by_station_freq[(station, freq_mhz)].append({
                         'toa_ms': toa,
                         'uncertainty_ms': uncertainty,
-                        'mode': mode
-                    }
-                    
-                    # Filter invalid Kalman states
-                    if obs['toa_ms'] is None or np.isnan(obs['toa_ms']):
-                        continue
-                    
-                    measurements_grouped[(station, mode)].append(obs)
+                        'mode': mode,
+                        'snr_db': snr,
+                    })
                              
             except Exception as e:
                 logger.debug(f"Failed to read channel {channel}: {e}")
                 continue
-                
-        return measurements_grouped
+        
+        # Median-aggregate per (station, frequency) to produce one measurement
+        # per distinct frequency per station
+        measurements_by_station: Dict[str, List[Dict]] = defaultdict(list)
+        
+        for (station, freq_mhz), obs_list in raw_by_station_freq.items():
+            toas = np.array([o['toa_ms'] for o in obs_list])
+            median_toa = float(np.median(toas))
+            # Use minimum uncertainty (best measurement)
+            min_unc = min(o['uncertainty_ms'] for o in obs_list)
+            # Best SNR
+            best_snr = max(o.get('snr_db', 0.0) for o in obs_list)
+            # Dominant mode (most common)
+            mode_counts: Dict[str, int] = defaultdict(int)
+            for o in obs_list:
+                mode_counts[o['mode']] += 1
+            dominant_mode = max(mode_counts, key=mode_counts.get)
+            
+            measurements_by_station[station].append({
+                'frequency_hz': freq_mhz * 1e6,
+                'toa_ms': median_toa,
+                'uncertainty_ms': min_unc,
+                'snr_db': best_snr,
+                'mode': dominant_mode,
+                'n_raw': len(obs_list),
+            })
+        
+        return measurements_by_station
 
     def process_minute(self, minute_timestamp: int, station_data: Optional[Dict[tuple, List[Dict]]] = None):
         """Process a single minute of data."""
@@ -293,29 +328,37 @@ class PhysicsFusionService:
             return
 
         # 2. Physics Estimation (TEC)
+        # station_data is now Dict[station, List[measurements]] with one entry per distinct frequency
         tec_estimates = {}
         
-        for (station, mode), observations in station_data.items():
-            # Need at least 2 frequencies for this SPECIFIC mode
-            if len(observations) < 2:
-                logger.debug(f"Station {station} Mode {mode}: insufficient frequencies ({len(observations)})")
+        for station, observations in station_data.items():
+            # Need at least 2 distinct frequencies for TEC
+            distinct_freqs = set(o['frequency_hz'] for o in observations)
+            if len(distinct_freqs) < 2:
+                logger.debug(f"Station {station}: insufficient distinct frequencies ({len(distinct_freqs)}: {[f/1e6 for f in sorted(distinct_freqs)]})")
                 continue
+            
+            # Determine dominant mode for metadata
+            mode_counts: Dict[str, int] = defaultdict(int)
+            for o in observations:
+                mode_counts[o.get('mode', 'UNKNOWN')] += 1
+            dominant_mode = max(mode_counts, key=mode_counts.get)
                 
             result = self.tec_estimator.estimate_tec(observations, station, minute_timestamp)
             
             if result:
                 if not (0.0 < result.tec_u <= 200.0):
                     logger.warning(
-                        f"TEC out of bounds for {station} ({mode}): {result.tec_u:.2f} TECU - skipping"
+                        f"TEC out of bounds for {station}: {result.tec_u:.2f} TECU - skipping"
                     )
                     continue
 
-                # Attach mode to result for writing
-                result.propagation_mode = mode
-                tec_estimates[(station, mode)] = result
-                logger.info(f"TEC {station} ({mode}): {result.tec_u:.2f} TECU (Conf: {result.confidence:.2f})")
+                result.propagation_mode = dominant_mode
+                tec_estimates[(station, dominant_mode)] = result
+                freq_list = ", ".join([f"{f/1e6:.1f}" for f in sorted(distinct_freqs)])
+                logger.info(f"TEC {station}: {result.tec_u:.2f} TECU (Conf: {result.confidence:.2f}, N_freq={len(distinct_freqs)}, freqs=[{freq_list}] MHz)")
             else:
-                 logger.debug(f"TEC estimation failed for {station} ({mode})")
+                 logger.debug(f"TEC estimation failed for {station}")
 
         # 3. E/F Layer Tomography
         tomo_result = None
@@ -370,6 +413,9 @@ class PhysicsFusionService:
             minute_timestamp,
             tec_estimates
         )
+
+        # 8. Carrier-phase dTEC estimation
+        self._process_carrier_dtec(minute_timestamp, tec_estimates)
 
     def _build_ipp_measurements(
         self,
@@ -476,7 +522,7 @@ class PhysicsFusionService:
                 'n_frequencies': int(result.n_frequencies),
                 'residuals_ms': float(result.residuals_ms),
                 # Format frequencies as comma-separated list
-                'frequencies_mhz': ",".join([f"{f/1e6:.2f}" for f in result.group_delay_ms.keys()]),
+                'frequencies_mhz': ",".join([f"{f:.2f}" for f in result.group_delay_ms.keys()]),
                 'quality_flag': 'GOOD' if result.confidence > 0.8 else 'MARGINAL',
                 'validation_flag': 'UNVALIDATED',
                 'processing_version': '5.0.0'
@@ -490,6 +536,214 @@ class PhysicsFusionService:
         
         if tec_estimates:
             logger.info(f"Written {len(tec_estimates)} TEC station records for {timestamp}")
+
+    def _get_tick_phase_reader(self, channel: str) -> Optional[DataProductReader]:
+        """Get (or create) a cached reader for tick_phase data."""
+        reader = self._tick_phase_reader_cache.get(channel)
+        if reader is not None:
+            return reader
+
+        tp_dir = self.data_root / 'phase2' / channel / 'tick_phase'
+        if not tp_dir.exists():
+            return None
+
+        try:
+            reader = DataProductReader(
+                data_dir=tp_dir,
+                product_level='L2',
+                product_name='tick_phase',
+                channel=channel,
+                use_registry=False
+            )
+            self._tick_phase_reader_cache[channel] = reader
+            return reader
+        except Exception as e:
+            logger.debug(f"Failed to create tick_phase reader for {channel}: {e}")
+            return None
+
+    def _read_tick_phase_minute(
+        self,
+        minute_timestamp: int
+    ) -> Dict[str, List[Dict]]:
+        """
+        Read tick_phase data for a specific minute across all channels.
+
+        Returns:
+            Dict mapping channel -> List of tick records with keys:
+                utc_epoch, carrier_phase_rad, snr_db, station, frequency_mhz
+        """
+        result: Dict[str, List[Dict]] = {}
+
+        for channel in self.channels:
+            reader = self._get_tick_phase_reader(channel)
+            if reader is None:
+                continue
+
+            try:
+                start_iso = datetime.fromtimestamp(
+                    minute_timestamp, tz=timezone.utc
+                ).isoformat().replace('+00:00', 'Z')
+                end_iso = datetime.fromtimestamp(
+                    minute_timestamp + 59.999, tz=timezone.utc
+                ).isoformat().replace('+00:00', 'Z')
+
+                items = reader.read_time_range(start=start_iso, end=end_iso)
+                if not items:
+                    continue
+
+                records = []
+                for item in items:
+                    mb = item.get('minute_boundary_utc')
+                    wc = item.get('window_center_second')
+                    cp = item.get('carrier_phase_rad')
+
+                    if mb is None or wc is None or cp is None:
+                        continue
+
+                    # Epoch = minute boundary + tick position within minute
+                    try:
+                        epoch = float(mb) + float(wc)
+                    except (TypeError, ValueError):
+                        continue
+
+                    if not np.isfinite(cp):
+                        continue
+
+                    records.append({
+                        'utc_epoch': epoch,
+                        'carrier_phase_rad': float(cp),
+                        'snr_db': float(item.get('snr_db', 0.0)),
+                        'station': item.get('station', ''),
+                        'frequency_mhz': float(item.get('frequency_mhz', 0.0)),
+                    })
+
+                if records:
+                    result[channel] = records
+
+            except Exception as e:
+                logger.debug(f"Failed to read tick_phase for {channel}: {e}")
+                continue
+
+        return result
+
+    def _process_carrier_dtec(
+        self,
+        minute_timestamp: int,
+        tec_estimates: Dict[tuple, 'TECResult']
+    ):
+        """
+        Compute carrier-phase dTEC for each channel and anchor to group-delay TEC.
+
+        Reads tick_phase data (carrier phase per tick, ~55/min), converts to
+        dTEC via Doppler, integrates, and anchors to the absolute TEC from
+        the group-delay 1/f² fit.
+        """
+        tick_data = self._read_tick_phase_minute(minute_timestamp)
+        if not tick_data:
+            return
+
+        # Build anchor lookup: station -> TEC in TECU (from group-delay fit)
+        anchor_by_station: Dict[str, float] = {}
+        for (station, mode), result in tec_estimates.items():
+            if result.confidence >= 0.1 and 0 < result.tec_u <= 200:
+                anchor_by_station[station] = result.tec_u
+
+        ts_iso = datetime.fromtimestamp(
+            minute_timestamp, tz=timezone.utc
+        ).isoformat()
+        n_written = 0
+
+        for channel, records in tick_data.items():
+            if len(records) < 5:
+                continue
+
+            # Shared channels contain multiple stations — group by station
+            by_station: Dict[str, List[Dict]] = defaultdict(list)
+            for r in records:
+                st = r.get('station', '')
+                if isinstance(st, bytes):
+                    st = st.decode('utf-8', errors='replace')
+                if st:
+                    by_station[st].append(r)
+
+            for station, station_records in by_station.items():
+                if len(station_records) < 5:
+                    continue
+
+                freq_mhz = station_records[0]['frequency_mhz']
+                if freq_mhz <= 0:
+                    continue
+
+                # Get anchor TEC for this station (if available from group-delay)
+                anchor_tec = anchor_by_station.get(station)
+                anchor_epoch = float(minute_timestamp + 30) if anchor_tec else None
+
+                try:
+                    dtec_result = self.carrier_tec.compute_dtec_from_records(
+                        records=station_records,
+                        frequency_mhz=freq_mhz,
+                        station=station,
+                        channel=channel,
+                        anchor_tec_tecu=anchor_tec,
+                        anchor_epoch=anchor_epoch,
+                    )
+                except Exception as e:
+                    logger.debug(f"dTEC computation failed for {channel}/{station}: {e}")
+                    continue
+
+                if dtec_result is None or dtec_result.n_points < 3:
+                    continue
+
+                # Compute summary statistics for the minute
+                dtec_arr = np.array(dtec_result.dtec_tecu)
+                rate_arr = np.array(dtec_result.dtec_rate_tecu_per_s)
+
+                dtec_mean = float(np.mean(dtec_arr))
+                dtec_std = float(np.std(dtec_arr))
+                rate_mean = float(np.mean(rate_arr))
+
+                # Quality flag
+                if dtec_result.n_points >= 30 and dtec_result.mean_snr_db >= 15:
+                    qflag = 'GOOD'
+                elif dtec_result.n_points >= 10 and dtec_result.mean_snr_db >= 8:
+                    qflag = 'MARGINAL'
+                else:
+                    qflag = 'BAD'
+
+                record = {
+                    'timestamp_utc': ts_iso,
+                    'minute_boundary': minute_timestamp,
+                    'station': station,
+                    'channel': channel,
+                    'frequency_mhz': freq_mhz,
+                    'n_ticks': dtec_result.n_points,
+                    'dtec_mean_tecu': dtec_mean,
+                    'dtec_std_tecu': dtec_std,
+                    'dtec_rate_tecu_per_s': rate_mean,
+                    'anchor_tec_tecu': anchor_tec if anchor_tec else float('nan'),
+                    'is_anchored': dtec_result.is_anchored,
+                    'sigma_noise_tecu': dtec_result.sigma_dtec_tecu,
+                    'mean_snr_db': dtec_result.mean_snr_db,
+                    'quality_flag': qflag,
+                    'processing_version': '5.0.0',
+                }
+
+                try:
+                    self.dtec_writer.write_measurement(record)
+                    n_written += 1
+                except Exception as e:
+                    logger.error(f"Failed to write dTEC record for {channel}/{station}: {e}")
+
+        if n_written > 0:
+            n_anchored = sum(
+                1 for ch_records in tick_data.values()
+                for st in set(r.get('station', '') for r in ch_records)
+                if st in anchor_by_station
+            )
+            logger.info(
+                f"Written {n_written} carrier-phase dTEC records for {minute_timestamp} "
+                f"({n_anchored} station-channels anchored to group-delay TEC)"
+            )
 
     def run(self):
         """Main service loop."""

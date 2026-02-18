@@ -1198,6 +1198,7 @@ class MetrologyEngine:
                             buffer_timing=buffer_timing,
                             expected_delay_sec=prop_delay_sec,
                             is_dedicated_channel=is_dedicated,
+                            iq_samples=iq_samples,
                         )
                     except Exception as e:
                         logger.debug(f"{self.channel_name}: Edge detection failed for "

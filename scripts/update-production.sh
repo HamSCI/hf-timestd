@@ -3,10 +3,11 @@
 # update-production.sh - Update production installation from git repository
 #
 # Usage:
-#   sudo scripts/update-production.sh [--pull]
+#   sudo scripts/update-production.sh [--pull] [--yes|-y]
 #
 # Options:
 #   --pull    Run 'git pull' before updating (recommended)
+#   --yes|-y  Accept current configuration without prompting
 #
 # This script:
 # 1. Optionally pulls latest code from git (--pull)
@@ -31,17 +32,23 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Parse arguments
 DO_GIT_PULL=false
+ACCEPT_CONFIG=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --pull)
             DO_GIT_PULL=true
             shift
             ;;
+        --yes|-y)
+            ACCEPT_CONFIG=true
+            shift
+            ;;
         --help|-h)
-            echo "Usage: sudo $0 [--pull]"
+            echo "Usage: sudo $0 [--pull] [--yes|-y]"
             echo ""
             echo "Options:"
             echo "  --pull    Run 'git pull' before updating (recommended)"
+            echo "  --yes|-y  Accept current configuration without prompting"
             echo "  --help    Show this help"
             exit 0
             ;;
@@ -118,7 +125,11 @@ CONFIG_REVIEW_SCRIPT="$PROJECT_DIR/scripts/config-review.sh"
 
 if [[ -f "$CONFIG_REVIEW_SCRIPT" ]]; then
     # Run config review (interactive by default, shows current settings)
-    bash "$CONFIG_REVIEW_SCRIPT"
+    if [[ "$ACCEPT_CONFIG" == "true" ]]; then
+        bash "$CONFIG_REVIEW_SCRIPT" --non-interactive
+    else
+        bash "$CONFIG_REVIEW_SCRIPT"
+    fi
 else
     log_warn "  Config review script not found, skipping"
 fi

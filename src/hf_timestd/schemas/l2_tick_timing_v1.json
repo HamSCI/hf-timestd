@@ -1,7 +1,7 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "2.0.0",
     "data_product": "L2_tick_timing",
-    "description": "Per-second tick timing measurements from matched filter detection. Provides 55+ timing estimates per minute for improved precision through averaging.",
+    "description": "Per-minute tick timing from TickEdgeDetector ensemble. D_clock from AM-domain front-edge detection (UTC-referenced), Doppler from carrier phase slope across the minute, SNR from per-tick matched filter correlation.",
     "cadence_seconds": 60,
     "processing_level": "L2",
     "standards": [
@@ -9,10 +9,10 @@
     ],
     "reference": "Per-second timing ticks from WWV/WWVH/CHU/BPM",
     "quality_flags": {
-        "GOOD": "High confidence tick detection with >30 valid windows",
-        "MARGINAL": "Moderate confidence with 10-30 valid windows",
-        "BAD": "Low confidence with <10 valid windows",
-        "MISSING": "No ticks detected"
+        "GOOD": "High confidence with >30 detected edges",
+        "MARGINAL": "Moderate confidence with 10-30 detected edges",
+        "BAD": "Low confidence with <10 detected edges",
+        "MISSING": "Insufficient ticks detected"
     },
     "fields": [
         {
@@ -47,40 +47,22 @@
             "description": "Broadcast frequency in MHz"
         },
         {
-            "name": "mean_timing_offset_ms",
-            "type": "float",
-            "required": true,
-            "description": "Mean timing offset across all valid windows (ms from expected)"
-        },
-        {
-            "name": "std_timing_offset_ms",
-            "type": "float",
-            "required": true,
-            "description": "Standard deviation of timing offset (ms)"
-        },
-        {
             "name": "mean_snr_db",
             "type": "float",
-            "required": false,
-            "description": "Mean SNR across valid windows (dB)"
-        },
-        {
-            "name": "drift_rate_ms_per_sec",
-            "type": "float",
-            "required": false,
-            "description": "Linear timing drift rate if detected (ms/s)"
+            "required": true,
+            "description": "Mean per-tick matched filter SNR (dB)"
         },
         {
             "name": "valid_windows",
             "type": "integer",
             "required": true,
-            "description": "Number of windows with valid detections"
+            "description": "Number of ticks with valid detections"
         },
         {
             "name": "total_windows",
             "type": "integer",
             "required": true,
-            "description": "Total number of windows processed"
+            "description": "Total number of seconds attempted"
         },
         {
             "name": "overall_confidence",
@@ -98,7 +80,43 @@
             "name": "d_clock_ms",
             "type": "float",
             "required": false,
-            "description": "Computed D_clock = timing_offset - expected_delay (ms)"
+            "description": "D_clock: ensemble timing residual from expected arrival (ms). Positive = late arrival (longer ionospheric path)."
+        },
+        {
+            "name": "d_clock_uncertainty_ms",
+            "type": "float",
+            "required": false,
+            "description": "D_clock uncertainty from MAD of per-tick timing errors (ms)"
+        },
+        {
+            "name": "d_clock_source",
+            "type": "string",
+            "required": false,
+            "description": "Source of D_clock estimate (edge_ensemble)"
+        },
+        {
+            "name": "doppler_hz",
+            "type": "float",
+            "required": false,
+            "description": "Doppler shift from carrier phase slope across the minute (Hz)"
+        },
+        {
+            "name": "doppler_uncertainty_hz",
+            "type": "float",
+            "required": false,
+            "description": "Doppler uncertainty from linear fit residuals (Hz)"
+        },
+        {
+            "name": "ensemble_n_edges",
+            "type": "integer",
+            "required": false,
+            "description": "Number of tick edges used in ensemble"
+        },
+        {
+            "name": "n_clean",
+            "type": "integer",
+            "required": false,
+            "description": "Number of ticks from clean (no-intermod) minutes"
         },
         {
             "name": "processed_at",

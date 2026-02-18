@@ -318,74 +318,117 @@ class PropagationService:
         station: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Get propagation mode timeline.
+        Get propagation mode timeline from the unified tick_timing L2 product.
         
-        Args:
-            start: Start time
-            end: End time
-            station: Optional station filter (WWV, WWVH, CHU, BPM)
+        tick_timing contains all three observables per minute, all from
+        TickEdgeDetector (processing_version 5.0.0):
+          - mean_snr_db: per-tick matched filter SNR
+          - d_clock_ms: AM-domain front-edge ensemble timing (UTC-referenced
+            via buffer_timing). This is the true ionospheric delay residual.
+          - doppler_hz: carrier phase slope across the minute (IQ-domain,
+            extracted at each detected tick position).
         
-        Returns:
-            Timeline of propagation modes with timestamps
+        Falls back to timing_measurements for channels without tick_timing.
         """
         try:
-            # Collect measurements from all channels
-            all_measurements = []
+            import math
+            start_iso = start.isoformat() + 'Z'
+            end_iso = end.isoformat() + 'Z'
+            
+            def _safe_float(val):
+                """Convert to float, returning None for NaN/Inf/invalid."""
+                if val is None:
+                    return None
+                try:
+                    v = float(val)
+                    if math.isnan(v) or math.isinf(v):
+                        return None
+                    return v
+                except (TypeError, ValueError):
+                    return None
+            
+            all_records = []
             
             for channel_dir in self.phase2_dir.iterdir():
                 if not channel_dir.is_dir() or channel_dir.name in ['fusion', 'science']:
                     continue
                 
-                # DataProductReader automatically resolves subdirectory via registry
+                # --- Read tick_timing (unified product) ---
+                tick_records = []
                 try:
                     reader = DataProductReader(
                         data_dir=channel_dir,
                         product_level='L2',
-                        product_name='timing_measurements',
+                        product_name='tick_timing',
                         channel=channel_dir.name
                     )
-                    
-                    measurements = reader.read_time_range(
-                        start=start.isoformat() + 'Z',
-                        end=end.isoformat() + 'Z'
+                    tick_records = reader.read_time_range(
+                        start=start_iso, end=end_iso
                     )
-                    
-                    # Filter by station if specified
                     if station:
-                        measurements = [m for m in measurements if m.get('station') == station]
-                    
-                    all_measurements.extend(measurements)
-                    
-                except Exception as e:
-                    logger.debug(f"Could not read {channel_dir.name}: {e}")
-                    continue
+                        tick_records = [m for m in tick_records if m.get('station') == station]
+                except Exception:
+                    pass
+                
+                if tick_records:
+                    for t in tick_records:
+                        all_records.append({
+                            'timestamp_utc': t.get('timestamp_utc'),
+                            'station': t.get('station', 'UNKNOWN'),
+                            'frequency_mhz': t.get('frequency_mhz', 0),
+                            'snr_db': _safe_float(t.get('mean_snr_db')),
+                            'd_clock_ms': _safe_float(t.get('d_clock_ms')),
+                            'doppler_hz': _safe_float(t.get('doppler_hz')),
+                            'propagation_mode': 'UNKNOWN',
+                        })
+                else:
+                    # Fallback: timing_measurements for channels without tick_timing
+                    try:
+                        reader = DataProductReader(
+                            data_dir=channel_dir,
+                            product_level='L2',
+                            product_name='timing_measurements',
+                            channel=channel_dir.name
+                        )
+                        co_records = reader.read_time_range(
+                            start=start_iso, end=end_iso
+                        )
+                        if station:
+                            co_records = [m for m in co_records if m.get('station') == station]
+                        for m in co_records:
+                            all_records.append({
+                                'timestamp_utc': m.get('timestamp_utc'),
+                                'station': m.get('station', 'UNKNOWN'),
+                                'frequency_mhz': m.get('frequency_mhz', 0),
+                                'snr_db': _safe_float(m.get('snr_db')),
+                                'd_clock_ms': _safe_float(m.get('raw_arrival_time_ms')),
+                                'doppler_hz': _safe_float(m.get('doppler_hz')),
+                                'propagation_mode': m.get('propagation_mode', 'UNKNOWN'),
+                            })
+                    except Exception:
+                        pass
             
-            if not all_measurements:
+            if not all_records:
                 return None
             
-            # Sort by timestamp
-            all_measurements.sort(key=lambda m: m.get('timestamp_utc', ''))
+            all_records.sort(key=lambda r: r.get('timestamp_utc', ''))
             
-            # Extract timeline data
-            timestamps = [m.get('timestamp_utc') for m in all_measurements]
-            modes = [m.get('propagation_mode', 'UNKNOWN') for m in all_measurements]
-            stations = [m.get('station', 'UNKNOWN') for m in all_measurements]
-            frequencies = [m.get('frequency_mhz', 0) for m in all_measurements]
-            import math
-            snrs = []
-            for m in all_measurements:
-                s = m.get('snr_db')
-                if s is not None and (math.isnan(s) or math.isinf(s)):
-                    s = None
-                snrs.append(s)
+            n_with_dc = sum(1 for r in all_records if r['d_clock_ms'] is not None)
+            n_with_dop = sum(1 for r in all_records if r['doppler_hz'] is not None)
+            logger.info(
+                f"Timeline: {len(all_records)} records, "
+                f"{n_with_dc} with D_clock, {n_with_dop} with Doppler"
+            )
             
             result = self._deep_sanitize({
-                'timestamps': timestamps,
-                'modes': modes,
-                'stations': stations,
-                'frequencies': frequencies,
-                'snr_db': snrs,
-                'count': len(all_measurements),
+                'timestamps': [r['timestamp_utc'] for r in all_records],
+                'modes': [r['propagation_mode'] for r in all_records],
+                'stations': [r['station'] for r in all_records],
+                'frequencies': [r['frequency_mhz'] for r in all_records],
+                'snr_db': [r['snr_db'] for r in all_records],
+                'd_clock_ms': [r['d_clock_ms'] for r in all_records],
+                'doppler_hz': [r['doppler_hz'] for r in all_records],
+                'count': len(all_records),
             })
             
             return result

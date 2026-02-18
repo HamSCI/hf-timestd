@@ -1,0 +1,110 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3A_dtec",
+    "description": "Carrier-phase differential TEC (dTEC) time series, anchored to group-delay absolute TEC",
+    "cadence_seconds": 60,
+    "processing_level": "L3A",
+    "standards": [
+        "CEDAR Madrigal patterns"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Start of the minute window"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "description": "Broadcast station"
+        },
+        {
+            "name": "channel",
+            "type": "string",
+            "required": true,
+            "description": "SDR channel name (e.g. CHU_7850)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Carrier frequency in MHz"
+        },
+        {
+            "name": "n_ticks",
+            "type": "integer",
+            "required": true,
+            "description": "Number of carrier phase measurements in this minute"
+        },
+        {
+            "name": "dtec_mean_tecu",
+            "type": "float",
+            "required": true,
+            "description": "Mean integrated dTEC over the minute (anchored to group-delay TEC if available)",
+            "units": "TECU"
+        },
+        {
+            "name": "dtec_std_tecu",
+            "type": "float",
+            "required": true,
+            "description": "Standard deviation of dTEC within the minute (scintillation indicator)",
+            "units": "TECU"
+        },
+        {
+            "name": "dtec_rate_tecu_per_s",
+            "type": "float",
+            "required": true,
+            "description": "Mean dTEC/dt rate over the minute",
+            "units": "TECU/s"
+        },
+        {
+            "name": "anchor_tec_tecu",
+            "type": "float",
+            "required": false,
+            "description": "Group-delay absolute TEC used as anchor (null if no anchor available)",
+            "units": "TECU"
+        },
+        {
+            "name": "is_anchored",
+            "type": "boolean",
+            "required": true,
+            "description": "Whether the dTEC was anchored to group-delay TEC"
+        },
+        {
+            "name": "sigma_noise_tecu",
+            "type": "float",
+            "required": false,
+            "description": "Estimated noise floor from detrended MAD",
+            "units": "TECU"
+        },
+        {
+            "name": "mean_snr_db",
+            "type": "float",
+            "required": false,
+            "description": "Mean SNR of carrier phase measurements",
+            "units": "dB"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": ["GOOD", "MARGINAL", "BAD"],
+            "description": "Quality flag based on n_ticks, SNR, and noise floor"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Processing version"
+        }
+    ]
+}

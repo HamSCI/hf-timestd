@@ -1,8 +1,8 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 6.6.0 (Authoritative RTP Timestamps + Dual-Purpose Architecture)  
-**Last Updated:** February 9, 2026  
+**System Version:** 6.7.1+ (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model)  
+**Last Updated:** February 17, 2026  
 **Author:** Michael James Hauan (AC0G)
 
 ---
@@ -18,8 +18,9 @@
 The system demonstrates metrological rigor through:
 
 - **Authoritative RTP timestamps** from GPS+PPS-disciplined radiod (no pipeline offset correction needed)
+- **TickEdgeDetector unified pipeline** — single source for D_clock (AM-domain front-edge ensemble), Doppler (carrier phase slope), and SNR (per-tick matched filter)
+- **Real-time ionospheric propagation model** (WAM-IPE + GIRO + IRI-2020 fallback)
 - **ISO GUM-compliant uncertainty budgets** with full traceability
-- **Physics-informed propagation modeling** (IONEX VTEC + IRI-2020)
 - **Kalman-filtered fusion** with inverse variance weighting
 - **Chrony SHM integration** for system clock discipline
 
@@ -215,54 +216,65 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 - **Sample Rate**: 24 kHz IQ per channel
 - **Format**: Digital RF (HDF5, MIT Haystack standard)
 
-### 5.2 Tone Detection (Sub-Sample Precision)
+### 5.2 Tick Edge Detection (TickEdgeDetector — v6.8+)
 
-**Primary Timing Tones:**
+**Primary Timing Source:**
 
-- **WWV**: 1000 Hz (5 ms per-second ticks; matched filter template: 20 ms)
-- **WWVH**: 1200 Hz (5 ms per-second ticks; matched filter template: 20 ms)
-- **CHU**: 1000 Hz (~300 ms pulse at most seconds; matched filter template: 100 ms)
-- **BPM**: 1000 Hz (10 ms UTC ticks, 100 ms UT1 ticks)
+The `TickEdgeDetector` is the single source for all three `tick_timing` observables:
 
-**Detection Method (v6.2 Enhancement - January 2026):**
+- **D_clock** (ms): AM-domain front-edge ensemble timing, UTC-referenced via `buffer_timing`
+- **Doppler** (Hz): Carrier phase slope across the minute from IQ-domain extraction
+- **SNR** (dB): Per-tick matched filter signal-to-noise ratio
 
-The tone detection pipeline implements a metrologically rigorous approach:
+**Tick Templates (per station):**
 
-1. **Two-Stage Detection:**
-   - **Stage 1 (Detection):** Quadrature matched filter correlation for phase-invariant detection
-   - **Stage 2 (Timing):** Edge detection on energy envelope for precise onset timing
+| Station | Tone Freq | Tick Duration | Template Samples (24 kHz) |
+|---------|-----------|---------------|--------------------------|
+| **WWV** | 1000 Hz | 5.0 ms | 120 |
+| **WWVH** | 1200 Hz | 5.0 ms | 120 |
+| **CHU** | 1000 Hz | 300 ms | 7200 |
+| **BPM** | 1000 Hz | 10 ms | 240 |
 
-2. **Complex Correlation with Phase Preservation:**
-   - Preserves phase information for sub-sample refinement
-   - Enables Doppler estimation from phase slope
-   - Supports multipath detection from phase discontinuities
+**Detection Method (inspired by ntpd refclock_wwv.c Type 36 driver):**
 
-3. **Sub-Sample Interpolation:**
-   - Parabolic interpolation on correlation peak (~5 μs precision)
-   - Phase-based refinement for additional ~10× improvement
+1. **Quadrature Matched Filter:**
+   - Generates I/Q template for the exact tick shape (e.g., 5 cycles of 1000 Hz for WWV)
+   - Phase-invariant detection via envelope of complex correlation
+   - 800–1400 Hz bandpass rejects 100 Hz BCD, 440/500/600 Hz audio tones
+   - Processing gain: ~21 dB per tick (120 samples at 24 kHz)
 
-4. **Cramér-Rao Bound Uncertainty:**
-   - Rigorous ToA uncertainty: `σ_ToA = 1 / (2π × √(2 × SNR × B × T))`
-   - At 20 dB SNR, 800 ms tone, 50 Hz bandwidth: σ_ToA ≈ 0.036 ms (theoretical minimum)
-   - At 6 dB SNR: σ_ToA ≈ 0.9 ms
+2. **Front-Edge Back-Calculation:**
+   - Correlation peak corresponds to the CENTER of the tick pulse
+   - The on-time marker is the LEADING EDGE (NIST SP 432)
+   - Subtract half the tick duration from peak position to recover front edge
+   - Sub-sample parabolic interpolation (~5 μs precision)
 
-5. **Multipath Detection:**
-   - Correlation peak width analysis (broadening indicates multipath)
-   - Secondary peak detection (>30% of primary)
-   - Phase stability measurement around peak
-   - Uncertainty inflation when multipath detected
+3. **Carrier Phase Extraction (IQ Domain):**
+   - At each detected tick, mix raw IQ samples at the tone frequency over the tick duration
+   - Take the angle of the mean phasor → carrier phase at that tick
+   - Phase progression across the minute encodes Doppler shift
 
-6. **Doppler Correction:**
-   - Estimates Doppler shift from phase rotation rate
-   - Applies timing correction: `Δt_bias ≈ (f_doppler / f_tone) × (T_tone / 2)`
-   - Typical correction: 0.1-2 ms for ±1-5 Hz Doppler
+4. **Ensemble Combination (57 ticks/minute):**
+   - SNR-weighted robust median of all detected per-second ticks
+   - Outlier rejection via MAD (Median Absolute Deviation)
+   - Typical: 50–57 valid ticks per minute per station
+   - Effective processing gain: 21 + 10×log10(57) ≈ 38.6 dB
 
-7. **Adaptive SNR Threshold:**
-   - CFAR-like approach adapts to channel conditions
-   - Adjusts based on detection rate history and noise floor stability
-   - Improves sensitivity by 10-20% in varying conditions
+5. **Doppler from Phase Slope:**
+   - Unwrap carrier phase across detected ticks
+   - Linear fit: slope (rad/s) / (2π) = Doppler frequency shift (Hz)
+   - Requires ≥5 detected ticks spanning ≥5 seconds for meaningful fit
+   - Uncertainty from linear fit covariance
 
-**Precision**: ±0.036 ms theoretical (Cramér-Rao bound at high SNR), ±0.5-1 ms operational
+6. **Intermodulation Awareness:**
+   - Audio tone schedule determines "clean" vs "contaminated" minutes
+   - WWV silent minutes: {29, 43–51, 59}; WWVH silent: {0, 8–10, 14–19, 30}
+   - When one station's audio tone is silent, the other's ticks are intermod-free
+   - Clean minutes yield higher detection confidence
+
+**Implementation:** `src/hf_timestd/core/tick_edge_detector.py`
+
+**Precision**: ±0.008 ms ensemble uncertainty (CHU at 20+ dB SNR), ±0.5–2 ms typical (WWV/WWVH)
 
 ### 5.3 Station Discrimination (Shared Frequencies)
 
@@ -281,68 +293,94 @@ On 2.5, 5, 10, 15 MHz, **WWV and WWVH transmit simultaneously**. Misidentificati
 - D_clock continuity (jumps > 5 ms flagged)
 - GPSDO lock status check
 
-### 5.4 Propagation Delay Modeling
+### 5.4 Real-Time Ionospheric Propagation Model (v6.7)
 
-**Tiered Hierarchy:**
-
-| Tier | Source | Accuracy | Usage |
-|------|--------|----------|-------|
-| **0** | Local GNSS-VTEC | ±0.5-1 ms | Optional (dual-frequency GNSS receiver) |
-| **1** | IONEX VTEC | ±1-2 ms | Production (NASA/IGS Global Ionosphere Maps) |
-| **2** | IRI-2020 | ±2-5 ms | Fallback (International Reference Ionosphere) |
-| **3** | Geometric/Empirical | ±5-10 ms | Last resort |
-
-#### Local GNSS-VTEC (Optional Enhancement)
-
-When a dual-frequency GNSS receiver (e.g., u-blox ZED-F9P) is available, the system can measure **local vertical TEC in real-time**:
-
-- **Mechanism**: The receiver measures L1/L2 (or L1/L5) pseudorange and carrier phase differences, which directly encode the ionospheric delay along each satellite path
-- **Advantage**: Provides ground-truth TEC at the receiver location with ~1-minute latency, compared to 1-2 hour latency for IONEX maps
-- **Integration**: The `timestd-vtec` service polls the GNSS receiver and writes measurements to `/var/lib/timestd/gnss_vtec.h5`
-
-**Metrological Impact:**
-
-| Aspect | Without Local GNSS | With Local GNSS |
-|--------|-------------------|-----------------|
-| **TEC Latency** | 1-2 hours (IONEX) | ~1 minute |
-| **Spatial Resolution** | 2.5° × 5° grid | Point measurement at receiver |
-| **Ionospheric Storms** | May miss rapid changes | Tracks real-time variations |
-| **Propagation Model Accuracy** | ±1-2 ms | ±0.5-1 ms |
-
-**How It Improves Timing:**
-
-1. **Path Midpoint Correction**: The HF signal reflects at the ionospheric layer ~350 km altitude, typically 500-1500 km from the receiver. Local GNSS-VTEC provides the "anchor" TEC value at the receiver, which is interpolated with IONEX data at the reflection point.
-
-2. **Diurnal Gradient Tracking**: During sunrise/sunset, TEC changes rapidly. Local GNSS captures these gradients in real-time, improving propagation delay estimates during transition periods.
-
-3. **Storm Detection**: Geomagnetic storms can cause TEC to vary by 50-200% within minutes. Local GNSS provides early warning and real-time tracking that IONEX maps cannot match.
-
-**Configuration**: Enable via `timestd-config.toml`:
-
-```toml
-[gnss]
-enabled = true
-device = "/dev/ttyACM0"
-baud_rate = 115200
-```
-
-**Note**: Local GNSS-VTEC is optional. The system achieves ±0.5 ms accuracy with IONEX alone under quiet conditions. Local GNSS provides marginal improvement during quiet conditions but significant improvement during disturbed conditions.
-
-**Ionospheric Delay Equation:**
+The `HFPropagationModel` computes frequency-dependent ionospheric delay using a three-tier data hierarchy:
 
 ```
-τ_iono = K × TEC / f²
-where K = 40.3 m³/s²
+HFPropagationModel.predict(station, frequency, utc_time)
+    ├── IonoDataService.get_iono_params()
+    │       ├── WAM-IPE grid (NOAA S3/NOMADS)     ← Tier 1: Real-time 3D model
+    │       ├── GIRO ionosonde corrections          ← Tier 1.5: Ground-truth hmF2/foF2
+    │       ├── IRI-2020 climatology                ← Tier 2: Monthly median model
+    │       └── Parametric fallback                 ← Tier 3: Diurnal/seasonal formula
+    ├── _evaluate_mode() × [1F, 2F, 3F, 1E]
+    │       ├── Geometric feasibility check
+    │       ├── MUF check (freq vs foF2/sec(i))
+    │       ├── Spherical Earth path length
+    │       └── Ionospheric group delay
+    │               ├── Ne(h) numerical integration  ← When profile available
+    │               └── TEC-based: 40.3·sTEC/(c·f²)  ← Fallback
+    └── _estimate_uncertainty()
 ```
+
+**Ionospheric Group Delay Physics:**
+
+```
+Δτ = (40.3 / c) × ∫ Ne(s) ds / f²  =  40.3 × sTEC / (c × f²)
+```
+
+For a vertical TEC of 20 TECU at 10 MHz, the excess delay is ~0.27 ms. At 5 MHz, it's ~1.07 ms (4× larger).
+
+**Multi-Mode Predictions:**
+
+For each (station, frequency) pair, the model evaluates four propagation modes:
+
+| Mode | Description | Typical Distance |
+|------|-------------|-----------------|
+| **1F** | Single F-layer hop | < 3000 km |
+| **2F** | Two F-layer hops | 3000–6000 km |
+| **3F** | Three F-layer hops | > 6000 km |
+| **1E** | Single E-layer hop (daytime) | < 2000 km |
+
+Each mode is checked for geometric feasibility, MUF constraint, and minimum elevation (>3°).
+
+**Adaptive Uncertainty:**
+
+| Data Source | 3σ Uncertainty | Confidence |
+|-------------|---------------|------------|
+| WAM-IPE + GIRO | ±1.5 ms | 0.8 |
+| WAM-IPE alone | ±3.0 ms | 0.6 |
+| IRI-2020 | ±4.5 ms | 0.5 |
+| Parametric fallback | ±9.0 ms | 0.2 |
+| No model | ±15.0 ms | 0.0 |
+
+The final window blends model uncertainty with tracked observational variance, floored at ±5 ms (3σ).
+
+**Self-Consistency Check:**
+
+Multi-frequency differential delay validates model TEC predictions:
+
+```
+Δτ(f1,f2) = τ(f1) - τ(f2) = 40.3 × sTEC × (1/f1² - 1/f2²) / c
+```
+
+If observed differential delay disagrees with predicted by >1 ms RMS, the model flags an inconsistency.
+
+**Great-Circle Path TEC Sampling (v6.7.1):** TEC is sampled along the great-circle path using spherical trigonometry, ensuring accurate TEC integration for long paths (e.g., BPM at 11,504 km).
+
+**Altitude-Dependent Obliquity Mapping (v6.7.1):** `M(h) = 1 / sqrt(1 - (R·cos(e) / (R + h))²)` replaces the simpler `1/sin(e)` approximation.
 
 **Propagation Delay Bounds:**
 
-- WWV: 4-12 ms
-- WWVH: 15-30 ms
-- CHU: 6-15 ms
-- BPM: 40-70 ms
+- WWV: 4–12 ms
+- WWVH: 15–30 ms
+- CHU: 6–15 ms
+- BPM: 40–70 ms
 
 Delays outside bounds have plausibility reduced by 70%.
+
+#### Optional: Local GNSS-VTEC Enhancement
+
+When a dual-frequency GNSS receiver (e.g., u-blox ZED-F9P) is available, the system can measure **local vertical TEC in real-time** (~1 minute latency vs 1–2 hours for IONEX maps). The `timestd-vtec` service polls the receiver and writes to `/var/lib/timestd/gnss_vtec.h5`.
+
+**Key Files:**
+
+| File | Purpose |
+|------|---------|
+| `src/hf_timestd/core/propagation_model.py` | `HFPropagationModel` — delay prediction, multi-mode, self-consistency |
+| `src/hf_timestd/core/iono_data_service.py` | `IonoDataService` — WAM-IPE/GIRO fetch, cache, great-circle TEC sampling |
+| `src/hf_timestd/core/arrival_pattern_matrix.py` | `ArrivalPatternMatrix` — integrates model into arrival predictions |
 
 ### 5.5 Adaptive Search Windows
 
@@ -548,11 +586,24 @@ Not a software bug—HF propagation on higher bands is poor during night/early m
 - **Metadata:** Global start time, sample rate (24 kHz), center frequency
 - **Size:** ~2-3 GB/day/channel
 
-### 9.2 Analytics Output: HDF5 L1/L2
+### 9.2 Tick Timing: L2 HDF5 (Primary Timing Product)
 
-- **L1A (Tone Detections):** `feature_extraction` group with raw SNR, tone power, BCD correlation
-- **L2 (Timing Measurements):** `timing_solution` group with `d_clock`, `uncertainty`, `propagation_model`
-- **Size:** ~50-100 MB/day
+**Schema:** `l2_tick_timing_v1.json` (schema version 2.0.0, processing version 5.0.0)
+
+All fields sourced from `TickEdgeDetector`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `d_clock_ms` | float | Ensemble timing residual from expected arrival (ms) |
+| `d_clock_uncertainty_ms` | float | MAD of per-tick timing errors (ms) |
+| `d_clock_source` | string | Always `edge_ensemble` |
+| `doppler_hz` | float | Carrier phase slope across the minute (Hz) |
+| `doppler_uncertainty_hz` | float | Doppler uncertainty from linear fit (Hz) |
+| `mean_snr_db` | float | Mean per-tick matched filter SNR (dB) |
+| `valid_windows` | int | Number of ticks with valid detections |
+| `total_windows` | int | Total seconds attempted |
+| `ensemble_n_edges` | int | Number of tick edges used in ensemble |
+| `n_clean` | int | Ticks from intermod-free minutes |
 
 ### 9.3 Fusion Output: HDF5 L3
 
@@ -565,10 +616,11 @@ Not a software bug—HF propagation on higher bands is poor during night/early m
 
 ### 9.4 Science Products
 
-- TEC estimates
+- TEC estimates (multi-frequency 1/f² fit)
 - Propagation mode statistics
 - Sporadic-E events
 - Space weather correlations
+- Doppler time series (ionospheric motion)
 
 ---
 
@@ -868,11 +920,120 @@ A Kalman filter at L3 would model `offset_to_UTC` as having **process noise** �
 
 ---
 
-## 13. Metrological Validation (v6.2)
+## 13. FUSION Mode Accuracy Analysis
+
+### 13.1 Motivating Rationale
+
+The system serves a dual purpose. In **RTP mode** (with GPSDO), the authoritative timing comes from GPS+PPS via radiod, and the metrology pipeline functions as a testbed for refining detection algorithms, calibration models, and ionospheric corrections against a known-good reference. This refinement directly serves the second purpose: **FUSION mode**, where GPS, GPSDO, or even network access may be unavailable, and the system must derive UTC solely from HF time standard receptions.
+
+FUSION mode addresses real operational scenarios:
+- **Remote/off-grid installations** without GPS coverage
+- **Disaster/emergency situations** where GPS and network infrastructure are disrupted
+- **Intentional GPS denial** (jamming, spoofing) in contested environments
+- **Backup timing** when primary GNSS disciplining fails
+
+### 13.2 Error Budget
+
+In FUSION mode, the timing chain is:
+
+```
+UTC(NIST/NRC) → HF transmitter → Ionosphere → Receiver → ADC → Detection → D_clock
+```
+
+| Source | Magnitude | Notes |
+|--------|-----------|-------|
+| **Transmitter timing** | < 1 µs | WWV/WWVH/CHU traceable to UTC(NIST)/UTC(NRC) |
+| **Ionospheric propagation** | 3–15 ms variation | Dominant error. Diurnal, seasonal, solar cycle |
+| **Multipath/mode structure** | 1–5 ms | Multiple ionospheric modes arrive at different times |
+| **ADC clock accuracy** | 0.1–10 ppm | TCXO: 1–2 ppm. Cheap crystal: 10–50 ppm |
+| **TickEdgeDetector** | 0.008–2 ms | Ensemble of 50–57 ticks/minute, sub-sample interpolation |
+| **NTP initial sync** | 1–50 ms | Depends on network path |
+
+### 13.3 Expected FUSION Mode Accuracy
+
+| Configuration | Expected Accuracy | Time to Lock |
+|--------------|-------------------|--------------|
+| Multi-station + TCXO + NTP | **±2–5 ms** steady-state | 2–3 min |
+| Multi-station + TCXO, no network | **±2–5 ms** steady-state | 5–10 min |
+| Single station + TCXO | **±5–15 ms** | 2–3 min |
+| Multi-station + cheap crystal | **±2–5 ms** (if freq lock works) | 5–10 min |
+
+The ionosphere is the dominant error in all cases. Oscillator quality affects **time to lock** and **holdover during outages**, but not steady-state accuracy once locked.
+
+### 13.4 Dual Chrony Feed Architecture (v6.5.1)
+
+| Feed | SHM Unit | Source | Purpose |
+|------|----------|--------|---------|
+| **TSL1** | 0 | L1 Kalman (geometric fallback) | Raw metrology fusion — no ionospheric model |
+| **TSL2** | 1 | L2 Kalman (physics model) | Full ionospheric correction via propagation model |
+
+Each feed has its own independent Kalman filter state. TSL2 should show lower jitter and better accuracy as the ionospheric correction model removes systematic propagation biases.
+
+---
+
+## 14. Timing Authority Levels: Achievable Uncertainty Analysis
+
+The system's achievable timing uncertainty depends critically on the hardware configuration and timing reference chain. Six levels (L1–L6) represent progressively better timing infrastructure.
+
+### 14.1 Error Source Taxonomy
+
+| # | Error Source | Symbol | Description |
+|---|-------------|--------|-------------|
+| 1 | **Transmitter timing** | σ_tx | UTC(NIST/NRC) to RF emission |
+| 2 | **Ionospheric propagation** | σ_iono | Path delay variation (dominant for HF) |
+| 3 | **Multipath/mode structure** | σ_mode | Multiple ionospheric modes |
+| 4 | **Detection algorithm** | σ_det | TickEdgeDetector ensemble + sub-sample interpolation |
+| 5 | **ADC sample clock** | σ_adc | Frequency accuracy and stability |
+| 6 | **RTP-to-UTC mapping** | σ_rtp | Mapping RTP timestamps to wall-clock UTC |
+| 7 | **Timing authority** | σ_auth | How well the system knows "what time is it now" |
+
+Sources 1–4 are **irreducible** (physics/algorithm). Sources 5–7 are **configuration-dependent**.
+
+### 14.2 Irreducible Error Sources
+
+- **σ_tx < 0.001 ms**: WWV/WWVH traceable to UTC(NIST) with < 1 µs. Negligible.
+- **σ_iono = 3–15 ms**: Dominant error. Diurnal, seasonal, solar cycle, geomagnetic.
+- **σ_mode = 1–5 ms**: Multiple propagation modes (1F2, 2F2, 1E) arrive at different times.
+- **σ_det ≈ 0.05 ms**: TickEdgeDetector ensemble of 50–57 ticks achieves ~38.6 dB processing gain. Negligible compared to σ_iono.
+
+### 14.3 Level Summary
+
+| Level | Sample Clock | Timing Authority | Single Meas. | Fused (10 min) | Best Grade | Primary Limiter |
+|-------|-------------|-----------------|-------------|----------------|------------|-----------------|
+| **L6** | GPSDO (< 1 ppb) | PPS in stream | 3–15 ms | 0.3–1.0 ms | **A** | Ionospheric scatter |
+| **L5** | GPSDO (< 1 ppb) | GPS+PPS local | 3–15 ms | 0.5–1.7 ms | **A–B** | RTP mapping + iono |
+| **L4** | GPSDO (< 1 ppb) | PTP/NTP via LAN | 3–15 ms | 0.5–2.0 ms | **B** | LAN timing jitter |
+| **L3** | GPSDO (< 1 ppb) | NTP via WAN | 3–15 ms | 1–3 ms | **B–C** | NTP wander |
+| **L2** | TCXO (1–2 ppm) | NTP via LAN | 3–15 ms | 2–5 ms | **C** | Oscillator drift + NTP |
+| **L1** | TCXO (1–2 ppm) | HF self-derived | 3–15 ms* | 2–5 ms | **C** | Oscillator drift + bootstrap |
+
+*L1 single measurement: 200+ ms during bootstrap, 3–15 ms after lock.
+
+### 14.4 Key Insights
+
+1. **The ionosphere is always the dominant single-measurement error** (3–15 ms). No hardware improvement changes this.
+2. **Grade A (< 0.5 ms) requires L5 or L6** — sub-µs timing authority AND long averaging.
+3. **The GPSDO matters for the ruler, not the zero-point.** It ensures measurements within a fusion window are coherent.
+4. **NTP is the ceiling for L2–L4.** NTP jitter sets a floor that multi-station fusion cannot average below.
+5. **L1 and L2 converge to the same steady-state** after bootstrap.
+6. **The current system operates at L5** and achieves 2–5 ms fused uncertainty.
+
+### 14.5 Station Priority Policy (v6.5.0)
+
+| Station | Role | Rationale |
+|---------|------|----------|
+| **CHU** | Reference | Unique frequencies, FSK-verified timing |
+| **WWV** | Primary | Closest station, best SNR |
+| **WWVH** | Primary | Independent path, cross-validation |
+| **BPM** | Scientific | Very long path (~11,000 km), weight reduced to 30% |
+
+---
+
+## 15. Metrological Validation (v6.2)
 
 This section describes procedures for validating hf-timestd performance against external references and theoretical predictions.
 
-### 13.1 TSL1 vs TSL2 Comparison
+### 15.1 TSL1 vs TSL2 Comparison
 
 The dual Chrony feed architecture (TSL1 and TSL2) provides built-in validation of propagation corrections.
 
@@ -953,9 +1114,9 @@ chronyc sources -v | grep -E "TSL|192.168"
 # The GPS offset (+1200us) reveals the HF systematic error (~1.2ms)
 ```
 
-### 13.2 Comparison with External Time Sources
+### 15.2 Comparison with External Time Sources
 
-#### 13.2.1 hf-timestd vs GPS Time Server
+#### 15.2.1 hf-timestd vs GPS Time Server
 
 If you have a local GPS-based time server (e.g., at 192.168.0.202), you can compare hf-timestd against it:
 
@@ -995,9 +1156,9 @@ chronyc sourcestats
 - **TSL2 offset from GPS < 1 ms**: System is working correctly
 - **TSL2 offset from GPS 1-3 ms**: Normal ionospheric variation
 - **TSL2 offset from GPS > 5 ms**: Investigate calibration or propagation model
-- **Consistent drift**: Possible GPSDO issue (see Section 13.3)
+- **Consistent drift**: Possible GPSDO issue (see Section 15.3)
 
-#### 13.2.2 GPS PPS Exposure
+#### 15.2.2 GPS PPS Exposure
 
 If your GPS receiver outputs PPS (Pulse Per Second), it provides the highest-precision timing reference available. The PPS signal marks the exact second boundary with ~10-100 ns accuracy.
 
@@ -1009,7 +1170,7 @@ If your GPS receiver outputs PPS (Pulse Per Second), it provides the highest-pre
 
 If PPS is available, you can compare the GPSDO's 1PPS output against the GPS receiver's PPS to detect GPSDO drift directly. This is the most rigorous validation method.
 
-### 13.3 GPSDO Drift Detection
+### 15.3 GPSDO Drift Detection
 
 The "Steel Ruler" philosophy assumes the GPSDO provides a stable frequency reference. However, GPSDOs can drift if:
 - GPS lock is lost for extended periods
@@ -1047,9 +1208,9 @@ curl http://localhost:8000/api/stability/adev
 # If ADEV increases at long tau, suspect GPSDO drift
 ```
 
-### 13.4 Theoretical Predictions vs Measured Performance
+### 15.4 Theoretical Predictions vs Measured Performance
 
-#### 13.4.1 Cramér-Rao Bound
+#### 15.4.1 Cramér-Rao Bound
 
 The theoretical minimum timing uncertainty is given by the Cramér-Rao bound:
 
@@ -1075,7 +1236,7 @@ Where:
 The fusion service records Cramér-Rao uncertainty:
 - `cramer_rao_mean_ms`: Mean Cramér-Rao bound across measurements
 
-#### 13.4.2 Multipath Impact
+#### 15.4.2 Multipath Impact
 
 Multipath propagation causes delay spread that inflates timing uncertainty:
 
@@ -1088,7 +1249,7 @@ u_multipath = delay_spread / 2
 - `multipath_detected_count`: Number of measurements with multipath
 - `multipath_mean_delay_spread_ms`: Mean delay spread
 
-#### 13.4.3 Doppler Correction
+#### 15.4.3 Doppler Correction
 
 Doppler shift from ionospheric motion causes systematic timing bias:
 
@@ -1104,7 +1265,7 @@ For typical HF Doppler (±1-5 Hz) on 1000 Hz tone over 800 ms:
 - `doppler_mean_hz`: Mean Doppler shift
 - `doppler_correction_applied_ms`: Total correction applied
 
-### 13.5 Propagation Mode Identification
+### 15.5 Propagation Mode Identification
 
 The system identifies propagation modes (1F2, 2F2, GW, etc.) based on:
 1. **Geometric delay** from transmitter-receiver distance
@@ -1130,7 +1291,7 @@ The system identifies propagation modes (1F2, 2F2, GW, etc.) based on:
 
 See `docs/PHYSICS.md` for detailed explanation of propagation mode identification physics.
 
-### 13.6 Calibration Convergence
+### 15.6 Calibration Convergence
 
 The system learns per-broadcast calibration offsets over time. Convergence is tracked via:
 
@@ -1150,7 +1311,7 @@ The system learns per-broadcast calibration offsets over time. Convergence is tr
 | `calibration_age_hours` | < 24 | Calibration is fresh |
 | `calibration_converged` | True | Validation success rate > 80% |
 
-### 13.7 Uncertainty Budget Summary
+### 15.7 Uncertainty Budget Summary
 
 The complete uncertainty budget for a fused D_clock measurement:
 
@@ -1223,7 +1384,9 @@ u_combined = √(u_statistical² + u_systematic² + u_propagation²)
 
 ## Appendix C: Related Documentation
 
-- **TECHNICAL_REFERENCE.md** — System architecture, service descriptions, configuration
+- **docs/TECHNICAL_REFERENCE.md** — System architecture, service descriptions, configuration
+- **docs/PHYSICS.md** — Ionospheric physics capabilities and measurements
+- **docs/ARCHITECTURE.md** — Design philosophy and system architecture
 - **INSTALLATION.md** — Setup and deployment guide
 - **README.md** — Project overview
 
