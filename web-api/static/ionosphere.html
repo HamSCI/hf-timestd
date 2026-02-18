@@ -187,8 +187,9 @@
                 <button class="filter-btn" onclick="shiftDate(-1)" title="Previous day" style="padding:4px 10px;">&larr;</button>
                 <input type="date" id="date-picker" onchange="setDate(this.value)"
                        style="padding:4px 8px; background:var(--bg-surface); border:1px solid var(--border-color); border-radius:var(--radius-md); color:var(--text-primary); font-size:13px;">
-                <button class="filter-btn" onclick="shiftDate(+1)" title="Next day" style="padding:4px 10px;">&rarr;</button>
+                <button class="filter-btn" id="btn-next-day" onclick="shiftDate(+1)" title="Next day" style="padding:4px 10px;">&rarr;</button>
                 <button class="filter-btn" onclick="setToday()" style="padding:4px 10px;">Today</button>
+                <button class="filter-btn" onclick="loadAll()" title="Refresh data" style="padding:4px 10px;">&#x21bb;</button>
             </div>
             <div class="status-item">Measurements: <strong id="stat-count">...</strong></div>
             <div class="status-item">Stations: <strong id="stat-stations">...</strong></div>
@@ -239,7 +240,7 @@
 
             <div class="plot-container">
                 <div class="plot-title">D_clock vs Time (Ionospheric Group Delay Residual)</div>
-                <div class="plot-subtitle">From TickEdgeDetector front-edge ensemble (50-57 ticks/minute) &mdash; UTC-referenced via RTP timestamps</div>
+                <div class="plot-subtitle">Residual after subtracting modeled propagation delay. Positive = signal arrived later than predicted (excess ionospheric delay). Negative = arrived earlier (model overestimates delay, or multipath/false detection). Values railed at &plusmn;20 ms are filtered out.</div>
                 <div id="plot-dclock" style="height: 300px;"></div>
             </div>
 
@@ -278,18 +279,19 @@
         <div id="display-tec" class="display-content">
             <div class="info-card">
                 <h3>Model vs Observation &rarr; TEC</h3>
-                <p>D_clock(f) = D_common + 1.344 &times; TEC / f&sup2;. Plotting D_clock vs 1/f&sup2; for multiple frequencies from the same station, the slope gives slant TEC in TECU. Daytime TEC: 20&ndash;80 TECU; nighttime: 5&ndash;20 TECU.</p>
+                <p>D_clock(f) = D_common + 1.344 &times; TEC / f&sup2;. Plotting D_clock vs 1/f&sup2; for multiple frequencies from the same station, the slope gives <strong>slant TEC</strong> along the oblique HF ray path. This samples the ionosphere at the path midpoint (reflection point), not the sub-receiver point.</p>
+                <p style="margin-top:8px;"><strong>Typical values:</strong> Daytime mid-latitude slant TEC: 20&ndash;80 TECU; nighttime: 5&ndash;20 TECU. Negative TEC values are unphysical and indicate systematic errors in D_clock (e.g. multipath, wrong propagation mode assignment). Compare with <a href="https://omniweb.gsfc.nasa.gov/" style="color:#3b82f6;">NASA OMNIWeb</a> vertical TEC maps or <a href="https://www.swpc.noaa.gov/products/us-total-electron-content" style="color:#3b82f6;">SWPC US-TEC</a> for validation. Our slant TEC &asymp; vertical TEC &times; sec(&chi;) where &chi; is the zenith angle at the ionospheric pierce point.</p>
             </div>
 
             <div class="grid-2">
                 <div class="plot-container">
                     <div class="plot-title">D_clock vs 1/f&sup2; &mdash; Live TEC Fit</div>
-                    <div class="plot-subtitle">Current hour &mdash; slope = 1.344 &times; TEC</div>
+                    <div class="plot-subtitle">Last hour of data &mdash; slope = 1.344 &times; TEC</div>
                     <div id="plot-tec-fit" style="height: 400px;"></div>
                 </div>
                 <div class="plot-container">
                     <div class="plot-title">TEC Time Series (24h)</div>
-                    <div class="plot-subtitle">Extracted TEC from multi-frequency 1/f&sup2; fit</div>
+                    <div class="plot-subtitle">Slant TEC at path midpoint from multi-frequency 1/f&sup2; fit &mdash; expect 5&ndash;20 TECU night, 20&ndash;80 TECU day</div>
                     <div id="plot-tec-ts" style="height: 400px;"></div>
                 </div>
             </div>
@@ -318,7 +320,7 @@
 
             <div class="plot-container">
                 <div class="plot-title">SNR with Event Markers</div>
-                <div class="plot-subtitle">Reference channel SNR overlaid with detected events</div>
+                <div class="plot-subtitle">All-station SNR overlaid with significant ionospheric events (SIDs, absorption). Mode changes shown as vertical lines (max 30).</div>
                 <div id="plot-events-snr" style="height: 350px;"></div>
             </div>
 
@@ -398,17 +400,29 @@
     function setDate(dateStr) {
         selectedDate = dateStr;
         document.getElementById('date-picker').value = dateStr;
+        updateDateControls();
         loadAll();
     }
 
     function shiftDate(delta) {
         const d = new Date(selectedDate + 'T12:00:00Z');
         d.setUTCDate(d.getUTCDate() + delta);
-        setDate(d.toISOString().slice(0, 10));
+        const newDate = d.toISOString().slice(0, 10);
+        const today = new Date().toISOString().slice(0, 10);
+        if (newDate > today) return;  // don't go past today
+        setDate(newDate);
     }
 
     function setToday() {
         setDate(new Date().toISOString().slice(0, 10));
+    }
+
+    function updateDateControls() {
+        const today = new Date().toISOString().slice(0, 10);
+        document.getElementById('date-picker').max = today;
+        const nextBtn = document.getElementById('btn-next-day');
+        nextBtn.style.opacity = (selectedDate >= today) ? '0.3' : '1';
+        nextBtn.style.pointerEvents = (selectedDate >= today) ? 'none' : 'auto';
     }
 
     async function fetchJSON(url) {
@@ -538,8 +552,11 @@
             if (currentSnrThreshold > 0 && (snrs[i] === null || snrs[i] < currentSnrThreshold)) continue;
             const key = `${st} ${fk} MHz`;
             if (!groups[key]) groups[key] = { ts: [], dc: [], snr: [], dop: [], station: st, freq: fk };
+            // Filter railed D_clock values (±20ms search window ceiling)
+            const dc_raw = dclocks ? dclocks[i] : null;
+            const dc_valid = (dc_raw !== null && Math.abs(dc_raw) < 19.5) ? dc_raw : null;
             groups[key].ts.push(ts[i]);
-            groups[key].dc.push(dclocks ? dclocks[i] : null);
+            groups[key].dc.push(dc_valid);
             groups[key].snr.push(snrs[i]);
             groups[key].dop.push(dopplers ? dopplers[i] : null);
         }
@@ -755,19 +772,19 @@
     // DISPLAY 3: TEC Inversion
     // ====================================================================
     function renderTEC(timelineData, tecData) {
-        // 1/f² scatter from current hour timeline data
+        // 1/f² scatter from last hour of data on selected date
         if (timelineData && timelineData.timestamps && timelineData.count > 0) {
-            // Get last hour of data
-            const now = new Date();
-            const oneHourAgo = new Date(now - 3600000);
+            // Find the last timestamp and go back 1 hour from there
+            const lastTs = new Date(timelineData.timestamps[timelineData.timestamps.length - 1]);
+            const oneHourBefore = new Date(lastTs - 3600000);
 
             // Group by station, collect (1/f², D_clock) pairs
             const stationData = {};
             for (let i = 0; i < timelineData.timestamps.length; i++) {
                 const t = new Date(timelineData.timestamps[i]);
-                if (t < oneHourAgo) continue;
+                if (t < oneHourBefore) continue;
                 const dc = timelineData.d_clock_ms ? timelineData.d_clock_ms[i] : null;
-                if (dc === null) continue;
+                if (dc === null || Math.abs(dc) >= 19.5) continue;  // filter railed values
                 const station = timelineData.stations[i];
                 const freq = freqKey(timelineData.frequencies[i]);
                 if (!stationData[station]) stationData[station] = {};
@@ -869,7 +886,7 @@
             const stGroups = {};
             for (let i = 0; i < timelineData.timestamps.length; i++) {
                 const dc = timelineData.d_clock_ms[i];
-                if (dc === null) continue;
+                if (dc === null || Math.abs(dc) >= 19.5) continue;  // filter railed values
                 const station = timelineData.stations[i];
                 const freq = freqKey(timelineData.frequencies[i]);
                 const key = `${station} ${freq} MHz`;
@@ -958,54 +975,70 @@
             document.getElementById('plot-kp').innerHTML = '<p style="color:#64748b;text-align:center;padding:20px;">Kp data unavailable</p>';
         }
 
-        // SNR with events overlay
+        // SNR with events overlay — all stations, grouped by station
         if (timelineData && timelineData.timestamps) {
-            // Use WWV 10 MHz as reference
-            const refTs = [], refSnr = [];
+            const stationSnr = {};
             for (let i = 0; i < timelineData.timestamps.length; i++) {
-                if (timelineData.stations[i] === 'WWV' && Math.abs(freqKey(timelineData.frequencies[i]) - 10.0) < 0.5) {
-                    refTs.push(timelineData.timestamps[i]);
-                    refSnr.push(timelineData.snr_db[i]);
-                }
+                const st = timelineData.stations[i];
+                const snr = timelineData.snr_db[i];
+                if (snr === null) continue;
+                if (!stationSnr[st]) stationSnr[st] = { ts: [], snr: [] };
+                stationSnr[st].ts.push(timelineData.timestamps[i]);
+                stationSnr[st].snr.push(snr);
             }
 
-            const evTraces = [{
-                x: refTs, y: refSnr,
-                mode: 'markers',
-                marker: { size: 3, color: '#3b82f6', opacity: 0.6 },
-                name: 'WWV 10 MHz SNR',
-            }];
+            const evTraces = [];
+            for (const [st, g] of Object.entries(stationSnr)) {
+                evTraces.push({
+                    x: g.ts, y: g.snr,
+                    mode: 'markers',
+                    marker: { size: 2.5, color: STATION_COLORS[st] || '#888', opacity: 0.5 },
+                    name: st + ' SNR',
+                });
+            }
 
-            // Try to get events
+            // Overlay events — separate significant events from mode changes
+            const evShapes = [];
             try {
                 const events = await fetchJSON('/api/physics/events/recent?hours=24');
                 if (events && events.events) {
-                    const evTs = [], evLabels = [], evColors = [];
-                    for (const ev of events.events) {
-                        evTs.push(ev.timestamp);
-                        evLabels.push(ev.type || ev.event_type || 'event');
-                        evColors.push(ev.type === 'mode_change' ? '#f59e0b' : '#ef4444');
-                    }
-                    if (evTs.length > 0) {
+                    const significant = events.events.filter(e => e.type !== 'mode_change');
+                    const modeChanges = events.events.filter(e => e.type === 'mode_change');
+
+                    // Significant events as prominent markers
+                    if (significant.length > 0) {
                         evTraces.push({
-                            x: evTs,
-                            y: evTs.map(() => Math.max(...refSnr.filter(v => v !== null)) * 0.95),
+                            x: significant.map(e => e.timestamp),
+                            y: significant.map(() => null),  // no y — use y2 or just mark x
                             mode: 'markers+text',
-                            marker: { size: 8, color: evColors, symbol: 'triangle-down' },
-                            text: evLabels,
+                            marker: { size: 10, color: '#ef4444', symbol: 'triangle-down' },
+                            text: significant.map(e => e.title || e.type),
                             textposition: 'top center',
-                            textfont: { size: 9, color: '#f59e0b' },
-                            name: 'Events',
-                            showlegend: true,
+                            textfont: { size: 9, color: '#ef4444' },
+                            name: 'Ionospheric Events',
+                            yaxis: 'y',
+                        });
+                    }
+
+                    // Mode changes as subtle vertical lines (limit to 30 evenly spaced)
+                    const step = Math.max(1, Math.floor(modeChanges.length / 30));
+                    for (let i = 0; i < modeChanges.length; i += step) {
+                        evShapes.push({
+                            type: 'line',
+                            x0: modeChanges[i].timestamp, x1: modeChanges[i].timestamp,
+                            y0: 0, y1: 1, yref: 'paper',
+                            line: { color: 'rgba(249,115,22,0.15)', width: 1 },
                         });
                     }
                 }
             } catch (e) { /* events optional */ }
 
+            const xRange = [selectedDate + 'T00:00:00Z', selectedDate + 'T23:59:59Z'];
             Plotly.newPlot('plot-events-snr', evTraces, {
                 ...PLOTLY_LAYOUT_BASE,
-                xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: 'UTC Time' },
+                xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: 'UTC Time', range: xRange },
                 yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'SNR (dB)' },
+                shapes: evShapes,
             }, { responsive: true });
         }
     }
@@ -1058,9 +1091,13 @@
         }
     }
 
+    updateDateControls();
     loadAll();
-    // Auto-refresh every 5 minutes
-    setInterval(loadAll, 300000);
+    // Auto-refresh every 5 minutes, but only if viewing today
+    setInterval(() => {
+        const today = new Date().toISOString().slice(0, 10);
+        if (selectedDate === today) loadAll();
+    }, 300000);
     </script>
 </body>
 </html>
