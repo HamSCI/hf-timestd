@@ -318,22 +318,25 @@ class PropagationService:
         station: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Get propagation mode timeline from the unified tick_timing L2 product.
-        
-        tick_timing contains all three observables per minute, all from
-        TickEdgeDetector (processing_version 5.0.0):
-          - mean_snr_db: per-tick matched filter SNR
-          - d_clock_ms: AM-domain front-edge ensemble timing (UTC-referenced
-            via buffer_timing). This is the true ionospheric delay residual.
-          - doppler_hz: carrier phase slope across the minute (IQ-domain,
-            extracted at each detected tick position).
-        
+        Get propagation mode timeline with best-available observables per source:
+
+          - d_clock_ms:  tick_timing (TickEdgeDetector ensemble, pv=5.0.0)
+          - snr_db:      tick_phase  (TMF window correlator, ~55 windows/min,
+                                      20-50 dB dynamic range vs 7-11 dB from
+                                      tick_timing/mean_snr_db)
+          - doppler_hz:  clock_offset/timing_measurements (minute-marker
+                                      carrier phase slope, 60 s baseline)
+
+        All three are joined on (minute_boundary_utc, station). tick_timing
+        drives record enumeration; tick_phase SNR and clock_offset Doppler
+        are looked up by key and substituted where available.
+
         Falls back to timing_measurements for channels without tick_timing.
         """
         try:
             import math
-            start_iso = start.isoformat() + 'Z'
-            end_iso = end.isoformat() + 'Z'
+            start_iso = start.strftime('%Y-%m-%dT%H:%M:%SZ')
+            end_iso = end.strftime('%Y-%m-%dT%H:%M:%SZ')
             
             def _safe_float(val):
                 """Convert to float, returning None for NaN/Inf/invalid."""
@@ -347,13 +350,66 @@ class PropagationService:
                 except (TypeError, ValueError):
                     return None
             
+            import statistics
+
             all_records = []
             
             for channel_dir in self.phase2_dir.iterdir():
                 if not channel_dir.is_dir() or channel_dir.name in ['fusion', 'science']:
                     continue
-                
-                # --- Read tick_timing (unified product) ---
+
+                # --- Build SNR lookup from tick_phase (best SNR observable) ---
+                # Key: (minute_boundary_utc, station) → median snr_db across
+                # the ~55 per-tick windows in that minute.
+                snr_lookup: Dict[tuple, float] = {}
+                try:
+                    tp_reader = DataProductReader(
+                        data_dir=channel_dir,
+                        product_level='L2',
+                        product_name='tick_phase',
+                        channel=channel_dir.name
+                    )
+                    tp_records = tp_reader.read_time_range(
+                        start=start_iso, end=end_iso
+                    )
+                    # Accumulate snr_db values per (minute_boundary, station)
+                    snr_buckets: Dict[tuple, list] = {}
+                    for tp in tp_records:
+                        mb  = tp.get('minute_boundary_utc')
+                        st  = tp.get('station', '')
+                        snr = _safe_float(tp.get('snr_db'))
+                        if mb is not None and st and snr is not None:
+                            snr_buckets.setdefault((int(mb), st), []).append(snr)
+                    for key, vals in snr_buckets.items():
+                        snr_lookup[key] = statistics.median(vals)
+                except Exception:
+                    pass
+
+                # --- Build Doppler lookup from clock_offset/timing_measurements ---
+                # Key: (minute_boundary_utc, station) → doppler_hz
+                # 60-second baseline gives ~0.017 Hz resolution vs ~1 Hz from
+                # the 57-tick linear fit in tick_timing.
+                doppler_lookup: Dict[tuple, float] = {}
+                try:
+                    co_reader = DataProductReader(
+                        data_dir=channel_dir,
+                        product_level='L2',
+                        product_name='timing_measurements',
+                        channel=channel_dir.name
+                    )
+                    co_records = co_reader.read_time_range(
+                        start=start_iso, end=end_iso
+                    )
+                    for co in co_records:
+                        mb  = co.get('minute_boundary_utc')
+                        st  = co.get('station', '')
+                        dop = _safe_float(co.get('doppler_hz'))
+                        if mb is not None and st and dop is not None:
+                            doppler_lookup[(int(mb), st)] = dop
+                except Exception:
+                    pass
+
+                # --- Read tick_timing (primary: d_clock_ms + record enumeration) ---
                 tick_records = []
                 try:
                     reader = DataProductReader(
@@ -372,13 +428,24 @@ class PropagationService:
                 
                 if tick_records:
                     for t in tick_records:
+                        mb  = t.get('minute_boundary_utc')
+                        st  = t.get('station', 'UNKNOWN')
+                        key = (int(mb), st) if mb is not None else None
+                        # SNR: prefer tick_phase median; fall back to tick_timing
+                        snr = snr_lookup.get(key) if key else None
+                        if snr is None:
+                            snr = _safe_float(t.get('mean_snr_db'))
+                        # Doppler: prefer clock_offset 60s baseline; fall back to tick_timing
+                        dop = doppler_lookup.get(key) if key else None
+                        if dop is None:
+                            dop = _safe_float(t.get('doppler_hz'))
                         all_records.append({
                             'timestamp_utc': t.get('timestamp_utc'),
-                            'station': t.get('station', 'UNKNOWN'),
+                            'station': st,
                             'frequency_mhz': t.get('frequency_mhz', 0),
-                            'snr_db': _safe_float(t.get('mean_snr_db')),
+                            'snr_db': snr,
                             'd_clock_ms': _safe_float(t.get('d_clock_ms')),
-                            'doppler_hz': _safe_float(t.get('doppler_hz')),
+                            'doppler_hz': dop,
                             'propagation_mode': 'UNKNOWN',
                         })
                 else:
@@ -390,17 +457,23 @@ class PropagationService:
                             product_name='timing_measurements',
                             channel=channel_dir.name
                         )
-                        co_records = reader.read_time_range(
+                        fb_records = reader.read_time_range(
                             start=start_iso, end=end_iso
                         )
                         if station:
-                            co_records = [m for m in co_records if m.get('station') == station]
-                        for m in co_records:
+                            fb_records = [m for m in fb_records if m.get('station') == station]
+                        for m in fb_records:
+                            mb  = m.get('minute_boundary_utc')
+                            st  = m.get('station', 'UNKNOWN')
+                            key = (int(mb), st) if mb is not None else None
+                            snr = snr_lookup.get(key) if key else None
+                            if snr is None:
+                                snr = _safe_float(m.get('snr_db'))
                             all_records.append({
                                 'timestamp_utc': m.get('timestamp_utc'),
-                                'station': m.get('station', 'UNKNOWN'),
+                                'station': st,
                                 'frequency_mhz': m.get('frequency_mhz', 0),
-                                'snr_db': _safe_float(m.get('snr_db')),
+                                'snr_db': snr,
                                 'd_clock_ms': _safe_float(m.get('raw_arrival_time_ms')),
                                 'doppler_hz': _safe_float(m.get('doppler_hz')),
                                 'propagation_mode': m.get('propagation_mode', 'UNKNOWN'),

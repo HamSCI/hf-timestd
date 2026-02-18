@@ -86,7 +86,7 @@ class DataProductWriter:
             f"(schema v{self.schema['schema_version']})"
         )
         
-        # Daily file tracking (no persistent file handle - crash safe)
+        # Daily file tracking (open/append/close per write — crash safe)
         self._current_path: Optional[Path] = None
         self._current_date: Optional[str] = None
         self._measurement_count = 0
@@ -163,43 +163,44 @@ class DataProductWriter:
     def _ensure_file_exists(self, timestamp_utc: str) -> Path:
         """
         Ensure HDF5 file exists for the given timestamp (daily rotation).
-        
-        CRASH-SAFE DESIGN (2026-02-06): Files are NOT held open. Each
-        write_measurement() call opens, appends, and closes the file.
-        This eliminates SWMR dirty-flag corruption from unclean shutdowns.
-        Concurrent readers work fine with libver='latest' files.
-        
+
+        CRASH-SAFE DESIGN: Files are NOT held open. Each write_measurement()
+        call opens, appends, and closes the file. This eliminates dirty-flag
+        corruption from unclean shutdowns. Concurrent readers work fine with
+        libver='latest' files.
+
         Args:
             timestamp_utc: ISO 8601 timestamp
-            
+
         Returns:
             Path to the HDF5 file (guaranteed to exist and be valid)
         """
         dt = datetime.fromisoformat(timestamp_utc.replace('Z', '+00:00'))
         date_str = dt.strftime('%Y%m%d')
-        
+
         # Daily rotation
         if self._current_date != date_str:
             if self._current_date is not None:
                 logger.info(
-                    f"Daily rotation: {self._current_date} had {self._measurement_count} measurements"
+                    f"Daily rotation: {self._current_date} had "
+                    f"{self._measurement_count} measurements"
                 )
             self._current_date = date_str
             self._measurement_count = 0
-        
+
         hdf5_path = self._get_hdf5_path(date_str)
-        
+
         if not hdf5_path.exists():
             self._create_file(hdf5_path)
         else:
-            # Verify existing file is readable (may be corrupt from old SWMR crash)
+            # Verify existing file is readable (may be corrupt from crash)
             try:
                 with h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
                     _ = f.attrs.get('metadata')
             except OSError as e:
                 logger.warning(f"Existing file corrupt ({hdf5_path}): {e}")
                 self._try_recover_corrupt_file(hdf5_path)
-        
+
         self._current_path = hdf5_path
         return hdf5_path
     
@@ -374,32 +375,62 @@ class DataProductWriter:
             if field.get('required', False) and field['name'] not in measurement:
                 raise ValueError(f"Required field '{field['name']}' missing from measurement")
     
+    def write_measurements_batch(self, measurements: List[Dict[str, Any]]) -> None:
+        """
+        Write multiple measurements in a single open/append/close cycle.
+
+        Use this for high-frequency products (e.g. tick_phase ~55 rows/min)
+        to avoid HDF5 heap corruption from thousands of open/close cycles/day.
+        All measurements must share the same date (same HDF5 file).
+
+        Args:
+            measurements: List of measurement dicts (must match schema)
+
+        Raises:
+            ValueError: If any measurement fails validation or dates differ
+        """
+        if not measurements:
+            return
+
+        for m in measurements:
+            self.validate_measurement(m)
+
+        timestamp_utc = measurements[0]['timestamp_utc']
+        hdf5_path = self._ensure_file_exists(timestamp_utc)
+
+        with h5py.File(hdf5_path, 'r+', libver='latest', locking=False) as hdf5_file:
+            for m in measurements:
+                self._append_measurement(hdf5_file, m)
+
+        self._measurement_count += len(measurements)
+        logger.debug(f"Batch wrote {len(measurements)} measurements to {self._current_date}")
+
     def write_measurement(self, measurement: Dict[str, Any]) -> None:
         """
         Write a single measurement to HDF5 file.
-        
+
         CRASH-SAFE: Opens the file, appends one row, closes the file.
         No persistent file handle means no dirty flags on unclean shutdown.
-        
+
         Args:
             measurement: Measurement dictionary (must match schema)
-            
+
         Raises:
             ValueError: If validation fails
         """
         # Validate measurement
         self.validate_measurement(measurement)
-        
+
         # Ensure file exists (creates if needed, handles daily rotation)
         timestamp_utc = measurement['timestamp_utc']
         hdf5_path = self._ensure_file_exists(timestamp_utc)
-        
+
         # Open, append, close — crash-safe write
         with h5py.File(hdf5_path, 'r+', libver='latest', locking=False) as hdf5_file:
             self._append_measurement(hdf5_file, measurement)
-        
+
         self._measurement_count += 1
-        
+
         if self._measurement_count % 100 == 0:
             logger.debug(f"Wrote {self._measurement_count} measurements to {self._current_date}")
 

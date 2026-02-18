@@ -583,10 +583,10 @@ class MetrologyService:
                 tick_results = self.engine._last_tick_results
                 if tick_results:
                     now_iso = datetime.now(timezone.utc).isoformat()
-                    n_phase_written = 0
+                    phase_batch = []
                     for station_name, tick_analysis in tick_results.items():
                         for wr in tick_analysis.window_results:
-                            phase_rec = {
+                            phase_batch.append({
                                 'timestamp_utc': now_iso,
                                 'minute_boundary_utc': minute_boundary,
                                 'channel': self.channel_name,
@@ -606,14 +606,13 @@ class MetrologyService:
                                 'valid_ticks': wr.valid_ticks,
                                 'processed_at': now_iso,
                                 'processing_version': "1.0.0"
-                            }
-                            try:
-                                self.tick_phase_writer.write_measurement(phase_rec)
-                                n_phase_written += 1
-                            except Exception as ph_err:
-                                logger.debug(f"Failed to write tick phase: {ph_err}")
-                    if n_phase_written > 0:
-                        logger.debug(f"Tick phase written: {n_phase_written} windows")
+                            })
+                    if phase_batch:
+                        try:
+                            self.tick_phase_writer.write_measurements_batch(phase_batch)
+                            logger.debug(f"Tick phase written: {len(phase_batch)} windows")
+                        except Exception as ph_err:
+                            logger.debug(f"Failed to write tick phase batch: {ph_err}")
 
             # Write detection attempts (every measurement attempt for threshold calibration)
             if self.attempts_writer and hasattr(self.engine, '_last_rtp_attempts'):
