@@ -12,6 +12,8 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ## 📋 NEXT SESSION: PHYSICS MODULE CRITICAL REVIEW
 
+**Approach:** Fix backend data pipelines first, then frontend. The ionosphere.html sub-pages have display issues, but most stem from broken or empty backend data (TEC constants, scintillation nulls, stale reanalysis). Fixing the frontend without fixing the data would be cosmetic. Pick one concrete pipeline (e.g., TEC producing constant values) and fix it end-to-end before touching the frontend display.
+
 **Objective:** Critically review the physics module of hf-timestd. The physics dashboard and API endpoints currently lack focus — they display many metrics but do not clearly answer the fundamental question: *"Does this instrument produce scientifically useful ionospheric measurements?"* The review should simplify and focus on **at most 4 high-yield demonstrations** of the instrument's utility as an ionospheric physics tool.
 
 ### The Two Concerns of hf-timestd
@@ -262,6 +264,9 @@ The physics dashboard (`physics.html`) has 3 tabs (Paths, Channels, Events) with
 ---
 
 ## ✅ RESOLVED IN PREVIOUS SESSIONS (Reference Only)
+
+### Kalman LOCKED Status Fix (2026-02-18)
+`_write_fused_result_hdf5()` overrode `result.kalman_state` with stale logic requiring `uncertainty < 1.0ms` for LOCKED. Actual uncertainty ~1.3ms, so dashboard always showed ACQUIRING. Fixed to use `result.kalman_state` directly (set from `self.kalman_converged`). Also relaxed WLS convergence threshold from 3→2 stations (normal operating condition). Deployed, verified end-to-end (HDF5 → API → dashboard), committed (e3b1d9e).
 
 ### A/B Decoder Comparison (2026-02-17)
 Edge ensemble (57 ticks/min, ±3ms) vs PLL carrier phase (±1ms). MF baseline fixed to use edge ensemble instead of broken TickMatchedFilter.d_clock_ms. Deployed, verified, committed (d016ddc).
