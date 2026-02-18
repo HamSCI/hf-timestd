@@ -205,6 +205,18 @@ chown -R timestd:timestd "$INSTALL_DIR/web-api/"
 log_info "  ✅ Web API synced to $INSTALL_DIR/web-api/"
 
 # =============================================================================
+# Step 2b2: Sync Schema Files
+# =============================================================================
+# The web API resolves schemas from $INSTALL_DIR/src/hf_timestd/schemas/ at
+# runtime (not from the venv site-packages). pip install copies schemas to
+# the venv but NOT to the src tree, so new schema files must be synced here.
+log_info "Step 2b2: Syncing schema files..."
+rsync -a \
+    "$PROJECT_DIR/src/hf_timestd/schemas/" "$INSTALL_DIR/src/hf_timestd/schemas/"
+chown -R timestd:timestd "$INSTALL_DIR/src/hf_timestd/schemas/"
+log_info "  ✅ Schemas synced to $INSTALL_DIR/src/hf_timestd/schemas/"
+
+# =============================================================================
 # Step 2c: Sync Documentation (for Living Docs)
 # =============================================================================
 log_info "Step 2c: Syncing documentation..."
