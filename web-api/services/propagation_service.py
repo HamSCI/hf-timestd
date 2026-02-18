@@ -361,6 +361,14 @@ class PropagationService:
                 # --- Build SNR lookup from tick_phase (best SNR observable) ---
                 # Key: (minute_boundary_utc, station) → median snr_db across
                 # the ~55 per-tick windows in that minute.
+                #
+                # IMPORTANT: tick_phase timestamp_utc = processing time (when
+                # the minute was written), NOT the minute's measurement time.
+                # After a service restart, all backlogged minutes are processed
+                # at once, so read_time_range(start, end) by timestamp_utc
+                # returns 0 records for most query windows.
+                # Fix: read using the full date span of the query so the daily
+                # file is found, then filter by minute_boundary_utc.
                 snr_lookup: Dict[tuple, float] = {}
                 try:
                     tp_reader = DataProductReader(
@@ -369,17 +377,26 @@ class PropagationService:
                         product_name='tick_phase',
                         channel=channel_dir.name
                     )
+                    # Use day-boundary ISO strings so read_time_range opens
+                    # every daily file that overlaps the query window.
+                    from datetime import timedelta as _timedelta
+                    day_start_iso = start.strftime('%Y-%m-%dT00:00:00Z')
+                    day_end_iso   = (end + _timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
                     tp_records = tp_reader.read_time_range(
-                        start=start_iso, end=end_iso
+                        start=day_start_iso, end=day_end_iso
                     )
-                    # Accumulate snr_db values per (minute_boundary, station)
+                    # Filter by minute_boundary_utc to match the query window
+                    start_unix = int(start.timestamp())
+                    end_unix   = int(end.timestamp())
                     snr_buckets: Dict[tuple, list] = {}
                     for tp in tp_records:
                         mb  = tp.get('minute_boundary_utc')
                         st  = tp.get('station', '')
                         snr = _safe_float(tp.get('snr_db'))
                         if mb is not None and st and snr is not None:
-                            snr_buckets.setdefault((int(mb), st), []).append(snr)
+                            mb_int = int(mb)
+                            if start_unix <= mb_int <= end_unix:
+                                snr_buckets.setdefault((mb_int, st), []).append(snr)
                     for key, vals in snr_buckets.items():
                         snr_lookup[key] = statistics.median(vals)
                 except Exception:
