@@ -7,9 +7,11 @@ Provides solar and geomagnetic data for correlation with HF propagation.
 from fastapi import APIRouter, Query, HTTPException
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+from pathlib import Path
 import logging
 
 from services.space_weather_service import SpaceWeatherService
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -212,3 +214,94 @@ async def get_summary(
     except Exception as e:
         logger.error(f"Error getting space weather summary: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/solar/elevation")
+async def get_solar_elevation(
+    start: str = Query("-6h", description="Start time (relative like '-6h' or ISO8601)"),
+    end: str = Query("now", description="End time"),
+    interval_minutes: int = Query(5, ge=1, le=60, description="Sample interval in minutes"),
+):
+    """
+    Solar elevation angle at the path midpoint for each station (WWV, WWVH, CHU, BPM).
+
+    Uses the receiver grid square from station config and the existing
+    solar_zenith_calculator to compute elevation at the geographic midpoint
+    of each propagation path. Elevation correlates with D-layer absorption.
+    """
+    try:
+        import sys, os
+        import math
+        from datetime import datetime, timedelta
+
+        # Resolve receiver grid from station config
+        meta = config.station_metadata
+        grid = meta.get("grid_square", "EM38ww")
+
+        # Parse time window
+        now = datetime.utcnow()
+        def _parse(s):
+            s = s.strip()
+            if s == "now":
+                return now
+            if s.startswith("-"):
+                val = float(s[1:-1])
+                u = s[-1]
+                if u == "h": return now - timedelta(hours=val)
+                if u == "d": return now - timedelta(days=val)
+                if u == "m": return now - timedelta(minutes=val)
+            return datetime.fromisoformat(s.replace("Z", ""))
+
+        t0 = _parse(start)
+        t1 = _parse(end)
+
+        # Import calculator (installed as part of hf_timestd package)
+        try:
+            from hf_timestd.core.solar_zenith_calculator import (
+                grid_to_latlon, calculate_midpoint, solar_position,
+                WWV_LOCATION, WWVH_LOCATION, CHU_LOCATION, BPM_LOCATION,
+            )
+        except ImportError:
+            # Fallback: add src to path
+            src = Path(__file__).parent.parent.parent / "src"
+            sys.path.insert(0, str(src))
+            from hf_timestd.core.solar_zenith_calculator import (
+                grid_to_latlon, calculate_midpoint, solar_position,
+                WWV_LOCATION, WWVH_LOCATION, CHU_LOCATION, BPM_LOCATION,
+            )
+
+        rx_lat, rx_lon = grid_to_latlon(grid)
+
+        midpoints = {
+            "WWV":  calculate_midpoint(rx_lat, rx_lon, *WWV_LOCATION),
+            "WWVH": calculate_midpoint(rx_lat, rx_lon, *WWVH_LOCATION),
+            "CHU":  calculate_midpoint(rx_lat, rx_lon, *CHU_LOCATION),
+            "BPM":  calculate_midpoint(rx_lat, rx_lon, *BPM_LOCATION),
+        }
+
+        timestamps = []
+        elevations = {s: [] for s in midpoints}
+
+        current = t0
+        dt = timedelta(minutes=interval_minutes)
+        while current <= t1:
+            timestamps.append(int(current.timestamp()))
+            for station, (mlat, mlon) in midpoints.items():
+                _, el = solar_position(current, mlat, mlon)
+                elevations[station].append(round(el, 2))
+            current += dt
+
+        return {
+            "status": "ok",
+            "receiver_grid": grid,
+            "receiver_lat": round(rx_lat, 4),
+            "receiver_lon": round(rx_lon, 4),
+            "interval_minutes": interval_minutes,
+            "timestamps": timestamps,
+            "elevations": elevations,
+            "midpoints": {s: {"lat": round(v[0], 4), "lon": round(v[1], 4)}
+                          for s, v in midpoints.items()},
+        }
+    except Exception as e:
+        logger.error(f"Error computing solar elevation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

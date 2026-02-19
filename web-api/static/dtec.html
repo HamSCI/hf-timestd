@@ -331,6 +331,8 @@ function freqMatches(freqMhz) {
     return Math.abs(freqMhz - parseFloat(_activeFreqFilter)) < 0.1;
 }
 
+let _solarData = null;
+
 async function loadData() {
     const window_ = document.getElementById('windowSelect').value;
     const station = document.getElementById('stationFilter').value;
@@ -347,9 +349,13 @@ async function loadData() {
         let url = `/api/tec/dtec?start=${window_}&min_snr_db=${minSnr}&downsample=${ds}`;
         if (station) url += `&station=${station}`;
 
-        const resp = await fetch(url);
+        const [resp, solarResp] = await Promise.all([
+            fetch(url),
+            fetch(`/api/space-weather/solar/elevation?start=${window_}&interval_minutes=5`),
+        ]);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        _solarData = solarResp.ok ? await solarResp.json() : null;
 
         if (data.status === 'no_data' || data.n_series === 0) {
             showError('No dTEC data available for this time window.');
@@ -390,6 +396,59 @@ function updateStats(data) {
         nTotal > 0 ? Math.round(100 * nAnchored / nTotal) + '%' : '—';
 }
 
+// Solar elevation colours (muted, distinct from dTEC station colours)
+const SOLAR_COLORS = {
+    WWV:  'rgba(255, 220, 80, 0.55)',
+    WWVH: 'rgba(255, 180, 60, 0.55)',
+    CHU:  'rgba(255, 200, 100, 0.55)',
+    BPM:  'rgba(255, 160, 40, 0.55)',
+};
+
+function buildSolarTraces(stationsNeeded) {
+    // Returns Plotly traces for solar elevation (yaxis2) for the given stations.
+    if (!_solarData || !_solarData.elevations) return [];
+    const toDate = ts => new Date(ts * 1000).toISOString();
+    const xs = _solarData.timestamps.map(toDate);
+    const traces = [];
+    const seen = new Set();
+    for (const st of stationsNeeded) {
+        if (seen.has(st) || !_solarData.elevations[st]) continue;
+        seen.add(st);
+        const el = _solarData.elevations[st];
+        // Clamp negative elevations to 0 for display (below horizon = night)
+        const elClamped = el.map(v => Math.max(0, v));
+        traces.push({
+            x: xs,
+            y: elClamped,
+            mode: 'lines',
+            type: 'scatter',
+            name: `Solar elev. ${st} path`,
+            yaxis: 'y2',
+            line: { color: SOLAR_COLORS[st] || 'rgba(255,220,80,0.5)', width: 1.5, dash: 'dot' },
+            opacity: 0.8,
+            hovertemplate: `%{y:.1f}°<extra>Solar ${st}</extra>`,
+        });
+    }
+    return traces;
+}
+
+function solarLayout() {
+    // Secondary y-axis definition for solar elevation overlay
+    return {
+        yaxis2: {
+            title: 'Solar elev. (°)',
+            overlaying: 'y',
+            side: 'right',
+            range: [0, 90],
+            gridcolor: 'rgba(71,85,105,0.3)',
+            tickfont: { color: 'rgba(255,220,80,0.7)', size: 10 },
+            titlefont: { color: 'rgba(255,220,80,0.7)', size: 10 },
+            showgrid: false,
+            zeroline: false,
+        },
+    };
+}
+
 function renderPlots(series) {
     const displayMode = document.getElementById('displayMode').value;
     const toDate = ts => new Date(ts * 1000).toISOString();
@@ -399,7 +458,10 @@ function renderPlots(series) {
     const meanTraces = [];
     const refTraces = [];
 
-    const stationFreqCounts = {};
+    // Track which stations appear in each plot for solar overlay
+    const rateStations = new Set();
+    const meanStations = new Set();
+    const refStations = new Set();
 
     for (const [key, s] of Object.entries(series)) {
         if (!freqMatches(s.frequency_mhz)) continue;
@@ -418,6 +480,7 @@ function renderPlots(series) {
             line: { color, width: 1 },
             opacity: 0.85,
         });
+        rateStations.add(s.station);
 
         // Integrated dTEC trace
         meanTraces.push({
@@ -429,6 +492,7 @@ function renderPlots(series) {
             line: { color, width: 1.5 },
             opacity: 0.85,
         });
+        meanStations.add(s.station);
 
         // 10 MHz reference comparison
         if (Math.abs(s.frequency_mhz - 10.0) < 0.1 && ['WWV', 'WWVH', 'BPM'].includes(s.station)) {
@@ -440,6 +504,7 @@ function renderPlots(series) {
                 name: label,
                 line: { color, width: 2 },
             });
+            refStations.add(s.station);
         }
     }
 
@@ -455,9 +520,11 @@ function renderPlots(series) {
         document.getElementById('dtecRatePlot').innerHTML =
             '<div class="loading-msg">No series match the current frequency filter</div>';
     } else {
-        Plotly.newPlot('dtecRatePlot', rateTraces, {
+        const solar = buildSolarTraces([...rateStations]);
+        Plotly.newPlot('dtecRatePlot', [...rateTraces, ...solar], {
             ...baseLayout,
-            margin: { t: 10, b: 40, l: 70, r: 10 },
+            ...solarLayout(),
+            margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
             yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', zeroline: true, zerolinecolor: '#475569' },
         }, { responsive: true, displayModeBar: false });
@@ -467,9 +534,11 @@ function renderPlots(series) {
         document.getElementById('dtecMeanPlot').innerHTML =
             '<div class="loading-msg">No series match the current frequency filter</div>';
     } else {
-        Plotly.newPlot('dtecMeanPlot', meanTraces, {
+        const solar = buildSolarTraces([...meanStations]);
+        Plotly.newPlot('dtecMeanPlot', [...meanTraces, ...solar], {
             ...baseLayout,
-            margin: { t: 10, b: 40, l: 70, r: 10 },
+            ...solarLayout(),
+            margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
             yaxis: { gridcolor: '#334155', title: 'Integrated dTEC (TECU)' },
         }, { responsive: true, displayModeBar: false });
@@ -479,9 +548,11 @@ function renderPlots(series) {
         document.getElementById('refPlot').innerHTML =
             '<div class="loading-msg">No 10 MHz paths available (WWV, WWVH, BPM)</div>';
     } else {
-        Plotly.newPlot('refPlot', refTraces, {
+        const solar = buildSolarTraces([...refStations]);
+        Plotly.newPlot('refPlot', [...refTraces, ...solar], {
             ...baseLayout,
-            margin: { t: 10, b: 40, l: 70, r: 10 },
+            ...solarLayout(),
+            margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
             yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', zeroline: true, zerolinecolor: '#475569' },
         }, { responsive: true, displayModeBar: false });
