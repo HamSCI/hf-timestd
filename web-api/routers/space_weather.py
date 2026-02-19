@@ -270,13 +270,52 @@ async def get_solar_elevation(
                 WWV_LOCATION, WWVH_LOCATION, CHU_LOCATION, BPM_LOCATION,
             )
 
+        import math as _math
+
         rx_lat, rx_lon = grid_to_latlon(grid)
 
+        def _gc_point(lat1, lon1, lat2, lon2, f=0.5):
+            """Point at fraction f along the great-circle from (lat1,lon1) to (lat2,lon2)."""
+            lat1r, lon1r = _math.radians(lat1), _math.radians(lon1)
+            lat2r, lon2r = _math.radians(lat2), _math.radians(lon2)
+            d = _math.acos(max(-1.0, min(1.0,
+                _math.sin(lat1r)*_math.sin(lat2r) +
+                _math.cos(lat1r)*_math.cos(lat2r)*_math.cos(lon2r - lon1r)
+            )))
+            if d < 1e-10:
+                return lat1, lon1
+            A = _math.sin((1 - f) * d) / _math.sin(d)
+            B = _math.sin(f * d) / _math.sin(d)
+            x = A*_math.cos(lat1r)*_math.cos(lon1r) + B*_math.cos(lat2r)*_math.cos(lon2r)
+            y = A*_math.cos(lat1r)*_math.sin(lon1r) + B*_math.cos(lat2r)*_math.sin(lon2r)
+            z = A*_math.sin(lat1r) + B*_math.sin(lat2r)
+            lat = _math.degrees(_math.atan2(z, _math.sqrt(x*x + y*y)))
+            lon = _math.degrees(_math.atan2(y, x))
+            return lat, lon
+
+        def _path_midpoint(rx_lat, rx_lon, tx_lat, tx_lon):
+            """
+            Return the ionospheric path midpoint.
+            For paths > 60 deg GC distance (e.g. BPM at ~103 deg), the true
+            geographic midpoint passes over the Arctic and is not representative
+            of the D-layer above the propagation path near the receiver.
+            Use the 1/4-path point instead so the solar elevation reflects the
+            ionosphere in the receiver's hemisphere.
+            """
+            lat1r, lon1r = _math.radians(rx_lat), _math.radians(rx_lon)
+            lat2r, lon2r = _math.radians(tx_lat), _math.radians(tx_lon)
+            d_deg = _math.degrees(_math.acos(max(-1.0, min(1.0,
+                _math.sin(lat1r)*_math.sin(lat2r) +
+                _math.cos(lat1r)*_math.cos(lat2r)*_math.cos(lon2r - lon1r)
+            ))))
+            f = 0.25 if d_deg > 60 else 0.5
+            return _gc_point(rx_lat, rx_lon, tx_lat, tx_lon, f)
+
         midpoints = {
-            "WWV":  calculate_midpoint(rx_lat, rx_lon, *WWV_LOCATION),
-            "WWVH": calculate_midpoint(rx_lat, rx_lon, *WWVH_LOCATION),
-            "CHU":  calculate_midpoint(rx_lat, rx_lon, *CHU_LOCATION),
-            "BPM":  calculate_midpoint(rx_lat, rx_lon, *BPM_LOCATION),
+            "WWV":  _path_midpoint(rx_lat, rx_lon, *WWV_LOCATION),
+            "WWVH": _path_midpoint(rx_lat, rx_lon, *WWVH_LOCATION),
+            "CHU":  _path_midpoint(rx_lat, rx_lon, *CHU_LOCATION),
+            "BPM":  _path_midpoint(rx_lat, rx_lon, *BPM_LOCATION),
         }
 
         timestamps = []
