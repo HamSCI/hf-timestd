@@ -319,21 +319,25 @@ class L2CalibrationService:
                 logger.warning(f"{channel}: No propagation modes for {station_id}")
                 return None
             
-            # CRITICAL FIX (2026-02-07): raw_toa_ms is MISLABELED in L1.
-            # It actually stores timing_error_ms (= arrival - expected_delay),
-            # computed in metrology_engine.py line 567. This IS already D_clock.
-            # To identify the propagation mode, we need the actual arrival time.
-            # Reconstruct: arrival ≈ timing_error + expected_delay.
-            # Since timing_error is small (~0ms), use the lowest-hop mode's delay
-            # as the initial estimate, then let identify_mode refine.
-            best_mode = min(modes, key=lambda m: m.n_hops)
-            estimated_arrival_ms = raw_toa_ms + best_mode.total_delay_ms
-            
-            mode_result = self.prop_solver.identify_mode(
-                station=station_id,
-                measured_delay_ms=estimated_arrival_ms,
-                frequency_mhz=frequency_mhz
-            )
+            # raw_toa_ms is D_clock (timing residual = arrival - expected_delay).
+            # To identify the propagation mode we need the absolute arrival time:
+            #   arrival ≈ D_clock + mode.total_delay_ms
+            # We do NOT assume the lowest-hop mode a priori — that is circular.
+            # Instead, try every candidate mode, reconstruct the implied arrival,
+            # and let identify_mode score each one.  Pick the mode whose implied
+            # arrival produces the highest identification confidence.
+            best_mode_result = None
+            for candidate_mode in modes:
+                candidate_arrival_ms = raw_toa_ms + candidate_mode.total_delay_ms
+                candidate_result = self.prop_solver.identify_mode(
+                    station=station_id,
+                    measured_delay_ms=candidate_arrival_ms,
+                    frequency_mhz=frequency_mhz
+                )
+                if (best_mode_result is None or
+                        candidate_result.confidence > best_mode_result.confidence):
+                    best_mode_result = candidate_result
+            mode_result = best_mode_result
             
             # L1 raw_toa_ms currently carries timing error (D_clock), not absolute ToA.
             # Reconstruct an absolute arrival time for L2 schema consistency:
@@ -409,7 +413,11 @@ class L2CalibrationService:
                 processing_version="1.0.0",
                 processed_at=datetime.now(timezone.utc).isoformat(),
                 calibration_date=datetime.now(timezone.utc).date().isoformat(),
-                gpsdo_locked=True  # Assume locked if we got L1 data
+                # P4-B: Derive gpsdo_locked from L1 quality_flag.
+                # L1 data only exists in RTP mode (GPSDO-locked), but a BAD
+                # quality_flag indicates the measurement was flagged as unreliable
+                # (e.g. low SNR, failed sanity check) — treat as unlocked.
+                gpsdo_locked=str(l1_dict.get('quality_flag', 'GOOD')).upper() not in ('BAD', 'MISSING')
             )
             
             return l2
@@ -477,30 +485,42 @@ class L2CalibrationService:
         """
         # Component uncertainties (all in ms)
         
-        # 1. RTP timestamp precision (GPSDO-locked)
-        u_rtp = 0.05  # 50 μs precision
+        # 1. RTP timestamp precision (GPSDO-locked, 24 kHz sample clock → ~42 μs)
+        u_rtp = 0.042  # 1 sample at 24 kHz
         
-        # 2. Ionospheric delay uncertainty (TEC model)
-        # Scales with number of hops and frequency
-        u_iono = 1.0 + (n_hops * 0.5)  # 1-2.5 ms depending on hops
+        # 2. Ionospheric delay uncertainty.
+        # The propagation model uncertainty already captures the ionospheric
+        # model error (it scales with 1 - mode_confidence below).  Here we
+        # account only for the residual TEC variability NOT captured by the
+        # model: empirically ~0.3 ms 1-sigma for a single hop at mid-latitudes
+        # (corresponds to ~1 TECU TEC uncertainty at 10 MHz).
+        # For multi-hop paths the uncertainty grows as sqrt(n_hops) because
+        # each hop samples a different ionospheric column.
+        u_iono = 0.3 * np.sqrt(max(1, n_hops))
         
-        # 3. Multipath (from SNR)
+        # 3. Multipath (from SNR).
+        # SNR < 10 dB: multipath-limited (~1 ms); 10-20 dB: ~0.3 ms; >20 dB: ~0.05 ms.
         if snr_db > 20:
-            u_multipath = 0.1
+            u_multipath = 0.05
         elif snr_db > 10:
-            u_multipath = 0.5
+            u_multipath = 0.3
         else:
             u_multipath = 1.0
         
-        # 4. Station discrimination
-        u_discrim = 0.2  # Tone frequency discrimination is good
+        # 4. Station discrimination.
+        # Tone frequency is unique per station — misidentification is rare.
+        # Residual ambiguity from multi-hop mode confusion: ~0.1 ms.
+        u_discrim = 0.1
         
-        # 5. GPSDO stability
-        u_gpsdo = 0.01  # 10 μs for locked GPSDO
+        # 5. GPSDO stability (Allan deviation at 1 s for a typical GPSDO: ~1e-11 s/s
+        # → ~10 ns over 1 s, negligible; dominant term is holdover during unlocked
+        # intervals, but we only process when locked).
+        u_gpsdo = 0.01  # 10 μs conservative bound for locked GPSDO
         
-        # 6. Propagation model uncertainty
-        # Scales with mode confidence
-        u_prop_model = 2.0 * (1.0 - mode_confidence)  # 0-2 ms
+        # 6. Propagation model uncertainty.
+        # mode_confidence=1.0 → model matches well → small residual (~0.2 ms).
+        # mode_confidence=0.0 → mode unknown → up to ~5 ms (worst-case hop ambiguity).
+        u_prop_model = 0.2 + 4.8 * (1.0 - max(0.0, min(1.0, mode_confidence)))
         
         # Combined uncertainty (RSS - Root Sum of Squares)
         u_combined = np.sqrt(

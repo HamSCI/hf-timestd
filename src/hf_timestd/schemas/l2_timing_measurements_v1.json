@@ -284,9 +284,10 @@
             "required": false,
             "allow_empty": true,
             "allow_nan": true,
-            "description": "Kalman-filtered Time of Flight (ionospheric path delay)",
+            "deprecated": true,
+            "description": "DEPRECATED (always NaN in production). Kalman-filtered Time of Flight. Do not use in calculations — see data_dictionary.json entry for tof_kalman_ms.",
             "units": "milliseconds",
-            "note": "Science-First Architecture v5.0: Per-broadcast Kalman filter state tracking ionospheric path dynamics"
+            "note": "Dead field as of 2026-02-19. Retained for HDF5 backward compatibility only."
         },
         {
             "name": "tof_uncertainty_ms",
@@ -294,7 +295,8 @@
             "required": false,
             "allow_empty": true,
             "allow_nan": true,
-            "description": "Kalman filter uncertainty for ToF estimate",
+            "deprecated": true,
+            "description": "DEPRECATED (always NaN in production). Kalman filter uncertainty for ToF. Do not use.",
             "units": "milliseconds"
         },
         {

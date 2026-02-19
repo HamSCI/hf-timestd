@@ -78,6 +78,8 @@ class CarrierTECResult:
     n_points: int = 0
     sigma_dtec_tecu: float = 0.0       # Noise floor estimate
     mean_snr_db: float = 0.0
+    unwrap_quality: float = 1.0        # 1.0 = clean, <1.0 = ambiguous unwrapping
+    n_phase_jumps: int = 0             # Number of inter-sample |Δφ| > π/2 steps
 
 
 class CarrierTECEstimator:
@@ -134,6 +136,22 @@ class CarrierTECEstimator:
 
         # Unwrap phase for continuity
         phase_unwrapped = np.unwrap(carrier_phase_rad)
+
+        # P3-A: Phase unwrapping quality check.
+        # If any inter-sample raw phase step |Δφ_raw| > π/2, np.unwrap may have
+        # chosen the wrong 2π branch.  Count such steps and compute a quality
+        # score.  Caller can gate on unwrap_quality < threshold.
+        dphi_raw = np.diff(carrier_phase_rad)
+        # Wrap raw differences to (-π, π] to measure the true step size
+        dphi_raw_wrapped = (dphi_raw + np.pi) % (2 * np.pi) - np.pi
+        n_jumps = int(np.sum(np.abs(dphi_raw_wrapped) > (np.pi / 2)))
+        unwrap_quality = max(0.0, 1.0 - n_jumps / max(len(dphi_raw_wrapped), 1))
+        if n_jumps > 0:
+            logger.debug(
+                f"Phase unwrap quality: {station}/{channel} "
+                f"{frequency_mhz:.2f} MHz — {n_jumps}/{len(dphi_raw_wrapped)} "
+                f"steps |Δφ|>π/2, quality={unwrap_quality:.2f}"
+            )
 
         # Compute phase rate via finite differences (central where possible)
         dt = np.diff(epochs)
@@ -200,6 +218,8 @@ class CarrierTECEstimator:
             n_points=len(mid_epochs),
             sigma_dtec_tecu=sigma,
             mean_snr_db=0.0,  # Caller should set this
+            unwrap_quality=unwrap_quality,
+            n_phase_jumps=n_jumps,
         )
 
     def compute_dtec_from_records(

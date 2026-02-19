@@ -819,6 +819,14 @@ class PhysicsFusionService:
                 if not dtec_result.is_anchored and qflag == 'GOOD':
                     qflag = 'MARGINAL'  # Unanchored: integrated TEC is relative only
 
+                # P3-A: Downgrade quality when phase unwrapping is ambiguous
+                unwrap_q = getattr(dtec_result, 'unwrap_quality', 1.0)
+                n_jumps = getattr(dtec_result, 'n_phase_jumps', 0)
+                if unwrap_q < 0.8 and qflag == 'GOOD':
+                    qflag = 'MARGINAL'
+                elif unwrap_q < 0.5:
+                    qflag = 'BAD'
+
                 # anchor_status: human-readable reason for anchor state
                 if dtec_result.is_anchored:
                     anchor_status = 'ANCHORED'
@@ -842,6 +850,8 @@ class PhysicsFusionService:
                     'anchor_status': anchor_status,
                     'sigma_noise_tecu': dtec_result.sigma_dtec_tecu,
                     'mean_snr_db': dtec_result.mean_snr_db,
+                    'unwrap_quality': unwrap_q,
+                    'n_phase_jumps': n_jumps,
                     'quality_flag': qflag,
                     'processing_version': '5.0.0',
                 }
