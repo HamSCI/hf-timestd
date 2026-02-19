@@ -234,10 +234,35 @@ async def get_all_arrivals(
         rank_arr = np.array(rows["peak_rank"])
         mb = np.array(rows["minute_boundary"])
 
-        # Cap SNR at 40 dB — values above this are correlation artefacts
-        # (DC leakage, self-interference) that distort the cluster plot.
+        # Cap SNR at 40 dB — values above this are correlation artefacts.
         SNR_CAP = 40.0
-        valid = (snr <= SNR_CAP) & np.isfinite(tof) & (tof >= 0)
+        te_arr = np.array(rows["timing_error_ms"])
+        # Filter timing_error_ms to the physically plausible window.
+        # CHU all_arrivals stores raw te BEFORE the 74ms onset correction,
+        # so real CHU arrivals sit at te ≈ +74ms (±40ms).
+        # WWV/WWVH/BPM have no onset correction: real arrivals near te ≈ 0.
+        station = _channel_to_station(channel)
+        if station == "CHU":
+            te_lo, te_hi = 20.0, 150.0
+            me_max = 50.0
+        elif station == "WWVH":
+            te_lo, te_hi = -80.0, 80.0
+            me_max = 200.0
+        elif station == "BPM":
+            te_lo, te_hi = -80.0, 80.0
+            me_max = 200.0
+        else:  # WWV
+            te_lo, te_hi = -80.0, 80.0
+            me_max = 150.0
+        me_arr = np.array(rows["model_expected_ms"])
+        valid = (
+            (snr <= SNR_CAP)
+            & np.isfinite(tof)
+            & (tof >= 0)
+            & (te_arr >= te_lo)
+            & (te_arr <= te_hi)
+            & (me_arr <= me_max)
+        )
         tof, snr, rank_arr, mb = tof[valid], snr[valid], rank_arr[valid], mb[valid]
 
         # Downsample for scatter (KDE always uses full set)
@@ -356,6 +381,23 @@ async def get_arrivals_timeseries(
         snr = np.array(rows["corr_snr_db"])
         rank_arr = np.array(rows["peak_rank"])
         mb = np.array(rows["minute_boundary"])
+        te_arr = np.array(rows["timing_error_ms"])
+
+        # Same te-window + me-ceiling filter as /arrivals endpoint
+        station = _channel_to_station(channel)
+        if station == "CHU":
+            te_lo, te_hi, me_max = 20.0, 150.0, 50.0
+        elif station in ("WWVH", "BPM"):
+            te_lo, te_hi, me_max = -80.0, 80.0, 200.0
+        else:  # WWV
+            te_lo, te_hi, me_max = -80.0, 80.0, 150.0
+        me_arr2 = np.array(rows["model_expected_ms"])
+        valid = (
+            np.isfinite(tof) & (tof >= 0)
+            & (te_arr >= te_lo) & (te_arr <= te_hi)
+            & (me_arr2 <= me_max)
+        )
+        tof, snr, rank_arr, mb = tof[valid], snr[valid], rank_arr[valid], mb[valid]
 
         dom = rank_arr == 0
         sec = rank_arr > 0

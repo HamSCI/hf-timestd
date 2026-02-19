@@ -532,7 +532,9 @@ function renderCluster(data) {
         yaxis: {
             gridcolor: '#334155',
             title: 'Time of Flight (ms)',
-            range: [0, 500],
+            range: [0, data.channel && data.channel.startsWith('BPM') ? 500
+                      : data.channel && data.channel.startsWith('WWV') ? 200
+                      : 150],
         },
         legend: { bgcolor: 'transparent', font: { size: 11 } },
         showlegend: true,
