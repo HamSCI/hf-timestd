@@ -415,11 +415,9 @@ function buildSolarTraces(stationsNeeded) {
         if (seen.has(st) || !_solarData.elevations[st]) continue;
         seen.add(st);
         const el = _solarData.elevations[st];
-        // Clamp negative elevations to 0 for display (below horizon = night)
-        const elClamped = el.map(v => Math.max(0, v));
         traces.push({
             x: xs,
-            y: elClamped,
+            y: el,
             mode: 'lines',
             type: 'scatter',
             name: `Solar elev. ${st} path`,
@@ -455,10 +453,11 @@ function centredSolarLayout(primaryTraces) {
     const mid = (lo + hi) / 2;
     const half = (hi - lo) / 2;
 
-    // Map solar elevation [0, 90] onto [mid - half, mid + half]
-    // so the curve occupies the full plot height, centred on mid.
-    const solarLo = mid - half;   // corresponds to elev = 0
-    const solarHi = mid + half;   // corresponds to elev = 90
+    // Map solar elevation [-90, 90] onto [mid - half, mid + half]
+    // so the horizon (0°) sits at the plot midpoint, with below-horizon
+    // values visible in the lower half and above-horizon in the upper half.
+    const solarLo = mid - half;   // corresponds to elev = -90°
+    const solarHi = mid + half;   // corresponds to elev = +90°
 
     return {
         yaxis2: {
@@ -466,8 +465,8 @@ function centredSolarLayout(primaryTraces) {
             overlaying: 'y',
             side: 'right',
             range: [solarLo, solarHi],
-            tickvals: [solarLo, solarLo + half * 0.5, mid, mid + half * 0.5, solarHi],
-            ticktext: ['0°', '22°', '45°', '67°', '90°'],
+            tickvals: [solarLo, mid - half * 0.5, mid, mid + half * 0.5, solarHi],
+            ticktext: ['-90°', '-45°', '0°', '45°', '90°'],
             gridcolor: 'rgba(71,85,105,0.3)',
             tickfont: { color: 'rgba(255,220,80,0.7)', size: 10 },
             titlefont: { color: 'rgba(255,220,80,0.7)', size: 10 },
