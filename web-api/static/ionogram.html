@@ -116,7 +116,7 @@
 <div class="container">
     <div class="header">
         <h1>Ionogram — Time-of-Flight Cluster Analysis</h1>
-        <div class="header-subtitle">All-arrivals multipath analysis: ToF time series and S+N cluster plot. Analogous to Gwyn Griffin's WSPRDaemon grape_acf_doppler_spread analysis.</div>
+        <div class="header-subtitle">GPS-referenced propagation delay: detection time minus scheduled broadcast time, corrected for transmitter onset delay. Clusters correspond to ionospheric propagation modes (1F2, 2F2, 1E, etc.).</div>
         <nav class="nav">
             <a href="/" class="nav-link">Overview</a>
             <a href="/static/health.html" class="nav-link">Health</a>
@@ -531,10 +531,10 @@ function renderCluster(data) {
         },
         yaxis: {
             gridcolor: '#334155',
-            title: 'Time of Flight (ms)',
+            title: 'Propagation Delay (ms)',
             range: [0, data.channel && data.channel.startsWith('BPM') ? 500
-                      : data.channel && data.channel.startsWith('WWV') ? 200
-                      : 150],
+                      : data.channel && (data.channel.startsWith('WWV') || data.channel.startsWith('WWVH')) ? 200
+                      : 30],
         },
         legend: { bgcolor: 'transparent', font: { size: 11 } },
         showlegend: true,

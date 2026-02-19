@@ -66,12 +66,17 @@ def _load_all_arrivals(
     if not files:
         return None
 
+    # Per-station transmitter onset correction (fixed calibration constant).
+    # CHU: 74ms H3E sideband filter group delay at the transmitter.
+    # All others: no correction needed.
+    station = _channel_to_station(channel)
+    onset_ms = 74.0 if station == "CHU" else 0.0
+
     rows = {
         "minute_boundary": [],
-        "timing_error_ms": [],
+        "arrival_ms": [],
         "corr_snr_db": [],
         "peak_rank": [],
-        "model_expected_ms": [],
         "utc_second": [],
     }
 
@@ -81,15 +86,14 @@ def _load_all_arrivals(
                 mb  = h["minute_boundary_utc"][:]
                 snr = h["corr_snr_db"][:]
                 rank = h["peak_rank"][:]
-                te  = h["timing_error_ms"][:]
-                me  = h["model_expected_ms"][:]
+                arr = h["arrival_ms"][:]
                 sec = h["utc_second"][:]
 
                 # HDF5 datasets may have slightly different lengths if the
                 # file was written mid-minute; truncate all to the minimum.
-                n = min(len(mb), len(snr), len(rank), len(te), len(me), len(sec))
-                mb, snr, rank, te, me, sec = (
-                    mb[:n], snr[:n], rank[:n], te[:n], me[:n], sec[:n]
+                n = min(len(mb), len(snr), len(rank), len(arr), len(sec))
+                mb, snr, rank, arr, sec = (
+                    mb[:n], snr[:n], rank[:n], arr[:n], sec[:n]
                 )
 
                 mask = (mb >= ts0) & (mb <= ts1)
@@ -98,8 +102,7 @@ def _load_all_arrivals(
 
                 snr = snr[mask]
                 rank = rank[mask]
-                te = te[mask]
-                me = me[mask]
+                arr = arr[mask]
                 sec = sec[mask]
                 mb_f = mb[mask]
 
@@ -109,10 +112,9 @@ def _load_all_arrivals(
                     fmask &= (rank == rank_filter)
 
                 rows["minute_boundary"].extend(mb_f[fmask].tolist())
-                rows["timing_error_ms"].extend(te[fmask].tolist())
+                rows["arrival_ms"].extend(arr[fmask].tolist())
                 rows["corr_snr_db"].extend(snr[fmask].tolist())
                 rows["peak_rank"].extend(rank[fmask].tolist())
-                rows["model_expected_ms"].extend(me[fmask].tolist())
                 rows["utc_second"].extend(sec[fmask].tolist())
         except Exception as e:
             logger.warning(f"Error reading {fpath}: {e}")
@@ -121,11 +123,22 @@ def _load_all_arrivals(
     if not rows["minute_boundary"]:
         return None
 
-    # Compute absolute ToF = model_expected_ms + timing_error_ms
+    # GPS-referenced ToF: no propagation model needed.
+    # arrival_ms = time from minute boundary to tone onset (GPS-disciplined).
+    # utc_second = Unix timestamp of the broadcast second.
+    # sec_in_min = utc_second - minute_boundary_utc  (1..59 for valid CHU seconds).
+    # tof_ms = arrival_ms - sec_in_min*1000 - onset_ms
+    #
+    # onset_ms is the fixed transmitter delay (CHU: 74ms H3E group delay).
+    # This gives the true propagation delay with no model dependency.
     import numpy as np
-    me_arr = np.array(rows["model_expected_ms"])
-    te_arr = np.array(rows["timing_error_ms"])
-    rows["tof_ms"] = (me_arr + te_arr).tolist()
+    arr_arr = np.array(rows["arrival_ms"])
+    mb_arr  = np.array(rows["minute_boundary"])
+    sec_arr = np.array(rows["utc_second"])
+    sec_in_min = sec_arr - mb_arr  # seconds since minute boundary
+    rows["tof_ms"] = (arr_arr - sec_in_min * 1000.0 - onset_ms).tolist()
+    rows["sec_in_min"] = sec_in_min.tolist()
+    rows["onset_correction_ms"] = onset_ms
 
     return rows
 
@@ -233,35 +246,29 @@ async def get_all_arrivals(
         snr = np.array(rows["corr_snr_db"])
         rank_arr = np.array(rows["peak_rank"])
         mb = np.array(rows["minute_boundary"])
+        sim = np.array(rows["sec_in_min"])
 
-        # Cap SNR at 40 dB — values above this are correlation artefacts.
+        # Filter to physically plausible GPS-referenced ToF.
+        # sec_in_min must be a valid broadcast second (1-59).
+        # tof_max is the physical upper bound for each station:
+        #   CHU: 1521 km path, max ~30ms for any realistic ionospheric mode.
+        #   WWV/WWVH/BPM: longer paths, allow more.
+        # SNR cap at 40 dB removes DC/self-interference artefacts.
         SNR_CAP = 40.0
-        te_arr = np.array(rows["timing_error_ms"])
-        # Filter timing_error_ms to the physically plausible window.
-        # CHU all_arrivals stores raw te BEFORE the 74ms onset correction,
-        # so real CHU arrivals sit at te ≈ +74ms (±40ms).
-        # WWV/WWVH/BPM have no onset correction: real arrivals near te ≈ 0.
         station = _channel_to_station(channel)
         if station == "CHU":
-            te_lo, te_hi = 20.0, 150.0
-            me_max = 50.0
-        elif station == "WWVH":
-            te_lo, te_hi = -80.0, 80.0
-            me_max = 200.0
-        elif station == "BPM":
-            te_lo, te_hi = -80.0, 80.0
-            me_max = 200.0
+            tof_max = 30.0
+        elif station in ("WWVH", "BPM"):
+            tof_max = 500.0
         else:  # WWV
-            te_lo, te_hi = -80.0, 80.0
-            me_max = 150.0
-        me_arr = np.array(rows["model_expected_ms"])
+            tof_max = 200.0
         valid = (
             (snr <= SNR_CAP)
             & np.isfinite(tof)
             & (tof >= 0)
-            & (te_arr >= te_lo)
-            & (te_arr <= te_hi)
-            & (me_arr <= me_max)
+            & (tof <= tof_max)
+            & (sim >= 1)
+            & (sim <= 59)
         )
         tof, snr, rank_arr, mb = tof[valid], snr[valid], rank_arr[valid], mb[valid]
 
@@ -381,21 +388,14 @@ async def get_arrivals_timeseries(
         snr = np.array(rows["corr_snr_db"])
         rank_arr = np.array(rows["peak_rank"])
         mb = np.array(rows["minute_boundary"])
-        te_arr = np.array(rows["timing_error_ms"])
+        sim = np.array(rows["sec_in_min"])
 
-        # Same te-window + me-ceiling filter as /arrivals endpoint
+        # Same GPS-referenced filter as /arrivals endpoint
         station = _channel_to_station(channel)
-        if station == "CHU":
-            te_lo, te_hi, me_max = 20.0, 150.0, 50.0
-        elif station in ("WWVH", "BPM"):
-            te_lo, te_hi, me_max = -80.0, 80.0, 200.0
-        else:  # WWV
-            te_lo, te_hi, me_max = -80.0, 80.0, 150.0
-        me_arr2 = np.array(rows["model_expected_ms"])
+        tof_max = 30.0 if station == "CHU" else (500.0 if station in ("WWVH", "BPM") else 200.0)
         valid = (
-            np.isfinite(tof) & (tof >= 0)
-            & (te_arr >= te_lo) & (te_arr <= te_hi)
-            & (me_arr2 <= me_max)
+            np.isfinite(tof) & (tof >= 0) & (tof <= tof_max)
+            & (sim >= 1) & (sim <= 59)
         )
         tof, snr, rank_arr, mb = tof[valid], snr[valid], rank_arr[valid], mb[valid]
 
