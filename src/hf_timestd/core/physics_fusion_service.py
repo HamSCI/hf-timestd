@@ -171,6 +171,7 @@ class PhysicsFusionService:
         self.channels = self._discover_channels()
         self._reader_cache: Dict[str, DataProductReader] = {}
         self._minute_retry_counts: Dict[int, int] = {}
+        self._processed_minutes: set = set()  # Minutes successfully processed — never re-process
         self._max_retry_history = 720  # Keep at most 12h of minute retry state
         
         # Data freshness tracking for upstream starvation detection
@@ -213,6 +214,9 @@ class PhysicsFusionService:
         if len(self._minute_retry_counts) > self._max_retry_history:
             for minute in sorted(self._minute_retry_counts)[:-self._max_retry_history]:
                 del self._minute_retry_counts[minute]
+
+        # Prune _processed_minutes to the same 12h window
+        self._processed_minutes = {m for m in self._processed_minutes if m >= cutoff}
 
     def _discover_channels(self) -> List[str]:
         """Discover available L2 broadcast channels."""
@@ -1012,21 +1016,26 @@ class PhysicsFusionService:
                 # We retry each minute up to 3 times to handle L2 write delays
                 for offset in range(5, 1, -1):
                     target_minute = int(now) - (int(now) % 60) - (60 * offset)
+
+                    # Never re-process a minute that already succeeded
+                    if target_minute in self._processed_minutes:
+                        continue
+
                     retry_count = self._minute_retry_counts.get(target_minute, 0)
-                    
-                    if target_minute > self.last_processed_minute or retry_count < 3:
-                        # Try to process this minute
-                        station_data = self._read_l2_slice(target_minute)
-                        if station_data:
-                            self.process_minute(target_minute, station_data=station_data)
-                            self.last_processed_minute = max(self.last_processed_minute, target_minute)
-                            # Clear retry counter on success
-                            self._minute_retry_counts.pop(target_minute, None)
-                        else:
-                            # Increment retry counter
-                            self._minute_retry_counts[target_minute] = retry_count + 1
-                            if retry_count == 0:
-                                logger.debug(f"No L2 data for minute {target_minute}, will retry")
+                    if retry_count >= 3:
+                        continue
+
+                    # Try to process this minute
+                    station_data = self._read_l2_slice(target_minute)
+                    if station_data:
+                        self.process_minute(target_minute, station_data=station_data)
+                        self.last_processed_minute = max(self.last_processed_minute, target_minute)
+                        self._processed_minutes.add(target_minute)
+                        self._minute_retry_counts.pop(target_minute, None)
+                    else:
+                        self._minute_retry_counts[target_minute] = retry_count + 1
+                        if retry_count == 0:
+                            logger.debug(f"No L2 data for minute {target_minute}, will retry")
 
                 self._prune_retry_counters(now)
                 
