@@ -1,7 +1,7 @@
 # HamSCI 2026 Workshop — Presentation Abstract
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 14, 2026  
+**Last Updated:** February 19, 2026 (revised)  
 **Status:** Accepted for presentation
 
 ---
@@ -14,7 +14,7 @@
 
 This project implements a precision HF monitoring station that receives 17 distinct time signal broadcasts across nine frequencies from four major national standards stations: WWV (USA), WWVH (Hawaii), CHU (Canada), and BPM (China). A Leo Bodnar GPS-Disciplined Oscillator (GPSDO) phase-locks the receiving hardware (stability ≈ 1 × 10⁻¹²), eliminating local clock drift and ensuring that all measured timing residuals are attributable to the propagation path.
 
-The system (`hf-timestd`, v5.4.1) is fully operational and runs 24/7 as eight independent systemd services on a single Linux host. It extracts high-precision Time of Arrival (ToA), carrier phase, and Doppler measurements from each broadcast, then compares these against predictions from a hierarchical ionospheric model stack: WAM-IPE numerical weather prediction, GIRO real-time ionosonde corrections, IRI-2020 climatology, and GPS-derived IONEX TEC maps. The residuals are inverted to solve for real-time ionospheric parameters — slant TEC along each ray path, effective reflection height, and propagation mode — effectively functioning as a passive, multi-frequency oblique ionosonde with 17 simultaneous sounding paths.
+The system (`hf-timestd`, v5.4.1) is fully operational and runs 24/7 as eight independent systemd services on a single Linux host. It extracts high-precision Time of Arrival (ToA), carrier phase, and Doppler measurements from each broadcast, then compares these against predictions from a hierarchical ionospheric model stack: WAM-IPE numerical weather prediction, GIRO real-time ionosonde corrections, IRI-2020 climatology, and GPS-derived IONEX TEC maps. A key result of this work is a precise characterization of the instrument's detection limits: the 24 kHz GPSDO-locked sample clock provides 41.7 µs timing resolution, but the dominant noise source is propagation model error (~6.5 ms 1σ for WWV), which sets the group-delay TEC noise floor far above the ionospheric dispersion signal. Carrier-phase dTEC bypasses this limit entirely, achieving ~0.1 mTECU/s sensitivity — sufficient to detect Traveling Ionospheric Disturbances (TIDs), solar flares, and Sporadic-E onset with large margin. The system is therefore best characterized as a high-sensitivity dTEC/dt sensor and passive oblique ionosonde with 17 simultaneous sounding paths.
 
 ### System Architecture & Methodology
 
@@ -60,50 +60,72 @@ The system (`hf-timestd`, v5.4.1) is fully operational and runs 24/7 as eight in
 
 ### Current Results (February 2026)
 
+#### Operational Metrics
+
 | Metric | Value |
 |--------|-------|
 | **Channels monitored** | 9 frequencies, 17 broadcasts |
-| **Timing accuracy** | Fusion D_clock ≈ 1 ms mean discrepancy vs. GPS ground truth |
+| **L1 timing measurements** | ~15,000/day |
+| **Timing accuracy (D_clock)** | Fusion D_clock ≈ 1 ms mean discrepancy vs. GPS ground truth |
 | **Chrony TSL offset** | 34–316 μs |
 | **Bootstrap convergence** | ~2 minutes to LOCKED state |
 | **Tick detection** | 50–57 ticks/min/station (CHU: 55/58, WWV: 57/57) |
 | **CHU FSK decode** | 8/9 frames, confidence 1.00 |
-| **Phase extraction** | Three-tier: audio, carrier, DC carrier (σ_φ improving) |
+| **Phase extraction** | Three-tier: audio, carrier, DC carrier |
 | **Carrier phase stability** | DC carrier 30% more stable than audio phase on unambiguous channels |
+| **Carrier-phase dTEC records** | ~250,000/day across all stations and frequencies |
+| **GRAPE spectrograms** | 9/9 channels uploading to PSWS network |
+
+#### Detection Limit Analysis
+
+A rigorous noise floor characterization establishes what the instrument can and cannot detect:
+
+| Measurement | Noise Floor (1σ) | Signal at 40 TECU | SNR | Verdict |
+|---|---|---|---|---|
+| Group-delay TEC (WWV, 2.5–25 MHz) | 6.5 ms (model error) | 0.85 ms | 0.13 | Below noise floor |
+| Group-delay TEC (CHU, 3.33–14.67 MHz) | ~8 ms (model error, systematic resolved) | 0.46 ms | 0.06 | Below noise floor |
+| Group-delay TEC (WWVH/BPM, 2.5–15 MHz) | ~5 ms (model error) | ~0.7 ms | ~0.14 | Below noise floor |
+| **Carrier-phase dTEC (1-min integration)** | **~6 mTECU** | **TID: 100–2000 mTECU** | **17–330×** | **Well above noise floor** |
+
+The dominant noise source for group-delay TEC is propagation model error (minute-to-minute ionospheric variability not captured by the model), not instrument noise. The 24 kHz sample clock contributes only 41.7 µs timing noise — negligible compared to the model floor. Carrier-phase dTEC bypasses this entirely: phase noise of ~1 mrad/tick at 20 dB SNR yields dTEC/dt sensitivity of ~0.1 mTECU/s, and 55 ticks/min reduces this to ~6 mTECU integrated over one minute.
+
+#### Ionospheric Products (Current Status)
+
+| Product | Status | Notes |
+|---|---|---|
+| L2 clock_offset_ms (D_clock) | ✅ Operational | CHU: +4 ms mean (7.85 MHz), +13 ms (14.67 MHz); WWV: 0 ms |
+| SNR per broadcast | ✅ Operational | Frequency- and time-varying; D-layer absorption visible |
+| Carrier-phase dTEC | ✅ Operational | 250K records/day; primary ionospheric product |
+| IONEX VTEC maps | ✅ Written per minute | Based on group-delay TEC; below noise floor pending model improvement |
+| All-arrivals (multipath) | ✅ Operational | CHU 7.85 MHz: 374 rows/min, 258 secondary arrivals |
+| Group-delay TEC | ⚠️ Below noise floor | Estimator runs; 71% of records confidence < 0.5; model-limited |
+| CHU timing systematic | ✅ **Resolved** | 74 ms H3E transmitter sideband filter group delay; corrected in pipeline |
+| dTEC multi-station overlay | ✅ Operational | New web visualization: multi-station dTEC time series with SNR filtering |
+| Ionogram / ToF cluster | ✅ Operational | New web visualization: Griffin-style ToF vs SNR scatter with KDE contours |
 
 ---
 
-### Recommendations for Next Development Steps
+### Current Development Status and Future Work
 
-The system described above is operational. The following recommendations target the transition from **timing-quality observation** to **high-precision TEC measurement**, optimizing how external models and direct measurements are combined.
+The following items represent the current development state and planned improvements, ordered by scientific impact.
 
-#### 1. Constrained TEC Inversion with Model Priors (Highest Priority)
+#### Implemented and Operational
 
-The current `TECEstimator` performs unconstrained 1/f² regression, which is sensitive to outliers and mode ambiguity (a 2F-hop measurement mixed with 1F-hop measurements corrupts the fit).
+- **Carrier-phase dTEC** (250K records/day): Phase rate-of-change converted to dTEC/dt via `dTEC/dt = −f_D · c · f / 40.3`, integrated per minute, anchored to group-delay TEC when confidence ≥ 0.5. This is the primary ionospheric product.
+- **Mode-constrained TEC inversion**: Multi-frequency WLS regression on 1/f² dispersion with 3σ outlier rejection and mode-confidence weighting. Currently model-limited (propagation error >> dispersion signal).
+- **VTEC map generation**: Per-minute IONEX output from slant-to-vertical TEC mapping with 2D polynomial surface fit across ionospheric pierce points.
+- **Propagation model stack**: Four-tier hierarchy (WAM-IPE → GIRO → IRI-2020 → parametric) with numerical group delay integration through Chapman-layer profiles.
 
-- **Recommendation:** Implement a **Bayesian TEC estimator** that uses the propagation model's mode predictions as informative priors. For each station, the model predicts which mode (1F, 2F, etc.) is active on each frequency. The estimator should:
-    1. Assign each ToA measurement to its predicted propagation mode
-    2. Subtract the mode-specific geometric path length (known from the model)
-    3. Fit the residual dispersive delay (∝ 1/f²) to extract sTEC
-    4. Weight by measurement SNR and model confidence
-    5. Reject measurements whose residuals exceed 3σ (mode misidentification)
+#### Near-Term (3 weeks, pre-HamSCI)
 
-- **Impact:** Eliminates the dominant error source (mode mixing) and enables TEC estimation even when only 2 frequencies are available per station.
+- **CHU systematic offset — RESOLVED**: The −74 ms frequency-independent offset on all CHU channels was traced to the H3E (USB + full carrier) transmitter's analog sideband filter group delay. Both the 1000 Hz timing pips and the 2225 Hz FSK mark tone appear ~74 ms late through the identical receiver pipeline; WWV (solid-state digital synthesis) shows 0 ms offset. The 74 ms correction is now applied in the metrology engine and edge detector, with the FSK stop-bit (+6 ms) confirming the corrected CHU clock offset. CHU is now a valid third independent path.
+- **dTEC visualization — COMPLETE**: Multi-station dTEC time series overlay with per-station color coding, SNR filtering, downsampling, and 10 MHz reference comparison. Available at `/static/dtec.html`.
+- **Ionogram visualization — COMPLETE**: Griffin-style dual-panel ToF time series and ToF vs SNR cluster scatter with KDE density contours. Available at `/static/ionogram.html`.
+- **SNR-based D-layer product**: Frequency-stratified SNR time series as a proxy for D-layer absorption, correlated with solar zenith angle and X-ray flux.
 
-#### 2. Differential TEC from Carrier Phase (Sub-TECU Precision)
+#### Future Work
 
-Group delay TEC (from ToA) has ~ms precision, corresponding to ~1–5 TECU uncertainty. Carrier phase is 1000× more precise but ambiguous (unknown integer cycles).
-
-- **Recommendation:** Implement **carrier-phase differential TEC (dTEC)**:
-    1. Use the existing three-tier phase extraction (already producing ~55 phase measurements/minute/station)
-    2. Compute phase rate of change (already implemented as Doppler)
-    3. Convert Doppler to dTEC/dt via: `dTEC/dt = -f² · Δf_D / (40.3 · f_carrier)`
-    4. Integrate dTEC/dt over time, anchored to the group-delay TEC absolute value
-    5. This gives **sub-TECU temporal resolution** of ionospheric dynamics while the group delay provides the absolute calibration
-
-- **Impact:** Resolves Traveling Ionospheric Disturbances (TIDs) with 15–60 minute periods and Medium-Scale TIDs (MSTIDs) that are invisible in group-delay TEC.
-
-#### 3. Cross-Path Tomographic Constraints
+#### 1. Cross-Path Tomographic Constraints
 
 With 17 simultaneous ray paths through the ionosphere at different frequencies and geometries, the system is over-determined for a single-layer TEC model.
 
@@ -116,7 +138,7 @@ With 17 simultaneous ray paths through the ionosphere at different frequencies a
 
 - **Impact:** Separates E-layer and F-layer TEC contributions, which is critical because E-layer TEC (daytime only, ~5–10% of total) has different dynamics than F-layer TEC. Also enables detection of sporadic-E events.
 
-#### 4. PHaRLAP 3D Ray Tracing Integration
+#### 2. PHaRLAP 3D Ray Tracing Integration
 
 The current `HFPropagationModel` uses numerical integration through 1D Chapman profiles, which assumes horizontal homogeneity. For long paths (BPM: ~10,000 km), the ionosphere varies significantly along the path.
 
@@ -128,7 +150,7 @@ The current `HFPropagationModel` uses numerical integration through 1D Chapman p
 
 - **Impact:** Resolves the known issue where the propagation model underestimates multi-hop delays (predicts 10 ms, observed 200–450 ms for some BPM paths). Enables proper 2F/3F mode identification.
 
-#### 5. Diversity Reception via Phase-Engine Integration
+#### 3. Diversity Reception via Phase-Engine Integration
 
 HF signals suffer from polarization fading (Faraday rotation) where the signal rotates as it passes through the ionosphere, causing deep nulls in carrier phase tracking.
 
@@ -140,30 +162,30 @@ HF signals suffer from polarization fading (Faraday rotation) where the signal r
 
 - **Impact:** Transforms the system from a single-antenna passive receiver into a **direction-finding oblique ionosonde**. Angle-of-arrival measurements provide the geometric constraint needed to separate propagation mode ambiguity without relying on model predictions.
 
-#### 6. Real-Time VTEC Map Generation
+#### 4. Improved VTEC Map Accuracy
 
-The system currently consumes external VTEC maps (IONEX) but does not produce its own.
+The system produces per-minute IONEX VTEC maps from slant TEC measurements at 17 ionospheric pierce points (IPPs) spanning azimuths from Hawaii (SW) to China (W) to Canada (NE). Current accuracy is limited by the group-delay TEC noise floor.
 
-- **Recommendation:** Generate **station-local VTEC maps** from the 17 slant TEC measurements:
-    1. Convert each sTEC to vTEC using the mapping function: `vTEC = sTEC × cos(χ)` where χ is the zenith angle at the ionospheric pierce point (IPP)
-    2. The 17 IPPs span a geographic area from the receiver to each transmitter's midpoint
-    3. Fit a 2D polynomial or spherical harmonic surface to the vTEC values at the IPPs
-    4. Publish as IONEX-format files for community use
+- **Path forward:** Once propagation model error is reduced below ~0.5 ms (via Bayesian mode-constrained inversion or GPS-IONEX assimilation), the 17-IPP geometry provides genuine spatial resolution that single-frequency GPS receivers cannot achieve.
 
-- **Impact:** Contributes original ionospheric data to the HamSCI community. The multi-frequency, multi-azimuth geometry provides spatial resolution that single-frequency GPS receivers cannot achieve.
+- **Impact:** Contributes original ionospheric data to the HamSCI community with multi-frequency, multi-azimuth geometric diversity.
 
 ---
 
 ### Summary: Development Roadmap
 
-| Priority | Task | Prerequisite | Expected Impact |
-|----------|------|-------------|-----------------|
-| **1** | Bayesian TEC with mode priors | Current propagation model | Eliminate mode-mixing errors |
-| **2** | Carrier-phase dTEC | Current phase extraction | Sub-TECU temporal resolution |
-| **3** | Multi-layer tomography | Tasks 1 + 2 | Separate E/F-layer contributions |
-| **4** | PHaRLAP ray tracing | WAM-IPE 3D grids | Fix BPM multi-hop predictions |
-| **5** | Phase-engine integration | phase-engine hardware | Angle-of-arrival, fading immunity |
-| **6** | VTEC map generation | Task 1 | Community data product |
+| Priority | Task | Status | Expected Impact |
+|----------|------|--------|----------------|
+| ✅ | Carrier-phase dTEC | **Operational** | 250K records/day, ~6 mTECU/min sensitivity |
+| ✅ | Mode-constrained TEC inversion | **Operational** | Model-limited; noise floor characterised |
+| ✅ | VTEC map generation | **Operational** | Per-minute IONEX; accuracy limited by TEC noise floor |
+| ✅ | CHU systematic offset resolution | **Resolved** | 74 ms H3E sideband filter delay corrected; CHU restored as 3rd path |
+| ✅ | dTEC multi-station visualization | **Operational** | Live at `/static/dtec.html`; multi-station overlay with SNR filtering |
+| ✅ | Ionogram / ToF cluster visualization | **Operational** | Live at `/static/ionogram.html`; Griffin-style dual panel |
+| **3** | Bayesian TEC with GPS-IONEX priors | Medium-term | Reduce model floor from 6.5 ms to ~0.5 ms |
+| **4** | Multi-layer tomography | Medium-term | Separate E/F-layer contributions |
+| **5** | PHaRLAP ray tracing | Long-term | Fix BPM multi-hop predictions |
+| **6** | Phase-engine integration | Long-term | Angle-of-arrival, fading immunity |
 
 ---
 
