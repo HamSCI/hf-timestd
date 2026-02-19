@@ -94,6 +94,20 @@
             "units": "dB"
         },
         {
+            "name": "unwrap_quality",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Phase unwrapping quality score: 1.0=clean, <0.8=ambiguous (|Δφ_raw|>π/2 steps present)",
+            "units": "dimensionless"
+        },
+        {
+            "name": "n_phase_jumps",
+            "type": "integer",
+            "required": false,
+            "description": "Number of inter-sample raw phase steps |Δφ|>π/2 before unwrapping"
+        },
+        {
             "name": "quality_flag",
             "type": "string",
             "required": true,
