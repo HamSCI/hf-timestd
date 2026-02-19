@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dTEC — Multi-Station Carrier-Phase TEC — hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        .controls-row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: flex-end;
+            margin-bottom: 16px;
+        }
+        .control-group { display: flex; flex-direction: column; gap: 4px; }
+        .control-group label { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+        .control-group select,
+        .control-group input {
+            padding: 6px 10px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary);
+            font-size: 13px;
+            min-width: 130px;
+        }
+        .btn-load {
+            padding: 8px 20px;
+            background: #1e3a8a;
+            border: 1px solid #3b82f6;
+            border-radius: var(--radius-sm);
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-load:hover { background: #2563eb; }
+        .plot-container {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .plot-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 2px;
+        }
+        .plot-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+        .stat-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: 12px 14px;
+        }
+        .stat-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+        .stat-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
+        .stat-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+        .series-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .series-chip {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: opacity 0.2s;
+        }
+        .series-chip.hidden { opacity: 0.35; }
+        .series-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .loading-msg {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        .error-msg {
+            text-align: center;
+            padding: 20px;
+            color: #f87171;
+            font-size: 13px;
+        }
+        .science-note {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: var(--radius-md);
+            padding: 12px 16px;
+            font-size: 12px;
+            color: #94a3b8;
+            margin-bottom: 16px;
+            line-height: 1.6;
+        }
+        .science-note strong { color: #cbd5e1; }
+        .freq-filter-row {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+        .freq-chip {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+        .freq-chip.active {
+            background: #1e3a8a;
+            border-color: #3b82f6;
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+<div class="app-container">
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-logo">⏱</div>
+            <div>
+                <div class="sidebar-title">hf-timestd</div>
+                <div class="sidebar-subtitle">HF Time Standard</div>
+            </div>
+        </div>
+        <ul class="nav-list">
+            <li class="nav-item"><a href="/" class="nav-link">Dashboard</a></li>
+            <li class="nav-item"><a href="/static/metrology.html" class="nav-link">Metrology</a></li>
+            <li class="nav-item"><a href="/static/ionosphere.html" class="nav-link">Ionosphere</a></li>
+            <li class="nav-item"><a href="/static/ionogram.html" class="nav-link">Ionogram</a></li>
+            <li class="nav-item"><a href="/static/dtec.html" class="nav-link active">dTEC</a></li>
+            <li class="nav-item"><a href="/static/phase.html" class="nav-link">Phase / Doppler</a></li>
+            <li class="nav-item"><a href="/static/stability.html" class="nav-link">Stability</a></li>
+            <li class="nav-item"><a href="/static/health.html" class="nav-link">Health</a></li>
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">dTEC — Multi-Station Carrier-Phase TEC</h1>
+            <p class="page-subtitle">
+                Carrier-phase differential TEC rate and integrated TEC across all 17 propagation paths.
+                Correlated signatures across stations indicate Traveling Ionospheric Disturbances (TIDs).
+            </p>
+        </div>
+
+        <div class="science-note">
+            <strong>Detection capability:</strong>
+            Carrier-phase dTEC achieves ~6 mTECU/min noise floor (55 ticks/min, ~1 mrad phase noise at 20 dB SNR).
+            TIDs produce 100–2000 mTECU perturbations → <strong>17–330× above noise floor</strong>.
+            Correlated signatures across WWV (SW), WWVH (W), CHU (NE), and BPM (W) paths
+            constrain the TID wavevector direction and speed.
+            <br><br>
+            <strong>Note:</strong> Group-delay TEC (from timing residuals) is below the noise floor (~6.5 ms model error
+            vs ~0.85 ms dispersion signal). Carrier-phase dTEC is the primary ionospheric product.
+        </div>
+
+        <!-- Controls -->
+        <div class="controls-row">
+            <div class="control-group">
+                <label>Time window</label>
+                <select id="windowSelect">
+                    <option value="-3h">Last 3 hours</option>
+                    <option value="-6h" selected>Last 6 hours</option>
+                    <option value="-12h">Last 12 hours</option>
+                    <option value="-24h">Last 24 hours</option>
+                    <option value="-48h">Last 48 hours</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Station filter</label>
+                <select id="stationFilter">
+                    <option value="">All stations</option>
+                    <option value="WWV">WWV only</option>
+                    <option value="WWVH">WWVH only</option>
+                    <option value="CHU">CHU only</option>
+                    <option value="BPM">BPM only</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Min SNR (dB)</label>
+                <input type="number" id="minSnr" value="6" min="0" max="30" step="1" style="width:70px">
+            </div>
+            <div class="control-group">
+                <label>Downsample</label>
+                <select id="downsampleSelect">
+                    <option value="1">All points</option>
+                    <option value="2" selected>Every 2nd</option>
+                    <option value="5">Every 5th</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Display</label>
+                <select id="displayMode">
+                    <option value="rate">dTEC rate (TECU/s)</option>
+                    <option value="mean">Integrated dTEC (TECU)</option>
+                </select>
+            </div>
+            <button class="btn-load" onclick="loadData()">Load</button>
+        </div>
+
+        <!-- Frequency filter chips -->
+        <div style="margin-bottom:8px; font-size:12px; color:var(--text-secondary)">Frequency filter:</div>
+        <div class="freq-filter-row" id="freqChips">
+            <span class="freq-chip active" data-freq="all" onclick="toggleFreq(this)">All</span>
+            <span class="freq-chip" data-freq="2.5" onclick="toggleFreq(this)">2.5 MHz</span>
+            <span class="freq-chip" data-freq="3.3" onclick="toggleFreq(this)">3.33 MHz</span>
+            <span class="freq-chip" data-freq="5.0" onclick="toggleFreq(this)">5 MHz</span>
+            <span class="freq-chip" data-freq="7.8" onclick="toggleFreq(this)">7.85 MHz</span>
+            <span class="freq-chip" data-freq="10.0" onclick="toggleFreq(this)">10 MHz</span>
+            <span class="freq-chip" data-freq="14.7" onclick="toggleFreq(this)">14.67 MHz</span>
+            <span class="freq-chip" data-freq="15.0" onclick="toggleFreq(this)">15 MHz</span>
+            <span class="freq-chip" data-freq="20.0" onclick="toggleFreq(this)">20 MHz</span>
+            <span class="freq-chip" data-freq="25.0" onclick="toggleFreq(this)">25 MHz</span>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-grid" id="statsGrid" style="display:none">
+            <div class="stat-card">
+                <div class="stat-label">Active paths</div>
+                <div class="stat-value" id="statPaths">—</div>
+                <div class="stat-sub">station/frequency pairs</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total records</div>
+                <div class="stat-value" id="statRecords">—</div>
+                <div class="stat-sub">in time window</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Anchored fraction</div>
+                <div class="stat-value" id="statAnchored">—</div>
+                <div class="stat-sub">dTEC anchored to group-delay TEC</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Noise floor</div>
+                <div class="stat-value">~6</div>
+                <div class="stat-sub">mTECU/min (1σ)</div>
+            </div>
+        </div>
+
+        <!-- Main dTEC rate plot -->
+        <div class="plot-container">
+            <div class="plot-title">dTEC Rate — All Paths Overlay</div>
+            <div class="plot-subtitle">
+                Carrier-phase dTEC/dt in TECU/s. Correlated wiggles across multiple paths = TID.
+                Click legend entries to show/hide individual paths.
+            </div>
+            <div id="dtecRatePlot" style="height:400px">
+                <div class="loading-msg">Select parameters and click Load</div>
+            </div>
+        </div>
+
+        <!-- Integrated dTEC plot -->
+        <div class="plot-container">
+            <div class="plot-title">Integrated dTEC — Relative TEC per Path</div>
+            <div class="plot-subtitle">
+                Cumulative dTEC (TECU) anchored at window start. Shows absolute TEC variation over time.
+                Divergence between paths indicates spatial TEC gradients across the ionosphere.
+            </div>
+            <div id="dtecMeanPlot" style="height:350px">
+                <div class="loading-msg">—</div>
+            </div>
+        </div>
+
+        <!-- Per-station comparison (10 MHz reference frequency) -->
+        <div class="plot-container">
+            <div class="plot-title">10 MHz Reference Comparison — WWV / WWVH / BPM</div>
+            <div class="plot-subtitle">
+                dTEC rate at 10 MHz from all stations that broadcast at 10 MHz.
+                Correlated features confirm ionospheric origin; uncorrelated features are path-specific.
+            </div>
+            <div id="refPlot" style="height:300px">
+                <div class="loading-msg">—</div>
+            </div>
+        </div>
+
+        <div id="errorMsg" class="error-msg" style="display:none"></div>
+    </main>
+</div>
+
+<script>
+// Station colour palette
+const STATION_COLORS = {
+    WWV:  ['#20B2AA', '#17a89f', '#0e9e96', '#05948d', '#008a84', '#00807b'],
+    WWVH: ['#FF8C00', '#f07800', '#e06400', '#d05000', '#c03c00', '#b02800'],
+    CHU:  ['#7B68EE', '#6a57dd', '#5946cc', '#4835bb', '#3724aa', '#261399'],
+    BPM:  ['#DC143C', '#c61236', '#b01030', '#9a0e2a', '#840c24', '#6e0a1e'],
+};
+const FREQ_ORDER = [2.5, 3.33, 5.0, 7.85, 10.0, 14.67, 15.0, 20.0, 25.0];
+
+let _allSeries = null;
+let _activeFreqFilter = 'all';
+
+function toggleFreq(el) {
+    document.querySelectorAll('.freq-chip').forEach(c => c.classList.remove('active'));
+    el.classList.add('active');
+    _activeFreqFilter = el.dataset.freq;
+    if (_allSeries) renderPlots(_allSeries);
+}
+
+function getSeriesColor(station, freqMhz) {
+    const colors = STATION_COLORS[station] || ['#888'];
+    const idx = FREQ_ORDER.indexOf(freqMhz);
+    return colors[Math.max(0, idx) % colors.length];
+}
+
+function freqMatches(freqMhz) {
+    if (_activeFreqFilter === 'all') return true;
+    return Math.abs(freqMhz - parseFloat(_activeFreqFilter)) < 0.1;
+}
+
+async function loadData() {
+    const window_ = document.getElementById('windowSelect').value;
+    const station = document.getElementById('stationFilter').value;
+    const minSnr = document.getElementById('minSnr').value;
+    const ds = document.getElementById('downsampleSelect').value;
+
+    document.getElementById('errorMsg').style.display = 'none';
+    document.getElementById('statsGrid').style.display = 'none';
+    setLoading('dtecRatePlot');
+    setLoading('dtecMeanPlot');
+    setLoading('refPlot');
+
+    try {
+        let url = `/api/tec/dtec?start=${window_}&min_snr_db=${minSnr}&downsample=${ds}`;
+        if (station) url += `&station=${station}`;
+
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        if (data.status === 'no_data' || data.n_series === 0) {
+            showError('No dTEC data available for this time window.');
+            return;
+        }
+
+        _allSeries = data.series;
+        updateStats(data);
+        renderPlots(data.series);
+
+    } catch (e) {
+        showError('Failed to load dTEC data: ' + e.message);
+    }
+}
+
+function setLoading(id) {
+    document.getElementById(id).innerHTML = '<div class="loading-msg">Loading…</div>';
+}
+
+function showError(msg) {
+    const el = document.getElementById('errorMsg');
+    el.textContent = msg;
+    el.style.display = 'block';
+}
+
+function updateStats(data) {
+    document.getElementById('statsGrid').style.display = 'grid';
+    document.getElementById('statPaths').textContent = data.n_series;
+    document.getElementById('statRecords').textContent = (data.n_points_total || 0).toLocaleString();
+
+    // Compute anchored fraction across all series
+    let nAnchored = 0, nTotal = 0;
+    for (const s of Object.values(data.series)) {
+        nAnchored += (s.is_anchored || []).filter(Boolean).length;
+        nTotal += (s.is_anchored || []).length;
+    }
+    document.getElementById('statAnchored').textContent =
+        nTotal > 0 ? Math.round(100 * nAnchored / nTotal) + '%' : '—';
+}
+
+function renderPlots(series) {
+    const displayMode = document.getElementById('displayMode').value;
+    const toDate = ts => new Date(ts * 1000).toISOString();
+
+    // Build traces for main overlay
+    const rateTraces = [];
+    const meanTraces = [];
+    const refTraces = [];
+
+    const stationFreqCounts = {};
+
+    for (const [key, s] of Object.entries(series)) {
+        if (!freqMatches(s.frequency_mhz)) continue;
+
+        const color = getSeriesColor(s.station, s.frequency_mhz);
+        const label = `${s.station} ${s.frequency_mhz.toFixed(1)} MHz`;
+        const xs = s.timestamps.map(toDate);
+
+        // dTEC rate trace
+        rateTraces.push({
+            x: xs,
+            y: s.dtec_rate_tecu_per_s,
+            mode: 'lines',
+            type: 'scatter',
+            name: label,
+            line: { color, width: 1 },
+            opacity: 0.85,
+        });
+
+        // Integrated dTEC trace
+        meanTraces.push({
+            x: xs,
+            y: s.dtec_mean_tecu,
+            mode: 'lines',
+            type: 'scatter',
+            name: label,
+            line: { color, width: 1.5 },
+            opacity: 0.85,
+        });
+
+        // 10 MHz reference comparison
+        if (Math.abs(s.frequency_mhz - 10.0) < 0.1 && ['WWV', 'WWVH', 'BPM'].includes(s.station)) {
+            refTraces.push({
+                x: xs,
+                y: s.dtec_rate_tecu_per_s,
+                mode: 'lines',
+                type: 'scatter',
+                name: label,
+                line: { color, width: 2 },
+            });
+        }
+    }
+
+    const baseLayout = {
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        font: { color: '#e2e8f0', size: 11 },
+        legend: { bgcolor: 'transparent', font: { size: 10 }, orientation: 'v' },
+        hovermode: 'x unified',
+    };
+
+    if (rateTraces.length === 0) {
+        document.getElementById('dtecRatePlot').innerHTML =
+            '<div class="loading-msg">No series match the current frequency filter</div>';
+    } else {
+        Plotly.newPlot('dtecRatePlot', rateTraces, {
+            ...baseLayout,
+            margin: { t: 10, b: 40, l: 70, r: 10 },
+            xaxis: { gridcolor: '#334155', title: 'UTC' },
+            yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', zeroline: true, zerolinecolor: '#475569' },
+        }, { responsive: true, displayModeBar: false });
+    }
+
+    if (meanTraces.length === 0) {
+        document.getElementById('dtecMeanPlot').innerHTML =
+            '<div class="loading-msg">No series match the current frequency filter</div>';
+    } else {
+        Plotly.newPlot('dtecMeanPlot', meanTraces, {
+            ...baseLayout,
+            margin: { t: 10, b: 40, l: 70, r: 10 },
+            xaxis: { gridcolor: '#334155', title: 'UTC' },
+            yaxis: { gridcolor: '#334155', title: 'Integrated dTEC (TECU)' },
+        }, { responsive: true, displayModeBar: false });
+    }
+
+    if (refTraces.length === 0) {
+        document.getElementById('refPlot').innerHTML =
+            '<div class="loading-msg">No 10 MHz paths available (WWV, WWVH, BPM)</div>';
+    } else {
+        Plotly.newPlot('refPlot', refTraces, {
+            ...baseLayout,
+            margin: { t: 10, b: 40, l: 70, r: 10 },
+            xaxis: { gridcolor: '#334155', title: 'UTC' },
+            yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', zeroline: true, zerolinecolor: '#475569' },
+        }, { responsive: true, displayModeBar: false });
+    }
+}
+
+window.addEventListener('load', loadData);
+</script>
+</body>
+</html>

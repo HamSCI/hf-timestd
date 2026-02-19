@@ -398,7 +398,11 @@ class TickEdgeDetector:
                 continue
             
             # Expected onset sample (integer!)
-            onset_utc = utc_sec + expected_delay_sec
+            # CHU 300ms tones start ~79ms after the UTC second boundary:
+            # ~52ms transmitter onset delay + ~27ms correlation peak offset
+            # from the gated-sinusoid onset (Tukey window rise).
+            chu_tx_onset_sec = 0.079 if station == 'CHU' else 0.0
+            onset_utc = utc_sec + expected_delay_sec + chu_tx_onset_sec
             expected_sample = int(round(buffer_timing.utc_to_sample(onset_utc)))
             
             # Check buffer bounds

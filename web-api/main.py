@@ -22,7 +22,7 @@ try:
 except ImportError:
     SYSTEMD_AVAILABLE = False
 
-from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router, tec_router, tid_router, dashboard_router, phase_router, grape_router
+from routers import health_router, metrology_router, station_router, stability_router, propagation_router, logs_router, stations_router, space_weather_router, correlations_router, physics_router, docs_router, tec_router, tid_router, dashboard_router, phase_router, grape_router, ionogram_router
 from routers.timing_validation import router as timing_validation_router
 from config import config
 
@@ -69,6 +69,7 @@ app.include_router(timing_validation_router)  # No prefix - router has its own /
 app.include_router(dashboard_router, prefix="/api")  # 24-hour dashboard endpoints
 app.include_router(phase_router, prefix="/api")  # Phase/Doppler analysis endpoints
 app.include_router(grape_router, prefix="/api")  # GRAPE spectrograms and upload status
+app.include_router(ionogram_router, prefix="/api")  # All-arrivals ionogram / ToF cluster analysis
 
 # Static files directory
 static_dir = Path(__file__).parent / "static"

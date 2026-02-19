@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ionogram — Time-of-Flight Cluster Analysis — hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        .controls-row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: flex-end;
+            margin-bottom: 16px;
+        }
+        .control-group { display: flex; flex-direction: column; gap: 4px; }
+        .control-group label { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+        .control-group select,
+        .control-group input {
+            padding: 6px 10px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary);
+            font-size: 13px;
+            min-width: 140px;
+        }
+        .btn-load {
+            padding: 8px 20px;
+            background: #1e3a8a;
+            border: 1px solid #3b82f6;
+            border-radius: var(--radius-sm);
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-load:hover { background: #2563eb; }
+        .plot-container {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .plot-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 2px;
+        }
+        .plot-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+        .stat-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: 12px 14px;
+        }
+        .stat-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+        .stat-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
+        .stat-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+        .tab-row { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+        .tab-btn {
+            padding: 8px 16px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .tab-btn:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
+        .tab-btn.active { background: #1e3a8a; border-color: #3b82f6; color: #fff; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+        .loading-msg {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        .error-msg {
+            text-align: center;
+            padding: 20px;
+            color: #f87171;
+            font-size: 13px;
+        }
+        .griffin-note {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: var(--radius-md);
+            padding: 12px 16px;
+            font-size: 12px;
+            color: #94a3b8;
+            margin-bottom: 16px;
+            line-height: 1.6;
+        }
+        .griffin-note strong { color: #cbd5e1; }
+    </style>
+</head>
+<body>
+<div class="app-container">
+    <!-- Sidebar nav (same as other pages) -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-logo">⏱</div>
+            <div>
+                <div class="sidebar-title">hf-timestd</div>
+                <div class="sidebar-subtitle">HF Time Standard</div>
+            </div>
+        </div>
+        <ul class="nav-list">
+            <li class="nav-item"><a href="/" class="nav-link">Dashboard</a></li>
+            <li class="nav-item"><a href="/static/metrology.html" class="nav-link">Metrology</a></li>
+            <li class="nav-item"><a href="/static/ionosphere.html" class="nav-link">Ionosphere</a></li>
+            <li class="nav-item"><a href="/static/ionogram.html" class="nav-link active">Ionogram</a></li>
+            <li class="nav-item"><a href="/static/dtec.html" class="nav-link">dTEC</a></li>
+            <li class="nav-item"><a href="/static/phase.html" class="nav-link">Phase / Doppler</a></li>
+            <li class="nav-item"><a href="/static/stability.html" class="nav-link">Stability</a></li>
+            <li class="nav-item"><a href="/static/health.html" class="nav-link">Health</a></li>
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <div class="page-header">
+            <h1 class="page-title">Ionogram — Time-of-Flight Cluster Analysis</h1>
+            <p class="page-subtitle">
+                All-arrivals multipath analysis: ToF time series and S+N cluster plot.
+                Analogous to Gwyn Griffin's WSPRDaemon grape_acf_doppler_spread analysis.
+            </p>
+        </div>
+
+        <div class="griffin-note">
+            <strong>Interpretation guide (after Griffin 2026):</strong>
+            Rank-0 arrivals (dominant path) cluster near the model-predicted ToF.
+            Rank-1+ arrivals (secondary paths) appear at longer delays — each cluster
+            corresponds to a distinct propagation mode (1F, 2F, sporadic-E, sidescatter).
+            The delay difference between rank-0 and rank-1 directly encodes the F2 virtual height.
+            SNR separates modes: higher-hop paths are weaker due to additional D-layer transits.
+        </div>
+
+        <!-- Controls -->
+        <div class="controls-row">
+            <div class="control-group">
+                <label>Channel</label>
+                <select id="channelSelect">
+                    <option value="CHU_7850">CHU 7.85 MHz</option>
+                    <option value="CHU_3330">CHU 3.33 MHz</option>
+                    <option value="CHU_14670">CHU 14.67 MHz</option>
+                    <option value="WWV_10000">WWV 10 MHz</option>
+                    <option value="WWV_5000">WWV 5 MHz</option>
+                    <option value="WWV_15000">WWV 15 MHz</option>
+                    <option value="WWV_20000">WWV 20 MHz</option>
+                    <option value="WWVH_10000">WWVH 10 MHz</option>
+                    <option value="WWVH_5000">WWVH 5 MHz</option>
+                    <option value="BPM_10000">BPM 10 MHz</option>
+                    <option value="BPM_5000">BPM 5 MHz</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Time window</label>
+                <select id="windowSelect">
+                    <option value="-6h">Last 6 hours</option>
+                    <option value="-12h">Last 12 hours</option>
+                    <option value="-24h" selected>Last 24 hours</option>
+                    <option value="-48h">Last 48 hours</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Min SNR (dB)</label>
+                <input type="number" id="minSnr" value="6" min="0" max="40" step="1" style="width:80px">
+            </div>
+            <div class="control-group">
+                <label>Downsample</label>
+                <select id="downsampleSelect">
+                    <option value="1">All points</option>
+                    <option value="3" selected>Every 3rd</option>
+                    <option value="5">Every 5th</option>
+                    <option value="10">Every 10th</option>
+                </select>
+            </div>
+            <button class="btn-load" onclick="loadData()">Load</button>
+        </div>
+
+        <!-- Stats row -->
+        <div class="stats-grid" id="statsGrid" style="display:none">
+            <div class="stat-card">
+                <div class="stat-label">Total arrivals</div>
+                <div class="stat-value" id="statTotal">—</div>
+                <div class="stat-sub">in time window</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Dominant (rank-0)</div>
+                <div class="stat-value" id="statRank0">—</div>
+                <div class="stat-sub" id="statRank0Tof">—</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Secondary (rank≥1)</div>
+                <div class="stat-value" id="statRankN">—</div>
+                <div class="stat-sub">multi-hop paths</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">F2 virtual height</div>
+                <div class="stat-value" id="statF2h">—</div>
+                <div class="stat-sub">km (from Δτ)</div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tab-row">
+            <button class="tab-btn active" onclick="showTab('timeseries')">ToF Time Series</button>
+            <button class="tab-btn" onclick="showTab('cluster')">ToF vs S+N Cluster</button>
+        </div>
+
+        <!-- Time series panel (Griffin top+bottom panels) -->
+        <div class="tab-panel active" id="tab-timeseries">
+            <div class="plot-container">
+                <div class="plot-title">Time of Flight — All Arrivals</div>
+                <div class="plot-subtitle">
+                    Dominant path (rank-0, filled circles) and secondary paths (rank≥1, open circles).
+                    Analogous to Griffin's "Time of Flight and WSPRDaemon Grape Signal+Noise Level".
+                </div>
+                <div id="tofPlot" style="height:320px"><div class="loading-msg">Select a channel and click Load</div></div>
+            </div>
+            <div class="plot-container">
+                <div class="plot-title">Correlation S+N Level (dB)</div>
+                <div class="plot-subtitle">
+                    Per-arrival correlation SNR. High SNR = strong signal; low SNR = marginal detection.
+                    D-layer absorption reduces SNR on lower frequencies during daytime.
+                </div>
+                <div id="snrPlot" style="height:220px"><div class="loading-msg">—</div></div>
+            </div>
+            <div class="plot-container">
+                <div class="plot-title">Implied F2 Virtual Height (km)</div>
+                <div class="plot-subtitle">
+                    Derived from rank-0 vs rank-1 delay difference: h_F2 ≈ c·Δτ/2.
+                    Tracks ionospheric layer height variations over the day.
+                </div>
+                <div id="heightPlot" style="height:220px"><div class="loading-msg">—</div></div>
+            </div>
+        </div>
+
+        <!-- Cluster panel (Griffin cluster analysis) -->
+        <div class="tab-panel" id="tab-cluster">
+            <div class="plot-container">
+                <div class="plot-title">ToF vs S+N Level — Cluster Analysis</div>
+                <div class="plot-subtitle">
+                    Each point is one arrival. KDE density contours identify propagation mode clusters.
+                    Analogous to Griffin's "Cluster analysis of ToF and S+N level" (KDE contours + scatter).
+                    Cluster interpretation: high-ToF/high-SNR = 2F sidescatter; low-ToF/high-SNR = 1F direct;
+                    low-ToF/low-SNR = forward scatter or artefact.
+                </div>
+                <div id="clusterPlot" style="height:520px"><div class="loading-msg">Select a channel and click Load</div></div>
+            </div>
+        </div>
+
+        <div id="errorMsg" class="error-msg" style="display:none"></div>
+    </main>
+</div>
+
+<script>
+let _tsData = null;
+let _scatterData = null;
+
+function showTab(name) {
+    document.querySelectorAll('.tab-btn').forEach((b, i) => {
+        const tabs = ['timeseries', 'cluster'];
+        b.classList.toggle('active', tabs[i] === name);
+    });
+    document.querySelectorAll('.tab-panel').forEach(p => {
+        p.classList.toggle('active', p.id === 'tab-' + name);
+    });
+    if (name === 'cluster' && _scatterData) renderCluster(_scatterData);
+}
+
+async function loadData() {
+    const channel = document.getElementById('channelSelect').value;
+    const window_ = document.getElementById('windowSelect').value;
+    const minSnr = document.getElementById('minSnr').value;
+    const ds = document.getElementById('downsampleSelect').value;
+
+    document.getElementById('errorMsg').style.display = 'none';
+    document.getElementById('statsGrid').style.display = 'none';
+    setLoading('tofPlot');
+    setLoading('snrPlot');
+    setLoading('heightPlot');
+    setLoading('clusterPlot');
+
+    try {
+        const [tsResp, scatterResp] = await Promise.all([
+            fetch(`/api/ionogram/arrivals/timeseries?channel=${channel}&start=${window_}&min_snr_db=${minSnr}`),
+            fetch(`/api/ionogram/arrivals?channel=${channel}&start=${window_}&min_snr_db=${minSnr}&downsample=${ds}&include_kde=true`)
+        ]);
+
+        if (!tsResp.ok || !scatterResp.ok) throw new Error('API error');
+        _tsData = await tsResp.json();
+        _scatterData = await scatterResp.json();
+
+        if (_tsData.status === 'no_data' && _scatterData.status === 'no_data') {
+            showError('No data available for this channel and time window.');
+            return;
+        }
+
+        updateStats(_tsData, _scatterData);
+        renderTimeSeries(_tsData);
+        renderCluster(_scatterData);
+
+    } catch (e) {
+        showError('Failed to load data: ' + e.message);
+    }
+}
+
+function setLoading(id) {
+    document.getElementById(id).innerHTML = '<div class="loading-msg">Loading…</div>';
+}
+
+function showError(msg) {
+    const el = document.getElementById('errorMsg');
+    el.textContent = msg;
+    el.style.display = 'block';
+}
+
+function updateStats(ts, scatter) {
+    document.getElementById('statsGrid').style.display = 'grid';
+    document.getElementById('statTotal').textContent = (scatter.n_points || 0).toLocaleString();
+
+    const r0 = scatter.rank_stats && scatter.rank_stats['0'];
+    const r1n = Object.entries(scatter.rank_stats || {})
+        .filter(([k]) => parseInt(k) >= 1)
+        .reduce((s, [, v]) => s + v.n, 0);
+
+    document.getElementById('statRank0').textContent = r0 ? r0.n.toLocaleString() : '—';
+    document.getElementById('statRank0Tof').textContent = r0 ? `ToF ${r0.tof_mean_ms.toFixed(1)} ± ${r0.tof_std_ms.toFixed(1)} ms` : '—';
+    document.getElementById('statRankN').textContent = r1n.toLocaleString();
+
+    const h = ts.f2_height;
+    if (h && h.n > 0) {
+        const vals = h.height_km;
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        document.getElementById('statF2h').textContent = mean.toFixed(0);
+    } else {
+        document.getElementById('statF2h').textContent = '—';
+    }
+}
+
+function renderTimeSeries(data) {
+    const dom = data.dominant;
+    const sec = data.secondary;
+    const h = data.f2_height;
+    const color = data.color || '#7B68EE';
+
+    if (!dom || dom.n === 0) {
+        document.getElementById('tofPlot').innerHTML = '<div class="loading-msg">No dominant arrivals in range</div>';
+        document.getElementById('snrPlot').innerHTML = '<div class="loading-msg">—</div>';
+        document.getElementById('heightPlot').innerHTML = '<div class="loading-msg">—</div>';
+        return;
+    }
+
+    const toDate = ts => new Date(ts * 1000).toISOString();
+
+    // ToF plot
+    const tofTraces = [
+        {
+            x: dom.timestamps.map(toDate),
+            y: dom.tof_ms,
+            mode: 'markers',
+            type: 'scatter',
+            name: 'Rank-0 (dominant)',
+            marker: { color, size: 4, symbol: 'circle' },
+        }
+    ];
+    if (sec && sec.n > 0) {
+        tofTraces.push({
+            x: sec.timestamps.map(toDate),
+            y: sec.tof_ms,
+            mode: 'markers',
+            type: 'scatter',
+            name: 'Rank≥1 (secondary)',
+            marker: { color: '#94a3b8', size: 3, symbol: 'circle-open' },
+        });
+    }
+
+    Plotly.newPlot('tofPlot', tofTraces, {
+        paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+        font: { color: '#e2e8f0', size: 11 },
+        margin: { t: 10, b: 40, l: 60, r: 10 },
+        xaxis: { gridcolor: '#334155', title: 'UTC' },
+        yaxis: { gridcolor: '#334155', title: 'Time of Flight (ms)', rangemode: 'tozero' },
+        legend: { bgcolor: 'transparent', font: { size: 11 } },
+        showlegend: true,
+    }, { responsive: true, displayModeBar: false });
+
+    // SNR plot
+    const snrTraces = [
+        {
+            x: dom.timestamps.map(toDate),
+            y: dom.snr_db,
+            mode: 'markers',
+            type: 'scatter',
+            name: 'Rank-0 SNR',
+            marker: { color, size: 3 },
+        }
+    ];
+    if (sec && sec.n > 0) {
+        snrTraces.push({
+            x: sec.timestamps.map(toDate),
+            y: sec.snr_db,
+            mode: 'markers',
+            type: 'scatter',
+            name: 'Rank≥1 SNR',
+            marker: { color: '#94a3b8', size: 2, symbol: 'circle-open' },
+        });
+    }
+
+    Plotly.newPlot('snrPlot', snrTraces, {
+        paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+        font: { color: '#e2e8f0', size: 11 },
+        margin: { t: 10, b: 40, l: 60, r: 10 },
+        xaxis: { gridcolor: '#334155', title: 'UTC' },
+        yaxis: { gridcolor: '#334155', title: 'Corr SNR (dB)' },
+        legend: { bgcolor: 'transparent', font: { size: 11 } },
+        showlegend: true,
+    }, { responsive: true, displayModeBar: false });
+
+    // F2 height plot
+    if (h && h.n > 5) {
+        Plotly.newPlot('heightPlot', [{
+            x: h.timestamps.map(toDate),
+            y: h.height_km,
+            mode: 'markers',
+            type: 'scatter',
+            name: 'F2 height',
+            marker: { color: '#34d399', size: 3 },
+        }], {
+            paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+            font: { color: '#e2e8f0', size: 11 },
+            margin: { t: 10, b: 40, l: 60, r: 10 },
+            xaxis: { gridcolor: '#334155', title: 'UTC' },
+            yaxis: { gridcolor: '#334155', title: 'h\'F2 (km)', range: [100, 600] },
+            showlegend: false,
+        }, { responsive: true, displayModeBar: false });
+    } else {
+        document.getElementById('heightPlot').innerHTML =
+            '<div class="loading-msg">Insufficient rank-0/rank-1 pairs for height estimate</div>';
+    }
+}
+
+function renderCluster(data) {
+    if (!data || data.status === 'no_data' || !data.scatter) {
+        document.getElementById('clusterPlot').innerHTML =
+            '<div class="loading-msg">No data available</div>';
+        return;
+    }
+
+    const scatter = data.scatter;
+    const kde = data.kde;
+    const color = data.color || '#7B68EE';
+    const rank = scatter.peak_rank || [];
+    const tof = scatter.tof_ms || [];
+    const snr = scatter.corr_snr_db || [];
+
+    const dom_mask = rank.map(r => r === 0);
+    const sec_mask = rank.map(r => r > 0);
+
+    const traces = [];
+
+    // KDE contours (background density)
+    if (kde && kde.x && kde.y && kde.z) {
+        traces.push({
+            type: 'contour',
+            x: kde.x,
+            y: kde.y,
+            z: kde.z,
+            colorscale: [
+                [0, 'rgba(30,58,138,0)'],
+                [0.2, 'rgba(30,58,138,0.3)'],
+                [0.5, 'rgba(59,130,246,0.5)'],
+                [0.8, 'rgba(99,179,237,0.7)'],
+                [1.0, 'rgba(196,230,255,0.9)'],
+            ],
+            showscale: false,
+            contours: { coloring: 'fill', showlines: true },
+            line: { color: 'rgba(148,163,184,0.4)', width: 0.5 },
+            name: 'KDE density',
+            hoverinfo: 'skip',
+        });
+    }
+
+    // Scatter: secondary arrivals (behind)
+    if (sec_mask.some(Boolean)) {
+        traces.push({
+            x: snr.filter((_, i) => sec_mask[i]),
+            y: tof.filter((_, i) => sec_mask[i]),
+            mode: 'markers',
+            type: 'scatter',
+            name: 'Rank≥1 (secondary)',
+            marker: { color: '#475569', size: 3, symbol: 'circle-open', opacity: 0.6 },
+        });
+    }
+
+    // Scatter: dominant arrivals (front)
+    if (dom_mask.some(Boolean)) {
+        traces.push({
+            x: snr.filter((_, i) => dom_mask[i]),
+            y: tof.filter((_, i) => dom_mask[i]),
+            mode: 'markers',
+            type: 'scatter',
+            name: 'Rank-0 (dominant)',
+            marker: { color, size: 4, opacity: 0.8 },
+        });
+    }
+
+    Plotly.newPlot('clusterPlot', traces, {
+        paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+        font: { color: '#e2e8f0', size: 11 },
+        margin: { t: 10, b: 50, l: 70, r: 10 },
+        xaxis: {
+            gridcolor: '#334155',
+            title: 'Signal + Noise level (dB)',
+            autorange: 'reversed',
+        },
+        yaxis: {
+            gridcolor: '#334155',
+            title: 'Time of Flight (ms)',
+            rangemode: 'tozero',
+        },
+        legend: { bgcolor: 'transparent', font: { size: 11 } },
+        showlegend: true,
+    }, { responsive: true, displayModeBar: false });
+}
+
+// Auto-load on page open
+window.addEventListener('load', () => {
+    // Populate channel list from API
+    fetch('/api/ionogram/channels').then(r => r.json()).then(d => {
+        if (d.channels && d.channels.length > 0) {
+            const sel = document.getElementById('channelSelect');
+            sel.innerHTML = '';
+            d.channels.forEach(ch => {
+                const opt = document.createElement('option');
+                opt.value = ch.channel;
+                const freqKhz = parseInt(ch.channel.split('_')[1]);
+                const freqMhz = (freqKhz / 1000).toFixed(2).replace(/\.?0+$/, '');
+                opt.textContent = `${ch.station} ${freqMhz} MHz`;
+                if (ch.channel === 'CHU_7850') opt.selected = true;
+                sel.appendChild(opt);
+            });
+        }
+    }).catch(() => {});
+    loadData();
+});
+</script>
+</body>
+</html>

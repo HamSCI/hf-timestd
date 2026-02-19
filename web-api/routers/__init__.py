@@ -18,6 +18,7 @@ from .tid import router as tid_router
 from .dashboard import router as dashboard_router
 from .phase import router as phase_router
 from .grape import router as grape_router
+from .ionogram import router as ionogram_router
 
 __all__ = [
     'health_router',
@@ -35,5 +36,6 @@ __all__ = [
     'tid_router',
     'dashboard_router',
     'phase_router',
-    'grape_router'
+    'grape_router',
+    'ionogram_router',
 ]
