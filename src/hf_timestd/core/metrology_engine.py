@@ -1573,24 +1573,41 @@ class MetrologyEngine:
                     sigma_ms = window_ms / 3.0
                     deviation_sigma = abs(timing_err) / sigma_ms if sigma_ms > 0 else float('inf')
                     
-                    if abs(timing_err) > window_ms:
+                    # Gate → Weight: physics model informs confidence, not a binary gate.
+                    # Detections within 1σ: full confidence.
+                    # Detections 1σ–5σ: degraded confidence (Gaussian tail).
+                    # Detections >5σ: still rejected — at this distance from the
+                    # model window the detection is almost certainly a false positive
+                    # (noise correlation peak), not a real arrival with model error.
+                    # The 5σ hard cutoff preserves false-positive suppression for
+                    # WWV/WWVH shared frequencies while allowing model-error-affected
+                    # real detections (e.g. CHU systematic offset) through.
+                    HARD_REJECT_SIGMA = 5.0
+                    if deviation_sigma > HARD_REJECT_SIGMA:
                         physics_valid = False
                         physics_confidence = 0.0
-                        validation_reason = (f"Outside ±{window_ms:.0f}ms window: "
-                                           f"{deviation_sigma:.1f}σ deviation")
+                        validation_reason = (f"Hard reject: {deviation_sigma:.1f}σ > {HARD_REJECT_SIGMA:.0f}σ "
+                                           f"(likely false positive, not model error)")
                         logger.info(f"{self.channel_name}: Physics REJECTED: "
                                    f"{det.station.value} timing_err={timing_err:+.1f}ms - "
                                    f"{validation_reason}")
-                        continue  # Skip this detection entirely
+                        continue  # Skip — almost certainly noise, not a real arrival
                     else:
                         physics_valid = True
-                        deviation_factor = max(0.0, 1.0 - deviation_sigma / 3.0)
+                        # Gaussian-like confidence decay: 1.0 at 0σ, ~0.6 at 1σ, ~0.1 at 3σ, ~0.01 at 5σ
+                        deviation_factor = math.exp(-0.5 * (deviation_sigma ** 2) / (3.0 ** 2))
                         snr_factor = 1.0 / (1.0 + math.exp(-(det.snr_db - 10.0) / 5.0))
                         physics_confidence = deviation_factor * snr_factor
-                        validation_reason = (f"timing_err={timing_err:+.1f}ms "
-                                           f"({deviation_sigma:.1f}σ)")
-                        logger.info(f"{self.channel_name}: Physics VALIDATED: "
-                                   f"{det.station.value} {validation_reason}")
+                        if deviation_sigma > 1.0:
+                            validation_reason = (f"timing_err={timing_err:+.1f}ms "
+                                               f"({deviation_sigma:.1f}σ, degraded confidence={physics_confidence:.2f})")
+                            logger.info(f"{self.channel_name}: Physics MARGINAL: "
+                                       f"{det.station.value} {validation_reason}")
+                        else:
+                            validation_reason = (f"timing_err={timing_err:+.1f}ms "
+                                               f"({deviation_sigma:.1f}σ)")
+                            logger.info(f"{self.channel_name}: Physics VALIDATED: "
+                                       f"{det.station.value} {validation_reason}")
             
             # Construct L1 measurement (only for validated detections)
             meas = L1MetrologyMeasurement(
