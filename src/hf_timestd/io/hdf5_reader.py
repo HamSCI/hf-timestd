@@ -228,25 +228,30 @@ class DataProductReader:
                             try:
                                 data[field_name] = f[field_name][:]
                             except OSError as read_err:
-                                # Corrupt chunk — find last good row
+                                # Corrupt trailing chunk (write-while-read race).
+                                # The corrupt chunk is always the last one being
+                                # written.  Use the HDF5 chunk size to find the
+                                # last COMPLETE chunk boundary in O(1) — no
+                                # binary search needed.
                                 ds = f[field_name]
                                 n = ds.shape[0]
-                                lo, hi = 0, n
-                                while lo < hi:
-                                    mid = (lo + hi) // 2
-                                    try:
-                                        _ = ds[mid]
-                                        lo = mid + 1
-                                    except OSError:
-                                        hi = mid
-                                safe_n = lo
+                                chunk_size = (ds.chunks or (1024,))[0]
+                                # Last complete chunk boundary
+                                safe_n = (n // chunk_size) * chunk_size
+                                if safe_n == 0 and n > 0:
+                                    safe_n = 0  # No complete chunks at all
                                 logger.warning(
                                     f"Corrupt chunk in {hdf5_path.name}/{field_name} "
                                     f"at row {safe_n}/{n} — truncating read "
                                     f"({read_err})"
                                 )
                                 if safe_n > 0:
-                                    data[field_name] = ds[:safe_n]
+                                    try:
+                                        data[field_name] = ds[:safe_n]
+                                    except OSError:
+                                        # Even the truncated read failed — skip field
+                                        data[field_name] = np.empty(0, dtype=ds.dtype)
+                                        safe_n = 0
                                     if truncate_to is None or safe_n < truncate_to:
                                         truncate_to = safe_n
                                 else:
