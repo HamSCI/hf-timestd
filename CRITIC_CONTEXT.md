@@ -69,7 +69,7 @@ L3  tec_tecu             = group-delay TEC fit (see F1 — mostly noise)
                            HDF5: phase2/science/tec/, phase2/science/dtec/
 ```
 
-`physics_fusion_service._read_l2_slice()` prefers `tof_kalman_ms`, falls back to `raw_arrival_time_ms`. Since `tof_kalman_ms` is all NaN, the fallback is always used. `raw_arrival_time_ms` is a residual + model delay, not a raw ToA — feeding it to the TEC estimator as `toa_ms` is conceptually wrong.
+`physics_fusion_service._read_l2_slice()` prefers `tof_kalman_ms`, falls back to `clock_offset_ms`. Since `tof_kalman_ms` is all NaN, the fallback is always used. `clock_offset_ms` IS the correct D_clock residual (= `timing_error_ms` from L1, i.e. arrival − expected_propagation_delay). The TEC estimator input is semantically correct; the problem is that the L1 propagation model has large systematic errors (CHU: −76 ms, others: per-station) that contaminate the 1/f² fit.
 
 ---
 
@@ -89,9 +89,9 @@ The noise is propagation model error (inter-minute mode/condition variability), 
 
 All three CHU channels: `clock_offset_ms ≈ −76 ms`, `raw_arrival_time_ms ≈ −66 ms`. Model predicts ~10 ms for Ottawa→Missouri. This −76 ms systematic is not ionospheric. WWV ≈ +3 ms, WWVH ≈ +22 ms, BPM ≈ +38 ms — all different, suggesting per-station propagation model errors.
 
-### F3 — `vtec_tecu` all NaN; VTEC RMS=0.00 is suspicious *(BUG)*
+### F3 — `vtec_tecu` all NaN; VTEC path never runs *(BUG — PARTIALLY FIXED)*
 
-Logs show "VTEC map: N IPPs, RMS=0.00 TECU, conf=1.00" every minute but `vtec_tecu` is all NaN in HDF5. RMS=0.00 with conf=1.00 suggests trivial/degenerate solution. Field not written to per-station TEC records.
+`vtec_tecu` is all NaN because group-delay TEC confidence is always < 0.3 (the IPP filter threshold), so `ipp_measurements` is always empty and the VTEC mapper never runs. **Fixed (P1-D):** code now logs explicitly why VTEC is unavailable instead of silently writing NaN. Root cause remains F1 (propagation model noise floor).
 
 ### F4 — Propagation mode labels are unreliable *(KNOWN)*
 
@@ -103,6 +103,32 @@ PHYSICS.md claims ✅ for TEC, scintillation, TIDs. Live system contradicts seve
 
 ---
 
+## Fixes Applied (2026-02-19 Session)
+
+| Fix | Status | Commit |
+|---|---|---|
+| Canonical data dictionary (`data_dictionary.json`) | ✅ Done | d625f33 |
+| `check_field()` / `get_data_dictionary()` API | ✅ Done | d625f33 |
+| P1-A diagnosis: L1 model systematic errors documented | ✅ Done | 3a15626 |
+| P1-B: Unanchored dTEC capped at MARGINAL; `anchor_status` field added | ✅ Done | d628727 |
+| P1-D: vtec_tecu NaN gating — explicit log instead of silent NaN | ✅ Done | d628727 |
+| P3-B: Full per-tick dTEC time series written to `dtec_timeseries/` | ✅ Done | d628727 |
+| P1-C: Receiver coords from config toml; geometric elevation in VTECMapper | ✅ Done | 21df170 |
+| P3-C: `compute_differential_dtec()` wired for multi-freq stations | ✅ Done | 54b3f4e |
+
+## Remaining Work
+
+| Item | Priority | Notes |
+|---|---|---|
+| P2-A: Wire IonoDataService for real foF2/hmF2 | HIGH | Root cause of TEC noise floor. IonoDataService already implemented (see memory). |
+| Validate differential dTEC pairs in physics.log | MEDIUM | Check RMS values; if sensible, add HDF5 write |
+| P4-B: `gpsdo_locked` from actual monitor state | LOW | Currently hardcoded `True` in l2_calibration_service.py |
+| P4-C: Remove `tof_kalman_ms` dead schema field | LOW | Always NaN; clutters schema |
+| P3-A: Phase unwrapping quality check | MEDIUM | Flag minutes where |Δφ| > π/2 |
+| P3-D: Pass `u_propagation_model_ms` to TEC estimator | MEDIUM | Correlated uncertainty not treated as correlated |
+
+---
+
 ## What Actually Works (Verified 2026-02-19)
 
 | Product | Status |
@@ -110,13 +136,16 @@ PHYSICS.md claims ✅ for TEC, scintillation, TIDs. Live system contradicts seve
 | L1 timing measurements | ✅ ~15K/day |
 | L2 clock_offset_ms | ✅ Real residuals (systematic offsets per station — see F2) |
 | SNR per broadcast | ✅ Real, frequency- and time-varying |
-| Carrier-phase dTEC | ✅ 250K records/day, anchored to group-delay TEC |
+| Carrier-phase dTEC rate (dtec_rate_tecu_per_s) | ✅ 250K records/day — primary science product |
 | IONEX output | ✅ Written per minute |
 | All-arrivals (multi-path) | ✅ NEW — `all_arrivals/` HDF5; CHU_7850: 374 rows/min, 258 secondary |
 | GRAPE spectrograms | ✅ 9/9 channels uploading to PSWS |
-| Group-delay TEC | ❌ Below noise floor |
-| vtec_tecu | ❌ All NaN |
-| tof_kalman_ms | ❌ All NaN |
+| Integrated dTEC (dtec_mean_tecu) | ⚠️ Unanchored — relative only (is_anchored always False) |
+| Per-tick dTEC time series | ✅ NEW — phase2/science/dtec_timeseries/ (~55 records/min/station) |
+| Differential carrier-phase TEC | ✅ NEW — computed in-process, logged; HDF5 write pending validation |
+| Group-delay TEC | ❌ Below noise floor (L1 propagation model systematic errors) |
+| vtec_tecu | ❌ All NaN (depends on group-delay TEC) |
+| tof_kalman_ms | ❌ All NaN (dead schema field) |
 | Scintillation indices | ❓ Not verified |
 
 ---
