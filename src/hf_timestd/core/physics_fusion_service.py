@@ -891,6 +891,89 @@ class PhysicsFusionService:
                 f"({n_anchored} station-channels anchored to group-delay TEC)"
             )
 
+        # P3-C: Differential carrier-phase TEC between frequency pairs.
+        # For stations with multiple frequencies (WWV: 5, WWVH: 4, CHU: 3),
+        # the inter-frequency differential removes common-mode errors (clock,
+        # geometry) and isolates the dispersive ionospheric component.
+        # This is the correct GNSS-style approach (analogous to L1-L2 combination).
+        # Results are logged; HDF5 write will be added once validated.
+        self._compute_differential_dtec_pairs(tick_data, minute_timestamp)
+
+    def _compute_differential_dtec_pairs(
+        self,
+        tick_data: Dict[str, List[Dict]],
+        minute_timestamp: int,
+    ):
+        """
+        P3-C: Compute inter-frequency differential dTEC for multi-frequency stations.
+
+        Groups tick_phase records by (station, frequency), computes per-frequency
+        CarrierTECResult, then calls compute_differential_dtec() on all pairs.
+        The differential removes common-mode errors and isolates ionospheric dispersion.
+        """
+        # Collect per-(station, freq) records across all channels
+        by_station_freq: Dict[str, Dict[float, List[Dict]]] = defaultdict(lambda: defaultdict(list))
+        for channel, records in tick_data.items():
+            for r in records:
+                st = r.get('station', '')
+                if isinstance(st, bytes):
+                    st = st.decode('utf-8', errors='replace')
+                freq = float(r.get('frequency_mhz', 0.0))
+                if st and freq > 0:
+                    by_station_freq[st][freq].append(r)
+
+        for station, freq_records in by_station_freq.items():
+            freqs = sorted(freq_records.keys())
+            if len(freqs) < 2:
+                continue  # Need at least 2 frequencies for a differential
+
+            # Compute per-frequency CarrierTECResult
+            freq_results: Dict[float, Any] = {}
+            for freq_mhz, records in freq_records.items():
+                if len(records) < 5:
+                    continue
+                try:
+                    result = self.carrier_tec.compute_dtec_from_records(
+                        records=records,
+                        frequency_mhz=freq_mhz,
+                        station=station,
+                        channel='DIFFERENTIAL',
+                    )
+                    if result is not None and result.n_points >= 3:
+                        freq_results[freq_mhz] = result
+                except Exception as e:
+                    logger.debug(f"Differential dTEC: per-freq compute failed {station}/{freq_mhz}: {e}")
+
+            if len(freq_results) < 2:
+                continue
+
+            # Compute differential between all frequency pairs (lowest vs highest
+            # gives the largest dispersive signal; log all pairs for now)
+            sorted_freqs = sorted(freq_results.keys())
+            n_pairs = 0
+            for i, f1 in enumerate(sorted_freqs):
+                for f2 in sorted_freqs[i + 1:]:
+                    try:
+                        diff = self.carrier_tec.compute_differential_dtec(
+                            freq_results[f1], freq_results[f2]
+                        )
+                        if diff is None:
+                            continue
+                        n_pairs += 1
+                        logger.debug(
+                            f"Differential dTEC {station} {f1:.2f}-{f2:.2f} MHz: "
+                            f"RMS={diff['rms_diff_tecu']:.4f} TECU, "
+                            f"n={diff['n_points']}"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Differential dTEC pair {station} {f1}/{f2}: {e}")
+
+            if n_pairs > 0:
+                logger.info(
+                    f"Differential dTEC {station}: {n_pairs} frequency pair(s) computed "
+                    f"from {len(freq_results)} frequencies {[f'{f:.2f}' for f in sorted_freqs]} MHz"
+                )
+
     def run(self):
         """Main service loop."""
         self.running = True
