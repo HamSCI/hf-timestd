@@ -404,9 +404,8 @@ const SOLAR_COLORS = {
     BPM:  'rgba(255, 160, 40, 0.55)',
 };
 
-function buildSolarTraces(stationsNeeded, mid, half) {
-    // Returns Plotly traces for solar elevation, rescaled into primary-axis
-    // coordinates so that 0° (horizon) maps to mid, ±90° maps to mid ± half.
+function buildSolarTraces(stationsNeeded) {
+    // Plot raw solar elevation degrees on yaxis2.
     if (!_solarData || !_solarData.elevations) return [];
     const toDate = ts => new Date(ts * 1000).toISOString();
     const xs = _solarData.timestamps.map(toDate);
@@ -415,27 +414,25 @@ function buildSolarTraces(stationsNeeded, mid, half) {
     for (const st of stationsNeeded) {
         if (seen.has(st) || !_solarData.elevations[st]) continue;
         seen.add(st);
-        const el = _solarData.elevations[st];
-        // Scale: e degrees -> mid + (e/90)*half
-        const scaled = el.map(e => mid + (e / 90) * half);
         traces.push({
             x: xs,
-            y: scaled,
+            y: _solarData.elevations[st],
             mode: 'lines',
             type: 'scatter',
             name: `Solar elev. ${st} path`,
             yaxis: 'y2',
             line: { color: SOLAR_COLORS[st] || 'rgba(255,220,80,0.5)', width: 1.5, dash: 'dot' },
             opacity: 0.8,
-            customdata: el,
-            hovertemplate: `%{customdata:.1f}°<extra>Solar ${st}</extra>`,
+            hovertemplate: `%{y:.1f}°<extra>Solar ${st}</extra>`,
         });
     }
     return traces;
 }
 
-function primaryMidHalf(traces) {
-    // Compute mid and half-span of the primary y-axis data range (with 10% padding).
+function primarySymmetricRange(traces) {
+    // Compute a symmetric primary y-axis range [mid-half, mid+half] from the
+    // data so that the visual midpoint of the left axis aligns with 0° on the
+    // right solar-elevation axis.
     let yMin = Infinity, yMax = -Infinity;
     for (const t of traces) {
         if (!t.y) continue;
@@ -450,32 +447,25 @@ function primaryMidHalf(traces) {
     const pad = (yMax - yMin) * 0.10;
     const lo = yMin - pad;
     const hi = yMax + pad;
-    return { mid: (lo + hi) / 2, half: (hi - lo) / 2 };
+    const mid = (lo + hi) / 2;
+    const half = Math.max(hi - mid, mid - lo);  // symmetric around mid
+    return [mid - half, mid + half];
 }
 
-function centredSolarLayout(mid, half) {
-    // yaxis2 spans exactly the same range as the primary axis.
-    // Solar elevation values have already been rescaled into primary-axis
-    // coordinates by buildSolarTraces, so this axis is just for tick labels.
-    const lo = mid - half;
-    const hi = mid + half;
-    return {
-        yaxis2: {
-            title: 'Solar elev. (°)',
-            overlaying: 'y',
-            side: 'right',
-            range: [lo, hi],
-            // Tick positions in primary-axis coords, labelled in degrees
-            tickvals: [lo, mid - half * 0.5, mid, mid + half * 0.5, hi],
-            ticktext: ['-90°', '-45°', '0°', '45°', '90°'],
-            gridcolor: 'rgba(71,85,105,0.3)',
-            tickfont: { color: 'rgba(255,220,80,0.7)', size: 10 },
-            titlefont: { color: 'rgba(255,220,80,0.7)', size: 10 },
-            showgrid: false,
-            zeroline: false,
-        },
-    };
-}
+const SOLAR_YAXIS2 = {
+    title: 'Solar elev. (°)',
+    overlaying: 'y',
+    side: 'right',
+    range: [-90, 90],
+    tickvals: [-90, -45, 0, 45, 90],
+    ticktext: ['-90°', '-45°', '0°', '45°', '90°'],
+    tickfont: { color: 'rgba(255,220,80,0.7)', size: 10 },
+    titlefont: { color: 'rgba(255,220,80,0.7)', size: 10 },
+    showgrid: false,
+    zeroline: true,
+    zerolinecolor: 'rgba(255,220,80,0.25)',
+    zerolinewidth: 1,
+};
 
 function renderPlots(series) {
     const displayMode = document.getElementById('displayMode').value;
@@ -548,14 +538,14 @@ function renderPlots(series) {
         document.getElementById('dtecRatePlot').innerHTML =
             '<div class="loading-msg">No series match the current frequency filter</div>';
     } else {
-        const { mid: rMid, half: rHalf } = primaryMidHalf(rateTraces);
-        const solar = buildSolarTraces([...rateStations], rMid, rHalf);
+        const solar = buildSolarTraces([...rateStations]);
+        const rRange = primarySymmetricRange(rateTraces);
         Plotly.newPlot('dtecRatePlot', [...rateTraces, ...solar], {
             ...baseLayout,
-            ...centredSolarLayout(rMid, rHalf),
+            yaxis2: SOLAR_YAXIS2,
             margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
-            yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', zeroline: true, zerolinecolor: '#475569' },
+            yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', zeroline: true, zerolinecolor: '#475569', range: rRange },
         }, { responsive: true, displayModeBar: false });
     }
 
@@ -563,14 +553,14 @@ function renderPlots(series) {
         document.getElementById('dtecMeanPlot').innerHTML =
             '<div class="loading-msg">No series match the current frequency filter</div>';
     } else {
-        const { mid: mMid, half: mHalf } = primaryMidHalf(meanTraces);
-        const solar = buildSolarTraces([...meanStations], mMid, mHalf);
+        const solar = buildSolarTraces([...meanStations]);
+        const mRange = primarySymmetricRange(meanTraces);
         Plotly.newPlot('dtecMeanPlot', [...meanTraces, ...solar], {
             ...baseLayout,
-            ...centredSolarLayout(mMid, mHalf),
+            yaxis2: SOLAR_YAXIS2,
             margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
-            yaxis: { gridcolor: '#334155', title: 'Integrated dTEC (TECU)' },
+            yaxis: { gridcolor: '#334155', title: 'Integrated dTEC (TECU)', range: mRange },
         }, { responsive: true, displayModeBar: false });
     }
 
@@ -578,14 +568,14 @@ function renderPlots(series) {
         document.getElementById('refPlot').innerHTML =
             '<div class="loading-msg">No 10 MHz paths available (WWV, WWVH, BPM)</div>';
     } else {
-        const { mid: fMid, half: fHalf } = primaryMidHalf(refTraces);
-        const solar = buildSolarTraces([...refStations], fMid, fHalf);
+        const solar = buildSolarTraces([...refStations]);
+        const fRange = primarySymmetricRange(refTraces);
         Plotly.newPlot('refPlot', [...refTraces, ...solar], {
             ...baseLayout,
-            ...centredSolarLayout(fMid, fHalf),
+            yaxis2: SOLAR_YAXIS2,
             margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
-            yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', zeroline: true, zerolinecolor: '#475569' },
+            yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', zeroline: true, zerolinecolor: '#475569', range: fRange },
         }, { responsive: true, displayModeBar: false });
     }
 }
