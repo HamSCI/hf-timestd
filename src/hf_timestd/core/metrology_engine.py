@@ -1212,23 +1212,25 @@ class MetrologyEngine:
                         # CHU regular-second 300ms tones start ~74ms after the
                         # UTC second boundary + propagation delay.
                         #
-                        # Evidence chain:
-                        # 1. Direct AM envelope measurement (5ms bins, bandpass
-                        #    950-1050Hz): tone onset consistently at +80ms from
-                        #    utc_sec + prop_delay across multiple seconds.
-                        # 2. FSK stop-bit anchor (T+0.500s, seconds 31-39):
-                        #    timing_offset = +6ms → CHU clock is +6ms fast.
-                        #    FSK seconds have NO 1000Hz tone; the FSK decoder's
-                        #    tick_timing_offset_ms measures 2225Hz mark-tone
-                        #    leakage into the 900-1100Hz band — not a valid
-                        #    1000Hz timing anchor.
-                        # 3. NRC spec: emission accuracy ≤1μs (atomic clock).
-                        #    This refers to the clock accuracy, not the programmed
-                        #    onset delay of the 1000Hz tones.
-                        # 4. Programmed onset delay = measured(80ms) − clock(6ms)
-                        #    = 74ms. Analogous to FSK data starting at T+133ms.
-                        # 5. Using 0.074 gives timing_error ≈ +6ms, consistent
-                        #    with the FSK stop-bit clock reference.
+                        # Evidence chain (definitive):
+                        # 1. Direct AM envelope measurement (3ms energy windows,
+                        #    BP 950-1050Hz): 1000Hz pip onset at +68-80ms from
+                        #    utc_sec (= +62-74ms from utc_sec + prop_delay).
+                        # 2. Same measurement for 2225Hz FSK mark tone (seconds
+                        #    31-39, NRC spec: T+10ms): onset at +87ms from
+                        #    utc_sec (= +71ms from expected T+prop+10ms).
+                        # 3. Both 1000Hz and 2225Hz are delayed by ~74ms through
+                        #    the IDENTICAL receiver pipeline. WWV shows 0ms
+                        #    offset through the same pipeline. The delay is
+                        #    CHU-specific and in the transmitted signal.
+                        # 4. Root cause: CHU uses H3E (USB + full carrier). The
+                        #    transmitter's analog sideband filter introduces a
+                        #    group delay of ~74ms on all audio content. NRC's
+                        #    ≤1μs spec refers to the atomic clock accuracy, not
+                        #    the audio onset relative to the second marker.
+                        # 5. FSK stop-bit (T+500ms, phase transition) gives
+                        #    timing_offset=+6ms → CHU clock offset is +6ms.
+                        #    Using 0.074 gives timing_error ≈ +6ms, consistent.
                         # Second 0 (minute marker, 500ms) starts at 0ms.
                         chu_tx_onset_sec = 0.0
                         if station_name == 'CHU' and sec_in_minute != 0:
