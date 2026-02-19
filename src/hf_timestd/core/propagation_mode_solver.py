@@ -262,13 +262,13 @@ class EmissionTimeResult:
 class PropagationModeSolver:
     """
     Solves for ionospheric propagation mode and back-calculates emission time.
-    
-    This transforms the receiver into a primary time standard by:
-    1. Calculating all possible propagation modes for a given path
-    2. Matching measured arrival time to identify the active mode
-    3. Subtracting the calculated delay to find emission time
+
+    Tier-1 (when available): HFPropagationModel with real-time IonoDataService
+    data (WAM-IPE foF2/hmF2, MUF checks, frequency-dependent iono delay).
+    Tier-2 (fallback): Fixed F2/E layer heights with parametric iono delay.
+    All downstream callers receive the same ModeCandidate interface.
     """
-    
+
     def __init__(
         self,
         receiver_grid: str,
@@ -277,29 +277,50 @@ class PropagationModeSolver:
     ):
         """
         Initialize solver with receiver location.
-        
+
         Args:
             receiver_grid: Maidenhead grid square (e.g., 'EM38ww')
-            f2_height_km: Assumed F2 layer height (adjustable for conditions)
-            e_height_km: Assumed E layer height
+            f2_height_km: Fallback F2 layer height when HFPropagationModel unavailable
+            e_height_km: Fallback E layer height
         """
         self.receiver_grid = receiver_grid
         self.receiver_lat, self.receiver_lon = self._grid_to_latlon(receiver_grid)
-        
+
         self.f2_height_km = f2_height_km
         self.e_height_km = e_height_km
-        
+
         # Cache great-circle distances to stations
         self._distances: Dict[str, float] = {}
         for station, (lat, lon) in STATION_LOCATIONS.items():
             self._distances[station] = self._great_circle_distance(
                 self.receiver_lat, self.receiver_lon, lat, lon
             )
-        
+
+        # Tier-1: HFPropagationModel with real-time ionospheric data (P2-A)
+        self._hf_model = None
+        try:
+            from .propagation_model import HFPropagationModel
+            self._hf_model = HFPropagationModel(
+                receiver_lat=self.receiver_lat,
+                receiver_lon=self.receiver_lon,
+                enable_realtime=True,
+            )
+            logger.info(
+                f"PropagationModeSolver: HFPropagationModel active "
+                f"(real-time foF2/hmF2/MUF)"
+            )
+        except Exception as e:
+            logger.warning(
+                f"PropagationModeSolver: HFPropagationModel unavailable "
+                f"({e}), using fixed-height fallback"
+            )
+
         logger.info(f"PropagationModeSolver initialized at {receiver_grid}")
-        logger.info(f"Distances: WWV={self._distances.get('WWV', 0):.0f} km, "
-                   f"WWVH={self._distances.get('WWVH', 0):.0f} km, "
-                   f"CHU={self._distances.get('CHU', 0):.0f} km")
+        logger.info(
+            f"Distances: WWV={self._distances.get('WWV', 0):.0f} km, "
+            f"WWVH={self._distances.get('WWVH', 0):.0f} km, "
+            f"CHU={self._distances.get('CHU', 0):.0f} km"
+        )
     
     def _grid_to_latlon(self, grid: str) -> Tuple[float, float]:
         """Convert Maidenhead grid to lat/lon"""
@@ -403,6 +424,73 @@ class PropagationModeSolver:
         delay_us = IONO_DELAY_COEFF_US_MHZ2 / (frequency_mhz**2) * 1000
         return delay_us / 1000.0  # Convert to ms
     
+    def _hf_model_candidates(
+        self,
+        station: str,
+        frequency_mhz: float,
+    ) -> Optional[List['ModeCandidate']]:
+        """
+        Tier-1: Get ModeCandidate list from HFPropagationModel.
+
+        Converts HFPropagationModel.ModeArrival objects into ModeCandidate
+        objects so all downstream callers are unchanged.  Returns None if
+        HFPropagationModel is unavailable or produces no feasible arrivals.
+        """
+        if self._hf_model is None:
+            return None
+        try:
+            from datetime import datetime, timezone
+            from .propagation_model import PROPAGATION_MODES
+            prediction = self._hf_model.predict(
+                station=station,
+                frequency_mhz=frequency_mhz,
+                utc_time=datetime.now(timezone.utc),
+            )
+            feasible = prediction.get_feasible_arrivals()
+            if not feasible:
+                return None
+
+            # Map layer label → PropagationMode enum used by ModeCandidate
+            _mode_map = {
+                ('1', 'F'): PropagationMode.F2_LAYER_1HOP,
+                ('2', 'F'): PropagationMode.F2_LAYER_2HOP,
+                ('3', 'F'): PropagationMode.F2_LAYER_3HOP,
+                ('4', 'F'): PropagationMode.F2_LAYER_4HOP,
+                ('1', 'E'): PropagationMode.E_LAYER_1HOP,
+                ('2', 'E'): PropagationMode.E_LAYER_2HOP,
+            }
+
+            candidates = []
+            for arr in feasible:
+                key = (str(arr.mode.n_hops), arr.mode.layer)
+                mode_enum = _mode_map.get(key, PropagationMode.UNKNOWN)
+                candidates.append(ModeCandidate(
+                    mode=mode_enum,
+                    n_hops=arr.mode.n_hops,
+                    layer_height_km=arr.reflection_height_km,
+                    ground_distance_km=self._distances.get(station, 0.0),
+                    path_length_km=arr.path_length_km,
+                    elevation_angle_deg=arr.elevation_angle_deg,
+                    propagation_delay_ms=arr.geometric_delay_ms,
+                    ionospheric_delay_ms=arr.iono_delay_ms,
+                    total_delay_ms=arr.delay_ms,
+                    delay_uncertainty_ms=arr.uncertainty_ms,
+                    viable=arr.is_feasible,
+                ))
+            candidates.sort(key=lambda c: c.total_delay_ms)
+            logger.debug(
+                f"HFPropagationModel [{prediction.data_source}] "
+                f"{station} {frequency_mhz:.2f} MHz: "
+                f"{len(candidates)} feasible modes, "
+                f"primary={prediction.primary_mode} "
+                f"{prediction.primary_delay_ms:.2f} ms "
+                f"(conf={prediction.model_confidence:.2f})"
+            )
+            return candidates
+        except Exception as e:
+            logger.debug(f"HFPropagationModel failed for {station}/{frequency_mhz}: {e}")
+            return None
+
     def calculate_modes(
         self,
         station: str,
@@ -412,19 +500,28 @@ class PropagationModeSolver:
     ) -> List[ModeCandidate]:
         """
         Calculate all possible propagation modes for a path.
-        
+
+        Tier-1: HFPropagationModel (real foF2/hmF2, MUF checks) when available.
+        Tier-2: Fixed F2/E layer heights with parametric iono delay (fallback).
+
         Args:
             station: Station name ('WWV', 'WWVH', 'CHU')
             frequency_mhz: Signal frequency in MHz
-            max_hops: Maximum number of hops to consider
-            include_e_layer: Whether to include E-layer modes
-            
+            max_hops: Maximum number of hops to consider (tier-2 only)
+            include_e_layer: Whether to include E-layer modes (tier-2 only)
+
         Returns:
             List of ModeCandidate objects, sorted by delay
         """
         if station not in self._distances:
             raise ValueError(f"Unknown station: {station}")
-        
+
+        # Tier-1: HFPropagationModel with real ionospheric data
+        hf_candidates = self._hf_model_candidates(station, frequency_mhz)
+        if hf_candidates:
+            return hf_candidates
+
+        # Tier-2: Fixed-height fallback (original implementation)
         ground_distance = self._distances[station]
         candidates = []
         
