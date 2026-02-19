@@ -301,7 +301,7 @@ class VTECMapper:
                 f.write(f"  3600                                                        INTERVAL\n")
                 f.write(f"     1                                                        # OF MAPS IN FILE\n")
                 f.write(f"  NONE                                                        MAPPING FUNCTION\n")
-                f.write(f"   {result.center_lat:6.1f}                                                  BASE RADIUS\n")
+                f.write(f"  6371.0                                                      BASE RADIUS\n")
                 f.write(f"     2                                                        MAP DIMENSION\n")
 
                 # Grid definition
@@ -312,7 +312,7 @@ class VTECMapper:
                 dlat = self.grid_resolution_deg
                 dlon = self.grid_resolution_deg
 
-                f.write(f"   {lat_min:6.1f}{lat_max:6.1f}{dlat:6.1f}                                    HGT1 / HGT2 / DHGT\n")
+                f.write(f"  {self.shell_height_km:6.1f}{self.shell_height_km:6.1f}   0.0                                    HGT1 / HGT2 / DHGT\n")
                 f.write(f"   {lat_min:6.1f}{lat_max:6.1f}{dlat:6.1f}                                    LAT1 / LAT2 / DLAT\n")
                 f.write(f"   {lon_min:6.1f}{lon_max:6.1f}{dlon:6.1f}                                    LON1 / LON2 / DLON\n")
                 f.write(f"    -1                                                        EXPONENT\n")

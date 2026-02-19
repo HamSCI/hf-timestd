@@ -106,5 +106,10 @@
             "required": true,
             "description": "Processing version"
         }
-    ]
+    ],
+    "quality_flags": {
+        "GOOD": "n_ticks >= 30, anchor_tec available, dtec_noise_floor_tecu < 0.5",
+        "MARGINAL": "n_ticks 10-29, or anchor_tec unavailable (relative dTEC only)",
+        "BAD": "n_ticks < 10, or dtec_noise_floor_tecu >= 0.5"
+    }
 }

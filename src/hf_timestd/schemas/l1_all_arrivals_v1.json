@@ -95,5 +95,10 @@
             "required": false,
             "description": "Processing software version"
         }
-    ]
+    ],
+    "quality_flags": {
+        "GOOD": "Peak SNR >= 12 dB, timing error within model uncertainty",
+        "MARGINAL": "Peak SNR 6-12 dB, or timing error exceeds model uncertainty",
+        "BAD": "Peak SNR < 6 dB, or timing error implausible for any known mode"
+    }
 }
