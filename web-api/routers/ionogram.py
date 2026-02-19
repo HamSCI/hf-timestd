@@ -78,16 +78,29 @@ def _load_all_arrivals(
     for fpath in files:
         try:
             with h5py.File(str(fpath), "r", locking=False) as h:
-                mb = h["minute_boundary_utc"][:]
+                mb  = h["minute_boundary_utc"][:]
+                snr = h["corr_snr_db"][:]
+                rank = h["peak_rank"][:]
+                te  = h["timing_error_ms"][:]
+                me  = h["model_expected_ms"][:]
+                sec = h["utc_second"][:]
+
+                # HDF5 datasets may have slightly different lengths if the
+                # file was written mid-minute; truncate all to the minimum.
+                n = min(len(mb), len(snr), len(rank), len(te), len(me), len(sec))
+                mb, snr, rank, te, me, sec = (
+                    mb[:n], snr[:n], rank[:n], te[:n], me[:n], sec[:n]
+                )
+
                 mask = (mb >= ts0) & (mb <= ts1)
                 if not np.any(mask):
                     continue
 
-                snr = h["corr_snr_db"][:][mask]
-                rank = h["peak_rank"][:][mask]
-                te = h["timing_error_ms"][:][mask]
-                me = h["model_expected_ms"][:][mask]
-                sec = h["utc_second"][:][mask]
+                snr = snr[mask]
+                rank = rank[mask]
+                te = te[mask]
+                me = me[mask]
+                sec = sec[mask]
                 mb_f = mb[mask]
 
                 # Apply filters
