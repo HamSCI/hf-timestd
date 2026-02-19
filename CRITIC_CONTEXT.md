@@ -35,6 +35,21 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
+## Canonical Data Dictionary (Prerequisite — Read Before Any Calculation)
+
+`src/hf_timestd/schemas/data_dictionary.json` is the **single authoritative definition** of every observable and derived quantity. Before using any field in a calculation, verify its entry there.
+
+```python
+from hf_timestd.schemas import check_field
+entry = check_field('clock_offset_ms')   # returns description, formula, pitfalls
+```
+
+Key entries: `raw_toa_ms`, `clock_offset_ms`, `raw_arrival_time_ms`, `propagation_delay_ms`, `tec_tecu`, `t_vacuum_error_ms`, `vtec_tecu`, `dtec_rate_tecu_per_s`, `dtec_mean_tecu`, `tof_kalman_ms`.
+
+Seven cross-field consistency rules (CR-1 through CR-7) are also defined there and enforced at write time.
+
+---
+
 ## Data Pipeline and Field Semantics (Read First)
 
 ```
