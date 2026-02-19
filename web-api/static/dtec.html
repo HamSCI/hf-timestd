@@ -432,14 +432,42 @@ function buildSolarTraces(stationsNeeded) {
     return traces;
 }
 
-function solarLayout() {
-    // Secondary y-axis definition for solar elevation overlay
+function centredSolarLayout(primaryTraces) {
+    // Compute the primary y-axis data range so we can centre the solar
+    // elevation curve on the plot midpoint.
+    let yMin = Infinity, yMax = -Infinity;
+    for (const t of primaryTraces) {
+        if (!t.y) continue;
+        for (const v of t.y) {
+            if (v != null && isFinite(v)) {
+                if (v < yMin) yMin = v;
+                if (v > yMax) yMax = v;
+            }
+        }
+    }
+    // Fallback if no finite data
+    if (!isFinite(yMin) || !isFinite(yMax)) { yMin = -1; yMax = 1; }
+
+    // Add 10% padding (mirrors Plotly's default autorange padding)
+    const pad = (yMax - yMin) * 0.10;
+    const lo = yMin - pad;
+    const hi = yMax + pad;
+    const mid = (lo + hi) / 2;
+    const half = (hi - lo) / 2;
+
+    // Map solar elevation [0, 90] onto [mid - half, mid + half]
+    // so the curve occupies the full plot height, centred on mid.
+    const solarLo = mid - half;   // corresponds to elev = 0
+    const solarHi = mid + half;   // corresponds to elev = 90
+
     return {
         yaxis2: {
             title: 'Solar elev. (°)',
             overlaying: 'y',
             side: 'right',
-            range: [0, 90],
+            range: [solarLo, solarHi],
+            tickvals: [solarLo, solarLo + half * 0.5, mid, mid + half * 0.5, solarHi],
+            ticktext: ['0°', '22°', '45°', '67°', '90°'],
             gridcolor: 'rgba(71,85,105,0.3)',
             tickfont: { color: 'rgba(255,220,80,0.7)', size: 10 },
             titlefont: { color: 'rgba(255,220,80,0.7)', size: 10 },
@@ -523,7 +551,7 @@ function renderPlots(series) {
         const solar = buildSolarTraces([...rateStations]);
         Plotly.newPlot('dtecRatePlot', [...rateTraces, ...solar], {
             ...baseLayout,
-            ...solarLayout(),
+            ...centredSolarLayout(rateTraces),
             margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
             yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', zeroline: true, zerolinecolor: '#475569' },
@@ -537,7 +565,7 @@ function renderPlots(series) {
         const solar = buildSolarTraces([...meanStations]);
         Plotly.newPlot('dtecMeanPlot', [...meanTraces, ...solar], {
             ...baseLayout,
-            ...solarLayout(),
+            ...centredSolarLayout(meanTraces),
             margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
             yaxis: { gridcolor: '#334155', title: 'Integrated dTEC (TECU)' },
@@ -551,7 +579,7 @@ function renderPlots(series) {
         const solar = buildSolarTraces([...refStations]);
         Plotly.newPlot('refPlot', [...refTraces, ...solar], {
             ...baseLayout,
-            ...solarLayout(),
+            ...centredSolarLayout(refTraces),
             margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
             yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', zeroline: true, zerolinecolor: '#475569' },
