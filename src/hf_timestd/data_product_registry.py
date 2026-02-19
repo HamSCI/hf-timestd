@@ -119,6 +119,7 @@ class DataProductRegistry:
         ('L1', 'tone_detections'): 'tone_detections',
         ('L1', 'bcd_timecode'): 'bcd_discrimination',
         ('L1', 'metrology_measurements'): 'metrology',
+        ('L1', 'all_arrivals'): 'all_arrivals',  # Multi-path physics: all correlation peaks per second
         ('L2', 'timing_measurements'): 'clock_offset',
         ('L2', 'test_signal'): 'test_signal',
         ('L2', 'physics_interpretation'): 'physics',

@@ -563,6 +563,76 @@ class MetrologyEngine:
             logger.debug(f"Signal presence check failed: {e}")
             return True  # Fail open — run tick filter if check fails
 
+    def _find_all_correlation_peaks(
+        self,
+        correlation: np.ndarray,
+        dominant_peak_idx: int,
+        noise_floor: float,
+        n_template: int,
+        start_sample: int,
+        min_corr_snr_db: float = 6.0,
+        max_peaks: int = 6
+    ) -> List[Dict[str, Any]]:
+        """
+        Find all significant peaks in the correlation envelope.
+
+        Each peak represents a distinct propagation path (e.g. 2F2, 3F2, 4F2
+        arriving at different delays).  Peaks are separated by at least one
+        template length so they represent independent arrivals, not sidelobes.
+
+        Args:
+            correlation:       Full correlation envelope (already computed).
+            dominant_peak_idx: Index of the already-identified dominant peak.
+            noise_floor:       Noise floor estimate (same units as correlation).
+            n_template:        Template length in samples (minimum peak separation).
+            start_sample:      Offset of measurement_region from audio_signal start.
+            min_corr_snr_db:   Minimum corr SNR for a secondary peak to be recorded.
+            max_peaks:         Maximum number of peaks to return (including dominant).
+
+        Returns:
+            List of dicts, each with keys:
+                peak_rank        int   0 = dominant, 1 = next strongest, ...
+                peak_idx         int   index into correlation array
+                arrival_sample   int   index into audio_signal
+                corr_snr_db      float correlation SNR of this peak
+                peak_value       float raw correlation value
+        """
+        if noise_floor <= 0 or len(correlation) == 0:
+            return []
+
+        peaks = []
+        suppressed = np.zeros(len(correlation), dtype=bool)
+
+        # Suppress a region of ±n_template around each found peak so the next
+        # search cannot pick up sidelobes of the same arrival.
+        for rank in range(max_peaks):
+            # Mask already-suppressed samples
+            search = np.where(suppressed, 0.0, correlation)
+            if search.max() <= 0:
+                break
+
+            idx = int(np.argmax(search))
+            val = correlation[idx]
+            snr_db = 20 * math.log10(val / noise_floor) if noise_floor > 0 else 0.0
+
+            if snr_db < min_corr_snr_db:
+                break  # All remaining peaks are below threshold
+
+            peaks.append({
+                'peak_rank': rank,
+                'peak_idx': idx,
+                'arrival_sample': start_sample + idx,
+                'corr_snr_db': float(snr_db),
+                'peak_value': float(val),
+            })
+
+            # Suppress ±n_template around this peak
+            lo = max(0, idx - n_template)
+            hi = min(len(suppressed), idx + n_template + 1)
+            suppressed[lo:hi] = True
+
+        return peaks
+
     def _measure_tone_at_known_time(
         self,
         audio_signal: np.ndarray,
@@ -948,6 +1018,31 @@ class MetrologyEngine:
                    f"(expected={expected_delay_ms:.1f}ms), error={timing_error_ms:+.2f}ms, "
                    f"corr_SNR={corr_snr_db:.1f}dB")
         
+        # Multi-path arrival search: find all significant peaks in the full
+        # correlation output.  Each peak above the SNR threshold and separated
+        # by at least one template length represents a distinct propagation path
+        # (e.g. 2F2, 3F2, 4F2 arriving at different delays).  The dominant peak
+        # (rank 0) is the one already identified above; secondary peaks are
+        # additional arrivals recorded for ionospheric science.
+        all_arrivals = self._find_all_correlation_peaks(
+            correlation=correlation,
+            dominant_peak_idx=peak_idx,
+            noise_floor=noise_floor,
+            n_template=n_template,
+            start_sample=start_sample,
+        )
+        # Annotate each arrival with its timing relative to minute boundary
+        for arr in all_arrivals:
+            arr_ms = arr['arrival_sample'] * 1000.0 / self.sample_rate
+            arr['arrival_ms'] = arr_ms
+            arr['timing_error_ms'] = arr_ms - expected_delay_ms
+        if len(all_arrivals) > 1:
+            logger.info(f"{station_name} @ {tone_freq_hz}Hz: {len(all_arrivals)} arrivals "
+                       f"(multi-path): " +
+                       ", ".join(f"rank{a['peak_rank']}={a['timing_error_ms']:+.1f}ms "
+                                 f"({a['corr_snr_db']:.1f}dB)"
+                                 for a in all_arrivals))
+
         # Include model metadata for traceability (M4)
         meta = getattr(self, '_last_prediction_meta', {})
         return {
@@ -965,6 +1060,7 @@ class MetrologyEngine:
             'model_data_source': meta.get('data_source', ''),
             'model_confidence': meta.get('model_confidence', 0.0),
             'propagation_mode': meta.get('propagation_mode', ''),
+            'all_arrivals': all_arrivals,  # All detected propagation paths
         }
 
     def process_minute(

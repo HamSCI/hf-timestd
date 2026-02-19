@@ -1,0 +1,99 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L1_all_arrivals",
+    "description": "All significant correlation peaks per UTC second per station — one row per propagation path. Records multi-path arrivals (e.g. 2F2, 3F2, 4F2 at different delays) that are discarded by the metrology pipeline but carry ionospheric science value. The dominant arrival (peak_rank=0) corresponds to the measurement used by metrology; secondary arrivals (peak_rank>0) are additional propagation paths.",
+    "cadence_seconds": 60,
+    "processing_level": "L1",
+    "standards": [
+        "ITU-R TF.460-6 Standard-frequency and time-signal emissions"
+    ],
+    "reference": "Multi-peak search in matched-filter correlation envelope, separated by >= one template length",
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Record write timestamp in UTC"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary (UTC second 0)"
+        },
+        {
+            "name": "channel",
+            "type": "string",
+            "required": true,
+            "description": "Receiver channel name (e.g., CHU_7850, SHARED_10000)"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "description": "Transmitting station (WWV, WWVH, CHU, BPM)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Broadcast carrier frequency in MHz"
+        },
+        {
+            "name": "utc_second",
+            "type": "integer",
+            "required": true,
+            "description": "UTC second of the transmitted tone (Unix epoch)"
+        },
+        {
+            "name": "peak_rank",
+            "type": "integer",
+            "required": true,
+            "description": "Arrival rank by correlation SNR: 0=dominant (used by metrology), 1=second strongest, etc."
+        },
+        {
+            "name": "arrival_ms",
+            "type": "float",
+            "required": true,
+            "description": "Measured arrival time from buffer start (ms). Convert to UTC: minute_boundary_utc + arrival_ms/1000."
+        },
+        {
+            "name": "timing_error_ms",
+            "type": "float",
+            "required": true,
+            "description": "Timing error: arrival_ms - model_expected_ms (ms). Positive = later than model prediction."
+        },
+        {
+            "name": "corr_snr_db",
+            "type": "float",
+            "required": true,
+            "description": "Correlation SNR of this peak relative to noise floor (dB). Minimum recorded: 6 dB."
+        },
+        {
+            "name": "peak_value",
+            "type": "float",
+            "required": false,
+            "description": "Raw correlation envelope value at this peak (unitless, normalized template energy)"
+        },
+        {
+            "name": "model_expected_ms",
+            "type": "float",
+            "required": false,
+            "description": "Model-predicted arrival time from buffer start (ms), from HFPropagationModel"
+        },
+        {
+            "name": "processed_at",
+            "type": "string",
+            "format": "iso8601",
+            "required": false,
+            "description": "ISO 8601 timestamp when record was written"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": false,
+            "description": "Processing software version"
+        }
+    ]
+}

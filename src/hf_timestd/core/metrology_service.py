@@ -277,7 +277,30 @@ class MetrologyService:
             station_metadata=self.station_config
         )
         logger.info(f"Tick phase writer initialized for {channel_name}")
-        
+
+        # All Arrivals Writer (multi-path physics product)
+        # Records every significant correlation peak per second per station —
+        # not just the dominant arrival.  Each row is one propagation path
+        # (e.g. 2F2, 3F2, 4F2 arriving at different delays).  This is the
+        # raw physics observable for ionospheric science; it does not feed
+        # the metrology pipeline.
+        all_arrivals_output_dir = DataProductRegistry.get_data_dir(
+            channel_dir=self.output_dir,
+            product_level="L1",
+            product_name="all_arrivals",
+            create=True
+        )
+        self.all_arrivals_writer = DataProductWriter(
+            output_dir=all_arrivals_output_dir,
+            product_level="L1",
+            product_name="all_arrivals",
+            channel=self.channel_name,
+            version="v1",
+            processing_version="1.0.0",
+            station_metadata=self.station_config
+        )
+        logger.info(f"All-arrivals writer initialized for {channel_name}")
+
         # Start IonoDataService background fetcher (singleton, safe to call multiple times)
         # This enables real-time WAM-IPE and GIRO ionospheric data for the propagation model.
         self._iono_service = None
@@ -649,6 +672,51 @@ class MetrologyService:
                     logger.debug(f"Detection attempts written: {len(rtp_attempts)} total, "
                                 f"{n_det} detected, {len(rtp_attempts) - n_det} rejected")
             
+            # Write all-arrivals (multi-path physics product)
+            # For each detected attempt that has secondary correlation peaks,
+            # write one row per arrival path.  This is purely additive — the
+            # metrology pipeline is unaffected.
+            if self.all_arrivals_writer and hasattr(self.engine, '_last_rtp_attempts'):
+                rtp_attempts = self.engine._last_rtp_attempts
+                if rtp_attempts:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    n_multipath = 0
+                    for attempt in rtp_attempts:
+                        if not attempt.get('detected'):
+                            continue
+                        arrivals = attempt.get('all_arrivals', [])
+                        if not arrivals:
+                            continue
+                        utc_sec = attempt.get('utc_second', 0)
+                        station = attempt.get('station', '')
+                        freq_mhz = self.frequency_hz / 1e6
+                        expected_ms = attempt.get('expected_delay_ms', 0.0)
+                        for arr in arrivals:
+                            rec = {
+                                'timestamp_utc': now_iso,
+                                'minute_boundary_utc': minute_boundary,
+                                'channel': self.channel_name,
+                                'station': station,
+                                'frequency_mhz': freq_mhz,
+                                'utc_second': utc_sec,
+                                'peak_rank': arr.get('peak_rank', 0),
+                                'arrival_ms': arr.get('arrival_ms', 0.0),
+                                'timing_error_ms': arr.get('timing_error_ms', 0.0),
+                                'corr_snr_db': arr.get('corr_snr_db', -99.0),
+                                'peak_value': arr.get('peak_value', 0.0),
+                                'model_expected_ms': expected_ms,
+                                'processed_at': now_iso,
+                                'processing_version': "1.0.0",
+                            }
+                            try:
+                                self.all_arrivals_writer.write_measurement(rec)
+                                if arr.get('peak_rank', 0) > 0:
+                                    n_multipath += 1
+                            except Exception as arr_err:
+                                logger.debug(f"Failed to write all_arrivals record: {arr_err}")
+                    if n_multipath > 0:
+                        logger.info(f"All-arrivals: {n_multipath} secondary path(s) recorded")
+
             # Write test signal for minutes 8 and 44 (WWV/WWVH channel sounding)
             minute_number = (minute_boundary // 60) % 60
             if minute_number in [8, 44] and self.test_signal_writer:
@@ -681,6 +749,8 @@ class MetrologyService:
             self.attempts_writer.close()
         if self.tick_phase_writer:
             self.tick_phase_writer.close()
+        if self.all_arrivals_writer:
+            self.all_arrivals_writer.close()
         if self._iono_service is not None:
             try:
                 self._iono_service.stop()
