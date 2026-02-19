@@ -518,7 +518,8 @@ class MultiBroadcastFusion:
         receiver_lat: Optional[float] = None,
         receiver_lon: Optional[float] = None,
         sample_rate: Optional[int] = None,
-        timing_authority_level: str = 'L5'
+        timing_authority_level: str = 'L5',
+        is_rtp_authority: bool = True
     ):
         """
         Initialize multi-broadcast fusion engine.
@@ -529,12 +530,16 @@ class MultiBroadcastFusion:
             auto_calibrate: Whether to learn calibration from data
             reference_station: Station to use as timing reference
             timing_authority_level: Hardware timing level (L1-L6), affects grade thresholds
+            is_rtp_authority: True when GPS+PPS is available (RTP mode). In RTP mode
+                              TEC is a science observable, not a correction to apply.
+                              In Fusion mode (False) TEC correction improves D_clock.
         """
         self.data_root = Path(data_root)
         self.timing_authority_level = timing_authority_level.upper()
         if self.timing_authority_level not in self.GRADE_THRESHOLDS:
             logger.warning(f"Unknown timing authority level '{timing_authority_level}', defaulting to L5")
             self.timing_authority_level = 'L5'
+        self.is_rtp_authority = is_rtp_authority
         self.phase2_dir = self.data_root / 'phase2'
         self.calibration: Dict[str, BroadcastCalibration] = {}
         self.calibration_update_count = 0  # Track updates for auto-save
@@ -3624,52 +3629,82 @@ class MultiBroadcastFusion:
                             logger.warning(f"TEC solver produced NaN for {station} (tec={tec_result.tec_u}, conf={tec_result.confidence}) - skipping")
                         elif tec_result.confidence > 0.5 and 1.0 <= tec_result.tec_u <= 200.0:
                             # TEC is physically reasonable (1-200 TECU) and well-fit
-                            # Use t_vacuum_error_ms to compute ionosphere-free D_clock
                             logger.info(
-                                f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}), "
+                                f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU "
+                                f"(R2={tec_result.confidence:.2f}), "
                                 f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms"
                             )
-                            
-                            # ================================================================
-                            # METROLOGICALLY SOUND TEC CORRECTION
-                            # ================================================================
-                            # The TEC fit gives us t_vacuum (ionosphere-free geometric delay)
-                            # and per-frequency group delays. 
-                            #
-                            # IMPORTANT: D_clock was computed as:
-                            #   D_clock = raw_toa - propagation_model_delay
-                            # where propagation_model_delay includes a MODELED ionospheric term.
-                            #
-                            # The TEC fit provides a MEASURED ionospheric term. To correct:
-                            #   D_clock_corrected = D_clock + (modeled_iono - measured_iono)
-                            #
-                            # However, we don't have access to the modeled ionospheric component
-                            # separately. Instead, we use the fact that all frequencies from
-                            # the same station should yield the SAME D_clock after correction.
-                            #
-                            # The TEC fit's t_vacuum represents the ionosphere-free arrival time.
-                            # If the propagation model were perfect, all D_clock values would
-                            # already agree. The TEC fit residuals tell us how much the model
-                            # was wrong for each frequency.
-                            #
-                            # CONSERVATIVE APPROACH: Only boost confidence for good TEC fits.
-                            # Do NOT modify D_clock values, as this requires knowing the
-                            # modeled ionospheric component which we don't have access to here.
-                            # The TEC validation confirms the measurements are self-consistent.
-                            
-                            for m in station_meas:
-                                m.propagation_mode = 'TEC_VALIDATED'
-                                m.confidence = min(1.0, m.confidence * 1.15)  # Modest confidence boost
-                            
-                            # Store TEC result for science products
-                            # The actual ionospheric correction should be applied upstream
-                            # in the L2 calibration service where we have access to the
-                            # propagation model components
-                            logger.debug(
-                                f"  TEC validated {len(station_meas)} measurements from {station}, "
-                                f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms, "
-                                f"residuals={tec_result.residuals_ms:.3f}ms"
-                            )
+
+                            if not self.is_rtp_authority:
+                                # ============================================================
+                                # FUSION MODE: Apply ionosphere-free D_clock correction
+                                # ============================================================
+                                # In Fusion mode (no GPS+PPS) the propagation model's
+                                # ionospheric term is the dominant error source.  The TEC
+                                # fit solves:
+                                #
+                                #   D_clock(f) = t_vacuum + K·TEC/f²
+                                #
+                                # The intercept t_vacuum_error_ms IS the ionosphere-free
+                                # D_clock — independent of which propagation mode was used
+                                # and independent of what TEC value the model assumed.
+                                # Replacing each measurement's d_clock_ms with t_vacuum
+                                # removes the ionospheric dispersion entirely.
+                                #
+                                # Guard: only apply when fit confidence is high enough that
+                                # the intercept is well-determined.  With N=3 (CHU) and
+                                # R²>0.5 the intercept uncertainty is typically <1ms.
+                                # With N=2 the fit is exact (R²=1 always) so we require
+                                # a higher confidence threshold to avoid over-fitting noise.
+                                n_pts = tec_result.n_frequencies
+                                min_conf = 0.7 if n_pts >= 3 else 0.85
+                                if tec_result.confidence >= min_conf:
+                                    t_vac = tec_result.t_vacuum_error_ms
+                                    for m in station_meas:
+                                        old_d = m.d_clock_ms
+                                        m.d_clock_ms = t_vac
+                                        m.propagation_mode = 'TEC_CORRECTED'
+                                        m.confidence = min(1.0, m.confidence * 1.2)
+                                        logger.debug(
+                                            f"  TEC correction {station} {m.frequency_mhz}MHz: "
+                                            f"D_clock {old_d:+.3f}ms → {t_vac:+.3f}ms "
+                                            f"(Δ={t_vac - old_d:+.3f}ms, "
+                                            f"TEC={tec_result.tec_u:.1f} TECU)"
+                                        )
+                                    logger.info(
+                                        f"TEC correction applied to {len(station_meas)} "
+                                        f"{station} measurements: "
+                                        f"t_vacuum={t_vac:+.3f}ms, "
+                                        f"TEC={tec_result.tec_u:.1f} TECU, "
+                                        f"conf={tec_result.confidence:.2f}"
+                                    )
+                                else:
+                                    # Fit exists but intercept not well-determined — validate only
+                                    for m in station_meas:
+                                        m.propagation_mode = 'TEC_VALIDATED'
+                                        m.confidence = min(1.0, m.confidence * 1.1)
+                                    logger.info(
+                                        f"TEC fit for {station} below correction threshold "
+                                        f"(conf={tec_result.confidence:.2f} < {min_conf:.2f}): "
+                                        f"validated only"
+                                    )
+                            else:
+                                # ============================================================
+                                # RTP MODE: TEC is a science observable, not a correction
+                                # ============================================================
+                                # In RTP mode the GPS+PPS reference is ~50µs accurate.
+                                # D_clock is a direct measurement of the propagation path.
+                                # Applying TEC correction would remove the ionospheric signal
+                                # we want to measure.  Only boost confidence.
+                                for m in station_meas:
+                                    m.propagation_mode = 'TEC_VALIDATED'
+                                    m.confidence = min(1.0, m.confidence * 1.15)
+                                logger.debug(
+                                    f"  TEC validated {len(station_meas)} measurements from "
+                                    f"{station} (RTP mode — not correcting), "
+                                    f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms, "
+                                    f"residuals={tec_result.residuals_ms:.3f}ms"
+                                )
                         elif tec_result.confidence > 0.9:
                             # TEC fit is good but value is unrealistic (e.g., 0.0 TECU)
                             logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}) - not applying correction")
@@ -4762,11 +4797,25 @@ def run_fusion_service(
         receiver_lon: Receiver longitude (from config)
         timing_authority_level: Hardware timing level (L1-L6)
     """
+    # Determine timing authority from config (same logic as bootstrap gate below)
+    _is_rtp_authority = True
+    try:
+        import toml as _toml_fs
+        _cfg_path = Path('/etc/hf-timestd/timestd-config.toml')
+        if _cfg_path.exists():
+            _cfg_fs = _toml_fs.load(_cfg_path)
+            _auth = _cfg_fs.get('timing', {}).get('authority', 'rtp')
+            _is_rtp_authority = (_auth == 'rtp')
+            logger.info(f"[FUSION] Timing authority: {_auth} → is_rtp_authority={_is_rtp_authority}")
+    except Exception as _e:
+        logger.warning(f"[FUSION] Could not read config for authority: {_e}")
+
     fusion = MultiBroadcastFusion(
         data_root,
         receiver_lat=receiver_lat,
         receiver_lon=receiver_lon,
-        timing_authority_level=timing_authority_level
+        timing_authority_level=timing_authority_level,
+        is_rtp_authority=_is_rtp_authority
     )
     
     # Initialize dual Chrony SHM outputs if enabled
