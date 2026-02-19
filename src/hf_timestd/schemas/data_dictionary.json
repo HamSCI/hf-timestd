@@ -79,11 +79,13 @@
                 "BPM": "+38"
             },
             "known_pitfalls": [
-                "CRITICAL: In production (as of 2026-02-19), clock_offset_ms = raw_toa_ms (the L1 residual), NOT raw_arrival_time_ms - propagation_delay_ms. The formula above is the INTENDED definition; the code inverts it. See P1-A in physics review.",
-                "The CHU systematic offset of ~-76 ms is NOT ionospheric — it is a propagation model error. Do not interpret as a clock offset.",
-                "This field is NOT a clock offset in the metrological sense (receiver clock vs UTC). It is a timing residual that includes propagation model error."
+                "clock_offset_ms IS correctly set to the D_clock residual (raw_toa_ms from L1, which is timing_error_ms = arrival - expected_propagation_delay). The field name is misleading but the value is the correct input to the TEC estimator.",
+                "CRITICAL: The L1 propagation model (expected_propagation_delay) is wrong for CHU by ~76 ms and has per-station systematic errors for all stations. This means clock_offset_ms contains a large non-ionospheric systematic bias that is NOT removed before TEC fitting. The TEC estimator intercept (t_vacuum_error_ms) absorbs this bias.",
+                "The CHU systematic offset of ~-76 ms is NOT ionospheric — it is a propagation model error in the L1 expected_propagation_delay. The TEC fit intercept for CHU is therefore ~-76 ms, not a clock offset.",
+                "This field is NOT a clock offset in the metrological sense (receiver clock vs UTC). It is a timing residual relative to the L1 propagation model, which has significant systematic errors.",
+                "The TEC slope (ionospheric dispersion) is extracted from the frequency-dependent variation in clock_offset_ms. This variation is dominated by propagation model error (different modes at different frequencies), not ionospheric dispersion — hence SNR ~0.01-0.14 (F1)."
             ],
-            "tec_estimator_requirement": "The TEC estimator requires clock_offset_ms to be the residual AFTER geometric delay removal, so that the remaining frequency-dependent variation is purely ionospheric (1/f² dispersion). Feeding raw_toa_ms (which includes the geometric delay) contaminates the fit.",
+            "tec_estimator_requirement": "The TEC estimator requires clock_offset_ms to be the residual after accurate geometric delay removal. The current L1 model has systematic errors of up to 76 ms (CHU), which dominate the fit. Fixing requires accurate propagation model (P2-A: IonoDataService + real foF2/hmF2).",
             "hdf5_path": "phase2/{CHANNEL}/clock_offset/",
             "schema_field": "clock_offset_ms",
             "schema_file": "l2_timing_measurements_v1.json"
