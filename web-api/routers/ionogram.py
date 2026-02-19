@@ -1,7 +1,7 @@
 """
 Ionogram API endpoints — all-arrivals Time-of-Flight vs SNR cluster analysis.
 
-Analogous to Gwyn Griffin's WSPRDaemon grape_acf_doppler_spread.py plots:
+Analogous to Gwyn Griffiths' WSPRDaemon grape_acf_doppler_spread.py plots:
   - ToF time series with S+N level overlay
   - ToF vs S+N scatter with KDE density contours (cluster analysis)
 
@@ -25,12 +25,12 @@ router = APIRouter(prefix="/ionogram", tags=["ionosphere"])
 # Channels that have all_arrivals data
 ALL_ARRIVALS_CHANNELS = [
     "CHU_3330", "CHU_7850", "CHU_14670",
-    "WWV_5000", "WWV_10000", "WWV_15000", "WWV_20000",
+    "WWV_5000", "WWV_10000", "WWV_15000", "WWV_20000", "WWV_25000",
     "WWVH_5000", "WWVH_10000",
     "BPM_5000", "BPM_10000",
 ]
 
-# Station colour palette (matches Gwyn Griffin slide aesthetic)
+# Station colour palette (matches Gwyn Griffiths slide aesthetic)
 STATION_COLORS = {
     "CHU": "#7B68EE",   # medium slate blue
     "WWV": "#20B2AA",   # light sea green
@@ -124,18 +124,20 @@ def _load_all_arrivals(
         return None
 
     # GPS-referenced ToF: no propagation model needed.
-    # arrival_ms = time from minute boundary to tone onset (GPS-disciplined).
-    # utc_second = Unix timestamp of the broadcast second.
-    # sec_in_min = utc_second - minute_boundary_utc  (1..59 for valid CHU seconds).
-    # tof_ms = arrival_ms - sec_in_min*1000 - onset_ms
     #
-    # onset_ms is the fixed transmitter delay (CHU: 74ms H3E group delay).
-    # This gives the true propagation delay with no model dependency.
+    # CHU: minute_boundary_utc is the true minute boundary; utc_second is the
+    #   broadcast second (Unix timestamp). sec_in_min = utc_second - mb (1..59).
+    #   tof_ms = arrival_ms - sec_in_min*1000 - onset_ms
+    #
+    # WWV/WWVH/BPM: the writer stores per-second boundaries — minute_boundary_utc
+    #   equals utc_second, so sec_in_min = 0. arrival_ms is already the offset
+    #   within that second, i.e. the propagation delay directly.
+    #   tof_ms = arrival_ms - onset_ms  (onset_ms = 0 for these stations)
     import numpy as np
     arr_arr = np.array(rows["arrival_ms"])
     mb_arr  = np.array(rows["minute_boundary"])
     sec_arr = np.array(rows["utc_second"])
-    sec_in_min = sec_arr - mb_arr  # seconds since minute boundary
+    sec_in_min = sec_arr - mb_arr  # 1..59 for CHU, 0 for WWV/WWVH/BPM
     rows["tof_ms"] = (arr_arr - sec_in_min * 1000.0 - onset_ms).tolist()
     rows["sec_in_min"] = sec_in_min.tolist()
     rows["onset_correction_ms"] = onset_ms
@@ -198,7 +200,7 @@ async def get_all_arrivals(
     All-arrivals Time-of-Flight data for one channel.
 
     Returns scatter data (ToF vs corr_snr_db) and optionally a KDE density
-    grid for contour overlay — analogous to Gwyn Griffin's cluster analysis
+    grid for contour overlay — analogous to Gwyn Griffiths' cluster analysis
     of ToF and S+N level.
 
     ToF = model_expected_ms + timing_error_ms (absolute propagation delay).
@@ -249,26 +251,28 @@ async def get_all_arrivals(
         sim = np.array(rows["sec_in_min"])
 
         # Filter to physically plausible GPS-referenced ToF.
-        # sec_in_min must be a valid broadcast second (1-59).
-        # tof_max is the physical upper bound for each station:
-        #   CHU: 1521 km path, max ~30ms for any realistic ionospheric mode.
-        #   WWV/WWVH/BPM: longer paths, allow more.
+        # CHU: sec_in_min must be 1-59 (valid broadcast seconds within minute).
+        # WWV/WWVH/BPM: sec_in_min=0 is correct (writer stores per-second
+        #   boundaries, so mb==utc_second and arrival_ms is already the ToF).
+        # tof_max: physical upper bound per station path length.
         # SNR cap at 40 dB removes DC/self-interference artefacts.
         SNR_CAP = 40.0
         station = _channel_to_station(channel)
         if station == "CHU":
             tof_max = 30.0
+            sim_valid = (sim >= 1) & (sim <= 59)
         elif station in ("WWVH", "BPM"):
             tof_max = 500.0
+            sim_valid = sim == 0
         else:  # WWV
             tof_max = 200.0
+            sim_valid = sim == 0
         valid = (
             (snr <= SNR_CAP)
             & np.isfinite(tof)
             & (tof >= 0)
             & (tof <= tof_max)
-            & (sim >= 1)
-            & (sim <= 59)
+            & sim_valid
         )
         tof, snr, rank_arr, mb = tof[valid], snr[valid], rank_arr[valid], mb[valid]
 
@@ -285,7 +289,7 @@ async def get_all_arrivals(
             "peak_rank": rank_arr[idx].tolist(),
         }
 
-        # KDE on full (undownsampled, capped) data — x=snr, y=tof (Griffin convention)
+        # KDE on full (undownsampled, capped) data — x=snr, y=tof (Griffiths convention)
         kde_result = None
         if include_kde and len(tof) >= 10:
             kde_result = _kde_contours(snr, tof, n_grid=60)
@@ -337,7 +341,7 @@ async def get_arrivals_timeseries(
     min_snr_db: float = Query(6.0, description="Minimum correlation SNR"),
 ):
     """
-    All-arrivals ToF time series (top panel of Griffin-style plot).
+    All-arrivals ToF time series (top panel of Griffiths-style plot).
 
     Returns per-minute ToF for rank-0 (dominant) and rank-1+ (secondary)
     arrivals separately, plus the corr_snr_db time series (bottom panel).
@@ -392,10 +396,17 @@ async def get_arrivals_timeseries(
 
         # Same GPS-referenced filter as /arrivals endpoint
         station = _channel_to_station(channel)
-        tof_max = 30.0 if station == "CHU" else (500.0 if station in ("WWVH", "BPM") else 200.0)
+        if station == "CHU":
+            tof_max = 30.0
+            sim_valid = (sim >= 1) & (sim <= 59)
+        elif station in ("WWVH", "BPM"):
+            tof_max = 500.0
+            sim_valid = sim == 0
+        else:  # WWV
+            tof_max = 200.0
+            sim_valid = sim == 0
         valid = (
-            np.isfinite(tof) & (tof >= 0) & (tof <= tof_max)
-            & (sim >= 1) & (sim <= 59)
+            np.isfinite(tof) & (tof >= 0) & (tof <= tof_max) & sim_valid
         )
         tof, snr, rank_arr, mb = tof[valid], snr[valid], rank_arr[valid], mb[valid]
 
