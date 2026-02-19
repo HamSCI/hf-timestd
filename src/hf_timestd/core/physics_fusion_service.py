@@ -113,7 +113,7 @@ class PhysicsFusionService:
             station_metadata={'description': 'Physics-Based Fusion TEC Output'}
         )
         
-        # Third writer for carrier-phase dTEC records
+        # Third writer for carrier-phase dTEC per-minute summary records
         self.dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
         self.dtec_dir.mkdir(parents=True, exist_ok=True)
         self.dtec_writer = DataProductWriter(
@@ -123,6 +123,21 @@ class PhysicsFusionService:
             channel='AGGREGATED',
             processing_version='5.0.0',
             station_metadata={'description': 'Carrier-Phase dTEC Output'}
+        )
+
+        # Fourth writer for full per-tick dTEC time series (P3-B fix)
+        # Preserves the ~1-second resolution carrier-phase data that the
+        # per-minute summary discards.  Stored separately to avoid bloating
+        # the summary HDF5 files.
+        self.dtec_ts_dir = self.data_root / 'phase2' / 'science' / 'dtec_timeseries'
+        self.dtec_ts_dir.mkdir(parents=True, exist_ok=True)
+        self.dtec_ts_writer = DataProductWriter(
+            output_dir=self.dtec_ts_dir,
+            product_level='L3',
+            product_name='dtec_timeseries',
+            channel='AGGREGATED',
+            processing_version='5.0.0',
+            station_metadata={'description': 'Carrier-Phase dTEC Full Time Series (~1s resolution)'}
         )
         
         # Tick-phase reader cache (separate from clock_offset readers)
@@ -244,10 +259,14 @@ class PhysicsFusionService:
                     if 'frequency_mhz' not in item:
                         continue
 
-                    # Resolve TOA: prefer Kalman if available, fallback to raw
+                    # Resolve D_clock residual: prefer Kalman if available,
+                    # fallback to clock_offset_ms (= D_clock, the timing residual
+                    # after subtracting the propagation model delay).  Do NOT use
+                    # raw_arrival_time_ms here — that is an absolute ToA and its
+                    # intercept is dominated by the geometric delay, not TEC.
                     toa = item.get('tof_kalman_ms')
                     if toa is None or np.isnan(toa):
-                        toa = item.get('raw_arrival_time_ms')
+                        toa = item.get('clock_offset_ms')
                         
                     uncertainty = item.get('tof_uncertainty_ms')
                     if uncertainty is None or np.isnan(uncertainty):
@@ -268,7 +287,7 @@ class PhysicsFusionService:
                     })
                              
             except Exception as e:
-                logger.debug(f"Failed to read channel {channel}: {e}")
+                logger.warning(f"Failed to read channel {channel}: {e}")
                 continue
         
         # Median-aggregate per (station, frequency) to produce one measurement
@@ -282,11 +301,11 @@ class PhysicsFusionService:
             min_unc = min(o['uncertainty_ms'] for o in obs_list)
             # Best SNR
             best_snr = max(o.get('snr_db', 0.0) for o in obs_list)
-            # Dominant mode (most common)
-            mode_counts: Dict[str, int] = defaultdict(int)
-            for o in obs_list:
-                mode_counts[o['mode']] += 1
-            dominant_mode = max(mode_counts, key=mode_counts.get)
+            # Dominant mode: use the mode from the highest-SNR observation.
+            # Mode-by-count is unreliable when different channels disagree;
+            # the highest-SNR measurement is the most trustworthy single source.
+            best_obs = max(obs_list, key=lambda o: o.get('snr_db', 0.0))
+            dominant_mode = best_obs['mode']
             
             measurements_by_station[station].append({
                 'frequency_hz': freq_mhz * 1e6,
@@ -377,11 +396,35 @@ class PhysicsFusionService:
                 logger.warning(f"Tomography failed: {e}")
 
         # 4. VTEC Map Generation
+        # VTEC requires credible group-delay TEC estimates (confidence >= 0.3).
+        # In production the group-delay TEC is below the noise floor (F1 in
+        # CRITIC_CONTEXT), so ipp_measurements is always empty and vtec_tecu is
+        # always NaN.  Log this explicitly rather than silently writing NaN.
         vtec_result = None
-        if len(tec_estimates) >= 3:
-            try:
-                ipp_measurements = self._build_ipp_measurements(tec_estimates)
-                if len(ipp_measurements) >= 3:
+        ipp_measurements = self._build_ipp_measurements(tec_estimates)
+        vtec_by_station: Dict[str, float] = {}
+
+        if not ipp_measurements:
+            n_low_conf = sum(
+                1 for r in tec_estimates.values() if r.confidence < 0.3
+            )
+            if n_low_conf > 0:
+                logger.debug(
+                    f"VTEC unavailable: {n_low_conf} station(s) have group-delay TEC "
+                    f"confidence < 0.3 (propagation model noise floor). "
+                    f"vtec_tecu will be NaN in TEC records. Fix: improve propagation model (P2-A)."
+                )
+        else:
+            # Build per-station vtec lookup (median vtec across frequencies per station)
+            for ipm in ipp_measurements:
+                station_key = ipm.station
+                if station_key not in vtec_by_station:
+                    vtec_by_station[station_key] = []
+                vtec_by_station[station_key].append(ipm.vtec_tecu)
+            vtec_by_station = {k: float(np.median(v)) for k, v in vtec_by_station.items()}
+
+            if len(ipp_measurements) >= 3:
+                try:
                     vtec_result = self.vtec_mapper.generate_map(
                         ipp_measurements, timestamp=float(minute_timestamp)
                     )
@@ -391,12 +434,11 @@ class PhysicsFusionService:
                             f"RMS={vtec_result.rms_residual_tecu:.2f} TECU, "
                             f"conf={vtec_result.confidence:.2f}"
                         )
-                        # Write IONEX file
                         ts = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)
                         ionex_path = self.ionex_dir / f"hftd_{ts.strftime('%Y%m%d_%H%M')}.ionex"
                         self.vtec_mapper.write_ionex(vtec_result, ionex_path)
-            except Exception as e:
-                logger.warning(f"VTEC map generation failed: {e}")
+                except Exception as e:
+                    logger.warning(f"VTEC map generation failed: {e}")
 
         # 5. UTC Consistency Check
         utc_consistent = len(tec_estimates) > 0
@@ -411,7 +453,8 @@ class PhysicsFusionService:
         # 7. Write per-station TEC records
         self._write_tec_records(
             minute_timestamp,
-            tec_estimates
+            tec_estimates,
+            vtec_by_station
         )
 
         # 8. Carrier-phase dTEC estimation
@@ -484,12 +527,23 @@ class PhysicsFusionService:
     ):
         """Write global L3 Physics Fusion product."""
         # Simple summary records for now (flattened for HDF5 compatibility)
+        # utc_offset_ms: median of t_vacuum_error_ms across all TEC estimates.
+        # t_vacuum_error_ms is the TEC-fit intercept — the ionosphere-free D_clock,
+        # i.e. the residual timing error after removing the dispersive ionospheric
+        # component.  It is the best available UTC offset estimate from this pipeline.
+        vacuum_errors = [r.t_vacuum_error_ms for r in tec_estimates.values()
+                         if np.isfinite(r.t_vacuum_error_ms)]
+        utc_offset = float(np.median(vacuum_errors)) if vacuum_errors else float('nan')
+        # Uncertainty: MAD-based robust spread, converted to 1-sigma equivalent
+        utc_unc = float(np.median(np.abs(np.array(vacuum_errors) - utc_offset)) * 1.4826) \
+            if len(vacuum_errors) > 1 else float('nan')
+
         record = {
             'timestamp_utc': datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace('+00:00', 'Z'),
             'minute_boundary_utc': timestamp,
             'stations_used': ", ".join(sorted(set(k[0] for k in tec_estimates.keys()))),
-            'utc_offset_ms': float('nan'), # Placeholder
-            'utc_uncertainty_ms': float('nan'),
+            'utc_offset_ms': utc_offset,
+            'utc_uncertainty_ms': utc_unc,
             'utc_consistency_flag': utc_consistent,
             'processing_version': '5.0.0',
             'processed_at': datetime.now(timezone.utc).isoformat()
@@ -502,13 +556,16 @@ class PhysicsFusionService:
             logger.error(f"Failed to write L3 physics summary: {e}")
 
     def _write_tec_records(
-        self, 
-        timestamp: int, 
-        tec_estimates: Dict[str, TECResult]
+        self,
+        timestamp: int,
+        tec_estimates: Dict[str, TECResult],
+        vtec_by_station: Optional[Dict[str, float]] = None,
     ):
         """Write individual station TEC records for L3A product."""
         ts_iso = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
-        
+        if vtec_by_station is None:
+            vtec_by_station = {}
+
         for (station, mode), result in tec_estimates.items():
             # Follow l3_tec_v1.json schema
             record = {
@@ -517,6 +574,7 @@ class PhysicsFusionService:
                 'station': station,
                 'propagation_mode': mode,
                 'tec_tecu': float(result.tec_u),
+                'vtec_tecu': float(vtec_by_station.get(station, float('nan'))),
                 't_vacuum_error_ms': float(result.t_vacuum_error_ms),
                 'confidence': float(result.confidence),
                 'n_frequencies': int(result.n_frequencies),
@@ -642,11 +700,23 @@ class PhysicsFusionService:
         if not tick_data:
             return
 
-        # Build anchor lookup: station -> TEC in TECU (from group-delay fit)
+        # Build anchor lookup: station -> TEC in TECU (from group-delay fit).
+        # Only anchor when the group-delay TEC estimate is credible.
+        # confidence < 0.5 means the 1/f² fit is dominated by noise (SNR ~0.01-0.14
+        # per CRITIC_CONTEXT F1); anchoring to it would inject a large DC bias into
+        # the carrier-phase dTEC series.  Unanchored dTEC (is_anchored=False) is
+        # still scientifically valid as a relative rate-of-change product.
+        ANCHOR_MIN_CONFIDENCE = 0.5
         anchor_by_station: Dict[str, float] = {}
         for (station, mode), result in tec_estimates.items():
-            if result.confidence >= 0.1 and 0 < result.tec_u <= 200:
+            if result.confidence >= ANCHOR_MIN_CONFIDENCE and 0 < result.tec_u <= 200:
                 anchor_by_station[station] = result.tec_u
+            elif result.confidence < ANCHOR_MIN_CONFIDENCE and 0 < result.tec_u <= 200:
+                logger.debug(
+                    f"dTEC anchor suppressed for {station}: group-delay TEC confidence "
+                    f"{result.confidence:.2f} < {ANCHOR_MIN_CONFIDENCE} threshold "
+                    f"(TEC={result.tec_u:.1f} TECU). dTEC will be unanchored."
+                )
 
         ts_iso = datetime.fromtimestamp(
             minute_timestamp, tz=timezone.utc
@@ -702,13 +772,26 @@ class PhysicsFusionService:
                 dtec_std = float(np.std(dtec_arr))
                 rate_mean = float(np.mean(rate_arr))
 
-                # Quality flag
+                # Quality flag.
+                # Unanchored dTEC is capped at MARGINAL: dtec_mean_tecu has no
+                # absolute reference and drifts freely (P1-B in physics review).
+                # Only dtec_rate_tecu_per_s is reliable when unanchored.
                 if dtec_result.n_points >= 30 and dtec_result.mean_snr_db >= 15:
                     qflag = 'GOOD'
                 elif dtec_result.n_points >= 10 and dtec_result.mean_snr_db >= 8:
                     qflag = 'MARGINAL'
                 else:
                     qflag = 'BAD'
+                if not dtec_result.is_anchored and qflag == 'GOOD':
+                    qflag = 'MARGINAL'  # Unanchored: integrated TEC is relative only
+
+                # anchor_status: human-readable reason for anchor state
+                if dtec_result.is_anchored:
+                    anchor_status = 'ANCHORED'
+                elif anchor_tec is not None:
+                    anchor_status = 'ANCHOR_LOW_CONF'
+                else:
+                    anchor_status = 'NO_ANCHOR'
 
                 record = {
                     'timestamp_utc': ts_iso,
@@ -722,6 +805,7 @@ class PhysicsFusionService:
                     'dtec_rate_tecu_per_s': rate_mean,
                     'anchor_tec_tecu': anchor_tec if anchor_tec else float('nan'),
                     'is_anchored': dtec_result.is_anchored,
+                    'anchor_status': anchor_status,
                     'sigma_noise_tecu': dtec_result.sigma_dtec_tecu,
                     'mean_snr_db': dtec_result.mean_snr_db,
                     'quality_flag': qflag,
@@ -733,6 +817,34 @@ class PhysicsFusionService:
                     n_written += 1
                 except Exception as e:
                     logger.error(f"Failed to write dTEC record for {channel}/{station}: {e}")
+
+                # P3-B: Write full per-tick time series so ~1-second resolution
+                # is preserved for scintillation and TID analysis.
+                # Each tick is one record; epochs are absolute UTC seconds.
+                try:
+                    epochs = dtec_result.epochs
+                    rates = dtec_result.dtec_rate_tecu_per_s
+                    dtecs = dtec_result.dtec_tecu
+                    for i, (ep, rate, dtec_val) in enumerate(zip(epochs, rates, dtecs)):
+                        ts_record = {
+                            'timestamp_utc': datetime.fromtimestamp(
+                                ep, tz=timezone.utc
+                            ).isoformat(),
+                            'epoch': float(ep),
+                            'minute_boundary': minute_timestamp,
+                            'station': station,
+                            'channel': channel,
+                            'frequency_mhz': freq_mhz,
+                            'dtec_rate_tecu_per_s': float(rate),
+                            'dtec_tecu': float(dtec_val),
+                            'is_anchored': dtec_result.is_anchored,
+                            'anchor_status': anchor_status,
+                            'snr_db': float(dtec_result.mean_snr_db),
+                            'processing_version': '5.0.0',
+                        }
+                        self.dtec_ts_writer.write_measurement(ts_record)
+                except Exception as e:
+                    logger.debug(f"Failed to write dTEC time series for {channel}/{station}: {e}")
 
         if n_written > 0:
             n_anchored = sum(
