@@ -1209,7 +1209,20 @@ class MetrologyEngine:
                         if station_name in ('WWV', 'WWVH') and sec_in_minute in (29, 59):
                             continue
                         
-                        tone_arrival_utc = utc_sec + prop_delay_sec
+                        # CHU regular-second 300ms tones start ~70ms after the
+                        # UTC second boundary + propagation delay.  Verified by
+                        # direct measurement of 1000 Hz power in the IQ buffer:
+                        # the tone is absent at 0-65ms and present from +70ms.
+                        # The FSK stop-bit anchor (+6ms) applies only to FSK
+                        # seconds (31-39) which have a different signal structure.
+                        # The 64ms difference between FSK and regular-tone timing
+                        # is a real CHU transmitter characteristic.
+                        # Second 0 (minute marker, 500ms) starts at 0ms.
+                        chu_tx_onset_sec = 0.0
+                        if station_name == 'CHU' and sec_in_minute != 0:
+                            chu_tx_onset_sec = 0.070
+
+                        tone_arrival_utc = utc_sec + prop_delay_sec + chu_tx_onset_sec
                         tone_end_utc = tone_arrival_utc + margin_sec
                         
                         onset_sample = buffer_timing.utc_to_sample(tone_arrival_utc)
@@ -1256,8 +1269,10 @@ class MetrologyEngine:
                             arrival_utc = buffer_timing.sample_to_utc(
                                 result['arrival_ms'] * self.sample_rate / 1000
                             )
-                            # Expected arrival UTC = utc_sec + prop_delay
-                            expected_utc = utc_sec + prop_delay_sec
+                            # Expected arrival UTC includes CHU tx_onset offset
+                            # so timing_error_ms reflects the true clock offset.
+                            chu_tx = 0.070 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
+                            expected_utc = utc_sec + prop_delay_sec + chu_tx
                             result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
                             result['arrival_utc'] = arrival_utc
                             rtp_measurements.append(result)
