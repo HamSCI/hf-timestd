@@ -28,6 +28,7 @@ Key classes:
 """
 
 import logging
+import math
 import time
 import argparse
 import signal
@@ -37,6 +38,14 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import numpy as np
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib  # Python < 3.11 fallback
+    except ImportError:
+        tomllib = None
 
 from hf_timestd.core.tec_estimator import TECEstimator, TECResult
 from hf_timestd.core.carrier_tec import CarrierTECEstimator
@@ -70,13 +79,23 @@ class PhysicsFusionService:
         data_root: Path,
         output_dir: Path,
         poll_interval: float = 60.0,
-        lookback_minutes: int = 5
+        lookback_minutes: int = 5,
+        receiver_lat: Optional[float] = None,
+        receiver_lon: Optional[float] = None,
     ):
         self.data_root = Path(data_root)
         self.output_dir = Path(output_dir)
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
-        
+
+        # Receiver coordinates — used for IPP computation and elevation geometry.
+        # Default to EM38ww (Columbia, MO) if not provided.
+        self.receiver_lat = receiver_lat if receiver_lat is not None else 38.92
+        self.receiver_lon = receiver_lon if receiver_lon is not None else -92.13
+        logger.info(
+            f"Receiver location: {self.receiver_lat:.4f}°N {self.receiver_lon:.4f}°E"
+        )
+
         # Initialize TEC Estimator
         self.tec_estimator = TECEstimator()
         
@@ -86,8 +105,11 @@ class PhysicsFusionService:
         # Initialize E/F layer tomography
         self.tomography = IonoTomography()
         
-        # Initialize VTEC mapper
-        self.vtec_mapper = VTECMapper()
+        # Initialize VTEC mapper with actual receiver coordinates (P1-C fix)
+        self.vtec_mapper = VTECMapper(
+            receiver_lat=self.receiver_lat,
+            receiver_lon=self.receiver_lon,
+        )
         self.ionex_dir = self.data_root / 'phase2' / 'ionex'
         self.ionex_dir.mkdir(parents=True, exist_ok=True)
         
@@ -495,11 +517,23 @@ class PhysicsFusionService:
             ipp_lat, ipp_lon = self.vtec_mapper.compute_ipp(
                 station_lat, station_lon
             )
-            
-            # Estimate elevation angle from frequency (rough heuristic)
-            # Higher frequencies tend to use higher elevation paths
+
+            # Compute elevation angle geometrically from path distance and
+            # F2 layer height (P1-C fix — replaces hardcoded 30°).
+            # For a 1-hop path: elevation = atan(h / (d/2)) where d is the
+            # great-circle distance and h is the virtual reflection height.
+            gc_dist_km = self._great_circle_km(
+                self.receiver_lat, self.receiver_lon, station_lat, station_lon
+            )
+            # n_hops from mode string (e.g. '2F2' -> 2, '1E' -> 1)
+            n_hops = max(1, int(''.join(filter(str.isdigit, str(mode)[:2])) or '1'))
+            h_km = 300.0  # F2 virtual height (km) — improved by P2-A later
+            half_hop_km = gc_dist_km / (2 * n_hops)
+            elevation_geometric = math.degrees(math.atan2(h_km, half_hop_km))
+            elevation_geometric = max(5.0, min(85.0, elevation_geometric))
+
             for f_mhz in result.group_delay_ms.keys():
-                elevation = 30.0  # Default mid-elevation
+                elevation = elevation_geometric
                 
                 vtec, mf = self.vtec_mapper.stec_to_vtec(result.tec_u, elevation)
                 uncertainty = max(1.0, result.tec_u * (1.0 - result.confidence))
@@ -915,17 +949,62 @@ class PhysicsFusionService:
         logger.info(f"Signal {signum} received, shutting down...")
         self.running = False
 
+    @staticmethod
+    def _great_circle_km(
+        lat1: float, lon1: float, lat2: float, lon2: float
+    ) -> float:
+        """Haversine great-circle distance in km."""
+        R = 6371.0
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlam = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _load_receiver_coords(config_path: str) -> tuple:
+    """
+    Read receiver lat/lon from the timestd config toml.
+    Returns (lat, lon) or (None, None) if unavailable.
+    """
+    if tomllib is None:
+        return None, None
+    try:
+        with open(config_path, 'rb') as f:
+            cfg = tomllib.load(f)
+        station = cfg.get('station', {})
+        lat = station.get('latitude')
+        lon = station.get('longitude')
+        if lat is not None and lon is not None:
+            return float(lat), float(lon)
+    except Exception as e:
+        logger.warning(f"Could not read receiver coords from {config_path}: {e}")
+    return None, None
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Physics-Based Fusion Service')
     parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
     parser.add_argument('--output', default='/var/lib/timestd/phase2/fusion', help='Output directory')
-    
+    parser.add_argument('--config', default='/etc/hf-timestd/timestd-config.toml',
+                        help='Path to timestd-config.toml')
+    parser.add_argument('--receiver-lat', type=float, default=None,
+                        help='Receiver latitude (overrides config toml)')
+    parser.add_argument('--receiver-lon', type=float, default=None,
+                        help='Receiver longitude (overrides config toml)')
+
     args = parser.parse_args()
-    
+
+    # Resolve receiver coordinates: CLI > config toml > built-in default
+    rx_lat, rx_lon = args.receiver_lat, args.receiver_lon
+    if rx_lat is None or rx_lon is None:
+        rx_lat, rx_lon = _load_receiver_coords(args.config)
+
     service = PhysicsFusionService(
         data_root=args.data_root,
-        output_dir=args.output
+        output_dir=args.output,
+        receiver_lat=rx_lat,
+        receiver_lon=rx_lon,
     )
-    
+
     service.run()
