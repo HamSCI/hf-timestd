@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-__all__ = ['get_schema', 'list_schemas', 'validate_schema_version']
+__all__ = ['get_schema', 'list_schemas', 'validate_schema_version', 'get_data_dictionary', 'check_field']
 
 SCHEMA_DIR = Path(__file__).parent
 
@@ -117,3 +117,52 @@ def get_registry() -> Dict[str, Any]:
     
     with open(registry_file, 'r') as f:
         return json.load(f)
+
+
+_data_dictionary_cache: Optional[Dict[str, Any]] = None
+
+
+def get_data_dictionary() -> Dict[str, Any]:
+    """
+    Load the canonical data dictionary — the single authoritative definition
+    of every observable and derived quantity in the hf-timestd pipeline.
+
+    Returns:
+        Data dictionary with 'observables', 'derived_quantities',
+        'consistency_rules', and 'pipeline_data_flow' sections.
+
+    Example:
+        >>> dd = get_data_dictionary()
+        >>> dd['derived_quantities']['clock_offset_ms']['formula']
+        'clock_offset_ms = raw_arrival_time_ms - propagation_delay_ms'
+    """
+    global _data_dictionary_cache
+    if _data_dictionary_cache is None:
+        dd_file = SCHEMA_DIR / 'data_dictionary.json'
+        if not dd_file.exists():
+            raise FileNotFoundError(f"Data dictionary not found: {dd_file}")
+        with open(dd_file, 'r') as f:
+            _data_dictionary_cache = json.load(f)
+    return _data_dictionary_cache
+
+
+def check_field(field_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Look up a field's canonical definition from the data dictionary.
+
+    Returns the full entry (description, formula, sign convention, pitfalls)
+    or None if the field is not in the dictionary.
+
+    Use this before using any field in a calculation to verify its meaning.
+
+    Example:
+        >>> entry = check_field('clock_offset_ms')
+        >>> print(entry['description'])
+        >>> for pitfall in entry['known_pitfalls']:
+        ...     print('PITFALL:', pitfall)
+    """
+    dd = get_data_dictionary()
+    entry = dd.get('observables', {}).get(field_name)
+    if entry is None:
+        entry = dd.get('derived_quantities', {}).get(field_name)
+    return entry

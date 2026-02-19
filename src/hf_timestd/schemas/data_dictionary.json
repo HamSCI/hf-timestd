@@ -1,0 +1,331 @@
+{
+    "_comment": "CANONICAL DATA DICTIONARY — hf-timestd physics pipeline",
+    "_version": "1.0.0",
+    "_updated": "2026-02-19",
+    "_purpose": [
+        "Single authoritative definition of every observable and derived quantity.",
+        "All schema field descriptions and code comments must be consistent with this file.",
+        "The DataProductWriter enforces cross-field consistency rules at write time.",
+        "Before using any field in a calculation, verify its entry here."
+    ],
+
+    "observables": {
+
+        "raw_toa_ms": {
+            "level": "L1",
+            "kind": "observable",
+            "description": "Timing residual from the L1 correlator: the difference between the measured tone arrival time and the minute boundary, as reported by the RTP-timestamped buffer. This is NOT an absolute Time of Arrival — it is the correlator output relative to the GPS-locked minute boundary. It equals the true propagation delay plus the receiver clock offset plus noise.",
+            "formula": "raw_toa_ms = T_arrival_rtp - T_minute_boundary_rtp",
+            "units": "milliseconds",
+            "sign_convention": "Positive means the tone arrived after the minute boundary.",
+            "typical_range_ms": [-200, 200],
+            "known_pitfalls": [
+                "Often mislabeled as 'D_clock' or 'clock_offset' in downstream code — it is not. It contains the full propagation delay.",
+                "The metrology engine subtracts its own geometric model delay internally before writing raw_toa_ms to L1. Verify which convention is in use for each software version."
+            ],
+            "hdf5_path": "phase2/{CHANNEL}/metrology/",
+            "schema_field": "raw_toa_ms",
+            "schema_file": "l1_metrology_measurements_v1.json"
+        },
+
+        "carrier_phase_rad": {
+            "level": "L2",
+            "kind": "observable",
+            "description": "RF carrier phase at the tone frequency, extracted by mixing the IQ stream at the tone frequency over the tick window and taking the angle of the mean phasor. This is a WRAPPED phase sample (range [-π, π]), not a continuous phase measurement. It tracks ionospheric path length changes between consecutive ticks.",
+            "formula": "carrier_phase_rad = angle(mean(I + jQ) mixed at f_tone over tick window)",
+            "units": "radians",
+            "sign_convention": "Increasing phase (positive rate) corresponds to decreasing path length (approaching ionosphere).",
+            "typical_range_ms": null,
+            "known_pitfalls": [
+                "Wrapped: np.unwrap() assumes |Δφ| < π between consecutive samples (~1 Hz). Doppler > 0.5 Hz causes unwrapping failure.",
+                "On shared channels (e.g. SHARED_10000) this is a mix of carriers from multiple stations — only use on single-station channels.",
+                "dc_carrier_phase_rad (mean IQ phasor) is distinct from carrier_phase_rad (tone-mixed) — do not conflate."
+            ],
+            "hdf5_path": "phase2/{CHANNEL}/tick_phase/",
+            "schema_field": "carrier_phase_rad",
+            "schema_file": "l2_tick_phase_v1.json"
+        },
+
+        "snr_db": {
+            "level": "L1/L2",
+            "kind": "observable",
+            "description": "Signal-to-Noise Ratio of the detected tone, measured by the matched filter correlator.",
+            "units": "dB",
+            "sign_convention": "Higher is better. Values below ~6 dB are below the noise floor.",
+            "typical_range_ms": null,
+            "known_pitfalls": [
+                "SNR is computed over the correlation window — it reflects the window-averaged SNR, not instantaneous SNR.",
+                "Used as a proxy for measurement quality in weighting, but does not capture propagation mode uncertainty."
+            ],
+            "schema_field": "snr_db"
+        }
+    },
+
+    "derived_quantities": {
+
+        "clock_offset_ms": {
+            "level": "L2",
+            "kind": "derived",
+            "also_known_as": ["D_clock", "timing_residual", "timing_error"],
+            "description": "The ionosphere-free timing residual after subtracting the geometric propagation model delay from the raw arrival. Represents the combined effect of: receiver clock offset from UTC, ionospheric group delay (dispersive, frequency-dependent), and propagation model error. This is the primary input to the TEC estimator.",
+            "formula": "clock_offset_ms = raw_arrival_time_ms - propagation_delay_ms",
+            "equivalently": "clock_offset_ms = raw_toa_ms - propagation_delay_ms  [if raw_toa_ms is absolute arrival]",
+            "units": "milliseconds",
+            "sign_convention": "Positive means the signal arrived later than the model predicts.",
+            "typical_values_ms": {
+                "WWV": "+3 (model ~4 ms, arrival ~7 ms)",
+                "WWVH": "+22 (model ~24 ms, arrival ~46 ms)",
+                "CHU": "-76 (KNOWN SYSTEMATIC — see F2 in CRITIC_CONTEXT)",
+                "BPM": "+38"
+            },
+            "known_pitfalls": [
+                "CRITICAL: In production (as of 2026-02-19), clock_offset_ms = raw_toa_ms (the L1 residual), NOT raw_arrival_time_ms - propagation_delay_ms. The formula above is the INTENDED definition; the code inverts it. See P1-A in physics review.",
+                "The CHU systematic offset of ~-76 ms is NOT ionospheric — it is a propagation model error. Do not interpret as a clock offset.",
+                "This field is NOT a clock offset in the metrological sense (receiver clock vs UTC). It is a timing residual that includes propagation model error."
+            ],
+            "tec_estimator_requirement": "The TEC estimator requires clock_offset_ms to be the residual AFTER geometric delay removal, so that the remaining frequency-dependent variation is purely ionospheric (1/f² dispersion). Feeding raw_toa_ms (which includes the geometric delay) contaminates the fit.",
+            "hdf5_path": "phase2/{CHANNEL}/clock_offset/",
+            "schema_field": "clock_offset_ms",
+            "schema_file": "l2_timing_measurements_v1.json"
+        },
+
+        "raw_arrival_time_ms": {
+            "level": "L2",
+            "kind": "derived",
+            "description": "Reconstructed absolute arrival time relative to the minute boundary, formed by adding the propagation model delay back to the timing residual. This is an estimate of the true Time of Arrival, not a direct measurement.",
+            "formula": "raw_arrival_time_ms = clock_offset_ms + propagation_delay_ms",
+            "units": "milliseconds",
+            "sign_convention": "Positive means the signal arrived after the minute boundary.",
+            "known_pitfalls": [
+                "This is a model-dependent reconstruction, not a raw observable. Its accuracy is limited by the propagation model.",
+                "In production code (l2_calibration_service.py), the construction is inverted: raw_arrival_time_ms = raw_toa_ms + propagation_delay_ms, where raw_toa_ms is the L1 residual. This is consistent only if raw_toa_ms is already the timing residual (D_clock), which it is in the current metrology engine. The naming is confusing.",
+                "Do NOT use raw_arrival_time_ms as input to the TEC estimator — it contains the geometric delay which is not frequency-dependent and will corrupt the 1/f² fit."
+            ],
+            "schema_field": "raw_arrival_time_ms",
+            "schema_file": "l2_timing_measurements_v1.json"
+        },
+
+        "propagation_delay_ms": {
+            "level": "L2",
+            "kind": "derived",
+            "description": "Model-predicted total propagation delay for the identified mode, including geometric path length and ionospheric group delay. Computed by PropagationModeSolver for the best-fit mode.",
+            "formula": "propagation_delay_ms = geometric_delay_ms + ionospheric_delay_ms",
+            "units": "milliseconds",
+            "typical_values_ms": {
+                "WWV_1F2": 4.3,
+                "WWVH_1F2": 24.0,
+                "CHU_1F2": 10.0,
+                "BPM_1F2": 39.0
+            },
+            "known_pitfalls": [
+                "Uses fixed F2 layer height (300 km) — does not vary with solar conditions, season, or time of day.",
+                "No MUF check — modes above the MUF are not excluded.",
+                "Two independent propagation models exist (metrology_engine and l2_calibration_service) — they may disagree."
+            ],
+            "schema_field": "propagation_delay_ms",
+            "schema_file": "l2_timing_measurements_v1.json"
+        },
+
+        "tec_tecu": {
+            "level": "L3",
+            "kind": "derived",
+            "description": "Total Electron Content along the slant path, estimated from the frequency-dependent group delay dispersion across multiple broadcast frequencies. Derived from a weighted least-squares fit of clock_offset_ms vs 1/f².",
+            "formula": "clock_offset_ms(f) = K·TEC/f² + D_common; slope = K·TEC → TEC = slope/K",
+            "formula_constant": "K = 40.3/c ≈ 1.345e-7 s·Hz²·m²/electron",
+            "units": "TECU (10^16 electrons/m²)",
+            "sign_convention": "Positive TEC means ionospheric group delay (signal arrives later at lower frequencies).",
+            "known_pitfalls": [
+                "CRITICAL (P1-A): In production, the TEC estimator receives clock_offset_ms which is the L1 residual (raw_toa_ms), NOT the geometric-delay-corrected D_clock. The fit is therefore dominated by propagation model error, not ionospheric dispersion. SNR ~0.01-0.14 (see F1 in CRITIC_CONTEXT).",
+                "Negative TEC slope is physically impossible and is rejected — but it occurs frequently due to noise, indicating the signal is below the noise floor.",
+                "Confidence > 0.8 (GOOD flag) does not mean the TEC is physically meaningful — it only means the fit is self-consistent. With N=2 frequencies, R²=1 always.",
+                "The 5-minute aggregation window mixes propagation conditions — mode switching within the window produces garbage fits."
+            ],
+            "noise_floor_analysis": {
+                "CHU": {"signal_at_40_tecu_ms": 0.46, "noise_1sigma_ms": 37, "snr": 0.01},
+                "WWV": {"signal_at_40_tecu_ms": 0.85, "noise_1sigma_ms": 6.5, "snr": 0.13},
+                "WWVH_BPM": {"signal_at_40_tecu_ms": 0.7, "noise_1sigma_ms": 5, "snr": 0.14}
+            },
+            "viable": false,
+            "viable_reason": "Below noise floor in all stations. Use dtec_rate_tecu_per_s instead.",
+            "hdf5_path": "phase2/science/tec/",
+            "schema_field": "tec_tecu",
+            "schema_file": "l3_tec_v1.json"
+        },
+
+        "t_vacuum_error_ms": {
+            "level": "L3",
+            "kind": "derived",
+            "description": "The intercept of the 1/f² TEC fit: the timing residual extrapolated to infinite frequency (zero ionospheric delay). In a correctly calibrated system this would be the ionosphere-free clock offset D_clock. In the current system it is contaminated by propagation model error and is NOT a calibrated UTC offset.",
+            "formula": "t_vacuum_error_ms = intercept of fit: clock_offset_ms = slope/f² + intercept",
+            "units": "milliseconds",
+            "known_pitfalls": [
+                "CRITICAL (P2-D): Because clock_offset_ms includes propagation model error (not just ionospheric dispersion), the intercept absorbs the model bias. For CHU this is ~-76 ms. This is NOT a UTC clock offset.",
+                "Used as utc_offset_ms in the L3 physics summary — this is incorrect until P1-A is fixed.",
+                "The intercept is metrologically useful only after P1-A is resolved."
+            ],
+            "schema_field": "t_vacuum_error_ms",
+            "schema_file": "l3_tec_v1.json"
+        },
+
+        "vtec_tecu": {
+            "level": "L3",
+            "kind": "derived",
+            "description": "Vertical TEC at the ionospheric pierce point (IPP), derived from slant TEC using the thin-shell mapping function. Currently all NaN in production.",
+            "formula": "vtec_tecu = tec_tecu × cos(χ'), where sin(χ') = R_E/(R_E + h_shell) × cos(elevation)",
+            "units": "TECU",
+            "known_pitfalls": [
+                "CRITICAL (P1-D): Always NaN in production because tec_tecu confidence is always < 0.3 (the IPP filter threshold), so no IPP measurements are ever built.",
+                "Elevation angle hardcoded at 30° for all paths — systematic error of 10-20% in mapping factor.",
+                "Receiver coordinates hardcoded in VTECMapper constructor, not injected from config."
+            ],
+            "viable": false,
+            "viable_reason": "Depends on tec_tecu which is below noise floor. All NaN in production.",
+            "schema_field": "vtec_tecu",
+            "schema_file": "l3_tec_v1.json"
+        },
+
+        "dtec_rate_tecu_per_s": {
+            "level": "L3",
+            "kind": "derived",
+            "description": "Rate of change of TEC (dTEC/dt) derived from carrier phase Doppler. This is the PRIMARY viable ionospheric science product. ~250K records/day. Sensitive to TIDs, solar flares, and ionospheric disturbances.",
+            "formula": "dtec_rate = -f_D × c × f / 40.3, where f_D = -(1/2π) × dφ/dt",
+            "units": "TECU/s",
+            "sign_convention": "Positive dTEC/dt means TEC is increasing (ionosphere thickening or path lengthening).",
+            "known_pitfalls": [
+                "Derived from np.unwrap() of carrier_phase_rad at ~1 Hz — unwrapping fails if |Δφ| > π between ticks (Doppler > 0.5 Hz). TID events may cause this.",
+                "The per-minute record stores only the MEAN rate — the full 1-second time series is discarded. This loses scintillation information.",
+                "The stored dtec_rate_tecu_per_s is the mean over the minute, not a time series."
+            ],
+            "viable": true,
+            "viable_reason": "Verified working. 250K records/day. Primary science product.",
+            "hdf5_path": "phase2/science/dtec/",
+            "schema_field": "dtec_rate_tecu_per_s",
+            "schema_file": "l3_dtec_v1.json"
+        },
+
+        "dtec_mean_tecu": {
+            "level": "L3",
+            "kind": "derived",
+            "description": "Integrated dTEC over the minute window (cumulative sum of dtec_rate × dt), anchored to group-delay absolute TEC if available. When is_anchored=False (which is always the case in production), this is a purely relative, zero-referenced integrated phase — NOT an absolute TEC value.",
+            "formula": "dtec_mean_tecu = integral(dtec_rate_tecu_per_s dt) + anchor_offset",
+            "units": "TECU",
+            "known_pitfalls": [
+                "CRITICAL (P1-B): is_anchored is always False in production because group-delay TEC confidence is always < 0.5 (the anchor threshold). The integrated value has no absolute reference and drifts freely.",
+                "When unanchored, dtec_mean_tecu is NOT comparable across minutes or stations — it is a relative quantity only.",
+                "The dashboard displays this as 'Integrated dTEC' without clearly flagging the unanchored status."
+            ],
+            "viable": "partial",
+            "viable_reason": "The rate (dtec_rate_tecu_per_s) is valid. The integrated value is unanchored and should be treated as relative only.",
+            "schema_field": "dtec_mean_tecu",
+            "schema_file": "l3_dtec_v1.json"
+        },
+
+        "tof_kalman_ms": {
+            "level": "L2",
+            "kind": "derived",
+            "description": "Kalman-filtered Time of Flight estimate. Intended to smooth the timing residuals using a state-space model tracking ionospheric path dynamics. Currently all NaN in production — the filter was never implemented.",
+            "units": "milliseconds",
+            "viable": false,
+            "viable_reason": "All NaN in production. Dead schema field.",
+            "schema_field": "tof_kalman_ms",
+            "schema_file": "l2_timing_measurements_v1.json"
+        }
+    },
+
+    "consistency_rules": [
+        {
+            "id": "CR-1",
+            "description": "clock_offset_ms must equal raw_arrival_time_ms minus propagation_delay_ms",
+            "formula": "abs(clock_offset_ms - (raw_arrival_time_ms - propagation_delay_ms)) < 0.001",
+            "level": "L2",
+            "severity": "ERROR",
+            "action": "Reject record and log. This indicates a semantic inversion in the calibration pipeline."
+        },
+        {
+            "id": "CR-2",
+            "description": "tec_tecu must be positive (negative TEC is unphysical)",
+            "formula": "tec_tecu > 0",
+            "level": "L3",
+            "severity": "ERROR",
+            "action": "Reject record. Negative TEC indicates mode mixing or noise domination."
+        },
+        {
+            "id": "CR-3",
+            "description": "tec_tecu must be within plausible ionospheric range",
+            "formula": "0 < tec_tecu <= 200",
+            "level": "L3",
+            "severity": "WARNING",
+            "action": "Flag as MARGINAL. Values > 200 TECU are extreme and likely noise."
+        },
+        {
+            "id": "CR-4",
+            "description": "vtec_tecu must be less than or equal to tec_tecu (vertical <= slant)",
+            "formula": "vtec_tecu <= tec_tecu or isnan(vtec_tecu)",
+            "level": "L3",
+            "severity": "WARNING",
+            "action": "Flag as suspicious. Mapping function error or elevation angle error."
+        },
+        {
+            "id": "CR-5",
+            "description": "is_anchored=True requires anchor_tec_tecu to be finite and positive",
+            "formula": "if is_anchored then anchor_tec_tecu > 0 and isfinite(anchor_tec_tecu)",
+            "level": "L3",
+            "severity": "ERROR",
+            "action": "Reject is_anchored=True if anchor_tec_tecu is NaN or non-positive."
+        },
+        {
+            "id": "CR-6",
+            "description": "propagation_delay_ms must be positive (signal cannot arrive before it is emitted)",
+            "formula": "propagation_delay_ms > 0",
+            "level": "L2",
+            "severity": "ERROR",
+            "action": "Reject record."
+        },
+        {
+            "id": "CR-7",
+            "description": "raw_arrival_time_ms must be greater than light_travel_time_ms (cannot travel faster than light)",
+            "formula": "raw_arrival_time_ms >= light_travel_time_ms",
+            "level": "L2",
+            "severity": "ERROR",
+            "action": "Reject record. Indicates timing error or model inversion."
+        }
+    ],
+
+    "pipeline_data_flow": {
+        "description": "Canonical data flow from raw observable to science product",
+        "stages": [
+            {
+                "stage": "L1",
+                "service": "timestd-metrology",
+                "input": "RTP-timestamped IQ at 24 kHz/channel",
+                "output": "raw_toa_ms, snr_db, doppler_hz, carrier_phase_rad",
+                "key_operation": "Matched filter correlation against tone template; RTP timestamp → minute-relative timing"
+            },
+            {
+                "stage": "L2",
+                "service": "timestd-l2-calibration",
+                "input": "raw_toa_ms (L1 timing residual)",
+                "output": "clock_offset_ms, raw_arrival_time_ms, propagation_delay_ms, uncertainty budget",
+                "key_operation": "Propagation mode identification; geometric delay subtraction; ISO GUM uncertainty budget",
+                "known_issue": "P1-A: clock_offset_ms is set to raw_toa_ms without geometric delay subtraction, inverting the intended formula"
+            },
+            {
+                "stage": "L3-TEC",
+                "service": "timestd-physics",
+                "input": "clock_offset_ms per frequency per station (must be geometric-delay-corrected D_clock)",
+                "output": "tec_tecu, t_vacuum_error_ms, confidence",
+                "key_operation": "Weighted least squares fit of clock_offset_ms vs 1/f²",
+                "known_issue": "P1-A contamination makes this product noise-dominated"
+            },
+            {
+                "stage": "L3-dTEC",
+                "service": "timestd-physics",
+                "input": "carrier_phase_rad time series from tick_phase",
+                "output": "dtec_rate_tecu_per_s, dtec_mean_tecu, is_anchored",
+                "key_operation": "Phase unwrap → Doppler → dTEC/dt → integrate → anchor to group-delay TEC",
+                "viable": true,
+                "known_issue": "P1-B: anchor always suppressed (group-delay TEC confidence always < 0.5); P3-B: full time series discarded"
+            }
+        ]
+    }
+}
