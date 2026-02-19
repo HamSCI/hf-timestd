@@ -144,6 +144,18 @@ STATION_FREQUENCIES = {
 # This is the search window half-width
 DEFAULT_UNCERTAINTY_3SIGMA_MS = 15.0  # ±15ms covers most ionospheric variation
 
+# Per-station minimum uncertainty floors (3-sigma).
+# The IRI model is well-calibrated for WWV/WWVH (Colorado/Hawaii, well-studied
+# paths) but has a systematic ~70ms error for CHU (Ottawa→Missouri, ~2200km).
+# These floors prevent the physics gate from rejecting valid detections when
+# the model prediction is off by more than the default ±15ms.
+STATION_MIN_UNCERTAINTY_3SIGMA_MS = {
+    'WWV':  15.0,   # Colorado, well-calibrated IRI path
+    'WWVH': 15.0,   # Hawaii, well-calibrated IRI path
+    'CHU':  100.0,  # Ottawa→Missouri: IRI off by ~70ms, need ±100ms floor
+    'BPM':  50.0,   # China, longer path with larger model uncertainty
+}
+
 # Bootstrap window parameters
 # RTP timestamps are authoritative (no wall-clock calibration bias).
 # Window only needs to cover ionospheric variation (~30ms) plus margin.
@@ -943,7 +955,13 @@ class ArrivalPatternMatrix:
         else:
             # Low confidence — use tracked or bootstrap uncertainty
             adaptive_3sigma_ms = tracked_uncertainty_ms
-        
+
+        # Apply per-station minimum floor: IRI model accuracy varies by path.
+        # CHU (Ottawa→Missouri) has a systematic ~70ms model error; without a
+        # wider floor the physics gate rejects all valid CHU detections.
+        station_floor_ms = STATION_MIN_UNCERTAINTY_3SIGMA_MS.get(station, DEFAULT_UNCERTAINTY_3SIGMA_MS)
+        adaptive_3sigma_ms = max(adaptive_3sigma_ms, station_floor_ms)
+
         # Convert to samples
         expected_sample = int(delay_ms * self.sample_rate / 1000)
         uncertainty_samples = int(adaptive_3sigma_ms * self.sample_rate / 1000)
