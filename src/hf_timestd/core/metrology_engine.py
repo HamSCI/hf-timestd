@@ -1209,26 +1209,30 @@ class MetrologyEngine:
                         if station_name in ('WWV', 'WWVH') and sec_in_minute in (29, 59):
                             continue
                         
-                        # CHU regular-second 300ms tones start ~64ms after the
+                        # CHU regular-second 300ms tones start ~74ms after the
                         # UTC second boundary + propagation delay.
                         #
                         # Evidence chain:
-                        # 1. Direct IQ power measurement: 1000Hz energy absent
-                        #    at 0-65ms, present from +70ms (utc_sec + prop_delay).
-                        # 2. FSK stop-bit anchor (T+0.500s on seconds 31-39):
+                        # 1. Direct AM envelope measurement (5ms bins, bandpass
+                        #    950-1050Hz): tone onset consistently at +80ms from
+                        #    utc_sec + prop_delay across multiple seconds.
+                        # 2. FSK stop-bit anchor (T+0.500s, seconds 31-39):
                         #    timing_offset = +6ms → CHU clock is +6ms fast.
                         #    FSK seconds have NO 1000Hz tone; the FSK decoder's
                         #    tick_timing_offset_ms measures 2225Hz mark-tone
                         #    leakage into the 900-1100Hz band — not a valid
                         #    1000Hz timing anchor.
-                        # 3. Tone onset delay = measured_offset − clock_offset
-                        #    = 70ms − 6ms = 64ms.
-                        # 4. Using 0.064 gives timing_error ≈ +6ms, consistent
+                        # 3. NRC spec: emission accuracy ≤1μs (atomic clock).
+                        #    This refers to the clock accuracy, not the programmed
+                        #    onset delay of the 1000Hz tones.
+                        # 4. Programmed onset delay = measured(80ms) − clock(6ms)
+                        #    = 74ms. Analogous to FSK data starting at T+133ms.
+                        # 5. Using 0.074 gives timing_error ≈ +6ms, consistent
                         #    with the FSK stop-bit clock reference.
                         # Second 0 (minute marker, 500ms) starts at 0ms.
                         chu_tx_onset_sec = 0.0
                         if station_name == 'CHU' and sec_in_minute != 0:
-                            chu_tx_onset_sec = 0.064
+                            chu_tx_onset_sec = 0.074
 
                         tone_arrival_utc = utc_sec + prop_delay_sec + chu_tx_onset_sec
                         tone_end_utc = tone_arrival_utc + margin_sec
@@ -1279,7 +1283,7 @@ class MetrologyEngine:
                             )
                             # Expected arrival UTC includes CHU tx_onset offset
                             # so timing_error_ms reflects the true clock offset.
-                            chu_tx = 0.064 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
+                            chu_tx = 0.074 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
                             expected_utc = utc_sec + prop_delay_sec + chu_tx
                             result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
                             result['arrival_utc'] = arrival_utc

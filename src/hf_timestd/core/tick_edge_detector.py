@@ -398,9 +398,9 @@ class TickEdgeDetector:
                 continue
             
             # Expected onset sample (integer!)
-            # CHU 300ms tones start ~64ms after utc_sec + prop_delay.
+            # CHU 300ms tones start ~74ms after utc_sec + prop_delay.
             # See metrology_engine.py for full evidence chain.
-            chu_tx_onset_sec = 0.064 if station == 'CHU' else 0.0
+            chu_tx_onset_sec = 0.074 if station == 'CHU' else 0.0
             onset_utc = utc_sec + expected_delay_sec + chu_tx_onset_sec
             expected_sample = int(round(buffer_timing.utc_to_sample(onset_utc)))
             
