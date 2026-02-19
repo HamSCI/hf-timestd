@@ -1209,18 +1209,7 @@ class MetrologyEngine:
                         if station_name in ('WWV', 'WWVH') and sec_in_minute in (29, 59):
                             continue
                         
-                        # CHU 300ms tones start ~52ms after the UTC second boundary.
-                        # The minute marker (second 0) starts at 0ms.
-                        # Measured directly from raw IQ buffer: onset at +52ms for
-                        # seconds 1-28, 30, 40-49.  This is a CHU transmitter
-                        # characteristic, not a propagation or clock offset.
-                        chu_tx_onset_sec = 0.0
-                        if station_name == 'CHU' and sec_in_minute != 0:
-                            chu_tx_onset_sec = 0.079  # 79ms: CHU 300ms tones start ~52ms
-                            # after the second boundary; correlation peak lands ~27ms
-                            # after the gated-sinusoid onset due to Tukey window rise.
-
-                        tone_arrival_utc = utc_sec + prop_delay_sec + chu_tx_onset_sec
+                        tone_arrival_utc = utc_sec + prop_delay_sec
                         tone_end_utc = tone_arrival_utc + margin_sec
                         
                         onset_sample = buffer_timing.utc_to_sample(tone_arrival_utc)
@@ -1267,13 +1256,8 @@ class MetrologyEngine:
                             arrival_utc = buffer_timing.sample_to_utc(
                                 result['arrival_ms'] * self.sample_rate / 1000
                             )
-                            # Expected arrival UTC = utc_sec + prop_delay + tx_onset_offset.
-                            # chu_tx_onset_sec accounts for the known CHU transmitter
-                            # characteristic (300ms tones start ~52ms after the second
-                            # boundary).  Including it here means timing_error_ms
-                            # reflects the true clock offset, not the onset delay.
-                            chu_tx = 0.079 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
-                            expected_utc = utc_sec + prop_delay_sec + chu_tx
+                            # Expected arrival UTC = utc_sec + prop_delay
+                            expected_utc = utc_sec + prop_delay_sec
                             result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
                             result['arrival_utc'] = arrival_utc
                             rtp_measurements.append(result)
