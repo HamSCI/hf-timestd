@@ -234,6 +234,12 @@ async def get_all_arrivals(
         rank_arr = np.array(rows["peak_rank"])
         mb = np.array(rows["minute_boundary"])
 
+        # Cap SNR at 40 dB — values above this are correlation artefacts
+        # (DC leakage, self-interference) that distort the cluster plot.
+        SNR_CAP = 40.0
+        valid = (snr <= SNR_CAP) & np.isfinite(tof) & (tof >= 0)
+        tof, snr, rank_arr, mb = tof[valid], snr[valid], rank_arr[valid], mb[valid]
+
         # Downsample for scatter (KDE always uses full set)
         if downsample > 1:
             idx = np.arange(0, len(tof), downsample)
@@ -247,7 +253,7 @@ async def get_all_arrivals(
             "peak_rank": rank_arr[idx].tolist(),
         }
 
-        # KDE on full (undownsampled) data — snr vs tof (x=snr, y=tof, matching Griffin slides)
+        # KDE on full (undownsampled, capped) data — x=snr, y=tof (Griffin convention)
         kde_result = None
         if include_kde and len(tof) >= 10:
             kde_result = _kde_contours(snr, tof, n_grid=60)

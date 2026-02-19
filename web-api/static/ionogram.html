@@ -464,8 +464,13 @@ function renderCluster(data) {
     const tof = scatter.tof_ms || [];
     const snr = scatter.corr_snr_db || [];
 
-    const dom_mask = rank.map(r => r === 0);
-    const sec_mask = rank.map(r => r > 0);
+    // Cap SNR at 40 dB — values above this are correlation artefacts
+    // (e.g. DC leakage, self-interference) that compress the real cluster.
+    const SNR_MAX = 40;
+    const valid = rank.map((_, i) => snr[i] <= SNR_MAX && isFinite(tof[i]) && tof[i] >= 0);
+
+    const dom_mask = rank.map((r, i) => r === 0 && valid[i]);
+    const sec_mask = rank.map((r, i) => r > 0  && valid[i]);
 
     const traces = [];
 
@@ -522,7 +527,7 @@ function renderCluster(data) {
         xaxis: {
             gridcolor: '#334155',
             title: 'Signal + Noise level (dB)',
-            autorange: 'reversed',
+            range: [SNR_MAX, 0],
         },
         yaxis: {
             gridcolor: '#334155',
