@@ -80,6 +80,13 @@
             "description": "Whether the dTEC was anchored to group-delay TEC"
         },
         {
+            "name": "anchor_status",
+            "type": "string",
+            "required": false,
+            "enum": ["ANCHORED", "ANCHOR_LOW_CONF", "NO_ANCHOR"],
+            "description": "Anchor state: ANCHORED=group-delay TEC applied, ANCHOR_LOW_CONF=TEC available but confidence<0.5, NO_ANCHOR=no group-delay TEC available"
+        },
+        {
             "name": "sigma_noise_tecu",
             "type": "float",
             "required": false,
