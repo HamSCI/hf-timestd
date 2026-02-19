@@ -1209,18 +1209,26 @@ class MetrologyEngine:
                         if station_name in ('WWV', 'WWVH') and sec_in_minute in (29, 59):
                             continue
                         
-                        # CHU regular-second 300ms tones start ~70ms after the
-                        # UTC second boundary + propagation delay.  Verified by
-                        # direct measurement of 1000 Hz power in the IQ buffer:
-                        # the tone is absent at 0-65ms and present from +70ms.
-                        # The FSK stop-bit anchor (+6ms) applies only to FSK
-                        # seconds (31-39) which have a different signal structure.
-                        # The 64ms difference between FSK and regular-tone timing
-                        # is a real CHU transmitter characteristic.
+                        # CHU regular-second 300ms tones start ~64ms after the
+                        # UTC second boundary + propagation delay.
+                        #
+                        # Evidence chain:
+                        # 1. Direct IQ power measurement: 1000Hz energy absent
+                        #    at 0-65ms, present from +70ms (utc_sec + prop_delay).
+                        # 2. FSK stop-bit anchor (T+0.500s on seconds 31-39):
+                        #    timing_offset = +6ms → CHU clock is +6ms fast.
+                        #    FSK seconds have NO 1000Hz tone; the FSK decoder's
+                        #    tick_timing_offset_ms measures 2225Hz mark-tone
+                        #    leakage into the 900-1100Hz band — not a valid
+                        #    1000Hz timing anchor.
+                        # 3. Tone onset delay = measured_offset − clock_offset
+                        #    = 70ms − 6ms = 64ms.
+                        # 4. Using 0.064 gives timing_error ≈ +6ms, consistent
+                        #    with the FSK stop-bit clock reference.
                         # Second 0 (minute marker, 500ms) starts at 0ms.
                         chu_tx_onset_sec = 0.0
                         if station_name == 'CHU' and sec_in_minute != 0:
-                            chu_tx_onset_sec = 0.070
+                            chu_tx_onset_sec = 0.064
 
                         tone_arrival_utc = utc_sec + prop_delay_sec + chu_tx_onset_sec
                         tone_end_utc = tone_arrival_utc + margin_sec
@@ -1271,7 +1279,7 @@ class MetrologyEngine:
                             )
                             # Expected arrival UTC includes CHU tx_onset offset
                             # so timing_error_ms reflects the true clock offset.
-                            chu_tx = 0.070 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
+                            chu_tx = 0.064 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
                             expected_utc = utc_sec + prop_delay_sec + chu_tx
                             result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
                             result['arrival_utc'] = arrival_utc
@@ -1421,15 +1429,36 @@ class MetrologyEngine:
                 logger.debug(f"{self.channel_name}: No signals detected at expected times")
                 return []
             
-            # Select best measurement per station (highest SNR) for timing use.
-            # All measurements become detections for SNR reporting, but only the
-            # best per station gets use_for_time_snap=True to avoid confusing
-            # downstream fusion with redundant timing from the same station.
-            best_per_station = {}
+            # Select best measurement per station for timing use.
+            # Strategy: robust median consistency filter across per-second
+            # measurements, then highest-SNR from the consistent set.
+            # This rejects false peaks (multipath, fading) that would win
+            # a naive highest-SNR selection.
+            from collections import defaultdict
+            by_station = defaultdict(list)
             for m in rtp_measurements:
-                stn = m['station']
-                if stn not in best_per_station or m['snr_db'] > best_per_station[stn]['snr_db']:
-                    best_per_station[stn] = m
+                by_station[m['station']].append(m)
+            
+            best_per_station = {}
+            for stn, stn_measurements in by_station.items():
+                errs = np.array([m['timing_error_ms'] for m in stn_measurements])
+                if len(errs) >= 3:
+                    med = np.median(errs)
+                    mad = np.median(np.abs(errs - med))
+                    sigma = max(mad * 1.4826, 15.0)  # MAD->std, floor 15ms
+                    threshold = max(30.0, 2.5 * sigma)
+                    consistent = [m for m in stn_measurements
+                                  if abs(m['timing_error_ms'] - med) <= threshold]
+                    n_rejected = len(stn_measurements) - len(consistent)
+                    if n_rejected:
+                        logger.debug(f"{self.channel_name}: {stn} consistency filter "
+                                     f"rejected {n_rejected}/{len(stn_measurements)} "
+                                     f"outliers (median={med:+.1f}ms, σ={sigma:.1f}ms)")
+                    pool = consistent if consistent else stn_measurements
+                else:
+                    pool = stn_measurements
+                best = max(pool, key=lambda m: m['snr_db'])
+                best_per_station[stn] = best
             
             best_keys = set()
             for m in best_per_station.values():
