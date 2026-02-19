@@ -1,0 +1,96 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3A_dtec_timeseries",
+    "description": "Full per-tick carrier-phase dTEC time series at ~1-second resolution. Each record is one carrier-phase sample within a minute window. Preserves scintillation-scale and TID-scale ionospheric dynamics discarded by the per-minute summary (l3_dtec_v1).",
+    "cadence_seconds": 1,
+    "processing_level": "L3A",
+    "standards": [
+        "CEDAR Madrigal patterns"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "UTC timestamp of this carrier-phase sample"
+        },
+        {
+            "name": "epoch",
+            "type": "float",
+            "required": true,
+            "description": "Unix epoch of this sample (seconds)",
+            "units": "seconds"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch of the parent minute boundary"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "description": "Broadcast station"
+        },
+        {
+            "name": "channel",
+            "type": "string",
+            "required": true,
+            "description": "SDR channel name (e.g. CHU_7850)"
+        },
+        {
+            "name": "frequency_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Carrier frequency in MHz",
+            "units": "MHz"
+        },
+        {
+            "name": "dtec_rate_tecu_per_s",
+            "type": "float",
+            "required": true,
+            "description": "Instantaneous dTEC/dt at this sample from carrier-phase Doppler",
+            "units": "TECU/s"
+        },
+        {
+            "name": "dtec_tecu",
+            "type": "float",
+            "required": true,
+            "description": "Integrated dTEC at this sample (anchored if is_anchored=True, else relative to minute start)",
+            "units": "TECU"
+        },
+        {
+            "name": "is_anchored",
+            "type": "boolean",
+            "required": true,
+            "description": "Whether dtec_tecu is anchored to group-delay absolute TEC"
+        },
+        {
+            "name": "anchor_status",
+            "type": "string",
+            "required": true,
+            "enum": ["ANCHORED", "ANCHOR_LOW_CONF", "NO_ANCHOR"],
+            "description": "Anchor state: ANCHORED=group-delay TEC applied; ANCHOR_LOW_CONF=anchor suppressed (confidence<0.5); NO_ANCHOR=no group-delay TEC available"
+        },
+        {
+            "name": "snr_db",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Mean SNR of carrier phase measurements for this minute",
+            "units": "dB"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Processing version"
+        }
+    ],
+    "quality_notes": {
+        "dtec_rate_tecu_per_s": "Valid regardless of anchor status. Primary science observable.",
+        "dtec_tecu": "Absolute only when is_anchored=True. When unanchored, value is relative to minute start and drifts freely across minutes."
+    }
+}
