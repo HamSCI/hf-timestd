@@ -103,29 +103,30 @@ PHYSICS.md claims ✅ for TEC, scintillation, TIDs. Live system contradicts seve
 
 ---
 
-## Fixes Applied (2026-02-19 Session)
+## Fixes Applied (2026-02-19 Session) — ALL COMPLETE
 
-| Fix | Status | Commit |
-|---|---|---|
-| Canonical data dictionary (`data_dictionary.json`) | ✅ Done | d625f33 |
-| `check_field()` / `get_data_dictionary()` API | ✅ Done | d625f33 |
-| P1-A diagnosis: L1 model systematic errors documented | ✅ Done | 3a15626 |
-| P1-B: Unanchored dTEC capped at MARGINAL; `anchor_status` field added | ✅ Done | d628727 |
-| P1-D: vtec_tecu NaN gating — explicit log instead of silent NaN | ✅ Done | d628727 |
-| P3-B: Full per-tick dTEC time series written to `dtec_timeseries/` | ✅ Done | d628727 |
-| P1-C: Receiver coords from config toml; geometric elevation in VTECMapper | ✅ Done | 21df170 |
-| P3-C: `compute_differential_dtec()` wired for multi-freq stations | ✅ Done | 54b3f4e |
+| Fix | Commit |
+|---|---|
+| Canonical data dictionary (`data_dictionary.json`) + `check_field()` API | d625f33 |
+| P1-A: Corrected diagnosis — L1 propagation model systematic errors documented | 3a15626 |
+| P1-B: Unanchored dTEC capped at MARGINAL; `anchor_status` field (ANCHORED/ANCHOR_LOW_CONF/NO_ANCHOR) | d628727 |
+| P1-D: vtec_tecu NaN gating — explicit DEBUG log instead of silent NaN | d628727 |
+| P3-B: Full per-tick dTEC time series → `phase2/science/dtec_timeseries/` (~55 rec/min/station) | d628727 |
+| P1-C: Receiver coords from config toml; geometric elevation in VTECMapper (WWV~19°, WWVH~7°) | 21df170 |
+| P3-C: `compute_differential_dtec()` wired for multi-freq stations (CHU: 3 pairs, WWV: 15 pairs) | 54b3f4e |
+| P2-A: `HFPropagationModel` wired as tier-1 in `PropagationModeSolver` (real foF2/hmF2/MUF) | 907618d |
+| P3-A: Phase unwrapping quality check — `unwrap_quality` + `n_phase_jumps` in dTEC records | 8740347 |
+| P4-B: `gpsdo_locked` from L1 `quality_flag` instead of hardcoded `True` | 8740347 |
+| P4-C: `tof_kalman_ms` marked `deprecated=true` in L2 schema | 8740347 |
+| P3-D: Confirmed no code change needed — correlated propagation uncertainty absorbed by WLS intercept | — |
 
 ## Remaining Work
 
 | Item | Priority | Notes |
 |---|---|---|
-| P2-A: Wire IonoDataService for real foF2/hmF2 | HIGH | Root cause of TEC noise floor. IonoDataService already implemented (see memory). |
-| Validate differential dTEC pairs in physics.log | MEDIUM | Check RMS values; if sensible, add HDF5 write |
-| P4-B: `gpsdo_locked` from actual monitor state | LOW | Currently hardcoded `True` in l2_calibration_service.py |
-| P4-C: Remove `tof_kalman_ms` dead schema field | LOW | Always NaN; clutters schema |
-| P3-A: Phase unwrapping quality check | MEDIUM | Flag minutes where |Δφ| > π/2 |
-| P3-D: Pass `u_propagation_model_ms` to TEC estimator | MEDIUM | Correlated uncertainty not treated as correlated |
+| Validate differential dTEC pairs in physics.log | MEDIUM | After next processing cycle, check RMS values; if sensible (<5 TECU), add HDF5 write |
+| IonoDataService startup in l2-calibration | MEDIUM | `HFPropagationModel` lazy-inits IonoDataService but doesn't call `.start()` — WAM-IPE fetch won't run until explicitly started |
+| P3-A production validation | LOW | Check physics.log for `unwrap_quality` < 0.8 events to understand phase noise characteristics |
 
 ---
 

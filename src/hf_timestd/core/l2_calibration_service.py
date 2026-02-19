@@ -130,7 +130,17 @@ class L2CalibrationService:
         """Start the calibration service."""
         self.running = True
         logger.info("L2 Calibration Service starting...")
-        
+
+        # Start IonoDataService background fetch thread so HFPropagationModel
+        # receives real WAM-IPE foF2/hmF2 data rather than climatological fallback.
+        try:
+            from .iono_data_service import IonoDataService
+            _iono = IonoDataService.get_instance()
+            _iono.start()
+            logger.info("IonoDataService background thread started")
+        except Exception as e:
+            logger.warning(f"IonoDataService could not start: {e} — propagation model will use fallback")
+
         # Notify systemd we're ready
         if SYSTEMD_AVAILABLE:
             systemd_daemon.notify('READY=1')
@@ -157,6 +167,12 @@ class L2CalibrationService:
         """Stop the calibration service."""
         logger.info("Stopping L2 Calibration Service...")
         self.running = False
+        try:
+            from .iono_data_service import IonoDataService
+            if IonoDataService._instance is not None:
+                IonoDataService._instance.stop()
+        except Exception:
+            pass
         
         # Close all writers
         for writer in self.l2_writers.values():
