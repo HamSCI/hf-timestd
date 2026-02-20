@@ -1,7 +1,7 @@
 {
     "registry_version": "1.1.0",
     "description": "Schema registry mapping data products to schema versions",
-    "last_updated": "2026-02-19T22:00:00Z",
+    "last_updated": "2026-02-20T01:00:00Z",
     "data_dictionary": "data_dictionary.json",
     "data_products": {
         "L1A_channel_observables": {
@@ -91,6 +91,12 @@
             "current_version": "v1",
             "schema_file": "l3_dtec_timeseries_v1.json",
             "description": "Full per-tick carrier-phase dTEC time series at ~1-second resolution",
+            "replaces": []
+        },
+        "L3A_dtec_diff": {
+            "current_version": "v1",
+            "schema_file": "l3_dtec_diff_v1.json",
+            "description": "Per-minute differential dTEC RMS between frequency pairs for the same station",
             "replaces": []
         }
     },

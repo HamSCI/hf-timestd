@@ -161,6 +161,21 @@ class PhysicsFusionService:
             processing_version='5.0.0',
             station_metadata={'description': 'Carrier-Phase dTEC Full Time Series (~1s resolution)'}
         )
+
+        # Fifth writer for per-minute differential dTEC frequency-pair records.
+        # Each row is one (station, freq1, freq2, minute) tuple with RMS of
+        # dTEC_f1 - dTEC_f2.  Near-zero RMS confirms ionospheric consistency
+        # across frequencies; elevated RMS flags scintillation or mode changes.
+        self.dtec_diff_dir = self.data_root / 'phase2' / 'science' / 'dtec_diff'
+        self.dtec_diff_dir.mkdir(parents=True, exist_ok=True)
+        self.dtec_diff_writer = DataProductWriter(
+            output_dir=self.dtec_diff_dir,
+            product_level='L3',
+            product_name='dtec_diff',
+            channel='AGGREGATED',
+            processing_version='5.0.0',
+            station_metadata={'description': 'Differential dTEC frequency-pair RMS'}
+        )
         
         # Tick-phase reader cache (separate from clock_offset readers)
         self._tick_phase_reader_cache: Dict[str, DataProductReader] = {}
@@ -966,6 +981,7 @@ class PhysicsFusionService:
             sorted_freqs = sorted(freq_results.keys())
             n_pairs = 0
             best_diff = None  # lowest-highest pair (largest dispersive signal)
+            ts_iso = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
             for i, f1 in enumerate(sorted_freqs):
                 for f2 in sorted_freqs[i + 1:]:
                     try:
@@ -975,14 +991,37 @@ class PhysicsFusionService:
                         if diff is None:
                             continue
                         n_pairs += 1
+                        n_pts = diff['n_points']
+                        rms = diff['rms_diff_tecu']
+                        mean_diff = float(np.mean(diff['dtec_diff_tecu']))
                         logger.debug(
                             f"Differential dTEC {station} {f1:.2f}-{f2:.2f} MHz: "
-                            f"RMS={diff['rms_diff_tecu']:.4f} TECU, "
-                            f"n={diff['n_points']}"
+                            f"RMS={rms:.4f} TECU mean={mean_diff:.4f} TECU n={n_pts}"
                         )
                         # Track the widest-separation pair for INFO-level summary
                         if i == 0 and f2 == sorted_freqs[-1]:
-                            best_diff = (f1, f2, diff)
+                            best_diff = (f1, f2, diff, mean_diff)
+                        # Determine quality flag
+                        if n_pts >= 30 and rms < 0.5:
+                            qflag = 'GOOD'
+                        elif n_pts >= 10 and rms < 2.0:
+                            qflag = 'MARGINAL'
+                        else:
+                            qflag = 'BAD'
+                        # Write to HDF5
+                        diff_record = {
+                            'timestamp_utc': ts_iso,
+                            'minute_boundary': minute_timestamp,
+                            'station': station,
+                            'freq1_mhz': f1,
+                            'freq2_mhz': f2,
+                            'rms_diff_tecu': rms,
+                            'mean_diff_tecu': mean_diff,
+                            'n_points': n_pts,
+                            'quality_flag': qflag,
+                            'processing_version': '5.0.0',
+                        }
+                        self.dtec_diff_writer.write_measurement(diff_record)
                     except Exception as e:
                         logger.debug(f"Differential dTEC pair {station} {f1}/{f2}: {e}")
 
@@ -992,10 +1031,10 @@ class PhysicsFusionService:
                     f"from {len(freq_results)} freqs {[f'{f:.2f}' for f in sorted_freqs]} MHz"
                 ]
                 if best_diff is not None:
-                    f1, f2, d = best_diff
+                    f1, f2, d, mean_d = best_diff
                     info_parts.append(
                         f"  widest pair {f1:.2f}-{f2:.2f} MHz: "
-                        f"RMS={d['rms_diff_tecu']:.4f} TECU n={d['n_points']}"
+                        f"RMS={d['rms_diff_tecu']:.4f} TECU mean={mean_d:.4f} TECU n={d['n_points']}"
                     )
                 logger.info("\n".join(info_parts))
 

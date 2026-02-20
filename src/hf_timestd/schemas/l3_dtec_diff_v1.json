@@ -1,0 +1,80 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3A_dtec_diff",
+    "description": "Per-minute differential carrier-phase TEC between frequency pairs for the same station. Removes common-mode clock/geometry errors; residual isolates dispersive ionospheric component and scintillation.",
+    "cadence_seconds": 60,
+    "processing_level": "L3A",
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Start of the minute window"
+        },
+        {
+            "name": "minute_boundary",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of minute boundary"
+        },
+        {
+            "name": "station",
+            "type": "string",
+            "required": true,
+            "description": "Broadcast station (e.g. WWV, CHU)"
+        },
+        {
+            "name": "freq1_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Lower frequency of the pair",
+            "units": "MHz"
+        },
+        {
+            "name": "freq2_mhz",
+            "type": "float",
+            "required": true,
+            "description": "Upper frequency of the pair",
+            "units": "MHz"
+        },
+        {
+            "name": "rms_diff_tecu",
+            "type": "float",
+            "required": true,
+            "description": "RMS of dTEC_f1 - dTEC_f2 over the minute. Near-zero for stable ionosphere; elevated during scintillation or mode changes.",
+            "units": "TECU"
+        },
+        {
+            "name": "mean_diff_tecu",
+            "type": "float",
+            "required": true,
+            "description": "Mean of dTEC_f1 - dTEC_f2. Non-zero offset indicates inter-frequency bias or unresolved phase ambiguity.",
+            "units": "TECU"
+        },
+        {
+            "name": "n_points",
+            "type": "integer",
+            "required": true,
+            "description": "Number of interpolated time points in the common overlap window"
+        },
+        {
+            "name": "quality_flag",
+            "type": "string",
+            "required": true,
+            "enum": ["GOOD", "MARGINAL", "BAD"],
+            "description": "Quality flag based on n_points and rms_diff_tecu"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "Processing version"
+        }
+    ],
+    "quality_flags": {
+        "GOOD": "n_points >= 30 and rms_diff_tecu < 0.5 TECU",
+        "MARGINAL": "n_points 10-29, or rms_diff_tecu 0.5-2.0 TECU",
+        "BAD": "n_points < 10, or rms_diff_tecu >= 2.0 TECU"
+    }
+}
