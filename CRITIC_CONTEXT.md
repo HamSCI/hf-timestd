@@ -120,13 +120,35 @@ PHYSICS.md claims ✅ for TEC, scintillation, TIDs. Live system contradicts seve
 | P4-C: `tof_kalman_ms` marked `deprecated=true` in L2 schema | 8740347 |
 | P3-D: Confirmed no code change needed — correlated propagation uncertainty absorbed by WLS intercept | — |
 
+## Additional Fixes (2026-02-19/20 Session) — ALL COMPLETE
+
+| Fix | Commit |
+|---|---|
+| `IonoDataService.start()` wired into `L2CalibrationService.start/stop()` | 4d4349b |
+| IONEX BASE RADIUS fixed to 6371.0 km (was `center_lat` ~39); HGT1/HGT2/DHGT fixed | a800885 |
+| `l3_dtec_v1` schema: add `anchor_status`, `unwrap_quality`, `n_phase_jumps` fields | 3bdfb73, 3b45357 |
+| Physics service minute re-processing bug: add `_processed_minutes` set | 9e8b4df |
+| `hdf5_reader`: O(1) chunk-boundary truncation replacing O(log N) binary search (watchdog fix) | 1ae970e |
+| Differential dTEC RMS promoted to INFO log; validated <0.03 TECU (all GOOD) | ea00ee5 |
+| Differential dTEC HDF5 writing: new `l3_dtec_diff_v1` schema + `dtec_diff_writer` | aa53942 |
+
+### Differential dTEC Validation Results (2026-02-20 ~01:00 UTC)
+
+| Station | Widest pair | RMS | n |
+|---|---|---|---|
+| CHU | 3.33–14.67 MHz | 0.005–0.007 TECU | 45–172 |
+| WWV | 2.50–25.00 MHz | 0.005–0.026 TECU | 54–235 |
+| WWVH | 2.50–15.00 MHz | 0.003–0.012 TECU | 22–235 |
+| BPM | 2.50–15.00 MHz | 0.002–0.011 TECU | 22–227 |
+
+All pairs GOOD quality. HDF5 output: `phase2/science/dtec_diff/AGGREGATED_dtec_diff_YYYYMMDD.h5`
+
 ## Remaining Work
 
 | Item | Priority | Notes |
 |---|---|---|
-| Validate differential dTEC pairs in physics.log | MEDIUM | After next processing cycle, check RMS values; if sensible (<5 TECU), add HDF5 write |
-| IonoDataService startup in l2-calibration | MEDIUM | `HFPropagationModel` lazy-inits IonoDataService but doesn't call `.start()` — WAM-IPE fetch won't run until explicitly started |
-| P3-A production validation | LOW | Check physics.log for `unwrap_quality` < 0.8 events to understand phase noise characteristics |
+| WAM-IPE access | LOW | S3 bucket access not available; IRI-2020 climatological fallback is active and correct |
+| P3-A production validation | LOW | Check physics.log for `unwrap_quality` < 0.8 events to characterise phase noise |
 
 ---
 
