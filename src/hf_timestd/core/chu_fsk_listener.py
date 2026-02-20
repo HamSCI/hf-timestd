@@ -217,6 +217,8 @@ class CHUFSKListener:
         """Create USB channels and start listening."""
         from ka9q import RadiodStream
 
+        channel_status = {}
+        n_started = 0
         for freq, ch in self.channels.items():
             try:
                 info = self.control.ensure_channel(
@@ -226,7 +228,7 @@ class CHUFSKListener:
                     agc_enable=self.agc,
                     gain=self.gain,
                     encoding=self.encoding,
-                    timeout=10.0,
+                    timeout=30.0,
                 )
                 ch.channel_info = info
                 ch.ssrc = info.ssrc
@@ -235,13 +237,43 @@ class CHUFSKListener:
                 stream = RadiodStream(info, on_samples=ch.on_samples)
                 stream.start()
                 ch.stream = stream
+                n_started += 1
 
                 logger.info(f"CHU FSK channel started: {ch.description} "
                             f"({freq/1e6:.3f} MHz) SSRC={info.ssrc:08x}")
+                channel_status[ch.iq_channel] = {
+                    'ok': True, 'ssrc': f"{info.ssrc:08x}",
+                    'freq_mhz': freq / 1e6,
+                }
             except Exception as e:
-                logger.error(f"Failed to start FSK channel {freq}: {e}")
+                logger.error(f"Failed to start FSK channel {freq/1e6:.3f} MHz: {e}",
+                             exc_info=True)
+                channel_status[ch.iq_channel] = {
+                    'ok': False, 'freq_mhz': freq / 1e6, 'error': str(e),
+                }
 
-        # Start decode thread
+        # Write startup status so the web API can surface diagnostics
+        try:
+            FSK_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+            status = {
+                'started_at': time.time(),
+                'n_channels_ok': n_started,
+                'n_channels_total': len(self.channels),
+                'channels': channel_status,
+            }
+            (FSK_RESULTS_DIR / '_status.json').write_text(
+                json.dumps(status, indent=2)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write FSK status: {e}")
+
+        if n_started == 0:
+            logger.error(
+                "CHU FSK: no channels started — FSK decoding disabled. "
+                "Check that radiod is reachable and accepts USB channel creation."
+            )
+
+        # Start decode thread (runs even if no channels started, for clean lifecycle)
         self._running = True
         self._thread = threading.Thread(
             target=self._decode_loop, daemon=True, name='chu-fsk-decode')

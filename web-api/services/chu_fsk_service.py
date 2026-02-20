@@ -190,11 +190,38 @@ class CHUFSKService:
                             'decode_confidence': data.get('decode_confidence', 0),
                             'written_at': data.get('written_at'),
                         })
-                
+
+                # Read FSK listener startup status for diagnostics
+                listener_status = None
+                try:
+                    status_path = FSK_RESULTS_DIR / '_status.json'
+                    if status_path.exists():
+                        import json as _json
+                        listener_status = _json.loads(status_path.read_text())
+                except Exception:
+                    pass
+
+                # Build human-readable message
+                if listener_status and listener_status.get('n_channels_ok', 0) == 0:
+                    failed = [
+                        f"{v['freq_mhz']:.2f} MHz: {v.get('error', 'unknown')}"
+                        for v in listener_status.get('channels', {}).values()
+                        if not v.get('ok')
+                    ]
+                    message = (
+                        'CHU FSK listener failed to start USB channels. '
+                        + ('; '.join(failed) if failed else 'Check core-recorder log.')
+                    )
+                elif not channel_status:
+                    message = 'CHU FSK listener not running (no recent decode attempts)'
+                else:
+                    message = 'No CHU FSK data available in last 24 hours'
+
                 return {
                     'available': False,
-                    'message': 'No CHU FSK data available in last 24 hours',
+                    'message': message,
                     'channel_status': channel_status,
+                    'listener_status': listener_status,
                     'dut1_seconds': None,
                     'tai_utc': None,
                     'year': None,
