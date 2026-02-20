@@ -965,6 +965,7 @@ class PhysicsFusionService:
             # gives the largest dispersive signal; log all pairs for now)
             sorted_freqs = sorted(freq_results.keys())
             n_pairs = 0
+            best_diff = None  # lowest-highest pair (largest dispersive signal)
             for i, f1 in enumerate(sorted_freqs):
                 for f2 in sorted_freqs[i + 1:]:
                     try:
@@ -979,14 +980,24 @@ class PhysicsFusionService:
                             f"RMS={diff['rms_diff_tecu']:.4f} TECU, "
                             f"n={diff['n_points']}"
                         )
+                        # Track the widest-separation pair for INFO-level summary
+                        if i == 0 and f2 == sorted_freqs[-1]:
+                            best_diff = (f1, f2, diff)
                     except Exception as e:
                         logger.debug(f"Differential dTEC pair {station} {f1}/{f2}: {e}")
 
             if n_pairs > 0:
-                logger.info(
-                    f"Differential dTEC {station}: {n_pairs} frequency pair(s) computed "
-                    f"from {len(freq_results)} frequencies {[f'{f:.2f}' for f in sorted_freqs]} MHz"
-                )
+                info_parts = [
+                    f"Differential dTEC {station}: {n_pairs} pair(s) "
+                    f"from {len(freq_results)} freqs {[f'{f:.2f}' for f in sorted_freqs]} MHz"
+                ]
+                if best_diff is not None:
+                    f1, f2, d = best_diff
+                    info_parts.append(
+                        f"  widest pair {f1:.2f}-{f2:.2f} MHz: "
+                        f"RMS={d['rms_diff_tecu']:.4f} TECU n={d['n_points']}"
+                    )
+                logger.info("\n".join(info_parts))
 
     def run(self):
         """Main service loop."""
