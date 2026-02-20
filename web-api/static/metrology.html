@@ -941,6 +941,18 @@
                     return;
                 }
                 
+                // Show warning banner when decoding is active but signal not yet decoded
+                const notDetectedBanner = (data.detected === false) ? `
+                    <div style="margin-bottom: 16px; padding: 12px; background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b; border-radius: 4px;">
+                        <div style="font-size: 12px; color: #fbbf24;">
+                            <strong>⚠ Signal not decoded</strong> — FSK listener active on ${data.channel || 'unknown channel'},
+                            last attempt ${data.last_decode ? formatTime(data.last_decode) : 'unknown'}.
+                            Decode quality ${data.decode_confidence !== null ? (data.decode_confidence * 100).toFixed(0) + '%' : 'N/A'}
+                            (${data.frames_decoded || 0}/${data.frames_total || 9} frames).
+                            DUT1/TAI-UTC values below are from the most recent successful decode.
+                        </div>
+                    </div>` : '';
+
                 // Format DUT1 with sign
                 const dut1Display = data.dut1_seconds !== null 
                     ? (data.dut1_seconds >= 0 ? '+' : '') + data.dut1_seconds.toFixed(1) + ' s'
@@ -956,6 +968,7 @@
                     : data.decode_confidence >= 0.5 ? '#f59e0b' : '#ef4444';
                 
                 container.innerHTML = `
+                    ${notDetectedBanner}
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px;">
                         <!-- DUT1 -->
                         <div style="text-align: center; padding: 16px; background: rgba(30, 41, 59, 0.5); border-radius: 8px;">
