@@ -134,7 +134,7 @@ else
 fi
 
 # =============================================================================
-# Step 5: Check if key is already accepted (skip password step if so)
+# Step 5: Check if key is already accepted (skip portal step if so)
 # =============================================================================
 log_step "Checking if key is already accepted by PSWS server..."
 
@@ -144,95 +144,65 @@ if sudo -u "${TIMESTD_USER}" sftp \
         -o ConnectTimeout=10 \
         -P "${PSWS_PORT}" \
         "${STATION_ID}@${PSWS_HOST}" <<< "quit" &>/dev/null; then
-    log_info "  ✅ Key already accepted — no password needed."
+    log_info "  ✅ Key already accepted — skipping portal registration step."
     KEY_ALREADY_INSTALLED=true
 else
     KEY_ALREADY_INSTALLED=false
 fi
 
 # =============================================================================
-# Step 6: Upload public key using one-time password (sftp-only method)
+# Step 6: Register public key via PSWS web portal
+# =============================================================================
+# The PSWS server manages authorized keys centrally — uploading to
+# ~/.ssh/authorized_keys via sftp does not work. Keys must be registered
+# through the web portal at https://pswsnetwork.caps.ua.edu/
 # =============================================================================
 if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
     echo ""
-    echo "  Your PSWS TOKEN is the password shown on your site admin page at:"
-    echo "  https://pswsnetwork.caps.ua.edu/"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  ACTION REQUIRED: Register your SSH public key with PSWS"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    read -rsp "  Enter PSWS TOKEN for ${STATION_ID}: " PSWS_TOKEN
+    echo "  1. Open: https://pswsnetwork.caps.ua.edu/"
+    echo "  2. Log in and navigate to your site: ${STATION_ID}"
+    echo "  3. Find the SSH Key / Public Key field and paste this key:"
+    echo ""
+    echo "─────────────────────────────────────────────────────────────"
+    cat "${KEY_FILE}.pub"
+    echo "─────────────────────────────────────────────────────────────"
+    echo ""
+    echo "  4. Save the key on the portal."
+    echo ""
+    read -rp "  Press Enter once you have saved the key on the portal..." _
     echo ""
 
-    if [[ -z "${PSWS_TOKEN}" ]]; then
-        log_error "No token entered. Aborting."
-        exit 1
+    # Poll for up to 2 minutes for the key to become active
+    log_step "Waiting for server to accept the key (up to 2 minutes)..."
+    ATTEMPTS=0
+    MAX_ATTEMPTS=12  # 12 × 10s = 2 minutes
+    while [[ ${ATTEMPTS} -lt ${MAX_ATTEMPTS} ]]; do
+        if sudo -u "${TIMESTD_USER}" sftp \
+                -i "${KEY_FILE}" \
+                -o BatchMode=yes \
+                -o ConnectTimeout=10 \
+                -P "${PSWS_PORT}" \
+                "${STATION_ID}@${PSWS_HOST}" <<< "quit" &>/dev/null; then
+            log_info "  ✅ Key accepted by server!"
+            KEY_ALREADY_INSTALLED=true
+            break
+        fi
+        ATTEMPTS=$(( ATTEMPTS + 1 ))
+        echo "  Attempt ${ATTEMPTS}/${MAX_ATTEMPTS} — waiting 10s..."
+        sleep 10
+    done
+
+    if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
+        log_warn "  Key not yet accepted after 2 minutes."
+        log_warn "  The server may still be propagating the key."
+        log_warn "  Re-run this script later to complete the setup:"
+        log_warn "    sudo $0"
+        exit 0
     fi
-
-    log_step "Uploading public key to PSWS server via SFTP..."
-
-    # Strategy: use sftp batch to:
-    #   1. Download existing authorized_keys (may not exist — that's OK)
-    #   2. Append our public key locally
-    #   3. Upload the merged authorized_keys back
-    #   4. Ensure ~/.ssh directory exists on the server
-
-    TMPDIR=$(mktemp -d)
-    trap 'rm -rf "${TMPDIR}"' EXIT
-
-    # Try to fetch existing authorized_keys (ignore failure if it doesn't exist)
-    SFTP_FETCH_BATCH="${TMPDIR}/fetch.sftp"
-    cat > "${SFTP_FETCH_BATCH}" <<EOF
--mkdir .ssh
-get .ssh/authorized_keys ${TMPDIR}/authorized_keys_remote
-quit
-EOF
-
-    sshpass -p "${PSWS_TOKEN}" sftp \
-        -o BatchMode=no \
-        -o StrictHostKeyChecking=no \
-        -o ConnectTimeout=15 \
-        -P "${PSWS_PORT}" \
-        -b "${SFTP_FETCH_BATCH}" \
-        "${STATION_ID}@${PSWS_HOST}" 2>/dev/null || true
-
-    # Merge: existing keys (if any) + our new key (deduplicated)
-    MERGED="${TMPDIR}/authorized_keys"
-    if [[ -f "${TMPDIR}/authorized_keys_remote" ]]; then
-        cp "${TMPDIR}/authorized_keys_remote" "${MERGED}"
-    else
-        touch "${MERGED}"
-    fi
-
-    # Append only if not already present
-    if ! grep -qF "${PUBKEY}" "${MERGED}" 2>/dev/null; then
-        echo "${PUBKEY}" >> "${MERGED}"
-        log_info "  Public key appended to authorized_keys"
-    else
-        log_info "  Public key already present in authorized_keys"
-    fi
-
-    # Upload merged authorized_keys back
-    SFTP_PUT_BATCH="${TMPDIR}/put.sftp"
-    cat > "${SFTP_PUT_BATCH}" <<EOF
--mkdir .ssh
-put ${MERGED} .ssh/authorized_keys
-quit
-EOF
-
-    if sshpass -p "${PSWS_TOKEN}" sftp \
-            -o BatchMode=no \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            -P "${PSWS_PORT}" \
-            -b "${SFTP_PUT_BATCH}" \
-            "${STATION_ID}@${PSWS_HOST}" 2>&1; then
-        log_info "  ✅ Public key uploaded to ${PSWS_HOST}"
-    else
-        log_error "  SFTP upload failed. Check your TOKEN and try again."
-        log_error "  TOKEN is shown on your site page at https://pswsnetwork.caps.ua.edu/"
-        exit 1
-    fi
-
-    # Unset token immediately — don't leave it in memory longer than needed
-    unset PSWS_TOKEN
 fi
 
 # =============================================================================
