@@ -151,35 +151,84 @@ else
 fi
 
 # =============================================================================
-# Step 6: Register public key via PSWS web portal
-# =============================================================================
-# The PSWS server manages authorized keys centrally — uploading to
-# ~/.ssh/authorized_keys via sftp does not work. Keys must be registered
-# through the web portal at https://pswsnetwork.caps.ua.edu/
+# Step 6: Upload public key via sftp using one-time password
 # =============================================================================
 if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
     echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ACTION REQUIRED: Register your SSH public key with PSWS"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Your PSWS TOKEN is the password shown on your site admin page at:"
+    echo "  https://pswsnetwork.caps.ua.edu/"
     echo ""
-    echo "  1. Open: https://pswsnetwork.caps.ua.edu/"
-    echo "  2. Log in and navigate to your site: ${STATION_ID}"
-    echo "  3. Find the SSH Key / Public Key field and paste this key:"
-    echo ""
-    echo "─────────────────────────────────────────────────────────────"
-    cat "${KEY_FILE}.pub"
-    echo "─────────────────────────────────────────────────────────────"
-    echo ""
-    echo "  4. Save the key on the portal."
-    echo ""
-    read -rp "  Press Enter once you have saved the key on the portal..." _
+    read -rsp "  Enter PSWS TOKEN for ${STATION_ID}: " PSWS_TOKEN
     echo ""
 
-    # Poll for up to 2 minutes for the key to become active
-    log_step "Waiting for server to accept the key (up to 2 minutes)..."
+    if [[ -z "${PSWS_TOKEN}" ]]; then
+        log_error "No token entered. Aborting."
+        exit 1
+    fi
+
+    log_step "Uploading public key to PSWS server via SFTP..."
+
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "${TMPDIR}"' EXIT
+
+    # Try to fetch existing authorized_keys (ignore failure if it doesn't exist)
+    SFTP_FETCH_BATCH="${TMPDIR}/fetch.sftp"
+    cat > "${SFTP_FETCH_BATCH}" <<EOF
+-mkdir .ssh
+get .ssh/authorized_keys ${TMPDIR}/authorized_keys_remote
+quit
+EOF
+
+    sshpass -p "${PSWS_TOKEN}" sftp \
+        -o BatchMode=no \
+        -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=15 \
+        -P "${PSWS_PORT}" \
+        -b "${SFTP_FETCH_BATCH}" \
+        "${STATION_ID}@${PSWS_HOST}" 2>/dev/null || true
+
+    # Merge: existing keys (if any) + our new key (deduplicated)
+    MERGED="${TMPDIR}/authorized_keys"
+    if [[ -f "${TMPDIR}/authorized_keys_remote" ]]; then
+        cp "${TMPDIR}/authorized_keys_remote" "${MERGED}"
+    else
+        touch "${MERGED}"
+    fi
+
+    if ! grep -qF "${PUBKEY}" "${MERGED}" 2>/dev/null; then
+        echo "${PUBKEY}" >> "${MERGED}"
+        log_info "  Public key appended to authorized_keys"
+    else
+        log_info "  Public key already present in authorized_keys"
+    fi
+
+    # Upload merged authorized_keys back
+    SFTP_PUT_BATCH="${TMPDIR}/put.sftp"
+    cat > "${SFTP_PUT_BATCH}" <<EOF
+-mkdir .ssh
+put ${MERGED} .ssh/authorized_keys
+quit
+EOF
+
+    if sshpass -p "${PSWS_TOKEN}" sftp \
+            -o BatchMode=no \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            -P "${PSWS_PORT}" \
+            -b "${SFTP_PUT_BATCH}" \
+            "${STATION_ID}@${PSWS_HOST}" 2>/dev/null; then
+        log_info "  ✅ Public key uploaded to ${PSWS_HOST}"
+    else
+        log_error "  SFTP upload failed. Check your TOKEN and try again."
+        exit 1
+    fi
+
+    unset PSWS_TOKEN
+
+    # Poll for up to 3 minutes — server may take time to propagate the key
+    log_step "Waiting for server to accept the key (up to 3 minutes)..."
     ATTEMPTS=0
-    MAX_ATTEMPTS=12  # 12 × 10s = 2 minutes
+    MAX_ATTEMPTS=18  # 18 × 10s = 3 minutes
     while [[ ${ATTEMPTS} -lt ${MAX_ATTEMPTS} ]]; do
         if sudo -u "${TIMESTD_USER}" sftp \
                 -i "${KEY_FILE}" \
@@ -197,9 +246,8 @@ if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
     done
 
     if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
-        log_warn "  Key not yet accepted after 2 minutes."
-        log_warn "  The server may still be propagating the key."
-        log_warn "  Re-run this script later to complete the setup:"
+        log_warn "  Key not yet accepted after 3 minutes."
+        log_warn "  Re-run this script later to complete setup (no TOKEN needed):"
         log_warn "    sudo $0"
         exit 0
     fi
