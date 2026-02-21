@@ -20,15 +20,15 @@
 #   - Your PSWS TOKEN (the password shown on your PSWS site admin page)
 #
 # Prerequisites:
-#   - hf-timestd installed (timestd user must exist)
 #   - /etc/hf-timestd/timestd-config.toml configured with station.id
 #   - Network access to pswsnetwork.eng.ua.edu
 # =============================================================================
 
 set -euo pipefail
 
-TIMESTD_USER="timestd"
-TIMESTD_HOME="/home/${TIMESTD_USER}"
+# Use the user who invoked sudo; fall back to current user
+TIMESTD_USER="${SUDO_USER:-$(whoami)}"
+TIMESTD_HOME=$(getent passwd "${TIMESTD_USER}" | cut -d: -f6)
 PSWS_HOST="pswsnetwork.eng.ua.edu"
 PSWS_PORT=22
 KEY_FILE="${TIMESTD_HOME}/.ssh/id_rsa_psws"
@@ -54,10 +54,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-if ! id "${TIMESTD_USER}" &>/dev/null; then
-    log_error "User '${TIMESTD_USER}' does not exist. Run install.sh first."
-    exit 1
-fi
+log_info "Running as user: ${TIMESTD_USER} (home: ${TIMESTD_HOME})"
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
     log_error "Config not found: ${CONFIG_FILE}"
