@@ -139,7 +139,7 @@ max_queue_size_gb = 100
 [uploader.sftp]
 host = "pswsnetwork.eng.ua.edu"
 port = 22
-user = "<YOUR_PSWS_STATION_ID>"         # Same as station.id
+# username is taken from station.id — no need to set it here
 ssh_key = "/home/timestd/.ssh/psws_key" # Dedicated PSWS SSH key (see docs/PSWS_SETUP_GUIDE.md)
 remote_base_path = "/"
 bandwidth_limit_kbps = 100              # Limit upload bandwidth (KB/s)
