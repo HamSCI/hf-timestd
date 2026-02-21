@@ -236,10 +236,11 @@ EOF
 fi
 
 # =============================================================================
-# Step 7: Verify passwordless login
+# Step 7: Verify passwordless login (as the key-generating user)
 # =============================================================================
-log_step "Verifying passwordless SFTP login..."
+log_step "Verifying passwordless SFTP login as ${TIMESTD_USER}..."
 
+LOGIN_OK=false
 if sudo -u "${TIMESTD_USER}" sftp \
         -i "${KEY_FILE}" \
         -o BatchMode=yes \
@@ -247,10 +248,65 @@ if sudo -u "${TIMESTD_USER}" sftp \
         -P "${PSWS_PORT}" \
         "${STATION_ID}@${PSWS_HOST}" <<< "quit" 2>/dev/null; then
     log_info "  ✅ Passwordless SFTP login verified!"
+    LOGIN_OK=true
 else
     log_warn "  ⚠️  Passwordless login test failed."
     log_warn "     The server may take a moment to apply the new key."
     log_warn "     Try again in a minute: sudo sftp -i ${KEY_FILE} ${STATION_ID}@${PSWS_HOST}"
+fi
+
+# =============================================================================
+# Step 8: Install keys into production location (timestd user) if needed
+# =============================================================================
+PRODUCTION_USER="timestd"
+PRODUCTION_KEY="/home/${PRODUCTION_USER}/.ssh/id_rsa_psws"
+
+if [[ "${LOGIN_OK}" == "true" && "${TIMESTD_USER}" != "${PRODUCTION_USER}" ]] \
+        && id "${PRODUCTION_USER}" &>/dev/null; then
+
+    log_step "Installing keys into production location for ${PRODUCTION_USER}..."
+
+    PROD_SSH_DIR="/home/${PRODUCTION_USER}/.ssh"
+    mkdir -p "${PROD_SSH_DIR}"
+    chmod 700 "${PROD_SSH_DIR}"
+
+    cp "${KEY_FILE}"     "${PRODUCTION_KEY}"
+    cp "${KEY_FILE}.pub" "${PRODUCTION_KEY}.pub"
+    chmod 600 "${PRODUCTION_KEY}"
+    chmod 644 "${PRODUCTION_KEY}.pub"
+
+    # Copy known_hosts so timestd trusts the server too
+    cp "${TIMESTD_HOME}/.ssh/known_hosts" "${PROD_SSH_DIR}/known_hosts" 2>/dev/null || true
+    chmod 644 "${PROD_SSH_DIR}/known_hosts" 2>/dev/null || true
+
+    chown -R "${PRODUCTION_USER}:${PRODUCTION_USER}" "${PROD_SSH_DIR}"
+    log_info "  ✅ Keys installed to ${PRODUCTION_KEY}"
+
+    # Update ssh_key path in config to point to production location
+    if grep -q 'ssh_key\s*=' "${CONFIG_FILE}"; then
+        sed -i "s|^\(ssh_key\s*=\s*\).*|\1\"${PRODUCTION_KEY}\"|" "${CONFIG_FILE}"
+        log_info "  ✅ Updated ssh_key in ${CONFIG_FILE} → ${PRODUCTION_KEY}"
+    fi
+
+    # Verify passwordless login as production user
+    log_step "Verifying passwordless SFTP login as ${PRODUCTION_USER}..."
+    if sudo -u "${PRODUCTION_USER}" sftp \
+            -i "${PRODUCTION_KEY}" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -P "${PSWS_PORT}" \
+            "${STATION_ID}@${PSWS_HOST}" <<< "quit" 2>/dev/null; then
+        log_info "  ✅ Passwordless SFTP login as ${PRODUCTION_USER} verified!"
+        FINAL_KEY="${PRODUCTION_KEY}"
+        FINAL_USER="${PRODUCTION_USER}"
+    else
+        log_warn "  ⚠️  Login as ${PRODUCTION_USER} failed — using ${TIMESTD_USER} key as fallback."
+        FINAL_KEY="${KEY_FILE}"
+        FINAL_USER="${TIMESTD_USER}"
+    fi
+else
+    FINAL_KEY="${KEY_FILE}"
+    FINAL_USER="${TIMESTD_USER}"
 fi
 
 # =============================================================================
@@ -261,12 +317,13 @@ echo "=============================================="
 echo "  PSWS Key Exchange Complete"
 echo "=============================================="
 echo ""
-echo "  Station ID : ${STATION_ID}"
-echo "  SFTP host  : ${PSWS_HOST}"
-echo "  Private key: ${KEY_FILE}"
-echo "  Public key : ${KEY_FILE}.pub"
+echo "  Station ID  : ${STATION_ID}"
+echo "  SFTP host   : ${PSWS_HOST}"
+echo "  Service user: ${FINAL_USER}"
+echo "  Private key : ${FINAL_KEY}"
+echo "  Public key  : ${FINAL_KEY}.pub"
 echo ""
 echo "  The grape-daily service will upload automatically."
 echo "  To test manually:"
-echo "    sudo -u timestd hf-timestd grape upload --dry-run"
+echo "    sudo -u ${FINAL_USER} hf-timestd grape upload --dry-run"
 echo ""
