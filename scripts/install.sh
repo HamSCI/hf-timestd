@@ -126,54 +126,73 @@ echo "=============================================="
 echo ""
 
 # =============================================================================
-# Step 1: Check Prerequisites
+# Step 1: Install apt Dependencies
 # =============================================================================
-log_info "Checking prerequisites..."
+log_step "Checking and installing apt dependencies..."
 
-# Check for required commands
-MISSING_PREREQS=false
+# Packages required to build/run hf-timestd:
+#   python3-dev      - headers for sysv_ipc, digital_rf C extensions
+#   python3-venv     - venv module (not always included with python3)
+#   python3-pip      - pip bootstrap
+#   git              - required to install iri2020 from GitHub
+#   libhdf5-dev      - h5py and digital_rf build dependency
+#   libsndfile1-dev  - soundfile (libsndfile) build dependency
+#   libsystemd-dev   - systemd-python build dependency
+#   pkg-config       - needed by systemd-python and others to find libs
+#   rsync            - used by this script and update-production.sh
+#   avahi-utils      - avahi-browse for mDNS/zeroconf (ka9q-python discovery)
+#   hdf5-tools       - h5clear for HDF5 crash recovery
+APT_PACKAGES=(
+    python3
+    python3-dev
+    python3-venv
+    python3-pip
+    git
+    libhdf5-dev
+    libsndfile1-dev
+    libsystemd-dev
+    pkg-config
+    rsync
+    avahi-utils
+    hdf5-tools
+)
 
-if command -v python3 > /dev/null; then
-    log_info "  ✅ python3 found"
+# Check which packages are missing
+MISSING_APT=()
+for pkg in "${APT_PACKAGES[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
+        MISSING_APT+=("$pkg")
+    fi
+done
+
+if [[ ${#MISSING_APT[@]} -gt 0 ]]; then
+    log_info "  Missing apt packages: ${MISSING_APT[*]}"
+    if [[ "$EUID" -eq 0 ]] || sudo -n true 2>/dev/null; then
+        log_info "  Running: sudo apt-get install -y ${MISSING_APT[*]}"
+        sudo apt-get update -qq
+        sudo apt-get install -y "${MISSING_APT[@]}"
+        log_info "  ✅ apt packages installed"
+    else
+        log_error "Cannot install missing packages without sudo."
+        log_error "Please run: sudo apt-get install -y ${MISSING_APT[*]}"
+        exit 1
+    fi
 else
-    log_warn "  ❌ python3 not found"
-    MISSING_PREREQS=true
+    log_info "  ✅ All apt dependencies already installed"
 fi
 
-if command -v pip3 > /dev/null; then
-    log_info "  ✅ pip3 found"
-else
-    log_warn "  ❌ pip3 not found"
-    MISSING_PREREQS=true
-fi
-
-if command -v git > /dev/null; then
-    log_info "  ✅ git found"
-else
-    log_warn "  ❌ git not found (required for iri2020 dependency)"
-    MISSING_PREREQS=true
-fi
-
-# Check Python version
+# Verify Python version (must be 3.10+ — apt may provide an older version)
 PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
 PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
 PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
 
-if [ "$PYTHON_MAJOR" -ge 3 ] && [ "$PYTHON_MINOR" -ge 10 ]; then
+if [[ "$PYTHON_MAJOR" -ge 3 && "$PYTHON_MINOR" -ge 10 ]]; then
     log_info "  ✅ Python $PYTHON_VERSION (>= 3.10 required)"
 else
-    log_error "  ❌ Python $PYTHON_VERSION found, but 3.10+ required"
-    MISSING_PREREQS=true
-fi
-
-if [ "$MISSING_PREREQS" = true ]; then
-    log_error "Prerequisites not met. Please install missing packages."
-    echo ""
-    echo "On Debian/Ubuntu, run:"
-    echo "  sudo apt-get update"
-    echo "  sudo apt-get install python3 python3-pip python3-venv python3-dev git"
-    echo "  sudo apt-get install avahi-utils hdf5-tools libhdf5-dev libsystemd-dev"
-    echo ""
+    log_error "  ❌ Python $PYTHON_VERSION found, but 3.10+ is required."
+    log_error "     On older Debian/Ubuntu, install python3.11 or python3.12:"
+    log_error "       sudo apt-get install python3.11 python3.11-venv python3.11-dev"
+    log_error "     Then re-run this script."
     exit 1
 fi
 
@@ -182,39 +201,22 @@ fi
 # =============================================================================
 if [[ "$MODE" == "production" ]]; then
     log_step "Checking system dependencies..."
-    
-    # Check for hdf5-tools (h5clear needed for robust recovery)
-    if ! command -v h5clear &> /dev/null; then
-        log_warn "  ⚠️  h5clear not found (required for HDF5 crash recovery)"
-        read -p "Install hdf5-tools? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "  Installing hdf5-tools..."
-            sudo apt-get update && sudo apt-get install -y hdf5-tools
-        else
-            log_warn "  Skipping hdf5-tools. Automatic HDF5 lock clearing will not work."
-        fi
-    else
-        log_info "  ✅ h5clear found"
-    fi
 
-    # Check for chrony - REQUIRED for production (system clock discipline is core functionality)
-    # Note: chronyd is in /usr/sbin which may not be in PATH for non-root users
+    # chrony is REQUIRED for production mode (system clock discipline)
+    # Install it now if missing (not in the base APT_PACKAGES list above since
+    # it's production-only and may conflict with existing NTP setups in test mode)
     if ! command -v chronyd &> /dev/null && [[ ! -x /usr/sbin/chronyd ]]; then
-        log_warn "  ⚠️  chronyd not found"
-        log_info "  Chrony is REQUIRED for production mode (system clock discipline)"
-        log_info "  Installing chrony..."
-        sudo apt-get update && sudo apt-get install -y chrony
-        
+        log_info "  Installing chrony (required for production mode)..."
+        sudo apt-get install -y chrony
         if ! command -v chronyd &> /dev/null && [[ ! -x /usr/sbin/chronyd ]]; then
             log_error "Failed to install chrony. This is required for production mode."
             exit 1
         fi
-        log_info "  ✅ chronyd installed successfully"
+        log_info "  ✅ chronyd installed"
     else
         log_info "  ✅ chronyd found"
     fi
-    
+
     # Configure chrony for timestd SHM integration
     if command -v chronyd &> /dev/null || [[ -x /usr/sbin/chronyd ]]; then
         # Detect chrony config file location
