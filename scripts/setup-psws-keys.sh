@@ -1,151 +1,275 @@
 #!/bin/bash
-# Setup PSWS SSH keys for the timestd user
-# This script copies existing PSWS SSH keys to the timestd user's home directory
-# and sets up the known_hosts file for the PSWS server.
+# =============================================================================
+# PSWS SSH Key Exchange Setup
+# =============================================================================
+# Automates first-time SSH key exchange with the PSWS upload server.
+# The PSWS server (pswsnetwork.eng.ua.edu) is SFTP-only — no shell access.
+#
+# What this script does:
+#   1. Reads station.id from timestd-config.toml (used as SFTP username)
+#   2. Generates an RSA keypair for the timestd user (if not already present)
+#   3. Caches the server's host key in known_hosts
+#   4. Uploads the public key to ~/.ssh/authorized_keys on the PSWS server
+#      using one-time password authentication (via sshpass + sftp batch mode)
+#   5. Verifies that subsequent logins are passwordless
 #
 # Usage:
-#   sudo ./setup-psws-keys.sh [source_key_path]
+#   sudo ./setup-psws-keys.sh
 #
-# If source_key_path is not provided, the script will look for keys in:
-#   1. /home/*/id_rsa_psws (any user's home directory)
-#   2. /root/.ssh/id_rsa_psws
+# You will be prompted for:
+#   - Your PSWS TOKEN (the password shown on your PSWS site admin page)
 #
-# The script can be run:
-#   - During initial install (if keys were exchanged beforehand)
-#   - After install (once keys are obtained from PSWS)
+# Prerequisites:
+#   - hf-timestd installed (timestd user must exist)
+#   - /etc/hf-timestd/timestd-config.toml configured with station.id
+#   - Network access to pswsnetwork.eng.ua.edu
+# =============================================================================
 
-set -e
+set -euo pipefail
 
 TIMESTD_USER="timestd"
 TIMESTD_HOME="/home/${TIMESTD_USER}"
 PSWS_HOST="pswsnetwork.eng.ua.edu"
+PSWS_PORT=22
+KEY_FILE="${TIMESTD_HOME}/.ssh/id_rsa_psws"
+CONFIG_FILE="/etc/hf-timestd/timestd-config.toml"
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
+log_info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
+log_step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
 
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
+# =============================================================================
+# Preflight checks
+# =============================================================================
 
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Check if running as root
 if [[ $EUID -ne 0 ]]; then
-    log_error "This script must be run as root (use sudo)"
+    log_error "Run with sudo: sudo $0"
     exit 1
 fi
 
-# Check if timestd user exists
 if ! id "${TIMESTD_USER}" &>/dev/null; then
-    log_error "User '${TIMESTD_USER}' does not exist. Install hf-timestd first."
+    log_error "User '${TIMESTD_USER}' does not exist. Run install.sh first."
     exit 1
 fi
 
-# Find source key
-SOURCE_KEY=""
-
-if [[ -n "$1" ]]; then
-    # User provided a path
-    if [[ -f "$1" ]]; then
-        SOURCE_KEY="$1"
-        log_info "Using provided key: ${SOURCE_KEY}"
-    else
-        log_error "Provided key file not found: $1"
-        exit 1
-    fi
-else
-    # Search for existing keys
-    log_info "Searching for existing PSWS SSH keys..."
-    
-    # Check common locations
-    for dir in /home/*/.ssh /root/.ssh; do
-        if [[ -f "${dir}/id_rsa_psws" ]]; then
-            SOURCE_KEY="${dir}/id_rsa_psws"
-            log_info "Found key: ${SOURCE_KEY}"
-            break
-        fi
-    done
-    
-    if [[ -z "${SOURCE_KEY}" ]]; then
-        log_error "No PSWS SSH key found."
-        echo ""
-        echo "To set up PSWS uploads, you need an SSH key registered with PSWS."
-        echo ""
-        echo "Options:"
-        echo "  1. If you have a key, run: sudo $0 /path/to/id_rsa_psws"
-        echo "  2. To generate a new key and register with PSWS:"
-        echo "     a. Generate: ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa_psws -N ''"
-        echo "     b. Register the public key at: https://pswsnetwork.eng.ua.edu"
-        echo "     c. Run this script again"
-        echo ""
-        exit 1
-    fi
+if [[ ! -f "${CONFIG_FILE}" ]]; then
+    log_error "Config not found: ${CONFIG_FILE}"
+    log_error "Run install.sh first, then edit the config with your station details."
+    exit 1
 fi
 
-# Create .ssh directory for timestd user
-log_info "Setting up SSH directory for ${TIMESTD_USER}..."
+# =============================================================================
+# Step 1: Read station.id from config (SFTP username)
+# =============================================================================
+log_step "Reading station ID from config..."
+
+STATION_ID=$(grep -E '^\s*id\s*=' "${CONFIG_FILE}" | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/')
+
+if [[ -z "${STATION_ID}" || "${STATION_ID}" == "<YOUR_STATION_ID>" ]]; then
+    log_error "station.id is not set in ${CONFIG_FILE}"
+    log_error "Edit the config and set your PSWS SITE_ID (e.g. id = \"S000171\")"
+    exit 1
+fi
+
+log_info "  Station ID (SFTP username): ${STATION_ID}"
+
+# =============================================================================
+# Step 2: Install sshpass if needed (one-time password use only)
+# =============================================================================
+log_step "Checking for sshpass..."
+
+if ! command -v sshpass &>/dev/null; then
+    log_info "  Installing sshpass (needed for one-time password authentication)..."
+    apt-get install -y -qq sshpass
+    log_info "  ✅ sshpass installed"
+else
+    log_info "  ✅ sshpass found"
+fi
+
+# =============================================================================
+# Step 3: Generate keypair (as timestd user) if not already present
+# =============================================================================
+log_step "Checking for existing PSWS keypair..."
+
 mkdir -p "${TIMESTD_HOME}/.ssh"
 chmod 700 "${TIMESTD_HOME}/.ssh"
+chown "${TIMESTD_USER}:${TIMESTD_USER}" "${TIMESTD_HOME}/.ssh"
 
-# Copy private key
-log_info "Copying private key..."
-cp "${SOURCE_KEY}" "${TIMESTD_HOME}/.ssh/id_rsa_psws"
-chmod 600 "${TIMESTD_HOME}/.ssh/id_rsa_psws"
-
-# Copy public key if it exists
-if [[ -f "${SOURCE_KEY}.pub" ]]; then
-    log_info "Copying public key..."
-    cp "${SOURCE_KEY}.pub" "${TIMESTD_HOME}/.ssh/id_rsa_psws.pub"
-    chmod 644 "${TIMESTD_HOME}/.ssh/id_rsa_psws.pub"
+if [[ -f "${KEY_FILE}" ]]; then
+    log_info "  ✅ Keypair already exists: ${KEY_FILE}"
+else
+    log_info "  Generating RSA-4096 keypair for PSWS uploads..."
+    sudo -u "${TIMESTD_USER}" ssh-keygen \
+        -t rsa -b 4096 \
+        -f "${KEY_FILE}" \
+        -N "" \
+        -C "PSWS upload key for ${STATION_ID}"
+    chmod 600 "${KEY_FILE}"
+    chmod 644 "${KEY_FILE}.pub"
+    chown "${TIMESTD_USER}:${TIMESTD_USER}" "${KEY_FILE}" "${KEY_FILE}.pub"
+    log_info "  ✅ Keypair generated: ${KEY_FILE}"
 fi
 
-# Set ownership
-chown -R "${TIMESTD_USER}:${TIMESTD_USER}" "${TIMESTD_HOME}/.ssh"
+PUBKEY=$(cat "${KEY_FILE}.pub")
 
-# Add PSWS host to known_hosts
-log_info "Adding ${PSWS_HOST} to known_hosts..."
-if ! grep -q "${PSWS_HOST}" "${TIMESTD_HOME}/.ssh/known_hosts" 2>/dev/null; then
-    ssh-keyscan -H "${PSWS_HOST}" >> "${TIMESTD_HOME}/.ssh/known_hosts" 2>/dev/null
-    chown "${TIMESTD_USER}:${TIMESTD_USER}" "${TIMESTD_HOME}/.ssh/known_hosts"
-    chmod 644 "${TIMESTD_HOME}/.ssh/known_hosts"
-    log_info "Added ${PSWS_HOST} to known_hosts"
+# =============================================================================
+# Step 4: Cache the server's host key
+# =============================================================================
+log_step "Caching PSWS server host key..."
+
+KNOWN_HOSTS="${TIMESTD_HOME}/.ssh/known_hosts"
+touch "${KNOWN_HOSTS}"
+chown "${TIMESTD_USER}:${TIMESTD_USER}" "${KNOWN_HOSTS}"
+chmod 644 "${KNOWN_HOSTS}"
+
+if ! grep -q "${PSWS_HOST}" "${KNOWN_HOSTS}" 2>/dev/null; then
+    ssh-keyscan -p "${PSWS_PORT}" -H "${PSWS_HOST}" >> "${KNOWN_HOSTS}" 2>/dev/null
+    log_info "  ✅ Host key cached for ${PSWS_HOST}"
 else
-    log_info "${PSWS_HOST} already in known_hosts"
+    log_info "  ✅ Host key already cached"
 fi
 
-# Test connection
-log_info "Testing SSH connection to PSWS..."
-if sudo -u "${TIMESTD_USER}" ssh -i "${TIMESTD_HOME}/.ssh/id_rsa_psws" \
-    -o BatchMode=yes -o ConnectTimeout=10 \
-    "${PSWS_HOST}" "echo 'Connection successful'" 2>/dev/null; then
-    log_info "SSH connection test successful!"
+# =============================================================================
+# Step 5: Check if key is already accepted (skip password step if so)
+# =============================================================================
+log_step "Checking if key is already accepted by PSWS server..."
+
+if sudo -u "${TIMESTD_USER}" sftp \
+        -i "${KEY_FILE}" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -P "${PSWS_PORT}" \
+        "${STATION_ID}@${PSWS_HOST}" <<< "quit" &>/dev/null; then
+    log_info "  ✅ Key already accepted — no password needed."
+    KEY_ALREADY_INSTALLED=true
 else
-    log_warn "SSH connection test failed. This may be normal if:"
-    log_warn "  - The key is not yet registered with PSWS"
-    log_warn "  - The PSWS server is temporarily unavailable"
+    KEY_ALREADY_INSTALLED=false
+fi
+
+# =============================================================================
+# Step 6: Upload public key using one-time password (sftp-only method)
+# =============================================================================
+if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
     echo ""
-    echo "To register your key with PSWS:"
-    echo "  1. Visit: https://pswsnetwork.eng.ua.edu"
-    echo "  2. Log in with your station credentials"
-    echo "  3. Upload the public key: ${TIMESTD_HOME}/.ssh/id_rsa_psws.pub"
+    echo "  Your PSWS TOKEN is the password shown on your site admin page at:"
+    echo "  https://pswsnetwork.caps.ua.edu/"
+    echo ""
+    read -rsp "  Enter PSWS TOKEN for ${STATION_ID}: " PSWS_TOKEN
+    echo ""
+
+    if [[ -z "${PSWS_TOKEN}" ]]; then
+        log_error "No token entered. Aborting."
+        exit 1
+    fi
+
+    log_step "Uploading public key to PSWS server via SFTP..."
+
+    # Strategy: use sftp batch to:
+    #   1. Download existing authorized_keys (may not exist — that's OK)
+    #   2. Append our public key locally
+    #   3. Upload the merged authorized_keys back
+    #   4. Ensure ~/.ssh directory exists on the server
+
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "${TMPDIR}"' EXIT
+
+    # Try to fetch existing authorized_keys (ignore failure if it doesn't exist)
+    SFTP_FETCH_BATCH="${TMPDIR}/fetch.sftp"
+    cat > "${SFTP_FETCH_BATCH}" <<EOF
+-mkdir .ssh
+get .ssh/authorized_keys ${TMPDIR}/authorized_keys_remote
+quit
+EOF
+
+    sshpass -p "${PSWS_TOKEN}" sftp \
+        -o BatchMode=no \
+        -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=15 \
+        -P "${PSWS_PORT}" \
+        -b "${SFTP_FETCH_BATCH}" \
+        "${STATION_ID}@${PSWS_HOST}" 2>/dev/null || true
+
+    # Merge: existing keys (if any) + our new key (deduplicated)
+    MERGED="${TMPDIR}/authorized_keys"
+    if [[ -f "${TMPDIR}/authorized_keys_remote" ]]; then
+        cp "${TMPDIR}/authorized_keys_remote" "${MERGED}"
+    else
+        touch "${MERGED}"
+    fi
+
+    # Append only if not already present
+    if ! grep -qF "${PUBKEY}" "${MERGED}" 2>/dev/null; then
+        echo "${PUBKEY}" >> "${MERGED}"
+        log_info "  Public key appended to authorized_keys"
+    else
+        log_info "  Public key already present in authorized_keys"
+    fi
+
+    # Upload merged authorized_keys back
+    SFTP_PUT_BATCH="${TMPDIR}/put.sftp"
+    cat > "${SFTP_PUT_BATCH}" <<EOF
+-mkdir .ssh
+put ${MERGED} .ssh/authorized_keys
+quit
+EOF
+
+    if sshpass -p "${PSWS_TOKEN}" sftp \
+            -o BatchMode=no \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            -P "${PSWS_PORT}" \
+            -b "${SFTP_PUT_BATCH}" \
+            "${STATION_ID}@${PSWS_HOST}" 2>&1; then
+        log_info "  ✅ Public key uploaded to ${PSWS_HOST}"
+    else
+        log_error "  SFTP upload failed. Check your TOKEN and try again."
+        log_error "  TOKEN is shown on your site page at https://pswsnetwork.caps.ua.edu/"
+        exit 1
+    fi
+
+    # Unset token immediately — don't leave it in memory longer than needed
+    unset PSWS_TOKEN
 fi
 
+# =============================================================================
+# Step 7: Verify passwordless login
+# =============================================================================
+log_step "Verifying passwordless SFTP login..."
+
+if sudo -u "${TIMESTD_USER}" sftp \
+        -i "${KEY_FILE}" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=15 \
+        -P "${PSWS_PORT}" \
+        "${STATION_ID}@${PSWS_HOST}" <<< "quit" 2>/dev/null; then
+    log_info "  ✅ Passwordless SFTP login verified!"
+else
+    log_warn "  ⚠️  Passwordless login test failed."
+    log_warn "     The server may take a moment to apply the new key."
+    log_warn "     Try again in a minute: sudo sftp -i ${KEY_FILE} ${STATION_ID}@${PSWS_HOST}"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
 echo ""
-log_info "PSWS SSH key setup complete!"
+echo "=============================================="
+echo "  PSWS Key Exchange Complete"
+echo "=============================================="
 echo ""
-echo "Key location: ${TIMESTD_HOME}/.ssh/id_rsa_psws"
+echo "  Station ID : ${STATION_ID}"
+echo "  SFTP host  : ${PSWS_HOST}"
+echo "  Private key: ${KEY_FILE}"
+echo "  Public key : ${KEY_FILE}.pub"
 echo ""
-echo "The grape-daily service will now be able to upload to PSWS."
-echo "Uploads run automatically at 1:00 AM UTC daily."
+echo "  The grape-daily service will upload automatically."
+echo "  To test manually:"
+echo "    sudo -u timestd hf-timestd grape upload --dry-run"
 echo ""
-echo "To manually test an upload:"
-echo "  sudo -u timestd python3 -m hf_timestd.cli grape upload --dry-run"
