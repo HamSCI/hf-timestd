@@ -72,6 +72,9 @@ For temporary capability testing or development.
 # 1. Run installer in test mode
 ./scripts/install.sh --mode test
 
+# (If you are not using install.sh) Create/update local venv
+./scripts/ensure-venv.sh --mode test --venv ./venv --python python3
+
 # 2. Edit local configuration
 nano config/timestd-config.toml
 

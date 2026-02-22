@@ -70,6 +70,16 @@ sudo systemctl enable --now timestd-fusion
 sudo systemctl enable --now timestd-web-api
 ```
 
+Note: Production services assume the venv exists at `/opt/hf-timestd/venv`. The core recorder service will run the venv bootstrap on startup if needed.
+
+### Test/Development Mode
+
+```bash
+./scripts/ensure-venv.sh --mode test --venv ./venv --python python3
+source venv/bin/activate
+python -m hf_timestd --config config/timestd-config.toml
+```
+
 ### Production Updates (Repo -> Live System)
 
 - Use **`sudo scripts/update-production.sh [--pull]`** for production updates.

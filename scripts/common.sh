@@ -25,7 +25,7 @@ if [ -f "$VENV_PATH/bin/python" ]; then
     export PATH="$VENV_PATH/bin:$PATH"
 else
     echo " ERROR: venv not found at $VENV_PATH"
-    echo "   Run: cd $PROJECT_DIR && python3 -m venv venv && venv/bin/pip install -e ."
+    echo "   Run: $PROJECT_DIR/scripts/ensure-venv.sh --mode test --venv $VENV_PATH"
     exit 1
 fi
 

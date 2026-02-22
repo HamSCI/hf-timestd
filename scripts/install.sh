@@ -413,59 +413,30 @@ fi
 # =============================================================================
 log_step "Setting up Python virtual environment..."
 
-if [[ "$MODE" == "production" ]]; then
-    sudo mkdir -p "$(dirname "$VENV_DIR")"
-    sudo python3 -m venv "$VENV_DIR"
-    sudo chown -R "$INSTALL_USER:$INSTALL_USER" "$VENV_DIR"
-else
-    python3 -m venv "$VENV_DIR"
+if [[ ! -x "$PROJECT_DIR/scripts/ensure-venv.sh" ]]; then
+    log_error "Missing venv bootstrap script: $PROJECT_DIR/scripts/ensure-venv.sh"
+    exit 1
 fi
 
-# Activate and install
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip
-
-log_info "Installing hf-timestd package (and dependencies from pyproject.toml)..."
-
-# CRITICAL: In production mode, use regular install (NOT editable)
-# Editable installs create .pth files pointing to the source directory,
-# which breaks when systemd runs as a different user or the source is removed
 if [[ "$MODE" == "production" ]]; then
-    # Copy source to temp location to avoid any path dependencies
-    TEMP_INSTALL_DIR=$(mktemp -d)
-    
-    # Copy all files except legacy setup.py and requirements.txt (project uses pyproject.toml)
-    rsync -a --exclude='setup.py' --exclude='requirements.txt' --exclude='requirements-dev.txt' \
-          "$PROJECT_DIR/" "$TEMP_INSTALL_DIR/"
-    
-    # Install from temp location (ensures no references to $PROJECT_DIR)
-    pip install "$TEMP_INSTALL_DIR"
-    
-    # Clean up
-    rm -rf "$TEMP_INSTALL_DIR"
-    
-    log_info "  Installed hf-timestd in production mode (no source directory references)"
+    sudo bash "$PROJECT_DIR/scripts/ensure-venv.sh" --mode production --venv "$VENV_DIR" --python python3
 else
-    # Test mode: use editable install for development convenience
-    pip install -e .
-    log_info "  Installed hf-timestd in editable mode (for development)"
+    bash "$PROJECT_DIR/scripts/ensure-venv.sh" --mode test --venv "$VENV_DIR" --python python3
 fi
 
-# Verify installation
-python -c "import hf_timestd; print(f'  ✅ hf_timestd installed from: {hf_timestd.__file__}')"
-python -c "import sysv_ipc; print(f'  ✅ sysv_ipc installed')"
-python -c "import iri2020; print(f'  ✅ iri2020 installed')"
+# Verify installation (using venv python)
+"$VENV_DIR/bin/python" -c "import hf_timestd; print(f'  ✅ hf_timestd installed from: {hf_timestd.__file__}')"
+"$VENV_DIR/bin/python" -c "import sysv_ipc; print(f'  ✅ sysv_ipc installed')"
+"$VENV_DIR/bin/python" -c "import iri2020; print(f'  ✅ iri2020 installed')"
 
 # Verify no repo path references in production
 if [[ "$MODE" == "production" ]]; then
-    if python -c "import sys; exit(1 if '$PROJECT_DIR' in str(sys.path) else 0)"; then
+    if "$VENV_DIR/bin/python" -c "import sys; exit(1 if '$PROJECT_DIR' in str(sys.path) else 0)"; then
         log_info "  ✅ No source directory in Python path (production clean)"
     else
         log_warn "  ⚠️  Source directory still in Python path - may cause issues"
     fi
 fi
-
-deactivate
 
 
 # =============================================================================
