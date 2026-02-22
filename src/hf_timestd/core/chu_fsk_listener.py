@@ -18,6 +18,7 @@ import logging
 import threading
 import time
 import numpy as np
+import inspect
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -68,6 +69,8 @@ class CHUFSKChannel:
         # Updated every callback: RTP timestamp of the last written sample
         self._head_rtp: Optional[int] = None
 
+        self._last_samples_time: float = 0.0
+
         # Stream objects (set after channel creation)
         self.channel_info = None
         self.stream = None
@@ -109,6 +112,7 @@ class CHUFSKChannel:
             # first_rtp_timestamp is the RTP of the very first delivered
             # sample; total_samples_delivered counts all samples so far.
             self._head_rtp = quality.first_rtp_timestamp + quality.total_samples_delivered
+            self._last_samples_time = time.time()
 
     def get_aligned_minute(self, minute_boundary: float) -> Optional[np.ndarray]:
         """Return 60s of audio aligned to a UTC minute boundary.
@@ -213,36 +217,103 @@ class CHUFSKListener:
         logger.info(f"CHUFSKListener: {len(self.channels)} channels, "
                     f"preset={self.preset}, sr={self.sample_rate}")
 
-    def start(self):
-        """Create USB channels and start listening."""
+        self._stale_stream_timeout_sec = float(fsk_cfg.get('stale_stream_timeout_sec', 15.0))
+        self._restart_backoff_sec = float(fsk_cfg.get('restart_backoff_sec', 5.0))
+        self._last_restart_attempt: Dict[int, float] = {}
+
+        self._ensure_channel_param_names = set()
+        try:
+            self._ensure_channel_param_names = set(
+                inspect.signature(self.control.ensure_channel).parameters.keys()
+            )
+        except Exception:
+            self._ensure_channel_param_names = set()
+
+    def _ensure_channel_compat(
+        self,
+        *,
+        frequency_hz: int,
+        preset: str,
+        sample_rate: int,
+        agc_enable: int,
+        gain: float,
+        encoding,
+        destination=None,
+        timeout: Optional[float] = None,
+        low_edge: Optional[float] = None,
+        high_edge: Optional[float] = None,
+    ):
+        kwargs = {
+            'frequency_hz': frequency_hz,
+            'preset': preset,
+            'sample_rate': sample_rate,
+            'agc_enable': agc_enable,
+            'gain': gain,
+            'destination': destination,
+            'encoding': encoding,
+            'timeout': timeout,
+            'low_edge': low_edge,
+            'high_edge': high_edge,
+        }
+
+        if self._ensure_channel_param_names:
+            kwargs = {k: v for k, v in kwargs.items() if k in self._ensure_channel_param_names}
+        else:
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+        return self.control.ensure_channel(**kwargs)
+
+    def _start_or_restart_channel(self, ch: CHUFSKChannel) -> bool:
         from ka9q import RadiodStream
 
+        now = time.time()
+        last_attempt = self._last_restart_attempt.get(ch.frequency_hz, 0.0)
+        if (now - last_attempt) < self._restart_backoff_sec:
+            return False
+        self._last_restart_attempt[ch.frequency_hz] = now
+
+        if ch.stream:
+            try:
+                ch.stream.stop()
+            except Exception:
+                pass
+            ch.stream = None
+
+        info = self._ensure_channel_compat(
+            frequency_hz=ch.frequency_hz,
+            preset=self.preset,
+            sample_rate=self.sample_rate,
+            agc_enable=self.agc,
+            gain=self.gain,
+            encoding=self.encoding,
+            destination=None,
+            timeout=30.0,
+        )
+
+        ch.channel_info = info
+        ch.ssrc = info.ssrc
+        ch.set_timing(info.gps_time, info.rtp_timesnap)
+
+        stream = RadiodStream(info, on_samples=ch.on_samples)
+        stream.start()
+        ch.stream = stream
+        return True
+
+    def start(self):
+        """Create USB channels and start listening."""
         channel_status = {}
         n_started = 0
         for freq, ch in self.channels.items():
             try:
-                info = self.control.ensure_channel(
-                    frequency_hz=freq,
-                    preset=self.preset,
-                    sample_rate=self.sample_rate,
-                    agc_enable=self.agc,
-                    gain=self.gain,
-                    encoding=self.encoding,
-                    timeout=30.0,
-                )
-                ch.channel_info = info
-                ch.ssrc = info.ssrc
-                ch.set_timing(info.gps_time, info.rtp_timesnap)
-
-                stream = RadiodStream(info, on_samples=ch.on_samples)
-                stream.start()
-                ch.stream = stream
+                ok = self._start_or_restart_channel(ch)
+                if not ok:
+                    raise RuntimeError("channel start suppressed by restart backoff")
                 n_started += 1
 
                 logger.info(f"CHU FSK channel started: {ch.description} "
-                            f"({freq/1e6:.3f} MHz) SSRC={info.ssrc:08x}")
+                            f"({freq/1e6:.3f} MHz) SSRC={ch.ssrc:08x}")
                 channel_status[ch.iq_channel] = {
-                    'ok': True, 'ssrc': f"{info.ssrc:08x}",
+                    'ok': True, 'ssrc': f"{ch.ssrc:08x}",
                     'freq_mhz': freq / 1e6,
                 }
             except Exception as e:
@@ -344,6 +415,37 @@ class CHUFSKListener:
                 minute_boundary = (int(time.time()) // 60) * 60 - 60
 
                 for freq, ch in self.channels.items():
+                    if ch.stream is None:
+                        try:
+                            logger.warning(f"{ch.description}: stream missing, restarting")
+                            self._start_or_restart_channel(ch)
+                        except Exception as e:
+                            logger.error(
+                                f"{ch.description}: restart failed: {e}",
+                                exc_info=True
+                            )
+                    elif ch._last_samples_time <= 0:
+                        try:
+                            logger.warning(f"{ch.description}: no samples received yet, restarting")
+                            self._start_or_restart_channel(ch)
+                        except Exception as e:
+                            logger.error(
+                                f"{ch.description}: restart failed: {e}",
+                                exc_info=True
+                            )
+                    elif (time.time() - ch._last_samples_time) > self._stale_stream_timeout_sec:
+                        try:
+                            logger.warning(
+                                f"{ch.description}: stream stale "
+                                f"({time.time() - ch._last_samples_time:.1f}s), restarting"
+                            )
+                            self._start_or_restart_channel(ch)
+                        except Exception as e:
+                            logger.error(
+                                f"{ch.description}: restart failed: {e}",
+                                exc_info=True
+                            )
+
                     audio = ch.get_aligned_minute(float(minute_boundary))
                     if audio is None:
                         logger.debug(f"{ch.description}: insufficient data for minute {minute_boundary}")

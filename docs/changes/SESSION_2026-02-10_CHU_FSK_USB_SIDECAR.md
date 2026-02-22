@@ -113,3 +113,7 @@ The byte extraction was relaxed to tolerate parity and framing errors in margina
    - Edge-effect mitigation when operating on short (1.1s) slices
 3. **Timing correlation** — Wire FSK timing offsets from USB channels back to IQ channel metrology for sub-millisecond timing from FSK 500ms boundaries
 4. **Clean up** — The `low_edge`/`high_edge` plumbing in `stream_recorder_v2.py` is infrastructure that proved unnecessary for the USB sidecar approach but may be useful for other channels in the future
+
+## Update (2026-02-21): Channel Lifecycle
+
+The CHU FSK USB channels are now explicitly maintained at runtime. The listener monitors sample delivery and will re-ensure and restart streams if the radiod channel is missing or becomes stale. Channel creation uses a compatibility wrapper around `RadiodControl.ensure_channel()` so it can pass radiod parameters when supported by the installed ka9q-python version.

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### CHU FSK Resilience
+
+- **CHU FSK channel maintenance**: CHU USB/FSK listener now restarts stale/missing streams and uses a compatibility wrapper around `RadiodControl.ensure_channel()` to pass only supported radiod parameters.
+
+### Installation / Venv Bootstrap
+
+- **Venv bootstrap**: Added `scripts/ensure-venv.sh` and wired `scripts/install.sh` to use it.
+- **Production self-heal**: `timestd-core-recorder.service` runs `ensure-venv.sh` as `ExecStartPre` to ensure `/opt/hf-timestd/venv` exists.
+
 ## [6.6.1] - 2026-02-22
 
 ### Automated PSWS Key Exchange
