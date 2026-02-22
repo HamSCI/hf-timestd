@@ -31,7 +31,6 @@ TIMESTD_USER="${SUDO_USER:-$(whoami)}"
 TIMESTD_HOME=$(getent passwd "${TIMESTD_USER}" | cut -d: -f6)
 PSWS_HOST="pswsnetwork.eng.ua.edu"
 PSWS_PORT=22
-KEY_FILE="${TIMESTD_HOME}/.ssh/id_rsa_psws"
 CONFIG_FILE="/etc/hf-timestd/timestd-config.toml"
 
 RED='\033[0;31m'
@@ -74,6 +73,8 @@ if [[ -z "${STATION_ID}" || "${STATION_ID}" == "<YOUR_STATION_ID>" ]]; then
     log_error "Edit the config and set your PSWS SITE_ID (e.g. id = \"S000171\")"
     exit 1
 fi
+
+KEY_FILE="${TIMESTD_HOME}/.ssh/id_rsa_psws_${STATION_ID}"
 
 log_info "  Station ID (SFTP username): ${STATION_ID}"
 
@@ -277,7 +278,7 @@ fi
 # Step 8: Install keys into production location (timestd user) if needed
 # =============================================================================
 PRODUCTION_USER="timestd"
-PRODUCTION_KEY="/home/${PRODUCTION_USER}/.ssh/id_rsa_psws"
+PRODUCTION_KEY="/home/${PRODUCTION_USER}/.ssh/id_rsa_psws_${STATION_ID}"
 
 if [[ "${LOGIN_OK}" == "true" && "${TIMESTD_USER}" != "${PRODUCTION_USER}" ]] \
         && id "${PRODUCTION_USER}" &>/dev/null; then

@@ -758,6 +758,33 @@ EOF
 fi
 
 # =============================================================================
+# Step 7.5: Interactive Configuration
+# =============================================================================
+HAS_CONFIGURED=false
+if [[ "$MODE" == "production" ]]; then
+    echo ""
+    read -rp "Would you like to configure your station settings now? [Y/n] " config_choice
+    config_choice=${config_choice:-Y}
+    if [[ "$config_choice" =~ ^[Yy]$ ]]; then
+        HAS_CONFIGURED=true
+        log_step "Opening configuration file..."
+        sudo ${EDITOR:-nano} "$CONFIG_DIR/timestd-config.toml"
+        
+        # Parse for STATION_ID
+        STATION_ID=$(grep -E '^\s*id\s*=' "$CONFIG_DIR/timestd-config.toml" | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/')
+        if [[ -n "$STATION_ID" && "$STATION_ID" != "<YOUR_STATION_ID>" && "$STATION_ID" != "<PSWS_STATION_ID>" ]]; then
+            echo ""
+            read -rp "Station ID '${STATION_ID}' detected. Would you like to set up the PSWS secure upload keys now? [Y/n] " key_choice
+            key_choice=${key_choice:-Y}
+            if [[ "$key_choice" =~ ^[Yy]$ ]]; then
+                log_step "Executing PSWS key setup..."
+                sudo "$PROJECT_DIR/scripts/setup-psws-keys.sh"
+            fi
+        fi
+    fi
+fi
+
+# =============================================================================
 # Step 8: Summary
 # =============================================================================
 echo ""
@@ -769,11 +796,13 @@ echo ""
 if [[ "$MODE" == "production" ]]; then
     echo "Production mode installed. Next steps:"
     echo ""
-    echo "1. Edit configuration:"
-    echo "   sudo nano $CONFIG_DIR/timestd-config.toml"
-    echo ""
-    echo "2. Set your station info (callsign, grid_square, lat/lon, etc.)"
-    echo ""
+    if [[ "$HAS_CONFIGURED" == "false" ]]; then
+        echo "1. Edit configuration:"
+        echo "   sudo nano $CONFIG_DIR/timestd-config.toml"
+        echo ""
+        echo "2. Set your station info (callsign, grid_square, lat/lon, etc.)"
+        echo ""
+    fi
     echo "3. Start continuous services (in order):"
     echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → Raw Buffer"
     echo "   sudo systemctl start timestd-metrology       # Phase 2: L1 Raw Measurements"

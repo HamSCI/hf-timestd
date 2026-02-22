@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.6.1] - 2026-02-22
+
+### Automated PSWS Key Exchange
+
+**Feature Enhancement:** Automated the generation and exchange of SSK keys for the Personal Space Weather Station (PSWS) uploads during installation.
+
+#### Interactive Key Setup
+
+- Modifies `install.sh` to optionally prompt users to configure `timestd-config.toml` interactively at the final step.
+- Upon completion of the configuration, the script checks if a custom `STATION_ID` has been set. If so, it will automatically trigger the `setup-psws-keys.sh` routine seamlessly.
+
+#### Unique SSH Keys per Station
+
+- Updated `setup-psws-keys.sh` to securely save the generated RSA keys as `id_rsa_psws_<STATION_ID>` instead of a globally shared key name. This makes managing multiple station IDs on the same host straightforward and avoids overwriting keys.
+- Maintains compatibility with `wsprdaemon`'s specific SFTP batch upload requirements and trigger directory features.
+
+#### Files Modified
+
+- `scripts/install.sh` - Interactive step added
+- `scripts/setup-psws-keys.sh` - Unique station ID key naming
+
 ## [6.6.0] - 2026-02-09
 
 ### Web-API UI Review & Test Signal Pipeline Fixes
@@ -9,24 +30,29 @@ All notable changes to this project will be documented in this file.
 Pre-demo review of all 13 web-API UI pages for HamSCI-WWV working group presentation.
 
 #### Test Signal Metric Fixes (wwv_test_signal.py)
+
 - **SNR estimator**: Replaced broadband power ratio (~0 dB for narrowband tones) with spectral SNR measuring tone peak vs adjacent noise floor in FFT domain
 - **Coherence time estimator**: Limited to first 5 windows where tone SNR is sufficient; switched to least-squares detrending
 - **Channel quality thresholds**: Adjusted to HF-realistic values (spectral SNR typically 5–15 dB)
 
 #### Memory Leak Fixes
+
 - **chu_fsk_decoder.py**: Extract 1.1s audio slice before demodulation instead of full 60s buffer; reduces hilbert() allocation from 23 MB to 0.4 MB per call
 - **metrology_service.py**: Copy numpy arrays from decompressed buffers and release memmap file descriptors promptly
 
 #### Web-API Backend
+
 - **logs.py**: Graceful fallback when journalctl fails (returns hint instead of HTTP 500); added timestd user to systemd-journal group
 - **correlations.py**: 15s async timeout wrapper on all 5 endpoints to prevent hanging on slow HDF5 reads
 
 #### Web-API Frontend
+
 - **test_signal.html**: Fixed Frequency Analysis tab — S4 tones and slope charts were referencing undefined variable; now builds measurement array from API response correctly
 - **logs.html**: Shows helpful error message with fix command when journalctl access denied
 - **All pages**: Added 📡 Test Signal nav link; fixed missing 📊 24h link on solar-correlation page; fixed corrupted emoji
 
 #### Files Modified
+
 - `src/hf_timestd/core/wwv_test_signal.py` - SNR, coherence time, channel quality fixes
 - `src/hf_timestd/core/chu_fsk_decoder.py` - Memory leak fix
 - `src/hf_timestd/core/metrology_service.py` - Memory leak fix
@@ -68,6 +94,7 @@ Pre-demo review of all 13 web-API UI pages for HamSCI-WWV working group presenta
 - **README.md**: Added "Why HF Time Standards?" rationale section, updated capabilities to v6.5.1, added v6.5.1 release notes.
 
 #### Files Modified
+
 - `src/hf_timestd/core/multi_broadcast_fusion.py` - Dual Kalman, discontinuity fix, env var ordering, error logging
 - `src/hf_timestd/io/hdf5_reader.py` - `locking=False` on 3 h5py.File calls
 - `src/hf_timestd/io/hdf5_writer.py` - `locking=False` on 7 h5py.File calls
@@ -110,6 +137,7 @@ Pre-demo review of all 13 web-API UI pages for HamSCI-WWV working group presenta
 Added "📊 24h" link to navigation bar on all 12 HTML pages.
 
 #### Files Modified
+
 - `web-api/routers/dashboard.py` (new)
 - `web-api/routers/__init__.py` - Added dashboard router export
 - `web-api/main.py` - Registered dashboard router, added `/dashboard-24h` route
@@ -147,6 +175,7 @@ Added "📊 24h" link to navigation bar on all 12 HTML pages.
    - Handle None values in bootstrap full lock callback
 
 #### Results
+
 | Metric | Before | After |
 |--------|--------|-------|
 | CPU idle | ~0% (overloaded) | ~73% |
@@ -154,12 +183,14 @@ Added "📊 24h" link to navigation bar on all 12 HTML pages.
 | Good WWV timing (when detected) | -4.0ms error | -4.0ms error |
 
 #### Files Modified
+
 - `src/hf_timestd/core/metrology_service.py` - Minute-boundary polling
 - `src/hf_timestd/core/metrology_engine.py` - Search window constraint, field fixes
 - `src/hf_timestd/core/core_recorder_v2.py` - Bootstrap callback None handling
 - `src/hf_timestd/core/binary_archive_writer.py` - Direct GPS_TIME/RTP_TIMESNAP mapping
 
 #### Known Issue
+
 ~60ms systematic offset remains in GPS_TIME/RTP_TIMESNAP mapping (radiod pipeline latency). When buffer timing is correct, WWV timing error is -4.0ms (excellent, matches propagation delay).
 
 ## [5.3.12] - 2026-01-31
@@ -169,7 +200,9 @@ Added "📊 24h" link to navigation bar on all 12 HTML pages.
 **Major Fix:** Buffer now starts exactly on minute boundary in RTP mode, fixing severe timing instability.
 
 #### Problem
+
 Despite GPSDO-locked RTP timestamps (L4/L5 accuracy), the pipeline showed:
+
 - D_clock offsets of -433ms to -3756ms (should be near zero)
 - Calibration sanity failures
 - Chrony SHM offsets in hundreds of milliseconds
@@ -177,12 +210,14 @@ Despite GPSDO-locked RTP timestamps (L4/L5 accuracy), the pipeline showed:
 Root cause: Buffer labeled as "minute X" but `start_system_time` was 14ms after the boundary, placing the minute marker tone **before** the buffer started (negative sample position).
 
 #### Solution
+
 1. **Buffer alignment** (`binary_archive_writer.py`): Calculate RTP timestamp at minute boundary and set `start_system_time` exactly on boundary
 2. **Sample positioning**: Place samples at correct offset based on RTP timestamp
 3. **Tone detector** (`tone_detector.py`): Simplified minute boundary calculation
 4. **Bootstrap buffer** (`bootstrap_rolling_buffer.py`): Fixed shape mismatch in circular buffer reordering
 
 #### Results
+
 | Metric | Before | After |
 |--------|--------|-------|
 | `start_system_time` | 1769901060.014 | 1769902200.0 (exact) |
@@ -191,6 +226,7 @@ Root cause: Buffer labeled as "minute X" but `start_system_time` was 14ms after 
 | D_clock | Unstable, 100s of ms | +14ms to +32ms |
 
 #### Files Modified
+
 - `src/hf_timestd/core/binary_archive_writer.py` - Buffer alignment and sample positioning
 - `src/hf_timestd/core/tone_detector.py` - Simplified minute boundary calculation
 - `src/hf_timestd/core/bootstrap_rolling_buffer.py` - Shape mismatch fix
@@ -204,12 +240,15 @@ See `docs/changes/SESSION_2026_01_31_RTP_BUFFER_ALIGNMENT.md` for full details.
 **Major Fix:** Implemented GPS-aligned wallclock timestamps for cross-SSRC comparison in bootstrap clustering and recurring cluster detection.
 
 #### Problem Addressed
+
 Different radio channels (WWV, CHU, etc.) have independent RTP clock spaces with different epochs. The bootstrap was comparing raw RTP timestamps across SSRCs, which have offsets of ~1.2 billion samples (~14 hours), preventing multi-station cluster formation and recurring cluster detection.
 
 #### Solution: GPS Wallclock Alignment
+
 Each SSRC broadcasts `GPS_TIME` and `RTP_TIMESNAP` which allows converting RTP timestamps to a common GPS-aligned wallclock timeline. This is used **only for inter-channel synchronization**, not for establishing the time basis (which comes from HF signal decoding).
 
 #### Key Changes
+
 1. **Helper functions** in `bootstrap_rolling_buffer.py`:
    - `rtp_to_wallclock(rtp, channel_info, sample_rate)` - Convert RTP to Unix timestamp
    - `wallclock_to_rtp(wallclock, channel_info, sample_rate)` - Convert back to RTP
@@ -223,12 +262,14 @@ Each SSRC broadcasts `GPS_TIME` and `RTP_TIMESNAP` which allows converting RTP t
 5. **Recurring cluster detection uses wallclock**: 60-second recurrence validation now works across different SSRCs
 
 #### Results
+
 - Multi-station clusters now form correctly: `WWV + CHU + BPM` with conf=1.00
 - Recurring clusters found with 2.9ms error (within 100ms threshold)
 - Bootstrap reaches TRACKING → PROVISIONAL state
 - D_clock calculated from 17+ tones with median ~29ms
 
 #### Current Bootstrap State
+
 ```
 lock_tier: PROVISIONAL
 time_confirmed: false (BCD/FSK decode pending - separate issue)
@@ -238,6 +279,7 @@ D_clock: ~+29ms
 The system is operational: writing minute archives at 100% completeness, calculating D_clock from multi-station tone detections. BCD/FSK time confirmation is a separate issue from the wallclock alignment work.
 
 #### Files Modified
+
 - `src/hf_timestd/core/bootstrap_rolling_buffer.py` - Wallclock helpers, ChannelInfo storage
 - `src/hf_timestd/core/bootstrap_service.py` - ChannelInfo passthrough
 - `src/hf_timestd/core/stream_recorder_v2.py` - Pass channel_info to bootstrap
@@ -250,13 +292,16 @@ The system is operational: writing minute archives at 100% completeness, calcula
 **Major Enhancement:** Implemented two-tier bootstrap locking that accounts for ionospheric variations before refining the RTP-to-UTC offset.
 
 #### Problem Addressed
+
 The previous bootstrap locked too quickly (2-3 min), capturing ionospheric variability as systematic offset error. The ionosphere introduces ±10-30ms variations from Traveling Ionospheric Disturbances (TIDs) with ~10-15 minute periods.
 
 #### Two-Tier Solution
+
 - **Tier 1 (Provisional Lock)**: Quick lock in 2-3 minutes for minute alignment, allowing archiving to begin
 - **Tier 2 (Refined Lock)**: Stable lock after 10+ minutes of ionospheric averaging with median-based offset
 
 #### New Features
+
 - `LockTier` enum: `NONE` (0), `PROVISIONAL` (1), `REFINED` (2)
 - `OffsetMeasurement` dataclass for tracking individual offset measurements
 - Offset measurements collected during provisional phase for statistical analysis
@@ -264,6 +309,7 @@ The previous bootstrap locked too quickly (2-3 min), capturing ionospheric varia
 - Refined lock criteria: 50+ measurements, std < 15ms, 10+ minutes elapsed
 
 #### Status Exposure
+
 - `lock_tier` in bootstrap status (0/1/2)
 - `provisional_lock_elapsed_sec` - time since provisional lock
 - `time_to_refined_sec` - estimated time until refined lock
@@ -271,6 +317,7 @@ The previous bootstrap locked too quickly (2-3 min), capturing ionospheric varia
 - `refined_offset_samples` and `refined_offset_std_ms` after tier 2
 
 #### Files Modified
+
 - `src/hf_timestd/core/timing_bootstrap.py` - Core two-tier logic
 - `src/hf_timestd/core/bootstrap_service.py` - Status exposure
 - `tests/test_bootstrap_rolling_buffer.py` - 12 new unit tests
@@ -282,28 +329,33 @@ The previous bootstrap locked too quickly (2-3 min), capturing ionospheric varia
 **Major Enhancement:** Improved scintillation calculation and added high-precision timing extraction from WWV/WWVH test signals, based on ionospheric science standards and the wwv-signal-timing-analysis notebook methodology.
 
 #### Scintillation Improvements
+
 - **Fixed S4 clipping**: Removed artificial `np.clip(0, 1)` - S4 > 1.0 is valid for saturated scintillation and now logged as warning
 - **Added detrending**: S4 now calculated from detrended intensity, removing the expected -3dB/sec attenuation pattern to isolate ionospheric fading
 - **Multi-frequency S4**: Computes S4 at 2, 3, 4, 5 kHz tones separately for frequency-dependent analysis
 - **S4 frequency slope**: Linear regression of S4 vs frequency for D-layer (positive slope) vs F-layer (near-zero) discrimination
 
 #### High-Precision Timing
+
 - **White noise template correlation**: New `_detect_noise_template_correlation()` method provides highest-precision timing via matched filter
 - **Processing gain**: ~40dB from BT product (2s × 10kHz = 20,000)
 - **ToA offset**: Sub-millisecond timing extraction from deterministic white noise segments
 
 #### New Data Fields
+
 - `s4_by_frequency`: Per-frequency S4 values {2000: 0.3, 3000: 0.4, ...}
 - `s4_frequency_slope`: Slope for ionospheric layer discrimination
 - `noise_toa_offset_ms`: High-precision ToA from template correlation
 - `noise_correlation_peak`: Correlation coefficient (0-1)
 
 #### Schema & API Updates
+
 - Updated `l2_test_signal_v1.json` schema with 8 new fields
 - Updated `MetrologyService` to write new fields to HDF5
 - Updated `TestSignalService` API to return new fields
 
 #### UI Enhancement
+
 - Enhanced `physics.html` Channels tab with new metrics display
 - Color-coded S4 values: green (<0.3 weak), yellow (0.3-0.6 moderate), red (>0.6 strong)
 - S4 slope color: green (F-layer stable), yellow (D-layer absorption), blue (unusual)
@@ -316,6 +368,7 @@ The previous bootstrap locked too quickly (2-3 min), capturing ionospheric varia
 **Major Cleanup:** Comprehensive repository organization to improve maintainability and eliminate security risks.
 
 #### Documentation Organization
+
 - **Archived 56 documents** to organized archive structure:
   - 43 interim documents (session notes, fix reports, analyses) → `archive/dev-history/`
   - 13 planning documents → `archive/planning/`
@@ -323,16 +376,19 @@ The previous bootstrap locked too quickly (2-3 min), capturing ionospheric varia
 - **Preserved 100%** of historical documentation (zero data loss)
 
 #### Security Fixes
+
 - **CRITICAL**: Removed `.netrc` credentials file from repository
 - Enhanced `.gitignore` with security patterns (*.pem, *.key, id_rsa*)
 
 #### Cleanup Actions
+
 - **Removed obsolete directories**: `web-ui.old/` (49 MB), `MagicMock/` (11 MB), `node_modules/` (228 KB)
 - **Archived debug tools**: 7 debug/verification scripts → `archive/debug-tools/`
 - **Removed test artifacts**: PNG images, HTML files, compiled binaries
 - **Removed Node.js leftovers**: package.json, pnpm-lock.yaml (project uses Python)
 
 #### Prevention
+
 - Enhanced `.gitignore` to prevent future accumulation of:
   - Credentials files
   - Node.js artifacts
@@ -340,6 +396,7 @@ The previous bootstrap locked too quickly (2-3 min), capturing ionospheric varia
   - Compiled binaries
 
 #### Results
+
 - **~60 MB freed** from root directory
 - **Zero security risks** remaining
 - **Professional, maintainable** repository structure
