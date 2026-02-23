@@ -184,7 +184,8 @@ fi
 log_info "Step 1b: Syncing source tree to $INSTALL_DIR..."
 
 cp "$PROJECT_DIR/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
-rsync -a --delete \
+# NOTE: no --delete here — compiled .so extensions in the venv are not in the repo
+rsync -a \
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     --exclude '*.egg-info' \
@@ -291,12 +292,17 @@ for service_file in "$PROJECT_DIR/systemd/"*.service "$PROJECT_DIR/systemd/"*.ti
     if [[ -f "$service_file" ]]; then
         filename=$(basename "$service_file")
         if [[ -f "$SYSTEMD_DIR/$filename" ]]; then
-            # Check if file has changed
+            # Update existing service file if changed
             if ! diff -q "$service_file" "$SYSTEMD_DIR/$filename" > /dev/null 2>&1; then
                 cp "$service_file" "$SYSTEMD_DIR/$filename"
                 log_info "  Updated: $filename"
                 SERVICES_UPDATED=true
             fi
+        else
+            # Install new service file (not present on this system yet)
+            cp "$service_file" "$SYSTEMD_DIR/$filename"
+            log_info "  Installed new: $filename"
+            SERVICES_UPDATED=true
         fi
     fi
 done

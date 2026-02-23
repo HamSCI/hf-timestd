@@ -72,6 +72,11 @@ TIMERS=(
     "grape-daily.timer"
 )
 
+# Path watchers (informational only — managed by setup-cpu-affinity.sh)
+PATH_WATCHERS=(
+    "timestd-radiod-affinity.path"
+)
+
 # Function to wait for service to be active
 wait_for_service() {
     local service=$1
@@ -144,7 +149,21 @@ show_status() {
         fi
         printf "  %-35s %b\n" "$timer" "$status"
     done
-    
+
+    echo ""
+    log_step "Path Watchers"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    for watcher in "${PATH_WATCHERS[@]}"; do
+        if systemctl is-active --quiet "$watcher" 2>/dev/null; then
+            status="${GREEN}●${NC} active"
+        elif systemctl is-enabled --quiet "$watcher" 2>/dev/null; then
+            status="${YELLOW}○${NC} enabled/inactive"
+        else
+            status="${YELLOW}○${NC} not installed"
+        fi
+        printf "  %-35s %b\n" "$watcher" "$status"
+    done
+
     echo ""
 }
 
@@ -215,10 +234,15 @@ fi
 # Start timers
 log_step "Starting periodic timers..."
 for timer in "${TIMERS[@]}"; do
+    # Enable timer if not already enabled (e.g. grape-daily on fresh install)
+    if ! systemctl is-enabled --quiet "$timer" 2>/dev/null; then
+        systemctl enable "$timer" 2>/dev/null || true
+        log_info "  Enabled: $timer"
+    fi
     if systemctl start "$timer" 2>/dev/null; then
         log_info "  ✓ $timer"
     else
-        log_warn "  ✗ $timer (failed)"
+        log_warn "  ✗ $timer (failed to start)"
     fi
 done
 
@@ -242,6 +266,24 @@ if curl -s http://localhost:8000/health > /dev/null 2>&1; then
     log_info "  Web API: http://localhost:8000 ✓"
 else
     log_warn "  Web API: not responding yet (may need a moment)"
+fi
+
+# Verify PSWS SFTP connectivity (non-fatal)
+SSH_KEY=$(grep -E '\bssh_key\s*=' /etc/hf-timestd/timestd-config.toml 2>/dev/null | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/')
+STATION_ID=$(grep -E '^\s*id\s*=' /etc/hf-timestd/timestd-config.toml 2>/dev/null | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/')
+if [[ -n "$SSH_KEY" && -n "$STATION_ID" && -f "$SSH_KEY" ]]; then
+    if sudo -u timestd sftp \
+            -i "$SSH_KEY" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -P 22 \
+            "${STATION_ID}@pswsnetwork.eng.ua.edu" <<< "quit" &>/dev/null; then
+        log_info "  PSWS SFTP ($STATION_ID): ✓ connected"
+    else
+        log_warn "  PSWS SFTP ($STATION_ID): ✗ cannot connect (run: sudo scripts/setup-psws-keys.sh)"
+    fi
+else
+    log_warn "  PSWS SFTP: key not configured (run: sudo scripts/setup-psws-keys.sh)"
 fi
 
 echo ""

@@ -633,9 +633,11 @@ EOF
     log_info "    - timestd-physics.service        (Phase 3: TEC Estimation)"
     log_info "    - timestd-web-api.service        (Web API & Dashboard)"
     log_info "    - timestd-radiod-monitor.service (Hardware Health Monitor)"
+    log_info "    - grape-daily.timer              (GRAPE/PSWS daily upload at 01:00 UTC)"
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         log_info "    - timestd-vtec.service           (GNSS VTEC Monitor)"
     fi
+    log_info "  Note: timestd-radiod-affinity.path is installed by setup-cpu-affinity.sh"
     
     # Enable core services
     log_step "Enabling services for auto-start..."
@@ -660,8 +662,12 @@ EOF
     # Enable grape-daily timer if service file exists
     if [[ -f "$SYSTEMD_DIR/grape-daily.timer" ]]; then
         sudo systemctl enable grape-daily.timer
-        log_info "  ✅ grape-daily.timer enabled"
+        sudo systemctl enable grape-daily.service
+        log_info "  ✅ grape-daily.timer enabled (runs daily at 01:00 UTC)"
     fi
+    
+    # Note: timestd-radiod-affinity.path/.service are installed separately
+    # by scripts/setup-cpu-affinity.sh and are not managed here.
     
     if [[ "$VTEC_ENABLED" == "true" ]]; then
         sudo systemctl enable timestd-vtec.service
