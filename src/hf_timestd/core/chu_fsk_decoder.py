@@ -241,35 +241,38 @@ class CHUFSKDecoder:
     def _fsk_demodulate_iq(self, iq_slice: np.ndarray) -> np.ndarray:
         """
         FSK demodulate directly from complex IQ samples.
-        
+
         The IQ is already analytic (complex baseband), so we skip the Hilbert
-        transform entirely.  This is the correct path — the old audio path
-        used abs() AM demod which destroys the FSK phase information.
-        
+        transform entirely.
+
         DSP chain:
         1. Frequency translate IQ by -2125 Hz to center FSK at DC
-        2. Low-pass filter at 300 Hz
+        2. Low-pass filter at 200 Hz
         3. Quadrature demod: inst_freq from phase differences
         """
         from scipy.signal import filtfilt
-        
+
         n_samples = len(iq_slice)
         if n_samples <= len(self._mixing_oscillator):
             shift = self._mixing_oscillator[:n_samples]
         else:
             t = np.arange(n_samples) / self.sample_rate
             shift = np.exp(-2j * np.pi * CENTER_FREQ * t)
-        
+
         baseband = iq_slice.astype(np.complex128) * shift
-        
+
         filtered = filtfilt(self._baseband_lpf_b, self._baseband_lpf_a, baseband)
-        
+
         delta_phase = np.angle(filtered[1:] * np.conj(filtered[:-1]))
         delta_phase = np.concatenate([[0], delta_phase])
-        
+
         inst_freq = delta_phase * self.sample_rate / (2 * np.pi)
         soft_decision = inst_freq / 100.0
-        
+
+        # Clip to suppress phase-discontinuity spikes (RTP gaps, noise bursts).
+        # Expected FSK signal is ±1.0; spikes of ±100 corrupt bit decisions.
+        np.clip(soft_decision, -5.0, 5.0, out=soft_decision)
+
         return soft_decision
 
     def _fsk_demodulate(self, audio: np.ndarray) -> np.ndarray:
@@ -785,15 +788,17 @@ class CHUFSKDecoder:
         slice_start = max(0, second_start_sample - int(0.05 * self.sample_rate))  # 50ms margin before
         slice_end = min(len(audio), second_start_sample + int(1.05 * self.sample_rate))  # 1.05s after
         slice_offset = slice_start  # to convert local indices back to global
-        
-        # Always use audio dual-bandpass discriminator for FSK demod.
-        # The IQ-direct path fails because radiod's decimation filter
-        # bandwidth (~1.5 kHz) attenuates the FSK tones at 2025/2225 Hz
-        # by 40+ dB.  The AM envelope detection (abs()) reconstructs
-        # the audio tones via mixing products, so the audio discriminator
-        # works even with narrow IQ bandwidth.
-        audio_slice = audio[slice_start:slice_end]
-        soft_decision = self._fsk_demodulate(audio_slice)
+
+        if iq_samples is not None:
+            # IQ-direct path: frequency-translate by -2125 Hz then quadrature discriminator.
+            # This is the correct path for complex baseband IQ — the AM abs() path
+            # destroys FSK phase information and gives unequal tone amplitudes when
+            # the carrier is offset from the channel centre frequency.
+            iq_slice = iq_samples[slice_start:slice_end]
+            soft_decision = self._fsk_demodulate_iq(iq_slice)
+        else:
+            audio_slice = audio[slice_start:slice_end]
+            soft_decision = self._fsk_demodulate(audio_slice)
         
         # Diagnostic: soft decision statistics
         sd_abs = np.abs(soft_decision)

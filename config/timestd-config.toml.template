@@ -48,7 +48,7 @@ tiered_storage = true
 hot_buffer_root = "/dev/shm/timestd"
 ram_percent = 20
 
-# Channel defaults (applied to all channels unless overridden)
+# Channel defaults (applied to all channel groups unless overridden per-group)
 [recorder.channel_defaults]
 preset = "iq"
 sample_rate = 24000
@@ -56,54 +56,64 @@ agc = 0
 gain = 0
 encoding = "F32"
 
-# === SHARED Channels (WWV + WWVH + BPM on same frequency) ===
-# 2.5, 5, 10, 15 MHz carry multiple time stations
+# === Channel Groups ===
+# Each group defines shared settings and an array of frequencies.
+# Group-level keys (preset, sample_rate, agc, gain, encoding, archive, consumer)
+# override [recorder.channel_defaults] for every channel in the group.
+# Per-channel keys (frequency_hz, description, and any overrides) are in
+# [[recorder.channel_group.<name>.channels]].
+#
+# archive = true  -> IQ samples written to Phase 1 archive (default)
+# archive = false -> channel provisioned for real-time use only (no disk write)
+# consumer = "chu_fsk" -> samples routed to CHU FSK decoder instead of archive
 
-[[recorder.channels]]
+# --- timestd: full IQ archive channels for metrology and physics analysis ---
+[recorder.channel_group.timestd]
+preset = "iq"
+sample_rate = 24000
+agc = 0
+gain = 0
+encoding = "F32"
+archive = true
+
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 2500000
 description = "SHARED_2500"
 
-[[recorder.channels]]
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 5000000
 description = "SHARED_5000"
 
-[[recorder.channels]]
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 10000000
 description = "SHARED_10000"
 
-[[recorder.channels]]
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 15000000
 description = "SHARED_15000"
 
-# === WWV-only Channels (20, 25 MHz) ===
-
-[[recorder.channels]]
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 20000000
 description = "WWV_20000"
 
-[[recorder.channels]]
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 25000000
 description = "WWV_25000"
 
-# === CHU Channels (3.33, 7.85, 14.67 MHz) ===
-# Canadian time station - useful for northern stations
-
-[[recorder.channels]]
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 3330000
 description = "CHU_3330"
 
-[[recorder.channels]]
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 7850000
 description = "CHU_7850"
 
-[[recorder.channels]]
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 14670000
 description = "CHU_14670"
 
-# === CHU FSK Decode Channels ===
-# USB preset for FSK tone demodulation
+# CHU FSK decode channels: USB preset for FSK tone demodulation
 # These are not archived - only used for real-time FSK decode + timing correlation
-# with the corresponding IQ archive channels above.
 [recorder.chu_fsk]
 preset = "usb"
 sample_rate = 12000
@@ -127,7 +137,7 @@ description = "CHU_14670_FSK"
 iq_channel = "CHU_14670"
 
 [uploader]
-enabled = false
+enabled = true
 protocol = "sftp"
 upload_time = "00:30"
 upload_timezone = "UTC"

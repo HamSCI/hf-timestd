@@ -50,7 +50,7 @@ except ImportError:
 from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding
 
 from ..quota_manager import QuotaManager
-from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
+from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig, RobustManagedStream
 from .timing_calibrator import TimingCalibrator
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
 # The recorder now always archives immediately. MetrologyEngine's fusion_state
@@ -413,17 +413,30 @@ class CoreRecorderV2:
         if self.fsk_listener:
             self.fsk_listener.stop()
     
+    @staticmethod
+    def _resolve_encoding(encoding_val) -> int:
+        """Map encoding string or value to Encoding constant."""
+        if isinstance(encoding_val, str):
+            return {
+                'F32': Encoding.F32,
+                'S16LE': Encoding.S16LE,
+                'OPUS': Encoding.OPUS,
+            }.get(encoding_val.upper(), Encoding.NO_ENCODING)
+        return encoding_val
+
     def _initialize_channels(self) -> bool:
         """
-        Initialize all channels.
-        
-        Delegates entirely to ka9q-python's ensure_channel() which handles:
-        - Computing deterministic SSRC from parameters
-        - Discovering existing channels
-        - Reusing or creating channels as needed
-        - Verifying channel configuration
-        
-        The client just needs to call ensure_channel() with consistent parameters.
+        Initialize all channels via a single unified path.
+
+        Every [[recorder.channels]] entry — whether an IQ archive channel or a
+        CHU FSK USB channel — is provisioned through RobustManagedStream /
+        ensure_channel().  The only difference is the 'consumer' field:
+
+          (absent / "archive")  ->  StreamRecorderV2  (archives to disk)
+          "chu_fsk"             ->  CHUFSKListener ring-buffer (decode only)
+
+        This means radiod-restart recovery, encoding, filter edges, and
+        ensure_channel() semantics are identical for every channel.
         """
         try:
             if not self.channel_specs:
@@ -431,86 +444,56 @@ class CoreRecorderV2:
                 return False
 
             logger.info(f"Initializing {len(self.channel_specs)} configured channels...")
-            
+
             for ch_spec in self.channel_specs:
                 freq = int(ch_spec['frequency_hz'])
-                
-                # Defaults are merged with channel-specific config
-                preset = ch_spec.get('preset', self.channel_defaults.get('preset', 'iq'))
+
+                # Merge per-channel overrides with defaults
+                preset      = ch_spec.get('preset',    self.channel_defaults.get('preset', 'iq'))
                 sample_rate = ch_spec.get('sample_rate', self.channel_defaults.get('sample_rate'))
                 if sample_rate is None:
-                     raise ValueError(f"No sample_rate configured for {freq} and no default provided")
-                encoding_val = ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
-                agc_val = ch_spec.get('agc', self.channel_defaults.get('agc', 0))
-                gain_val = ch_spec.get('gain', self.channel_defaults.get('gain', 0.0))
-                
-                # Map string encoding to integer constant
-                if isinstance(encoding_val, str):
-                    if encoding_val.upper() == 'F32':
-                        encoding = Encoding.F32
-                    elif encoding_val.upper() == 'S16LE':
-                        encoding = Encoding.S16LE
-                    elif encoding_val.upper() == 'OPUS':
-                        encoding = Encoding.OPUS
-                    else:
-                        encoding = Encoding.NO_ENCODING
-                else:
-                    encoding = encoding_val
-
-                logger.info(f"Requesting channel for {freq/1e6:.3f} MHz (ka9q-python will reuse if exists)")
-                
-                # Create config - let StreamRecorderV2/RobustManagedStream call ensure_channel()
-                # with these parameters. The library will handle discovery and reuse.
-                # Filter edges: per-channel override, then channel_defaults
-                low_edge = ch_spec.get('low_edge', self.channel_defaults.get('low_edge'))
+                    raise ValueError(f"No sample_rate for {freq} and no default")
+                encoding = self._resolve_encoding(
+                    ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
+                )
+                agc_val  = int(ch_spec.get('agc',  self.channel_defaults.get('agc',  0)))
+                gain_val = float(ch_spec.get('gain', self.channel_defaults.get('gain', 0.0)))
+                low_edge  = ch_spec.get('low_edge',  self.channel_defaults.get('low_edge'))
                 high_edge = ch_spec.get('high_edge', self.channel_defaults.get('high_edge'))
-                
+                description = ch_spec.get('description', f"{freq/1e6:.3f} MHz")
+                logger.info(f"Provisioning {description} ({freq/1e6:.3f} MHz) "
+                            f"preset={preset} sr={sample_rate}")
+
                 rec_config = StreamRecorderConfig(
-                    ssrc=None,  # Let ka9q-python compute the SSRC
+                    ssrc=None,
                     frequency_hz=freq,
                     encoding=encoding,
-                    agc_enable=int(agc_val),
-                    gain=float(gain_val),
-                    description=ch_spec.get('description', f"{freq/1e6:.3f} MHz"),
+                    agc_enable=agc_val,
+                    gain=gain_val,
+                    description=description,
                     preset=preset,
                     sample_rate=sample_rate,
                     output_dir=self.output_dir,
-                    
-                    # Propagation
                     receiver_grid=self.station_config.get('grid_square', ''),
                     station_config=self.station_config,
-                    
-                    # Storage settings
                     raw_buffer_file_duration_sec=3600,
                     tiered_storage=self.recorder_config.get('tiered_storage', False),
-                    hot_buffer_root=Path(self.recorder_config.get('hot_buffer_root')) if self.recorder_config.get('hot_buffer_root') else None,
-                    
-                    # Compression
+                    hot_buffer_root=Path(self.recorder_config.get('hot_buffer_root'))
+                        if self.recorder_config.get('hot_buffer_root') else None,
                     compression=self.recorder_config.get('compression', 'none'),
                     compression_level=self.recorder_config.get('compression_level', 3),
-                    
-                    # L0 Storage
                     use_digital_rf=self.recorder_config.get('save_digital_rf', False),
-                    
-                    # CRITICAL: Use None to let radiod assign destination consistently
-                    # This ensures the same SSRC is computed every time
                     destination=None,
-                    
-                    # Filter edges (Hz) for radiod passband control
                     low_edge=float(low_edge) if low_edge is not None else None,
                     high_edge=float(high_edge) if high_edge is not None else None,
                 )
-                
-                # Create recorder - it will call ensure_channel() which handles everything
                 recorder = StreamRecorderV2(
                     config=rec_config,
                     control=self.control,
-                    # NOTE (2026-02-03): bootstrap_service removed - MetrologyEngine handles timing
                 )
-                
                 self.recorders[freq] = recorder
-                
-            logger.info(f"✓ Initialized {len(self.recorders)} channel recorders")
+
+            logger.info(f"✓ Initialized {len(self.recorders)} archive recorders")
             return True
         except Exception as e:
             logger.error(f"Failed to initialize channels: {e}", exc_info=True)
@@ -761,6 +744,13 @@ class CoreRecorderV2:
             except Exception as e:
                 logger.error(f"Error stopping recorder for freq {freq}: {e}")
         
+        # Stop CHU FSK listener
+        if self.fsk_listener:
+            try:
+                self.fsk_listener.stop()
+            except Exception:
+                pass
+
         # Close RadiodControl
         try:
             self.control.close()
@@ -773,6 +763,36 @@ class CoreRecorderV2:
         logger.info("Core recorder stopped")
 
 
+
+
+def _expand_channel_groups(recorder_section: dict) -> list:
+    """
+    Expand [recorder.channel_group.<name>] into a flat list of channel specs.
+
+    Each group table supplies group-level defaults (preset, sample_rate, agc,
+    gain, encoding, archive, consumer, …).  Per-channel entries in
+    [[recorder.channel_group.<name>.channels]] inherit those defaults and may
+    override any key individually.
+
+    Also accepts the legacy [[recorder.channels]] flat list for backward
+    compatibility — those entries are appended unchanged.
+    """
+    channels = []
+
+    # New schema: channel_group.<name>
+    for group_name, group in recorder_section.get('channel_group', {}).items():
+        group_defaults = {k: v for k, v in group.items() if k != 'channels'}
+        for ch in group.get('channels', []):
+            merged = dict(group_defaults)
+            merged.update(ch)
+            merged.setdefault('group', group_name)
+            channels.append(merged)
+
+    # Legacy schema: [[recorder.channels]]
+    for ch in recorder_section.get('channels', []):
+        channels.append(ch)
+
+    return channels
 
 
 def main():
@@ -802,11 +822,12 @@ def main():
     
     # Build recorder config
     recorder_section = config.get('recorder', {})
+    channels = _expand_channel_groups(recorder_section)
     recorder_config = {
         'output_dir': output_dir,
         'station': config.get('station', {}),
         'recorder': recorder_section,
-        'channels': recorder_section.get('channels', []),
+        'channels': channels,
         'channel_defaults': recorder_section.get('channel_defaults', {}),
         'status_address': config.get('ka9q', {}).get('status_address', '239.192.152.141'),
     }

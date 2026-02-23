@@ -339,6 +339,10 @@ class StreamRecorderV2:
         
         self.archive_writer = BinaryArchiveWriter(archive_config)
         
+        # Tap callbacks: additional on_samples consumers (e.g. FSK listener)
+        self._tap_callbacks: list = []
+        self._tap_lock = threading.Lock()
+
         # Statistics
         self.samples_received = 0
         self.samples_written = 0
@@ -674,6 +678,16 @@ class StreamRecorderV2:
         
         return final_quality
     
+    def add_tap(self, callback) -> None:
+        """Register an additional on_samples consumer (e.g. CHUFSKChannel.on_samples).
+
+        The callback receives the same (samples, quality) arguments as the
+        RadiodStream on_samples callback.  Taps are called after the archive
+        write so they never block recording.
+        """
+        with self._tap_lock:
+            self._tap_callbacks.append(callback)
+
     def _handle_samples(self, samples: np.ndarray, quality: StreamQuality):
         """
         Handle incoming samples from RadiodStream.
@@ -740,7 +754,16 @@ class StreamRecorderV2:
             )
             
             self.samples_written += len(samples)
-            
+
+            # Forward to tap callbacks (e.g. CHUFSKChannel ring buffer)
+            with self._tap_lock:
+                taps = list(self._tap_callbacks)
+            for tap in taps:
+                try:
+                    tap(samples, quality)
+                except Exception as tap_err:
+                    logger.debug(f"{self.config.description}: tap callback error: {tap_err}")
+
             # Log gaps if present
             if quality.has_gaps:
                 logger.debug(
