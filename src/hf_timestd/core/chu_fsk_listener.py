@@ -76,6 +76,10 @@ class CHUFSKChannel:
         self.stream = None
         self.ssrc = None
 
+        # Health monitor thread (started by CHUFSKListener)
+        self._health_monitor_thread: Optional[threading.Thread] = None
+        self._health_running = False
+
     def set_timing(self, gps_time_ns: int, rtp_timesnap: int):
         """Set the authoritative RTP-to-UTC mapping from ChannelInfo."""
         self._gps_time_unix = (
@@ -125,9 +129,14 @@ class CHUFSKChannel:
         """
         needed = self.sample_rate * 60
         with self._lock:
-            if (self._total_samples < needed
-                    or self._gps_time_unix is None
-                    or self._head_rtp is None):
+            if self._gps_time_unix is None or self._head_rtp is None:
+                logger.info(f"{self.description}: no RTP timing yet — skipping decode")
+                return None
+            if self._total_samples < needed:
+                logger.info(
+                    f"{self.description}: only {self._total_samples/self.sample_rate:.0f}s "
+                    f"buffered, need 60s — skipping decode"
+                )
                 return None
 
             # How many samples back from the head is the minute boundary?
@@ -220,6 +229,7 @@ class CHUFSKListener:
         self._stale_stream_timeout_sec = float(fsk_cfg.get('stale_stream_timeout_sec', 15.0))
         self._restart_backoff_sec = float(fsk_cfg.get('restart_backoff_sec', 5.0))
         self._last_restart_attempt: Dict[int, float] = {}
+        self._health_check_interval = 10.0  # seconds between health checks
 
         self._ensure_channel_param_names = set()
         try:
@@ -297,10 +307,44 @@ class CHUFSKListener:
         stream = RadiodStream(info, on_samples=ch.on_samples)
         stream.start()
         ch.stream = stream
+        logger.info(f"{ch.description}: stream (re)started SSRC={ch.ssrc:08x}")
         return True
+
+    def _health_monitor_loop(self, ch: CHUFSKChannel):
+        """Continuously monitor one USB channel; recreate it if silent.
+
+        Mirrors StreamRecorderV2._health_monitor_loop so USB channels get
+        the same 10-second silence detection that IQ channels have.
+        """
+        while ch._health_running:
+            try:
+                time.sleep(self._health_check_interval)
+                if not ch._health_running:
+                    break
+
+                silence = time.time() - ch._last_samples_time
+                if ch._last_samples_time <= 0:
+                    silence = time.time() - self.start_time
+
+                if silence > self._stale_stream_timeout_sec:
+                    logger.warning(
+                        f"{ch.description}: no samples for {silence:.0f}s — recreating channel"
+                    )
+                    try:
+                        # Force backoff reset so restart isn't suppressed
+                        self._last_restart_attempt[ch.frequency_hz] = 0.0
+                        self._start_or_restart_channel(ch)
+                    except Exception as e:
+                        logger.error(
+                            f"{ch.description}: channel recreation failed: {e}",
+                            exc_info=True
+                        )
+            except Exception as e:
+                logger.error(f"{ch.description}: health monitor error: {e}")
 
     def start(self):
         """Create USB channels and start listening."""
+        self.start_time = time.time()
         channel_status = {}
         n_started = 0
         for freq, ch in self.channels.items():
@@ -316,6 +360,17 @@ class CHUFSKListener:
                     'ok': True, 'ssrc': f"{ch.ssrc:08x}",
                     'freq_mhz': freq / 1e6,
                 }
+
+                # Start per-channel health monitor thread
+                ch._health_running = True
+                ch._health_monitor_thread = threading.Thread(
+                    target=self._health_monitor_loop,
+                    args=(ch,),
+                    daemon=True,
+                    name=f'fsk-health-{ch.description}',
+                )
+                ch._health_monitor_thread.start()
+
             except Exception as e:
                 logger.error(f"Failed to start FSK channel {freq/1e6:.3f} MHz: {e}",
                              exc_info=True)
@@ -354,6 +409,7 @@ class CHUFSKListener:
         """Stop all streams and decode thread."""
         self._running = False
         for freq, ch in self.channels.items():
+            ch._health_running = False
             if ch.stream:
                 try:
                     ch.stream.stop()
@@ -415,30 +471,13 @@ class CHUFSKListener:
                 minute_boundary = (int(time.time()) // 60) * 60 - 60
 
                 for freq, ch in self.channels.items():
+                    # Health monitor thread handles continuous silence detection.
+                    # Decode loop only needs to check for a completely missing stream
+                    # (e.g. channel failed to start initially).
                     if ch.stream is None:
                         try:
                             logger.warning(f"{ch.description}: stream missing, restarting")
-                            self._start_or_restart_channel(ch)
-                        except Exception as e:
-                            logger.error(
-                                f"{ch.description}: restart failed: {e}",
-                                exc_info=True
-                            )
-                    elif ch._last_samples_time <= 0:
-                        try:
-                            logger.warning(f"{ch.description}: no samples received yet, restarting")
-                            self._start_or_restart_channel(ch)
-                        except Exception as e:
-                            logger.error(
-                                f"{ch.description}: restart failed: {e}",
-                                exc_info=True
-                            )
-                    elif (time.time() - ch._last_samples_time) > self._stale_stream_timeout_sec:
-                        try:
-                            logger.warning(
-                                f"{ch.description}: stream stale "
-                                f"({time.time() - ch._last_samples_time:.1f}s), restarting"
-                            )
+                            self._last_restart_attempt[ch.frequency_hz] = 0.0
                             self._start_or_restart_channel(ch)
                         except Exception as e:
                             logger.error(

@@ -176,6 +176,23 @@ if command -v pip3 &> /dev/null; then
 fi
 
 # =============================================================================
+# Step 1b: Sync source tree to INSTALL_DIR for ensure-venv.sh
+# =============================================================================
+# ensure-venv.sh (run as ExecStartPre by core-recorder) pip-installs from a
+# temp copy of $INSTALL_DIR.  It needs pyproject.toml and src/ to be present
+# there, otherwise any unattended restart (OOM kill, watchdog, etc.) fails.
+log_info "Step 1b: Syncing source tree to $INSTALL_DIR..."
+
+cp "$PROJECT_DIR/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
+rsync -a --delete \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    --exclude '*.egg-info' \
+    "$PROJECT_DIR/src/" "$INSTALL_DIR/src/"
+chown -R timestd:timestd "$INSTALL_DIR/src/" "$INSTALL_DIR/pyproject.toml"
+log_info "  ✅ pyproject.toml + src/ synced to $INSTALL_DIR"
+
+# =============================================================================
 # Step 2: Copy Updated Scripts
 # =============================================================================
 log_info "Step 2: Copying updated scripts..."
