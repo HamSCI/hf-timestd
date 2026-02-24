@@ -2,8 +2,8 @@
 
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 6.7.1+ (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model)  
-**Last Updated:** 2026-02-17
+**System Version:** 6.7.1+ (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring)  
+**Last Updated:** 2026-02-24
 
 ---
 
@@ -859,45 +859,84 @@ FSS = 10×log10((P_2kHz + P_3kHz) / (P_4kHz + P_5kHz))
 
 ---
 
-## 8. Optional GNSS-VTEC Enhancement
+## 8. GNSS-VTEC Integration (Implemented 2026-02-24)
 
 ### 8.1 Local TEC Ground Truth
 
-When a dual-frequency GNSS receiver (e.g., u-blox ZED-F9P) is available, the system can measure **local vertical TEC in real-time**.
+A dual-frequency GNSS receiver (u-blox ZED-F9P) measures **local vertical TEC in real-time** at ~1 Hz cadence.
 
-**Implementation:** `timestd-vtec` service
+**Implementation:** `timestd-vtec` service (`scripts/live_vtec.py`)
+
+**Data flow:**
+```
+ZED-F9P (TCP) → UBX Parser → GNSSTECAnalyzer → HDF5 (86K records/day)
+                                                   ↓
+                              PhysicsFusionService._read_gnss_vtec()
+                                                   ↓
+                              carrier-phase dTEC anchoring (±120s match)
+```
 
 **Advantages:**
-- ~1 minute latency (vs 1-2 hours for IONEX)
+- ~1 second latency (vs 1-2 hours for IONEX)
 - Point measurement at receiver location
+- ~1 TECU accuracy (DCB-corrected, ≥6 satellites, 20° elevation mask)
 - Tracks rapid TEC changes during storms
 
-### 8.2 Integration with HF Measurements
+### 8.2 Carrier-Phase dTEC Anchoring
 
-The local GNSS-VTEC provides:
+The primary use of GNSS VTEC is anchoring the carrier-phase dTEC product. Before anchoring, integrated dTEC was a **relative** product (dTEC/dt rate valid, but absolute level unknown). Now:
 
-1. **Anchor point** for HF-derived TEC validation
-2. **Real-time TEC** for propagation delay correction
-3. **Storm detection** via rapid TEC changes
+**Anchor source priority cascade:**
 
-**Comparison:**
+| Priority | Source | Method | Accuracy | anchor_status |
+|----------|--------|--------|----------|---------------|
+| 1 | **Local GNSS VTEC** | ZED-F9P overhead VTEC | ±1 TECU | `ANCHORED_GNSS` |
+| 2 | Group-delay TEC | HF 1/f² fit | SNR 0.13 (noise) | `ANCHORED_GROUP_DELAY` |
+| 3 | None | — | — | `NO_ANCHOR` |
+
+**Implementation:** `physics_fusion_service.py:_read_gnss_vtec()` reads the nearest VTEC measurement within ±120 seconds from the HDF5 files written by `live_vtec.py`. The VTEC is applied as the DC offset for all station-channels. Per-day arrays are cached in memory with automatic eviction.
+
+**Schema:** `l3_dtec_v1.json` and `l3_dtec_timeseries_v1.json` updated to v1.1.0 with expanded `anchor_status` enum.
+
+**Effect on metrology:**
+- `is_anchored` flips True for all station-channels when GNSS VTEC is available
+- `quality_flag` can reach `GOOD` (was capped at `MARGINAL` when unanchored)
+- `dtec_mean_tecu` becomes physically meaningful (absolute overhead TEC ± integration drift)
+- Minute-to-minute continuity established (common GNSS reference eliminates inter-minute DC jumps)
+
+**Known limitation:** GNSS VTEC is overhead (zenith). The true slant TEC for each HF path would be `sTEC = VTEC × M(elevation)` where M is the thin-shell mapping factor. This introduces a ~10–30% systematic bias that is constant and removable in post-processing. Future work: apply per-path slant correction using the elevation geometry from `_build_ipp_measurements()`.
+
+**Validated (2026-02-24):** 17 station-channel records written with `ANCHORED_GNSS`, `anchor_tec=41.7 TECU` from Feb 20 data.
+
+### 8.3 VTEC Map Enhancement (Future)
+
+GNSS VTEC gives vertical TEC overhead at one point. For VTEC maps you need spatially distributed measurements. Options:
+1. Use GNSS VTEC as a Bayesian prior in the 1/f² fit → better per-path sTEC
+2. Use GNSS VTEC as map background, overlay HF-derived dTEC perturbations
+
+### 8.4 Comparison with Other TEC Sources
 
 | Source | Latency | Spatial Resolution | Accuracy |
 |--------|---------|-------------------|----------|
 | IONEX maps | 1-2 hours | 2.5° × 5° grid | ±2-5 TECU |
-| Local GNSS | ~1 minute | Point at receiver | ±1-2 TECU |
-| HF dispersion | Real-time | Path-integrated | ±2-5 TECU |
+| **Local GNSS** | **~1 second** | **Point at receiver** | **±1 TECU** |
+| HF group-delay | Real-time | Path-integrated | SNR 0.13 (noise) |
+| HF carrier-phase dTEC | Real-time | Path-integrated | ~6 mTECU/min (rate) |
 
-### 8.3 Configuration
+### 8.5 Configuration
 
 Enable via `timestd-config.toml`:
 
 ```toml
-[gnss]
+[gnss_vtec]
 enabled = true
-device = "/dev/ttyACM0"
-baud_rate = 115200
+host = "192.168.0.203"
+port = 9000
+save_hdf5 = true
+hdf5_path = "data/gnss_vtec"
 ```
+
+The `physics_fusion_service` reads `[gnss_vtec].hdf5_path` from the config and resolves relative paths against `data_root`.
 
 ---
 
@@ -1040,6 +1079,10 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 | **Propagation Model** | `src/hf_timestd/core/propagation_model.py` |
 | **Ionospheric Data** | `src/hf_timestd/core/iono_data_service.py` |
 | TEC Estimation | `src/hf_timestd/core/tec_estimator.py` |
+| Carrier-Phase dTEC + Anchoring | `src/hf_timestd/core/carrier_tec.py` |
+| GNSS VTEC (ZED-F9P) | `src/hf_timestd/core/gnss_tec.py` |
+| GNSS VTEC Live Service | `scripts/live_vtec.py` |
+| Physics Fusion (dTEC anchor) | `src/hf_timestd/core/physics_fusion_service.py` |
 | Ionospheric Model | `src/hf_timestd/core/ionospheric_model.py` |
 | Propagation Modes | `src/hf_timestd/core/propagation_mode_solver.py` |
 | Doppler/Multipath | `src/hf_timestd/core/advanced_signal_analysis.py` |

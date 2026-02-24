@@ -166,10 +166,10 @@ All pairs GOOD quality. HDF5 output: `phase2/science/dtec_diff/AGGREGATED_dtec_d
 | Integrated dTEC (dtec_mean_tecu) | ⚠️ Unanchored — relative only (is_anchored always False) |
 | Per-tick dTEC time series | ✅ NEW — phase2/science/dtec_timeseries/ (~55 records/min/station) |
 | Differential carrier-phase TEC | ✅ NEW — computed in-process, logged; HDF5 write pending validation |
-| Group-delay TEC | ❌ Below noise floor (L1 propagation model systematic errors) |
-| vtec_tecu | ❌ All NaN (depends on group-delay TEC) |
+| Group-delay TEC | ⚠️ SNR ~0.13 — fits produce values but noise-dominated (see 2026-02-24 audit) |
+| vtec_tecu | ⚠️ 55% valid (969/1772 on 2026-02-23) — gate is confidence≥0.3; geometrically correct but sTEC unreliable |
 | tof_kalman_ms | ❌ All NaN (dead schema field) |
-| Scintillation indices | ❓ Not verified |
+| Scintillation indices | ⚠️ Two implementations exist; test signal S4 all NaN (SNR gate); phase σ_φ works but measures multipath+noise, not scintillation |
 
 ---
 

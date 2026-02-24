@@ -1,7 +1,7 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "data_product": "L3A_dtec",
-    "description": "Carrier-phase differential TEC (dTEC) time series, anchored to group-delay absolute TEC",
+    "description": "Carrier-phase differential TEC (dTEC) time series, anchored to GNSS VTEC (preferred) or group-delay absolute TEC",
     "cadence_seconds": 60,
     "processing_level": "L3A",
     "standards": [
@@ -70,21 +70,21 @@
             "name": "anchor_tec_tecu",
             "type": "float",
             "required": false,
-            "description": "Group-delay absolute TEC used as anchor (null if no anchor available)",
+            "description": "Absolute TEC used as anchor: GNSS overhead VTEC or group-delay TEC (null if no anchor available)",
             "units": "TECU"
         },
         {
             "name": "is_anchored",
             "type": "boolean",
             "required": true,
-            "description": "Whether the dTEC was anchored to group-delay TEC"
+            "description": "Whether the dTEC was anchored to an absolute TEC source (GNSS VTEC or group-delay)"
         },
         {
             "name": "anchor_status",
             "type": "string",
             "required": false,
-            "enum": ["ANCHORED", "ANCHOR_LOW_CONF", "NO_ANCHOR"],
-            "description": "Anchor state: ANCHORED=group-delay TEC applied, ANCHOR_LOW_CONF=TEC available but confidence<0.5, NO_ANCHOR=no group-delay TEC available"
+            "enum": ["ANCHORED", "ANCHORED_GNSS", "ANCHORED_GROUP_DELAY", "ANCHOR_LOW_CONF", "NO_ANCHOR"],
+            "description": "Anchor state: ANCHORED_GNSS=GNSS overhead VTEC applied, ANCHORED_GROUP_DELAY=HF group-delay TEC applied, ANCHORED=legacy (either source), ANCHOR_LOW_CONF=TEC available but confidence<0.5, NO_ANCHOR=no anchor available"
         },
         {
             "name": "sigma_noise_tecu",

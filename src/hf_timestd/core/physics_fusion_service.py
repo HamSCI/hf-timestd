@@ -82,11 +82,19 @@ class PhysicsFusionService:
         lookback_minutes: int = 5,
         receiver_lat: Optional[float] = None,
         receiver_lon: Optional[float] = None,
+        gnss_vtec_dir: Optional[Path] = None,
     ):
         self.data_root = Path(data_root)
         self.output_dir = Path(output_dir)
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
+
+        # GNSS VTEC anchoring: path to HDF5 files written by live_vtec.py
+        if gnss_vtec_dir is not None:
+            self.gnss_vtec_dir = Path(gnss_vtec_dir)
+        else:
+            self.gnss_vtec_dir = self.data_root / 'data' / 'gnss_vtec'
+        self._gnss_vtec_cache: Dict[str, Any] = {}  # date_str -> (timestamps, vtecs)
 
         # Receiver coordinates — used for IPP computation and elevation geometry.
         # Default to EM38ww (Columbia, MO) if not provided.
@@ -737,39 +745,136 @@ class PhysicsFusionService:
 
         return result
 
+    def _read_gnss_vtec(self, epoch: float) -> Optional[float]:
+        """
+        Read the nearest GNSS overhead VTEC measurement for a given epoch.
+
+        Returns VTEC in TECU, or None if no data is available within ±120s.
+        Reads from the HDF5 files written by live_vtec.py.
+        """
+        import h5py
+
+        target_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        date_str = target_dt.strftime('%Y%m%d')
+
+        # Check cache first
+        cached = self._gnss_vtec_cache.get(date_str)
+        if cached is not None:
+            timestamps, vtecs = cached
+        else:
+            # Load from HDF5
+            h5_path = self.gnss_vtec_dir / f'GNSS_gnss_vtec_{date_str}.h5'
+            if not h5_path.exists():
+                return None
+            try:
+                with h5py.File(h5_path, 'r', locking=False) as f:
+                    if 'unix_timestamp' not in f or 'vtec_tecu' not in f:
+                        return None
+                    timestamps = f['unix_timestamp'][:].astype(np.float64)
+                    vtecs = f['vtec_tecu'][:].astype(np.float64)
+                    # Optional quality gate
+                    if 'quality_flag' in f:
+                        qflags = f['quality_flag'][:]
+                        good_mask = np.array([
+                            (q == b'GOOD' or q == b'MARGINAL')
+                            if isinstance(q, bytes) else (q in ('GOOD', 'MARGINAL'))
+                            for q in qflags
+                        ])
+                        timestamps = timestamps[good_mask]
+                        vtecs = vtecs[good_mask]
+            except Exception as e:
+                logger.debug(f"Failed to read GNSS VTEC from {h5_path}: {e}")
+                return None
+
+            if len(timestamps) == 0:
+                return None
+
+            # Cache — evict old dates to bound memory (keep at most 2 days)
+            self._gnss_vtec_cache[date_str] = (timestamps, vtecs)
+            stale = [k for k in self._gnss_vtec_cache if k < date_str and k != date_str]
+            for k in stale[:-1]:  # keep yesterday for midnight boundary
+                del self._gnss_vtec_cache[k]
+
+        # Find nearest measurement within ±120 seconds
+        idx = np.searchsorted(timestamps, epoch)
+        best_vtec = None
+        best_dt = 121.0  # just above threshold
+        for candidate in [idx - 1, idx]:
+            if 0 <= candidate < len(timestamps):
+                dt_sec = abs(timestamps[candidate] - epoch)
+                if dt_sec < best_dt:
+                    best_dt = dt_sec
+                    best_vtec = float(vtecs[candidate])
+
+        if best_vtec is not None and 0 < best_vtec <= 200:
+            return best_vtec
+        return None
+
     def _process_carrier_dtec(
         self,
         minute_timestamp: int,
         tec_estimates: Dict[tuple, 'TECResult']
     ):
         """
-        Compute carrier-phase dTEC for each channel and anchor to group-delay TEC.
+        Compute carrier-phase dTEC for each channel and anchor to GNSS VTEC
+        (preferred) or group-delay TEC (fallback).
 
         Reads tick_phase data (carrier phase per tick, ~55/min), converts to
         dTEC via Doppler, integrates, and anchors to the absolute TEC from
-        the group-delay 1/f² fit.
+        the local ZED-F9P GNSS receiver (overhead VTEC) or, if unavailable,
+        from the group-delay 1/f² fit.
         """
         tick_data = self._read_tick_phase_minute(minute_timestamp)
         if not tick_data:
             return
 
-        # Build anchor lookup: station -> TEC in TECU (from group-delay fit).
-        # Only anchor when the group-delay TEC estimate is credible.
-        # confidence < 0.5 means the 1/f² fit is dominated by noise (SNR ~0.01-0.14
-        # per CRITIC_CONTEXT F1); anchoring to it would inject a large DC bias into
-        # the carrier-phase dTEC series.  Unanchored dTEC (is_anchored=False) is
-        # still scientifically valid as a relative rate-of-change product.
-        ANCHOR_MIN_CONFIDENCE = 0.5
+        # --- Anchor source selection (priority order) ---
+        # 1. GNSS overhead VTEC from local ZED-F9P (best: ~1 TECU accuracy)
+        # 2. Group-delay TEC from HF 1/f² fit (poor: SNR ~0.13, rarely usable)
+        # 3. No anchor (dTEC rate still valid as relative product)
+        #
+        # GNSS VTEC is overhead (zenith).  For dTEC anchoring we use it
+        # directly as the DC level for all stations — the integrated
+        # carrier-phase dTEC is a *relative* product, and the GNSS VTEC
+        # provides a much better absolute scale than group-delay TEC.
+        # A per-path slant correction could refine this further but the
+        # mapping function error (~10-30%) is still far smaller than the
+        # group-delay TEC noise floor.
+        gnss_vtec = self._read_gnss_vtec(float(minute_timestamp + 30))  # mid-minute
+        anchor_source = 'NONE'
+
+        # Build anchor lookup: station -> TEC in TECU
         anchor_by_station: Dict[str, float] = {}
-        for (station, mode), result in tec_estimates.items():
-            if result.confidence >= ANCHOR_MIN_CONFIDENCE and 0 < result.tec_u <= 200:
-                anchor_by_station[station] = result.tec_u
-            elif result.confidence < ANCHOR_MIN_CONFIDENCE and 0 < result.tec_u <= 200:
-                logger.debug(
-                    f"dTEC anchor suppressed for {station}: group-delay TEC confidence "
-                    f"{result.confidence:.2f} < {ANCHOR_MIN_CONFIDENCE} threshold "
-                    f"(TEC={result.tec_u:.1f} TECU). dTEC will be unanchored."
-                )
+
+        if gnss_vtec is not None:
+            # Use GNSS VTEC for all stations (overhead, station-independent)
+            anchor_source = 'GNSS'
+            for channel_records in tick_data.values():
+                for r in channel_records:
+                    st = r.get('station', '')
+                    if isinstance(st, bytes):
+                        st = st.decode('utf-8', errors='replace')
+                    if st and st not in anchor_by_station:
+                        anchor_by_station[st] = gnss_vtec
+            logger.info(
+                f"dTEC anchor: GNSS VTEC = {gnss_vtec:.1f} TECU "
+                f"(applied to {len(anchor_by_station)} stations)"
+            )
+        else:
+            # Fallback: group-delay TEC (rarely usable)
+            ANCHOR_MIN_CONFIDENCE = 0.5
+            for (station, mode), result in tec_estimates.items():
+                if result.confidence >= ANCHOR_MIN_CONFIDENCE and 0 < result.tec_u <= 200:
+                    anchor_by_station[station] = result.tec_u
+                    anchor_source = 'GROUP_DELAY'
+                elif result.confidence < ANCHOR_MIN_CONFIDENCE and 0 < result.tec_u <= 200:
+                    logger.debug(
+                        f"dTEC anchor suppressed for {station}: group-delay TEC confidence "
+                        f"{result.confidence:.2f} < {ANCHOR_MIN_CONFIDENCE} threshold "
+                        f"(TEC={result.tec_u:.1f} TECU). dTEC will be unanchored."
+                    )
+            if not anchor_by_station:
+                anchor_source = 'NONE'
 
         ts_iso = datetime.fromtimestamp(
             minute_timestamp, tz=timezone.utc
@@ -848,7 +953,7 @@ class PhysicsFusionService:
 
                 # anchor_status: human-readable reason for anchor state
                 if dtec_result.is_anchored:
-                    anchor_status = 'ANCHORED'
+                    anchor_status = f'ANCHORED_{anchor_source}'
                 elif anchor_tec is not None:
                     anchor_status = 'ANCHOR_LOW_CONF'
                 else:
@@ -917,7 +1022,7 @@ class PhysicsFusionService:
             )
             logger.info(
                 f"Written {n_written} carrier-phase dTEC records for {minute_timestamp} "
-                f"({n_anchored} station-channels anchored to group-delay TEC)"
+                f"({n_anchored} station-channels anchored via {anchor_source})"
             )
 
         # P3-C: Differential carrier-phase TEC between frequency pairs.
@@ -1152,11 +1257,28 @@ if __name__ == '__main__':
     if rx_lat is None or rx_lon is None:
         rx_lat, rx_lon = _load_receiver_coords(args.config)
 
+    # Load GNSS VTEC path from config if available
+    gnss_vtec_dir = None
+    if tomllib is not None:
+        try:
+            with open(args.config, 'rb') as _f:
+                _cfg = tomllib.load(_f)
+            gnss_cfg = _cfg.get('gnss_vtec', {})
+            if gnss_cfg.get('enabled', False):
+                hdf5_rel = gnss_cfg.get('hdf5_path')
+                if hdf5_rel:
+                    p = Path(hdf5_rel)
+                    # Resolve relative paths against data_root
+                    gnss_vtec_dir = p if p.is_absolute() else Path(args.data_root) / p
+        except Exception as e:
+            logger.warning(f"Could not read gnss_vtec config: {e}")
+
     service = PhysicsFusionService(
         data_root=args.data_root,
         output_dir=args.output,
         receiver_lat=rx_lat,
         receiver_lon=rx_lon,
+        gnss_vtec_dir=gnss_vtec_dir,
     )
 
     service.run()

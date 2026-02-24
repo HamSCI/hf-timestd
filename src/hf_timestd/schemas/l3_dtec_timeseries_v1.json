@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "data_product": "L3A_dtec_timeseries",
     "description": "Full per-tick carrier-phase dTEC time series at ~1-second resolution. Each record is one carrier-phase sample within a minute window. Preserves scintillation-scale and TID-scale ionospheric dynamics discarded by the per-minute summary (l3_dtec_v1).",
     "cadence_seconds": 1,
@@ -65,14 +65,14 @@
             "name": "is_anchored",
             "type": "boolean",
             "required": true,
-            "description": "Whether dtec_tecu is anchored to group-delay absolute TEC"
+            "description": "Whether dtec_tecu is anchored to an absolute TEC source (GNSS VTEC or group-delay)"
         },
         {
             "name": "anchor_status",
             "type": "string",
             "required": true,
-            "enum": ["ANCHORED", "ANCHOR_LOW_CONF", "NO_ANCHOR"],
-            "description": "Anchor state: ANCHORED=group-delay TEC applied; ANCHOR_LOW_CONF=anchor suppressed (confidence<0.5); NO_ANCHOR=no group-delay TEC available"
+            "enum": ["ANCHORED", "ANCHORED_GNSS", "ANCHORED_GROUP_DELAY", "ANCHOR_LOW_CONF", "NO_ANCHOR"],
+            "description": "Anchor state: ANCHORED_GNSS=GNSS overhead VTEC applied; ANCHORED_GROUP_DELAY=HF group-delay TEC applied; ANCHORED=legacy (either source); ANCHOR_LOW_CONF=anchor suppressed (confidence<0.5); NO_ANCHOR=no anchor available"
         },
         {
             "name": "snr_db",

@@ -88,13 +88,22 @@ These are enforced at write time by `DataProductWriter`:
 - Sample count invariant: `24000 × 60 = 1,440,000` samples exactly per minute
 - Gaps filled with zeros (maintains timing alignment)
 
+### Schema Lookup (DataProductRegistry)
+
+- `DataProductRegistry.get_schema(level, product)` → full JSON schema with field definitions
+- `DataProductRegistry.get_field_type(level, product, field)` → `{'type', 'format', 'description'}`
+- **Readers MUST use the registry to discover field types** — do not assume format from naming conventions
+- The `_utc` suffix does NOT guarantee ISO 8601: `timestamp_utc` is a string, `minute_boundary_utc` is an integer epoch
+- The canonical data dictionary (`data_dictionary.json`) has a `structural_fields` section documenting these conventions
+
 ### Field Semantics (Critical Pitfalls)
 
 - `clock_offset_ms` is a **timing residual** (arrival − expected_propagation_delay), NOT a clock offset in the metrological sense
 - `raw_arrival_time_ms` is a **model-dependent reconstruction**, not a raw observable
+- `minute_boundary_utc` is an **integer Unix epoch** (seconds since 1970), NOT an ISO string
 - `tof_kalman_ms` is **deprecated** (all NaN) — marked `deprecated=true` in L2 schema
 - `tec_tecu` is **below noise floor** in production — use `dtec_rate_tecu_per_s` instead
-- `vtec_tecu` is **all NaN** — depends on group-delay TEC which is noise-dominated
+- `vtec_tecu` is **55% valid but noise-dominated** — geometrically correct but sTEC unreliable (2026-02-24 audit)
 
 ---
 
@@ -104,7 +113,7 @@ These are enforced at write time by `DataProductWriter`:
 
 ```
 phase2/{CHANNEL}/metrology/{date}_metrology_measurements.h5
-    ├── minute_boundary_utc    (string, ISO 8601)
+    ├── minute_boundary_utc    (int64, Unix epoch seconds)
     ├── station                (string)
     ├── frequency_hz           (float64)
     ├── raw_toa_ms             (float64)

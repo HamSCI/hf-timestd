@@ -1545,6 +1545,7 @@ class WWVTestSignalDetector:
         
         # Analyze 1-second windows
         tone_power_timeseries = {freq: [] for freq in self.TONE_FREQUENCIES}
+        noise_floor_timeseries = []  # Per-window noise floor from off-tone bins
         
         for sec in range(10):
             window_start = sec * self.sample_rate
@@ -1558,17 +1559,31 @@ class WWVTestSignalDetector:
             # FFT to get power at each tone frequency
             fft_result = np.abs(rfft(window))
             freqs = rfftfreq(len(window), 1/self.sample_rate)
+            freq_res = freqs[1] - freqs[0] if len(freqs) > 1 else 1.0
+            search_range = int(50 / freq_res) if freq_res > 0 else 5
             
+            # Collect tone powers
+            tone_bins = set()  # Track which bins belong to tones
             for target_freq in self.TONE_FREQUENCIES:
                 idx = np.argmin(np.abs(freqs - target_freq))
-                # Peak search within ±50 Hz
-                search_range = int(50 / (freqs[1] - freqs[0])) if len(freqs) > 1 else 5
                 start = max(0, idx - search_range)
                 end = min(len(fft_result), idx + search_range + 1)
+                for b in range(start, end):
+                    tone_bins.add(b)
                 
                 peak_power = np.max(fft_result[start:end]**2)
                 power_db = 10 * np.log10(peak_power + 1e-10)
                 tone_power_timeseries[target_freq].append(power_db)
+            
+            # Noise floor: median power of bins between 1.5–5.5 kHz excluding tone bins
+            noise_lo = int(1500 / freq_res)
+            noise_hi = min(len(fft_result), int(5500 / freq_res))
+            noise_bins = [i for i in range(noise_lo, noise_hi) if i not in tone_bins]
+            if noise_bins:
+                noise_power = np.median(fft_result[noise_bins]**2)
+                noise_floor_timeseries.append(10 * np.log10(noise_power + 1e-10))
+            else:
+                noise_floor_timeseries.append(float('nan'))
         
         # Calculate fading variance and multi-frequency S4 scintillation
         fading_variance = None
@@ -1580,39 +1595,37 @@ class WWVTestSignalDetector:
         # S4 is only meaningful when the tone is well above the noise floor;
         # at low SNR the FFT peak is noise-dominated and power variance is
         # driven by noise statistics, not ionospheric scintillation.
+        noise_floor_arr = np.array(noise_floor_timeseries) if noise_floor_timeseries else np.array([])
+        median_noise_db = float(np.nanmedian(noise_floor_arr)) if len(noise_floor_arr) > 0 else -999.0
+        
         for freq, powers in tone_power_timeseries.items():
             if len(powers) >= 5:
                 powers_arr = np.array(powers)
                 n_pts = len(powers_arr)
                 
-                # Check tone SNR: use first 3 windows (strongest signal)
-                # compared to noise floor.  Skip S4 if tone SNR < 6 dB.
-                first3_mean_db = np.mean(powers_arr[:3])
-                # Noise floor estimate: use the last 3 windows where the
-                # designed attenuation has reduced the tone by 21-27 dB.
-                # At that level the measurement is noise-dominated, giving
-                # a reasonable noise floor estimate.
-                last3_mean_db = np.mean(powers_arr[-3:])
-                # Expected attenuation over 7-9 seconds: 21-27 dB
-                expected_drop_db = 3.0 * (n_pts - 2)  # midpoint of last 3
-                tone_snr_db = first3_mean_db - last3_mean_db - expected_drop_db
+                # SNR gate: compare median tone power against noise floor
+                # measured from off-tone FFT bins in the same windows.
+                # The designed -3dB/sec attenuation is masked by ionospheric
+                # fading (~13 dB std) so we cannot use the attenuation model
+                # to estimate noise floor.
+                median_tone_db = float(np.median(powers_arr))
+                tone_snr_db = median_tone_db - median_noise_db
                 
                 if tone_snr_db < 6.0:
-                    # Tone is too weak relative to noise for reliable S4
                     logger.debug(f"S4 skipped at {freq}Hz: tone_snr={tone_snr_db:.1f}dB < 6dB")
                     continue
                 
-                # Expected attenuation pattern: -3dB per second
-                expected_atten_db = np.array([-3.0 * i for i in range(n_pts)])
-                
-                # Detrend: fit the expected -3dB/sec slope to the data via
-                # least-squares to find the best reference level.  Anchoring
-                # to powers_arr[0] made S4 sensitive to a single outlier;
-                # the LS fit is robust to individual faded windows.
-                # Model: powers_arr ≈ P0 + expected_atten_db
-                # Solve for P0 = mean(powers_arr - expected_atten_db)
-                p0_fit = np.mean(powers_arr - expected_atten_db)
-                detrended_db = powers_arr - (p0_fit + expected_atten_db)
+                # Detrend: data-driven linear fit instead of -3dB/sec model.
+                # After ionospheric propagation, fading dominates the designed
+                # attenuation pattern.  A linear fit removes any slow trend
+                # (including residual attenuation) without assuming a fixed slope.
+                t_sec = np.arange(n_pts, dtype=float)
+                try:
+                    coeffs = np.polyfit(t_sec, powers_arr, 1)
+                    trend_db = np.polyval(coeffs, t_sec)
+                except (np.linalg.LinAlgError, ValueError):
+                    trend_db = np.full(n_pts, np.mean(powers_arr))
+                detrended_db = powers_arr - trend_db
                 
                 # Clamp to ±15 dB to prevent extreme values from dominating
                 detrended_db = np.clip(detrended_db, -15.0, 15.0)
@@ -1646,11 +1659,16 @@ class WWVTestSignalDetector:
                 s4_frequency_slope = float(slope)
         
         # Fading variance from 2 kHz (for backward compatibility)
+        # Use data-driven detrending consistent with S4 calculation
         if len(tone_power_timeseries.get(2000, [])) >= 5:
             powers_2k = np.array(tone_power_timeseries[2000])
-            expected_atten_db = np.array([-3.0 * i for i in range(len(powers_2k))])
-            p0_2k = np.mean(powers_2k - expected_atten_db)
-            detrended = powers_2k - (p0_2k + expected_atten_db)
+            t_2k = np.arange(len(powers_2k), dtype=float)
+            try:
+                coeffs_2k = np.polyfit(t_2k, powers_2k, 1)
+                trend_2k = np.polyval(coeffs_2k, t_2k)
+            except (np.linalg.LinAlgError, ValueError):
+                trend_2k = np.full(len(powers_2k), np.mean(powers_2k))
+            detrended = powers_2k - trend_2k
             fading_variance = float(np.var(detrended))
         
         return tone_power_timeseries, fading_variance, scintillation_index, s4_by_frequency, s4_frequency_slope

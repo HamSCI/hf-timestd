@@ -165,4 +165,6 @@ def check_field(field_name: str) -> Optional[Dict[str, Any]]:
     entry = dd.get('observables', {}).get(field_name)
     if entry is None:
         entry = dd.get('derived_quantities', {}).get(field_name)
+    if entry is None:
+        entry = dd.get('structural_fields', {}).get(field_name)
     return entry

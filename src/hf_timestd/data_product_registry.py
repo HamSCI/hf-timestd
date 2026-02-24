@@ -37,8 +37,9 @@ All frequencies are in kHz (integers) to avoid floating-point issues:
 This registry ensures all readers and writers use consistent paths.
 """
 
+import json
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple, Union
+from typing import Any, Dict, Optional, List, Tuple, Union
 
 
 class DataProductRegistry:
@@ -60,6 +61,45 @@ class DataProductRegistry:
         /var/lib/timestd/phase2/CHU_14670/clock_offset
     """
     
+    # Map: (product_level, product_name) -> schema filename
+    # This links every product to its authoritative field definitions so that
+    # readers can discover field names, types, and formats programmatically.
+    PRODUCT_SCHEMAS: Dict[Tuple[str, str], str] = {
+        # L1
+        ('L1', 'broadcast_measurements'):   'l1_broadcast_measurements_v1.json',
+        ('L1', 'tick_analysis'):             'l1_broadcast_measurements_v1.json',
+        ('L1', 'channel_observables'):       'l1_channel_observables_v1.json',
+        ('L1', 'tone_detections'):           'l1_tone_detections_v1.json',
+        ('L1', 'bcd_timecode'):              'l1_bcd_timecode_v1.json',
+        ('L1', 'metrology_measurements'):    'l1_metrology_measurements_v1.json',
+        ('L1', 'all_arrivals'):              'l1_all_arrivals_v1.json',
+        # L2
+        ('L2', 'broadcast_timing'):          'l2_timing_measurements_v1.json',
+        ('L2', 'broadcast_physics'):         'l2_physics_v1.json',
+        ('L2', 'chu_fsk'):                   'l2_chu_fsk_v1.json',
+        ('L2', 'wwv_test_signal'):           'l2_test_signal_v1.json',
+        ('L2', 'tick_timing'):               'l2_tick_timing_v1.json',
+        ('L2', 'detection_attempts'):        'l2_detection_attempts_v1.json',
+        ('L2', 'tick_phase'):                'l2_tick_phase_v1.json',
+        ('L2', 'decoder_comparison'):        'l2_decoder_comparison_v1.json',
+        ('L2', 'timing_measurements'):       'l2_timing_measurements_v1.json',
+        ('L2', 'test_signal'):               'l2_test_signal_v1.json',
+        ('L2', 'physics_interpretation'):    'l2_physics_v1.json',
+        # L3
+        ('L3', 'fusion_timing'):             'l3_fusion_timing_v1.json',
+        ('L3', 'd_clock'):                   'l3_fusion_timing_v1.json',
+        ('L3', 'tec'):                       'l3_tec_v1.json',
+        ('L3', 'gnss_vtec'):                 'l3_gnss_vtec_v1.json',
+        # L3B
+        ('L3B', 'absorption'):               'l3b_absorption_v1.json',
+        ('L3B', 'iono_events'):              'l3b_iono_events_v1.json',
+        # L3C
+        ('L3C', 'propagation_stats'):        'l3c_propagation_stats_v1.json',
+    }
+
+    # Cache for loaded schema JSON
+    _schema_cache: Dict[str, Dict[str, Any]] = {}
+
     # Map: (product_level, product_name) -> subdirectory
     # Empty string means root of base directory
     # 
@@ -450,11 +490,78 @@ class DataProductRegistry:
             return 'legacy'
     
     @classmethod
+    def get_schema(
+        cls,
+        product_level: str,
+        product_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Load the JSON schema for a data product.
+
+        Returns the full parsed schema dict (with 'fields' list), or None if
+        no schema is registered for this product.
+
+        Example:
+            >>> schema = DataProductRegistry.get_schema('L2', 'tick_phase')
+            >>> for f in schema['fields']:
+            ...     print(f['name'], f['type'])
+        """
+        key = (product_level, product_name)
+        schema_filename = cls.PRODUCT_SCHEMAS.get(key)
+        if schema_filename is None:
+            return None
+
+        if schema_filename in cls._schema_cache:
+            return cls._schema_cache[schema_filename]
+
+        # Resolve path relative to the schemas package
+        schema_dir = Path(__file__).parent / 'schemas'
+        schema_path = schema_dir / schema_filename
+        if not schema_path.exists():
+            return None
+
+        with open(schema_path, 'r') as fh:
+            schema = json.load(fh)
+        cls._schema_cache[schema_filename] = schema
+        return schema
+
+    @classmethod
+    def get_field_type(
+        cls,
+        product_level: str,
+        product_name: str,
+        field_name: str,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Look up a single field's type metadata from the product schema.
+
+        Returns a dict with at least 'type' (and optionally 'format'), or
+        None if the field or schema is not found.
+
+        Example:
+            >>> info = DataProductRegistry.get_field_type('L2', 'tick_phase', 'minute_boundary_utc')
+            >>> print(info)
+            {'type': 'integer', 'format': None, 'description': 'Unix epoch timestamp of minute boundary'}
+        """
+        schema = cls.get_schema(product_level, product_name)
+        if schema is None:
+            return None
+        for field_def in schema.get('fields', []):
+            if field_def.get('name') == field_name:
+                return {
+                    'type': field_def.get('type'),
+                    'format': field_def.get('format'),
+                    'description': field_def.get('description'),
+                }
+        return None
+
+    @classmethod
     def register_product(
         cls,
         product_level: str,
         product_name: str,
-        subdirectory: str
+        subdirectory: str,
+        schema_file: Optional[str] = None,
     ) -> None:
         """
         Register a new data product type (for extensions).
@@ -463,14 +570,18 @@ class DataProductRegistry:
             product_level: L1, L2, L3, etc.
             product_name: Product name
             subdirectory: Subdirectory spec (e.g., 'broadcast:fsk', 'channel:snr', 'fusion:tec')
+            schema_file: Optional schema JSON filename in the schemas directory
             
         Example:
-            >>> DataProductRegistry.register_product('L3', 'custom_product', 'custom')
+            >>> DataProductRegistry.register_product('L3', 'custom_product', 'custom',
+            ...     schema_file='l3_custom_v1.json')
         """
         key = (product_level, product_name)
         if key in cls.PRODUCT_LOCATIONS:
             raise ValueError(f"Product {product_level}/{product_name} already registered")
         cls.PRODUCT_LOCATIONS[key] = subdirectory
+        if schema_file:
+            cls.PRODUCT_SCHEMAS[key] = schema_file
     
     @classmethod
     def print_registry(cls) -> None:

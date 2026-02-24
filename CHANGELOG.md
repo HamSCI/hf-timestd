@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### GNSS VTEC Anchoring for Carrier-Phase dTEC
+
+**Feature:** The physics fusion service now anchors carrier-phase dTEC to absolute TEC using the local ZED-F9P GNSS receiver's overhead VTEC measurement.
+
+- **`physics_fusion_service.py`**: Added `_read_gnss_vtec()` method — reads nearest VTEC within ±120s from HDF5 files written by `live_vtec.py`, caches per-day arrays, quality-gates on GOOD/MARGINAL flags
+- **`physics_fusion_service.py`**: Modified `_process_carrier_dtec()` — anchor source priority: (1) GNSS VTEC → `ANCHORED_GNSS`, (2) group-delay TEC → `ANCHORED_GROUP_DELAY`, (3) none → `NO_ANCHOR`
+- **`l3_dtec_v1.json`**: Schema v1.0.0 → v1.1.0 — `anchor_status` enum expanded to include `ANCHORED_GNSS` and `ANCHORED_GROUP_DELAY`
+- **`l3_dtec_timeseries_v1.json`**: Schema v1.0.0 → v1.1.0 — same enum expansion
+- **Config**: Reads `[gnss_vtec].hdf5_path` from `timestd-config.toml`, resolves relative paths against `data_root`
+
+**Effect:** All 17 station-channel dTEC records now have `is_anchored=True` and `quality_flag=GOOD` when GNSS VTEC is available (~100% uptime). Previously, all records were `NO_ANCHOR` / `MARGINAL` because group-delay TEC has SNR ~0.13.
+
 ### CHU FSK Resilience
 
 - **CHU FSK channel maintenance**: CHU USB/FSK listener now restarts stale/missing streams and uses a compatibility wrapper around `RadiodControl.ensure_channel()` to pass only supported radiod parameters.
