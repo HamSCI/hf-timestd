@@ -30,7 +30,7 @@
 | 3 | RX888 + GPSDO + GPS+PPS on LAN | Chrony+PPS (±0.5–1 ms) | GPSDO (1 ppb) | **D_clock, mode ID, propagation geometry** — adds absolute delay |
 | 4 | RX888 + GPSDO + PPS in HF stream | GPS_TIME in RTP (±1 µs) | GPSDO (1 ppb) | **Sub-ms multipath, group-delay TEC** — full timing precision |
 
-**Key insight for the audience:** Tier 2 adds a Leo Bodnar GPSDO (~$162). It unlocks carrier-phase Doppler and dTEC/dt — arguably the most scientifically valuable observables. You don't need PPS or GPS_TIME integration for the rate domain. The absolute-time domain (D_clock, mode identification) requires Tier 3+, but this system can *bootstrap its own absolute time* from the HF signals themselves, lifting a Tier 2 station to effective Tier 3.
+**Key insight for the audience:** Tier 2 adds a Leo Bodnar GPSDO (~$162). It unlocks carrier-phase Doppler and dTEC/dt — arguably the most scientifically valuable observables. You don't need PPS or GPS\_TIME integration for the rate domain. The absolute-time domain (D_clock, mode identification) requires Tier 3+, but this system can *bootstrap its own absolute time* from the HF signals themselves, lifting a Tier 2 station to effective Tier 3.
 
 **The punchline:** This station operates at Tier 4 (GPS_TIME in RTP chain), which lets us validate the full measurement chain. But most of the science products we demonstrate — Doppler, dTEC, discrimination — are available to any Tier 2 station. The UTC recovery we demonstrate is the metrology that bridges Tier 2 → Tier 3, making absolute-delay products accessible without external PPS.
 
@@ -52,6 +52,7 @@
 **Key finding:** TSL2 (ionospherically corrected) has **3.3× tighter uncertainty** than TSL1 (geometric only). Both are **100× better than internet NTP**. The improvement from L1→L2 validates that the ionospheric correction is doing real work.
 
 **Fusion D_clock statistics (full day, 2026-02-23):**
+
 - 1,101 valid measurements out of 1,441 minutes
 - Median offset: −1.2 ms
 - MAD: 1.4 ms
@@ -140,7 +141,7 @@ The physics is correct. The problem is signal-to-noise:
 - **Noise:** D_clock uncertainty from propagation model errors ≈ **6.5 ms**
 - **SNR ≈ 0.13** — the 1/f² signal is buried in noise
 
-With N=2 frequencies, confidence is capped at 0.3 (MAX_CONFIDENCE_N2). With N≥3,
+With N=2 frequencies, confidence is capped at 0.3 (MAX\_CONFIDENCE_N2). With N≥3,
 the R² of the fit is typically low. The VTEC values that exist are **geometrically
 correct but physically unreliable** — the thin-shell mapping, IPP computation, and
 2D polynomial surface fit are all sound, but the input sTEC is noise-dominated.
@@ -160,6 +161,7 @@ The carrier-phase dTEC product is now **anchored** to GNSS overhead VTEC. The
 `_read_gnss_vtec()` method in `physics_fusion_service.py` reads the nearest VTEC
 measurement (±120s window) from the HDF5 files written by `live_vtec.py`, and
 applies it as the DC level for all station-channels. Priority cascade:
+
 1. GNSS overhead VTEC (~1 TECU accuracy) → `anchor_status=ANCHORED_GNSS`
 2. Group-delay TEC (SNR 0.13, rarely usable) → `anchor_status=ANCHORED_GROUP_DELAY`
 3. No anchor → `anchor_status=NO_ANCHOR`
@@ -170,6 +172,7 @@ Schemas updated: `l3_dtec_v1.json` and `l3_dtec_timeseries_v1.json` → v1.1.0.
 **Role B — Improve VTEC maps (MODERATE VALUE, HARDER):**
 GNSS VTEC gives vertical TEC overhead at one point. For VTEC maps you need
 spatially distributed measurements. Options:
+
 1. Use GNSS VTEC as a Bayesian prior in the 1/f² fit → better per-path sTEC
 2. Use GNSS VTEC as map background, overlay HF-derived dTEC perturbations
    (most scientifically interesting approach)
@@ -205,12 +208,12 @@ linear detrending instead of the -3 dB/sec model. `fading_variance` was already
 populated (mean ~70–89 dB²); S4 will now populate after deployment.
 
 **Implementation B — Per-Tick Phase Scintillation (tick\_phase + phase_service):**
-Computes σ\_φ from tick_phase HDF5 data using sliding windows with Doppler
+Computes σ\_φ from tick\_phase HDF5 data using sliding windows with Doppler
 detrending. Produces 1,938 σ_φ records per 2-hour window across all channels.
 190K+ per-tick carrier phase records/day.
 
 **ScintillationService rewritten (2026-02-24):** Now reads from both `test_signal`
-(for S4) and `tick_phase` (for σ_φ). Also computes tick-based amplitude S4 from
+(for S4) and `tick_phase` (for σ\_φ). Also computes tick-based amplitude S4 from
 correlation_peak and provides cross-source validation. Fixed `minute_boundary_utc`
 format mismatch (integer epoch, not ISO string) — led to adding schema linkage
 to DataProductRegistry and structural field documentation in the data dictionary.
@@ -221,6 +224,7 @@ Tick-to-tick σ_φ ≈ 1.0 rad across all channels. This is **not** scintillatio
 in the GNSS sense. At HF (3–25 MHz), the ionospheric Fresnel zone is ~100 km,
 so amplitude scintillation from small-scale irregularities is rare. The 1.0 rad
 phase noise is dominated by:
+
 1. Multipath interference (multiple modes beating)
 2. Measurement noise (~0.5 rad floor at 7.9 dB SNR)
 3. Residual ionospheric bulk motion after detrending
@@ -232,15 +236,15 @@ characteristics. We're not currently separating these from the background.
 ### Validation path — status as of 2026-02-24
 
 1. ~~Fix test signal S4 SNR gate~~ — **DONE** (off-tone noise floor + data-driven detrend)
-2. ~~Wire ScintillationService to tick_phase + test_signal~~ — **DONE** (full rewrite)
-3. ~~Add schema linkage to DataProductRegistry~~ — **DONE** (get_schema/get_field_type)
+2. ~~Wire ScintillationService to tick\_phase + test_signal~~ — **DONE** (full rewrite)
+3. ~~Add schema linkage to DataProductRegistry~~ — **DONE** (get\_schema/get\_field_type)
 4. **Wait for geomagnetic storm** — checked Feb 11–24 data: all quiet (σ(dTEC/dt) ≈ 0.0004 TECU/s every day, fading variance stable ~80–89 dB²). X8.1 flare from AR4366 was Feb 5, before our tick_phase data started.
 5. **Cross-validate S4 vs σ_φ** — infrastructure ready; needs a real event to test
 
 ### Presentation framing
 
 - **Brief mention:** "Dual-source scintillation infrastructure: S4 from test signal multi-tone, σ_φ from per-tick carrier phase. Groundwork is laid; validation awaits a geomagnetic event."
-- **Honest:** "σ_φ ≈ 1.0 rad during quiet conditions is multipath + noise, not ionospheric scintillation. A storm would show correlated S4 + σ_φ spikes."
+- **Honest:** "σ\_φ ≈ 1.0 rad during quiet conditions is multipath + noise, not ionospheric scintillation. A storm would show correlated S4 + σ_φ spikes."
 
 ---
 
@@ -269,6 +273,7 @@ capability if asked, but don't feature it.
 
 ### Slide 1: Title (30 sec)
 **"With an RX888 and a GPSDO, What Kind of Ionospheric Science Can We Do?"**
+
 - AC0G, EM38, central Missouri
 - 4 stations (WWV, WWVH, CHU, BPM), 9 frequencies, 17 simultaneous paths
 - Single RX888 SDR + GPSDO via KA9Q-radio
@@ -288,6 +293,7 @@ Show fig15\_phenomena_ladder — the four-tier version:
 | 4 | + PPS in HF stream (~$620 total) | Sub-ms multipath, group-delay TEC |
 
 **Two orthogonal axes — frequency stability vs absolute time:**
+
 - The GPSDO provides **frequency stability** (1 ppb sample clock). This makes carrier-phase measurements metrologically coherent. Doppler, dTEC/dt, and scintillation are all *rate* measurements that only need precise sample spacing — they don't need to know what time it is.
 - **Absolute time-of-day** (knowing when each sample occurred in UTC) adds D_clock — the propagation delay residual. This requires either an external PPS or self-recovery from the HF signals.
 
@@ -307,6 +313,7 @@ Speaker notes: "Here's the organizing framework. On the left is what hardware yo
 **"50–57 ticks per minute, four observables per tick"**
 
 Show:
+
 - Matched filter template (WWV 5 ms/1000 Hz, WWVH 5 ms/1200 Hz, CHU 300 ms, BPM 10 ms)
 - Front-edge back-calculation + sub-sample parabolic interpolation (from ntpd refclock_wwv.c)
 - SNR-weighted robust median ensemble
@@ -314,6 +321,7 @@ Show:
 - **From the minute ensemble: D_clock, Doppler (phase slope), mean SNR**
 
 **What needs the GPSDO (Tier 2+) and what needs absolute time (Tier 3+):**
+
 - Doppler = linear fit to carrier phase vs sample index. Needs stable clock only. ✔ Tier 2
 - D_clock = (observed arrival) − (expected arrival). Needs UTC. ✔ Tier 3+
 
@@ -333,6 +341,7 @@ Speaker notes: "The measurement engine is a tick edge detector inspired by the n
 **"The time signals tell us what time it is."**
 
 The metrology that lifts Tier 2 → Tier 3:
+
 - D_clock residuals from 17 broadcasts, per minute
 - L1 Kalman filter: geometric propagation model only
 - L2 Kalman filter: ionospheric group-delay correction applied
@@ -348,6 +357,7 @@ Live chronyc comparison (the metrological ladder):
 | GPS+PPS (ground truth) | −0.001 ms | ±0.094 ms |
 
 **Key results:**
+
 - HF timing is **100× better than internet NTP**
 - L2 has **3.3× tighter bound** than L1 — ionospheric correction is doing real work
 - Fusion D_clock: median −1.2 ms, 60% within ±2 ms, 86% within ±5 ms
@@ -361,6 +371,7 @@ Speaker notes: "Since we're listening to time standard stations and we know thei
 The hardest measurement challenge: WWV, WWVH, and BPM on 2.5/5/10/15 MHz.
 
 **Methods (abbreviated — full detail in backup):**
+
 - Tick frequency: 1000 Hz (WWV/BPM) vs 1200 Hz (WWVH), 3 dB gate
 - Tick duration: 5 ms (WWV/WWVH) vs 10 ms (BPM)
 - NIST tone schedule: ground truth 14 min/hr
@@ -390,6 +401,7 @@ Speaker notes: "On the shared frequencies, three stations transmit simultaneousl
 **"Bypassing the propagation model noise floor"**
 
 The detection-limit argument:
+
 - Group-delay TEC: signal 0.85 ms, noise 6.5 ms → **SNR 0.13** (buried)
 - Carrier-phase dTEC: ~6 mTECU/min sensitivity → **SNR 17–330×** for TIDs
 - Formula: dTEC/dt = −f_D × c × f / 40.3
@@ -397,6 +409,7 @@ The detection-limit argument:
 **This is a Tier 2 product** — needs only the GPSDO, not absolute time.
 
 Evidence:
+
 - 17,045 dTEC records/day (per-minute)
 - 848,599 per-tick dTEC records/day (1-second resolution)
 - GNSS-anchored (ZED-F9P VTEC: 41.7 TECU, ±1 TECU accuracy)
@@ -423,6 +436,7 @@ Speaker notes: "How do we know we're measuring real ionospheric physics? For eac
 [FIGURE: fig16 GRAPE spectrogram CHU 7.85 (top) + fig13 physics cascade panels B–D (below)]
 
 Show for CHU 7.85 MHz (exclusive channel — no discrimination ambiguity):
+
 - Top: GRAPE spectrogram + power graph (the carrier Doppler trace is *visible* in the spectrogram)
 - Panel B: Doppler (phase rate, Tier 2) — the same feature, extracted quantitatively
 - Panel C: dTEC/dt (derived from Doppler, Tier 2)
@@ -440,11 +454,13 @@ Speaker notes: "This is CHU at 7.85 MHz — an exclusive channel with no discrim
 [FIGURE: fig10 ionospheric fingerprint (4-panel SHARED 10 MHz) + fig14 frequency ladder]
 
 **Three stations on 10 MHz — three independent paths through the same ionosphere:**
+
 - D_clock: three distinct systematic offsets matching propagation geometry
 - Doppler: three distinct diurnal signatures (r ≈ 0 cross-station)
 - dTEC/dt: three independent TEC rate measurements
 
 **WWV across 6 frequencies — six layers of the ionosphere:**
+
 - 2.5–25 MHz, each reflecting at a different height
 - Cross-frequency Doppler: r ≈ 0 (different layers)
 - CHU cross-frequency: r = 0.43 (shared path, correlated)
@@ -459,24 +475,29 @@ Speaker notes: "The full system monitors 17 simultaneous paths through the ionos
 **"What doesn't work yet, and what's coming"**
 
 **Current limits:**
+
 - Group-delay TEC: below noise floor (SNR 0.13)
 - VTEC maps from HF alone: geometrically correct but sTEC noise-dominated
 - Scintillation: infrastructure ready, awaiting geomagnetic event
 
 **Just deployed:**
+
 - ✅ GNSS-anchored dTEC (ZED-F9P, ~1 TECU accuracy)
 
 **Future:**
+
 - Tier 4: PPS injection into HF IQ stream (under development)
 - Per-path slant correction for GNSS anchoring
 
 **What would a network of stations enable?**
+
 - Spatial TEC gradients: multiple stations → horizontal structure of ionospheric disturbances
 - TID wavefront tracking: correlated Doppler across sites gives propagation direction and velocity
 - Geolocation of ionospheric scatterers via multilateration of propagation delays
 - Continental-scale oblique ionosonde network using existing HF time signal infrastructure — no transmitter needed
 
 **What would 2–4 GPSDO-locked RX888s at one site enable?**
+
 - Phased-array angle-of-arrival estimation on HF time signals (antenna spacing ~ λ/2 at 10 MHz ≈ 15 m)
 - Separate multipath arrivals by direction, not just by delay — resolve 1F vs 2F geometrically
 - Per-mode Doppler and dTEC: track ionospheric dynamics on individual ray paths
@@ -490,6 +511,7 @@ Speaker notes: "What doesn't work yet: group-delay TEC is buried in noise. VTEC 
 **The answer to the central question:**
 
 With an RX888 (~$180) and a GPSDO (~$162), you can:
+
 - Measure ionospheric Doppler at 99.7% coverage, 24/7
 - Extract dTEC/dt at ~6 mTECU/min sensitivity on 17 paths
 - Discriminate three co-channel stations via physics
