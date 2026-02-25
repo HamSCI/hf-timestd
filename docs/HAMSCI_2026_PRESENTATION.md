@@ -593,3 +593,70 @@ D_clock scatter by station on SHARED 10 MHz, color-coded by station (WWV/WWVH/BP
 **Absolute delay** — The one-way propagation time from transmitter to receiver, measured in milliseconds. Equivalent to D\_clock when the propagation model offset is zero. Requires knowing both when the signal was transmitted (from the time standard schedule) and when it was received (from UTC recovery or PPS).
 
 **Kalman filter** — A recursive state estimator that combines noisy measurements with a dynamic model to produce optimal estimates of system state. Our dual Kalman fusion runs two independent filters: L1 (geometric propagation model only) and L2 (with ionospheric group-delay correction). Each filter tracks the system clock offset and drift, fed by D\_clock residuals from 17 broadcast paths per minute.
+
+---
+
+## Q&A Preparation — Anticipated Questions and Answers
+
+### Measurement validity
+
+**"How do you know the Doppler is real ionospheric motion and not oscillator drift?"**
+The GPSDO provides 1 ppb frequency stability. The observed Doppler on CHU 7.85 MHz is ±0.34 Hz, corresponding to ~43 ppb — 43× larger than possible GPSDO drift. Cross-frequency correlation within CHU (r = 0.43 across 3.33/7.85/14.67 MHz) confirms a shared ionospheric origin. Cross-station correlation is zero, confirming independent paths.
+
+**"What's the actual accuracy of your dTEC measurements?"**
+Internal consistency: differential dTEC RMS < 0.03 TECU across frequencies (22,474 checks/day, all GOOD). Absolute calibration comes from GNSS anchoring — the local ZED-F9P gives overhead VTEC at ±1 TECU, which sets the DC level. The carrier-phase dTEC/dt sensitivity is ~6 mTECU/min.
+
+**"Your D\_clock has ±1–7 ms uncertainty — isn't that too noisy for ionospheric science?"**
+Yes — that's exactly why we emphasize carrier-phase dTEC (SNR 17–330×) over group-delay TEC (SNR 0.13). D\_clock is useful for mode identification and for validating that Doppler tracks the same ionosphere (r = 0.65 shape correlation), but it's not the primary science observable. The rate-domain products (Doppler, dTEC/dt) are far more precise.
+
+### Comparison to existing systems
+
+**"How does this compare to a standard GRAPE receiver?"**
+We produce GRAPE-compatible spectrograms and upload to PSWS. The GPSDO adds quantitative Doppler extraction and dTEC derivation on top of what a standard GRAPE shows qualitatively in the spectrogram. The spectrogram is the starting point; our pipeline extracts the physics quantitatively.
+
+**"Why not just use a GNSS receiver for TEC?"**
+GNSS measures overhead vertical TEC at one point. HF time signals give oblique paths at fixed geometries to known transmitters — complementary measurements. The 17 paths sample different parts of the ionosphere at different reflection heights (2.5–25 MHz). GNSS provides the absolute scale; HF provides the spatial and temporal structure.
+
+**"How does this compare to SuperDARN / ionosondes?"**
+Those are active systems requiring transmit licenses and significant hardware. This is entirely passive, single-antenna, ~$340 total cost (Tier 2), 24/7 autonomous. The trade-off is that we only observe along fixed paths to known transmitters rather than scanning arbitrary directions.
+
+### Practical / replication
+
+**"Can I do this with my existing SDR?"**
+You need wideband simultaneous coverage (0.5–30 MHz) for multi-frequency operation. The RX888 is unique at this price point (~$180) with 16-bit ADC and 64 MHz bandwidth. A narrowband SDR could monitor one frequency but loses the cross-frequency consistency checks, differential dTEC, and the 17-path geometry.
+
+**"Do I need the $440 differential GPSDO?"**
+No. The $162 Leo Bodnar base model gives you Tier 2 — Doppler, dTEC/dt, scintillation indices. The differential version with PPS output is Tier 4 for sub-microsecond timing precision, which enables sub-ms multipath resolution and group-delay TEC. Most of the science products we demonstrate are Tier 2.
+
+**"How much bandwidth / storage does this take?"**
+The RX888 streams ~250 MB/s raw IQ over USB3. KA9Q-radio does the channelization in real-time on the host PC. The decimated 10 Hz products are ~50 MB/day per channel (~450 MB/day for 9 channels). The raw 24 kHz per-minute archive is ~2 GB/day per channel if retained (we currently retain only today's raw data).
+
+### Scientific depth
+
+**"You show r = 0.65 shape correlation between integrated Doppler and D\_clock — why not higher?"**
+D\_clock has ~6.5 ms noise from propagation model errors; integrated Doppler accumulates its own drift from measurement noise. The scale ratio (45–82×) shows that Doppler has far finer sensitivity to ionospheric changes than D\_clock. The correlation is statistically significant given the noise levels, and the fact that it's positive at all — with the correct sign and physically meaningful scale ratio — is the validation.
+
+**"Can you detect TIDs with this?"**
+The infrastructure exists — dTEC time series at 1-second resolution on 17 paths. Medium-scale TIDs (period 15–60 min, velocity ~100–300 m/s) should produce coherent oscillations in dTEC across paths. We haven't had a validated TID event in the current data window (February conditions, quiet geomagnetic activity). This is a near-term goal, particularly as we approach equinox.
+
+**"What about ionospheric absorption / D-region effects?"**
+The power graph in the spectrogram shows signal strength variations that include D-region absorption (riometer-like). We don't currently separate absorption from multipath fading or other propagation effects, but the multi-frequency power data is there. A solar flare SID (sudden ionospheric disturbance) would show simultaneous power drops across all channels — detectable but not yet demonstrated.
+
+### Network / future
+
+**"What would a network of these stations show?"**
+With 2–3 stations in different grid squares: spatial TEC gradients, TID wavefront tracking (propagation direction and velocity from correlated Doppler across sites), and multilateration of ionospheric scatterers from differential propagation delays. Each station adds 17 independent paths.
+
+**"Is this compatible with PSWS / HamSCI data infrastructure?"**
+Yes. We produce standard GRAPE spectrograms (same format, same frequency resolution). The decimated 10 Hz IQ data is the GRAPE standard. Full PSWS upload integration is in progress.
+
+### The "gotcha" questions
+
+**"You're claiming sub-millisecond UTC from HF — isn't that just because you already have GPS?"**
+Fair question. Our GPS validates the claim but isn't required for operation. The UTC recovery uses only the HF signals themselves — tick detection, propagation model, dual Kalman fusion. The GPS+PPS provides ground truth for measuring how well it works. A Tier 2 station (no PPS) can bootstrap to effective Tier 3 using only the HF time signals. The GPS lets us *prove* it works, not *make* it work.
+
+**"Your scintillation infrastructure has never detected a real event — why present it?"**
+We present it as "within reach," not "demonstrated." The honest framing matters. The dual-source infrastructure (S4 from test signal multi-tone, σ\_φ from per-tick carrier phase) is wired and producing data. Solar cycle 25 is near maximum — geomagnetic storms will come. When they do, the infrastructure is ready. We'd rather have the measurement chain validated and waiting than scrambling to build it during an event.
+
+**"How much of this was built by AI?"**
+The codebase is developed in collaboration with AI coding assistants (primarily Cascade/Claude). The human provides domain knowledge, measurement strategy, and validation against physical reality. The AI accelerates implementation of signal processing pipelines, data management, and analysis code. All scientific claims are validated against production data and physical consistency checks — the AI doesn't get to decide what's true, the data does.
