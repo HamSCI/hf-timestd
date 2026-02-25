@@ -389,46 +389,56 @@ def build_presentation():
         "checks per day, all passing.")
 
     # =================================================================
-    # SLIDE 8: Physics Cascade (fig13)
+    # SLIDE 8: Physics Cascade — Spectrogram + derived products
     # =================================================================
     slide = prs.slides.add_slide(content_layout)
-    slide.placeholders[0].text = "Cross-Domain Consistency — Physics Cascade"
+    slide.placeholders[0].text = (
+        "From Spectrogram to TEC — CHU 7.85 MHz")
 
-    # Full-width figure
+    # Top: GRAPE spectrogram (full width, compact)
+    if os.path.exists(fig('fig16_grape_spectrogram_chu7850.png')):
+        slide.shapes.add_picture(
+            fig('fig16_grape_spectrogram_chu7850.png'),
+            Inches(0.2), Inches(0.75), Inches(8.5), Inches(3.0))
+
+    # Bottom: Physics cascade figure (panels B-D visible)
     slide.shapes.add_picture(
         fig('fig13_physics_cascade.png'),
-        Inches(0.3), Inches(0.8), Inches(7.5), Inches(6.4))
+        Inches(0.2), Inches(3.85), Inches(8.5), Inches(3.5))
 
     # Right annotations
-    add_textbox(slide, 8.0, 0.9, 5.0, 0.5,
-                "CHU 7.85 MHz — exclusive channel",
-                font_size=16, bold=True, color=(0x15, 0x65, 0xc0))
+    add_textbox(slide, 8.9, 0.8, 4.2, 0.5,
+                "One ionospheric path, four views",
+                font_size=15, bold=True, color=(0x15, 0x65, 0xc0))
 
-    add_bullet_list(slide, 8.0, 1.5, 5.0, 4.5, [
-        "Panel A: D_clock (absolute delay, Tier 3+)",
-        "Panel B: Doppler (phase rate, Tier 2)",
-        "Panel C: dTEC/dt (derived from Doppler)",
-        "Panel D: Integrated Doppler vs D_clock",
+    add_bullet_list(slide, 8.9, 1.4, 4.2, 5.5, [
+        "GRAPE spectrogram: Doppler shift",
+        "visible as carrier frequency offset",
         "",
-        "The money shot (Panel D):",
-        "Integrated Doppler tracks the shape",
-        "of D_clock at 82× smaller amplitude",
-        "r = 0.60 correlation",
+        "Power graph: signal strength tracks",
+        "propagation conditions",
         "",
-        "Same ionosphere, different physics,",
-        "consistent measurements",
-    ], font_size=14)
+        "Pipeline extracts Doppler → dTEC/dt",
+        "",
+        "Bottom panel: integrated Doppler",
+        "tracks D_clock shape at 82× finer",
+        "sensitivity (r = 0.60)",
+        "",
+        "Standard GRAPE data for PSWS upload",
+    ], font_size=13)
 
     set_notes(slide,
         "This is CHU at 7.85 MHz — an exclusive channel with no "
-        "discrimination ambiguity. Four panels, one ionospheric path. "
-        "At top, D_clock shows the diurnal propagation delay variation. "
-        "Below, Doppler — the carrier phase slope. Then dTEC/dt derived "
-        "from Doppler. The bottom panel is the key: if we integrate the "
-        "Doppler, it should track the shape of D_clock. It does — r = 0.60 "
-        "— but at 82 times smaller amplitude. The Doppler is measuring real "
-        "ionospheric motion, at a sensitivity 82 times finer than D_clock "
-        "noise.")
+        "discrimination ambiguity. At top, the GRAPE spectrogram — the "
+        "standard data product we upload to PSWS. You can see the carrier "
+        "frequency offset changing through the day — that's ionospheric "
+        "Doppler, directly visible in the spectrogram. The power graph "
+        "above it shows signal strength. Below, our pipeline extracts the "
+        "Doppler quantitatively, converts to dTEC/dt, and in the bottom "
+        "panel validates against D_clock. Integrated Doppler tracks the "
+        "shape of D_clock at 82 times smaller amplitude, r = 0.60. So the "
+        "spectrogram, the Doppler, the dTEC, and the D_clock are all "
+        "measuring the same ionosphere through different physical processes.")
 
     # =================================================================
     # SLIDE 9: 17 Paths

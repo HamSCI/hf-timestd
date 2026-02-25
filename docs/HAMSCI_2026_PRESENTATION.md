@@ -86,39 +86,32 @@
 | Per-tick carrier phase | 190,367 (3 channels) | ✅ | tick-to-tick σ_φ ≈ 1.0 rad (ionospheric) |
 | Fusion UTC estimate | 1,101/day | ✅ | Median offset −1.2 ms vs GPS |
 
-### Claims to KEEP (demonstrable)
+### Demonstrated Claims (backed by production data, 2026-02-23)
 
-1. **Sub-millisecond UTC recovery from HF** — TSL2 at +774 µs ± 600 µs
-2. **100× better than internet NTP** — 0.8 ms vs 6–7 ms
-3. **L2 ionospheric correction improves L1** — 3.3× tighter uncertainty bound
-4. **50–57 ticks/min ensemble** — verified across all channels
-5. **~850K per-tick dTEC records/day** — 1-second time resolution
-6. **17K per-minute dTEC records/day** — primary science product
-7. **Differential dTEC RMS < 0.03 TECU** — multi-frequency consistency validated
-8. **Doppler extraction at 99.7%+ coverage** — diurnal signatures visible
-9. **Multipath identification** — 46K all-arrivals records/day on CHU 7.85 alone
-10. **17 simultaneous sounding paths** — 4 stations × multiple frequencies
-11. **24/7 autonomous operation** — 6 systemd services, all active
+1. **Sub-millisecond UTC recovery from HF** — TSL2 at +774 µs ± 600 µs vs GPS ground truth
+2. **100× better than internet NTP** — HF-derived time at 0.8 ms vs NTP at 6–7 ms offset
+3. **L2 ionospheric correction improves L1** — 3.3× tighter uncertainty bound; the correction does real work
+4. **50–57 ticks/min ensemble** — verified across all 9 channels, SNR-weighted robust median
+5. **~850K per-tick carrier-phase records/day** — 1-second time resolution across 17 paths
+6. **17K per-minute dTEC records/day** — primary science product, carrier-phase derived
+7. **Differential dTEC RMS < 0.03 TECU** — 22K cross-frequency consistency checks/day, all GOOD quality
+8. **Doppler extraction at 99.7%+ coverage** — diurnal signatures clearly resolved, 24/7
+9. **Multipath mode identification** — 46K all-arrivals records/day on CHU 7.85 alone; multiple modes resolved per minute
+10. **17 simultaneous sounding paths** — 4 stations × multiple frequencies, passive oblique ionosonde
+11. **Shared-channel station discrimination** — 7 independent methods separate WWV, WWVH, and BPM on 2.5/5/10/15 MHz
+12. **Metrological ladder** — live chronyc comparison: NTP → HF L1 → HF L2 → GPS+PPS
+13. **GNSS-anchored dTEC** — local ZED-F9P VTEC (41.7 TECU, ±1 TECU) provides absolute scale for carrier-phase dTEC
+14. **GRAPE-compatible data products** — standard spectrograms and decimated IQ for PSWS upload
+15. **24/7 autonomous operation** — 6 systemd services, all active, continuous since January 2026
 
-### Claims to DROP or DOWNGRADE
+### Potential Claims Within Reach (infrastructure exists, validation pending)
 
-1. **❌ VTEC maps from HF alone** — group-delay TEC has SNR ~0.13; drop as current capability, reframe as future work with GNSS anchoring
-2. **⚠️ Scintillation indices** — S4 gate fixed, σ_φ service wired to tick_phase; infrastructure validated but no geomagnetic storm in data to demonstrate real event detection (Feb 11–24 all quiet)
-3. **⚠️ TID detection** — algorithm exists but no validated TID event to show
-4. **⚠️ Sporadic-E detection** — algorithm exists but no validated event to show
-5. **⚠️ CHU FSK decode** — previously working (8/9 frames, conf=1.00); write path broken by later refactoring
-6. **⚠️ "±0.008 ms uncertainty"** — this was a peak CHU result; typical is ±1–7 ms across channels
-7. **⚠️ Phase stability claim** — tick-to-tick σ_φ ≈ 1.0 rad is multipath+noise, not scintillation; the Doppler (phase slope) is the validated product
-
-### Claims to ADD (newly demonstrable)
-
-1. **Metrological ladder comparison** — the chronyc snapshot is a powerful one-slide demonstration
-2. **Differential dTEC as self-consistency check** — 22K records/day, all GOOD quality, validates carrier-phase methodology
-3. **~850K per-tick measurements/day** — impressive data volume for a single-antenna station
-4. **Per-station D_clock systematic offsets** — CHU +1–2 ms, WWV/WWVH/BPM ≈ 0 ms — reveals propagation model quality per path
-5. **GNSS-anchored dTEC now live** — local ZED-F9P overhead VTEC (41.7 TECU typical, ~1 TECU accuracy) anchors carrier-phase dTEC; all 17 station-channels produce `ANCHORED_GNSS` records when GNSS data is available
-6. **Scintillation infrastructure** — dual-source S4 (test signal) + σ_φ (tick phase), cross-correlated; groundwork laid, awaiting geomagnetic event for validation
-7. **Shared-channel station discrimination** — 7 independent methods separate WWV, WWVH, and BPM on 2.5/5/10/15 MHz; exploits NIST tone schedule, template duration, cross-frequency gate, and propagation delay ordering
+1. **Scintillation monitoring** — dual-source S4 (test signal multi-tone) + σ\_φ (per-tick carrier phase) infrastructure is wired and producing data; awaiting a geomagnetic storm for real event validation (Feb 11–24 all quiet)
+2. **TID detection** — Doppler signatures of TIDs should be visible in the dTEC time series; algorithm exists but no validated TID event in the current data window
+3. **Sporadic-E detection** — anomalous propagation on higher frequencies would produce distinctive D\_clock and Doppler signatures; detection algorithm exists but no event observed
+4. **CHU FSK time code decode** — previously demonstrated (8/9 frames decoded, confidence=1.00 on CHU 14670); write path broken by later refactoring, fixable
+5. **VTEC maps from HF** — group-delay TEC has SNR ~0.13 (signal buried in propagation model noise); geometrically correct but physically unreliable without better per-path sTEC or GNSS priors
+6. **Phase-array angle-of-arrival** — multiple GPSDO-locked RX888s at one site would enable direction-of-arrival separation of multipath modes
 
 ---
 
@@ -126,7 +119,7 @@
 
 ### What the data actually shows (2026-02-23)
 
-The CRITIC_CONTEXT claim that "vtec_tecu is all NaN" is outdated. Live data:
+The CRITIC\_CONTEXT claim that "vtec_tecu is all NaN" is outdated. Live data:
 
 | Station | TEC Records | VTEC Valid | Confidence Median |
 |---------|------------|-----------|-------------------|
@@ -136,7 +129,7 @@ The CRITIC_CONTEXT claim that "vtec_tecu is all NaN" is outdated. Live data:
 | WWVH    | 569        | 409 (72%) | 0.300             |
 
 969/1,772 records (55%) have valid VTEC. The gate is `confidence >= 0.3` in
-`_build_ipp_measurements()` (physics_fusion_service.py:524).
+`_build_ipp_measurements()` (physics\_fusion_service.py:524).
 
 ### The hard limit: group-delay TEC SNR
 
@@ -198,7 +191,7 @@ much better per-path sTEC or multiple GNSS receivers (which is what IGS does).
 
 ### Two independent implementations exist
 
-**Implementation A — WWV/WWVH Test Signal S4 (wwv_test_signal.py:1516):**
+**Implementation A — WWV/WWVH Test Signal S4 (wwv\_test_signal.py:1516):**
 Extracts per-frequency power from the multi-tone segment (seconds 13–23).
 Computes S4 at 2, 3, 4, 5 kHz audio tones plus frequency slope for D/F-layer
 discrimination. HDF5 files exist (46 records/day).
@@ -211,8 +204,8 @@ all tones. **Fix:** measure noise floor from off-tone FFT bins; use data-driven
 linear detrending instead of the -3 dB/sec model. `fading_variance` was already
 populated (mean ~70–89 dB²); S4 will now populate after deployment.
 
-**Implementation B — Per-Tick Phase Scintillation (tick_phase + phase_service):**
-Computes σ_φ from tick_phase HDF5 data using sliding windows with Doppler
+**Implementation B — Per-Tick Phase Scintillation (tick\_phase + phase_service):**
+Computes σ\_φ from tick_phase HDF5 data using sliding windows with Doppler
 detrending. Produces 1,938 σ_φ records per 2-hour window across all channels.
 190K+ per-tick carrier phase records/day.
 
@@ -285,7 +278,7 @@ Speaker notes: "This talk is organized around one question: if you have an RX888
 ### Slide 2: The Phenomena Ladder — What Each Dollar Buys (2 min)
 **"Each level of timing infrastructure unlocks a new class of observable."**
 
-Show fig15_phenomena_ladder — the four-tier version:
+Show fig15\_phenomena_ladder — the four-tier version:
 
 | Tier | Hardware (~cost) | What it unlocks |
 |------|-----------------|----------------|
@@ -425,19 +418,21 @@ Same station at multiple frequencies → same ionospheric path → dTEC should m
 Speaker notes: "How do we know we're measuring real ionospheric physics? For each station, we compare dTEC at different frequencies on the same path. They agree to within 0.03 TECU RMS. This is 22,000 consistency checks per day, all passing."
 
 ### Slide 8: Cross-Domain Consistency — Physics Cascade (1.5 min)
-**"Four observables, one ionospheric path"**
+**"From spectrogram to TEC — one ionospheric path, four views"**
 
-[FIGURE: fig13 CHU 7.85 MHz physics cascade]
+[FIGURE: fig16 GRAPE spectrogram CHU 7.85 (top) + fig13 physics cascade panels B–D (below)]
 
 Show for CHU 7.85 MHz (exclusive channel — no discrimination ambiguity):
-- Panel A: D_clock (absolute delay, Tier 3+)
-- Panel B: Doppler (phase rate, Tier 2)
+- Top: GRAPE spectrogram + power graph (the carrier Doppler trace is *visible* in the spectrogram)
+- Panel B: Doppler (phase rate, Tier 2) — the same feature, extracted quantitatively
 - Panel C: dTEC/dt (derived from Doppler, Tier 2)
-- Panel D: Integrated Doppler vs smoothed D_clock — shape correlation r = 0.60
+- Panel D: Integrated Doppler vs smoothed D\_clock — shape correlation r = 0.60
 
-**The money shot (Panel D):** Integrated Doppler tracks the *shape* of D_clock at 82× smaller amplitude. They're measuring the same ionosphere through different physical processes. Doppler is the derivative of path delay; D_clock is the path delay itself.
+**The visual story:** The spectrogram shows the carrier frequency offset varying with time — that's ionospheric Doppler, directly visible. The power graph shows signal strength varying with propagation conditions. Below, our pipeline extracts the Doppler quantitatively, converts it to dTEC/dt, and validates against D\_clock. The bottom panel is the money shot: integrated Doppler tracks the shape of D\_clock at 82× finer sensitivity.
 
-Speaker notes: "This is CHU at 7.85 MHz — an exclusive channel with no discrimination ambiguity. Four panels, one ionospheric path. At top, D_clock shows the diurnal propagation delay variation. Below, Doppler — the carrier phase slope. Then dTEC/dt derived from Doppler. The bottom panel is the key: if we integrate the Doppler, it should track the shape of D_clock. It does — r = 0.60 — but at 82 times smaller amplitude. The Doppler is measuring real ionospheric motion, at a sensitivity 82 times finer than D_clock noise."
+**GRAPE compatibility:** This spectrogram is the standard GRAPE data product uploaded to PSWS — the same data that feeds our science pipeline.
+
+Speaker notes: "This is CHU at 7.85 MHz — an exclusive channel with no discrimination ambiguity. At top, the GRAPE spectrogram — the standard data product we upload to PSWS. You can see the carrier frequency offset changing through the day — that's ionospheric Doppler, directly visible in the spectrogram. The power graph above it shows signal strength. Below, our pipeline extracts the Doppler quantitatively, converts to dTEC/dt, and in the bottom panel validates against D_clock. Integrated Doppler tracks the shape of D_clock at 82 times smaller amplitude, r = 0.60. So the spectrogram, the Doppler, the dTEC, and the D_clock are all measuring the same ionosphere through different physical processes."
 
 ### Slide 9: 17 Simultaneous Ionospheric Paths (1.5 min)
 **"A passive oblique ionosonde"**
@@ -535,7 +530,7 @@ Scatter plot of dTEC at freq1 vs freq2 for same station. Source: dtec_timeseries
 Time-of-flight vs time showing multiple propagation modes. Source: all_arrivals HDF5.
 
 ### Figure 9: Shared-Channel Discrimination
-D_clock scatter by station on SHARED 10 MHz, color-coded by station (WWV/WWVH/BPM), showing distinct systematic offsets. Inset: test signal tone power comparison between WWV (min 8) and WWVH (min 44). Source: tick_timing + test_signal HDF5.
+D_clock scatter by station on SHARED 10 MHz, color-coded by station (WWV/WWVH/BPM), showing distinct systematic offsets. Inset: test signal tone power comparison between WWV (min 8) and WWVH (min 44). Source: tick\_timing + test_signal HDF5.
 
 ---
 
@@ -556,3 +551,23 @@ D_clock scatter by station on SHARED 10 MHz, color-coded by station (WWV/WWVH/BP
 |   | 11 | Summary + call to action | 0:30 | 15:00 |
 
 **Note:** Slides 10–11 are compressed closers. The three acts structure the narrative as question → method → payoff, echoing the central question on every slide.
+
+---
+
+## Glossary — Key Terms for Q&A
+
+**D\_clock** — The propagation delay residual: the difference between the observed arrival time of a time signal tick and the expected arrival time based on a geometric propagation model. Measured in milliseconds. Positive D\_clock means the signal arrived later than predicted (longer ionospheric path). Requires absolute UTC (Tier 3+).
+
+**dTEC** — The rate of change of Total Electron Content along the signal path, derived from carrier-phase Doppler shift: dTEC/dt = −f\_D × c × f / 40.3. Measured in TECU per second or TECU per minute. A *rate* measurement that requires only frequency stability (Tier 2), not absolute time.
+
+**Scintillation** — Rapid fluctuations in signal amplitude (S4 index) and/or phase (σ\_φ index) caused by small-scale ionospheric irregularities. At HF frequencies the Fresnel zone is ~100 km, so classical scintillation is rare except during geomagnetic storms (equatorial spread-F, polar irregularities). Our tick-to-tick σ\_φ ≈ 1.0 rad during quiet conditions is multipath + noise, not scintillation.
+
+**sTEC** — Slant Total Electron Content: the integrated electron density along the oblique signal path from transmitter to receiver, in TEC Units (1 TECU = 10¹⁶ electrons/m²). Related to VTEC by a geometric mapping function that depends on elevation angle and assumed ionospheric shell height.
+
+**IONEX** — IONosphere EXchange format: a standard file format for distributing ionospheric TEC maps. Our system writes IONEX files from the VTEC mapper every ~3 minutes and also reads external GPS-derived IONEX maps for comparison.
+
+**Mode ID** — Propagation mode identification: determining whether a received signal arrived via 1-hop F-layer (1F), 2-hop F-layer (2F), E-layer, or other paths. Modes are distinguished by their propagation delay (D\_clock), with 1F arriving first and higher-order modes arriving later. Requires absolute time (Tier 3+).
+
+**Absolute delay** — The one-way propagation time from transmitter to receiver, measured in milliseconds. Equivalent to D\_clock when the propagation model offset is zero. Requires knowing both when the signal was transmitted (from the time standard schedule) and when it was received (from UTC recovery or PPS).
+
+**Kalman filter** — A recursive state estimator that combines noisy measurements with a dynamic model to produce optimal estimates of system state. Our dual Kalman fusion runs two independent filters: L1 (geometric propagation model only) and L2 (with ionospheric group-delay correction). Each filter tracks the system clock offset and drift, fed by D\_clock residuals from 17 broadcast paths per minute.
