@@ -77,18 +77,17 @@
                 <a href="/" class="nav-link">Overview</a>
                 <a href="/static/health.html" class="nav-link">Health</a>
                 <span class="nav-divider"></span>
-                <a href="/static/metrology.html" class="nav-link">Timing</a>
+                <a href="/static/metrology.html" class="nav-link">⏱️ Timing</a>
                 <a href="/static/timing-validation.html" class="nav-link">Validation</a>
-                <a href="/static/stability.html" class="nav-link">Stability</a>
                 <span class="nav-divider"></span>
-                <a href="/static/phase.html" class="nav-link">Phase</a>
+                <a href="/static/phase.html" class="nav-link">📡 Phase</a>
                 <a href="/static/ionosphere.html" class="nav-link">🔬 Observatory</a>
                 <a href="/static/ionogram.html" class="nav-link">📻 Ionogram</a>
                 <a href="/static/dtec.html" class="nav-link">⚡ dTEC</a>
-                <a href="/static/test_signal.html" class="nav-link active">Test Signal</a>
+                <a href="/static/test_signal.html" class="nav-link active">📡 Test Signal</a>
                 <a href="/static/grape.html" class="nav-link">&#x1F347; GRAPE</a>
                 <span class="nav-divider"></span>
-                <a href="/static/docs.html" class="nav-link">Docs</a>
+                <a href="/static/docs.html" class="nav-link">📚 Docs</a>
                 <a href="/static/logs.html" class="nav-link">Logs</a>
             </nav>
         </div>
@@ -114,7 +113,6 @@
             <button class="view-tab" data-view="evolution">Daily Evolution</button>
             <button class="view-tab" data-view="comparison">WWV vs WWVH</button>
             <button class="view-tab" data-view="tones">Multi-Tone Power</button>
-            <button class="view-tab" data-view="frequency">Frequency Analysis</button>
             <button class="view-tab" data-view="paths">Path Analysis</button>
         </div>
 
@@ -257,10 +255,6 @@
                     <div class="chart-container" id="chart-evo-coherence"></div>
                 </div>
             </div>
-            <div class="card">
-                <div class="card-header"><div><div class="card-title">Frequency Selectivity</div><div class="card-subtitle">FSS = 10 log10((P_2kHz+P_3kHz)/(P_4kHz+P_5kHz)) &mdash; positive = dispersive path</div></div></div>
-                <div class="chart-container" id="chart-evo-fss"></div>
-            </div>
         </div>
 
         <!-- ============================================================ -->
@@ -283,10 +277,6 @@
                     <div class="solar-legend-item"><div class="solar-legend-swatch" style="background:var(--wwv-color);opacity:0.3;height:12px;width:24px;"></div> WWV solar elev.</div>
                     <div class="solar-legend-item"><div class="solar-legend-swatch" style="background:var(--wwvh-color);opacity:0.3;height:12px;width:24px;"></div> WWVH solar elev.</div>
                 </div>
-            </div>
-            <div class="card">
-                <div class="card-header"><div><div class="card-title">S4 Scintillation Comparison</div><div class="card-subtitle">Scintillation on two different ionospheric paths</div></div></div>
-                <div class="chart-container" id="chart-comp-s4"></div>
             </div>
             <div class="card">
                 <div class="card-header"><div><div class="card-title">Average SNR by Frequency</div><div class="card-subtitle">Bar comparison across all monitored carriers</div></div></div>
@@ -313,28 +303,6 @@
             <div class="card">
                 <div class="card-header"><div><div class="card-title">Tone Power Evolution</div><div class="card-subtitle">Individual tone powers over the day with solar zenith</div></div></div>
                 <div class="chart-container" id="chart-tone-evolution"></div>
-            </div>
-        </div>
-
-        <!-- ============================================================ -->
-        <!-- FREQUENCY ANALYSIS -->
-        <!-- ============================================================ -->
-        <div id="view-frequency" class="view-content">
-            <div class="card">
-                <div class="card-header"><div><div class="card-title">S4 Frequency Slope</div><div class="card-subtitle">Positive slope = D-layer absorption dominates, near-zero = F-layer scintillation</div></div></div>
-                <div class="date-nav">
-                    <button onclick="changeDate(-1)">&#8592; Previous</button>
-                    <input type="date" id="date-picker-freq" onchange="onDatePicked(this.value)">
-                    <button onclick="changeDate(1)">Next &#8594;</button>
-                    <button onclick="setToday()">Today</button>
-                </div>
-                <div class="chart-container" id="chart-s4-slope"></div>
-                <div class="section-note">The S4 frequency slope is computed from per-tone S4 values (2-5 kHz). A positive slope means higher-frequency tones show more scintillation, characteristic of D-layer absorption. Near-zero slope indicates F-layer scintillation which is broadband.</div>
-            </div>
-            <div class="card">
-                <div class="card-header"><div><div class="card-title">Per-Tone S4 Analysis</div><div class="card-subtitle">S4 at each tone frequency &mdash; reveals ionospheric layer responsible for scintillation</div></div></div>
-                <div class="tab-group" id="s4tone-freq-tabs"></div>
-                <div class="chart-container" id="chart-s4-tones"></div>
             </div>
         </div>
 
@@ -426,7 +394,6 @@
     let cachedKey = null;
     let compFreq = null;
     let toneFreq = null;
-    let s4toneFreq = null;
 
     const FREQ_COLORS = {
         2.5: '#8b5cf6', 5: '#3b82f6', 10: '#10b981',
@@ -513,7 +480,6 @@
             else if (view === 'evolution') loadEvolutionData();
             else if (view === 'comparison') loadComparisonData();
             else if (view === 'tones') loadTonesData();
-            else if (view === 'frequency') loadFrequencyData();
             else if (view === 'paths') loadPathsData();
         });
     });
@@ -523,7 +489,6 @@
         else if (currentView === 'evolution') loadEvolutionData();
         else if (currentView === 'comparison') loadComparisonData();
         else if (currentView === 'tones') loadTonesData();
-        else if (currentView === 'frequency') loadFrequencyData();
         else if (currentView === 'paths') loadPathsData();
         else loadOverview();
     }
@@ -782,10 +747,6 @@
             plotEvoSingle('chart-evo-delay', wwv, wwvh, 'delay_spread_ms', 'Delay Spread (ms)', nightShapes);
             // Coherence time
             plotEvoSingle('chart-evo-coherence', wwv, wwvh, 'coherence_time_sec', 'Coherence Time (s)', nightShapes);
-            // Frequency selectivity
-            plotEvoChart('chart-evo-fss', wwv, wwvh, 'frequency_selectivity_db', 'FSS (dB)', solar, nightShapes, solarTraces, [
-                { type:'line', y0:0, y1:0, xref:'paper', x0:0, x1:1, line:{color:'#64748b',width:1,dash:'dash'} }
-            ]);
         } catch(e) { console.error('Evolution error:', e); }
     }
 
@@ -857,8 +818,6 @@
 
         // SNR comparison with solar
         plotEvoChart('chart-comp-snr', wwv, wwvh, 'snr_db', `SNR (dB) @ ${compFreq} MHz`, solar, nightShapes, solarTraces);
-        // S4 comparison with solar
-        plotEvoChart('chart-comp-s4', wwv, wwvh, 'scintillation_index', `S4 @ ${compFreq} MHz`, solar, nightShapes, solarTraces);
 
         // Bar chart across all frequencies
         const allFreqs = data.frequencies || [];
@@ -946,74 +905,6 @@
                 shapes: nightShapes
             }), {responsive:true});
         }
-    }
-
-    // ====================================================================
-    // FREQUENCY ANALYSIS
-    // ====================================================================
-    async function loadFrequencyData() {
-        try {
-            const data = await fetchDaily();
-            const solar = data.solar;
-            const nightShapes = makeSolarShapes(solar);
-            const solarTraces = makeSolarTraces(solar);
-            const all = [...(data.by_station?.WWV||[]), ...(data.by_station?.WWVH||[])];
-
-            // S4 frequency slope — separate by frequency+station
-            const withSlope = all.filter(m => m.s4_frequency_slope != null);
-            if (withSlope.length) {
-                const wwvS = withSlope.filter(m=>m.station==='WWV');
-                const wwvhS = withSlope.filter(m=>m.station==='WWVH');
-                const traces = [...makeFreqStationTraces(wwvS, wwvhS, 's4_frequency_slope'), ...solarTraces];
-                Plotly.newPlot('chart-s4-slope', traces, pLayout({
-                    xaxis: gridAxis('UTC Time'), yaxis: gridAxis('S4 Slope (per kHz)'), yaxis2: solarY2Axis(),
-                    shapes: [...nightShapes, {type:'line',y0:0,y1:0,xref:'paper',x0:0,x1:1,line:{color:'#64748b',width:1,dash:'dash'}}],
-                    annotations: [
-                        {x:1.01,y:0.05,xref:'paper',yref:'y',text:'D-layer',showarrow:false,font:{size:10,color:'#f59e0b'}},
-                        {x:1.01,y:-0.02,xref:'paper',yref:'y',text:'F-layer',showarrow:false,font:{size:10,color:'#10b981'}}
-                    ]
-                }), {responsive:true});
-            }
-
-            // Per-tone S4
-            const freqs = data.frequencies || [];
-            buildTabGroup('s4tone-freq-tabs', freqs, s4toneFreq||freqs[0], f => { s4toneFreq=f; renderS4Tones(data); });
-            if (!s4toneFreq) s4toneFreq = freqs[0];
-            renderS4Tones(data);
-        } catch(e) { console.error('Frequency error:', e); }
-    }
-
-    function renderS4Tones(data) {
-        const solar = data.solar;
-        const nightShapes = makeSolarShapes(solar);
-        const solarTraces = makeSolarTraces(solar);
-        const wwvAll = (data.by_station?.WWV||[]).filter(m=>m.frequency_mhz===s4toneFreq && m.s4_2khz!=null).sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
-        const wwvhAll = (data.by_station?.WWVH||[]).filter(m=>m.frequency_mhz===s4toneFreq && m.s4_2khz!=null).sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
-        const container = document.getElementById('chart-s4-tones');
-        if (!wwvAll.length && !wwvhAll.length) { container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted);">No per-tone S4 data</div>'; return; }
-        const toneColors = { 2:'#8b5cf6', 3:'#3b82f6', 4:'#10b981', 5:'#f59e0b' };
-        const traces = [];
-        [2,3,4,5].forEach(t => {
-            if (wwvAll.length) traces.push({
-                x: wwvAll.map(m=>m.timestamp), y: wwvAll.map(m=>m['s4_'+t+'khz']),
-                name: t+' kHz WWV', legendgroup: t+'kHz',
-                type:'scatter', mode:'lines+markers',
-                marker:{size:5, color:toneColors[t], symbol:'circle'},
-                line:{width:2, color:toneColors[t]}
-            });
-            if (wwvhAll.length) traces.push({
-                x: wwvhAll.map(m=>m.timestamp), y: wwvhAll.map(m=>m['s4_'+t+'khz']),
-                name: t+' kHz WWVH', legendgroup: t+'kHz',
-                type:'scatter', mode:'lines+markers',
-                marker:{size:5, color:toneColors[t], symbol:'diamond-open'},
-                line:{width:2, color:toneColors[t], dash:'dash'}
-            });
-        });
-        traces.push(...solarTraces);
-        Plotly.newPlot(container, traces, pLayout({
-            xaxis: gridAxis('UTC Time'), yaxis: gridAxis('S4 Index @ '+s4toneFreq+' MHz'),
-            yaxis2: solarY2Axis(), shapes: nightShapes
-        }), {responsive:true});
     }
 
     // ====================================================================
