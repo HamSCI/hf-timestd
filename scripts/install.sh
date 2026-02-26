@@ -229,12 +229,11 @@ EOF
     systemctl daemon-reload
     log_info "  ✅ Chronyd will start after timestd-fusion (ensures correct SHM permissions)"
 
-    # Restart chronyd if it's running to apply configuration changes
-    if systemctl is-active --quiet chronyd; then
-        log_info "  Restarting chronyd to apply configuration changes..."
-        systemctl restart chronyd
-        log_info "  ✅ Chronyd restarted"
-    fi
+    # NOTE: Do NOT restart chronyd here. If chronyd starts before fusion,
+    # it creates SHM segments with root:600 permissions, blocking the
+    # timestd user from writing. start-services.sh handles the correct
+    # ordering: clear stale SHM → start fusion → restart chronyd.
+    log_info "  ℹ️  Chronyd will be restarted after fusion starts (via start-services.sh)"
 fi
 
 # Configure UDP receive buffers (CRITICAL for preventing packet loss)
