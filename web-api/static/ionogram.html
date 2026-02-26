@@ -166,16 +166,25 @@
             </div>
             <div class="control-group">
                 <label>Time window</label>
-                <select id="windowSelect">
+                <select id="windowSelect" onchange="toggleCustomDate()">
                     <option value="-6h">Last 6 hours</option>
                     <option value="-12h">Last 12 hours</option>
                     <option value="-24h" selected>Last 24 hours</option>
                     <option value="-48h">Last 48 hours</option>
+                    <option value="custom">Custom range…</option>
                 </select>
+            </div>
+            <div class="control-group" id="customDateGroup" style="display:none">
+                <label>Start (UTC)</label>
+                <input type="datetime-local" id="customStart" style="width:190px">
+            </div>
+            <div class="control-group" id="customEndGroup" style="display:none">
+                <label>End (UTC)</label>
+                <input type="datetime-local" id="customEnd" style="width:190px">
             </div>
             <div class="control-group">
                 <label>Min SNR (dB)</label>
-                <input type="number" id="minSnr" value="6" min="0" max="40" step="1" style="width:80px">
+                <input type="number" id="minSnr" value="15" min="0" max="40" step="1" style="width:80px">
             </div>
             <div class="control-group">
                 <label>Downsample</label>
@@ -217,6 +226,7 @@
         <div class="tab-row">
             <button class="tab-btn active" onclick="showTab('timeseries')">ToF Time Series</button>
             <button class="tab-btn" onclick="showTab('cluster')">ToF vs S+N Cluster</button>
+            <button class="tab-btn" onclick="showTab('doppler')">Doppler-Delay</button>
         </div>
 
         <!-- Time series panel (Griffin top+bottom panels) -->
@@ -261,6 +271,55 @@
             </div>
         </div>
 
+        <!-- Doppler-Delay panel -->
+        <div class="tab-panel" id="tab-doppler">
+            <div class="griffin-note">
+                <strong>Doppler-Delay spread function:</strong>
+                Each point is one per-second tick detection. X-axis = propagation delay residual (timing_error_ms);
+                Y-axis = carrier phase at tick onset (radians). Different propagation modes (1F2, 2F2, Es) have
+                different Doppler shifts because the reflecting layers move at different velocities.
+                Clusters in this 2D space identify distinct modes even when their delays overlap.
+            </div>
+            <div class="stats-grid" id="dopplerStatsGrid" style="display:none">
+                <div class="stat-card">
+                    <div class="stat-label">Edge tick detections</div>
+                    <div class="stat-value" id="statEdgeTicks">--</div>
+                    <div class="stat-sub">per-second ticks with phase</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Delay spread</div>
+                    <div class="stat-value" id="statDelaySpread">--</div>
+                    <div class="stat-sub">ms (std dev)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Phase spread</div>
+                    <div class="stat-value" id="statPhaseSpread">--</div>
+                    <div class="stat-sub">rad (std dev)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Minutes w/ Doppler</div>
+                    <div class="stat-value" id="statDopplerMins">--</div>
+                    <div class="stat-sub">phase slope fit</div>
+                </div>
+            </div>
+            <div class="plot-container">
+                <div class="plot-title">Doppler-Delay Scatter</div>
+                <div class="plot-subtitle">
+                    Per-tick timing error vs carrier phase. KDE contours highlight propagation mode clusters.
+                    Color = correlation SNR.
+                </div>
+                <div id="dopplerDelayPlot" style="height:520px"><div class="loading-msg">Select a channel and click Load</div></div>
+            </div>
+            <div class="plot-container">
+                <div class="plot-title">Per-Minute Doppler Shift (Hz)</div>
+                <div class="plot-subtitle">
+                    Doppler from carrier phase slope across ticks within each minute.
+                    Diurnal variation tracks bulk ionospheric motion.
+                </div>
+                <div id="dopplerTsPlot" style="height:240px"><div class="loading-msg">--</div></div>
+            </div>
+        </div>
+
         <div id="errorMsg" class="error-msg" style="display:none"></div>
     </main>
 </div>
@@ -268,16 +327,30 @@
 <script>
 let _tsData = null;
 let _scatterData = null;
+let _dopplerData = null;
 
 function showTab(name) {
     document.querySelectorAll('.tab-btn').forEach((b, i) => {
-        const tabs = ['timeseries', 'cluster'];
+        const tabs = ['timeseries', 'cluster', 'doppler'];
         b.classList.toggle('active', tabs[i] === name);
     });
     document.querySelectorAll('.tab-panel').forEach(p => {
         p.classList.toggle('active', p.id === 'tab-' + name);
     });
     if (name === 'cluster' && _scatterData) renderCluster(_scatterData);
+    if (name === 'doppler' && _dopplerData) renderDopplerDelay(_dopplerData);
+}
+
+function toggleCustomDate() {
+    const isCustom = document.getElementById('windowSelect').value === 'custom';
+    document.getElementById('customDateGroup').style.display = isCustom ? '' : 'none';
+    document.getElementById('customEndGroup').style.display = isCustom ? '' : 'none';
+    if (isCustom && !document.getElementById('customStart').value) {
+        const now = new Date();
+        const yesterday = new Date(now.getTime() - 86400000);
+        document.getElementById('customStart').value = yesterday.toISOString().slice(0, 16);
+        document.getElementById('customEnd').value = now.toISOString().slice(0, 16);
+    }
 }
 
 async function loadData() {
@@ -285,6 +358,20 @@ async function loadData() {
     const window_ = document.getElementById('windowSelect').value;
     const minSnr = document.getElementById('minSnr').value;
     const ds = document.getElementById('downsampleSelect').value;
+
+    let startParam, endParam;
+    if (window_ === 'custom') {
+        const cs = document.getElementById('customStart').value;
+        const ce = document.getElementById('customEnd').value;
+        if (!cs || !ce) { showError('Please select both start and end times.'); return; }
+        startParam = cs + ':00';
+        endParam = ce + ':00';
+    } else {
+        startParam = window_;
+        endParam = 'now';
+    }
+    const sp = encodeURIComponent(startParam);
+    const ep = encodeURIComponent(endParam);
 
     document.getElementById('errorMsg').style.display = 'none';
     document.getElementById('statsGrid').style.display = 'none';
@@ -294,14 +381,16 @@ async function loadData() {
     setLoading('clusterPlot');
 
     try {
-        const [tsResp, scatterResp] = await Promise.all([
-            fetch(`/api/ionogram/arrivals/timeseries?channel=${channel}&start=${window_}&min_snr_db=${minSnr}`),
-            fetch(`/api/ionogram/arrivals?channel=${channel}&start=${window_}&min_snr_db=${minSnr}&downsample=${ds}&include_kde=true`)
+        const [tsResp, scatterResp, dopplerResp] = await Promise.all([
+            fetch(`/api/ionogram/arrivals/timeseries?channel=${channel}&start=${sp}&end=${ep}&min_snr_db=${minSnr}`),
+            fetch(`/api/ionogram/arrivals?channel=${channel}&start=${sp}&end=${ep}&min_snr_db=${minSnr}&downsample=${ds}&include_kde=true`),
+            fetch(`/api/ionogram/doppler-delay?channel=${channel}&start=${sp}&end=${ep}&min_snr_db=3&method=edge_tick&include_kde=true`)
         ]);
 
         if (!tsResp.ok || !scatterResp.ok) throw new Error('API error');
         _tsData = await tsResp.json();
         _scatterData = await scatterResp.json();
+        _dopplerData = dopplerResp.ok ? await dopplerResp.json() : null;
 
         if (_tsData.status === 'no_data' && _scatterData.status === 'no_data') {
             showError('No data available for this channel and time window.');
@@ -311,6 +400,7 @@ async function loadData() {
         updateStats(_tsData, _scatterData);
         renderTimeSeries(_tsData);
         renderCluster(_scatterData);
+        if (_dopplerData) renderDopplerDelay(_dopplerData);
 
     } catch (e) {
         showError('Failed to load data: ' + e.message);
@@ -354,6 +444,7 @@ function renderTimeSeries(data) {
     const dom = data.dominant;
     const sec = data.secondary;
     const h = data.f2_height;
+    const solar = data.solar;
     const color = data.color || '#7B68EE';
 
     if (!dom || dom.n === 0) {
@@ -364,6 +455,44 @@ function renderTimeSeries(data) {
     }
 
     const toDate = ts => new Date(ts * 1000).toISOString();
+
+    // Compute shared x-axis range from all timestamps so panels align
+    let allTs = [...dom.timestamps];
+    if (sec && sec.n > 0) allTs = allTs.concat(sec.timestamps);
+    if (h && h.n > 0) allTs = allTs.concat(h.timestamps);
+    if (solar && solar.timestamps) allTs = allTs.concat(solar.timestamps);
+    const xMin = toDate(Math.min(...allTs));
+    const xMax = toDate(Math.max(...allTs));
+    const sharedXaxis = { gridcolor: '#334155', title: 'UTC', range: [xMin, xMax] };
+
+    // Solar zenith overlay — elevation curve only (no shading)
+    function makeSolarTrace(solar, yaxisId) {
+        if (!solar || !solar.timestamps) return null;
+        return {
+            x: solar.timestamps.map(toDate),
+            y: solar.elevation_deg,
+            name: 'Solar elev. (midpoint)',
+            yaxis: yaxisId || 'y2',
+            type: 'scatter', mode: 'lines',
+            line: { color: 'rgba(255,220,80,0.55)', width: 1.5, dash: 'dot' },
+            hovertemplate: 'Solar: %{y:.1f}°<extra></extra>',
+            showlegend: true,
+        };
+    }
+
+    const solarY2 = {
+        title: 'Solar Elev. (°)', overlaying: 'y', side: 'right',
+        gridcolor: 'rgba(148,163,184,0.05)', zeroline: true,
+        zerolinecolor: 'rgba(255,220,80,0.25)', zerolinewidth: 1,
+        range: [-90, 90], showgrid: false,
+        tickvals: [-90, -45, 0, 45, 90],
+        ticktext: ['-90°', '-45°', '0°', '45°', '90°'],
+        titlefont: { size: 11, color: 'rgba(255,220,80,0.7)' },
+        tickfont: { size: 10, color: 'rgba(255,220,80,0.7)' },
+    };
+
+    const sharedMargin = { t: 10, b: 40, l: 60, r: 130 };
+    const sharedLegend = { bgcolor: 'transparent', font: { size: 11 }, x: 1.02, xanchor: 'left', y: 1, yanchor: 'top' };
 
     // ToF plot
     const tofTraces = [
@@ -383,19 +512,19 @@ function renderTimeSeries(data) {
             mode: 'markers',
             type: 'scatter',
             name: 'Rank≥1 (secondary)',
-            marker: { color: '#94a3b8', size: 3, symbol: 'circle-open' },
+            marker: { color: '#cbd5e1', size: 2, symbol: 'circle-open', opacity: 0.4 },
         });
     }
-
-    const sharedMargin = { t: 10, b: 40, l: 60, r: 130 };
-    const sharedLegend = { bgcolor: 'transparent', font: { size: 11 }, x: 1.02, xanchor: 'left', y: 1, yanchor: 'top' };
+    const solarTof = makeSolarTrace(solar, 'y2');
+    if (solarTof) tofTraces.push(solarTof);
 
     Plotly.newPlot('tofPlot', tofTraces, {
         paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
         font: { color: '#e2e8f0', size: 11 },
         margin: sharedMargin,
-        xaxis: { gridcolor: '#334155', title: 'UTC' },
+        xaxis: sharedXaxis,
         yaxis: { gridcolor: '#334155', title: 'Propagation Delay (ms)', rangemode: 'tozero' },
+        yaxis2: solarY2,
         legend: sharedLegend,
         showlegend: true,
     }, { responsive: true, displayModeBar: false });
@@ -418,35 +547,43 @@ function renderTimeSeries(data) {
             mode: 'markers',
             type: 'scatter',
             name: 'Rank≥1 SNR',
-            marker: { color: '#94a3b8', size: 2, symbol: 'circle-open' },
+            marker: { color: '#cbd5e1', size: 2, symbol: 'circle-open', opacity: 0.4 },
         });
     }
+    const solarSnr = makeSolarTrace(solar, 'y2');
+    if (solarSnr) { solarSnr.showlegend = false; snrTraces.push(solarSnr); }
 
     Plotly.newPlot('snrPlot', snrTraces, {
         paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
         font: { color: '#e2e8f0', size: 11 },
         margin: sharedMargin,
-        xaxis: { gridcolor: '#334155', title: 'UTC' },
-        yaxis: { gridcolor: '#334155', title: 'Corr SNR (dB)' },
+        xaxis: sharedXaxis,
+        yaxis: { gridcolor: '#334155', title: 'Corr SNR (dB)', range: [0, 80] },
+        yaxis2: solarY2,
         legend: sharedLegend,
         showlegend: true,
     }, { responsive: true, displayModeBar: false });
 
     // F2 height plot
     if (h && h.n > 5) {
-        Plotly.newPlot('heightPlot', [{
+        const heightTraces = [{
             x: h.timestamps.map(toDate),
             y: h.height_km,
             mode: 'markers',
             type: 'scatter',
             name: 'F2 height',
             marker: { color: '#34d399', size: 3 },
-        }], {
+        }];
+        const solarH = makeSolarTrace(solar, 'y2');
+        if (solarH) { solarH.showlegend = false; heightTraces.push(solarH); }
+
+        Plotly.newPlot('heightPlot', heightTraces, {
             paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
             font: { color: '#e2e8f0', size: 11 },
             margin: sharedMargin,
-            xaxis: { gridcolor: '#334155', title: 'UTC' },
+            xaxis: sharedXaxis,
             yaxis: { gridcolor: '#334155', title: 'h\'F2 (km)', range: [100, 600] },
+            yaxis2: solarY2,
             showlegend: false,
         }, { responsive: true, displayModeBar: false });
     } else {
@@ -542,6 +679,119 @@ function renderCluster(data) {
         legend: { bgcolor: 'transparent', font: { size: 11 } },
         showlegend: true,
     }, { responsive: true, displayModeBar: false });
+}
+
+function renderDopplerDelay(data) {
+    if (!data || data.status === 'no_data' || !data.scatter) {
+        document.getElementById('dopplerDelayPlot').innerHTML =
+            '<div class="loading-msg">No per-tick edge data available yet. Data starts accumulating after service restart with v2.0.0.</div>';
+        document.getElementById('dopplerTsPlot').innerHTML = '<div class="loading-msg">--</div>';
+        document.getElementById('dopplerStatsGrid').style.display = 'none';
+        return;
+    }
+
+    const s = data.scatter;
+    const kde = data.kde;
+    const color = data.color || '#7B68EE';
+    const te = s.timing_error_ms || [];
+    const phase = s.carrier_phase_rad || [];
+    const snr = s.corr_snr_db || [];
+    const summary = data.summary || {};
+
+    // Update stats
+    document.getElementById('dopplerStatsGrid').style.display = 'grid';
+    document.getElementById('statEdgeTicks').textContent = data.n_edge_ticks || 0;
+    document.getElementById('statDelaySpread').textContent = (summary.timing_error_std_ms || 0).toFixed(2);
+    document.getElementById('statPhaseSpread').textContent = (summary.phase_std_rad || 0).toFixed(2);
+    document.getElementById('statDopplerMins').textContent = summary.n_minutes_with_doppler || 0;
+
+    if (te.length === 0) {
+        document.getElementById('dopplerDelayPlot').innerHTML =
+            '<div class="loading-msg">No edge tick detections with carrier phase in this window.</div>';
+        return;
+    }
+
+    const traces = [];
+
+    // KDE contours (background)
+    if (kde && kde.x && kde.y && kde.z) {
+        traces.push({
+            type: 'contour',
+            x: kde.x,
+            y: kde.y,
+            z: kde.z,
+            colorscale: [
+                [0, 'rgba(30,58,138,0)'],
+                [0.2, 'rgba(30,58,138,0.3)'],
+                [0.5, 'rgba(59,130,246,0.5)'],
+                [0.8, 'rgba(99,179,237,0.7)'],
+                [1.0, 'rgba(196,230,255,0.9)'],
+            ],
+            showscale: false,
+            contours: { coloring: 'fill', showlines: true },
+            line: { color: 'rgba(148,163,184,0.4)', width: 0.5 },
+            name: 'KDE density',
+            hoverinfo: 'skip',
+        });
+    }
+
+    // Scatter colored by SNR
+    traces.push({
+        x: te,
+        y: phase,
+        mode: 'markers',
+        type: 'scatter',
+        name: 'Per-tick detection',
+        marker: {
+            color: snr,
+            colorscale: 'Viridis',
+            size: 4,
+            opacity: 0.7,
+            colorbar: { title: 'SNR (dB)', len: 0.5, y: 0.8 },
+            cmin: 3,
+            cmax: Math.min(30, Math.max(...snr)),
+        },
+        text: te.map((t, i) => `delay=${t.toFixed(2)}ms, phase=${phase[i].toFixed(2)}rad, SNR=${snr[i].toFixed(1)}dB`),
+        hoverinfo: 'text',
+    });
+
+    Plotly.newPlot('dopplerDelayPlot', traces, {
+        paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+        font: { color: '#e2e8f0', size: 11 },
+        margin: { t: 10, b: 50, l: 70, r: 10 },
+        xaxis: { gridcolor: '#334155', title: 'Timing Error (ms)', zeroline: true, zerolinecolor: '#475569' },
+        yaxis: { gridcolor: '#334155', title: 'Carrier Phase (rad)' },
+        legend: { bgcolor: 'transparent', font: { size: 11 } },
+        showlegend: true,
+    }, { responsive: true, displayModeBar: false });
+
+    // Per-minute Doppler time series
+    const md = data.minute_doppler || {};
+    const dTs = Object.keys(md).map(Number).sort((a, b) => a - b);
+    const dHz = dTs.map(t => md[t]);
+
+    if (dTs.length >= 3) {
+        const toDate = ts => new Date(ts * 1000).toISOString();
+        Plotly.newPlot('dopplerTsPlot', [{
+            x: dTs.map(toDate),
+            y: dHz,
+            mode: 'markers+lines',
+            type: 'scatter',
+            name: 'Doppler',
+            marker: { color: '#34d399', size: 3 },
+            line: { color: '#34d399', width: 1 },
+        }], {
+            paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+            font: { color: '#e2e8f0', size: 11 },
+            margin: { t: 10, b: 40, l: 60, r: 10 },
+            xaxis: { gridcolor: '#334155', title: 'UTC' },
+            yaxis: { gridcolor: '#334155', title: 'Doppler (Hz)', zeroline: true, zerolinecolor: '#475569' },
+            showlegend: false,
+        }, { responsive: true, displayModeBar: false });
+    } else {
+        document.getElementById('dopplerTsPlot').innerHTML =
+            '<div class="loading-msg">Insufficient minutes with Doppler estimate</div>';
+    }
 }
 
 // Auto-load on page open

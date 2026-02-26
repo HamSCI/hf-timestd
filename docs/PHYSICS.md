@@ -3,7 +3,7 @@
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
 **System Version:** 6.7.1+ (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring)  
-**Last Updated:** 2026-02-24
+**Last Updated:** 2026-02-26
 
 ---
 

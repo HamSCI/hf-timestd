@@ -152,12 +152,21 @@
 
             <div class="control-group">
                 <span class="control-label">Time Range</span>
-                <select id="time-select">
+                <select id="time-select" onchange="toggleLogsCustomDate()">
                     <option value="1h">Last 1 Hour</option>
                     <option value="6h">Last 6 Hours</option>
                     <option value="24h">Last 24 Hours</option>
                     <option value="7d">Last 7 Days</option>
+                    <option value="custom">Custom range…</option>
                 </select>
+            </div>
+            <div class="control-group" id="logsCustomDateGroup" style="display:none">
+                <span class="control-label">Start (UTC)</span>
+                <input type="datetime-local" id="logsCustomStart" style="padding:4px 8px; font-size:12px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">
+            </div>
+            <div class="control-group" id="logsCustomEndGroup" style="display:none">
+                <span class="control-label">End (UTC)</span>
+                <input type="datetime-local" id="logsCustomEnd" style="padding:4px 8px; font-size:12px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">
             </div>
 
             <div class="control-group">
@@ -206,6 +215,18 @@
             isAutoScrolling = isAtBottom;
         });
 
+        function toggleLogsCustomDate() {
+            const isCustom = document.getElementById('time-select').value === 'custom';
+            document.getElementById('logsCustomDateGroup').style.display = isCustom ? '' : 'none';
+            document.getElementById('logsCustomEndGroup').style.display = isCustom ? '' : 'none';
+            if (isCustom && !document.getElementById('logsCustomStart').value) {
+                const now = new Date();
+                const yesterday = new Date(now.getTime() - 86400000);
+                document.getElementById('logsCustomStart').value = yesterday.toISOString().slice(0, 16);
+                document.getElementById('logsCustomEnd').value = now.toISOString().slice(0, 16);
+            }
+        }
+
         async function loadLogs() {
             const service = document.getElementById('service-select').value;
             const range = document.getElementById('time-select').value;
@@ -216,9 +237,16 @@
                 // Build query params
                 const params = new URLSearchParams({
                     service: service,
-                    lines: 500,  // Fetch last 500 lines
-                    since: range
+                    lines: 500,
                 });
+                if (range === 'custom') {
+                    const cs = document.getElementById('logsCustomStart').value;
+                    const ce = document.getElementById('logsCustomEnd').value;
+                    if (cs) params.append('since', cs.replace('T', ' '));
+                    if (ce) params.append('until', ce.replace('T', ' '));
+                } else {
+                    params.append('since', range);
+                }
                 if (level) params.append('level', level);
 
                 const data = await api.get(`/logs/?${params.toString()}`);

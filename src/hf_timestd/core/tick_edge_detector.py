@@ -144,6 +144,17 @@ def intermod_at_tick_freq(station: str, minute: int) -> bool:
 # =============================================================================
 
 @dataclass
+class CleanComponent:
+    """One CLEAN deconvolution component — a resolved multipath arrival."""
+    peak_rank: int               # 0 = primary (same as original), 1+ = secondary
+    timing_error_ms: float       # Front edge offset from expected (ms)
+    corr_snr_db: float           # SNR of this component
+    relative_amplitude: float    # Amplitude relative to primary peak (0-1)
+    delay_offset_ms: float       # Delay relative to primary arrival (ms)
+    carrier_phase_rad: float = 0.0  # Carrier phase at this arrival
+
+
+@dataclass
 class TickDetection:
     """Single per-second tick matched filter detection result."""
     utc_second: int              # Absolute UTC second
@@ -157,6 +168,7 @@ class TickDetection:
     is_clean_minute: bool        # No intermod contamination
     is_doubled_tick: bool        # UT1 doubled tick (seconds 1-16)
     carrier_phase_rad: float = 0.0  # Carrier phase at tick (from IQ mixing)
+    clean_arrivals: List['CleanComponent'] = field(default_factory=list)  # CLEAN multipath
 
 
 @dataclass
@@ -274,11 +286,21 @@ class TickEdgeDetector:
     BANDPASS_LOW_HZ = 800.0
     BANDPASS_HIGH_HZ = 1400.0
     
+    # CLEAN deconvolution parameters
+    CLEAN_GAIN = 0.3           # Fraction of peak subtracted per iteration (loop gain)
+    CLEAN_MAX_ITER = 3         # Maximum CLEAN iterations (real multipath rarely >2 modes)
+    CLEAN_MIN_SNR_DB = 8.0     # Minimum SNR for a CLEAN component to be kept
+    CLEAN_PRIMARY_MIN_SNR_DB = 15.0  # Primary must be this strong before running CLEAN
+    # Only apply CLEAN for templates shorter than this (ms).
+    # 5ms WWV/WWVH and 10ms BPM benefit; 300ms CHU does not.
+    CLEAN_MAX_TEMPLATE_MS = 15.0
+
     def __init__(self, sample_rate: int = 24000):
         self.sample_rate = sample_rate
         self._bandpass_sos: Optional[np.ndarray] = None
         self._templates: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         self._template_half_len: Dict[str, int] = {}
+        self._psf: Dict[str, np.ndarray] = {}  # Template autocorrelation (PSF)
         
         self._init_bandpass()
         self._init_templates()
@@ -324,7 +346,149 @@ class TickEdgeDetector:
             
             self._templates[station] = (template_sin, template_cos)
             self._template_half_len[station] = n_samples // 2
+            
+            # Pre-compute PSF (template autocorrelation) for CLEAN deconvolution.
+            # The PSF is the response of the matched filter to its own template —
+            # this is what needs to be subtracted to reveal secondary arrivals.
+            # Use the envelope (sqrt(sin²+cos²)) autocorrelation.
+            tick_duration_ms = STATION_TICK_DURATION_MS.get(station, 999)
+            if tick_duration_ms <= self.CLEAN_MAX_TEMPLATE_MS:
+                # Create a unit-amplitude tick signal
+                unit_tick = np.sin(2 * np.pi * freq_hz * t)
+                # Correlate it with the template pair to get the envelope response
+                psf_sin = correlate(unit_tick, template_sin, mode='full')
+                psf_cos = correlate(unit_tick, template_cos, mode='full')
+                psf = np.sqrt(psf_sin**2 + psf_cos**2)
+                # Normalize so peak = 1.0
+                psf_max = np.max(psf)
+                if psf_max > 0:
+                    psf = psf / psf_max
+                self._psf[station] = psf
     
+    def _clean_deconvolve(
+        self,
+        corr_env: np.ndarray,
+        station: str,
+        primary_peak_idx: int,
+        primary_peak_val: float,
+        noise_floor: float,
+        region_start: int,
+        half_template: int,
+        expected_sample: int,
+        iq_samples: Optional[np.ndarray],
+        tick_freq: float,
+    ) -> List[CleanComponent]:
+        """
+        CLEAN deconvolution on correlation envelope to resolve multipath.
+        
+        Algorithm (adapted from Högbom 1974 for 1-D correlation envelopes):
+        1. Find the peak in the residual correlation envelope.
+        2. Record the peak as a CLEAN component (arrival).
+        3. Subtract gain × PSF centered at the peak.
+        4. Repeat until the residual peak is below the noise threshold.
+        
+        Returns a list of CleanComponent objects.  The first (rank 0) is
+        always the primary arrival (same as the original detection).
+        Secondary arrivals (rank ≥ 1) are resolved multipath.
+        
+        For WWV/WWVH 5ms ticks: the PSF mainlobe is ~5ms wide, so
+        CLEAN can resolve secondary arrivals separated by ≥ 2-3 ms
+        from the primary — well within the 1F→2F range (3-6 ms typical).
+        """
+        psf = self._psf.get(station)
+        if psf is None:
+            return []
+        
+        psf_center = len(psf) // 2
+        residual = corr_env.copy()
+        components: List[CleanComponent] = []
+        
+        # Primary arrival as rank 0
+        primary_front_edge = region_start + primary_peak_idx + half_template - half_template
+        primary_timing_error_ms = (primary_front_edge - expected_sample) * 1000.0 / self.sample_rate
+        
+        # Extract carrier phase for primary (already done in main loop, but
+        # we store it for consistency in the CleanComponent)
+        primary_phase = 0.0
+        if iq_samples is not None:
+            tick_start = int(round(region_start + primary_peak_idx))
+            n_template = half_template * 2
+            tick_end = tick_start + n_template
+            if 0 <= tick_start and tick_end <= len(iq_samples):
+                iq_tick = iq_samples[tick_start:tick_end]
+                t_tick = (tick_start + np.arange(n_template)) / self.sample_rate
+                mixer = np.exp(-1j * 2 * np.pi * tick_freq * t_tick)
+                primary_phase = float(np.angle(np.mean(iq_tick * mixer)))
+        
+        primary_snr_db = 20 * np.log10(max(primary_peak_val, 1e-10) / max(noise_floor, 1e-10))
+        components.append(CleanComponent(
+            peak_rank=0,
+            timing_error_ms=primary_timing_error_ms,
+            corr_snr_db=primary_snr_db,
+            relative_amplitude=1.0,
+            delay_offset_ms=0.0,
+            carrier_phase_rad=primary_phase,
+        ))
+        
+        # Iterative CLEAN
+        for iteration in range(self.CLEAN_MAX_ITER):
+            # Find current peak in residual
+            peak_idx = int(np.argmax(residual))
+            peak_val = residual[peak_idx]
+            
+            if peak_val <= 0:
+                break
+            
+            # Check SNR of this peak against noise floor
+            iter_snr_db = 20 * np.log10(max(peak_val, 1e-10) / max(noise_floor, 1e-10))
+            if iter_snr_db < self.CLEAN_MIN_SNR_DB:
+                break
+            
+            # Subtract scaled PSF centered at this peak
+            psf_start = peak_idx - psf_center
+            for i in range(len(psf)):
+                target = psf_start + i
+                if 0 <= target < len(residual):
+                    residual[target] -= self.CLEAN_GAIN * peak_val * psf[i]
+            
+            # Clamp residual to non-negative (correlation envelope)
+            residual = np.maximum(residual, 0)
+            
+            # If this is the primary peak location (within ±2 samples), skip —
+            # we already have rank 0
+            if abs(peak_idx - primary_peak_idx) <= 2:
+                continue
+            
+            # This is a secondary arrival
+            # Compute its timing and phase
+            front_edge_sample = region_start + peak_idx + half_template - half_template
+            timing_error_ms = (front_edge_sample - expected_sample) * 1000.0 / self.sample_rate
+            delay_offset_ms = timing_error_ms - primary_timing_error_ms
+            relative_amplitude = peak_val / max(primary_peak_val, 1e-10)
+            
+            # Extract carrier phase for this arrival
+            arrival_phase = 0.0
+            if iq_samples is not None:
+                n_template = half_template * 2
+                tick_start = int(round(region_start + peak_idx))
+                tick_end = tick_start + n_template
+                if 0 <= tick_start and tick_end <= len(iq_samples):
+                    iq_tick = iq_samples[tick_start:tick_end]
+                    t_tick = (tick_start + np.arange(n_template)) / self.sample_rate
+                    mixer = np.exp(-1j * 2 * np.pi * tick_freq * t_tick)
+                    arrival_phase = float(np.angle(np.mean(iq_tick * mixer)))
+            
+            components.append(CleanComponent(
+                peak_rank=len(components),
+                timing_error_ms=timing_error_ms,
+                corr_snr_db=iter_snr_db,
+                relative_amplitude=relative_amplitude,
+                delay_offset_ms=delay_offset_ms,
+                carrier_phase_rad=arrival_phase,
+            ))
+        
+        return components
+
     def detect_edges(
         self,
         audio_signal: np.ndarray,
@@ -511,6 +675,31 @@ class TickEdgeDetector:
                     mixer = np.exp(-1j * 2 * np.pi * tick_freq * t_tick)
                     carrier_phase = float(np.angle(np.mean(iq_tick * mixer)))
             
+            # CLEAN deconvolution for multipath resolution on short-tick stations.
+            # Only run on DEDICATED channels — on shared channels (e.g.
+            # SHARED_10000 carrying both WWV and WWVH), the other station's
+            # tick at the same frequency creates a systematic ±5ms offset
+            # artifact that CLEAN incorrectly reports as multipath.
+            clean_components: List[CleanComponent] = []
+            tick_duration_ms = STATION_TICK_DURATION_MS.get(station, 999)
+            if (detected
+                    and is_dedicated_channel
+                    and tick_duration_ms <= self.CLEAN_MAX_TEMPLATE_MS
+                    and station in self._psf
+                    and corr_snr_db >= self.CLEAN_PRIMARY_MIN_SNR_DB):
+                clean_components = self._clean_deconvolve(
+                    corr_env=corr_env,
+                    station=station,
+                    primary_peak_idx=peak_idx,
+                    primary_peak_val=peak_val,
+                    noise_floor=noise_floor,
+                    region_start=region_start,
+                    half_template=half_template,
+                    expected_sample=expected_sample,
+                    iq_samples=iq_samples,
+                    tick_freq=tick_freq,
+                )
+            
             ticks.append(TickDetection(
                 utc_second=utc_sec,
                 sec_in_minute=sec_in_minute,
@@ -523,6 +712,7 @@ class TickEdgeDetector:
                 is_clean_minute=clean,
                 is_doubled_tick=doubled,
                 carrier_phase_rad=carrier_phase,
+                clean_arrivals=clean_components,
             ))
         
         # --- Ensemble combination ---

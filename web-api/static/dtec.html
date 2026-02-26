@@ -182,13 +182,22 @@
         <div class="controls-row">
             <div class="control-group">
                 <label>Time window</label>
-                <select id="windowSelect">
+                <select id="windowSelect" onchange="toggleCustomDate()">
                     <option value="-3h">Last 3 hours</option>
                     <option value="-6h" selected>Last 6 hours</option>
                     <option value="-12h">Last 12 hours</option>
                     <option value="-24h">Last 24 hours</option>
                     <option value="-48h">Last 48 hours</option>
+                    <option value="custom">Custom range…</option>
                 </select>
+            </div>
+            <div class="control-group" id="customDateGroup" style="display:none">
+                <label>Start (UTC)</label>
+                <input type="datetime-local" id="customStart" style="width:190px">
+            </div>
+            <div class="control-group" id="customEndGroup" style="display:none">
+                <label>End (UTC)</label>
+                <input type="datetime-local" id="customEnd" style="width:190px">
             </div>
             <div class="control-group">
                 <label>Station filter</label>
@@ -210,13 +219,6 @@
                     <option value="1">All points</option>
                     <option value="2" selected>Every 2nd</option>
                     <option value="5">Every 5th</option>
-                </select>
-            </div>
-            <div class="control-group">
-                <label>Display</label>
-                <select id="displayMode">
-                    <option value="rate">dTEC rate (TECU/s)</option>
-                    <option value="mean">Integrated dTEC (TECU)</option>
                 </select>
             </div>
             <button class="btn-load" onclick="loadData()">Load</button>
@@ -273,17 +275,6 @@
             </div>
         </div>
 
-        <!-- Integrated dTEC plot -->
-        <div class="plot-container">
-            <div class="plot-title">Integrated dTEC — Relative TEC per Path</div>
-            <div class="plot-subtitle">
-                Cumulative dTEC (TECU) anchored at window start. Shows absolute TEC variation over time.
-                Divergence between paths indicates spatial TEC gradients across the ionosphere.
-            </div>
-            <div id="dtecMeanPlot" style="height:350px">
-                <div class="loading-msg">—</div>
-            </div>
-        </div>
 
         <!-- Per-station comparison (10 MHz reference frequency) -->
         <div class="plot-container">
@@ -304,15 +295,28 @@
 <script>
 // Station colour palette
 const STATION_COLORS = {
-    WWV:  ['#20B2AA', '#17a89f', '#0e9e96', '#05948d', '#008a84', '#00807b'],
-    WWVH: ['#FF8C00', '#f07800', '#e06400', '#d05000', '#c03c00', '#b02800'],
-    CHU:  ['#7B68EE', '#6a57dd', '#5946cc', '#4835bb', '#3724aa', '#261399'],
-    BPM:  ['#DC143C', '#c61236', '#b01030', '#9a0e2a', '#840c24', '#6e0a1e'],
+    WWV:  ['#2DD4BF', '#5EEAD4', '#99F6E4', '#14B8A6', '#0D9488', '#0F766E'],
+    WWVH: ['#FB923C', '#FDBA74', '#FED7AA', '#F97316', '#EA580C', '#C2410C'],
+    CHU:  ['#A78BFA', '#C4B5FD', '#DDD6FE', '#8B5CF6', '#7C3AED', '#6D28D9'],
+    BPM:  ['#FB7185', '#FDA4AF', '#FECDD3', '#F43F5E', '#E11D48', '#BE123C'],
 };
 const FREQ_ORDER = [2.5, 3.33, 5.0, 7.85, 10.0, 14.67, 15.0, 20.0, 25.0];
 
 let _allSeries = null;
 let _activeFreqFilter = 'all';
+
+function toggleCustomDate() {
+    const isCustom = document.getElementById('windowSelect').value === 'custom';
+    document.getElementById('customDateGroup').style.display = isCustom ? '' : 'none';
+    document.getElementById('customEndGroup').style.display = isCustom ? '' : 'none';
+    if (isCustom && !document.getElementById('customStart').value) {
+        // Default to yesterday 00:00 - today 00:00 UTC
+        const now = new Date();
+        const yesterday = new Date(now.getTime() - 86400000);
+        document.getElementById('customStart').value = yesterday.toISOString().slice(0, 16);
+        document.getElementById('customEnd').value = now.toISOString().slice(0, 16);
+    }
+}
 
 function toggleFreq(el) {
     document.querySelectorAll('.freq-chip').forEach(c => c.classList.remove('active'));
@@ -340,19 +344,30 @@ async function loadData() {
     const minSnr = document.getElementById('minSnr').value;
     const ds = document.getElementById('downsampleSelect').value;
 
+    let startParam, endParam;
+    if (window_ === 'custom') {
+        const cs = document.getElementById('customStart').value;
+        const ce = document.getElementById('customEnd').value;
+        if (!cs || !ce) { showError('Please select both start and end times.'); return; }
+        startParam = cs + ':00';
+        endParam = ce + ':00';
+    } else {
+        startParam = window_;
+        endParam = 'now';
+    }
+
     document.getElementById('errorMsg').style.display = 'none';
     document.getElementById('statsGrid').style.display = 'none';
     setLoading('dtecRatePlot');
-    setLoading('dtecMeanPlot');
     setLoading('refPlot');
 
     try {
-        let url = `/api/tec/dtec?start=${window_}&min_snr_db=${minSnr}&downsample=${ds}`;
+        let url = `/api/tec/dtec?start=${encodeURIComponent(startParam)}&end=${encodeURIComponent(endParam)}&min_snr_db=${minSnr}&downsample=${ds}`;
         if (station) url += `&station=${station}`;
 
         const [resp, solarResp] = await Promise.all([
             fetch(url),
-            fetch(`/api/space-weather/solar/elevation?start=${window_}&interval_minutes=5`),
+            fetch(`/api/space-weather/solar/elevation?start=${encodeURIComponent(startParam)}&end=${encodeURIComponent(endParam)}&interval_minutes=5`),
         ]);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
@@ -469,17 +484,14 @@ const SOLAR_YAXIS2 = {
 };
 
 function renderPlots(series) {
-    const displayMode = document.getElementById('displayMode').value;
     const toDate = ts => new Date(ts * 1000).toISOString();
 
     // Build traces for main overlay
     const rateTraces = [];
-    const meanTraces = [];
     const refTraces = [];
 
     // Track which stations appear in each plot for solar overlay
     const rateStations = new Set();
-    const meanStations = new Set();
     const refStations = new Set();
 
     for (const [key, s] of Object.entries(series)) {
@@ -501,17 +513,6 @@ function renderPlots(series) {
         });
         rateStations.add(s.station);
 
-        // Integrated dTEC trace
-        meanTraces.push({
-            x: xs,
-            y: s.dtec_mean_tecu,
-            mode: 'lines',
-            type: 'scatter',
-            name: label,
-            line: { color, width: 1.5 },
-            opacity: 0.85,
-        });
-        meanStations.add(s.station);
 
         // 10 MHz reference comparison
         if (Math.abs(s.frequency_mhz - 10.0) < 0.1 && ['WWV', 'WWVH', 'BPM'].includes(s.station)) {
@@ -550,20 +551,6 @@ function renderPlots(series) {
         }, { responsive: true, displayModeBar: false });
     }
 
-    if (meanTraces.length === 0) {
-        document.getElementById('dtecMeanPlot').innerHTML =
-            '<div class="loading-msg">No series match the current frequency filter</div>';
-    } else {
-        const solar = buildSolarTraces([...meanStations]);
-        const mRange = primarySymmetricRange(meanTraces);
-        Plotly.newPlot('dtecMeanPlot', [...meanTraces, ...solar], {
-            ...baseLayout,
-            yaxis2: SOLAR_YAXIS2,
-            margin: { t: 10, b: 40, l: 70, r: 60 },
-            xaxis: { gridcolor: '#334155', title: 'UTC' },
-            yaxis: { gridcolor: '#334155', title: 'Integrated dTEC (TECU)', range: mRange },
-        }, { responsive: true, displayModeBar: false });
-    }
 
     if (refTraces.length === 0) {
         document.getElementById('refPlot').innerHTML =

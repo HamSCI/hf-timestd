@@ -30,7 +30,8 @@ async def get_logs(
     service: str = Query(..., description="Service name (web-api, core, metrology, fusion, vtec, physics, l2-calibration, radiod-monitor)"),
     lines: int = Query(100, ge=1, le=1000, description="Number of lines to return"),
     level: str = Query(None, description="Log level filter (INFO, WARNING, ERROR)"),
-    since: str = Query("1h", description="Time range (e.g., 1h, 6h, 24h, 7d)")
+    since: str = Query("1h", description="Time range (e.g., 1h, 6h, 24h, 7d) or ISO8601 datetime"),
+    until: str = Query(None, description="End time (ISO8601 datetime, optional)")
 ):
     """
     Get logs for a specific service using journalctl.
@@ -43,9 +44,14 @@ async def get_logs(
     # Construct journalctl command
     cmd = ["journalctl", "-u", unit_name, "-n", str(lines), "--no-pager", "--output=short-iso"]
     
-    # Add time filter
+    # Add time filter — detect ISO datetime vs relative duration
     if since:
-        cmd.extend(["--since", f"-{since}"])
+        if 'T' in since or (len(since) >= 10 and since[4] == '-'):
+            cmd.extend(["--since", since])
+        else:
+            cmd.extend(["--since", f"-{since}"])
+    if until:
+        cmd.extend(["--until", until])
         
     # Add priority filter if specified
     # journalctl priority: 0=emerg, 1=alert, 2=crit, 3=err, 4=warning, 5=notice, 6=info, 7=debug

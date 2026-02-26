@@ -200,6 +200,13 @@ class PhysicsFusionService:
         # Data freshness tracking for upstream starvation detection
         self.upstream_stale_warning_issued = False
         self.max_upstream_age_seconds = 300.0  # 5 minutes - warn if L2 data older than this
+
+        # HDF5 write timeout (seconds).  If a write_measurement() call blocks
+        # longer than this (typically due to file lock contention with
+        # concurrent readers), we abandon that write rather than letting the
+        # service hang until the systemd watchdog kills it.
+        self._write_timeout_seconds = 30
+        self._write_timeout_count = 0
         
         logger.info(f"PhysicsFusionService initialized with {len(self.channels)} channels")
 
@@ -240,6 +247,46 @@ class PhysicsFusionService:
 
         # Prune _processed_minutes to the same 12h window
         self._processed_minutes = {m for m in self._processed_minutes if m >= cutoff}
+
+    def _pet_watchdog(self):
+        """Notify systemd watchdog.  Call this frequently during long processing."""
+        if SYSTEMD_AVAILABLE:
+            systemd_daemon.notify('WATCHDOG=1')
+
+    def _timed_write(self, writer: 'DataProductWriter', record: dict, label: str = '') -> bool:
+        """Write a measurement with a timeout to prevent file-lock hangs.
+
+        Returns True if the write succeeded, False if it timed out or failed.
+        On timeout, logs a warning and increments the timeout counter but does
+        NOT raise — the caller can continue processing the next record.
+        """
+        import threading
+
+        result = [None]  # [exception_or_None]
+
+        def _do_write():
+            try:
+                writer.write_measurement(record)
+            except Exception as e:
+                result[0] = e
+
+        t = threading.Thread(target=_do_write, daemon=True)
+        t.start()
+        t.join(timeout=self._write_timeout_seconds)
+
+        if t.is_alive():
+            self._write_timeout_count += 1
+            logger.warning(
+                f"HDF5 write timed out after {self._write_timeout_seconds}s "
+                f"({label or 'unknown'}), total timeouts: {self._write_timeout_count}"
+            )
+            return False
+
+        if result[0] is not None:
+            logger.error(f"HDF5 write failed ({label}): {result[0]}")
+            return False
+
+        return True
 
     def _discover_channels(self) -> List[str]:
         """Discover available L2 broadcast channels."""
@@ -395,6 +442,8 @@ class PhysicsFusionService:
             logger.warning(f"No valid L2 data found for minute {minute_timestamp}")
             return
 
+        self._pet_watchdog()
+
         # 2. Physics Estimation (TEC)
         # station_data is now Dict[station, List[measurements]] with one entry per distinct frequency
         tec_estimates = {}
@@ -428,6 +477,8 @@ class PhysicsFusionService:
             else:
                  logger.debug(f"TEC estimation failed for {station}")
 
+        self._pet_watchdog()
+
         # 3. E/F Layer Tomography
         tomo_result = None
         if len(tec_estimates) >= 2:
@@ -443,6 +494,8 @@ class PhysicsFusionService:
                         )
             except Exception as e:
                 logger.warning(f"Tomography failed: {e}")
+
+        self._pet_watchdog()
 
         # 4. VTEC Map Generation
         # VTEC requires credible group-delay TEC estimates (confidence >= 0.3).
@@ -489,6 +542,8 @@ class PhysicsFusionService:
                 except Exception as e:
                     logger.warning(f"VTEC map generation failed: {e}")
 
+        self._pet_watchdog()
+
         # 5. UTC Consistency Check
         utc_consistent = len(tec_estimates) > 0
         
@@ -499,12 +554,16 @@ class PhysicsFusionService:
             utc_consistent
         )
         
+        self._pet_watchdog()
+
         # 7. Write per-station TEC records
         self._write_tec_records(
             minute_timestamp,
             tec_estimates,
             vtec_by_station
         )
+
+        self._pet_watchdog()
 
         # 8. Carrier-phase dTEC estimation
         self._process_carrier_dtec(minute_timestamp, tec_estimates)
@@ -610,11 +669,8 @@ class PhysicsFusionService:
             'processed_at': datetime.now(timezone.utc).isoformat()
         }
         
-        try:
-            self.l3_writer.write_measurement(record)
+        if self._timed_write(self.l3_writer, record, 'L3 physics summary'):
             logger.info(f"Written L3 physics summary for {timestamp}")
-        except Exception as e:
-            logger.error(f"Failed to write L3 physics summary: {e}")
 
     def _write_tec_records(
         self,
@@ -647,11 +703,8 @@ class PhysicsFusionService:
                 'processing_version': '5.0.0'
             }
             
-            try:
-                self.tec_writer.write_measurement(record)
-                logger.debug(f"Written TEC record for {station} at {timestamp}")
-            except Exception as e:
-                logger.error(f"Failed to write TEC record for {station}: {e}")
+            self._timed_write(self.tec_writer, record, f'TEC {station}')
+            self._pet_watchdog()
         
         if tec_estimates:
             logger.info(f"Written {len(tec_estimates)} TEC station records for {timestamp}")
@@ -980,11 +1033,10 @@ class PhysicsFusionService:
                     'processing_version': '5.0.0',
                 }
 
-                try:
-                    self.dtec_writer.write_measurement(record)
+                if self._timed_write(self.dtec_writer, record, f'dTEC {channel}/{station}'):
                     n_written += 1
-                except Exception as e:
-                    logger.error(f"Failed to write dTEC record for {channel}/{station}: {e}")
+
+                self._pet_watchdog()
 
                 # P3-B: Write full per-tick time series so ~1-second resolution
                 # is preserved for scintillation and TID analysis.
@@ -1010,7 +1062,9 @@ class PhysicsFusionService:
                             'snr_db': float(dtec_result.mean_snr_db),
                             'processing_version': '5.0.0',
                         }
-                        self.dtec_ts_writer.write_measurement(ts_record)
+                        self._timed_write(self.dtec_ts_writer, ts_record, f'dTEC_ts {station}')
+                        if i % 20 == 0:
+                            self._pet_watchdog()
                 except Exception as e:
                     logger.debug(f"Failed to write dTEC time series for {channel}/{station}: {e}")
 
@@ -1126,7 +1180,8 @@ class PhysicsFusionService:
                             'quality_flag': qflag,
                             'processing_version': '5.0.0',
                         }
-                        self.dtec_diff_writer.write_measurement(diff_record)
+                        self._timed_write(self.dtec_diff_writer, diff_record, f'dtec_diff {station} {f1}/{f2}')
+                        self._pet_watchdog()
                     except Exception as e:
                         logger.debug(f"Differential dTEC pair {station} {f1}/{f2}: {e}")
 
@@ -1181,7 +1236,9 @@ class PhysicsFusionService:
                         continue
 
                     # Try to process this minute
+                    self._pet_watchdog()
                     station_data = self._read_l2_slice(target_minute)
+                    self._pet_watchdog()
                     if station_data:
                         self.process_minute(target_minute, station_data=station_data)
                         self.last_processed_minute = max(self.last_processed_minute, target_minute)

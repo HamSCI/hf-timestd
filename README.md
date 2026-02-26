@@ -168,7 +168,7 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Status
 
-**Testing (V6.7.1)** - Active development and field testing in progress.
+**Testing (V6.8.0)** - Active development and field testing in progress.
 
 ## Credits & Support
 
@@ -177,6 +177,15 @@ The system is composed of eight independent services that form a pipeline:
 **License:** MIT - See [LICENSE](LICENSE)
 
 ### Recent Updates
+
+**v6.8.0 (February 26, 2026) - Web UI Polish & Physics Service Resilience**
+
+- ✅ **Custom date range** on all time-selector pages (ionogram, dTEC, metrology, logs) — browse any historical day
+- ✅ **Solar elevation overlay** on ionogram ToF/SNR time series — curve-only, no shading, consistent across all pages
+- ✅ **Brighter color scheme** for dark backgrounds — station colors and secondary markers improved on ionogram and dTEC pages
+- ✅ **Removed integrated dTEC panel** from dTEC page (rarely detectable, compressed useful plots)
+- ✅ **Physics service crash-loop protection** — `_timed_write()` wraps all HDF5 writes with 30s timeout; `_pet_watchdog()` called 17× throughout `process_minute()` to prevent watchdog kills during heavy I/O
+- ✅ **Logs API `until` parameter** — enables custom date range queries for journal logs
 
 **v6.7.1 (February 12, 2026) - Propagation Model Full Integration**
 

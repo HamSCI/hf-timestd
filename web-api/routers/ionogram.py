@@ -32,10 +32,10 @@ ALL_ARRIVALS_CHANNELS = [
 
 # Station colour palette (matches Gwyn Griffiths slide aesthetic)
 STATION_COLORS = {
-    "CHU": "#7B68EE",   # medium slate blue
-    "WWV": "#20B2AA",   # light sea green
-    "WWVH": "#FF8C00",  # dark orange
-    "BPM": "#DC143C",   # crimson
+    "CHU": "#A78BFA",   # bright violet (was #7B68EE)
+    "WWV": "#2DD4BF",   # bright teal (was #20B2AA)
+    "WWVH": "#FB923C",  # bright orange (was #FF8C00)
+    "BPM": "#FB7185",   # bright rose (was #DC143C)
 }
 
 
@@ -44,6 +44,48 @@ def _channel_to_station(channel: str) -> str:
         if channel.startswith(s):
             return s
     return channel
+
+
+def _compute_solar_overlay(station: str, t0: datetime, t1: datetime) -> dict:
+    """Compute solar elevation at the path midpoint for day/night shading."""
+    try:
+        from hf_timestd.core.solar_zenith_calculator import (
+            calculate_midpoint, solar_position,
+        )
+
+        rx_lat = config.station_metadata.get('latitude', 0.0)
+        rx_lon = config.station_metadata.get('longitude', 0.0)
+
+        # Transmitter coordinates (approximate)
+        TX_COORDS = {
+            "CHU": (45.2950, -75.7533),   # Ottawa
+            "WWV": (40.6776, -105.0461),   # Fort Collins
+            "WWVH": (21.9886, -159.7642),  # Kauai
+            "BPM": (34.95, 109.51),        # Pucheng
+        }
+        tx_lat, tx_lon = TX_COORDS.get(station, (40.0, -100.0))
+        mid_lat, mid_lon = calculate_midpoint(rx_lat, rx_lon, tx_lat, tx_lon)
+
+        # Generate every 5 minutes over the window
+        timestamps = []
+        elevations = []
+        step = timedelta(minutes=5)
+        curr = t0
+        while curr <= t1:
+            _, el = solar_position(curr, mid_lat, mid_lon)
+            timestamps.append(int(curr.timestamp()))
+            elevations.append(round(el, 2))
+            curr += step
+
+        return {
+            "timestamps": timestamps,
+            "elevation_deg": elevations,
+            "midpoint": {"lat": round(mid_lat, 2), "lon": round(mid_lon, 2)},
+            "station": station,
+        }
+    except Exception as e:
+        logger.debug(f"Solar overlay failed: {e}")
+        return None
 
 
 def _load_all_arrivals(
@@ -79,6 +121,9 @@ def _load_all_arrivals(
         "corr_snr_db": [],
         "peak_rank": [],
         "utc_second": [],
+        "carrier_phase_rad": [],
+        "detection_method": [],
+        "sec_in_minute": [],
     }
 
     for fpath in files:
@@ -92,11 +137,39 @@ def _load_all_arrivals(
                 sec = h["utc_second"][:]
 
                 # HDF5 datasets may have slightly different lengths if the
-                # file was written mid-minute; truncate all to the minimum.
+                # file was written mid-minute; truncate core fields to minimum.
                 n = min(len(mb), len(snr), len(rank), len(arr), len(te), len(sec))
                 mb, snr, rank, arr, te, sec = (
                     mb[:n], snr[:n], rank[:n], arr[:n], te[:n], sec[:n]
                 )
+
+                # New fields (v2.0.0) — graceful fallback for older files
+                # or mixed files where new fields are shorter (pre-deploy
+                # records in the same daily file lack these fields).
+                # New records are APPENDED, so new fields correspond to the
+                # LAST n_new rows of core fields.  Pad the front with defaults.
+                def _pad_field(h5file, name, n_core, default_val, dtype=None):
+                    if name in h5file:
+                        raw = h5file[name][:]
+                        if len(raw) >= n_core:
+                            return raw[:n_core]
+                        # Pad front (old rows) with defaults, append real data
+                        n_pad = n_core - len(raw)
+                        if isinstance(default_val, bytes):
+                            pad = np.array([default_val] * n_pad)
+                        else:
+                            pad = np.full(n_pad, default_val,
+                                          dtype=dtype or type(default_val))
+                        return np.concatenate([pad, raw])
+                    # Field entirely absent — all defaults
+                    if isinstance(default_val, bytes):
+                        return np.array([default_val] * n_core)
+                    return np.full(n_core, default_val,
+                                   dtype=dtype or type(default_val))
+
+                phase = _pad_field(h, "carrier_phase_rad", n, 0.0)
+                method = _pad_field(h, "detection_method", n, b'tone_correlator')
+                sim_col = _pad_field(h, "sec_in_minute", n, 0, dtype=int)
 
                 mask = (mb >= ts0) & (mb <= ts1)
                 if not np.any(mask):
@@ -108,6 +181,9 @@ def _load_all_arrivals(
                 te = te[mask]
                 sec = sec[mask]
                 mb_f = mb[mask]
+                phase = phase[mask]
+                method = method[mask]
+                sim_col = sim_col[mask]
 
                 # Apply filters
                 fmask = snr >= min_snr_db
@@ -120,6 +196,14 @@ def _load_all_arrivals(
                 rows["corr_snr_db"].extend(snr[fmask].tolist())
                 rows["peak_rank"].extend(rank[fmask].tolist())
                 rows["utc_second"].extend(sec[fmask].tolist())
+                rows["carrier_phase_rad"].extend(phase[fmask].tolist())
+                # Decode bytes to str for detection_method
+                m_filtered = method[fmask]
+                rows["detection_method"].extend(
+                    [m.decode('utf-8') if isinstance(m, bytes) else str(m)
+                     for m in m_filtered]
+                )
+                rows["sec_in_minute"].extend(sim_col[fmask].tolist())
         except Exception as e:
             logger.warning(f"Error reading {fpath}: {e}")
             continue
@@ -444,40 +528,40 @@ async def get_arrivals_timeseries(
         dom_ts, dom_tof, dom_snr = _bin_by_minute(mb[dom], tof[dom], snr[dom])
         sec_ts, sec_tof, sec_snr = _bin_by_minute(mb[sec], tof[sec], snr[sec])
 
-        # Implied F2 height from rank-0 vs rank-1 delay difference
-        # Match dominant and secondary by minute, compute Δτ
+        # Implied F2 height from rank-0 vs rank-1 delay difference.
+        # Match dominant and secondary by minute, compute Δτ.
+        # Require Δτ ≥ 2ms to reject correlation sidelobes masquerading
+        # as multipath (real 1F2→2F2 separation is typically 3-10ms).
         dom_dict = dict(zip(dom_ts, dom_tof))
+        dom_snr_dict = dict(zip(dom_ts, dom_snr))
         sec_dict = dict(zip(sec_ts, sec_tof))
+        sec_snr_dict = dict(zip(sec_ts, sec_snr))
         common = sorted(set(dom_dict) & set(sec_dict))
 
-        # Distance for this channel (rough, from wwv_constants)
-        DIST_KM = {
-            "CHU_3330": 1650, "CHU_7850": 1650, "CHU_14670": 1650,
-            "WWV_5000": 1200, "WWV_10000": 1200, "WWV_15000": 1200,
-            "WWV_20000": 1200, "WWV_25000": 1200,
-            "WWVH_5000": 4400, "WWVH_10000": 4400,
-            "BPM_5000": 10960, "BPM_10000": 10960,
-        }
-        d_km = DIST_KM.get(channel, 1500)
         C_KM_S = 299792.458
+        MIN_DELTA_TAU_MS = 2.0   # reject sidelobes (< 2ms not physical)
+        MIN_PAIR_SNR_DB = 20.0   # both arrivals must be strong
 
         h_ts, h_vals = [], []
         for t in common:
-            delta_tau_s = (sec_dict[t] - dom_dict[t]) / 1000.0
-            if delta_tau_s <= 0:
+            delta_tau_ms = sec_dict[t] - dom_dict[t]
+            if delta_tau_ms < MIN_DELTA_TAU_MS:
                 continue
-            # 2-hop vs 1-hop: Δτ = 2/c * (sqrt(h²+(d/2)²) - sqrt(h²+(d/4)²))
-            # Approximate: use simpler flat-Earth 1F vs 2F formula
-            # τ_1F = 2/c * sqrt(h² + (d/2)²)
-            # τ_2F = 4/c * sqrt(h² + (d/4)²)
-            # Δτ = τ_2F - τ_1F → solve for h numerically
-            # For display, use the simpler estimate: h ≈ c*Δτ/2 (vertical path approx)
-            h_approx_km = C_KM_S * delta_tau_s / 2.0
+            # Require both rank-0 and rank-1 to have decent SNR
+            if dom_snr_dict.get(t, 0) < MIN_PAIR_SNR_DB:
+                continue
+            if sec_snr_dict.get(t, 0) < MIN_PAIR_SNR_DB:
+                continue
+            # Simple vertical-path approximation: h ≈ c·Δτ/2
+            h_approx_km = C_KM_S * (delta_tau_ms / 1000.0) / 2.0
             if 100 < h_approx_km < 600:
                 h_ts.append(int(t))
                 h_vals.append(float(h_approx_km))
 
         station = _channel_to_station(channel)
+
+        # Solar zenith at path midpoint — for day/night shading overlay
+        solar = _compute_solar_overlay(station, t0, t1)
 
         return {
             "status": "ok",
@@ -503,12 +587,185 @@ async def get_arrivals_timeseries(
                 "n": len(h_ts),
                 "note": "Approximate F2 virtual height from rank-0 vs rank-1 delay difference",
             },
+            "solar": solar,
         }
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error in /ionogram/arrivals/timeseries: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/doppler-delay")
+async def get_doppler_delay(
+    channel: str = Query("CHU_7850", description="Channel name"),
+    start: str = Query("-6h", description="Start time"),
+    end: str = Query("now", description="End time"),
+    min_snr_db: float = Query(3.0, description="Minimum tick SNR (lower for edge ticks)"),
+    method: Optional[str] = Query(None, description="Filter by detection_method: 'edge_tick', 'tone_correlator', or None for all"),
+    include_kde: bool = Query(True, description="Include 2D KDE density grid"),
+):
+    """
+    Doppler-Delay scatter: per-tick timing_error vs carrier_phase.
+
+    Each point is one per-second tick detection from the TickEdgeDetector.
+    The carrier_phase_rad progression across seconds within a minute encodes
+    Doppler shift; the timing_error_ms is the propagation delay residual.
+
+    Multipath modes (1F2, 2F2, ...) arriving via different ionospheric layers
+    have different Doppler shifts (because the layers move at different
+    velocities).  Even when delays are too close to resolve temporally,
+    different Doppler signatures separate them in the phase domain.
+
+    The 2D KDE highlights clusters — each cluster is a candidate propagation
+    mode.  This is the HF time-signal analogue of a Doppler-Delay spread
+    function from channel sounding.
+    """
+    try:
+        import numpy as np
+
+        now = datetime.utcnow()
+
+        def _parse(s):
+            if s == "now":
+                return now
+            if s.startswith("-"):
+                val = int(s[1:-1])
+                u = s[-1]
+                if u == "h":
+                    return now - timedelta(hours=val)
+                if u == "d":
+                    return now - timedelta(days=val)
+                if u == "m":
+                    return now - timedelta(minutes=val)
+                raise ValueError(f"Unknown unit '{u}'")
+            return datetime.fromisoformat(s.replace("Z", ""))
+
+        t0 = _parse(start)
+        t1 = _parse(end)
+        ts0 = int(t0.timestamp())
+        ts1 = int(t1.timestamp())
+
+        data_root = Path(config.data_root)
+        rows = _load_all_arrivals(channel, ts0, ts1, None, min_snr_db, data_root)
+
+        if rows is None or not rows["minute_boundary"]:
+            return {
+                "status": "no_data",
+                "channel": channel,
+                "time_range": {"start": t0.isoformat() + "Z", "end": t1.isoformat() + "Z"},
+                "n_points": 0,
+                "scatter": {},
+                "kde": None,
+            }
+
+        te_arr = np.array(rows["timing_error_ms"])
+        phase_arr = np.array(rows["carrier_phase_rad"])
+        snr_arr = np.array(rows["corr_snr_db"])
+        mb_arr = np.array(rows["minute_boundary"])
+        sec_arr = np.array(rows["utc_second"])
+        sim_arr = np.array(rows.get("sec_in_minute", [0] * len(te_arr)))
+        method_arr = np.array(rows["detection_method"])
+
+        # Filter by detection method if specified
+        if method:
+            method_mask = np.array([m == method for m in method_arr])
+        else:
+            method_mask = np.ones(len(te_arr), dtype=bool)
+
+        # Filter out zero-phase records (tone_correlator doesn't have real phase)
+        # and require finite values
+        valid = (
+            method_mask
+            & np.isfinite(te_arr)
+            & np.isfinite(phase_arr)
+            & (snr_arr >= min_snr_db)
+        )
+
+        # For edge_tick records, also filter implausible timing errors
+        station = _channel_to_station(channel)
+        if station == "CHU":
+            valid &= (np.abs(te_arr) < 20.0)
+        else:
+            valid &= (np.abs(te_arr) < 15.0)
+
+        te = te_arr[valid]
+        phase = phase_arr[valid]
+        snr = snr_arr[valid]
+        mb = mb_arr[valid]
+        sec = sec_arr[valid]
+        sim = sim_arr[valid]
+        meth = method_arr[valid]
+
+        # Unwrap phase per minute to show Doppler trend
+        # Group by minute_boundary, unwrap within each minute
+        phase_unwrapped = np.copy(phase)
+        for m in np.unique(mb):
+            minute_mask = mb == m
+            if np.sum(minute_mask) >= 3:
+                phase_unwrapped[minute_mask] = np.unwrap(phase[minute_mask])
+
+        # Compute per-minute Doppler from phase slope
+        minute_doppler = {}
+        for m in np.unique(mb):
+            minute_mask = mb == m
+            if np.sum(minute_mask) >= 5:
+                t_sec = sim[minute_mask].astype(float)
+                p_rad = phase_unwrapped[minute_mask]
+                if t_sec[-1] - t_sec[0] > 5.0:
+                    try:
+                        coeffs = np.polyfit(t_sec, p_rad, 1)
+                        doppler_hz = coeffs[0] / (2.0 * np.pi)
+                        minute_doppler[int(m)] = float(doppler_hz)
+                    except Exception:
+                        pass
+
+        scatter = {
+            "minute_boundary": mb.tolist(),
+            "utc_second": sec.tolist(),
+            "sec_in_minute": sim.tolist(),
+            "timing_error_ms": te.tolist(),
+            "carrier_phase_rad": phase.tolist(),
+            "phase_unwrapped_rad": phase_unwrapped.tolist(),
+            "corr_snr_db": snr.tolist(),
+            "detection_method": [str(m) for m in meth],
+        }
+
+        # 2D KDE: timing_error (x) vs carrier_phase (y)
+        kde_result = None
+        if include_kde and len(te) >= 20:
+            kde_result = _kde_contours(te, phase, n_grid=50, bandwidth=None)
+
+        # Summary statistics
+        n_edge = int(np.sum(np.array([m == 'edge_tick' for m in meth])))
+        n_corr = int(np.sum(np.array([m == 'tone_correlator' for m in meth])))
+
+        return {
+            "status": "ok",
+            "channel": channel,
+            "station": station,
+            "color": STATION_COLORS.get(station, "#888888"),
+            "time_range": {"start": t0.isoformat() + "Z", "end": t1.isoformat() + "Z"},
+            "n_points": len(te),
+            "n_edge_ticks": n_edge,
+            "n_tone_correlator": n_corr,
+            "scatter": scatter,
+            "kde": kde_result,
+            "minute_doppler": minute_doppler,
+            "summary": {
+                "timing_error_mean_ms": float(np.nanmean(te)) if len(te) > 0 else 0.0,
+                "timing_error_std_ms": float(np.nanstd(te)) if len(te) > 0 else 0.0,
+                "phase_std_rad": float(np.nanstd(phase)) if len(phase) > 0 else 0.0,
+                "mean_snr_db": float(np.nanmean(snr)) if len(snr) > 0 else 0.0,
+                "n_minutes_with_doppler": len(minute_doppler),
+            },
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error in /ionogram/doppler-delay: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

@@ -705,8 +705,11 @@ class MetrologyService:
                                 'corr_snr_db': arr.get('corr_snr_db', -99.0),
                                 'peak_value': arr.get('peak_value', 0.0),
                                 'model_expected_ms': expected_ms,
+                                'carrier_phase_rad': 0.0,
+                                'detection_method': 'tone_correlator',
+                                'sec_in_minute': int(utc_sec % 60) if utc_sec else 0,
                                 'processed_at': now_iso,
-                                'processing_version': "1.0.0",
+                                'processing_version': "2.0.0",
                             }
                             try:
                                 self.all_arrivals_writer.write_measurement(rec)
@@ -716,6 +719,92 @@ class MetrologyService:
                                 logger.debug(f"Failed to write all_arrivals record: {arr_err}")
                     if n_multipath > 0:
                         logger.info(f"All-arrivals: {n_multipath} secondary path(s) recorded")
+
+            # Write per-tick edge detections to all_arrivals (Doppler-Delay product).
+            # Each detected tick from the TickEdgeDetector becomes one row with
+            # timing_error_ms and carrier_phase_rad.  This enables Doppler-Delay
+            # scatter plots: phase slope across seconds = Doppler, timing_error =
+            # propagation delay residual.  Multipath modes show as distinct
+            # clusters in the (delay, phase) plane even when temporally unresolved.
+            if self.all_arrivals_writer and edge_results:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                freq_mhz = self.frequency_hz / 1e6
+                n_edge_ticks = 0
+                for station_name, edge_result in edge_results.items():
+                    if not edge_result.edges:
+                        continue
+                    expected_delay_ms = None
+                    if hasattr(self.engine, '_predict_geometric_delay'):
+                        try:
+                            expected_delay_ms, _, _ = self.engine._predict_geometric_delay(
+                                station_name, minute_boundary
+                            )
+                        except Exception:
+                            pass
+                    n_clean_multipath = 0
+                    for tick in edge_result.edges:
+                        if not tick.detected:
+                            continue
+                        rec = {
+                            'timestamp_utc': now_iso,
+                            'minute_boundary_utc': minute_boundary,
+                            'channel': self.channel_name,
+                            'station': station_name,
+                            'frequency_mhz': freq_mhz,
+                            'utc_second': tick.utc_second,
+                            'peak_rank': 0,
+                            'arrival_ms': tick.front_edge_sample * 1000.0 / self.engine.sample_rate,
+                            'timing_error_ms': tick.timing_error_ms,
+                            'corr_snr_db': tick.corr_snr_db,
+                            'peak_value': 0.0,
+                            'model_expected_ms': expected_delay_ms or 0.0,
+                            'carrier_phase_rad': tick.carrier_phase_rad,
+                            'detection_method': 'edge_tick',
+                            'sec_in_minute': tick.sec_in_minute,
+                            'processed_at': now_iso,
+                            'processing_version': "2.0.0",
+                        }
+                        try:
+                            self.all_arrivals_writer.write_measurement(rec)
+                            n_edge_ticks += 1
+                        except Exception as edge_err:
+                            logger.debug(f"Failed to write edge tick record: {edge_err}")
+                        
+                        # Write CLEAN multipath arrivals (rank >= 1 only;
+                        # rank 0 is the same as the edge_tick primary above).
+                        for comp in tick.clean_arrivals:
+                            if comp.peak_rank == 0:
+                                continue
+                            clean_rec = {
+                                'timestamp_utc': now_iso,
+                                'minute_boundary_utc': minute_boundary,
+                                'channel': self.channel_name,
+                                'station': station_name,
+                                'frequency_mhz': freq_mhz,
+                                'utc_second': tick.utc_second,
+                                'peak_rank': comp.peak_rank,
+                                'arrival_ms': 0.0,
+                                'timing_error_ms': comp.timing_error_ms,
+                                'corr_snr_db': comp.corr_snr_db,
+                                'peak_value': comp.relative_amplitude,
+                                'model_expected_ms': expected_delay_ms or 0.0,
+                                'carrier_phase_rad': comp.carrier_phase_rad,
+                                'detection_method': 'clean',
+                                'sec_in_minute': tick.sec_in_minute,
+                                'processed_at': now_iso,
+                                'processing_version': "2.0.0",
+                            }
+                            try:
+                                self.all_arrivals_writer.write_measurement(clean_rec)
+                                n_clean_multipath += 1
+                            except Exception as clean_err:
+                                logger.debug(f"Failed to write CLEAN record: {clean_err}")
+                if n_edge_ticks > 0:
+                    logger.info(f"All-arrivals: {n_edge_ticks} edge tick(s) written "
+                               f"for Doppler-Delay analysis")
+                if n_clean_multipath > 0:
+                    logger.info(f"All-arrivals: {n_clean_multipath} CLEAN multipath "
+                               f"component(s) written")
 
             # Write test signal for minutes 8 and 44 (WWV/WWVH channel sounding)
             minute_number = (minute_boundary // 60) % 60

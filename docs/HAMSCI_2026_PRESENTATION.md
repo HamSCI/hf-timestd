@@ -113,6 +113,7 @@
 4. **CHU FSK time code decode** — previously demonstrated (8/9 frames decoded, confidence=1.00 on CHU 14670); write path broken by later refactoring, fixable
 5. **VTEC maps from HF** — group-delay TEC has SNR ~0.13 (signal buried in propagation model noise); geometrically correct but physically unreliable without better per-path sTEC or GNSS priors
 6. **Phase-array angle-of-arrival** — multiple GPSDO-locked RX888s at one site would enable direction-of-arrival separation of multipath modes
+7. **Resolved multipath ionogram** — the current matched-filter correlator uses 300 ms (CHU) / 800 ms (WWV) tone templates with 100 Hz bandpass, giving ~10 ms time resolution. Multi-hop 1F→2F separation is only 3–6 ms for our geometry, below the mainlobe width. GPSDO provides µs-level absolute sample timing, so the limit is the *ambiguity function* of the matched filter, not the clock. Three paths forward: (a) carrier-domain analysis on unique channels (CHU, WWV 20/25) where wider bandpass is possible without cross-station contamination, (b) PhaRLAP ray-tracing integration for precise multi-hop delay predictions enabling constrained model fitting even within the mainlobe, (c) phased-array angle-of-arrival to separate modes geometrically rather than temporally
 
 ---
 
@@ -638,6 +639,9 @@ D\_clock has ~6.5 ms noise from propagation model errors; integrated Doppler acc
 
 **"Can you detect TIDs with this?"**
 The infrastructure exists — dTEC time series at 1-second resolution on 17 paths. Medium-scale TIDs (period 15–60 min, velocity ~100–300 m/s) should produce coherent oscillations in dTEC across paths. We haven't had a validated TID event in the current data window (February conditions, quiet geomagnetic activity). This is a near-term goal, particularly as we approach equinox.
+
+**"Can you resolve individual multipath modes on the ionogram?"**
+Not yet with the current matched-filter correlator. The GPSDO gives us µs-level absolute sample timing, so the clock isn't the limit — the limit is the ambiguity function of the matched filter. A 300 ms CHU tone template with 100 Hz bandpass produces a correlation mainlobe ~10 ms wide. The 1F→2F hop separation for our geometry (CHU at ~1650 km) is only ~6 ms — below the mainlobe width. Two arrivals within 10 ms merge into a single broadened peak. Three paths forward: (a) carrier-domain analysis on unique channels (CHU, WWV 20/25 MHz) where we can use wider bandpass without cross-station contamination, giving finer time resolution; (b) PhaRLAP ray-tracing for precise multi-hop delay predictions, enabling constrained model fitting even within the mainlobe; (c) phased-array angle-of-arrival with multiple GPSDO-locked receivers to separate modes geometrically rather than temporally. The 3F and 4F hops (>12 ms separation) may already be resolvable — that's a near-term investigation.
 
 **"What about ionospheric absorption / D-region effects?"**
 The power graph in the spectrogram shows signal strength variations that include D-region absorption (riometer-like). We don't currently separate absorption from multipath fading or other propagation effects, but the multi-frequency power data is there. A solar flare SID (sudden ionospheric disturbance) would show simultaneous power drops across all channels — detectable but not yet demonstrated.

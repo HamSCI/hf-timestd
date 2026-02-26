@@ -230,11 +230,18 @@
             <div class="card-header">
                 <div class="card-title">Fusion History</div>
             </div>
-            <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
+            <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
                 <button class="time-range-btn" data-range="-1h">Last Hour</button>
                 <button class="time-range-btn active" data-range="-6h">Last 6 Hours</button>
                 <button class="time-range-btn" data-range="-1d">Last 24 Hours</button>
                 <button class="time-range-btn" data-range="-7d">Last 7 Days</button>
+                <button class="time-range-btn" data-range="custom" id="fusionCustomBtn">Custom…</button>
+                <span id="fusionCustomInputs" style="display:none; gap:6px; align-items:center;">
+                    <input type="datetime-local" id="fusionCustomStart" style="padding:4px 8px; background:var(--bg-surface,#1e293b); border:1px solid rgba(59,130,246,0.3); border-radius:6px; color:#e2e8f0; font-size:12px;">
+                    <span style="color:#64748b; font-size:12px;">→</span>
+                    <input type="datetime-local" id="fusionCustomEnd" style="padding:4px 8px; background:var(--bg-surface,#1e293b); border:1px solid rgba(59,130,246,0.3); border-radius:6px; color:#e2e8f0; font-size:12px;">
+                    <button class="time-range-btn" onclick="loadCustomFusion()" style="padding:4px 12px;">Go</button>
+                </span>
             </div>
             <div id="fusion-plot" style="width: 100%; height: 400px;"></div>
         </div>
@@ -1091,11 +1098,11 @@
             }
         }
 
-        async function loadFusionHistory(range = '-6h') {
+        async function loadFusionHistory(range = '-6h', endParam = 'now') {
             try {
                 const data = await api.get('/metrology/fusion/history', {
                     start: range,
-                    end: 'now'
+                    end: endParam
                 });
 
                 if (data.count === 0) {
@@ -1186,14 +1193,34 @@
         }
 
         // Time range button handlers
-        document.querySelectorAll('.time-range-btn').forEach(btn => {
+        document.querySelectorAll('.time-range-btn:not(.adev-range-btn)').forEach(btn => {
             btn.addEventListener('click', () => {
-                document.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.time-range-btn:not(.adev-range-btn)').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
-                currentRange = btn.dataset.range;
+                const range = btn.dataset.range;
+                const customEl = document.getElementById('fusionCustomInputs');
+                if (range === 'custom') {
+                    customEl.style.display = 'flex';
+                    if (!document.getElementById('fusionCustomStart').value) {
+                        const now = new Date();
+                        const yesterday = new Date(now.getTime() - 86400000);
+                        document.getElementById('fusionCustomStart').value = yesterday.toISOString().slice(0, 16);
+                        document.getElementById('fusionCustomEnd').value = now.toISOString().slice(0, 16);
+                    }
+                    return;
+                }
+                customEl.style.display = 'none';
+                currentRange = range;
                 loadFusionHistory(currentRange);
             });
         });
+
+        function loadCustomFusion() {
+            const cs = document.getElementById('fusionCustomStart').value;
+            const ce = document.getElementById('fusionCustomEnd').value;
+            if (!cs || !ce) return;
+            loadFusionHistory(cs + ':00', ce + ':00');
+        }
 
         // Load Allan deviation
         let currentAdevRange = '-100000s';

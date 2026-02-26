@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** February 17, 2026  
+**Last Updated:** February 26, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.7.1+
+**Version:** V6.8.0
 
 ---
 
@@ -356,7 +356,7 @@ FastAPI Monitoring Server (Python, port 8000)
 ├─→ phase2/fusion/fusion_timing_*.h5
 └─→ phase2/{CHANNEL}/state/*.json
      ↓
-JSON Response → Chart.js plots
+JSON Response → Plotly.js plots
 ```
 
 ---
@@ -477,6 +477,8 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 ### Resilience
 
 - **Watchdogs:** All Python services integrate `systemd-python` to send heartbeat `WATCHDOG=1` notifications. If a service hangs, systemd restarts it automatically.
+- **Frequent watchdog pinging (v6.8):** The physics service calls `_pet_watchdog()` between every major processing step (TEC estimation, tomography, VTEC mapping, each HDF5 write) — 17+ times per `process_minute()` cycle. This prevents the 2-minute systemd watchdog from firing during heavy I/O.
+- **HDF5 write timeout (v6.8):** `_timed_write()` wraps every `write_measurement()` call in a 30-second thread timeout. If an HDF5 write blocks on file lock contention (from concurrent web API readers), the write is abandoned with a WARNING log rather than hanging the service until the watchdog kills it. This eliminates the crash-loop failure mode where the physics service would restart every ~20 minutes.
 - **Alerting:** Failures trigger email alerts via `OnFailure` handlers.
 
 ---
@@ -505,7 +507,7 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 
 ---
 
-**Last Updated:** February 17, 2026
+**Last Updated:** February 26, 2026
 
 ## Real-Time Ionospheric Propagation Model (v6.7)
 

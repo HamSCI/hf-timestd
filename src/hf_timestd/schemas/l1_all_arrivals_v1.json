@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.0.0",
+    "schema_version": "2.0.0",
     "data_product": "L1_all_arrivals",
     "description": "All significant correlation peaks per UTC second per station — one row per propagation path. Records multi-path arrivals (e.g. 2F2, 3F2, 4F2 at different delays) that are discarded by the metrology pipeline but carry ionospheric science value. The dominant arrival (peak_rank=0) corresponds to the measurement used by metrology; secondary arrivals (peak_rank>0) are additional propagation paths.",
     "cadence_seconds": 60,
@@ -7,7 +7,7 @@
     "standards": [
         "ITU-R TF.460-6 Standard-frequency and time-signal emissions"
     ],
-    "reference": "Multi-peak search in matched-filter correlation envelope, separated by >= one template length",
+    "reference": "Multi-peak search in matched-filter correlation envelope; per-tick edge detector with carrier phase for Doppler-Delay analysis",
     "fields": [
         {
             "name": "timestamp_utc",
@@ -81,6 +81,24 @@
             "type": "float",
             "required": false,
             "description": "Model-predicted arrival time from buffer start (ms), from HFPropagationModel"
+        },
+        {
+            "name": "carrier_phase_rad",
+            "type": "float",
+            "required": false,
+            "description": "Carrier phase at tone frequency (radians). Extracted by IQ mix-down at tick onset. Phase slope across ticks encodes Doppler shift; phase scatter indicates multipath."
+        },
+        {
+            "name": "detection_method",
+            "type": "string",
+            "required": false,
+            "description": "How this arrival was detected: 'tone_correlator' (long template matched filter, 300-800ms), 'edge_tick' (per-second 5ms tick edge detector), or 'clean' (CLEAN deconvolution)."
+        },
+        {
+            "name": "sec_in_minute",
+            "type": "integer",
+            "required": false,
+            "description": "Second within the minute (0-59) for per-tick detections."
         },
         {
             "name": "processed_at",

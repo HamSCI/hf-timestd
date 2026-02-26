@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 17, 2026
+**Last Updated:** February 26, 2026
 
 ---
 
