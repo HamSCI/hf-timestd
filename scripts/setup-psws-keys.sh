@@ -191,7 +191,7 @@ EOF
         -o ConnectTimeout=15 \
         -P "${PSWS_PORT}" \
         -b "${SFTP_FETCH_BATCH}" \
-        "${STATION_ID}@${PSWS_HOST}" 2>/dev/null || true
+        "${STATION_ID}@${PSWS_HOST}" || true
 
     # Merge: existing keys (if any) + our new key (deduplicated)
     MERGED="${TMPDIR}/authorized_keys"
@@ -222,7 +222,7 @@ EOF
             -o ConnectTimeout=15 \
             -P "${PSWS_PORT}" \
             -b "${SFTP_PUT_BATCH}" \
-            "${STATION_ID}@${PSWS_HOST}" 2>/dev/null; then
+            "${STATION_ID}@${PSWS_HOST}"; then
         log_info "  ✅ Public key uploaded to ${PSWS_HOST}"
     else
         log_error "  SFTP upload failed. Check your TOKEN and try again."
