@@ -188,6 +188,12 @@ refresh_interval = 60
 #              then narrows window. HF-timestd disciplines Chrony via SHM.
 authority = "rtp"
 
+# Expected accuracy when authority = "rtp" (used for search window sizing)
+# L5 (GPS+PPS local): 0.0001 ms (100 ns)
+# L4 (GPS+PPS LAN):   0.001 ms (1 us)
+# L3 (NTP only):      1.0 ms
+rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
+
 [gnss_vtec]
 enabled = false                         # Set to true if you have a GNSS receiver
 host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge

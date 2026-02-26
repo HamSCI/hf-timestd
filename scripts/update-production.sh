@@ -164,16 +164,9 @@ find /usr/local/lib/python*/dist-packages -name 'hf-timestd.egg-link' -delete 2>
 find /usr/local/lib/python*/dist-packages -name '__editable__.hf_timestd*' -delete 2>/dev/null || true
 
 # Install the package (NOT editable) to ensure production uses copied code
-# --force-reinstall ensures all modules are updated even if version unchanged
-"$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet --force-reinstall
+# pip will skip if version hasn't changed; bump version in pyproject.toml to force
+"$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet
 log_info "  ✅ Python package updated in venv (copied, not linked)"
-
-# Also update the system-wide package for services that use system Python
-# This is needed because some services may use /usr/bin/python3 instead of venv
-if command -v pip3 &> /dev/null; then
-    pip3 install "$PROJECT_DIR" --quiet --break-system-packages --force-reinstall 2>/dev/null || true
-    log_info "  ✅ System Python package also updated"
-fi
 
 # =============================================================================
 # Step 1b: Sync source tree to INSTALL_DIR for ensure-venv.sh
@@ -198,12 +191,15 @@ log_info "  ✅ pyproject.toml + src/ synced to $INSTALL_DIR"
 # =============================================================================
 log_info "Step 2: Copying updated scripts..."
 
-# Copy all scripts
-cp "$PROJECT_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/" 2>/dev/null || true
-cp "$PROJECT_DIR/scripts/"*.py "$INSTALL_DIR/scripts/" 2>/dev/null || true
+# Sync scripts (--delete removes scripts that no longer exist in repo)
+rsync -a --delete \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    "$PROJECT_DIR/scripts/" "$INSTALL_DIR/scripts/"
 chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
+chown -R timestd:timestd "$INSTALL_DIR/scripts/"
 
-log_info "  ✅ Scripts copied to $INSTALL_DIR/scripts/"
+log_info "  ✅ Scripts synced to $INSTALL_DIR/scripts/"
 
 # =============================================================================
 # Step 2b: Sync Web API Directory

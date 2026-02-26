@@ -798,19 +798,36 @@ class IonosphericReanalysis:
                 logger.error(f"Failed to process hour {hour_start}: {e}", exc_info=True)
 
 
+def _load_config(config_path: str) -> dict:
+    """Load and return the parsed TOML config, or empty dict on failure."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # Python < 3.11
+    try:
+        with open(config_path, 'rb') as f:
+            return tomllib.load(f)
+    except Exception as e:
+        logger.warning(f"Could not load config {config_path}: {e}")
+        return {}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Ionospheric Reanalysis Service - offline mode/TEC cleanup'
     )
     parser.add_argument(
-        '--data-root', type=str,
-        default=os.environ.get('TIMESTD_DATA_ROOT', '/var/lib/timestd'),
-        help='Data root directory'
+        '--config', type=str,
+        default='/etc/hf-timestd/timestd-config.toml',
+        help='Path to timestd-config.toml'
     )
     parser.add_argument(
-        '--grid', type=str,
-        default=os.environ.get('TIMESTD_GRID', 'EM38ww'),
-        help='Receiver Maidenhead grid square'
+        '--data-root', type=str, default=None,
+        help='Data root directory (overrides config)'
+    )
+    parser.add_argument(
+        '--grid', type=str, default=None,
+        help='Receiver Maidenhead grid square (overrides config)'
     )
     parser.add_argument(
         '--hours', type=int, default=1,
@@ -826,14 +843,25 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    logger.info(f"Ionospheric Reanalysis starting: data_root={args.data_root}, "
-                f"grid={args.grid}, hours={args.hours}")
+    # Load config, then apply CLI overrides
+    cfg = _load_config(args.config)
+    data_root = args.data_root or os.environ.get('TIMESTD_DATA_ROOT') or \
+        cfg.get('recorder', {}).get('production_data_root', '/var/lib/timestd')
+    grid = args.grid or os.environ.get('TIMESTD_GRID') or \
+        cfg.get('station', {}).get('grid_square', '')
+
+    if not grid:
+        logger.error("grid not set (provide --grid or set station.grid_square in config)")
+        sys.exit(1)
+
+    logger.info(f"Ionospheric Reanalysis starting: data_root={data_root}, "
+                f"grid={grid}, hours={args.hours}")
 
     start_time = time.time()
 
     reanalysis = IonosphericReanalysis(
-        data_root=Path(args.data_root),
-        receiver_grid=args.grid,
+        data_root=Path(data_root),
+        receiver_grid=grid,
     )
     reanalysis.run_backfill(hours_back=args.hours)
 

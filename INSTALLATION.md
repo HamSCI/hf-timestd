@@ -1,7 +1,7 @@
 # HF Time Standard Analysis (hf-timestd) - Installation Guide
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 14, 2026
+**Last Updated:** February 26, 2026
 
 This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, CHU, WWV, WWVH).
 
@@ -19,102 +19,119 @@ This guide covers installing and configuring `hf-timestd` for recording and anal
 ### Software
 
 - Linux (Debian/Ubuntu class)
-- Python 3.11+
+- Python 3.10+
 - **ka9q-radio** installed and running (`radiod`)
-- **HDF5 Libraries** (`libhdf5-dev`)
+- **HDF5 Libraries** (installed automatically by the installer)
+
+### Information You Will Need
+
+Before running the installer, have the following ready:
+
+- **Station callsign** (e.g., `W1ABC`)
+- **Maidenhead grid square** (6 or 10 characters, e.g., `FN31pr` or `FN31pr42ab`)
+- **Station latitude and longitude** (decimal degrees)
+- **ka9q-radio status address** (e.g., `hf-status.local` — find via `avahi-browse -rt _ka9q-ctl._udp`)
+- **PSWS station ID and instrument ID** (if uploading to the HamSCI PSWS network)
+- **GNSS receiver address and port** (if using a ZED-F9P for VTEC monitoring)
 
 ---
 
-## Install (Production Mode)
-
-This is the recommended installation for 24/7 operation.
+## Installation
 
 ```bash
 # 1. Clone repository
 git clone https://github.com/mijahauan/hf-timestd.git
 cd hf-timestd
 
-# 2. Run installer (installs all dependencies, creates 'timestd' system user)
-sudo ./scripts/install.sh --mode production
+# 2. Run installer (interactive wizard guides configuration)
+sudo ./scripts/install.sh
+```
 
-# 3. Edit global configuration
-sudo nano /etc/hf-timestd/timestd-config.toml
+The installer:
 
-# 4. Enable and start core services (in dependency order)
-sudo systemctl enable --now timestd-core-recorder    # Phase 1: RTP → Raw Buffer
-sudo systemctl enable --now timestd-metrology        # Phase 2: L1 Raw Measurements
-sudo systemctl enable --now timestd-l2-calibration   # Phase 2: L2 Calibrated Timing
-sudo systemctl enable --now timestd-fusion           # Phase 3: Fusion → Chrony SHM
-sudo systemctl enable --now timestd-physics          # Phase 3: TEC Estimation
-sudo systemctl enable --now timestd-web-api          # Web API & Dashboard
+1. Installs all apt dependencies and verifies Python 3.10+
+2. Installs and configures chrony for SHM clock discipline
+3. Configures UDP receive buffers for RTP packet handling
+4. Creates the `timestd` system user and production directories
+5. Sets up the Python virtual environment (`/opt/hf-timestd/venv`)
+6. Copies web-api, scripts, and systemd service files
+7. **Runs the setup wizard** (`setup-station.sh`) — an interactive prompt that collects your station identity, ka9q-radio address, timing mode, GNSS VTEC settings, and PSWS upload credentials, then generates `/etc/hf-timestd/timestd-config.toml`
+8. Installs and enables all systemd services and timers
 
-# 5. Enable optional services
-sudo systemctl enable --now timestd-vtec                    # GNSS VTEC (if enabled in config)
-sudo systemctl enable --now timestd-ionex-download.timer    # Daily IONEX downloads
-sudo systemctl enable --now timestd-chrony-monitor.timer    # Chrony health monitoring
-sudo systemctl enable --now timestd-radiod-monitor          # Radiod health monitoring
-sudo systemctl enable --now grape-daily.timer                # Daily GRAPE processing + PSWS upload
+The installation is **idempotent** — safe to re-run. On re-run, it will skip steps that are already complete and offer to re-run the configuration wizard if a config already exists.
+
+### After Installation
+
+```bash
+# Start all services
+sudo systemctl start timestd-core-recorder    # Phase 1: RTP → Raw Buffer
+sudo systemctl start timestd-metrology        # Phase 2: L1 Raw Measurements
+sudo systemctl start timestd-l2-calibration   # Phase 2: L2 Calibrated Timing
+sudo systemctl start timestd-fusion           # Phase 3: Fusion → Chrony SHM
+sudo systemctl start timestd-physics          # Phase 3: TEC Estimation
+sudo systemctl start timestd-web-api          # Web API & Dashboard
+
+# Start periodic timers
+sudo systemctl start timestd-ionex-download.timer    # Daily IONEX maps
+sudo systemctl start timestd-chrony-monitor.timer    # Chrony health check
 ```
 
 ### Production Paths
 
 - **Data:** `/var/lib/timestd/`
 - **Logs:** `/var/log/hf-timestd/`
-- **Config:** `/etc/hf-timestd/`
+- **Config:** `/etc/hf-timestd/timestd-config.toml`
+- **Venv:** `/opt/hf-timestd/venv/`
+- **Web API:** `/opt/hf-timestd/web-api/`
 
 ---
 
-## Install (Test/Development Mode)
-
-For temporary capability testing or development.
+## Updating
 
 ```bash
-# 1. Run installer in test mode
-./scripts/install.sh --mode test
-
-# (If you are not using install.sh) Create/update local venv
-./scripts/ensure-venv.sh --mode test --venv ./venv --python python3
-
-# 2. Edit local configuration
-nano config/timestd-config.toml
-
-# 3. Start core recorder
-source venv/bin/activate
-python -m hf_timestd --config config/timestd-config.toml
-
-# 4. In another terminal, start web API
-cd web-api && ../venv/bin/python main.py
+cd /path/to/hf-timestd
+sudo ./scripts/update-production.sh --pull
 ```
 
-### Test Paths
+This pulls the latest code, reinstalls the Python package, syncs scripts/web-api/systemd files, and restarts affected services. The core recorder is **not** restarted automatically to avoid data gaps.
 
-- **Data:** `/tmp/timestd-test/`
-- **Logs:** `/tmp/timestd-test/logs/`
-- **Config:** `config/timestd-config.toml`
+---
+
+## Re-running the Configuration Wizard
+
+To change station settings after installation:
+
+```bash
+sudo ./scripts/setup-station.sh --config /etc/hf-timestd/timestd-config.toml --reconfig
+```
+
+Or re-run the full installer, which will offer to re-run the wizard:
+
+```bash
+sudo ./scripts/install.sh
+```
 
 ---
 
 ## Configuration Overview
 
-After installation, configure your station-specific settings.
+The setup wizard populates `/etc/hf-timestd/timestd-config.toml` from a template. You can also edit it manually.
 
 **📖 See [docs/STATION_SETUP_GUIDE.md](docs/STATION_SETUP_GUIDE.md) for detailed configuration instructions.**
 
-### Required Settings
-
-Edit `/etc/hf-timestd/timestd-config.toml`:
+### Key Sections
 
 ```toml
 [station]
-callsign = "<YOUR_CALLSIGN>"      # e.g., "W1ABC"
-grid_square = "<YOUR_GRID>"       # 10-char Maidenhead, e.g., "FN42ab12cd"
-latitude = 0.0                    # Decimal degrees (required for physics)
-longitude = 0.0                   # Decimal degrees (required for physics)
-id = "<PSWS_STATION_ID>"          # e.g., "S000171" (if uploading to PSWS)
-instrument_id = "<PSWS_INSTR_ID>" # e.g., "172" (if uploading to PSWS)
+callsign = "W1ABC"
+grid_square = "FN31pr42ab"
+latitude = 42.123
+longitude = -71.456
+id = "S000171"              # PSWS station ID
+instrument_id = "172"       # PSWS instrument ID
 
 [ka9q]
-status_address = "<YOUR_RADIOD>"  # e.g., "hf-status.local"
+status_address = "hf-status.local"
 ```
 
 ### Optional: GNSS VTEC Monitoring

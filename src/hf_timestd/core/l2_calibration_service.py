@@ -586,17 +586,48 @@ class L2CalibrationService:
             return QualityGrade.D
 
 
+def _load_config(config_path: str) -> dict:
+    """Load and return the parsed TOML config, or empty dict on failure."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # Python < 3.11
+    try:
+        with open(config_path, 'rb') as f:
+            return tomllib.load(f)
+    except Exception as e:
+        logger.warning(f"Could not load config {config_path}: {e}")
+        return {}
+
+
+def _channels_from_config(cfg: dict) -> List[str]:
+    """Extract channel description strings from recorder.channel_group.timestd."""
+    channels = []
+    try:
+        groups = cfg.get('recorder', {}).get('channel_group', {})
+        timestd_group = groups.get('timestd', {})
+        for ch in timestd_group.get('channels', []):
+            desc = ch.get('description', '')
+            if desc:
+                channels.append(desc)
+    except Exception as e:
+        logger.warning(f"Could not extract channels from config: {e}")
+    return channels
+
+
 def main():
     """Main entry point for L2 calibration service."""
     import argparse
     import sys
     
     parser = argparse.ArgumentParser(description="L2 Calibration Service")
-    parser.add_argument("--data-root", required=True, help="Data root directory")
-    parser.add_argument("--receiver-grid", required=True, help="Maidenhead grid square")
-    parser.add_argument("--receiver-lat", type=float, required=True, help="Receiver latitude")
-    parser.add_argument("--receiver-lon", type=float, required=True, help="Receiver longitude")
-    parser.add_argument("--channels", nargs='+', required=True, help="Channels to process")
+    parser.add_argument("--config", default="/etc/hf-timestd/timestd-config.toml",
+                        help="Path to timestd-config.toml (default: /etc/hf-timestd/timestd-config.toml)")
+    parser.add_argument("--data-root", default=None, help="Data root directory (overrides config)")
+    parser.add_argument("--receiver-grid", default=None, help="Maidenhead grid square (overrides config)")
+    parser.add_argument("--receiver-lat", type=float, default=None, help="Receiver latitude (overrides config)")
+    parser.add_argument("--receiver-lon", type=float, default=None, help="Receiver longitude (overrides config)")
+    parser.add_argument("--channels", nargs='+', default=None, help="Channels to process (overrides config)")
     parser.add_argument("--poll-interval", type=float, default=60.0, help="Poll interval (seconds)")
     parser.add_argument("--log-level", default="INFO", help="Log level")
     
@@ -608,13 +639,34 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     
+    # Load config, then apply CLI overrides
+    cfg = _load_config(args.config)
+    station = cfg.get('station', {})
+    
+    data_root = args.data_root or cfg.get('recorder', {}).get('production_data_root', '/var/lib/timestd')
+    receiver_grid = args.receiver_grid or station.get('grid_square', '')
+    receiver_lat = args.receiver_lat if args.receiver_lat is not None else station.get('latitude')
+    receiver_lon = args.receiver_lon if args.receiver_lon is not None else station.get('longitude')
+    channels = args.channels or _channels_from_config(cfg)
+    
+    # Validate required fields
+    if not receiver_grid:
+        logger.error("receiver-grid not set (provide --receiver-grid or set station.grid_square in config)")
+        sys.exit(1)
+    if receiver_lat is None or receiver_lon is None:
+        logger.error("receiver lat/lon not set (provide --receiver-lat/--receiver-lon or set station.latitude/longitude in config)")
+        sys.exit(1)
+    if not channels:
+        logger.error("No channels configured (provide --channels or define recorder.channel_group.timestd in config)")
+        sys.exit(1)
+    
     # Create and start service
     service = L2CalibrationService(
-        data_root=Path(args.data_root),
-        receiver_grid=args.receiver_grid,
-        receiver_lat=args.receiver_lat,
-        receiver_lon=args.receiver_lon,
-        channels=args.channels,
+        data_root=Path(data_root),
+        receiver_grid=receiver_grid,
+        receiver_lat=float(receiver_lat),
+        receiver_lon=float(receiver_lon),
+        channels=channels,
         poll_interval=args.poll_interval
     )
     

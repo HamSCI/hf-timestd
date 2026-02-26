@@ -1,10 +1,9 @@
-
 #!/bin/bash
+# Force-reinstall the hf-timestd Python package into the production venv.
+# This is a convenience wrapper around ensure-venv.sh --force.
+#
+# Usage: sudo bash scripts/reinstall.sh
 set -e
-# Uninstall multiple times to clear any layers
-/opt/hf-timestd/venv/bin/pip uninstall -y hf-timestd || true
-/opt/hf-timestd/venv/bin/pip uninstall -y hf-timestd || true
 
-# Install in editable mode
-/opt/hf-timestd/venv/bin/pip install /home/mjh/git/hf-timestd
-echo "Clean Re-installation complete."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec bash "$SCRIPT_DIR/ensure-venv.sh" --force

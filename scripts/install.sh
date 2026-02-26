@@ -2,21 +2,24 @@
 # =============================================================================
 # TimeStd Recorder Installation Script
 # =============================================================================
-# Usage: ./install.sh [--mode test|production] [--user <username>]
+# Usage: sudo ./install.sh [--verbose]
 #
 # This script:
-#   1. Creates required directories
-#   2. Sets up Python virtual environment
-#   3. Installs systemd services (production mode)
-#   4. Creates configuration from template
-#   5. Validates prerequisites
+#   1. Installs apt dependencies and verifies Python 3.10+
+#   2. Creates timestd service user and production directories
+#   3. Configures chrony, UDP buffers, and SHM permissions
+#   4. Sets up Python virtual environment (via ensure-venv.sh)
+#   5. Copies web-api, scripts, and systemd service files
+#   6. Runs setup-station.sh wizard if config doesn't exist
+#   7. Enables systemd services and timers
+#
+# Idempotent: safe to re-run on an existing installation.
 # =============================================================================
 
 set -euo pipefail
 
 # Default values
-MODE=""
-INSTALL_USER="${USER}"
+INSTALL_USER="timestd"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 VERBOSE=false
@@ -37,7 +40,7 @@ log_step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
 while [[ $# -gt 0 ]]; do
     case $1 in
         --mode)
-            MODE="$2"
+            # Legacy flag — accepted for backward compat, ignored
             shift 2
             ;;
         --user)
@@ -51,20 +54,13 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo "TimeStd Recorder Installation Script"
             echo ""
-            echo "Usage: $0 [OPTIONS]"
+            echo "Usage: sudo $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --mode test|production  Installation mode (prompts if omitted)"
-            echo "  --user <username>       User to run services as (default: current user)"
             echo "  --verbose, -v           Verbose output"
             echo "  --help, -h              Show this help"
             echo ""
-            echo "Test Mode:"
-            echo "  - Data stored in /tmp/timestd-test"
-            echo "  - Manual startup via Python module commands"
-            echo "  - Ideal for development and testing"
-            echo ""
-            echo "Production Mode:"
+            echo "This script installs hf-timestd in production mode:"
             echo "  - Data stored in /var/lib/timestd"
             echo "  - Configuration in /etc/hf-timestd"
             echo "  - Systemd services for auto-start and recovery"
@@ -79,47 +75,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Interactive mode selection if --mode not specified
-if [[ -z "$MODE" ]]; then
-    echo ""
-    echo "=============================================="
-    echo "  TimeStd Recorder Installation"
-    echo "=============================================="
-    echo ""
-    echo "  Select installation mode:"
-    echo ""
-    echo "    1) test"
-    echo "       - Data in /tmp/timestd-test"
-    echo "       - Manual startup, no systemd services"
-    echo "       - For development and testing"
-    echo ""
-    echo "    2) production"
-    echo "       - Data in /var/lib/timestd"
-    echo "       - Systemd services with auto-start"
-    echo "       - Web API on port 8000"
-    echo "       - Requires sudo"
-    echo ""
-    while true; do
-        read -rp "  Enter choice [1/2]: " choice
-        case "$choice" in
-            1|test)       MODE="test"; break ;;
-            2|production) MODE="production"; break ;;
-            *)            echo "  Invalid choice. Enter 1 or 2." ;;
-        esac
-    done
-    echo ""
-fi
-
-# Validate mode
-if [[ "$MODE" != "test" && "$MODE" != "production" ]]; then
-    log_error "Invalid mode: $MODE (must be 'test' or 'production')"
+# Must be root for production install
+if [[ "$EUID" -ne 0 ]]; then
+    log_error "This script must be run as root (sudo ./scripts/install.sh)"
     exit 1
 fi
 
 echo "=============================================="
 echo "  TimeStd Recorder Installation"
 echo "=============================================="
-echo "  Mode:    $MODE"
 echo "  User:    $INSTALL_USER"
 echo "  Project: $PROJECT_DIR"
 echo "=============================================="
@@ -197,42 +161,39 @@ else
 fi
 
 # =============================================================================
-# Step 1.5: Check System Dependencies (Production Only)
+# Step 2: Check System Dependencies
 # =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Checking system dependencies..."
+log_step "Checking system dependencies..."
 
-    # chrony is REQUIRED for production mode (system clock discipline)
-    # Install it now if missing (not in the base APT_PACKAGES list above since
-    # it's production-only and may conflict with existing NTP setups in test mode)
+# chrony is REQUIRED (system clock discipline)
+if ! command -v chronyd &> /dev/null && [[ ! -x /usr/sbin/chronyd ]]; then
+    log_info "  Installing chrony..."
+    apt-get install -y chrony
     if ! command -v chronyd &> /dev/null && [[ ! -x /usr/sbin/chronyd ]]; then
-        log_info "  Installing chrony (required for production mode)..."
-        sudo apt-get install -y chrony
-        if ! command -v chronyd &> /dev/null && [[ ! -x /usr/sbin/chronyd ]]; then
-            log_error "Failed to install chrony. This is required for production mode."
-            exit 1
-        fi
-        log_info "  ✅ chronyd installed"
+        log_error "Failed to install chrony."
+        exit 1
+    fi
+    log_info "  ✅ chronyd installed"
+else
+    log_info "  ✅ chronyd found"
+fi
+
+# Configure chrony for timestd SHM integration
+if command -v chronyd &> /dev/null || [[ -x /usr/sbin/chronyd ]]; then
+    # Detect chrony config file location
+    if [[ -f "/etc/chrony/chrony.conf" ]]; then
+        CHRONY_CONF="/etc/chrony/chrony.conf"
+    elif [[ -f "/etc/chrony.conf" ]]; then
+        CHRONY_CONF="/etc/chrony.conf"
     else
-        log_info "  ✅ chronyd found"
+        CHRONY_CONF=""
     fi
 
-    # Configure chrony for timestd SHM integration
-    if command -v chronyd &> /dev/null || [[ -x /usr/sbin/chronyd ]]; then
-        # Detect chrony config file location
-        if [[ -f "/etc/chrony/chrony.conf" ]]; then
-            CHRONY_CONF="/etc/chrony/chrony.conf"
-        elif [[ -f "/etc/chrony.conf" ]]; then
-            CHRONY_CONF="/etc/chrony.conf"
-        else
-            CHRONY_CONF=""
-        fi
-
-        if [[ -n "$CHRONY_CONF" ]]; then
-            log_info "  Found chrony config: $CHRONY_CONF"
-            if ! grep -q "refclock SHM 0 refid TSL1" "$CHRONY_CONF" 2>/dev/null; then
+    if [[ -n "$CHRONY_CONF" ]]; then
+        log_info "  Found chrony config: $CHRONY_CONF"
+        if ! grep -q "refclock SHM 0 refid TSL1" "$CHRONY_CONF" 2>/dev/null; then
             log_info "  Adding timestd dual SHM refclocks to chrony.conf..."
-            sudo tee -a "$CHRONY_CONF" > /dev/null <<'EOF'
+            tee -a "$CHRONY_CONF" > /dev/null <<'EOF'
 
 # HF Time Standard Dual Chrony Refclock Configuration
 # Add this to /etc/chrony/chrony.conf or include it via:
@@ -256,62 +217,51 @@ EOF
         else
             log_info "  ℹ️  Chrony already configured for timestd SHM"
         fi
-        else
-            log_warn "  ⚠️  Could not find chrony.conf (checked /etc/chrony/chrony.conf and /etc/chrony.conf)"
-            log_warn "      Please manually add 'refclock SHM 0 refid TMGR ...' to your chrony configuration."
-        fi
-        
-        # Install chronyd service override to ensure correct startup order
-        log_info "  Installing chronyd service override for SHM ordering..."
-        sudo mkdir -p /etc/systemd/system/chronyd.service.d
-        sudo cp "$PROJECT_DIR/systemd/chronyd-timestd-shm.conf" /etc/systemd/system/chronyd.service.d/timestd-shm.conf
-        sudo systemctl daemon-reload
-        log_info "  ✅ Chronyd will start after timestd-fusion (ensures correct SHM permissions)"
-        
-        # Restart chronyd if it's running to apply configuration changes
-        if systemctl is-active --quiet chronyd; then
-            log_info "  Restarting chronyd to apply configuration changes..."
-            sudo systemctl restart chronyd
-            log_info "  ✅ Chronyd restarted"
-        fi
+    else
+        log_warn "  ⚠️  Could not find chrony.conf (checked /etc/chrony/chrony.conf and /etc/chrony.conf)"
+        log_warn "      Please manually add 'refclock SHM 0 refid TMGR ...' to your chrony configuration."
     fi
-    
-    # Configure UDP receive buffers (CRITICAL for preventing packet loss)
-    log_step "Configuring UDP receive buffers..."
-    if [[ ! -f "/etc/sysctl.d/99-timestd.conf" ]]; then
-        log_info "  Creating /etc/sysctl.d/99-timestd.conf..."
-        sudo tee /etc/sysctl.d/99-timestd.conf > /dev/null <<'EOF'
+
+    # Install chronyd service override to ensure correct startup order
+    log_info "  Installing chronyd service override for SHM ordering..."
+    mkdir -p /etc/systemd/system/chronyd.service.d
+    cp "$PROJECT_DIR/systemd/chronyd-timestd-shm.conf" /etc/systemd/system/chronyd.service.d/timestd-shm.conf
+    systemctl daemon-reload
+    log_info "  ✅ Chronyd will start after timestd-fusion (ensures correct SHM permissions)"
+
+    # Restart chronyd if it's running to apply configuration changes
+    if systemctl is-active --quiet chronyd; then
+        log_info "  Restarting chronyd to apply configuration changes..."
+        systemctl restart chronyd
+        log_info "  ✅ Chronyd restarted"
+    fi
+fi
+
+# Configure UDP receive buffers (CRITICAL for preventing packet loss)
+log_step "Configuring UDP receive buffers..."
+if [[ ! -f "/etc/sysctl.d/99-timestd.conf" ]]; then
+    log_info "  Creating /etc/sysctl.d/99-timestd.conf..."
+    tee /etc/sysctl.d/99-timestd.conf > /dev/null <<'EOF'
 # HF-TimeStd: Increase UDP receive buffers to prevent packet loss
 # Radiod sends large RTP packets (up to 3.8KB at 24kHz sample rate)
 # which can be fragmented across multiple IP packets
 net.core.rmem_max = 16777216      # 16MB max
 net.core.rmem_default = 8388608   # 8MB default
 EOF
-        sudo sysctl -p /etc/sysctl.d/99-timestd.conf > /dev/null
-        log_info "  ✅ UDP buffers configured (16MB max, 8MB default)"
-    else
-        log_info "  ℹ️  UDP buffer config already exists"
-    fi
-fi
-
-# =============================================================================
-# Step 2: Set Paths Based on Mode
-# =============================================================================
-log_step "Setting up paths for $MODE mode..."
-
-if [[ "$MODE" == "production" ]]; then
-    DATA_ROOT="/var/lib/timestd"
-    CONFIG_DIR="/etc/hf-timestd"
-    VENV_DIR="/opt/hf-timestd/venv"
-    WEBUI_DIR="/opt/hf-timestd/web-api"
-    LOG_DIR="/var/log/hf-timestd"  # FHS standard: logs in /var/log/
+    sysctl -p /etc/sysctl.d/99-timestd.conf > /dev/null
+    log_info "  ✅ UDP buffers configured (16MB max, 8MB default)"
 else
-    DATA_ROOT="/tmp/timestd-test"
-    CONFIG_DIR="$PROJECT_DIR/config"
-    VENV_DIR="$PROJECT_DIR/venv"
-    WEBUI_DIR="$PROJECT_DIR/web-api"
-    LOG_DIR="$DATA_ROOT/logs"  # Test mode: keep logs with data for simplicity
+    log_info "  ℹ️  UDP buffer config already exists"
 fi
+
+# =============================================================================
+# Step 3: Production Paths
+# =============================================================================
+DATA_ROOT="/var/lib/timestd"
+CONFIG_DIR="/etc/hf-timestd"
+VENV_DIR="/opt/hf-timestd/venv"
+WEBUI_DIR="/opt/hf-timestd/web-api"
+LOG_DIR="/var/log/hf-timestd"
 
 log_info "  Data root: $DATA_ROOT"
 log_info "  Config:    $CONFIG_DIR"
@@ -320,56 +270,46 @@ log_info "  Web UI:    $WEBUI_DIR"
 log_info "  Logs:      $LOG_DIR"
 
 # =============================================================================
-# Step 2.5: Create Service User (Production Only)
+# Step 4: Create Service User
 # =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Creating timestd service user..."
-    
-    # Create timestd system user and group
-    if ! id -u timestd &>/dev/null; then
-        sudo useradd --system --no-create-home --shell /usr/sbin/nologin \
-            --comment "HF Time Standard Service" timestd
-        log_info "  ✅ Created system user: timestd"
-    else
-        log_info "  ℹ️  User timestd already exists"
-    fi
-    
-    # Detect chrony group (distribution-specific)
-    CHRONY_GROUP=""
-    if getent group _chrony &>/dev/null; then
-        CHRONY_GROUP="_chrony"  # Debian/Ubuntu
-    elif getent group chrony &>/dev/null; then
-        CHRONY_GROUP="chrony"   # RHEL/Fedora/Arch
-    fi
-    
-    if [[ -n "$CHRONY_GROUP" ]]; then
-        sudo usermod -a -G "$CHRONY_GROUP" timestd
-        log_info "  ✅ Added timestd to $CHRONY_GROUP group (for chrony SHM access)"
-    else
-        log_warn "  ⚠️  Chrony group not found - chrony SHM integration may not work"
-        log_warn "     Install chrony and run: sudo usermod -a -G <chrony-group> timestd"
-    fi
-    
-    # Override INSTALL_USER for production mode
-    INSTALL_USER="timestd"
-    log_info "  📝 Services will run as: $INSTALL_USER"
+log_step "Creating timestd service user..."
+
+if ! id -u timestd &>/dev/null; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin \
+        --comment "HF Time Standard Service" timestd
+    log_info "  ✅ Created system user: timestd"
+else
+    log_info "  ℹ️  User timestd already exists"
 fi
 
+# Detect chrony group (distribution-specific)
+CHRONY_GROUP=""
+if getent group _chrony &>/dev/null; then
+    CHRONY_GROUP="_chrony"  # Debian/Ubuntu
+elif getent group chrony &>/dev/null; then
+    CHRONY_GROUP="chrony"   # RHEL/Fedora/Arch
+fi
+
+if [[ -n "$CHRONY_GROUP" ]]; then
+    usermod -a -G "$CHRONY_GROUP" timestd
+    log_info "  ✅ Added timestd to $CHRONY_GROUP group (for chrony SHM access)"
+else
+    log_warn "  ⚠️  Chrony group not found - chrony SHM integration may not work"
+    log_warn "     Install chrony and run: usermod -a -G <chrony-group> timestd"
+fi
+
+log_info "  📝 Services will run as: $INSTALL_USER"
+
 # =============================================================================
-# Step 3: Create Directories
+# Step 5: Create Directories
 # =============================================================================
 log_step "Creating directories..."
 
 create_dir() {
     local dir="$1"
     local owner="${2:-$INSTALL_USER}"
-    
-    if [[ "$MODE" == "production" ]]; then
-        sudo mkdir -p "$dir"
-        sudo chown "$owner:$owner" "$dir"
-    else
-        mkdir -p "$dir"
-    fi
+    mkdir -p "$dir"
+    chown "$owner:$owner" "$dir"
     log_info "  Created: $dir"
 }
 
@@ -391,25 +331,20 @@ create_dir "$DATA_ROOT/space_weather_cache" # Cached space weather indices
 create_dir "$LOG_DIR"
 
 # Shared memory directory for hot buffer (tiered storage)
-if [[ "$MODE" == "production" ]]; then
-    sudo mkdir -p /dev/shm/timestd
-    sudo chown "$INSTALL_USER:$INSTALL_USER" /dev/shm/timestd
-    log_info "  Created: /dev/shm/timestd (hot buffer)"
-    
-    # Install tmpfiles.d configuration to recreate on boot
-    sudo cp "$PROJECT_DIR/systemd/timestd-tmpfiles.conf" /etc/tmpfiles.d/timestd.conf
-    log_info "  Installed: /etc/tmpfiles.d/timestd.conf (ensures /dev/shm/timestd persists across reboots)"
-fi
+mkdir -p /dev/shm/timestd
+chown "$INSTALL_USER:$INSTALL_USER" /dev/shm/timestd
+log_info "  Created: /dev/shm/timestd (hot buffer)"
 
-# Config directory
+# Install tmpfiles.d configuration to recreate on boot
+cp "$PROJECT_DIR/systemd/timestd-tmpfiles.conf" /etc/tmpfiles.d/timestd.conf
+log_info "  Installed: /etc/tmpfiles.d/timestd.conf (ensures /dev/shm/timestd persists across reboots)"
+
+# Config and install directories
 create_dir "$CONFIG_DIR"
-
-if [[ "$MODE" == "production" ]]; then
-    create_dir "/opt/hf-timestd"
-fi
+create_dir "/opt/hf-timestd"
 
 # =============================================================================
-# Step 4: Create Python Virtual Environment
+# Step 6: Create Python Virtual Environment
 # =============================================================================
 log_step "Setting up Python virtual environment..."
 
@@ -418,160 +353,134 @@ if [[ ! -x "$PROJECT_DIR/scripts/ensure-venv.sh" ]]; then
     exit 1
 fi
 
-if [[ "$MODE" == "production" ]]; then
-    sudo bash "$PROJECT_DIR/scripts/ensure-venv.sh" --mode production --venv "$VENV_DIR" --python python3
-else
-    bash "$PROJECT_DIR/scripts/ensure-venv.sh" --mode test --venv "$VENV_DIR" --python python3
-fi
+bash "$PROJECT_DIR/scripts/ensure-venv.sh" --venv "$VENV_DIR" --python python3
 
 # Verify installation (using venv python)
 "$VENV_DIR/bin/python" -c "import hf_timestd; print(f'  ✅ hf_timestd installed from: {hf_timestd.__file__}')"
 "$VENV_DIR/bin/python" -c "import sysv_ipc; print(f'  ✅ sysv_ipc installed')"
 "$VENV_DIR/bin/python" -c "import iri2020; print(f'  ✅ iri2020 installed')"
 
-# Verify no repo path references in production
-if [[ "$MODE" == "production" ]]; then
-    if "$VENV_DIR/bin/python" -c "import sys; exit(1 if '$PROJECT_DIR' in str(sys.path) else 0)"; then
-        log_info "  ✅ No source directory in Python path (production clean)"
-    else
-        log_warn "  ⚠️  Source directory still in Python path - may cause issues"
+# Verify no repo path references in production venv
+if "$VENV_DIR/bin/python" -c "import sys; exit(1 if '$PROJECT_DIR' in str(sys.path) else 0)"; then
+    log_info "  ✅ No source directory in Python path (production clean)"
+else
+    log_warn "  ⚠️  Source directory still in Python path - may cause issues"
+fi
+
+# =============================================================================
+# Step 7: Set up Web API and Scripts
+# =============================================================================
+mkdir -p "$WEBUI_DIR"
+cp -r "$PROJECT_DIR/web-api/"* "$WEBUI_DIR/"
+chown -R "$INSTALL_USER:$INSTALL_USER" "$WEBUI_DIR"
+log_info "Web API installed at $WEBUI_DIR (Python FastAPI)"
+
+# Copy scripts directory for service startup scripts
+mkdir -p /opt/hf-timestd/scripts
+cp -r "$PROJECT_DIR/scripts/"* /opt/hf-timestd/scripts/
+chown -R "$INSTALL_USER:$INSTALL_USER" /opt/hf-timestd/scripts
+log_info "Scripts installed at /opt/hf-timestd/scripts"
+
+# Create config symlink for web-api (expects /opt/hf-timestd/config/)
+mkdir -p /opt/hf-timestd/config
+ln -sf /etc/hf-timestd/timestd-config.toml /opt/hf-timestd/config/timestd-config.toml
+log_info "Config symlink created: /opt/hf-timestd/config -> /etc/hf-timestd"
+
+# =============================================================================
+# Step 8: Station Configuration
+# =============================================================================
+log_step "Station configuration..."
+
+MAIN_CONFIG="$CONFIG_DIR/timestd-config.toml"
+
+if [[ ! -f "$MAIN_CONFIG" ]]; then
+    log_info "  No config found — running setup wizard..."
+    bash "$PROJECT_DIR/scripts/setup-station.sh" --config "$MAIN_CONFIG"
+elif [[ -f "$MAIN_CONFIG" ]]; then
+    log_info "  Config exists: $MAIN_CONFIG (not overwriting)"
+    echo ""
+    read -rp "  Re-run station configuration wizard? [y/N] " reconfig_choice
+    reconfig_choice=${reconfig_choice:-N}
+    if [[ "$reconfig_choice" =~ ^[Yy]$ ]]; then
+        bash "$PROJECT_DIR/scripts/setup-station.sh" --config "$MAIN_CONFIG" --reconfig
     fi
 fi
 
-
-# =============================================================================
-# Step 5: Set up Web API and Scripts (Python FastAPI)
-# =============================================================================
-# Web API is now Python-based (FastAPI) - all dependencies installed via pip above
-# Copy web-api and scripts directories to production location
-if [[ "$MODE" == "production" ]]; then
-    sudo mkdir -p "$WEBUI_DIR"
-    sudo cp -r "$PROJECT_DIR/web-api/"* "$WEBUI_DIR/"
-    sudo chown -R "$INSTALL_USER:$INSTALL_USER" "$WEBUI_DIR"
-    log_info "Web API installed at $WEBUI_DIR (Python FastAPI)"
-    
-    # Copy scripts directory for service startup scripts
-    sudo mkdir -p /opt/hf-timestd/scripts
-    sudo cp -r "$PROJECT_DIR/scripts/"* /opt/hf-timestd/scripts/
-    sudo chown -R "$INSTALL_USER:$INSTALL_USER" /opt/hf-timestd/scripts
-    log_info "Scripts installed at /opt/hf-timestd/scripts"
-    
-    # Create config symlink for web-api (expects /opt/hf-timestd/config/)
-    sudo mkdir -p /opt/hf-timestd/config
-    sudo ln -sf /etc/hf-timestd/timestd-config.toml /opt/hf-timestd/config/timestd-config.toml
-    log_info "Config symlink created: /opt/hf-timestd/config -> /etc/hf-timestd"
-else
-    log_info "Web API will run from $PROJECT_DIR/web-api (Python FastAPI)"
-    log_info "Scripts will run from $PROJECT_DIR/scripts"
-fi
-
-# =============================================================================
-# Step 6: Create Configuration Files
-# =============================================================================
-log_step "Creating configuration files..."
-
-# Environment file
+# Ensure environment file exists (setup-station.sh creates it, but ensure on re-run)
 ENV_FILE="$CONFIG_DIR/environment"
-
-generate_env_block() {
-    cat << EOF
+if [[ ! -f "$ENV_FILE" ]]; then
+    cat > "$ENV_FILE" << EOF
 # HF Time Standard Environment
 # Generated by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-TIMESTD_MODE=$1
+TIMESTD_MODE=production
 TIMESTD_DATA_ROOT=$DATA_ROOT
 TIMESTD_LOG_DIR=$LOG_DIR
-TIMESTD_CONFIG=$CONFIG_DIR/timestd-config.toml
-TIMESTD_PROJECT=$PROJECT_DIR
-TIMESTD_INSTALL_DIR=$PROJECT_DIR
+TIMESTD_CONFIG=$MAIN_CONFIG
+TIMESTD_PROJECT=/opt/hf-timestd
+TIMESTD_INSTALL_DIR=/opt/hf-timestd
 TIMESTD_WEBUI=$WEBUI_DIR
 TIMESTD_VENV=$VENV_DIR
-TIMESTD_LOG_LEVEL=$2
+TIMESTD_LOG_LEVEL=INFO
 EOF
-}
-
-if [[ "$MODE" == "production" ]]; then
-    generate_env_block "production" "INFO" | sudo tee "$ENV_FILE" > /dev/null
-    sudo chown "$INSTALL_USER:$INSTALL_USER" "$ENV_FILE"
-else
-    generate_env_block "test" "DEBUG" > "$ENV_FILE"
-fi
-
-log_info "  Created: $ENV_FILE"
-
-# Copy/update main config if not exists
-MAIN_CONFIG="$CONFIG_DIR/timestd-config.toml"
-if [[ ! -f "$MAIN_CONFIG" ]]; then
-    if [[ "$MODE" == "production" ]]; then
-        sudo cp "$PROJECT_DIR/config/timestd-config.toml" "$MAIN_CONFIG"
-        # Update mode in config
-        sudo sed -i 's/mode = "test"/mode = "production"/' "$MAIN_CONFIG"
-        sudo sed -i "s|test_data_root = .*|test_data_root = \"/tmp/timestd-test\"|" "$MAIN_CONFIG"
-        sudo sed -i "s|production_data_root = .*|production_data_root = \"$DATA_ROOT\"|" "$MAIN_CONFIG"
-        sudo chown "$INSTALL_USER:$INSTALL_USER" "$MAIN_CONFIG"
-    else
-        cp "$PROJECT_DIR/config/timestd-config.toml" "$MAIN_CONFIG" 2>/dev/null || true
-    fi
-    log_info "  Created: $MAIN_CONFIG"
-else
-    log_info "  Config exists: $MAIN_CONFIG (not overwriting)"
+    chown "$INSTALL_USER:$INSTALL_USER" "$ENV_FILE"
+    log_info "  Created: $ENV_FILE"
 fi
 
 # =============================================================================
-# Step 7: Install Systemd Services (Production Only)
+# Step 9: Install Systemd Services
 # =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Installing systemd services..."
-    
-    SYSTEMD_DIR="/etc/systemd/system"
-    
-    # Copy pre-tested service files from repository
-    # These files have watchdogs, proper dependencies, and security hardening
-    log_info "  Copying service files from $PROJECT_DIR/systemd/..."
-    
-    # Core services (always installed)
-    CORE_SERVICES=(
-        "timestd-core-recorder"
-        "timestd-metrology"
-        "timestd-l2-calibration"
-        "timestd-fusion"
-        "timestd-physics"
-        "timestd-web-api"
-        "timestd-radiod-monitor"
-    )
-    
-    for svc in "${CORE_SERVICES[@]}"; do
-        sudo cp "$PROJECT_DIR/systemd/${svc}.service" "$SYSTEMD_DIR/"
-        log_info "    ✅ ${svc}.service"
-    done
-    
-    # Copy timer files and optional services
-    TIMER_FILES=(
-        "timestd-ionex-download.service"
-        "timestd-ionex-download.timer"
-        "timestd-chrony-monitor.service"
-        "timestd-chrony-monitor.timer"
-        "timestd-iono-reanalysis.service"
-        "timestd-iono-reanalysis.timer"
-        "grape-daily.service"
-        "grape-daily.timer"
-    )
-    
-    for timer_file in "${TIMER_FILES[@]}"; do
-        if [[ -f "$PROJECT_DIR/systemd/$timer_file" ]]; then
-            sudo cp "$PROJECT_DIR/systemd/$timer_file" "$SYSTEMD_DIR/"
-            log_info "    ✅ $timer_file"
-        fi
-    done
-    
-    # Copy alert template service
-    if [[ -f "$PROJECT_DIR/systemd/timestd-alert@.service" ]]; then
-        sudo cp "$PROJECT_DIR/systemd/timestd-alert@.service" "$SYSTEMD_DIR/"
-        log_info "    ✅ timestd-alert@.service"
+log_step "Installing systemd services..."
+
+SYSTEMD_DIR="/etc/systemd/system"
+
+# Copy pre-tested service files from repository
+# These files have watchdogs, proper dependencies, and security hardening
+log_info "  Copying service files from $PROJECT_DIR/systemd/..."
+
+# Core services (always installed)
+CORE_SERVICES=(
+    "timestd-core-recorder"
+    "timestd-metrology"
+    "timestd-l2-calibration"
+    "timestd-fusion"
+    "timestd-physics"
+    "timestd-web-api"
+    "timestd-radiod-monitor"
+)
+
+for svc in "${CORE_SERVICES[@]}"; do
+    cp "$PROJECT_DIR/systemd/${svc}.service" "$SYSTEMD_DIR/"
+    log_info "    ✅ ${svc}.service"
+done
+
+# Copy timer files and optional services
+TIMER_FILES=(
+    "timestd-ionex-download.service"
+    "timestd-ionex-download.timer"
+    "timestd-chrony-monitor.service"
+    "timestd-chrony-monitor.timer"
+    "timestd-iono-reanalysis.service"
+    "timestd-iono-reanalysis.timer"
+    "grape-daily.service"
+    "grape-daily.timer"
+)
+
+for timer_file in "${TIMER_FILES[@]}"; do
+    if [[ -f "$PROJECT_DIR/systemd/$timer_file" ]]; then
+        cp "$PROJECT_DIR/systemd/$timer_file" "$SYSTEMD_DIR/"
+        log_info "    ✅ $timer_file"
     fi
-    
-    # GNSS VTEC Service (Optional - only if enabled in config)
-    VTEC_ENABLED=$($VENV_DIR/bin/python3 -c "
+done
+
+# Copy alert template service
+if [[ -f "$PROJECT_DIR/systemd/timestd-alert@.service" ]]; then
+    cp "$PROJECT_DIR/systemd/timestd-alert@.service" "$SYSTEMD_DIR/"
+    log_info "    ✅ timestd-alert@.service"
+fi
+
+# GNSS VTEC Service (Optional - only if enabled in config)
+VTEC_ENABLED=$("$VENV_DIR/bin/python3" -c "
 import tomllib
 try:
     with open('$MAIN_CONFIG', 'rb') as f:
@@ -581,13 +490,12 @@ except:
     print('false')
 " 2>/dev/null)
 
-    if [[ "$VTEC_ENABLED" == "true" ]]; then
-        sudo cp "$PROJECT_DIR/systemd/timestd-vtec.service" "$SYSTEMD_DIR/"
-        log_info "    ✅ timestd-vtec.service (GNSS VTEC enabled in config)"
-        
-        # Add GNSS timeserver to chrony if gnss_vtec is enabled
-        # The ZED-F9P host typically also provides NTP service
-        GNSS_HOST=$($VENV_DIR/bin/python3 -c "
+if [[ "$VTEC_ENABLED" == "true" ]]; then
+    cp "$PROJECT_DIR/systemd/timestd-vtec.service" "$SYSTEMD_DIR/"
+    log_info "    ✅ timestd-vtec.service (GNSS VTEC enabled in config)"
+
+    # Add GNSS timeserver to chrony if gnss_vtec is enabled
+    GNSS_HOST=$("$VENV_DIR/bin/python3" -c "
 import tomllib
 try:
     with open('$MAIN_CONFIG', 'rb') as f:
@@ -596,88 +504,85 @@ try:
 except:
     print('')
 " 2>/dev/null)
-        
-        if [[ -n "$GNSS_HOST" && -n "$CHRONY_CONF" ]]; then
-            if ! grep -q "server $GNSS_HOST" "$CHRONY_CONF" 2>/dev/null; then
-                log_info "  Adding GNSS timeserver ($GNSS_HOST) to chrony.conf..."
-                sudo tee -a "$CHRONY_CONF" > /dev/null <<EOF
+
+    if [[ -n "$GNSS_HOST" && -n "${CHRONY_CONF:-}" ]]; then
+        if ! grep -q "server $GNSS_HOST" "$CHRONY_CONF" 2>/dev/null; then
+            log_info "  Adding GNSS timeserver ($GNSS_HOST) to chrony.conf..."
+            tee -a "$CHRONY_CONF" > /dev/null <<EOF
 
 # GNSS Timeserver (ZED-F9P host providing NTP)
 # Added by hf-timestd install when gnss_vtec is enabled
 server $GNSS_HOST iburst prefer
 EOF
-                log_info "  ✅ Added GNSS timeserver $GNSS_HOST to chrony"
-            else
-                log_info "  ℹ️  GNSS timeserver $GNSS_HOST already in chrony.conf"
-            fi
-        fi
-    else
-        log_info "    ℹ️  timestd-vtec.service skipped (GNSS VTEC disabled in config)"
-        
-        # No GNSS timeserver - make TSL2 the preferred source
-        if [[ -n "$CHRONY_CONF" ]] && grep -q "refclock SHM 1 refid TSL2.*trust$" "$CHRONY_CONF" 2>/dev/null; then
-            log_info "  Adding 'prefer' to TSL2 (no GNSS timeserver available)..."
-            sudo sed -i 's/refclock SHM 1 refid TSL2\(.*\) trust$/refclock SHM 1 refid TSL2\1 trust prefer/' "$CHRONY_CONF"
-            log_info "  ✅ TSL2 is now the preferred time source"
+            log_info "  ✅ Added GNSS timeserver $GNSS_HOST to chrony"
+        else
+            log_info "  ℹ️  GNSS timeserver $GNSS_HOST already in chrony.conf"
         fi
     fi
+else
+    log_info "    ℹ️  timestd-vtec.service skipped (GNSS VTEC disabled in config)"
 
-    # Reload systemd
-    sudo systemctl daemon-reload
-    
-    log_info "  Installed systemd services:"
-    log_info "    - timestd-core-recorder.service  (Phase 1: RTP → Raw Buffer)"
-    log_info "    - timestd-metrology.service      (Phase 2: L1 Raw Measurements)"
-    log_info "    - timestd-l2-calibration.service (Phase 2: L2 Calibrated Timing)"
-    log_info "    - timestd-fusion.service         (Phase 3: Fusion → Chrony SHM)"
-    log_info "    - timestd-physics.service        (Phase 3: TEC Estimation)"
-    log_info "    - timestd-web-api.service        (Web API & Dashboard)"
-    log_info "    - timestd-radiod-monitor.service (Hardware Health Monitor)"
-    log_info "    - grape-daily.timer              (GRAPE/PSWS daily upload at 01:00 UTC)"
-    if [[ "$VTEC_ENABLED" == "true" ]]; then
-        log_info "    - timestd-vtec.service           (GNSS VTEC Monitor)"
+    # No GNSS timeserver - make TSL2 the preferred source
+    if [[ -n "${CHRONY_CONF:-}" ]] && grep -q "refclock SHM 1 refid TSL2.*trust$" "$CHRONY_CONF" 2>/dev/null; then
+        log_info "  Adding 'prefer' to TSL2 (no GNSS timeserver available)..."
+        sed -i 's/refclock SHM 1 refid TSL2\(.*\) trust$/refclock SHM 1 refid TSL2\1 trust prefer/' "$CHRONY_CONF"
+        log_info "  ✅ TSL2 is now the preferred time source"
     fi
-    log_info "  Note: timestd-radiod-affinity.path is installed by setup-cpu-affinity.sh"
-    
-    # Enable core services
-    log_step "Enabling services for auto-start..."
-    sudo systemctl enable timestd-core-recorder.service
-    sudo systemctl enable timestd-metrology.service
-    sudo systemctl enable timestd-l2-calibration.service
-    sudo systemctl enable timestd-fusion.service
-    sudo systemctl enable timestd-physics.service
-    sudo systemctl enable timestd-web-api.service
-    sudo systemctl enable timestd-radiod-monitor.service
-    
-    # Enable optional services/timers
-    sudo systemctl enable timestd-ionex-download.timer
-    sudo systemctl enable timestd-chrony-monitor.timer
-    
-    # Enable iono-reanalysis timer if service file exists
-    if [[ -f "$SYSTEMD_DIR/timestd-iono-reanalysis.timer" ]]; then
-        sudo systemctl enable timestd-iono-reanalysis.timer
-        log_info "  ✅ timestd-iono-reanalysis.timer enabled (hourly)"
-    fi
-    
-    # Enable grape-daily timer if service file exists
-    if [[ -f "$SYSTEMD_DIR/grape-daily.timer" ]]; then
-        sudo systemctl enable grape-daily.timer
-        sudo systemctl enable grape-daily.service
-        log_info "  ✅ grape-daily.timer enabled (runs daily at 01:00 UTC)"
-    fi
-    
-    # Note: timestd-radiod-affinity.path/.service are installed separately
-    # by scripts/setup-cpu-affinity.sh and are not managed here.
-    
-    if [[ "$VTEC_ENABLED" == "true" ]]; then
-        sudo systemctl enable timestd-vtec.service
-        log_info "  ✅ timestd-vtec.service enabled"
-    fi
-    
-    log_info "  Services enabled (will start on boot)"
+fi
 
-    # Create logrotate config
-    sudo tee "/etc/logrotate.d/hf-timestd" > /dev/null << EOF
+# Reload systemd
+systemctl daemon-reload
+
+log_info "  Installed systemd services:"
+log_info "    - timestd-core-recorder.service  (Phase 1: RTP → Raw Buffer)"
+log_info "    - timestd-metrology.service      (Phase 2: L1 Raw Measurements)"
+log_info "    - timestd-l2-calibration.service (Phase 2: L2 Calibrated Timing)"
+log_info "    - timestd-fusion.service         (Phase 3: Fusion → Chrony SHM)"
+log_info "    - timestd-physics.service        (Phase 3: TEC Estimation)"
+log_info "    - timestd-web-api.service        (Web API & Dashboard)"
+log_info "    - timestd-radiod-monitor.service (Hardware Health Monitor)"
+log_info "    - grape-daily.timer              (GRAPE/PSWS daily upload at 01:00 UTC)"
+if [[ "$VTEC_ENABLED" == "true" ]]; then
+    log_info "    - timestd-vtec.service           (GNSS VTEC Monitor)"
+fi
+log_info "  Note: timestd-radiod-affinity.path is installed by setup-cpu-affinity.sh"
+
+# Enable core services
+log_step "Enabling services for auto-start..."
+systemctl enable timestd-core-recorder.service
+systemctl enable timestd-metrology.service
+systemctl enable timestd-l2-calibration.service
+systemctl enable timestd-fusion.service
+systemctl enable timestd-physics.service
+systemctl enable timestd-web-api.service
+systemctl enable timestd-radiod-monitor.service
+
+# Enable optional services/timers
+systemctl enable timestd-ionex-download.timer
+systemctl enable timestd-chrony-monitor.timer
+
+# Enable iono-reanalysis timer if service file exists
+if [[ -f "$SYSTEMD_DIR/timestd-iono-reanalysis.timer" ]]; then
+    systemctl enable timestd-iono-reanalysis.timer
+    log_info "  ✅ timestd-iono-reanalysis.timer enabled (hourly)"
+fi
+
+# Enable grape-daily timer if service file exists
+if [[ -f "$SYSTEMD_DIR/grape-daily.timer" ]]; then
+    systemctl enable grape-daily.timer
+    systemctl enable grape-daily.service
+    log_info "  ✅ grape-daily.timer enabled (runs daily at 01:00 UTC)"
+fi
+
+if [[ "$VTEC_ENABLED" == "true" ]]; then
+    systemctl enable timestd-vtec.service
+    log_info "  ✅ timestd-vtec.service enabled"
+fi
+
+log_info "  Services enabled (will start on boot)"
+
+# Create logrotate config
+tee "/etc/logrotate.d/hf-timestd" > /dev/null << EOF
 $LOG_DIR/*.log {
     daily
     rotate 14
@@ -688,147 +593,90 @@ $LOG_DIR/*.log {
     copytruncate
 }
 EOF
-    log_info "  Created logrotate configuration"
-    
-    # Install freshness monitor cron job
-    if [[ -f "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" ]]; then
-        sudo cp "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" /etc/cron.d/timestd-freshness-monitor
-        sudo chmod 644 /etc/cron.d/timestd-freshness-monitor
-        log_info "  ✅ Installed freshness monitor cron job (/etc/cron.d/timestd-freshness-monitor)"
-    fi
-    
-    # =============================================================================
-    # Initial IONEX Download
-    # =============================================================================
-    log_info "Downloading initial IONEX data..."
-    
-    # Create IONEX directory
-    sudo mkdir -p /var/lib/timestd/ionex
-    sudo chown timestd:timestd /var/lib/timestd/ionex
-    
-    # Run initial IONEX download (yesterday's data)
-    if [[ -f "$PROJECT_DIR/scripts/download_ionex_daily.sh" ]]; then
-        sudo -u timestd "$PROJECT_DIR/scripts/download_ionex_daily.sh" 2>&1 | head -20 || true
-        if ls /var/lib/timestd/ionex/*.gz 2>/dev/null | head -1 > /dev/null; then
-            log_info "  ✅ Initial IONEX data downloaded"
-        else
-            log_warn "  ⚠️  IONEX download may have failed (check ~/.netrc for NASA CDDIS credentials)"
-            log_info "     See: https://cddis.nasa.gov/Data_and_Derived_Products/CreateNetrcFile.html"
-        fi
+log_info "  Created logrotate configuration"
+
+# Install freshness monitor cron job
+if [[ -f "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" ]]; then
+    cp "$PROJECT_DIR/config/cron.d/timestd-freshness-monitor" /etc/cron.d/timestd-freshness-monitor
+    chmod 644 /etc/cron.d/timestd-freshness-monitor
+    log_info "  ✅ Installed freshness monitor cron job (/etc/cron.d/timestd-freshness-monitor)"
+fi
+
+# =============================================================================
+# Step 10: Initial IONEX Download
+# =============================================================================
+log_info "Downloading initial IONEX data..."
+
+mkdir -p /var/lib/timestd/ionex
+chown timestd:timestd /var/lib/timestd/ionex
+
+if [[ -f "$PROJECT_DIR/scripts/download_ionex_daily.sh" ]]; then
+    sudo -u timestd "$PROJECT_DIR/scripts/download_ionex_daily.sh" 2>&1 | head -20 || true
+    if ls /var/lib/timestd/ionex/*.gz 2>/dev/null | head -1 > /dev/null; then
+        log_info "  ✅ Initial IONEX data downloaded"
     else
-        log_warn "  ⚠️  IONEX download script not found at $PROJECT_DIR/scripts/download_ionex_daily.sh"
+        log_warn "  ⚠️  IONEX download may have failed (check ~/.netrc for NASA CDDIS credentials)"
+        log_info "     See: https://cddis.nasa.gov/Data_and_Derived_Products/CreateNetrcFile.html"
     fi
-    
-    # =============================================================================
-    # SHM Permissions Setup
-    # =============================================================================
-    log_info "Setting up Chrony SHM permissions..."
-    
-    # Remove any stale SHM segments that might have wrong permissions
-    for key in 0x4e545030 0x4e545031; do
-        shmid=$(ipcs -m | grep "$key" | awk '{print $2}')
-        if [[ -n "$shmid" ]]; then
-            ipcrm -m "$shmid" 2>/dev/null || true
-        fi
-    done
-    log_info "  ✅ Cleared stale SHM segments (fusion will recreate with correct permissions)"
+else
+    log_warn "  ⚠️  IONEX download script not found at $PROJECT_DIR/scripts/download_ionex_daily.sh"
 fi
 
 # =============================================================================
-# Step 7.5: Interactive Configuration
+# Step 11: SHM Permissions Setup
 # =============================================================================
-HAS_CONFIGURED=false
-if [[ "$MODE" == "production" ]]; then
-    echo ""
-    read -rp "Would you like to configure your station settings now? [Y/n] " config_choice
-    config_choice=${config_choice:-Y}
-    if [[ "$config_choice" =~ ^[Yy]$ ]]; then
-        HAS_CONFIGURED=true
-        log_step "Opening configuration file..."
-        sudo ${EDITOR:-nano} "$CONFIG_DIR/timestd-config.toml"
-        
-        # Parse for STATION_ID
-        STATION_ID=$(grep -E '^\s*id\s*=' "$CONFIG_DIR/timestd-config.toml" | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/')
-        if [[ -n "$STATION_ID" && "$STATION_ID" != "<YOUR_STATION_ID>" && "$STATION_ID" != "<PSWS_STATION_ID>" ]]; then
-            echo ""
-            read -rp "Station ID '${STATION_ID}' detected. Would you like to set up the PSWS secure upload keys now? [Y/n] " key_choice
-            key_choice=${key_choice:-Y}
-            if [[ "$key_choice" =~ ^[Yy]$ ]]; then
-                log_step "Executing PSWS key setup..."
-                sudo "$PROJECT_DIR/scripts/setup-psws-keys.sh"
-            fi
-        fi
+log_info "Setting up Chrony SHM permissions..."
+
+# Remove any stale SHM segments that might have wrong permissions
+for key in 0x4e545030 0x4e545031; do
+    shmid=$(ipcs -m | grep "$key" | awk '{print $2}')
+    if [[ -n "$shmid" ]]; then
+        ipcrm -m "$shmid" 2>/dev/null || true
     fi
-fi
+done
+log_info "  ✅ Cleared stale SHM segments (fusion will recreate with correct permissions)"
 
 # =============================================================================
-# Step 8: Summary
+# Summary
 # =============================================================================
 echo ""
 echo "=============================================="
 echo "  Installation Complete!"
 echo "=============================================="
 echo ""
+echo "Next steps:"
+echo ""
+echo "1. Start continuous services (in order):"
+echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → Raw Buffer"
+echo "   sudo systemctl start timestd-metrology       # Phase 2: L1 Raw Measurements"
+echo "   sudo systemctl start timestd-l2-calibration  # Phase 2: L2 Calibrated Timing"
+echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion → Chrony SHM"
+echo "   sudo systemctl start timestd-physics         # Phase 3: TEC Estimation"
+echo "   sudo systemctl start timestd-web-api         # Web API & Dashboard"
+if [[ "$VTEC_ENABLED" == "true" ]]; then
+    echo "   sudo systemctl start timestd-vtec            # GNSS VTEC Monitor"
+fi
+echo ""
+echo "2. Start periodic timers:"
+echo "   sudo systemctl start timestd-ionex-download.timer  # Daily IONEX maps"
+echo "   sudo systemctl start timestd-chrony-monitor.timer  # Chrony health check"
+echo ""
+echo "3. Check status:"
+echo "   sudo systemctl status timestd-core-recorder timestd-metrology timestd-l2-calibration timestd-fusion timestd-physics timestd-web-api"
+echo "   sudo systemctl list-timers timestd-*"
+echo "   journalctl -u timestd-core-recorder -f"
+echo ""
 
-if [[ "$MODE" == "production" ]]; then
-    echo "Production mode installed. Next steps:"
+# Add chrony note if it wasn't installed during setup
+if ! command -v chronyd &> /dev/null; then
+    echo "📝 Note: If you install chrony later for system clock discipline:"
+    echo "   sudo mkdir -p /etc/systemd/system/chronyd.service.d"
+    echo "   sudo cp $PROJECT_DIR/systemd/chronyd-timestd-shm.conf /etc/systemd/system/chronyd.service.d/timestd-shm.conf"
+    echo "   sudo systemctl daemon-reload"
     echo ""
-    if [[ "$HAS_CONFIGURED" == "false" ]]; then
-        echo "1. Edit configuration:"
-        echo "   sudo nano $CONFIG_DIR/timestd-config.toml"
-        echo ""
-        echo "2. Set your station info (callsign, grid_square, lat/lon, etc.)"
-        echo ""
-    fi
-    echo "3. Start continuous services (in order):"
-    echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → Raw Buffer"
-    echo "   sudo systemctl start timestd-metrology       # Phase 2: L1 Raw Measurements"
-    echo "   sudo systemctl start timestd-l2-calibration  # Phase 2: L2 Calibrated Timing"
-    echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion → Chrony SHM"
-    echo "   sudo systemctl start timestd-physics         # Phase 3: TEC Estimation"
-    echo "   sudo systemctl start timestd-web-api         # Web API & Dashboard"
-    if [[ "$VTEC_ENABLED" == "true" ]]; then
-        echo "   sudo systemctl start timestd-vtec            # GNSS VTEC Monitor"
-    fi
-    echo ""
-    echo "4. Start periodic timers:"
-    echo "   sudo systemctl start timestd-ionex-download.timer  # Daily IONEX maps"
-    echo "   sudo systemctl start timestd-chrony-monitor.timer  # Chrony health check"
-    echo ""
-    echo "5. Check status:"
-    echo "   sudo systemctl status timestd-core-recorder timestd-metrology timestd-l2-calibration timestd-fusion timestd-physics timestd-web-api"
-    echo "   sudo systemctl list-timers timestd-*"
-    echo "   journalctl -u timestd-core-recorder -f"
-    echo ""
-    
-    # Add chrony note if it wasn't installed during setup
-    if ! command -v chronyd &> /dev/null; then
-        echo "📝 Note: If you install chrony later for system clock discipline:"
-        echo "   sudo mkdir -p /etc/systemd/system/chronyd.service.d"
-        echo "   sudo cp $PROJECT_DIR/systemd/chronyd-timestd-shm.conf /etc/systemd/system/chronyd.service.d/timestd-shm.conf"
-        echo "   sudo systemctl daemon-reload"
-        echo ""
-    fi
-    
-    echo "Web API: http://localhost:8000"
-else
-    echo "Test mode installed. Next steps:"
-    echo ""
-    echo "1. Edit configuration:"
-    echo "   nano $CONFIG_DIR/timestd-config.toml"
-    echo ""
-    echo "2. Activate virtual environment:"
-    echo "   source $VENV_DIR/bin/activate"
-    echo ""
-    echo "3. Start core recorder:"
-    echo "   python -m hf_timestd --config $CONFIG_DIR/timestd-config.toml"
-    echo ""
-    echo "4. In another terminal, start web API:"
-    echo "   cd $PROJECT_DIR/web-api && $VENV_DIR/bin/python main.py"
-    echo ""
-    echo "Web API: http://localhost:8000"
 fi
 
-echo ""
-echo "Data location: $DATA_ROOT"
+echo "Web API:   http://localhost:8000"
+echo "Config:    $MAIN_CONFIG"
+echo "Data:      $DATA_ROOT"
 echo "=============================================="

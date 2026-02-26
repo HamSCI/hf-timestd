@@ -1,8 +1,7 @@
 [Unit]
 Description=HF Time Standard Radiod Health Monitor
 Documentation=https://github.com/mijahauan/hf-timestd
-After=network.target radiod@ac0g-bee1-rx888.service
-Wants=radiod@ac0g-bee1-rx888.service
+After=network.target
 
 [Service]
 Type=simple

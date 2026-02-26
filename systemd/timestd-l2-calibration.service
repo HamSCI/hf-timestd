@@ -14,13 +14,9 @@ WorkingDirectory=/var/lib/timestd
 # Watchdog: restart if no heartbeat for 180s (3 poll intervals)
 WatchdogSec=180
 
-# Run L2 calibration service for all 9 channels
+# Run L2 calibration service (reads station info and channels from config)
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_service \
-    --data-root /var/lib/timestd \
-    --receiver-grid EM38ww40pk \
-    --receiver-lat 38.918461 \
-    --receiver-lon -92.127974 \
-    --channels SHARED_2500 SHARED_5000 SHARED_10000 SHARED_15000 WWV_20000 WWV_25000 CHU_3330 CHU_7850 CHU_14670 \
+    --config /etc/hf-timestd/timestd-config.toml \
     --poll-interval 60.0 \
     --log-level INFO
 

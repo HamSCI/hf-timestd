@@ -2,7 +2,7 @@
 # =============================================================================
 # TimeStd Recorder Uninstallation Script
 # =============================================================================
-# Usage: ./uninstall.sh [--mode test|production] [--keep-data]
+# Usage: sudo ./uninstall.sh [--keep-data]
 #
 # This script reverses all changes made by install.sh:
 #   1. Stops and disables systemd services
@@ -16,7 +16,6 @@
 set -euo pipefail
 
 # Default values
-MODE="production"
 KEEP_DATA=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -37,7 +36,7 @@ log_step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
 while [[ $# -gt 0 ]]; do
     case $1 in
         --mode)
-            MODE="$2"
+            # Legacy flag — accepted for backward compat, ignored
             shift 2
             ;;
         --keep-data)
@@ -50,7 +49,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --mode test|production  Uninstall mode (default: production)"
+            echo "  --mode MODE             (ignored, accepted for backward compatibility)"
             echo "  --keep-data             Keep data directories (default: remove)"
             echo "  --help, -h              Show this help"
             echo ""
@@ -65,235 +64,209 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate mode
-if [[ "$MODE" != "test" && "$MODE" != "production" ]]; then
-    log_error "Invalid mode: $MODE (must be 'test' or 'production')"
-    exit 1
-fi
-
 echo "=============================================="
 echo "  TimeStd Recorder Uninstallation"
 echo "=============================================="
-echo "  Mode:      $MODE"
 echo "  Keep data: $KEEP_DATA"
 echo "=============================================="
 echo ""
 
 # Confirm uninstall
-if [[ "$MODE" == "production" ]]; then
-    log_warn "This will remove ALL hf-timestd components from the system."
-    if [[ "$KEEP_DATA" == "false" ]]; then
-        log_warn "Data in /var/lib/timestd will be PERMANENTLY DELETED."
+log_warn "This will remove ALL hf-timestd components from the system."
+if [[ "$KEEP_DATA" == "false" ]]; then
+    log_warn "Data in /var/lib/timestd will be PERMANENTLY DELETED."
+fi
+read -p "Are you sure you want to continue? (yes/no) " -r
+echo
+if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+    log_info "Uninstall cancelled."
+    exit 0
+fi
+
+# Production paths
+DATA_ROOT="/var/lib/timestd"
+CONFIG_DIR="/etc/hf-timestd"
+VENV_DIR="/opt/hf-timestd/venv"
+WEBUI_DIR="/opt/hf-timestd/web-api"
+LOG_DIR="/var/log/hf-timestd"
+INSTALL_USER="timestd"
+
+# =============================================================================
+# Step 1: Stop and Disable Services
+# =============================================================================
+log_step "Stopping and disabling systemd services..."
+
+SERVICES=(
+    "timestd-core-recorder.service"
+    "timestd-metrology.service"
+    "timestd-l2-calibration.service"
+    "timestd-fusion.service"
+    "timestd-physics.service"
+    "timestd-web-api.service"
+    "timestd-vtec.service"
+    "timestd-radiod-monitor.service"
+    "timestd-chrony-monitor.service"
+    "timestd-ionex-download.service"
+    "timestd-iono-reanalysis.service"
+    "grape-daily.service"
+    # Legacy services
+    "timestd-analytics.service"
+    "timestd-web-ui.service"
+)
+
+for service in "${SERVICES[@]}"; do
+    if systemctl list-unit-files | grep -q "$service"; then
+        log_info "  Stopping $service..."
+        sudo systemctl stop "$service" 2>/dev/null || true
+        sudo systemctl disable "$service" 2>/dev/null || true
+        log_info "  ✅ Stopped and disabled $service"
     fi
-    read -p "Are you sure you want to continue? (yes/no) " -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
-        log_info "Uninstall cancelled."
-        exit 0
+done
+
+# Stop timers
+TIMERS=(
+    "timestd-upload-daily.timer"
+    "timestd-ionex-download.timer"
+    "timestd-chrony-monitor.timer"
+    "timestd-iono-reanalysis.timer"
+    "grape-daily.timer"
+)
+
+for timer in "${TIMERS[@]}"; do
+    if systemctl list-unit-files | grep -q "$timer"; then
+        log_info "  Stopping $timer..."
+        sudo systemctl stop "$timer" 2>/dev/null || true
+        sudo systemctl disable "$timer" 2>/dev/null || true
+        log_info "  ✅ Stopped and disabled $timer"
+    fi
+done
+
+# =============================================================================
+# Step 2: Remove Service Files
+# =============================================================================
+log_step "Removing systemd service files..."
+
+SERVICE_FILES=(
+    "/etc/systemd/system/timestd-core-recorder.service"
+    "/etc/systemd/system/timestd-metrology.service"
+    "/etc/systemd/system/timestd-l2-calibration.service"
+    "/etc/systemd/system/timestd-fusion.service"
+    "/etc/systemd/system/timestd-physics.service"
+    "/etc/systemd/system/timestd-web-api.service"
+    "/etc/systemd/system/timestd-vtec.service"
+    "/etc/systemd/system/timestd-radiod-monitor.service"
+    "/etc/systemd/system/timestd-chrony-monitor.service"
+    "/etc/systemd/system/timestd-chrony-monitor.timer"
+    "/etc/systemd/system/timestd-ionex-download.service"
+    "/etc/systemd/system/timestd-ionex-download.timer"
+    "/etc/systemd/system/timestd-upload-daily.service"
+    "/etc/systemd/system/timestd-upload-daily.timer"
+    "/etc/systemd/system/timestd-alert@.service"
+    "/etc/systemd/system/timestd-iono-reanalysis.service"
+    "/etc/systemd/system/timestd-iono-reanalysis.timer"
+    "/etc/systemd/system/grape-daily.service"
+    "/etc/systemd/system/grape-daily.timer"
+    # Legacy services (no longer used)
+    "/etc/systemd/system/timestd-analytics.service"
+    "/etc/systemd/system/timestd-web-ui.service"
+)
+
+for file in "${SERVICE_FILES[@]}"; do
+    if [[ -f "$file" ]]; then
+        sudo rm -f "$file"
+        log_info "  Removed: $file"
+    fi
+done
+
+# Remove chronyd override
+if [[ -f "/etc/systemd/system/chronyd.service.d/timestd-shm.conf" ]]; then
+    sudo rm -f "/etc/systemd/system/chronyd.service.d/timestd-shm.conf"
+    log_info "  Removed: /etc/systemd/system/chronyd.service.d/timestd-shm.conf"
+    
+    # Remove directory if empty
+    if [[ -d "/etc/systemd/system/chronyd.service.d" ]]; then
+        sudo rmdir "/etc/systemd/system/chronyd.service.d" 2>/dev/null || true
     fi
 fi
 
-# Set paths based on mode
-if [[ "$MODE" == "production" ]]; then
-    DATA_ROOT="/var/lib/timestd"
-    CONFIG_DIR="/etc/hf-timestd"
-    VENV_DIR="/opt/hf-timestd/venv"
-    WEBUI_DIR="/opt/hf-timestd/web-api"
-    LOG_DIR="/var/log/hf-timestd"
-    INSTALL_USER="timestd"
-else
-    DATA_ROOT="/tmp/timestd-test"
-    CONFIG_DIR="$PROJECT_DIR/config"
-    VENV_DIR="$PROJECT_DIR/venv"
-    WEBUI_DIR="$PROJECT_DIR/web-ui"
-    LOG_DIR="$DATA_ROOT/logs"
-    INSTALL_USER="${USER}"
-fi
+# Reload systemd
+sudo systemctl daemon-reload
+log_info "  ✅ Systemd daemon reloaded"
 
 # =============================================================================
-# Step 1: Stop and Disable Services (Production Only)
+# Step 3: Remove Chrony Configuration
 # =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Stopping and disabling systemd services..."
-    
-    SERVICES=(
-        "timestd-core-recorder.service"
-        "timestd-metrology.service"
-        "timestd-l2-calibration.service"
-        "timestd-fusion.service"
-        "timestd-physics.service"
-        "timestd-web-api.service"
-        "timestd-vtec.service"
-        "timestd-radiod-monitor.service"
-        "timestd-chrony-monitor.service"
-        "timestd-ionex-download.service"
-        "timestd-iono-reanalysis.service"
-        "grape-daily.service"
-        # Legacy services
-        "timestd-analytics.service"
-        "timestd-web-ui.service"
-    )
-    
-    for service in "${SERVICES[@]}"; do
-        if systemctl list-unit-files | grep -q "$service"; then
-            log_info "  Stopping $service..."
-            sudo systemctl stop "$service" 2>/dev/null || true
-            sudo systemctl disable "$service" 2>/dev/null || true
-            log_info "  ✅ Stopped and disabled $service"
-        fi
-    done
-    
-    # Stop timers
-    TIMERS=(
-        "timestd-upload-daily.timer"
-        "timestd-ionex-download.timer"
-        "timestd-chrony-monitor.timer"
-        "timestd-iono-reanalysis.timer"
-        "grape-daily.timer"
-    )
-    
-    for timer in "${TIMERS[@]}"; do
-        if systemctl list-unit-files | grep -q "$timer"; then
-            log_info "  Stopping $timer..."
-            sudo systemctl stop "$timer" 2>/dev/null || true
-            sudo systemctl disable "$timer" 2>/dev/null || true
-            log_info "  ✅ Stopped and disabled $timer"
-        fi
-    done
+log_step "Removing chrony configuration..."
+
+# Detect chrony config file
+CHRONY_CONF=""
+if [[ -f "/etc/chrony/chrony.conf" ]]; then
+    CHRONY_CONF="/etc/chrony/chrony.conf"
+elif [[ -f "/etc/chrony.conf" ]]; then
+    CHRONY_CONF="/etc/chrony.conf"
 fi
 
-# =============================================================================
-# Step 2: Remove Service Files (Production Only)
-# =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Removing systemd service files..."
+if [[ -n "$CHRONY_CONF" ]]; then
+    CHRONY_CHANGED=false
     
-    SERVICE_FILES=(
-        "/etc/systemd/system/timestd-core-recorder.service"
-        "/etc/systemd/system/timestd-metrology.service"
-        "/etc/systemd/system/timestd-l2-calibration.service"
-        "/etc/systemd/system/timestd-fusion.service"
-        "/etc/systemd/system/timestd-physics.service"
-        "/etc/systemd/system/timestd-web-api.service"
-        "/etc/systemd/system/timestd-vtec.service"
-        "/etc/systemd/system/timestd-radiod-monitor.service"
-        "/etc/systemd/system/timestd-chrony-monitor.service"
-        "/etc/systemd/system/timestd-chrony-monitor.timer"
-        "/etc/systemd/system/timestd-ionex-download.service"
-        "/etc/systemd/system/timestd-ionex-download.timer"
-        "/etc/systemd/system/timestd-upload-daily.service"
-        "/etc/systemd/system/timestd-upload-daily.timer"
-        "/etc/systemd/system/timestd-alert@.service"
-        "/etc/systemd/system/timestd-iono-reanalysis.service"
-        "/etc/systemd/system/timestd-iono-reanalysis.timer"
-        "/etc/systemd/system/grape-daily.service"
-        "/etc/systemd/system/grape-daily.timer"
-        # Legacy services (no longer used)
-        "/etc/systemd/system/timestd-analytics.service"
-        "/etc/systemd/system/timestd-web-ui.service"
-    )
-    
-    for file in "${SERVICE_FILES[@]}"; do
-        if [[ -f "$file" ]]; then
-            sudo rm -f "$file"
-            log_info "  Removed: $file"
-        fi
-    done
-    
-    # Remove chronyd override
-    if [[ -f "/etc/systemd/system/chronyd.service.d/timestd-shm.conf" ]]; then
-        sudo rm -f "/etc/systemd/system/chronyd.service.d/timestd-shm.conf"
-        log_info "  Removed: /etc/systemd/system/chronyd.service.d/timestd-shm.conf"
-        
-        # Remove directory if empty
-        if [[ -d "/etc/systemd/system/chronyd.service.d" ]]; then
-            sudo rmdir "/etc/systemd/system/chronyd.service.d" 2>/dev/null || true
-        fi
+    if grep -q "refclock SHM 0 refid TSL1" "$CHRONY_CONF" 2>/dev/null; then
+        log_info "  Removing timestd SHM refclock from $CHRONY_CONF..."
+        # Remove the dual refclock block added by install.sh
+        sudo sed -i '/# HF Time Standard Dual Chrony Refclock Configuration/,/# TSL1 serves as backup/d' "$CHRONY_CONF"
+        log_info "  ✅ Removed SHM refclock configuration"
+        CHRONY_CHANGED=true
+    else
+        log_info "  ℹ️  No timestd SHM configuration found in chrony.conf"
     fi
     
-    # Reload systemd
-    sudo systemctl daemon-reload
-    log_info "  ✅ Systemd daemon reloaded"
-fi
-
-# =============================================================================
-# Step 3: Remove Chrony Configuration (Production Only)
-# =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Removing chrony configuration..."
-    
-    # Detect chrony config file
-    CHRONY_CONF=""
-    if [[ -f "/etc/chrony/chrony.conf" ]]; then
-        CHRONY_CONF="/etc/chrony/chrony.conf"
-    elif [[ -f "/etc/chrony.conf" ]]; then
-        CHRONY_CONF="/etc/chrony.conf"
+    # Remove GNSS timeserver if added by install.sh
+    if grep -q "# GNSS Timeserver (ZED-F9P host providing NTP)" "$CHRONY_CONF" 2>/dev/null; then
+        log_info "  Removing GNSS timeserver from $CHRONY_CONF..."
+        sudo sed -i '/# GNSS Timeserver (ZED-F9P host providing NTP)/,/^server .* iburst prefer$/d' "$CHRONY_CONF"
+        log_info "  ✅ Removed GNSS timeserver configuration"
+        CHRONY_CHANGED=true
     fi
     
-    if [[ -n "$CHRONY_CONF" ]]; then
-        CHRONY_CHANGED=false
-        
-        if grep -q "refclock SHM 0 refid TSL1" "$CHRONY_CONF" 2>/dev/null; then
-            log_info "  Removing timestd SHM refclock from $CHRONY_CONF..."
-            # Remove the dual refclock block added by install.sh
-            sudo sed -i '/# HF Time Standard Dual Chrony Refclock Configuration/,/# TSL1 serves as backup/d' "$CHRONY_CONF"
-            log_info "  ✅ Removed SHM refclock configuration"
-            CHRONY_CHANGED=true
-        else
-            log_info "  ℹ️  No timestd SHM configuration found in chrony.conf"
-        fi
-        
-        # Remove GNSS timeserver if added by install.sh
-        if grep -q "# GNSS Timeserver (ZED-F9P host providing NTP)" "$CHRONY_CONF" 2>/dev/null; then
-            log_info "  Removing GNSS timeserver from $CHRONY_CONF..."
-            sudo sed -i '/# GNSS Timeserver (ZED-F9P host providing NTP)/,/^server .* iburst prefer$/d' "$CHRONY_CONF"
-            log_info "  ✅ Removed GNSS timeserver configuration"
-            CHRONY_CHANGED=true
-        fi
-        
-        # Restart chronyd if we made changes and it's running
-        if [[ "$CHRONY_CHANGED" == "true" ]] && systemctl is-active --quiet chronyd; then
-            log_info "  Restarting chronyd..."
-            sudo systemctl restart chronyd
-        fi
+    # Restart chronyd if we made changes and it's running
+    if [[ "$CHRONY_CHANGED" == "true" ]] && systemctl is-active --quiet chronyd; then
+        log_info "  Restarting chronyd..."
+        sudo systemctl restart chronyd
     fi
 fi
 
 # =============================================================================
-# Step 4: Remove System Configurations (Production Only)
+# Step 4: Remove System Configurations
 # =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Removing system configurations..."
-    
-    # Remove UDP buffer configuration
-    if [[ -f "/etc/sysctl.d/99-timestd.conf" ]]; then
-        sudo rm -f "/etc/sysctl.d/99-timestd.conf"
-        log_info "  Removed: /etc/sysctl.d/99-timestd.conf"
-    fi
-    
-    # Remove tmpfiles.d configuration
-    if [[ -f "/etc/tmpfiles.d/timestd.conf" ]]; then
-        sudo rm -f "/etc/tmpfiles.d/timestd.conf"
-        log_info "  Removed: /etc/tmpfiles.d/timestd.conf"
-    fi
-    
-    # Remove logrotate configuration
-    if [[ -f "/etc/logrotate.d/hf-timestd" ]]; then
-        sudo rm -f "/etc/logrotate.d/hf-timestd"
-        log_info "  Removed: /etc/logrotate.d/hf-timestd"
-    fi
-    
-    # Remove cron jobs
-    if [[ -f "/etc/cron.d/timestd-freshness-monitor" ]]; then
-        sudo rm -f "/etc/cron.d/timestd-freshness-monitor"
-        log_info "  Removed: /etc/cron.d/timestd-freshness-monitor"
-    fi
-    
-    # Remove shared memory directory
-    if [[ -d "/dev/shm/timestd" ]]; then
-        sudo rm -rf "/dev/shm/timestd"
-        log_info "  Removed: /dev/shm/timestd"
-    fi
+log_step "Removing system configurations..."
+
+# Remove UDP buffer configuration
+if [[ -f "/etc/sysctl.d/99-timestd.conf" ]]; then
+    sudo rm -f "/etc/sysctl.d/99-timestd.conf"
+    log_info "  Removed: /etc/sysctl.d/99-timestd.conf"
+fi
+
+# Remove tmpfiles.d configuration
+if [[ -f "/etc/tmpfiles.d/timestd.conf" ]]; then
+    sudo rm -f "/etc/tmpfiles.d/timestd.conf"
+    log_info "  Removed: /etc/tmpfiles.d/timestd.conf"
+fi
+
+# Remove logrotate configuration
+if [[ -f "/etc/logrotate.d/hf-timestd" ]]; then
+    sudo rm -f "/etc/logrotate.d/hf-timestd"
+    log_info "  Removed: /etc/logrotate.d/hf-timestd"
+fi
+
+# Remove cron jobs
+if [[ -f "/etc/cron.d/timestd-freshness-monitor" ]]; then
+    sudo rm -f "/etc/cron.d/timestd-freshness-monitor"
+    log_info "  Removed: /etc/cron.d/timestd-freshness-monitor"
+fi
+
+# Remove shared memory directory
+if [[ -d "/dev/shm/timestd" ]]; then
+    sudo rm -rf "/dev/shm/timestd"
+    log_info "  Removed: /dev/shm/timestd"
 fi
 
 # =============================================================================
@@ -302,11 +275,7 @@ fi
 log_step "Removing Python virtual environment..."
 
 if [[ -d "$VENV_DIR" ]]; then
-    if [[ "$MODE" == "production" ]]; then
-        sudo rm -rf "$VENV_DIR"
-    else
-        rm -rf "$VENV_DIR"
-    fi
+    sudo rm -rf "$VENV_DIR"
     log_info "  Removed: $VENV_DIR"
 else
     log_info "  ℹ️  Virtual environment not found: $VENV_DIR"
@@ -320,28 +289,26 @@ if pip3 show hf-timestd &>/dev/null; then
 fi
 
 # =============================================================================
-# Step 6: Remove Installation Directories (Production Only)
+# Step 6: Remove Installation Directories
 # =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Removing installation directories..."
-    
-    # Remove /opt/hf-timestd (except venv which was already removed)
-    if [[ -d "/opt/hf-timestd" ]]; then
-        sudo rm -rf "/opt/hf-timestd"
-        log_info "  Removed: /opt/hf-timestd"
-    fi
-    
-    # Remove config directory
-    if [[ -d "$CONFIG_DIR" ]]; then
-        sudo rm -rf "$CONFIG_DIR"
-        log_info "  Removed: $CONFIG_DIR"
-    fi
-    
-    # Remove log directory
-    if [[ -d "$LOG_DIR" ]]; then
-        sudo rm -rf "$LOG_DIR"
-        log_info "  Removed: $LOG_DIR"
-    fi
+log_step "Removing installation directories..."
+
+# Remove /opt/hf-timestd (except venv which was already removed)
+if [[ -d "/opt/hf-timestd" ]]; then
+    sudo rm -rf "/opt/hf-timestd"
+    log_info "  Removed: /opt/hf-timestd"
+fi
+
+# Remove config directory
+if [[ -d "$CONFIG_DIR" ]]; then
+    sudo rm -rf "$CONFIG_DIR"
+    log_info "  Removed: $CONFIG_DIR"
+fi
+
+# Remove log directory
+if [[ -d "$LOG_DIR" ]]; then
+    sudo rm -rf "$LOG_DIR"
+    log_info "  Removed: $LOG_DIR"
 fi
 
 # =============================================================================
@@ -351,12 +318,8 @@ if [[ "$KEEP_DATA" == "false" ]]; then
     log_step "Removing data directories..."
     
     if [[ -d "$DATA_ROOT" ]]; then
-        if [[ "$MODE" == "production" ]]; then
-            log_warn "  Removing $DATA_ROOT (this may take a while)..."
-            sudo rm -rf "$DATA_ROOT"
-        else
-            rm -rf "$DATA_ROOT"
-        fi
+        log_warn "  Removing $DATA_ROOT (this may take a while)..."
+        sudo rm -rf "$DATA_ROOT"
         log_info "  ✅ Removed: $DATA_ROOT"
     else
         log_info "  ℹ️  Data directory not found: $DATA_ROOT"
@@ -367,31 +330,29 @@ else
 fi
 
 # =============================================================================
-# Step 8: Remove System User (Production Only)
+# Step 8: Remove System User
 # =============================================================================
-if [[ "$MODE" == "production" ]]; then
-    log_step "Removing system user..."
-    
-    if id -u timestd &>/dev/null; then
-        # Remove user from chrony group first
-        CHRONY_GROUP=""
-        if getent group _chrony &>/dev/null; then
-            CHRONY_GROUP="_chrony"
-        elif getent group chrony &>/dev/null; then
-            CHRONY_GROUP="chrony"
-        fi
-        
-        if [[ -n "$CHRONY_GROUP" ]]; then
-            sudo gpasswd -d timestd "$CHRONY_GROUP" 2>/dev/null || true
-        fi
-        
-        # Remove user and group
-        sudo userdel timestd 2>/dev/null || true
-        sudo groupdel timestd 2>/dev/null || true
-        log_info "  ✅ Removed system user and group: timestd"
-    else
-        log_info "  ℹ️  System user 'timestd' not found"
+log_step "Removing system user..."
+
+if id -u timestd &>/dev/null; then
+    # Remove user from chrony group first
+    CHRONY_GROUP=""
+    if getent group _chrony &>/dev/null; then
+        CHRONY_GROUP="_chrony"
+    elif getent group chrony &>/dev/null; then
+        CHRONY_GROUP="chrony"
     fi
+    
+    if [[ -n "$CHRONY_GROUP" ]]; then
+        sudo gpasswd -d timestd "$CHRONY_GROUP" 2>/dev/null || true
+    fi
+    
+    # Remove user and group
+    sudo userdel timestd 2>/dev/null || true
+    sudo groupdel timestd 2>/dev/null || true
+    log_info "  ✅ Removed system user and group: timestd"
+else
+    log_info "  ℹ️  System user 'timestd' not found"
 fi
 
 # =============================================================================
@@ -408,18 +369,12 @@ if [[ "$KEEP_DATA" == "true" ]]; then
     log_warn "Data directories were preserved:"
     log_warn "  $DATA_ROOT"
     log_warn "To remove data manually, run:"
-    if [[ "$MODE" == "production" ]]; then
-        log_warn "  sudo rm -rf $DATA_ROOT"
-    else
-        log_warn "  rm -rf $DATA_ROOT"
-    fi
+    log_warn "  sudo rm -rf $DATA_ROOT"
 fi
 
-if [[ "$MODE" == "production" ]]; then
-    echo ""
-    log_info "To reinstall, run:"
-    log_info "  cd $PROJECT_DIR"
-    log_info "  sudo ./scripts/install.sh --mode production"
-fi
+echo ""
+log_info "To reinstall, run:"
+log_info "  cd $PROJECT_DIR"
+log_info "  sudo ./scripts/install.sh"
 
 echo ""

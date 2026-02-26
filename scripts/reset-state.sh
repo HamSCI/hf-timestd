@@ -16,7 +16,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-CONFIG_FILE="${PROJECT_ROOT}/config/timestd-config.toml"
+CONFIG_FILE="/etc/hf-timestd/timestd-config.toml"
 
 # Colors for output
 RED='\033[0;31m'
@@ -26,18 +26,11 @@ NC='\033[0m' # No Color
 
 # Parse config to get data root
 get_data_root() {
-    local mode=$(grep -A10 '^\[recorder\]' "$CONFIG_FILE" | grep 'mode' | head -1 | cut -d'"' -f2)
-    
-    if [ "$mode" = "production" ]; then
-        grep -A10 '^\[recorder\]' "$CONFIG_FILE" | grep 'production_data_root' | head -1 | cut -d'"' -f2
+    if [ -f "$CONFIG_FILE" ]; then
+        grep '^production_data_root' "$CONFIG_FILE" | head -1 | cut -d'"' -f2
     else
-        grep -A10 '^\[recorder\]' "$CONFIG_FILE" | grep 'test_data_root' | head -1 | cut -d'"' -f2
+        echo "/var/lib/timestd"
     fi
-}
-
-# Get current mode from config
-get_mode() {
-    grep -A10 '^\[recorder\]' "$CONFIG_FILE" | grep 'mode' | head -1 | cut -d'"' -f2
 }
 
 usage() {
@@ -62,7 +55,6 @@ usage() {
     echo "  $0 --all --dry-run            # Preview changes"
     echo ""
     echo "Current configuration:"
-    echo "  Mode: $(get_mode)"
     echo "  Data root: $(get_data_root)"
 }
 
@@ -125,7 +117,6 @@ fi
 
 # Get data root
 DATA_ROOT=$(get_data_root)
-MODE=$(get_mode)
 
 if [ ! -d "$DATA_ROOT" ]; then
     echo -e "${RED}Error: Data root does not exist: $DATA_ROOT${NC}"
@@ -133,7 +124,6 @@ if [ ! -d "$DATA_ROOT" ]; then
 fi
 
 echo -e "${GREEN}GRAPE State Reset${NC}"
-echo "Mode: $MODE"
 echo "Data root: $DATA_ROOT"
 echo ""
 

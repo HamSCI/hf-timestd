@@ -18,8 +18,7 @@ ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/science/tec_reanalyzed
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/science
 
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.ionospheric_reanalysis \
-    --data-root /var/lib/timestd \
-    --grid EM38ww \
+    --config /etc/hf-timestd/timestd-config.toml \
     --hours 1
 
 # Timeout: should complete well within 5 minutes

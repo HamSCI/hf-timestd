@@ -1,12 +1,31 @@
 #!/bin/bash
 # GRAPE pipeline status report
 # Shows decimation, spectrogram, packaging, and upload status for all dates
-# Usage: bash scripts/grape-status.sh [--log]
-#   --log  Append output to logs/grape-status.log
+# Usage: bash scripts/grape-status.sh [--config /path/to/config.toml] [--log]
+#   --config  Path to timestd-config.toml (default: /etc/hf-timestd/timestd-config.toml)
+#   --log     Append output to /var/log/hf-timestd/grape-status.log
 
+CONFIG="/etc/hf-timestd/timestd-config.toml"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --config) CONFIG="$2"; shift 2 ;;
+        --log)    DO_LOG=true; shift ;;
+        *)        shift ;;
+    esac
+done
+
+PYTHON="/opt/hf-timestd/venv/bin/python3"
 DATA_ROOT="/var/lib/timestd"
-LOG_FILE="/home/mjh/git/hf-timestd/logs/grape-status.log"
-CHANNELS=9
+LOG_FILE="/var/log/hf-timestd/grape-status.log"
+
+# Read channel count from config
+CHANNELS=$($PYTHON -c "
+import tomllib
+with open('$CONFIG', 'rb') as f:
+    cfg = tomllib.load(f)
+n = len(cfg.get('recorder', {}).get('channel_group', {}).get('timestd', {}).get('channels', []))
+print(n)
+" 2>/dev/null || echo 9)
 
 # Header
 header() {
@@ -75,7 +94,7 @@ scan() {
 }
 
 # Main
-if [ "$1" = "--log" ]; then
+if [[ "${DO_LOG:-false}" == "true" ]]; then
     mkdir -p "$(dirname "$LOG_FILE")"
     { header; scan; } | tee -a "$LOG_FILE"
     echo "(Appended to $LOG_FILE)"
