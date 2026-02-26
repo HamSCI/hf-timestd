@@ -644,39 +644,35 @@ echo "=============================================="
 echo "  Installation Complete!"
 echo "=============================================="
 echo ""
-echo "Next steps:"
-echo ""
-echo "1. Start continuous services (in order):"
-echo "   sudo systemctl start timestd-core-recorder   # Phase 1: RTP → Raw Buffer"
-echo "   sudo systemctl start timestd-metrology       # Phase 2: L1 Raw Measurements"
-echo "   sudo systemctl start timestd-l2-calibration  # Phase 2: L2 Calibrated Timing"
-echo "   sudo systemctl start timestd-fusion          # Phase 3: Fusion → Chrony SHM"
-echo "   sudo systemctl start timestd-physics         # Phase 3: TEC Estimation"
-echo "   sudo systemctl start timestd-web-api         # Web API & Dashboard"
-if [[ "$VTEC_ENABLED" == "true" ]]; then
-    echo "   sudo systemctl start timestd-vtec            # GNSS VTEC Monitor"
-fi
-echo ""
-echo "2. Start periodic timers:"
-echo "   sudo systemctl start timestd-ionex-download.timer  # Daily IONEX maps"
-echo "   sudo systemctl start timestd-chrony-monitor.timer  # Chrony health check"
-echo ""
-echo "3. Check status:"
-echo "   sudo systemctl status timestd-core-recorder timestd-metrology timestd-l2-calibration timestd-fusion timestd-physics timestd-web-api"
-echo "   sudo systemctl list-timers timestd-*"
-echo "   journalctl -u timestd-core-recorder -f"
-echo ""
 
 # Add chrony note if it wasn't installed during setup
 if ! command -v chronyd &> /dev/null; then
-    echo "📝 Note: If you install chrony later for system clock discipline:"
+    echo "Note: If you install chrony later for system clock discipline:"
     echo "   sudo mkdir -p /etc/systemd/system/chronyd.service.d"
     echo "   sudo cp $PROJECT_DIR/systemd/chronyd-timestd-shm.conf /etc/systemd/system/chronyd.service.d/timestd-shm.conf"
     echo "   sudo systemctl daemon-reload"
     echo ""
 fi
 
-echo "Web API:   http://localhost:8000"
-echo "Config:    $MAIN_CONFIG"
-echo "Data:      $DATA_ROOT"
+echo "  Config:    $MAIN_CONFIG"
+echo "  Data:      $DATA_ROOT"
+echo "  Web API:   http://localhost:8000"
+echo ""
+
+# Offer to start all services now
+read -rp "  Start all services now? [Y/n] " start_choice
+start_choice=${start_choice:-Y}
+if [[ "$start_choice" =~ ^[Yy]$ ]]; then
+    echo ""
+    bash "$PROJECT_DIR/scripts/start-services.sh"
+else
+    echo ""
+    echo "  To start services later:"
+    echo "    sudo ./scripts/start-services.sh"
+    echo ""
+    echo "  To check status:"
+    echo "    sudo ./scripts/start-services.sh --status"
+    echo ""
+fi
+
 echo "=============================================="

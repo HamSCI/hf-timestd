@@ -62,18 +62,14 @@ The installation is **idempotent** — safe to re-run. On re-run, it will skip s
 
 ### After Installation
 
-```bash
-# Start all services
-sudo systemctl start timestd-core-recorder    # Phase 1: RTP → Raw Buffer
-sudo systemctl start timestd-metrology        # Phase 2: L1 Raw Measurements
-sudo systemctl start timestd-l2-calibration   # Phase 2: L2 Calibrated Timing
-sudo systemctl start timestd-fusion           # Phase 3: Fusion → Chrony SHM
-sudo systemctl start timestd-physics          # Phase 3: TEC Estimation
-sudo systemctl start timestd-web-api          # Web API & Dashboard
+The installer will offer to start all services automatically. If you decline, or need to start them later:
 
-# Start periodic timers
-sudo systemctl start timestd-ionex-download.timer    # Daily IONEX maps
-sudo systemctl start timestd-chrony-monitor.timer    # Chrony health check
+```bash
+# Start all services, timers, and run health check
+sudo ./scripts/start-services.sh
+
+# Check status only
+sudo ./scripts/start-services.sh --status
 ```
 
 ### Production Paths
