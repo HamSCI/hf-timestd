@@ -10,180 +10,189 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: PHYSICS PIPELINE CRITICAL REVIEW
+## 📋 NEXT SESSION: CHU FSK DECODER — DEFINITIVE OPTIMIZATION
 
-**Task:** Scrutinize the physics pipeline for errors, inconsistencies, circular reasoning, clarity of data model, and missed opportunities. Trace data from raw observable through each processing stage. Produce a ranked list of findings with severity and recommended action. Do not fix cosmetically — find structural problems.
+**Task:** Make the CHU FSK decoder reliably decode on all machines. Diagnose why it fails silently on two of three machines despite good CHU signals. Fix the decoder, not the symptoms. Produce working, tested code.
 
-**Focus:** Ionospheric physics in RTP mode (GPS+PPS, Lock Tier L6). UTC reconstruction is out of scope.
+**What "working" means:**
+1. Reliably decodes DUT1, TAI-UTC, year, and time on at least one CHU frequency per machine
+2. Dashboard shows date+time (not time-only) for "Last Decode"
+3. Decode success rate ≥50% of minutes when SNR permits (currently ~3/9 frames on the one machine where it works at all)
 
 ---
 
 ## System Context
 
 - **Receiver:** GPSDO-locked RX888 SDR via KA9Q-radio, RTP-timestamped IQ at 24 kHz/channel
-- **Stations:** WWV (2.5–25 MHz), WWVH (2.5–15 MHz), CHU (3.33, 7.85, 14.67 MHz), BPM (2.5–15 MHz)
+- **CHU Frequencies:** 3.330 MHz, 7.850 MHz, 14.670 MHz (Ottawa, Canada)
+- **Machines:** 3 identical setups (B3-1, others) — decoder works intermittently on B3-1, fails on the other two
 - **Location:** EM38 (~38.9°N, ~92.1°W, central Missouri)
 - **Git:** `/home/mjh/git/hf-timestd/` | **Production:** `/opt/hf-timestd/` | **Data:** `/var/lib/timestd/`
 - **Deploy:** `sudo scripts/update-production.sh [--pull]`
 
-| Service | Purpose | Log |
-|---|---|---|
-| `timestd-metrology` | IQ → L1 measurements | `/var/log/hf-timestd/phase2-*.log` |
-| `timestd-l2-calibration` | L1 → L2 calibrated timing | journalctl |
-| `timestd-physics` | L2 → L3 TEC/dTEC/VTEC | `/var/log/hf-timestd/physics.log` |
-| `timestd-web-api` | REST API + dashboard (port 8000) | journalctl |
+---
+
+## CHU FSK Signal Specification (NRC)
+
+CHU broadcasts a **Bell 103** compatible FSK time code during **seconds 31–39** of each minute:
+
+| Parameter | Value |
+|---|---|
+| Mark frequency | 2225 Hz (logic 1) |
+| Space frequency | 2025 Hz (logic 0) |
+| Center frequency | 2125 Hz |
+| Baud rate | 300 bps |
+| Bit duration | 3.333 ms |
+| Frame format | 1 start + 8 data + 1 parity (even) + 1 stop = 11 bits/byte |
+| Bytes per second | 10 (5 data + 5 redundancy) |
+| Timing per second | 0–10ms: 1000 Hz tick, 10–~133ms: mark sync, ~133–500ms: data, 500ms = precise boundary |
+
+**Frame types:**
+- **Frame A** (seconds 32–39): `6d dd hh mm ss` (BCD, nibble-swapped, repeated as bytes 5–9)
+- **Frame B** (second 31): `xz yy yy tt aa` (DUT1, year, TAI-UTC, DST; bytes 5–9 = bitwise NOT of 0–4)
 
 ---
 
-## Canonical Data Dictionary (Prerequisite — Read Before Any Calculation)
+## Architecture Overview
 
-`src/hf_timestd/schemas/data_dictionary.json` is the **single authoritative definition** of every observable and derived quantity. Before using any field in a calculation, verify its entry there.
+```
+CHUFSKListener (chu_fsk_listener.py)
+  │
+  ├── Creates USB-preset channels on radiod (12 kHz real audio)
+  ├── CHUFSKChannel: 75s ring buffer per frequency, RTP-aligned
+  ├── Health monitor thread per channel (10s check, 15s stale timeout)
+  ├── _decode_loop: runs at ~2s past each minute boundary
+  │     │
+  │     ├── get_aligned_minute(minute_boundary) → 60s audio
+  │     └── CHUFSKDecoder.decode_minute(audio, minute_boundary, is_audio=True)
+  │           │
+  │           ├── For each second 31–39:
+  │           │   ├── detect_tick_onset() → tick timing (primary, ~0.05ms)
+  │           │   ├── _fsk_demodulate_audio() → soft decisions (quadrature discriminator)
+  │           │   ├── _find_first_start_bit() → synchronization
+  │           │   ├── _extract_bits() → 110 bits
+  │           │   ├── _bits_to_bytes() → 10 bytes (with parity check)
+  │           │   └── _decode_frame_a() or _decode_frame_b()
+  │           │
+  │           └── _find_consensus_time() → majority vote across frames
+  │
+  ├── Writes JSON → /dev/shm/timestd/fsk_results/{channel}.json
+  └── Writes HDF5 → phase2/{CHANNEL}/broadcast:fsk/
 
-```python
-from hf_timestd.schemas import check_field
-entry = check_field('clock_offset_ms')   # returns description, formula, pitfalls
+Web Dashboard (metrology.html)
+  └── loadCHUFSK() → GET /api/metrology/chu-fsk/latest
+        └── CHUFSKService (chu_fsk_service.py)
+              ├── Primary: reads JSON from /dev/shm (last 5 min)
+              └── Fallback: reads HDF5 (last 3 days)
 ```
 
-Key entries: `raw_toa_ms`, `clock_offset_ms`, `raw_arrival_time_ms`, `propagation_delay_ms`, `tec_tecu`, `t_vacuum_error_ms`, `vtec_tecu`, `dtec_rate_tecu_per_s`, `dtec_mean_tecu`, `tof_kalman_ms`.
+---
 
-Seven cross-field consistency rules (CR-1 through CR-7) are also defined there and enforced at write time.
+## Known Bug 1: "Last Decode" Shows Time-Only (No Date)
+
+**Root cause:** `metrology.html` line 1047 uses `formatTime(data.last_decode)` which calls `Date.toLocaleTimeString()` — time only, no date. When the last successful decode was days ago (from HDF5 fallback), the display shows just `17:23:00` with no indication it's stale.
+
+**Files:**
+- `web-api/static/js/common.js:51-60` — `formatTime()` = time only; `formatTimestamp()` = date+time
+- `web-api/static/metrology.html:1047` — uses `formatTime` for "Last Decode"
+- `web-api/static/metrology.html:955` — also uses `formatTime` in the warning banner
+
+**Fix:** Replace `formatTime(data.last_decode)` with `formatTimestamp(data.last_decode)` on both lines 955 and 1047. Consider also adding a `timeAgo()` annotation (e.g., "2d 6h ago").
 
 ---
 
-## Data Pipeline and Field Semantics (Read First)
+## Known Bug 2: Decoder Fails Silently on Other Machines
 
+**Symptom:** On two of three machines, CHU signals are present and tone detection works (ticks detected, SNR adequate), but the FSK decoder produces `detected=false` every minute. No error in logs — just "frames=0/9" every cycle.
+
+**Suspected failure modes (investigate all):**
+
+### FM-1: Parity check is too strict (rejects ALL frames on marginal signals)
+
+`_bits_to_bytes()` (line 392) rejects entire frames when parity errors exceed a threshold. On HF paths with moderate SNR, individual bit errors are common. The redundancy check (bytes 0–4 == 5–9 for Frame A) is already a strong integrity check — parity rejection before that discards frames that could have passed redundancy. **The current code at line 416 notes "log but don't reject" in the comment, but the actual behavior should be verified carefully.** If there's a code path that rejects on parity, it's too aggressive for HF.
+
+### FM-2: Start bit search may fail at low SNR
+
+`_find_first_start_bit()` has two strategies:
+- **Frame A (secs 32–39):** Pattern-matches the 11-bit frame for expected byte `0x06`. Requires ≥9/11 bits matching. At low SNR this threshold may be too high.
+- **Frame B (sec 31):** Edge detection with adaptive threshold based on `std * 0.3`. May fail with weak signals or DC offset.
+
+Both search within a narrow window (50ms–200ms into the second). If the signal has a timing offset (e.g., from ionospheric delay), the start bit may be outside this window.
+
+### FM-3: Consensus requires ≥3 Frame A decodes
+
+`decode_minute()` line 971: consensus needs `len(frame_a_results) >= 3`. If only 1–2 frames decode (marginal signal), `detected` stays True but decoded_day/hour/minute aren't set via consensus. The fallback (line 1000) uses `max(set(...), key=count)` but logs a warning and doesn't validate time consistency. On other machines with weaker signals, this could produce unreliable results that get filtered out downstream.
+
+### FM-4: AM demodulation may not apply (audio mode)
+
+The listener passes `is_audio=True` because USB channels deliver real audio, not IQ. But `decode_second()` receives both `audio` and optionally `iq_samples`. When `is_audio=True`, `iq_samples` is `None` (line 930), so the code uses `_fsk_demodulate_audio()` (Hilbert → quadrature discriminator). This is correct, but the Hilbert transform on real audio can produce artifacts at signal edges. The IQ-direct path (`_fsk_demodulate_iq()`) is only used when the listener passes IQ — which it never does in the current architecture.
+
+### FM-5: No SNR gating or diagnostic logging for "why no frames decoded"
+
+When all 9 seconds produce `frame=None`, the only log is `frames=0/9, conf=0.00` — no per-second breakdown of _why_ each second failed. Add per-second diagnostic: was it start-bit search failure? Parity rejection? Redundancy mismatch? Byte decoding failure? This is essential for diagnosing cross-machine failures.
+
+---
+
+## Known Bug 3: Duplicate Decoder in advanced_signal_analysis.py
+
+`advanced_signal_analysis.py` lines 1123–1353 contain a completely separate `decode_chu_fsk()` implementation with:
+- A Python-loop Goertzel algorithm (extremely slow, ~300x slower than the production decoder)
+- Wrong frame format (no nibble swap, wrong BCD parsing, wrong redundancy check)
+- No parity checking, no consensus, no timing
+
+This is dead code (never called in production) but could confuse future developers. It should be deleted.
+
+---
+
+## Key Files for This Session
+
+| File | What to do |
+|---|---|
+| `src/hf_timestd/core/chu_fsk_decoder.py` | **PRIMARY TARGET.** Fix start-bit search robustness, review parity strictness, improve SNR tolerance, add per-second failure diagnostics |
+| `src/hf_timestd/core/chu_fsk_listener.py` | Review decode loop timing, verify audio alignment, check health monitor behavior |
+| `src/hf_timestd/core/advanced_signal_analysis.py:1123-1353` | **DELETE** the duplicate `decode_chu_fsk()` and related FSK methods |
+| `web-api/static/metrology.html:955,1047` | Fix "Last Decode" to show date+time (`formatTimestamp`) |
+| `web-api/services/chu_fsk_service.py` | Review HDF5 fallback logic, verify `last_decode` timestamp propagation |
+| `web-api/static/js/common.js` | Reference only — `formatTime` vs `formatTimestamp` |
+| `tests/test_chu_frame_slip.py` | **EXPAND** — add synthetic signal tests, SNR sweep, per-second failure mode tests |
+| `src/hf_timestd/core/wwv_constants.py:329-343` | CHU FSK constants (reference) |
+
+---
+
+## Diagnostic Commands
+
+```bash
+# Check FSK listener status
+cat /dev/shm/timestd/fsk_results/_status.json | python3 -m json.tool
+
+# Check latest decode results per channel
+for f in /dev/shm/timestd/fsk_results/CHU_*.json; do echo "=== $(basename $f) ==="; python3 -m json.tool "$f" 2>/dev/null | head -20; done
+
+# Check FSK decoder logs (last 50 lines with FSK)
+journalctl -u timestd-core-recorder --no-pager -n 200 | grep -i fsk | tail -50
+
+# Check HDF5 decode history
+python3 -c "
+import h5py, sys
+for ch in ['CHU_3330', 'CHU_7850', 'CHU_14670']:
+    path = f'/var/lib/timestd/phase2/{ch}/broadcast:fsk/{ch}_chu_fsk_$(date -u +%Y%m%d).h5'
+    try:
+        with h5py.File(path, 'r', locking=False) as f:
+            n = f['timestamp_utc'].shape[0]
+            valid = sum(f['fsk_valid'][:])
+            print(f'{ch}: {valid}/{n} valid decodes today')
+    except: print(f'{ch}: no data')
+"
 ```
-L1  timing_error_ms      = observed_ToA − model_expected_delay
-                           HDF5: phase2/{CHANNEL}/metrology/
-
-L2  clock_offset_ms      = same as L1 timing_error_ms (mislabeled — it is a residual, not a clock offset)
-    propagation_delay_ms = model path delay (~10ms CHU, ~4ms WWV, ~24ms WWVH, ~39ms BPM)
-    raw_arrival_time_ms  = clock_offset_ms + propagation_delay_ms  ← NOT an absolute ToA
-    tof_kalman_ms        = ALL NaN in production
-                           HDF5: phase2/{CHANNEL}/clock_offset/
-
-L3  tec_tecu             = group-delay TEC fit (see F1 — mostly noise)
-    t_vacuum_error_ms    = TEC-fit intercept = ionosphere-free D_clock (metrologically useful)
-    vtec_tecu            = ALL NaN in production (mapper runs but field not written to records)
-    dtec_rate_tecu_per_s = carrier-phase dTEC — 250K records/day — the viable physics product
-                           HDF5: phase2/science/tec/, phase2/science/dtec/
-```
-
-`physics_fusion_service._read_l2_slice()` prefers `tof_kalman_ms`, falls back to `clock_offset_ms`. Since `tof_kalman_ms` is all NaN, the fallback is always used. `clock_offset_ms` IS the correct D_clock residual (= `timing_error_ms` from L1, i.e. arrival − expected_propagation_delay). The TEC estimator input is semantically correct; the problem is that the L1 propagation model has large systematic errors (CHU: −76 ms, others: per-station) that contaminate the 1/f² fit.
 
 ---
 
-## Pre-Verified Findings (Confirmed 2026-02-19 by HDF5 Inspection)
+## Success Criteria
 
-### F1 — Group-delay TEC is below the noise floor *(CRITICAL)*
-
-| Station | Freq range | Signal @ 40 TECU | Noise 1σ | SNR |
-|---|---|---|---|---|
-| CHU | 3.33–14.67 MHz | 0.46 ms | 37 ms | **0.01** |
-| WWV | 2.5–25 MHz | 0.85 ms | 6.5 ms | **0.13** |
-| WWVH/BPM | 2.5–15 MHz | ~0.7 ms | ~5 ms | **~0.14** |
-
-The noise is propagation model error (inter-minute mode/condition variability), not instrument noise. The TEC estimator aggregates over a 5-minute lookback window mixing different propagation conditions. It cannot recover a sub-ms dispersion signal. The 11.7K TEC records today are noise fits — 71% have confidence < 0.5. The viable path is carrier-phase dTEC (already 250K records/day).
-
-### F2 — CHU has a ~76 ms systematic offset in `clock_offset_ms` *(STRUCTURAL)*
-
-All three CHU channels: `clock_offset_ms ≈ −76 ms`, `raw_arrival_time_ms ≈ −66 ms`. Model predicts ~10 ms for Ottawa→Missouri. This −76 ms systematic is not ionospheric. WWV ≈ +3 ms, WWVH ≈ +22 ms, BPM ≈ +38 ms — all different, suggesting per-station propagation model errors.
-
-### F3 — `vtec_tecu` all NaN; VTEC path never runs *(BUG — PARTIALLY FIXED)*
-
-`vtec_tecu` is all NaN because group-delay TEC confidence is always < 0.3 (the IPP filter threshold), so `ipp_measurements` is always empty and the VTEC mapper never runs. **Fixed (P1-D):** code now logs explicitly why VTEC is unavailable instead of silently writing NaN. Root cause remains F1 (propagation model noise floor).
-
-### F4 — Propagation mode labels are unreliable *(KNOWN)*
-
-BPM 2.5 MHz labeled "4F2" at 07:00 UTC (nighttime Missouri). Mode solver appears purely geometric — no physical constraints (MUF, absorption, layer height).
-
-### F5 — `docs/PHYSICS.md` and HamSCI abstract overstate capabilities *(DOCUMENTATION)*
-
-PHYSICS.md claims ✅ for TEC, scintillation, TIDs. Live system contradicts several claims. `docs/HAMSCI_2026_WORKSHOP_ABSTRACT.md` makes public claims needing honest validation.
-
----
-
-## Fixes Applied (2026-02-19 Session) — ALL COMPLETE
-
-| Fix | Commit |
-|---|---|
-| Canonical data dictionary (`data_dictionary.json`) + `check_field()` API | d625f33 |
-| P1-A: Corrected diagnosis — L1 propagation model systematic errors documented | 3a15626 |
-| P1-B: Unanchored dTEC capped at MARGINAL; `anchor_status` field (ANCHORED/ANCHOR_LOW_CONF/NO_ANCHOR) | d628727 |
-| P1-D: vtec_tecu NaN gating — explicit DEBUG log instead of silent NaN | d628727 |
-| P3-B: Full per-tick dTEC time series → `phase2/science/dtec_timeseries/` (~55 rec/min/station) | d628727 |
-| P1-C: Receiver coords from config toml; geometric elevation in VTECMapper (WWV~19°, WWVH~7°) | 21df170 |
-| P3-C: `compute_differential_dtec()` wired for multi-freq stations (CHU: 3 pairs, WWV: 15 pairs) | 54b3f4e |
-| P2-A: `HFPropagationModel` wired as tier-1 in `PropagationModeSolver` (real foF2/hmF2/MUF) | 907618d |
-| P3-A: Phase unwrapping quality check — `unwrap_quality` + `n_phase_jumps` in dTEC records | 8740347 |
-| P4-B: `gpsdo_locked` from L1 `quality_flag` instead of hardcoded `True` | 8740347 |
-| P4-C: `tof_kalman_ms` marked `deprecated=true` in L2 schema | 8740347 |
-| P3-D: Confirmed no code change needed — correlated propagation uncertainty absorbed by WLS intercept | — |
-
-## Additional Fixes (2026-02-19/20 Session) — ALL COMPLETE
-
-| Fix | Commit |
-|---|---|
-| `IonoDataService.start()` wired into `L2CalibrationService.start/stop()` | 4d4349b |
-| IONEX BASE RADIUS fixed to 6371.0 km (was `center_lat` ~39); HGT1/HGT2/DHGT fixed | a800885 |
-| `l3_dtec_v1` schema: add `anchor_status`, `unwrap_quality`, `n_phase_jumps` fields | 3bdfb73, 3b45357 |
-| Physics service minute re-processing bug: add `_processed_minutes` set | 9e8b4df |
-| `hdf5_reader`: O(1) chunk-boundary truncation replacing O(log N) binary search (watchdog fix) | 1ae970e |
-| Differential dTEC RMS promoted to INFO log; validated <0.03 TECU (all GOOD) | ea00ee5 |
-| Differential dTEC HDF5 writing: new `l3_dtec_diff_v1` schema + `dtec_diff_writer` | aa53942 |
-
-### Differential dTEC Validation Results (2026-02-20 ~01:00 UTC)
-
-| Station | Widest pair | RMS | n |
-|---|---|---|---|
-| CHU | 3.33–14.67 MHz | 0.005–0.007 TECU | 45–172 |
-| WWV | 2.50–25.00 MHz | 0.005–0.026 TECU | 54–235 |
-| WWVH | 2.50–15.00 MHz | 0.003–0.012 TECU | 22–235 |
-| BPM | 2.50–15.00 MHz | 0.002–0.011 TECU | 22–227 |
-
-All pairs GOOD quality. HDF5 output: `phase2/science/dtec_diff/AGGREGATED_dtec_diff_YYYYMMDD.h5`
-
-## Remaining Work
-
-| Item | Priority | Notes |
-|---|---|---|
-| WAM-IPE access | LOW | S3 bucket access not available; IRI-2020 climatological fallback is active and correct |
-| P3-A production validation | LOW | Check physics.log for `unwrap_quality` < 0.8 events to characterise phase noise |
-
----
-
-## What Actually Works (Verified 2026-02-19)
-
-| Product | Status |
-|---|---|
-| L1 timing measurements | ✅ ~15K/day |
-| L2 clock_offset_ms | ✅ Real residuals (systematic offsets per station — see F2) |
-| SNR per broadcast | ✅ Real, frequency- and time-varying |
-| Carrier-phase dTEC rate (dtec_rate_tecu_per_s) | ✅ 250K records/day — primary science product |
-| IONEX output | ✅ Written per minute |
-| All-arrivals (multi-path) | ✅ NEW — `all_arrivals/` HDF5; CHU_7850: 374 rows/min, 258 secondary |
-| GRAPE spectrograms | ✅ 9/9 channels uploading to PSWS |
-| Integrated dTEC (dtec_mean_tecu) | ⚠️ Unanchored — relative only (is_anchored always False) |
-| Per-tick dTEC time series | ✅ NEW — phase2/science/dtec_timeseries/ (~55 records/min/station) |
-| Differential carrier-phase TEC | ✅ NEW — computed in-process, logged; HDF5 write pending validation |
-| Group-delay TEC | ⚠️ SNR ~0.13 — fits produce values but noise-dominated (see 2026-02-24 audit) |
-| vtec_tecu | ⚠️ 55% valid (969/1772 on 2026-02-23) — gate is confidence≥0.3; geometrically correct but sTEC unreliable |
-| tof_kalman_ms | ❌ All NaN (dead schema field) |
-| Scintillation indices | ⚠️ Two implementations exist; test signal S4 all NaN (SNR gate); phase σ_φ works but measures multipath+noise, not scintillation |
-
----
-
-## Key Files for Review
-
-| File | What to scrutinize |
-|---|---|
-| `src/hf_timestd/core/physics_fusion_service.py` | `_read_l2_slice()` input semantics; TEC estimator inputs; vtec_tecu write path |
-| `src/hf_timestd/core/tec_estimator.py` | Whether inputs are raw ToA or residuals; confidence calibration |
-| `src/hf_timestd/core/l2_calibration_service.py` | `raw_arrival_time_ms` construction; field naming; systematic offsets |
-| `src/hf_timestd/core/propagation_mode_solver.py` | Physical constraints vs pure geometry |
-| `src/hf_timestd/core/vtec_mapper.py` | Why RMS=0.00; why vtec_tecu not written to per-station records |
-| `src/hf_timestd/core/carrier_tec.py` | dTEC anchor quality; how group-delay TEC is used as anchor |
-| `web-api/routers/propagation.py` | Does timeline expose D_clock? TEC endpoint freshness |
-| `web-api/static/physics.html` | SNR plot coloring (by station, not frequency — misses D-layer story) |
-| `docs/PHYSICS.md` | Accuracy audit — downgrade ✅ claims that contradict live system |
-| `docs/HAMSCI_2026_WORKSHOP_ABSTRACT.md` | Public claims — honest validation |
+1. **Dashboard fix deployed:** "Last Decode" shows `MM/DD/YYYY, HH:MM:SS` (using `formatTimestamp`)
+2. **Per-second diagnostics:** Each FSK second logs reason for failure (start-bit miss / parity reject / redundancy fail / byte-count short)
+3. **Decoder robustness:** On B3-1, decode success rate improves from 3/9 to ≥5/9 frames per minute on CHU_3330 (the best channel)
+4. **Cross-machine fix:** At least one CHU channel decodes on each of the other two machines (verify via HDF5 history)
+5. **Dead code removed:** `advanced_signal_analysis.py` duplicate FSK decoder deleted
+6. **Tests expanded:** `test_chu_frame_slip.py` gains synthetic signal tests covering FM-1 through FM-5
+7. **All changes committed and pushed**
