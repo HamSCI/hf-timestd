@@ -1,27 +1,29 @@
 #!/bin/bash
 # =============================================================================
-# PSWS SSH Key Exchange Setup
+# PSWS SSH Key Setup
 # =============================================================================
-# Automates first-time SSH key exchange with the PSWS upload server.
+# Sets up SSH keys for SFTP uploads to the PSWS server.
 # The PSWS server (pswsnetwork.eng.ua.edu) is SFTP-only — no shell access.
 #
 # What this script does:
 #   1. Reads station.id from timestd-config.toml (used as SFTP username)
-#   2. Generates an RSA keypair for the timestd user (if not already present)
+#   2. Generates an ed25519 keypair (if not already present)
 #   3. Caches the server's host key in known_hosts
-#   4. Uploads the public key to ~/.ssh/authorized_keys on the PSWS server
-#      using one-time password authentication (via sshpass + sftp batch mode)
-#   5. Verifies that subsequent logins are passwordless
+#   4. Displays the public key for you to register via the PSWS web portal
+#   5. Waits for the server to accept the key
+#   6. Installs the key for the timestd production user
+#
+# The PSWS server uses sshd StrictModes, so keys MUST be registered via
+# the web portal — direct SFTP upload of authorized_keys breaks permissions.
+# This matches the approach used by wsprdaemon.
 #
 # Usage:
 #   sudo ./setup-psws-keys.sh
 #
-# You will be prompted for:
-#   - Your PSWS TOKEN (the password shown on your PSWS site admin page)
-#
 # Prerequisites:
 #   - /etc/hf-timestd/timestd-config.toml configured with station.id
 #   - Network access to pswsnetwork.eng.ua.edu
+#   - A PSWS account at https://pswsnetwork.caps.ua.edu/
 # =============================================================================
 
 set -euo pipefail
@@ -79,25 +81,13 @@ if [[ -z "${STATION_ID}" || "${STATION_ID}" == "<YOUR_STATION_ID>" ]]; then
     exit 1
 fi
 
-KEY_FILE="${TIMESTD_HOME}/.ssh/id_rsa_psws_${STATION_ID}"
+KEY_FILE="${TIMESTD_HOME}/.ssh/id_ed25519_psws_${STATION_ID}"
+KEY_FILE_LEGACY="${TIMESTD_HOME}/.ssh/id_rsa_psws_${STATION_ID}"
 
 log_info "  Station ID (SFTP username): ${STATION_ID}"
 
 # =============================================================================
-# Step 2: Install sshpass if needed (one-time password use only)
-# =============================================================================
-log_step "Checking for sshpass..."
-
-if ! command -v sshpass &>/dev/null; then
-    log_info "  Installing sshpass (needed for one-time password authentication)..."
-    apt-get install -y -qq sshpass
-    log_info "  ✅ sshpass installed"
-else
-    log_info "  ✅ sshpass found"
-fi
-
-# =============================================================================
-# Step 3: Generate keypair (as timestd user) if not already present
+# Step 2: Generate keypair (as timestd user) if not already present
 # =============================================================================
 log_step "Checking for existing PSWS keypair..."
 
@@ -105,15 +95,19 @@ mkdir -p "${TIMESTD_HOME}/.ssh"
 chmod 700 "${TIMESTD_HOME}/.ssh"
 chown "${TIMESTD_USER}:${TIMESTD_USER}" "${TIMESTD_HOME}/.ssh"
 
+# Prefer ed25519 (matches wsprdaemon convention); accept existing RSA key
 if [[ -f "${KEY_FILE}" ]]; then
     log_info "  ✅ Keypair already exists: ${KEY_FILE}"
+elif [[ -f "${KEY_FILE_LEGACY}" ]]; then
+    KEY_FILE="${KEY_FILE_LEGACY}"
+    log_info "  ✅ Found existing RSA keypair: ${KEY_FILE}"
 else
-    log_info "  Generating RSA-4096 keypair for PSWS uploads..."
+    log_info "  Generating ed25519 keypair for PSWS uploads..."
     sudo -u "${TIMESTD_USER}" ssh-keygen \
-        -t rsa -b 4096 \
+        -t ed25519 \
         -f "${KEY_FILE}" \
         -N "" \
-        -C "PSWS upload key for ${STATION_ID}"
+        -C "$(whoami)@$(hostname)"
     chmod 600 "${KEY_FILE}"
     chmod 644 "${KEY_FILE}.pub"
     chown "${TIMESTD_USER}:${TIMESTD_USER}" "${KEY_FILE}" "${KEY_FILE}.pub"
@@ -123,7 +117,7 @@ fi
 PUBKEY=$(cat "${KEY_FILE}.pub")
 
 # =============================================================================
-# Step 4: Cache the server's host key
+# Step 3: Cache the server's host key
 # =============================================================================
 log_step "Caching PSWS server host key..."
 
@@ -140,115 +134,49 @@ else
 fi
 
 # =============================================================================
-# Step 5: Check if key is already accepted (skip portal step if so)
+# Step 4: Check if key is already accepted
 # =============================================================================
 log_step "Checking if key is already accepted by PSWS server..."
 
+KEY_ALREADY_INSTALLED=false
 if sudo -u "${TIMESTD_USER}" sftp \
         -i "${KEY_FILE}" \
         -o BatchMode=yes \
         -o ConnectTimeout=10 \
         -P "${PSWS_PORT}" \
         "${STATION_ID}@${PSWS_HOST}" <<< "quit" &>/dev/null; then
-    log_info "  ✅ Key already accepted — skipping portal registration step."
+    log_info "  ✅ Key already accepted — passwordless login working."
     KEY_ALREADY_INSTALLED=true
-else
-    KEY_ALREADY_INSTALLED=false
 fi
 
 # =============================================================================
-# Step 6: Upload public key via sftp using one-time password
+# Step 5: Display public key for portal registration
+# =============================================================================
+# The PSWS server uses sshd StrictModes, which requires that ~/.ssh and
+# authorized_keys have strict ownership/permissions.  Uploading authorized_keys
+# via SFTP 'put' can break those permissions and permanently disable key auth.
+# The correct approach (used by wsprdaemon) is to register the key through
+# the PSWS web portal, which sets permissions correctly on the server side.
 # =============================================================================
 if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
     echo ""
-    echo "  Your PSWS TOKEN is the password shown on your site admin page at:"
-    echo "  https://pswsnetwork.caps.ua.edu/"
+    echo "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Your public key needs to be registered on the PSWS server."
     echo ""
-    read -rsp "  Enter PSWS TOKEN for ${STATION_ID}: " PSWS_TOKEN < /dev/tty
-    echo "" > /dev/tty
-
-    if [[ -z "${PSWS_TOKEN}" ]]; then
-        log_error "No token entered. Aborting."
-        exit 1
-    fi
-
-    log_step "Uploading public key to PSWS server via SFTP..."
-
-    TMPDIR=$(mktemp -d)
-    trap 'rm -rf "${TMPDIR}"' EXIT
-
-    # Helper: run an SFTP batch command with password auth
-    sftp_with_token() {
-        SSHPASS="${PSWS_TOKEN}" sshpass -e sftp \
-            -o BatchMode=no \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            -P "${PSWS_PORT}" \
-            -b "$1" \
-            "${STATION_ID}@${PSWS_HOST}" 2>&1
-    }
-
-    # Step 6a: Fetch existing authorized_keys (ignore failure if it doesn't exist)
-    SFTP_FETCH_BATCH="${TMPDIR}/fetch.sftp"
-    cat > "${SFTP_FETCH_BATCH}" <<EOF
-get .ssh/authorized_keys ${TMPDIR}/authorized_keys_remote
-quit
-EOF
-
-    sftp_with_token "${SFTP_FETCH_BATCH}" > /dev/null || true
-
-    # Merge: existing keys (if any) + our new key (deduplicated)
-    MERGED="${TMPDIR}/authorized_keys"
-    if [[ -f "${TMPDIR}/authorized_keys_remote" ]]; then
-        cp "${TMPDIR}/authorized_keys_remote" "${MERGED}"
-    else
-        touch "${MERGED}"
-    fi
-
-    if ! grep -qF "${PUBKEY}" "${MERGED}" 2>/dev/null; then
-        echo "${PUBKEY}" >> "${MERGED}"
-        log_info "  Public key appended to authorized_keys"
-    else
-        log_info "  Public key already present in authorized_keys"
-    fi
-
-    # Step 6b: Upload merged authorized_keys
-    SFTP_PUT_BATCH="${TMPDIR}/put.sftp"
-    cat > "${SFTP_PUT_BATCH}" <<EOF
-put ${MERGED} .ssh/authorized_keys
-quit
-EOF
-
-    if ! sftp_with_token "${SFTP_PUT_BATCH}" > /dev/null; then
-        log_error "  SFTP upload failed. Check your TOKEN and try again."
-        unset PSWS_TOKEN
-        exit 1
-    fi
-
-    # Step 6c: Verify the upload by re-downloading and checking our key is present
-    log_step "Verifying uploaded key..."
-    SFTP_VERIFY_BATCH="${TMPDIR}/verify.sftp"
-    cat > "${SFTP_VERIFY_BATCH}" <<EOF
-get .ssh/authorized_keys ${TMPDIR}/authorized_keys_verify
-quit
-EOF
-
-    if sftp_with_token "${SFTP_VERIFY_BATCH}" > /dev/null \
-            && [[ -f "${TMPDIR}/authorized_keys_verify" ]] \
-            && grep -qF "${PUBKEY}" "${TMPDIR}/authorized_keys_verify"; then
-        log_info "  ✅ Public key verified on ${PSWS_HOST}"
-    else
-        log_error "  Upload appeared to succeed but key not found on server."
-        log_error "  Try again later: sudo $0"
-        unset PSWS_TOKEN
-        exit 1
-    fi
-
-    unset PSWS_TOKEN
+    echo "  1. Log in to your PSWS site admin page at:"
+    echo "     https://pswsnetwork.caps.ua.edu/"
+    echo ""
+    echo "  2. Add this SSH public key to your account for station ${STATION_ID}:"
+    echo ""
+    echo "     ${PUBKEY}"
+    echo ""
+    echo "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    read -rp "  Press Enter after you have registered the key (or Ctrl-C to quit)..." < /dev/tty
 
     # Wait for server to accept the key for passwordless login
     # Use conservative polling to avoid fail2ban (3 attempts, 30s apart)
-    log_step "Waiting for server to accept the key for passwordless login..."
+    log_step "Waiting for server to accept the key..."
     ATTEMPTS=0
     MAX_ATTEMPTS=3
     while [[ ${ATTEMPTS} -lt ${MAX_ATTEMPTS} ]]; do
@@ -268,16 +196,16 @@ EOF
     done
 
     if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
-        log_warn "  Key uploaded but not yet accepted for passwordless login."
-        log_warn "  The server may need time to propagate."
-        log_warn "  Re-run this script later (no TOKEN needed):"
+        log_warn "  Key not yet accepted for passwordless login."
+        log_warn "  The server may need time to propagate the key."
+        log_warn "  Re-run this script later to check:"
         log_warn "    sudo $0"
         exit 0
     fi
 fi
 
 # =============================================================================
-# Step 7: Verify passwordless login (as the key-generating user)
+# Step 6: Verify passwordless login (as the key-generating user)
 # =============================================================================
 log_step "Verifying passwordless SFTP login as ${TIMESTD_USER}..."
 
@@ -297,10 +225,16 @@ else
 fi
 
 # =============================================================================
-# Step 8: Install keys into production location (timestd user) if needed
+# Step 7: Install keys into production location (timestd user) if needed
 # =============================================================================
 PRODUCTION_USER="timestd"
-PRODUCTION_KEY="/home/${PRODUCTION_USER}/.ssh/id_rsa_psws_${STATION_ID}"
+PRODUCTION_KEY="/home/${PRODUCTION_USER}/.ssh/id_ed25519_psws_${STATION_ID}"
+PRODUCTION_KEY_LEGACY="/home/${PRODUCTION_USER}/.ssh/id_rsa_psws_${STATION_ID}"
+
+# Use the same basename for production key as the source key
+if [[ "${KEY_FILE}" == *"id_rsa"* ]]; then
+    PRODUCTION_KEY="${PRODUCTION_KEY_LEGACY}"
+fi
 
 if [[ "${LOGIN_OK}" == "true" && "${TIMESTD_USER}" != "${PRODUCTION_USER}" ]] \
         && id "${PRODUCTION_USER}" &>/dev/null; then
