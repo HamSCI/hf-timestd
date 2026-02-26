@@ -8,10 +8,12 @@
 # What this script does:
 #   1. Reads station.id from timestd-config.toml (used as SFTP username)
 #   2. Generates an ed25519 keypair (if not already present)
-#   3. Caches the server's host key in known_hosts
-#   4. Displays the public key for you to register via the PSWS web portal
-#   5. Waits for the server to accept the key
-#   6. Installs the key for the timestd production user
+#   3. Verifies TCP connectivity to the PSWS server (fail-fast)
+#   4. Caches the server's host key in known_hosts
+#   5. Checks if the key is already accepted for passwordless login
+#   6. Displays the public key for you to register via the PSWS web portal
+#   7. Verifies passwordless login
+#   8. Installs the key for the timestd production user
 #
 # The PSWS server uses sshd StrictModes, so keys MUST be registered via
 # the web portal — direct SFTP upload of authorized_keys breaks permissions.
@@ -117,7 +119,27 @@ fi
 PUBKEY=$(cat "${KEY_FILE}.pub")
 
 # =============================================================================
-# Step 3: Cache the server's host key
+# Step 3: Verify network connectivity to PSWS server
+# =============================================================================
+# Adapted from wsprdaemon bash-aliases wd-sftp-psws(): fail fast if the
+# server is unreachable before attempting any SSH/SFTP operations.
+# =============================================================================
+log_step "Testing network connectivity to ${PSWS_HOST}:${PSWS_PORT}..."
+
+NC_TIMEOUT=5
+START_EPOCH=${EPOCHSECONDS}
+if nc -vz -w "${NC_TIMEOUT}" "${PSWS_HOST}" "${PSWS_PORT}" &>/dev/null; then
+    ELAPSED=$(( EPOCHSECONDS - START_EPOCH ))
+    log_info "  ✅ TCP connection to ${PSWS_HOST}:${PSWS_PORT} OK (${ELAPSED}s)"
+else
+    ELAPSED=$(( EPOCHSECONDS - START_EPOCH ))
+    log_error "  Cannot reach ${PSWS_HOST}:${PSWS_PORT} after ${ELAPSED}s."
+    log_error "  Check your network connection and firewall settings."
+    exit 1
+fi
+
+# =============================================================================
+# Step 4: Cache the server's host key
 # =============================================================================
 log_step "Caching PSWS server host key..."
 
@@ -134,7 +156,7 @@ else
 fi
 
 # =============================================================================
-# Step 4: Check if key is already accepted
+# Step 5: Check if key is already accepted
 # =============================================================================
 log_step "Checking if key is already accepted by PSWS server..."
 
@@ -150,7 +172,7 @@ if sudo -u "${TIMESTD_USER}" sftp \
 fi
 
 # =============================================================================
-# Step 5: Display public key for portal registration
+# Step 6: Display public key for portal registration
 # =============================================================================
 # The PSWS server uses sshd StrictModes, which requires that ~/.ssh and
 # authorized_keys have strict ownership/permissions.  Uploading authorized_keys
@@ -205,7 +227,7 @@ if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
 fi
 
 # =============================================================================
-# Step 6: Verify passwordless login (as the key-generating user)
+# Step 7: Verify passwordless login (as the key-generating user)
 # =============================================================================
 log_step "Verifying passwordless SFTP login as ${TIMESTD_USER}..."
 
@@ -225,7 +247,7 @@ else
 fi
 
 # =============================================================================
-# Step 7: Install keys into production location (timestd user) if needed
+# Step 8: Install keys into production location (timestd user) if needed
 # =============================================================================
 PRODUCTION_USER="timestd"
 PRODUCTION_KEY="/home/${PRODUCTION_USER}/.ssh/id_ed25519_psws_${STATION_ID}"
