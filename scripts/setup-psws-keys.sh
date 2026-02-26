@@ -164,8 +164,8 @@ if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
     echo "  Your PSWS TOKEN is the password shown on your site admin page at:"
     echo "  https://pswsnetwork.caps.ua.edu/"
     echo ""
-    read -rsp "  Enter PSWS TOKEN for ${STATION_ID}: " PSWS_TOKEN
-    echo ""
+    read -rsp "  Enter PSWS TOKEN for ${STATION_ID}: " PSWS_TOKEN < /dev/tty
+    echo "" > /dev/tty
 
     if [[ -z "${PSWS_TOKEN}" ]]; then
         log_error "No token entered. Aborting."
@@ -185,13 +185,13 @@ get .ssh/authorized_keys ${TMPDIR}/authorized_keys_remote
 quit
 EOF
 
-    sshpass -p "${PSWS_TOKEN}" sftp \
+    SSHPASS="${PSWS_TOKEN}" sshpass -e sftp \
         -o BatchMode=no \
         -o StrictHostKeyChecking=no \
         -o ConnectTimeout=15 \
         -P "${PSWS_PORT}" \
         -b "${SFTP_FETCH_BATCH}" \
-        "${STATION_ID}@${PSWS_HOST}" || true
+        "${STATION_ID}@${PSWS_HOST}" 2>&1 || true
 
     # Merge: existing keys (if any) + our new key (deduplicated)
     MERGED="${TMPDIR}/authorized_keys"
@@ -216,13 +216,13 @@ put ${MERGED} .ssh/authorized_keys
 quit
 EOF
 
-    if sshpass -p "${PSWS_TOKEN}" sftp \
+    if SSHPASS="${PSWS_TOKEN}" sshpass -e sftp \
             -o BatchMode=no \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=15 \
             -P "${PSWS_PORT}" \
             -b "${SFTP_PUT_BATCH}" \
-            "${STATION_ID}@${PSWS_HOST}"; then
+            "${STATION_ID}@${PSWS_HOST}" 2>&1; then
         log_info "  ✅ Public key uploaded to ${PSWS_HOST}"
     else
         log_error "  SFTP upload failed. Check your TOKEN and try again."
