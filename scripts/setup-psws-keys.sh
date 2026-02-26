@@ -177,21 +177,25 @@ if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "${TMPDIR}"' EXIT
 
-    # Try to fetch existing authorized_keys (ignore failure if it doesn't exist)
+    # Helper: run an SFTP batch command with password auth
+    sftp_with_token() {
+        SSHPASS="${PSWS_TOKEN}" sshpass -e sftp \
+            -o BatchMode=no \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            -P "${PSWS_PORT}" \
+            -b "$1" \
+            "${STATION_ID}@${PSWS_HOST}" 2>&1
+    }
+
+    # Step 6a: Fetch existing authorized_keys (ignore failure if it doesn't exist)
     SFTP_FETCH_BATCH="${TMPDIR}/fetch.sftp"
     cat > "${SFTP_FETCH_BATCH}" <<EOF
--mkdir .ssh
 get .ssh/authorized_keys ${TMPDIR}/authorized_keys_remote
 quit
 EOF
 
-    SSHPASS="${PSWS_TOKEN}" sshpass -e sftp \
-        -o BatchMode=no \
-        -o StrictHostKeyChecking=no \
-        -o ConnectTimeout=15 \
-        -P "${PSWS_PORT}" \
-        -b "${SFTP_FETCH_BATCH}" \
-        "${STATION_ID}@${PSWS_HOST}" 2>&1 || true
+    sftp_with_token "${SFTP_FETCH_BATCH}" > /dev/null || true
 
     # Merge: existing keys (if any) + our new key (deduplicated)
     MERGED="${TMPDIR}/authorized_keys"
@@ -208,33 +212,45 @@ EOF
         log_info "  Public key already present in authorized_keys"
     fi
 
-    # Upload merged authorized_keys back
+    # Step 6b: Upload merged authorized_keys
     SFTP_PUT_BATCH="${TMPDIR}/put.sftp"
     cat > "${SFTP_PUT_BATCH}" <<EOF
--mkdir .ssh
 put ${MERGED} .ssh/authorized_keys
 quit
 EOF
 
-    if SSHPASS="${PSWS_TOKEN}" sshpass -e sftp \
-            -o BatchMode=no \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            -P "${PSWS_PORT}" \
-            -b "${SFTP_PUT_BATCH}" \
-            "${STATION_ID}@${PSWS_HOST}" 2>&1; then
-        log_info "  ✅ Public key uploaded to ${PSWS_HOST}"
-    else
+    if ! sftp_with_token "${SFTP_PUT_BATCH}" > /dev/null; then
         log_error "  SFTP upload failed. Check your TOKEN and try again."
+        unset PSWS_TOKEN
+        exit 1
+    fi
+
+    # Step 6c: Verify the upload by re-downloading and checking our key is present
+    log_step "Verifying uploaded key..."
+    SFTP_VERIFY_BATCH="${TMPDIR}/verify.sftp"
+    cat > "${SFTP_VERIFY_BATCH}" <<EOF
+get .ssh/authorized_keys ${TMPDIR}/authorized_keys_verify
+quit
+EOF
+
+    if sftp_with_token "${SFTP_VERIFY_BATCH}" > /dev/null \
+            && [[ -f "${TMPDIR}/authorized_keys_verify" ]] \
+            && grep -qF "${PUBKEY}" "${TMPDIR}/authorized_keys_verify"; then
+        log_info "  ✅ Public key verified on ${PSWS_HOST}"
+    else
+        log_error "  Upload appeared to succeed but key not found on server."
+        log_error "  Try again later: sudo $0"
+        unset PSWS_TOKEN
         exit 1
     fi
 
     unset PSWS_TOKEN
 
-    # Poll for up to 3 minutes — server may take time to propagate the key
-    log_step "Waiting for server to accept the key (up to 3 minutes)..."
+    # Wait for server to accept the key for passwordless login
+    # Use conservative polling to avoid fail2ban (3 attempts, 30s apart)
+    log_step "Waiting for server to accept the key for passwordless login..."
     ATTEMPTS=0
-    MAX_ATTEMPTS=18  # 18 × 10s = 3 minutes
+    MAX_ATTEMPTS=3
     while [[ ${ATTEMPTS} -lt ${MAX_ATTEMPTS} ]]; do
         if sudo -u "${TIMESTD_USER}" sftp \
                 -i "${KEY_FILE}" \
@@ -247,13 +263,14 @@ EOF
             break
         fi
         ATTEMPTS=$(( ATTEMPTS + 1 ))
-        echo "  Attempt ${ATTEMPTS}/${MAX_ATTEMPTS} — waiting 10s..."
-        sleep 10
+        echo "  Attempt ${ATTEMPTS}/${MAX_ATTEMPTS} — waiting 30s..."
+        sleep 30
     done
 
     if [[ "${KEY_ALREADY_INSTALLED}" == "false" ]]; then
-        log_warn "  Key not yet accepted after 3 minutes."
-        log_warn "  Re-run this script later to complete setup (no TOKEN needed):"
+        log_warn "  Key uploaded but not yet accepted for passwordless login."
+        log_warn "  The server may need time to propagate."
+        log_warn "  Re-run this script later (no TOKEN needed):"
         log_warn "    sudo $0"
         exit 0
     fi
