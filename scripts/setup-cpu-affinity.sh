@@ -137,19 +137,36 @@ if [ -n "$L3_GROUPS" ]; then
         # cores, so the upper group has less contention for radiod.
         SELECTED_GROUP=$(echo "$L3_GROUPS" | tail -1)
     else
-        # Single L3 domain: use all cores (no cache boundary to worry about)
+        # Single L3 domain: still pick upper cores for isolation from kernel tasks
         SELECTED_GROUP=$(echo "$L3_GROUPS" | head -1)
     fi
 
-    RADIOD_CORES=$(expand_cpu_range "$SELECTED_GROUP")
-    echo -e "${GREEN}Selected L3 group for radiod: CPUs ${SELECTED_GROUP}${NC}"
+    ALL_GROUP_CORES=$(expand_cpu_range "$SELECTED_GROUP")
 else
     # No L3 info in sysfs: fall back to upper-half heuristic
     echo -e "${YELLOW}No L3 cache info in sysfs, falling back to upper-half heuristic${NC}"
     HALF_CORES=$((NPROC / 2))
-    RADIOD_CORES=$(seq -s ' ' $HALF_CORES $((NPROC - 1)))
+    ALL_GROUP_CORES=$(seq -s ' ' $HALF_CORES $((NPROC - 1)))
     SELECTED_GROUP="${HALF_CORES}-$((NPROC - 1))"
 fi
+
+# Limit radiod to RADIOD_MAX_CORES from the selected group.
+# radiod can comfortably function with 4 cores (even 2 in a pinch).
+# Using fewer cores keeps the rest available for hf-timestd and system tasks.
+RADIOD_MAX_CORES=4
+GROUP_CORE_ARRAY=($ALL_GROUP_CORES)
+GROUP_SIZE=${#GROUP_CORE_ARRAY[@]}
+
+if [ "$GROUP_SIZE" -le "$RADIOD_MAX_CORES" ]; then
+    RADIOD_CORES="$ALL_GROUP_CORES"
+else
+    # Take the highest-numbered cores from the group (least kernel contention)
+    START_IDX=$(( GROUP_SIZE - RADIOD_MAX_CORES ))
+    RADIOD_CORES="${GROUP_CORE_ARRAY[*]:$START_IDX:$RADIOD_MAX_CORES}"
+fi
+
+echo -e "${GREEN}L3 group: CPUs ${SELECTED_GROUP} (${GROUP_SIZE} cores)${NC}"
+echo -e "${GREEN}Assigning radiod: CPUs ${RADIOD_CORES} (${RADIOD_MAX_CORES} of ${GROUP_SIZE})${NC}"
 
 # ============================================================================
 # CREATE SYSTEMD DROP-IN
@@ -181,10 +198,8 @@ CPUAffinity=
 # Pin to L3 cache group: CPUs ${SELECTED_GROUP}
 CPUAffinity=${RADIOD_CORES}
 
-# High priority for real-time audio processing
+# High priority for USB DMA and FFT processing
 Nice=-15
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=80
 EOF
 
 echo -e "${GREEN}Created ${DROPIN_FILE}${NC}"
@@ -259,13 +274,11 @@ if [ -d "$(dirname "$TEMPLATE_FILE")" ]; then
 [Service]
 # Reset any CPUAffinity from the base radiod@.service unit
 CPUAffinity=
-# Pin to detected L3 cache group (example: upper half of 16-core system)
+# Pin to detected L3 cache group (up to 4 cores from the upper end)
 CPUAffinity=${RADIOD_CORES}
 
-# Ensure high priority for real-time audio processing
+# High priority for USB DMA and FFT processing
 Nice=-15
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=80
 EOF
     echo -e "${GREEN}Updated template: ${TEMPLATE_FILE}${NC}"
 fi
@@ -276,7 +289,7 @@ fi
 echo ""
 echo -e "${GREEN}CPU affinity configured successfully!${NC}"
 echo ""
-echo "  radiod pinned to: CPUs ${SELECTED_GROUP} (single L3 cache domain)"
+echo "  radiod pinned to: CPUs ${RADIOD_CORES} (from L3 group ${SELECTED_GROUP})"
 echo "  Drop-in: ${DROPIN_FILE}"
 echo "  Watcher: ${WATCHER_PATH_FILE} (re-applies after ka9q-radio reinstalls)"
 echo ""

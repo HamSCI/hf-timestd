@@ -405,8 +405,36 @@ elif [[ -f "$MAIN_CONFIG" ]]; then
     fi
 fi
 
-# Ensure environment file exists (setup-station.sh creates it, but ensure on re-run)
+# =============================================================================
+# Step 8b: Detect radiod co-location
+# =============================================================================
+# CPU affinity pinning is only needed when radiod shares this machine.
+# radiod performs high-bandwidth USB DMA and FFT (up to 129.6 MHz) and is
+# sensitive to L3 cache contention. When radiod runs on a separate networked
+# computer, none of this applies.
+# =============================================================================
+RADIOD_LOCAL=false
+
+# Check if a previous choice was saved
 ENV_FILE="$CONFIG_DIR/environment"
+if [[ -f "$ENV_FILE" ]] && grep -q '^TIMESTD_RADIOD_LOCAL=' "$ENV_FILE"; then
+    RADIOD_LOCAL=$(grep '^TIMESTD_RADIOD_LOCAL=' "$ENV_FILE" | cut -d= -f2)
+    log_info "  radiod co-location (from environment): ${RADIOD_LOCAL}"
+else
+    echo ""
+    log_step "Does radiod (ka9q-radio) run on THIS computer?"
+    echo "  If radiod runs here, CPU affinity will be configured to avoid"
+    echo "  L3 cache contention between radiod and hf-timestd."
+    echo "  If radiod runs on a separate networked computer, this is not needed."
+    echo ""
+    read -rp "  Does radiod run on this computer? [y/N] " radiod_choice < /dev/tty
+    radiod_choice=${radiod_choice:-N}
+    if [[ "$radiod_choice" =~ ^[Yy]$ ]]; then
+        RADIOD_LOCAL=true
+    fi
+fi
+
+# Ensure environment file exists (setup-station.sh creates it, but ensure on re-run)
 if [[ ! -f "$ENV_FILE" ]]; then
     cat > "$ENV_FILE" << EOF
 # HF Time Standard Environment
@@ -421,9 +449,15 @@ TIMESTD_INSTALL_DIR=/opt/hf-timestd
 TIMESTD_WEBUI=$WEBUI_DIR
 TIMESTD_VENV=$VENV_DIR
 TIMESTD_LOG_LEVEL=INFO
+TIMESTD_RADIOD_LOCAL=${RADIOD_LOCAL}
 EOF
     chown "$INSTALL_USER:$INSTALL_USER" "$ENV_FILE"
     log_info "  Created: $ENV_FILE"
+elif ! grep -q '^TIMESTD_RADIOD_LOCAL=' "$ENV_FILE"; then
+    echo "TIMESTD_RADIOD_LOCAL=${RADIOD_LOCAL}" >> "$ENV_FILE"
+    log_info "  Added TIMESTD_RADIOD_LOCAL=${RADIOD_LOCAL} to $ENV_FILE"
+else
+    sed -i "s/^TIMESTD_RADIOD_LOCAL=.*/TIMESTD_RADIOD_LOCAL=${RADIOD_LOCAL}/" "$ENV_FILE"
 fi
 
 # =============================================================================
@@ -445,8 +479,12 @@ CORE_SERVICES=(
     "timestd-fusion"
     "timestd-physics"
     "timestd-web-api"
-    "timestd-radiod-monitor"
 )
+
+# radiod-monitor only needed when radiod runs locally
+if [[ "$RADIOD_LOCAL" == "true" ]]; then
+    CORE_SERVICES+=("timestd-radiod-monitor")
+fi
 
 for svc in "${CORE_SERVICES[@]}"; do
     cp "$PROJECT_DIR/systemd/${svc}.service" "$SYSTEMD_DIR/"
@@ -539,12 +577,13 @@ log_info "    - timestd-l2-calibration.service (Phase 2: L2 Calibrated Timing)"
 log_info "    - timestd-fusion.service         (Phase 3: Fusion → Chrony SHM)"
 log_info "    - timestd-physics.service        (Phase 3: TEC Estimation)"
 log_info "    - timestd-web-api.service        (Web API & Dashboard)"
-log_info "    - timestd-radiod-monitor.service (Hardware Health Monitor)"
+if [[ "$RADIOD_LOCAL" == "true" ]]; then
+    log_info "    - timestd-radiod-monitor.service (Hardware Health Monitor)"
+fi
 log_info "    - grape-daily.timer              (GRAPE/PSWS daily upload at 01:00 UTC)"
 if [[ "$VTEC_ENABLED" == "true" ]]; then
     log_info "    - timestd-vtec.service           (GNSS VTEC Monitor)"
 fi
-log_info "  Note: timestd-radiod-affinity.path is installed by setup-cpu-affinity.sh"
 
 # Enable core services
 log_step "Enabling services for auto-start..."
@@ -554,7 +593,9 @@ systemctl enable timestd-l2-calibration.service
 systemctl enable timestd-fusion.service
 systemctl enable timestd-physics.service
 systemctl enable timestd-web-api.service
-systemctl enable timestd-radiod-monitor.service
+if [[ "$RADIOD_LOCAL" == "true" ]]; then
+    systemctl enable timestd-radiod-monitor.service
+fi
 
 # Enable optional services/timers
 systemctl enable timestd-ionex-download.timer
@@ -634,6 +675,21 @@ for key in 0x4e545030 0x4e545031; do
     fi
 done
 log_info "  ✅ Cleared stale SHM segments (fusion will recreate with correct permissions)"
+
+# =============================================================================
+# Step 12: CPU Affinity (radiod co-located only)
+# =============================================================================
+if [[ "$RADIOD_LOCAL" == "true" ]]; then
+    log_step "Configuring CPU affinity for radiod co-location..."
+    if bash "$PROJECT_DIR/scripts/setup-cpu-affinity.sh"; then
+        log_info "  ✅ CPU affinity configured for radiod"
+    else
+        log_warn "  ⚠️  CPU affinity setup failed (radiod may not be running yet)."
+        log_warn "     Run later: sudo $PROJECT_DIR/scripts/setup-cpu-affinity.sh"
+    fi
+else
+    log_info "  Skipping CPU affinity setup (radiod runs remotely)"
+fi
 
 # =============================================================================
 # Summary

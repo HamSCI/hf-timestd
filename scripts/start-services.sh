@@ -36,6 +36,13 @@ fi
 MAIN_CONFIG="/etc/hf-timestd/timestd-config.toml"
 VENV_DIR="/opt/hf-timestd/venv"
 
+# Check if radiod runs locally
+ENV_FILE="/etc/hf-timestd/environment"
+RADIOD_LOCAL=false
+if [[ -f "$ENV_FILE" ]] && grep -q '^TIMESTD_RADIOD_LOCAL=true' "$ENV_FILE"; then
+    RADIOD_LOCAL=true
+fi
+
 # Check if VTEC is enabled
 VTEC_ENABLED=$($VENV_DIR/bin/python3 -c "
 import tomllib
@@ -55,8 +62,12 @@ CORE_SERVICES=(
     "timestd-fusion"           # Phase 3: Fusion → Chrony SHM
     "timestd-physics"          # Phase 3: TEC Estimation
     "timestd-web-api"          # Web API & Dashboard
-    "timestd-radiod-monitor"   # Hardware Health Monitor
 )
+
+# radiod-monitor only when radiod runs locally
+if [[ "$RADIOD_LOCAL" == "true" ]]; then
+    CORE_SERVICES+=("timestd-radiod-monitor")
+fi
 
 # Optional services (conditional)
 OPTIONAL_SERVICES=()
@@ -72,10 +83,11 @@ TIMERS=(
     "grape-daily.timer"
 )
 
-# Path watchers (informational only — managed by setup-cpu-affinity.sh)
-PATH_WATCHERS=(
-    "timestd-radiod-affinity.path"
-)
+# Path watchers (only when radiod runs locally — managed by setup-cpu-affinity.sh)
+PATH_WATCHERS=()
+if [[ "$RADIOD_LOCAL" == "true" ]]; then
+    PATH_WATCHERS+=("timestd-radiod-affinity.path")
+fi
 
 # Function to wait for service to be active
 wait_for_service() {
