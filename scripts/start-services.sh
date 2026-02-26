@@ -269,8 +269,14 @@ else
 fi
 
 # Verify PSWS SFTP connectivity (non-fatal)
-SSH_KEY=$(grep -E '\bssh_key\s*=' /etc/hf-timestd/timestd-config.toml 2>/dev/null | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/')
-STATION_ID=$(grep -E '^\s*id\s*=' /etc/hf-timestd/timestd-config.toml 2>/dev/null | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/')
+read -r SSH_KEY STATION_ID < <($VENV_DIR/bin/python3 -c "
+import tomllib
+with open('$MAIN_CONFIG', 'rb') as f:
+    cfg = tomllib.load(f)
+ssh_key = cfg.get('uploader', {}).get('sftp', {}).get('ssh_key', '')
+station_id = cfg.get('station', {}).get('id', '')
+print(ssh_key, station_id)
+" 2>/dev/null || echo "")
 if [[ -n "$SSH_KEY" && -n "$STATION_ID" && -f "$SSH_KEY" ]]; then
     if sudo -u timestd sftp \
             -i "$SSH_KEY" \

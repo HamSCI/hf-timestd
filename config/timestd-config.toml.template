@@ -4,18 +4,18 @@
 # REQUIRED: Update all values marked with <YOUR_...>
 
 [station]
-callsign = "<YOUR_CALLSIGN>"           # e.g., "W1ABC"
-grid_square = "<YOUR_GRID>"            # e.g., "FN31pr" (10-char Maidenhead)
-id = "<YOUR_STATION_ID>"               # e.g., "S000001"
-instrument_id = "<YOUR_INSTRUMENT_ID>" # e.g., "172"
-description = "<YOUR_DESCRIPTION>"     # e.g., "RX888 MkII with resonant dipole"
+callsign = "<YOUR_CALLSIGN>"           # e.g., W1ABC
+grid_square = "<YOUR_GRID>"            # e.g., FN31pr (10-char Maidenhead)
+id = "<YOUR_STATION_ID>"               # e.g., S000001
+instrument_id = "<YOUR_INSTRUMENT_ID>" # e.g., 172
+description = "<YOUR_DESCRIPTION>"     # e.g., RX888 MkII with resonant dipole
 latitude = 0.0                          # Your latitude in decimal degrees (REQUIRED)
 longitude = 0.0                         # Your longitude in decimal degrees (REQUIRED)
 
 [ka9q]
 # Your ka9q-radio status multicast address
 # Find this in your radiod config file or use: avahi-browse -rt _ka9q-ctl._udp
-status_address = "<YOUR_RADIOD_STATUS>"  # e.g., "hf-status.local" or "239.x.x.x"
+status_address = "<YOUR_RADIOD_STATUS>"  # e.g., hf-status.local or 239.x.x.x
 auto_create_channels = true
 # Data source mode: "radiod" (single antenna, 9 channels) or "phase-engine" (beamformed, 17 channels)
 source = "radiod"

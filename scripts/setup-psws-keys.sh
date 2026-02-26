@@ -66,7 +66,12 @@ fi
 # =============================================================================
 log_step "Reading station ID from config..."
 
-STATION_ID=$(grep -E '^\s*id\s*=' "${CONFIG_FILE}" | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/')
+STATION_ID=$(/opt/hf-timestd/venv/bin/python3 -c "
+import tomllib
+with open('${CONFIG_FILE}', 'rb') as f:
+    cfg = tomllib.load(f)
+print(cfg.get('station', {}).get('id', ''))
+" 2>/dev/null)
 
 if [[ -z "${STATION_ID}" || "${STATION_ID}" == "<YOUR_STATION_ID>" ]]; then
     log_error "station.id is not set in ${CONFIG_FILE}"
