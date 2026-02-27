@@ -640,6 +640,13 @@ class MultiBroadcastFusion:
         
         self._load_calibration()
         
+        # CHU FSK auxiliary state (populated during FSK timing integration)
+        # DUT1: UT1-UTC correction for propagation model solar zenith
+        # TAI-UTC: leap second awareness for Kalman hold
+        self._fsk_dut1: Optional[float] = None
+        self._fsk_tai_utc: Optional[int] = None
+        self._fsk_leap_second_hold: bool = False
+        
         # Fusion output
         self.fusion_dir = self.data_root / 'phase2' / 'fusion'
         self.fusion_dir.mkdir(parents=True, exist_ok=True)
@@ -3401,6 +3408,14 @@ class MultiBroadcastFusion:
         # ====================================================================
         # CHU FSK provides the most precise timing reference from HF broadcasts.
         # The 500ms boundary is decoded from the FSK time code with ~0.1ms precision.
+        #
+        # Confidence is scaled by BER (frames_decoded/9):
+        #   9/9 frames → full confidence (clean channel)
+        #   2/9 frames → 22% confidence (heavy fading, marginal decode)
+        #
+        # DUT1 and TAI-UTC are passed through to self for downstream use:
+        #   - DUT1: corrects solar zenith in propagation model (UT1 = UTC + DUT1)
+        #   - TAI-UTC: leap second awareness (hold Kalman during transition)
         try:
             fsk_timing = self._read_chu_fsk_timing(lookback_minutes)
             if fsk_timing:
@@ -3408,8 +3423,11 @@ class MultiBroadcastFusion:
                 latest_fsk_minute = max(fsk_timing.keys())
                 fsk_data = fsk_timing[latest_fsk_minute]
                 
-                # FSK timing is high-confidence anchor
-                confidence = min(0.95, fsk_data.get('decode_confidence', 0.5))
+                # BER-weighted confidence: decode_confidence × (frames/9)
+                frames = fsk_data.get('frames_decoded', 0)
+                decode_rate = frames / 9.0 if frames > 0 else 0.0
+                raw_confidence = fsk_data.get('decode_confidence', 0.5)
+                confidence = min(0.95, raw_confidence * decode_rate)
                 
                 measurements.append(
                     BroadcastMeasurement(
@@ -3421,12 +3439,30 @@ class MultiBroadcastFusion:
                         propagation_mode='FSK',
                         confidence=confidence,
                         snr_db=20.0,
-                        quality_grade='A',  # FSK is highest quality
+                        quality_grade='A' if decode_rate > 0.5 else 'B',
                         channel_name=fsk_data.get('channel', 'CHU')
                     )
                 )
                 logger.info(f"Integrated CHU FSK timing: {fsk_data.get('timing_offset_ms', 0.0):+.2f}ms "
-                           f"(confidence={confidence:.2f}, frames={fsk_data.get('frames_decoded', 0)})")
+                           f"(confidence={confidence:.2f}, frames={frames}/9, "
+                           f"decode_rate={decode_rate:.2f})")
+                
+                # Pass through DUT1 and TAI-UTC for downstream use
+                dut1 = fsk_data.get('dut1_seconds')
+                tai_utc = fsk_data.get('tai_utc')
+                if dut1 is not None:
+                    self._fsk_dut1 = dut1
+                    # Feed DUT1 to propagation model for UT1-corrected solar zenith
+                    if self.physics_model is not None and hasattr(self.physics_model, 'set_dut1'):
+                        self.physics_model.set_dut1(dut1)
+                if tai_utc is not None:
+                    if hasattr(self, '_fsk_tai_utc') and self._fsk_tai_utc != tai_utc:
+                        logger.warning(f"Fusion: TAI-UTC changed {self._fsk_tai_utc} → {tai_utc} "
+                                      f"— leap second transition, holding Kalman")
+                        self._fsk_leap_second_hold = True
+                    else:
+                        self._fsk_leap_second_hold = False
+                    self._fsk_tai_utc = tai_utc
         except Exception as e:
             logger.debug(f"CHU FSK timing integration failed: {e}")
         
@@ -3857,7 +3893,15 @@ class MultiBroadcastFusion:
         use_l2_kalman = not force_l1_only
         measurement_uncertainty = float(np.sqrt(np.sum(w * (d_calibrated - fused_d_clock_raw)**2) / np.sum(w)))
         measurement_uncertainty = max(measurement_uncertainty, 1.0)  # Floor at 1ms
-        kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty, use_l2=use_l2_kalman)
+        
+        # Leap second hold: skip Kalman update when CHU FSK detects TAI-UTC change.
+        # A leap second causes a 1-second UTC jump that would look like a massive
+        # Kalman innovation and corrupt the state. Coast on prediction instead.
+        if getattr(self, '_fsk_leap_second_hold', False):
+            logger.warning("Kalman HELD: leap second transition detected via CHU FSK TAI-UTC change")
+            kalman_uncertainty = measurement_uncertainty
+        else:
+            kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty, use_l2=use_l2_kalman)
         
         # Use the Kalman-filtered state as the fused output
         k_state_active = self.kalman_state_l2 if use_l2_kalman else self.kalman_state

@@ -239,6 +239,12 @@ class HFPropagationModel:
         self._cache: Dict[Tuple[str, float, int], PropagationPrediction] = {}
         self._cache_ttl_s = 60  # Cache predictions for 1 minute
         
+        # DUT1 (UT1-UTC) correction from CHU FSK Frame B decode.
+        # Used to compute UT1 for correct solar zenith angle in the parametric
+        # ionospheric fallback model. UT1 = UTC + DUT1 gives the correct Earth
+        # rotation angle. Typical magnitude: ±0.9s, updated via set_dut1().
+        self._dut1_seconds: float = 0.0
+        
         logger.info(f"HFPropagationModel initialized at ({receiver_lat:.4f}, {receiver_lon:.4f})")
     
     def _get_iono_service(self):
@@ -436,6 +442,24 @@ class HFPropagationModel:
         # Parametric fallback
         return self._parametric_iono(lat, lon, utc_time)
     
+    def set_dut1(self, dut1_seconds: float) -> None:
+        """Set DUT1 (UT1-UTC) from CHU FSK Frame B decode.
+        
+        DUT1 corrects UTC to UT1 (Earth rotation angle) for accurate solar
+        zenith computation in the parametric ionospheric model. The effect is
+        small (±0.9s → ±0.004° solar angle) but represents a real correction
+        from a national time lab broadcast.
+        
+        Args:
+            dut1_seconds: DUT1 in seconds (typically -0.9 to +0.9)
+        """
+        if abs(dut1_seconds) > 1.0:
+            logger.warning(f"DUT1={dut1_seconds}s out of expected range ±0.9s")
+            return
+        if dut1_seconds != self._dut1_seconds:
+            logger.info(f"Propagation model DUT1 updated: {self._dut1_seconds:+.1f}s → {dut1_seconds:+.1f}s")
+            self._dut1_seconds = dut1_seconds
+
     def _parametric_iono(
         self,
         lat: float,
@@ -462,7 +486,9 @@ class HFPropagationModel:
             }
         except Exception:
             # Minimal inline fallback if IonoDataService import fails
-            lst = utc_time.hour + utc_time.minute / 60.0 + lon / 15.0
+            # Apply DUT1 correction: UT1 = UTC + DUT1 for correct solar geometry
+            ut1_hour = utc_time.hour + utc_time.minute / 60.0 + self._dut1_seconds / 3600.0
+            lst = ut1_hour + lon / 15.0
             lst = lst % 24.0
             diurnal_phase = (lst - 14.0) / 24.0 * 2 * math.pi
             hmF2 = 300.0 - 50.0 * math.cos(diurnal_phase)

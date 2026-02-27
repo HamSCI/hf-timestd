@@ -113,6 +113,17 @@ class MetrologyEngine:
         # Edge detection results (per-second onset timing)
         self._last_edge_results: Dict[str, Any] = {}
         
+        # CHU FSK cross-validation state (populated by decode_minute results)
+        # These fields enable four downstream integrations:
+        #   1. Frame A UTC sanity check (detect broken RTP timing chain)
+        #   2. TAI-UTC leap second watch (detect upcoming leap seconds)
+        #   3. DUT1 for UT1 recovery (correct solar zenith in propagation model)
+        #   4. BER-based confidence weighting (degrade CHU weight during fading)
+        self._fsk_last_tai_utc: Optional[int] = None        # Last decoded TAI-UTC
+        self._fsk_last_dut1: Optional[float] = None          # Last decoded DUT1 (seconds)
+        self._fsk_tai_utc_changed: bool = False               # True when leap second detected
+        self._fsk_utc_mismatch_count: int = 0                 # Consecutive UTC mismatches
+        
         # Calibration state (Learned RTP offsets, etc.)
         self.bpm_calibration = {
             'calibrated': False,
@@ -1581,6 +1592,8 @@ class MetrologyEngine:
             chu_metrics = self._read_fsk_result(minute_boundary)
             if not chu_metrics and hasattr(self, 'chu_fsk_decoder'):
                 chu_metrics = self._decode_fsk_from_iq(iq_samples, minute_boundary)
+            if chu_metrics:
+                self._cross_validate_fsk(chu_metrics, minute_boundary)
         
         # === Step 2D: Per-Second Tick Phase Extraction (deferred physics) ===
         # The tick filter extracts carrier phase from per-second ticks for
@@ -1949,6 +1962,86 @@ class MetrologyEngine:
             )
         except Exception as e:
             logger.error(f"{self.channel_name}: Failed to write bootstrap state: {e}")
+
+    def _cross_validate_fsk(self, chu_metrics: dict, minute_boundary: int) -> None:
+        """Cross-validate CHU FSK decode against other metrology functions.
+        
+        Implements four integrations:
+        
+        1. **Frame A UTC sanity check**: Compare FSK-decoded minute against
+           RTP-derived minute_boundary. A mismatch indicates the RTP timing
+           chain (GPS → radiod → RTP counter → UTC) may be broken. This is
+           the only independent UTC source in the system.
+        
+        2. **TAI-UTC leap second watch**: Track TAI-UTC value across minutes.
+           When it changes (e.g. 37→38), a leap second insertion is imminent.
+           Sets _fsk_tai_utc_changed flag so fusion can hold off the Kalman
+           filter during the transition.
+        
+        3. **DUT1 tracking**: Store latest DUT1 (UT1-UTC) for use by the
+           propagation model's solar zenith calculation. UT1 = UTC + DUT1
+           gives the correct Earth rotation angle for ionospheric modeling.
+        
+        4. **BER confidence**: Degrade chu_metrics['fsk_confidence'] based on
+           frame decode rate (frames_decoded/9). Minutes with heavy fading
+           (few frames decoded) get lower confidence in fusion weighting.
+        """
+        from datetime import datetime, timezone
+        
+        # === 1. Frame A UTC Sanity Check ===
+        decoded_minute = chu_metrics.get('decoded_minute')
+        if decoded_minute is not None:
+            expected_minute = int((minute_boundary // 60) % 60)
+            if decoded_minute != expected_minute:
+                self._fsk_utc_mismatch_count += 1
+                if self._fsk_utc_mismatch_count >= 3:
+                    logger.error(
+                        f"{self.channel_name}: FSK UTC MISMATCH x{self._fsk_utc_mismatch_count}: "
+                        f"CHU says :{decoded_minute:02d} but RTP says :{expected_minute:02d} — "
+                        f"RTP timing chain may be broken!")
+                else:
+                    logger.warning(
+                        f"{self.channel_name}: FSK UTC mismatch: "
+                        f"CHU=:{decoded_minute:02d} vs RTP=:{expected_minute:02d} "
+                        f"(count={self._fsk_utc_mismatch_count})")
+            else:
+                if self._fsk_utc_mismatch_count > 0:
+                    logger.info(f"{self.channel_name}: FSK UTC sanity check OK "
+                               f"(cleared {self._fsk_utc_mismatch_count} prior mismatches)")
+                self._fsk_utc_mismatch_count = 0
+        
+        # === 2. TAI-UTC Leap Second Watch ===
+        tai_utc = chu_metrics.get('tai_utc')
+        if tai_utc is not None and isinstance(tai_utc, int) and tai_utc > 0:
+            if self._fsk_last_tai_utc is not None and tai_utc != self._fsk_last_tai_utc:
+                logger.warning(
+                    f"{self.channel_name}: *** TAI-UTC CHANGED: {self._fsk_last_tai_utc} → {tai_utc} *** "
+                    f"Leap second {'insertion' if tai_utc > self._fsk_last_tai_utc else 'deletion'} detected!")
+                self._fsk_tai_utc_changed = True
+            elif self._fsk_last_tai_utc is not None:
+                self._fsk_tai_utc_changed = False
+            self._fsk_last_tai_utc = tai_utc
+        
+        # === 3. DUT1 Tracking ===
+        dut1 = chu_metrics.get('dut1_seconds')
+        if dut1 is not None:
+            if self._fsk_last_dut1 is not None and abs(dut1 - self._fsk_last_dut1) > 0.05:
+                logger.info(f"{self.channel_name}: DUT1 changed: {self._fsk_last_dut1:+.1f}s → {dut1:+.1f}s")
+            self._fsk_last_dut1 = dut1
+        
+        # === 4. BER-Based Confidence Adjustment ===
+        frames_decoded = chu_metrics.get('fsk_frames_decoded', 0)
+        if frames_decoded > 0:
+            # Scale confidence by decode rate: 9/9 → 1.0, 2/9 → 0.22
+            decode_rate = frames_decoded / 9.0
+            raw_confidence = chu_metrics.get('fsk_confidence', 0.5)
+            adjusted_confidence = raw_confidence * decode_rate
+            chu_metrics['fsk_confidence'] = adjusted_confidence
+            chu_metrics['fsk_decode_rate'] = decode_rate
+            if decode_rate < 0.5:
+                logger.debug(f"{self.channel_name}: FSK confidence degraded: "
+                            f"{raw_confidence:.2f} → {adjusted_confidence:.2f} "
+                            f"(decode_rate={decode_rate:.2f})")
 
     def _decode_fsk_from_iq(self, iq_samples: np.ndarray, minute_boundary: int) -> dict:
         """Decode CHU FSK directly from IQ buffer (fallback when sidecar not running)."""
