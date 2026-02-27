@@ -211,11 +211,26 @@ refclock SHM 0 refid TSL1 poll 4 precision 1e-3 offset 0.0 delay 0.002
 # - 'trust' ensures it's always combined with other sources
 # - If no GNSS timeserver, add 'prefer' to make TSL2 primary
 refclock SHM 1 refid TSL2 poll 4 precision 1e-4 offset 0.0 delay 0.001 trust
+
+# Enable measurement logging for metrology validation
+# Logs: /var/log/chrony/{tracking,measurements,statistics}.log
+log tracking measurements statistics
 EOF
             log_info "  ✅ Chrony configured for timestd dual SHM integration (TSL1=L1, TSL2=L2)"
             log_info "  📝 Note: timestd-fusion must start BEFORE chronyd to create SHM with correct permissions"
         else
             log_info "  ℹ️  Chrony already configured for timestd SHM"
+            # Ensure chrony logging is enabled (may be missing on older installs)
+            if ! grep -q "^log tracking measurements statistics" "$CHRONY_CONF" 2>/dev/null; then
+                log_info "  Adding chrony measurement logging..."
+                tee -a "$CHRONY_CONF" > /dev/null <<'EOF'
+
+# Enable measurement logging for metrology validation (added by hf-timestd)
+# Logs: /var/log/chrony/{tracking,measurements,statistics}.log
+log tracking measurements statistics
+EOF
+                log_info "  ✅ Chrony logging enabled (tracking, measurements, statistics)"
+            fi
         fi
     else
         log_warn "  ⚠️  Could not find chrony.conf (checked /etc/chrony/chrony.conf and /etc/chrony.conf)"

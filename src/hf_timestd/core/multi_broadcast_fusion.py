@@ -4891,11 +4891,25 @@ def run_fusion_service(
             chrony_shm_l1 = None
             chrony_shm_l2 = None
     
+    # Initialize chrony stats collector (runs alongside fusion, logs source comparison)
+    chrony_stats_collector = None
+    if enable_chrony:
+        try:
+            from hf_timestd.core.chrony_stats import ChronyStatsCollector
+            chrony_stats_collector = ChronyStatsCollector(
+                interval_sec=60.0,  # Collect once per minute
+                data_root=data_root,
+            )
+            logger.info("Chrony stats collector initialized (60s interval)")
+        except Exception as e:
+            logger.warning(f"Chrony stats collector not available: {e}")
+    
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
     logger.info(f"  Chrony SHM L1: {'enabled' if chrony_shm_l1 else 'disabled'}")
     logger.info(f"  Chrony SHM L2: {'enabled' if chrony_shm_l2 else 'disabled'}")
+    logger.info(f"  Chrony stats: {'enabled' if chrony_stats_collector else 'disabled'}")
     
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s, lookback: {lookback_minutes}m")
@@ -5328,6 +5342,13 @@ def run_fusion_service(
                             )
                         else:
                             logger.debug(f"Chrony feed skipped: {', '.join(reasons)}")
+
+            # Collect chrony source statistics (rate-limited to once per minute)
+            if chrony_stats_collector:
+                try:
+                    chrony_stats_collector.collect()
+                except Exception as e:
+                    logger.debug(f"Chrony stats collection error: {e}")
 
             # BREADCRUMB: Sleeping
             loop_duration = time.time() - loop_start_time

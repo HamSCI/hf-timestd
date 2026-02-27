@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chrony Source Comparison - hf-timestd</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="/static/js/common.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>&#x1F551; Chrony Source Comparison</h1>
+            <div class="header-subtitle">NTP/SHM source offsets, reachability, and system tracking</div>
+            <nav class="nav">
+                <a href="/" class="nav-link">Overview</a>
+                <a href="/static/health.html" class="nav-link">Health</a>
+                <span class="nav-divider"></span>
+                <a href="/static/metrology.html" class="nav-link">&#x23F1;&#xFE0F; Timing</a>
+                <a href="/static/timing-validation.html" class="nav-link">Validation</a>
+                <a href="/static/chrony.html" class="nav-link active">&#x1F551; Chrony</a>
+                <span class="nav-divider"></span>
+                <a href="/static/phase.html" class="nav-link">&#x1F4E1; Phase</a>
+                <a href="/static/ionosphere.html" class="nav-link">&#x1F52C; Observatory</a>
+                <a href="/static/ionogram.html" class="nav-link">&#x1F4FB; Ionogram</a>
+                <a href="/static/dtec.html" class="nav-link">&#x26A1; dTEC</a>
+                <a href="/static/test_signal.html" class="nav-link">&#x1F4E1; Test Signal</a>
+                <a href="/static/grape.html" class="nav-link">&#x1F347; GRAPE</a>
+                <span class="nav-divider"></span>
+                <a href="/static/docs.html" class="nav-link">&#x1F4DA; Docs</a>
+                <a href="/static/logs.html" class="nav-link">Logs</a>
+            </nav>
+        </div>
+
+        <div id="error-container" style="display: none;"></div>
+
+        <!-- Tracking Summary -->
+        <div id="tracking-card" style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h3 style="color: var(--text-primary); margin-bottom: var(--spacing-sm);">System Tracking</h3>
+            <div id="tracking-content" style="color: var(--text-secondary);">Loading...</div>
+        </div>
+
+        <!-- Source Comparison Table -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--spacing-sm);">
+                <h3 style="color: var(--text-primary); margin: 0;">Source Comparison</h3>
+                <div style="display: flex; gap: var(--spacing-sm); align-items: center;">
+                    <div class="live-indicator" id="live-indicator">
+                        <div class="live-dot"></div>
+                        <span>Live</span>
+                    </div>
+                    <button id="refresh-btn" onclick="refreshAll()" style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">Refresh</button>
+                </div>
+            </div>
+            <div style="overflow-x: auto;">
+                <table id="sources-table" style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                    <thead>
+                        <tr style="border-bottom: 2px solid var(--border-color);">
+                            <th style="text-align: left; padding: 8px; color: var(--text-secondary);">Source</th>
+                            <th style="text-align: center; padding: 8px; color: var(--text-secondary);">Type</th>
+                            <th style="text-align: center; padding: 8px; color: var(--text-secondary);">State</th>
+                            <th style="text-align: center; padding: 8px; color: var(--text-secondary);">Stratum</th>
+                            <th style="text-align: right; padding: 8px; color: var(--text-secondary);">Offset (ms)</th>
+                            <th style="text-align: right; padding: 8px; color: var(--text-secondary);">Error (ms)</th>
+                            <th style="text-align: right; padding: 8px; color: var(--text-secondary);">Std Dev (ms)</th>
+                            <th style="text-align: right; padding: 8px; color: var(--text-secondary);">Freq (ppm)</th>
+                            <th style="text-align: center; padding: 8px; color: var(--text-secondary);">Samples</th>
+                            <th style="text-align: center; padding: 8px; color: var(--text-secondary);">Reach</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sources-body">
+                        <tr><td colspan="10" style="text-align: center; padding: 20px; color: var(--text-secondary);">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- History Controls -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg); display: flex; gap: var(--spacing-md); align-items: center;">
+            <div>
+                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">History Window</label>
+                <div style="display: flex; gap: 4px;">
+                    <button class="time-btn" data-hours="1" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">1h</button>
+                    <button class="time-btn" data-hours="6" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">6h</button>
+                    <button class="time-btn active" data-hours="24" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">24h</button>
+                    <button class="time-btn" data-hours="72" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">3d</button>
+                    <button class="time-btn" data-hours="168" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">7d</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Source Offset History Plot -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h3 style="color: var(--text-primary); margin-bottom: var(--spacing-sm);">Source Offset History</h3>
+            <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: var(--spacing-sm);">
+                Offset of each source vs system clock over time. TSL1/TSL2 are HF fusion feeds; others are NTP/GPS.
+            </div>
+            <div id="offset-plot" style="width: 100%; height: 400px;"></div>
+        </div>
+
+        <!-- System Offset History Plot -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h3 style="color: var(--text-primary); margin-bottom: var(--spacing-sm);">System Clock Offset</h3>
+            <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: var(--spacing-sm);">
+                System clock offset from NTP time as reported by chrony tracking. Near-zero = well-disciplined clock.
+            </div>
+            <div id="sys-offset-plot" style="width: 100%; height: 300px;"></div>
+        </div>
+
+        <!-- Source Std Dev History Plot -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <h3 style="color: var(--text-primary); margin-bottom: var(--spacing-sm);">Source Stability (Std Dev)</h3>
+            <div style="color: var(--text-secondary); font-size: 13px; margin-bottom: var(--spacing-sm);">
+                Standard deviation of each source's offset estimates. Lower = more stable. GPS NTP typically &lt;0.01ms, HF fusion ~0.01-0.05ms.
+            </div>
+            <div id="stddev-plot" style="width: 100%; height: 350px;"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentHours = 24;
+        let refreshTimer = null;
+
+        const darkLayout = {
+            paper_bgcolor: '#1e293b',
+            plot_bgcolor: '#0f172a',
+            font: { color: '#e0e0e0', size: 12 },
+            xaxis: {
+                gridcolor: '#334155',
+                linecolor: '#475569',
+                tickformat: '%H:%M',
+            },
+            yaxis: {
+                gridcolor: '#334155',
+                linecolor: '#475569',
+            },
+            margin: { l: 70, r: 30, t: 10, b: 40 },
+            legend: {
+                bgcolor: 'rgba(30,41,59,0.8)',
+                font: { color: '#e0e0e0' },
+            },
+            hovermode: 'x unified',
+        };
+
+        const plotConfig = { responsive: true, displayModeBar: false };
+
+        // Color palette for sources
+        const sourceColors = {
+            'TSL1': '#f59e0b',   // amber - L1 raw fusion
+            'TSL2': '#10b981',   // emerald - L2 calibrated
+            'default_server': ['#3b82f6', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316'],
+        };
+
+        function getSourceColor(name, idx) {
+            if (sourceColors[name]) return sourceColors[name];
+            const colors = sourceColors['default_server'];
+            return colors[idx % colors.length];
+        }
+
+        // State indicators
+        const stateIcons = {
+            '*': { text: '★ Selected', color: '#10b981' },
+            '+': { text: '+ Combined', color: '#3b82f6' },
+            '-': { text: '− Unused', color: '#6b7280' },
+            'x': { text: '✕ Falseticker', color: '#ef4444' },
+            '~': { text: '~ Variable', color: '#f59e0b' },
+            '?': { text: '? Unusable', color: '#9ca3af' },
+        };
+
+        function renderStateCell(state) {
+            const info = stateIcons[state] || { text: state, color: '#9ca3af' };
+            return `<span style="color: ${info.color}; font-weight: 600;">${info.text}</span>`;
+        }
+
+        // Reachability bar (8-bit register visualization)
+        function renderReach(reach, reachOct) {
+            const bits = reach.toString(2).padStart(8, '0');
+            let bars = '';
+            for (const b of bits) {
+                const color = b === '1' ? '#10b981' : '#374151';
+                bars += `<span style="display:inline-block;width:6px;height:12px;background:${color};margin:0 1px;border-radius:1px;"></span>`;
+            }
+            return `${bars} <span style="color:var(--text-secondary);font-size:11px;">${reachOct}</span>`;
+        }
+
+        async function loadComparison() {
+            try {
+                const data = await api.get('/chrony/comparison');
+
+                // Update tracking card
+                if (data.tracking) {
+                    const t = data.tracking;
+                    document.getElementById('tracking-content').innerHTML = `
+                        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--spacing-md);">
+                            <div>
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary);">Reference</div>
+                                <div style="font-size: 16px; color: var(--text-primary); font-weight: 600;">${t.reference_id}</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary);">System Offset</div>
+                                <div style="font-size: 16px; color: ${Math.abs(t.system_time_offset_us) < 100 ? '#10b981' : '#f59e0b'}; font-weight: 600;">${t.system_time_offset_us.toFixed(1)} &micro;s</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary);">RMS Offset</div>
+                                <div style="font-size: 16px; color: var(--text-primary);">${t.rms_offset_us.toFixed(1)} &micro;s</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary);">Frequency</div>
+                                <div style="font-size: 16px; color: var(--text-primary);">${t.frequency_ppm.toFixed(3)} ppm</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary);">Skew</div>
+                                <div style="font-size: 16px; color: var(--text-primary);">${t.skew_ppm.toFixed(3)} ppm</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary);">Root Delay</div>
+                                <div style="font-size: 16px; color: var(--text-primary);">${t.root_delay_ms.toFixed(3)} ms</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary);">Update Interval</div>
+                                <div style="font-size: 16px; color: var(--text-primary);">${t.update_interval_s.toFixed(1)} s</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary);">Leap Status</div>
+                                <div style="font-size: 16px; color: ${t.leap_status === 'Normal' ? '#10b981' : '#ef4444'};">${t.leap_status}</div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    document.getElementById('tracking-content').innerHTML = '<span style="color: var(--text-tertiary);">Tracking data unavailable</span>';
+                }
+
+                // Update sources table
+                const tbody = document.getElementById('sources-body');
+                if (data.sources.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--text-secondary);">No sources available</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.sources.map(s => `
+                    <tr style="border-bottom: 1px solid var(--border-color);">
+                        <td style="padding: 8px; color: var(--text-primary); font-weight: 600;">${s.name}</td>
+                        <td style="padding: 8px; text-align: center; color: var(--text-secondary);">${s.type}</td>
+                        <td style="padding: 8px; text-align: center;">${renderStateCell(s.state)}</td>
+                        <td style="padding: 8px; text-align: center; color: var(--text-secondary);">${s.stratum}</td>
+                        <td style="padding: 8px; text-align: right; color: var(--text-primary); font-family: monospace;">${s.offset_ms >= 0 ? '+' : ''}${s.offset_ms.toFixed(4)}</td>
+                        <td style="padding: 8px; text-align: right; color: var(--text-secondary); font-family: monospace;">${s.error_ms.toFixed(4)}</td>
+                        <td style="padding: 8px; text-align: right; color: var(--text-secondary); font-family: monospace;">${s.std_dev_ms.toFixed(4)}</td>
+                        <td style="padding: 8px; text-align: right; color: var(--text-secondary); font-family: monospace;">${s.frequency_ppm >= 0 ? '+' : ''}${s.frequency_ppm.toFixed(3)}</td>
+                        <td style="padding: 8px; text-align: center; color: var(--text-secondary);">${s.n_samples}</td>
+                        <td style="padding: 8px; text-align: center;">${renderReach(s.reach, s.reach_oct)}</td>
+                    </tr>
+                `).join('');
+
+            } catch (e) {
+                console.error('Failed to load comparison:', e);
+                document.getElementById('sources-body').innerHTML = `<tr><td colspan="10" style="text-align:center;padding:20px;color:#ef4444;">Error: ${e.message}</td></tr>`;
+            }
+        }
+
+        async function loadHistory() {
+            try {
+                const data = await api.get(`/chrony/history?hours=${currentHours}`);
+
+                if (!data.sources || Object.keys(data.sources).length === 0) {
+                    Plotly.react('offset-plot', [], {
+                        ...darkLayout,
+                        annotations: [{ text: 'No historical data yet — chrony stats collection starts with fusion service', showarrow: false, font: { color: '#9ca3af', size: 14 } }],
+                    }, plotConfig);
+                    Plotly.react('sys-offset-plot', [], darkLayout, plotConfig);
+                    Plotly.react('stddev-plot', [], darkLayout, plotConfig);
+                    return;
+                }
+
+                // Source offset plot
+                const offsetTraces = [];
+                let colorIdx = 0;
+                for (const [name, series] of Object.entries(data.sources)) {
+                    const times = series.timestamps.map(t => new Date(t * 1000));
+                    offsetTraces.push({
+                        x: times,
+                        y: series.offset_ms,
+                        name: name,
+                        type: 'scatter',
+                        mode: 'lines+markers',
+                        marker: { size: 3 },
+                        line: { width: 1.5, color: getSourceColor(name, colorIdx) },
+                    });
+                    colorIdx++;
+                }
+
+                Plotly.react('offset-plot', offsetTraces, {
+                    ...darkLayout,
+                    yaxis: { ...darkLayout.yaxis, title: 'Offset (ms)' },
+                }, plotConfig);
+
+                // System offset plot
+                if (data.system && data.system.length > 0) {
+                    const sysTimes = data.system.map(p => new Date(p.unix_time * 1000));
+                    const sysVals = data.system.map(p => p.sys_offset_us);
+                    Plotly.react('sys-offset-plot', [{
+                        x: sysTimes,
+                        y: sysVals,
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { width: 1.5, color: '#3b82f6' },
+                        name: 'System offset',
+                        fill: 'tozeroy',
+                        fillcolor: 'rgba(59,130,246,0.1)',
+                    }], {
+                        ...darkLayout,
+                        yaxis: { ...darkLayout.yaxis, title: 'System Offset (\u00B5s)' },
+                    }, plotConfig);
+                }
+
+                // Std dev plot
+                const stddevTraces = [];
+                colorIdx = 0;
+                for (const [name, series] of Object.entries(data.sources)) {
+                    if (!series.std_dev_ms || series.std_dev_ms.length === 0) continue;
+                    const times = series.timestamps.map(t => new Date(t * 1000));
+                    stddevTraces.push({
+                        x: times,
+                        y: series.std_dev_ms,
+                        name: name,
+                        type: 'scatter',
+                        mode: 'lines+markers',
+                        marker: { size: 3 },
+                        line: { width: 1.5, color: getSourceColor(name, colorIdx) },
+                    });
+                    colorIdx++;
+                }
+
+                Plotly.react('stddev-plot', stddevTraces, {
+                    ...darkLayout,
+                    yaxis: { ...darkLayout.yaxis, title: 'Std Dev (ms)', type: 'log' },
+                }, plotConfig);
+
+            } catch (e) {
+                console.error('Failed to load history:', e);
+            }
+        }
+
+        async function refreshAll() {
+            await Promise.all([loadComparison(), loadHistory()]);
+        }
+
+        // Time range buttons
+        document.querySelectorAll('.time-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentHours = parseInt(btn.dataset.hours);
+                loadHistory();
+            });
+        });
+
+        // Initial load
+        refreshAll();
+
+        // Auto-refresh every 60s
+        refreshTimer = setInterval(refreshAll, 60000);
+    </script>
+</body>
+
+</html>
