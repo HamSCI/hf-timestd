@@ -549,6 +549,39 @@ function renderPlots(series) {
         hovermode: 'x unified',
     };
 
+    // Add TID markers
+    if (typeof _tidData !== 'undefined' && _tidData && _tidData.events) {
+        _tidData.events.forEach((evt, idx) => {
+            const ts = new Date(evt.timestamp);
+            rateTraces.push({
+                x: [ts, ts],
+                y: [-0.003, 0.003], // span a reasonable rate range for UI limits
+                mode: 'lines',
+                name: `TID: ${evt.velocity_m_s.toFixed(0)}m/s @ ${evt.direction_deg.toFixed(0)}°`,
+                line: { color: 'rgba(168, 85, 247, 0.7)', width: 2, dash: 'dash' },
+                hoverinfo: 'name',
+                showlegend: idx === 0 // only show one legend entry for all TIDs
+            });
+            if (idx === 0) {
+                rateTraces[rateTraces.length-1].name = 'TID Detection';
+            }
+        });
+    }
+
+    // Add X-ray flux if available
+    if (typeof _xrayData !== 'undefined' && _xrayData && _xrayData.flux && _xrayData.flux.length > 0) {
+        // Find long and short bands
+        rateTraces.push({
+            x: _xrayData.timestamps.map(t => new Date(t)),
+            y: _xrayData.flux,
+            mode: 'lines',
+            name: 'GOES X-Ray (0.1-0.8nm)',
+            yaxis: 'y3',
+            line: { color: 'rgba(239, 68, 68, 0.6)', width: 1.5, dash: 'dot' },
+            hoverinfo: 'name+y'
+        });
+    }
+
     if (rateTraces.length === 0) {
         document.getElementById('dtecRatePlot').innerHTML =
             '<div class="loading-msg">No series match the current frequency filter</div>';
@@ -558,6 +591,17 @@ function renderPlots(series) {
         Plotly.newPlot('dtecRatePlot', [...rateTraces, ...solar], {
             ...baseLayout,
             yaxis2: SOLAR_YAXIS2,
+            yaxis3: {
+                title: 'GOES X-Ray Flux (W/m²)',
+                titlefont: {color: '#ef4444'},
+                tickfont: {color: '#ef4444'},
+                overlaying: 'y',
+                side: 'right',
+                type: 'log',
+                range: [-9, -2],
+                showgrid: false,
+                position: 0.95
+            },
             margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
             yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', zeroline: true, zerolinecolor: '#475569', range: rRange },
@@ -574,6 +618,17 @@ function renderPlots(series) {
         Plotly.newPlot('refPlot', [...refTraces, ...solar], {
             ...baseLayout,
             yaxis2: SOLAR_YAXIS2,
+            yaxis3: {
+                title: 'GOES X-Ray Flux (W/m²)',
+                titlefont: {color: '#ef4444'},
+                tickfont: {color: '#ef4444'},
+                overlaying: 'y',
+                side: 'right',
+                type: 'log',
+                range: [-9, -2],
+                showgrid: false,
+                position: 0.95
+            },
             margin: { t: 10, b: 40, l: 70, r: 60 },
             xaxis: { gridcolor: '#334155', title: 'UTC' },
             yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', zeroline: true, zerolinecolor: '#475569', range: fRange },
