@@ -3078,7 +3078,7 @@ class MultiBroadcastFusion:
             sum(self.recent_validations) / len(self.recent_validations) > 0.8
         )
         
-        base_threshold = 5.0 if not calibration_converged else 2.5  # ms
+        base_threshold = 5.0 if not calibration_converged else 3.5  # ms (raised from 2.5: CHU-WWVH path difference routinely 2.5-5ms)
         
         # Time of day factor (nighttime more variable)
         from datetime import datetime, timezone
@@ -5167,11 +5167,13 @@ def run_fusion_service(
                         consistent = True
                     elif calibration_converged:
                         # Operational: only accept disagreement with low uncertainty
-                        if result.consistency_flag in ('INTER_ANOMALY', 'CROSS_STATION_DISAGREE') and result.uncertainty_ms < 1.0:
+                        # Raised from 1.0ms to 2.0ms: typical fused uncertainty is 1.2-1.3ms
+                        # which is still useful for Chrony (better than no feed at all)
+                        if result.consistency_flag in ('INTER_ANOMALY', 'CROSS_STATION_DISAGREE') and result.uncertainty_ms < 2.0:
                             consistent = True
                             logger.debug(
                                 f"Chrony feed: Accepting {result.consistency_flag} with low uncertainty "
-                                f"({result.uncertainty_ms:.3f}ms < 1.0ms threshold)"
+                                f"({result.uncertainty_ms:.3f}ms < 2.0ms threshold)"
                             )
                         else:
                             consistent = False
@@ -5225,11 +5227,20 @@ def run_fusion_service(
                     
                     # DIAGNOSTIC: Log gating status for debugging chrony feed issues
                     if not (quality_ok and multi_station and consistent and discontinuity_ok):
+                        gate_reasons = []
+                        if not quality_ok:
+                            gate_reasons.append(f"quality(grade={result.quality_grade},unc={result.uncertainty_ms:.1f}ms)")
+                        if not multi_station:
+                            gate_reasons.append(f"multi_station(n={result.n_stations})")
+                        if not consistent:
+                            gate_reasons.append(f"consistent(flag={result.consistency_flag},unc={result.uncertainty_ms:.1f}ms,thresh=2.0ms)")
+                        if not discontinuity_ok:
+                            gate_reasons.append("discontinuity")
                         logger.info(
-                            f"Chrony feed GATED: quality_ok={quality_ok}, multi_station={multi_station}, "
-                            f"consistent={consistent}, discontinuity_ok={discontinuity_ok} "
+                            f"Chrony feed GATED: {' + '.join(gate_reasons)} "
                             f"[grade={result.quality_grade}, n_sta={result.n_stations}, "
-                            f"flag={result.consistency_flag}, unc={result.uncertainty_ms:.1f}ms]"
+                            f"flag={result.consistency_flag}, unc={result.uncertainty_ms:.1f}ms, "
+                            f"cal_converged={calibration_converged}]"
                         )
                     
                     if quality_ok and multi_station and consistent and discontinuity_ok:

@@ -87,7 +87,7 @@ In a GPSDO-disciplined system, the local clock is significantly more stable (sub
 
 | Hardware | Frequency (Slope) | Time (Offset) | Cost |
 |----------|-------------------|---------------|------|
-| **GPSDO** | Excellent | Drifting (if undisciplined) | ~$200-500 |
+| **GPSDO** | Excellent | Drifting (if undisciplined) | ~$162-400 |
 | **Cesium Beam** | Excellent | Excellent | ~$30,000+ |
 | **GPSDO + hf-timestd** | Excellent | ±0.5 ms | Software |
 
