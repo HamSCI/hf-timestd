@@ -558,9 +558,14 @@ class CHUFSKDecoder:
         redundancy = raw_bytes[5:10]
         
         inverted = [(~b) & 0xFF for b in data_bytes]
-        if inverted != redundancy:
-            logger.debug("Frame B redundancy check failed")
+        diff_bits = sum(bin(a ^ b).count('1') for a, b in zip(inverted, redundancy))
+        if diff_bits > 8:
+            # More than 8/40 bits differ — too many errors to trust
+            logger.info(f"Frame B redundancy FAIL: bit_errors={diff_bits}/40, "
+                       f"data={bytes(data_bytes).hex()}, redun={bytes(redundancy).hex()}")
             return None
+        if diff_bits > 0:
+            logger.debug(f"Frame B redundancy: {diff_bits} bit errors, using data half")
         
         # Swap nibbles in each byte
         swapped = [self._swap_nibbles(b) for b in data_bytes]
@@ -591,9 +596,22 @@ class CHUFSKDecoder:
         dst_low = swapped[4] & 0x0F
         dst_pattern = dst_high * 10 + dst_low
         
-        # Validate
-        if not (1990 <= year <= 2100 and 0 <= tai_utc <= 99):
-            logger.debug(f"Frame B values out of range: year={year}, tai_utc={tai_utc}")
+        # Validate BCD digits (each must be 0-9, not hex A-F from bit errors)
+        bcd_digits = [x_nibble, z_nibble, year_1000, year_100, year_10, year_1,
+                      tai_high, tai_low, dst_high, dst_low]
+        if any(d > 9 for d in bcd_digits):
+            logger.debug(f"Frame B invalid BCD digit: {bcd_digits}")
+            return None
+        
+        # Tight range validation (compensates for relaxed redundancy check)
+        if not (2024 <= year <= 2030):
+            logger.debug(f"Frame B year out of range: {year}")
+            return None
+        if not (35 <= tai_utc <= 40):
+            logger.debug(f"Frame B TAI-UTC out of range: {tai_utc}")
+            return None
+        if z_nibble > 9:
+            logger.debug(f"Frame B DUT1 tenths out of range: {z_nibble}")
             return None
         
         return CHUFrameB(
@@ -838,16 +856,11 @@ class CHUFSKDecoder:
         slice_end = min(len(audio), second_start_sample + int(1.05 * self.sample_rate))  # 1.05s after
         slice_offset = slice_start  # to convert local indices back to global
 
-        if iq_samples is not None:
-            # IQ-direct path: frequency-translate by -2125 Hz then quadrature discriminator.
-            # This is the correct path for complex baseband IQ — the AM abs() path
-            # destroys FSK phase information and gives unequal tone amplitudes when
-            # the carrier is offset from the channel centre frequency.
-            iq_slice = iq_samples[slice_start:slice_end]
-            soft_decision = self._fsk_demodulate_iq(iq_slice)
-        else:
-            audio_slice = audio[slice_start:slice_end]
-            soft_decision = self._fsk_demodulate(audio_slice)
+        # Always use AM-demodulated audio for FSK.  The IQ dual-tone-to-DC
+        # path produces soft decisions ~40× weaker than the audio discriminator
+        # because the decimation filter attenuates the 2025/2225 Hz tones.
+        audio_slice = audio[slice_start:slice_end]
+        soft_decision = self._fsk_demodulate(audio_slice)
         
         # Diagnostic: soft decision statistics
         sd_abs = np.abs(soft_decision)
@@ -855,10 +868,18 @@ class CHUFSKDecoder:
                     f"sd_mean={np.mean(soft_decision):.2f}, sd_std={np.std(soft_decision):.2f}, "
                     f"sd_max={np.max(sd_abs):.2f}, iq={'yes' if iq_samples is not None else 'no'}")
         
-        # Find the first start bit by searching for expected pattern
-        # Search from ~30ms to ~250ms into the second (wider for ionospheric delay)
-        search_start = (second_start_sample - slice_offset) + int(30 * self.sample_rate / 1000)
-        search_end = (second_start_sample - slice_offset) + int(250 * self.sample_rate / 1000)
+        # Find the first start bit by searching for expected pattern.
+        # CHU timing: 0-10ms tick, 10-133ms mark preamble, 133-500ms FSK data.
+        # Frame A (secs 32-39): search from 30ms — the 0x06 pattern match rejects
+        #   false hits in the tick/preamble region.
+        # Frame B (sec 31): search from 200ms — no pattern to match, so we must
+        #   skip the tick noise region to avoid false UART framing matches.
+        if second_number == 31:
+            search_start_ms, search_end_ms = 200, 500
+        else:
+            search_start_ms, search_end_ms = 30, 500
+        search_start = (second_start_sample - slice_offset) + int(search_start_ms * self.sample_rate / 1000)
+        search_end = (second_start_sample - slice_offset) + int(search_end_ms * self.sample_rate / 1000)
         
         # Frame A (seconds 32-39) starts with 0x06, Frame B (second 31) has variable first byte
         expected_byte = 0x06 if second_number != 31 else None
