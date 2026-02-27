@@ -294,16 +294,35 @@
                 params.window = 60;
 
                 const data = await api.get('/phase/scintillation', params);
-                const traces = (data.series || []).map((s, i) => ({
-                    x: s.timestamps,
-                    y: s.sigma_phi_rad,
-                    name: `${s.channel} / ${s.station}`,
-                    type: 'scattergl',
-                    mode: 'lines',
-                    line: { color: s.color, width: 1.5 },
-                    hovertemplate: '&sigma;<sub>&phi;</sub> = %{y:.3f} rad<extra>%{fullData.name}</extra>',
-                    visible: i === 0 ? true : 'legendonly',
-                }));
+                const traces = [];
+                (data.series || []).forEach((s, i) => {
+                    // Sigma Phi (Phase Scintillation)
+                    traces.push({
+                        x: s.timestamps,
+                        y: s.sigma_phi_rad,
+                        name: `&sigma;<sub>&phi;</sub> ${s.channel} / ${s.station}`,
+                        type: 'scattergl',
+                        mode: 'lines',
+                        line: { color: s.color, width: 1.5 },
+                        hovertemplate: '&sigma;<sub>&phi;</sub> = %{y:.3f} rad<extra>%{fullData.name}</extra>',
+                        visible: i === 0 ? true : 'legendonly',
+                    });
+                    
+                    // S4 (Amplitude Scintillation)
+                    if (s.s4 && s.s4.some(v => v !== null)) {
+                        traces.push({
+                            x: s.timestamps,
+                            y: s.s4,
+                            name: `S4 ${s.channel} / ${s.station}`,
+                            type: 'scattergl',
+                            mode: 'lines',
+                            line: { color: s.color, width: 1.5, dash: 'dot' },
+                            hovertemplate: 'S4 = %{y:.3f}<extra>%{fullData.name}</extra>',
+                            visible: i === 0 ? true : 'legendonly',
+                            yaxis: 'y2'
+                        });
+                    }
+                });
 
                 // Add threshold line at 0.3 rad
                 if (traces.length > 0) {
@@ -321,6 +340,14 @@
                 const layout = {
                     ...darkLayout,
                     yaxis: { ...darkLayout.yaxis, title: '&sigma;<sub>&phi;</sub> (rad)', rangemode: 'tozero' },
+                    yaxis2: { 
+                        title: 'S4 Index', 
+                        overlaying: 'y', 
+                        side: 'right', 
+                        rangemode: 'tozero',
+                        gridcolor: 'transparent',
+                        zeroline: false
+                    },
                     showlegend: true,
                 };
 

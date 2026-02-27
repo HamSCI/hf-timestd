@@ -355,6 +355,12 @@ class PhaseService:
             sigma_phi = []
             sigma_epochs = []
 
+            # P3-C: Extract SNR to compute S4 proxy
+            has_snr = 'snr_db' in trace and len(trace['snr_db']) == len(epochs)
+            snrs = np.array(trace['snr_db']) if has_snr else None
+            
+            s4_vals = []
+
             for i in range(0, len(epochs) - window_samples + 1, max(1, window_samples // 2)):
                 chunk = phases[i:i + window_samples]
                 t_chunk = epochs[i:i + window_samples]
@@ -366,6 +372,17 @@ class PhaseService:
                     detrended = chunk - trend
                     sigma_phi.append(float(np.std(detrended)))
                     sigma_epochs.append(float(np.mean(t_chunk)))
+                    
+                    if has_snr:
+                        snr_chunk = snrs[i:i + window_samples]
+                        intensity = 10.0 ** (snr_chunk / 10.0)
+                        mean_i = np.mean(intensity)
+                        if mean_i > 1e-10:
+                            s4_vals.append(float(np.sqrt(np.var(intensity)) / mean_i))
+                        else:
+                            s4_vals.append(None)
+                    else:
+                        s4_vals.append(None)
 
             if not sigma_phi:
                 continue
@@ -380,6 +397,7 @@ class PhaseService:
                 ],
                 'epochs': sigma_epochs,
                 'sigma_phi_rad': sigma_phi,
+                's4': s4_vals if has_snr else None,
                 'n_points': len(sigma_phi),
             })
 

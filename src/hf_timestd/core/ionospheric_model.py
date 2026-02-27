@@ -996,6 +996,71 @@ class IonosphericModel:
         logger.debug(f"Calibration update: predicted_hmF2={predicted_hmF2:.1f} km, "
                     f"implied={implied_hmF2:.1f} km, offset={offset_km:+.1f} km")
     
+
+    def update_calibration_from_ionogram(
+        self,
+        latitude: float,
+        longitude: float,
+        timestamp: datetime,
+        measured_hmF2_km: float,
+        confidence: float = 1.0
+    ):
+        """
+        P3-D: Update calibration directly from ionosonde data (ionogram).
+        
+        This anchors the IRI-2020 empirical model directly to real-time 
+        local physical measurements of the F2 layer height, bypassing the
+        need to infer height from propagation delay.
+        
+        Args:
+            latitude, longitude: Location of the ionosonde
+            timestamp: When the ionogram was recorded
+            measured_hmF2_km: The true F2 layer peak height from the ionogram
+            confidence: Weight for this calibration point (0-1), default 1.0 for hard anchors
+        """
+        # Get what the model *would* have predicted before calibration
+        base_heights = self.get_layer_heights(latitude, longitude, timestamp)
+        predicted_hmF2_km = base_heights.hmF2_km
+        
+        offset_km = measured_hmF2_km - predicted_hmF2_km
+        
+        # We don't want extreme outliers to break the model
+        # Limit the offset to ±150 km
+        offset_km = max(-150.0, min(150.0, offset_km))
+        
+        entry = CalibrationEntry(
+            timestamp=timestamp,
+            predicted_hmF2_km=predicted_hmF2_km,
+            implied_hmF2_km=measured_hmF2_km,
+            offset_km=offset_km,
+            confidence=confidence
+        )
+        
+        # Add to calibration history
+        grid_key = self._get_grid_key(latitude, longitude)
+        
+        if grid_key not in self.calibration_history:
+            self.calibration_history[grid_key] = []
+            
+        self.calibration_history[grid_key].append(entry)
+        
+        # Maintain history size (keep last 24 hours of calibrations, max ~100)
+        cutoff = timestamp.timestamp() - self.calibration_window_hours * 3600
+        
+        valid_history = []
+        for e in self.calibration_history[grid_key]:
+            if e.timestamp.timestamp() > cutoff:
+                valid_history.append(e)
+                
+        # Keep manageable size
+        if len(valid_history) > 100:
+            valid_history = valid_history[-100:]
+            
+        self.calibration_history[grid_key] = valid_history
+        
+        logger.info(f"Ionogram Anchor at {grid_key}: Measured hmF2={measured_hmF2_km:.1f}km, "
+                   f"Predicted={predicted_hmF2_km:.1f}km, Offset={offset_km:.1f}km")
+
     def get_calibration_stats(self, latitude: float, longitude: float) -> Dict:
         """Get calibration statistics for a location."""
         loc_key = f"{round(latitude)}_{round(longitude)}"

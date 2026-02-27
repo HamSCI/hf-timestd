@@ -505,8 +505,8 @@ if is_multipath and delay_spread_ms > 0:
 **Capabilities:**
 - ✅ Rolling buffers of timing residuals per path
 - ✅ Cross-correlation between path pairs
-- ✅ TID velocity estimation from path geometry and lag
-- ✅ TID direction estimation from leading/lagging paths
+- ✅ **3D TDOA Resolution:** When $\ge 3$ paths are correlated, uses a 2D Time-Delay of Arrival array solver to unambiguously resolve velocity vector and azimuth.
+- ✅ Fallback TID velocity/direction estimation from 2-path geometry and lag
 - ✅ Period estimation from autocorrelation
 - ✅ Confidence scoring
 

@@ -279,12 +279,31 @@ class TIDDetector:
         else:
             leading_path = f"{best_pair[1][0]}@{best_pair[1][1]}MHz"
             lagging_path = f"{best_pair[0][0]}@{best_pair[0][1]}MHz"
-        
-        # Estimate TID velocity from path geometry and lag
-        velocity_m_s = self._estimate_tid_velocity(best_pair, abs(lag_minutes))
-        
-        # Estimate TID direction
-        direction_deg = self._estimate_tid_direction(best_pair, best_lag)
+
+        # P3-B: 3D TDOA TID Velocity/Direction
+        # Find all paths that correlate well with the best path to form an array
+        correlated_paths = [best_pair[0]]
+        for path in path_keys:
+            if path != best_pair[0]:
+                corr, _ = self._cross_correlate(aligned_series[best_pair[0]], aligned_series[path])
+                if corr >= self.min_correlation * 0.8:  # Slightly lower threshold for array inclusion
+                    correlated_paths.append(path)
+
+        velocity_m_s = None
+        direction_deg = None
+
+        if len(correlated_paths) >= 3:
+            # We have enough paths to solve TDOA unambiguously
+            v_tdoa, dir_tdoa = self._solve_tdoa_velocity(correlated_paths, aligned_series)
+            if v_tdoa is not None and dir_tdoa is not None:
+                velocity_m_s = v_tdoa
+                direction_deg = dir_tdoa
+                logger.info(f"Resolved TID via TDOA ({len(correlated_paths)} paths): {velocity_m_s:.0f} m/s @ {direction_deg:.0f}°")
+
+        if velocity_m_s is None or direction_deg is None:
+            # Fallback to 2-path geometry estimation
+            velocity_m_s = self._estimate_tid_velocity(best_pair, abs(lag_minutes))
+            direction_deg = self._estimate_tid_direction(best_pair, best_lag)
         
         # Estimate period from autocorrelation
         period_minutes = self._estimate_period(aligned_series[best_pair[0]])
@@ -406,6 +425,87 @@ class TIDDetector:
         
         return float(abs(best_corr)), int(best_lag)
     
+
+    def _compute_pierce_point(self, station: str) -> Tuple[float, float]:
+        if station not in self._station_locations:
+            return self.receiver_lat, self.receiver_lon
+        
+        st_lat, st_lon = self._station_locations[station]
+        import math
+        rx_lat_rad = math.radians(self.receiver_lat)
+        rx_lon_rad = math.radians(self.receiver_lon)
+        tx_lat_rad = math.radians(st_lat)
+        tx_lon_rad = math.radians(st_lon)
+        
+        Bx = math.cos(tx_lat_rad) * math.cos(tx_lon_rad - rx_lon_rad)
+        By = math.cos(tx_lat_rad) * math.sin(tx_lon_rad - rx_lon_rad)
+        
+        mid_lat_rad = math.atan2(
+            math.sin(rx_lat_rad) + math.sin(tx_lat_rad),
+            math.sqrt((math.cos(rx_lat_rad) + Bx)**2 + By**2)
+        )
+        mid_lon_rad = rx_lon_rad + math.atan2(By, math.cos(rx_lat_rad) + Bx)
+        
+        return math.degrees(mid_lat_rad), math.degrees(mid_lon_rad)
+
+    def _get_enu_coords(self, lat: float, lon: float) -> Tuple[float, float]:
+        import math
+        R = 6371.0
+        lat_rad, lon_rad = math.radians(lat), math.radians(lon)
+        ref_lat_rad, ref_lon_rad = math.radians(self.receiver_lat), math.radians(self.receiver_lon)
+        d_lat = lat_rad - ref_lat_rad
+        d_lon = lon_rad - ref_lon_rad
+        y = d_lat * R
+        x = d_lon * R * math.cos(ref_lat_rad)
+        return x, y
+
+    def _solve_tdoa_velocity(
+        self,
+        correlated_paths: List[Tuple[str, float]],
+        aligned_series: Dict[Tuple[str, float], np.ndarray]
+    ) -> Tuple[Optional[float], Optional[float]]:
+        import itertools
+        import math
+        
+        if len(correlated_paths) < 3:
+            return None, None
+            
+        A = []
+        B = []
+        
+        points = []
+        for p in correlated_paths:
+            station = p[0]
+            lat, lon = self._compute_pierce_point(station)
+            x, y = self._get_enu_coords(lat, lon)
+            points.append((x, y))
+            
+        for i, j in itertools.combinations(range(len(correlated_paths)), 2):
+            p1, p2 = correlated_paths[i], correlated_paths[j]
+            corr, lag_samples = self._cross_correlate(aligned_series[p1], aligned_series[p2])
+            
+            dt_seconds = lag_samples * self.sample_interval_seconds
+            
+            dx = points[i][0] - points[j][0]
+            dy = points[i][1] - points[j][1]
+            
+            A.append([dx, dy])
+            B.append(dt_seconds)
+            
+        A = np.array(A)
+        B = np.array(B)
+        
+        try:
+            sol, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
+            sx, sy = sol
+            
+            v_km_s = 1.0 / np.sqrt(sx**2 + sy**2)
+            az_rad = math.atan2(sx, sy)
+            az_deg = (math.degrees(az_rad)) % 360
+            
+            return v_km_s * 1000.0, az_deg
+        except Exception:
+            return None, None
     def _estimate_tid_velocity(
         self,
         path_pair: Tuple[Tuple[str, float], Tuple[str, float]],

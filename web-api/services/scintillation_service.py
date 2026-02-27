@@ -271,6 +271,14 @@ class ScintillationService:
                                         mean_i = np.mean(intensity)
                                         if mean_i > 1e-10:
                                             amp_s4 = float(np.sqrt(np.var(intensity)) / mean_i)
+                                            
+                                # P3-C: Compute S4 opportunistically from SNR if correlation peak isn't available
+                                if amp_s4 is None and len(snr_good) >= 5:
+                                    # Convert SNR (dB) to linear power proxy
+                                    intensity = 10.0 ** (snr_good / 10.0)
+                                    mean_i = np.mean(intensity)
+                                    if mean_i > 1e-10:
+                                        amp_s4 = float(np.sqrt(np.var(intensity)) / mean_i)
 
                                 mb_iso = datetime.fromtimestamp(mb_epoch, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 

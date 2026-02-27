@@ -84,25 +84,12 @@ class GNSSTECAnalyzer:
             
             f1 = FREQ_GPS_L1
             f2 = FREQ_GPS_L2
-            factor = (f1**2 * f2**2) / (K * (f1**2 - f2**2))
             
             p1 = obs['P1']
             p2 = obs['P2']
             
             # DCB Correction
-            # DCB value from file. Usually DCB_P1P2 (ns).
-            # dcb_ns = self.dcb_data.get((key, 'C1C', 'C2W'), 0.0) # Check keys!
-            # If our download script returns METERS, use directly.
-            # My cddis.py converts to METERS: bias_meters = value_ns * 1e-9 * c
-            
             dcb_meters = 0.0
-            # Look up bias. Our parser returns keys like ('G01', 'C1C', 'C2W')
-            # ZED-F9P tracks L1 C/A (C1C) and L2C (C2L or C2X). 
-            # CAS Bias files usually provide C1C-C1W (P1-P2) or C1C-C2W.
-            # L2C biases might be C1C-C2L or C1C-C2X. 
-            # If not found, fall back to C1C-C2W (standard P1-P2) as approximation?
-            # Or assume differnce between C2W and C2L is small? (It is distinct: C2C-C2W DCB exists).
-            # For now, try exact match, then C1C-C2W.
             
             lookup_keys = [
                 (key, 'C1C', 'C2L'), # L1 C/A - L2C(L)
@@ -115,42 +102,27 @@ class GNSSTECAnalyzer:
                 if k in self.dcb_data:
                     dcb_meters = self.dcb_data[k]
                     found_dcb = True
-                    # logger.debug(f"Using DCB {k}: {dcb_meters}")
                     break
             
             # Calculate Raw Code STEC
-            # The ionospheric delay difference (I1 - I2) is negative since I2 > I1
-            # We use absolute value to ensure positive STEC
+            # The ionospheric delay difference (I1 - I2) is negative since I2 > I1 (P2 > P1).
+            # 1/f1^2 - 1/f2^2 is also negative. The negatives cancel to yield a positive STEC.
             term = (p1 - p2) + dcb_meters # Ignoring receiver bias for now
-            denom = K * abs(1.0/f1**2 - 1.0/f2**2)  # Use abs() to get positive denominator
-            stec_code = term / denom
+            denom = K * (1.0/f1**2 - 1.0/f2**2)  # Preserved actual sign (negative)
+            stec_code = term / denom             # neg / neg = positive STEC
             
             # 2. Carrier Phase Smoothing (Levelling)
-            # L_gf = L1_m - L2_m (Phase in meters)
             lamb1 = C / f1
             lamb2 = C / f2
             l1_m = obs['L1'] * lamb1
             l2_m = obs['L2'] * lamb2
             
             # Phase difference (geometry free)
-            # Phi1 - Phi2 = (I1 - I2_phase) + ambiguities
-            # Ionosphere advance phase? I_phase = -I_code.
-            # So Phase difference has OPPOSITE sign to code difference for Iono.
-            # L1 - L2 = -(I1 - I2) + N_gf = - (Code_I1_I2) + N
-            # So L1 - L2 increases with STEC (since -(I1-I2) is positive).
-            
             l_gf = l1_m - l2_m # Meters
             
-            # Levelling
-            # We want to fit L_gf to match the "level" of STEC_code.
-            # Equivalent code variance:
-            # Code_gf = (P1 - P2) ? No, we derived STEC_code already.
-            # Let's verify scaling.
-            # STEC_phase_unlevelled = l_gf / (-denom) ??
-            # L_gf = - (I1 - I2) = - (40.3 STEC (1/f1^2 - 1/f2^2)) = - (denom * STEC)
-            # So STEC = L_gf / (-denom).
-            
-            stec_phase_raw = l_gf / denom  # Use same denominator (already positive)
+            # L_gf = L1_m - L2_m = - K * TEC * (1/f1^2 - 1/f2^2) = - denom * TEC
+            stec_phase_raw = l_gf / (-denom)
+
             
             # Levelling logic: STEC = STEC_phase_raw + Offset
             # Offset = Mean(STEC_code - STEC_phase_raw)

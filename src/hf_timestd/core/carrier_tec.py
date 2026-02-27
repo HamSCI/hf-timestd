@@ -166,6 +166,18 @@ class CarrierTECEstimator:
         doppler_hz = np.zeros(len(dt))
         doppler_hz[valid] = -(1.0 / (2.0 * np.pi)) * dphi[valid] / dt[valid]
 
+        # P3-A: Cycle-Slip Detection
+        # Deep fades cause cycle slips, which manifest as massive, brief spikes in phase rate (Doppler).
+        # We detect these by looking at the second derivative (phase acceleration).
+        d2phi = np.zeros_like(doppler_hz)
+        d2phi[1:] = np.diff(doppler_hz)
+        
+        # Threshold: > 5 Hz/s acceleration is almost certainly a cycle slip for ionospheric HF
+        slip_mask = np.abs(d2phi) > 5.0
+        if np.any(slip_mask):
+            logger.debug(f"Detected {np.sum(slip_mask)} cycle slips for {station}/{channel} at {frequency_mhz}MHz")
+            doppler_hz[slip_mask] = 0.0 # Freeze dTEC rate during the slip
+
         # Midpoint epochs for the derivative
         mid_epochs = (epochs[:-1] + epochs[1:]) / 2.0
 

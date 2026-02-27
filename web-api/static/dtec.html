@@ -366,13 +366,25 @@ async function loadData() {
         let url = `/api/tec/dtec?start=${encodeURIComponent(startParam)}&end=${encodeURIComponent(endParam)}&min_snr_db=${minSnr}&downsample=${ds}`;
         if (station) url += `&station=${station}`;
 
-        const [resp, solarResp] = await Promise.all([
+        // Parse window for xray API (needs hours integer roughly)
+        let hours = 24;
+        if (window_ === '1h') hours = 1;
+        else if (window_ === '6h') hours = 6;
+        else if (window_ === '24h') hours = 24;
+        else if (window_ === '48h') hours = 48;
+        else if (window_ === '7d') hours = 168;
+        
+        const [resp, solarResp, xrayResp, tidResp] = await Promise.all([
             fetch(url),
             fetch(`/api/space-weather/solar/elevation?start=${encodeURIComponent(startParam)}&end=${encodeURIComponent(endParam)}&interval_minutes=5`),
+            fetch(`/api/space-weather/xray?hours=${hours}`),
+            fetch(`/api/tid/history?start=${encodeURIComponent(startParam)}&end=${encodeURIComponent(endParam)}`)
         ]);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         _solarData = solarResp.ok ? await solarResp.json() : null;
+        _xrayData = xrayResp.ok ? await xrayResp.json() : null;
+        _tidData = tidResp.ok ? await tidResp.json() : null;
 
         if (data.status === 'no_data' || data.n_series === 0) {
             showError('No dTEC data available for this time window.');
