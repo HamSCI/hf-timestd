@@ -18,9 +18,65 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
 - ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
-- 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path TEC visualization.
+- 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path dTEC visualization.
 - ⏰ **Dual Chrony feeds** - Independent L1 (geometric) and L2 (physics-corrected) SHM refclocks with separate Kalman filters.
 - 📊 **Metrological Rigor (v6.2)** - Cramér-Rao uncertainty, multipath detection, Doppler correction, adaptive thresholds.
+
+### Complete Feature Inventory
+
+**Signal Reception & Recording:**
+- **ka9q-python integration** — Python interface to Phil Karn's radiod for channel creation, RTP reception, resequencing, gap detection
+- **Multi-channel IQ recording** — 9 channels × 24 kHz IQ, binary `.bin.zst` + JSON metadata sidecars
+- **RTP timestamp preservation** — GPS+PPS authoritative timestamps (~50 μs) via radiod's `GPS_TIME`/`RTP_TIMESNAP`
+
+**Time Signal Detection:**
+- **Tick edge detection** — Quadrature matched filter, sub-sample parabolic interpolation, SNR-weighted robust median ensemble (up to 57 ticks/min)
+- **Carrier-phase Doppler** — Phase slope across ticks → Hz per minute
+- **Multipath detection** — Peak broadening, secondary peaks, phase stability analysis
+
+**Station Identification:**
+- **WWV/WWVH discrimination** — Weighted voting (BCD correlation, 1000/1200 Hz tone ratio, station ID tones, test signal detection)
+- **BPM discrimination** — Tick duration (10 ms UTC vs 100 ms UT1), minute gating
+- **Probabilistic discriminator** — Logistic regression model for station ID confidence scoring
+
+**Time Code Decoding:**
+- **CHU FSK** — Bell 103 demodulation (300 baud), Frame A (UTC) + Frame B (DUT1, TAI-UTC, year), multi-second consensus, cross-validation against RTP
+- **WWV/WWVH BCD** — 100 Hz subcarrier extraction for station identification and time confirmation
+- **Leap second awareness** — TAI-UTC monitoring via CHU FSK, Kalman hold during transitions
+
+**Ionospheric Science:**
+- **Carrier-phase dTEC** — Primary product (~6 mTECU/min sensitivity, ~250K records/day), GNSS VTEC-anchored
+- **Group-delay TEC** — 1/f² dispersion fit (validation product)
+- **Local GNSS VTEC** — ZED-F9P dual-frequency GPS, ~1 Hz, DCB-corrected, ±1 TECU
+- **Propagation mode identification** — GW, 1E, 1F2, 2F2, 3F2 from delay matching
+- **TID detection** — Cross-path timing residual correlation
+- **Scintillation indices** — S4 (amplitude) and σ_φ (phase) per ITU-R P.531
+- **Sporadic-E detection** — SNR anomaly + mode change + foEs estimation
+
+**Propagation Modeling:**
+- **HFPropagationModel** — Multi-mode delay prediction with Ne(h) integration
+- **IonoDataService** — WAM-IPE (NOAA S3) + GIRO ionosonde real-time data
+- **IRI-2020 / IONEX / parametric** — Tiered fallback chain for ionospheric parameters
+
+**WWV/WWVH Test Signal Analysis:**
+- **Minutes :08/:44** — Multi-tone power (2, 3, 4, 5 kHz), Frequency Selectivity Score, chirp delay spread, transient detection
+
+**HamSCI GRAPE:**
+- **10 Hz IQ decimation** — All 9 channels decimated from 24 kHz for GRAPE compatibility
+- **Digital RF packaging** — PSWS/wsprdaemon-compatible DRF format
+- **Automated daily upload** — SFTP to HamSCI PSWS network
+- **Spectrograms** — Daily spectrogram generation from decimated data
+
+**Web UI & API:**
+- **FastAPI dashboard** — Metrology, dTEC, ionogram, GRAPE, logs, propagation conditions pages
+- **Custom date range** — Browse any historical day on all time-selector pages
+- **Solar elevation overlay** — Ionogram and dTEC time series
+
+**Infrastructure:**
+- **systemd services** — 8+ services with dependency management, watchdog, CPU affinity
+- **Production installer** — `scripts/install.sh` (creates timestd user, venv, config, services)
+- **Log rotation** — Daily rotation with 14-day retention
+- **Freshness monitoring** — Cron-based alerts on stale data
 
 ---
 
@@ -112,7 +168,7 @@ python -m hf_timestd --config config/timestd-config.toml
 - **System Logs** - Real-time service logs viewer (`/static/logs.html`)
 - **API Docs** - Interactive API documentation (`/api/docs`)
 - **Metrology Dashboard** - Fusion timing, ISO GUM uncertainty, Allan Deviation analysis
-- **Propagation Analysis** - Per-broadcast modes, multi-frequency comparison, per-path TEC with error bars
+- **Propagation Analysis** - Per-broadcast modes, multi-frequency comparison, per-path dTEC with error bars
 
 ---
 
@@ -130,7 +186,7 @@ The system is composed of eight independent services that form a pipeline:
    • Reads Raw IQ -> Detects Tones -> L1/L2 Measurements (HDF5)
      ↓
 3. L2 CALIBRATION (timestd-l2-calibration)
-   • Applies geometric + TEC corrections -> L2 Timing
+   • Applies geometric + ionospheric corrections -> L2 Timing
      ↓
 4. FUSION (timestd-fusion) <------- 5. VTEC (timestd-vtec)
    • Reads L2 HDF5 (crash-safe)     • GNSS VTEC monitoring
@@ -138,7 +194,7 @@ The system is composed of eight independent services that form a pipeline:
    • Feeds Chrony SHM (TSL1/TSL2)
      ↓
 6. PHYSICS (timestd-physics)
-   • TEC Estimation from multi-frequency
+   • Carrier-phase dTEC + group-delay TEC validation
      ↓
 7. WEB API (timestd-web-api)
    • FastAPI dashboard & REST API (port 8000)
@@ -151,7 +207,7 @@ The system is composed of eight independent services that form a pipeline:
 
 - **Binary IQ Archive:** Compressed `.bin.zst` files with JSON metadata sidecars for raw 24 kHz IQ recording. Digital RF (MIT Haystack) is used for GRAPE packaging/upload only.
 - **HDF5 Crash-Safe Pipeline:** Open-write-close pattern with `locking=False` for all inter-service data exchange. No SWMR — crash-safe by design.
-- **IONEX VTEC:** Incorporates global ionospheric maps (NASA/IGS) to correct for group delay ($\tau_{iono} \propto TEC/f^2$).
+- **Ionospheric Correction:** GNSS VTEC (primary) and IONEX maps (fallback) correct for group delay ($\tau_{iono} \propto TEC/f^2$). Carrier-phase dTEC is the primary ionospheric science product.
 
 ---
 
@@ -244,6 +300,6 @@ The system is composed of eight independent services that form a pipeline:
 
 **v5.0.0 (January 7, 2026) - HDF5-Native Pipeline**
 
-- ✅ **Digital RF Storage:** Standard HDF5 format for raw IQ
-- ✅ **HDF5-Native Analytics:** All L1/L2/L3 data uses HDF5 with SWMR
+- ✅ **Binary IQ Archive:** Compressed `.bin.zst` + JSON sidecars for raw IQ (replaced Digital RF)
+- ✅ **HDF5-Native Analytics:** All L1/L2/L3 data uses HDF5 (crash-safe open-write-close)
 - ✅ **Physics-Informed Propagation:** IONEX VTEC maps for precise path delay

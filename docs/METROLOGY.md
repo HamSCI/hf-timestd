@@ -1,8 +1,8 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 6.7.1+ (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model)  
-**Last Updated:** February 17, 2026  
+**System Version:** 6.8.0 (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring)  
+**Last Updated:** February 27, 2026  
 **Author:** Michael James Hauan (AC0G)
 
 ---
@@ -11,7 +11,7 @@
 
 **hf-timestd** is a dual-purpose HF time transfer and ionospheric measurement system. It receives WWV/WWVH/CHU/BPM time signal broadcasts via a GPSDO-disciplined SDR and operates in two complementary modes:
 
-**RTP Mode (Physics Pathway):** With GPS+PPS providing authoritative timing (~50 μs accuracy via radiod's RTP timestamps), the system uses the known transmission times and measured arrival times to **study the ionosphere**. The propagation delay residuals reveal Total Electron Content (TEC), traveling ionospheric disturbances (TIDs), and space weather effects.
+**RTP Mode (Physics Pathway):** With GPS+PPS providing authoritative timing (~50 μs accuracy via radiod's RTP timestamps), the system uses the known transmission times and measured arrival times to **study the ionosphere**. The propagation delay residuals reveal carrier-phase differential TEC (dTEC, the primary ionospheric product, anchored by GNSS VTEC), traveling ionospheric disturbances (TIDs), and space weather effects.
 
 **Fusion Mode (Metrology Pathway):** The system attempts to **recover UTC from the HF broadcasts alone**, using multi-broadcast fusion to solve for the local clock offset. This pathway demonstrates how closely tone analysis can reconstruct the timing authority that RTP mode provides directly. Current accuracy: ±5-100 ms depending on ionospheric conditions (vs ±0.05 ms from RTP).
 
@@ -137,24 +137,26 @@ By adding geography (WWV vs WWVH vs CHU vs BPM), you sound the ionosphere from d
 
 ## 4. System Architecture
 
-### 4.1 The Six Services
+### 4.1 The Eight Services
 
-The system is composed of six independent systemd services:
+The system is composed of eight independent systemd services:
 
 | Service | Responsibility | Output |
 |---------|---------------|--------|
 | **timestd-core-recorder** | Reliable Data Capture | `/var/lib/timestd/raw_buffer/` |
 | **timestd-metrology** | Signal Processing & Timing Extraction | `/var/lib/timestd/phase2/{CHANNEL}/` |
+| **timestd-l2-calibration** | Geometric + Ionospheric Corrections | L2 calibrated timing (HDF5) |
 | **timestd-fusion** | Multi-Broadcast Synthesis | `/var/lib/timestd/phase2/fusion/` + Chrony SHM |
 | **timestd-vtec** | Ionospheric Data Acquisition | `/var/lib/timestd/gnss_vtec.h5`, `/var/lib/timestd/ionex/` |
-| **timestd-physics** | Propagation Modeling & TEC Estimation | Enriched L2 HDF5 files |
+| **timestd-physics** | Carrier-phase dTEC, group-delay TEC validation, T_iono | `/var/lib/timestd/phase2/science/tec/` |
 | **timestd-web-api** | User Visualization & System API | Port 8000 |
+| **timestd-radiod-monitor** | Hardware Health Monitoring | Alerts on failure |
 
 ### 4.2 Three-Phase Pipeline
 
 ```
 Phase 1: Core Recorder (Immutable Archive)
-  ↓ Digital RF HDF5 (24 kHz IQ)
+  ↓ Binary IQ (.bin.zst) + JSON sidecars (24 kHz IQ)
 Phase 2: Analytics (Timing Extraction)
   ↓ HDF5 L2 Timing Measurements
 Phase 3: Fusion (Multi-Broadcast Synthesis)
@@ -190,7 +192,7 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 
 | Level | Description | Content |
 |-------|-------------|---------|
-| **L0** | Digital RF | Raw IQ samples |
+| **L0** | Binary IQ Archive | Raw IQ samples (.bin.zst + JSON sidecars) |
 | **L1A** | Tone Detections | Channel observables, SNR, BCD |
 | **L1B** | BCD Timecode | Decoded time information |
 | **L2** | Timing Measurements | D_clock + ISO GUM uncertainty |
@@ -214,7 +216,7 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 - **SDR**: ka9q-radio (Phil Karn's software-defined radio)
 - **Reference**: GPSDO-disciplined sampling clock
 - **Sample Rate**: 24 kHz IQ per channel
-- **Format**: Digital RF (HDF5, MIT Haystack standard)
+- **Format**: Binary IQ archive (.bin.zst + JSON metadata sidecars)
 
 ### 5.2 Tick Edge Detection (TickEdgeDetector — v6.8+)
 
@@ -577,14 +579,16 @@ Not a software bug—HF propagation on higher bands is poor during night/early m
 
 ## 9. Data Products
 
-### 9.1 Raw Archive: Digital RF (HDF5)
+### 9.1 Raw Archive: Binary IQ + JSON Sidecars
 
-- **Format:** HDF5 with `drf_properties` attribute (MIT Haystack standard)
+- **Format:** `.bin.zst` (zstd-compressed binary) + `.json` metadata sidecar per minute
 - **Structure:**
-  - `/rf_data`: Dataset containing complex64 IQ samples
-  - `/rf_data_index`: Index mapping sample ranges to timestamps
-- **Metadata:** Global start time, sample rate (24 kHz), center frequency
+  - Binary file: 1,440,000 complex64 IQ samples per minute (24 kHz × 60s)
+  - JSON sidecar: RTP timestamps, gap info, system time, quality metrics
+- **Metadata:** Start RTP timestamp, start system time, sample rate (24 kHz), center frequency, gap count
 - **Size:** ~2-3 GB/day/channel
+
+> **Note:** Digital RF (MIT Haystack) is used only for GRAPE DRF packaging/upload, not for raw recording.
 
 ### 9.2 Tick Timing: L2 HDF5 (Primary Timing Product)
 

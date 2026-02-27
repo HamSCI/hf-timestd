@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 26, 2026
+**Last Updated:** February 27, 2026
 
 ---
 
@@ -78,12 +78,13 @@ The system is composed of eight independent systemd services, each with a specif
 
 ### 5. Physics Service (`timestd-physics`)
 
-**Responsibility:** Propagation Modeling & TEC Estimation
+**Responsibility:** Propagation Modeling & Ionospheric Science Products
 
 - Computes ionospheric propagation delays using IONEX/IRI-2020 models.
-- Estimates Total Electron Content (TEC) from multi-frequency measurements.
+- Produces carrier-phase dTEC (primary science product) with GNSS VTEC anchoring.
+- Estimates group-delay TEC from multi-frequency dispersion (validation product, noise-dominated).
 - Computes ionospheric residual (T_iono = T_observed - T_vacuum).
-- Archives TEC and T_iono to HDF5 for scientific analysis.
+- Archives dTEC, TEC, and T_iono to HDF5 for scientific analysis.
 - **Output:** `/var/lib/timestd/phase2/science/tec/` (HDF5 L3)
 
 ### 6. Web UI & API (`timestd-web-api`)
@@ -914,8 +915,8 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ---
 
-**Version**: 6.7.1+  
-**Last Updated**: February 14, 2026  
+**Version**: 6.8.0  
+**Last Updated**: February 27, 2026  
 **Purpose**: Technical reference for HF Time Standard developers
 
 **v6.7.1 Release (February 12, 2026) - Propagation Model Full Integration:**

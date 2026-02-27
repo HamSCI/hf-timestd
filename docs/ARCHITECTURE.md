@@ -1,6 +1,6 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** February 26, 2026  
+**Last Updated:** February 27, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
 **Version:** V6.8.0
@@ -46,7 +46,7 @@ The system serves a **dual purpose**:
 
 **Purpose 2: Ionospheric Characterization (RTP Mode)**
 - Measure ionospheric effects as residuals using authoritative RTP timestamps (GPS+PPS, ~50 μs)
-- Compute TEC from multi-frequency observations
+- Compute carrier-phase dTEC with GNSS VTEC anchoring (primary); group-delay TEC as validation
 - Detect traveling ionospheric disturbances (TIDs)
 - The timing accuracy enables precision ionospheric science — propagation delays are the measurement, not the error
 
@@ -56,7 +56,7 @@ The system serves a **dual purpose**:
 2. **WWV/WWVH discrimination** on 4 shared frequencies (2.5, 5, 10, 15 MHz)
 3. **Propagation mode estimation** - Ionospheric hop identification (Physics-Informed)
 4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination (HDF5)
-5. **TEC estimation** - Total Electron Content from multi-frequency dispersion
+5. **Carrier-phase dTEC** - Differential TEC with GNSS VTEC anchoring (~6 mTECU/min sensitivity)
 6. **TID detection** - Cross-path correlation for traveling ionospheric disturbances
 
 ### Channel Configuration (17 broadcasts)
@@ -465,7 +465,7 @@ We use a **Weighted Voting** system combining:
 | `timestd-metrology.service` | Phase 2: L1 timing analysis |
 | `timestd-l2-calibration.service` | Phase 2: L2 calibrated timing |
 | `timestd-fusion.service` | Phase 3: Multi-broadcast fusion & Chrony feed |
-| `timestd-physics.service` | Phase 3: TEC estimation |
+| `timestd-physics.service` | Phase 3: Carrier-phase dTEC, group-delay TEC validation, T_iono |
 | *(IonoDataService)* | Ionospheric data ingestion (WAM-IPE, GIRO) — runs as a **background thread** within metrology, not a separate service |
 | `timestd-web-api.service` | Web monitoring UI (FastAPI) |
 | `timestd-radiod-monitor.service` | Hardware health monitoring |
@@ -497,6 +497,36 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 
 ---
 
+## HamSCI GRAPE Data Product
+
+The system produces HamSCI GRAPE-compatible data products for community science. This is an independent subsystem (`src/hf_timestd/grape/`) that consumes the same raw IQ data recorded by Phase 1.
+
+### Pipeline
+
+```
+raw_buffer/{CHANNEL}/ (24 kHz IQ)
+    ↓
+grape/decimation_pipeline.py — 10 Hz IQ decimation (all 9 channels)
+    ↓
+grape/packager.py — Digital RF (DRF) packaging (MIT Haystack format)
+    ↓
+grape/uploader.py — SFTP upload to HamSCI PSWS network
+    ↓
+grape/spectrogram.py — Daily spectrograms from decimated data
+```
+
+### Scheduling
+
+- **`grape-daily.timer`** — Triggers daily at a configured time
+- **`grape-daily.service`** — Runs `grape_daily.py` which orchestrates decimation → packaging → upload → spectrogram
+- **PSWS station ID:** S000171 (sftp-only: `pswsnetwork.eng.ua.edu`)
+
+### Design Decision: Separate from Metrology
+
+GRAPE decimation is intentionally decoupled from the timing/metrology pipeline. It operates on the immutable Phase 1 raw buffer after-the-fact, does not interfere with real-time services, and uses Digital RF format (MIT Haystack) only for GRAPE output — the rest of the system uses binary IQ + HDF5.
+
+---
+
 ## Related Documentation
 
 - **`docs/TECHNICAL_REFERENCE.md`** - API and algorithm details
@@ -507,7 +537,7 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 
 ---
 
-**Last Updated:** February 26, 2026
+**Last Updated:** February 27, 2026
 
 ## Real-Time Ionospheric Propagation Model (v6.7)
 

@@ -29,7 +29,7 @@ See ARCHITECTURE.md for design details.
 Copyright 2025
 """
 
-__version__ = "3.2.0"
+__version__ = "6.8.0"
 __author__ = "HF Time Standard Analysis Project"
 
 # =============================================================================

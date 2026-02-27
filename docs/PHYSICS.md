@@ -1,9 +1,10 @@
 # HF-TimeStd: Ionospheric Physics Capabilities
 
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
+**Scope:** This document covers the *science* — what measurements mean physically and how they are validated. For *design decisions* (why the system is built this way), see `docs/ARCHITECTURE.md`. For *algorithms and data formats*, see `docs/TECHNICAL_REFERENCE.md`.  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 6.7.1+ (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring)  
-**Last Updated:** 2026-02-26
+**System Version:** 6.8.0 (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring)  
+**Last Updated:** February 27, 2026
 
 ---
 
@@ -52,9 +53,40 @@ This geometry provides ionospheric sampling across:
 
 ## 3. Currently Implemented Measurements
 
-### 3.1 Total Electron Content (TEC) ✅
+### 3.1 Ionospheric Electron Content: dTEC and TEC ✅
 
-**Status:** Fully implemented with GNSS VTEC correction (v6.1)
+**Status:** Carrier-phase dTEC fully operational (v6.8); group-delay TEC available as validation product
+
+The system produces two distinct TEC-related products with very different characteristics:
+
+#### 3.1.1 Carrier-Phase Differential TEC (dTEC) — Primary Product
+
+**Sensitivity:** ~6 mTECU/min (carrier-phase precision)
+**Volume:** ~250,000 records/day across all station-channels
+**Anchoring:** GNSS VTEC (±1 TECU) when available; group-delay TEC fallback
+
+Carrier-phase dTEC measures the *rate of change* of TEC along each HF path by tracking the carrier phase progression across successive minutes. The integrated dTEC is inherently **relative** (unknown DC offset) until anchored by an external absolute TEC source.
+
+**Anchor source priority (v6.8):**
+
+| Priority | Source | Method | Accuracy | anchor_status |
+|----------|--------|--------|----------|---------------|
+| 1 | **Local GNSS VTEC** | ZED-F9P overhead VTEC | ±1 TECU | `ANCHORED_GNSS` |
+| 2 | Group-delay TEC | HF 1/f² fit | Noise-dominated (see below) | `ANCHORED_GROUP_DELAY` |
+| 3 | None | — | — | `NO_ANCHOR` |
+
+**Implementation:**
+- Carrier-phase dTEC: `src/hf_timestd/core/carrier_tec.py`
+- GNSS VTEC anchor: `src/hf_timestd/core/physics_fusion_service.py`
+- GNSS VTEC acquisition: `src/hf_timestd/core/gnss_tec.py`, `scripts/live_vtec.py`
+
+**Scientific value:**
+- TID (Traveling Ionospheric Disturbance) detection via cross-path correlation
+- Solar flare signatures (rapid TEC enhancement)
+- Diurnal TEC variation with minute-level resolution
+- Storm-time ionospheric dynamics
+
+#### 3.1.2 HF Group-Delay TEC — Validation Product
 
 **Physics:** The ionospheric group delay follows the dispersion relation:
 
@@ -64,48 +96,42 @@ where K = 40.3 m³/s² (ionospheric constant)
       τ_ms = 1.344 × TEC_TECU / f_MHz² (delay in milliseconds)
 ```
 
-**Implementation:**
-- HF-derived TEC: `src/hf_timestd/core/tec_estimator.py`
-- GNSS VTEC: `src/hf_timestd/core/gnss_tec.py`
-- Ionospheric correction: `src/hf_timestd/core/multi_broadcast_fusion.py`
+By fitting measured arrival times across multiple frequencies to a 1/f² model, the system estimates path-integrated TEC. However, **this product is noise-dominated** due to multipath, mode mixing, and the limited frequency spread of HF broadcasts.
 
-**TEC Source Hierarchy (v6.1):**
+**Limitation:** The group-delay TEC fit has a typical signal-to-noise ratio of ~0.13, meaning individual estimates are unreliable for absolute TEC. Its primary value is:
+- **Validation** of carrier-phase dTEC trends
+- **Consistency check** that multi-frequency measurements follow 1/f² physics
+- **Confidence gating** — good R² boosts measurement confidence; poor R² reduces it
+- **Mode change detection** — breaks in the 1/f² relationship indicate mode transitions
 
-| Priority | Source | Method | Accuracy | Latency |
-|----------|--------|--------|----------|---------|
-| 1 | Local GNSS VTEC | Dual-frequency GPS (ZED-F9P) | ±1-2 TECU | ~1s |
-| 2 | IONEX maps | Global GPS network (NASA CDDIS) | ±2-5 TECU | 2 hours |
-| 3 | IRI-2020 | Climatological model | ±5-10 TECU | N/A |
-| 4 | Parametric | Diurnal/solar model | ±10-20 TECU | N/A |
+**Implementation:** `src/hf_timestd/core/tec_estimator.py`
 
-**GNSS VTEC Ionospheric Correction (NEW in v6.1):**
+#### 3.1.3 GNSS VTEC for Ionospheric Correction
 
-When local GNSS VTEC is available, the system applies a direct correction to D_clock:
+When local GNSS VTEC is available, the system applies a direct correction to D_clock measurements in the metrology pathway:
 
 ```
 D_clock_corrected = D_clock + Δiono
 Δiono = 1.344 × (TEC_model - TEC_gnss) × n_hops × obliquity / f²
 ```
 
-This correction removes the systematic bias from using modeled TEC instead of measured TEC.
+**TEC source hierarchy for propagation modeling:**
+
+| Priority | Source | Accuracy | Latency |
+|----------|--------|----------|---------|
+| 1 | Local GNSS VTEC | ±1-2 TECU | ~1s |
+| 2 | IONEX maps | ±2-5 TECU | 2 hours |
+| 3 | IRI-2020 | ±5-10 TECU | Climatology |
+| 4 | Parametric | ±10-20 TECU | Climatology |
+
+**Implementation:** `src/hf_timestd/core/multi_broadcast_fusion.py` (GNSS VTEC correction block)
 
 **Outputs:**
-- `tec_tecu`: Total Electron Content in TECU (10¹⁶ electrons/m²)
-- `t_vacuum_error_ms`: Residual timing error after TEC correction
-- `confidence`: R² of the dispersion fit
-- `group_delay_ms`: Per-frequency ionospheric delay
+- `dtec_mean_tecu`: Anchored differential TEC (primary science product)
+- `tec_tecu`: Group-delay TEC estimate (validation product)
+- `anchor_status`: `ANCHORED_GNSS`, `ANCHORED_GROUP_DELAY`, or `NO_ANCHOR`
 - `gnss_vtec_tecu`: Local GNSS-measured vertical TEC
-
-**Validation:**
-- Cross-validation between GNSS VTEC and HF-derived TEC
-- Comparison with GPS-derived IONEX maps (1-2 hour latency)
-- Expected agreement: ±2-5 TECU under quiet conditions (validated 2026-01-16)
-
-**Scientific Value:**
-- Continuous TEC monitoring along multiple paths
-- Diurnal TEC variation tracking
-- Storm-time TEC enhancement detection
-- Real-time ionospheric correction for timing
+- `confidence`: R² of the group-delay dispersion fit
 
 <!-- LIVE: tec-summary -->
 
@@ -954,8 +980,10 @@ Each minute, per broadcast:
 ### 9.2 L3 Science Products
 
 Aggregated across frequencies/stations:
-- `tec_tecu`: Total Electron Content
-- `tec_confidence`: Fit quality
+- `dtec_mean_tecu`: Carrier-phase dTEC (primary product, GNSS-anchored when available)
+- `tec_tecu`: Group-delay TEC estimate (validation product, noise-dominated)
+- `anchor_status`: TEC anchoring source (`ANCHORED_GNSS`, `ANCHORED_GROUP_DELAY`, `NO_ANCHOR`)
+- `tec_confidence`: Group-delay fit quality (R²)
 - `group_delay_ms`: Per-frequency delays
 
 ### 9.3 Channel Characterization
@@ -987,7 +1015,8 @@ At minutes :08/:44:
 | Doppler shift | Physical range check | ✅ Validated |
 | Propagation delay | Great circle + model | ✅ Validated |
 | Mode identification | Delay-based heuristics | ⚠️ ~80-90% accuracy |
-| TEC | GPS IONEX comparison | ⚠️ In progress |
+| Carrier-phase dTEC | GNSS VTEC cross-check | ✅ Validated (v6.8) |
+| Group-delay TEC | GPS IONEX comparison | ⚠️ Noise-dominated (SNR ~0.13) |
 
 ### 10.2 Fundamental Limitations
 
@@ -999,7 +1028,7 @@ At minutes :08/:44:
 **Model Dependence:**
 - Propagation delay requires ionospheric model
 - Mode identification uses heuristics
-- TEC assumes single-layer ionosphere
+- Group-delay TEC assumes single-layer ionosphere; carrier-phase dTEC avoids this assumption
 
 **Ionospheric Variability:**
 - ±1-3 ms timing uncertainty from ionosphere
@@ -1011,13 +1040,13 @@ At minutes :08/:44:
 ✅ **Well-suited for:**
 - D-layer absorption studies
 - Propagation mode statistics
-- Long-term TEC monitoring
+- Long-term dTEC monitoring (carrier-phase)
 - Sporadic-E event detection
 - Diurnal ionospheric patterns
 
 ⚠️ **Use with caution:**
-- Absolute TEC values (needs validation)
-- TID detection (needs implementation)
+- Absolute TEC values (group-delay TEC is noise-dominated; use GNSS-anchored dTEC instead)
+- TID detection (implemented but requires further validation)
 - Real-time propagation prediction
 
 ❌ **Not suitable for:**
@@ -1090,8 +1119,8 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 | Sporadic-E Detection | `src/hf_timestd/core/propagation_mode_solver.py` |
 | CHU FSK Decoding | `src/hf_timestd/core/chu_fsk_decoder.py` |
 | Test Signal | `src/hf_timestd/core/wwv_test_signal.py` |
-| Discrimination | `src/hf_timestd/core/wwvh_discrimination.py` |
-| Science Aggregator | `src/hf_timestd/core/science_aggregator.py` |
+| WWV/WWVH Discrimination (legacy) | `src/hf_timestd/core/wwvh_discrimination.py` |
+| WWV/WWVH Discrimination (primary) | `src/hf_timestd/core/probabilistic_discriminator.py` |
 | TID Detection | `src/hf_timestd/core/tid_detector.py` |
 | Physics Validation | `src/hf_timestd/core/arrival_pattern_matrix.py` |
 | Multi-Constraint Validation | `src/hf_timestd/core/timing_consistency_validator.py` |
