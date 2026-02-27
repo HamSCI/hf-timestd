@@ -601,10 +601,25 @@ def _load_config(config_path: str) -> dict:
 
 
 def _channels_from_config(cfg: dict) -> List[str]:
-    """Extract channel description strings from recorder.channel_group.timestd."""
+    """Extract channel description strings from config.
+
+    Checks two locations (in order):
+      1. recorder.channels  — TOML array-of-tables  [[recorder.channels]]
+      2. recorder.channel_group.timestd.channels  — legacy nested format
+    """
     channels = []
     try:
-        groups = cfg.get('recorder', {}).get('channel_group', {})
+        # Primary: [[recorder.channels]] array-of-tables
+        recorder = cfg.get('recorder', {})
+        for ch in recorder.get('channels', []):
+            desc = ch.get('description', '')
+            if desc:
+                channels.append(desc)
+        if channels:
+            return channels
+
+        # Fallback: recorder.channel_group.timestd.channels
+        groups = recorder.get('channel_group', {})
         timestd_group = groups.get('timestd', {})
         for ch in timestd_group.get('channels', []):
             desc = ch.get('description', '')
