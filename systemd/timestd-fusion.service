@@ -33,6 +33,13 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fus
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/fusion
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
 
+# Remove stale Chrony SHM segments with wrong permissions (root:0600)
+# If chrony starts before fusion, it creates SHM as root:0600 which the
+# timestd user cannot write to. Removing them lets fusion recreate with 0666.
+# -M = remove by key; ignore errors if segments don't exist (|| true)
+ExecStartPre=+/bin/sh -c 'ipcrm -M 0x4e545030 2>/dev/null || true'
+ExecStartPre=+/bin/sh -c 'ipcrm -M 0x4e545031 2>/dev/null || true'
+
 # Health check: Verify Chrony SHM is being updated (disabled - service needs time to start)
 #ExecStartPost=/opt/hf-timestd/scripts/health-check-fusion.sh
 

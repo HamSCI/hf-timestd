@@ -114,7 +114,13 @@ class ChronySHM:
             return False
     
     def _connect_sysv(self, sysv_ipc):
-        """Connect using System V IPC shared memory."""
+        """Connect using System V IPC shared memory.
+        
+        Handles the chrony-creates-first race condition:
+        If chrony starts before fusion, it creates SHM segments as root:0600.
+        Fusion (running as timestd) can't write to them. We detect this and
+        remove/recreate the segment with correct permissions.
+        """
         try:
             # Try to CREATE segment first (for fresh installs)
             # This ensures we create it with group-writable permissions
@@ -127,23 +133,43 @@ class ChronySHM:
             )
             logger.info("Created new Chrony SHM segment with world-readable permissions (0666)")
         except sysv_ipc.ExistentialError:
-            # Segment already exists, try to attach
+            # Segment already exists — attach and check permissions
             try:
                 self.shm = sysv_ipc.SharedMemory(
                     self.key,
                     flags=0,  # Attach to existing
                     size=SHM_SIZE
                 )
-                logger.info("Attached to existing Chrony SHM segment")
-            except PermissionError as e:
-                # SHM segment exists but we don't have permission
-                # This usually means chronyd created it with restricted permissions (0600)
+                # Check if permissions are correct (need 0666 for cross-user access)
+                current_mode = self.shm.mode
+                current_uid = self.shm.uid
+                my_uid = os.getuid()
+                if current_mode & 0o666 != 0o666:
+                    logger.warning(
+                        f"Chrony SHM (key=0x{self.key:08x}) has restrictive permissions "
+                        f"(mode={oct(current_mode)}, owner_uid={current_uid}, my_uid={my_uid}). "
+                        f"Removing and recreating with correct permissions."
+                    )
+                    self.shm.detach()
+                    self.shm.remove()
+                    self.shm = sysv_ipc.SharedMemory(
+                        self.key,
+                        flags=sysv_ipc.IPC_CREAT | sysv_ipc.IPC_EXCL,
+                        size=SHM_SIZE,
+                        mode=0o666
+                    )
+                    logger.info("Recreated Chrony SHM segment with world-readable permissions (0666)")
+                else:
+                    logger.info(
+                        f"Attached to existing Chrony SHM segment "
+                        f"(mode={oct(current_mode)}, owner_uid={current_uid})"
+                    )
+            except PermissionError:
+                # Can't even attach — need to remove via ExecStartPre or manual ipcrm
                 logger.error(
                     f"Permission denied accessing Chrony SHM (key=0x{self.key:08x}). "
-                    f"The segment exists but has restrictive permissions. "
-                    f"Solution: Stop chronyd, remove SHM, start timestd-analytics (creates SHM), then start chronyd. "
-                    f"Commands: sudo systemctl stop chronyd && sudo ipcrm -M 0x{self.key:08x} && "
-                    f"sudo systemctl restart timestd-analytics && sudo systemctl start chronyd"
+                    f"The segment exists with restrictive permissions and we cannot attach. "
+                    f"Fix: sudo ipcrm -M 0x{self.key:08x} && sudo systemctl restart timestd-fusion"
                 )
                 raise
         
