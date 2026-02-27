@@ -1572,12 +1572,15 @@ class MetrologyEngine:
             doppler_metrics = doppler_info
             
         # 2C. CHU FSK Time Code Decoding
-        # FSK tones (2025/2225 Hz) are attenuated by the IQ decimation filter,
-        # so decoding is done by separate USB sidecar channels (CHUFSKListener).
-        # Results are read from shared JSON in /dev/shm/timestd/fsk_results/.
+        # Primary: read from USB sidecar (CHUFSKListener) shared JSON.
+        # Fallback: decode directly from IQ buffer using AM demod + FSK discriminator.
+        # The IQ decimation filter attenuates FSK tones (2025/2225 Hz), but the
+        # AM-demodulated audio path recovers them via the envelope detector.
         chu_metrics = {}
         if self.is_chu_channel:
             chu_metrics = self._read_fsk_result(minute_boundary)
+            if not chu_metrics and hasattr(self, 'chu_fsk_decoder'):
+                chu_metrics = self._decode_fsk_from_iq(iq_samples, minute_boundary)
         
         # === Step 2D: Per-Second Tick Phase Extraction (deferred physics) ===
         # The tick filter extracts carrier phase from per-second ticks for
@@ -1946,6 +1949,42 @@ class MetrologyEngine:
             )
         except Exception as e:
             logger.error(f"{self.channel_name}: Failed to write bootstrap state: {e}")
+
+    def _decode_fsk_from_iq(self, iq_samples: np.ndarray, minute_boundary: int) -> dict:
+        """Decode CHU FSK directly from IQ buffer (fallback when sidecar not running)."""
+        try:
+            result = self.chu_fsk_decoder.decode_minute(
+                iq_samples, float(minute_boundary), is_audio=False
+            )
+            if not result.detected:
+                logger.debug(f"{self.channel_name}: IQ-direct FSK: not detected")
+                return {}
+            chu_metrics = {
+                'fsk_valid': True,
+                'fsk_frames_decoded': result.frames_decoded,
+                'fsk_confidence': result.decode_confidence,
+                'source': 'iq_direct',
+            }
+            if result.decoded_day is not None:
+                chu_metrics['decoded_day'] = result.decoded_day
+                chu_metrics['decoded_hour'] = result.decoded_hour
+                chu_metrics['decoded_minute'] = result.decoded_minute
+            if result.dut1_seconds is not None:
+                chu_metrics['dut1_seconds'] = result.dut1_seconds
+            if result.tai_utc is not None:
+                chu_metrics['tai_utc'] = result.tai_utc
+            if result.year is not None:
+                chu_metrics['year'] = result.year
+            if result.timing_offset_ms is not None:
+                chu_metrics['timing_offset_ms'] = result.timing_offset_ms
+            logger.info(f"{self.channel_name}: CHU FSK from IQ-direct - "
+                       f"frames={result.frames_decoded}/9, "
+                       f"DUT1={result.dut1_seconds}s, "
+                       f"TAI-UTC={result.tai_utc}s")
+            return chu_metrics
+        except Exception as e:
+            logger.warning(f"{self.channel_name}: IQ-direct FSK decode failed: {e}")
+            return {}
 
     def _read_fsk_result(self, minute_boundary: int) -> dict:
         """Read CHU FSK result from shared JSON (written by CHUFSKListener)."""
