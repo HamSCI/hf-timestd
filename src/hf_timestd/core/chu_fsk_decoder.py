@@ -200,12 +200,20 @@ class CHUFSKDecoder:
         filtered = filtfilt(self._baseband_lpf_b, self._baseband_lpf_a, baseband)
         
         # Step 4: Discriminator — angle(x[n] * conj(x[n-1]))
-        # Output is in radians: +0.052 for mark, -0.052 for space at 12 kHz.
-        # No normalization needed — bit slicer only uses sign.
+        # Raw output is in radians/sample: ±0.052 at 12 kHz for ±100 Hz deviation.
+        # Normalize to ±1.0 (same as IQ path) so bit slicer and start-bit search
+        # have consistent, robust signal levels regardless of sample rate.
         discriminator = np.angle(filtered[1:] * np.conj(filtered[:-1]))
         
+        # Convert radians/sample → Hz, then normalize by expected deviation (100 Hz)
+        inst_freq = discriminator * self.sample_rate / (2 * np.pi)
+        soft_decision = inst_freq / 100.0
+        
+        # Clip to suppress phase-discontinuity spikes (RTP gaps, noise bursts).
+        np.clip(soft_decision, -5.0, 5.0, out=soft_decision)
+        
         # Pad to match input length
-        soft_decision = np.concatenate(([discriminator[0]], discriminator))
+        soft_decision = np.concatenate(([soft_decision[0]], soft_decision))
         
         return soft_decision
     
@@ -332,17 +340,58 @@ class CHUFSKDecoder:
                 return best_pos
             return None
         
-        # --- STRATEGY 2: Edge Detection (Frame B) ---
+        # --- STRATEGY 2: UART Frame Search (Frame B) ---
         else:
-            # Look for transition from Mark (positive) to Space (negative)
+            # Frame B first byte is variable, so we can't pattern-match the data.
+            # Instead, look for UART framing structure:
+            #   - Preceding mark (idle/sync tone, positive)
+            #   - Start bit (space, negative)
+            #   - 8 data bits
+            #   - Parity bit
+            #   - Stop bit (mark, positive)
+            # Verify the stop bit is mark — this confirms valid framing.
+            
+            mark_len = int(samples_per_bit_float)  # 1 bit of mark before start
+            frame_len = int(11 * samples_per_bit_float)  # 11 bits total
+            step = max(1, int(samples_per_bit_float / 4))
+            
+            min_score = 1.5  # Minimum quality threshold
+            
+            for i in range(search_start, min(search_end, len(soft_decision) - frame_len - mark_len), step):
+                # Check preceding mark (positive region)
+                pre_mark = np.mean(soft_decision[i:i + mark_len])
+                if pre_mark <= 0:
+                    continue
+                
+                start_pos = i + mark_len
+                
+                # Check start bit (should be space/negative)
+                start_center = int(start_pos + 0.5 * samples_per_bit_float)
+                if start_center >= len(soft_decision) or soft_decision[start_center] > 0:
+                    continue
+                
+                # Check stop bit (should be mark/positive)
+                stop_center = int(start_pos + 10.5 * samples_per_bit_float)
+                if stop_center >= len(soft_decision) or soft_decision[stop_center] < 0:
+                    continue
+                
+                # Score: strength of mark-before + start-bit-negative + stop-bit-positive
+                start_val = -soft_decision[start_center]  # more negative = better
+                stop_val = soft_decision[stop_center]  # more positive = better
+                score = pre_mark + start_val + stop_val
+                
+                # Return FIRST valid match — CHU data starts at byte 0,
+                # so the earliest qualifying UART frame is the correct one.
+                if score >= min_score:
+                    return start_pos
+            
+            # Fallback: simple edge detection
             check_len = int(samples_per_bit_float / 2)
-            # Adaptive threshold: use a fraction of the signal's std dev
             sd_std = np.std(soft_decision[search_start:search_end]) if search_end > search_start else 0.01
-            edge_thresh = max(0.005, sd_std * 0.3)
+            edge_thresh = max(0.1, sd_std * 0.3)
             
             for i in range(search_start + 1, min(search_end, len(soft_decision) - check_len)):
                 if soft_decision[i-1] > edge_thresh and soft_decision[i] < -edge_thresh:
-                    # Verify it stays low for at least half a bit
                     if np.mean(soft_decision[i:i+check_len]) < -edge_thresh:
                         return i
             return None
@@ -807,9 +856,9 @@ class CHUFSKDecoder:
                     f"sd_max={np.max(sd_abs):.2f}, iq={'yes' if iq_samples is not None else 'no'}")
         
         # Find the first start bit by searching for expected pattern
-        # Search from ~50ms to ~200ms into the second (indices relative to slice)
-        search_start = (second_start_sample - slice_offset) + int(50 * self.sample_rate / 1000)
-        search_end = (second_start_sample - slice_offset) + int(200 * self.sample_rate / 1000)
+        # Search from ~30ms to ~250ms into the second (wider for ionospheric delay)
+        search_start = (second_start_sample - slice_offset) + int(30 * self.sample_rate / 1000)
+        search_end = (second_start_sample - slice_offset) + int(250 * self.sample_rate / 1000)
         
         # Frame A (seconds 32-39) starts with 0x06, Frame B (second 31) has variable first byte
         expected_byte = 0x06 if second_number != 31 else None
@@ -817,7 +866,9 @@ class CHUFSKDecoder:
         data_start_sample = self._find_first_start_bit(soft_decision, search_start, search_end, expected_byte)
         
         found_start = data_start_sample is not None
+        failure_reason = None
         if data_start_sample is None:
+            failure_reason = 'start_bit_miss'
             # Fallback to fixed offset if start bit not found
             delay_samples = int(time_delay_ms * self.sample_rate / 1000)
             data_start_sample = (second_start_sample - slice_offset) + int(DATA_START_MS * self.sample_rate / 1000) + delay_samples
@@ -826,24 +877,41 @@ class CHUFSKDecoder:
         bits, bit_confidence = self._extract_bits(soft_decision, data_start_sample, BITS_PER_FRAME)
         
         if len(bits) < BITS_PER_FRAME:
-            # Return tick timing even if FSK decode fails
+            failure_reason = failure_reason or 'insufficient_bits'
+            logger.info(f"{self.channel_name} FSK sec {second_number}: FAIL reason={failure_reason}, "
+                       f"bits={len(bits)}/{BITS_PER_FRAME}")
             return None, 0.0, 0.0, tick_timing_offset_ms if tick_confidence > 0.5 else None
         
         # Convert to bytes
         raw_bytes = self._bits_to_bytes(bits)
         
-        logger.info(f"{self.channel_name} FSK sec {second_number}: "
-                    f"start_found={found_start}, bytes={bytes(raw_bytes[:4]).hex() if len(raw_bytes)>=4 else 'short'}, "
-                    f"n_bits={len(bits)}, conf={bit_confidence:.2f}")
-        
         if len(raw_bytes) < 10:
+            failure_reason = failure_reason or 'byte_count_short'
+            logger.info(f"{self.channel_name} FSK sec {second_number}: FAIL reason={failure_reason}, "
+                       f"bytes={len(raw_bytes)}/10")
             return None, 0.0, bit_confidence, tick_timing_offset_ms if tick_confidence > 0.5 else None
         
         # Decode based on second number
         if second_number == 31:
             frame = self._decode_frame_b(raw_bytes)
+            if frame is None:
+                failure_reason = failure_reason or 'frame_b_redundancy_fail'
         else:
             frame = self._decode_frame_a(raw_bytes)
+            if frame is None:
+                # Distinguish redundancy fail from range check fail
+                data_bytes = raw_bytes[:5]
+                redundancy = raw_bytes[5:10]
+                if data_bytes != redundancy:
+                    failure_reason = failure_reason or 'frame_a_redundancy_fail'
+                else:
+                    failure_reason = failure_reason or 'frame_a_range_fail'
+        
+        logger.info(f"{self.channel_name} FSK sec {second_number}: "
+                    f"start_found={found_start}, bytes={bytes(raw_bytes[:4]).hex() if len(raw_bytes)>=4 else 'short'}, "
+                    f"n_bits={len(bits)}, conf={bit_confidence:.2f}, "
+                    f"result={'OK' if frame else 'FAIL'}"
+                    f"{'' if frame else f', reason={failure_reason}'}")
         
         # Measure timing offset from 500ms boundary (SECONDARY timing reference)
         # The last stop bit should end at exactly 500ms
@@ -930,12 +998,6 @@ class CHUFSKDecoder:
                     iq_samples=iq_samples if not is_audio else None
                 )
                 
-                logger.info(f"{self.channel_name} FSK sec {second}: "
-                           f"frame={'OK' if frame else 'NONE'}, "
-                           f"conf={confidence:.2f}, "
-                           f"start_sample={second_start_sample}, "
-                           f"audio_len={len(audio)}")
-                
                 result.frame_results.append({
                     'second': second,
                     'decoded': frame is not None,
@@ -960,7 +1022,7 @@ class CHUFSKDecoder:
                     confidences.append(confidence)
                     
             except Exception as e:
-                logger.debug(f"Error decoding second {second}: {e}")
+                logger.warning(f"Error decoding second {second}: {e}", exc_info=True)
         
         # Aggregate results
         if result.frames_decoded > 0:
@@ -968,7 +1030,7 @@ class CHUFSKDecoder:
             result.decode_confidence = result.frames_decoded / result.frames_total
             
             # ===== NEW: Multi-second consensus with validation =====
-            if len(frame_a_results) >= 3:  # Need at least 3 valid decodes for consensus
+            if len(frame_a_results) >= 2:  # Need at least 2 valid decodes for consensus
                 from datetime import datetime, timezone
                 
                 consensus_time = self._find_consensus_time(frame_a_results)
