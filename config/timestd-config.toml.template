@@ -21,6 +21,8 @@ auto_create_channels = true
 source = "phase-engine"
 
 [recorder]
+# engine = "phase-engine" # Set to phase-engine to enable automatic multi-station channel expansion
+engine = "radiod"
 # Mode: "test" (uses /tmp) or "production" (uses /var/lib/timestd)
 # Start with "test" to verify operation, then switch to "production"
 mode = "test"

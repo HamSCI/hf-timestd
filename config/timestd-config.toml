@@ -17,6 +17,8 @@ auto_create_channels = true
 source = "radiod"
 
 [recorder]
+# engine = "phase-engine" # uncomment to enable phase-engine target expansion
+engine = "radiod"
 mode = "production"
 test_data_root = "/tmp/timestd-test"
 production_data_root = "/var/lib/timestd"

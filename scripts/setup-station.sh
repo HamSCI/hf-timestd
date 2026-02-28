@@ -444,6 +444,7 @@ set_str("station", "instrument_id", e("WIZ_INSTRUMENT_ID"))
 # ka9q
 set_str("ka9q", "status_address", e("WIZ_KA9Q_STATUS"))
 set_str("ka9q", "source", e("WIZ_KA9Q_SOURCE"))
+set_str("recorder", "engine", e("WIZ_KA9Q_SOURCE"))
 
 # Recorder
 set_str("recorder", "mode", "production")

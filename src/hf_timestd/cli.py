@@ -192,12 +192,13 @@ def main():
         else:
             output_dir = recorder_section.get('production_data_root', '/var/lib/signal-recorder')
         
+        from .core.core_recorder_v2 import _expand_channel_groups
         recorder_config = {
             'multicast_address': config.get('ka9q', {}).get('data_address', '239.103.26.231'),
             'port': 5004,
             'output_dir': output_dir,
             'station': config.get('station', {}),
-            'channels': recorder_section.get('channels', []),
+            'channels': _expand_channel_groups(recorder_section),
             'status_address': config.get('ka9q', {}).get('status_address', '239.192.152.141')
         }
         

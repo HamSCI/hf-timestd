@@ -228,6 +228,12 @@ class StreamRecorderConfig:
     low_edge: Optional[float] = None
     high_edge: Optional[float] = None
     
+    # Phase-engine specific fields
+    reception_mode: Optional[str] = None
+    target: Optional[str] = None
+    null_targets: Optional[list] = None
+    combining_method: Optional[str] = None
+    
     # Tiered storage: hot buffer in /dev/shm, cold storage on disk
     tiered_storage: bool = False
     hot_buffer_root: Path = None  # e.g., /dev/shm/timestd

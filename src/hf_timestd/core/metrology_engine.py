@@ -2043,6 +2043,35 @@ class MetrologyEngine:
                             f"{raw_confidence:.2f} → {adjusted_confidence:.2f} "
                             f"(decode_rate={decode_rate:.2f})")
 
+
+    def _write_fsk_result(self, metrics: dict):
+        """Write CHU FSK result to shared JSON for real-time dashboard."""
+        from pathlib import Path
+        import time
+        try:
+            fsk_dir = Path('/dev/shm/timestd/fsk_results')
+            fsk_dir.mkdir(parents=True, exist_ok=True)
+            fsk_path = fsk_dir / f'{self.channel_name}.json'
+            
+            # Map metrics to what the dashboard expects
+            data = {
+                'written_at': time.time(),
+                'detected': metrics.get('fsk_valid', False),
+                'frames_decoded': metrics.get('fsk_frames_decoded', 0),
+                'decode_confidence': metrics.get('fsk_confidence', 0.0),
+                'decoded_day': metrics.get('decoded_day'),
+                'decoded_hour': metrics.get('decoded_hour'),
+                'decoded_minute': metrics.get('decoded_minute'),
+                'dut1_seconds': metrics.get('dut1_seconds'),
+                'tai_utc': metrics.get('tai_utc'),
+                'year': metrics.get('year'),
+                'timing_offset_ms': metrics.get('timing_offset_ms'),
+            }
+            with open(fsk_path, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.debug(f"{self.channel_name}: Failed to write FSK result JSON: {e}")
+
     def _decode_fsk_from_iq(self, iq_samples: np.ndarray, minute_boundary: int) -> dict:
         """Decode CHU FSK directly from IQ buffer (fallback when sidecar not running)."""
         try:
@@ -2074,6 +2103,7 @@ class MetrologyEngine:
                        f"frames={result.frames_decoded}/9, "
                        f"DUT1={result.dut1_seconds}s, "
                        f"TAI-UTC={result.tai_utc}s")
+            self._write_fsk_result(chu_metrics)
             return chu_metrics
         except Exception as e:
             logger.warning(f"{self.channel_name}: IQ-direct FSK decode failed: {e}")

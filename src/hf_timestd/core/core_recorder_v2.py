@@ -183,6 +183,10 @@ class CoreRecorderV2:
         # Station config
         self.station_config = config.get('station', {})
         self.recorder_config = config.get('recorder', {})
+        self.engine_type = self.recorder_config.get('engine', 'radiod')
+        if self.engine_type not in ('radiod', 'phase-engine'):
+            logger.warning(f"Unknown engine type '{self.engine_type}', defaulting to 'radiod'")
+            self.engine_type = 'radiod'
         
         # Let radiod use its configured default destination, OR force one if missing.
         # Logic update: We default to the standard multicast group to ensuring functional channels
@@ -212,7 +216,7 @@ class CoreRecorderV2:
         self.channel_infos: Dict[int, ChannelInfo] = {}
         
         # Per-channel recorders (ssrc -> StreamRecorderV2)
-        self.recorders: Dict[int, StreamRecorderV2] = {}
+        self.recorders: Dict[str, StreamRecorderV2] = {}
         
         logger.info(f"CoreRecorderV2: {len(self.channel_specs)} channels configured")
         logger.info(f"  Defaults: preset={self.channel_defaults.get('preset')}, "
@@ -247,16 +251,6 @@ class CoreRecorderV2:
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
         
         # CHU FSK Listener (USB channels for FSK decode, no archive)
-        self.fsk_listener = None
-        fsk_cfg = self.recorder_config.get('chu_fsk', {})
-        if fsk_cfg.get('channels'):
-            try:
-                from .chu_fsk_listener import CHUFSKListener
-                self.fsk_listener = CHUFSKListener(self.recorder_config, self.control)
-                logger.info(f"CHU FSK listener configured: {len(fsk_cfg['channels'])} channels")
-            except Exception as e:
-                logger.error(f"Failed to init CHU FSK listener: {e}", exc_info=True)
-        
         # Graceful shutdown
         self.running = False
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -283,9 +277,6 @@ class CoreRecorderV2:
         # Initialize tiered storage if enabled
         tiered_enabled = self.recorder_config.get('tiered_storage', False)
         
-        # Register FSK listener taps
-        if hasattr(self, 'fsk_listener') and self.fsk_listener:
-            self.fsk_listener.register_taps(self.recorders)
         logger.info(f"Tiered storage: {'enabled' if tiered_enabled else 'disabled'}")
         
         if tiered_enabled:
@@ -321,7 +312,7 @@ class CoreRecorderV2:
             logger.info("Tiered storage: disabled (files written directly to disk)")
         
         # Start all recorders
-        for freq, recorder in self.recorders.items():
+        for key, recorder in self.recorders.items():
             recorder.start()
             logger.info(f"Started recorder for {freq/1e6:.3f} MHz ({recorder.config.description})")
 
@@ -334,15 +325,7 @@ class CoreRecorderV2:
                     else:
                         logger.warning(f"Recorder {recorder.config.description} started but has no SSRC")
                 except Exception as e:
-                    logger.warning(f"Failed to register SSRC for {freq}: {e}")
-        
-        # Start CHU FSK listener (USB channels, no archive)
-        if self.fsk_listener:
-            try:
-                self.fsk_listener.start()
-                logger.info("CHU FSK listener started")
-            except Exception as e:
-                logger.error(f"Failed to start CHU FSK listener: {e}", exc_info=True)
+                    logger.warning(f"Failed to register SSRC for {key}: {e}")
         
         logger.info("Core recorder running. Press Ctrl+C to stop.")
         
@@ -414,8 +397,6 @@ class CoreRecorderV2:
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
-        if self.fsk_listener:
-            self.fsk_listener.stop()
     
     @staticmethod
     def _resolve_encoding(encoding_val) -> int:
@@ -437,7 +418,7 @@ class CoreRecorderV2:
         ensure_channel().  The only difference is the 'consumer' field:
 
           (absent / "archive")  ->  StreamRecorderV2  (archives to disk)
-          "chu_fsk"             ->  CHUFSKListener ring-buffer (decode only)
+          (legacy chu_fsk removed)
 
         This means radiod-restart recovery, encoding, filter edges, and
         ensure_channel() semantics are identical for every channel.
@@ -446,6 +427,27 @@ class CoreRecorderV2:
             if not self.channel_specs:
                 logger.warning("No channels configured")
                 return False
+
+            expanded_specs = []
+            if self.engine_type == 'phase-engine':
+                logger.info("PhaseEngine mode enabled: expanding SHARED channels into WWV, WWVH, BPM")
+                for spec in self.channel_specs:
+                    freq = int(spec['frequency_hz'])
+                    desc = spec.get('description', '')
+                    # If this is a SHARED channel (or one of the standard shared frequencies)
+                    # We create 3 separate recorders for PhaseEngine
+                    if freq in [2500000, 5000000, 10000000, 15000000] and desc.startswith('SHARED'):
+                        for target in ['WWV', 'WWVH', 'BPM']:
+                            new_spec = spec.copy()
+                            new_spec['description'] = f"{target}_{freq//1000}"
+                            new_spec['target'] = target
+                            expanded_specs.append(new_spec)
+                    else:
+                        expanded_specs.append(spec)
+            else:
+                expanded_specs = self.channel_specs
+                
+            self.channel_specs = expanded_specs
 
             logger.info(f"Initializing {len(self.channel_specs)} configured channels...")
 
@@ -499,7 +501,7 @@ class CoreRecorderV2:
                     config=rec_config,
                     control=self.control,
                 )
-                self.recorders[freq] = recorder
+                self.recorders[desc] = recorder
 
             logger.info(f"✓ Initialized {len(self.recorders)} archive recorders")
             return True
@@ -526,7 +528,7 @@ class CoreRecorderV2:
                 }
             }
             
-            for freq, recorder in self.recorders.items():
+            for key, recorder in self.recorders.items():
                 ch_stats = recorder.get_status()
                 # Use SSRC as key if known, otherwise use hex frequency
                 ssrc = recorder.config.ssrc
@@ -536,7 +538,7 @@ class CoreRecorderV2:
                 ch_stats['preset'] = recorder.config.preset
                 ch_stats['encoding'] = recorder.config.encoding
                 
-                status['channels'][key] = ch_stats
+                status['channels'][stats_key] = ch_stats
                 
                 if ch_stats.get('samples_received', 0) > 0:
                     status['overall']['channels_active'] += 1
@@ -554,7 +556,7 @@ class CoreRecorderV2:
     
     def _log_status(self):
         """Log periodic status."""
-        for ssrc, recorder in self.recorders.items():
+        for key, recorder in self.recorders.items():
             stats = recorder.get_stats()
             quality = recorder.get_quality()
             
@@ -613,7 +615,7 @@ class CoreRecorderV2:
         """Monitor stream health and data freshness."""
         try:
             # Check individual channel health
-            for freq, recorder in self.recorders.items():
+            for key, recorder in self.recorders.items():
                 if not recorder.is_healthy():
                     silence = recorder.get_silence_duration()
                     logger.warning(
@@ -729,7 +731,7 @@ class CoreRecorderV2:
         logger.info("Shutting down core recorder...")
         
         # Stop all recorders
-        for freq, recorder in self.recorders.items():
+        for key, recorder in self.recorders.items():
             try:
                 ssrc = recorder.config.ssrc
                 final_quality = recorder.stop()
@@ -750,14 +752,8 @@ class CoreRecorderV2:
                 #         logger.debug(f"Failed to remove channel {ssrc:x}: {e}")
                         
             except Exception as e:
-                logger.error(f"Error stopping recorder for freq {freq}: {e}")
+                logger.error(f"Error stopping recorder for channel {key}: {e}")
         
-        # Stop CHU FSK listener
-        if self.fsk_listener:
-            try:
-                self.fsk_listener.stop()
-            except Exception:
-                pass
 
         # Close RadiodControl
         try:
