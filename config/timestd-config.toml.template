@@ -15,10 +15,10 @@ longitude = 0.0                         # Your longitude in decimal degrees (REQ
 [ka9q]
 # Your ka9q-radio status multicast address
 # Find this in your radiod config file or use: avahi-browse -rt _ka9q-ctl._udp
-status_address = "<YOUR_RADIOD_STATUS>"  # e.g., hf-status.local or 239.x.x.x
+status_address = "<YOUR_RADIOD_STATUS>"  # e.g., hf-status.local or phase-engine-status.local
 auto_create_channels = true
 # Data source mode: "radiod" (single antenna, 9 channels) or "phase-engine" (beamformed, 17 channels)
-source = "radiod"
+source = "phase-engine"
 
 [recorder]
 # Mode: "test" (uses /tmp) or "production" (uses /var/lib/timestd)
@@ -57,16 +57,6 @@ gain = 0
 encoding = "F32"
 
 # === Channel Groups ===
-# Each group defines shared settings and an array of frequencies.
-# Group-level keys (preset, sample_rate, agc, gain, encoding, archive, consumer)
-# override [recorder.channel_defaults] for every channel in the group.
-# Per-channel keys (frequency_hz, description, and any overrides) are in
-# [[recorder.channel_group.<name>.channels]].
-#
-# archive = true  -> IQ samples written to Phase 1 archive (default)
-# archive = false -> channel provisioned for real-time use only (no disk write)
-# consumer = "chu_fsk" -> samples routed to CHU FSK decoder instead of archive
-
 # --- timestd: full IQ archive channels for metrology and physics analysis ---
 [recorder.channel_group.timestd]
 preset = "iq"
@@ -76,65 +66,108 @@ gain = 0
 encoding = "F32"
 archive = true
 
+# NOTE: When source = "phase-engine", we request 17 targeted channels instead of 9 shared frequencies.
+# The phase-engine will isolate each station spatially.
+
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 2500000
-description = "SHARED_2500"
+description = "WWV_2500"
+reception_mode = "focus"
+target = "WWV"
+
+[[recorder.channel_group.timestd.channels]]
+frequency_hz = 2500000
+description = "WWVH_2500"
+reception_mode = "focus"
+target = "WWVH"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 5000000
-description = "SHARED_5000"
+description = "WWV_5000"
+reception_mode = "focus"
+target = "WWV"
+
+[[recorder.channel_group.timestd.channels]]
+frequency_hz = 5000000
+description = "WWVH_5000"
+reception_mode = "focus"
+target = "WWVH"
+
+[[recorder.channel_group.timestd.channels]]
+frequency_hz = 5000000
+description = "BPM_5000"
+reception_mode = "focus"
+target = "BPM"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 10000000
-description = "SHARED_10000"
+description = "WWV_10000"
+reception_mode = "focus"
+target = "WWV"
+
+[[recorder.channel_group.timestd.channels]]
+frequency_hz = 10000000
+description = "WWVH_10000"
+reception_mode = "focus"
+target = "WWVH"
+
+[[recorder.channel_group.timestd.channels]]
+frequency_hz = 10000000
+description = "BPM_10000"
+reception_mode = "focus"
+target = "BPM"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 15000000
-description = "SHARED_15000"
+description = "WWV_15000"
+reception_mode = "focus"
+target = "WWV"
+
+[[recorder.channel_group.timestd.channels]]
+frequency_hz = 15000000
+description = "WWVH_15000"
+reception_mode = "focus"
+target = "WWVH"
+
+[[recorder.channel_group.timestd.channels]]
+frequency_hz = 15000000
+description = "BPM_15000"
+reception_mode = "focus"
+target = "BPM"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 20000000
 description = "WWV_20000"
+reception_mode = "focus"
+target = "WWV"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 25000000
 description = "WWV_25000"
+reception_mode = "focus"
+target = "WWV"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 3330000
 description = "CHU_3330"
+reception_mode = "focus"
+target = "CHU"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 7850000
 description = "CHU_7850"
+reception_mode = "focus"
+target = "CHU"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 14670000
 description = "CHU_14670"
+reception_mode = "focus"
+target = "CHU"
 
-# CHU FSK decode channels: USB preset for FSK tone demodulation
-# These are not archived - only used for real-time FSK decode + timing correlation
-[recorder.chu_fsk]
-preset = "usb"
-sample_rate = 12000
-agc = 0
-gain = 0
-encoding = "F32"
-
-[[recorder.chu_fsk.channels]]
-frequency_hz = 3330000
-description = "CHU_3330_FSK"
-iq_channel = "CHU_3330"
-
-[[recorder.chu_fsk.channels]]
-frequency_hz = 7850000
-description = "CHU_7850_FSK"
-iq_channel = "CHU_7850"
-
-[[recorder.chu_fsk.channels]]
-frequency_hz = 14670000
-description = "CHU_14670_FSK"
-iq_channel = "CHU_14670"
+# CHU FSK decode channels are NO LONGER requested as separate USB channels.
+# hf-timestd now derives the 12kHz audio internally from the archived IQ buffers.
+# Therefore, [recorder.chu_fsk] has been removed to conserve network and SDR DSP resources.
 
 [uploader]
 enabled = true
@@ -149,8 +182,7 @@ max_queue_size_gb = 100
 [uploader.sftp]
 host = "pswsnetwork.eng.ua.edu"
 port = 22
-# username is taken from station.id — no need to set it here
-ssh_key = "/home/timestd/.ssh/id_rsa_psws" # Set by setup-psws-keys.sh to id_rsa_psws_<STATION_ID>
+ssh_key = "/home/timestd/.ssh/id_rsa_psws"
 remote_base_path = "/"
 bandwidth_limit_kbps = 100              # Limit upload bandwidth (KB/s)
 verify_after_upload = true
@@ -172,26 +204,8 @@ enable_metrics = true
 port = 8000
 refresh_interval = 60
 
-# GNSS VTEC Monitoring (Optional)
-# Requires a GNSS receiver providing RTCM or UBX data stream
 [timing]
-# Timing Authority Mode:
-#   "rtp"    - Trust radiod's GPS_TIME/RTP_TIMESNAP (requires GPS+PPS on radiod)
-#   "fusion" - Use HF fusion to establish RTP-to-UTC mapping (NTP-only systems)
-#   "auto"   - Monitor discrepancy, infer best source (future)
-#
-# RTP mode: Radiod has GPSDO with GPS+PPS feed. Timing is authoritative.
-#           Metrology measures at known times. Clock discipline via GPS+PPS.
-#
-# Fusion mode: Radiod uses NTP only. Timing is uncertain.
-#              MetrologyEngine searches with wide window, establishes lock,
-#              then narrows window. HF-timestd disciplines Chrony via SHM.
 authority = "rtp"
-
-# Expected accuracy when authority = "rtp" (used for search window sizing)
-# L5 (GPS+PPS local): 0.0001 ms (100 ns)
-# L4 (GPS+PPS LAN):   0.001 ms (1 us)
-# L3 (NTP only):      1.0 ms
 rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
 
 [gnss_vtec]

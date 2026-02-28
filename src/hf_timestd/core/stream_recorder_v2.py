@@ -416,20 +416,38 @@ class StreamRecorderV2:
                    f"agc={self.config.agc_enable}, gain={self.config.gain}, enc={self.config.encoding}")
         
         # Let ka9q-python handle all channel management
-        # NOTE: ka9q-python's ensure_channel doesn't accept SSRC parameter - radiod assigns it.
-        # Channel reuse depends on radiod finding an existing channel with matching parameters.
-        # Duplicate channels occur when radiod doesn't find a match (e.g., after radiod restart).
-        self.channel_info = self._control.ensure_channel(
-            frequency_hz=float(self.config.frequency_hz),
-            preset=self.config.preset,
-            sample_rate=self.config.sample_rate,
-            agc_enable=self.config.agc_enable,
-            gain=self.config.gain,
-            destination=self.config.destination,
-            encoding=self.config.encoding,
-            timeout=10.0,
-            frequency_tolerance=1.0
-        )
+        kwargs = {
+            'frequency_hz': float(self.config.frequency_hz),
+            'preset': self.config.preset,
+            'sample_rate': self.config.sample_rate,
+            'agc_enable': self.config.agc_enable,
+            'gain': self.config.gain,
+            'destination': self.config.destination,
+            'encoding': self.config.encoding,
+            'timeout': 10.0,
+            'frequency_tolerance': 1.0,
+        }
+        
+        # Check backend capabilities
+        caps = {}
+        try:
+            if hasattr(self._control, 'get_capabilities'):
+                caps = self._control.get_capabilities()
+        except Exception as e:
+            pass
+            
+        # Add phase-engine extensions if supported
+        if caps.get("backend") == "phase-engine":
+            if getattr(self.config, 'reception_mode', None):
+                kwargs['reception_mode'] = self.config.reception_mode
+            if getattr(self.config, 'target', None):
+                kwargs['target'] = self.config.target
+            if getattr(self.config, 'null_targets', None):
+                kwargs['null_targets'] = self.config.null_targets
+            if getattr(self.config, 'combining_method', None):
+                kwargs['combining_method'] = self.config.combining_method
+                
+        self.channel_info = self._control.ensure_channel(**kwargs)
         
         # Update config with SSRC from ka9q-python
         self.config.ssrc = self.channel_info.ssrc

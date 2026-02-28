@@ -406,15 +406,8 @@ class CHUFSKListener:
         self._thread.start()
 
     def stop(self):
-        """Stop all streams and decode thread."""
+        """Stop decode thread."""
         self._running = False
-        for freq, ch in self.channels.items():
-            ch._health_running = False
-            if ch.stream:
-                try:
-                    ch.stream.stop()
-                except Exception:
-                    pass
         if self._thread:
             self._thread.join(timeout=5)
 

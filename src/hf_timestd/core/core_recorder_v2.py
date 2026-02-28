@@ -282,6 +282,10 @@ class CoreRecorderV2:
         
         # Initialize tiered storage if enabled
         tiered_enabled = self.recorder_config.get('tiered_storage', False)
+        
+        # Register FSK listener taps
+        if hasattr(self, 'fsk_listener') and self.fsk_listener:
+            self.fsk_listener.register_taps(self.recorders)
         logger.info(f"Tiered storage: {'enabled' if tiered_enabled else 'disabled'}")
         
         if tiered_enabled:
@@ -486,6 +490,10 @@ class CoreRecorderV2:
                     destination=None,
                     low_edge=float(low_edge) if low_edge is not None else None,
                     high_edge=float(high_edge) if high_edge is not None else None,
+                    reception_mode=ch_spec.get('reception_mode'),
+                    target=ch_spec.get('target'),
+                    null_targets=ch_spec.get('null_targets'),
+                    combining_method=ch_spec.get('combining_method'),
                 )
                 recorder = StreamRecorderV2(
                     config=rec_config,
