@@ -314,7 +314,7 @@ class CoreRecorderV2:
         # Start all recorders
         for key, recorder in self.recorders.items():
             recorder.start()
-            logger.info(f"Started recorder for {freq/1e6:.3f} MHz ({recorder.config.description})")
+            logger.info(f"Started recorder for {recorder.config.frequency_hz/1e6:.3f} MHz ({recorder.config.description})")
 
             # Register SSRC now that recorder is started and SSRC is resolved
             if self.calibrator:
@@ -501,7 +501,7 @@ class CoreRecorderV2:
                     config=rec_config,
                     control=self.control,
                 )
-                self.recorders[desc] = recorder
+                self.recorders[description] = recorder
 
             logger.info(f"✓ Initialized {len(self.recorders)} archive recorders")
             return True
