@@ -385,7 +385,8 @@ class StandardTimeSignalGenerator:
                  if end <= len(full_minute_bcd):
                      bcd_chunk = full_minute_bcd[start:end]
                      buffer += bcd_chunk
-             except Exception:
+             except Exception as e:
+                 logger.debug(f"Caught exception: {e}")
                  # Fallback/Error (silent BCD)
                  pass
 

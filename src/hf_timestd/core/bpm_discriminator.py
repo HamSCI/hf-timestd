@@ -499,7 +499,8 @@ class BPMDiscriminator:
         try:
             b, a = butter(4, [low, high], btype='band')
             filtered = filtfilt(b, a, audio)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Caught exception: {e}")
             return None
         
         envelope = np.abs(filtered)

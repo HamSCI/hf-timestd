@@ -73,7 +73,8 @@ class RawBinaryReader:
                     # Check if stem is integer timestamp
                     if stem.isdigit():
                         minutes.add(int(stem))
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Caught exception: {e}")
                 continue
                 
         return sorted(list(minutes))

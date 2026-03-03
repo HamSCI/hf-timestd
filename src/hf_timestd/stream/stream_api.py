@@ -211,7 +211,10 @@ def subscribe_iq(
     radiod: str,
     frequency_hz: float,
     sample_rate: int = 16000,
-    **kwargs
+    agc: bool = False,
+    gain: float = 0.0,
+    destination: Optional[str] = None,
+    description: str = ""
 ) -> StreamHandle:
     """
     Subscribe to an IQ stream (convenience wrapper).
@@ -220,7 +223,10 @@ def subscribe_iq(
         radiod: radiod address
         frequency_hz: Center frequency in Hz
         sample_rate: Sample rate (default: 16000)
-        **kwargs: Additional arguments passed to subscribe_stream
+        agc: Enable automatic gain control (default: False)
+        gain: Manual gain in dB (default: 0.0)
+        destination: Multicast destination address (optional)
+        description: Human-readable description for logging
         
     Returns:
         StreamHandle
@@ -230,7 +236,10 @@ def subscribe_iq(
         frequency_hz=frequency_hz,
         preset="iq",
         sample_rate=sample_rate,
-        **kwargs
+        agc=agc,
+        gain=gain,
+        destination=destination,
+        description=description
     )
 
 
@@ -238,7 +247,10 @@ def subscribe_usb(
     radiod: str,
     frequency_hz: float,
     sample_rate: int = 12000,
-    **kwargs
+    agc: bool = False,
+    gain: float = 0.0,
+    destination: Optional[str] = None,
+    description: str = ""
 ) -> StreamHandle:
     """
     Subscribe to a USB (upper sideband) stream.
@@ -247,7 +259,10 @@ def subscribe_usb(
         radiod: radiod address
         frequency_hz: Center frequency in Hz
         sample_rate: Sample rate (default: 12000)
-        **kwargs: Additional arguments passed to subscribe_stream
+        agc: Enable automatic gain control (default: False)
+        gain: Manual gain in dB (default: 0.0)
+        destination: Multicast destination address (optional)
+        description: Human-readable description for logging
         
     Returns:
         StreamHandle
@@ -257,7 +272,10 @@ def subscribe_usb(
         frequency_hz=frequency_hz,
         preset="usb",
         sample_rate=sample_rate,
-        **kwargs
+        agc=agc,
+        gain=gain,
+        destination=destination,
+        description=description
     )
 
 
@@ -266,7 +284,9 @@ def subscribe_am(
     frequency_hz: float,
     sample_rate: int = 12000,
     agc: bool = True,
-    **kwargs
+    gain: float = 0.0,
+    destination: Optional[str] = None,
+    description: str = ""
 ) -> StreamHandle:
     """
     Subscribe to an AM stream (with AGC by default).
@@ -276,7 +296,9 @@ def subscribe_am(
         frequency_hz: Center frequency in Hz
         sample_rate: Sample rate (default: 12000)
         agc: Enable AGC (default: True for AM)
-        **kwargs: Additional arguments passed to subscribe_stream
+        gain: Manual gain in dB (default: 0.0)
+        destination: Multicast destination address (optional)
+        description: Human-readable description for logging
         
     Returns:
         StreamHandle
@@ -287,7 +309,9 @@ def subscribe_am(
         preset="am",
         sample_rate=sample_rate,
         agc=agc,
-        **kwargs
+        gain=gain,
+        destination=destination,
+        description=description
     )
 
 
@@ -299,13 +323,15 @@ def subscribe_batch(
     preset: str = "iq",
     sample_rate: int = 16000,
     destination: Optional[str] = None,
-    **kwargs
+    agc: bool = False,
+    gain: float = 0.0,
+    description: str = ""
 ) -> List[StreamHandle]:
     """
     Subscribe to multiple streams with the same parameters.
     
     Efficient batch creation for applications like hf-timestd that need
-    many streams with identical settings.
+    many simultaneous channels (e.g. all WWV/CHU frequencies).
     
     Args:
         radiod: radiod address
@@ -313,20 +339,18 @@ def subscribe_batch(
         preset: Demodulation mode (same for all)
         sample_rate: Sample rate (same for all)
         destination: Multicast destination (same for all)
-        **kwargs: Additional arguments passed to subscribe_stream
+        agc: Enable automatic gain control (same for all)
+        gain: Manual gain in dB (same for all)
+        description: Human-readable description base string
         
     Returns:
         List of StreamHandles
         
     Example:
-        # hf-timestd: 9 WWV/CHU channels
-        streams = subscribe_batch(
+        handles = subscribe_batch(
             radiod="bee1-hf.local",
-            frequencies=[2.5e6, 5.0e6, 10.0e6, 15.0e6, 20.0e6, 25.0e6,
-                        3.33e6, 7.85e6, 14.67e6],
-            preset="iq",
-            sample_rate=16000,
-            destination="239.1.2.101:5004"
+            frequencies=[2.5e6, 5.0e6, 10.0e6, 15.0e6, 20.0e6],
+            preset="iq"
         )
     """
     handles = []
@@ -337,7 +361,9 @@ def subscribe_batch(
             preset=preset,
             sample_rate=sample_rate,
             destination=destination,
-            **kwargs
+            agc=agc,
+            gain=gain,
+            description=f"{description} {freq/1e6:.1f}MHz".strip()
         )
         handles.append(handle)
     

@@ -535,7 +535,8 @@ class BootstrapValidator:
                     receiver_lon=self.receiver_lon,
                     enable_realtime=False  # Don't need real-time during bootstrap
                 )
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception: {e}")
                 pass
         
         if self._prop_model is not None:
@@ -546,7 +547,8 @@ class BootstrapValidator:
                 )
                 if prediction.primary_delay_ms > 0:
                     return prediction.primary_delay_ms
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception: {e}")
                 pass
         
         # Static fallback

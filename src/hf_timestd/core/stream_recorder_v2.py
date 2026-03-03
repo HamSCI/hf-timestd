@@ -484,7 +484,7 @@ class StreamRecorderV2:
         self.stream.start()
         self._last_sample_time = time.time()  # Reset silence timer
         logger.info(f"{self.config.description}: RadiodStream started")
-    
+
     def _set_filter_edges(self, ssrc: int):
         """Send filter edge commands to radiod if configured."""
         low = self.config.low_edge

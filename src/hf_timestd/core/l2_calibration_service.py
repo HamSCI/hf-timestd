@@ -171,7 +171,8 @@ class L2CalibrationService:
             from .iono_data_service import IonoDataService
             if IonoDataService._instance is not None:
                 IonoDataService._instance.stop()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception: {e}")
             pass
         
         # Close all writers

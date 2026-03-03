@@ -64,7 +64,8 @@ def get_host_ip() -> str:
     try:
         s.connect(('8.8.8.8', 1))
         IP = s.getsockname()[0]
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Caught exception: {e}")
         IP = '127.0.0.1'
     finally:
         s.close()
@@ -122,71 +123,62 @@ class CoreRecorderV2:
         self.output_dir = Path(config['output_dir'])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Channel management via ka9q-python RadiodControl
-        self.status_address = config.get('status_address')
-        if not self.status_address:
-            # Fallback to ka9q defaults if installed? Or error?
-            # User requested "No Default fallback ip address".
-            # Try to get from [ka9q] section if not at top level (config structure varies)
-            ka9q_section = config.get('ka9q', {})
-            self.status_address = ka9q_section.get('status_address')
-            
+        # Determine engine type: check ka9q.source first, then recorder.engine
+        ka9q_section = config.get('ka9q', {})
+        self.recorder_config = config.get('recorder', {})
+        self.engine_type = (
+            ka9q_section.get('source')
+            or self.recorder_config.get('engine', 'radiod')
+        )
+        if self.engine_type not in ('radiod', 'phase-engine'):
+            logger.warning(f"Unknown engine type '{self.engine_type}', defaulting to 'radiod'")
+            self.engine_type = 'radiod'
+
+        # Resolve the status/control address.
+        # When source is 'phase-engine', use its status multicast address
+        # (from ka9q.phase_engine_status or the well-known default 239.99.1.1)
+        # instead of the radiod status address.
+        if self.engine_type == 'phase-engine':
+            self.status_address = ka9q_section.get(
+                'phase_engine_status', '239.99.1.1'
+            )
+            logger.info(f"Engine type is phase-engine, using status address: {self.status_address}")
+        else:
+            self.status_address = config.get('status_address')
+            if not self.status_address:
+                self.status_address = ka9q_section.get('status_address')
+
         if not self.status_address:
             raise ValueError("Configuration missing 'status_address' in [ka9q] section")
 
         # Try to resolve status address, falling back to discovery if needed
         from ka9q.utils import resolve_multicast_address
         try:
-            # Check if address resolves
             resolve_multicast_address(self.status_address, timeout=2.0)
         except Exception:
             logger.warning(f"Failed to resolve configured address '{self.status_address}', attempting auto-discovery...")
             from ka9q.discovery import discover_radiod_services
-            
-            # Discover services
+
             services = discover_radiod_services(timeout=5.0)
             if not services:
                 logger.error("Discovery failed: No radiod services found!")
-                # processing will likely fail at RadiodControl init, but we let it proceed to raise the error there
             else:
                 logger.info(f"Discovered {len(services)} radiod services: {[s['name'] for s in services]}")
-                
-                # Simple selection logic:
-                # 1. Look for a service matching the configured hostname (loose match)
-                # 2. Look for "B3" since user mentioned it
-                # 3. Default to the first one
                 selected = None
-                
-                # Try 1: configured name in service name?
                 for s in services:
                     if self.status_address.replace('.local', '') in s['name'] or self.status_address in s['name']:
                         selected = s
                         break
-                
-                # Try 2: "B3" tag?
-                if not selected:
-                    for s in services:
-                        if "B3" in s['name']:
-                            selected = s
-                            break
-                            
-                # Try 3: First available
                 if not selected:
                     selected = services[0]
-                
                 if selected:
                     logger.warning(f"Redirecting to discovered service: '{selected['name']}' at {selected['address']}")
                     self.status_address = selected['address']
 
         self.control = RadiodControl(self.status_address)
-        
+
         # Station config
         self.station_config = config.get('station', {})
-        self.recorder_config = config.get('recorder', {})
-        self.engine_type = self.recorder_config.get('engine', 'radiod')
-        if self.engine_type not in ('radiod', 'phase-engine'):
-            logger.warning(f"Unknown engine type '{self.engine_type}', defaulting to 'radiod'")
-            self.engine_type = 'radiod'
         
         # Let radiod use its configured default destination, OR force one if missing.
         # Logic update: We default to the standard multicast group to ensuring functional channels
@@ -758,7 +750,8 @@ class CoreRecorderV2:
         # Close RadiodControl
         try:
             self.control.close()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception: {e}")
             pass
         
         # Write final status
@@ -827,13 +820,15 @@ def main():
     # Build recorder config
     recorder_section = config.get('recorder', {})
     channels = _expand_channel_groups(recorder_section)
+    ka9q_section = config.get('ka9q', {})
     recorder_config = {
         'output_dir': output_dir,
         'station': config.get('station', {}),
         'recorder': recorder_section,
         'channels': channels,
         'channel_defaults': recorder_section.get('channel_defaults', {}),
-        'status_address': config.get('ka9q', {}).get('status_address', '239.192.152.141'),
+        'status_address': ka9q_section.get('status_address', '239.192.152.141'),
+        'ka9q': ka9q_section,
     }
     
     logger.info(f"Loaded {len(recorder_config['channels'])} channels from config")

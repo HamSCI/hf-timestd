@@ -629,6 +629,12 @@ class BinaryArchiveWriter:
         for start, end in zip(starts, ends):
             gap_len = end - start
             
+            # Do not interpolate massive gaps (e.g. dropped network connection).
+            # Interpolating > 1000 samples (~40ms) is mathematically meaningless
+            # for a 24kHz RF signal and causes huge CPU spikes.
+            if gap_len > 1000:
+                continue
+                
             # Get samples before and after gap
             before_idx = start - 1 if start > 0 else None
             after_idx = end if end < len(samples) else None
@@ -855,7 +861,10 @@ class BinaryArchiveReader:
         # Try uncompressed first (fastest - memory-mappable)
         bin_path = Path(f"{base_path}.bin")
         if bin_path.exists():
-            return np.memmap(bin_path, dtype=np.complex64, mode='r')
+            mm = np.memmap(bin_path, dtype=np.complex64, mode='r')
+            arr = np.array(mm)
+            del mm
+            return arr
         
         # Try zstd compressed
         zst_path = Path(f"{base_path}.bin.zst")

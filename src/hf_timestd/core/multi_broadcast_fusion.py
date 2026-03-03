@@ -2159,7 +2159,8 @@ class MultiBroadcastFusion:
                             ambiguity_penalty = 0.4  # Severe ambiguity
                         
                         mode_scale_factor *= ambiguity_penalty
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Ignored exception: {e}")
                     pass  # Fail silently - mode scoring is an enhancement, not critical
             
             # Scale by SNR (signal quality)
@@ -4996,6 +4997,10 @@ def run_fusion_service(
     EMPTY_CYCLE_ERROR_THRESHOLD = 15   # Error after 15 consecutive empty cycles (~2 min at 8s interval)
     last_successful_fusion_time = time.time()
     
+    # Track chrony updates for discontinuity filtering
+    last_chrony_d_clock = None
+    last_chrony_update_time = None
+    
     while running:
         try:
             # BREADCRUMB: Loop start
@@ -5207,11 +5212,10 @@ def run_fusion_service(
                     # Discontinuity filter: reject large jumps (>10ms)
                     # Increased from 3ms to 10ms to allow for legitimate calibration convergence
                     # and ionospheric variations while still protecting against major errors
-                    global last_chrony_d_clock, last_chrony_update_time
                     discontinuity_ok = True
                     
                     # Reset discontinuity check if no update for >5 minutes (allows recovery)
-                    if 'last_chrony_update_time' in globals() and last_chrony_update_time is not None:
+                    if last_chrony_update_time is not None:
                         time_since_update = time.time() - last_chrony_update_time
                         if time_since_update > 300:  # 5 minutes
                             logger.info(
@@ -5220,7 +5224,7 @@ def run_fusion_service(
                             )
                             last_chrony_d_clock = None
                     
-                    if 'last_chrony_d_clock' in globals() and last_chrony_d_clock is not None:
+                    if last_chrony_d_clock is not None:
                         delta = abs(result.d_clock_fused_ms - last_chrony_d_clock)
                         # Scale discontinuity threshold with measurement uncertainty.
                         # HF timing has 5-30ms uncertainty; cycle-to-cycle variation of
@@ -5425,7 +5429,8 @@ if __name__ == '__main__':
             if cfg_level and args.timing_level == 'L5':  # Only use config if CLI is default
                 timing_level = cfg_level
                 logger.info(f"Using timing authority level from config: {timing_level}")
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception: {e}")
             pass
     
     enable_chrony = args.enable_chrony and not args.disable_chrony

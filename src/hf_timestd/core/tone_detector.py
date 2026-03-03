@@ -1275,7 +1275,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
                 coeffs = np.polyfit(t, phase_unwrapped, 1)
                 phase_detrended = phase_unwrapped - np.polyval(coeffs, t)
                 phase_std = float(np.std(phase_detrended))
-            except:
+            except Exception as e:
+                logger.debug(f"Phase detrending failed: {e}")
                 phase_std = 0.5
         else:
             phase_std = 0.5
@@ -2591,7 +2592,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             sos = scipy_signal.butter(4, [low, high], btype='band', 
                                       fs=self.sample_rate, output='sos')
             filtered = scipy_signal.sosfiltfilt(sos, audio_signal)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Caught exception: {e}")
             filtered = audio_signal
         
         # Quadrature correlation

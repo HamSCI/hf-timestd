@@ -295,6 +295,10 @@ class TickMatchedFilter:
         self._templates: Dict[float, Tuple[np.ndarray, np.ndarray]] = {}
         self._iq_templates: Dict[float, np.ndarray] = {}  # Complex IQ templates
         self._am_templates: Dict[float, np.ndarray] = {}  # AM envelope templates
+        
+        # Pre-allocated buffers for zero-allocation DSP
+        self._max_samples = 65 * self.sample_rate
+        self._envelope_buffer = np.empty(self._max_samples, dtype=np.float32)
         self._build_templates()
         self._build_iq_templates()
         self._build_am_templates()

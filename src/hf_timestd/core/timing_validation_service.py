@@ -329,12 +329,7 @@ class TimingValidationService:
             import h5py
             import numpy as np
             
-            try:
-                f = h5py.File(fusion_file, 'r', libver='latest', locking=False)
-            except OSError:
-                return None
-            
-            try:
+            with h5py.File(fusion_file, 'r', libver='latest', locking=False) as f:
                 # HDF5 structure: each column is a separate dataset
                 if 'minute_boundary' not in f:
                     return None
@@ -368,7 +363,8 @@ class TimingValidationService:
                             if isinstance(val, bytes):
                                 val = val.decode('utf-8', errors='replace')
                             result[key] = val
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Ignored exception: {e}")
                             pass  # Skip problematic columns
                 
                 # Cache for reuse

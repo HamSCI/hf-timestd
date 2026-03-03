@@ -504,7 +504,8 @@ class TIDDetector:
             az_deg = (math.degrees(az_rad)) % 360
             
             return v_km_s * 1000.0, az_deg
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Caught exception: {e}")
             return None, None
     def _estimate_tid_velocity(
         self,

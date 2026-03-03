@@ -598,7 +598,8 @@ class MultiStationDetector:
                         'source_snr_db': data['snr_db'],
                         'source_quality': data['quality']
                     }
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Caught exception: {e}")
                 continue
         
         return best_guidance

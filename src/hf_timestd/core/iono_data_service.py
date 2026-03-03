@@ -814,7 +814,8 @@ class IonoDataService:
             
             return None
             
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Caught exception: {e}")
             return None
     
     # =========================================================================

@@ -313,7 +313,8 @@ class PhysicsPropagationModel:
                 if heights:
                     hmF2_km = heights.hmF2
                     hmE_km = heights.hmE
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception: {e}")
                 pass
         
         return self._get_mode_candidates(distance_km, frequency_mhz, hmF2_km, hmE_km)

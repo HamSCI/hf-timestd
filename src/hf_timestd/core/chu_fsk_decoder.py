@@ -751,7 +751,8 @@ class CHUFSKDecoder:
         # Bandpass filter around 1000 Hz using pre-computed coefficients
         try:
             filtered = filtfilt(self._tick_b, self._tick_a, search_region)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Caught exception: {e}")
             filtered = search_region
         
         # Compute energy envelope

@@ -179,7 +179,8 @@ class CarrierSpectrogramGenerator:
                     return ['WWV']  # WWVH doesn't broadcast 20/25 MHz
                 else:
                     return ['WWV', 'WWVH']
-            except:
+            except Exception as e:
+                logger.debug(f"Failed to extract stations from {file_path}: {e}")
                 return ['WWV', 'WWVH']
         
         return []

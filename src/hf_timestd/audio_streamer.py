@@ -103,7 +103,8 @@ class AudioStreamer:
                         # Process immediately to maintain continuity
                         new_audio = self._demodulate(np.array(iq_samples))
                         self.audio_buffer.extend(new_audio)
-            except:
+            except Exception as e:
+                logger.error(f"Error streaming archived data: {e}")
                 continue
         
         print(f"Buffer ready: {len(self.audio_buffer)} audio samples")
@@ -138,7 +139,7 @@ class AudioStreamer:
                                 try:
                                     self.audio_queue.get_nowait()
                                     self.audio_queue.put(audio_int16.tobytes(), block=False)
-                                except:
+                                except Queue.Empty:
                                     pass
                                     
             except Exception as e:
@@ -210,7 +211,7 @@ class AudioStreamer:
         """
         try:
             return self.audio_queue.get(timeout=timeout)
-        except:
+        except Exception:
             # Return silence if no data
             silence = np.zeros(320, dtype=np.int16)
             return silence.tobytes()

@@ -88,6 +88,10 @@ class MetrologyEngine:
         self.precise_lat = precise_lat
         self.precise_lon = precise_lon
         self.is_rtp_authority = is_rtp_authority
+        
+        # Pre-allocated buffers for zero-allocation DSP
+        self._max_samples = 65 * self.sample_rate
+        self._envelope_buffer = np.empty(self._max_samples, dtype=np.float32)
         self.is_chu_channel = 'CHU' in channel_name.upper()
         
         # Initialize sub-components
@@ -1121,9 +1125,16 @@ class MetrologyEngine:
         else:
             buffer_mid_time = system_time + len(iq_samples) / self.sample_rate / 2
         
+        # Expand pre-allocated buffer if needed
+        n_samples = len(iq_samples)
+        if n_samples > self._max_samples:
+            self._max_samples = n_samples + 5 * self.sample_rate
+            self._envelope_buffer = np.empty(self._max_samples, dtype=np.float32)
+            
         # === Step 0: Carrier SNR Check ===
         # Don't attempt detection if carrier is too weak.
-        envelope = np.abs(iq_samples)
+        envelope = self._envelope_buffer[:n_samples]
+        np.abs(iq_samples, out=envelope)
         carrier_amplitude = np.mean(envelope)
         mad = np.median(np.abs(envelope - np.median(envelope)))
         noise_std = 1.4826 * mad

@@ -484,7 +484,8 @@ class HFPropagationModel:
                 'source': 'parametric',
                 'confidence': 0.2,
             }
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Caught exception: {e}")
             # Minimal inline fallback if IonoDataService import fails
             # Apply DUT1 correction: UT1 = UTC + DUT1 for correct solar geometry
             ut1_hour = utc_time.hour + utc_time.minute / 60.0 + self._dut1_seconds / 3600.0

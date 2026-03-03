@@ -561,7 +561,8 @@ class MetrologyService:
                             expected_delay_ms, _, _ = self.engine._predict_geometric_delay(
                                 station_name, minute_boundary
                             )
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Ignored exception: {e}")
                             pass
                     
                     d_clock_ms = edge_result.ensemble_timing_error_ms if edge_result.ensemble_n_edges >= 5 else None
@@ -739,7 +740,8 @@ class MetrologyService:
                             expected_delay_ms, _, _ = self.engine._predict_geometric_delay(
                                 station_name, minute_boundary
                             )
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Ignored exception: {e}")
                             pass
                     n_clean_multipath = 0
                     for tick in edge_result.edges:
@@ -843,7 +845,8 @@ class MetrologyService:
         if self._iono_service is not None:
             try:
                 self._iono_service.stop()
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception: {e}")
                 pass
     
     def _write_test_signal(self, minute_boundary: int, iq_samples: np.ndarray, minute_number: int):

@@ -396,7 +396,8 @@ class DecimatedBuffer:
             with open(meta_path, 'r') as f:
                 data = json.load(f)
             return data.get('summary', {})
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Caught exception: {e}")
             return None
 
 
