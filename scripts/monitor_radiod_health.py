@@ -119,7 +119,7 @@ def check_radiod_status_channel(status_address: str = None, timeout: float = 2.0
             addresses_to_try.append(status_address)
         else:
             # Try to read from config or use common defaults
-            addresses_to_try = ['bee4-status.local', 'bee1-status.local', 'radiod-status.local']
+            addresses_to_try = ['239.99.1.1', 'bee4-status.local', 'bee1-status.local', 'radiod-status.local']
         
         for addr in addresses_to_try:
             try:

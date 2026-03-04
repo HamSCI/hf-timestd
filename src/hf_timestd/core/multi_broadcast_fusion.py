@@ -2462,9 +2462,32 @@ class MultiBroadcastFusion:
                                    f"hw_offset={old_hw_offset:+.2f}ms, "
                                    f"target={hw_target:+.2f}ms")
                 elif hw_converged:
-                    # Hardware converged: near-frozen, only track thermal drift
-                    hw_alpha = 0.005
-                    max_delta = 0.01  # ±0.01ms per update — glacial
+                    # Check if ionospheric conditions have changed significantly.
+                    # If calibrated residual (mean D_clock) exceeds 2ms, the
+                    # hardware offset is stale — temporarily use standard rate
+                    # instead of glacial drift-tracking. (2026-03-04)
+                    calibrated_residual = abs(broadcast_mean)
+                    if calibrated_residual > 10.0:
+                        # Large ionospheric shift (mode change, sunrise/sunset)
+                        hw_alpha = 0.15
+                        max_delta = 5.0  # Track fast at 5ms/cycle
+                        logger.info(
+                            f"HW Calibration UN-CONVERGE FAST {broadcast_key}: "
+                            f"residual={broadcast_mean:+.2f}ms > 10ms, "
+                            f"alpha={hw_alpha}, max_delta={max_delta}ms"
+                        )
+                    elif calibrated_residual > 2.0:
+                        hw_alpha = 0.10
+                        max_delta = 1.0  # Moderate tracking
+                        logger.info(
+                            f"HW Calibration UN-CONVERGE {broadcast_key}: "
+                            f"residual={broadcast_mean:+.2f}ms > 2ms, "
+                            f"alpha={hw_alpha}, max_delta={max_delta}ms"
+                        )
+                    else:
+                        # Truly converged: near-frozen, only track thermal drift
+                        hw_alpha = 0.005
+                        max_delta = 0.01  # ±0.01ms per update — glacial
                 else:
                     # Standard operation: moderate learning rate
                     base_alpha = max(0.05, min(0.15, 5.0 / old_cal.n_samples))
@@ -3324,7 +3347,19 @@ class MultiBroadcastFusion:
                         f"raw={measurements[i].d_clock_ms:.2f}ms)"
                     )
             
-            if len(keep_indices) < len(measurements):
+            if len(keep_indices) == 0:
+                # CRITICAL FIX (2026-03-04): Never reject ALL measurements.
+                # In single-station mode with stale calibration, the sigma cap
+                # (5ms) creates a 17.5ms threshold that rejects every channel
+                # when ionospheric conditions have changed since calibration.
+                # Starving the Kalman is worse than feeding it noisy data —
+                # the Kalman will inflate uncertainty appropriately.
+                logger.warning(
+                    f"Outlier filter would reject ALL {len(measurements)} measurements "
+                    f"(median={median_d:.1f}ms, mad={mad:.1f}ms, threshold={filter_threshold:.1f}ms). "
+                    f"Keeping all to prevent Kalman starvation."
+                )
+            elif len(keep_indices) < len(measurements):
                 measurements = [measurements[i] for i in keep_indices]
         
         if not measurements:
@@ -5165,10 +5200,12 @@ def run_fusion_service(
                         calibration_converged = False
                     
                     if calibration_converged:
-                        # Operational: prefer A/B/C but accept D with reasonable uncertainty
-                        # Grade D with <10ms uncertainty is still useful for Chrony (better than no feed)
+                        # Operational: prefer A/B/C but accept D with reasonable uncertainty.
+                        # Raised from 10ms to 25ms (2026-03-04): single-station mode
+                        # structurally inflates uncertainty to 17-20ms even when D_clock
+                        # is accurate to <2ms. Chrony has its own outlier rejection.
                         quality_ok = result.quality_grade in ('A', 'B', 'C') or \
-                                    (result.quality_grade == 'D' and result.uncertainty_ms < 10.0)
+                                    (result.quality_grade == 'D' and result.uncertainty_ms < 25.0)
                     else:
                         # Bootstrap: accept grade D (uncertainty <50ms is acceptable during learning/single-station)
                         # High uncertainty during bootstrap is normal due to calibration convergence
@@ -5185,14 +5222,16 @@ def run_fusion_service(
                     if result.consistency_flag == 'OK':
                         consistent = True
                     elif calibration_converged:
-                        # Operational: only accept disagreement with low uncertainty
-                        # Raised from 1.0ms to 2.0ms: typical fused uncertainty is 1.2-1.3ms
-                        # which is still useful for Chrony (better than no feed at all)
-                        if result.consistency_flag in ('INTER_ANOMALY', 'CROSS_STATION_DISAGREE') and result.uncertainty_ms < 2.0:
+                        # Operational: accept disagreement with reasonable uncertainty.
+                        # Raised from 2.0ms to 5.0ms (2026-03-04): stale calibration +
+                        # ionospheric variability routinely produces 3ms uncertainty with
+                        # CROSS_STATION_DISAGREE, which is still far better than no feed.
+                        # 5ms still rejects truly degraded data.
+                        if result.consistency_flag in ('INTER_ANOMALY', 'CROSS_STATION_DISAGREE') and result.uncertainty_ms < 5.0:
                             consistent = True
                             logger.debug(
                                 f"Chrony feed: Accepting {result.consistency_flag} with low uncertainty "
-                                f"({result.uncertainty_ms:.3f}ms < 2.0ms threshold)"
+                                f"({result.uncertainty_ms:.3f}ms < 5.0ms threshold)"
                             )
                         else:
                             consistent = False
@@ -5251,7 +5290,7 @@ def run_fusion_service(
                         if not multi_station:
                             gate_reasons.append(f"multi_station(n={result.n_stations})")
                         if not consistent:
-                            gate_reasons.append(f"consistent(flag={result.consistency_flag},unc={result.uncertainty_ms:.1f}ms,thresh=2.0ms)")
+                            gate_reasons.append(f"consistent(flag={result.consistency_flag},unc={result.uncertainty_ms:.1f}ms,thresh=5.0ms)")
                         if not discontinuity_ok:
                             gate_reasons.append("discontinuity")
                         logger.info(

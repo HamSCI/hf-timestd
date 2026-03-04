@@ -374,6 +374,49 @@ This document provides an honest assessment of what signal features the HF-TimeS
 
 ---
 
+## Multi-Antenna Coherent Array (Phase-Engine)
+
+When multiple GPSDO-locked RX888 SDRs are available, the phase-engine provides coherent
+combining, beamforming, and interferometry. These capabilities are unavailable to a single
+antenna. See `docs/PHASE_ENGINE_ARCHITECTURE.md` for the full architectural design.
+
+### Capabilities Unique to a Coherent Array
+
+| Capability | Min Antennas | Science Value |
+|-----------|-------------|--------------|
+| Spatial null steering | 2 | Co-channel interference rejection (WWV/WWVH/BPM separation) |
+| Angle of arrival (azimuth) | 2 | Ionospheric reflection geometry, multipath mode ID |
+| Angle of arrival (elevation) | 3 | Direct hop count determination (1F vs 2F) |
+| Diversity gain | 2 | Fade resistance (+3 dB per doubling), continuous timing |
+| Coherent integration gain | 2 | Extended range (BPM at 39,000 km, CHU 3.33 MHz daytime) |
+| MVDR adaptive cancellation | 3 | Automatic RFI nulling without known interference direction |
+| Interferometric scintillation | 2 | Fresnel scale and irregularity drift velocity |
+| Multipath spatial resolution | 3 | Per-mode timing/Doppler/TEC (eliminates multipath bias) |
+| O/X polarization separation | 3-4 | Removes polarization fading, Faraday rotation measurement |
+
+### Effect on Physics Observables
+
+Coherent combining preserves most HF observables because the antenna array aperture
+(meters) is far smaller than the ionospheric Fresnel radius (~2 km at 10 MHz):
+
+- **Doppler:** Preserved (all antennas see the same ionospheric path)
+- **dTEC/dt:** Rate preserved; absolute TEC may have quasi-static combining bias
+- **S4, σ_φ scintillation:** Preserved (array ≪ Fresnel zone)
+- **Absolute carrier phase:** Not meaningful (combining injects arbitrary offset)
+- **Angle of arrival:** Destroyed by combining (requires per-antenna data)
+
+**Caveat:** The adaptive calibration loop may suppress deep fades by adjusting antenna
+weights, artificially reducing observed S4.
+
+### Raw Data Preservation
+
+**Architectural principle:** Phase-engine output is a real-time enhancement product, not
+the archival record. Per-antenna raw IQ from a designated reference radiod is always
+archived for scientific reproducibility. See `docs/PHASE_ENGINE_ARCHITECTURE.md` §Raw
+Data Preservation Principle.
+
+---
+
 ## Measurement Uncertainties and Limitations
 
 ### Timing Precision

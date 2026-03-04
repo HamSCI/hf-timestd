@@ -40,8 +40,11 @@ ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
 ExecStartPre=+/bin/sh -c 'ipcrm -M 0x4e545030 2>/dev/null || true'
 ExecStartPre=+/bin/sh -c 'ipcrm -M 0x4e545031 2>/dev/null || true'
 
-# Health check: Verify Chrony SHM is being updated (disabled - service needs time to start)
-#ExecStartPost=/opt/hf-timestd/scripts/health-check-fusion.sh
+# Restart Chrony so it reattaches to the new SHM segments created by fusion.
+# Fusion creates fresh SHM on startup; chrony holds stale segment references
+# from the previous fusion instance and will show reach=0 until restarted.
+# The + prefix runs as root (required for systemctl).
+ExecStartPost=+/bin/sh -c 'sleep 3 && systemctl restart chrony 2>/dev/null || true'
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5

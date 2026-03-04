@@ -51,11 +51,37 @@ else
     MODE="test"
 fi
 
+# Detect engine type from config (radiod: 9 frequency channels, phase-engine: 17 broadcast channels)
+# Both modes are broadcast-oriented — metrology and physics resolve to the same 17 broadcasts.
+# The difference is channel naming: radiod uses SHARED_* for multi-station frequencies,
+# phase-engine uses per-station names (WWV_5000, WWVH_5000, BPM_5000) via beamforming.
+ENGINE_TYPE="radiod"
+CONFIG_FILE="/etc/hf-timestd/timestd-config.toml"
+if [[ -f "$CONFIG_FILE" ]]; then
+    # Check ka9q.source first (takes priority), then recorder.engine
+    KA9Q_SOURCE=$(grep -E '^source\s*=' "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/.*=\s*"\([^"]*\)".*/\1/')
+    RECORDER_ENGINE=$(grep -E '^engine\s*=' "$CONFIG_FILE" 2>/dev/null | grep -v '^#' | head -1 | sed 's/.*=\s*"\([^"]*\)".*/\1/')
+    if [[ -n "$KA9Q_SOURCE" && "$KA9Q_SOURCE" != "radiod" ]]; then
+        ENGINE_TYPE="$KA9Q_SOURCE"
+    elif [[ -n "$RECORDER_ENGINE" && "$RECORDER_ENGINE" != "radiod" ]]; then
+        ENGINE_TYPE="$RECORDER_ENGINE"
+    fi
+fi
+
+if [[ "$ENGINE_TYPE" == "radiod" ]]; then
+    EXPECTED_CHANNELS=9
+    ENGINE_DESC="radiod (9 frequency channels, SHARED require discrimination)"
+else
+    EXPECTED_CHANNELS=17
+    ENGINE_DESC="phase-engine (17 broadcast channels, per-station beamforming)"
+fi
+
 echo "=============================================="
 echo "  hf-timestd Pipeline Verification"
 echo "=============================================="
-echo "  Mode: $MODE"
-echo "  Data: $DATA_ROOT"
+echo "  Mode:   $MODE"
+echo "  Engine: $ENGINE_DESC"
+echo "  Data:   $DATA_ROOT"
 echo "=============================================="
 
 # =============================================================================
@@ -273,10 +299,24 @@ PHASE2_DIR="$DATA_ROOT/phase2"
 if [[ -d "$PHASE2_DIR" ]]; then
     check_pass "Phase 2 directory exists: $PHASE2_DIR"
     
-    # Count channel directories
+    # Count channel directories — expected set depends on engine mode
+    # radiod: 9 (SHARED_2500..SHARED_15000, WWV_20000, WWV_25000, CHU_3330, CHU_7850, CHU_14670)
+    # phase-engine: up to 17 (WWV_2500..WWV_25000, WWVH_2500..WWVH_15000, CHU_*, BPM_*)
+    # Both modes: directories are named {STATION}_{FREQ_KHZ} or SHARED_{FREQ_KHZ}
     CHANNELS=$(find "$PHASE2_DIR" -maxdepth 1 -type d -name "*_*" 2>/dev/null | wc -l)
     if [[ $CHANNELS -gt 0 ]]; then
-        check_pass "Found $CHANNELS channel directories"
+        if [[ "$ENGINE_TYPE" == "phase-engine" ]]; then
+            # In phase-engine mode, SHARED_* directories are legacy — only broadcast-specific dirs expected
+            SHARED_COUNT=$(find "$PHASE2_DIR" -maxdepth 1 -type d -name "SHARED_*" 2>/dev/null | wc -l)
+            BROADCAST_COUNT=$((CHANNELS - SHARED_COUNT))
+            if [[ $SHARED_COUNT -gt 0 ]]; then
+                check_warn "Found $SHARED_COUNT legacy SHARED_* directories (phase-engine uses per-broadcast channels)"
+                echo "  → SHARED dirs are from previous radiod operation, not actively written in phase-engine mode"
+            fi
+            check_pass "Found $BROADCAST_COUNT broadcast channel directories (phase-engine mode, expect up to 17)"
+        else
+            check_pass "Found $CHANNELS channel directories (radiod mode, expect 9)"
+        fi
     else
         check_fail "No channel directories found in $PHASE2_DIR"
     fi
@@ -288,6 +328,11 @@ if [[ -d "$PHASE2_DIR" ]]; then
     for channel_dir in "$PHASE2_DIR"/*_*/; do
         if [[ -d "$channel_dir" ]]; then
             CHANNEL=$(basename "$channel_dir")
+            
+            # Skip legacy SHARED_* directories in phase-engine mode
+            if [[ "$ENGINE_TYPE" == "phase-engine" && "$CHANNEL" == SHARED_* ]]; then
+                continue
+            fi
             # Metrology (L1/L2 primary metric)
             # Find most recent file (no time filter - we check latency below)
             LATEST_HDF5=$(find "$channel_dir/metrology" -name "${CHANNEL}_metrology_measurements_*.h5" -type f 2>/dev/null | sort | tail -1)
@@ -525,7 +570,7 @@ section "Phase 5: Adaptive Calibration (System State)"
 
 # 5a. Timing Authority Check
 # As of v5.4.0, bootstrap is deprecated. Check timing authority mode instead.
-CONFIG_FILE="/etc/hf-timestd/timestd-config.toml"
+# CONFIG_FILE already set at top of script during engine detection
 TIMING_AUTHORITY="unknown"
 
 if [[ -f "$CONFIG_FILE" ]]; then

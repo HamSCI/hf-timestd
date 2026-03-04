@@ -524,13 +524,13 @@ class CoreRecorderV2:
                 ch_stats = recorder.get_status()
                 # Use SSRC as key if known, otherwise use hex frequency
                 ssrc = recorder.config.ssrc
-                key = hex(ssrc) if ssrc and ssrc != 0 else f"freq_{freq}"
+                key = hex(ssrc) if ssrc and ssrc != 0 else f"freq_{recorder.config.frequency_hz}"
                 
                 # Add metadata to ch_stats for better UI/debugging
                 ch_stats['preset'] = recorder.config.preset
                 ch_stats['encoding'] = recorder.config.encoding
                 
-                status['channels'][stats_key] = ch_stats
+                status['channels'][key] = ch_stats
                 
                 if ch_stats.get('samples_received', 0) > 0:
                     status['overall']['channels_active'] += 1

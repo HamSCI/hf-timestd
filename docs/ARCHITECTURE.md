@@ -532,6 +532,7 @@ GRAPE decimation is intentionally decoupled from the timing/metrology pipeline. 
 - **`docs/TECHNICAL_REFERENCE.md`** - API and algorithm details
 - **`docs/METROLOGY.md`** - Metrological description and uncertainty budgets
 - **`docs/PHYSICS.md`** - Ionospheric physics capabilities
+- **`docs/PHASE_ENGINE_ARCHITECTURE.md`** - Multi-antenna coherent array design, scientific benefits, raw data preservation
 - **`docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md`** - Production deployment and verification gates
 - **`INSTALLATION.md`** - Setup and service configuration
 
