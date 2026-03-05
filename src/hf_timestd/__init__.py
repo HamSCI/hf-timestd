@@ -59,8 +59,6 @@ from .stream import (
     StreamManager,
     subscribe_stream,
     subscribe_iq,
-    subscribe_usb,
-    subscribe_am,
     subscribe_batch,
     discover_streams,
     find_stream,
@@ -101,8 +99,6 @@ __all__ = [
     # === Stream API (primary interface) ===
     "subscribe_stream",
     "subscribe_iq",
-    "subscribe_usb",
-    "subscribe_am",
     "subscribe_batch",
     "discover_streams",
     "find_stream",

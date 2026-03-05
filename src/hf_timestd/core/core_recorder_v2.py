@@ -242,7 +242,6 @@ class CoreRecorderV2:
         self.status_file = self.output_dir / 'status' / 'core-recorder-status.json'
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # CHU FSK Listener (USB channels for FSK decode, no archive)
         # Graceful shutdown
         self.running = False
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -405,15 +404,9 @@ class CoreRecorderV2:
         """
         Initialize all channels via a single unified path.
 
-        Every [[recorder.channels]] entry — whether an IQ archive channel or a
-        CHU FSK USB channel — is provisioned through RobustManagedStream /
-        ensure_channel().  The only difference is the 'consumer' field:
-
-          (absent / "archive")  ->  StreamRecorderV2  (archives to disk)
-          (legacy chu_fsk removed)
-
-        This means radiod-restart recovery, encoding, filter edges, and
-        ensure_channel() semantics are identical for every channel.
+        Every [[recorder.channels]] entry is provisioned through
+        RobustManagedStream / ensure_channel() and archived to disk
+        via StreamRecorderV2.
         """
         try:
             if not self.channel_specs:

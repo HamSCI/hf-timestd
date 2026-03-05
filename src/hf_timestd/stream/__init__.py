@@ -22,8 +22,6 @@ from .stream_manager import StreamManager
 from .stream_api import (
     subscribe_stream,
     subscribe_iq,
-    subscribe_usb,
-    subscribe_am,
     subscribe_batch,
     discover_streams,
     find_stream,
@@ -43,8 +41,6 @@ __all__ = [
     # High-level API
     "subscribe_stream",
     "subscribe_iq",
-    "subscribe_usb",
-    "subscribe_am",
     "subscribe_batch",
     "discover_streams",
     "find_stream",

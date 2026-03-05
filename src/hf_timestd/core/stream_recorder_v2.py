@@ -723,7 +723,7 @@ class StreamRecorderV2:
         return final_quality
     
     def add_tap(self, callback) -> None:
-        """Register an additional on_samples consumer (e.g. CHUFSKChannel.on_samples).
+        """Register an additional on_samples consumer.
 
         The callback receives the same (samples, quality) arguments as the
         RadiodStream on_samples callback.  Taps are called after the archive
@@ -799,7 +799,7 @@ class StreamRecorderV2:
             
             self.samples_written += len(samples)
 
-            # Forward to tap callbacks (e.g. CHUFSKChannel ring buffer)
+            # Forward to tap callbacks
             with self._tap_lock:
                 taps = list(self._tap_callbacks)
             for tap in taps:

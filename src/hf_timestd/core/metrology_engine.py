@@ -1594,14 +1594,12 @@ class MetrologyEngine:
             doppler_metrics = doppler_info
             
         # 2C. CHU FSK Time Code Decoding
-        # Primary: read from USB sidecar (CHUFSKListener) shared JSON.
-        # Fallback: decode directly from IQ buffer using AM demod + FSK discriminator.
+        # Decode directly from IQ buffer using AM demod + FSK discriminator.
         # The IQ decimation filter attenuates FSK tones (2025/2225 Hz), but the
         # AM-demodulated audio path recovers them via the envelope detector.
         chu_metrics = {}
         if self.is_chu_channel:
-            chu_metrics = self._read_fsk_result(minute_boundary)
-            if not chu_metrics and hasattr(self, 'chu_fsk_decoder'):
+            if hasattr(self, 'chu_fsk_decoder'):
                 chu_metrics = self._decode_fsk_from_iq(iq_samples, minute_boundary)
             if chu_metrics:
                 self._cross_validate_fsk(chu_metrics, minute_boundary)
@@ -2118,49 +2116,6 @@ class MetrologyEngine:
             return chu_metrics
         except Exception as e:
             logger.warning(f"{self.channel_name}: IQ-direct FSK decode failed: {e}")
-            return {}
-
-    def _read_fsk_result(self, minute_boundary: int) -> dict:
-        """Read CHU FSK result from shared JSON (written by CHUFSKListener)."""
-        from pathlib import Path
-        fsk_path = Path('/dev/shm/timestd/fsk_results') / f'{self.channel_name}.json'
-        try:
-            if not fsk_path.exists():
-                return {}
-            with open(fsk_path, 'r') as f:
-                data = json.load(f)
-            # Only use if reasonably fresh (within 2 minutes)
-            age = time.time() - data.get('written_at', 0)
-            if age > 120:
-                logger.debug(f"{self.channel_name}: FSK result stale ({age:.0f}s old)")
-                return {}
-            if not data.get('detected'):
-                logger.debug(f"{self.channel_name}: FSK result: not detected")
-                return {}
-            chu_metrics = {
-                'fsk_valid': True,
-                'fsk_frames_decoded': data.get('frames_decoded', 0),
-                'fsk_confidence': data.get('decode_confidence', 0.0),
-            }
-            if data.get('decoded_day') is not None:
-                chu_metrics['decoded_day'] = data['decoded_day']
-                chu_metrics['decoded_hour'] = data.get('decoded_hour')
-                chu_metrics['decoded_minute'] = data.get('decoded_minute')
-            if data.get('dut1_seconds') is not None:
-                chu_metrics['dut1_seconds'] = data['dut1_seconds']
-            if data.get('tai_utc') is not None:
-                chu_metrics['tai_utc'] = data['tai_utc']
-            if data.get('year') is not None:
-                chu_metrics['year'] = data['year']
-            if data.get('timing_offset_ms') is not None:
-                chu_metrics['timing_offset_ms'] = data['timing_offset_ms']
-            logger.info(f"{self.channel_name}: CHU FSK from USB sidecar - "
-                       f"frames={data.get('frames_decoded', 0)}/9, "
-                       f"DUT1={data.get('dut1_seconds')}s, "
-                       f"TAI-UTC={data.get('tai_utc')}s")
-            return chu_metrics
-        except Exception as e:
-            logger.debug(f"{self.channel_name}: Failed to read FSK result: {e}")
             return {}
 
     def _station_from_channel_name(self) -> str:
