@@ -526,10 +526,10 @@ function renderPlots(series) {
             x: xs,
             y: s.dtec_rate_tecu_per_s,
             mode: 'lines',
-            type: 'scatter',
+            type: 'scattergl',
             name: label,
-            line: { color, width: 1 },
-            opacity: 0.85,
+            line: { color, width: 1.2 },
+            opacity: 0.55,
         });
         rateStations.add(s.station);
 
@@ -575,18 +575,30 @@ function renderPlots(series) {
         });
     }
 
-    // Add X-ray flux if available
+    // Add X-ray flux if available — filter zeros/nulls and deduplicate timestamps
     if (typeof _xrayData !== 'undefined' && _xrayData && _xrayData.flux && _xrayData.flux.length > 0) {
-        // Find long and short bands
-        rateTraces.push({
-            x: _xrayData.timestamps.map(t => new Date(t)),
-            y: _xrayData.flux,
-            mode: 'lines',
-            name: 'GOES X-Ray (0.1-0.8nm)',
-            yaxis: 'y3',
-            line: { color: 'rgba(239, 68, 68, 0.6)', width: 1.5, dash: 'dot' },
-            hoverinfo: 'name+y'
-        });
+        const xrTs = [], xrFlux = [];
+        const seen = new Set();
+        for (let i = 0; i < _xrayData.flux.length; i++) {
+            const f = _xrayData.flux[i];
+            const t = _xrayData.timestamps[i];
+            if (f && f > 0 && !seen.has(t)) {
+                seen.add(t);
+                xrTs.push(new Date(t));
+                xrFlux.push(f);
+            }
+        }
+        if (xrFlux.length > 0) {
+            rateTraces.push({
+                x: xrTs,
+                y: xrFlux,
+                mode: 'lines',
+                name: 'GOES X-Ray (0.1-0.8nm)',
+                yaxis: 'y3',
+                line: { color: 'rgba(239, 68, 68, 0.7)', width: 1.5 },
+                hovertemplate: '%{y:.2e} W/m²<extra>GOES X-Ray</extra>',
+            });
+        }
     }
 
     if (rateTraces.length === 0) {
@@ -599,18 +611,19 @@ function renderPlots(series) {
             ...baseLayout,
             yaxis2: SOLAR_YAXIS2,
             yaxis3: {
-                title: 'GOES X-Ray Flux (W/m²)',
-                titlefont: {color: '#ef4444'},
-                tickfont: {color: '#ef4444'},
+                title: 'GOES X-ray Flux (W/m²)',
+                titlefont: {color: 'rgba(239,68,68,0.7)', size: 10},
+                tickfont: {color: 'rgba(239,68,68,0.7)', size: 10},
                 overlaying: 'y',
                 side: 'right',
+                anchor: 'free',
+                position: 0.92,
                 type: 'log',
                 range: [-9, -2],
                 showgrid: false,
-                position: 0.95
             },
-            margin: { t: 10, b: 40, l: 70, r: 60 },
-            xaxis: { gridcolor: '#334155', title: 'UTC', range: _timeRange ? [_timeRange.start, _timeRange.end] : undefined },
+            margin: { t: 10, b: 40, l: 70, r: 100 },
+            xaxis: { gridcolor: '#334155', title: 'UTC', range: _timeRange ? [_timeRange.start, _timeRange.end] : undefined, domain: [0, 0.88] },
             yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', zeroline: true, zerolinecolor: '#475569', range: rRange },
         }, { responsive: true, displayModeBar: false });
     }
@@ -626,18 +639,19 @@ function renderPlots(series) {
             ...baseLayout,
             yaxis2: SOLAR_YAXIS2,
             yaxis3: {
-                title: 'GOES X-Ray Flux (W/m²)',
-                titlefont: {color: '#ef4444'},
-                tickfont: {color: '#ef4444'},
+                title: 'GOES X-ray Flux (W/m²)',
+                titlefont: {color: 'rgba(239,68,68,0.7)', size: 10},
+                tickfont: {color: 'rgba(239,68,68,0.7)', size: 10},
                 overlaying: 'y',
                 side: 'right',
+                anchor: 'free',
+                position: 0.92,
                 type: 'log',
                 range: [-9, -2],
                 showgrid: false,
-                position: 0.95
             },
-            margin: { t: 10, b: 40, l: 70, r: 60 },
-            xaxis: { gridcolor: '#334155', title: 'UTC', range: _timeRange ? [_timeRange.start, _timeRange.end] : undefined },
+            margin: { t: 10, b: 40, l: 70, r: 100 },
+            xaxis: { gridcolor: '#334155', title: 'UTC', range: _timeRange ? [_timeRange.start, _timeRange.end] : undefined, domain: [0, 0.88] },
             yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', zeroline: true, zerolinecolor: '#475569', range: fRange },
         }, { responsive: true, displayModeBar: false });
     }
