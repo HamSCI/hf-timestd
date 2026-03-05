@@ -262,6 +262,15 @@ class CarrierTECEstimator:
         phases = np.array([r.get('carrier_phase_rad', 0.0) for r in records])
         snrs = np.array([r.get('snr_db', 0.0) for r in records])
 
+        # Reject records with no real phase measurement (carrier_phase_rad == 0.0
+        # indicates the IQ phase extraction path failed — no carrier phasors).
+        nonzero_mask = phases != 0.0
+        if np.sum(nonzero_mask) < 3:
+            return None
+        epochs = epochs[nonzero_mask]
+        phases = phases[nonzero_mask]
+        snrs = snrs[nonzero_mask]
+
         result = self.compute_dtec_from_phase(
             epochs=epochs,
             carrier_phase_rad=phases,

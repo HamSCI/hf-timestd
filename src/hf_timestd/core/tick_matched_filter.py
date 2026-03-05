@@ -611,7 +611,7 @@ class TickMatchedFilter:
                 snr_linear = peak_value / noise_std
                 snr_db = 20 * np.log10(max(snr_linear, 1e-10))
             else:
-                snr_db = 40.0
+                snr_db = 40.0 if peak_value > 1e-6 else 0.0
         else:
             snr_db = 0.0
         
@@ -721,7 +721,7 @@ class TickMatchedFilter:
                 snr_linear = peak_value / noise_std
                 snr_db = 20 * np.log10(max(snr_linear, 1e-10))
             else:
-                snr_db = 40.0
+                snr_db = 40.0 if peak_value > 1e-6 else 0.0
         else:
             snr_db = 0.0
         
