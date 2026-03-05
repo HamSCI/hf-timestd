@@ -4,6 +4,15 @@ import requests
 import gzip
 import shutil
 import glob
+import logging
+
+try:
+    from hf_timestd.cddis_auth import get_cddis_session
+    _HAS_CDDIS_AUTH = True
+except ImportError:
+    _HAS_CDDIS_AUTH = False
+
+logger = logging.getLogger(__name__)
 
 class CDDISDownloader:
     def __init__(self, output_dir="data/dcb"):
@@ -47,8 +56,11 @@ class CDDISDownloader:
                 return unzipped_path
 
             try:
-                with requests.Session() as session:
-                    # session.auth = ('username', 'password') # Uses .netrc by default
+                if _HAS_CDDIS_AUTH:
+                    session = get_cddis_session()
+                else:
+                    session = requests.Session()
+                with session:
                     r = session.get(url, stream=True)
                     
                     if r.status_code == 200:
@@ -59,10 +71,7 @@ class CDDISDownloader:
                              # or we need to debug auth.
                              print("Response content-type is HTML, likely login page or error.")
                              print(f"Preview: {r.text[:200]}")
-                             # If we want to support explicit auth fallback:
-                             # session.auth = ('ac0g', 'YRX-zvg!mxr0wbn*jvq')
-                             # r = session.get(url, stream=True)
-                             pass # Proceed to fail or retry?
+                             pass
 
                         # If content length is small (<1KB), it's suspicious for a gz file
                         if len(r.content) < 1000 and 'text/html' in r.headers.get('Content-Type', ''):

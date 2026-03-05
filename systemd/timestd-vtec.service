@@ -11,6 +11,7 @@ Type=notify
 User=timestd
 Group=timestd
 EnvironmentFile=/etc/hf-timestd/environment
+Environment=NETRC=/etc/hf-timestd/earthdata-netrc
 WorkingDirectory=/var/lib/timestd
 
 # Watchdog: restart if no heartbeat for 60s (6 poll intervals at 10s each)

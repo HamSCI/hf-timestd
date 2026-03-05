@@ -42,6 +42,12 @@ from typing import Optional, Tuple, List
 import numpy as np
 import logging
 
+try:
+    from hf_timestd.cddis_auth import get_cddis_session, check_earthdata_credentials
+    _HAS_CDDIS_AUTH = True
+except ImportError:
+    _HAS_CDDIS_AUTH = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -404,7 +410,11 @@ def download_ionex(
                 logger.debug(f"Trying {product_name} {days_offset} days back: {filename}")
             
             try:
-                with requests.Session() as session:
+                if _HAS_CDDIS_AUTH:
+                    session = get_cddis_session()
+                else:
+                    session = requests.Session()
+                with session:
                     response = session.get(file_url, allow_redirects=True, stream=True, timeout=60)
                     
                     if response.status_code == 200:
@@ -424,10 +434,13 @@ def download_ionex(
                         return output_file
                         
                     elif response.status_code == 401:
-                        logger.error("Authentication failed (401). Check ~/.netrc file:")
-                        logger.error("  machine urs.earthdata.nasa.gov")
-                        logger.error("      login YOUR_USERNAME")
-                        logger.error("      password YOUR_PASSWORD")
+                        logger.error("Authentication failed (401). Check credentials:")
+                        logger.error("  File: /etc/hf-timestd/earthdata-netrc (or ~/.netrc)")
+                        logger.error("  Required contents:")
+                        logger.error("    machine urs.earthdata.nasa.gov")
+                        logger.error("    login YOUR_USERNAME")
+                        logger.error("    password YOUR_PASSWORD")
+                        logger.error("  See docs/NASA_EARTHDATA_SETUP.md for details.")
                         return None
                         
                     elif response.status_code == 404:

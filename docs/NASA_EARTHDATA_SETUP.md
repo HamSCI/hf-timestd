@@ -1,10 +1,17 @@
-# NASA Earthdata Account Setup for VTEC Service
+# NASA Earthdata Account Setup
 
-The VTEC service downloads Differential Code Bias (DCB) correction files from NASA's CDDIS archive to improve ionospheric measurements. This requires a free NASA Earthdata account.
+Several hf-timestd services download data from NASA's CDDIS archive:
+
+- **IONEX** (Global Ionosphere Maps) — used by the ionospheric model
+- **DCB** (Differential Code Bias) — used by the VTEC service
+
+Both require a free NASA Earthdata account.
 
 ## Why This Is Needed
 
-DCB corrections improve VTEC accuracy by accounting for satellite and receiver biases. Without these corrections, the system assumes zero bias, which degrades accuracy.
+IONEX provides global TEC maps for ionospheric delay modeling. DCB corrections
+improve VTEC accuracy by accounting for satellite and receiver biases. Without
+credentials, these downloads fail and the system falls back to parametric models.
 
 ## Setup Steps
 
@@ -20,7 +27,8 @@ DCB corrections improve VTEC accuracy by accounting for satellite and receiver b
 
 ### 2. Configure Authentication
 
-The VTEC service runs as the `timestd` user and needs credentials in `/home/timestd/.netrc`.
+Credentials are stored in a netrc file at `/etc/hf-timestd/earthdata-netrc`.
+This is the system-wide location used by all hf-timestd services.
 
 **Option A: During Installation (Recommended)**
 
@@ -29,28 +37,42 @@ The install script will prompt for your credentials and create the file automati
 **Option B: Manual Setup**
 
 ```bash
-# Create timestd home directory if it doesn't exist
-sudo mkdir -p /home/timestd
-
-# Create .netrc file
-sudo tee /home/timestd/.netrc > /dev/null << 'EOF'
+# Create the credential file
+sudo tee /etc/hf-timestd/earthdata-netrc > /dev/null << 'EOF'
 machine urs.earthdata.nasa.gov
 login YOUR_EARTHDATA_USERNAME
 password YOUR_EARTHDATA_PASSWORD
 EOF
 
-# Set correct permissions (CRITICAL - .netrc must be 600)
-sudo chown timestd:timestd /home/timestd/.netrc
-sudo chmod 600 /home/timestd/.netrc
+# Set correct ownership and permissions (CRITICAL - must be 600)
+sudo chown timestd:timestd /etc/hf-timestd/earthdata-netrc
+sudo chmod 600 /etc/hf-timestd/earthdata-netrc
 ```
+
+**Credential Lookup Order:**
+
+The system checks for credentials in this order:
+1. `NETRC` environment variable (set automatically by systemd units)
+2. `/etc/hf-timestd/earthdata-netrc` (system-wide, recommended)
+3. `~/.netrc` (user home directory, fallback for interactive/dev use)
 
 ### 3. Verify Setup
 
-After restarting the VTEC service, check the logs:
+After creating the credential file, restart the affected services:
 
 ```bash
 sudo systemctl restart timestd-vtec
+sudo systemctl start timestd-ionex-download
+```
+
+Check the logs:
+
+```bash
+# VTEC/DCB downloads
 sudo journalctl -u timestd-vtec -n 50 | grep -E "DCB|bias|Download"
+
+# IONEX downloads
+sudo journalctl -u timestd-ionex -n 50
 ```
 
 You should see:
@@ -66,9 +88,10 @@ Loaded XXXX bias entries.
 
 ### "Unzip failed: Not a gzipped file"
 
-This means authentication failed. Check:
+This means authentication failed — CDDIS returned an HTML login page
+instead of the binary file. Check:
 
-1. Credentials are correct in `.netrc`
+1. Credentials are correct in `/etc/hf-timestd/earthdata-netrc`
 2. File permissions are exactly `600` (not `644` or `640`)
 3. File is owned by `timestd:timestd`
 4. You've authorized CDDIS access in your Earthdata account
@@ -85,9 +108,14 @@ sudo rm /var/lib/timestd/data/dcb/*.BIA
 sudo systemctl restart timestd-vtec
 ```
 
-### Service Works Without DCB
+### Services Work Without Credentials
 
-The VTEC service will run without DCB corrections, but accuracy is reduced. Logs will show:
+Both services degrade gracefully without CDDIS credentials:
+
+- **VTEC**: Runs but assumes zero DCB bias (reduced accuracy)
+- **Ionospheric model**: Falls back to parametric IRI model (no IONEX)
+
+Logs will show warnings like:
 
 ```
 Failed to download DCB file. VTEC accuracy will be degraded (0 bias assumed).
@@ -95,14 +123,15 @@ Failed to download DCB file. VTEC accuracy will be degraded (0 bias assumed).
 
 ## Security Notes
 
-- The `.netrc` file contains your password in plain text
+- The credential file contains your password in plain text
 - **Must** have `600` permissions (owner read/write only)
+- Stored in `/etc/hf-timestd/` alongside other system config
 - Consider using a dedicated Earthdata account for this system
 - Rotate password periodically
 
-## Alternative: Disable DCB Downloads
+## Alternative: Disable CDDIS Downloads
 
-If you don't want to set up NASA Earthdata, you can disable DCB downloads:
+If you don't want to set up NASA Earthdata, you can disable downloads:
 
 ```toml
 # In /etc/hf-timestd/timestd-config.toml
@@ -111,4 +140,4 @@ enabled = true
 download_dcb = false  # Disable DCB downloads
 ```
 
-The system will work but with reduced VTEC accuracy.
+The system will work but with reduced ionospheric correction accuracy.
