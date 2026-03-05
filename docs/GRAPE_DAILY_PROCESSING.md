@@ -60,6 +60,20 @@ The daily job processes **yesterday's data** through the following pipeline:
 4. **Upload** (optional) - Upload to PSWS repository
    - Uploads packaged data via SFTP
 
+## Upload Behavior
+
+Upload failures are **non-fatal** — stages 1-3 (decimate, spectrogram, package) always complete and the data is preserved on disk. If the upload fails (e.g., SSH key not yet registered with PSWS), the dataset is queued for retry. Upload the backlog later with:
+
+```bash
+sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape upload --date YYYYMMDD
+```
+
+To skip the upload stage entirely (e.g., while waiting for PSWS key registration):
+
+```bash
+sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape daily --no-upload
+```
+
 ## Configuration
 
 Edit `/etc/systemd/system/grape-daily.service` to customize:

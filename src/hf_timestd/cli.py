@@ -113,6 +113,7 @@ def main():
     grape_daily_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
     grape_daily_parser.add_argument('--config', '-c', default='/etc/hf-timestd/timestd-config.toml', help='Config file')
     grape_daily_parser.add_argument('--date', help='Date (YYYY-MM-DD or YYYYMMDD, default: yesterday)')
+    grape_daily_parser.add_argument('--no-upload', action='store_true', help='Skip upload stage (decimate, spectrogram, package only)')
     grape_daily_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
 
     # GRAPE decimate
@@ -455,49 +456,67 @@ def main():
             print(f"   ✅ GATE PASSED: {len(obs_dirs)} dataset(s) ready")
 
             # === Stage 4: Upload to PSWS ===
-            print(f"\n━━━ Stage 4: Upload ━━━")
-            uploader_config = config.get('uploader', {})
-            sftp_config = uploader_config.get('sftp', {})
-            ssh_key = os.path.expanduser(sftp_config.get('ssh_key', '~/.ssh/psws_key'))
+            upload_attempted = False
+            upload_ok = False
 
-            upload_config = {
-                'protocol': uploader_config.get('protocol', 'sftp'),
-                'host': sftp_config.get('host', 'pswsnetwork.eng.ua.edu'),
-                'user': sftp_config.get('user', station.get('id', '')),
-                'ssh': {'key_file': ssh_key},
-                'bandwidth_limit_kbps': sftp_config.get('bandwidth_limit_kbps', 100),
-                'max_retries': uploader_config.get('max_retries', 5),
-                'queue_file': data_root / 'upload' / 'queue.json'
-            }
+            if args.no_upload:
+                print(f"\n━━━ Stage 4: Upload (skipped via --no-upload) ━━━")
+                print(f"   Packaged data ready at: {upload_dir}")
+                print(f"   Upload later with: hf-timestd grape upload --date {date_str}")
+            else:
+                print(f"\n━━━ Stage 4: Upload ━━━")
+                upload_attempted = True
+                uploader_config = config.get('uploader', {})
+                sftp_config = uploader_config.get('sftp', {})
+                ssh_key = os.path.expanduser(sftp_config.get('ssh_key', '~/.ssh/psws_key'))
 
-            manager = UploadManager(upload_config)
-
-            for obs_dir in obs_dirs:
-                metadata = {
-                    'date': f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}",
-                    'callsign': callsign,
-                    'grid_square': grid,
-                    'station_id': station.get('id', 'S000171'),
-                    'instrument_id': station.get('instrument_id', '172')
+                upload_config = {
+                    'protocol': uploader_config.get('protocol', 'sftp'),
+                    'host': sftp_config.get('host', 'pswsnetwork.eng.ua.edu'),
+                    'user': sftp_config.get('user', station.get('id', '')),
+                    'ssh': {'key_file': ssh_key},
+                    'bandwidth_limit_kbps': sftp_config.get('bandwidth_limit_kbps', 100),
+                    'max_retries': uploader_config.get('max_retries', 5),
+                    'queue_file': data_root / 'upload' / 'queue.json'
                 }
-                manager.enqueue(obs_dir, metadata)
 
-            manager.process_queue()
+                manager = UploadManager(upload_config)
 
-            status = manager.get_status()
-            print(f"   Queue: {status['completed']} completed, {status['pending']} pending, {status['failed']} failed")
+                for obs_dir in obs_dirs:
+                    metadata = {
+                        'date': f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}",
+                        'callsign': callsign,
+                        'grid_square': grid,
+                        'station_id': station.get('id', 'S000171'),
+                        'instrument_id': station.get('instrument_id', '172')
+                    }
+                    manager.enqueue(obs_dir, metadata)
 
-            report_file = manager.write_upload_report()
-            print(f"   Report: {report_file}")
+                try:
+                    manager.process_queue()
+                except Exception as e:
+                    print(f"   ⚠️  Upload error: {e}")
 
-            if status['failed'] > 0:
-                print(f"\n❌ Upload had failures")
-                sys.exit(1)
+                status = manager.get_status()
+                print(f"   Queue: {status['completed']} completed, {status['pending']} pending, {status['failed']} failed")
+
+                report_file = manager.write_upload_report()
+                print(f"   Report: {report_file}")
+
+                if status['failed'] > 0:
+                    print(f"   ⚠️  Upload had failures — data is queued for retry")
+                    print(f"   Retry with: hf-timestd grape upload --date {date_str}")
+                else:
+                    upload_ok = True
 
             print(f"\n✅ GRAPE daily pipeline complete for {date_str}")
             print(f"   {len(decimated)} channels decimated")
             print(f"   {len(spectrograms)} spectrograms generated")
-            print(f"   {status['completed']} dataset(s) uploaded to PSWS")
+            if upload_attempted:
+                if upload_ok:
+                    print(f"   {status['completed']} dataset(s) uploaded to PSWS")
+                else:
+                    print(f"   ⚠️  Upload pending — queued for retry")
 
         elif args.grape_command == 'decimate':
             from .grape.decimation_pipeline import DecimationPipeline
