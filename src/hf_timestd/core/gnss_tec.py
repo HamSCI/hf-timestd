@@ -18,6 +18,10 @@ class GNSSTECAnalyzer:
         self.dcb_data = dcb_data if dcb_data else {}
         self.state = defaultdict(dict) # sv_key -> {'leveling_bias': float, 'count': int, 'last_phase_gf': float}
         self.sat_positions = {} # sv_key -> {'elev': float, 'azim': float, 'updated': float}
+        # Receiver DCB estimation state
+        self._rx_dcb_tecu = 0.0   # Current receiver DCB estimate (TECU)
+        self._rx_dcb_count = 0    # Number of epochs used
+        self._rx_dcb_converged = False
         
     def update_satellite_positions(self, nav_sat_msg, timestamp):
         """
@@ -89,12 +93,15 @@ class GNSSTECAnalyzer:
             p2 = obs['P2']
             
             # DCB Correction
+            # ZED-F9P uses L1 C/A (C1C) and L2C (C2L). CAS Rapid DCB files
+            # rarely provide direct C1C→C2L; instead they provide C1C→C2W and
+            # C2W→C2L separately. Compose: DCB(C1C,C2L) = DCB(C1C,C2W) + DCB(C2W,C2L).
             dcb_meters = 0.0
             
+            # 1. Try direct lookup first (L2C signals only — matches ZED-F9P)
             lookup_keys = [
                 (key, 'C1C', 'C2L'), # L1 C/A - L2C(L)
                 (key, 'C1C', 'C2X'), # L1 C/A - L2C(M+L)
-                (key, 'C1C', 'C2W'), # L1 C/A - L2P(Y) - Standard P1-P2
             ]
             
             found_dcb = False
@@ -103,6 +110,19 @@ class GNSSTECAnalyzer:
                     dcb_meters = self.dcb_data[k]
                     found_dcb = True
                     break
+            
+            # 2. Compose C1C→C2W + C2W→C2L (or C2W→C2X) if no direct match
+            if not found_dcb:
+                c1c_c2w = self.dcb_data.get((key, 'C1C', 'C2W'))
+                if c1c_c2w is not None:
+                    c2w_c2l = self.dcb_data.get((key, 'C2W', 'C2L'))
+                    c2w_c2x = self.dcb_data.get((key, 'C2W', 'C2X'))
+                    if c2w_c2l is not None:
+                        dcb_meters = c1c_c2w + c2w_c2l
+                        found_dcb = True
+                    elif c2w_c2x is not None:
+                        dcb_meters = c1c_c2w + c2w_c2x
+                        found_dcb = True
             
             # Calculate Raw Code STEC
             # The ionospheric delay difference (I1 - I2) is negative since I2 > I1 (P2 > P1).
@@ -187,12 +207,41 @@ class GNSSTECAnalyzer:
             vtec = stec_smooth / m_factor
             
             results[key] = {
-                'vtec': vtec, # In electrons/m^2
-                'vtec_u': vtec / TECU,
+                'vtec': vtec, # In electrons/m^2 (before rx DCB)
+                'vtec_u': vtec / TECU,  # Will be corrected below
                 'stec_u': stec_smooth / TECU,
                 'elev': sat_pos['elev'],
                 'azim': sat_pos['azim']
             }
-            
+        
+        # Receiver DCB estimation and correction
+        # The receiver hardware bias is common to all satellites.
+        # Estimate it as the median per-satellite VTEC offset, then subtract.
+        if len(results) >= 3:
+            raw_vtecs = [r['vtec_u'] for r in results.values() if r['elev'] > 20]
+            if len(raw_vtecs) >= 3:
+                epoch_median = float(np.median(raw_vtecs))
+                
+                # Exponential moving average for receiver DCB
+                self._rx_dcb_count += 1
+                if self._rx_dcb_count == 1:
+                    self._rx_dcb_tecu = epoch_median
+                else:
+                    # Fast convergence initially (alpha=0.1), then slow tracking (alpha=0.005)
+                    alpha = 0.1 if self._rx_dcb_count < 30 else 0.005
+                    self._rx_dcb_tecu = (1 - alpha) * self._rx_dcb_tecu + alpha * epoch_median
+                
+                if self._rx_dcb_count >= 10 and not self._rx_dcb_converged:
+                    self._rx_dcb_converged = True
+                    logger.info(f"Receiver DCB converged: {self._rx_dcb_tecu:.2f} TECU "
+                                f"({self._rx_dcb_tecu * TECU * K * (1/FREQ_GPS_L1**2 - 1/FREQ_GPS_L2**2):.3f} m)")
+                
+                # Only apply correction after initial convergence
+                if self._rx_dcb_converged:
+                    for r in results.values():
+                        r['vtec'] -= self._rx_dcb_tecu * TECU
+                        r['vtec_u'] -= self._rx_dcb_tecu
+                        r['stec_u'] -= self._rx_dcb_tecu  # Approximate
+        
         return results
 

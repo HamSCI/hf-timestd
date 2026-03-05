@@ -1,52 +1,46 @@
 #!/bin/bash
 #
 # Daily IONEX Download Script
-# Run via cron at 02:00 UTC
+# Run via systemd timer (timestd-ionex-download.timer)
+# Output goes to systemd journal via StandardOutput=journal
 #
+
+set -euo pipefail
 
 # Configuration
 IONEX_DIR="/var/lib/timestd/ionex"
-LOG_FILE="/var/log/timestd/ionex_download.log"
 VENV_PYTHON="/opt/hf-timestd/venv/bin/python3"
 SCRIPT_DIR="/opt/hf-timestd/scripts"
 IONEX_SCRIPT="$SCRIPT_DIR/ionex_integration.py"
 
-# Ensure directories exist
+# Ensure IONEX directory exists
 mkdir -p "$IONEX_DIR"
-dirname "$LOG_FILE" | xargs mkdir -p
 
-# Logging function
-log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-}
-
-log "Starting daily IONEX download..."
+echo "Starting daily IONEX download..."
 
 # Check script exists
 if [ ! -f "$IONEX_SCRIPT" ]; then
-    log "ERROR: Script not found at $IONEX_SCRIPT"
+    echo "ERROR: Script not found at $IONEX_SCRIPT"
     exit 1
 fi
 
-# Run python script
 # Calculate yesterday's date
 # Strategy: Try Final first (most accurate), fall back to Rapid (~1 day latency)
 # With Rapid fallback, we only need to search back ~7 days
 YESTERDAY=$(date -d "yesterday" +%Y-%m-%d)
-"$VENV_PYTHON" "$IONEX_SCRIPT" "$YESTERDAY" --output-dir "$IONEX_DIR" --max-days-back 7 >> "$LOG_FILE" 2>&1
-DOWNLOAD_STATUS=$?
+"$VENV_PYTHON" "$IONEX_SCRIPT" "$YESTERDAY" --output-dir "$IONEX_DIR" --max-days-back 7 && DOWNLOAD_STATUS=0 || DOWNLOAD_STATUS=$?
 
 if [ $DOWNLOAD_STATUS -eq 0 ]; then
-    log "✓ IONEX download successful"
+    echo "IONEX download successful"
     
     # Clean up old files (>30 days) to save space
     # Modern files are .gz, legacy are .Z
     find "$IONEX_DIR" -type f -name "*.gz" -mtime +30 -delete
     find "$IONEX_DIR" -type f -name "*.Z" -mtime +30 -delete
-    log "Cleaned up old files"
+    echo "Cleaned up old files"
 else
-    log "✗ IONEX download failed"
+    echo "IONEX download failed"
     exit 1
 fi
 
-log "Done."
+echo "Done."
