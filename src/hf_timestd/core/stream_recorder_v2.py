@@ -322,11 +322,9 @@ class StreamRecorderV2:
         self._health_check_interval = 5.0  # Check every 5 seconds (fast detection)
         self._silence_threshold = 10.0  # Recreate if silent for 10 seconds
         
-        # Timing snapshot polling (~2 Hz to match radiod's status update rate)
-        # Captures GPS_TIME/RTP_TIMESNAP pairs for post-hoc timing analysis
-        self._timing_poll_thread: Optional[threading.Thread] = None
-        self._timing_poll_interval = 0.5  # 2 Hz - matches radiod's default status rate
-        self._last_timing_poll = 0.0
+        # NOTE (2026-03-04): Timing poll thread removed — see start() comment.
+        # GPS/RTP mapping is now seeded once from channel_info in _create_channel().
+        self._timing_poll_thread: Optional[threading.Thread] = None  # kept for stop() compat
         
         # Initialize BinaryArchiveWriter for Phase 1 raw IQ storage
         # Phase 2/3 are handled by separate systemd services (6-service architecture)
@@ -387,15 +385,15 @@ class StreamRecorderV2:
             self._health_monitor_thread.start()
             logger.info(f"{self.config.description}: Health monitoring started")
             
-            # Start timing snapshot polling thread (~2 Hz)
-            # Captures GPS_TIME/RTP_TIMESNAP pairs from radiod for post-hoc timing
-            self._timing_poll_thread = threading.Thread(
-                target=self._timing_poll_loop,
-                name=f"TimingPoll-{self.config.description}",
-                daemon=True
-            )
-            self._timing_poll_thread.start()
-            logger.info(f"{self.config.description}: Timing snapshot polling started (2 Hz)")
+            # NOTE (2026-03-04): Timing poll thread REMOVED.
+            # discover_channels() listens to the GLOBAL status multicast which
+            # mixes status from ALL radiod decoders.  Different decoders for the
+            # same SSRC have different RTP counter spaces, so the poll frequently
+            # returned the wrong rtp_timesnap — corrupting the GPS/RTP mapping
+            # and pushing minute boundaries ~4500s into the future.
+            # The archive writer is now seeded once from channel_info (per-client,
+            # authoritative) in _create_channel(), and re-seeded on radiod restart
+            # via the health monitor's _create_channel() call.
             
             self.session_start_time = time.time()
             
@@ -484,6 +482,28 @@ class StreamRecorderV2:
         self.stream.start()
         self._last_sample_time = time.time()  # Reset silence timer
         logger.info(f"{self.config.description}: RadiodStream started")
+
+        # Seed archive writer with GPS/RTP mapping from the channel's own
+        # ChannelInfo.  ensure_channel() returns timing from our dedicated
+        # multicast group — not the global status multicast, which mixes
+        # status packets from ALL decoders and can return the wrong
+        # rtp_timesnap for our SSRC.
+        gps_time = getattr(self.channel_info, 'gps_time', None)
+        rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
+        if gps_time is not None and rtp_snap is not None:
+            self.archive_writer.add_timing_snapshot(
+                gps_time_ns=gps_time,
+                rtp_timesnap=rtp_snap
+            )
+            logger.info(
+                f"{self.config.description}: Seeded timing from channel_info — "
+                f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_snap}"
+            )
+        else:
+            logger.warning(
+                f"{self.config.description}: channel_info missing timing — "
+                f"gps_time={gps_time}, rtp_timesnap={rtp_snap}"
+            )
 
     def _set_filter_edges(self, ssrc: int):
         """Send filter edge commands to radiod if configured."""

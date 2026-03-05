@@ -15,10 +15,10 @@ longitude = 0.0                         # Your longitude in decimal degrees (REQ
 [ka9q]
 # Your ka9q-radio status multicast address
 # Find this in your radiod config file or use: avahi-browse -rt _ka9q-ctl._udp
-status_address = "<YOUR_RADIOD_STATUS>"  # e.g., hf-status.local or phase-engine-status.local
+status_address = "<YOUR_RADIOD_STATUS>"  # e.g., hf-status.local
 auto_create_channels = true
 # Data source mode: "radiod" (single antenna, 9 channels) or "phase-engine" (beamformed, 17 channels)
-source = "phase-engine"
+source = "radiod"
 
 [recorder]
 # engine = "phase-engine" # Set to phase-engine to enable automatic multi-station channel expansion
@@ -68,104 +68,41 @@ gain = 0
 encoding = "F32"
 archive = true
 
-# NOTE: When source = "phase-engine", we request 17 targeted channels instead of 9 shared frequencies.
-# The phase-engine will isolate each station spatially.
-
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 2500000
-description = "WWV_2500"
-reception_mode = "focus"
-target = "WWV"
-
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 2500000
-description = "WWVH_2500"
-reception_mode = "focus"
-target = "WWVH"
+description = "SHARED_2500"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 5000000
-description = "WWV_5000"
-reception_mode = "focus"
-target = "WWV"
-
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 5000000
-description = "WWVH_5000"
-reception_mode = "focus"
-target = "WWVH"
-
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 5000000
-description = "BPM_5000"
-reception_mode = "focus"
-target = "BPM"
+description = "SHARED_5000"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 10000000
-description = "WWV_10000"
-reception_mode = "focus"
-target = "WWV"
-
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 10000000
-description = "WWVH_10000"
-reception_mode = "focus"
-target = "WWVH"
-
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 10000000
-description = "BPM_10000"
-reception_mode = "focus"
-target = "BPM"
+description = "SHARED_10000"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 15000000
-description = "WWV_15000"
-reception_mode = "focus"
-target = "WWV"
-
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 15000000
-description = "WWVH_15000"
-reception_mode = "focus"
-target = "WWVH"
-
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 15000000
-description = "BPM_15000"
-reception_mode = "focus"
-target = "BPM"
+description = "SHARED_15000"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 20000000
 description = "WWV_20000"
-reception_mode = "focus"
-target = "WWV"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 25000000
 description = "WWV_25000"
-reception_mode = "focus"
-target = "WWV"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 3330000
 description = "CHU_3330"
-reception_mode = "focus"
-target = "CHU"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 7850000
 description = "CHU_7850"
-reception_mode = "focus"
-target = "CHU"
 
 [[recorder.channel_group.timestd.channels]]
 frequency_hz = 14670000
 description = "CHU_14670"
-reception_mode = "focus"
-target = "CHU"
 
 # CHU FSK decode channels are NO LONGER requested as separate USB channels.
 # hf-timestd now derives the 12kHz audio internally from the archived IQ buffers.

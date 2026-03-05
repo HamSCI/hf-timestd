@@ -14,7 +14,9 @@ The answer comes from the RTP timestamp chain — the sole timing authority:
 
 Every buffer's metadata contains:
   - start_rtp_timestamp: RTP timestamp of sample 0
-  - timing_snapshots[]: GPS_TIME / RTP_TIMESNAP pairs from radiod
+  - gps_time_ns: GPS_TIME (ns since GPS epoch) — authoritative, from the writer
+  - rtp_timesnap: RTP counter at GPS_TIME — authoritative, from the writer
+  - timing_snapshots[]: GPS_TIME / RTP_TIMESNAP pairs (legacy, used as fallback)
 
 GPS_TIME is the GPSDO-disciplined ground truth.  RTP_TIMESNAP is the
 RTP counter value at the moment GPS_TIME was sampled.  Both are in the
@@ -98,9 +100,48 @@ def resolve_buffer_timing(
         BufferTiming mapping for this buffer
     """
     start_rtp = metadata.get('start_rtp_timestamp')
-    snapshots = metadata.get('timing_snapshots', [])
 
-    if start_rtp is None or not snapshots:
+    if start_rtp is None:
+        logger.error("No start_rtp_timestamp in metadata — cannot determine buffer timing")
+        return BufferTiming(
+            sample0_utc=0.0,
+            sample_rate=sample_rate,
+            source='no_timing',
+            n_snapshots_used=0,
+            jitter_ms=float('inf')
+        )
+
+    start_rtp = int(start_rtp)
+
+    # Primary: top-level gps_time_ns / rtp_timesnap written by the archive
+    # writer from its authoritative GPS/RTP mapping.  Always present when
+    # timing is locked — no dependency on the timing poll thread.
+    top_gps_ns = metadata.get('gps_time_ns')
+    top_rtp_snap = metadata.get('rtp_timesnap')
+    if top_gps_ns is not None and top_rtp_snap is not None:
+        gps_utc = top_gps_ns / BILLION + GPS_EPOCH_UNIX - GPS_LEAP_SECONDS
+        delta = _rtp_delta_signed(start_rtp, int(top_rtp_snap))
+        sample0_utc = gps_utc + delta / sample_rate
+
+        sst = float(metadata.get('start_system_time', 0))
+        if sst > 0 and abs(sample0_utc - sst) > 1.0:
+            logger.warning(
+                f"BufferTiming: RTP authority gives sample0_utc={sample0_utc:.3f}, "
+                f"writer's start_system_time={sst:.3f} (off by {sample0_utc - sst:+.1f}s)"
+            )
+
+        logger.debug(f"BufferTiming (top-level): sample0_utc={sample0_utc:.6f}")
+        return BufferTiming(
+            sample0_utc=sample0_utc,
+            sample_rate=sample_rate,
+            source='rtp_gps',
+            n_snapshots_used=1,
+            jitter_ms=0.0
+        )
+
+    # Fallback: timing_snapshots[] array (for files written before this change)
+    snapshots = metadata.get('timing_snapshots', [])
+    if not snapshots:
         logger.error("No RTP timing in metadata — cannot determine buffer timing")
         return BufferTiming(
             sample0_utc=0.0,
@@ -110,7 +151,7 @@ def resolve_buffer_timing(
             jitter_ms=float('inf')
         )
 
-    return _from_rtp_gps(int(start_rtp), snapshots, sample_rate, metadata)
+    return _from_rtp_gps(start_rtp, snapshots, sample_rate, metadata)
 
 
 # ── internal helpers ─────────────────────────────────────────────────

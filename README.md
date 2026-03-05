@@ -218,6 +218,7 @@ The system is composed of eight independent services that form a pipeline:
 - **[METROLOGY.md](docs/METROLOGY.md)** - RTP-to-UTC calibration methodology and timing bootstrap.
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System design philosophy ("The Why").
 - **[docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md](docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md)** - Production deployment and verification gates.
+
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mijahauan/hf-timestd)
 
 ---

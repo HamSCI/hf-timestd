@@ -98,29 +98,8 @@ description = "CHU_7850"
 frequency_hz = 14670000
 description = "CHU_14670"
 
-# CHU FSK decode channels: USB preset for FSK tone demodulation
-# These are not archived - only used for real-time FSK decode + timing correlation
-[recorder.chu_fsk]
-preset = "usb"
-sample_rate = 12000
-agc = 0
-gain = 0
-encoding = "F32"
-
-[[recorder.chu_fsk.channels]]
-frequency_hz = 3330000
-description = "CHU_3330_FSK"
-iq_channel = "CHU_3330"
-
-[[recorder.chu_fsk.channels]]
-frequency_hz = 7850000
-description = "CHU_7850_FSK"
-iq_channel = "CHU_7850"
-
-[[recorder.chu_fsk.channels]]
-frequency_hz = 14670000
-description = "CHU_14670_FSK"
-iq_channel = "CHU_14670"
+# CHU FSK decode channels are NO LONGER requested as separate USB channels.
+# hf-timestd now derives the 12kHz audio internally from the archived IQ buffers.
 
 [uploader]
 enabled = true

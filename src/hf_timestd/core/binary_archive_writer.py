@@ -158,6 +158,7 @@ class BinaryArchiveWriter:
         # counter space (input_sample_index / decimation). No pipeline
         # offset correction is needed — the timestamps are authoritative.
         self._gps_time_unix: Optional[float] = None  # GPS_TIME converted to Unix time
+        self._gps_time_ns_raw: Optional[int] = None   # GPS_TIME in original ns (for metadata)
         self._rtp_timesnap: Optional[int] = None     # RTP timestamp at GPS_TIME
         self._timing_locked: bool = False
         
@@ -229,6 +230,7 @@ class BinaryArchiveWriter:
             
             # Store GPS_TIME/RTP_TIMESNAP mapping directly — no correction needed.
             self._gps_time_unix = gps_unix_sec
+            self._gps_time_ns_raw = gps_time_ns
             self._rtp_timesnap = rtp_timesnap
             if not self._timing_locked:
                 self._timing_locked = True
@@ -520,6 +522,10 @@ class BinaryArchiveWriter:
                 'gap_samples': buffer.gap_samples,
                 'start_rtp_timestamp': buffer.start_rtp,
                 'start_system_time': buffer.start_system_time,
+                # Authoritative GPS/RTP mapping from the writer — always present
+                # when timing is locked.  buffer_timing.py uses these directly.
+                'gps_time_ns': self._gps_time_ns_raw,
+                'rtp_timesnap': self._rtp_timesnap,
                 'dtype': 'complex64',
                 'byte_order': 'little',
                 'compression': compression if compression != 'none' else None,
