@@ -13,15 +13,53 @@ K = 40.308       # Ionospheric constant m^3/s^2
 FREQ_GPS_L1 = 1575.42e6
 FREQ_GPS_L2 = 1227.60e6
 
+# Minimum VTEC floor for receiver DCB estimation (TECU).
+# Night-time mid-latitude VTEC rarely drops below 2-5 TECU.
+# Using 2 TECU as a conservative floor.
+MIN_VTEC_FLOOR_TECU = 2.0
+
 class GNSSTECAnalyzer:
     def __init__(self, dcb_data=None):
-        self.dcb_data = dcb_data if dcb_data else {}
-        self.state = defaultdict(dict) # sv_key -> {'leveling_bias': float, 'count': int, 'last_phase_gf': float}
+        self.dcb_data = self._build_l2c_dcbs(dcb_data) if dcb_data else {}
+        self.state = defaultdict(dict) # sv_key -> {'count', 'sum_diff', 'last_l_gf'}
         self.sat_positions = {} # sv_key -> {'elev': float, 'azim': float, 'updated': float}
-        # Receiver DCB estimation state
-        self._rx_dcb_tecu = 0.0   # Current receiver DCB estimate (TECU)
-        self._rx_dcb_count = 0    # Number of epochs used
-        self._rx_dcb_converged = False
+        # Receiver inter-frequency bias (meters in P1-P2 domain).
+        # Estimated once from the first epoch's high-elevation satellites
+        # using the minimum-VTEC physical constraint.
+        self._rx_dcb_meters = 0.0
+        self._rx_dcb_estimated = False
+
+    @staticmethod
+    def _build_l2c_dcbs(dcb_data):
+        """Build C1C-C2L DCBs for ZED-F9P (L2C) from SINEX chain.
+
+        The SINEX file provides C1C-C2W and C2W-C2L separately.
+        ZED-F9P measures L2C (sigId 3/4), so the correct satellite DCB is:
+            DCB(C1C, C2L) = DCB(C1C, C2W) - DCB(C2W, C2L)
+
+        If C1C-C2L or C1C-C2X is directly available, prefer those.
+        """
+        if not dcb_data:
+            return {}
+        enriched = dict(dcb_data)
+        # Synthesize C1C-C2L for every GPS satellite that has the chain
+        svs = set(k[0] for k in dcb_data.keys() if k[0].startswith('G'))
+        for sv in svs:
+            # Skip if direct C1C-C2L already present
+            if (sv, 'C1C', 'C2L') in enriched:
+                continue
+            c1c_c2w = dcb_data.get((sv, 'C1C', 'C2W'))
+            c2w_c2l = dcb_data.get((sv, 'C2W', 'C2L'))
+            if c1c_c2w is not None and c2w_c2l is not None:
+                enriched[(sv, 'C1C', 'C2L')] = c1c_c2w - c2w_c2l
+            # Also try C1C-C2X from C1C-C2W - C2W-C2X
+            if (sv, 'C1C', 'C2X') not in enriched:
+                c2w_c2x = dcb_data.get((sv, 'C2W', 'C2X'))
+                if c1c_c2w is not None and c2w_c2x is not None:
+                    enriched[(sv, 'C1C', 'C2X')] = c1c_c2w - c2w_c2x
+        n_synth = sum(1 for sv in svs if (sv, 'C1C', 'C2L') in enriched)
+        logger.info(f"DCB: {n_synth} GPS satellites with C1C-C2L (synthesized from chain)")
+        return enriched
         
     def update_satellite_positions(self, nav_sat_msg, timestamp):
         """
@@ -39,209 +77,187 @@ class GNSSTECAnalyzer:
                 'updated': timestamp
             }
 
+    def _get_sat_dcb(self, sv_key):
+        """Look up satellite DCB in meters for the given SV."""
+        for k in [
+            (sv_key, 'C1C', 'C2L'),  # Correct for ZED-F9P L2C
+            (sv_key, 'C1C', 'C2X'),  # L2C(M+L) alternative
+            (sv_key, 'C1C', 'C2W'),  # L2P(Y) fallback, ~0.15m error
+        ]:
+            if k in self.dcb_data:
+                return self.dcb_data[k]
+        return 0.0
+
+    @staticmethod
+    def _slm_mapping(elev_deg):
+        """Single-layer mapping function (VTEC → STEC)."""
+        el_rad = np.radians(elev_deg)
+        Re = 6371e3
+        H_ion = 350e3
+        return 1.0 / np.sqrt(1.0 - (Re * np.cos(el_rad) / (Re + H_ion))**2)
+
+    def _group_observations(self, rawx_msg):
+        """Group RAWX measurements by satellite, extracting L1/L2 code + phase."""
+        sat_obs = defaultdict(dict)
+        for meas in rawx_msg['measurements']:
+            if meas['gnssId'] != 0:
+                continue  # GPS only
+            key = f"G{meas['svId']:02d}"
+            sig_id = meas['sigId']
+            # ZED-F9P RAWX sigIds: 0=L1C/A, 3=L2CL, 4=L2CM
+            if sig_id == 0:
+                sat_obs[key]['P1'] = meas['prMes']
+                sat_obs[key]['L1'] = meas['cpMes']
+            elif sig_id in [3, 4]:
+                sat_obs[key]['P2'] = meas['prMes']
+                sat_obs[key]['L2'] = meas['cpMes']
+        return sat_obs
+
+    def _estimate_rx_dcb(self, sat_obs, denom):
+        """Estimate receiver inter-frequency bias from first epoch.
+
+        Uses the minimum-VTEC physical constraint: true VTEC >= MIN_VTEC_FLOOR_TECU.
+
+        The receiver DCB adds a constant bias B (meters) to P1-P2 for ALL
+        satellites.  In code-STEC: bias = B / denom (constant STEC offset).
+        In VTEC: bias_vtec_i = (B/denom) / m_i  (varies per sat by mapping).
+
+        We compute raw code VTEC for high-elevation sats.  The MINIMUM
+        raw VTEC satellite has the largest ionospheric path (lowest elev
+        of those considered), so its true VTEC is likely the smallest.
+        Setting min(raw_VTEC) = FLOOR gives us the receiver DCB directly.
+        """
+        # Collect (raw_code_stec, mapping_factor, raw_vtec) per satellite
+        sat_data = []
+        for sv, obs in sat_obs.items():
+            if not all(k in obs for k in ('P1', 'P2', 'L1', 'L2')):
+                continue
+            sat_pos = self.sat_positions.get(sv)
+            if not sat_pos or sat_pos['elev'] < 20:
+                continue
+            dcb_sat = self._get_sat_dcb(sv)
+            term = (obs['P1'] - obs['P2']) - dcb_sat
+            stec_code = term / denom
+            m_f = self._slm_mapping(sat_pos['elev'])
+            vtec = stec_code / m_f / TECU  # TECU
+            sat_data.append((sv, stec_code, m_f, vtec))
+
+        if len(sat_data) < 4:
+            return  # Not enough satellites
+
+        vtec_vals = [d[3] for d in sat_data]
+        min_vtec_raw = min(vtec_vals)
+        median_vtec = float(np.median(vtec_vals))
+
+        if min_vtec_raw >= MIN_VTEC_FLOOR_TECU:
+            self._rx_dcb_estimated = True
+            logger.info(f"Rx DCB: not needed, min raw VTEC = {min_vtec_raw:.1f} TECU")
+            return
+
+        # Find the satellite with the minimum VTEC
+        min_idx = vtec_vals.index(min_vtec_raw)
+        _, stec_min, m_f_min, _ = sat_data[min_idx]
+
+        # We want: (stec_min - B/denom) / m_f_min / TECU = MIN_VTEC_FLOOR_TECU
+        # => stec_min - B/denom = MIN_VTEC_FLOOR_TECU * TECU * m_f_min
+        # => B/denom = stec_min - MIN_VTEC_FLOOR_TECU * TECU * m_f_min
+        # => B = (stec_min - MIN_VTEC_FLOOR_TECU * TECU * m_f_min) * denom
+        rx_dcb_meters = (stec_min - MIN_VTEC_FLOOR_TECU * TECU * m_f_min) * denom
+
+        self._rx_dcb_meters = rx_dcb_meters
+        self._rx_dcb_estimated = True
+        logger.info(f"Rx DCB estimated: {rx_dcb_meters:.3f} m "
+                    f"({rx_dcb_meters/0.299792458:.1f} ns), "
+                    f"min_raw_vtec={min_vtec_raw:.1f}, "
+                    f"deficit={MIN_VTEC_FLOOR_TECU - min_vtec_raw:.1f} TECU, "
+                    f"median_raw_vtec={median_vtec:.1f}")
+
     def process_rawx(self, rawx_msg):
         """
         Process RXM-RAWX epoch.
         Returns dictionary of results: {sv_key: {'vtec': float, 'stec': float, 'elev': float}}
         """
         results = {}
-        
-        # Group by Satellite
-        sat_obs = defaultdict(dict)
-        for meas in rawx_msg['measurements']:
-            gnss_id = meas['gnssId']
-            sv_id = meas['svId']
-            if gnss_id != 0: continue # Only GPS
-            
-            key = f"G{sv_id:02d}"
-            sig_id = meas['sigId']
-            
-            # Map sigId to Band (L1/L2)
-            # GPS: L1C/A (sigId=0), L2CL (sigId=3), L2CM (sigId=4) -> ZED-F9P usually 0 and 3/4? 
-            # Note: ZED-F9P RAWX sigIds:
-            # 0: L1C/A
-            # 3: L2C (L2 CL)
-            # 4: L2C (L2 CM)
-            # Need to create 'L1' and 'L2' logical observations
-            
-            if sig_id == 0:
-                sat_obs[key]['P1'] = meas['prMes']
-                sat_obs[key]['L1'] = meas['cpMes']
-            elif sig_id in [3, 4]: 
-                # Prefer one? Or just overwrite. L2CL/CM are same freq.
-                sat_obs[key]['P2'] = meas['prMes']
-                sat_obs[key]['L2'] = meas['cpMes']
-                
-        # Calculate TEC for each satellite
+        f1 = FREQ_GPS_L1
+        f2 = FREQ_GPS_L2
+        denom = K * (1.0/f1**2 - 1.0/f2**2)  # negative
+
+        sat_obs = self._group_observations(rawx_msg)
+
+        # Estimate receiver DCB once on the first usable epoch.
+        if not self._rx_dcb_estimated:
+            self._estimate_rx_dcb(sat_obs, denom)
+            if self._rx_dcb_estimated:
+                # Reset leveling state — it was built with uncorrected
+                # stec_code and must reconverge with the new rx DCB.
+                self.state.clear()
+
+        # Compute per-satellite STEC with all DCB corrections + leveling.
         for key, obs in sat_obs.items():
-            if 'P1' not in obs or 'P2' not in obs or 'L1' not in obs or 'L2' not in obs:
+            if not all(k in obs for k in ('P1', 'P2', 'L1', 'L2')):
                 continue
-                
-            # Get Elevation
+
             sat_pos = self.sat_positions.get(key)
-            if not sat_pos: continue # Need elevation for mapping
-            if sat_pos['elev'] < 10: continue # Elevation mask
-            
-            # 1. Geometry-Free Combination (Code)
-            # STEC_code = F * ( (P2 - P1) - c * DCB_sat )
-            # F = f1^2 * f2^2 / (40.3 * (f1^2 - f2^2))
-            
-            f1 = FREQ_GPS_L1
-            f2 = FREQ_GPS_L2
-            
-            p1 = obs['P1']
-            p2 = obs['P2']
-            
-            # DCB Correction
-            # ZED-F9P uses L1 C/A (C1C) and L2C (C2L). CAS Rapid DCB files
-            # rarely provide direct C1C→C2L; instead they provide C1C→C2W and
-            # C2W→C2L separately. Compose: DCB(C1C,C2L) = DCB(C1C,C2W) + DCB(C2W,C2L).
-            dcb_meters = 0.0
-            
-            # 1. Try direct lookup first (L2C signals only — matches ZED-F9P)
-            lookup_keys = [
-                (key, 'C1C', 'C2L'), # L1 C/A - L2C(L)
-                (key, 'C1C', 'C2X'), # L1 C/A - L2C(M+L)
-            ]
-            
-            found_dcb = False
-            for k in lookup_keys:
-                if k in self.dcb_data:
-                    dcb_meters = self.dcb_data[k]
-                    found_dcb = True
-                    break
-            
-            # 2. Compose C1C→C2W + C2W→C2L (or C2W→C2X) if no direct match
-            if not found_dcb:
-                c1c_c2w = self.dcb_data.get((key, 'C1C', 'C2W'))
-                if c1c_c2w is not None:
-                    c2w_c2l = self.dcb_data.get((key, 'C2W', 'C2L'))
-                    c2w_c2x = self.dcb_data.get((key, 'C2W', 'C2X'))
-                    if c2w_c2l is not None:
-                        dcb_meters = c1c_c2w + c2w_c2l
-                        found_dcb = True
-                    elif c2w_c2x is not None:
-                        dcb_meters = c1c_c2w + c2w_c2x
-                        found_dcb = True
-            
-            # Calculate Raw Code STEC
-            # The ionospheric delay difference (I1 - I2) is negative since I2 > I1 (P2 > P1).
-            # 1/f1^2 - 1/f2^2 is also negative. The negatives cancel to yield a positive STEC.
-            term = (p1 - p2) + dcb_meters # Ignoring receiver bias for now
-            denom = K * (1.0/f1**2 - 1.0/f2**2)  # Preserved actual sign (negative)
-            stec_code = term / denom             # neg / neg = positive STEC
-            
-            # 2. Carrier Phase Smoothing (Levelling)
-            lamb1 = C / f1
-            lamb2 = C / f2
-            l1_m = obs['L1'] * lamb1
-            l2_m = obs['L2'] * lamb2
-            
-            # Phase difference (geometry free)
-            l_gf = l1_m - l2_m # Meters
-            
-            # L_gf = L1_m - L2_m = - K * TEC * (1/f1^2 - 1/f2^2) = - denom * TEC
+            if not sat_pos or sat_pos['elev'] < 10:
+                continue
+
+            p1, p2 = obs['P1'], obs['P2']
+
+            # DCB correction: satellite + receiver
+            dcb_sat = self._get_sat_dcb(key)
+            term = (p1 - p2) - dcb_sat - self._rx_dcb_meters
+            stec_code = term / denom
+
+            # Carrier Phase Smoothing (Levelling)
+            l1_m = obs['L1'] * (C / f1)
+            l2_m = obs['L2'] * (C / f2)
+            l_gf = l1_m - l2_m
             stec_phase_raw = l_gf / (-denom)
 
-            
-            # Levelling logic: STEC = STEC_phase_raw + Offset
-            # Offset = Mean(STEC_code - STEC_phase_raw)
-            
             state = self.state[key]
             if 'count' not in state:
                 state['count'] = 0
                 state['sum_diff'] = 0.0
-                state['smooth_stec'] = 0.0
                 state['last_l_gf'] = None
-                
-            # Carrier Smoothing (Arc based)
-            # Check for cycle slip (large jump in L_gf)
-            # A cycle slip causes a sudden jump in the geometry-free phase combination
-            CYCLE_SLIP_THRESHOLD = 0.5  # meters - typical L1 wavelength is ~0.19m
-            
+
+            # Cycle slip detection
+            CYCLE_SLIP_THRESHOLD = 0.5  # meters
             if state['last_l_gf'] is not None:
-                l_gf_jump = abs(l_gf - state['last_l_gf'])
-                if l_gf_jump > CYCLE_SLIP_THRESHOLD:
-                    # Cycle slip detected - reset leveling for this satellite
-                    logger.debug(f"{key}: Cycle slip detected (jump={l_gf_jump:.2f}m), resetting leveling")
+                if abs(l_gf - state['last_l_gf']) > CYCLE_SLIP_THRESHOLD:
+                    logger.debug(f"{key}: Cycle slip, resetting leveling")
                     state['count'] = 0
                     state['sum_diff'] = 0.0
-            
             state['last_l_gf'] = l_gf
-            
+
             diff = stec_code - stec_phase_raw
-            
-            # Update running mean (Levelling) with exponential weighting
-            # This prevents unbounded accumulation of bias
             n = state['count'] + 1
-            
-            # Use exponential moving average after initial convergence (100 samples)
             if n <= 100:
-                # Initial convergence: simple accumulation
                 state['sum_diff'] = state.get('sum_diff', 0.0) + diff
                 state['count'] = n
                 offset = state['sum_diff'] / n
             else:
-                # After convergence: exponential moving average (alpha = 0.01)
-                # This allows slow adaptation while preventing runaway drift
                 alpha = 0.01
                 old_offset = state['sum_diff'] / state['count']
                 offset = (1 - alpha) * old_offset + alpha * diff
-                state['sum_diff'] = offset * state['count']  # Update sum to match new offset
-            
+                state['sum_diff'] = offset * state['count']
+
             stec_smooth = stec_phase_raw + offset
-            
-            # Sanity check: STEC should be positive (ionosphere delays signals)
-            # If negative, use code-only STEC (less precise but always valid)
-            if stec_smooth < 0:
-                logger.debug(f"{key}: Negative STEC ({stec_smooth/TECU:.2f} TECU), using code-only")
-                stec_smooth = stec_code
-            
-            # 3. Mapping Function (VTEC)
-            # SLM (Single Layer Model)
-            el_rad = np.radians(sat_pos['elev'])
-            Re = 6371e3
-            H_ion = 350e3
-            m_factor = 1.0 / np.sqrt(1.0 - (Re * np.cos(el_rad) / (Re + H_ion))**2)
-            
+
+            # Skip unphysical values after leveling convergence
+            if n > 30 and stec_smooth < 0:
+                logger.debug(f"{key}: Negative STEC ({stec_smooth/TECU:.2f} TECU), skipping")
+                continue
+
+            m_factor = self._slm_mapping(sat_pos['elev'])
             vtec = stec_smooth / m_factor
-            
+
             results[key] = {
-                'vtec': vtec, # In electrons/m^2 (before rx DCB)
-                'vtec_u': vtec / TECU,  # Will be corrected below
+                'vtec': vtec,
+                'vtec_u': vtec / TECU,
                 'stec_u': stec_smooth / TECU,
                 'elev': sat_pos['elev'],
                 'azim': sat_pos['azim']
             }
-        
-        # Receiver DCB estimation and correction
-        # The receiver hardware bias is common to all satellites.
-        # Estimate it as the median per-satellite VTEC offset, then subtract.
-        if len(results) >= 3:
-            raw_vtecs = [r['vtec_u'] for r in results.values() if r['elev'] > 20]
-            if len(raw_vtecs) >= 3:
-                epoch_median = float(np.median(raw_vtecs))
-                
-                # Exponential moving average for receiver DCB
-                self._rx_dcb_count += 1
-                if self._rx_dcb_count == 1:
-                    self._rx_dcb_tecu = epoch_median
-                else:
-                    # Fast convergence initially (alpha=0.1), then slow tracking (alpha=0.005)
-                    alpha = 0.1 if self._rx_dcb_count < 30 else 0.005
-                    self._rx_dcb_tecu = (1 - alpha) * self._rx_dcb_tecu + alpha * epoch_median
-                
-                if self._rx_dcb_count >= 10 and not self._rx_dcb_converged:
-                    self._rx_dcb_converged = True
-                    logger.info(f"Receiver DCB converged: {self._rx_dcb_tecu:.2f} TECU "
-                                f"({self._rx_dcb_tecu * TECU * K * (1/FREQ_GPS_L1**2 - 1/FREQ_GPS_L2**2):.3f} m)")
-                
-                # Only apply correction after initial convergence
-                if self._rx_dcb_converged:
-                    for r in results.values():
-                        r['vtec'] -= self._rx_dcb_tecu * TECU
-                        r['vtec_u'] -= self._rx_dcb_tecu
-                        r['stec_u'] -= self._rx_dcb_tecu  # Approximate
-        
+
         return results
 
