@@ -128,56 +128,76 @@ class SpaceWeatherService:
             hours: Number of hours of history (max 7 days from NOAA)
         
         Returns:
-            List of XrayFlux measurements
+            List of XrayFlux measurements (one per timestamp, both bands merged)
         """
+        # Select the smallest NOAA endpoint that covers the requested window
+        if hours <= 6:
+            endpoint = "xrays-6-hour.json"
+            cache_key = "xray_6hour"
+        elif hours <= 24:
+            endpoint = "xrays-1-day.json"
+            cache_key = "xray_1day"
+        elif hours <= 72:
+            endpoint = "xrays-3-day.json"
+            cache_key = "xray_3day"
+        else:
+            endpoint = "xrays-7-day.json"
+            cache_key = "xray_7day"
+
         def fetch():
-            # NOAA provides 6-hour data (primary satellite)
-            url = f"{self.NOAA_BASE_URL}/goes/primary/xrays-6-hour.json"
+            url = f"{self.NOAA_BASE_URL}/goes/primary/{endpoint}"
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             return response.json()
         
-        data = self._get_cached_or_fetch("xray_6hour", fetch)
+        data = self._get_cached_or_fetch(cache_key, fetch)
         if not data:
             return []
         
         # Parse and filter by time range
         cutoff = datetime.utcnow() - timedelta(hours=hours)
-        results = []
-        
+
+        # NOAA returns two rows per timestamp (short 0.05-0.4nm and long
+        # 0.1-0.8nm bands).  Merge them into one XrayFlux per timestamp.
+        merged: Dict[str, Dict] = {}  # time_tag -> {flux_short, flux_long, satellite}
+
         for item in data:
             try:
-                ts = datetime.strptime(item['time_tag'], '%Y-%m-%dT%H:%M:%SZ')
+                ts_str = item['time_tag']
+                ts = datetime.strptime(ts_str, '%Y-%m-%dT%H:%M:%SZ')
                 if ts < cutoff:
                     continue
                 
-                # Parse energy channel to determine short/long wavelength
                 energy = item.get('energy', '')
                 flux_val = float(item.get('flux', 0))
-                
-                # 0.05-0.4nm is short, 0.1-0.8nm is long
+                satellite = int(item.get('satellite', 0))
+
+                if ts_str not in merged:
+                    merged[ts_str] = {'flux_short': 0.0, 'flux_long': 0.0, 'satellite': satellite}
+
                 if '0.05-0.4' in energy:
-                    flux_short = flux_val
-                    flux_long = 0  # Will be filled by next entry
+                    merged[ts_str]['flux_short'] = flux_val
                 elif '0.1-0.8' in energy:
-                    flux_short = 0  # Use previous entry if needed
-                    flux_long = flux_val
+                    merged[ts_str]['flux_long'] = flux_val
                 else:
-                    flux_short = flux_val
-                    flux_long = flux_val
-                
-                xray = XrayFlux(
-                    timestamp=item['time_tag'],
-                    flux_short=flux_short,
-                    flux_long=flux_long,
-                    satellite=int(item.get('satellite', 0))
-                )
-                results.append(xray)
+                    # Unknown band — treat as long
+                    merged[ts_str]['flux_long'] = flux_val
             except (ValueError, KeyError) as e:
                 logger.debug(f"Skipping invalid X-ray entry: {e}")
                 continue
+
+        results = [
+            XrayFlux(
+                timestamp=ts_str,
+                flux_short=vals['flux_short'],
+                flux_long=vals['flux_long'],
+                satellite=vals['satellite'],
+            )
+            for ts_str, vals in sorted(merged.items())
+            if vals['flux_long'] > 0  # Drop entries with no long-band data
+        ]
         
-        logger.info(f"Retrieved {len(results)} X-ray flux measurements")
+        logger.info(f"Retrieved {len(results)} X-ray flux measurements ({endpoint})")
         return results
     
     def get_kp_index(self, hours: int = 24) -> List[KpIndex]:
