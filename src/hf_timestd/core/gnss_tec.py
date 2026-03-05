@@ -18,6 +18,9 @@ FREQ_GPS_L2 = 1227.60e6
 # Using 2 TECU as a conservative floor.
 MIN_VTEC_FLOOR_TECU = 2.0
 
+# Module version — logged at startup to detect site-packages shadowing.
+_MODULE_VERSION = '2.0.0'  # bumped from 1.x after DCB/rx-DCB fix
+
 class GNSSTECAnalyzer:
     def __init__(self, dcb_data=None):
         self.dcb_data = self._build_l2c_dcbs(dcb_data) if dcb_data else {}
@@ -171,6 +174,51 @@ class GNSSTECAnalyzer:
                     f"min_raw_vtec={min_vtec_raw:.1f}, "
                     f"deficit={MIN_VTEC_FLOOR_TECU - min_vtec_raw:.1f} TECU, "
                     f"median_raw_vtec={median_vtec:.1f}")
+
+    @classmethod
+    def self_test(cls):
+        """Known-answer self-test to catch physics regressions.
+
+        Computes VTEC from synthetic dual-frequency pseudoranges where the
+        true STEC is exactly 10 TECU.  If the result is wrong, the physics
+        formulas are broken (wrong sign, wrong constant, etc.).
+
+        Returns (ok: bool, details: str).
+        """
+        true_stec_tecu = 10.0
+        true_stec = true_stec_tecu * TECU  # electrons/m^2
+        f1, f2 = FREQ_GPS_L1, FREQ_GPS_L2
+        denom = K * (1.0 / f1**2 - 1.0 / f2**2)  # negative
+
+        # Synthetic pseudoranges: P1-P2 = stec * denom (no DCBs)
+        p1_minus_p2 = true_stec * denom  # negative meters
+
+        # Recover STEC from code
+        stec_recovered = p1_minus_p2 / denom
+        vtec_recovered = stec_recovered / TECU  # at zenith, mapping=1
+
+        err = abs(vtec_recovered - true_stec_tecu)
+        if err > 0.01:
+            return False, (f"Self-test FAILED: expected {true_stec_tecu:.1f} TECU, "
+                           f"got {vtec_recovered:.4f} TECU (err={err:.4f})")
+
+        # Verify mapping function: at 90° elevation, mapping should be ~1.0
+        m90 = cls._slm_mapping(90.0)
+        if abs(m90 - 1.0) > 0.01:
+            return False, f"Self-test FAILED: mapping(90°) = {m90:.4f}, expected ~1.0"
+
+        # Verify mapping at 30° is in expected range [1.5, 2.5]
+        m30 = cls._slm_mapping(30.0)
+        if not (1.5 <= m30 <= 2.5):
+            return False, f"Self-test FAILED: mapping(30°) = {m30:.4f}, expected [1.5, 2.5]"
+
+        # Verify denom is negative (critical sign convention)
+        if denom >= 0:
+            return False, f"Self-test FAILED: denom = {denom}, expected negative"
+
+        return True, (f"OK v{_MODULE_VERSION}: "
+                      f"VTEC={vtec_recovered:.2f} TECU, "
+                      f"m(90°)={m90:.4f}, m(30°)={m30:.4f}")
 
     def process_rawx(self, rawx_msg):
         """

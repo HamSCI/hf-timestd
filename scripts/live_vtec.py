@@ -95,7 +95,20 @@ def main():
     # 3. Processing Loop
     parser_ubx = UBXParser()
     analyzer = GNSSTECAnalyzer(dcb_data)
-    
+
+    # Startup self-test: catch physics regressions before entering main loop
+    from hf_timestd.core.gnss_tec import _MODULE_VERSION
+    ok, details = GNSSTECAnalyzer.self_test()
+    if ok:
+        logger.info(f"GNSSTECAnalyzer self-test: {details}")
+    else:
+        logger.error(f"GNSSTECAnalyzer self-test: {details}")
+        logger.error("Aborting — VTEC physics self-test failed. "
+                     "Check for stale site-packages or code regression.")
+        return
+    logger.info(f"gnss_tec module version: {_MODULE_VERSION} "
+                f"(source: {GNSSTECAnalyzer.__module__})")
+
     # Notify systemd we're ready
     if SYSTEMD_AVAILABLE:
         systemd_daemon.notify('READY=1')
@@ -140,11 +153,19 @@ def main():
         except Exception as e:
             logger.error(f"Failed to initialize HDF5 writer: {e}", exc_info=True)
 
+    # Plausibility bounds for VTEC (TECU).  Nighttime minimum ~1, daytime
+    # storm maximum ~300, but sustained values outside [0,150] indicate a
+    # processing bug rather than real ionospheric conditions.
+    VTEC_PLAUSIBLE_MIN = -1.0   # allow slight noise around zero
+    VTEC_PLAUSIBLE_MAX = 150.0
+    CONSECUTIVE_REJECT_LIMIT = 300  # ~5 min at 1 Hz
+
     try:
         bytes_received = 0
         msg_count = 0
         last_log_time = time.time()
-        last_data_time = time.time()  # Track when we last received valid VTEC data
+        last_data_time = time.time()  # Track when we last got a SUCCESSFUL HDF5 write
+        consecutive_rejects = 0       # Plausibility rejections in a row
         
         while True:
             try:
@@ -195,9 +216,22 @@ def main():
                         valid_vtecs = [r['vtec_u'] for r in results.values() if r['elev'] > 20]
                         if valid_vtecs:
                             avg_vtec = sum(valid_vtecs) / len(valid_vtecs)
-                            # Sanity check: 0-150 TECU is normal.
                             logger.info(f"VTEC: {avg_vtec:.2f} TECU (Sats: {len(valid_vtecs)})")
-                            last_data_time = time.time()  # Reset watchdog on successful VTEC output
+
+                            # ── Plausibility gate ──
+                            if not (VTEC_PLAUSIBLE_MIN <= avg_vtec <= VTEC_PLAUSIBLE_MAX):
+                                consecutive_rejects += 1
+                                if consecutive_rejects == 1 or consecutive_rejects % 60 == 0:
+                                    logger.warning(
+                                        f"VTEC plausibility rejection #{consecutive_rejects}: "
+                                        f"{avg_vtec:.2f} TECU outside [{VTEC_PLAUSIBLE_MIN}, {VTEC_PLAUSIBLE_MAX}]")
+                                if consecutive_rejects >= CONSECUTIVE_REJECT_LIMIT:
+                                    logger.error(
+                                        f"{consecutive_rejects} consecutive implausible VTEC values "
+                                        f"— exiting for restart (possible processing bug)")
+                                    break
+                                continue  # skip CSV + HDF5 write
+                            consecutive_rejects = 0
                             
                             # Write to CSV
                             line = f"{timestamp},{avg_vtec:.2f},{len(valid_vtecs)}\n"
@@ -206,6 +240,7 @@ def main():
                                 csv_file.write(line)
                             
                             # Write to HDF5
+                            hdf5_ok = False
                             if hdf5_writer:
                                 try:
                                     from datetime import datetime as dt, timezone as tz
@@ -220,8 +255,13 @@ def main():
                                         'dcb_corrected': bool(dcb_data)
                                     }
                                     hdf5_writer.write_measurement(measurement)
+                                    hdf5_ok = True
                                 except Exception as e:
                                     logger.error(f"Failed to write HDF5: {e}")
+
+                            # Only reset watchdog on successful persistent write
+                            if hdf5_ok or not hdf5_writer:
+                                last_data_time = time.time()
                         else:
                             logger.debug(f"No valid VTEC solutions (Low elevation or no lock). Total sats: {len(results)}")
                     else:

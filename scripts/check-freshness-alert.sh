@@ -165,6 +165,14 @@ FAILED=false
 check_output_freshness "Fusion" "$DATA_ROOT/phase2/fusion" "*fusion_timing_*.h5" "$MAX_FUSION_STALE_SECONDS" || FAILED=true
 check_output_freshness "Physics" "$DATA_ROOT/phase2/science/tec" "*tec_*.h5" "$MAX_PHYSICS_STALE_SECONDS" || FAILED=true
 
+# GNSS VTEC: optional service, only check if directory exists and service is active
+MAX_VTEC_STALE_SECONDS=600  # 10 min; VTEC writes at 1 Hz but allow receiver restarts
+if systemctl is-active --quiet timestd-vtec 2>/dev/null; then
+    if [ -d "$DATA_ROOT/data/gnss_vtec" ]; then
+        check_output_freshness "GNSS_VTEC" "$DATA_ROOT/data/gnss_vtec" "*gnss_vtec_*.h5" "$MAX_VTEC_STALE_SECONDS" || FAILED=true
+    fi
+fi
+
 if [ "$FAILED" = true ]; then
     exit 1
 fi
