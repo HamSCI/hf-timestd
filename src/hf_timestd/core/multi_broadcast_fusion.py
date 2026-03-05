@@ -198,12 +198,11 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 # HDF5 I/O for reading L1A and L2 data products
 try:
     from hf_timestd.io import DataProductReader
+    HDF5_AVAILABLE = True
 except ImportError:
     HDF5_AVAILABLE = False
     logger.warning("h5py/xarray not available, HDF5 reads will fail")
 
-# HDF5 is enabled
-HDF5_AVAILABLE = True
 if not HDF5_AVAILABLE:
     logger.warning("HDF5 storage DISABLED")
 
@@ -4980,7 +4979,7 @@ def run_fusion_service(
     #
     # In fusion authority mode, MetrologyEngine writes bootstrap_state.json
     # when FusionTimingState achieves PROVISIONAL or REFINED lock.
-    _skip_bootstrap_gate = False
+    _skip_bootstrap_gate = True  # Default: skip gate (RTP authority assumed)
     try:
         import toml as _toml
         _config_path = Path('/etc/hf-timestd/timestd-config.toml')
@@ -4990,9 +4989,13 @@ def run_fusion_service(
             _authority = _cfg.get('timing', {}).get('authority', 'rtp')
             if _authority == 'rtp':
                 logger.info("[BOOTSTRAP] RTP authority mode (GPS+PPS) - skipping bootstrap gate")
-                _skip_bootstrap_gate = True
+            else:
+                logger.info(f"[BOOTSTRAP] Authority mode '{_authority}' - bootstrap gate enabled")
+                _skip_bootstrap_gate = False
+        else:
+            logger.info("[BOOTSTRAP] No config file found - defaulting to RTP authority (skip gate)")
     except Exception as e:
-        logger.warning(f"[BOOTSTRAP] Could not read config to check authority: {e}")
+        logger.warning(f"[BOOTSTRAP] Could not read config to check authority: {e} - defaulting to skip gate")
     
     if not _skip_bootstrap_gate:
         try:

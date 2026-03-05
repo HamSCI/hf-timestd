@@ -44,7 +44,7 @@ ExecStartPre=+/bin/sh -c 'ipcrm -M 0x4e545031 2>/dev/null || true'
 # Fusion creates fresh SHM on startup; chrony holds stale segment references
 # from the previous fusion instance and will show reach=0 until restarted.
 # The + prefix runs as root (required for systemctl).
-ExecStartPost=+/bin/sh -c 'sleep 3 && systemctl restart chrony 2>/dev/null || true'
+ExecStartPost=+/bin/sh -c 'sleep 3 && systemctl restart --no-block chrony 2>/dev/null || true'
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
