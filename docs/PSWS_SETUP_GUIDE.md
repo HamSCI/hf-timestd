@@ -91,14 +91,35 @@ You should see: `Number of key(s) added: 1`
 
 ### Step 6: Test Authentication
 
-Verify SSH key authentication is working:
+Verify the full upload chain with the built-in preflight check:
 
 ```bash
-# Test SFTP connection (should connect without password)
-sudo -u timestd sftp -i /home/timestd/.ssh/id_rsa_psws -o BatchMode=yes S000171@pswsnetwork.eng.ua.edu <<< "quit"
+sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape test-upload
 ```
 
-If it asks for a password, authentication setup failed - check your TOKEN and try Step 5 again.
+This tests three things in sequence:
+1. **TCP connectivity** to `pswsnetwork.eng.ua.edu:22`
+2. **SSH key** exists at the configured path with correct permissions
+3. **SFTP autologin** connects and authenticates without a password
+
+Expected output when everything is configured correctly:
+```
+PSWS Upload Preflight Check
+  Host:    pswsnetwork.eng.ua.edu
+  User:    S000171
+  SSH key: /home/timestd/.ssh/id_rsa_psws
+
+[1/3] TCP connectivity to pswsnetwork.eng.ua.edu:22 ... OK (0.1s)
+[2/3] SSH key at /home/timestd/.ssh/id_rsa_psws ... OK
+      Public key: ssh-rsa AAAAB3NzaC1yc2EAAA...
+[3/3] SFTP autologin as S000171@pswsnetwork.eng.ua.edu ... OK (1.0s)
+
+All checks passed — PSWS upload should work.
+```
+
+If step 3 fails, authentication setup is incomplete — check your TOKEN and try Step 5 again.
+
+> **Note:** You must run this as the `timestd` user (via `sudo -u timestd`), since that user owns the SSH key. Running as your own user will show a helpful hint about this.
 
 ### Step 7: Configure hf-timestd
 
@@ -149,6 +170,12 @@ sudo -u timestd hf-timestd grape upload --date 2026-01-20
 
 ### Authentication Issues
 
+Start by running the preflight check to pinpoint which step fails:
+
+```bash
+sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape test-upload
+```
+
 **Problem**: `ssh-copy-id` rejects the password
 
 **Solutions**:
@@ -156,12 +183,13 @@ sudo -u timestd hf-timestd grape upload --date 2026-01-20
 2. Copy TOKEN again carefully (no extra spaces)
 3. Try typing the TOKEN manually instead of pasting
 
-**Problem**: SFTP asks for password after `ssh-copy-id` succeeded
+**Problem**: Preflight check 3 fails (SFTP autologin rejected)
 
 **Solutions**:
-1. Verify key path is correct in config
-2. Check key permissions: `ls -la /home/timestd/.ssh/id_rsa_psws`
-3. Test with verbose output: `sftp -v -i /home/timestd/.ssh/id_rsa_psws S000171@pswsnetwork.eng.ua.edu`
+1. Verify key path is correct in config (`[uploader.sftp].ssh_key`)
+2. Check key permissions: `ls -la /home/timestd/.ssh/id_rsa_psws` (should be `600`)
+3. Verify public key is registered with PSWS: compare output of `cat /home/timestd/.ssh/id_rsa_psws.pub` with what's on the PSWS admin page
+4. Test with verbose output: `sudo -u timestd sftp -v -i /home/timestd/.ssh/id_rsa_psws S000171@pswsnetwork.eng.ua.edu`
 
 ### Upload Issues
 

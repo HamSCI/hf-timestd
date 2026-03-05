@@ -147,6 +147,11 @@ def main():
     grape_upload_parser.add_argument('--dry-run', action='store_true', help='Show what would be uploaded')
     grape_upload_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
     
+    # GRAPE test-upload (preflight connectivity check)
+    grape_test_upload_parser = grape_subparsers.add_parser('test-upload', help='Test PSWS SFTP connectivity and SSH key')
+    grape_test_upload_parser.add_argument('--config', '-c', default='/etc/hf-timestd/timestd-config.toml', help='Config file')
+    grape_test_upload_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
+
     # GRAPE status
     grape_status_parser = grape_subparsers.add_parser('status', help='Show upload status and history')
     grape_status_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
@@ -321,7 +326,7 @@ def main():
             grape_parser.print_help()
             sys.exit(1)
         
-        data_root = Path(args.data_root)
+        data_root = Path(args.data_root) if hasattr(args, 'data_root') else None
         
         def resolve_date(date_arg):
             """Resolve date argument to YYYYMMDD string."""
@@ -644,6 +649,20 @@ def main():
             report_file = manager.write_upload_report()
             print(f"   Report: {report_file}")
             
+        elif args.grape_command == 'test-upload':
+            from .grape.uploader import test_psws_connectivity
+            import toml
+
+            config_path = Path(args.config)
+            if not config_path.exists():
+                print(f"Config not found: {config_path}")
+                sys.exit(1)
+            with open(config_path, 'r') as f:
+                config = toml.load(f)
+
+            ok = test_psws_connectivity(config)
+            sys.exit(0 if ok else 1)
+
         elif args.grape_command == 'status':
             from .grape.uploader import UploadManager
             

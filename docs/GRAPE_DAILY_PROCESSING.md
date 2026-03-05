@@ -127,6 +127,39 @@ hf-timestd grape package --date 2026-01-02 --callsign AC0G --grid EM28
 hf-timestd grape upload --date 2026-01-02 --dry-run
 ```
 
+## Preflight Check
+
+Before relying on automated uploads, verify PSWS connectivity with the built-in preflight test:
+
+```bash
+# Run as timestd user (the service user that owns the SSH key)
+sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape test-upload
+```
+
+This performs three checks:
+1. **TCP connectivity** — can we reach `pswsnetwork.eng.ua.edu:22`?
+2. **SSH key** — does the configured key file exist with correct permissions?
+3. **SFTP autologin** — can we authenticate and connect without a password?
+
+Example output (all checks passing):
+```
+PSWS Upload Preflight Check
+  Host:    pswsnetwork.eng.ua.edu
+  User:    S000171
+  SSH key: /home/timestd/.ssh/id_rsa_psws
+
+[1/3] TCP connectivity to pswsnetwork.eng.ua.edu:22 ... OK (0.1s)
+[2/3] SSH key at /home/timestd/.ssh/id_rsa_psws ... OK
+      Public key: ssh-rsa AAAAB3NzaC1yc2EAAA...
+[3/3] SFTP autologin as S000171@pswsnetwork.eng.ua.edu ... OK (1.0s)
+
+All checks passed — PSWS upload should work.
+```
+
+The command reads host, user, and SSH key path from `/etc/hf-timestd/timestd-config.toml` (sections `[station]` and `[uploader.sftp]`). Use `--config` to specify an alternate config file.
+
+Run this on every new installation before enabling `grape-daily.timer`.
+
 ## Troubleshooting
 
 ### Timer not running
