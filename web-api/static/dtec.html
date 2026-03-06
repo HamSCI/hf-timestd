@@ -495,8 +495,8 @@ const SOLAR_YAXIS2 = {
     range: [-90, 90],
     tickvals: [-90, -45, 0, 45, 90],
     ticktext: ['-90°', '-45°', '0°', '45°', '90°'],
-    tickfont: { color: 'rgba(255,220,80,0.7)', size: 10 },
-    titlefont: { color: 'rgba(255,220,80,0.7)', size: 10 },
+    tickfont: { color: 'rgba(255,220,80,0.7)', size: 12 },
+    titlefont: { color: 'rgba(255,220,80,0.7)', size: 12 },
     showgrid: false,
     zeroline: true,
     zerolinecolor: 'rgba(255,220,80,0.25)',
@@ -551,8 +551,8 @@ function renderPlots(series) {
     const baseLayout = {
         paper_bgcolor: 'transparent',
         plot_bgcolor: 'transparent',
-        font: { color: '#e2e8f0', size: 11 },
-        legend: { bgcolor: 'transparent', font: { size: 10 }, orientation: 'v' },
+        font: { color: '#e2e8f0', size: 14 },
+        legend: { bgcolor: 'transparent', font: { size: 13 }, orientation: 'v' },
         hovermode: 'x unified',
     };
 
@@ -612,8 +612,8 @@ function renderPlots(series) {
             yaxis2: SOLAR_YAXIS2,
             yaxis3: {
                 title: 'GOES X-ray Flux (W/m²)',
-                titlefont: {color: 'rgba(239,68,68,0.7)', size: 10},
-                tickfont: {color: 'rgba(239,68,68,0.7)', size: 10},
+                titlefont: {color: 'rgba(239,68,68,0.7)', size: 12},
+                tickfont: {color: 'rgba(239,68,68,0.7)', size: 11},
                 overlaying: 'y',
                 side: 'right',
                 anchor: 'free',
@@ -622,9 +622,9 @@ function renderPlots(series) {
                 range: [-9, -2],
                 showgrid: false,
             },
-            margin: { t: 10, b: 40, l: 70, r: 100 },
-            xaxis: { gridcolor: '#334155', title: 'UTC', range: _timeRange ? [_timeRange.start, _timeRange.end] : undefined, domain: [0, 0.88] },
-            yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', zeroline: true, zerolinecolor: '#475569', range: rRange },
+            margin: { t: 10, b: 50, l: 80, r: 110 },
+            xaxis: { gridcolor: '#334155', title: 'UTC', titlefont: {size: 14}, tickfont: {size: 12}, range: _timeRange ? [_timeRange.start, _timeRange.end] : undefined, domain: [0, 0.88] },
+            yaxis: { gridcolor: '#334155', title: 'dTEC/dt (TECU/s)', titlefont: {size: 14}, tickfont: {size: 12}, zeroline: true, zerolinecolor: '#475569', range: rRange },
         }, { responsive: true, displayModeBar: false });
     }
 
@@ -640,8 +640,8 @@ function renderPlots(series) {
             yaxis2: SOLAR_YAXIS2,
             yaxis3: {
                 title: 'GOES X-ray Flux (W/m²)',
-                titlefont: {color: 'rgba(239,68,68,0.7)', size: 10},
-                tickfont: {color: 'rgba(239,68,68,0.7)', size: 10},
+                titlefont: {color: 'rgba(239,68,68,0.7)', size: 12},
+                tickfont: {color: 'rgba(239,68,68,0.7)', size: 11},
                 overlaying: 'y',
                 side: 'right',
                 anchor: 'free',
@@ -650,9 +650,9 @@ function renderPlots(series) {
                 range: [-9, -2],
                 showgrid: false,
             },
-            margin: { t: 10, b: 40, l: 70, r: 100 },
-            xaxis: { gridcolor: '#334155', title: 'UTC', range: _timeRange ? [_timeRange.start, _timeRange.end] : undefined, domain: [0, 0.88] },
-            yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', zeroline: true, zerolinecolor: '#475569', range: fRange },
+            margin: { t: 10, b: 50, l: 80, r: 110 },
+            xaxis: { gridcolor: '#334155', title: 'UTC', titlefont: {size: 14}, tickfont: {size: 12}, range: _timeRange ? [_timeRange.start, _timeRange.end] : undefined, domain: [0, 0.88] },
+            yaxis: { gridcolor: '#334155', title: 'dTEC/dt @ 10 MHz (TECU/s)', titlefont: {size: 14}, tickfont: {size: 12}, zeroline: true, zerolinecolor: '#475569', range: fRange },
         }, { responsive: true, displayModeBar: false });
     }
 }
