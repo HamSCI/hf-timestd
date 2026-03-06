@@ -10,180 +10,238 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## 📋 NEXT SESSION: dTEC/dt QUALITY DEGRADATION DIAGNOSIS
+## NEXT SESSION: WEB-API DASHBOARD AUDIT — DEMO-READY BY HAMSCI WORKSHOP
 
-**Task:** The carrier-phase dTEC/dt assessments have degraded from showing clear diurnal ionospheric variation to resembling noise. Systematically investigate the physics, methodology, and measurement layers of the dTEC pipeline to identify what changed and what is broken. The goal is to either restore the diurnally-varying dTEC/dt signal or identify the upstream data quality problem that is masking it.
+**Goal:** Systematically review every page of the web-api dashboard, fix broken pages, standardize time/date selection controls, improve plot readability, ensure data actually flows to every page, and update the living documentation. The system must be demo-ready for a live presentation at the HamSCI 2026 workshop (next weekend, around March 15, 2026).
 
-**Symptom:** dTEC/dt time series on the web dashboard (`/tec/dtec` endpoint) now look like uncorrelated noise across all station-frequency paths, rather than the smooth, correlated diurnal TEC variation seen in earlier data (late February 2026). The diurnal pattern — rising TEC after sunrise, peak near local solar noon, declining after sunset — should be clearly visible on paths with decent SNR (>15 dB).
+**Approach:** Work through pages one at a time. For each page: verify the backend router returns data, verify the frontend renders it, fix any issues, then move on. Apply the consistency standards documented below.
 
 ---
 
 ## System Context
 
-- **System:** hf-timestd v6.9.1 (March 5, 2026) — multi-broadcast HF time transfer and ionospheric measurement
-- **Focus Area:** dTEC/dt pipeline quality — from L1 carrier phase measurement to L3 dTEC products
-- **Recent Fix (2026-03-04):** RTP timing mismatch causing ~4500s minute boundary offset. Fixed by removing the timing poll thread and seeding GPS/RTP mapping from `channel_info`. See `docs/changes/SESSION_2026_03_04_RTP_TIMING_FIX.md`.
-- **Data Output Directories:**
-  - Per-minute dTEC summaries: `/var/lib/timestd/phase2/science/dtec/`
-  - Full ~1s resolution time series: `/var/lib/timestd/phase2/science/dtec_timeseries/`
-  - Differential dTEC frequency pairs: `/var/lib/timestd/phase2/science/dtec_diff/`
-  - L2 tick_phase (carrier phase per tick): `/var/lib/timestd/phase2/<CHANNEL>/tick_phase/`
+- **System:** hf-timestd v6.9.2 (March 6, 2026)
+- **Focus Area:** `web-api/` — FastAPI backend (`web-api/routers/*.py`) + static HTML/JS frontend (`web-api/static/*.html`)
+- **Deadline:** Demo-ready by approximately March 14, 2026
+- **Recent change (2026-03-06):** Archived dead code from `wwvh_discrimination.py` (3918 to 1237 lines). No web-api impact.
+- **Recent change (2026-03-04):** RTP timing mismatch fix. May have affected data continuity for some pages.
 
 ---
 
-## 1. The Three Investigation Axes
+## 1. Page Inventory and Known Issues
 
-The diagnosis must proceed along three independent axes. A flaw in ANY of them will produce noise-like dTEC/dt. The agent must verify each axis independently before concluding.
+There are **14 dashboard pages** served from `web-api/static/`. The table below summarizes the current state of each, based on a code audit performed on 2026-03-06.
 
-### Axis 1: PHYSICS — Are the equations correct?
-
-The carrier-phase dTEC pipeline implements:
-
-```
-φ(t) = (2πf/c) ∫ n_φ ds       # carrier phase is integral of refractive index
-f_D = dφ/dt / (2π)              # Doppler from phase rate
-dTEC/dt = -f_D · c · f / 40.3   # Doppler → dTEC rate (TECU/s)
-TEC(t) = ∫ dTEC/dt · dt         # integrate rate → relative TEC
-```
-
-**Key files:**
-- `src/hf_timestd/core/carrier_tec.py` — `CarrierTECEstimator.compute_dtec_from_phase()` (lines 104-235)
-- `src/hf_timestd/core/physics_fusion_service.py` — `_process_carrier_dtec()` (lines 866-1080)
-
-**Check specifically:**
-- Sign convention: `dtec_rate = -doppler * C_LIGHT * freq_hz / K_GROUP_DELAY` — is the negative sign correct? Increasing TEC causes phase advance (positive Doppler in our convention?).
-- Units: `frequency_mhz * 1e6` gives Hz. `K_GROUP_DELAY = 40.3` (m³/s²). `C_LIGHT = 299792458.0` (m/s). Result should be el/m²/s, then `/1e16` for TECU/s.
-- Phase unwrapping: `np.unwrap()` on `carrier_phase_rad`. If the input phases are noisy or sparsely sampled (~1s intervals), unwrapping can introduce large spurious jumps.
-- Cycle-slip detection: threshold `|d²φ/dt²| > 5 Hz/s` — is this appropriate for HF ionospheric Doppler? Typical HF Doppler is 0.01-1 Hz; 5 Hz/s acceleration may be too loose.
-- Integration: trapezoidal with 120s gap threshold. Are there edge effects?
-- GNSS VTEC anchor: applied as a DC offset to integrated dTEC at mid-minute. This is methodologically sound only if the integration drift within one minute is small compared to VTEC accuracy (~1 TECU).
-
-### Axis 2: METHODOLOGY — Is the data pipeline intact?
-
-The dTEC pipeline has five stages. A break at any stage produces garbage:
-
-```
-Stage 1: tick_matched_filter.py → carrier_phase_rad per tick (~55/min)
-Stage 2: metrology_service.py → writes carrier_phase_rad to L2/tick_phase HDF5
-Stage 3: physics_fusion_service.py → reads L2/tick_phase, calls carrier_tec.py
-Stage 4: carrier_tec.py → unwrap, differentiate, convert, integrate
-Stage 5: physics_fusion_service.py → write L3/dtec summary + timeseries HDF5
-```
-
-**Key files at each stage:**
-- **Stage 1:** `src/hf_timestd/core/tick_matched_filter.py` — `TickMatchedFilter._compute_ensemble()` produces `carrier_phase_rad` by coherently combining per-tick IQ phasors at the tone frequency. This is the raw measurement.
-- **Stage 2:** `src/hf_timestd/core/metrology_service.py` — writes `carrier_phase_rad` field to tick_phase HDF5 via `write_measurements_batch()`.
-- **Stage 3:** `src/hf_timestd/core/physics_fusion_service.py` — `_read_tick_phase_minute()` reads from HDF5. Check: epoch = `minute_boundary + window_center_second`. Is `minute_boundary` a Unix timestamp? Is `window_center_second` in [0, 60)?
-- **Stage 4:** `src/hf_timestd/core/carrier_tec.py` — `compute_dtec_from_records()`. Check: are the epochs monotonically increasing? Are there duplicate timestamps? Are the phases in radians (not degrees)?
-- **Stage 5:** `src/hf_timestd/core/physics_fusion_service.py` — `_process_carrier_dtec()`. Check: `dtec_rate_tecu_per_s` in the summary record is `np.mean(rate_arr)` — is averaging the rate over the minute meaningful, or does it cancel the signal?
-
-**Critical methodological question:** The `carrier_phase_rad` field in `tick_matched_filter.py` is computed by mixing the IQ signal at the tone frequency and taking `np.angle(np.mean(mixed))`. This gives the **phase of the carrier at the tone frequency relative to the local oscillator**. For dTEC, we need the **ionospheric component** of phase change. If the dominant contribution to `dφ/dt` is NOT ionospheric (e.g., it's dominated by transmitter instability, receiver LO drift, or geometric Doppler from Earth rotation), then dTEC/dt will be noise.
-
-**Important:** The carrier phase measurement includes ALL sources of phase change: ionospheric, geometric (Earth rotation / satellite motion — N/A for fixed ground stations, but relevant for the propagation path geometry change with ionospheric layer height), transmitter phase stability (NIST/NRC rubidium standards are ~10⁻¹² — negligible), and receiver LO stability (GPSDO at ~10⁻¹² — negligible). The dominant non-ionospheric term for a fixed ground-to-ground HF link is **multipath fading**: when two propagation modes (e.g., 1F2 and 2F2) interfere, the composite phase jumps rapidly. This would produce exactly the noise-like signature observed.
-
-### Axis 3: MEASUREMENTS — Is the upstream L2 data healthy?
-
-Even if the physics and methodology are correct, garbage in → garbage out. The investigation must verify:
-
-1. **Are tick_phase HDF5 files being written?** Check `/var/lib/timestd/phase2/<CHANNEL>/tick_phase/` for recent files with non-zero size.
-2. **Do they contain `carrier_phase_rad` values that vary smoothly within a minute?** Read a sample file and plot phase vs. tick position. If the phases are random, the measurement is broken.
-3. **Is the phase measurement consistent across minutes?** Read consecutive minutes and check for large inter-minute phase jumps. If every minute resets to a random phase, the integration in `carrier_tec.py` produces noise.
-4. **Has the RTP timing fix (2026-03-04) affected phase extraction?** The `carrier_phase_rad` is computed from IQ samples at the detected tick position. If the minute boundary shifted by ~4500s and was then corrected, the tick positions within the buffer may have been wrong during the corrupted period. **Check data from before the timing corruption (Feb 25-27) vs. after the fix (Mar 5).**
-5. **SNR trends:** If channel SNR has dropped (propagation conditions, antenna issue, interference), the phase measurements become noisier. Check `mean_snr_db` in the dTEC records — is it above 15 dB?
-6. **Is the GNSS VTEC anchor working?** Check `anchor_status` in dTEC records. If anchoring fails (e.g., `live_vtec.py` stopped writing), the integrated dTEC drifts freely and the `dtec_mean_tecu` field is meaningless (only `dtec_rate_tecu_per_s` is valid).
+| # | Page | File | Router | Chart Lib | common.js | Time Selection | Known Issues |
+|---|------|------|--------|-----------|-----------|----------------|--------------|
+| 1 | Overview | `index.html` | `dashboard.py` | none | YES | None (live only) | OK |
+| 2 | Health | `health.html` | `health.py` | none | YES | None (live only) | OK |
+| 3 | Timing | `metrology.html` | `metrology.py` | Plotly | YES | Preset buttons + datetime-local custom | Best UI — use as reference |
+| 4 | Validation | `timing-validation.html` | `timing_validation.py` | **Chart.js** | **NO** | hours param (points selector) | **LIKELY BROKEN** — depends on singleton service; uses Chart.js not Plotly |
+| 5 | Chrony | `chrony.html` | `chrony.py` | none | YES | time-btn (1h/6h/24h) | No custom date picker |
+| 6 | Phase | `phase.html` | `phase.py` | Plotly | YES | time-btn (15m/1h/6h/24h) relative only | **NO DATE PICKER** — cannot view historical data |
+| 7 | Observatory | `ionosphere.html` | `physics.py` | Plotly | **NO** | Custom date-picker | Own date picker implementation; no common.js |
+| 8 | Ionogram | `ionogram.html` | `ionogram.py` | Plotly | **NO** | datetime-local start/end | No common.js |
+| 9 | dTEC | `dtec.html` | `tec.py` | Plotly | **NO** | datetime-local start/end | No common.js; dTEC data may be degraded |
+| 10 | Test Signal | `test_signal.html` | (inline) | Plotly | YES | date-nav + date picker + time-range bar | Unique elaborate UI; plot readability unclear |
+| 11 | GRAPE | `grape.html` | `grape.py` | none | YES | Date dropdown from API | Depends on GRAPE data availability |
+| 12 | Docs | `docs.html` | `docs.py` | Plotly | **NO** | None (document viewer) | **LIVING DOCS NEED UPDATING** |
+| 13 | Logs | `logs.html` | `logs.py` | none | YES | datetime-local start/end | Functional as-is |
+| 14 | Station | `station.html` | `stations.py` | **Chart.js+Plotly** | **NO** | Fixed hours=24 | Uses BOTH Chart.js and Plotly; hardcoded 24h |
 
 ---
 
-## 2. Recent Changes That Could Have Caused Degradation
+## 2. Consistency Standards to Apply
 
-Review these commits and their effects on the dTEC pipeline:
+### 2.1 Time Selection Widget
 
-| Date | Commit | Change | Potential Impact |
-|------|--------|--------|-----------------|
-| 2026-03-03 | `c3fd733` | Power of 10 rules: pre-allocated buffers in `metrology_engine.py`, `tick_matched_filter.py` | Buffer reuse could corrupt carrier phase if not reset properly between windows |
-| 2026-03-02 | `5bab3b0` | Phase-engine native support, FSK decoupled listener removal | Changed stream_recorder tap architecture; could affect IQ sample delivery to tick_matched_filter |
-| 2026-02-27 | `df1458f` | Phase 3 physics critique implementations (P1-B, P3-A, P3-B, P4-B, P4-C) | Multiple changes to carrier_tec.py and physics_fusion_service.py; added cycle-slip detection, phase unwrap quality gating |
-| 2026-02-24 | `aa9c31a` | GNSS VTEC anchoring | Changed anchor source; if VTEC data stops, dTEC becomes unanchored |
-| 2026-03-04 | (runtime) | RTP timing mismatch: minute boundaries were ~4500s off for several days | All L2 data written during the corrupted period has wrong minute boundaries; tick_phase epochs may be wrong |
+**Reference implementation:** `metrology.html` (Fusion History section, lines 229-248)
+
+Every page displaying time-series data should have:
+1. **Preset buttons:** 1h, 6h, 24h, 7d (at minimum)
+2. **Custom date range:** Two `datetime-local` inputs with a Go button
+3. **Active button highlighting:** Blue (#3b82f6) background for selected preset
+4. **CSS class:** `.time-range-btn` (already defined in metrology.html)
+
+Pages that do NOT need time selection: `index.html`, `health.html`, `docs.html`.
+
+### 2.2 Charting Library
+
+**Standard:** Plotly.js 2.27.0
+
+All charting should use Plotly with this dark theme layout:
+```javascript
+const darkLayout = {
+    paper_bgcolor: '#1e293b',
+    plot_bgcolor: '#0f172a',
+    font: { color: '#e0e0e0', size: 12 },
+    xaxis: { gridcolor: '#334155', linecolor: '#475569', tickformat: '%H:%M' },
+    yaxis: { gridcolor: '#334155', linecolor: '#475569' },
+    margin: { l: 60, r: 30, t: 10, b: 40 },
+    legend: { bgcolor: 'rgba(30,41,59,0.8)', font: { color: '#e0e0e0' } },
+    hovermode: 'x unified',
+};
+```
+
+**Action required:** Migrate `timing-validation.html` and `station.html` from Chart.js to Plotly.
+
+### 2.3 common.js Adoption
+
+**Standard:** Every page should include `<script src="/static/js/common.js"></script>` and use the `api` global for API calls.
+
+Currently **missing from 6 pages:** timing-validation, ionosphere, ionogram, dtec, docs, station.
+
+Benefits: consistent error handling, `timeAgo()`, `AutoRefresh` class, `showError()`/`clearError()`.
+
+### 2.4 Navigation Bar
+
+The nav bar is consistent across pages (good). One minor issue:
+- Both Phase and Test Signal use the same emoji icon — differentiate them.
+
+### 2.5 Plot Readability (Demo Projection)
+
+- **Font size:** Minimum 12px for axis labels, 14px for titles
+- **Line width:** Minimum 1.5px for data traces
+- **Legend:** Always visible (not hidden behind hover)
+- **Axis labels:** Always present with units
+- **Zero lines:** Show for Doppler, dTEC/dt, and discrepancy plots
 
 ---
 
-## 3. Diagnostic Procedure
+## 3. Page-by-Page Audit Procedure
 
-Execute these steps in order. Each step either clears or implicates one layer.
+For each page, execute these steps:
 
-### Step 1: Verify L2 tick_phase data exists and is recent
+### Step A: Backend Verification
 ```bash
-ls -lt /var/lib/timestd/phase2/CHU_7850/tick_phase/ | head -5
-ls -lt /var/lib/timestd/phase2/SHARED_5000/tick_phase/ | head -5
+curl -s http://localhost:8000/api/<endpoint> | python3 -m json.tool | head -30
 ```
+Verify: HTTP 200, contains data, fields match what frontend expects.
 
-### Step 2: Sample carrier_phase_rad from a single minute
-```python
-import h5py, numpy as np
-f = h5py.File('/var/lib/timestd/phase2/CHU_7850/tick_phase/CHU_7850_tick_phase_YYYYMMDD.h5', 'r')
-# Find the latest minute, extract carrier_phase_rad vs window_center_second
-# Plot: do the phases progress smoothly or jump randomly?
-```
+### Step B: Frontend Verification
+1. Does data appear? (Not "Loading..." forever, not "No data")
+2. Do all plots render?
+3. Do time selection controls work?
+4. Does auto-refresh work?
+5. Is the nav bar correct with current page highlighted?
 
-### Step 3: Check inter-minute phase continuity
-Read `carrier_phase_rad` at tick 55 of minute N and tick 0 of minute N+1. If there's a large (>π/4) jump every minute boundary, the phase is not continuous across minutes and `np.unwrap()` in `carrier_tec.py` will inject spurious dTEC.
+### Step C: Apply Consistency Standards
+1. Add common.js if missing
+2. Replace Chart.js with Plotly if applicable
+3. Add standard time selection widget if missing
+4. Apply dark theme layout to all Plotly charts
+5. Ensure axis labels and units are present
 
-### Step 4: Compare known-good vs. current dTEC data
-```python
-# Compare Feb 25 (known good) vs Mar 5 (possibly degraded)
-# Look at dtec_rate_tecu_per_s distribution, variance, correlation between paths
-```
+### Step D: Fix Any Data Issues
+If a page shows no data, trace the pipeline: router endpoint -> service layer -> HDF5 data files.
 
-### Step 5: Check GNSS VTEC availability
+---
+
+## 4. Prioritized Work Order
+
+### Priority 1 — Core Demo Pages (must work perfectly)
+1. **metrology.html** — Flagship page. Verify D_clock, fusion history, Allan deviation. Already best UI.
+2. **phase.html** — Add date picker for historical data. Currently relative-only.
+3. **dtec.html** — Verify dTEC data flows post-RTP-fix. Add common.js.
+4. **ionogram.html** — Verify arrival patterns. Add common.js. Standardize time controls.
+
+### Priority 2 — Supporting Demo Pages (should work)
+5. **timing-validation.html** — Likely broken. Migrate Chart.js to Plotly. Add common.js. Verify service running.
+6. **ionosphere.html** — Verify observatory data. Add common.js.
+7. **chrony.html** — Add date picker alongside existing time buttons.
+8. **test_signal.html** — Review plot readability. Standardize time controls.
+
+### Priority 3 — Nice-to-Have Pages
+9. **station.html** — Migrate Chart.js to Plotly. Add common.js.
+10. **grape.html** — Verify GRAPE data. Low priority unless demo planned.
+11. **health.html** — Verify health checks. No time selection needed.
+12. **index.html** — Verify station cards. No time selection needed.
+
+### Priority 4 — Documentation
+13. **docs.html** — Update living documentation content. Add common.js.
+14. **logs.html** — Functional as-is. Low priority.
+
+---
+
+## 5. Key Files
+
+### Frontend
+| File | Role |
+|------|------|
+| `web-api/static/js/common.js` (214 lines) | Shared API client, formatters, AutoRefresh — adopt everywhere |
+| `web-api/static/css/styles.css` | Shared stylesheet — already used by all pages |
+| `web-api/static/*.html` (14 files) | Individual page implementations |
+
+### Backend Routers
+| File | Prefix | Serves |
+|------|--------|--------|
+| `web-api/routers/dashboard.py` | `/api/dashboard` | index.html |
+| `web-api/routers/health.py` | `/api/health` | health.html |
+| `web-api/routers/metrology.py` | `/api/metrology` | metrology.html |
+| `web-api/routers/timing_validation.py` | `/api/timing-validation` | timing-validation.html |
+| `web-api/routers/chrony.py` | `/api/chrony` | chrony.html |
+| `web-api/routers/phase.py` | `/api/phase` | phase.html |
+| `web-api/routers/physics.py` | `/api/physics` | ionosphere.html |
+| `web-api/routers/ionogram.py` | `/api/ionogram` | ionogram.html |
+| `web-api/routers/tec.py` | `/api/tec` | dtec.html |
+| `web-api/routers/grape.py` | `/api/grape` | grape.html |
+| `web-api/routers/docs.py` | `/api/living-docs` | docs.html |
+| `web-api/routers/logs.py` | `/api/logs` | logs.html |
+| `web-api/routers/stations.py` | `/api/stations` | station.html |
+| `web-api/routers/station.py` | `/api/station` | station.html (alt?) |
+
+**Note:** Two station routers exist (`station.py` and `stations.py`). Investigate whether both are needed.
+
+### Routers Without Dedicated Pages
+| File | Prefix | Used By |
+|------|--------|---------|
+| `web-api/routers/correlations.py` | `/api/correlations` | No dedicated page |
+| `web-api/routers/propagation.py` | `/api/propagation` | docs.html live widgets |
+| `web-api/routers/space_weather.py` | `/api/space-weather` | dtec.html overlays |
+| `web-api/routers/stability.py` | `/api/stability` | metrology.html (Allan deviation) |
+| `web-api/routers/tid.py` | `/api/tid` | dtec.html |
+
+---
+
+## 6. Living Documentation Update Checklist
+
+The `docs.html` page renders markdown from `/api/living-docs/`. Review:
+
+1. **System architecture** — Verify it reflects current codebase (TickEdgeDetector is now primary, not TickMatchedFilter)
+2. **Measurement methodology** — Verify L1/L2/L3 layer descriptions are current
+3. **Live widgets** — Verify inline data widgets are wired to working endpoints
+4. **Dead code references** — Remove references to archived voting pipeline (moved to `core/legacy/`)
+
+---
+
+## 7. What "Demo-Ready" Looks Like
+
+A successful live demo should be able to:
+
+1. Show the **overview page** with all 4 stations reporting active channels
+2. Show the **Timing page** with live D_clock, fusion history (24h), and Allan deviation
+3. Navigate to **Phase** and show carrier phase and Doppler for a selected channel with date navigation
+4. Navigate to **dTEC** and show ionospheric TEC variation
+5. Navigate to **Ionogram** and show arrival patterns with mode identification
+6. Navigate to **Validation** and show timing accuracy against GPS ground truth
+7. **All pages** load without broken links, missing data, or stuck loading spinners
+8. **All plots** readable on a projected screen (font sizes, contrast, labels)
+
+---
+
+## 8. Quick Diagnostic Commands
+
 ```bash
-ls -lt /var/lib/timestd/data/gnss_vtec/ | head -5
-# Is live_vtec.py running? Is the ZED-F9P connected?
+# Check if web-api is running
+curl -s http://localhost:8000/api/health | python3 -m json.tool
+
+# Check specific endpoints that may be broken
+curl -s http://localhost:8000/api/timing-validation/dashboard?hours=1 | python3 -m json.tool | head -20
+curl -s http://localhost:8000/api/phase/summary | python3 -m json.tool | head -20
+curl -s http://localhost:8000/api/tec/dtec | python3 -m json.tool | head -20
+
+# Check data directories have recent files
+ls -lt /var/lib/timestd/phase2/science/dtec/ | head -3
+ls -lt /var/lib/timestd/phase2/CHU_7850/tick_phase/ | head -3
+ls -lt /var/lib/timestd/data/fusion/ | head -3
 ```
-
-### Step 6: Check physics service logs for anomalies
-```bash
-grep -E "dTEC|anchor|unwrap|cycle.slip|BAD|noise" /var/log/hf-timestd/physics-fusion.log | tail -50
-```
-
----
-
-## 4. Key Files to Analyze
-
-| File | Role | What to Check |
-|------|------|--------------|
-| `src/hf_timestd/core/tick_matched_filter.py` | Produces `carrier_phase_rad` from IQ | Phase measurement methodology; buffer reuse after Power-of-10 changes |
-| `src/hf_timestd/core/metrology_service.py` | Writes tick_phase to HDF5 | Is `carrier_phase_rad` actually being written? Field name correct? |
-| `src/hf_timestd/core/carrier_tec.py` | dTEC computation | Phase unwrapping, Doppler conversion, integration, noise floor estimation |
-| `src/hf_timestd/core/physics_fusion_service.py` | Orchestrator | `_read_tick_phase_minute()` epoch construction, `_process_carrier_dtec()` anchor logic |
-| `src/hf_timestd/core/tick_edge_detector.py` | Also produces `carrier_phase_rad` | Separate code path for tick-edge carrier phase; used for Doppler estimation |
-| `web-api/routers/tec.py` | Dashboard data source | `/tec/dtec` reads from L3 dTEC HDF5; verify it's reading the right fields |
-| `src/hf_timestd/core/binary_archive_writer.py` | Raw buffer timing | If minute boundaries are wrong, tick positions within the buffer are wrong |
-| `src/hf_timestd/core/buffer_timing.py` | RTP→UTC conversion | Uses `gps_time_ns` / `rtp_timesnap` for timing; recently changed |
-
----
-
-## 5. What "Good" dTEC/dt Looks Like
-
-For reference, healthy dTEC/dt data should exhibit:
-
-1. **Diurnal variation:** TEC rises from ~5 TECU at night to 20-60 TECU during the day (at solar maximum). The rate dTEC/dt peaks at ~0.01 TECU/s near sunrise/sunset.
-2. **Correlated across paths:** All paths through similar ionospheric regions should show correlated dTEC variations. If WWV 5 MHz and WWV 10 MHz show uncorrelated dTEC, something is wrong in the measurement layer (the ionosphere is the same for both).
-3. **Frequency-dependent magnitude:** Higher frequencies are less affected by the ionosphere. dTEC/dt magnitude should scale roughly as 1/f for paths through the same ionosphere.
-4. **Smooth within a minute:** The ~55 carrier-phase samples per minute should show a smooth phase progression (Doppler is quasi-constant over 60 seconds for ionospheric changes). Scatter > 0.1 rad within a minute suggests measurement noise, not ionospheric signal.
-
----
-
-## 6. Hypotheses to Test (Ranked by Likelihood)
-
-1. **Multipath fading dominates carrier phase:** If propagation conditions have shifted (e.g., increased multimode overlap at current solar cycle phase), the measured carrier phase may be dominated by interference fading rather than ionospheric refraction. This is physics, not a bug — but the pipeline should detect and flag it (e.g., via phase scintillation index σ_φ or S4).
-
-2. **Power-of-10 buffer reuse corrupted phase extraction:** The `c3fd733` commit introduced pre-allocated `_envelope_buffer` arrays. If the carrier phase extraction path shares or aliases these buffers, phases could be contaminated.
-
-3. **Inter-minute phase discontinuity:** `carrier_phase_rad` is measured relative to a local reference within each tick window. If there is no inter-minute phase coherence, the integration in `carrier_tec.py` starts fresh each minute and the "integrated dTEC" is just noise around zero.
-
-4. **Timing corruption period data poisoning:** L2 tick_phase data written during the ~4500s timing offset period (before Mar 4 fix) has wrong `minute_boundary` values. The physics service may be reading this corrupted data for recent dTEC plots.
-
-5. **GNSS VTEC starvation:** If `live_vtec.py` is not running or the ZED-F9P lost lock, all dTEC records are unanchored and `dtec_mean_tecu` drifts randomly. Only `dtec_rate_tecu_per_s` remains valid.
-
-6. **Upstream SNR collapse:** Propagation or hardware issue causing low SNR across all channels, making carrier phase measurements unreliable.
