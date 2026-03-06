@@ -300,36 +300,36 @@ Within a single second, both WWV and BPM produce a 1000 Hz tick. Their arrival t
 **4. WWV/WWVH BCD time code crosstalk:**
 Both stations broadcast BCD amplitude modulation at 100 Hz. The BCD codes encode identical UTC time but with slightly different timing. The cross-correlation method separates them by fitting two time-shifted templates simultaneously, using the learned propagation delay difference to constrain the fit. When both are strong, the BCD correlation shows two peaks separated by the differential propagation delay.
 
-### 8-method weighted voting system
+### How we actually measure each station (parallel direct measurement)
 
-The discrimination uses weighted voting across independent methods, with minute-specific weight adjustments:
+The current architecture does **not** decide which station is present — it **measures all three in parallel** using station-specific matched-filter templates. On each shared channel, three independent measurement pipelines run every minute:
 
-| Method | Discriminates | Weight | Availability |
-|--------|--------------|--------|-------------|
-| 1. 1000/1200 Hz tone power ratio | WWV+BPM vs WWVH | 5–10 | Every minute |
-| 2. 440 Hz tone | WWV vs WWVH (definitive) | 10 | Minutes 1, 2 only |
-| 3. 500/600 Hz ground truth | Scheduled exclusivity | 15 | 14 min/hr |
-| 4. BCD amplitude ratio | WWV vs WWVH | 2–10 | Every minute |
-| 5. Per-tick SNR average | Dominant station | 5 | Every minute |
-| 6. Test signal (min 8/44) | Scheduled exclusivity + FSS | 15 | 2 min/hr |
-| 7. Doppler stability | Cleaner path → dominant | 2 | Every minute |
-| 8. Harmonic power ratio | Cross-validates tone ID | 1.5 | When 500/600 Hz present |
+| Pipeline | Template | Tone freq | Tick duration | Expected arrival window |
+|----------|----------|-----------|---------------|------------------------|
+| WWV | 0.8s tone, 5ms tick | 1000 Hz | 5 ms | ~4–8 ms (1,119 km) |
+| WWVH | 0.8s tone, 5ms tick | 1200 Hz | 5 ms | ~22–30 ms (6,599 km) |
+| BPM | 0.3s marker, 10ms tick | 1000 Hz | 10 ms | ~40–55 ms (11,564 km) |
 
-**Ground truth minutes (14 per hour):** During exclusive broadcast minutes, only one station transmits its audio tone:
+Each pipeline produces its own D_clock, Doppler, SNR, and confidence — independently and simultaneously. The physical separability is inherent:
+
+- **WWV vs WWVH:** Separated by tick frequency (1000 Hz vs 1200 Hz). Different matched-filter templates; they don't compete.
+- **WWV vs BPM:** Both 1000 Hz, but separated by tick duration (5 ms vs 10 ms template), marker duration (800 ms vs 300 ms), and arrival time (~35+ ms gap from propagation geometry).
+- **All three:** Each pipeline searches within an expected arrival window anchored to the station's GPSDO-derived propagation delay model. Once the delay model is calibrated, geography is the discriminator.
+
+**Calibration from ground truth minutes (14 per hour):** During exclusive broadcast minutes, only one station transmits its audio tone:
 - WWV-only: minutes 1, 16, 17, 19
 - WWVH-only: minutes 2, 43, 44, 45, 46, 47, 48, 49, 50, 51
 
-These provide unambiguous station identification and calibrate the other methods.
+These provide unambiguous calibration of the per-station delay models. The `TimingDiscriminator` uses these to bootstrap → validate → refine the expected arrival windows for each station-frequency pair.
 
-**Decision logic:**
-```
-score_WWV = Σ(w_i × vote_WWV_i) / Σ(w_i)
-score_WWVH = Σ(w_i × vote_WWVH_i) / Σ(w_i)
-margin = |score_WWV - score_WWVH|
+**Additional broadcast features exploited for validation (not voting):**
+- 440 Hz tone: definitive station ID in minutes 1 (WWVH) and 2 (WWV)
+- Test signal: minutes 8 (WWV) and 44 (WWVH) — multi-tone + chirp for channel characterization
+- BPM UT1 minutes (25–29, 55–59): 100 ms pulses, 10× longer than WWV ticks — unambiguous BPM identification
+- BCD amplitude ratio: 100 Hz cross-correlation shows two peaks separated by differential propagation delay
+- Harmonic power ratios (P_1000/P_500, P_1200/P_600): confirmatory when 500/600 Hz tones present
 
-DECISION: margin < 0.15 → BALANCED; else dominant = higher score
-CONFIDENCE: margin > 0.7 → high; margin > 0.4 → medium; else low
-```
+**Note on legacy code:** The `wwvh_discrimination.py` module contains a "weighted voting" system with 8+ methods that was designed before the TickEdgeDetector existed. The voting logic (`finalize_discrimination()`, `compute_discrimination()`) is **no longer called at runtime**. The active code path uses only three services from that module: `detect_bcd_discrimination()` for BCD amplitude extraction, `estimate_doppler_shift_from_ticks()` for legacy Doppler, and the `WWVTestSignalDetector` sub-object for minutes 8/44. The broadcast schedule constants and contamination knowledge embedded in that module remain valuable reference material.
 
 ### Production discrimination evidence (2026-03-06)
 
@@ -342,7 +342,7 @@ CONFIDENCE: margin > 0.7 → high; margin > 0.4 → medium; else low
 | 10.0 MHz | −0.44 ms (MAD 3.57) | −3.32 ms (MAD 4.34) | −3.00 ms (MAD 4.14) |
 | 15.0 MHz | −0.32 ms (MAD 3.30) | −1.01 ms (MAD 3.12) | −0.65 ms (MAD 3.30) |
 
-**Interpretation:** The WWV−BPM separation (1.0–4.0 ms median) is the most reliable discriminant — consistent negative sign across all frequencies, as expected from the 10,445 km path length difference. The WWV−WWVH separation is smaller (0.3–2.2 ms) because the ionospheric delays partially compensate the geometric path difference (WWVH's longer path has higher MUF and often fewer hops). The MAD values (3.1–4.7 ms) are comparable to the separations, so minute-by-minute D_clock alone is not sufficient — the multi-method voting is essential.
+**Interpretation:** The WWV−BPM separation (1.0–4.0 ms median) is the most reliable discriminant — consistent negative sign across all frequencies, as expected from the 10,445 km path length difference. The WWV−WWVH separation is smaller (0.3–2.2 ms) because the ionospheric delays partially compensate the geometric path difference (WWVH's longer path has higher MUF and often fewer hops). The MAD values (3.1–4.7 ms) are comparable to the separations, which is why the parallel measurement architecture uses station-specific templates (different tick frequencies and durations) rather than relying on D_clock separation alone. The 14 ground-truth minutes per hour continuously recalibrate the per-station delay models.
 
 **Cross-station Doppler correlation (r values):**
 
@@ -359,13 +359,13 @@ All cross-station correlations are near zero (|r| < 0.2). This is the strongest 
 
 ### What the audience should take away
 
-1. **The discrimination is physics-based, not just pattern matching.** The D_clock ordering follows propagation geometry. The Doppler independence confirms separate ionospheric paths. The NIST tone schedule provides 14 ground-truth minutes per hour.
+1. **The system measures, it doesn't decide.** Three station-specific matched-filter templates run in parallel on every shared channel. WWV and WWVH separate by tick frequency (1000 vs 1200 Hz). BPM separates by tick duration (10 vs 5 ms) and arrival time (~35 ms later than WWV). No voting algorithm is needed — the physics does the work.
 
 2. **Known contamination is explicitly handled.** Harmonic intermodulation from 500/600 Hz tones is removed with notch filters before tick detection. BPM/WWV overlap is resolved by tick duration templates and temporal windowing. BCD crosstalk is handled by dual-template fitting.
 
-3. **The evidence is compelling but the individual-minute discrimination is noisy.** The MAD of the D_clock separation (3–5 ms) exceeds the median separation on some pairs. The multi-method voting compensates: 14 ground-truth minutes per hour continuously recalibrate the per-station delay models. The system works not because any single measurement is decisive, but because the ensemble of methods is overdetermined.
+3. **Geography is the ultimate discriminator.** Once the GPSDO-anchored delay models are calibrated (14 ground-truth minutes per hour from NIST's exclusive tone schedule), each station's expected arrival window is precise enough that geography alone resolves them. The D_clock ordering (WWV < WWVH < BPM) is consistent across all four shared frequencies, matching path geometry.
 
-4. **BPM is the most challenging station.** It shares 1000 Hz with WWV, has higher D_clock variance from its multi-hop transoceanic path, and its timing schedule is less well-documented than NIST's. The 100 ms UT1 pulses (minutes 25–29, 55–59) are the most reliable BPM discriminator.
+4. **BPM is the most challenging station.** It shares 1000 Hz with WWV, has higher D_clock variance from its multi-hop transoceanic path, and its timing schedule is less well-documented than NIST's. The 100 ms UT1 pulses (minutes 25–29, 55–59) provide unambiguous BPM identification and calibrate the delay model.
 
 ---
 
@@ -504,17 +504,23 @@ Speaker notes: "The Allan deviation gives the stability story in one plot. The x
 ---
 
 ### Slide 7: Shared-Channel Discrimination (2 min)
-**"Three stations on one frequency — physics tells them apart"**
+**"Three stations on one frequency — we measure all three in parallel"**
 
 The hardest measurement challenge: WWV, WWVH, and BPM on 2.5/5/10/15 MHz.
 
-**Methods (abbreviated — full detail in deep-dive below):**
+**Direct parallel measurement — not a decision algorithm:**
 
-- Tick frequency: 1000 Hz (WWV/BPM) vs 1200 Hz (WWVH), 3 dB gate
-- Tick duration: 5 ms (WWV/WWVH) vs 10 ms (BPM), 100 ms (BPM UT1 minutes)
-- NIST tone schedule: ground truth 14 min/hr (exclusive broadcast minutes)
-- Propagation delay ordering: WWV < WWVH ≪ BPM (consistent across all 4 shared frequencies)
-- 8-method weighted voting with inter-method cross-validation
+Three station-specific matched-filter pipelines run simultaneously on every shared channel:
+
+| Pipeline | Tick freq | Tick duration | Expected arrival |
+|----------|-----------|---------------|-----------------|
+| WWV | 1000 Hz | 5 ms | ~4–8 ms |
+| WWVH | 1200 Hz | 5 ms | ~22–30 ms |
+| BPM | 1000 Hz | 10 ms | ~40–55 ms |
+
+- WWV vs WWVH: separated by tick frequency (1000 vs 1200 Hz) — different templates, no ambiguity
+- WWV vs BPM: both 1000 Hz, but separated by tick duration (5 vs 10 ms) and arrival time (~35 ms gap)
+- Calibration: 14 NIST ground-truth minutes/hr refine per-station delay models
 
 **Production evidence — all 4 shared channels (2026-03-06, 14h window):**
 
@@ -541,7 +547,7 @@ The hardest measurement challenge: WWV, WWVH, and BPM on 2.5/5/10/15 MHz.
 
 [FIGURE: fig11 Doppler scatter triptych + fig_discrimination_4freq D_clock scatter across all 4 shared frequencies]
 
-Speaker notes: "On the shared frequencies, three stations transmit simultaneously. We separate them with a layered approach. The strongest discriminator is the tick frequency gate — WWV at 1000 Hz, WWVH at 1200 Hz. BPM also uses 1000 Hz but has a 10 ms tick duration versus 5 ms for WWV, and its propagation delay is 35–50 ms from China versus 3–5 ms from Colorado. For ground truth, the NIST tone schedule gives us 14 minutes per hour where only one station broadcasts its audio tone. The table shows production data from today across all four shared frequencies. Three things jump out: first, the D_clock ordering is consistent on every channel — WWV most negative, WWVH in the middle, BPM most positive — matching the geometric path lengths. Second, the cross-station Doppler correlations are zero, proving these really are independent ionospheric paths. Third, all three stations maintain equal measurement cadence — we're not just seeing WWV and calling everything else noise."
+Speaker notes: "On the shared frequencies, three stations transmit simultaneously. We don't decide which one we're hearing — we measure all three in parallel. Each station has its own matched-filter template running against the same IQ buffer. WWV and WWVH separate trivially by tick frequency — 1000 versus 1200 Hz, completely different templates. BPM also uses 1000 Hz, but its 10-millisecond tick is twice as long as WWV's, and it arrives 35 to 50 milliseconds later from China versus 4 to 8 milliseconds from Colorado. Once the delay models are calibrated — and NIST gives us 14 ground-truth minutes per hour for that — geography does the rest. The table shows today's production data. Three things confirm the separation is real: the D_clock ordering is consistent on every channel, matching the geometric path lengths. The cross-station Doppler correlations are zero — these are genuinely independent ionospheric paths. And all three stations produce equal measurement rates — we're not favoring the loudest signal."
 
 ---
 
@@ -891,10 +897,10 @@ Integration path: PhaRLAP is a MATLAB/compiled library. We would call it via the
 ### Shared-channel discrimination
 
 **"How do you separate WWV from WWVH — they're on the same frequency?"**
-Eight independent discrimination methods, combined by weighted voting. The two strongest: (1) Tick frequency gate — WWV uses 1000 Hz, WWVH uses 1200 Hz. The matched-filter correlator runs separate templates for each. At 3 dB power ratio, the dominant station is identified. (2) NIST tone schedule — 14 minutes per hour, only one station broadcasts its 500/600 Hz audio tone (WWV-only: minutes 1, 16, 17, 19; WWVH-only: minutes 2, 43–51). These provide absolute ground truth. Additional methods: 440 Hz tone (definitive in minutes 1/2), BCD amplitude ratio, per-tick SNR, test signal in minutes 8/44, Doppler stability, and harmonic power ratios. No single method is always reliable; the weighted ensemble is overdetermined.
+We don't separate them — we measure both in parallel. The TickEdgeDetector runs station-specific matched-filter templates simultaneously: WWV at 1000 Hz (5 ms tick) and WWVH at 1200 Hz (5 ms tick). Different tone frequencies mean different templates — they don't interfere. Each produces its own independent D_clock, Doppler, SNR, and confidence every minute. The NIST tone schedule provides 14 ground-truth calibration minutes per hour (WWV-only: minutes 1, 16, 17, 19; WWVH-only: minutes 2, 43–51) which refine the per-station delay models. Additional broadcast features (440 Hz in minutes 1/2, test signals in minutes 8/44) provide further calibration opportunities, but the primary separation is physical — different tone frequencies, different templates.
 
 **"How do you separate BPM from WWV — both use 1000 Hz?"**
-Three features: (1) Tick duration — WWV = 5 ms tick within an 800 ms tone; BPM = 10 ms tick within a 300 ms marker. Separate matched-filter templates (0.8s vs 0.3s). (2) Propagation delay — WWV arrives at ~4–8 ms after the minute boundary (1,119 km path); BPM arrives at ~40–55 ms (11,564 km, 3F/4F multi-hop). The >30 ms temporal gap keeps them well-resolved. (3) BPM UT1 minutes (25–29, 55–59) — BPM transmits 100 ms pulses, 10× longer than WWV's 5 ms ticks. These are unambiguous BPM markers and provide definitive path calibration.
+Three physical features make them distinguishable even at the same tone frequency: (1) Tick duration — WWV = 5 ms tick within an 800 ms tone; BPM = 10 ms tick within a 300 ms marker. Separate matched-filter templates (0.8s vs 0.3s). (2) Propagation delay — WWV arrives at ~4–8 ms after the minute boundary (1,119 km path); BPM arrives at ~40–55 ms (11,564 km, 3F/4F multi-hop). The >30 ms temporal gap keeps them well-resolved, and each template searches within its station's expected arrival window. (3) BPM UT1 minutes (25–29, 55–59) — BPM transmits 100 ms pulses, 10× longer than WWV's 5 ms ticks. These are unambiguous BPM markers and calibrate BPM's delay model.
 
 **"What about harmonics and intermodulation products contaminating the tick detection?"**
 This is a real issue. The 500 Hz × 2 = 1000 Hz harmonic contaminates WWV tick detection; 600 Hz × 2 = 1200 Hz contaminates WWVH. The 440 Hz × 3 = 1320 Hz harmonic lands near the WWVH 1200 Hz band. Mitigation: IIR notch filters at 440, 500, and 600 Hz (Q=20) are applied before tick correlation, removing the fundamentals that generate the harmonics. Additionally, the NIST broadcast specification (SP 432) provides a 10 ms silence zone before each tick, which suppresses the intermod pedestal. On shared channels during intermod-prone minutes, tick detection confidence is reduced (clean=0) but ticks are still detected because the notch filters remove the contamination source.
@@ -905,8 +911,8 @@ Within each second, both WWV and BPM produce a 1000 Hz tick. Their arrivals diff
 **"How do you know the discrimination is working correctly and not producing artifacts?"**
 The strongest validation is the cross-station Doppler correlation. If the discrimination were mislabeling multipath components of a single station as different stations, the Doppler time series would be correlated (same ionospheric path → same Doppler). Instead, we measure r ≈ 0 between all station pairs on all four shared frequencies (max |r| = 0.18). Independent ionospheric paths produce uncorrelated Doppler — which is exactly what we observe. Additionally, the D_clock ordering (WWV < WWVH < BPM) is consistent across all four shared frequencies and matches the geographic path distances (1,119 / 6,599 / 11,564 km). An artifact wouldn't maintain physically consistent ordering across independent frequencies.
 
-**"What fraction of minutes have confident discrimination?"**
-14 out of 60 minutes per hour (23%) have scheduled ground truth from NIST's exclusive tone minutes. On these minutes, discrimination confidence is high by construction. On the remaining 46 minutes, the tone power ratio (1000 Hz vs 1200 Hz) is the primary discriminator for WWV vs WWVH, and temporal windowing separates BPM. Production data shows ~860–877 records per station per frequency per day (of ~877 possible), meaning the discrimination rarely fails to produce a measurement for each station. The measurement cadence is essentially identical across all three stations — we're not biased toward the strongest signal.
+**"What fraction of minutes produce valid measurements for all three stations?"**
+Production data shows ~860–877 records per station per frequency per day (of ~877 possible minutes in a 14-hour window). All three stations maintain essentially identical measurement cadence — we're not biased toward the strongest signal. The parallel template approach means each station is measured independently every minute; a "failure" for one station (e.g., BPM below noise floor at night) doesn't affect the other two. The 14 ground-truth minutes per hour from NIST's exclusive tone schedule calibrate the delay models, but the measurements themselves don't depend on voting or decision logic — the matched-filter templates inherently select for each station's physical signal characteristics.
 
 ### The "gotcha" questions
 
