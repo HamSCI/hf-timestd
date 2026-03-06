@@ -7,7 +7,7 @@
 
 ---
 
-## Narrative Arc (revised 2026-02-25)
+## Narrative Arc (revised 2026-03-06)
 
 **Central question:** *With an RX888 and a GPSDO, what kind of ionospheric science can we do?*
 
@@ -17,9 +17,9 @@
 
 1. **The hardware question** (Slides 1–2): What timing infrastructure do you have? Four tiers from bare crystal to GPS+PPS. Each tier unlocks a different class of ionospheric observable. This is the organizing framework.
 
-2. **The metrology** (Slides 3–5): How we recover UTC from HF time signals when we already have a GPSDO. The GPSDO gives us the sample clock; the time signals give us absolute time-of-day via tick detection → multi-station fusion → Chrony feed. This is the bridge from Tier 2 (GPSDO-only, rate measurements) to Tier 3 (D_clock, absolute delay).
+2. **The metrology** (Slides 3–7): How we recover UTC from HF time signals when we already have a GPSDO. The GPSDO gives us the sample clock; the time signals give us absolute time-of-day via tick detection → multi-station fusion → Chrony feed. Includes visual evidence (Kalman fusion plot, Allan deviation) and shared-channel discrimination. This is the bridge from Tier 2 (GPSDO-only, rate measurements) to Tier 3 (D_clock, absolute delay).
 
-3. **The science payoff** (Slides 6–10): What comes into view once you have both frequency stability and time recovery. Demonstrated products from live data: carrier-phase dTEC, Doppler, shared-channel discrimination, multipath mode identification, cross-domain consistency.
+3. **The science payoff** (Slides 8–14): What comes into view once you have both frequency stability and time recovery. Demonstrated products from live data: 17 simultaneous paths, carrier-phase dTEC (4 slides), differential dTEC self-consistency, and the spectrogram-to-TEC physics cascade.
 
 **The four hardware tiers:**
 
@@ -264,7 +264,112 @@ capability if asked, but don't feature it.
 
 ---
 
-## Presentation Outline (15 minutes) — revised 2026-02-25
+## Deep-Dive: Shared-Channel Station Discrimination
+
+### The discrimination challenge
+
+On the four shared frequencies (2.5, 5, 10, 15 MHz), three stations transmit simultaneously:
+
+| Station | Location | Distance | Vacuum delay | Tick freq | Tick duration |
+|---------|----------|----------|-------------|-----------|---------------|
+| WWV | Fort Collins, CO | 1,119 km | 3.7 ms | 1000 Hz | 5 ms (800 ms tone) |
+| WWVH | Kauai, HI | 6,599 km | 22.0 ms | 1200 Hz | 5 ms (800 ms tone) |
+| BPM | Xi'an, China | 11,564 km | 38.6 ms | 1000 Hz | 10 ms (300 ms marker) |
+
+The signals arrive superimposed at the receiver. Without discrimination, timing is ambiguous and all derived products (D_clock, Doppler, dTEC) are contaminated.
+
+### Known contamination mechanisms
+
+**1. Harmonic intermodulation (receiver nonlinearity):**
+The NIST 500/600 Hz audio tones generate harmonics in the receiver chain:
+- 500 Hz × 2 = 1000 Hz — contaminates WWV tick detection
+- 600 Hz × 2 = 1200 Hz — contaminates WWVH tick detection
+- 440 Hz × 3 = 1320 Hz — near WWVH 1200 Hz band
+
+**Mitigation:** IIR notch filters at 440, 500, and 600 Hz (Q=20) applied before tick correlation. The notch filters remove the fundamentals, eliminating harmonic contamination of the tick-frequency bands. The harmonic ratios (P_1000/P_500, P_1200/P_600) are also measured and used as a confirmatory vote — when harmonics are strong, that itself indicates which station's tone is present.
+
+**2. BPM/WWV 1000 Hz overlap:**
+Both WWV and BPM use 1000 Hz ticks. They cannot be separated by tone frequency alone. Three features discriminate them:
+- **Tick duration:** WWV = 5 ms (within 800 ms tone), BPM = 10 ms (within 300 ms marker). The matched-filter correlator uses separate templates: 0.8s template for WWV, 0.3s template for BPM.
+- **Propagation delay:** WWV arrives at ~4–8 ms after the minute boundary; BPM arrives at ~40–55 ms. The temporal windows are well-separated (>30 ms gap).
+- **BPM UT1 minutes (25–29, 55–59):** BPM transmits 100 ms pulses — 10× longer than WWV's 5 ms ticks. These are unambiguous BPM markers and provide definitive path calibration.
+
+**3. WWV/BPM timing overlap on tick edges:**
+Within a single second, both WWV and BPM produce a 1000 Hz tick. Their arrival times differ by ~35–50 ms (depending on ionospheric conditions). The matched filter correlation function can, in principle, have overlapping sidelobes. In practice, the 10 ms mainlobe width and 35+ ms separation keep them resolved. During anomalous propagation (e.g., long-delayed WWV multipath), the arrivals could approach each other — this is flagged when timing falls outside the learned delay model window.
+
+**4. WWV/WWVH BCD time code crosstalk:**
+Both stations broadcast BCD amplitude modulation at 100 Hz. The BCD codes encode identical UTC time but with slightly different timing. The cross-correlation method separates them by fitting two time-shifted templates simultaneously, using the learned propagation delay difference to constrain the fit. When both are strong, the BCD correlation shows two peaks separated by the differential propagation delay.
+
+### 8-method weighted voting system
+
+The discrimination uses weighted voting across independent methods, with minute-specific weight adjustments:
+
+| Method | Discriminates | Weight | Availability |
+|--------|--------------|--------|-------------|
+| 1. 1000/1200 Hz tone power ratio | WWV+BPM vs WWVH | 5–10 | Every minute |
+| 2. 440 Hz tone | WWV vs WWVH (definitive) | 10 | Minutes 1, 2 only |
+| 3. 500/600 Hz ground truth | Scheduled exclusivity | 15 | 14 min/hr |
+| 4. BCD amplitude ratio | WWV vs WWVH | 2–10 | Every minute |
+| 5. Per-tick SNR average | Dominant station | 5 | Every minute |
+| 6. Test signal (min 8/44) | Scheduled exclusivity + FSS | 15 | 2 min/hr |
+| 7. Doppler stability | Cleaner path → dominant | 2 | Every minute |
+| 8. Harmonic power ratio | Cross-validates tone ID | 1.5 | When 500/600 Hz present |
+
+**Ground truth minutes (14 per hour):** During exclusive broadcast minutes, only one station transmits its audio tone:
+- WWV-only: minutes 1, 16, 17, 19
+- WWVH-only: minutes 2, 43, 44, 45, 46, 47, 48, 49, 50, 51
+
+These provide unambiguous station identification and calibrate the other methods.
+
+**Decision logic:**
+```
+score_WWV = Σ(w_i × vote_WWV_i) / Σ(w_i)
+score_WWVH = Σ(w_i × vote_WWVH_i) / Σ(w_i)
+margin = |score_WWV - score_WWVH|
+
+DECISION: margin < 0.15 → BALANCED; else dominant = higher score
+CONFIDENCE: margin > 0.7 → high; margin > 0.4 → medium; else low
+```
+
+### Production discrimination evidence (2026-03-06)
+
+**D_clock separation across all 4 shared frequencies (paired by minute):**
+
+| Freq | WWV−WWVH | WWV−BPM | WWVH−BPM |
+|------|---------|---------|----------|
+| 2.5 MHz | −0.34 ms (MAD 3.51) | −2.48 ms (MAD 4.03) | −1.71 ms (MAD 3.91) |
+| 5.0 MHz | −2.16 ms (MAD 3.86) | −3.96 ms (MAD 4.71) | −1.52 ms (MAD 4.25) |
+| 10.0 MHz | −0.44 ms (MAD 3.57) | −3.32 ms (MAD 4.34) | −3.00 ms (MAD 4.14) |
+| 15.0 MHz | −0.32 ms (MAD 3.30) | −1.01 ms (MAD 3.12) | −0.65 ms (MAD 3.30) |
+
+**Interpretation:** The WWV−BPM separation (1.0–4.0 ms median) is the most reliable discriminant — consistent negative sign across all frequencies, as expected from the 10,445 km path length difference. The WWV−WWVH separation is smaller (0.3–2.2 ms) because the ionospheric delays partially compensate the geometric path difference (WWVH's longer path has higher MUF and often fewer hops). The MAD values (3.1–4.7 ms) are comparable to the separations, so minute-by-minute D_clock alone is not sufficient — the multi-method voting is essential.
+
+**Cross-station Doppler correlation (r values):**
+
+| Freq | WWV−WWVH | WWV−BPM | WWVH−BPM |
+|------|---------|---------|----------|
+| 2.5 MHz | +0.036 | −0.025 | −0.026 |
+| 5.0 MHz | +0.018 | +0.128 | +0.071 |
+| 10.0 MHz | +0.090 | +0.074 | −0.047 |
+| 15.0 MHz | +0.182 | +0.164 | −0.037 |
+
+All cross-station correlations are near zero (|r| < 0.2). This is the strongest physical validation: if the discrimination were producing artifacts — e.g., assigning multipath components of the same station to different labels — the Doppler would be correlated. Independent paths through different ionospheric volumes produce uncorrelated Doppler, which is exactly what we observe.
+
+**Contrast with same-station cross-frequency Doppler:** Within a single station (e.g., WWV across 2.5/5/10/15 MHz), cross-frequency Doppler correlation is also low (r < 0.1) because different frequencies reflect at different ionospheric heights. This is expected: the ionospheric Doppler at each frequency reflects a different layer. The higher correlation reported for CHU (r ≈ 0.43 at 3.33/7.85/14.67) reflects CHU's shorter path (1,522 km, single-hop geometry) where all frequencies see similar ionospheric dynamics.
+
+### What the audience should take away
+
+1. **The discrimination is physics-based, not just pattern matching.** The D_clock ordering follows propagation geometry. The Doppler independence confirms separate ionospheric paths. The NIST tone schedule provides 14 ground-truth minutes per hour.
+
+2. **Known contamination is explicitly handled.** Harmonic intermodulation from 500/600 Hz tones is removed with notch filters before tick detection. BPM/WWV overlap is resolved by tick duration templates and temporal windowing. BCD crosstalk is handled by dual-template fitting.
+
+3. **The evidence is compelling but the individual-minute discrimination is noisy.** The MAD of the D_clock separation (3–5 ms) exceeds the median separation on some pairs. The multi-method voting compensates: 14 ground-truth minutes per hour continuously recalibrate the per-station delay models. The system works not because any single measurement is decisive, but because the ensemble of methods is overdetermined.
+
+4. **BPM is the most challenging station.** It shares 1000 Hz with WWV, has higher D_clock variance from its multi-hop transoceanic path, and its timing schedule is less well-documented than NIST's. The 100 ms UT1 pulses (minutes 25–29, 55–59) are the most reliable BPM discriminator.
+
+---
+
+## Presentation Outline (16 slides, 15 minutes) — revised 2026-03-06
 
 ---
 
@@ -366,31 +471,77 @@ Live chronyc comparison (the metrological ladder):
 
 Speaker notes: "Since we're listening to time standard stations and we know their broadcast schedules, we can recover UTC from the signals themselves. We run two independent Kalman filters — L1 uses geometric path delays, L2 adds an ionospheric correction. Both feed Chrony as reference clocks. The result: our HF-derived time is 100 times better than internet NTP and within about 1 millisecond of GPS ground truth. The ionospheric correction makes L2 three times tighter than L1 — it's doing real work. This is the bridge: a station with only a GPSDO can recover absolute time from the HF signals and unlock the D_clock products."
 
-### Slide 5: Shared-Channel Discrimination (2 min)
-**"Three stations on one frequency — seven ways to tell them apart"**
+### Slide 5: Kalman Fusion — Visual Evidence (30 sec)
+**[Image: Kalman fusion plot from metrology dashboard]**
+
+Shows the dual Kalman filter output over 24 hours: L1 (geometric-only) and L2 (ionospheric-corrected) D_clock estimates overlaid with GPS ground truth. The plot demonstrates:
+
+- L1 (blue) tracks GPS with ±2 ms bound, visible diurnal wander from uncorrected ionospheric delay
+- L2 (green) tracks GPS with ±0.6 ms bound — the ionospheric correction removes most of the diurnal structure
+- GPS+PPS ground truth (red) is the flat baseline at ~0 ms
+- The gap between L1 and L2 *is* the ionospheric correction — it's doing measurable work
+
+**Current live values:** TSL1 offset +1.9 ms (±2.0 ms), TSL2 offset +0.7 ms (±0.6 ms), GPS ground truth +0.002 ms (±0.094 ms).
+
+Speaker notes: "This is the Kalman fusion in action — 24 hours of continuous UTC recovery from HF time signals. The blue trace is L1, using only geometric propagation delays. It wanders through the day as the ionosphere changes — that's the uncorrected group delay. The green trace is L2, which applies the ionospheric correction from our propagation model. Notice how much tighter it tracks GPS. The gap between L1 and L2 is the ionospheric correction itself — you can see it grow during the day and shrink at night, exactly as you'd expect. L2 is three times tighter than L1. Both are a hundred times better than internet NTP."
+
+---
+
+### Slide 6: Allan Deviation — Timing Stability (30 sec)
+**[Image: Allan deviation plot from metrology dashboard]**
+
+Shows the Modified Allan Deviation (MDEV) for each timing source as a function of averaging time τ:
+
+- **GPS+PPS:** Floor at ~10⁻¹¹ for τ > 100 s — the GPSDO's intrinsic stability
+- **HF TSL2 (ionospheric):** ~10⁻⁸ at τ = 60 s, improving as τ⁻¹/² to ~10⁻⁹ at τ = 1000 s — white phase noise, averaging down
+- **HF TSL1 (geometric):** ~3× worse than L2 at all τ, limited by unmodeled ionospheric delay
+- **Internet NTP:** ~10⁻⁶ at τ = 60 s — three decades worse than HF
+
+The Allan deviation makes the hierarchy quantitative: GPS > HF L2 > HF L1 > NTP, consistent at every timescale.
+
+Speaker notes: "The Allan deviation gives the stability story in one plot. The x-axis is averaging time — how long you average before comparing. The y-axis is fractional frequency stability. GPS is at the bottom — that's our reference. The HF sources are three decades above GPS but three decades below NTP. And L2 consistently beats L1 at every timescale — the ionospheric correction isn't just reducing the mean offset, it's reducing the *instability*. The slope follows τ to the minus one-half, which tells us the dominant noise is white phase noise — exactly what you'd expect from independent per-minute measurements averaging down."
+
+---
+
+### Slide 7: Shared-Channel Discrimination (2 min)
+**"Three stations on one frequency — physics tells them apart"**
 
 The hardest measurement challenge: WWV, WWVH, and BPM on 2.5/5/10/15 MHz.
 
-**Methods (abbreviated — full detail in backup):**
+**Methods (abbreviated — full detail in deep-dive below):**
 
 - Tick frequency: 1000 Hz (WWV/BPM) vs 1200 Hz (WWVH), 3 dB gate
-- Tick duration: 5 ms (WWV/WWVH) vs 10 ms (BPM)
-- NIST tone schedule: ground truth 14 min/hr
-- Propagation delay ordering: WWV < WWVH < BPM (consistent across 4 frequencies)
+- Tick duration: 5 ms (WWV/WWVH) vs 10 ms (BPM), 100 ms (BPM UT1 minutes)
+- NIST tone schedule: ground truth 14 min/hr (exclusive broadcast minutes)
+- Propagation delay ordering: WWV < WWVH ≪ BPM (consistent across all 4 shared frequencies)
+- 8-method weighted voting with inter-method cross-validation
 
-**Production evidence (SHARED 10 MHz, 2026-02-23):**
+**Production evidence — all 4 shared channels (2026-03-06, 14h window):**
 
-| Station | Records/day | Median D_clock | Median SNR |
-|---------|------------|---------------|------------|
-| WWV | 1,380 | −1.12 ms | 26.2 dB |
-| WWVH | 1,379 | −0.08 ms | 17.8 dB |
-| BPM | 1,380 | +1.48 ms | 21.1 dB |
+| Freq | Station | n | Median D\_clock | MAD | Median SNR |
+|------|---------|---|----------------|-----|------------|
+| 2.5 MHz | WWV | 875 | −1.01 ms | 2.35 ms | 9.6 dB |
+| 2.5 MHz | WWVH | 876 | −0.20 ms | 2.35 ms | 9.6 dB |
+| 2.5 MHz | BPM | 872 | +1.16 ms | 2.67 ms | 8.7 dB |
+| 5.0 MHz | WWV | 876 | −1.57 ms | 2.41 ms | 9.0 dB |
+| 5.0 MHz | WWVH | 876 | −0.15 ms | 2.33 ms | 8.8 dB |
+| 5.0 MHz | BPM | 859 | +0.49 ms | 2.39 ms | 8.3 dB |
+| 10.0 MHz | WWV | 874 | −1.84 ms | 2.31 ms | 8.1 dB |
+| 10.0 MHz | WWVH | 877 | −0.71 ms | 2.51 ms | 8.1 dB |
+| 10.0 MHz | BPM | 872 | +1.22 ms | 3.10 ms | 7.6 dB |
+| 15.0 MHz | WWV | 876 | −0.48 ms | 2.06 ms | 8.0 dB |
+| 15.0 MHz | WWVH | 876 | −0.07 ms | 2.03 ms | 8.0 dB |
+| 15.0 MHz | BPM | 859 | +0.34 ms | 2.46 ms | 7.6 dB |
 
-**Physical validation:** D_clock ordering matches propagation geometry on all 4 shared frequencies. Cross-station Doppler: r ≈ 0 (independent ionospheric paths). Same-station cross-frequency Doppler: r = 0.43 (shared path → correlated).
+**Key observations:**
+1. **D\_clock ordering is consistent across all 4 frequencies:** WWV < WWVH < BPM, matching path geometry (1,119 km / 6,599 km / 11,564 km).
+2. **Cross-station Doppler correlation: r ≈ 0** on all channels (max |r| = 0.18 at 15 MHz). Independent ionospheric paths confirmed.
+3. **~860–877 records per station per frequency per day** — all three stations maintain consistent measurement cadence, not just one dominant station.
+4. **BPM has systematically higher D\_clock variance** (MAD 2.4–3.1 ms vs 2.0–2.5 ms for WWV/WWVH), consistent with its longer multi-hop path (3F/4F at 11,564 km).
 
-[FIGURE: fig11 Doppler scatter triptych]
+[FIGURE: fig11 Doppler scatter triptych + fig_discrimination_4freq D_clock scatter across all 4 shared frequencies]
 
-Speaker notes: "On the shared frequencies, three stations transmit simultaneously. We separate them with a layered approach. The strongest discriminator is the tick frequency gate — WWV at 1000 Hz, WWVH at 1200 Hz. For ground truth, the NIST tone schedule gives us 14 minutes per hour where only one station is broadcasting its audio tone. The physical validation is compelling: the D_clock offsets follow propagation geometry on all four shared frequencies, and the cross-station Doppler correlations are zero — proving these really are independent ionospheric paths, not artifacts of the discrimination."
+Speaker notes: "On the shared frequencies, three stations transmit simultaneously. We separate them with a layered approach. The strongest discriminator is the tick frequency gate — WWV at 1000 Hz, WWVH at 1200 Hz. BPM also uses 1000 Hz but has a 10 ms tick duration versus 5 ms for WWV, and its propagation delay is 35–50 ms from China versus 3–5 ms from Colorado. For ground truth, the NIST tone schedule gives us 14 minutes per hour where only one station broadcasts its audio tone. The table shows production data from today across all four shared frequencies. Three things jump out: first, the D_clock ordering is consistent on every channel — WWV most negative, WWVH in the middle, BPM most positive — matching the geometric path lengths. Second, the cross-station Doppler correlations are zero, proving these really are independent ionospheric paths. Third, all three stations maintain equal measurement cadence — we're not just seeing WWV and calling everything else noise."
 
 ---
 
@@ -398,58 +549,7 @@ Speaker notes: "On the shared frequencies, three stations transmit simultaneousl
 
 ---
 
-### Slide 6: Carrier-Phase dTEC — The Primary Science Product (2 min)
-**"Bypassing the propagation model noise floor"**
-
-The detection-limit argument:
-
-- Group-delay TEC: signal 0.85 ms, noise 6.5 ms → **SNR 0.13** (buried)
-- Carrier-phase dTEC: ~6 mTECU/min sensitivity → **SNR 17–330×** for TIDs
-- Formula: dTEC/dt = −f_D × c × f / 40.3
-
-**This is a Tier 2 product** — needs only the GPSDO, not absolute time.
-
-Evidence:
-
-- 17,045 dTEC records/day (per-minute)
-- 848,599 per-tick dTEC records/day (1-second resolution)
-- GNSS-anchored (ZED-F9P VTEC: 41.7 TECU, ±1 TECU accuracy)
-
-Speaker notes: "Here's the payoff. Group-delay TEC — the classical approach of measuring 1/f² dispersion — is below our noise floor. The propagation model has 6.5 millisecond errors, the dispersion signal is 0.85 milliseconds. We can't see it. But carrier-phase dTEC bypasses this entirely. We measure the Doppler shift — the rate of change of carrier phase — and convert it to dTEC/dt. The sensitivity is 6 milli-TECU per minute. And crucially, this is a Tier 2 product: it only needs the GPSDO, not absolute time."
-
-### Slide 7: Differential dTEC — Self-Consistency (1 min)
-**"Same ionosphere, different frequencies — do they agree?"**
-
-Same station at multiple frequencies → same ionospheric path → dTEC should match.
-
-| Station | Widest pair | RMS |
-|---------|------------|-----|
-| CHU | 3.33–14.67 MHz | 0.005–0.007 TECU |
-| WWV | 2.50–25.00 MHz | 0.005–0.026 TECU |
-
-22,474 records/day, all GOOD quality. Also a Tier 2 product.
-
-Speaker notes: "How do we know we're measuring real ionospheric physics? For each station, we compare dTEC at different frequencies on the same path. They agree to within 0.03 TECU RMS. This is 22,000 consistency checks per day, all passing."
-
-### Slide 8: Cross-Domain Consistency — Physics Cascade (1.5 min)
-**"From spectrogram to TEC — one ionospheric path, four views"**
-
-[FIGURE: fig16 GRAPE spectrogram CHU 7.85 (top) + fig13 physics cascade panels B–D (below)]
-
-Show for CHU 7.85 MHz (exclusive channel — no discrimination ambiguity):
-
-- Top: GRAPE spectrogram + power graph (the carrier Doppler trace is *visible* in the spectrogram)
-- Panel B: Doppler (phase rate, Tier 2) — the same feature, extracted quantitatively
-- Panel C: dTEC/dt (derived from Doppler, Tier 2)
-- Panel D: Integrated Doppler vs smoothed D\_clock — shape correlation r = 0.60
-
-**The visual story:** The spectrogram shows the carrier frequency offset varying with time — that's ionospheric Doppler, directly visible. The power graph shows signal strength varying with propagation conditions. Below, our pipeline extracts the Doppler quantitatively, converts it to dTEC/dt, and validates against D\_clock. The bottom panel is the money shot: integrated Doppler tracks the shape of D\_clock at 82× finer sensitivity.
-
-**GRAPE compatibility:** This spectrogram is the standard GRAPE data product uploaded to PSWS — the same data that feeds our science pipeline.
-
-Speaker notes: "This is CHU at 7.85 MHz — an exclusive channel with no discrimination ambiguity. At top, the GRAPE spectrogram — the standard data product we upload to PSWS. You can see the carrier frequency offset changing through the day — that's ionospheric Doppler, directly visible in the spectrogram. The power graph above it shows signal strength. Below, our pipeline extracts the Doppler quantitatively, converts to dTEC/dt, and in the bottom panel validates against D_clock. Integrated Doppler tracks the shape of D_clock at 82 times smaller amplitude, r = 0.60. So the spectrogram, the Doppler, the dTEC, and the D_clock are all measuring the same ionosphere through different physical processes."
-
-### Slide 9: 17 Simultaneous Ionospheric Paths (1.5 min)
+### Slide 8: 17 Simultaneous Ionospheric Paths (1.5 min)
 **"A passive oblique ionosonde"**
 
 [FIGURE: fig10 ionospheric fingerprint (4-panel SHARED 10 MHz) + fig14 frequency ladder]
@@ -472,7 +572,77 @@ Speaker notes: "This is CHU at 7.85 MHz — an exclusive channel with no discrim
 
 Speaker notes: "The full system monitors 17 simultaneous paths through the ionosphere. On the shared channels, three stations at the same frequency give three independent ionospheric soundings — the Doppler correlation is zero, confirming they see different paths. Across frequencies, WWV from 2.5 to 25 MHz samples six different layers. CHU across three frequencies shows correlated Doppler — same path, same ionosphere, consistent. The correlation heatmap makes the structure clear: station clusters are independent, within-station cross-frequency is correlated. This is essentially a passive oblique ionosonde with 17 beams."
 
-### Slide 10: What's Next — Honest Assessment (1 min)
+### Slides 9–12: Carrier-Phase dTEC — A Primary Science Product (2 min)
+**"Bypassing the propagation model noise floor"**
+
+*These four slides develop the dTEC argument progressively:*
+
+**Slide 9 — The detection-limit argument:**
+
+- Group-delay TEC: signal 0.85 ms, noise 6.5 ms → **SNR 0.13** (buried)
+- Carrier-phase dTEC: ~6 mTECU/min sensitivity → **SNR 17–330×** for TIDs
+- Formula: dTEC/dt = −f_D × c × f / 40.3
+- **This is a Tier 2 product** — needs only the GPSDO, not absolute time
+
+Evidence:
+
+- 17,045 dTEC records/day (per-minute)
+- 848,599 per-tick dTEC records/day (1-second resolution)
+- GNSS-anchored (ZED-F9P VTEC: 41.7 TECU, ±1 TECU accuracy)
+
+**Slide 10 — dTEC time series (figure):**
+
+[FIGURE: Multi-station dTEC rate overlay showing ionospheric dynamics across stations/frequencies]
+
+Shows dTEC/dt time series for multiple paths simultaneously. The diurnal ionospheric variation is clearly visible: positive rates during sunrise (ionization building), negative during sunset (recombination). Different stations and frequencies show correlated but not identical structure — the expected signature of ionospheric dynamics sampled along different oblique paths.
+
+**Slide 11 — dTEC detail / validation (figure):**
+
+[FIGURE: Per-station dTEC comparison or scatter plot showing cross-frequency consistency]
+
+Zoomed view or scatter plot demonstrating internal consistency of dTEC across frequencies for the same station. The 1/f dispersion relation predicts that dTEC/dt should be identical regardless of carrier frequency — the data confirms this to within measurement noise.
+
+**Slide 12 — GNSS anchoring (figure):**
+
+[FIGURE: Anchored TEC time series showing absolute scale from ZED-F9P VTEC]
+
+Shows integrated dTEC pinned to absolute VTEC from the local GNSS receiver. Without anchoring, the integrated TEC drifts freely. With GNSS anchoring, the DC level is set to ±1 TECU accuracy. The oblique HF paths track the temporal dynamics; the GNSS provides the absolute scale.
+
+Speaker notes (spanning slides 9–12): "Here's the payoff. Group-delay TEC — the classical approach of measuring 1/f² dispersion — is below our noise floor. The propagation model has 6.5 millisecond errors, the dispersion signal is 0.85 milliseconds. We can't see it. But carrier-phase dTEC bypasses this entirely. We measure the Doppler shift — the rate of change of carrier phase — and convert it to dTEC/dt using the ionospheric dispersion relation. The sensitivity is 6 milli-TECU per minute. And crucially, this is a Tier 2 product: it only needs the GPSDO, not absolute time. The time series shows the diurnal TEC variation across all 17 paths. To anchor the relative dTEC to absolute scale, we use a local ZED-F9P GPS receiver providing overhead VTEC at 1 TECU accuracy. The cross-frequency consistency — same station, different frequencies, same dTEC — validates that we're measuring real ionospheric physics."
+
+### Slide 13: Differential dTEC — Self-Consistency (1 min)
+**"Same ionosphere, different frequencies — do they agree?"**
+
+Same station at multiple frequencies → same ionospheric path → dTEC should match.
+
+| Station | Widest pair | RMS |
+|---------|------------|-----|
+| CHU | 3.33–14.67 MHz | 0.005–0.007 TECU |
+| WWV | 2.50–25.00 MHz | 0.005–0.026 TECU |
+
+22,474 records/day, all GOOD quality. Also a Tier 2 product.
+
+Speaker notes: "How do we know we're measuring real ionospheric physics? For each station, we compare dTEC at different frequencies on the same path. They agree to within 0.03 TECU RMS. This is 22,000 consistency checks per day, all passing."
+
+### Slide 14: From Spectrogram to TEC — CHU 7.85 MHz (1.5 min)
+**"One ionospheric path, four views"**
+
+[FIGURE: fig16 GRAPE spectrogram CHU 7.85 (top) + fig13 physics cascade panels B–D (below)]
+
+Show for CHU 7.85 MHz (exclusive channel — no discrimination ambiguity):
+
+- Top: GRAPE spectrogram + power graph (the carrier Doppler trace is *visible* in the spectrogram)
+- Panel B: Doppler (phase rate, Tier 2) — the same feature, extracted quantitatively
+- Panel C: dTEC/dt (derived from Doppler, Tier 2)
+- Panel D: Integrated Doppler vs smoothed D\_clock — shape correlation r = 0.60
+
+**The visual story:** The spectrogram shows the carrier frequency offset varying with time — that's ionospheric Doppler, directly visible. The power graph shows signal strength varying with propagation conditions. Below, our pipeline extracts the Doppler quantitatively, converts it to dTEC/dt, and validates against D\_clock. The bottom panel is the money shot: integrated Doppler tracks the shape of D\_clock at 82× finer sensitivity.
+
+**GRAPE compatibility:** This spectrogram is the standard GRAPE data product uploaded to PSWS — the same data that feeds our science pipeline.
+
+Speaker notes: "This is CHU at 7.85 MHz — an exclusive channel with no discrimination ambiguity. At top, the GRAPE spectrogram — the standard data product we upload to PSWS. You can see the carrier frequency offset changing through the day — that's ionospheric Doppler, directly visible in the spectrogram. The power graph above it shows signal strength. Below, our pipeline extracts the Doppler quantitatively, converts to dTEC/dt, and in the bottom panel validates against D_clock. Integrated Doppler tracks the shape of D_clock at 82 times smaller amplitude, r = 0.60. So the spectrogram, the Doppler, the dTEC, and the D_clock are all measuring the same ionosphere through different physical processes."
+
+### Slide 15: What's Next — Honest Assessment (1 min)
 **"What doesn't work yet, and what's coming"**
 
 **Current limits:**
@@ -507,7 +677,7 @@ Speaker notes: "The full system monitors 17 simultaneous paths through the ionos
 
 Speaker notes: "What doesn't work yet: group-delay TEC is buried in noise. VTEC maps from HF alone aren't credible. Scintillation monitoring is built but the ionosphere has been quiet. What just shipped: GNSS-anchored dTEC, using a local GPS receiver to provide absolute scale. What's coming: PPS injection directly into the HF IQ stream — that's Tier 4, which would give us microsecond timing on every sample and potentially rescue group-delay TEC. But I want to leave you with two bigger ideas. First: a network of these stations. Each one gives 17 ionospheric paths. Ten stations across the continent gives 170 paths — that's a passive oblique ionosonde network using transmitters that are already on the air. Correlated Doppler across sites gives you TID wavefront direction and velocity. Second: multiple GPSDO-locked RX888s at a single site. Because they share the same 10 MHz reference, the antennas are phase-coherent — you get a phased array for free. Antenna spacing of 15 meters at 10 MHz gives you angle-of-arrival discrimination. That means you can separate multipath arrivals by direction, not just by delay, and track Doppler and dTEC on individual ray paths. The infrastructure is the same — the GPSDO is doing the heavy lifting."
 
-### Slide 11: Summary & Call to Action (30 sec)
+### Slide 16: Bottom Line Summary & Call to Action (30 sec)
 
 **The answer to the central question:**
 
@@ -557,23 +727,25 @@ D_clock scatter by station on SHARED 10 MHz, color-coded by station (WWV/WWVH/BP
 
 ---
 
-## Timing Budget (15 minutes) — revised 2026-02-25
+## Timing Budget (15 minutes) — revised 2026-03-06
 
 | Act | Slide | Topic | Time | Cumulative |
 |-----|-------|-------|------|------------|
 | 1 | 1 | Title + central question | 0:30 | 0:30 |
 | 1 | 2 | Phenomena ladder (hardware tiers) | 2:00 | 2:30 |
-| 2 | 3 | TickEdgeDetector (measurement engine) | 2:00 | 4:30 |
-| 2 | 4 | UTC recovery (dual Kalman, metrological ladder) | 1:30 | 6:00 |
-| 2 | 5 | Shared-channel discrimination | 2:00 | 8:00 |
-| 3 | 6 | Carrier-phase dTEC (primary science product) | 2:00 | 10:00 |
-| 3 | 7 | Differential dTEC (self-consistency) | 1:00 | 11:00 |
-| 3 | 8 | Physics cascade (CHU 4-domain) | 1:30 | 12:30 |
-| 3 | 9 | 17 paths (fingerprint + heatmap) | 1:30 | 14:00 |
-|   | 10 | What’s next (honest assessment) | 0:30 | 14:30 |
-|   | 11 | Summary + call to action | 0:30 | 15:00 |
+| 2 | 3 | TickEdgeDetector (measurement engine) | 1:30 | 4:00 |
+| 2 | 4 | UTC recovery (dual Kalman, metrological ladder) | 1:00 | 5:00 |
+| 2 | 5 | Kalman fusion plot (visual evidence) | 0:30 | 5:30 |
+| 2 | 6 | Allan deviation (timing stability) | 0:30 | 6:00 |
+| 2 | 7 | Shared-channel discrimination | 2:00 | 8:00 |
+| 3 | 8 | 17 paths (fingerprint + heatmap) | 1:00 | 9:00 |
+| 3 | 9–12 | Carrier-phase dTEC (4 slides, progressive) | 2:00 | 11:00 |
+| 3 | 13 | Differential dTEC (self-consistency) | 1:00 | 12:00 |
+| 3 | 14 | From spectrogram to TEC (CHU 7.85 MHz) | 1:30 | 13:30 |
+|   | 15 | What's next (honest assessment) | 1:00 | 14:30 |
+|   | 16 | Bottom line summary + call to action | 0:30 | 15:00 |
 
-**Note:** Slides 10–11 are compressed closers. The three acts structure the narrative as question → method → payoff, echoing the central question on every slide.
+**Note:** Slides 5–6 are visual evidence supporting the Slide 4 metrology claims — let the plots speak, minimal narration. Slides 9–12 develop the dTEC argument progressively across four slides. Slides 15–16 are closers. The three acts structure the narrative as question → method → payoff.
 
 ---
 
@@ -715,6 +887,26 @@ Our current propagation model uses a 1D numerical integration through a Chapman-
 4. **Angle-of-arrival prediction.** If we add a phased array (multiple GPSDO-locked RX888s), PhaRLAP would predict the expected elevation and azimuth of each mode arrival, enabling direct comparison with measured angles of arrival.
 
 Integration path: PhaRLAP is a MATLAB/compiled library. We would call it via the Python `pharlap` wrapper or pre-compute lookup tables of (station, frequency, time) → (mode, delay, elevation) and interpolate at runtime. The IonoDataService already provides the ionospheric parameters that PhaRLAP needs as input.
+
+### Shared-channel discrimination
+
+**"How do you separate WWV from WWVH — they're on the same frequency?"**
+Eight independent discrimination methods, combined by weighted voting. The two strongest: (1) Tick frequency gate — WWV uses 1000 Hz, WWVH uses 1200 Hz. The matched-filter correlator runs separate templates for each. At 3 dB power ratio, the dominant station is identified. (2) NIST tone schedule — 14 minutes per hour, only one station broadcasts its 500/600 Hz audio tone (WWV-only: minutes 1, 16, 17, 19; WWVH-only: minutes 2, 43–51). These provide absolute ground truth. Additional methods: 440 Hz tone (definitive in minutes 1/2), BCD amplitude ratio, per-tick SNR, test signal in minutes 8/44, Doppler stability, and harmonic power ratios. No single method is always reliable; the weighted ensemble is overdetermined.
+
+**"How do you separate BPM from WWV — both use 1000 Hz?"**
+Three features: (1) Tick duration — WWV = 5 ms tick within an 800 ms tone; BPM = 10 ms tick within a 300 ms marker. Separate matched-filter templates (0.8s vs 0.3s). (2) Propagation delay — WWV arrives at ~4–8 ms after the minute boundary (1,119 km path); BPM arrives at ~40–55 ms (11,564 km, 3F/4F multi-hop). The >30 ms temporal gap keeps them well-resolved. (3) BPM UT1 minutes (25–29, 55–59) — BPM transmits 100 ms pulses, 10× longer than WWV's 5 ms ticks. These are unambiguous BPM markers and provide definitive path calibration.
+
+**"What about harmonics and intermodulation products contaminating the tick detection?"**
+This is a real issue. The 500 Hz × 2 = 1000 Hz harmonic contaminates WWV tick detection; 600 Hz × 2 = 1200 Hz contaminates WWVH. The 440 Hz × 3 = 1320 Hz harmonic lands near the WWVH 1200 Hz band. Mitigation: IIR notch filters at 440, 500, and 600 Hz (Q=20) are applied before tick correlation, removing the fundamentals that generate the harmonics. Additionally, the NIST broadcast specification (SP 432) provides a 10 ms silence zone before each tick, which suppresses the intermod pedestal. On shared channels during intermod-prone minutes, tick detection confidence is reduced (clean=0) but ticks are still detected because the notch filters remove the contamination source.
+
+**"What about the WWV/BPM timing overlap — don't the ticks collide?"**
+Within each second, both WWV and BPM produce a 1000 Hz tick. Their arrivals differ by ~35–50 ms (path difference). The matched-filter mainlobe is ~10 ms wide, and the 35+ ms separation keeps the correlation peaks resolved. During anomalous propagation (e.g., long-delayed WWV multipath approaching BPM's normal arrival time), the arrivals could converge — this is flagged when timing falls outside the learned delay model's ±1 ms window (measurement phase) or ±5 ms window (refinement phase).
+
+**"How do you know the discrimination is working correctly and not producing artifacts?"**
+The strongest validation is the cross-station Doppler correlation. If the discrimination were mislabeling multipath components of a single station as different stations, the Doppler time series would be correlated (same ionospheric path → same Doppler). Instead, we measure r ≈ 0 between all station pairs on all four shared frequencies (max |r| = 0.18). Independent ionospheric paths produce uncorrelated Doppler — which is exactly what we observe. Additionally, the D_clock ordering (WWV < WWVH < BPM) is consistent across all four shared frequencies and matches the geographic path distances (1,119 / 6,599 / 11,564 km). An artifact wouldn't maintain physically consistent ordering across independent frequencies.
+
+**"What fraction of minutes have confident discrimination?"**
+14 out of 60 minutes per hour (23%) have scheduled ground truth from NIST's exclusive tone minutes. On these minutes, discrimination confidence is high by construction. On the remaining 46 minutes, the tone power ratio (1000 Hz vs 1200 Hz) is the primary discriminator for WWV vs WWVH, and temporal windowing separates BPM. Production data shows ~860–877 records per station per frequency per day (of ~877 possible), meaning the discrimination rarely fails to produce a measurement for each station. The measurement cadence is essentially identical across all three stations — we're not biased toward the strongest signal.
 
 ### The "gotcha" questions
 
