@@ -654,6 +654,68 @@ With 2–3 stations in different grid squares: spatial TEC gradients, TID wavefr
 **"Is this compatible with PSWS / HamSCI data infrastructure?"**
 Yes. We produce standard GRAPE spectrograms (same format, same frequency resolution). The decimated 10 Hz IQ data is the GRAPE standard. Full PSWS upload integration is in progress.
 
+### dTEC methodology
+
+**"How do you calculate dTEC/dt?"**
+From the carrier phase of individual per-second tick detections. The TickEdgeDetector extracts ~55 carrier phase measurements per minute per station-frequency (one per tick). We unwrap the phase time series for continuity, compute the finite-difference phase rate (Doppler), then apply the ionospheric dispersion relation:
+
+    d(sTEC)/dt = −f_D × c × f / 40.3
+
+where f_D is the Doppler shift in Hz, c is the speed of light, f is the carrier frequency in Hz, and 40.3 m³/s² is the ionospheric constant. The physics: ionospheric phase advance is φ_iono(t) = −(2π/c) × (40.3/f) × sTEC(t), so the time derivative gives dTEC/dt directly from the measured Doppler. We then integrate dTEC/dt via trapezoidal rule to get relative TEC(t). Quality gates include: cycle-slip detection (phase acceleration > 5 Hz/s), unwrap quality scoring (fraction of inter-sample |Δφ| > π/2), and gap rejection (dt > 120 s). The code is in `carrier_tec.py:CarrierTECEstimator.compute_dtec_from_phase()`.
+
+Key point for the audience: this is a **Tier 2 product** — it requires only GPSDO frequency stability to ensure consecutive samples are correctly spaced. It does not require absolute time. The Doppler is measured from the *slope* of carrier phase across ticks within a minute, not from the absolute phase value.
+
+**"What does anchoring with local GNSS VTEC add? What's the quantitative difference with and without it?"**
+Without anchoring, carrier-phase dTEC is a *relative* measurement — you get dTEC/dt (the rate) and the *shape* of TEC(t) via integration, but the DC level is arbitrary. The integrated TEC drifts freely because there's no absolute reference. The per-minute summary (`dtec_mean_tecu`) is meaningless without an anchor; only `dtec_rate_tecu_per_s` is reliable. Quality is capped at MARGINAL regardless of SNR when unanchored (code enforces this: `if not is_anchored and qflag == 'GOOD': qflag = 'MARGINAL'`).
+
+With GNSS anchoring (our ZED-F9P provides overhead VTEC at ~1 TECU accuracy, ~1 sample/second), the integrated dTEC is pinned to an absolute scale. The anchor is applied at the midpoint of each minute: we read the nearest GNSS VTEC within ±120 seconds and use it as the DC level for all station-channels.
+
+Quantitative difference:
+- **Without anchor:** dTEC/dt sensitivity ~6 mTECU/min (unchanged), but integrated TEC has unbounded cumulative drift (~0.05–0.5 TECU/hour depending on noise). Useful for short-term dynamics (TIDs, flares) but not for absolute TEC.
+- **With GNSS anchor:** Integrated TEC absolute accuracy ~1–3 TECU (dominated by the ±1 TECU GNSS accuracy and the ~10–30% mapping error from using zenith VTEC for oblique paths without per-path slant correction).
+- **With group-delay anchor (fallback):** Essentially useless — group-delay TEC has SNR 0.13, so the anchor itself is noise-dominated. Confidence gate (≥0.5) rejects most group-delay anchors in practice.
+
+For stations without a GNSS receiver: the dTEC *rate* products are fully valid — Doppler, dTEC/dt, differential dTEC (cross-frequency consistency) all work at Tier 2 without any anchor. The integrated absolute TEC is the only product that degrades. The rate domain is where most of the science value lives anyway.
+
+### Propagation modeling
+
+**"What external data sources are you using?"**
+Three tiers, with automatic fallback:
+
+1. **WAM-IPE (primary)** — NOAA's Whole Atmosphere Model–Ionosphere Plasmasphere Electrodynamics. Fetched from public S3 bucket (`s3://noaa-nws-wam-ipe-pds/`, no credentials needed) or NOMADS fallback. 5-minute cadence, 1° geographic grid. Provides hmF2, NmF2, TEC. Updated every 5 minutes, cached for 1 hour.
+
+2. **GIRO ionosonde network (supplementary)** — Global Ionospheric Radio Observatory, via DIDBase (`lgdc.uml.edu/common/DIDBFast498`). Real-time foF2 and hmF2 from nearby ionosondes. Used to correct WAM-IPE systematic biases. Cached for 15 minutes.
+
+3. **Climatological fallback** — Built-in parametric model using Chapman layer profiles with diurnal, seasonal, latitudinal, and equatorial anomaly terms. No network dependency. This is what runs when WAM-IPE and GIRO are both unavailable.
+
+Additionally: **IRI-2020** (International Reference Ionosphere) is attempted as a middle tier between WAM-IPE and the parametric fallback, providing foF2 and hmF2 from the empirical climatological model when real-time data is unavailable.
+
+The propagation model (`propagation_model.py:HFPropagationModel`) uses these ionospheric parameters to compute HF group delay by numerically integrating the group refractive index n_g = 1/√(1 − f_p²/f²) through the electron density profile, evaluating 1F/2F/3F/1E modes with MUF checks. Uncertainty is source-dependent: ±0.5 ms (WAM-IPE+GIRO), ±1.0 ms (WAM-IPE alone), ±1.5 ms (IRI), ±3.0 ms (parametric), ±5.0 ms (no model).
+
+**"What external data sources could you use?"**
+Several additional sources exist but are not yet integrated:
+
+- **IRTAM (IRI Real-Time Assimilative Mapping)** — GIRO's real-time assimilation product that blends IRI with live ionosonde data globally. Would replace our own WAM-IPE + GIRO blending with a community-standard assimilated product. Available via DIDBase.
+- **SWPC US-TEC** — NOAA Space Weather Prediction Center real-time TEC maps from dual-frequency GPS. Would provide a cross-validation source for our HF-derived TEC and a better spatial anchor than single-point GNSS VTEC.
+- **Madrigal/CEDAR** — MIT Haystack Observatory's database of ionospheric measurements including ISR (incoherent scatter radar) profiles. Rich Ne(h) data but not real-time.
+- **GOES X-ray flux** — Already fetched for SID detection but not yet used as a D-region absorption model input. C/M/X-class flare magnitudes could drive a real-time D-region opacity correction.
+- **SuperDARN** — Convection patterns and irregularity maps from the HF radar network. Would help identify scintillation-prone conditions. Data available via BAS/VT.
+- **OMNI/ACE solar wind** — Upstream solar wind parameters for predicting geomagnetic storm onset. Would enable predictive mode switching (e.g., widen search windows during storm onset).
+- **IGS IONEX maps** — Already partially integrated (we write and read IONEX files). Global GPS-derived TEC maps at 2-hour cadence with 2.5°×5° resolution. Would provide better spatial anchoring than single-point GNSS VTEC.
+
+**"What would ray-tracing (e.g., PhaRLAP) add?"**
+Our current propagation model uses a 1D numerical integration through a Chapman-layer electron density profile — essentially a vertical slice model with geometric hop geometry. This has three significant limitations that ray-tracing would address:
+
+1. **Multi-hop delay precision.** Our model computes N-hop delay as N × (geometric + iono per hop), treating each hop identically. In reality, the reflection height and slant TEC differ for each hop because the ionosphere varies along the path. For CHU at ~1650 km, the 1F→2F delay separation is only ~6 ms — our model uncertainty (±0.5–5 ms depending on data source) is comparable to the mode separation. PhaRLAP would give per-hop delays accurate to ~0.1 ms by tracing the actual ray through a 3D ionosphere, making mode identification far more reliable.
+
+2. **Off-great-circle propagation.** HF rays don't follow great circles — tilted ionospheric layers (from TIDs, the equatorial anomaly, or auroral gradients) bend rays laterally. Our model assumes great-circle geometry. PhaRLAP traces through the 3D refractive index field and naturally captures lateral deviation, which affects both the delay and the effective reflection point location.
+
+3. **Constrained multipath fitting.** The matched-filter correlator's 10 ms mainlobe merges 1F and 2F arrivals (6 ms separation for CHU). With PhaRLAP providing precise predicted arrival times for each mode, we could fit a constrained multi-mode model to the correlation function — essentially deconvolving the merged arrivals using the predicted delays as priors. This would let us resolve multipath modes that are currently below our temporal resolution limit.
+
+4. **Angle-of-arrival prediction.** If we add a phased array (multiple GPSDO-locked RX888s), PhaRLAP would predict the expected elevation and azimuth of each mode arrival, enabling direct comparison with measured angles of arrival.
+
+Integration path: PhaRLAP is a MATLAB/compiled library. We would call it via the Python `pharlap` wrapper or pre-compute lookup tables of (station, frequency, time) → (mode, delay, elevation) and interpolate at runtime. The IonoDataService already provides the ionospheric parameters that PhaRLAP needs as input.
+
 ### The "gotcha" questions
 
 **"You're claiming sub-millisecond UTC from HF — isn't that just because you already have GPS?"**
