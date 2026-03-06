@@ -214,7 +214,6 @@ __all__ = [
     "Phase2AnalyticsService",
     "WWVHDiscriminator",
     "WWVTestSignalDetector",
-    "DiscriminationCSVWriters",
     # Supporting
     "WWVGeographicPredictor",
     "StandardTimeSignalGenerator",
