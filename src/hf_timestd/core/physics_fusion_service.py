@@ -94,7 +94,8 @@ class PhysicsFusionService:
             self.gnss_vtec_dir = Path(gnss_vtec_dir)
         else:
             self.gnss_vtec_dir = self.data_root / 'data' / 'gnss_vtec'
-        self._gnss_vtec_cache: Dict[str, Any] = {}  # date_str -> (timestamps, vtecs)
+        # _gnss_vtec_cache removed — _read_gnss_vtec() now does tail-reads
+        # instead of caching the entire daily file in memory.
 
         # Receiver coordinates — used for IPP computation and elevation geometry.
         # Default to EM38ww (Columbia, MO) if not provided.
@@ -803,50 +804,46 @@ class PhysicsFusionService:
         Read the nearest GNSS overhead VTEC measurement for a given epoch.
 
         Returns VTEC in TECU, or None if no data is available within ±120s.
-        Reads from the HDF5 files written by live_vtec.py.
+        Reads only the tail of the HDF5 file (last 300 rows ≈ 5 minutes at 1 Hz)
+        to avoid loading the entire daily file (~368 MB) into memory.
         """
         import h5py
 
         target_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
         date_str = target_dt.strftime('%Y%m%d')
 
-        # Check cache first
-        cached = self._gnss_vtec_cache.get(date_str)
-        if cached is not None:
-            timestamps, vtecs = cached
-        else:
-            # Load from HDF5
-            h5_path = self.gnss_vtec_dir / f'GNSS_gnss_vtec_{date_str}.h5'
-            if not h5_path.exists():
-                return None
-            try:
-                with h5py.File(h5_path, 'r', locking=False) as f:
-                    if 'unix_timestamp' not in f or 'vtec_tecu' not in f:
-                        return None
-                    timestamps = f['unix_timestamp'][:].astype(np.float64)
-                    vtecs = f['vtec_tecu'][:].astype(np.float64)
-                    # Optional quality gate
-                    if 'quality_flag' in f:
-                        qflags = f['quality_flag'][:]
-                        good_mask = np.array([
-                            (q == b'GOOD' or q == b'MARGINAL')
-                            if isinstance(q, bytes) else (q in ('GOOD', 'MARGINAL'))
-                            for q in qflags
-                        ])
-                        timestamps = timestamps[good_mask]
-                        vtecs = vtecs[good_mask]
-            except Exception as e:
-                logger.debug(f"Failed to read GNSS VTEC from {h5_path}: {e}")
-                return None
+        h5_path = self.gnss_vtec_dir / f'GNSS_gnss_vtec_{date_str}.h5'
+        if not h5_path.exists():
+            return None
 
-            if len(timestamps) == 0:
-                return None
+        TAIL_ROWS = 300  # ~5 minutes at 1 Hz — covers ±120s search window
 
-            # Cache — evict old dates to bound memory (keep at most 2 days)
-            self._gnss_vtec_cache[date_str] = (timestamps, vtecs)
-            stale = [k for k in self._gnss_vtec_cache if k < date_str and k != date_str]
-            for k in stale[:-1]:  # keep yesterday for midnight boundary
-                del self._gnss_vtec_cache[k]
+        try:
+            with h5py.File(h5_path, 'r', locking=False) as f:
+                if 'unix_timestamp' not in f or 'vtec_tecu' not in f:
+                    return None
+                n = f['unix_timestamp'].shape[0]
+                if n == 0:
+                    return None
+                start = max(0, n - TAIL_ROWS)
+                timestamps = f['unix_timestamp'][start:].astype(np.float64)
+                vtecs = f['vtec_tecu'][start:].astype(np.float64)
+                # Optional quality gate
+                if 'quality_flag' in f:
+                    qflags = f['quality_flag'][start:]
+                    good_mask = np.array([
+                        (q == b'GOOD' or q == b'MARGINAL')
+                        if isinstance(q, bytes) else (q in ('GOOD', 'MARGINAL'))
+                        for q in qflags
+                    ])
+                    timestamps = timestamps[good_mask]
+                    vtecs = vtecs[good_mask]
+        except Exception as e:
+            logger.debug(f"Failed to read GNSS VTEC from {h5_path}: {e}")
+            return None
+
+        if len(timestamps) == 0:
+            return None
 
         # Find nearest measurement within ±120 seconds
         idx = np.searchsorted(timestamps, epoch)

@@ -166,6 +166,9 @@ def main():
         last_log_time = time.time()
         last_data_time = time.time()  # Track when we last got a SUCCESSFUL HDF5 write
         consecutive_rejects = 0       # Plausibility rejections in a row
+        hdf5_write_buffer = []         # Buffer measurements for batch HDF5 write
+        BATCH_FLUSH_INTERVAL = 60      # Flush HDF5 buffer every 60 seconds
+        last_hdf5_flush = time.time()
         
         while True:
             try:
@@ -187,15 +190,27 @@ def main():
             bytes_received += len(data)
             
             # Log data reception rate every 10 seconds
-            if time.time() - last_log_time > 10:
+            now = time.time()
+            if now - last_log_time > 10:
                 logger.info(f"Receiving data: {bytes_received} bytes, {msg_count} UBX messages processed")
-                last_log_time = time.time()
+                last_log_time = now
                 bytes_received = 0
                 msg_count = 0
                 
                 # Notify systemd watchdog
                 if SYSTEMD_AVAILABLE:
                     systemd_daemon.notify('WATCHDOG=1')
+            
+            # Flush HDF5 buffer periodically (batch write reduces file bloat)
+            if hdf5_write_buffer and hdf5_writer and now - last_hdf5_flush >= BATCH_FLUSH_INTERVAL:
+                try:
+                    hdf5_writer.write_measurements_batch(hdf5_write_buffer)
+                    last_data_time = now
+                    logger.debug(f"Flushed {len(hdf5_write_buffer)} VTEC measurements to HDF5")
+                except Exception as e:
+                    logger.error(f"Failed to flush HDF5 batch: {e}")
+                hdf5_write_buffer = []
+                last_hdf5_flush = now
                 
             for msg_class, msg_id, payload in parser_ubx.process_data(data):
                 msg_count += 1
@@ -239,28 +254,21 @@ def main():
                             if csv_file:
                                 csv_file.write(line)
                             
-                            # Write to HDF5
-                            hdf5_ok = False
+                            # Buffer for batch HDF5 write
                             if hdf5_writer:
-                                try:
-                                    from datetime import datetime as dt, timezone as tz
-                                    measurement = {
-                                        'timestamp_utc': dt.fromtimestamp(timestamp, tz.utc).isoformat().replace('+00:00', 'Z'),
-                                        'unix_timestamp': timestamp,
-                                        'vtec_tecu': avg_vtec,
-                                        'n_satellites': len(valid_vtecs),
-                                        'quality_flag': 'GOOD' if len(valid_vtecs) >= 6 else 'MARGINAL' if len(valid_vtecs) >= 4 else 'BAD',
-                                        'processing_version': '1.0.0',
-                                        'min_elevation_deg': 20.0,
-                                        'dcb_corrected': bool(dcb_data)
-                                    }
-                                    hdf5_writer.write_measurement(measurement)
-                                    hdf5_ok = True
-                                except Exception as e:
-                                    logger.error(f"Failed to write HDF5: {e}")
-
-                            # Only reset watchdog on successful persistent write
-                            if hdf5_ok or not hdf5_writer:
+                                from datetime import datetime as dt, timezone as tz
+                                measurement = {
+                                    'timestamp_utc': dt.fromtimestamp(timestamp, tz.utc).isoformat().replace('+00:00', 'Z'),
+                                    'unix_timestamp': timestamp,
+                                    'vtec_tecu': avg_vtec,
+                                    'n_satellites': len(valid_vtecs),
+                                    'quality_flag': 'GOOD' if len(valid_vtecs) >= 6 else 'MARGINAL' if len(valid_vtecs) >= 4 else 'BAD',
+                                    'processing_version': '1.0.0',
+                                    'min_elevation_deg': 20.0,
+                                    'dcb_corrected': bool(dcb_data)
+                                }
+                                hdf5_write_buffer.append(measurement)
+                            else:
                                 last_data_time = time.time()
                         else:
                             logger.debug(f"No valid VTEC solutions (Low elevation or no lock). Total sats: {len(results)}")
@@ -308,6 +316,13 @@ def main():
     except KeyboardInterrupt:
         logger.info("Stopping...")
     finally:
+        # Flush any remaining buffered measurements before exit
+        if hdf5_write_buffer and hdf5_writer:
+            try:
+                hdf5_writer.write_measurements_batch(hdf5_write_buffer)
+                logger.info(f"Final flush: {len(hdf5_write_buffer)} VTEC measurements to HDF5")
+            except Exception as e:
+                logger.error(f"Failed final HDF5 flush: {e}")
         sock.close()
         if csv_file: csv_file.close()
         if hdf5_writer: hdf5_writer.close()
