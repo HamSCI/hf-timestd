@@ -289,7 +289,7 @@ class EventService:
                     prev_mode = mode
                     
             except Exception as e:
-                logger.debug(f"Could not analyze events from {channel}: {e}")
+                logger.warning(f"Could not analyze events from {channel}: {e}")
                 continue
         
         return events

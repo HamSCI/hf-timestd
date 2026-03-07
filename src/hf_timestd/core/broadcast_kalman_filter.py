@@ -69,6 +69,8 @@ REVISION HISTORY
 2026-01-07: Initial implementation for science-first architecture (v5.0.0)
 """
 
+import time
+
 import numpy as np
 import json
 import logging
@@ -566,7 +568,6 @@ class BroadcastKalmanFilter:
         innovation_ok = abs(self.last_innovation) < 1.0
         
         # Check mode stability (no recent transitions)
-        import time
         time_since_transition = time.time() - self.last_mode_transition_time
         mode_stable = time_since_transition > 180  # 3 minutes
         

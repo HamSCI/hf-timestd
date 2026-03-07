@@ -731,7 +731,7 @@ class PhysicsFusionService:
             self._tick_phase_reader_cache[channel] = reader
             return reader
         except Exception as e:
-            logger.debug(f"Failed to create tick_phase reader for {channel}: {e}")
+            logger.warning(f"Failed to create tick_phase reader for {channel}: {e}")
             return None
 
     def _read_tick_phase_minute(
@@ -794,7 +794,7 @@ class PhysicsFusionService:
                     result[channel] = records
 
             except Exception as e:
-                logger.debug(f"Failed to read tick_phase for {channel}: {e}")
+                logger.warning(f"Failed to read tick_phase for {channel}: {e}")
                 continue
 
         return result
@@ -839,7 +839,7 @@ class PhysicsFusionService:
                     timestamps = timestamps[good_mask]
                     vtecs = vtecs[good_mask]
         except Exception as e:
-            logger.debug(f"Failed to read GNSS VTEC from {h5_path}: {e}")
+            logger.warning(f"Failed to read GNSS VTEC from {h5_path}: {e}")
             return None
 
         if len(timestamps) == 0:

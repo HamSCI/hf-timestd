@@ -575,7 +575,7 @@ class MetrologyEngine:
             
             return False
         except Exception as e:
-            logger.debug(f"Signal presence check failed: {e}")
+            logger.warning(f"Signal presence check failed: {e}")
             return True  # Fail open — run tick filter if check fails
 
     def _find_all_correlation_peaks(
@@ -854,7 +854,7 @@ class MetrologyEngine:
         if corr_snr_db < MIN_CORR_SNR_DB:
             logger.info(f"{station_name}: Correlation too weak "
                         f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB:.1f}dB, expected={expected_delay_ms:.1f}ms, "
-                        f"peak_idx={peak_idx}, peak={peak_val:.4f}, noise={noise_median:.4f})")
+                        f"peak_idx={peak_idx}, peak={peak_val:.4f}, noise={noise_floor:.4f})")
             # Still compute arrival so the rejection is a complete record
             arrival_sample_rej = start_sample + peak_idx
             raw_arrival_ms_rej = arrival_sample_rej * 1000 / self.sample_rate
@@ -1176,6 +1176,10 @@ class MetrologyEngine:
             if expected_delay_ms > 0:
                 expected_delays_by_station[station] = expected_delay_ms
         
+        # edge_results is populated in the RTP branch (Step 1 edge ensemble)
+        # and consumed later in Step 2D (tick phase extraction) regardless of mode.
+        edge_results = {}
+        
         # === RTP MODE: Direct Measurement at Known Times ===
         # In RTP mode, timing is authoritative (GPSDO + GPS+PPS).
         # BufferTiming tells us the exact UTC time of every sample.
@@ -1367,7 +1371,7 @@ class MetrologyEngine:
                             iq_samples=iq_samples,
                         )
                     except Exception as e:
-                        logger.debug(f"{self.channel_name}: Edge detection failed for "
+                        logger.warning(f"{self.channel_name}: Edge detection failed for "
                                     f"{station_name}: {e}")
                         edge_result = None
                     
@@ -1703,9 +1707,9 @@ class MetrologyEngine:
                                             f"PLL: {pll_ticks} ticks, "
                                             f"winner: {comparison.get('winner', 'NONE')}")
                             except Exception as e:
-                                logger.debug(f"{self.channel_name}: PLL comparison failed: {e}")
+                                logger.warning(f"{self.channel_name}: PLL comparison failed: {e}")
                 except Exception as e:
-                    logger.debug(f"{self.channel_name}: {station_type.value} tick extraction failed: {e}")
+                    logger.warning(f"{self.channel_name}: {station_type.value} tick extraction failed: {e}")
             
             # Periodically update comparison metrics for API exposure (every 10 minutes)
             if self.comparison_tracker and self.minutes_processed % 10 == 0:
@@ -2079,7 +2083,7 @@ class MetrologyEngine:
             with open(fsk_path, 'w') as f:
                 json.dump(data, f)
         except Exception as e:
-            logger.debug(f"{self.channel_name}: Failed to write FSK result JSON: {e}")
+            logger.warning(f"{self.channel_name}: Failed to write FSK result JSON: {e}")
 
     def _decode_fsk_from_iq(self, iq_samples: np.ndarray, minute_boundary: int) -> dict:
         """Decode CHU FSK directly from IQ buffer (fallback when sidecar not running)."""

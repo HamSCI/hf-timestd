@@ -420,7 +420,7 @@ class ChronyStatsCollector:
             fusion_dir.mkdir(parents=True, exist_ok=True)
             h5_path = fusion_dir / f'chrony_stats_{date_str}.h5'
 
-            with h5py.File(h5_path, 'a') as f:
+            with h5py.File(h5_path, 'a', locking=False) as f:
                 # Flat table: one row per source per snapshot
                 grp = f.require_group('chrony_sources')
 

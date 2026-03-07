@@ -143,7 +143,7 @@ class RobustManagedStream:
                 return True
                 
         except Exception as e:
-            logger.debug(f"RobustManagedStream: ensure failed: {e}")
+            logger.warning(f"RobustManagedStream: ensure failed: {e}")
             
         return False
 
@@ -438,7 +438,7 @@ class StreamRecorderV2:
             if hasattr(self._control, 'get_capabilities'):
                 caps = self._control.get_capabilities()
         except Exception as e:
-            pass
+            logger.debug(f"{self.config.description}: get_capabilities failed: {e}")
             
         # Add phase-engine extensions if supported
         if caps.get("backend") == "phase-engine":
@@ -467,8 +467,8 @@ class StreamRecorderV2:
         if self.stream:
             try:
                 self.stream.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"{self.config.description}: Failed to stop previous stream: {e}")
         
         samples_per_packet = 200  # Average timestamp delta per packet
         
@@ -630,7 +630,7 @@ class StreamRecorderV2:
                     rtp_timesnap = fresh_info.rtp_timesnap
                     
                 except Exception as e:
-                    logger.debug(f"{self.config.description}: Discovery failed: {e}")
+                    logger.debug(f"{self.config.description}: Discovery failed: {e}")  # Expected during radiod restart
                     continue
                 
                 if gps_time is not None and rtp_timesnap is not None:
@@ -787,7 +787,7 @@ class StreamRecorderV2:
                 try:
                     tap(samples, quality)
                 except Exception as tap_err:
-                    logger.debug(f"{self.config.description}: tap callback error: {tap_err}")
+                    logger.warning(f"{self.config.description}: tap callback error: {tap_err}")
 
             # Log gaps if present
             if quality.has_gaps:

@@ -177,7 +177,7 @@ class TestSignalService:
                                 results.append(record)
                             
                 except Exception as e:
-                    logger.debug(f"Could not read test signal from {channel}: {e}")
+                    logger.warning(f"Could not read test signal from {channel}: {e}")
                     continue
             
             # Sort by timestamp descending
@@ -317,7 +317,7 @@ class TestSignalService:
                                 results.append(record)
                             
                 except Exception as e:
-                    logger.debug(f"Could not read from {channel}: {e}")
+                    logger.warning(f"Could not read from {channel}: {e}")
                     continue
             
             results.sort(key=lambda x: x.get('timestamp', ''))

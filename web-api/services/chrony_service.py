@@ -156,7 +156,7 @@ class ChronyService:
                     }
                     all_rows.append(rows)
             except Exception as e:
-                logger.debug(f"Failed to read {h5_path}: {e}")
+                logger.warning(f"Failed to read {h5_path}: {e}")
 
         if not all_rows:
             return {'sources': {}, 'system': []}

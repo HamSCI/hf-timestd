@@ -443,17 +443,21 @@ class L2CalibrationService:
             logger.error(f"{channel}: Calibration failed for {station_id}: {e}")
             return None
     
-    def _create_missing_l2(self, l1_dict: dict, channel: str) -> L2TimingMeasurement:
+    def _create_missing_l2(self, l1_dict: dict, channel: str) -> Optional[L2TimingMeasurement]:
         """Create L2 measurement for missing/bad L1 data."""
         station_id = l1_dict.get('station_id')
         if isinstance(station_id, bytes):
             station_id = station_id.decode()
         
+        if station_id not in StationID.__members__:
+            logger.warning(f"{channel}: Unknown station_id '{station_id}' in missing L2 — skipping")
+            return None
+        
         return L2TimingMeasurement(
             timestamp_utc=l1_dict.get('timestamp_utc'),
             minute_boundary_utc=int(l1_dict.get('minute_boundary_utc', 0)),
             rtp_timestamp=int(l1_dict.get('rtp_timestamp', 0)),
-            station=StationID[station_id] if station_id in StationID.__members__ else StationID.WWV,
+            station=StationID[station_id],
             frequency_mhz=float(l1_dict.get('frequency_mhz', 0)),
             
             discrimination_method=DiscriminationMethod.TONE,

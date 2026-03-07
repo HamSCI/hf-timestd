@@ -399,8 +399,8 @@ class PropagationService:
                                 snr_buckets.setdefault((mb_int, st), []).append(snr)
                     for key, vals in snr_buckets.items():
                         snr_lookup[key] = statistics.median(vals)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to read tick_phase SNR for {channel}: {e}")
 
                 # --- Build Doppler + Mode lookups from clock_offset/timing_measurements ---
                 # Key: (minute_boundary_utc, station) → doppler_hz / propagation_mode
@@ -429,8 +429,8 @@ class PropagationService:
                             mode = co.get('propagation_mode')
                             if mode and mode != 'UNKNOWN':
                                 mode_lookup[key] = mode
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to read clock_offset for {channel}: {e}")
 
                 # --- Read tick_timing (primary: d_clock_ms + record enumeration) ---
                 tick_records = []
@@ -446,8 +446,8 @@ class PropagationService:
                     )
                     if station:
                         tick_records = [m for m in tick_records if m.get('station') == station]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to read tick_timing for {channel}: {e}")
                 
                 if tick_records:
                     for t in tick_records:
@@ -503,8 +503,8 @@ class PropagationService:
                                 'doppler_hz': _safe_float(m.get('doppler_hz')),
                                 'propagation_mode': m.get('propagation_mode', 'UNKNOWN'),
                             })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to read L2 timing for {channel}: {e}")
             
             if not all_records:
                 return None
@@ -735,7 +735,7 @@ class PropagationService:
                                 all_measurements.append(measurement)
                     
                     except Exception as e:
-                        logger.debug(f"Could not read {csv_file}: {e}")
+                        logger.warning(f"Could not read {csv_file}: {e}")
                         continue
             
             if not all_measurements:

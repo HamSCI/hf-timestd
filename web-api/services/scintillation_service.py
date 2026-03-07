@@ -147,7 +147,7 @@ class ScintillationService:
                                     'source': 'test_signal',
                                 })
                     except Exception as e:
-                        logger.debug(f"Could not read test_signal from {fpath}: {e}")
+                        logger.warning(f"Could not read test_signal from {fpath}: {e}")
         return records
 
     # ------------------------------------------------------------------
@@ -296,7 +296,7 @@ class ScintillationService:
                                     'source': 'tick_phase',
                                 })
                     except Exception as e:
-                        logger.debug(f"Could not read tick_phase from {fpath}: {e}")
+                        logger.warning(f"Could not read tick_phase from {fpath}: {e}")
         return records
 
     # ------------------------------------------------------------------

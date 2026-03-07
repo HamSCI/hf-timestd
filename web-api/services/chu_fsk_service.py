@@ -112,7 +112,7 @@ class CHUFSKService:
                                     }
                                 break
                 except Exception as e:
-                    logger.debug(f"Could not read HDF5 for {channel} day -{days_back}: {e}")
+                    logger.warning(f"Could not read HDF5 for {channel} day -{days_back}: {e}")
 
         if best is None:
             return None
@@ -382,7 +382,7 @@ class CHUFSKService:
                     confidences.append(m.get('decode_confidence'))
                     channel_names.append(channel)
             except Exception as e:
-                logger.debug(f"Could not read FSK history from {channel}: {e}")
+                logger.warning(f"Could not read FSK history from {channel}: {e}")
 
         return {
             'timestamps': timestamps,

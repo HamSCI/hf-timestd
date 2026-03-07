@@ -188,8 +188,10 @@ class ChronySHM:
         
         # Memory-map the file
         fd = os.open(shm_path, os.O_RDWR)
-        self.shm_map = mmap.mmap(fd, SHM_SIZE)
-        os.close(fd)
+        try:
+            self.shm_map = mmap.mmap(fd, SHM_SIZE)
+        finally:
+            os.close(fd)
         
         self._use_sysv = False
         logger.info(f"Using file-based SHM: {shm_path}")
@@ -343,7 +345,7 @@ class ChronySHM:
             if self.count <= 10 or self.count % 60 == 0:
                 logger.info(
                     f"ChronySHM write #{self.count}: "
-                    f"mode=1, valid=1, nsamples=1, precision={precision}, "
+                    f"mode=0, valid=1, nsamples=1, precision={precision}, "
                     f"clock={reference_time:.6f}, recv={system_time:.6f}, "
                     f"offset={(system_time - reference_time)*1000:+.3f}ms"
                 )
