@@ -125,6 +125,96 @@
         // State
         let refreshTimer = null;
         let tps = null;  // TimePeriodSelector instance
+        let solarData = null;  // cached solar zenith data
+
+        // Station colors for solar traces
+        const SOLAR_STATION_COLORS = {
+            'WWV': '#3b82f6', 'WWVH': '#f59e0b', 'CHU': '#10b981', 'BPM': '#ef4444',
+        };
+
+        // Build night-shade shapes from solar elevation for a given station
+        function makeNightShapes(station) {
+            if (!solarData || !solarData.paths || !solarData.timestamps) return [];
+            // Find any path for this station (all freqs share same midpoint)
+            let elevs = null;
+            for (const [pid, pdata] of Object.entries(solarData.paths)) {
+                if (pdata.station === station) { elevs = pdata.elevation_deg; break; }
+            }
+            if (!elevs) return [];
+            const ts = solarData.timestamps;
+            const shapes = [];
+            let inNight = false, nightStart = null;
+            for (let i = 0; i < ts.length; i++) {
+                if (elevs[i] < 0 && !inNight) { inNight = true; nightStart = ts[i]; }
+                else if (elevs[i] >= 0 && inNight) {
+                    inNight = false;
+                    shapes.push({
+                        type: 'rect', xref: 'x', yref: 'paper',
+                        x0: nightStart, x1: ts[i], y0: 0, y1: 1,
+                        fillcolor: 'rgba(15,23,42,0.4)', line: { width: 0 }, layer: 'below'
+                    });
+                }
+            }
+            if (inNight && nightStart) {
+                shapes.push({
+                    type: 'rect', xref: 'x', yref: 'paper',
+                    x0: nightStart, x1: ts[ts.length - 1], y0: 0, y1: 1,
+                    fillcolor: 'rgba(15,23,42,0.4)', line: { width: 0 }, layer: 'below'
+                });
+            }
+            return shapes;
+        }
+
+        // Build solar elevation trace for a given station
+        function makeSolarTrace(station) {
+            if (!solarData || !solarData.paths || !solarData.timestamps) return null;
+            for (const [pid, pdata] of Object.entries(solarData.paths)) {
+                if (pdata.station === station) {
+                    return {
+                        x: solarData.timestamps,
+                        y: pdata.elevation_deg,
+                        mode: 'lines',
+                        line: { color: '#eab308', width: 2, shape: 'spline' },
+                        name: `Solar elev. (${station} path)`,
+                        yaxis: 'y3',
+                        showlegend: true,
+                        hovertemplate: 'Solar: %{y:.1f}\u00b0<extra></extra>',
+                    };
+                }
+            }
+            return null;
+        }
+
+        // Collect unique stations from plot series and build combined shapes
+        function getSolarOverlay(series) {
+            const stations = [...new Set((series || []).map(s => s.station))];
+            // Use first station for night shading (they mostly overlap)
+            const shapes = stations.length > 0 ? makeNightShapes(stations[0]) : [];
+            // Add solar trace for each unique station
+            const traces = [];
+            const seen = new Set();
+            for (const st of stations) {
+                if (seen.has(st)) continue;
+                seen.add(st);
+                const t = makeSolarTrace(st);
+                if (t) traces.push(t);
+            }
+            return { shapes, traces };
+        }
+
+        // Solar elevation y-axis (shared across plots)
+        const solarY3Axis = {
+            title: '',
+            overlaying: 'y',
+            side: 'right',
+            range: [-90, 90],
+            showgrid: false,
+            zeroline: false,
+            tickvals: [0, 30, 60, 90],
+            ticktext: ['0\u00b0', '30\u00b0', '60\u00b0', '90\u00b0'],
+            tickfont: { color: '#eab308', size: 9 },
+            automargin: false,
+        };
 
         // Plotly dark theme layout with uniform margins
         const darkLayout = {
@@ -229,18 +319,22 @@
                     visible: i === 0 ? true : 'legendonly',
                 }));
 
-                const layout = {
-                    ...darkLayout,
-                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: '' },
-                    yaxis: { ...darkLayout.yaxis, title: 'Phase (rad)' },
-                    showlegend: true,
-                };
-
                 if (traces.length === 0) {
                     document.getElementById('phase-plot').innerHTML =
                         '<div style="text-align: center; color: var(--text-secondary); padding: 60px;">No phase data in selected range</div>';
                     return;
                 }
+
+                const solar = getSolarOverlay(data.series);
+                traces.push(...solar.traces);
+                const layout = {
+                    ...darkLayout,
+                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: '' },
+                    yaxis: { ...darkLayout.yaxis, title: 'Phase (rad)' },
+                    yaxis3: solarY3Axis,
+                    shapes: solar.shapes,
+                    showlegend: true,
+                };
 
                 Plotly.react('phase-plot', traces, layout, PLOTLY_CONFIG);
             } catch (e) {
@@ -266,18 +360,22 @@
                     visible: i === 0 ? true : 'legendonly',
                 }));
 
-                const layout = {
-                    ...darkLayout,
-                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: '' },
-                    yaxis: { ...darkLayout.yaxis, title: 'Doppler (Hz)', zeroline: true, zerolinecolor: '#475569' },
-                    showlegend: true,
-                };
-
                 if (traces.length === 0) {
                     document.getElementById('doppler-plot').innerHTML =
                         '<div style="text-align: center; color: var(--text-secondary); padding: 60px;">No Doppler data in selected range</div>';
                     return;
                 }
+
+                const solar = getSolarOverlay(data.series);
+                traces.push(...solar.traces);
+                const layout = {
+                    ...darkLayout,
+                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: '' },
+                    yaxis: { ...darkLayout.yaxis, title: 'Doppler (Hz)', zeroline: true, zerolinecolor: '#475569' },
+                    yaxis3: solarY3Axis,
+                    shapes: solar.shapes,
+                    showlegend: true,
+                };
 
                 Plotly.react('doppler-plot', traces, layout, PLOTLY_CONFIG);
             } catch (e) {
@@ -359,6 +457,12 @@
                     return;
                 }
 
+                // Add solar overlay (use yaxis3 since yaxis2 is S4)
+                const solar = getSolarOverlay(data.series);
+                traces.push(...solar.traces);
+                layout.yaxis3 = solarY3Axis;
+                layout.shapes = solar.shapes;
+
                 Plotly.react('scintillation-plot', traces, layout, PLOTLY_CONFIG);
             } catch (e) {
                 console.error('Scintillation plot error:', e);
@@ -392,18 +496,22 @@
                     visible: i === 0 ? true : 'legendonly',
                 }));
 
-                const layout = {
-                    ...darkLayout,
-                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: 'UTC Time' },
-                    yaxis: { ...darkLayout.yaxis, title: 'DC Carrier Phase (rad)' },
-                    showlegend: true,
-                };
-
                 if (traces.length === 0) {
                     document.getElementById('dc-phase-plot').innerHTML =
                         '<div style="text-align: center; color: var(--text-secondary); padding: 60px;">No DC carrier phase data (requires CHU or WWV 20/25 MHz channels)</div>';
                     return;
                 }
+
+                const solar = getSolarOverlay(filtered);
+                traces.push(...solar.traces);
+                const layout = {
+                    ...darkLayout,
+                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: 'UTC Time' },
+                    yaxis: { ...darkLayout.yaxis, title: 'DC Carrier Phase (rad)' },
+                    yaxis3: solarY3Axis,
+                    shapes: solar.shapes,
+                    showlegend: true,
+                };
 
                 Plotly.react('dc-phase-plot', traces, layout, PLOTLY_CONFIG);
             } catch (e) {
@@ -411,9 +519,24 @@
             }
         }
 
+        // Fetch solar zenith data for the current date
+        async function fetchSolarData() {
+            try {
+                const range = tps.getRange();
+                const dateStr = range.start.slice(0, 10).replace(/-/g, '');
+                solarData = await api.get('/dashboard/solar-zenith/24h', {
+                    date: dateStr, interval_minutes: 10
+                });
+            } catch (e) {
+                console.warn('Solar zenith fetch failed:', e);
+                solarData = null;
+            }
+        }
+
         // Refresh all plots
         async function refreshAll() {
             document.getElementById('live-indicator').style.display = 'flex';
+            await fetchSolarData();
             await Promise.all([
                 updateSummary(),
                 updatePhasePlot(),
