@@ -10,238 +10,120 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## NEXT SESSION: WEB-API DASHBOARD AUDIT — DEMO-READY BY HAMSCI WORKSHOP
+## NEXT SESSION: DIAGNOSE AND FIX THE GRAPE MODULE
 
-**Goal:** Systematically review every page of the web-api dashboard, fix broken pages, standardize time/date selection controls, improve plot readability, ensure data actually flows to every page, and update the living documentation. The system must be demo-ready for a live presentation at the HamSCI 2026 workshop (next weekend, around March 15, 2026).
+**Goal:** The GRAPE daily pipeline (`grape-daily.service`) is failing every night. The decimation stage produces no output for any of the 21 channels, the quality gate aborts, and consequently `grape.html` has nothing to display (0 channels, empty selectors). Diagnose why decimation produces no output and fix it so the full pipeline (decimate → spectrogram → package → upload) succeeds.
 
-**Approach:** Work through pages one at a time. For each page: verify the backend router returns data, verify the frontend renders it, fix any issues, then move on. Apply the consistency standards documented below.
-
----
-
-## System Context
-
-- **System:** hf-timestd v6.9.2 (March 6, 2026)
-- **Focus Area:** `web-api/` — FastAPI backend (`web-api/routers/*.py`) + static HTML/JS frontend (`web-api/static/*.html`)
-- **Deadline:** Demo-ready by approximately March 14, 2026
-- **Recent change (2026-03-06):** Archived dead code from `wwvh_discrimination.py` (3918 to 1237 lines). No web-api impact.
-- **Recent change (2026-03-04):** RTP timing mismatch fix. May have affected data continuity for some pages.
+**Deadline:** Demo-ready by approximately March 14, 2026 (HamSCI workshop).
 
 ---
 
-## 1. Page Inventory and Known Issues
+## 1. Observed Symptoms
 
-There are **14 dashboard pages** served from `web-api/static/`. The table below summarizes the current state of each, based on a code audit performed on 2026-03-06.
+1. **`grape-daily.service`** is in **failed** state (`systemctl status grape-daily.service`)
+2. **Journal output** shows every channel fails identically:
+   ```
+   ⚠️  CHU_7850: decimation produced no output
+   ```
+   Root cause visible in earlier log lines:
+   ```
+   WARNING - No data directory for 20260306 at /var/lib/timestd/raw_archive/WWVH_5000/20260306
+   Found 0 minutes for 20260306 in WWVH 5000
+   Completed WWVH 5000: 0 minutes, 0 samples
+   ```
+3. **Quality gate** requires ALL 21 channels to decimate successfully; since 0/21 succeed, it aborts before spectrogram/package/upload stages.
+4. **`grape.html`** shows: CHANNELS: 0, empty channel/date selectors, "No decimated data found"
+5. **Upload history works fine** — 40 completed uploads from earlier (Jan-Feb 2026)
 
-| # | Page | File | Router | Chart Lib | common.js | Time Selection | Known Issues |
-|---|------|------|--------|-----------|-----------|----------------|--------------|
-| 1 | Overview | `index.html` | `dashboard.py` | none | YES | None (live only) | OK |
-| 2 | Health | `health.html` | `health.py` | none | YES | None (live only) | OK |
-| 3 | Timing | `metrology.html` | `metrology.py` | Plotly | YES | Preset buttons + datetime-local custom | Best UI — use as reference |
-| 4 | Validation | `timing-validation.html` | `timing_validation.py` | **Chart.js** | **NO** | hours param (points selector) | **LIKELY BROKEN** — depends on singleton service; uses Chart.js not Plotly |
-| 5 | Chrony | `chrony.html` | `chrony.py` | none | YES | time-btn (1h/6h/24h) | No custom date picker |
-| 6 | Phase | `phase.html` | `phase.py` | Plotly | YES | time-btn (15m/1h/6h/24h) relative only | **NO DATE PICKER** — cannot view historical data |
-| 7 | Observatory | `ionosphere.html` | `physics.py` | Plotly | **NO** | Custom date-picker | Own date picker implementation; no common.js |
-| 8 | Ionogram | `ionogram.html` | `ionogram.py` | Plotly | **NO** | datetime-local start/end | No common.js |
-| 9 | dTEC | `dtec.html` | `tec.py` | Plotly | **NO** | datetime-local start/end | No common.js; dTEC data may be degraded |
-| 10 | Test Signal | `test_signal.html` | (inline) | Plotly | YES | date-nav + date picker + time-range bar | Unique elaborate UI; plot readability unclear |
-| 11 | GRAPE | `grape.html` | `grape.py` | none | YES | Date dropdown from API | Depends on GRAPE data availability |
-| 12 | Docs | `docs.html` | `docs.py` | Plotly | **NO** | None (document viewer) | **LIVING DOCS NEED UPDATING** |
-| 13 | Logs | `logs.html` | `logs.py` | none | YES | datetime-local start/end | Functional as-is |
-| 14 | Station | `station.html` | `stations.py` | **Chart.js+Plotly** | **NO** | Fixed hours=24 | Uses BOTH Chart.js and Plotly; hardcoded 24h |
+## 2. Key Observation: Raw Data Exists But Is Sparse
 
----
-
-## 2. Consistency Standards to Apply
-
-### 2.1 Time Selection Widget
-
-**Reference implementation:** `metrology.html` (Fusion History section, lines 229-248)
-
-Every page displaying time-series data should have:
-1. **Preset buttons:** 1h, 6h, 24h, 7d (at minimum)
-2. **Custom date range:** Two `datetime-local` inputs with a Go button
-3. **Active button highlighting:** Blue (#3b82f6) background for selected preset
-4. **CSS class:** `.time-range-btn` (already defined in metrology.html)
-
-Pages that do NOT need time selection: `index.html`, `health.html`, `docs.html`.
-
-### 2.2 Charting Library
-
-**Standard:** Plotly.js 2.27.0
-
-All charting should use Plotly with this dark theme layout:
-```javascript
-const darkLayout = {
-    paper_bgcolor: '#1e293b',
-    plot_bgcolor: '#0f172a',
-    font: { color: '#e0e0e0', size: 12 },
-    xaxis: { gridcolor: '#334155', linecolor: '#475569', tickformat: '%H:%M' },
-    yaxis: { gridcolor: '#334155', linecolor: '#475569' },
-    margin: { l: 60, r: 30, t: 10, b: 40 },
-    legend: { bgcolor: 'rgba(30,41,59,0.8)', font: { color: '#e0e0e0' } },
-    hovermode: 'x unified',
-};
+```
+/var/lib/timestd/raw_archive/          # Raw 24kHz audio per channel per day
+├── CHU_3330/20260306/                  # ✓ has data for some dates
+├── CHU_7850/                           # directories exist but dates vary
+├── WWVH_5000/                          # ✗ missing 20260306
+└── ...                                 # 21 channel directories total
 ```
 
-**Action required:** Migrate `timing-validation.html` and `station.html` from Chart.js to Plotly.
+- Raw archive has data, but **not every channel has data for every date**
+- The pipeline runs for yesterday's date and expects ALL channels to have raw data
+- The all-or-nothing gate (`GATE FAILED: 21 channels missing`) means **partial data is discarded**
 
-### 2.3 common.js Adoption
+## 3. Files to Examine
 
-**Standard:** Every page should include `<script src="/static/js/common.js"></script>` and use the `api` global for API calls.
-
-Currently **missing from 6 pages:** timing-validation, ionosphere, ionogram, dtec, docs, station.
-
-Benefits: consistent error handling, `timeAgo()`, `AutoRefresh` class, `showError()`/`clearError()`.
-
-### 2.4 Navigation Bar
-
-The nav bar is consistent across pages (good). One minor issue:
-- Both Phase and Test Signal use the same emoji icon — differentiate them.
-
-### 2.5 Plot Readability (Demo Projection)
-
-- **Font size:** Minimum 12px for axis labels, 14px for titles
-- **Line width:** Minimum 1.5px for data traces
-- **Legend:** Always visible (not hidden behind hover)
-- **Axis labels:** Always present with units
-- **Zero lines:** Show for Doppler, dTEC/dt, and discrepancy plots
-
----
-
-## 3. Page-by-Page Audit Procedure
-
-For each page, execute these steps:
-
-### Step A: Backend Verification
-```bash
-curl -s http://localhost:8000/api/<endpoint> | python3 -m json.tool | head -30
-```
-Verify: HTTP 200, contains data, fields match what frontend expects.
-
-### Step B: Frontend Verification
-1. Does data appear? (Not "Loading..." forever, not "No data")
-2. Do all plots render?
-3. Do time selection controls work?
-4. Does auto-refresh work?
-5. Is the nav bar correct with current page highlighted?
-
-### Step C: Apply Consistency Standards
-1. Add common.js if missing
-2. Replace Chart.js with Plotly if applicable
-3. Add standard time selection widget if missing
-4. Apply dark theme layout to all Plotly charts
-5. Ensure axis labels and units are present
-
-### Step D: Fix Any Data Issues
-If a page shows no data, trace the pipeline: router endpoint -> service layer -> HDF5 data files.
-
----
-
-## 4. Prioritized Work Order
-
-### Priority 1 — Core Demo Pages (must work perfectly)
-1. **metrology.html** — Flagship page. Verify D_clock, fusion history, Allan deviation. Already best UI.
-2. **phase.html** — Add date picker for historical data. Currently relative-only.
-3. **dtec.html** — Verify dTEC data flows post-RTP-fix. Add common.js.
-4. **ionogram.html** — Verify arrival patterns. Add common.js. Standardize time controls.
-
-### Priority 2 — Supporting Demo Pages (should work)
-5. **timing-validation.html** — Likely broken. Migrate Chart.js to Plotly. Add common.js. Verify service running.
-6. **ionosphere.html** — Verify observatory data. Add common.js.
-7. **chrony.html** — Add date picker alongside existing time buttons.
-8. **test_signal.html** — Review plot readability. Standardize time controls.
-
-### Priority 3 — Nice-to-Have Pages
-9. **station.html** — Migrate Chart.js to Plotly. Add common.js.
-10. **grape.html** — Verify GRAPE data. Low priority unless demo planned.
-11. **health.html** — Verify health checks. No time selection needed.
-12. **index.html** — Verify station cards. No time selection needed.
-
-### Priority 4 — Documentation
-13. **docs.html** — Update living documentation content. Add common.js.
-14. **logs.html** — Functional as-is. Low priority.
-
----
-
-## 5. Key Files
-
-### Frontend
+### Core Pipeline (start here)
 | File | Role |
 |------|------|
-| `web-api/static/js/common.js` (214 lines) | Shared API client, formatters, AutoRefresh — adopt everywhere |
-| `web-api/static/css/styles.css` | Shared stylesheet — already used by all pages |
-| `web-api/static/*.html` (14 files) | Individual page implementations |
+| `src/hf_timestd/cli.py` ~lines 360-520 | `grape daily` CLI command — orchestrates decimate → spectrogram → package → upload with quality gates |
+| `src/hf_timestd/grape/decimation_pipeline.py` | `DecimationPipeline` — reads raw audio, calls `StatefulDecimator`, writes `.bin` output |
+| `src/hf_timestd/grape/decimation.py` | `StatefulDecimator` — 24kHz → 10Hz decimation with anti-alias filtering |
+| `src/hf_timestd/grape/raw_reader.py` | Reads raw IQ/audio files from `raw_archive/<channel>/<date>/` |
 
-### Backend Routers
-| File | Prefix | Serves |
-|------|--------|--------|
-| `web-api/routers/dashboard.py` | `/api/dashboard` | index.html |
-| `web-api/routers/health.py` | `/api/health` | health.html |
-| `web-api/routers/metrology.py` | `/api/metrology` | metrology.html |
-| `web-api/routers/timing_validation.py` | `/api/timing-validation` | timing-validation.html |
-| `web-api/routers/chrony.py` | `/api/chrony` | chrony.html |
-| `web-api/routers/phase.py` | `/api/phase` | phase.html |
-| `web-api/routers/physics.py` | `/api/physics` | ionosphere.html |
-| `web-api/routers/ionogram.py` | `/api/ionogram` | ionogram.html |
-| `web-api/routers/tec.py` | `/api/tec` | dtec.html |
-| `web-api/routers/grape.py` | `/api/grape` | grape.html |
-| `web-api/routers/docs.py` | `/api/living-docs` | docs.html |
-| `web-api/routers/logs.py` | `/api/logs` | logs.html |
-| `web-api/routers/stations.py` | `/api/stations` | station.html |
-| `web-api/routers/station.py` | `/api/station` | station.html (alt?) |
+### Product Generation
+| File | Role |
+|------|------|
+| `src/hf_timestd/grape/spectrogram.py` | Generates spectrogram PNGs from decimated `.bin` data |
+| `src/hf_timestd/grape/packager.py` | Packages decimated data for HamSCI upload |
+| `src/hf_timestd/grape/uploader.py` | Uploads packaged data to HamSCI servers |
+| `src/hf_timestd/grape/decimated_buffer.py` | Buffer for decimated samples |
 
-**Note:** Two station routers exist (`station.py` and `stations.py`). Investigate whether both are needed.
+### Web Layer
+| File | Role |
+|------|------|
+| `web-api/services/grape_service.py` | Serves channel list, spectrograms, upload history — reads from `products/` |
+| `web-api/routers/grape.py` | FastAPI router, `/api/grape/*` endpoints |
+| `web-api/static/grape.html` | Frontend — channel/date selectors, spectrogram viewer, upload history |
 
-### Routers Without Dedicated Pages
-| File | Prefix | Used By |
-|------|--------|---------|
-| `web-api/routers/correlations.py` | `/api/correlations` | No dedicated page |
-| `web-api/routers/propagation.py` | `/api/propagation` | docs.html live widgets |
-| `web-api/routers/space_weather.py` | `/api/space-weather` | dtec.html overlays |
-| `web-api/routers/stability.py` | `/api/stability` | metrology.html (Allan deviation) |
-| `web-api/routers/tid.py` | `/api/tid` | dtec.html |
+### Service Configuration
+| File | Role |
+|------|------|
+| `/etc/systemd/system/grape-daily.service` | Runs `python3 -m hf_timestd.cli grape daily` |
+| `/etc/systemd/system/grape-daily.timer` | Triggers daily at 01:01 UTC |
 
----
+## 4. Data Directory Layout
 
-## 6. Living Documentation Update Checklist
+```
+/var/lib/timestd/
+├── raw_archive/<CHANNEL>/<YYYYMMDD>/*.raw    # Input: 24kHz raw audio per minute
+├── products/<CHANNEL>/
+│   ├── decimated/*.bin                        # Output: 10Hz decimated (ALL EMPTY)
+│   └── spectrograms/*_spectrogram.png         # Output: daily spectrograms (ALL EMPTY)
+└── upload/<YYYYMMDD>/                         # Packaged data for HamSCI upload
+    └── queue.json                             # Upload queue (40 completed from Jan-Feb)
+```
 
-The `docs.html` page renders markdown from `/api/living-docs/`. Review:
+## 5. Likely Root Causes to Investigate
 
-1. **System architecture** — Verify it reflects current codebase (TickEdgeDetector is now primary, not TickMatchedFilter)
-2. **Measurement methodology** — Verify L1/L2/L3 layer descriptions are current
-3. **Live widgets** — Verify inline data widgets are wired to working endpoints
-4. **Dead code references** — Remove references to archived voting pipeline (moved to `core/legacy/`)
+1. **Raw data path mismatch** — Does `raw_reader.py` look in the right directory? The warning says `/var/lib/timestd/raw_archive/WWVH_5000/20260306` doesn't exist, but raw data may be stored differently (different naming, subdirectory structure, or the recorder writes to a different path).
 
----
+2. **Channel naming mismatch** — The pipeline expects channels like `WWVH_5000` but the recorder may use a different naming convention (e.g., `WWVH_5_MHz`, `WWVH_5000_Hz`). Check what the core recorder (`timestd-core-recorder.service`) actually writes.
 
-## 7. What "Demo-Ready" Looks Like
+3. **All-or-nothing gate too strict** — The pipeline aborts if ANY channel is missing. For a station that only receives a subset of broadcasts (e.g., no BPM reception), this gate will always fail. Consider making it partial-success tolerant.
 
-A successful live demo should be able to:
+4. **Decimation writes to wrong output path** — The decimation may run but write `.bin` files somewhere other than `products/<CHANNEL>/decimated/`. Check `DecimationPipeline` output path logic.
 
-1. Show the **overview page** with all 4 stations reporting active channels
-2. Show the **Timing page** with live D_clock, fusion history (24h), and Allan deviation
-3. Navigate to **Phase** and show carrier phase and Doppler for a selected channel with date navigation
-4. Navigate to **dTEC** and show ionospheric TEC variation
-5. Navigate to **Ionogram** and show arrival patterns with mode identification
-6. Navigate to **Validation** and show timing accuracy against GPS ground truth
-7. **All pages** load without broken links, missing data, or stuck loading spinners
-8. **All plots** readable on a projected screen (font sizes, contrast, labels)
+5. **Raw file format issue** — Even for channels that DO have raw data directories (like `CHU_3330/20260306/`), the decimation still produces 0 samples. This suggests `raw_reader.py` may not be finding or parsing the raw files correctly. Check the expected file naming pattern (`????????.bin` glob) vs. what actually exists.
 
----
-
-## 8. Quick Diagnostic Commands
+## 6. Diagnostic Commands
 
 ```bash
-# Check if web-api is running
-curl -s http://localhost:8000/api/health | python3 -m json.tool
+# Service status and recent logs
+systemctl status grape-daily.service
+sudo journalctl -u grape-daily.service --no-pager -n 100
 
-# Check specific endpoints that may be broken
-curl -s http://localhost:8000/api/timing-validation/dashboard?hours=1 | python3 -m json.tool | head -20
-curl -s http://localhost:8000/api/phase/summary | python3 -m json.tool | head -20
-curl -s http://localhost:8000/api/tec/dtec | python3 -m json.tool | head -20
+# What raw data exists for a channel that should have data?
+ls -la /var/lib/timestd/raw_archive/CHU_3330/20260306/
+ls -la /var/lib/timestd/raw_archive/CHU_7850/ | head -10
 
-# Check data directories have recent files
-ls -lt /var/lib/timestd/phase2/science/dtec/ | head -3
-ls -lt /var/lib/timestd/phase2/CHU_7850/tick_phase/ | head -3
-ls -lt /var/lib/timestd/data/fusion/ | head -3
+# What does the products directory look like?
+find /var/lib/timestd/products/ -name "decimated" -type d -exec sh -c 'echo "$1: $(ls "$1" | wc -l) files"' _ {} \;
+
+# Run decimation manually for a single channel with verbose output
+/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape daily --help
+
+# Check what the recorder actually writes
+ls -la /var/lib/timestd/raw_archive/CHU_3330/20260306/ | head -20
+
+# API response
+curl -s http://localhost:8000/api/grape/summary | python3 -m json.tool | head -20
 ```
