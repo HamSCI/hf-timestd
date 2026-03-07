@@ -149,6 +149,22 @@ async def get_scintillation(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.get("/channels")
+async def get_available_channels():
+    """
+    List all channels and stations that have tick_phase data on disk.
+
+    Used by the frontend to populate channel/station filter dropdowns.
+    """
+    try:
+        result = phase_service.get_available_channels()
+        return result
+
+    except Exception as e:
+        logger.error(f"Error listing channels: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/summary")
 async def get_phase_summary():
     """

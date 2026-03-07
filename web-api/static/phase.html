@@ -64,10 +64,6 @@
                     <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Station Filter</label>
                     <select id="station-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
                         <option value="">All Stations</option>
-                        <option value="WWV">WWV</option>
-                        <option value="WWVH">WWVH</option>
-                        <option value="CHU">CHU</option>
-                        <option value="BPM">BPM</option>
                     </select>
                 </div>
                 <div style="margin-left: auto;">
@@ -260,21 +256,29 @@
             hovermode: 'x unified',
         };
 
-        // Populate channel dropdown from summary
-        async function populateChannels() {
+        // Populate channel and station dropdowns from /phase/channels
+        async function populateFilters() {
             try {
-                const data = await api.get('/phase/summary');
-                const select = document.getElementById('channel-select');
-                const channels = new Set();
-                (data.channels || []).forEach(c => channels.add(c.channel));
-                channels.forEach(ch => {
+                const data = await api.get('/phase/channels');
+                const chSelect = document.getElementById('channel-select');
+                (data.channels || []).forEach(c => {
                     const opt = document.createElement('option');
-                    opt.value = ch;
-                    opt.textContent = ch;
-                    select.appendChild(opt);
+                    opt.value = c.channel;
+                    const label = c.dc_meaningful
+                        ? `${c.channel}  (DC, ${c.stations.join('/')})`
+                        : `${c.channel}  (${c.stations.join('/')})`;
+                    opt.textContent = label;
+                    chSelect.appendChild(opt);
+                });
+                const stSelect = document.getElementById('station-select');
+                (data.stations || []).forEach(st => {
+                    const opt = document.createElement('option');
+                    opt.value = st;
+                    opt.textContent = st;
+                    stSelect.appendChild(opt);
                 });
             } catch (e) {
-                console.warn('Could not populate channels:', e);
+                console.warn('Could not populate filters:', e);
             }
         }
 
@@ -583,7 +587,7 @@
 
         // Initialize TimePeriodSelector and load
         tps = new TimePeriodSelector('time-period-selector', refreshAll);
-        populateChannels();
+        populateFilters();
         refreshAll();
 
         // Auto-refresh every 60 seconds

@@ -411,6 +411,59 @@ class PhaseService:
             }
         }
 
+    # Known broadcast station call-signs
+    VALID_STATIONS = {'WWV', 'WWVH', 'CHU', 'BPM'}
+
+    def get_available_channels(self) -> Dict[str, Any]:
+        """List all channels that have tick_phase data on disk."""
+        channels = []
+        stations = set()
+        for d in sorted(self.phase2_dir.glob('*/tick_phase')):
+            if not d.is_dir():
+                continue
+            channel = d.parent.name
+            # Derive station from channel name prefix
+            if channel.startswith('SHARED_'):
+                # SHARED channels carry multiple stations; peek at latest file
+                station = None
+                latest = sorted(d.glob('*.h5'))
+                if latest:
+                    try:
+                        with h5py.File(str(latest[-1]), 'r', locking=False) as f:
+                            if 'station' in f:
+                                st_arr = f['station'][:]
+                                unique_st = set()
+                                for s in st_arr:
+                                    val = s.decode('utf-8') if isinstance(s, bytes) else str(s)
+                                    if val in self.VALID_STATIONS:
+                                        unique_st.add(val)
+                                stations.update(unique_st)
+                                station = sorted(unique_st)
+                    except Exception as e:
+                        logger.warning(f"Error reading stations from {latest[-1]}: {e}")
+            else:
+                # Named channel like CHU_14670 or WWV_25000
+                parts = channel.split('_')
+                station = parts[0] if parts else channel
+                if station in self.VALID_STATIONS:
+                    stations.add(station)
+                    station = [station]
+                else:
+                    station = []
+
+            n_files = len(list(d.glob('*.h5')))
+            channels.append({
+                'channel': channel,
+                'stations': station or [],
+                'n_files': n_files,
+                'dc_meaningful': channel in UNAMBIGUOUS_CHANNELS,
+            })
+
+        return {
+            'channels': sorted(channels, key=lambda c: c['channel']),
+            'stations': sorted(stations),
+        }
+
     def get_phase_summary(self) -> Dict[str, Any]:
         """
         Get current phase/Doppler state across all channels.
