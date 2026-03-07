@@ -766,11 +766,16 @@ class StreamRecorderV2:
                     # trust the OS clock instead. This prevents 6-day drifts from breaking fusion.
                     os_now = time.time()
                     if abs(system_time - os_now) > 3600: # 1 hour threshold
-                        logger.warning(
-                            f"{self.config.description}: RTP Clock Drift Detected! "
-                            f"RTP={system_time:.0f}, OS={os_now:.0f}, diff={system_time-os_now:.1f}s. "
-                            f"Falling back to OS clock."
-                        )
+                        # Rate-limit to one warning per minute per channel to avoid log floods
+                        # when radiod has not been restarted and RTP epoch is days behind wall clock.
+                        last_warn = getattr(self, '_last_drift_warn', 0)
+                        if os_now - last_warn >= 60:
+                            logger.warning(
+                                f"{self.config.description}: RTP Clock Drift Detected! "
+                                f"RTP={system_time:.0f}, OS={os_now:.0f}, diff={system_time-os_now:.1f}s. "
+                                f"Falling back to OS clock."
+                            )
+                            self._last_drift_warn = os_now
                         system_time = os_now
                         
                 except (ValueError, TypeError):

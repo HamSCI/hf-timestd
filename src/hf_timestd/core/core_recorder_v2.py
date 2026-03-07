@@ -628,7 +628,7 @@ class CoreRecorderV2:
         Systemd will restart the service automatically.
         """
         try:
-            from datetime import datetime, timedelta
+            from datetime import datetime
             
             # Check hot buffer (tiered storage) or cold buffer
             hot_buffer = Path('/dev/shm/timestd/raw_buffer')
@@ -638,23 +638,18 @@ class CoreRecorderV2:
             if not search_path.exists():
                 return
             
-            # Find most recent .bin or .bin.zst file
-            # Check today and yesterday (for just-after-midnight edge case)
-            now = datetime.now(timezone.utc)
-            dates_to_check = [
-                now.strftime('%Y%m%d'),
-                (now - timedelta(days=1)).strftime('%Y%m%d')
-            ]
-            
+            # Find most recent .bin or .bin.zst file by filesystem mtime.
+            # Scan ALL date subdirectories rather than only today/yesterday:
+            # when radiod has not been restarted its RTP epoch can be days
+            # behind wall clock, causing files to land in older date dirs.
             latest_mtime = 0
             latest_file = None
             
             for channel_dir in search_path.iterdir():
                 if not channel_dir.is_dir():
                     continue
-                for date_str in dates_to_check:
-                    day_dir = channel_dir / date_str
-                    if not day_dir.exists():
+                for day_dir in channel_dir.iterdir():
+                    if not day_dir.is_dir():
                         continue
                     for f in day_dir.glob('*.bin*'):
                         try:
