@@ -74,24 +74,24 @@ class Config:
     
     def _parse_channels(self) -> List[Dict[str, Any]]:
         """
-        Parse channel configuration.
+        Parse channel configuration from recorder.channel_group.*.channels.
         
         Returns:
             List of channel dictionaries with frequency and description
         """
         channels = []
-        for channel_config in self.recorder.get('channels', []):
-            freq_hz = channel_config.get('frequency_hz')
-            description = channel_config.get('description', '')
-            
-            if freq_hz:
-                channels.append({
-                    'frequency_hz': freq_hz,
-                    'frequency_mhz': freq_hz / 1e6,
-                    'description': description,
-                    'channel_name': description
-                })
-        
+        channel_groups = self.recorder.get('channel_group', {})
+        for group_name, group_config in channel_groups.items():
+            for channel_config in group_config.get('channels', []):
+                freq_hz = channel_config.get('frequency_hz')
+                description = channel_config.get('description', '')
+                if freq_hz:
+                    channels.append({
+                        'frequency_hz': freq_hz,
+                        'frequency_mhz': freq_hz / 1e6,
+                        'description': description,
+                        'channel_name': description
+                    })
         return channels
     
     def get_channel_dir(self, channel_name: str) -> Path:
