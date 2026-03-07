@@ -2,8 +2,11 @@
 # Install to: /etc/logrotate.d/timestd
 
 /var/log/hf-timestd/*.log {
-    # Rotate daily
+    # Rotate daily, or sooner if a log exceeds 50 MB.
+    # maxsize prevents log floods (e.g. per-packet warnings) from filling
+    # the disk before the daily rotation fires.
     daily
+    maxsize 50M
     
     # Keep 14 days of logs
     rotate 14

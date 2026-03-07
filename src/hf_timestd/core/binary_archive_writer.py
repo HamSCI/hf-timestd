@@ -208,22 +208,46 @@ class BinaryArchiveWriter:
             gps_unix_ns = gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)
             gps_unix_sec = gps_unix_ns / BILLION
             
-            # Detect RTP counter space change (radiod restart).
-            # If the old and new mappings disagree on the UTC of the same
-            # RTP timestamp by more than 1 second, the counter space changed.
+            # Detect RTP counter-space discontinuity (wraparound or radiod restart).
+            #
+            # The 32-bit RTP counter at 24 kHz wraps every ~49.7 hours — this is a
+            # routine event, not an error.  A radiod restart resets the counter to
+            # near zero at an arbitrary wall-clock moment.
+            #
+            # In both cases the correct action is identical: flush the in-progress
+            # minute buffer (so it is written with the OLD mapping) and then adopt
+            # the NEW GPS_TIME/RTP_TIMESNAP.  GPS_TIME is always authoritative; we
+            # never need to second-guess it.
+            #
+            # Distinguishing wraparound from restart for logging purposes:
+            #   - gps_unix_sec advances smoothly from _gps_time_unix  → wraparound
+            #   - gps_unix_sec is close to time.time()                → either case
+            #   The clearest signal is the magnitude of UTC disagreement relative to
+            #   one full wrap period (~178957 s).
+            WRAP_PERIOD = (0x100000000) / self.config.sample_rate  # ~178957 s at 24 kHz
             if self._gps_time_unix is not None and self._rtp_timesnap is not None:
                 # What UTC does the OLD mapping give for the NEW rtp_timesnap?
                 old_delta = int((rtp_timesnap - self._rtp_timesnap) & 0xFFFFFFFF)
                 if old_delta > 0x7FFFFFFF:
                     old_delta -= 0x100000000
                 old_utc = self._gps_time_unix + old_delta / self.config.sample_rate
-                if abs(old_utc - gps_unix_sec) > 1.0:
-                    logger.warning(
-                        f"{self.config.channel_name}: RTP counter space CHANGED — "
-                        f"old mapping gives UTC={old_utc:.3f} but new GPS_TIME={gps_unix_sec:.3f} "
-                        f"(diff={old_utc - gps_unix_sec:+.1f}s). Flushing current buffer."
-                    )
-                    # Flush current buffer before switching to new mapping
+                utc_diff = old_utc - gps_unix_sec
+                if abs(utc_diff) > 1.0:
+                    is_wraparound = abs(abs(utc_diff) - WRAP_PERIOD) < 60  # within 1 min of wrap period
+                    if is_wraparound:
+                        logger.info(
+                            f"{self.config.channel_name}: RTP counter wrapped "
+                            f"(32-bit rollover at {WRAP_PERIOD/3600:.1f}h). "
+                            f"Adopting new GPS_TIME={gps_unix_sec:.3f}. Flushing current buffer."
+                        )
+                    else:
+                        logger.warning(
+                            f"{self.config.channel_name}: RTP counter space CHANGED "
+                            f"(likely radiod restart) — "
+                            f"old mapping gives UTC={old_utc:.3f} but new GPS_TIME={gps_unix_sec:.3f} "
+                            f"(diff={utc_diff:+.1f}s). Flushing current buffer."
+                        )
+                    # In both cases: flush and adopt new mapping
                     if self.current_buffer is not None:
                         self._flush_minute(self.current_buffer)
                         self.current_buffer = None

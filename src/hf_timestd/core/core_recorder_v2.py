@@ -616,81 +616,60 @@ class CoreRecorderV2:
             logger.error(f"Health monitoring error: {e}")
     
     def _check_data_freshness(self):
-        """Check that raw buffer files are being written recently.
-        
-        This catches failure modes where:
-        - RTP clock is frozen/drifted
-        - Disk is full
-        - Permissions issues
-        - Silent processing failures
-        
-        If data is stale for >10 minutes, triggers a self-restart via sys.exit(1).
-        Systemd will restart the service automatically.
+        """Check that recorders are actively receiving and writing samples.
+
+        Uses per-recorder samples_written counters rather than filesystem mtime.
+        Filesystem mtime is unreliable when the RTP epoch is behind wall clock
+        (files land in past-dated directories) or when tiered storage moves files
+        between hot and cold buffers.
+
+        If no samples have been written across all recorders for >10 minutes,
+        triggers a self-restart via sys.exit(1).  Systemd will restart the service.
         """
         try:
-            from datetime import datetime
-            
-            # Check hot buffer (tiered storage) or cold buffer
-            hot_buffer = Path('/dev/shm/timestd/raw_buffer')
-            cold_buffer = self.output_dir / 'raw_buffer'
-            
-            search_path = hot_buffer if hot_buffer.exists() else cold_buffer
-            if not search_path.exists():
+            now = time.time()
+            uptime = now - self.start_time
+
+            # Snapshot total samples written across all active recorders
+            total_written = sum(
+                r.samples_written for r in self.recorders.values()
+            )
+
+            # Initialise snapshot on first call
+            if not hasattr(self, '_freshness_last_written'):
+                self._freshness_last_written = total_written
+                self._freshness_last_advance = now
                 return
-            
-            # Find most recent .bin or .bin.zst file by filesystem mtime.
-            # Scan ALL date subdirectories rather than only today/yesterday:
-            # when radiod has not been restarted its RTP epoch can be days
-            # behind wall clock, causing files to land in older date dirs.
-            latest_mtime = 0
-            latest_file = None
-            
-            for channel_dir in search_path.iterdir():
-                if not channel_dir.is_dir():
-                    continue
-                for day_dir in channel_dir.iterdir():
-                    if not day_dir.is_dir():
-                        continue
-                    for f in day_dir.glob('*.bin*'):
-                        try:
-                            mtime = f.stat().st_mtime
-                            if mtime > latest_mtime:
-                                latest_mtime = mtime
-                                latest_file = f
-                        except (OSError, IOError):
-                            continue
-            
-            if latest_file is None:
-                # No files found - service may be starting up
-                # Only alert if we've been running for a while
-                uptime = time.time() - self.start_time
-                if uptime > 300:  # 5 minutes
-                    logger.error(
-                        f"DATA FRESHNESS CRITICAL: No raw buffer files found after {uptime:.0f}s uptime!"
-                    )
+
+            if total_written > self._freshness_last_written:
+                # Progress — reset the stale timer
+                self._freshness_last_written = total_written
+                self._freshness_last_advance = now
                 return
-            
-            file_age = time.time() - latest_mtime
-            
-            # Alert if no new files in 5 minutes (300 seconds)
-            if file_age > 300:
+
+            # No progress since last check
+            silence = now - self._freshness_last_advance
+
+            # Only alert after the service has had time to start up
+            if uptime < 300:
+                return
+
+            if silence > 300:  # 5 minutes
                 logger.error(
-                    f"DATA FRESHNESS WARNING: No new raw buffer files in {file_age:.0f}s! "
-                    f"Latest: {latest_file.name} ({file_age/60:.1f} min old). "
-                    f"Check for RTP clock drift, disk full, or processing errors."
+                    f"DATA FRESHNESS WARNING: No samples written in {silence:.0f}s "
+                    f"across {len(self.recorders)} recorders. "
+                    f"Check disk full, permissions, or network loss."
                 )
-            
-            # CRITICAL: Trigger self-restart if stale for >10 minutes
-            # This ensures automatic recovery from silent failures
-            if file_age > 600:  # 10 minutes
+
+            # CRITICAL: trigger self-restart after 10 minutes of silence
+            if silence > 600:
                 logger.critical(
-                    f"DATA FRESHNESS CRITICAL: No new data in {file_age:.0f}s ({file_age/60:.1f} min). "
-                    f"Triggering self-restart to recover. Latest file: {latest_file}"
+                    f"DATA FRESHNESS CRITICAL: No samples written in {silence:.0f}s "
+                    f"({silence/60:.1f} min). Triggering self-restart to recover."
                 )
-                # Exit with error code - systemd will restart us (Restart=always)
                 self.running = False
                 sys.exit(1)
-                
+
         except Exception as e:
             logger.debug(f"Data freshness check error: {e}")
     

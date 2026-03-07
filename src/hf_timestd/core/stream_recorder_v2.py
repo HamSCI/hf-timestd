@@ -751,37 +751,13 @@ class StreamRecorderV2:
                 self._last_sample_time = self.last_sample_time  # For health monitor
                 self.last_quality = quality
             
-            # Get system time from quality metrics (GPS-derived from ka9q-python)
-            if quality.last_packet_utc:
-                try:
-                    from datetime import datetime
-                    if isinstance(quality.last_packet_utc, str):
-                        dt = datetime.fromisoformat(quality.last_packet_utc.replace('Z', '+00:00'))
-                        system_time = dt.timestamp()
-                    else:
-                        system_time = float(quality.last_packet_utc)
-                    
-                    # CRITICAL FIX (2026-01-09): Clock drift protection
-                    # If the RTP-derived time is significantly different from our OS clock,
-                    # trust the OS clock instead. This prevents 6-day drifts from breaking fusion.
-                    os_now = time.time()
-                    if abs(system_time - os_now) > 3600: # 1 hour threshold
-                        # Rate-limit to one warning per minute per channel to avoid log floods
-                        # when radiod has not been restarted and RTP epoch is days behind wall clock.
-                        last_warn = getattr(self, '_last_drift_warn', 0)
-                        if os_now - last_warn >= 60:
-                            logger.warning(
-                                f"{self.config.description}: RTP Clock Drift Detected! "
-                                f"RTP={system_time:.0f}, OS={os_now:.0f}, diff={system_time-os_now:.1f}s. "
-                                f"Falling back to OS clock."
-                            )
-                            self._last_drift_warn = os_now
-                        system_time = os_now
-                        
-                except (ValueError, TypeError):
-                    system_time = time.time()
-            else:
-                system_time = time.time()
+            # system_time is a startup hint only — the archive writer uses
+            # GPS_TIME/RTP_TIMESNAP as its authoritative source once locked.
+            # last_packet_utc comes from rtp_to_wallclock() which is derived
+            # from the 32-bit RTP counter; that counter wraps every ~49.7 hours
+            # at 24 kHz, making any comparison against time.time() unreliable.
+            # Always use the OS clock here; the archive writer will correct it.
+            system_time = time.time()
             
             # Calculate gap samples for this batch
             # ka9q-python fills gaps with zeros which breaks phase continuity
