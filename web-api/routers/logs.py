@@ -14,15 +14,43 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/logs", tags=["logs"])
 
 # Map service short names to systemd unit names
+# Groups: core pipeline, batch jobs, infrastructure
 SERVICE_MAP = {
-    "web-api": "timestd-web-api",
+    # --- Core pipeline (always running) ---
     "core": "timestd-core-recorder",
     "metrology": "timestd-metrology",
+    "l2-calibration": "timestd-l2-calibration",
+    "physics": "timestd-physics",
     "fusion": "timestd-fusion",
     "vtec": "timestd-vtec",
-    "physics": "timestd-physics",
-    "l2-calibration": "timestd-l2-calibration",
-    "radiod-monitor": "timestd-radiod-monitor"
+    "web-api": "timestd-web-api",
+    "radiod-monitor": "timestd-radiod-monitor",
+    # --- Batch / timer-triggered ---
+    "chrony-monitor": "timestd-chrony-monitor",
+    "iono-reanalysis": "timestd-iono-reanalysis",
+    "ionex-download": "timestd-ionex-download",
+    "grape-daily": "grape-daily",
+    # --- Infrastructure (external dependencies) ---
+    "chrony": "chrony",
+    "radiod": "radiod@*",
+}
+
+# Human-readable labels and groups for the UI
+SERVICE_META = {
+    "core":             {"label": "Core Recorder",       "group": "Pipeline"},
+    "metrology":        {"label": "Metrology (L1)",      "group": "Pipeline"},
+    "l2-calibration":   {"label": "L2 Calibration",      "group": "Pipeline"},
+    "physics":          {"label": "Physics (L2)",        "group": "Pipeline"},
+    "fusion":           {"label": "Fusion",              "group": "Pipeline"},
+    "vtec":             {"label": "VTEC",                "group": "Pipeline"},
+    "web-api":          {"label": "Web API",             "group": "Pipeline"},
+    "radiod-monitor":   {"label": "Radiod Monitor",      "group": "Pipeline"},
+    "chrony-monitor":   {"label": "Chrony Monitor",      "group": "Batch"},
+    "iono-reanalysis":  {"label": "Iono Reanalysis",     "group": "Batch"},
+    "ionex-download":   {"label": "IONEX Download",      "group": "Batch"},
+    "grape-daily":      {"label": "GRAPE Daily",         "group": "Batch"},
+    "chrony":           {"label": "Chrony (NTP)",        "group": "Infrastructure"},
+    "radiod":           {"label": "Radiod (SDR)",        "group": "Infrastructure"},
 }
 
 @router.get("/")
@@ -42,6 +70,7 @@ async def get_logs(
     unit_name = SERVICE_MAP[service]
     
     # Construct journalctl command
+    # journalctl -u supports glob patterns natively (e.g. radiod@*)
     cmd = ["journalctl", "-u", unit_name, "-n", str(lines), "--no-pager", "--output=short-iso"]
     
     # Add time filter — detect ISO datetime vs relative duration
@@ -133,3 +162,18 @@ async def get_logs(
     except Exception as e:
         logger.error(f"Error fetching logs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/services")
+async def list_services():
+    """Return available services with labels and groups for the UI."""
+    services = []
+    for key in SERVICE_MAP:
+        meta = SERVICE_META.get(key, {"label": key, "group": "Other"})
+        services.append({
+            "key": key,
+            "label": meta["label"],
+            "group": meta["group"],
+            "unit": SERVICE_MAP[key],
+        })
+    return {"services": services}

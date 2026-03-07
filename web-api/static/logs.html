@@ -26,6 +26,16 @@
             gap: 12px;
         }
 
+        .log-entry.has-warning {
+            border-left: 3px solid #f59e0b;
+            padding-left: 9px;
+        }
+
+        .log-entry.has-error {
+            border-left: 3px solid #ef4444;
+            padding-left: 9px;
+        }
+
         .log-time {
             color: #64748b;
             white-space: nowrap;
@@ -136,18 +146,74 @@
 
         <div id="error-container" style="display: none;"></div>
 
+        <!-- Error Guidance Panel (collapsible) -->
+        <details id="guidance-panel" style="margin-bottom: 16px;">
+            <summary style="cursor: pointer; color: #94a3b8; font-size: 13px; padding: 8px 0; user-select: none;">
+                📖 Error Guidance Reference
+            </summary>
+            <div style="background: #1e293b; border-radius: 6px; padding: 16px; margin-top: 8px; font-size: 12px; line-height: 1.6; border: 1px solid rgba(148, 163, 184, 0.1);">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                    <div>
+                        <div style="color: #ef4444; font-weight: 600; margin-bottom: 6px;">🔴 Critical Errors</div>
+                        <div style="color: #cbd5e1;">
+                            <b style="color:#f59e0b">Unable to lock file / errno=11</b><br>
+                            HDF5 file lock contention. Verify all <code>h5py.File()</code> calls use <code>locking=False</code>.<br>
+                            Quick check: <code>grep -rn 'h5py.File' src/ web-api/ --include='*.py' | grep -v locking</code><br><br>
+                            <b style="color:#f59e0b">NameError / AttributeError in hot path</b><br>
+                            Variable undefined in one code branch. Check recent commits. Restart the affected service after fix.<br><br>
+                            <b style="color:#f59e0b">L1 metrology read: 0 entries</b><br>
+                            Fusion is starved. Check metrology service is writing HDF5. Verify <code>/var/lib/timestd/</code> disk space.
+                        </div>
+                    </div>
+                    <div>
+                        <div style="color: #f59e0b; font-weight: 600; margin-bottom: 6px;">🟡 Common Warnings</div>
+                        <div style="color: #cbd5e1;">
+                            <b style="color:#f59e0b">Failed to read tick_phase / clock_offset</b><br>
+                            HDF5 file missing or corrupt for that day. Check if metrology service is running.<br>
+                            <code>systemctl status timestd-metrology</code><br><br>
+                            <b style="color:#f59e0b">Edge detection failed / tick extraction failed</b><br>
+                            Low SNR on that channel. Normal during nighttime fading or propagation outages. Check SNR on Timing page.<br><br>
+                            <b style="color:#f59e0b">Discovery failed / ensure failed</b><br>
+                            Radiod connection lost. Check: <code>systemctl status radiod@*</code><br>
+                            If radiod was restarted, recorder reconnects automatically within ~30s.
+                        </div>
+                    </div>
+                    <div>
+                        <div style="color: #3b82f6; font-weight: 600; margin-bottom: 6px;">🔵 Service Recovery</div>
+                        <div style="color: #cbd5e1;">
+                            <b style="color:#f59e0b">Restart a single service:</b><br>
+                            <code>sudo systemctl restart timestd-{name}</code><br><br>
+                            <b style="color:#f59e0b">Restart all (except recorder):</b><br>
+                            <code>sudo scripts/update-production.sh</code><br><br>
+                            <b style="color:#f59e0b">Full deploy from git:</b><br>
+                            <code>sudo scripts/update-production.sh --pull</code>
+                        </div>
+                    </div>
+                    <div>
+                        <div style="color: #22c55e; font-weight: 600; margin-bottom: 6px;">🟢 Batch Job Issues</div>
+                        <div style="color: #cbd5e1;">
+                            <b style="color:#f59e0b">GRAPE daily failed</b><br>
+                            Check raw data availability. Files &lt;2 days old are protected from quota cleanup.<br>
+                            Manual run: <code>sudo systemctl start grape-daily</code><br><br>
+                            <b style="color:#f59e0b">IONEX download failed</b><br>
+                            CDDIS server may be down. Retries automatically next day.<br>
+                            Manual: <code>sudo systemctl start timestd-ionex-download</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </details>
+
+        <!-- Contextual alert (shown when known error patterns detected) -->
+        <div id="contextual-alert" style="display: none; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; font-size: 12px; color: #fbbf24;"></div>
+
         <div class="controls-bar">
             <div class="control-group">
                 <span class="control-label">Service</span>
                 <select id="service-select">
-                    <option value="fusion">Fusion</option>
-                    <option value="metrology">Metrology (L1)</option>
-                    <option value="physics">Physics (L2)</option>
-                    <option value="l2-calibration">L2 Calibration</option>
-                    <option value="core">Core Recorder</option>
-                    <option value="vtec">VTEC</option>
-                    <option value="web-api">Web API</option>
-                    <option value="radiod-monitor">Radiod Monitor</option>
+                    <optgroup label="Pipeline" id="optgroup-pipeline"></optgroup>
+                    <optgroup label="Batch Jobs" id="optgroup-batch"></optgroup>
+                    <optgroup label="Infrastructure" id="optgroup-infra"></optgroup>
                 </select>
             </div>
 
@@ -200,8 +266,9 @@
             <div class="loading">Loading logs...</div>
         </div>
 
-        <div style="margin-top: 8px; font-size: 11px; color: #64748b; text-align: right;">
-            Showing <span id="log-count">0</span> lines
+        <div style="margin-top: 8px; font-size: 11px; color: #64748b; display: flex; justify-content: space-between;">
+            <span id="error-summary"></span>
+            <span>Showing <span id="log-count">0</span> lines</span>
         </div>
     </div>
 
@@ -278,16 +345,30 @@
                 }
 
                 // Render logs
-                const html = logs.map(log => `
-                    <div class="log-entry">
+                let warnCount = 0, errCount = 0;
+                const html = logs.map(log => {
+                    const cls = log.level === 'ERROR' ? 'has-error' : log.level === 'WARNING' ? 'has-warning' : '';
+                    if (log.level === 'ERROR') errCount++;
+                    if (log.level === 'WARNING') warnCount++;
+                    return `
+                    <div class="log-entry ${cls}">
                         <span class="log-time">${formatLogTime(log.timestamp)}</span>
                         <span class="log-level level-${log.level}">${log.level}</span>
                         <span class="log-message">${escapeHtml(log.message)}</span>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
 
                 logDisplay.innerHTML = html;
                 document.getElementById('log-count').textContent = logs.length;
+
+                // Error/warning summary
+                const parts = [];
+                if (errCount > 0) parts.push(`<span style="color:#ef4444">${errCount} error${errCount>1?'s':''}</span>`);
+                if (warnCount > 0) parts.push(`<span style="color:#f59e0b">${warnCount} warning${warnCount>1?'s':''}</span>`);
+                document.getElementById('error-summary').innerHTML = parts.join(' · ');
+
+                // Contextual guidance for known error patterns
+                detectKnownPatterns(logs);
 
                 // Auto-scroll to bottom if enabled
                 if (isAutoScrolling) {
@@ -319,8 +400,73 @@
             return div.innerHTML;
         }
 
-        // Initialize with auto-refresh
-        loadLogs();
+        // Known error patterns → contextual guidance
+        const ERROR_PATTERNS = [
+            { pattern: /unable to lock file|errno.?11/i,
+              msg: '<b>HDF5 lock contention detected.</b> Verify all h5py.File() calls use locking=False. See guidance above.' },
+            { pattern: /L1 metrology read: 0 entries/i,
+              msg: '<b>Fusion starved — no L1 data.</b> Check timestd-metrology status and /var/lib/timestd/ disk space.' },
+            { pattern: /NameError|AttributeError/i,
+              msg: '<b>Code bug detected.</b> A variable or attribute is undefined. Check recent code changes and restart the service.' },
+            { pattern: /Discovery failed|ensure failed/i,
+              msg: '<b>Radiod connection lost.</b> Check radiod status. Recorder reconnects automatically within ~30s.' },
+            { pattern: /Failed to read tick_phase|Failed to read clock_offset/i,
+              msg: '<b>HDF5 data read failure.</b> The daily HDF5 file may be missing or corrupt. Check metrology service is running.' },
+            { pattern: /disk.?full|No space left/i,
+              msg: '<b>Disk full!</b> Check df -h /var/lib/timestd/. Run storage quota cleanup or free space immediately.' },
+            { pattern: /Permission denied|EPERM/i,
+              msg: '<b>Permission error.</b> Check file ownership under /var/lib/timestd/ and service user group membership.' },
+        ];
+
+        function detectKnownPatterns(logs) {
+            const alert = document.getElementById('contextual-alert');
+            const matched = new Set();
+            for (const log of logs) {
+                if (log.level !== 'ERROR' && log.level !== 'WARNING') continue;
+                for (const ep of ERROR_PATTERNS) {
+                    if (ep.pattern.test(log.message)) matched.add(ep.msg);
+                }
+            }
+            if (matched.size > 0) {
+                alert.innerHTML = '⚠️ ' + [...matched].join('<br>⚠️ ');
+                alert.style.display = 'block';
+            } else {
+                alert.style.display = 'none';
+            }
+        }
+
+        // Populate service dropdown from API
+        async function populateServices() {
+            try {
+                const data = await api.get('/logs/services');
+                const groupMap = { 'Pipeline': 'optgroup-pipeline', 'Batch': 'optgroup-batch', 'Infrastructure': 'optgroup-infra' };
+                for (const svc of data.services) {
+                    const groupId = groupMap[svc.group] || 'optgroup-pipeline';
+                    const optgroup = document.getElementById(groupId);
+                    if (optgroup) {
+                        const opt = document.createElement('option');
+                        opt.value = svc.key;
+                        opt.textContent = svc.label;
+                        optgroup.appendChild(opt);
+                    }
+                }
+                // Default to fusion
+                document.getElementById('service-select').value = 'fusion';
+            } catch (e) {
+                // Fallback: add basic options if API fails
+                const sel = document.getElementById('service-select');
+                sel.innerHTML = '';
+                for (const name of ['fusion','metrology','physics','l2-calibration','core','vtec','web-api','radiod-monitor']) {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    sel.appendChild(opt);
+                }
+            }
+        }
+
+        // Initialize
+        populateServices().then(() => loadLogs());
 
         const refreshInterval = setInterval(() => {
             if (document.getElementById('auto-refresh').checked) {
