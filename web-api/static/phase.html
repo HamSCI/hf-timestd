@@ -339,14 +339,16 @@
                     xaxis: { ...darkLayout.xaxis, range: xRange, title: '' },
                     yaxis: { ...darkLayout.yaxis, title: '&sigma;<sub>&phi;</sub> (rad)', rangemode: 'tozero' },
                     yaxis2: { 
-                        title: 'S4 Index', 
+                        title: '',
                         overlaying: 'y', 
                         side: 'right', 
                         anchor: 'free',
                         position: 1,
+                        automargin: false,
                         rangemode: 'tozero',
                         gridcolor: 'transparent',
-                        zeroline: false
+                        zeroline: false,
+                        tickfont: { color: '#94a3b8', size: 10 },
                     },
                     showlegend: true,
                 };
