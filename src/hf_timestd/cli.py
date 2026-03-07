@@ -338,10 +338,12 @@ def main():
         if args.grape_command == 'daily':
             from .grape.decimation_pipeline import DecimationPipeline
             from .grape.spectrogram import CarrierSpectrogramGenerator
-            from .grape.packager import DailyDRFPackager, StationConfig
+            from .grape.packager import DailyDRFPackager, StationConfig, STANDARD_CHANNELS
             from .grape.uploader import UploadManager
             import toml
             import os
+            import json as _json
+            import shutil
 
             date_str = resolve_date(args.date)
 
@@ -357,22 +359,38 @@ def main():
             callsign = station.get('callsign', 'AC0G')
             grid = station.get('grid_square', 'EM38ww')
 
-            # Discover all channels from raw_buffer (tiered storage) and raw_archive (legacy)
-            channel_set = set()
-            for subdir in ['raw_buffer', 'raw_archive']:
-                channels_dir = data_root / subdir
-                if channels_dir.exists():
-                    for d in channels_dir.iterdir():
-                        if d.is_dir():
-                            channel_set.add(d.name.replace('_', ' '))
-            if not channel_set:
-                print(f"❌ No raw data found in {data_root}/raw_buffer/ or {data_root}/raw_archive/")
-                sys.exit(1)
-
-            all_channels = sorted(channel_set)
+            # Use canonical 9 GRAPE channels — not dir scanning which picks up
+            # legacy aliases (BPM_10000, WWV_10000, WWVH_10000, etc.)
+            all_channels = [name for name, _freq in STANDARD_CHANNELS]
             expected_count = len(all_channels)
             print(f"📡 GRAPE daily pipeline for {date_str}")
             print(f"   Channels: {expected_count} ({', '.join(all_channels)})")
+
+            # Status file for health dashboard
+            status_file = data_root / 'upload' / 'grape_status.json'
+            pipeline_status = {
+                'date': date_str,
+                'started_at': datetime.now().isoformat(),
+                'completed_at': None,
+                'status': 'running',
+                'channels_expected': expected_count,
+                'channels_decimated': 0,
+                'channels_spectrogram': 0,
+                'upload_status': 'pending',
+                'upload_completed': 0,
+                'upload_failed': 0,
+                'error': None,
+            }
+
+            def _save_status():
+                try:
+                    status_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(status_file, 'w') as sf:
+                        _json.dump(pipeline_status, sf, indent=2)
+                except Exception:
+                    pass
+
+            _save_status()
 
             # === Stage 1: Decimate all channels ===
             print(f"\n━━━ Stage 1: Decimation ({expected_count} channels) ━━━")
@@ -397,11 +415,16 @@ def main():
                     print(f"   ❌ {ch}: {e}")
 
             print(f"\n   Decimation: {len(decimated)}/{expected_count} channels")
+            pipeline_status['channels_decimated'] = len(decimated)
 
-            # === Gate 1: At least some channels must be decimated ===
+            # === Gate 1: At least one channel must be decimated ===
             if len(decimated) == 0:
                 print(f"   ❌ GATE FAILED: 0/{expected_count} channels decimated")
                 print(f"   Aborting — no data to package/upload")
+                pipeline_status['status'] = 'failed'
+                pipeline_status['error'] = f'0/{expected_count} channels decimated'
+                pipeline_status['completed_at'] = datetime.now().isoformat()
+                _save_status()
                 sys.exit(1)
             if failed_decimate:
                 print(f"   ⚠️  {len(failed_decimate)} channels had no data: {', '.join(failed_decimate)}")
@@ -431,11 +454,17 @@ def main():
                     print(f"   ❌ {ch}: {e}")
 
             print(f"\n   Spectrograms: {len(spectrograms)}/{len(decimated)} channels")
+            pipeline_status['channels_spectrogram'] = len(spectrograms)
+            _save_status()
 
-            # === Gate 2: At least some spectrograms must exist ===
+            # === Gate 2: At least one spectrogram must exist ===
             if len(spectrograms) == 0:
                 print(f"   ❌ GATE FAILED: 0/{len(decimated)} spectrograms generated")
                 print(f"   Aborting — no spectrograms to package/upload")
+                pipeline_status['status'] = 'failed'
+                pipeline_status['error'] = f'0/{len(decimated)} spectrograms generated'
+                pipeline_status['completed_at'] = datetime.now().isoformat()
+                _save_status()
                 sys.exit(1)
             if failed_spec:
                 print(f"   ⚠️  {len(failed_spec)} spectrograms missing: {', '.join(failed_spec)}")
@@ -451,6 +480,10 @@ def main():
             except Exception as e:
                 print(f"   ❌ Package failed: {e}")
                 print(f"   Aborting — will not upload without valid package")
+                pipeline_status['status'] = 'failed'
+                pipeline_status['error'] = f'Package failed: {e}'
+                pipeline_status['completed_at'] = datetime.now().isoformat()
+                _save_status()
                 sys.exit(1)
 
             # === Gate 3: Verify OBS directory exists ===
@@ -458,6 +491,10 @@ def main():
             obs_dirs = list(upload_dir.rglob('OBS*')) if upload_dir.exists() else []
             if not obs_dirs:
                 print(f"   ❌ GATE FAILED: no OBS directory in {upload_dir}")
+                pipeline_status['status'] = 'failed'
+                pipeline_status['error'] = 'No OBS directory after packaging'
+                pipeline_status['completed_at'] = datetime.now().isoformat()
+                _save_status()
                 sys.exit(1)
             print(f"   ✅ GATE PASSED: {len(obs_dirs)} dataset(s) ready")
 
@@ -469,6 +506,7 @@ def main():
                 print(f"\n━━━ Stage 4: Upload (skipped via --no-upload) ━━━")
                 print(f"   Packaged data ready at: {upload_dir}")
                 print(f"   Upload later with: hf-timestd grape upload --date {date_str}")
+                pipeline_status['upload_status'] = 'skipped'
             else:
                 print(f"\n━━━ Stage 4: Upload ━━━")
                 upload_attempted = True
@@ -509,14 +547,54 @@ def main():
                 report_file = manager.write_upload_report()
                 print(f"   Report: {report_file}")
 
+                pipeline_status['upload_completed'] = status['completed']
+                pipeline_status['upload_failed'] = status['failed']
+
                 if status['failed'] > 0:
                     print(f"   ⚠️  Upload had failures — data is queued for retry")
                     print(f"   Retry with: hf-timestd grape upload --date {date_str}")
+                    pipeline_status['upload_status'] = 'failed'
                 else:
                     upload_ok = True
+                    pipeline_status['upload_status'] = 'completed'
+
+            # === Stage 5: Post-upload cleanup ===
+            if upload_ok:
+                print(f"\n━━━ Stage 5: Cleanup ━━━")
+                # Delete decimated .bin files (regenerable from raw if needed)
+                cleaned_dec = 0
+                for ch in decimated:
+                    ch_dir = ch.replace(' ', '_')
+                    dec_file = data_root / 'products' / ch_dir / 'decimated' / f'{date_str}.bin'
+                    meta_file = data_root / 'products' / ch_dir / 'decimated' / f'{date_str}_meta.json'
+                    for f in [dec_file, meta_file]:
+                        try:
+                            if f.exists():
+                                f.unlink()
+                                cleaned_dec += 1
+                        except Exception as e:
+                            print(f"   ⚠️  Could not delete {f.name}: {e}")
+                if cleaned_dec > 0:
+                    print(f"   Removed {cleaned_dec} decimated files")
+
+                # Delete DRF upload package (already uploaded)
+                if upload_dir.exists():
+                    try:
+                        shutil.rmtree(upload_dir)
+                        print(f"   Removed upload package: {upload_dir.name}")
+                    except Exception as e:
+                        print(f"   ⚠️  Could not delete {upload_dir}: {e}")
+
+                # Spectrograms are KEPT — they're the permanent visual record
+                print(f"   Spectrograms retained")
+
+            # Finalize status
+            pipeline_status['status'] = 'completed' if upload_ok or args.no_upload else 'upload_pending'
+            pipeline_status['completed_at'] = datetime.now().isoformat()
+            _save_status()
 
             print(f"\n✅ GRAPE daily pipeline complete for {date_str}")
-            print(f"   {len(decimated)} channels decimated")
+            print(f"   {len(decimated)}/{expected_count} channels decimated")
             print(f"   {len(spectrograms)} spectrograms generated")
             if upload_attempted:
                 if upload_ok:

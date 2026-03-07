@@ -53,11 +53,13 @@ class QuotaManager:
     """Manages disk quota by removing the oldest day-units when over threshold."""
 
     # Deletion priority (lowest number deleted first when over quota).
+    # Principle: derived data before primary data — we can re-derive but
+    # cannot recover deleted raw recordings.
     CATEGORY_PRIORITY = {
-        'raw_iq':   1,     # Largest per-day, recoverable from stream
-        'products': 2,     # GRAPE decimated/spectrograms — regenerable
-        'vtec':     3,     # GNSS VTEC daily HDF5 — small
-        'phase2':   4,     # Timing/metrology HDF5 — most expensive to recompute
+        'products': 1,     # GRAPE decimated/spectrograms — regenerable from raw
+        'phase2':   2,     # Timing/metrology HDF5 — regenerable from raw
+        'vtec':     3,     # GNSS VTEC daily HDF5 — small, re-downloadable
+        'raw_iq':   4,     # Primary 24 kHz recordings — NOT recoverable
     }
 
     def __init__(
@@ -326,14 +328,18 @@ class QuotaManager:
         """
         used, total, percent = self.get_disk_usage()
 
-        # --- raw_iq: channel/<YYYYMMDD>/ dirs ---
+        # --- raw_iq: channel/<YYYYMMDD>/ dirs (only if binary data exists) ---
         raw_iq_dates: set = set()
         if self.raw_buffer_dir.exists():
             for channel_dir in self.raw_buffer_dir.iterdir():
                 if not channel_dir.is_dir():
                     continue
                 for day_dir in channel_dir.iterdir():
-                    if day_dir.is_dir() and _DATE_RE.fullmatch(day_dir.name):
+                    if not day_dir.is_dir() or not _DATE_RE.fullmatch(day_dir.name):
+                        continue
+                    # Only count if at least one .bin* file exists (not just .json)
+                    has_binary = any(day_dir.glob('*.bin*'))
+                    if has_binary:
                         raw_iq_dates.add(day_dir.name)
 
         # --- phase2: files with YYYYMMDD in name ---

@@ -138,6 +138,42 @@
             </div>
         </div>
 
+        <!-- GRAPE Pipeline Status -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">&#x1F347; GRAPE Pipeline</div>
+                    <div class="card-subtitle">Daily decimation, spectrogram, and PSWS upload</div>
+                </div>
+                <div id="grape-status-badge"></div>
+            </div>
+            <div id="grape-loading" style="text-align: center; padding: 16px;">
+                <div class="loading"></div>
+            </div>
+            <div id="grape-section" style="display: none;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; padding: 0 16px 12px;">
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; text-align: center;">
+                        <div style="font-size: 18px; font-weight: 700;" id="grape-date">-</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Last Run Date</div>
+                    </div>
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; text-align: center;">
+                        <div style="font-size: 18px; font-weight: 700;" id="grape-channels">-</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Channels Decimated</div>
+                    </div>
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; text-align: center;">
+                        <div style="font-size: 18px; font-weight: 700;" id="grape-spectrograms">-</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Spectrograms</div>
+                    </div>
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; text-align: center;">
+                        <div style="font-size: 18px; font-weight: 700;" id="grape-upload">-</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Upload Status</div>
+                    </div>
+                </div>
+                <div id="grape-details" style="padding: 4px 16px 12px; font-size: 13px; color: var(--text-secondary);"></div>
+                <div id="grape-queue" style="padding: 0 16px 12px; font-size: 13px;"></div>
+            </div>
+        </div>
+
         <!-- Process Status -->
         <div class="card">
             <div class="card-header">
@@ -271,6 +307,80 @@
             }
         }
 
+        async function loadGrapeStatus() {
+            try {
+                const resp = await fetch('/api/health/grape');
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const d = await resp.json();
+
+                document.getElementById('grape-loading').style.display = 'none';
+                document.getElementById('grape-section').style.display = 'block';
+
+                const p = d.pipeline;
+                const q = d.upload_queue;
+                const badge = document.getElementById('grape-status-badge');
+
+                if (!p) {
+                    badge.innerHTML = '<span class="badge" style="background: var(--bg-tertiary); color: var(--text-secondary);">No data</span>';
+                    document.getElementById('grape-details').textContent = 'No pipeline status available. Has grape daily run yet?';
+                    return;
+                }
+
+                // Format date nicely
+                const ds = p.date || '';
+                const dateLabel = ds.length === 8 ? `${ds.slice(0,4)}-${ds.slice(4,6)}-${ds.slice(6,8)}` : ds;
+                document.getElementById('grape-date').textContent = dateLabel;
+
+                // Channels
+                const chEl = document.getElementById('grape-channels');
+                chEl.textContent = `${p.channels_decimated}/${p.channels_expected}`;
+                chEl.style.color = p.channels_decimated === p.channels_expected ? 'var(--quality-a)' :
+                                   p.channels_decimated > 0 ? 'var(--status-degraded)' : 'var(--status-error)';
+
+                // Spectrograms
+                const spEl = document.getElementById('grape-spectrograms');
+                spEl.textContent = p.channels_spectrogram;
+                spEl.style.color = p.channels_spectrogram >= p.channels_decimated ? 'var(--quality-a)' : 'var(--status-degraded)';
+
+                // Upload status
+                const upEl = document.getElementById('grape-upload');
+                const upStatus = p.upload_status || 'unknown';
+                upEl.textContent = upStatus.charAt(0).toUpperCase() + upStatus.slice(1);
+                upEl.style.color = upStatus === 'completed' ? 'var(--quality-a)' :
+                                   upStatus === 'failed' ? 'var(--status-error)' :
+                                   upStatus === 'skipped' ? 'var(--text-secondary)' : 'var(--status-degraded)';
+
+                // Overall badge
+                const status = p.status || 'unknown';
+                const badgeColor = status === 'completed' ? 'var(--quality-a)' :
+                                   status === 'failed' ? 'var(--status-error)' :
+                                   status === 'running' ? 'var(--status-degraded)' : 'var(--text-secondary)';
+                badge.innerHTML = `<span class="badge" style="background: ${badgeColor}; color: #fff;">${status.toUpperCase()}</span>`;
+
+                // Details line
+                const details = [];
+                if (p.completed_at) details.push(`Completed: ${new Date(p.completed_at).toLocaleString()}`);
+                if (p.error) details.push(`Error: ${p.error}`);
+                document.getElementById('grape-details').innerHTML = details.join(' &mdash; ');
+
+                // Upload queue summary
+                const queueEl = document.getElementById('grape-queue');
+                if (q && q.total > 0) {
+                    const parts = [];
+                    if (q.completed > 0) parts.push(`<span style="color: var(--quality-a);">${q.completed} completed</span>`);
+                    if (q.pending > 0) parts.push(`<span style="color: var(--status-degraded);">${q.pending} pending</span>`);
+                    if (q.failed > 0) parts.push(`<span style="color: var(--status-error);">${q.failed} failed</span>`);
+                    queueEl.innerHTML = `Upload queue (${q.total} total): ${parts.join(', ')}`;
+                } else {
+                    queueEl.textContent = '';
+                }
+            } catch (err) {
+                console.error('Failed to load GRAPE status:', err);
+                document.getElementById('grape-loading').innerHTML =
+                    '<div style="color: var(--text-secondary); padding: 8px;">GRAPE status unavailable</div>';
+            }
+        }
+
         async function loadSystemHealth() {
             try {
                 clearError();
@@ -356,12 +466,13 @@
 
         // Initialize
         async function init() {
-            await Promise.all([loadSystemHealth(), loadStorageStatus()]);
+            await Promise.all([loadSystemHealth(), loadStorageStatus(), loadGrapeStatus()]);
 
-            // Auto-refresh every 10 seconds (health) and 60 seconds (storage)
+            // Auto-refresh every 10 seconds (health) and 60 seconds (storage/grape)
             const refresh = new AutoRefresh(loadSystemHealth, 10000);
             refresh.start();
             setInterval(loadStorageStatus, 60000);
+            setInterval(loadGrapeStatus, 60000);
         }
 
         init();

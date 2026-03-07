@@ -21,6 +21,59 @@ from hf_timestd.io.uncertainty import ISOGUMCalculator
 logger = logging.getLogger(__name__)
 
 
+# Default max byte lengths for fixed-length string fields.
+# Overridden by "max_length" in individual schema field definitions.
+_DEFAULT_STRING_LENGTHS: Dict[str, int] = {
+    'timestamp_utc':    36,   # ISO 8601 with microseconds + tz
+    'processed_at':     36,
+    'event_start':      36,
+    'event_end':        36,
+    'peak_time':        36,
+    'period_start':     36,
+    'calibration_date': 36,
+    'processing_version': 12, # e.g. '5.0.0'
+    'schema_version':   12,
+    'station':          8,    # WWV, WWVH, CHU, BPM
+    'station_id':       8,
+    'bcd_station':      8,
+    'anchor_station':   8,
+    'reference_station': 8,
+    'channel':          20,   # e.g. SHARED_15000
+    'broadcast_id':     20,
+    'detection_method': 20,   # e.g. edge_tick
+    'quality_flag':     20,
+    'quality_grade':    4,    # A, B, C, D
+    'comparison_quality': 20,
+    'anchor_status':    24,   # ANCHORED_GROUP_DELAY
+    'propagation_mode': 8,    # 1F2, 2F2, etc.
+    'dominant_propagation_mode': 8,
+    'aggregation_period': 12, # e.g. 'daily'
+    'event_type':       32,
+    'anomaly_type':     32,
+    'anomaly_flag':     20,
+    'validation_flag':  20,
+    'consistency_flag': 20,
+    'identification_method': 32,
+    'attribution_method': 32,
+    'discrimination_method': 32,
+    'toa_source':       32,
+    'd_clock_source':   20,
+    'rejection_reason': 48,
+    'winner':           20,
+    'channel_quality':  20,
+    'bcd_decoded_time': 24,
+    'traceability_chain': 64,
+    'kalman_state':     64,
+    'description':      128,
+    'stations_used':    64,   # comma-separated list
+    'affected_stations': 64,
+    'frequencies_mhz':  48,
+    'affected_frequencies_mhz': 64,
+    'propagation_modes_used': 48,
+}
+_DEFAULT_STRING_MAX = 48      # fallback for unlisted fields
+
+
 class DataProductWriter:
     """
     HDF5 data product writer with schema validation.
@@ -262,7 +315,11 @@ class DataProductWriter:
             elif field_type == 'integer':
                 dtype = np.int64
             elif field_type == 'string':
-                dtype = h5py.string_dtype(encoding='utf-8')
+                max_len = field.get(
+                    'max_length',
+                    _DEFAULT_STRING_LENGTHS.get(field_name, _DEFAULT_STRING_MAX)
+                )
+                dtype = f'S{max_len}'
             elif field_type == 'boolean':
                 dtype = np.bool_
             else:
@@ -477,7 +534,14 @@ class DataProductWriter:
             elif field_type == 'integer':
                 dtype = np.int64
             elif field_type == 'string':
-                dtype = h5py.string_dtype(encoding='utf-8')
+                max_len = field.get(
+                    'max_length',
+                    _DEFAULT_STRING_LENGTHS.get(field_name, _DEFAULT_STRING_MAX)
+                )
+                dtype = f'S{max_len}'
+                # Encode string to bytes for fixed-length storage
+                if isinstance(value, str):
+                    value = value.encode('utf-8')[:max_len]
             elif field_type == 'boolean':
                 dtype = np.bool_
             else:
