@@ -73,9 +73,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Check if chronyd is running
-if ! systemctl is-active --quiet chronyd 2>/dev/null; then
-    echo "CRITICAL: chronyd service is not running"
+# Check if chrony is running (Debian/Ubuntu = 'chrony', RHEL/Fedora = 'chronyd')
+if ! systemctl is-active --quiet chrony 2>/dev/null && ! systemctl is-active --quiet chronyd 2>/dev/null; then
+    echo "CRITICAL: chrony service is not running"
     exit 2
 fi
 
@@ -218,9 +218,14 @@ fi
 
 # Restart logic - only if BOTH sources have zero reach
 if [[ "$RESTART_ON_FAILURE" == "true" ]] && [[ "$BEST_REACH" -eq 0 ]]; then
-    echo "CRITICAL: All Chrony TSL sources have reach 0. Attempting to restart chronyd..."
-    systemctl restart chronyd
-    echo "Restarted chronyd. Fusion service should auto-reconnect."
+    echo "CRITICAL: All Chrony TSL sources have reach 0. Attempting to restart chrony..."
+    # Debian/Ubuntu = 'chrony', RHEL/Fedora = 'chronyd'
+    if systemctl list-units --type=service --no-pager 2>/dev/null | grep -q 'chrony.service'; then
+        systemctl restart chrony
+    else
+        systemctl restart chronyd
+    fi
+    echo "Restarted chrony. Fusion service should auto-reconnect."
 fi
 
 exit $EXIT_CODE
