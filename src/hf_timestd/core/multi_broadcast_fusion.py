@@ -4637,7 +4637,7 @@ class MultiBroadcastFusion:
             TAIL_SIZE = 10
             MAX_AGE_SECONDS = 300  # 5 minutes
             
-            with _h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
+            with _h5py.File(hdf5_path, 'r', libver='latest', swmr=True) as f:
                 if 'unix_timestamp' not in f or 'vtec_tecu' not in f:
                     logger.warning(f"Missing required datasets in {hdf5_path}")
                     return None

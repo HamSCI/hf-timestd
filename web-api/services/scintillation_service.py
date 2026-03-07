@@ -105,7 +105,7 @@ class ScintillationService:
                 pattern = str(ts_dir / f'*{date_str}*.h5')
                 for fpath in sorted(glob.glob(pattern)):
                     try:
-                        with h5py.File(fpath, 'r', locking=False) as f:
+                        with h5py.File(fpath, 'r', libver='latest', swmr=True) as f:
                             if 'timestamp_utc' not in f:
                                 continue
                             timestamps = [
@@ -180,7 +180,7 @@ class ScintillationService:
                 pattern = str(tp_dir / f'*{date_str}*.h5')
                 for fpath in sorted(glob.glob(pattern)):
                     try:
-                        with h5py.File(fpath, 'r', locking=False) as f:
+                        with h5py.File(fpath, 'r', libver='latest', swmr=True) as f:
                             if 'carrier_phase_rad' not in f or 'window_center_second' not in f:
                                 continue
 

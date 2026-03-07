@@ -83,7 +83,7 @@ class CHUFSKService:
                 if not h5_path.exists():
                     continue
                 try:
-                    with h5py.File(str(h5_path), 'r', locking=False) as f:
+                    with h5py.File(str(h5_path), 'r', libver='latest', swmr=True) as f:
                         n = f['timestamp_utc'].shape[0]
                         if n == 0:
                             continue

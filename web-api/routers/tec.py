@@ -79,7 +79,7 @@ async def get_dtec_timeseries(
 
         for fpath in files:
             try:
-                with h5py.File(str(fpath), 'r', locking=False) as h:
+                with h5py.File(str(fpath), 'r', libver='latest', swmr=True) as h:
                     mb = h['minute_boundary'][:]
                     mask = (mb >= ts0) & (mb <= ts1)
                     if not np.any(mask):

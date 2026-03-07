@@ -128,7 +128,7 @@ class ChronyService:
             if not h5_path.exists():
                 continue
             try:
-                with h5py.File(h5_path, 'r', locking=False) as f:
+                with h5py.File(h5_path, 'r', libver='latest', swmr=True) as f:
                     if 'chrony_sources' not in f:
                         continue
                     grp = f['chrony_sources']

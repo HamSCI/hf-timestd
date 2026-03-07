@@ -80,7 +80,7 @@ class PhaseService:
 
         for fpath in files:
             try:
-                with h5py.File(str(fpath), 'r', locking=False) as f:
+                with h5py.File(str(fpath), 'r', libver='latest', swmr=True) as f:
                     if 'minute_boundary_utc' not in f:
                         continue
 
@@ -429,7 +429,7 @@ class PhaseService:
                 latest = sorted(d.glob('*.h5'))
                 if latest:
                     try:
-                        with h5py.File(str(latest[-1]), 'r', locking=False) as f:
+                        with h5py.File(str(latest[-1]), 'r', libver='latest', swmr=True) as f:
                             if 'station' in f:
                                 st_arr = f['station'][:]
                                 unique_st = set()

@@ -128,7 +128,7 @@ def _load_all_arrivals(
 
     for fpath in files:
         try:
-            with h5py.File(str(fpath), "r", locking=False) as h:
+            with h5py.File(str(fpath), "r", libver='latest', swmr=True) as h:
                 mb  = h["minute_boundary_utc"][:]
                 snr = h["corr_snr_db"][:]
                 rank = h["peak_rank"][:]

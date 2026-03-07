@@ -212,7 +212,7 @@ class TIDService:
     def _read_event_h5(self, filepath: Path, detailed: bool = False) -> Optional[Dict[str, Any]]:
         """Read a single TID event from HDF5 file."""
         try:
-            with h5py.File(filepath, 'r', locking=False) as f:
+            with h5py.File(filepath, 'r', libver='latest', swmr=True) as f:
                 event = {
                     'event_id': f.attrs.get('event_id', filepath.stem),
                     'timestamp': f.attrs.get('timestamp_utc', ''),

@@ -420,7 +420,15 @@ class ChronyStatsCollector:
             fusion_dir.mkdir(parents=True, exist_ok=True)
             h5_path = fusion_dir / f'chrony_stats_{date_str}.h5'
 
-            with h5py.File(h5_path, 'a', locking=False) as f:
+            # Create file with libver='latest' on first use so SWMR works.
+            # Then open r+ and enable swmr_mode before appending, consistent
+            # with the rest of the codebase.
+            if not h5_path.exists():
+                with h5py.File(h5_path, 'w', libver='latest') as _init:
+                    _init.require_group('chrony_sources')
+
+            with h5py.File(h5_path, 'r+', libver='latest') as f:
+                f.swmr_mode = True
                 # Flat table: one row per source per snapshot
                 grp = f.require_group('chrony_sources')
 

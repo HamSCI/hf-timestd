@@ -329,7 +329,7 @@ class TimingValidationService:
             import h5py
             import numpy as np
             
-            with h5py.File(fusion_file, 'r', libver='latest', locking=False) as f:
+            with h5py.File(fusion_file, 'r', libver='latest', swmr=True) as f:
                 # HDF5 structure: each column is a separate dataset
                 if 'minute_boundary' not in f:
                     return None
