@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** February 27, 2026  
+**Last Updated:** March 7, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.8.0
+**Version:** V6.10.0
 
 ---
 
@@ -146,16 +146,17 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 - **Compression:** Optional zstd/lz4 compression (2-3x reduction)
 - **Metadata:** JSON sidecars preserve RTP timestamps and quality metrics
 
-### 4. HDF5-Native Pipeline (v5.0)
+### 4. HDF5 SWMR Pipeline (v5.0 / v6.10)
 
-**Decision:** Use HDF5 with crash-safe open-write-close pattern for all inter-service data exchange (Phase 2 -> Phase 3).
+**Decision:** Use HDF5 with Single Writer Multiple Reader (SWMR) protocol for all inter-service data exchange (Phase 2 -> Phase 3).
 
 **Why?**
 
 - **Performance:** Binary format is 10x-100x faster than CSV parsing
-- **Crash safety:** Open-write-close per measurement means no dirty HDF5 flags on unclean shutdown
+- **Concurrency safety:** SWMR allows one writer and many concurrent readers with zero lock contention. Writer keeps the daily file open (`swmr_mode=True`) and calls `flush()` after each append so readers see data immediately.
+- **Crash recovery:** `h5clear -s` is called **unconditionally** on every open of an existing file (not just on error). This automatically clears stale SWMR consistency flags left by unclean shutdowns (SIGKILL, service restart) — no manual intervention required.
 - **Structure:** Hierarchical data storage matches the signal complexity
-- **Low Latency:** Fusion polls for new data within seconds of Analytics writing it
+- **Low Latency:** Fusion sees new data within seconds of Analytics writing it
 
 ### 5. "Steel Ruler" Metrology (v5.3)
 
@@ -297,7 +298,7 @@ The recording layer uses **ka9q-python** directly for all RTP reception and chan
 
 **Advantages:**
 
-- **Crash-safe writes:** Open-write-close per measurement eliminates dirty HDF5 flags on crash.
+- **SWMR concurrency:** Writer keeps file open with `swmr_mode=True`; readers use `swmr=True`. Zero contention. `h5clear -s` on every writer open handles crash recovery automatically.
 - **Precision:** Binary float64 storage eliminates ASCII truncation errors.
 - **Metadata:** Attributes store schema versions, processing flags, and processing time inside the file.
 - **Compression:** HDF5 internal compression reduces disk usage vs CSV.
@@ -478,7 +479,7 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 
 - **Watchdogs:** All Python services integrate `systemd-python` to send heartbeat `WATCHDOG=1` notifications. If a service hangs, systemd restarts it automatically.
 - **Frequent watchdog pinging (v6.8):** The physics service calls `_pet_watchdog()` between every major processing step (TEC estimation, tomography, VTEC mapping, each HDF5 write) — 17+ times per `process_minute()` cycle. This prevents the 2-minute systemd watchdog from firing during heavy I/O.
-- **HDF5 write timeout (v6.8):** `_timed_write()` wraps every `write_measurement()` call in a 30-second thread timeout. If an HDF5 write blocks on file lock contention (from concurrent web API readers), the write is abandoned with a WARNING log rather than hanging the service until the watchdog kills it. This eliminates the crash-loop failure mode where the physics service would restart every ~20 minutes.
+- **HDF5 SWMR (v6.10):** All HDF5 I/O uses SWMR protocol — writer holds the file open, readers open with `swmr=True`. This eliminates the write/read lock contention that previously caused the physics service crash-loop and periodic `OSError: file already open for write` errors in the web API and fusion services. `_timed_write()` (30s timeout) is retained as a belt-and-suspenders guard.
 - **Alerting:** Failures trigger email alerts via `OnFailure` handlers.
 
 ---
@@ -492,7 +493,7 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 
 ### Failure Recovery
 
-- **Crash Safety:** Phase 1 uses atomic writes. Phase 2/3 can restart and process backlog.
+- **Crash Safety:** Phase 1 uses atomic writes. Phase 2/3 can restart and process backlog. HDF5 SWMR dirty flags are cleared unconditionally on every writer open, so no manual `h5clear` is ever needed after a crash.
 - **Backfill:** If Analytics is down for an hour, it will process the raw buffer backlog upon restart until caught up.
 
 ---
@@ -538,7 +539,7 @@ GRAPE decimation is intentionally decoupled from the timing/metrology pipeline. 
 
 ---
 
-**Last Updated:** February 27, 2026
+**Last Updated:** March 7, 2026
 
 ## Real-Time Ionospheric Propagation Model (v6.7)
 

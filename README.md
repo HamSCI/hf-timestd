@@ -13,7 +13,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **binary IQ archive** format with JSON metadata sidecars.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
 - 🌐 **Real-time ionospheric model (v6.7)** - WAM-IPE + GIRO data for frequency-dependent, time-varying group delay predictions with multi-hop support (1F, 2F, 3F).
-- 🔗 **HDF5-Native Pipeline** - High-performance crash-safe data exchange.
+- 🔗 **HDF5 SWMR Pipeline** - Single Writer Multiple Reader protocol with `h5clear` crash recovery. Writers keep files open and flush after each append; readers use `swmr=True`. Zero write/read contention.
 - 🌍 **Real-time GNSS VTEC Correction** - Local dual-frequency GPS provides direct ionospheric correction.
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
 - ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
@@ -206,7 +206,7 @@ The system is composed of eight independent services that form a pipeline:
 ### Key Technologies
 
 - **Binary IQ Archive:** Compressed `.bin.zst` files with JSON metadata sidecars for raw 24 kHz IQ recording. Digital RF (MIT Haystack) is used for GRAPE packaging/upload only.
-- **HDF5 Crash-Safe Pipeline:** Open-write-close pattern with `locking=False` for all inter-service data exchange. No SWMR — crash-safe by design.
+- **HDF5 SWMR Pipeline:** Single Writer Multiple Reader protocol for all inter-service data exchange. Writer keeps the daily file open (`swmr_mode=True`) and flushes after each append; readers open with `swmr=True`. `h5clear -s` is run unconditionally on every open of an existing file, providing automatic crash recovery without manual intervention.
 - **Ionospheric Correction:** GNSS VTEC (primary) and IONEX maps (fallback) correct for group delay ($\tau_{iono} \propto TEC/f^2$). Carrier-phase dTEC is the primary ionospheric science product.
 
 ---
@@ -225,7 +225,7 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Status
 
-**Testing (V6.8.0)** - Active development and field testing in progress.
+**Production (V6.10.0)** - Active development and field testing in progress.
 
 ## Credits & Support
 
@@ -234,6 +234,18 @@ The system is composed of eight independent services that form a pipeline:
 **License:** MIT - See [LICENSE](LICENSE)
 
 ### Recent Updates
+
+**v6.10.0 (March 7, 2026) - HDF5 SWMR + Web UI + Robustness**
+
+- ✅ **HDF5 SWMR throughout** — Replaced `open-write-close` + `locking=False` with proper SWMR across all 13 reader/writer sites. Writer keeps daily file open in SWMR mode, flushes after each append. `h5clear -s` called unconditionally on every open-for-write — this is the key fix that makes SWMR robust to unclean shutdowns (previous SWMR attempt abandoned Feb 6 due to this)
+- ✅ **32-bit RTP counter wraparound** fix (49.7 hr period at 24 kHz)
+- ✅ **Recorder crash-loop prevention** on restart (uptime-gated freshness self-restart)
+- ✅ **GRAPE pipeline** robustness: tiered storage search, 2-day retention, non-fatal SFTP upload
+- ✅ **GNSS TEC**: correct DCB sign, C1C-C2L synthesis, receiver DCB estimation, plausibility gate
+- ✅ **QuotaManager** rewritten: day-level circular buffer deletion with priority ordering
+- ✅ **Phase page**: dynamic channel/station filters, solar zenith overlay, gap line breaks
+- ✅ **Logs page**: all services grouped with error guidance panel
+- ✅ **Dead code archived** from `wwvh_discrimination.py` (3918 → 1237 lines)
 
 **v6.8.0 (February 26, 2026) - Web UI Polish & Physics Service Resilience**
 

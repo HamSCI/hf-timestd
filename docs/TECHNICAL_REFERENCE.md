@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 27, 2026
+**Last Updated:** March 7, 2026
 
 ---
 
@@ -53,7 +53,7 @@ The system is composed of eight independent systemd services, each with a specif
 
 **Responsibility:** Multi-Broadcast Synthesis (v6.1 Architecture)
 
-- Reads L2 HDF5 measurements from all 9 channels (crash-safe open-write-close pattern).
+- Reads L2 HDF5 measurements from all 9 channels via SWMR (`swmr=True` readers, writer holds file open with `swmr_mode=True`).
 - **Per-broadcast Kalman filtering** — tracks ionospheric path dynamics for each of 17 broadcasts.
 - **GNSS VTEC correction** — applies real-time ionospheric correction when local GNSS available.
 - **Weighted Least Squares fusion** — optimal linear combination without temporal smoothing.
@@ -74,7 +74,7 @@ The system is composed of eight independent systemd services, each with a specif
 
 - Polls GNSS receiver (ZED-F9P) for dual-frequency observables.
 - Downloads global IONEX maps from NASA CDDIS.
-- **Output:** `/var/lib/timestd/gnss_vtec.h5`, `/var/lib/timestd/ionex/`
+- **Output:** `/var/lib/timestd/data/gnss_vtec/GNSS_gnss_vtec_YYYYMMDD.h5`, `/var/lib/timestd/ionex/`
 
 ### 5. Physics Service (`timestd-physics`)
 

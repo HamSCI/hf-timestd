@@ -1,8 +1,8 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 6.8.0 (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring)  
-**Last Updated:** February 27, 2026  
+**System Version:** 6.10.0 (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring + HDF5 SWMR)  
+**Last Updated:** March 7, 2026  
 **Author:** Michael James Hauan (AC0G)
 
 ---
@@ -147,7 +147,7 @@ The system is composed of eight independent systemd services:
 | **timestd-metrology** | Signal Processing & Timing Extraction | `/var/lib/timestd/phase2/{CHANNEL}/` |
 | **timestd-l2-calibration** | Geometric + Ionospheric Corrections | L2 calibrated timing (HDF5) |
 | **timestd-fusion** | Multi-Broadcast Synthesis | `/var/lib/timestd/phase2/fusion/` + Chrony SHM |
-| **timestd-vtec** | Ionospheric Data Acquisition | `/var/lib/timestd/gnss_vtec.h5`, `/var/lib/timestd/ionex/` |
+| **timestd-vtec** | Ionospheric Data Acquisition | `/var/lib/timestd/data/gnss_vtec/GNSS_gnss_vtec_YYYYMMDD.h5`, `/var/lib/timestd/ionex/` |
 | **timestd-physics** | Carrier-phase dTEC, group-delay TEC validation, T_iono | `/var/lib/timestd/phase2/science/tec/` |
 | **timestd-web-api** | User Visualization & System API | Port 8000 |
 | **timestd-radiod-monitor** | Hardware Health Monitoring | Alerts on failure |
@@ -168,7 +168,7 @@ Phase 3: Fusion (Multi-Broadcast Synthesis)
 - **Phase 1 never drops data** during Phase 2 updates
 - **Reprocessability**: Improve algorithms without re-recording
 - **Independent validation**: Test analytics on archived data
-- **HDF5 crash-safe writes**: Open-write-close per measurement (no dirty flags on crash)
+- **HDF5 SWMR**: Writer keeps file open (`swmr_mode=True`), flushes after each append; readers use `swmr=True`. `h5clear -s` on every writer open handles crash recovery automatically.
 
 ### 4.3 RTP Timestamp as Authoritative Reference
 
@@ -374,7 +374,7 @@ Delays outside bounds have plausibility reduced by 70%.
 
 #### Optional: Local GNSS-VTEC Enhancement
 
-When a dual-frequency GNSS receiver (e.g., u-blox ZED-F9P) is available, the system can measure **local vertical TEC in real-time** (~1 minute latency vs 1–2 hours for IONEX maps). The `timestd-vtec` service polls the receiver and writes to `/var/lib/timestd/gnss_vtec.h5`.
+When a dual-frequency GNSS receiver (e.g., u-blox ZED-F9P) is available, the system can measure **local vertical TEC in real-time** (~1 minute latency vs 1–2 hours for IONEX maps). The `timestd-vtec` service polls the receiver and writes to `/var/lib/timestd/data/gnss_vtec/GNSS_gnss_vtec_YYYYMMDD.h5`.
 
 **Key Files:**
 
