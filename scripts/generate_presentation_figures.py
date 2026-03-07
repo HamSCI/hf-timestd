@@ -93,11 +93,11 @@ def fig1_metrological_ladder(outdir):
     """Bar chart of timing accuracy tiers."""
     tiers = [
         ('Unsync PC',      100.0,  '#d62728'),
-        ('Internet NTP',     6.0,  '#ff7f0e'),
-        ('LAN NTP',          6.7,  '#ffbb78'),
-        ('GPS+PPS',          0.001, '#2ca02c'),
+        ('Internet NTP',     0.6,  '#ff7f0e'),
+        ('LAN NTP',          1.2,  '#ffbb78'),
+        ('GPS+PPS',          0.006, '#2ca02c'),
         ('HF TSL1\n(geometric)', 1.1, '#9467bd'),
-        ('HF TSL2\n(ionospheric)', 0.8, '#1f77b4'),
+        ('HF TSL2\n(ionospheric)', 0.055, '#1f77b4'),
     ]
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -445,9 +445,45 @@ def fig7_all_arrivals(outdir, date_str):
     print(f'  [7] {path}')
 
 
+# Template duration per station (ms) — used to normalize correlation SNR
+# to a signal-level metric comparable across stations with different tick lengths.
+# CHU's 300ms template has ~18 dB more processing gain than WWV's 5ms template.
+STATION_TICK_DURATION_MS = {
+    'CHU': 300.0,
+    'WWV': 5.0,
+    'WWVH': 5.0,
+    'BPM': 10.0,
+}
+
+# Map channel ID prefix to primary station for processing-gain normalization
+CHANNEL_PRIMARY_STATION = {
+    'CHU_3330':     'CHU',
+    'CHU_7850':     'CHU',
+    'CHU_14670':    'CHU',
+    'SHARED_2500':  'WWV',   # Use WWV as reference for shared channels
+    'SHARED_5000':  'WWV',
+    'SHARED_10000': 'WWV',
+    'SHARED_15000': 'WWV',
+    'WWV_20000':    'WWV',
+    'WWV_25000':    'WWV',
+}
+
+
+def _processing_gain_db(station: str) -> float:
+    """Matched-filter processing gain in dB for a station's tick template.
+
+    Processing gain = 10*log10(N_samples), where N_samples = duration_ms * sample_rate/1000.
+    At 24 kHz sample rate: CHU=7200 samples (38.6 dB), WWV=120 (20.8 dB).
+    """
+    dur_ms = STATION_TICK_DURATION_MS.get(station, 5.0)
+    n_samples = dur_ms * 24.0  # 24 kHz sample rate
+    return 10.0 * np.log10(max(n_samples, 1.0))
+
+
 def fig8_detection_summary(outdir, date_str):
     """Tick detection performance summary per channel."""
     channels = []
+    ch_ids_found = []
     records = []
     median_edges = []
     median_snr = []
@@ -463,6 +499,7 @@ def fig8_detection_summary(outdir, date_str):
                 snr = safe_float(f['mean_snr_db'][:]) if 'mean_snr_db' in f else None
 
                 channels.append(ch_label)
+                ch_ids_found.append(ch_id)
                 records.append(n)
                 median_edges.append(float(np.nanmedian(edges)) if edges is not None else 0)
                 median_snr.append(float(np.nanmedian(snr)) if snr is not None else 0)
@@ -473,13 +510,16 @@ def fig8_detection_summary(outdir, date_str):
         print('  [8] No tick_timing data found')
         return
 
+    # Normalize SNR: subtract processing gain to get signal-level SNR/ms
+    # This makes CHU (300ms template) comparable to WWV (5ms template)
+    normalized_snr = []
+    for i, ch_id in enumerate(ch_ids_found):
+        station = CHANNEL_PRIMARY_STATION.get(ch_id, 'WWV')
+        gain = _processing_gain_db(station)
+        normalized_snr.append(median_snr[i] - gain)
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Records per channel
-    colors = [CHANNEL_COLORS.get(ch_id, 'gray')
-              for ch_id, _ in CHANNELS_TICK_TIMING
-              if _ in [c.replace('\n', '') for c in channels] or any(c.startswith(_[:4]) for c in channels)]
-    # Simpler: just use a colormap
     cmap = plt.cm.tab10
     bar_colors = [cmap(i / len(channels)) for i in range(len(channels))]
 
@@ -489,11 +529,12 @@ def fig8_detection_summary(outdir, date_str):
     for i, v in enumerate(records):
         ax1.text(v + 50, i, str(v), va='center', fontsize=9)
 
-    # SNR per channel
-    ax2.barh(channels, median_snr, color=bar_colors, edgecolor='white')
-    ax2.set_xlabel('Median SNR (dB)', fontsize=11)
-    ax2.set_title('Median SNR per Channel', fontsize=13)
-    for i, v in enumerate(median_snr):
+    # Normalized SNR per channel (processing gain removed)
+    ax2.barh(channels, normalized_snr, color=bar_colors, edgecolor='white')
+    ax2.set_xlabel('Signal-Level SNR (dB)', fontsize=11)
+    ax2.set_title('Median Signal SNR per Channel\n'
+                  '(correlation SNR − processing gain)', fontsize=12)
+    for i, v in enumerate(normalized_snr):
         ax2.text(v + 0.3, i, f'{v:.1f}', va='center', fontsize=9)
 
     plt.suptitle(f'Detection Performance Summary ({date_str})', fontsize=14, y=1.02)

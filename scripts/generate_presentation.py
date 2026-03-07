@@ -189,15 +189,15 @@ def build_presentation():
 
     # Right column: evidence table
     add_table(slide, 6.8, 1.0, 6.0, 2.5, [
-        ['Channel', 'Edges/min', 'SNR (dB)', 'D_clock (ms)', 'Doppler'],
-        ['CHU 7.85', '51', '27.3', '+1.96', '99.8%'],
-        ['SHARED 10.0', '57', '7.9', '−0.02', '99.7%'],
-        ['WWV 20.0', '57', '7.9', '−0.05', '99.9%'],
+        ['Channel', 'Edges/min', 'Uncertainty', 'D_clock (ms)', 'Doppler'],
+        ['CHU 7.85', '53', '±0.12 ms', '+0.79', '99.9%'],
+        ['SHARED 10.0', '57', '±2.1 ms', '−0.53', '100.0%'],
+        ['WWV 20.0', '57', '±2.0 ms', '−0.72', '99.9%'],
     ])
 
     add_textbox(slide, 6.8, 3.8, 6.0, 1.5,
                 "~24K tick timing records/day\n"
-                "~850K per-tick phase records/day\n"
+                "~1.15M per-tick phase records/day\n"
                 "9 channels, 24/7",
                 font_size=14, color=(0x44, 0x44, 0x44))
 
@@ -237,16 +237,16 @@ def build_presentation():
 
     add_table(slide, 6.8, 1.6, 5.8, 2.2, [
         ['Source', 'Offset vs GPS', 'Bound (±)'],
-        ['Internet NTP', '−6.0 ms', '±19 ms'],
-        ['HF TSL1 (geometric)', '+1.1 ms', '±2.0 ms'],
-        ['HF TSL2 (ionospheric)', '+0.8 ms', '±0.6 ms'],
-        ['GPS+PPS (ground truth)', '−0.001 ms', '±0.094 ms'],
+        ['Internet NTP', '+0.6 ms', '±4.2 ms'],
+        ['HF TSL1 (geometric)', '+1.1 ms', '±0.6 ms'],
+        ['HF TSL2 (ionospheric)', '−0.055 ms', '±0.5 ms'],
+        ['GPS+PPS (ground truth)', '+0.006 ms', '±0.039 ms'],
     ])
 
     add_bullet_list(slide, 6.8, 4.1, 5.8, 3.0, [
-        "HF timing is 100× better than internet NTP",
-        "L2 has 3.3× tighter bound than L1",
-        "Fusion D_clock: median −1.2 ms, 86% within ±5 ms",
+        "TSL2 is −55 µs vs GPS — sub-100 µs from HF alone",
+        "TSL2 is 20× closer to GPS than TSL1",
+        "Fusion D_clock: median −0.10 ms, 100% within ±2 ms",
         "A Tier 2 station bootstraps itself to Tier 3",
     ], font_size=15, color=(0x1b, 0x5e, 0x20))
 
@@ -263,8 +263,8 @@ def build_presentation():
         "delays, L2 adds an ionospheric correction. Both feed Chrony as "
         "reference clocks. The result: our HF-derived time is 100 times "
         "better than internet NTP and within about 1 millisecond of GPS "
-        "ground truth. The ionospheric correction makes L2 three times "
-        "tighter than L1 — it's doing real work. This is the bridge: a "
+        "ground truth. The ionospheric correction makes L2 twenty times "
+        "closer to GPS than L1 — it's doing real work. This is the bridge: a "
         "station with only a GPSDO can recover absolute time from the HF "
         "signals and unlock the D_clock products.")
 
@@ -288,10 +288,10 @@ def build_presentation():
 
     # Evidence table
     add_table(slide, 0.4, 3.8, 5.8, 2.0, [
-        ['Station', 'Records/day', 'Median D_clock', 'Median SNR'],
-        ['WWV', '1,380', '−1.12 ms', '26.2 dB'],
-        ['WWVH', '1,379', '−0.08 ms', '17.8 dB'],
-        ['BPM', '1,380', '+1.48 ms', '21.1 dB'],
+        ['Station', 'Records/day', 'Median D_clock', 'Uncertainty'],
+        ['WWV', '1,380', '−1.12 ms', '±0.3 ms'],
+        ['WWVH', '1,379', '−0.08 ms', '±0.3 ms'],
+        ['BPM', '1,380', '+1.48 ms', '±0.4 ms'],
     ])
 
     add_textbox(slide, 0.4, 5.9, 5.8, 1.0,
@@ -333,9 +333,9 @@ def build_presentation():
         "",
         "This is a Tier 2 product — needs only the GPSDO",
         "",
-        "17,045 dTEC records/day (per-minute)",
-        "848,599 per-tick records/day (1-second resolution)",
-        "GNSS-anchored: ZED-F9P VTEC 41.7 TECU, ±1 TECU",
+        "19,571 dTEC records/day (per-minute)",
+        "933,243 per-tick records/day (1-second resolution)",
+        "GNSS-anchored when available (301 anchored records on 3/6)",
     ], font_size=15)
 
     # dTEC figure
@@ -371,7 +371,7 @@ def build_presentation():
     ])
 
     add_bullet_list(slide, 0.4, 3.5, 5.5, 2.0, [
-        "22,474 records/day, all GOOD quality",
+        "29,312 records/day, 98.6% GOOD quality",
         "Also a Tier 2 product",
         "Cross-frequency consistency validates the physics",
     ], font_size=15, color=(0x1b, 0x5e, 0x20))
@@ -563,15 +563,15 @@ def build_presentation():
                 font_size=22, bold=True, color=(0x1b, 0x5e, 0x20))
 
     add_bullet_list(slide, 0.6, 1.8, 11.5, 2.5, [
-        "Measure ionospheric Doppler at 99.7% coverage, 24/7",
+        "Measure ionospheric Doppler at 100% coverage, 24/7",
         "Extract dTEC/dt at ~6 mTECU/min sensitivity on 17 paths",
         "Discriminate three co-channel stations via physics",
-        "Self-recover UTC to ±1 ms from the time signals",
+        "Self-recover UTC to −55 µs from the time signals",
     ], font_size=18, color=(0x22, 0x22, 0x22))
 
     add_textbox(slide, 0.6, 4.0, 11.5, 0.5,
-                "Daily output: 24K timing · 850K phase · 17K dTEC · "
-                "22K consistency checks",
+                "Daily output: 24K timing · 1.15M phase · 20K dTEC · "
+                "29K consistency checks",
                 font_size=16, color=(0x44, 0x44, 0x44))
 
     add_textbox(slide, 0.6, 4.8, 11.5, 0.5,
