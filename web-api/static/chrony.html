@@ -82,13 +82,7 @@
         <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg); display: flex; gap: var(--spacing-md); align-items: center;">
             <div>
                 <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">History Window</label>
-                <div style="display: flex; gap: 4px;">
-                    <button class="time-btn" data-hours="1" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">1h</button>
-                    <button class="time-btn" data-hours="6" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">6h</button>
-                    <button class="time-btn active" data-hours="24" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">24h</button>
-                    <button class="time-btn" data-hours="72" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">3d</button>
-                    <button class="time-btn" data-hours="168" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">7d</button>
-                </div>
+                <div id="time-period-selector"></div>
             </div>
         </div>
 
@@ -121,7 +115,7 @@
     </div>
 
     <script>
-        let currentHours = 24;
+        let tps = null;
         let refreshTimer = null;
 
         const darkLayout = {
@@ -263,7 +257,9 @@
 
         async function loadHistory() {
             try {
-                const data = await api.get(`/chrony/history?hours=${currentHours}`);
+                const range = tps.getAPIParams();
+                const hours = Math.max(1, Math.ceil((new Date(range.end) - new Date(range.start)) / 3600000));
+                const data = await api.get(`/chrony/history?hours=${hours}`);
 
                 if (!data.sources || Object.keys(data.sources).length === 0) {
                     Plotly.react('offset-plot', [], {
@@ -348,17 +344,8 @@
             await Promise.all([loadComparison(), loadHistory()]);
         }
 
-        // Time range buttons
-        document.querySelectorAll('.time-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                currentHours = parseInt(btn.dataset.hours);
-                loadHistory();
-            });
-        });
-
-        // Initial load
+        // Initialize TimePeriodSelector and load
+        tps = new TimePeriodSelector('time-period-selector', refreshAll);
         refreshAll();
 
         // Auto-refresh every 60s

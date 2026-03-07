@@ -402,11 +402,12 @@ class PropagationService:
                 except Exception:
                     pass
 
-                # --- Build Doppler lookup from clock_offset/timing_measurements ---
-                # Key: (minute_boundary_utc, station) → doppler_hz
+                # --- Build Doppler + Mode lookups from clock_offset/timing_measurements ---
+                # Key: (minute_boundary_utc, station) → doppler_hz / propagation_mode
                 # 60-second baseline gives ~0.017 Hz resolution vs ~1 Hz from
                 # the 57-tick linear fit in tick_timing.
                 doppler_lookup: Dict[tuple, float] = {}
+                mode_lookup: Dict[tuple, str] = {}
                 try:
                     co_reader = DataProductReader(
                         data_dir=channel_dir,
@@ -420,9 +421,14 @@ class PropagationService:
                     for co in co_records:
                         mb  = co.get('minute_boundary_utc')
                         st  = co.get('station', '')
-                        dop = _safe_float(co.get('doppler_hz'))
-                        if mb is not None and st and dop is not None:
-                            doppler_lookup[(int(mb), st)] = dop
+                        if mb is not None and st:
+                            key = (int(mb), st)
+                            dop = _safe_float(co.get('doppler_hz'))
+                            if dop is not None:
+                                doppler_lookup[key] = dop
+                            mode = co.get('propagation_mode')
+                            if mode and mode != 'UNKNOWN':
+                                mode_lookup[key] = mode
                 except Exception:
                     pass
 
@@ -456,6 +462,8 @@ class PropagationService:
                         dop = doppler_lookup.get(key) if key else None
                         if dop is None:
                             dop = _safe_float(t.get('doppler_hz'))
+                        # Mode: prefer timing_measurements lookup
+                        mode = mode_lookup.get(key, 'UNKNOWN') if key else 'UNKNOWN'
                         all_records.append({
                             'timestamp_utc': t.get('timestamp_utc'),
                             'station': st,
@@ -463,7 +471,7 @@ class PropagationService:
                             'snr_db': snr,
                             'd_clock_ms': _safe_float(t.get('d_clock_ms')),
                             'doppler_hz': dop,
-                            'propagation_mode': 'UNKNOWN',
+                            'propagation_mode': mode,
                         })
                 else:
                     # Fallback: timing_measurements for channels without tick_timing

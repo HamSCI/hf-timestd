@@ -6,6 +6,7 @@
     <title>Ionogram — Time-of-Flight Cluster Analysis — hf-timestd</title>
     <link rel="stylesheet" href="/static/css/styles.css">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="/static/js/common.js"></script>
     <style>
         .controls-row {
             display: flex;
@@ -129,7 +130,7 @@
                 <a href="/static/ionosphere.html" class="nav-link">🔬 Observatory</a>
                 <a href="/static/ionogram.html" class="nav-link active">📻 Ionogram</a>
                 <a href="/static/dtec.html" class="nav-link">⚡ dTEC</a>
-                <a href="/static/test_signal.html" class="nav-link">📡 Test Signal</a>
+                <a href="/static/test_signal.html" class="nav-link">🔊 Test Signal</a>
                 <a href="/static/grape.html" class="nav-link">&#x1F347; GRAPE</a>
                 <span class="nav-divider"></span>
                 <a href="/static/docs.html" class="nav-link">📚 Docs</a>
@@ -146,11 +147,18 @@
             SNR separates modes: higher-hop paths are weaker due to additional D-layer transits.
         </div>
 
-        <!-- Controls -->
+        <!-- Time Period Selector -->
+        <div class="controls-row">
+            <div class="control-group">
+                <label>Time Period</label>
+                <div id="time-period-selector"></div>
+            </div>
+        </div>
+        <!-- Filters -->
         <div class="controls-row">
             <div class="control-group">
                 <label>Channel</label>
-                <select id="channelSelect">
+                <select id="channelSelect" onchange="loadData()">
                     <option value="CHU_7850">CHU 7.85 MHz</option>
                     <option value="CHU_3330">CHU 3.33 MHz</option>
                     <option value="CHU_14670">CHU 14.67 MHz</option>
@@ -166,37 +174,18 @@
                 </select>
             </div>
             <div class="control-group">
-                <label>Time window</label>
-                <select id="windowSelect" onchange="toggleCustomDate()">
-                    <option value="-6h">Last 6 hours</option>
-                    <option value="-12h">Last 12 hours</option>
-                    <option value="-24h" selected>Last 24 hours</option>
-                    <option value="-48h">Last 48 hours</option>
-                    <option value="custom">Custom range…</option>
-                </select>
-            </div>
-            <div class="control-group" id="customDateGroup" style="display:none">
-                <label>Start (UTC)</label>
-                <input type="datetime-local" id="customStart" style="width:190px">
-            </div>
-            <div class="control-group" id="customEndGroup" style="display:none">
-                <label>End (UTC)</label>
-                <input type="datetime-local" id="customEnd" style="width:190px">
-            </div>
-            <div class="control-group">
                 <label>Min SNR (dB)</label>
-                <input type="number" id="minSnr" value="15" min="0" max="40" step="1" style="width:80px">
+                <input type="number" id="minSnr" value="15" min="0" max="40" step="1" style="width:80px" onchange="loadData()">
             </div>
             <div class="control-group">
                 <label>Downsample</label>
-                <select id="downsampleSelect">
+                <select id="downsampleSelect" onchange="loadData()">
                     <option value="1">All points</option>
                     <option value="3" selected>Every 3rd</option>
                     <option value="5">Every 5th</option>
                     <option value="10">Every 10th</option>
                 </select>
             </div>
-            <button class="btn-load" onclick="loadData()">Load</button>
         </div>
 
         <!-- Stats row -->
@@ -342,37 +331,17 @@ function showTab(name) {
     if (name === 'doppler' && _dopplerData) renderDopplerDelay(_dopplerData);
 }
 
-function toggleCustomDate() {
-    const isCustom = document.getElementById('windowSelect').value === 'custom';
-    document.getElementById('customDateGroup').style.display = isCustom ? '' : 'none';
-    document.getElementById('customEndGroup').style.display = isCustom ? '' : 'none';
-    if (isCustom && !document.getElementById('customStart').value) {
-        const now = new Date();
-        const yesterday = new Date(now.getTime() - 86400000);
-        document.getElementById('customStart').value = yesterday.toISOString().slice(0, 16);
-        document.getElementById('customEnd').value = now.toISOString().slice(0, 16);
-    }
-}
+// TimePeriodSelector instance
+let tps = null;
 
 async function loadData() {
     const channel = document.getElementById('channelSelect').value;
-    const window_ = document.getElementById('windowSelect').value;
     const minSnr = document.getElementById('minSnr').value;
     const ds = document.getElementById('downsampleSelect').value;
 
-    let startParam, endParam;
-    if (window_ === 'custom') {
-        const cs = document.getElementById('customStart').value;
-        const ce = document.getElementById('customEnd').value;
-        if (!cs || !ce) { showError('Please select both start and end times.'); return; }
-        startParam = cs + ':00';
-        endParam = ce + ':00';
-    } else {
-        startParam = window_;
-        endParam = 'now';
-    }
-    const sp = encodeURIComponent(startParam);
-    const ep = encodeURIComponent(endParam);
+    const range = tps.getAPIParams();
+    const sp = encodeURIComponent(range.start);
+    const ep = encodeURIComponent(range.end);
 
     document.getElementById('errorMsg').style.display = 'none';
     document.getElementById('statsGrid').style.display = 'none';
@@ -795,8 +764,9 @@ function renderDopplerDelay(data) {
     }
 }
 
-// Auto-load on page open
+// Initialize TimePeriodSelector and auto-load
 window.addEventListener('load', () => {
+    tps = new TimePeriodSelector('time-period-selector', loadData);
     // Populate channel list from API
     fetch('/api/ionogram/channels').then(r => r.json()).then(d => {
         if (d.channels && d.channels.length > 0) {

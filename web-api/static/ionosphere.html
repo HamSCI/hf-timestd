@@ -7,6 +7,7 @@
     <title>Ionospheric Observatory - hf-timestd</title>
     <link rel="stylesheet" href="/static/css/styles.css">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="/static/js/common.js"></script>
     <style>
         .display-tabs {
             display: flex;
@@ -171,7 +172,7 @@
                 <a href="/static/ionosphere.html" class="nav-link active">🔬 Observatory</a>
                 <a href="/static/ionogram.html" class="nav-link">📻 Ionogram</a>
                 <a href="/static/dtec.html" class="nav-link">⚡ dTEC</a>
-                <a href="/static/test_signal.html" class="nav-link">📡 Test Signal</a>
+                <a href="/static/test_signal.html" class="nav-link">🔊 Test Signal</a>
                 <a href="/static/grape.html" class="nav-link">&#x1F347; GRAPE</a>
                 <span class="nav-divider"></span>
                 <a href="/static/docs.html" class="nav-link">📚 Docs</a>
@@ -181,19 +182,15 @@
 
         <div id="error-container" style="display: none; background: #7f1d1d; border: 1px solid #ef4444; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; color: #fca5a5; font-size: 13px;"></div>
 
-        <!-- Date Selector + Status Bar -->
+        <!-- Time Period Selector + Status Bar -->
         <div class="status-bar" id="status-bar">
             <div class="status-item" style="display:flex; align-items:center; gap:6px;">
-                <label style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:12px;">Date:</label>
-                <button class="filter-btn" onclick="shiftDate(-1)" title="Previous day" style="padding:4px 10px;">&larr;</button>
-                <input type="date" id="date-picker" onchange="setDate(this.value)"
-                       style="padding:4px 8px; background:var(--bg-surface); border:1px solid var(--border-color); border-radius:var(--radius-md); color:var(--text-primary); font-size:13px;">
-                <button class="filter-btn" id="btn-next-day" onclick="shiftDate(+1)" title="Next day" style="padding:4px 10px;">&rarr;</button>
-                <button class="filter-btn" onclick="setToday()" style="padding:4px 10px;">Today</button>
-                <button class="filter-btn" onclick="loadAll()" title="Refresh data" style="padding:4px 10px;">&#x21bb;</button>
+                <div id="time-period-selector"></div>
             </div>
             <div class="status-item">Measurements: <strong id="stat-count">...</strong></div>
             <div class="status-item">Stations: <strong id="stat-stations">...</strong></div>
+        </div>
+        <div class="status-bar" style="margin-top:-12px;">
             <div class="status-item">Frequencies: <strong id="stat-freqs">...</strong></div>
             <div class="status-item">Last Update: <strong id="stat-time">...</strong></div>
         </div>
@@ -314,21 +311,15 @@
             </div>
 
             <div class="plot-container">
-                <div class="plot-title">GOES X-ray Flux</div>
-                <div class="plot-subtitle">Solar flare indicator &mdash; M/X class flares cause SIDs</div>
-                <div id="plot-xray" style="height: 200px;"></div>
+                <div class="plot-title">Space Weather &mdash; X-ray Flux + Kp Index</div>
+                <div class="plot-subtitle">GOES X-ray (red, left axis, log) &mdash; M/X flares cause SIDs. Kp index (bars, right axis) &mdash; Kp &ge; 5 = storm.</div>
+                <div id="plot-space-weather" style="height: 250px;"></div>
             </div>
 
             <div class="plot-container">
                 <div class="plot-title">SNR with Event Markers</div>
                 <div class="plot-subtitle">All-station SNR overlaid with significant ionospheric events (SIDs, absorption). Mode changes shown as vertical lines (max 30).</div>
                 <div id="plot-events-snr" style="height: 350px;"></div>
-            </div>
-
-            <div class="plot-container">
-                <div class="plot-title">Geomagnetic Activity (Kp Index)</div>
-                <div class="plot-subtitle">Kp &ge; 5 = geomagnetic storm conditions</div>
-                <div id="plot-kp" style="height: 200px;"></div>
             </div>
         </div>
     </div>
@@ -365,7 +356,7 @@
         paper_bgcolor: '#1e293b',
         plot_bgcolor: '#0f172a',
         font: { color: '#94a3b8', size: 12 },
-        margin: { l: 60, r: 20, t: 10, b: 50 },
+        margin: PLOT_MARGINS,
         xaxis: { gridcolor: '#334155', zerolinecolor: '#475569' },
         yaxis: { gridcolor: '#334155', zerolinecolor: '#475569' },
         legend: { bgcolor: 'rgba(30,41,59,0.8)', bordercolor: '#475569', borderwidth: 1, font: { size: 11 } },
@@ -393,38 +384,15 @@
     let solarData = null;
     let currentStation = 'WWVH';
     let currentFreq = 'ALL';
-    let selectedDate = new Date().toISOString().slice(0, 10);  // YYYY-MM-DD
 
-    // Initialize date picker to today
-    document.getElementById('date-picker').value = selectedDate;
-
-    function setDate(dateStr) {
-        selectedDate = dateStr;
-        document.getElementById('date-picker').value = dateStr;
-        updateDateControls();
-        loadAll();
+    // TimePeriodSelector drives the date; selectedDate derived from it
+    let tps = null;
+    function getSelectedDate() {
+        const r = tps.getRange();
+        return r.start.slice(0, 10);  // YYYY-MM-DD
     }
-
-    function shiftDate(delta) {
-        const d = new Date(selectedDate + 'T12:00:00Z');
-        d.setUTCDate(d.getUTCDate() + delta);
-        const newDate = d.toISOString().slice(0, 10);
-        const today = new Date().toISOString().slice(0, 10);
-        if (newDate > today) return;  // don't go past today
-        setDate(newDate);
-    }
-
-    function setToday() {
-        setDate(new Date().toISOString().slice(0, 10));
-    }
-
-    function updateDateControls() {
-        const today = new Date().toISOString().slice(0, 10);
-        document.getElementById('date-picker').max = today;
-        const nextBtn = document.getElementById('btn-next-day');
-        nextBtn.style.opacity = (selectedDate >= today) ? '0.3' : '1';
-        nextBtn.style.pointerEvents = (selectedDate >= today) ? 'none' : 'auto';
-    }
+    // Legacy alias used throughout render functions
+    let selectedDate = new Date().toISOString().slice(0, 10);
 
     async function fetchJSON(url) {
         const resp = await fetch(url);
@@ -594,7 +562,7 @@
             yaxis2: szaY2,
             showlegend: true,
             legend: { ...PLOTLY_LAYOUT_BASE.legend, x: 1.12, y: 1 },
-        }, { responsive: true });
+        }, PLOTLY_CONFIG);
 
         // ---- D_clock plot + SZA ----
         const dcTraces = [];
@@ -620,7 +588,7 @@
                 yaxis2: szaY2,
                 showlegend: true,
                 legend: { ...PLOTLY_LAYOUT_BASE.legend, x: 1.12, y: 1 },
-            }, { responsive: true });
+            }, PLOTLY_CONFIG);
         } else {
             document.getElementById('plot-dclock').innerHTML = '<p style="color:#64748b;text-align:center;padding:40px;">No valid D_clock data for this station (insufficient tick detections)</p>';
         }
@@ -649,7 +617,7 @@
                 yaxis2: szaY2,
                 showlegend: true,
                 legend: { ...PLOTLY_LAYOUT_BASE.legend, x: 1.12, y: 1 },
-            }, { responsive: true });
+            }, PLOTLY_CONFIG);
         } else {
             document.getElementById('plot-doppler').innerHTML = '<p style="color:#64748b;text-align:center;padding:40px;">No Doppler data for this selection</p>';
         }
@@ -724,7 +692,7 @@
             font: { color: '#94a3b8' },
             margin: { l: 0, r: 0, t: 0, b: 0 },
             showlegend: false,
-        }, { responsive: true });
+        }, PLOTLY_CONFIG);
 
         // Mode timeline
         if (!data || !data.timestamps || data.count === 0) {
@@ -766,7 +734,7 @@
             yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: '', automargin: true, categoryorder: 'category ascending' },
             legend: { ...PLOTLY_LAYOUT_BASE.legend, orientation: 'h', y: -0.15 },
             height: 400,
-        }, { responsive: true });
+        }, PLOTLY_CONFIG);
     }
 
     // ====================================================================
@@ -849,7 +817,7 @@
                     xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: '1/f² (MHz⁻²)' },
                     yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'D_clock (ms)' },
                     legend: { ...PLOTLY_LAYOUT_BASE.legend },
-                }, { responsive: true });
+                }, PLOTLY_CONFIG);
             } else {
                 document.getElementById('plot-tec-fit').innerHTML = '<p style="color:#64748b;text-align:center;padding:40px;">Insufficient multi-frequency data in last hour</p>';
             }
@@ -874,7 +842,7 @@
                     ...PLOTLY_LAYOUT_BASE,
                     xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: 'UTC Time' },
                     yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'TEC (TECU)', range: [0, 100] },
-                }, { responsive: true });
+                }, PLOTLY_CONFIG);
             } else {
                 document.getElementById('plot-tec-ts').innerHTML = '<p style="color:#64748b;text-align:center;padding:40px;">No TEC time series data</p>';
             }
@@ -909,7 +877,7 @@
                 xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: 'UTC Time' },
                 yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'D_clock (ms)' },
                 legend: { ...PLOTLY_LAYOUT_BASE.legend, x: 1.02, y: 1 },
-            }, { responsive: true });
+            }, PLOTLY_CONFIG);
         }
     }
 
@@ -917,63 +885,80 @@
     // DISPLAY 4: Events & Space Weather
     // ====================================================================
     async function renderEvents(timelineData) {
-        // X-ray flux
+        // Shared time range aligned to selected date
+        const evXRange = [selectedDate + 'T00:00:00Z', selectedDate + 'T23:59:59Z'];
+
+        // Combined space weather: X-ray (y1, log) + Kp (y2, linear bars)
         try {
-            const xray = await fetchJSON('/api/space-weather/xray?hours=24');
+            const [xray, kp] = await Promise.all([
+                fetchJSON('/api/space-weather/xray?hours=24').catch(() => null),
+                fetchJSON('/api/space-weather/kp?hours=72').catch(() => null),
+            ]);
+
+            const swTraces = [];
+            const swShapes = [];
+            const swAnnotations = [];
+
+            // X-ray on y1 (left, log)
             if (xray && xray.timestamps && xray.timestamps.length > 0) {
-                Plotly.newPlot('plot-xray', [{
+                swTraces.push({
                     x: xray.timestamps,
                     y: xray.flux,
                     mode: 'lines',
                     line: { color: '#ef4444', width: 1.5 },
-                    name: 'GOES X-ray',
+                    name: 'X-ray',
                     fill: 'tozeroy',
-                    fillcolor: 'rgba(239,68,68,0.1)',
-                }], {
-                    ...PLOTLY_LAYOUT_BASE,
-                    xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: '' },
-                    yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'W/m²', type: 'log' },
-                    margin: { ...PLOTLY_LAYOUT_BASE.margin, t: 5, b: 30 },
-                    showlegend: false,
-                    // Add flare class annotations
-                    shapes: [
-                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 1e-5, y1: 1e-5, line: { color: '#f59e0b', width: 1, dash: 'dot' } },
-                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 1e-4, y1: 1e-4, line: { color: '#ef4444', width: 1, dash: 'dot' } },
-                    ],
-                    annotations: [
-                        { x: 1.02, xref: 'paper', y: Math.log10(1e-5), yref: 'y', text: 'M', showarrow: false, font: { color: '#f59e0b', size: 10 } },
-                        { x: 1.02, xref: 'paper', y: Math.log10(1e-4), yref: 'y', text: 'X', showarrow: false, font: { color: '#ef4444', size: 10 } },
-                    ],
-                }, { responsive: true });
+                    fillcolor: 'rgba(239,68,68,0.08)',
+                    yaxis: 'y',
+                });
+                swShapes.push(
+                    { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 1e-5, y1: 1e-5, yref: 'y', line: { color: '#f59e0b', width: 1, dash: 'dot' } },
+                    { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 1e-4, y1: 1e-4, yref: 'y', line: { color: '#ef4444', width: 1, dash: 'dot' } },
+                );
+                swAnnotations.push(
+                    { x: -0.01, xref: 'paper', y: Math.log10(1e-5), yref: 'y', text: 'M', showarrow: false, font: { color: '#f59e0b', size: 9 }, xanchor: 'right' },
+                    { x: -0.01, xref: 'paper', y: Math.log10(1e-4), yref: 'y', text: 'X', showarrow: false, font: { color: '#ef4444', size: 9 }, xanchor: 'right' },
+                );
             }
-        } catch (e) {
-            document.getElementById('plot-xray').innerHTML = '<p style="color:#64748b;text-align:center;padding:20px;">X-ray data unavailable</p>';
-        }
 
-        // Kp index
-        try {
-            const kp = await fetchJSON('/api/space-weather/kp?hours=72');
+            // Kp on y2 (right, linear bars)
             if (kp && kp.timestamps && kp.timestamps.length > 0) {
-                const colors = kp.values.map(v => v >= 5 ? '#ef4444' : v >= 4 ? '#f59e0b' : '#22c55e');
-                Plotly.newPlot('plot-kp', [{
+                const colors = kp.kp.map(v => v >= 5 ? '#ef4444' : v >= 4 ? '#f59e0b' : '#22c55e');
+                swTraces.push({
                     x: kp.timestamps,
-                    y: kp.values,
+                    y: kp.kp,
                     type: 'bar',
-                    marker: { color: colors },
+                    marker: { color: colors, opacity: 0.4 },
                     name: 'Kp',
-                }], {
+                    yaxis: 'y2',
+                    width: 60000,  // 1-minute bar width in ms
+                });
+                swShapes.push(
+                    { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 5, y1: 5, yref: 'y2', line: { color: '#ef4444', width: 1, dash: 'dot' } },
+                );
+                swAnnotations.push(
+                    { x: 1.01, xref: 'paper', y: 5, yref: 'y2', text: 'Storm', showarrow: false, font: { color: '#ef4444', size: 9 }, xanchor: 'left' },
+                );
+            }
+
+            if (swTraces.length > 0) {
+                Plotly.newPlot('plot-space-weather', swTraces, {
                     ...PLOTLY_LAYOUT_BASE,
-                    xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: '' },
-                    yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'Kp', range: [0, 9] },
+                    xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: '', range: evXRange },
+                    yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'X-ray (W/m²)', type: 'log', side: 'left', titlefont: { color: '#ef4444', size: 12 }, tickfont: { color: '#ef4444' } },
+                    yaxis2: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'Kp Index', range: [0, 9], side: 'right', overlaying: 'y', titlefont: { color: '#22c55e', size: 12 }, tickfont: { color: '#22c55e' }, showgrid: false },
                     margin: { ...PLOTLY_LAYOUT_BASE.margin, t: 5, b: 30 },
-                    showlegend: false,
-                    shapes: [
-                        { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 5, y1: 5, line: { color: '#ef4444', width: 1, dash: 'dot' } },
-                    ],
-                }, { responsive: true });
+                    legend: { ...PLOTLY_LAYOUT_BASE.legend, orientation: 'h', x: 0.5, xanchor: 'center', y: 1.05 },
+                    showlegend: true,
+                    shapes: swShapes,
+                    annotations: swAnnotations,
+                    bargap: 0,
+                }, PLOTLY_CONFIG);
+            } else {
+                document.getElementById('plot-space-weather').innerHTML = '<p style="color:#64748b;text-align:center;padding:40px;">Space weather data unavailable</p>';
             }
         } catch (e) {
-            document.getElementById('plot-kp').innerHTML = '<p style="color:#64748b;text-align:center;padding:20px;">Kp data unavailable</p>';
+            document.getElementById('plot-space-weather').innerHTML = '<p style="color:#64748b;text-align:center;padding:20px;">Space weather data unavailable</p>';
         }
 
         // SNR with events overlay — all stations, grouped by station
@@ -1034,13 +1019,12 @@
                 }
             } catch (e) { /* events optional */ }
 
-            const xRange = [selectedDate + 'T00:00:00Z', selectedDate + 'T23:59:59Z'];
             Plotly.newPlot('plot-events-snr', evTraces, {
                 ...PLOTLY_LAYOUT_BASE,
-                xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: 'UTC Time', range: xRange },
+                xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: 'UTC Time', range: evXRange },
                 yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'SNR (dB)' },
                 shapes: evShapes,
-            }, { responsive: true });
+            }, PLOTLY_CONFIG);
         }
     }
 
@@ -1049,6 +1033,8 @@
     // ====================================================================
     async function loadAll() {
         try {
+            // Sync selectedDate from TimePeriodSelector
+            selectedDate = getSelectedDate();
             // Build date range from selected date: 00:00 - 23:59:59 UTC
             const dayStart = selectedDate + 'T00:00:00Z';
             const dayEnd = selectedDate + 'T23:59:59Z';
@@ -1092,12 +1078,13 @@
         }
     }
 
-    updateDateControls();
+    // Initialize TimePeriodSelector and load
+    tps = new TimePeriodSelector('time-period-selector', loadAll);
     loadAll();
     // Auto-refresh every 5 minutes, but only if viewing today
     setInterval(() => {
         const today = new Date().toISOString().slice(0, 10);
-        if (selectedDate === today) loadAll();
+        if (getSelectedDate() === today) loadAll();
     }, 300000);
     </script>
 </body>

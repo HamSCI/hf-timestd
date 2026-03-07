@@ -85,7 +85,7 @@
                 <a href="/static/ionosphere.html" class="nav-link">🔬 Observatory</a>
                 <a href="/static/ionogram.html" class="nav-link">📻 Ionogram</a>
                 <a href="/static/dtec.html" class="nav-link">⚡ dTEC</a>
-                <a href="/static/test_signal.html" class="nav-link active">📡 Test Signal</a>
+                <a href="/static/test_signal.html" class="nav-link active">🔊 Test Signal</a>
                 <a href="/static/grape.html" class="nav-link">&#x1F347; GRAPE</a>
                 <span class="nav-divider"></span>
                 <a href="/static/docs.html" class="nav-link">📚 Docs</a>
@@ -95,16 +95,9 @@
 
         <div id="error-container" style="display:none;"></div>
 
-        <!-- Global Time Range Selector -->
+        <!-- Time Period Selector -->
         <div class="time-range-bar" id="time-range-bar">
-            <span class="range-label">Time Range</span>
-            <button class="range-btn" data-hours="6" onclick="setTimeRange(6)">6h</button>
-            <button class="range-btn active" data-hours="24" onclick="setTimeRange(24)">24h</button>
-            <button class="range-btn" data-hours="48" onclick="setTimeRange(48)">48h</button>
-            <button class="range-btn" data-hours="168" onclick="setTimeRange(168)">7d</button>
-            <div class="range-sep"></div>
-            <input type="date" id="date-picker-global" onchange="onGlobalDatePicked(this.value)" title="Jump to a specific UTC date">
-            <span class="range-info" id="range-info">Last 24 hours UTC</span>
+            <div id="time-period-selector"></div>
         </div>
 
         <!-- View Tabs -->
@@ -179,12 +172,6 @@
                         <div class="card-subtitle">24h x Frequency grid &mdash; SNR and S4 with solar zenith overlay</div>
                     </div>
                 </div>
-                <div class="date-nav">
-                    <button onclick="changeDate(-1)">&#8592; Previous</button>
-                    <input type="date" id="date-picker-heatmap" onchange="onDatePicked(this.value)">
-                    <button onclick="changeDate(1)">Next &#8594;</button>
-                    <button onclick="setToday()">Today</button>
-                </div>
                 <div class="chart-row">
                     <div>
                         <div style="font-size:13px;font-weight:600;color:var(--wwv-color);margin-bottom:4px;">WWV &mdash; SNR (dB)</div>
@@ -237,12 +224,6 @@
                         <div class="card-subtitle">Test signal metrics over a UTC day &mdash; shaded region = solar elevation at path midpoint</div>
                     </div>
                 </div>
-                <div class="date-nav">
-                    <button onclick="changeDate(-1)">&#8592; Previous</button>
-                    <input type="date" id="date-picker-evo" onchange="onDatePicked(this.value)">
-                    <button onclick="changeDate(1)">Next &#8594;</button>
-                    <button onclick="setToday()">Today</button>
-                </div>
                 <div class="chart-container" id="chart-evo-snr"></div>
             </div>
             <div class="card">
@@ -264,12 +245,6 @@
         <div id="view-comparison" class="view-content">
             <div class="card">
                 <div class="card-header"><div><div class="card-title">WWV vs WWVH Path Comparison</div><div class="card-subtitle">Same frequency, different ionospheric paths &mdash; solar zenith explains the difference</div></div></div>
-                <div class="date-nav">
-                    <button onclick="changeDate(-1)">&#8592; Previous</button>
-                    <input type="date" id="date-picker-comp" onchange="onDatePicked(this.value)">
-                    <button onclick="changeDate(1)">Next &#8594;</button>
-                    <button onclick="setToday()">Today</button>
-                </div>
                 <div class="tab-group" id="comp-freq-tabs"></div>
                 <div class="chart-container" id="chart-comp-snr"></div>
                 <div class="solar-legend" style="margin-top:12px;">
@@ -291,12 +266,6 @@
         <div id="view-tones" class="view-content">
             <div class="card">
                 <div class="card-header"><div><div class="card-title">Multi-Tone Power Fingerprint</div><div class="card-subtitle">2/3/4/5 kHz tone powers reveal frequency-selective fading from ionospheric multipath</div></div></div>
-                <div class="date-nav">
-                    <button onclick="changeDate(-1)">&#8592; Previous</button>
-                    <input type="date" id="date-picker-tones" onchange="onDatePicked(this.value)">
-                    <button onclick="changeDate(1)">Next &#8594;</button>
-                    <button onclick="setToday()">Today</button>
-                </div>
                 <div class="tab-group" id="tone-freq-tabs"></div>
                 <div class="chart-container" id="chart-tone-waterfall"></div>
                 <div class="section-note">The test signal transmits four tones at 2, 3, 4, 5 kHz with known 3 dB steps. Deviations from the expected pattern indicate frequency-selective fading &mdash; a direct measure of ionospheric multipath.</div>
@@ -317,12 +286,6 @@
                         <div class="card-title">Propagation Path Analysis</div>
                         <div class="card-subtitle">Test signal metrics organized by ionospheric path &mdash; all frequencies per path with TEC and solar zenith overlay</div>
                     </div>
-                </div>
-                <div class="date-nav">
-                    <button onclick="changeDate(-1)">&#8592; Previous</button>
-                    <input type="date" id="date-picker-paths" onchange="onDatePicked(this.value)">
-                    <button onclick="changeDate(1)">Next &#8594;</button>
-                    <button onclick="setToday()">Today</button>
                 </div>
                 <div class="section-note">Each propagation path traverses a different ionospheric column. Grouping by path reveals how TEC, solar illumination, and frequency interact along a single ionospheric transect. Solid lines = data traces, dashed = solar elevation, shaded area = TEC.</div>
             </div>
@@ -386,10 +349,8 @@
     // ====================================================================
     // GLOBALS
     // ====================================================================
+    let tps = null;
     let currentView = 'overview';
-    let currentDate = new Date();
-    let currentHours = 24;
-    let useHoursMode = true;
     let cachedDaily = null;
     let cachedTEC = null;
     let cachedKey = null;
@@ -414,55 +375,13 @@
     function gridAxis(title) { return { title: title, gridcolor: 'rgba(148,163,184,0.1)', zeroline: false }; }
 
     // ====================================================================
-    // TIME RANGE CONTROL
+    // TIME RANGE CONTROL (via TimePeriodSelector)
     // ====================================================================
-    function setTimeRange(hours) {
-        currentHours = hours;
-        useHoursMode = true;
+    function onTimeChange() {
         cachedDaily = null;
         cachedTEC = null;
         cachedKey = null;
-        // Update button states
-        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
-        const btn = document.querySelector(`.range-btn[data-hours="${hours}"]`);
-        if (btn) btn.classList.add('active');
-        // Update info label
-        const labels = { 6: 'Last 6 hours UTC', 24: 'Last 24 hours UTC', 48: 'Last 48 hours UTC', 168: 'Last 7 days UTC' };
-        document.getElementById('range-info').textContent = labels[hours] || `Last ${hours}h UTC`;
-        // Clear date picker highlight
-        document.getElementById('date-picker-global').value = '';
         reloadCurrentView();
-    }
-    function onGlobalDatePicked(val) {
-        if (!val) return;
-        currentDate = new Date(val + 'T12:00:00Z');
-        useHoursMode = false;
-        cachedDaily = null;
-        cachedTEC = null;
-        cachedKey = null;
-        // Deactivate range buttons
-        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
-        document.getElementById('range-info').textContent = val + ' UTC';
-        reloadCurrentView();
-    }
-    function syncDatePickers() {
-        if (!useHoursMode) {
-            const ds = currentDate.toISOString().split('T')[0];
-            document.getElementById('date-picker-global').value = ds;
-        }
-    }
-    function onDatePicked(val) { onGlobalDatePicked(val); }
-    function setToday() { setTimeRange(24); }
-    function changeDate(delta) {
-        if (useHoursMode) {
-            // Switch to date mode at today + delta
-            const d = new Date();
-            d.setDate(d.getDate() + delta);
-            onGlobalDatePicked(d.toISOString().split('T')[0]);
-        } else {
-            currentDate.setDate(currentDate.getDate() + delta);
-            onGlobalDatePicked(currentDate.toISOString().split('T')[0]);
-        }
     }
 
     // ====================================================================
@@ -495,14 +414,11 @@
     }
 
     async function fetchDaily() {
-        const key = useHoursMode ? `hours_${currentHours}` : `date_${currentDate.toISOString().split('T')[0]}`;
+        const range = tps.getAPIParams();
+        const key = `${range.start}_${range.end}`;
         if (cachedDaily && cachedKey === key) return cachedDaily;
-        if (useHoursMode) {
-            cachedDaily = await api.get('/physics/channels/daily', { hours: currentHours });
-        } else {
-            const ds = currentDate.toISOString().split('T')[0];
-            cachedDaily = await api.get('/physics/channels/daily', { date: ds });
-        }
+        const ds = range.start.slice(0, 10);
+        cachedDaily = await api.get('/physics/channels/daily', { date: ds });
         cachedKey = key;
         return cachedDaily;
     }
@@ -691,7 +607,7 @@
             margin: { t: 10, r: 80, b: 40, l: 70 },
             xaxis: { title: 'UTC Hour', dtick: 3 },
             yaxis: { title: '' }
-        }), { responsive: true });
+        }), PLOTLY_CONFIG);
     }
 
     function plotSolarZenith(solar) {
@@ -722,7 +638,7 @@
             yaxis: gridAxis('Solar Elevation (°)'),
             shapes: shapes,
             annotations: [{ x: 1.01, y: 0, xref: 'paper', yref: 'y', text: 'Horizon', showarrow: false, font: { size: 10, color: '#ef4444' } }]
-        }), { responsive: true });
+        }), PLOTLY_CONFIG);
     }
 
     // ====================================================================
@@ -785,7 +701,7 @@
             yaxis: gridAxis(yTitle),
             yaxis2: solarY2Axis(),
             shapes: [...nightShapes, ...(extraShapes||[])]
-        }), { responsive: true });
+        }), PLOTLY_CONFIG);
     }
 
     function plotEvoSingle(containerId, wwv, wwvh, field, yTitle, nightShapes) {
@@ -793,7 +709,7 @@
         const traces = makeFreqStationTraces(wwv, wwvh, field);
         Plotly.newPlot(container, traces, pLayout({
             xaxis: gridAxis('UTC Time'), yaxis: gridAxis(yTitle), shapes: nightShapes
-        }), { responsive: true });
+        }), PLOTLY_CONFIG);
     }
 
     // ====================================================================
@@ -827,7 +743,7 @@
         Plotly.newPlot('chart-comp-bar', [
             { x: allFreqs.map(f=>f+' MHz'), y: wwvAvg, name:'WWV', type:'bar', marker:{color:WWV_COLOR} },
             { x: allFreqs.map(f=>f+' MHz'), y: wwvhAvg, name:'WWVH', type:'bar', marker:{color:WWVH_COLOR} }
-        ], pLayout({ xaxis: gridAxis('Frequency'), yaxis: gridAxis('Avg SNR (dB)'), barmode:'group' }), {responsive:true});
+        ], pLayout({ xaxis: gridAxis('Frequency'), yaxis: gridAxis('Avg SNR (dB)'), barmode:'group' }), PLOTLY_CONFIG);
     }
 
     // ====================================================================
@@ -870,7 +786,7 @@
             }], pLayout({
                 margin:{t:10,r:80,b:40,l:120},
                 xaxis:{title:'Tone Frequency'}, yaxis:{title:'', autorange:'reversed'}
-            }), {responsive:true});
+            }), PLOTLY_CONFIG);
         }
 
         // Tone power evolution over day — separate by station
@@ -904,7 +820,7 @@
                 yaxis: gridAxis('Tone Power (dB)'),
                 yaxis2: solarY2Axis(),
                 shapes: nightShapes
-            }), {responsive:true});
+            }), PLOTLY_CONFIG);
         }
     }
 
@@ -912,21 +828,11 @@
     // PATH ANALYSIS (with TEC + solar overlay)
     // ====================================================================
     async function fetchTEC() {
-        const key = useHoursMode ? `hours_${currentHours}` : `date_${currentDate.toISOString().split('T')[0]}`;
+        const range = tps.getAPIParams();
+        const key = `tec_${range.start}_${range.end}`;
         if (cachedTEC && cachedTEC._key === key) return cachedTEC;
         try {
-            let startISO, endISO;
-            if (useHoursMode) {
-                const now = new Date();
-                const start = new Date(now.getTime() - currentHours * 3600000);
-                startISO = start.toISOString();
-                endISO = now.toISOString();
-            } else {
-                const ds = currentDate.toISOString().split('T')[0];
-                startISO = ds + 'T00:00:00Z';
-                endISO = ds + 'T23:59:59Z';
-            }
-            const data = await api.get('/propagation/tec', { start: startISO, end: endISO });
+            const data = await api.get('/propagation/tec', { start: range.start, end: range.end });
             if (data && data.paths) {
                 cachedTEC = data;
                 cachedTEC._key = key;
@@ -1093,7 +999,7 @@
                 layout.margin = { t: 30, r: 130, b: 50, l: 60 };
             }
 
-            Plotly.newPlot(container, traces, pLayout(layout), { responsive: true });
+            Plotly.newPlot(container, traces, pLayout(layout), PLOTLY_CONFIG);
         });
     }
 
@@ -1147,7 +1053,7 @@
             xaxis: gridAxis('TEC (TECU)'),
             yaxis: gridAxis('SNR (dB)'),
             hovermode: 'closest'
-        }), { responsive: true });
+        }), PLOTLY_CONFIG);
     }
 
     // ====================================================================
@@ -1175,6 +1081,7 @@
     // ====================================================================
     // INIT
     // ====================================================================
+    tps = new TimePeriodSelector('time-period-selector', onTimeChange);
     loadOverview();
     setInterval(() => { if (currentView === 'overview') loadOverview(); }, 120000);
     </script>

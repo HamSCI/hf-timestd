@@ -27,7 +27,7 @@
                 <a href="/static/ionosphere.html" class="nav-link">🔬 Observatory</a>
                 <a href="/static/ionogram.html" class="nav-link">📻 Ionogram</a>
                 <a href="/static/dtec.html" class="nav-link">⚡ dTEC</a>
-                <a href="/static/test_signal.html" class="nav-link">📡 Test Signal</a>
+                <a href="/static/test_signal.html" class="nav-link">🔊 Test Signal</a>
                 <a href="/static/grape.html" class="nav-link">&#x1F347; GRAPE</a>
                 <span class="nav-divider"></span>
                 <a href="/static/docs.html" class="nav-link">📚 Docs</a>
@@ -37,45 +37,44 @@
 
         <div id="error-container" style="display: none;"></div>
 
-        <!-- Controls -->
-        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg); display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center;">
-            <div>
-                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Time Range</label>
-                <div style="display: flex; gap: 4px;">
-                    <button class="time-btn" data-range="-15m" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">15m</button>
-                    <button class="time-btn active" data-range="-1h" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">1h</button>
-                    <button class="time-btn" data-range="-6h" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">6h</button>
-                    <button class="time-btn" data-range="-24h" style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary); cursor: pointer;">24h</button>
+        <!-- Time Period Selector -->
+        <div style="background: var(--bg-surface); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-lg);">
+            <div style="display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center;">
+                <div>
+                    <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Time Period</label>
+                    <div id="time-period-selector"></div>
                 </div>
             </div>
-            <div>
-                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Phase Type</label>
-                <select id="phase-type-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
-                    <option value="carrier_phase_rad" selected>Carrier Phase (IQ mix-down)</option>
-                    <option value="dc_carrier_phase_rad">DC Carrier Phase (unambiguous only)</option>
-                    <option value="phase_rad">Audio Modulation Phase</option>
-                </select>
-            </div>
-            <div>
-                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Channel Filter</label>
-                <select id="channel-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
-                    <option value="">All Channels</option>
-                </select>
-            </div>
-            <div>
-                <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Station Filter</label>
-                <select id="station-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
-                    <option value="">All Stations</option>
-                    <option value="WWV">WWV</option>
-                    <option value="WWVH">WWVH</option>
-                    <option value="CHU">CHU</option>
-                    <option value="BPM">BPM</option>
-                </select>
-            </div>
-            <div style="margin-left: auto;">
-                <div class="live-indicator" id="live-indicator" style="display: none;">
-                    <div class="live-dot"></div>
-                    <span>Live</span>
+            <div style="display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center; margin-top: var(--spacing-sm);">
+                <div>
+                    <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Phase Type</label>
+                    <select id="phase-type-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
+                        <option value="carrier_phase_rad" selected>Carrier Phase (IQ mix-down)</option>
+                        <option value="dc_carrier_phase_rad">DC Carrier Phase (unambiguous only)</option>
+                        <option value="phase_rad">Audio Modulation Phase</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Channel Filter</label>
+                    <select id="channel-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
+                        <option value="">All Channels</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 4px;">Station Filter</label>
+                    <select id="station-select" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-primary);">
+                        <option value="">All Stations</option>
+                        <option value="WWV">WWV</option>
+                        <option value="WWVH">WWVH</option>
+                        <option value="CHU">CHU</option>
+                        <option value="BPM">BPM</option>
+                    </select>
+                </div>
+                <div style="margin-left: auto;">
+                    <div class="live-indicator" id="live-indicator" style="display: none;">
+                        <div class="live-dot"></div>
+                        <span>Live</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -124,10 +123,10 @@
 
     <script>
         // State
-        let currentRange = '-1h';
         let refreshTimer = null;
+        let tps = null;  // TimePeriodSelector instance
 
-        // Plotly dark theme layout
+        // Plotly dark theme layout with uniform margins
         const darkLayout = {
             paper_bgcolor: '#1e293b',
             plot_bgcolor: '#0f172a',
@@ -141,15 +140,13 @@
                 gridcolor: '#334155',
                 linecolor: '#475569',
             },
-            margin: { l: 60, r: 30, t: 10, b: 40 },
+            margin: PLOT_MARGINS,
             legend: {
                 bgcolor: 'rgba(30,41,59,0.8)',
                 font: { color: '#e0e0e0' },
             },
             hovermode: 'x unified',
         };
-
-        const plotConfig = { responsive: true, displayModeBar: false };
 
         // Populate channel dropdown from summary
         async function populateChannels() {
@@ -169,9 +166,9 @@
             }
         }
 
-        // Get current filter params
+        // Get current filter params (absolute ISO timestamps from TimePeriodSelector)
         function getParams() {
-            const params = { start: currentRange, end: 'now' };
+            const params = tps.getAPIParams();
             const ch = document.getElementById('channel-select').value;
             const stn = document.getElementById('station-select').value;
             if (ch) params.channel = ch;
@@ -234,6 +231,7 @@
 
                 const layout = {
                     ...darkLayout,
+                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: '' },
                     yaxis: { ...darkLayout.yaxis, title: 'Phase (rad)' },
                     showlegend: true,
                 };
@@ -244,7 +242,7 @@
                     return;
                 }
 
-                Plotly.react('phase-plot', traces, layout, plotConfig);
+                Plotly.react('phase-plot', traces, layout, PLOTLY_CONFIG);
             } catch (e) {
                 console.error('Phase plot error:', e);
             }
@@ -268,9 +266,9 @@
                     visible: i === 0 ? true : 'legendonly',
                 }));
 
-                // Add zero line
                 const layout = {
                     ...darkLayout,
+                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: '' },
                     yaxis: { ...darkLayout.yaxis, title: 'Doppler (Hz)', zeroline: true, zerolinecolor: '#475569' },
                     showlegend: true,
                 };
@@ -281,7 +279,7 @@
                     return;
                 }
 
-                Plotly.react('doppler-plot', traces, layout, plotConfig);
+                Plotly.react('doppler-plot', traces, layout, PLOTLY_CONFIG);
             } catch (e) {
                 console.error('Doppler plot error:', e);
             }
@@ -294,6 +292,7 @@
                 params.window = 60;
 
                 const data = await api.get('/phase/scintillation', params);
+                const xRange = tps.getXRange();
                 const traces = [];
                 (data.series || []).forEach((s, i) => {
                     // Sigma Phi (Phase Scintillation)
@@ -324,21 +323,20 @@
                     }
                 });
 
-                // Add threshold line at 0.3 rad
-                if (traces.length > 0) {
-                    traces.push({
-                        x: [traces[0].x[0], traces[0].x[traces[0].x.length - 1]],
-                        y: [0.3, 0.3],
-                        name: 'Irregularity threshold',
-                        type: 'scatter',
-                        mode: 'lines',
-                        line: { color: '#ef4444', width: 1, dash: 'dash' },
-                        showlegend: true,
-                    });
-                }
+                // Add threshold line spanning full x range
+                traces.push({
+                    x: xRange,
+                    y: [0.3, 0.3],
+                    name: 'Irregularity threshold',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#ef4444', width: 1, dash: 'dash' },
+                    showlegend: true,
+                });
 
                 const layout = {
                     ...darkLayout,
+                    xaxis: { ...darkLayout.xaxis, range: xRange, title: '' },
                     yaxis: { ...darkLayout.yaxis, title: '&sigma;<sub>&phi;</sub> (rad)', rangemode: 'tozero' },
                     yaxis2: { 
                         title: 'S4 Index', 
@@ -351,13 +349,13 @@
                     showlegend: true,
                 };
 
-                if (traces.length === 0) {
+                if (traces.length <= 1) {
                     document.getElementById('scintillation-plot').innerHTML =
                         '<div style="text-align: center; color: var(--text-secondary); padding: 60px;">No scintillation data in selected range</div>';
                     return;
                 }
 
-                Plotly.react('scintillation-plot', traces, layout, plotConfig);
+                Plotly.react('scintillation-plot', traces, layout, PLOTLY_CONFIG);
             } catch (e) {
                 console.error('Scintillation plot error:', e);
             }
@@ -392,6 +390,7 @@
 
                 const layout = {
                     ...darkLayout,
+                    xaxis: { ...darkLayout.xaxis, range: tps.getXRange(), title: 'UTC Time' },
                     yaxis: { ...darkLayout.yaxis, title: 'DC Carrier Phase (rad)' },
                     showlegend: true,
                 };
@@ -402,7 +401,7 @@
                     return;
                 }
 
-                Plotly.react('dc-phase-plot', traces, layout, plotConfig);
+                Plotly.react('dc-phase-plot', traces, layout, PLOTLY_CONFIG);
             } catch (e) {
                 console.error('DC phase plot error:', e);
             }
@@ -420,24 +419,6 @@
             ]);
         }
 
-        // Time range buttons
-        document.querySelectorAll('.time-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.time-btn').forEach(b => {
-                    b.style.background = 'var(--bg-surface)';
-                    b.style.borderColor = 'var(--border-color)';
-                });
-                btn.style.background = '#3b82f6';
-                btn.style.borderColor = '#3b82f6';
-                currentRange = btn.dataset.range;
-                refreshAll();
-            });
-        });
-
-        // Highlight default button
-        document.querySelector('.time-btn[data-range="-1h"]').style.background = '#3b82f6';
-        document.querySelector('.time-btn[data-range="-1h"]').style.borderColor = '#3b82f6';
-
         // Filter change handlers
         document.getElementById('phase-type-select').addEventListener('change', () => {
             updatePhasePlot();
@@ -445,7 +426,8 @@
         document.getElementById('channel-select').addEventListener('change', refreshAll);
         document.getElementById('station-select').addEventListener('change', refreshAll);
 
-        // Initial load
+        // Initialize TimePeriodSelector and load
+        tps = new TimePeriodSelector('time-period-selector', refreshAll);
         populateChannels();
         refreshAll();
 

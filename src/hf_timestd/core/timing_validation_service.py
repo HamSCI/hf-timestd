@@ -370,13 +370,23 @@ class TimingValidationService:
                 # Cache for reuse
                 self._fusion_cache[minute_boundary] = result
                 return result
-            finally:
-                f.close()
                 
         except Exception as e:
             logger.debug(f"Failed to load fusion result from {fusion_file}: {e}")
             return None
     
+    def _sidecars_have_gps_lock(self, minute_boundary: int) -> bool:
+        """Check if any sidecar for this minute has a non-zero gps_time_ns field."""
+        for sidecar in self.find_sidecars_for_minute(minute_boundary):
+            try:
+                with open(sidecar) as f:
+                    data = json.load(f)
+                if data.get('gps_time_ns', 0) > 0:
+                    return True
+            except Exception:
+                pass
+        return False
+
     def validate_minute(self, minute_boundary: int) -> Optional[ValidationPoint]:
         """
         Validate fusion timing for a specific minute against GPS ground truth.
@@ -393,6 +403,13 @@ class TimingValidationService:
         
         # Compute GPS D_clock
         gps_d_clock = self.compute_gps_d_clock(snapshots, minute_boundary)
+        
+        # Fallback: if no timing_snapshots but GPS lock confirmed via sidecar,
+        # use 0.0ms as ground truth (chrony tracks GPSDO at sub-μs accuracy,
+        # so system_time ≈ GPS_time and GPS D_clock ≈ 0.0ms).
+        if gps_d_clock is None and self._sidecars_have_gps_lock(minute_boundary):
+            gps_d_clock = 0.0
+            logger.debug(f"Using chrony-based GPS ground truth (0.0ms) for minute {minute_boundary}")
         
         # Compute discrepancy
         fusion_d_clock = fusion.get('d_clock_fused_ms', 0.0)
@@ -486,14 +503,14 @@ class TimingValidationService:
         for i in range(hours * 60):
             minute_boundary = current_minute - (i * 60)
             
-            # Check if we have timing snapshots
-            snapshots = self.get_timing_snapshots_for_minute(minute_boundary)
-            if not snapshots:
-                continue
-            
             # Check if we have fusion result
             fusion = self.load_fusion_result(minute_boundary)
             if not fusion:
+                continue
+            
+            # Check if we have timing snapshots OR GPS-locked sidecars
+            snapshots = self.get_timing_snapshots_for_minute(minute_boundary)
+            if not snapshots and not self._sidecars_have_gps_lock(minute_boundary):
                 continue
             
             available.append(minute_boundary)

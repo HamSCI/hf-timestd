@@ -226,17 +226,27 @@ class SpaceWeatherService:
         
         for item in data:
             try:
-                ts = datetime.strptime(item['time_tag'], '%Y-%m-%d %H:%M:%S.%f')
+                ts_str = item['time_tag']
+                # NOAA uses ISO format (2026-03-06T18:45:00) or space-separated
+                try:
+                    ts = datetime.strptime(ts_str, '%Y-%m-%dT%H:%M:%S')
+                except ValueError:
+                    try:
+                        ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S.%f')
+                    except ValueError:
+                        ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
                 if ts < cutoff:
                     continue
                 
-                kp = KpIndex(
-                    timestamp=item['time_tag'],
-                    kp=float(item.get('kp', 0)),
+                # kp field is a string like '3M' or '0Z'; use estimated_kp for numeric value
+                kp_val = float(item.get('estimated_kp', 0))
+                kp_obj = KpIndex(
+                    timestamp=ts.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    kp=kp_val,
                     kp_index=int(item.get('kp_index', 0)),
-                    observed=item.get('observed', 'estimated')
+                    observed='observed' if str(item.get('kp', '')).endswith('Z') else 'estimated'
                 )
-                results.append(kp)
+                results.append(kp_obj)
             except (ValueError, KeyError) as e:
                 logger.debug(f"Skipping invalid Kp entry: {e}")
                 continue

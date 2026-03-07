@@ -26,7 +26,7 @@
                 <a href="/static/ionosphere.html" class="nav-link">🔬 Observatory</a>
                 <a href="/static/ionogram.html" class="nav-link">📻 Ionogram</a>
                 <a href="/static/dtec.html" class="nav-link">⚡ dTEC</a>
-                <a href="/static/test_signal.html" class="nav-link">📡 Test Signal</a>
+                <a href="/static/test_signal.html" class="nav-link">🔊 Test Signal</a>
                 <a href="/static/grape.html" class="nav-link">&#x1F347; GRAPE</a>
                 <span class="nav-divider"></span>
                 <a href="/static/docs.html" class="nav-link">📚 Docs</a>
@@ -226,23 +226,13 @@
             </div>
         </div>
 
-        <!-- Time Range Selector -->
+        <!-- Fusion History -->
         <div class="card">
             <div class="card-header">
                 <div class="card-title">Fusion History</div>
             </div>
-            <div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-                <button class="time-range-btn" data-range="-1h">Last Hour</button>
-                <button class="time-range-btn active" data-range="-6h">Last 6 Hours</button>
-                <button class="time-range-btn" data-range="-1d">Last 24 Hours</button>
-                <button class="time-range-btn" data-range="-7d">Last 7 Days</button>
-                <button class="time-range-btn" data-range="custom" id="fusionCustomBtn">Custom…</button>
-                <span id="fusionCustomInputs" style="display:none; gap:6px; align-items:center;">
-                    <input type="datetime-local" id="fusionCustomStart" style="padding:4px 8px; background:var(--bg-surface,#1e293b); border:1px solid rgba(59,130,246,0.3); border-radius:6px; color:#e2e8f0; font-size:12px;">
-                    <span style="color:#64748b; font-size:12px;">→</span>
-                    <input type="datetime-local" id="fusionCustomEnd" style="padding:4px 8px; background:var(--bg-surface,#1e293b); border:1px solid rgba(59,130,246,0.3); border-radius:6px; color:#e2e8f0; font-size:12px;">
-                    <button class="time-range-btn" onclick="loadCustomFusion()" style="padding:4px 12px;">Go</button>
-                </span>
+            <div style="margin-bottom: 16px;">
+                <div id="time-period-selector"></div>
             </div>
             <div id="fusion-plot" style="width: 100%; height: 400px;"></div>
         </div>
@@ -333,7 +323,7 @@
 
     <script src="/static/js/common.js"></script>
     <script>
-        let currentRange = '-6h';
+        let tps = null; // TimePeriodSelector instance
 
         // Toggle How It Works section
         function toggleHowItWorks() {
@@ -1099,12 +1089,9 @@
             }
         }
 
-        async function loadFusionHistory(range = '-6h', endParam = 'now') {
+        async function loadFusionHistory() {
             try {
-                const data = await api.get('/metrology/fusion/history', {
-                    start: range,
-                    end: endParam
-                });
+                const data = await api.get('/metrology/fusion/history', tps.getAPIParams());
 
                 if (data.count === 0) {
                     showError('No fusion data available for selected time range');
@@ -1154,7 +1141,7 @@
                     hovermode: 'closest'
                 };
 
-                Plotly.newPlot('fusion-plot', [trace], layout, { responsive: true });
+                Plotly.newPlot('fusion-plot', [trace], layout, PLOTLY_CONFIG);
 
                 // Plot uncertainty
                 const uncertaintyTrace = {
@@ -1186,42 +1173,14 @@
                     margin: { t: 20, r: 20, b: 60, l: 60 }
                 };
 
-                Plotly.newPlot('uncertainty-plot', [uncertaintyTrace], uncertaintyLayout, { responsive: true });
+                Plotly.newPlot('uncertainty-plot', [uncertaintyTrace], uncertaintyLayout, PLOTLY_CONFIG);
 
             } catch (error) {
                 showError(`Failed to load fusion history: ${error.message}`);
             }
         }
 
-        // Time range button handlers
-        document.querySelectorAll('.time-range-btn:not(.adev-range-btn)').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.time-range-btn:not(.adev-range-btn)').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                const range = btn.dataset.range;
-                const customEl = document.getElementById('fusionCustomInputs');
-                if (range === 'custom') {
-                    customEl.style.display = 'flex';
-                    if (!document.getElementById('fusionCustomStart').value) {
-                        const now = new Date();
-                        const yesterday = new Date(now.getTime() - 86400000);
-                        document.getElementById('fusionCustomStart').value = yesterday.toISOString().slice(0, 16);
-                        document.getElementById('fusionCustomEnd').value = now.toISOString().slice(0, 16);
-                    }
-                    return;
-                }
-                customEl.style.display = 'none';
-                currentRange = range;
-                loadFusionHistory(currentRange);
-            });
-        });
-
-        function loadCustomFusion() {
-            const cs = document.getElementById('fusionCustomStart').value;
-            const ce = document.getElementById('fusionCustomEnd').value;
-            if (!cs || !ce) return;
-            loadFusionHistory(cs + ':00', ce + ':00');
-        }
+        // (Fusion time range now handled by TimePeriodSelector)
 
         // Load Allan deviation
         let currentAdevRange = '-100000s';
@@ -1289,7 +1248,7 @@
                     }]
                 };
 
-                Plotly.newPlot('adev-plot', [trace], layout, { responsive: true });
+                Plotly.newPlot('adev-plot', [trace], layout, PLOTLY_CONFIG);
 
             } catch (error) {
                 console.error('Failed to load Allan deviation:', error);
@@ -1311,16 +1270,17 @@
 
         // Initialize
         async function init() {
+            tps = new TimePeriodSelector('time-period-selector', loadFusionHistory);
             await loadLatestFusion();
             await loadCHUFSK();
-            await loadFusionHistory(currentRange);
+            await loadFusionHistory();
             await loadAllanDeviation(currentAdevRange);
 
             // Auto-refresh every 60 seconds
             const refresh = new AutoRefresh(() => {
                 loadLatestFusion();
                 loadCHUFSK();
-                loadFusionHistory(currentRange);
+                loadFusionHistory();
                 // Don't auto-refresh ADEV - it's computationally expensive
             }, 60000);
             refresh.start();

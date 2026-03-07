@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Timing Validation - hf-timestd</title>
     <link rel="stylesheet" href="/static/css/styles.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="/static/js/common.js"></script>
     <style>
         /* Page-specific styles */
         .status-badge {
@@ -237,7 +238,7 @@
                 <a href="/static/ionosphere.html" class="nav-link">🔬 Observatory</a>
                 <a href="/static/ionogram.html" class="nav-link">📻 Ionogram</a>
                 <a href="/static/dtec.html" class="nav-link">⚡ dTEC</a>
-                <a href="/static/test_signal.html" class="nav-link">📡 Test Signal</a>
+                <a href="/static/test_signal.html" class="nav-link">🔊 Test Signal</a>
                 <a href="/static/grape.html" class="nav-link">&#x1F347; GRAPE</a>
                 <span class="nav-divider"></span>
                 <a href="/static/docs.html" class="nav-link">📚 Docs</a>
@@ -300,24 +301,20 @@
     <div class="chart-container">
         <div class="chart-header">
             <div class="chart-title">Fusion vs GPS Discrepancy Over Time</div>
-            <div class="chart-controls">
-                <button class="active" onclick="setTimeRange(60)">1 Hour</button>
-                <button onclick="setTimeRange(360)">6 Hours</button>
-                <button onclick="setTimeRange(1440)">24 Hours</button>
-            </div>
+            <div id="time-period-selector"></div>
         </div>
-        <div style="position:relative;height:300px;"><canvas id="discrepancyChart"></canvas></div>
+        <div id="discrepancyPlot" style="width:100%;height:300px;"></div>
     </div>
     
     <!-- Quality Grade Distribution -->
     <div class="grid" style="grid-template-columns: 1fr 1fr;">
         <div class="chart-container">
             <div class="chart-title" style="margin-bottom: 16px;">Quality Grade Distribution</div>
-            <div style="position:relative;height:200px;"><canvas id="gradeChart"></canvas></div>
+            <div id="gradePlot" style="width:100%;height:200px;"></div>
         </div>
         <div class="chart-container">
             <div class="chart-title" style="margin-bottom: 16px;">Discrepancy Histogram</div>
-            <div style="position:relative;height:200px;"><canvas id="histogramChart"></canvas></div>
+            <div id="histogramPlot" style="width:100%;height:200px;"></div>
         </div>
     </div>
     
@@ -346,29 +343,39 @@
     </div>
     
     <script>
-        let discrepancyChart = null;
-        let gradeChart = null;
-        let histogramChart = null;
-        let currentTimeRange = 60;
+        let tps = null;
         let dashboardData = null;
-        
+
+        const darkLayout = {
+            paper_bgcolor: '#1e293b',
+            plot_bgcolor: '#0f172a',
+            font: { color: '#94a3b8', size: 12 },
+            margin: { l: 60, r: 20, t: 10, b: 40 },
+            xaxis: { gridcolor: '#334155', linecolor: '#475569' },
+            yaxis: { gridcolor: '#334155', linecolor: '#475569' },
+            legend: { bgcolor: 'rgba(30,41,59,0.8)', font: { color: '#e0e0e0' } },
+        };
+        const plotConfig = { responsive: true, displayModeBar: false };
+
         async function loadDashboard() {
             const refreshBtn = document.getElementById('refreshBtn');
             const refreshIcon = document.getElementById('refreshIcon');
             const statusBadge = document.getElementById('statusBadge');
-            
+
             refreshBtn.disabled = true;
             refreshIcon.classList.add('spinning');
             statusBadge.className = 'status-badge status-loading';
             statusBadge.textContent = 'Loading...';
-            
+
             try {
-                const hours = Math.ceil(currentTimeRange / 60);
-                const response = await fetch(`/api/timing-validation/dashboard?hours=${hours}&points=${currentTimeRange}`);
+                const range = tps.getAPIParams();
+                const hours = Math.max(1, Math.ceil((new Date(range.end) - new Date(range.start)) / 3600000));
+                const points = hours * 60;
+                const response = await fetch(`/api/timing-validation/dashboard?hours=${hours}&points=${points}`);
                 const data = await response.json();
-                
+
                 dashboardData = data;
-                
+
                 if (data.status === 'ok') {
                     statusBadge.className = 'status-badge status-ok';
                     statusBadge.textContent = '✓ Connected';
@@ -384,10 +391,10 @@
                     statusBadge.textContent = '✗ Error';
                     clearDisplay(data.message);
                 }
-                
-                document.getElementById('lastUpdated').textContent = 
+
+                document.getElementById('lastUpdated').textContent =
                     `Updated: ${new Date(data.last_updated).toLocaleTimeString()}`;
-                    
+
             } catch (error) {
                 statusBadge.className = 'status-badge status-error';
                 statusBadge.textContent = '✗ Error';
@@ -397,7 +404,7 @@
                 refreshIcon.classList.remove('spinning');
             }
         }
-        
+
         function clearDisplay(message) {
             document.getElementById('meanDiscrepancy').textContent = '--';
             document.getElementById('stdDiscrepancy').textContent = '--';
@@ -406,203 +413,137 @@
             document.getElementById('nPoints').textContent = '--';
             document.getElementById('timingAuthority').textContent = '--';
             document.getElementById('gpsAccuracy').textContent = '--';
-            document.getElementById('validationTable').innerHTML = 
+            document.getElementById('validationTable').innerHTML =
                 `<tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">${message || 'No data'}</td></tr>`;
+            const noDataLayout = {
+                ...darkLayout,
+                xaxis: { visible: false },
+                yaxis: { visible: false },
+                annotations: [{
+                    text: message || 'No validation data available',
+                    xref: 'paper', yref: 'paper',
+                    x: 0.5, y: 0.5,
+                    showarrow: false,
+                    font: { size: 14, color: '#64748b' },
+                    xanchor: 'center',
+                }],
+            };
+            Plotly.react('discrepancyPlot', [], noDataLayout, plotConfig);
+            Plotly.react('gradePlot', [], noDataLayout, plotConfig);
+            Plotly.react('histogramPlot', [], noDataLayout, plotConfig);
         }
-        
+
         function updateStatistics(stats) {
             if (!stats) return;
-            
+
             const meanEl = document.getElementById('meanDiscrepancy');
             meanEl.textContent = stats.mean_discrepancy_ms.toFixed(3);
             meanEl.className = 'card-value ' + getDiscrepancyClass(Math.abs(stats.mean_discrepancy_ms));
-            
+
             document.getElementById('stdDiscrepancy').textContent = stats.std_discrepancy_ms.toFixed(3);
-            
+
             const withinEl = document.getElementById('withinUncertainty');
             withinEl.textContent = stats.within_uncertainty_pct.toFixed(1) + '%';
             withinEl.className = 'card-value ' + (stats.within_uncertainty_pct >= 95 ? 'good' : stats.within_uncertainty_pct >= 80 ? 'warning' : 'bad');
-            
+
             const within1msEl = document.getElementById('within1ms');
             within1msEl.textContent = stats.within_1ms_pct.toFixed(1) + '%';
             within1msEl.className = 'card-value ' + (stats.within_1ms_pct >= 95 ? 'good' : stats.within_1ms_pct >= 80 ? 'warning' : 'bad');
-            
+
             document.getElementById('nPoints').textContent = stats.n_points;
             document.getElementById('timingAuthority').textContent = stats.timing_authority.toUpperCase();
             document.getElementById('gpsAccuracy').textContent = stats.gps_accuracy_ms + ' ms';
         }
-        
+
         function getDiscrepancyClass(absMs) {
             if (absMs < 1) return 'good';
             if (absMs < 5) return 'warning';
             return 'bad';
         }
-        
+
         function updateCharts(points) {
             if (!points || points.length === 0) return;
-            
-            // Discrepancy over time
-            const labels = points.map(p => {
-                const d = new Date(p.timestamp_utc);
-                return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-            });
-            
+
+            const timestamps = points.map(p => p.timestamp_utc);
             const discrepancies = points.map(p => p.discrepancy_ms);
             const uncertainties = points.map(p => p.fusion_uncertainty_ms);
-            
-            if (discrepancyChart) discrepancyChart.destroy();
-            
-            const ctx = document.getElementById('discrepancyChart').getContext('2d');
-            discrepancyChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [
-                        {
-                            label: 'Discrepancy (ms)',
-                            data: discrepancies,
-                            borderColor: '#3b82f6',
-                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                            fill: true,
-                            tension: 0.3,
-                            pointRadius: 2
-                        },
-                        {
-                            label: '+Uncertainty',
-                            data: uncertainties,
-                            borderColor: 'rgba(34, 197, 94, 0.5)',
-                            borderDash: [5, 5],
-                            fill: false,
-                            pointRadius: 0
-                        },
-                        {
-                            label: '-Uncertainty',
-                            data: uncertainties.map(u => -u),
-                            borderColor: 'rgba(34, 197, 94, 0.5)',
-                            borderDash: [5, 5],
-                            fill: false,
-                            pointRadius: 0
-                        }
-                    ]
+
+            // Discrepancy over time (Plotly)
+            Plotly.react('discrepancyPlot', [
+                {
+                    x: timestamps, y: discrepancies,
+                    name: 'Discrepancy (ms)',
+                    type: 'scatter', mode: 'lines+markers',
+                    line: { color: '#3b82f6', width: 2 },
+                    marker: { size: 4 },
+                    fill: 'tozeroy',
+                    fillcolor: 'rgba(59, 130, 246, 0.1)',
                 },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            labels: { color: '#94a3b8' }
-                        }
-                    },
-                    scales: {
-                        x: {
-                            ticks: { color: '#94a3b8', maxTicksLimit: 12 },
-                            grid: { color: 'rgba(51, 65, 85, 0.5)' }
-                        },
-                        y: {
-                            ticks: { color: '#94a3b8' },
-                            grid: { color: 'rgba(51, 65, 85, 0.5)' },
-                            title: {
-                                display: true,
-                                text: 'Discrepancy (ms)',
-                                color: '#94a3b8'
-                            }
-                        }
-                    }
-                }
-            });
-            
-            // Grade distribution
+                {
+                    x: timestamps, y: uncertainties,
+                    name: '+Uncertainty',
+                    type: 'scatter', mode: 'lines',
+                    line: { color: 'rgba(34, 197, 94, 0.5)', width: 1.5, dash: 'dash' },
+                },
+                {
+                    x: timestamps, y: uncertainties.map(u => u !== null ? -u : null),
+                    name: '−Uncertainty',
+                    type: 'scatter', mode: 'lines',
+                    line: { color: 'rgba(34, 197, 94, 0.5)', width: 1.5, dash: 'dash' },
+                },
+            ], {
+                ...darkLayout,
+                xaxis: { ...darkLayout.xaxis, title: 'UTC Time' },
+                yaxis: { ...darkLayout.yaxis, title: 'Discrepancy (ms)', zeroline: true, zerolinecolor: '#475569' },
+                hovermode: 'x unified',
+            }, plotConfig);
+
+            // Grade distribution (Plotly pie)
             if (dashboardData && dashboardData.statistics) {
                 const stats = dashboardData.statistics;
-                
-                if (gradeChart) gradeChart.destroy();
-                
-                const gradeCtx = document.getElementById('gradeChart').getContext('2d');
-                gradeChart = new Chart(gradeCtx, {
-                    type: 'doughnut',
-                    data: {
-                        labels: ['Grade A', 'Grade B', 'Grade C', 'Grade D'],
-                        datasets: [{
-                            data: [stats.grade_a_pct, stats.grade_b_pct, stats.grade_c_pct, stats.grade_d_pct],
-                            backgroundColor: [
-                                'rgba(34, 197, 94, 0.8)',
-                                'rgba(59, 130, 246, 0.8)',
-                                'rgba(234, 179, 8, 0.8)',
-                                'rgba(239, 68, 68, 0.8)'
-                            ]
-                        }]
+                Plotly.react('gradePlot', [{
+                    values: [stats.grade_a_pct, stats.grade_b_pct, stats.grade_c_pct, stats.grade_d_pct],
+                    labels: ['Grade A', 'Grade B', 'Grade C', 'Grade D'],
+                    type: 'pie',
+                    hole: 0.45,
+                    marker: {
+                        colors: ['rgba(34,197,94,0.8)', 'rgba(59,130,246,0.8)', 'rgba(234,179,8,0.8)', 'rgba(239,68,68,0.8)'],
                     },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {
-                            legend: {
-                                position: 'right',
-                                labels: { color: '#94a3b8' }
-                            }
-                        }
-                    }
-                });
+                    textinfo: 'label+percent',
+                    textfont: { color: '#e2e8f0', size: 11 },
+                }], {
+                    ...darkLayout,
+                    margin: { l: 10, r: 10, t: 10, b: 10 },
+                    showlegend: false,
+                }, plotConfig);
             }
-            
-            // Histogram
+
+            // Histogram (Plotly)
             const validDiscrepancies = discrepancies.filter(d => d !== null);
-            const bins = [-10, -5, -2, -1, -0.5, 0, 0.5, 1, 2, 5, 10];
-            const histogram = new Array(bins.length - 1).fill(0);
-            
-            validDiscrepancies.forEach(d => {
-                for (let i = 0; i < bins.length - 1; i++) {
-                    if (d >= bins[i] && d < bins[i + 1]) {
-                        histogram[i]++;
-                        break;
-                    }
-                }
-            });
-            
-            if (histogramChart) histogramChart.destroy();
-            
-            const histCtx = document.getElementById('histogramChart').getContext('2d');
-            histogramChart = new Chart(histCtx, {
-                type: 'bar',
-                data: {
-                    labels: bins.slice(0, -1).map((b, i) => `${b} to ${bins[i+1]}`),
-                    datasets: [{
-                        label: 'Count',
-                        data: histogram,
-                        backgroundColor: 'rgba(59, 130, 246, 0.8)'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: false }
-                    },
-                    scales: {
-                        x: {
-                            ticks: { color: '#94a3b8', maxRotation: 45 },
-                            grid: { display: false }
-                        },
-                        y: {
-                            ticks: { color: '#94a3b8' },
-                            grid: { color: 'rgba(51, 65, 85, 0.5)' }
-                        }
-                    }
-                }
-            });
+            Plotly.react('histogramPlot', [{
+                x: validDiscrepancies,
+                type: 'histogram',
+                marker: { color: 'rgba(59, 130, 246, 0.8)' },
+                xbins: { start: -10, end: 10, size: 1 },
+            }], {
+                ...darkLayout,
+                xaxis: { ...darkLayout.xaxis, title: 'Discrepancy (ms)' },
+                yaxis: { ...darkLayout.yaxis, title: 'Count' },
+                bargap: 0.05,
+            }, plotConfig);
         }
-        
+
         function updateTable(points) {
             const tbody = document.getElementById('validationTable');
-            
+
             if (!points || points.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">No data</td></tr>';
                 return;
             }
-            
+
             // Show most recent first
             const sorted = [...points].reverse().slice(0, 20);
-            
+
             tbody.innerHTML = sorted.map(p => {
                 const time = new Date(p.timestamp_utc).toLocaleTimeString();
                 const fusionD = p.fusion_d_clock_ms?.toFixed(3) ?? '--';
@@ -611,7 +552,7 @@
                 const unc = p.fusion_uncertainty_ms?.toFixed(3) ?? '--';
                 const validated = p.within_uncertainty;
                 const grade = p.fusion_quality_grade;
-                
+
                 return `
                     <tr>
                         <td>${time}</td>
@@ -626,7 +567,7 @@
                 `;
             }).join('');
         }
-        
+
         function getDiscrepancyColor(ms) {
             if (ms === null) return 'var(--text-secondary)';
             const abs = Math.abs(ms);
@@ -634,22 +575,11 @@
             if (abs < 5) return 'var(--accent-yellow)';
             return 'var(--accent-red)';
         }
-        
-        function setTimeRange(minutes) {
-            currentTimeRange = minutes;
-            
-            // Update button states
-            document.querySelectorAll('.chart-controls button').forEach(btn => {
-                btn.classList.remove('active');
-            });
-            event.target.classList.add('active');
-            
-            loadDashboard();
-        }
-        
-        // Initial load
+
+        // Initialize TimePeriodSelector and load
+        tps = new TimePeriodSelector('time-period-selector', loadDashboard);
         loadDashboard();
-        
+
         // Auto-refresh every 60 seconds
         setInterval(loadDashboard, 60000);
     </script>
