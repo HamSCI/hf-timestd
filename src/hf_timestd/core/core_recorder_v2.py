@@ -661,8 +661,12 @@ class CoreRecorderV2:
                     f"Check disk full, permissions, or network loss."
                 )
 
-            # CRITICAL: trigger self-restart after 10 minutes of silence
-            if silence > 600:
+            # CRITICAL: Trigger self-restart if stale for >10 minutes
+            # This ensures automatic recovery from silent failures.
+            # Guard: only self-restart if we've been running long enough to have
+            # written our own data. Otherwise we crash-loop on restart because
+            # stale files from the previous run trigger immediate exit.
+            if silence > 600 and uptime > 660:  # 10 min stale + 11 min uptime
                 logger.critical(
                     f"DATA FRESHNESS CRITICAL: No samples written in {silence:.0f}s "
                     f"({silence/60:.1f} min). Triggering self-restart to recover."
