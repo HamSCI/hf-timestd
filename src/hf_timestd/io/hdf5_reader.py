@@ -163,17 +163,9 @@ class DataProductReader:
         if not hdf5_path.exists():
             raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
         
-        for _attempt in range(3):
-            try:
-                with h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
-                    metadata = dict(f.attrs)
-                return metadata
-            except OSError as e:
-                if 'already open' in str(e) and _attempt < 2:
-                    import time as _time
-                    _time.sleep(0.05 * (2 ** _attempt))
-                    continue
-                raise
+        with h5py.File(hdf5_path, 'r', libver='latest', swmr=True) as f:
+            metadata = dict(f.attrs)
+        return metadata
     
     def read_time_range(
         self,
@@ -215,27 +207,8 @@ class DataProductReader:
                 logger.debug(f"HDF5 file not found: {hdf5_path}")
                 continue
             
-            # The writer uses open/write/close per measurement (~ms hold time).
-            # If we collide with a write, "file is already open for write" is
-            # raised on h5py.File() itself.  Retry up to 3 times with a short
-            # sleep — the window is tiny so the first retry almost always works.
-            _f = None
-            for _attempt in range(3):
-                try:
-                    _f = h5py.File(hdf5_path, 'r', libver='latest', locking=False)
-                    break
-                except OSError as _open_err:
-                    if 'already open' in str(_open_err) and _attempt < 2:
-                        import time as _time
-                        _time.sleep(0.05 * (2 ** _attempt))  # 50ms, 100ms
-                        continue
-                    logger.error(f"Error reading {hdf5_path}: {_open_err}")
-                    _f = None
-                    break
-            if _f is None:
-                continue
             try:
-                with _f as f:
+                with h5py.File(hdf5_path, 'r', libver='latest', swmr=True) as f:
                     # Get number of measurements
                     if 'timestamp_utc' not in f:
                         logger.warning(f"No timestamp_utc dataset in {hdf5_path}")
@@ -392,7 +365,7 @@ class DataProductReader:
         if not hdf5_path.exists():
             raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
         
-        with h5py.File(hdf5_path, 'r', libver='latest', locking=False) as f:
+        with h5py.File(hdf5_path, 'r', libver='latest', swmr=True) as f:
             # Get datasets
             quality_grades = f.get('quality_grade', None)
             quality_flags = f.get('quality_flag', None)
