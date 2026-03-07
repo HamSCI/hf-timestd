@@ -316,6 +316,86 @@ class QuotaManager:
 
         return result
 
+    def get_storage_inventory(self) -> dict:
+        """
+        Full inventory of all dates in storage, by category.
+
+        Unlike scan_day_entries() this includes protected dates and reports
+        the complete set of available dates — useful for knowing exactly
+        which days of raw IQ can be retrieved for event analysis.
+        """
+        used, total, percent = self.get_disk_usage()
+
+        # --- raw_iq: channel/<YYYYMMDD>/ dirs ---
+        raw_iq_dates: set = set()
+        if self.raw_buffer_dir.exists():
+            for channel_dir in self.raw_buffer_dir.iterdir():
+                if not channel_dir.is_dir():
+                    continue
+                for day_dir in channel_dir.iterdir():
+                    if day_dir.is_dir() and _DATE_RE.fullmatch(day_dir.name):
+                        raw_iq_dates.add(day_dir.name)
+
+        # --- phase2: files with YYYYMMDD in name ---
+        phase2_dates: set = set()
+        if self.phase2_dir.exists():
+            for f in self.phase2_dir.rglob('*.h5'):
+                m = _DATE_RE.search(f.stem)
+                if m:
+                    phase2_dates.add(m.group(1))
+
+        # --- products: files with YYYYMMDD in name ---
+        products_dates: set = set()
+        if self.products_dir.exists():
+            for f in self.products_dir.rglob('*'):
+                if f.is_file():
+                    m = _DATE_RE.search(f.stem)
+                    if m:
+                        products_dates.add(m.group(1))
+
+        # --- vtec ---
+        vtec_dates: set = set()
+        if self.vtec_dir.exists():
+            for f in self.vtec_dir.glob('*.h5'):
+                m = _DATE_RE.search(f.stem)
+                if m:
+                    vtec_dates.add(m.group(1))
+
+        # Union of all dates
+        all_dates = raw_iq_dates | phase2_dates | products_dates | vtec_dates
+        # Filter out bogus dates (e.g. 19700101)
+        valid_dates = sorted(d for d in all_dates if d >= '20250101')
+
+        def _category_summary(dates: set) -> dict:
+            valid = sorted(d for d in dates if d >= '20250101')
+            return {
+                'days': len(valid),
+                'oldest': valid[0] if valid else None,
+                'newest': valid[-1] if valid else None,
+                'dates': valid,
+            }
+
+        protected = sorted(self._protected_dates())
+
+        return {
+            'disk_usage_percent': round(percent, 1),
+            'disk_used_gb': round(used / 1024**3, 1),
+            'disk_total_gb': round(total / 1024**3, 1),
+            'disk_free_gb': round((total - used) / 1024**3, 1),
+            'threshold_percent': self.threshold_percent,
+            'over_threshold': percent > self.threshold_percent,
+            'total_days': len(valid_dates),
+            'oldest_date': valid_dates[0] if valid_dates else None,
+            'newest_date': valid_dates[-1] if valid_dates else None,
+            'protected_dates': protected,
+            'categories': {
+                'raw_iq': _category_summary(raw_iq_dates),
+                'phase2': _category_summary(phase2_dates),
+                'products': _category_summary(products_dates),
+                'vtec': _category_summary(vtec_dates),
+            },
+        }
+
     def get_status(self) -> dict:
         """Get current quota status without making changes."""
         used, total, percent = self.get_disk_usage()

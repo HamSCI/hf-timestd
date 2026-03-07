@@ -70,6 +70,74 @@
             </div>
         </div>
 
+        <!-- Data Storage -->
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">Data Storage</div>
+                    <div class="card-subtitle">Disk quota and data retention inventory</div>
+                </div>
+            </div>
+            <div id="storage-loading" style="text-align: center; padding: 16px;">
+                <div class="loading"></div>
+            </div>
+            <div id="storage-section" style="display: none;">
+                <!-- Quota bar -->
+                <div style="padding: 0 16px 12px;">
+                    <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px;">
+                        <span><strong id="stor-used">-</strong> / <span id="stor-total">-</span> GB used</span>
+                        <span id="stor-free" style="color: var(--text-secondary);">- GB free</span>
+                    </div>
+                    <div style="background: var(--bg-tertiary); border-radius: 4px; height: 10px; overflow: hidden;">
+                        <div id="stor-bar" style="height: 100%; border-radius: 4px; transition: width 0.4s;"></div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+                        <span id="stor-pct">-</span>
+                        <span>Threshold: <span id="stor-thresh">75</span>%</span>
+                    </div>
+                </div>
+                <!-- Summary cards row -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; padding: 0 16px 12px;">
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; text-align: center;">
+                        <div style="font-size: 24px; font-weight: 700; color: var(--text-accent);" id="stor-total-days">-</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Total Days</div>
+                    </div>
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; text-align: center;">
+                        <div style="font-size: 24px; font-weight: 700; color: var(--quality-a);" id="stor-raw-days">-</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Raw IQ Days</div>
+                    </div>
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; text-align: center;">
+                        <div style="font-size: 24px; font-weight: 700; color: var(--text-accent);" id="stor-phase2-days">-</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Phase 2 Days</div>
+                    </div>
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; text-align: center;">
+                        <div style="font-size: 24px; font-weight: 700; color: var(--text-accent);" id="stor-products-days">-</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">GRAPE Days</div>
+                    </div>
+                </div>
+                <!-- Category detail table -->
+                <table class="table" style="font-size: 13px;">
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Days</th>
+                            <th>Oldest</th>
+                            <th>Newest</th>
+                        </tr>
+                    </thead>
+                    <tbody id="storage-table">
+                    </tbody>
+                </table>
+                <!-- Raw IQ available dates (for event retrieval) -->
+                <div style="padding: 8px 16px 12px;">
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">
+                        Raw IQ dates available for event retrieval:
+                    </div>
+                    <div id="stor-raw-dates" style="font-size: 12px; font-family: monospace; line-height: 1.6; color: var(--text-primary);"></div>
+                </div>
+            </div>
+        </div>
+
         <!-- Process Status -->
         <div class="card">
             <div class="card-header">
@@ -132,6 +200,77 @@
 
     <script src="/static/js/common.js"></script>
     <script>
+        async function loadStorageStatus() {
+            try {
+                const resp = await fetch('/api/health/storage');
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const d = await resp.json();
+
+                document.getElementById('storage-loading').style.display = 'none';
+                document.getElementById('storage-section').style.display = 'block';
+
+                // Quota bar
+                const pct = d.disk_usage_percent;
+                const barColor = pct > 90 ? 'var(--status-error)' :
+                                 pct > d.threshold_percent ? 'var(--status-degraded)' :
+                                 'var(--quality-a)';
+                document.getElementById('stor-used').textContent = d.disk_used_gb;
+                document.getElementById('stor-total').textContent = d.disk_total_gb;
+                document.getElementById('stor-free').textContent = d.disk_free_gb + ' GB free';
+                document.getElementById('stor-pct').textContent = pct + '% used';
+                document.getElementById('stor-thresh').textContent = d.threshold_percent;
+                const bar = document.getElementById('stor-bar');
+                bar.style.width = Math.min(pct, 100) + '%';
+                bar.style.background = barColor;
+
+                // Summary numbers
+                const cats = d.categories || {};
+                document.getElementById('stor-total-days').textContent = d.total_days || 0;
+                document.getElementById('stor-raw-days').textContent = (cats.raw_iq || {}).days || 0;
+                document.getElementById('stor-phase2-days').textContent = (cats.phase2 || {}).days || 0;
+                document.getElementById('stor-products-days').textContent = (cats.products || {}).days || 0;
+
+                // Category table
+                const catLabels = {
+                    raw_iq: 'Raw IQ (full bandwidth)',
+                    phase2: 'Phase 2 (timing / metrology)',
+                    products: 'GRAPE (decimated / spectrograms)',
+                    vtec: 'GNSS VTEC',
+                };
+                const tbody = document.getElementById('storage-table');
+                const fmtDate = s => s ? `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}` : '-';
+                tbody.innerHTML = ['raw_iq', 'phase2', 'products', 'vtec'].map(key => {
+                    const c = cats[key] || {};
+                    return `<tr>
+                        <td>${catLabels[key]}</td>
+                        <td style="text-align: center; font-weight: 600;">${c.days || 0}</td>
+                        <td style="font-family: monospace; font-size: 12px;">${fmtDate(c.oldest)}</td>
+                        <td style="font-family: monospace; font-size: 12px;">${fmtDate(c.newest)}</td>
+                    </tr>`;
+                }).join('');
+
+                // Raw IQ available dates as date badges
+                const rawDates = (cats.raw_iq || {}).dates || [];
+                const datesEl = document.getElementById('stor-raw-dates');
+                if (rawDates.length === 0) {
+                    datesEl.innerHTML = '<span style="color: var(--text-secondary);">No raw IQ data in storage</span>';
+                } else {
+                    const protectedSet = new Set(d.protected_dates || []);
+                    datesEl.innerHTML = rawDates.map(ds => {
+                        const label = `${ds.slice(0,4)}-${ds.slice(4,6)}-${ds.slice(6,8)}`;
+                        const isProtected = protectedSet.has(ds);
+                        const bg = isProtected ? 'var(--quality-a)' : 'var(--bg-tertiary)';
+                        const fg = isProtected ? '#fff' : 'var(--text-primary)';
+                        return `<span style="display: inline-block; padding: 2px 6px; margin: 1px 2px; border-radius: 3px; background: ${bg}; color: ${fg}; font-size: 11px;" title="${isProtected ? 'Protected (will not be deleted)' : 'Subject to quota cleanup'}">${label}</span>`;
+                    }).join('');
+                }
+            } catch (err) {
+                console.error('Failed to load storage status:', err);
+                document.getElementById('storage-loading').innerHTML =
+                    '<div style="color: var(--text-secondary); padding: 8px;">Storage status unavailable</div>';
+            }
+        }
+
         async function loadSystemHealth() {
             try {
                 clearError();
@@ -217,11 +356,12 @@
 
         // Initialize
         async function init() {
-            await loadSystemHealth();
+            await Promise.all([loadSystemHealth(), loadStorageStatus()]);
 
-            // Auto-refresh every 10 seconds
+            // Auto-refresh every 10 seconds (health) and 60 seconds (storage)
             const refresh = new AutoRefresh(loadSystemHealth, 10000);
             refresh.start();
+            setInterval(loadStorageStatus, 60000);
         }
 
         init();

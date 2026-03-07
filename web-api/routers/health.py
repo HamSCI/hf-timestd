@@ -2,12 +2,18 @@
 Health monitoring API endpoints.
 """
 
+import sys
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any
 
 from models.health import SystemHealth
 from services.health_service import HealthService
 from config import config
+
+# Ensure hf_timestd is importable
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
+from hf_timestd.quota_manager import QuotaManager
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -31,6 +37,25 @@ async def get_system_health():
         )
         return service.get_system_health()
     
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/storage")
+async def get_storage_status():
+    """
+    Data storage inventory: days in storage, quota usage, per-category breakdown.
+
+    Useful for determining which days of complete raw IQ data are available
+    for retrieval (e.g. ionospheric event analysis).
+    """
+    try:
+        mgr = QuotaManager(
+            data_root=config.data_root,
+            threshold_percent=75.0,
+            min_days_to_keep=7,
+        )
+        return mgr.get_storage_inventory()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
