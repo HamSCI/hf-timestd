@@ -357,17 +357,19 @@ def main():
             callsign = station.get('callsign', 'AC0G')
             grid = station.get('grid_square', 'EM38ww')
 
-            # Discover all channels from raw_archive
-            channels_dir = data_root / 'raw_archive'
-            if not channels_dir.exists():
-                print(f"❌ No raw_archive found at {channels_dir}")
+            # Discover all channels from raw_buffer (tiered storage) and raw_archive (legacy)
+            channel_set = set()
+            for subdir in ['raw_buffer', 'raw_archive']:
+                channels_dir = data_root / subdir
+                if channels_dir.exists():
+                    for d in channels_dir.iterdir():
+                        if d.is_dir():
+                            channel_set.add(d.name.replace('_', ' '))
+            if not channel_set:
+                print(f"❌ No raw data found in {data_root}/raw_buffer/ or {data_root}/raw_archive/")
                 sys.exit(1)
 
-            all_channels = sorted([
-                d.name.replace('_', ' ')
-                for d in channels_dir.iterdir()
-                if d.is_dir()
-            ])
+            all_channels = sorted(channel_set)
             expected_count = len(all_channels)
             print(f"📡 GRAPE daily pipeline for {date_str}")
             print(f"   Channels: {expected_count} ({', '.join(all_channels)})")
@@ -396,19 +398,21 @@ def main():
 
             print(f"\n   Decimation: {len(decimated)}/{expected_count} channels")
 
-            # === Gate 1: All channels must be decimated ===
-            if len(decimated) < expected_count:
-                print(f"   ❌ GATE FAILED: {len(failed_decimate)} channels missing: {', '.join(failed_decimate)}")
-                print(f"   Aborting — will not package/upload incomplete data")
+            # === Gate 1: At least some channels must be decimated ===
+            if len(decimated) == 0:
+                print(f"   ❌ GATE FAILED: 0/{expected_count} channels decimated")
+                print(f"   Aborting — no data to package/upload")
                 sys.exit(1)
-            print(f"   ✅ GATE PASSED: all {expected_count} channels decimated")
+            if failed_decimate:
+                print(f"   ⚠️  {len(failed_decimate)} channels had no data: {', '.join(failed_decimate)}")
+            print(f"   ✅ GATE PASSED: {len(decimated)}/{expected_count} channels decimated")
 
             # === Stage 2: Generate spectrograms ===
-            print(f"\n━━━ Stage 2: Spectrograms ({expected_count} channels) ━━━")
+            print(f"\n━━━ Stage 2: Spectrograms ({len(decimated)} channels) ━━━")
             spectrograms = []
             failed_spec = []
 
-            for ch in all_channels:
+            for ch in decimated:
                 try:
                     gen = CarrierSpectrogramGenerator(
                         data_root=data_root,
@@ -426,14 +430,16 @@ def main():
                     failed_spec.append(ch)
                     print(f"   ❌ {ch}: {e}")
 
-            print(f"\n   Spectrograms: {len(spectrograms)}/{expected_count} channels")
+            print(f"\n   Spectrograms: {len(spectrograms)}/{len(decimated)} channels")
 
-            # === Gate 2: All spectrograms must exist ===
-            if len(spectrograms) < expected_count:
-                print(f"   ❌ GATE FAILED: {len(failed_spec)} spectrograms missing: {', '.join(failed_spec)}")
-                print(f"   Aborting — will not package/upload without complete spectrograms")
+            # === Gate 2: At least some spectrograms must exist ===
+            if len(spectrograms) == 0:
+                print(f"   ❌ GATE FAILED: 0/{len(decimated)} spectrograms generated")
+                print(f"   Aborting — no spectrograms to package/upload")
                 sys.exit(1)
-            print(f"   ✅ GATE PASSED: all {expected_count} spectrograms generated")
+            if failed_spec:
+                print(f"   ⚠️  {len(failed_spec)} spectrograms missing: {', '.join(failed_spec)}")
+            print(f"   ✅ GATE PASSED: {len(spectrograms)}/{len(decimated)} spectrograms generated")
 
             # === Stage 3: Package into Digital RF ===
             print(f"\n━━━ Stage 3: Package ━━━")
@@ -526,17 +532,20 @@ def main():
             pipeline = DecimationPipeline(data_root)
             
             if args.all_channels:
-                # Get all channels from raw_archive
-                channels_dir = data_root / 'raw_archive'
-                if channels_dir.exists():
-                    for channel_dir in channels_dir.iterdir():
-                        if channel_dir.is_dir():
-                            channel_name = channel_dir.name.replace('_', ' ')
-                            print(f"Processing {channel_name}...")
-                            pipeline.process_day(date_str, channel_name)  # FIXED: date first, then channel
-                else:
-                    print(f"❌ No raw_archive found at {channels_dir}")
+                # Get all channels from raw_buffer (tiered storage) and raw_archive (legacy)
+                channel_set = set()
+                for subdir in ['raw_buffer', 'raw_archive']:
+                    channels_dir = data_root / subdir
+                    if channels_dir.exists():
+                        for d in channels_dir.iterdir():
+                            if d.is_dir():
+                                channel_set.add(d.name.replace('_', ' '))
+                if not channel_set:
+                    print(f"❌ No raw data found in {data_root}/raw_buffer/ or {data_root}/raw_archive/")
                     sys.exit(1)
+                for channel_name in sorted(channel_set):
+                    print(f"Processing {channel_name}...")
+                    pipeline.process_day(date_str, channel_name)
             elif args.channel:
                 pipeline.process_day(date_str, args.channel)  # FIXED: date first, then channel
             else:

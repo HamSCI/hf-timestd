@@ -414,12 +414,20 @@ class BinaryArchiveWriter:
             # Sort by modification time (oldest first)
             files_with_time.sort(key=lambda x: x[0])
             
+            # Protect files less than 2 days old from cleanup.
+            # The GRAPE daily pipeline runs at 01:01 UTC for yesterday's data,
+            # so we need at least 1 day + margin of retention.
+            retention_cutoff = time.time() - (2 * 86400)
+            
             # Remove oldest files until we've freed enough space
             bytes_freed = 0
             files_removed = 0
             for mtime, size, filepath in files_with_time:
                 if bytes_freed >= bytes_needed:
                     break
+                if mtime > retention_cutoff:
+                    # Skip files newer than retention cutoff
+                    continue
                 
                 try:
                     # Also remove the corresponding .json sidecar
