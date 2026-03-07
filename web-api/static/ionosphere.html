@@ -946,8 +946,8 @@
                     ...PLOTLY_LAYOUT_BASE,
                     xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: '', range: evXRange },
                     yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'X-ray (W/m²)', type: 'log', side: 'left', titlefont: { color: '#ef4444', size: 12 }, tickfont: { color: '#ef4444' } },
-                    yaxis2: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'Kp Index', range: [0, 9], side: 'right', overlaying: 'y', anchor: 'free', position: 1, titlefont: { color: '#22c55e', size: 12 }, tickfont: { color: '#22c55e' }, showgrid: false },
-                    margin: { ...PLOTLY_LAYOUT_BASE.margin, t: 5, b: 30 },
+                    yaxis2: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'Kp Index', range: [0, 9], side: 'right', overlaying: 'y', titlefont: { color: '#22c55e', size: 12 }, tickfont: { color: '#22c55e' }, showgrid: false },
+                    margin: { ...PLOTLY_LAYOUT_BASE.margin, t: 5, b: 30, r: 120 },
                     legend: { ...PLOTLY_LAYOUT_BASE.legend, orientation: 'h', x: 0.5, xanchor: 'center', y: 1.05 },
                     showlegend: true,
                     shapes: swShapes,
@@ -1023,6 +1023,7 @@
                 ...PLOTLY_LAYOUT_BASE,
                 xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: 'UTC Time', range: evXRange },
                 yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'SNR (dB)' },
+                margin: { ...PLOTLY_LAYOUT_BASE.margin, r: 120 },
                 shapes: evShapes,
             }, PLOTLY_CONFIG);
         }
