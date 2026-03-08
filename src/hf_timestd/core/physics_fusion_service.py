@@ -415,8 +415,8 @@ class PhysicsFusionService:
         
         return measurements_by_station
 
-    def process_minute(self, minute_timestamp: int, station_data: Optional[Dict[tuple, List[Dict]]] = None):
-        """Process a single minute of data."""
+    def process_minute(self, minute_timestamp: int, station_data: Optional[Dict[tuple, List[Dict]]] = None) -> bool:
+        """Process a single minute of data.  Returns True if the L3 summary was written."""
         logger.info(f"Processing minute {minute_timestamp} ({datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)})")
         
         # 0. Check upstream data freshness
@@ -441,7 +441,7 @@ class PhysicsFusionService:
         
         if not station_data:
             logger.warning(f"No valid L2 data found for minute {minute_timestamp}")
-            return
+            return False
 
         self._pet_watchdog()
 
@@ -549,9 +549,9 @@ class PhysicsFusionService:
         utc_consistent = len(tec_estimates) > 0
         
         # 6. Write L3
-        self._write_physics_summary(
-            minute_timestamp, 
-            tec_estimates, 
+        l3_ok = self._write_physics_summary(
+            minute_timestamp,
+            tec_estimates,
             utc_consistent
         )
         
@@ -568,6 +568,8 @@ class PhysicsFusionService:
 
         # 8. Carrier-phase dTEC estimation
         self._process_carrier_dtec(minute_timestamp, tec_estimates)
+
+        return l3_ok
 
     def _build_ipp_measurements(
         self,
@@ -641,12 +643,12 @@ class PhysicsFusionService:
         return ipp_list
 
     def _write_physics_summary(
-        self, 
-        timestamp: int, 
+        self,
+        timestamp: int,
         tec_estimates: Dict[str, TECResult],
         utc_consistent: bool
-    ):
-        """Write global L3 Physics Fusion product."""
+    ) -> bool:
+        """Write global L3 Physics Fusion product.  Returns True if write succeeded."""
         # Simple summary records for now (flattened for HDF5 compatibility)
         # utc_offset_ms: median of t_vacuum_error_ms across all TEC estimates.
         # t_vacuum_error_ms is the TEC-fit intercept — the ionosphere-free D_clock,
@@ -670,8 +672,10 @@ class PhysicsFusionService:
             'processed_at': datetime.now(timezone.utc).isoformat()
         }
         
-        if self._timed_write(self.l3_writer, record, 'L3 physics summary'):
+        ok = self._timed_write(self.l3_writer, record, 'L3 physics summary')
+        if ok:
             logger.info(f"Written L3 physics summary for {timestamp}")
+        return ok
 
     def _write_tec_records(
         self,
@@ -1327,10 +1331,14 @@ class PhysicsFusionService:
                     station_data = self._read_l2_slice(target_minute)
                     self._pet_watchdog()
                     if station_data:
-                        self.process_minute(target_minute, station_data=station_data)
-                        self.last_processed_minute = max(self.last_processed_minute, target_minute)
-                        self._processed_minutes.add(target_minute)
-                        self._minute_retry_counts.pop(target_minute, None)
+                        ok = self.process_minute(target_minute, station_data=station_data)
+                        if ok:
+                            self.last_processed_minute = max(self.last_processed_minute, target_minute)
+                            self._processed_minutes.add(target_minute)
+                            self._minute_retry_counts.pop(target_minute, None)
+                        else:
+                            self._minute_retry_counts[target_minute] = retry_count + 1
+                            logger.warning(f"L3 write failed for minute {target_minute}, will retry")
                     else:
                         self._minute_retry_counts[target_minute] = retry_count + 1
                         if retry_count == 0:
