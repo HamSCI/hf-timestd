@@ -2,17 +2,29 @@
 Space Weather Service - Ingest and provide solar/geomagnetic data.
 
 Data sources:
-- NOAA SWPC JSON API for X-ray flux, Kp index, proton flux
-- Space Weather Canada for F10.7 solar flux
+- NOAA SWPC JSON API for X-ray flux, Kp index, proton flux, F10.7
+- GFZ Potsdam JSON API for Kp index (fallback when NOAA unavailable)
+
+Architecture:
+- A background thread polls all endpoints every POLL_INTERVAL minutes,
+  keeping cache files warm regardless of UI activity.
+- Public get_*() methods read from cache only — they never block on
+  network I/O and therefore never stall the FastAPI event loop.
+- requests.Session with urllib3 Retry handles transient 5xx / connection
+  errors automatically, with exponential backoff.
+- Stale cache (> STALE_WARN_AGE) is served with a WARNING log entry.
+  Cache older than STALE_MAX_AGE is treated as absent.
 """
 
 import logging
+import threading
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 import json
-import time
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
@@ -68,58 +80,245 @@ class SolarIndices:
     ap: Optional[int] = None  # Daily Ap index
 
 
+def _make_session(retries: int = 3, backoff: float = 1.0) -> requests.Session:
+    """Build a requests.Session with retry/backoff on 5xx and connection errors."""
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 class SpaceWeatherService:
-    """Service for fetching and caching space weather data."""
-    
+    """Service for fetching and caching space weather data.
+
+    A background daemon thread (started on first instantiation) refreshes
+    all cache files on POLL_INTERVAL.  Public get_*() methods read only
+    from disk cache — no network I/O on the calling thread.
+    """
+
     NOAA_BASE_URL = "https://services.swpc.noaa.gov/json"
+    GFZ_KP_URL = "https://kp.gfz.de/app/json/?starttime={start}&endtime={end}&index=Kp"
     CACHE_DIR = Path("/var/lib/timestd/space_weather_cache")
-    CACHE_DURATION = timedelta(minutes=15)  # Cache API responses
-    
+
+    POLL_INTERVAL = timedelta(minutes=10)  # Background refresh cadence
+    STALE_WARN_AGE = timedelta(hours=2)    # Log WARNING when cache this old
+    STALE_MAX_AGE = timedelta(hours=6)     # Treat cache as absent beyond this
+
     def __init__(self, cache_dir: Optional[Path] = None):
-        """Initialize space weather service."""
+        """Initialize space weather service and start background poller."""
         self.cache_dir = cache_dir or self.CACHE_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Space Weather Service initialized, cache: {self.cache_dir}")
-    
-    def _get_cached_or_fetch(self, cache_key: str, fetch_func, max_age: timedelta = None) -> Optional[Any]:
-        """Get data from cache or fetch fresh data."""
-        max_age = max_age or self.CACHE_DURATION
-        cache_file = self.cache_dir / f"{cache_key}.json"
-        
-        # Check cache
-        if cache_file.exists():
-            cache_age = datetime.utcnow() - datetime.fromtimestamp(cache_file.stat().st_mtime)
-            if cache_age < max_age:
-                try:
-                    with open(cache_file, 'r') as f:
-                        data = json.load(f)
-                    logger.debug(f"Cache hit: {cache_key} (age: {cache_age})")
-                    return data
-                except Exception as e:
-                    logger.warning(f"Cache read error for {cache_key}: {e}")
-        
-        # Fetch fresh data
+        self._session = _make_session()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._poll_loop,
+            name="SpaceWeatherPoller",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info(
+            f"Space Weather Service initialized, cache: {self.cache_dir}, "
+            f"polling every {self.POLL_INTERVAL}"
+        )
+
+    def stop(self):
+        """Signal the background poller to stop (for clean shutdown)."""
+        self._stop_event.set()
+
+    # ------------------------------------------------------------------
+    # Background poller
+    # ------------------------------------------------------------------
+
+    def _poll_loop(self):
+        """Background thread: refresh all cache files periodically."""
+        # Immediate first fetch so cache is warm before the first UI request
+        self._refresh_all()
+        while not self._stop_event.wait(timeout=self.POLL_INTERVAL.total_seconds()):
+            self._refresh_all()
+
+    def _refresh_all(self):
+        """Fetch all endpoints and update cache files."""
+        jobs = [
+            ("xray_6hour",   self._fetch_xray, {"endpoint": "xrays-6-hour.json"}),
+            ("xray_1day",    self._fetch_xray, {"endpoint": "xrays-1-day.json"}),
+            ("xray_3day",    self._fetch_xray, {"endpoint": "xrays-3-day.json"}),
+            ("xray_7day",    self._fetch_xray, {"endpoint": "xrays-7-day.json"}),
+            ("kp_index",     self._fetch_kp,   {}),
+            ("proton_flux",  self._fetch_proton, {}),
+            ("solar_indices", self._fetch_solar_indices, {}),
+        ]
+        for cache_key, fetch_fn, kwargs in jobs:
+            try:
+                data = fetch_fn(**kwargs)
+                if data is not None:
+                    self._write_cache(cache_key, data)
+                    logger.debug(f"Poller: refreshed {cache_key} ({len(data) if isinstance(data, list) else 'dict'} items)")
+            except Exception as e:
+                logger.warning(f"Poller: failed to refresh {cache_key}: {e}")
+
+    # ------------------------------------------------------------------
+    # Low-level fetch helpers (network I/O only, no caching logic)
+    # ------------------------------------------------------------------
+
+    def _fetch_xray(self, endpoint: str) -> Optional[list]:
+        url = f"{self.NOAA_BASE_URL}/goes/primary/{endpoint}"
+        resp = self._session.get(url, timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
+        logger.warning(f"GOES X-ray fetch failed: HTTP {resp.status_code} ({url})")
+        return None
+
+    def _fetch_kp(self) -> Optional[list]:
+        """Fetch Kp from NOAA; fall back to GFZ Potsdam on failure."""
+        url = f"{self.NOAA_BASE_URL}/planetary_k_index_1m.json"
+        resp = self._session.get(url, timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
+        logger.warning(f"NOAA Kp fetch failed (HTTP {resp.status_code}), trying GFZ fallback")
+        return self._fetch_kp_gfz()
+
+    def _fetch_kp_gfz(self) -> Optional[list]:
+        """Fetch Kp from GFZ Potsdam and normalise to NOAA-compatible schema."""
+        now = datetime.utcnow()
+        start = (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = self.GFZ_KP_URL.format(start=start, end=end)
         try:
-            data = fetch_func()
-            if data is not None:
-                # Save to cache
-                with open(cache_file, 'w') as f:
-                    json.dump(data, f)
-                logger.debug(f"Cache updated: {cache_key}")
-            return data
+            resp = self._session.get(url, timeout=15)
+            if resp.status_code != 200:
+                logger.warning(f"GFZ Kp fetch failed: HTTP {resp.status_code}")
+                return None
+            raw = resp.json()
+            # GFZ schema: {"datetime": [...], "Kp": [...], "status": [...]}
+            datetimes = raw.get("datetime", [])
+            kp_vals = raw.get("Kp", [])
+            statuses = raw.get("status", [])
+            result = []
+            for i, ts_str in enumerate(datetimes):
+                kp_val = kp_vals[i] if i < len(kp_vals) else 0.0
+                status = statuses[i] if i < len(statuses) else 1
+                # Normalise to NOAA-like dict so _parse_kp_data works unchanged
+                result.append({
+                    "time_tag": ts_str.replace(" ", "T").rstrip("Z") ,
+                    "estimated_kp": float(kp_val),
+                    "kp_index": int(round(float(kp_val))),
+                    "kp": "Z" if status == 1 else "M",  # Z=observed, M=model
+                    "_source": "gfz",
+                })
+            logger.info(f"GFZ Kp fallback: retrieved {len(result)} entries")
+            return result
         except Exception as e:
-            logger.error(f"Fetch error for {cache_key}: {e}")
-            # Try to return stale cache if available
-            if cache_file.exists():
-                try:
-                    with open(cache_file, 'r') as f:
-                        data = json.load(f)
-                    logger.warning(f"Using stale cache for {cache_key}")
-                    return data
-                except:
-                    pass
+            logger.error(f"GFZ Kp fallback error: {e}")
             return None
-    
+
+    def _fetch_proton(self) -> Optional[list]:
+        url = f"{self.NOAA_BASE_URL}/goes/primary/integral-protons-plot-6-hour.json"
+        resp = self._session.get(url, timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
+        logger.warning(f"Proton flux fetch failed: HTTP {resp.status_code}")
+        return None
+
+    def _fetch_solar_indices(self) -> Optional[list]:
+        """Fetch daily solar indices: F10.7 from 10cm-flux, Ap from noaa-planetary-k-index."""
+        # Current F10.7 from 10cm-flux summary
+        f107 = None
+        f107_url = "https://services.swpc.noaa.gov/products/summary/10cm-flux.json"
+        try:
+            resp = self._session.get(f107_url, timeout=15)
+            if resp.status_code == 200:
+                raw = resp.json()
+                f107 = float(raw.get("Flux", 0)) or None
+        except Exception as e:
+            logger.warning(f"F10.7 fetch error: {e}")
+
+        # 3-hourly Kp/Ap from noaa-planetary-k-index (covers ~7 days)
+        kp_url = f"{self.NOAA_BASE_URL.replace('/json', '')}/products/noaa-planetary-k-index.json"
+        try:
+            resp = self._session.get(kp_url, timeout=15)
+            if resp.status_code != 200:
+                logger.warning(f"noaa-planetary-k-index fetch failed: HTTP {resp.status_code}")
+                kp_rows = []
+            else:
+                kp_rows = resp.json()
+        except Exception as e:
+            logger.warning(f"noaa-planetary-k-index fetch error: {e}")
+            kp_rows = []
+
+        # Aggregate 3-hourly Ap values into daily records
+        daily: dict = {}
+        for row in kp_rows:
+            try:
+                ts_str = row[0] if isinstance(row, list) else row.get("time_tag", "")
+                date_str = ts_str[:10]  # YYYY-MM-DD
+                ap_val = int(row[2]) if isinstance(row, list) else int(row.get("a_running", 0))
+                if date_str not in daily:
+                    daily[date_str] = {"ap_sum": 0, "ap_count": 0}
+                daily[date_str]["ap_sum"] += ap_val
+                daily[date_str]["ap_count"] += 1
+            except (ValueError, IndexError, TypeError):
+                continue
+
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        if today not in daily:
+            daily[today] = {"ap_sum": 0, "ap_count": 0}
+
+        result = []
+        for date_str, vals in sorted(daily.items()):
+            ap_mean = round(vals["ap_sum"] / vals["ap_count"]) if vals["ap_count"] else None
+            result.append({
+                "time_tag": date_str,
+                "f10_7": f107 if date_str == today else None,
+                "f10_7_index": None,
+                "sunspot_number": None,
+                "ap": ap_mean,
+            })
+        return result if result else None
+
+    # ------------------------------------------------------------------
+    # Cache helpers
+    # ------------------------------------------------------------------
+
+    def _write_cache(self, cache_key: str, data: Any):
+        cache_file = self.cache_dir / f"{cache_key}.json"
+        tmp = cache_file.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        tmp.replace(cache_file)  # atomic rename
+
+    def _read_cache(self, cache_key: str) -> Optional[Any]:
+        """Read cache file, respecting stale-age policy."""
+        cache_file = self.cache_dir / f"{cache_key}.json"
+        if not cache_file.exists():
+            return None
+        age = datetime.utcnow() - datetime.fromtimestamp(cache_file.stat().st_mtime)
+        if age > self.STALE_MAX_AGE:
+            logger.warning(
+                f"Cache too stale ({age}) for {cache_key} — treating as absent. "
+                f"Check network connectivity."
+            )
+            return None
+        if age > self.STALE_WARN_AGE:
+            logger.warning(f"Serving stale cache ({age}) for {cache_key}")
+        try:
+            with open(cache_file, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Cache read error for {cache_key}: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Public API — reads cache only, never blocks on network
+    # ------------------------------------------------------------------
+
     def get_xray_flux(self, hours: int = 24) -> List[XrayFlux]:
         """
         Get X-ray flux data from GOES satellites.
@@ -132,25 +331,15 @@ class SpaceWeatherService:
         """
         # Select the smallest NOAA endpoint that covers the requested window
         if hours <= 6:
-            endpoint = "xrays-6-hour.json"
             cache_key = "xray_6hour"
         elif hours <= 24:
-            endpoint = "xrays-1-day.json"
             cache_key = "xray_1day"
         elif hours <= 72:
-            endpoint = "xrays-3-day.json"
             cache_key = "xray_3day"
         else:
-            endpoint = "xrays-7-day.json"
             cache_key = "xray_7day"
 
-        def fetch():
-            url = f"{self.NOAA_BASE_URL}/goes/primary/{endpoint}"
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        
-        data = self._get_cached_or_fetch(cache_key, fetch)
+        data = self._read_cache(cache_key)
         if not data:
             return []
         
@@ -197,7 +386,7 @@ class SpaceWeatherService:
             if vals['flux_long'] > 0  # Drop entries with no long-band data
         ]
         
-        logger.info(f"Retrieved {len(results)} X-ray flux measurements ({endpoint})")
+        logger.debug(f"Retrieved {len(results)} X-ray flux measurements ({cache_key})")
         return results
     
     def get_kp_index(self, hours: int = 24) -> List[KpIndex]:
@@ -210,13 +399,7 @@ class SpaceWeatherService:
         Returns:
             List of KpIndex measurements
         """
-        def fetch():
-            url = f"{self.NOAA_BASE_URL}/planetary_k_index_1m.json"
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        
-        data = self._get_cached_or_fetch("kp_index", fetch)
+        data = self._read_cache("kp_index")
         if not data:
             return []
         
@@ -264,14 +447,7 @@ class SpaceWeatherService:
         Returns:
             List of ProtonFlux measurements
         """
-        def fetch():
-            # 6-hour integral protons
-            url = f"{self.NOAA_BASE_URL}/goes/primary/integral-protons-plot-6-hour.json"
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        
-        data = self._get_cached_or_fetch("proton_flux", fetch)
+        data = self._read_cache("proton_flux")
         if not data:
             return []
         
@@ -383,21 +559,39 @@ class SpaceWeatherService:
     
     def get_solar_indices(self, days: int = 30) -> List[SolarIndices]:
         """
-        Get daily solar indices (F10.7, Ap, sunspot number).
-        
-        Note: This is a placeholder. Full implementation would fetch from
-        Space Weather Canada or NOAA archives.
+        Get daily solar indices (F10.7, Ap, sunspot number) from NOAA SWPC.
         
         Args:
             days: Number of days of history
         
         Returns:
-            List of SolarIndices
+            List of SolarIndices sorted by date ascending
         """
-        # TODO: Implement F10.7 fetching from Space Weather Canada
-        # For now, return empty list
-        logger.warning("Solar indices (F10.7) not yet implemented")
-        return []
+        data = self._read_cache("solar_indices")
+        if not data:
+            return []
+
+        cutoff_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        results = []
+        for item in data:
+            try:
+                date_str = item.get("time_tag", item.get("date", ""))[:10]  # YYYY-MM-DD
+                if date_str < cutoff_date:
+                    continue
+                results.append(SolarIndices(
+                    date=date_str,
+                    f107=float(item["f10_7"]) if item.get("f10_7") not in (None, "") else None,
+                    f107_adj=float(item["f10_7_index"]) if item.get("f10_7_index") not in (None, "") else None,
+                    sunspot_number=int(float(item["sunspot_number"])) if item.get("sunspot_number") not in (None, "") else None,
+                    ap=int(float(item["ap"])) if item.get("ap") not in (None, "") else None,
+                ))
+            except (ValueError, KeyError, TypeError) as e:
+                logger.debug(f"Skipping invalid solar indices entry: {e}")
+                continue
+
+        results.sort(key=lambda x: x.date)
+        logger.debug(f"Retrieved {len(results)} solar indices records")
+        return results
     
     def detect_sid_events(self, hours: int = 6) -> List[Dict[str, Any]]:
         """

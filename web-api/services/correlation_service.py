@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 class CorrelationService:
     """Service for analyzing space weather / propagation correlations."""
     
-    def __init__(self, data_root: Path):
+    def __init__(self, data_root: Path, space_weather: Optional[SpaceWeatherService] = None):
         """Initialize correlation service."""
         self.data_root = data_root
-        self.space_weather = SpaceWeatherService()
+        self.space_weather = space_weather if space_weather is not None else SpaceWeatherService()
         self.propagation = PropagationService(data_root)
         logger.info("Correlation Service initialized")
     

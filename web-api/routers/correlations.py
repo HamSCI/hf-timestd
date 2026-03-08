@@ -13,14 +13,15 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 from services.correlation_service import CorrelationService
+from routers.space_weather import space_weather_service
 from config import config
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/correlations", tags=["correlations"])
 
-# Initialize service
-correlation_service = CorrelationService(config.data_root)
+# Initialize service — share the singleton SpaceWeatherService (one poller thread)
+correlation_service = CorrelationService(config.data_root, space_weather=space_weather_service)
 
 # Thread pool for running sync correlation functions with timeout
 _executor = ThreadPoolExecutor(max_workers=2)
