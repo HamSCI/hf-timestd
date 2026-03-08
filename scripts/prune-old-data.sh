@@ -18,6 +18,8 @@
 #   SCIENCE_TEC_DAYS=90      tec (~2 MB/day — tiny, keep longer)
 #   L1_DAYS=30               L1 metrology per-channel
 #   L2_DAYS=30               L2 clock_offset per-channel
+#   ALL_ARRIVALS_DAYS=7      all_arrivals per-channel (~3 GB/channel/day)
+#   TICK_PHASE_DAYS=14       tick_phase per-channel (~2 GB/channel/day)
 #   DISK_WARN_PCT=85         log warning when usage exceeds this
 #   DISK_CRIT_PCT=92         skip non-critical deletes above this (keep more free space)
 
@@ -32,6 +34,8 @@ SCIENCE_DTEC_DIFF_DAYS=30
 SCIENCE_TEC_DAYS=90
 L1_DAYS=30
 L2_DAYS=30
+ALL_ARRIVALS_DAYS=7
+TICK_PHASE_DAYS=14
 DISK_WARN_PCT=85
 DISK_CRIT_PCT=92
 DRY_RUN=0
@@ -79,9 +83,11 @@ if [[ "$USED_PCT" -ge "$DISK_CRIT_PCT" ]]; then
     SCIENCE_TEC_DAYS=$(( SCIENCE_TEC_DAYS / 2 < 14 ? 14 : SCIENCE_TEC_DAYS / 2 ))
     L1_DAYS=$(( L1_DAYS / 2 < 7 ? 7 : L1_DAYS / 2 ))
     L2_DAYS=$(( L2_DAYS / 2 < 7 ? 7 : L2_DAYS / 2 ))
+    ALL_ARRIVALS_DAYS=$(( ALL_ARRIVALS_DAYS / 2 < 1 ? 1 : ALL_ARRIVALS_DAYS / 2 ))
+    TICK_PHASE_DAYS=$(( TICK_PHASE_DAYS / 2 < 1 ? 1 : TICK_PHASE_DAYS / 2 ))
 fi
 
-log "Retention: raw_buffer=${RAW_BUFFER_DAYS}d dtec_ts=${SCIENCE_DTEC_TS_DAYS}d dtec=${SCIENCE_DTEC_DAYS}d dtec_diff=${SCIENCE_DTEC_DIFF_DAYS}d tec=${SCIENCE_TEC_DAYS}d L1=${L1_DAYS}d L2=${L2_DAYS}d"
+log "Retention: raw_buffer=${RAW_BUFFER_DAYS}d dtec_ts=${SCIENCE_DTEC_TS_DAYS}d dtec=${SCIENCE_DTEC_DAYS}d dtec_diff=${SCIENCE_DTEC_DIFF_DAYS}d tec=${SCIENCE_TEC_DAYS}d L1=${L1_DAYS}d L2=${L2_DAYS}d all_arrivals=${ALL_ARRIVALS_DAYS}d tick_phase=${TICK_PHASE_DAYS}d"
 
 # ── Helper: delete files/dirs older than N days, never touching today ────────
 # For raw_buffer the structure is: .../raw_buffer/CHANNEL/YYYYMMDD/
@@ -179,8 +185,10 @@ for channel_dir in "$PHASE2_DIR"/*/; do
     # Skip non-channel dirs
     case "$channel" in science|fusion) continue ;; esac
 
-    prune_hdf5_dir "$channel_dir/metrology" "$L1_DAYS"    "L1/${channel}/metrology"
-    prune_hdf5_dir "$channel_dir/clock_offset" "$L2_DAYS" "L2/${channel}/clock_offset"
+    prune_hdf5_dir "$channel_dir/metrology" "$L1_DAYS"              "L1/${channel}/metrology"
+    prune_hdf5_dir "$channel_dir/clock_offset" "$L2_DAYS"           "L2/${channel}/clock_offset"
+    prune_hdf5_dir "$channel_dir/all_arrivals" "$ALL_ARRIVALS_DAYS" "L1/${channel}/all_arrivals"
+    prune_hdf5_dir "$channel_dir/tick_phase"   "$TICK_PHASE_DAYS"   "L2/${channel}/tick_phase"
 done
 
 # ── 4. Corrupt file cleanup ───────────────────────────────────────────────────
