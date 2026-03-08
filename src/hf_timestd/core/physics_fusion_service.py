@@ -1195,6 +1195,84 @@ class PhysicsFusionService:
                     )
                 logger.info("\n".join(info_parts))
 
+    def _startup_lookback_minutes(self) -> int:
+        """Return how many minutes back to scan on startup.
+
+        Reads the last written timestamp from the L3 dtec output file for
+        today (and yesterday as a fallback) to find where processing stopped.
+        Falls back to L2 file mtime if no L3 output exists yet.
+        Capped at 24 hours.
+        """
+        import h5py
+
+        last_written_ts = 0.0
+
+        # Scan L3 dtec files newest-first to find the oldest stale file.
+        # We want the OLDEST last-timestamp that is more than 5 minutes behind
+        # now — that is where backfill must start.  Scanning newest-first and
+        # stopping at the first file whose last timestamp is recent (≤5 min old)
+        # handles the UTC-midnight-crossing case correctly: if physics crashed
+        # partway through March 7 UTC and a March 8 UTC file already exists
+        # (because metrology kept running), we must resume from March 7's last
+        # written minute, not March 8's.
+        dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
+        if dtec_dir.exists():
+            for l3_path in sorted(dtec_dir.glob('AGGREGATED_dtec_????????.h5'), reverse=True):
+                try:
+                    with h5py.File(str(l3_path), 'r', swmr=True) as f:
+                        # minute_boundary is epoch float; timestamp_utc is ISO string
+                        for key in ('minute_boundary', 'timestamp_utc'):
+                            if key not in f or len(f[key]) == 0:
+                                continue
+                            raw = f[key][-1]
+                            if isinstance(raw, (bytes, str)):
+                                raw_s = raw.decode() if isinstance(raw, bytes) else raw
+                                ts = datetime.fromisoformat(
+                                    raw_s.replace('Z', '+00:00')
+                                ).timestamp()
+                            else:
+                                ts = float(raw)
+                            # If this file is current (≤5 min old), skip it and
+                            # keep looking at older files for a gap.
+                            if time.time() - ts <= 5 * 60:
+                                ts = 0.0
+                            if ts > last_written_ts:
+                                last_written_ts = ts
+                            break
+                except Exception:
+                    pass
+            # If every file was current, last_written_ts stays 0 → returns 5 below
+
+        if last_written_ts == 0.0:
+            # No L3 output yet — fall back to L2 file mtime
+            newest_mtime = 0.0
+            for channel in self.channels:
+                l2_dir = self.data_root / 'phase2' / channel / 'clock_offset'
+                if l2_dir.exists():
+                    for h5_file in l2_dir.glob("*.h5"):
+                        try:
+                            mtime = h5_file.stat().st_mtime
+                            if mtime > newest_mtime:
+                                newest_mtime = mtime
+                        except OSError:
+                            pass
+            last_written_ts = newest_mtime
+
+        if last_written_ts == 0.0:
+            return 5
+
+        gap_minutes = int((time.time() - last_written_ts) / 60) + 10
+        if gap_minutes <= 5:
+            return 5
+
+        capped = min(gap_minutes, 24 * 60)
+        last_dt = datetime.fromtimestamp(last_written_ts, tz=timezone.utc).strftime('%H:%M:%SZ')
+        logger.info(
+            f"Startup: last L3 output at {last_dt}, gap is ~{gap_minutes} minutes — "
+            f"extending lookback to {capped} minutes to backfill"
+        )
+        return capped
+
     def run(self):
         """Main service loop."""
         self.running = True
@@ -1209,6 +1287,12 @@ class PhysicsFusionService:
             logger.info("Systemd watchdog enabled")
         
         logger.info("Service started. Polling for data...")
+
+        # On restart after a gap (crash, update, etc.) the standard 5-minute
+        # lookback window misses all minutes between the last processed minute
+        # and now.  Compute a wider initial window that shrinks to 5 once we
+        # have caught up to real-time.
+        max_lookback = self._startup_lookback_minutes()
         
         while self.running:
             try:
@@ -1220,8 +1304,14 @@ class PhysicsFusionService:
                 now = time.time()
                 # Process last few minutes to find enough frequencies for verification
                 # L2 calibration service has ~1-2 minute lag, so we look back 2-5 minutes
-                # We retry each minute up to 3 times to handle L2 write delays
-                for offset in range(5, 1, -1):
+                # We retry each minute up to 3 times to handle L2 write delays.
+                # max_lookback starts wide on restart (to cover any gap) and
+                # shrinks to 5 once we have caught up to within 5 minutes of now.
+                if max_lookback > 5:
+                    oldest_target = int(now) - (int(now) % 60) - (60 * max_lookback)
+                    if self.last_processed_minute >= oldest_target:
+                        max_lookback = max(5, max_lookback - 1)
+                for offset in range(max_lookback, 1, -1):
                     target_minute = int(now) - (int(now) % 60) - (60 * offset)
 
                     # Never re-process a minute that already succeeded
