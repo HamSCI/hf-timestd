@@ -18,11 +18,12 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.physics_fusion_serv
     --data-root /var/lib/timestd \
     --output /var/lib/timestd/phase2/fusion
 
-# Ensure directories exist and have correct permissions
+# Ensure directories exist and have correct permissions.
+# The full phase2 chown also repairs any root-owned L2 channel files
+# that result from manual sudo operations or metrology running as root.
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/fusion
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/science
-ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
-ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/science
+ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
