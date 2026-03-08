@@ -455,8 +455,10 @@ class MetrologyService:
         now = time.time()
         current_minute = (int(now) // 60) * 60
         
-        # Check last 10 minutes for unprocessed files
-        for minutes_ago in range(10, 0, -1):
+        # Scan up to 24 hours back — _read_binary_minute returns None quickly
+        # for missing minutes, so a large window is harmless and ensures
+        # backfill covers gaps after crashes or updates.
+        for minutes_ago in range(24 * 60, 0, -1):
             target_minute = current_minute - (minutes_ago * 60)
             if target_minute in self.processed_minutes:
                 continue

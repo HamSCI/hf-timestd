@@ -113,6 +113,7 @@ class L2CalibrationService:
         
         # Service state
         self.running = False
+        # Seeded from L2 output on startup (see _seed_last_processed)
         self.last_processed: Dict[str, int] = {ch: 0 for ch in channels}
         
         # Data freshness tracking
@@ -140,6 +141,10 @@ class L2CalibrationService:
             logger.info("IonoDataService background thread started")
         except Exception as e:
             logger.warning(f"IonoDataService could not start: {e} — propagation model will use fallback")
+
+        # Seed last_processed from existing L2 output files and expand the
+        # lookback window to cover any gap since the last processed minute.
+        self._seed_last_processed()
 
         # Notify systemd we're ready
         if SYSTEMD_AVAILABLE:
@@ -184,6 +189,78 @@ class L2CalibrationService:
         logger.info(f"Received signal {signum}")
         self.stop()
     
+    def _seed_last_processed(self):
+        """Initialise last_processed and lookback_minutes from existing L2 output.
+
+        On a normal restart the L2 clock_offset files already contain the most
+        recently calibrated minute.  Reading the last minute_boundary from each
+        file lets the service continue from where it left off instead of
+        re-processing the whole default lookback window, or — worse — silently
+        skipping the gap when the gap is wider than lookback_minutes.
+
+        The lookback_minutes is expanded to cover the largest per-channel gap
+        (plus a 10-minute margin), capped at 24 hours.
+        """
+        import h5py
+
+        max_gap_minutes = 0
+
+        for channel in self.channels:
+            l2_dir = self.data_root / "phase2" / channel / "clock_offset"
+            if not l2_dir.exists():
+                continue
+
+            # Find the newest L2 file for this channel
+            h5_files = sorted(l2_dir.glob(f"{channel}_timing_measurements_????????.h5"))
+            if not h5_files:
+                continue
+
+            last_ts = 0.0
+            for h5_path in reversed(h5_files):
+                try:
+                    with h5py.File(str(h5_path), 'r', swmr=True) as f:
+                        # L2 files store minute_boundary_utc (epoch int) or timestamp_utc (ISO str)
+                        for key in ('minute_boundary_utc', 'minute_boundary', 'timestamp_utc'):
+                            if key not in f or len(f[key]) == 0:
+                                continue
+                            raw = f[key][-1]
+                            if isinstance(raw, (bytes, str)):
+                                raw_s = raw.decode() if isinstance(raw, bytes) else raw
+                                last_ts = datetime.fromisoformat(
+                                    raw_s.replace('Z', '+00:00')
+                                ).timestamp()
+                            else:
+                                last_ts = float(raw)
+                            break
+                        if last_ts > 0:
+                            break
+                except Exception:
+                    continue
+
+            if last_ts <= 0:
+                continue
+
+            # Seed the cursor so _process_channel skips already-done work
+            last_minute = int(last_ts // 60) * 60
+            self.last_processed[channel] = last_minute
+
+            gap_minutes = int((time.time() - last_ts) / 60)
+            if gap_minutes > max_gap_minutes:
+                max_gap_minutes = gap_minutes
+
+        if max_gap_minutes > self.lookback_minutes:
+            new_lookback = min(max_gap_minutes + 10, 24 * 60)
+            logger.info(
+                f"Startup: largest L2 gap is ~{max_gap_minutes} minutes — "
+                f"expanding lookback from {self.lookback_minutes} to {new_lookback} minutes"
+            )
+            self.lookback_minutes = new_lookback
+        else:
+            logger.info(
+                f"Startup: L2 gap ≤{self.lookback_minutes} minutes — "
+                f"normal lookback window sufficient"
+            )
+
     def _check_l1_freshness(self, channel: str) -> Tuple[bool, float]:
         """
         Check if L1 data for a channel is fresh enough to process.
