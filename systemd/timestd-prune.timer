@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily hf-timestd data retention pruning
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Timer]
+# Run daily at 03:00 UTC — quiet period between day boundaries
+OnCalendar=*-*-* 03:00:00 UTC
+# Run missed timer on next boot if the system was down at 03:00
+Persistent=true
+# Randomize within 30 minutes to avoid stampede with other timers
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

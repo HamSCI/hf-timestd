@@ -23,9 +23,9 @@
     # copytruncate keeps the same inode so logs continue in *.log after rotate.
     copytruncate
     
-    # Use date extension instead of numbers
+    # Use date+time extension so multiple rotations per day don't collide
     dateext
-    dateformat -%Y%m%d
+    dateformat -%Y%m%d-%H%M%S
     
     # Shared scripts block intentionally omitted: no daemon signal needed with copytruncate.
 }

@@ -1,0 +1,17 @@
+[Unit]
+Description=hf-timestd data retention pruning
+Documentation=https://github.com/mijahauan/hf-timestd
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/prune-old-data.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-prune
+
+# Limit I/O priority so prune does not starve the recording services
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+Nice=19
