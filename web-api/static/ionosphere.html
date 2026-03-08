@@ -199,7 +199,7 @@
         <div class="display-tabs">
             <button class="display-tab active" data-display="diurnal">1. Solar Diurnal Cycle</button>
             <button class="display-tab" data-display="geometry">2. Propagation Geometry</button>
-            <button class="display-tab" data-display="tec">3. TEC Inversion</button>
+            <button class="display-tab" data-display="tec">3. Frequency Dispersion / TEC</button>
             <button class="display-tab" data-display="events">4. Events &amp; Space Weather</button>
         </div>
 
@@ -276,15 +276,15 @@
         <!-- ================================================================ -->
         <div id="display-tec" class="display-content">
             <div class="info-card">
-                <h3>Model vs Observation &rarr; TEC</h3>
-                <p>D_clock(f) = D_common + 1.344 &times; TEC / f&sup2;. Plotting D_clock vs 1/f&sup2; for multiple frequencies from the same station, the slope gives <strong>slant TEC</strong> along the oblique HF ray path. This samples the ionosphere at the path midpoint (reflection point), not the sub-receiver point.</p>
-                <p style="margin-top:8px;"><strong>Typical values:</strong> Daytime mid-latitude slant TEC: 20&ndash;80 TECU; nighttime: 5&ndash;20 TECU. Negative TEC values are unphysical and indicate systematic errors in D_clock (e.g. multipath, wrong propagation mode assignment). Compare with <a href="https://omniweb.gsfc.nasa.gov/" style="color:#3b82f6;">NASA OMNIWeb</a> vertical TEC maps or <a href="https://www.swpc.noaa.gov/products/us-total-electron-content" style="color:#3b82f6;">SWPC US-TEC</a> for validation. Our slant TEC &asymp; vertical TEC &times; sec(&chi;) where &chi; is the zenith angle at the ionospheric pierce point.</p>
+                <h3>Frequency Dispersion &mdash; Experimental Group-Delay TEC</h3>
+                <p>D_clock(f) = D_common + 1.344 &times; TEC / f&sup2;. Plotting D_clock vs 1/f&sup2; for multiple frequencies <em>with the same propagation mode</em>, the slope gives <strong>slant TEC</strong> along the oblique HF ray path. The fit is filtered to same-mode points only &mdash; mixing 1F2 and 2F2 hops would conflate geometry differences with dispersion.</p>
+                <p style="margin-top:8px;"><strong>Limitations:</strong> Group-delay TEC is a <em>noise-dominated validation product</em>. D_clock uncertainty (~1&ndash;2 ms) is comparable to the TEC-induced dispersion between adjacent frequencies. R&sup2; &lt; 0.7 or RMS &gt; 2 ms indicates the estimate is unreliable. Negative TEC is unphysical (mode misassignment or multipath). <strong>The primary ionospheric TEC product is carrier-phase dTEC</strong> on the <a href="/static/dtec.html" style="color:#3b82f6;">dTEC page</a>. Typical slant TEC: 5&ndash;20 TECU night, 20&ndash;80 TECU day. Compare with <a href="https://www.swpc.noaa.gov/products/us-total-electron-content" style="color:#3b82f6;">SWPC US-TEC</a>.</p>
             </div>
 
             <div class="grid-2">
                 <div class="plot-container">
                     <div class="plot-title">D_clock vs 1/f&sup2; &mdash; Live TEC Fit</div>
-                    <div class="plot-subtitle">Last hour of data &mdash; slope = 1.344 &times; TEC</div>
+                    <div class="plot-subtitle">Last hour of data, same-mode points only &mdash; slope = 1.344 &times; TEC. Badge shows R&sup2; and residual RMS.</div>
                     <div id="plot-tec-fit" style="height: 400px;"></div>
                 </div>
                 <div class="plot-container">
@@ -738,8 +738,30 @@
     }
 
     // ====================================================================
-    // DISPLAY 3: TEC Inversion
+    // DISPLAY 3: Frequency Dispersion / TEC
     // ====================================================================
+
+    // Helper: linear regression returning {slope, intercept, r2, rmsResidual}
+    function linRegStats(xs, ys) {
+        const n = xs.length;
+        const sx  = xs.reduce((a,b) => a+b, 0);
+        const sy  = ys.reduce((a,b) => a+b, 0);
+        const sxy = xs.reduce((a,b,i) => a + b*ys[i], 0);
+        const sx2 = xs.reduce((a,b) => a + b*b, 0);
+        const sy2 = ys.reduce((a,b) => a + b*b, 0);
+        const denom = n*sx2 - sx*sx;
+        if (denom === 0) return null;
+        const slope     = (n*sxy - sx*sy) / denom;
+        const intercept = (sy - slope*sx) / n;
+        // R²
+        const yMean  = sy / n;
+        const ssTot  = ys.reduce((a,b) => a + (b-yMean)**2, 0);
+        const ssRes  = xs.reduce((a,b,i) => a + (ys[i] - (slope*b + intercept))**2, 0);
+        const r2     = ssTot > 0 ? 1 - ssRes/ssTot : 0;
+        const rmsRes = Math.sqrt(ssRes / n);
+        return { slope, intercept, r2, rmsRes };
+    }
+
     function renderTEC(timelineData, tecData) {
         // 1/f² scatter from last hour of data on selected date
         if (timelineData && timelineData.timestamps && timelineData.count > 0) {
@@ -747,32 +769,62 @@
             const lastTs = new Date(timelineData.timestamps[timelineData.timestamps.length - 1]);
             const oneHourBefore = new Date(lastTs - 3600000);
 
-            // Group by station, collect (1/f², D_clock) pairs
+            // Group by station+dominantMode, collect (1/f², D_clock, mode, n) per freq
+            // stationData[station][mode][freq] = [dc, ...]
             const stationData = {};
             for (let i = 0; i < timelineData.timestamps.length; i++) {
                 const t = new Date(timelineData.timestamps[i]);
                 if (t < oneHourBefore) continue;
                 const dc = timelineData.d_clock_ms ? timelineData.d_clock_ms[i] : null;
-                if (dc === null || Math.abs(dc) >= 19.5) continue;  // filter railed values
+                if (dc === null || Math.abs(dc) >= 19.5) continue;
                 const station = timelineData.stations[i];
-                const freq = freqKey(timelineData.frequencies[i]);
+                const freq    = freqKey(timelineData.frequencies[i]);
+                const mode    = (timelineData.modes && timelineData.modes[i]) || 'UNKNOWN';
                 if (!stationData[station]) stationData[station] = {};
-                if (!stationData[station][freq]) stationData[station][freq] = [];
-                stationData[station][freq].push(dc);
+                if (!stationData[station][mode]) stationData[station][mode] = {};
+                if (!stationData[station][mode][freq]) stationData[station][mode][freq] = [];
+                stationData[station][mode][freq].push(dc);
             }
 
             const fitTraces = [];
-            for (const [station, freqMap] of Object.entries(stationData)) {
+            const fitAnnotations = [];
+
+            for (const [station, modeMap] of Object.entries(stationData)) {
+                // Pick the mode with the most frequency coverage for this station
+                let bestMode = null, bestModeFreqCount = 0;
+                for (const [mode, freqMap] of Object.entries(modeMap)) {
+                    if (mode === 'UNKNOWN') continue;
+                    const cnt = Object.keys(freqMap).length;
+                    if (cnt > bestModeFreqCount) { bestModeFreqCount = cnt; bestMode = mode; }
+                }
+                // Fall back to UNKNOWN if nothing else has ≥2 freqs
+                if (!bestMode) bestMode = 'UNKNOWN';
+                const freqMap = modeMap[bestMode];
+                if (!freqMap || Object.keys(freqMap).length < 2) continue;
+
                 const xs = [], ys = [], labels = [];
                 for (const [freq, dcs] of Object.entries(freqMap)) {
                     const f = parseFloat(freq);
-                    const invF2 = 1.0 / (f * f);
-                    const medianDc = dcs.sort((a,b) => a-b)[Math.floor(dcs.length/2)];
-                    xs.push(invF2);
+                    const sorted = [...dcs].sort((a,b) => a-b);
+                    const medianDc = sorted[Math.floor(sorted.length/2)];
+                    xs.push(1.0 / (f * f));
                     ys.push(medianDc);
                     labels.push(`${f} MHz (n=${dcs.length})`);
                 }
                 if (xs.length < 2) continue;
+
+                const stats = linRegStats(xs, ys);
+                if (!stats) continue;
+                const { slope, intercept, r2, rmsRes } = stats;
+                const tec = slope / 1.344;
+
+                // Quality badge: LOW / OK / GOOD
+                const quality = (r2 >= 0.85 && rmsRes < 1.5) ? 'GOOD'
+                              : (r2 >= 0.70 && rmsRes < 2.5) ? 'OK' : 'LOW';
+                const badgeColor = quality === 'GOOD' ? '#22c55e'
+                                 : quality === 'OK'   ? '#f59e0b' : '#ef4444';
+                const badgeText = `R²=${r2.toFixed(2)}  RMS=${rmsRes.toFixed(2)} ms  [${quality}]`;
+                const tecLabel  = tec < 0 ? `${tec.toFixed(1)} TECU ⚠ unphysical` : `${tec.toFixed(1)} TECU`;
 
                 fitTraces.push({
                     x: xs, y: ys,
@@ -781,34 +833,35 @@
                     text: labels,
                     textposition: 'top center',
                     textfont: { size: 10, color: STATION_COLORS[station] || '#888' },
-                    name: station,
+                    name: `${station} (mode=${bestMode}, N=${xs.length})`,
                     hovertemplate: '1/f²=%{x:.4f}<br>D_clock=%{y:.2f} ms<extra>' + station + '</extra>',
                 });
 
-                // Linear fit
-                if (xs.length >= 2) {
-                    const n = xs.length;
-                    const sx = xs.reduce((a,b) => a+b, 0);
-                    const sy = ys.reduce((a,b) => a+b, 0);
-                    const sxy = xs.reduce((a,b,i) => a + b*ys[i], 0);
-                    const sx2 = xs.reduce((a,b) => a + b*b, 0);
-                    const slope = (n*sxy - sx*sy) / (n*sx2 - sx*sx);
-                    const intercept = (sy - slope*sx) / n;
-                    // TEC = slope / K where K = 1.344 ms·MHz²/TECU
-                    // But slope is in ms / (1/MHz²) = ms·MHz², so TEC = slope / 1.344
-                    const tec = slope / 1.344;
+                const xMin = Math.min(...xs) * 0.8;
+                const xMax = Math.max(...xs) * 1.2;
+                fitTraces.push({
+                    x: [xMin, xMax],
+                    y: [slope*xMin + intercept, slope*xMax + intercept],
+                    mode: 'lines',
+                    line: { color: STATION_COLORS[station] || '#888', dash: 'dash', width: 1.5 },
+                    name: `${station}: ${tecLabel}`,
+                    showlegend: true,
+                });
 
-                    const xMin = Math.min(...xs) * 0.8;
-                    const xMax = Math.max(...xs) * 1.2;
-                    fitTraces.push({
-                        x: [xMin, xMax],
-                        y: [slope*xMin + intercept, slope*xMax + intercept],
-                        mode: 'lines',
-                        line: { color: STATION_COLORS[station] || '#888', dash: 'dash', width: 1.5 },
-                        name: `${station}: ${tec.toFixed(1)} TECU`,
-                        showlegend: true,
-                    });
-                }
+                // Quality badge as annotation near the fit line midpoint
+                const xMid = (xMin + xMax) / 2;
+                fitAnnotations.push({
+                    x: xMid,
+                    y: slope*xMid + intercept,
+                    text: badgeText,
+                    showarrow: false,
+                    font: { color: badgeColor, size: 10 },
+                    bgcolor: 'rgba(15,23,42,0.85)',
+                    bordercolor: badgeColor,
+                    borderwidth: 1,
+                    borderpad: 3,
+                    yshift: 18,
+                });
             }
 
             if (fitTraces.length > 0) {
@@ -817,9 +870,10 @@
                     xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, title: '1/f² (MHz⁻²)' },
                     yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, title: 'D_clock (ms)' },
                     legend: { ...PLOTLY_LAYOUT_BASE.legend },
+                    annotations: fitAnnotations,
                 }, PLOTLY_CONFIG);
             } else {
-                document.getElementById('plot-tec-fit').innerHTML = '<p style="color:#64748b;text-align:center;padding:40px;">Insufficient multi-frequency data in last hour</p>';
+                document.getElementById('plot-tec-fit').innerHTML = '<p style="color:#64748b;text-align:center;padding:40px;">Insufficient same-mode multi-frequency data in last hour</p>';
             }
         }
 
