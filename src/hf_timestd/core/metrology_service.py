@@ -373,32 +373,56 @@ class MetrologyService:
         self._process_backlog()
         
         last_poll_time = time.time()
+        last_success_time = time.time()
         poll_interval = 5.0  # Poll every 5 seconds as fallback
+        # Minutes to scan in poll fallback.  Widens to 30 when we haven't
+        # successfully processed anything for >5 minutes (catches stalls where
+        # inotify events stopped arriving after hot→cold archiver races).
+        POLL_NORMAL_MINUTES = 3
+        POLL_STALE_MINUTES  = 30
+        STALE_THRESHOLD_S   = 300  # 5 minutes without a successful write
         
         while self.running:
             try:
                 # Wait for new file notification (with short timeout)
                 minute_boundary, file_dir = self._file_queue.get(timeout=2.0)
                 
-                # Small delay to ensure file is fully written
-                time.sleep(0.5)
-                
                 if minute_boundary not in self.processed_minutes:
-                    logger.info(f"Processing minute {minute_boundary} (inotify triggered)")
-                    success = self.process_minute(minute_boundary)
+                    # Retry up to 3 times with backoff to survive the
+                    # hot→cold archiver race: inotify fires when .json lands
+                    # in hot buffer, but by the time we read it the archiver
+                    # may have moved it to cold before cold is visible.
+                    success = False
+                    for attempt, delay in enumerate([0.5, 1.5, 3.0]):
+                        time.sleep(delay)
+                        logger.info(f"Processing minute {minute_boundary} (inotify, attempt {attempt+1})")
+                        success = self.process_minute(minute_boundary)
+                        if success:
+                            break
+                        if attempt < 2:
+                            logger.debug(f"Minute {minute_boundary} not ready yet, retrying")
                     if success:
                         self.processed_minutes.add(minute_boundary)
                         self._cleanup_processed_set()
+                        last_success_time = time.time()
                         logger.info(f"Minute {minute_boundary} processed successfully")
                     else:
-                        logger.warning(f"Failed to process minute {minute_boundary}")
+                        logger.warning(f"Failed to process minute {minute_boundary} after 3 attempts")
                         
             except queue.Empty:
                 # Fallback: poll for new files periodically (inotify may miss events on tmpfs)
                 now = time.time()
                 if now - last_poll_time >= poll_interval:
                     last_poll_time = now
-                    self._poll_for_new_files()
+                    stale = (now - last_success_time) > STALE_THRESHOLD_S
+                    if stale:
+                        logger.warning(
+                            f"No successful minute processed for "
+                            f"{(now - last_success_time):.0f}s — widening poll to {POLL_STALE_MINUTES} min"
+                        )
+                    self._poll_for_new_files(
+                        lookback_minutes=POLL_STALE_MINUTES if stale else POLL_NORMAL_MINUTES
+                    )
     
     def _run_polling_mode(self):
         """Fallback polling mode when watchdog is not available."""
@@ -425,14 +449,12 @@ class MetrologyService:
             logger.debug(f"Waiting {wait_time:.1f}s for next minute")
             time.sleep(wait_time)
     
-    def _poll_for_new_files(self):
+    def _poll_for_new_files(self, lookback_minutes: int = 3):
         """Poll for new files (fallback when inotify misses events)."""
-        # Check the last few minutes for any unprocessed files
         now = time.time()
         current_minute = (int(now) // 60) * 60
         
-        # Check last 3 minutes (files are written at end of minute)
-        for minutes_ago in range(3, 0, -1):
+        for minutes_ago in range(lookback_minutes, 0, -1):
             target_minute = current_minute - (minutes_ago * 60)
             if target_minute in self.processed_minutes:
                 continue
