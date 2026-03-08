@@ -10,267 +10,345 @@ Make your criticism from the perspective of 1) a user of the system, 2) a metrol
 
 ---
 
-## NEXT SESSION: CODEBASE QUALITY, ROBUSTNESS & CONTRACT-COMPLIANCE AUDIT
+## NEXT SESSION: INSTALL & UPDATE PROCESS AUDIT
 
-**Goal:** Systematically review the hf-timestd codebase for adherence to the CODING_CONTRACT (`.windsurf/contracts/CODING_CONTRACT.md`), robustness under edge cases, error handling quality, and general production readiness. Identify code that violates contract rules, swallows errors silently, leaks resources, contains dead/zombie code, or lacks test coverage for critical paths.
+**Goal:** Critically review the hf-timestd installation and update process from usability, reliability, completeness, stability, and documentation perspectives. Identify gaps, failure modes, undocumented prerequisites, and places where the installer can be silently misconfigured. Produce a concrete remediation plan and implement agreed fixes.
 
-**Method:** The user will direct the review module-by-module or subsystem-by-subsystem. For each module reviewed, produce:
-1. A list of **contract violations** (cite the specific CODING_CONTRACT rule number)
-2. **Edge-case and error-handling defects** (silent exception swallowing, missing bounds checks, unhandled None/NaN, race conditions)
-3. **Resource management issues** (unclosed h5py.File, leaked mmap/FDs, unbounded memory growth, missing context managers)
-4. **Dead code and zombie imports** (unused functions, deprecated code paths still imported, stale fallback branches)
-5. **Test coverage gaps** (critical paths with no corresponding test, tests that test the wrong thing, tests that can't fail)
-6. **Concrete recommendations** ranked by severity (CRITICAL / HIGH / MEDIUM / LOW)
-
-Do NOT suggest cosmetic changes (reformatting, renaming variables, reordering imports) unless they mask a real bug. Focus on correctness, resilience, and maintainability.
+**The four perspectives applied to install/update:**
+- **User (operator):** Can a first-time installer complete a working installation with only the README and wizard prompts? Are error messages actionable? Is the update process safe to run without data loss?
+- **Metrologist:** Does the install guarantee the timing chain is correctly configured — GPSDO authority, SHM ordering, IONEX data, chrony integration — so that time outputs are traceable from first boot?
+- **Ionospheric scientist:** Are the optional science enhancements (GNSS VTEC, IONEX, GRAPE upload) clearly differentiated from core function? Does the wizard explain what each enables so the installer can make an informed choice?
+- **Software engineer:** Is the install idempotent? Does the update script avoid data loss? Are failure modes recoverable? Is the config file forward-compatible? Are there silent partial-failure modes?
 
 ---
 
-## 1. The CODING_CONTRACT (Summary)
+## 1. The Install/Update Script Inventory
 
-The full contract is in `.windsurf/contracts/CODING_CONTRACT.md`. The 10 rules are:
+All scripts live in `scripts/` in the git repo and are deployed to `/opt/hf-timestd/scripts/` on install.
 
-| # | Rule | Key Violations to Look For |
-|---|------|---------------------------|
-| 1 | No `exec`, `eval`, `globals()` manipulation | Dynamic code execution, monkey-patching |
-| 2 | Max 3 levels of nesting (cyclomatic complexity) | Deeply nested if/for/try blocks |
-| 3 | No `*args`/`**kwargs` in core APIs | Implicit interfaces that bypass type checking |
-| 4 | Strict type hinting (`NDArray` exceptions only in DSP) | Missing type hints on public APIs, `Any` proliferation |
-| 5 | No bare `except:`; broad catches must log at ERROR/WARNING | `except Exception: pass`, `except: ...` with DEBUG logging |
-| 6 | Pre-allocate numpy buffers in hot path (zero-allocation DSP) | `np.zeros()` or list appends inside per-tick/per-second loops |
-| 7 | Immutable dataclass/NamedTuple for metadata and measurements | Mutable dicts passed between modules for measurement records |
-| 8 | Context managers for all I/O; explicit release of mmap/C handles | `h5py.File()` without `with`, `np.memmap` without explicit close |
-| 9 | Compute threads must never block on disk/network I/O | HDF5 writes, HTTP requests, or file I/O in the audio/DSP thread |
-| 10 | Strict venv isolation, exact version pinning, no side-effect imports | Import-time network calls, global state mutation on import |
-
-**Additional contract detail:**
-- Rule 5 expanded: Thread-level broad catches must log `ERROR` tracebacks, never `DEBUG` or `INFO`
-- Rule 8 expanded: Specifically mandate explicit closure of `h5py.File`, `np.memmap`, file-backed numpy arrays
-- Rule 9 expanded: FFT/audio threads on strict real-time deadlines; 200ms disk wait drops RTP packets
-
----
-
-## 2. Companion Contracts (Cross-Check These)
-
-The CODING_CONTRACT is the primary lens, but violations of these companion contracts should also be flagged:
-
-| Contract | File | Key Cross-Check Items |
-|----------|------|-----------------------|
-| **DATA_CONTRACT** | `.windsurf/contracts/DATA_CONTRACT.md` | All `h5py.File()` must use `locking=False`; `HDF5_USE_FILE_LOCKING=FALSE` set before `import h5py`; CR-1 through CR-7 consistency rules enforced at write time; no per-record writes for high-frequency products (>10/min); schema version bumped on field changes |
-| **METROLOGY_CONTRACT** | `.windsurf/contracts/METROLOGY_CONTRACT.md` | `TickEdgeDetector` is sole source for `tick_timing` HDF5; physics validation gate ±15 ms must not be widened; dual Kalman must have independent state; CHU 74ms H3E correction must be applied |
-| **PHYSICS_CONTRACT** | `.windsurf/contracts/PHYSICS_CONTRACT.md` | `HFPropagationModel` is sole propagation model (deprecated `PhysicsPropagationModel` must not be used); group-delay TEC is below noise floor (don't claim it works); `_processed_minutes` set prevents duplicate records |
-| **WEB_API_CONTRACT** | `.windsurf/contracts/WEB_API_CONTRACT.md` | Routers must not read HDF5 directly (services layer); numpy types cast before JSON serialization; no `isoformat() + 'Z'`; loading/error states on all charts |
-| **INSTALLATION_CONTRACT** | `.windsurf/contracts/INSTALLATION_CONTRACT.md` | Services run as `timestd` user; CPU affinity separation (Python on 0–7, radiod on 8–15); schema files in both venv and `/opt/` src tree |
+| Script | Purpose | Entry Point |
+|--------|---------|-------------|
+| `install.sh` | Full first-time install (requires sudo, idempotent) | `sudo ./scripts/install.sh` |
+| `setup-station.sh` | Interactive config wizard — generates `timestd-config.toml` | called by install.sh or standalone |
+| `config-review.sh` | Config review + incremental update, called by update-production.sh | `sudo ./scripts/config-review.sh` |
+| `update-production.sh` | Pull + reinstall Python package + sync files + restart services | `sudo ./scripts/update-production.sh [--pull] [--yes]` |
+| `start-services.sh` | Start all services in dependency order (incl. SHM/chrony dance) | `sudo ./scripts/start-services.sh [--status]` |
+| `stop-services.sh` | Stop all services | `sudo ./scripts/stop-services.sh` |
+| `reinstall.sh` | Force-reinstall Python package into venv (wraps ensure-venv.sh) | `sudo ./scripts/reinstall.sh` |
+| `ensure-venv.sh` | Create/update venv, install hf_timestd package | called by install.sh and as ExecStartPre |
+| `setup-psws-keys.sh` | Generate/exchange SSH keys for PSWS/GRAPE SFTP upload | `sudo ./scripts/setup-psws-keys.sh` |
+| `setup-cpu-affinity.sh` | Pin CPU affinity for radiod co-location | `sudo ./scripts/setup-cpu-affinity.sh` |
+| `download_ionex_daily.sh` | Download today's IONEX ionospheric map from NASA CDDIS | run by timer, or manually |
+| `uninstall.sh` | Remove installation (but preserve data) | `sudo ./scripts/uninstall.sh` |
+| `reset-state.sh` | Clear Kalman/fusion state files (use after config changes) | `sudo ./scripts/reset-state.sh` |
+| `config-review.sh` | Show/update critical config fields interactively | `sudo ./scripts/config-review.sh` |
 
 ---
 
-## 3. Architecture Overview (For Orientation)
+## 2. Filesystem Layout (Deployed)
 
 ```
-Phase 1: Core Recorder (RTP → raw_buffer)
-  core_recorder_v2.py → channel_recorder.py → binary_archive_writer.py
-  ↓
-Phase 2: Metrology (raw → L1/L2 measurements)
-  metrology_service.py → metrology_engine.py → tick_edge_detector.py
-  bootstrap_state.py, buffer_timing.py, broadcast_specs.py
-  l2_calibration_service.py → broadcast_kalman_filter.py
-  ↓
-Phase 3: Fusion & Physics (L2 → L3 science products)
-  multi_broadcast_fusion.py → chrony_shm.py (Chrony SHM output)
-  physics_fusion_service.py → carrier_tec.py, propagation_model.py
-  ↓
-GRAPE Module (parallel pipeline)
-  decimation_pipeline.py → decimation.py → spectrogram.py → packager.py → uploader.py
-  ↓
-Web API (visualization)
-  web-api/main.py → routers/*.py → services/*.py → HDF5 reads
+/etc/hf-timestd/
+    timestd-config.toml       ← Station config (generated by setup-station.sh)
+    environment               ← Env vars for systemd services (TIMESTD_* vars)
+
+/opt/hf-timestd/
+    venv/                     ← Python virtual environment
+    web-api/                  ← FastAPI app (synced from repo by update-production.sh)
+    scripts/                  ← Shell scripts (synced from repo)
+    src/                      ← Python source tree (synced; needed for ensure-venv.sh)
+    pyproject.toml            ← Needed for ensure-venv.sh on unattended restart
+    config/
+        timestd-config.toml   ← Symlink → /etc/hf-timestd/timestd-config.toml
+    docs/                     ← Documentation (synced)
+
+/var/lib/timestd/
+    raw_buffer/               ← Phase 1: IQ archive (KEEP — never delete)
+    phase2/                   ← Phase 2: L1/L2 HDF5 (KEEP)
+    phase2/fusion/            ← Phase 3: L3 fusion HDF5 (KEEP)
+    state/                    ← Kalman/bootstrap state files (safe to clear with reset-state.sh)
+    space_weather_cache/      ← Space weather JSON cache (safe to delete)
+    ionex/                    ← IONEX ionospheric maps (recreated by timer)
+    grape/                    ← GRAPE export staging (safe to delete after upload)
+
+/var/log/hf-timestd/          ← Per-service log files (rotated by logrotate)
+/dev/shm/timestd/             ← Hot buffer (recreated on boot by tmpfiles.d)
 ```
 
-### Service Boundaries (systemd units)
+---
 
-| Service | Entry Point | Thread Model |
-|---------|------------|--------------|
-| `timestd-core-recorder` | `core_recorder_v2.py` | 1 thread per channel (9–17 channels), RTP receive + write |
-| `timestd-metrology` | `metrology_service.py` | 1 thread per channel, processes raw buffer minutes |
-| `timestd-l2-calibration` | `l2_calibration_service.py` | Single-threaded, reads L1, writes L2 |
-| `timestd-fusion` | `multi_broadcast_fusion.py` | Single-threaded, 8-second cycle, writes Chrony SHM |
-| `timestd-physics` | `physics_service.py` | Single-threaded + reanalysis timer |
-| `timestd-web-api` | `web-api/main.py` | FastAPI/uvicorn async |
-| `grape-daily.timer` | `cli.py grape daily` | One-shot daily batch |
+## 3. The `timestd-config.toml` — Field Reference
+
+This is the single most important file. The wizard generates it but operators need to understand it for troubleshooting and post-install tuning.
+
+### 3a. Required Fields (install will not work correctly without these)
+
+```toml
+[station]
+callsign = "W0XYZ"           # Amateur radio callsign — used in GRAPE metadata
+grid_square = "EM38ab"       # Maidenhead, 6 or 10 chars — path geometry calculations
+latitude = 38.9              # Decimal degrees, positive = North
+longitude = -92.1            # Decimal degrees, positive = East
+
+[ka9q]
+status_address = "hf-status.local"  # ka9q-radio status multicast (mDNS or IP)
+source = "radiod"            # "radiod" (standard) or "phase-engine" (coherent)
+
+[recorder]
+mode = "production"
+compression = "zstd"         # "zstd" | "lz4" | "none"
+
+[timing]
+authority = "rtp"            # "rtp" (GPS+PPS via radiod) or "fusion" (NTP only)
+rtp_expected_accuracy_ms = 0.001  # 0.0001 (direct GPS), 0.001 (LAN GPS), 1.0 (NTP)
+```
+
+### 3b. Optional Enhancements (disabled by default, enable for full capability)
+
+```toml
+# GNSS VTEC — dual-frequency GNSS receiver (e.g. u-blox ZED-F9P) provides
+# real-time ionospheric TEC for improved L2 timing corrections.
+# Requires: receiver accessible via TCP (e.g. ser2net), timestd-vtec.service enabled.
+[gnss_vtec]
+enabled = false
+host = "192.168.0.203"       # IP/hostname of receiver
+port = 9000                  # TCP port (ser2net default)
+
+# PSWS/GRAPE Upload — contributes decimated IQ spectrograms to the
+# Personal Space Weather Station network (HamSCI).
+# Requires: PSWS account at https://pswsnetwork.caps.ua.edu/
+#           SSH key pair generated by setup-psws-keys.sh
+[uploader]
+enabled = false
+[uploader.sftp]
+host = "pswsnetwork.eng.ua.edu"
+ssh_key = "/home/timestd/.ssh/id_rsa_psws_S000171"
+[uploader.metadata]
+station_id = "S000171"       # From PSWS site admin page
+instrument_id = "172"        # From PSWS site admin page
+```
+
+### 3c. Channels (`[[recorder.channels]]`)
+
+Each `[[recorder.channels]]` block defines one monitored frequency. The standard deployment monitors 9 channels across 4 stations. The channel list is the most installation-specific part of the config and is **not set by the wizard** — it must be populated from the config template and edited to match the stations actually receivable at the operator's location.
+
+**Key fields per channel:**
+```toml
+[[recorder.channels]]
+channel = "WWV_5000"          # Unique key — used in file paths and logs
+station = "WWV"               # Broadcast station identifier
+frequency_hz = 5000000        # Exact carrier frequency
+multicast_address = "239.x.x.x"  # ka9q-radio multicast output address
+ssrc = 12345                  # RTP SSRC from radiod (find with: ka9q-radio status)
+enabled = true
+```
+
+**Critical:** The `ssrc` values must match the actual radiod configuration. Finding them: `avahi-browse -r _ka9q-radio._udp` or the radiod web status page.
+
+### 3d. Config Schema Versioning
+
+The template in `config/timestd-config.toml.template` is the canonical schema. When new fields are added to the codebase, the template is updated. Running `config-review.sh` detects sections present in the template but absent from the production config and offers to add them.
 
 ---
 
-## 4. Known Problem Areas (Prioritize These)
+## 4. Install Process — Step-by-Step (What Actually Happens)
 
-These are known issues or areas of fragility discovered during development. Verify whether they have been properly fixed and whether the fixes are robust:
+Understanding the sequence helps diagnose failures at each step.
 
-### 4a. Error Handling & Silent Failures
-- **`DataProductReader.read_time_range()`** in `io/hdf5_reader.py` loads entire HDF5 dataset into memory (`f[field_name][:]`) — O(N) full table scan for every time-range query. Any caller reading from large daily files (e.g., VTEC at 67K rows) will time out or OOM.
-- **Silent exception swallowing**: Search for `except Exception` and `except:` blocks that log at `DEBUG` or don't log at all. Per CODING_CONTRACT Rule 5, broad catches at thread boundaries must log at `ERROR`/`WARNING`.
-- **HDF5 read failures logged at DEBUG**: The DATA_CONTRACT specifically warns about "silent exception swallowing in HDF5 reads" causing invisible data starvation.
+```
+sudo ./scripts/install.sh
+  │
+  ├─ Step 1: apt dependencies (python3-dev, libhdf5-dev, hdf5-tools, avahi-utils, ...)
+  ├─ Step 1b: Python 3.10+ check
+  ├─ Step 2: chrony install + SHM refclock config (appends to chrony.conf)
+  │          chronyd.service.d/timestd-shm.conf override (After=timestd-fusion)
+  ├─ Step 2b: UDP buffer tuning (sysctl.d/99-timestd.conf)
+  ├─ Step 3: Path constants established
+  ├─ Step 4: timestd system user + chrony group membership
+  ├─ Step 5: Directory tree creation (see §2 above)
+  ├─ Step 6: ensure-venv.sh → creates /opt/hf-timestd/venv, pip installs hf_timestd
+  ├─ Step 7: web-api copy, scripts copy, config symlink
+  ├─ Step 8: setup-station.sh wizard → generates /etc/hf-timestd/timestd-config.toml
+  ├─ Step 8b: radiod co-location question → sets TIMESTD_RADIOD_LOCAL in environment
+  ├─ Step 9: systemd service/timer files installed + enabled
+  │          (vtec.service conditional on gnss_vtec.enabled in config)
+  │          (GNSS timeserver added to chrony if gnss_vtec enabled)
+  ├─ Step 10: Initial IONEX download (requires ~/.netrc with NASA CDDIS credentials)
+  ├─ Step 11: Stale SHM segments cleared
+  ├─ Step 12: CPU affinity setup (radiod co-location only)
+  └─ Offer: start-services.sh
+```
 
-### 4b. Resource Management
-- **`h5py.File()` without context managers**: Any `h5py.File()` opened without `with` and not explicitly closed leaks file descriptors. Particularly dangerous in long-running services.
-- **`np.memmap` and `np.frombuffer` leaks**: Per CODING_CONTRACT Rule 8, file-backed numpy arrays hold C-level FDs that Python's GC doesn't deterministically clean up. Look for missing `del mm` or `.close()`.
-- **HDF5 locking**: Every `h5py.File()` call must use `locking=False`. Check for any calls missing this parameter.
-- **`HDF5_USE_FILE_LOCKING` env var timing**: Must be set **before** `import h5py`. Check import order in all modules.
+### Critical Ordering Constraints
 
-### 4c. Thread Safety & Concurrency
-- **Shared mutable state between metrology threads**: Each channel runs in its own thread. Any shared singleton (e.g., `ArrivalPatternMatrix`, `IonoDataService`, `BroadcastSpecs`) must be thread-safe.
-- **HDF5 concurrent access**: Multiple services may read the same HDF5 file simultaneously. With `locking=False`, concurrent reads are safe but concurrent read+write is not. Check for any write-while-read scenarios.
-- **Chrony SHM writes**: Must not block the fusion cycle. Check that SHM write is non-blocking.
+1. **fusion before chronyd**: `timestd-fusion` must start before `chronyd`. Fusion creates the Chrony SHM segments with `timestd:666` permissions. If chrony starts first, it creates them with `root:600`, blocking fusion writes. The `chronyd-timestd-shm.conf` override (`After=timestd-fusion`) and `start-services.sh` SHM-clearing both enforce this.
 
-### 4d. DSP Hot Path Performance (CODING_CONTRACT Rule 6)
-- **`metrology_engine.py` `process_minute()`**: This is the innermost hot path — runs per-channel per-minute. Check for: numpy array allocations inside loops, list appends that should be pre-allocated arrays, Python-level iteration over samples.
-- **`tick_edge_detector.py`**: Runs 57 matched-filter correlations per minute per channel. Check for allocation inside the per-tick loop.
-- **`correlator_bank.py`**: Bank of correlators — check buffer reuse.
+2. **ensure-venv.sh on restart**: `timestd-core-recorder.service` has `ExecStartPre=ensure-venv.sh`. This means `/opt/hf-timestd/pyproject.toml` and `/opt/hf-timestd/src/` must exist and be up to date. `update-production.sh` Step 1b syncs these.
 
-### 4e. Deprecated / Zombie Code
-- **`physics_propagation.py`** (`PhysicsPropagationModel`): Explicitly deprecated by PHYSICS_CONTRACT. Must not be imported or called by any active code. Check for lingering imports.
-- **`tof_kalman_ms`**: Deprecated schema field (all NaN). Check if any code reads or writes this field.
-- **`core/legacy/wwvh_discrimination_archive.py`**: In a `legacy/` directory — verify nothing imports it.
-- **`tick_matched_filter.py`** vs **`tick_edge_detector.py`**: The edge detector is the canonical timing source per METROLOGY_CONTRACT. `tick_matched_filter` may still exist for carrier phase extraction — verify it is not writing to `tick_timing/` HDF5 (which would be a contract violation).
-- **`audio_stream.py` vs `audio_streamer.py`**: Two similarly-named modules — check if one is dead.
-- **`ionospheric_model.py`**: May overlap with `propagation_model.py` — check if deprecated.
-
-### 4f. Test Coverage Gaps
-- **28 test files exist** for **~70 source modules** — coverage is sparse.
-- **No tests for**: `core_recorder_v2.py`, `channel_recorder.py`, `binary_archive_writer.py`, `multi_broadcast_fusion.py`, `chrony_shm.py`, `l2_calibration_service.py`, `physics_fusion_service.py`, `quota_manager.py`, the entire GRAPE module, or any web-api code.
-- **Critical untested paths**: HDF5 writer crash safety (simulate SIGKILL during write), day-boundary rollover, service restart with stale state files, RTP gap handling in core recorder.
-
-### 4g. Data Integrity
-- **Day boundary rollover** (midnight UTC): Files rotate daily. Check for off-by-one in date calculations, race conditions between the last write of day N and the first write of day N+1, and correct file selection when processing "yesterday."
-- **HDF5 string encoding**: Recently fixed (variable-length → fixed-length byte strings). Verify the writer and reader are consistent. The writer uses `S` dtype; the reader must `.decode()` byte strings. Check for any code path that assumes strings are `str` type when reading from HDF5.
-- **Schema consistency**: New fields added to code but not to JSON schemas, or vice versa.
+3. **config symlink**: `web-api/main.py` reads config from `/opt/hf-timestd/config/timestd-config.toml` which is a symlink to `/etc/hf-timestd/timestd-config.toml`. The symlink is created at Step 7. If it breaks (e.g. config file moved), the web API silently fails to read config.
 
 ---
 
-## 5. Source Module Inventory
+## 5. Update Process — Step-by-Step
 
-### Core Library (`src/hf_timestd/core/`) — 50+ modules
+```
+sudo ./scripts/update-production.sh [--pull] [--yes]
+  │
+  ├─ Step 0:   git pull (--pull flag only; pulls as repo owner, not root)
+  ├─ Step 0.5: config-review.sh (interactive unless --yes)
+  │            → shows current settings, detects missing template sections
+  ├─ Step 1:   pip reinstall hf_timestd (cleans .pyc, removes editable installs first)
+  ├─ Step 1b:  rsync src/ and pyproject.toml to /opt/hf-timestd/ (for ensure-venv.sh)
+  ├─ Step 2:   rsync scripts/ to /opt/hf-timestd/scripts/
+  ├─ Step 2b:  rsync web-api/ to /opt/hf-timestd/web-api/
+  ├─ Step 2b2: rsync schemas/ to /opt/hf-timestd/src/hf_timestd/schemas/
+  ├─ Step 2c:  rsync docs/ to /opt/hf-timestd/docs/
+  ├─ Step 2d:  update cron jobs (freshness-monitor)
+  ├─ Step 2e:  update logrotate config
+  ├─ Step 3:   diff-based systemd service file update + daemon-reload (only if changed)
+  ├─ Step 4:   restart services (NOT core-recorder — to avoid data gaps)
+  └─ Step 5:   verify venv using installed package (not repo path)
+```
 
-**Phase 1 — Recording:**
-`core_recorder_v2.py`, `channel_recorder.py`, `binary_archive_writer.py`, `packet_resequencer.py`, `audio_buffer.py`
-
-**Phase 2 — Metrology:**
-`metrology_service.py`, `metrology_engine.py`, `tick_edge_detector.py`, `tick_matched_filter.py`, `bootstrap_state.py`, `bootstrap_validator.py`, `buffer_timing.py`, `broadcast_specs.py`, `decoder_config.py`, `bpm_discriminator.py`, `probabilistic_discriminator.py`, `multi_station_detector.py`, `audio_tone_monitor.py`, `chu_fsk_decoder.py`, `correlator_bank.py`
-
-**Phase 2 — Calibration:**
-`l2_calibration_service.py`, `broadcast_kalman_filter.py`, `clock_convergence.py`
-
-**Phase 3 — Fusion:**
-`multi_broadcast_fusion.py`, `fusion_timing_state.py`, `chrony_shm.py`, `chrony_stats.py`, `consensus_combiner.py`, `global_timing_coordinator.py`, `differential_time_solver.py`
-
-**Phase 3 — Physics/Science:**
-`physics_service.py`, `physics_fusion_service.py`, `carrier_tec.py`, `propagation_model.py`, `propagation_engine.py`, `propagation_mode_solver.py`, `propagation_stats.py`, `arrival_pattern_matrix.py`, `iono_data_service.py`, `ionospheric_model.py`, `ionospheric_reanalysis.py`, `iono_tomography.py`, `gnss_tec.py`, `advanced_signal_analysis.py`
-
-**Infrastructure:**
-`quality_metrics.py`, `operational_phase_manager.py`, `primary_time_standard.py`, `gpsdo_monitor.py`, `ground_truth_validator.py`, `leap_second.py`
-
-**Deprecated/Legacy (verify no active imports):**
-`physics_propagation.py`, `legacy/wwvh_discrimination_archive.py`
-
-### I/O Layer (`src/hf_timestd/io/`)
-`hdf5_writer.py`, `hdf5_reader.py`
-
-### GRAPE Module (`src/hf_timestd/grape/`)
-`decimation_pipeline.py`, `decimation.py`, `decimated_buffer.py`, `raw_reader.py`, `spectrogram.py`, `packager.py`, `uploader.py`
-
-### Top-Level
-`cli.py`, `config_utils.py`, `channel_manager.py`, `quota_manager.py`, `audio_stream.py`, `audio_streamer.py`, `cddis.py`, `cddis_auth.py`
-
-### Web API (`web-api/`)
-`main.py`, `routers/*.py` (14 routers), `services/*.py`
-
-### Tests (`tests/`) — 28 files
-See Section 4f for coverage gap analysis.
+**What update does NOT restart:** `timestd-core-recorder` is intentionally skipped to avoid IQ data gaps. If recorder needs restarting (e.g. new channel config), do it manually: `sudo systemctl restart timestd-core-recorder`.
 
 ---
 
-## 6. Recommended Review Order
+## 6. Known Issues, Gaps & Fragility Points
 
-Start with the highest-impact, highest-risk modules and work outward:
+These are the areas requiring scrutiny in the next session. Review each and propose/implement fixes.
 
-1. **Hot path**: `metrology_engine.py` → `tick_edge_detector.py` → `buffer_timing.py` (Rules 6, 9)
-2. **Data integrity**: `io/hdf5_writer.py` → `io/hdf5_reader.py` (Rules 5, 8; DATA_CONTRACT)
-3. **Long-running services**: `multi_broadcast_fusion.py` → `chrony_shm.py` → `fusion_timing_state.py` (Rules 5, 8, 9)
-4. **Core recorder**: `core_recorder_v2.py` → `channel_recorder.py` → `packet_resequencer.py` (Rules 6, 8, 9)
-5. **Calibration chain**: `l2_calibration_service.py` → `broadcast_kalman_filter.py` (Rule 7)
-6. **Physics pipeline**: `physics_fusion_service.py` → `carrier_tec.py` → `propagation_model.py` (PHYSICS_CONTRACT)
-7. **GRAPE module**: `decimation_pipeline.py` → `packager.py` → `uploader.py` (Rules 5, 8)
-8. **Web API**: `services/*.py` → `routers/*.py` (WEB_API_CONTRACT)
-9. **Zombie hunt**: Cross-reference all imports to find dead modules and unreachable code paths
-10. **Test audit**: Map test files to source modules, identify untested critical paths
+### 6a. Channel Configuration — Biggest Installer Stumbling Block
+**Problem:** The wizard (setup-station.sh) collects station identity, timing mode, and optional features — but **does not configure channels**. The `[[recorder.channels]]` section must be populated manually from the template. New installers frequently miss this, get no data, and have no clear error pointing to the cause. The core-recorder will start but log "no channels configured" or silently receive nothing.
+
+**What the AI agent should address:**
+- Does the wizard warn clearly that channels must be configured manually post-install?
+- Is there a `validate-channels.sh` or equivalent that confirms channels are reachable (via avahi/mDNS) before services start?
+- Does the README/INSTALL guide walk through channel configuration with examples?
+
+### 6b. IONEX / NASA CDDIS Credentials — Silent Failure
+**Problem:** Step 10 of install.sh attempts an IONEX download. It requires a `~/.netrc` file with NASA CDDIS credentials (urs.earthdata.nasa.gov). This is an optional enhancement but is not clearly communicated as such. The install warns if the download fails, but the service starts anyway. Without IONEX data, the physics service uses a degraded ionospheric model. No indication of degraded mode is visible in normal operation.
+
+**What the AI agent should address:**
+- Is the IONEX credential requirement documented at the point of need (during install)?
+- Does the physics service log clearly when running without IONEX?
+- Is there a health check endpoint or status display that shows IONEX availability?
+
+### 6c. PSWS SSH Key Setup — Deferred But Undiscoverable
+**Problem:** If the user enables PSWS upload during setup-station.sh, they are told to run `setup-psws-keys.sh` after install. But this step is mentioned only in the post-wizard banner and is not enforced or re-checked by start-services.sh (beyond a non-fatal connectivity test). If the key setup is skipped, uploads silently fail for months.
+
+**What the AI agent should address:**
+- Does `start-services.sh` clearly distinguish "PSWS key missing" from "PSWS enabled but key not yet set up"?
+- Is there a persistent status indicator in the web dashboard?
+- Is `setup-psws-keys.sh` documented well enough to run without assistance?
+
+### 6d. `config-review.sh` sed Fragility
+**Problem:** The interactive config update in `config-review.sh` uses `sed -i "s/^callsign = .*/..."` to patch values. This works only if the key is at the start of a line and is unique in the file. TOML files can have duplicate keys in different sections (e.g. `host` appears in `[gnss_vtec]`, `[uploader.sftp]`, `[chrony]`). A bare `sed` on `host` would clobber the wrong section.
+
+**What the AI agent should address:**
+- Is the sed approach safe for all fields currently patched?
+- Should this be rewritten to use the Python TOML-aware substitution from setup-station.sh?
+
+### 6e. `update-production.sh` Does Not Re-run `config-review.sh` for New Required Fields
+**Problem:** When a new required config field is introduced (e.g. `[timing]` section added in v5.4.0), existing installs will be missing it. `config-review.sh` detects this and offers to add it. But `update-production.sh --yes` skips the interactive review entirely (`--non-interactive` mode only shows status without adding missing sections). An automated update with `--yes` can leave the config in a broken state.
+
+**What the AI agent should address:**
+- Should `--yes` still apply non-destructive missing-section additions automatically?
+- Should there be a `--check-config` exit code that blocks service restart if required fields are absent?
+
+### 6f. Startup Race: SHM Permissions
+**Problem:** The Chrony SHM segment ordering is handled by both the systemd override (`After=timestd-fusion`) and by `start-services.sh` (explicit SHM clear + fusion first). But on a fresh boot where fusion fails to start (e.g., config error), chrony starts without SHM, creates segments with root:600, and even when fusion recovers it cannot write. Recovery requires manual `ipcrm` + `systemctl restart chronyd`. This is documented in comments but not surfaced to the operator.
+
+**What the AI agent should address:**
+- Is there a health check that detects SHM permission problems and suggests the fix?
+- Should `timestd-fusion.service` include an `ExecStartPre` that clears stale SHM?
+
+### 6g. `ensure-venv.sh` on Unattended Restart
+**Problem:** `ExecStartPre=ensure-venv.sh` runs before core-recorder on every start (including OOM/watchdog restarts). It requires `/opt/hf-timestd/pyproject.toml` and `/opt/hf-timestd/src/` to exist. `update-production.sh` Step 1b syncs these. But on a **fresh install followed by a pull** (i.e., the operator does `git pull` + runs `update-production.sh --pull`), if the pull changes the package version and `ensure-venv.sh` reinstalls, the version in the venv will differ from what was installed by `install.sh`. This is correct behavior but can surprise operators who see pip output in the core-recorder journal.
+
+**What the AI agent should address:** Verify this is harmless and add a comment to the service file.
+
+### 6h. No Post-Install Validation Script
+**Problem:** After install completes, there is no single command that checks: (1) all services running, (2) chrony seeing TSL2 source, (3) raw_buffer being written, (4) L2 HDF5 being updated, (5) web API responding, (6) space weather cache populated. `start-services.sh --status` shows service state but not data pipeline health.
+
+**What the AI agent should address:**
+- Propose or implement a `verify-install.sh` (or extend `start-services.sh --status`) that runs these checks and gives pass/fail with actionable error messages.
+
+### 6i. Stale `deploy-*.sh` Scripts
+**Problem:** The `scripts/` directory contains several `deploy-*.sh` scripts (`deploy-pll-decoder.sh`, `deploy-service-improvements.sh`, `deploy-service-management.sh`, `deploy-v3.10.1-fixes.sh`, `deploy_ionex.sh`, `deploy_web_ui.sh`) that appear to be one-off migration helpers from pre-production development. They reference old paths, old service names, and `bee1` hostnames. They are dead code and confuse new installers reading the scripts/ directory.
+
+**What the AI agent should address:** Confirm these are obsolete and remove or archive them.
 
 ---
 
-## 7. Diagnostic Commands
+## 7. Config Template Completeness Check
+
+Run these before the session to understand the current state:
 
 ```bash
-# Run existing test suite
-cd /home/mjh/git/hf-timestd && python -m pytest tests/ -v --tb=short 2>&1 | tail -40
+# What sections does the template have vs production config?
+bash /home/mjh/git/hf-timestd/scripts/config-review.sh --non-interactive
 
-# Find bare except clauses (CODING_CONTRACT Rule 5)
-grep -rn 'except:' src/hf_timestd/ --include='*.py'
-grep -rn 'except Exception' src/hf_timestd/ --include='*.py' | grep -v 'logging\|logger\|log\.'
+# What channels are configured?
+grep -c '^\[\[recorder.channels\]\]' /etc/hf-timestd/timestd-config.toml
 
-# Find h5py.File without locking=False (DATA_CONTRACT)
-grep -rn 'h5py.File(' src/hf_timestd/ web-api/ --include='*.py' | grep -v 'locking'
+# Is IONEX data present and fresh?
+ls -la /var/lib/timestd/ionex/ | tail -5
+find /var/lib/timestd/ionex -name "*.gz" -newer /var/lib/timestd/ionex -mtime -2 | wc -l
 
-# Find h5py.File without context manager
-grep -rn 'h5py.File(' src/hf_timestd/ web-api/ --include='*.py' | grep -v 'with '
+# Is SHM working?
+ipcs -m | grep -E '0x4e545030|0x4e545031'
+chronyc sources 2>/dev/null | grep -E 'TSL|HF'
 
-# Find HDF5_USE_FILE_LOCKING timing issues
-grep -rn 'HDF5_USE_FILE_LOCKING' src/hf_timestd/ web-api/ --include='*.py'
+# Are all services healthy?
+sudo bash /home/mjh/git/hf-timestd/scripts/start-services.sh --status
 
-# Find *args/**kwargs in core APIs (CODING_CONTRACT Rule 3)
-grep -rn '\*args\|\*\*kwargs' src/hf_timestd/core/ --include='*.py'
+# Check for stale/dead deploy scripts
+ls /home/mjh/git/hf-timestd/scripts/deploy*.sh
 
-# Find deprecated PhysicsPropagationModel usage (PHYSICS_CONTRACT)
-grep -rn 'PhysicsPropagationModel\|physics_propagation' src/hf_timestd/ --include='*.py' | grep -v 'physics_propagation.py'
+# Verify config symlink integrity
+ls -la /opt/hf-timestd/config/
 
-# Find deprecated tof_kalman_ms usage
-grep -rn 'tof_kalman' src/hf_timestd/ web-api/ --include='*.py'
+# Check venv is using installed (not repo) package
+/opt/hf-timestd/venv/bin/python3 -c "import hf_timestd; print(hf_timestd.__file__)"
 
-# Find imports of legacy module
-grep -rn 'wwvh_discrimination_archive' src/hf_timestd/ --include='*.py' | grep -v 'legacy/'
-
-# Check for numpy allocations in hot-path loops (CODING_CONTRACT Rule 6)
-grep -rn 'np\.zeros\|np\.empty\|np\.array' src/hf_timestd/core/metrology_engine.py src/hf_timestd/core/tick_edge_detector.py
-
-# Module-level complexity scan (deeply nested blocks)
-grep -rn 'if\|for\|while\|try' src/hf_timestd/core/metrology_engine.py | wc -l
-
-# Check services are healthy after review changes
-systemctl status timestd-metrology timestd-fusion timestd-physics timestd-web-api
+# Check ensure-venv.sh target files exist
+ls -la /opt/hf-timestd/pyproject.toml /opt/hf-timestd/src/ 2>&1
 ```
 
 ---
 
-## 8. Output Format
+## 8. Recommended Review Order for the Session
 
-For each module or subsystem reviewed, produce findings in this structure:
+Work through these in order — each builds on the previous:
+
+1. **Channel config gap** (§6a): Highest impact on new installer success. Decide: wizard enhancement vs. post-install validator vs. README fix.
+2. **Post-install validation script** (§6h): Implement `verify-install.sh` — gives the operator immediate pass/fail feedback.
+3. **`config-review.sh` sed fragility** (§6d): Assess which fields are at risk; rewrite to Python-based TOML patching if needed.
+4. **`update-production.sh --yes` config gap** (§6e): Fix so automated updates don't silently miss new required fields.
+5. **IONEX credential documentation** (§6b): Improve in-wizard messaging and health API endpoint.
+6. **PSWS key status visibility** (§6c): Web dashboard indicator + clearer start-services output.
+7. **SHM health check** (§6f): Add to verify-install.sh and/or fusion ExecStartPre.
+8. **Dead deploy scripts** (§6i): Remove after confirming obsolescence.
+9. **README/INSTALL documentation pass**: Verify the end-to-end install narrative matches current scripts. Specifically: channel config, IONEX credentials, PSWS key setup, timing authority choice.
+
+---
+
+## 9. Output Format for This Session
+
+For each issue identified, produce findings in this structure:
 
 ```markdown
-### Module: `<module_name.py>`
+### Issue: <short title>
 
-**Contract Violations:**
-- [RULE #] Description of violation (line N)
+**Severity:** CRITICAL | HIGH | MEDIUM | LOW
+**Affected:** <script(s) / file(s)>
 
-**Edge Cases & Error Handling:**
-- [CRITICAL/HIGH/MEDIUM/LOW] Description
+**Problem:** Precise description of what is wrong or missing.
 
-**Resource Management:**
-- Description of leak or missing cleanup
+**Failure mode:** What happens to the installer / operator when this goes wrong.
 
-**Dead Code:**
-- Description of unused function/import/branch
+**Proposed fix:** Concrete change — code, script, or documentation.
 
-**Test Coverage:**
-- What is tested / what is not
-
-**Recommendations:**
-1. [CRITICAL] ...
-2. [HIGH] ...
-3. [MEDIUM] ...
+**Verdict:** Implement now | Defer | Document only
 ```
