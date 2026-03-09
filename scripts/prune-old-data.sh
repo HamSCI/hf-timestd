@@ -11,17 +11,24 @@
 #          systemd timer (timestd-prune.timer) which runs it daily at 03:00 UTC.
 #
 # Retention defaults (override via /etc/hf-timestd/prune.conf if it exists):
-#   RAW_BUFFER_DAYS=3        raw IQ data  (~20 GB/channel/day — largest)
-#   SCIENCE_DTEC_TS_DAYS=7   dtec_timeseries (~2 GB/day — second largest)
-#   SCIENCE_DTEC_DAYS=30     dtec aggregated (~70 MB/day)
-#   SCIENCE_DTEC_DIFF_DAYS=30 dtec_diff (~90 MB/day)
-#   SCIENCE_TEC_DAYS=90      tec (~2 MB/day — tiny, keep longer)
-#   L1_DAYS=30               L1 metrology per-channel
-#   L2_DAYS=30               L2 clock_offset per-channel
-#   ALL_ARRIVALS_DAYS=7      all_arrivals per-channel (~3 GB/channel/day)
-#   TICK_PHASE_DAYS=14       tick_phase per-channel (~2 GB/channel/day)
+#
+# Retention hierarchy:
+#   Raw buffer is the source of truth — all L1/L2 products can be reconstructed
+#   from it, so derived products should not outlive the raw buffer.  Science
+#   outputs (L3 dtec/tec) are the final irreducible products and worth keeping
+#   longer than raw.
+#
+#   RAW_BUFFER_DAYS=3        raw IQ data  (~6.7 GB/channel/day)
+#   ALL_ARRIVALS_DAYS=3      reconstructible from raw — keep <= RAW_BUFFER_DAYS
+#   TICK_PHASE_DAYS=3        reconstructible from raw — keep <= RAW_BUFFER_DAYS
+#   L1_DAYS=3                reconstructible from raw — keep <= RAW_BUFFER_DAYS
+#   L2_DAYS=3                reconstructible from raw — keep <= RAW_BUFFER_DAYS
+#   SCIENCE_DTEC_TS_DAYS=7   final science product — keep longer than raw
+#   SCIENCE_DTEC_DAYS=30     final science product
+#   SCIENCE_DTEC_DIFF_DAYS=30 final science product
+#   SCIENCE_TEC_DAYS=90      final science product (~2 MB/day — tiny)
 #   DISK_WARN_PCT=85         log warning when usage exceeds this
-#   DISK_CRIT_PCT=92         skip non-critical deletes above this (keep more free space)
+#   DISK_CRIT_PCT=92         halve all retention windows above this
 
 set -euo pipefail
 
@@ -32,10 +39,10 @@ SCIENCE_DTEC_TS_DAYS=7
 SCIENCE_DTEC_DAYS=30
 SCIENCE_DTEC_DIFF_DAYS=30
 SCIENCE_TEC_DAYS=90
-L1_DAYS=30
-L2_DAYS=30
-ALL_ARRIVALS_DAYS=7
-TICK_PHASE_DAYS=14
+L1_DAYS=3
+L2_DAYS=3
+ALL_ARRIVALS_DAYS=3
+TICK_PHASE_DAYS=3
 DISK_WARN_PCT=85
 DISK_CRIT_PCT=92
 DRY_RUN=0
