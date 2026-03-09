@@ -1,0 +1,65 @@
+[Unit]
+Description=HF-TimeStd Metrology — %i
+Documentation=https://github.com/mijahauan/hf-timestd
+After=timestd-core-recorder.service
+Wants=timestd-core-recorder.service
+# Isolate failures: one channel crashing doesn't affect others
+PartOf=timestd-metrology.target
+
+[Service]
+Type=simple
+User=timestd
+Group=timestd
+
+EnvironmentFile=/etc/hf-timestd/environment
+EnvironmentFile=/etc/hf-timestd/metrology-channels/%i.env
+
+ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.metrology_service \
+    --archive-dir ${ARCHIVE_ROOT}/%i \
+    --output-dir ${DATA_ROOT}/phase2/%i \
+    --channel-name %i \
+    --frequency-hz ${FREQUENCY_HZ} \
+    --state-file ${DATA_ROOT}/state/phase2-%i.json \
+    --poll-interval 10.0 \
+    --log-level ${TIMESTD_LOG_LEVEL} \
+    --callsign ${CALLSIGN} \
+    --grid-square ${GRID_SQUARE} \
+    --receiver-name HF-TimeStd \
+    --station-id ${STATION_ID} \
+    --instrument-id ${INSTRUMENT_ID} \
+    --latitude ${LATITUDE} \
+    --longitude ${LONGITUDE} \
+    --use-tiered-storage
+
+WorkingDirectory=/var/lib/timestd
+
+# --- Resilience ---
+Restart=always
+RestartSec=15
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# --- Resource limits ---
+# Each worker uses ~400-700 MB; cap at 1.2 GB to prevent runaway growth
+MemoryMax=1200M
+MemoryHigh=900M
+
+# Protect timestd from OOM killer — IDE/language servers should die first
+OOMScoreAdjust=-500
+
+# Pin to first 8 logical CPUs (same as old taskset 0x00ff)
+CPUAffinity=0 1 2 3 4 5 6 7
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-metrology-%i
+
+# --- Security hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/timestd /var/log/hf-timestd /dev/shm/timestd
+ProtectHome=true
+
+[Install]
+WantedBy=timestd-metrology.target

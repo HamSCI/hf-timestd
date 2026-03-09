@@ -1,0 +1,11 @@
+[Unit]
+Description=HF-TimeStd Raw Buffer Cleanup (daily)
+
+[Timer]
+# Run at 02:30 UTC daily — after midnight rollover, before peak processing
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
