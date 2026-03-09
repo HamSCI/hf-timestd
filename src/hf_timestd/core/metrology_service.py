@@ -348,6 +348,7 @@ class MetrologyService:
     def run(self):
         """Main service loop with inotify-based file watching."""
         self.running = True
+        self._resource_guardian = getattr(self, '_resource_guardian', None)
         logger.info("Starting MetrologyService loop")
         
         # Handle signals
@@ -403,6 +404,15 @@ class MetrologyService:
                         logger.debug(f"Minute {minute_boundary} not in hot buffer or processing failed")
                         
             except queue.Empty:
+                # Resource watchdog (runs every ~60s, cheap no-op otherwise)
+                if self._resource_guardian:
+                    from hf_timestd.core.resource_guardian import ResourceState
+                    rs = self._resource_guardian.watchdog_check()
+                    if rs.state in (ResourceState.STOP, ResourceState.EMERGENCY):
+                        logger.critical(f"Resource guardian: {rs.message} — stopping")
+                        self.running = False
+                        break
+
                 # Fallback: poll hot buffer for new files (inotify may miss events on tmpfs)
                 now = time.time()
                 if now - last_poll_time >= poll_interval:
@@ -421,6 +431,15 @@ class MetrologyService:
     def _run_polling_mode(self):
         """Fallback polling mode when watchdog is not available."""
         while self.running:
+            # Resource watchdog (runs every ~60s, cheap no-op otherwise)
+            if self._resource_guardian:
+                from hf_timestd.core.resource_guardian import ResourceState
+                rs = self._resource_guardian.watchdog_check()
+                if rs.state in (ResourceState.STOP, ResourceState.EMERGENCY):
+                    logger.critical(f"Resource guardian: {rs.message} — stopping")
+                    self.running = False
+                    break
+
             # Determine next minute to process
             target_minute = self._get_latest_minute()
             logger.info(f"Target minute: {target_minute}")
@@ -1193,6 +1212,14 @@ if __name__ == "__main__":
         "longitude": args.longitude
     }
     
+    # --- Resource Guardian: preflight check ---
+    from hf_timestd.core.resource_guardian import ResourceGuardian
+    config_path = str(args.config_file) if args.config_file else '/etc/hf-timestd/timestd-config.toml'
+    guardian = ResourceGuardian.from_config(config_path)
+    if not guardian.preflight_check():
+        logger.critical("Resource preflight failed — exiting")
+        sys.exit(1)
+
     try:
         service = MetrologyService(
             config=config,
@@ -1203,6 +1230,7 @@ if __name__ == "__main__":
             receiver_grid=args.grid_square,
             station_config=station_config
         )
+        service._resource_guardian = guardian
         service.run()
     except KeyboardInterrupt:
         pass
