@@ -1516,7 +1516,7 @@ class MetrologyEngine:
                     timestamp_utc=timestamp_utc_val,
                     timing_error_ms=m['timing_error_ms'],
                     snr_db=m['snr_db'],
-                    confidence=min(1.0, m['snr_db'] / 20.0),
+                    confidence=max(0.0, min(1.0, m['snr_db'] / 20.0)),
                     use_for_time_snap=is_best,
                     correlation_peak=m.get('correlation_peak', 0.0),
                     noise_floor=0.0,
