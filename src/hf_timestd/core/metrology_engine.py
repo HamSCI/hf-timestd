@@ -1218,11 +1218,17 @@ class MetrologyEngine:
         elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
             station_tone_freqs = [('WWV', 1000)]
         else:
-            # SHARED channels: try all stations
+            # SHARED channels: WWV and WWVH only.
+            # BPM is EXCLUDED: it uses the same 1000 Hz tone as WWV, so
+            # the matched filter cannot distinguish them.  The fig12
+            # correlation heatmap shows r=0.91 between "BPM" and WWV
+            # Doppler at 10 MHz — confirming that "BPM" detections on
+            # shared frequencies are misattributed WWV signals.
+            # BPM discrimination would require tick-duration measurement
+            # (10ms BPM vs 5ms WWV) which is below our time resolution.
             station_tone_freqs = [
                 ('WWV', 1000),
                 ('WWVH', 1200),
-                ('BPM', 1000),
             ]
         
         measurements = []
@@ -1241,19 +1247,7 @@ class MetrologyEngine:
             buf_start_utc = buffer_timing.sample0_utc
             buf_end_utc = buffer_timing.sample_to_utc(n_samples)
             
-            # Current UTC hour for BPM schedule gating
-            current_utc_hour = int(buf_start_utc // 3600) % 24
-            
             for station_name, tone_freq in station_tone_freqs:
-                # BPM broadcast schedule gate: skip BPM when it's not transmitting.
-                # Without this, WWV's 1000 Hz tone on shared frequencies produces
-                # false BPM detections (same tone freq, same matched filter).
-                if station_name == 'BPM' and hasattr(self, 'bpm_discriminator'):
-                    if current_utc_hour not in self.bpm_discriminator.active_hours:
-                        logger.debug(f"{self.channel_name}: Skipping BPM — "
-                                    f"hour {current_utc_hour} outside broadcast schedule")
-                        continue
-                
                 prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
                 prop_delay_sec = prop_delay_ms / 1000.0
                 
@@ -1403,16 +1397,27 @@ class MetrologyEngine:
             #
             # The edge ensemble augments timing for stations that had NO
             # successful minute marker correlation this minute.
+            #
+            # BPM is included here (but NOT in the per-second correlator)
+            # because the edge detector uses tick-duration-specific templates
+            # (10ms BPM vs 5ms WWV) which provide real discrimination.
+            # BPM edge results feed the physics pipeline (Doppler, dTEC,
+            # carrier phase) for transpolar ionospheric analysis, but do NOT
+            # create synthetic timing measurements.
             is_dedicated = ('WWV_20' in channel_upper or 'WWV_25' in channel_upper)
             stations_with_corr = {m['station'] for m in measurements}
             edge_results = {}
             
-            for station_name, tone_freq in station_tone_freqs:
-                # Same BPM schedule gate as the per-second correlator above.
-                if station_name == 'BPM' and hasattr(self, 'bpm_discriminator'):
-                    if current_utc_hour not in self.bpm_discriminator.active_hours:
-                        continue
-                
+            # Build edge station list: start from correlator list, add BPM
+            # on shared frequencies during its broadcast hours.
+            edge_station_freqs = list(station_tone_freqs)
+            if ('BPM', 1000) not in edge_station_freqs:
+                current_utc_hour = int(buf_start_utc // 3600) % 24
+                if (hasattr(self, 'bpm_discriminator')
+                        and current_utc_hour in self.bpm_discriminator.active_hours):
+                    edge_station_freqs.append(('BPM', 1000))
+            
+            for station_name, tone_freq in edge_station_freqs:
                 prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
                 prop_delay_sec = prop_delay_ms / 1000.0
                 
@@ -1437,7 +1442,13 @@ class MetrologyEngine:
                     # If this station had NO correlation detection but the
                     # edge ensemble has sufficient confidence, create a
                     # synthetic measurement from the ensemble.
-                    if (station_name not in stations_with_corr
+                    # BPM is excluded from timing recovery: transpolar path
+                    # is too variable, and on shared frequencies the 10ms
+                    # template may still correlate with WWV's 5ms ticks.
+                    # BPM edge results still feed the physics pipeline
+                    # (tick_phase → Doppler → dTEC) via edge_results dict.
+                    if (station_name != 'BPM'
+                            and station_name not in stations_with_corr
                             and edge_result.confidence >= 0.3
                             and edge_result.ensemble_n_edges >= 5):
                         

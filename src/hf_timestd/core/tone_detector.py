@@ -323,15 +323,20 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             # Revert to 0.8s template to detect the strong Minute Tone
             self.templates[StationType.WWV] = self._create_template(1000, 0.8)
             
-            # WWVH and BPM only broadcast on 2.5, 5, 10, 15 MHz (NOT on 20 or 25 MHz)
+            # WWVH broadcasts on 2.5, 5, 10, 15 MHz (NOT on 20 or 25 MHz)
+            # BPM also broadcasts on these frequencies but is EXCLUDED:
+            # BPM uses the same 1000 Hz tone as WWV, so the matched filter
+            # cannot distinguish them.  The fig12 correlation heatmap shows
+            # r=0.91 between "BPM" and WWV Doppler at 10 MHz — confirming
+            # that "BPM" detections on shared frequencies are misattributed
+            # WWV signals.  BPM discrimination would require tick-duration
+            # measurement (10ms BPM vs 5ms WWV) below our time resolution.
             shared_frequencies = [2.5, 5.0, 10.0, 15.0]
             if self.channel_frequency_mhz in shared_frequencies:
                 self.templates[StationType.WWVH] = self._create_template(1200, 0.8)
-                # BPM minute marker is 300ms at 1000Hz
-                self.templates[StationType.BPM] = self._create_template(1000, 0.3)
-                logger.info(f"{channel_name}: WWVH and BPM detection enabled (shared frequency)")
+                logger.info(f"{channel_name}: WWVH detection enabled (shared frequency, BPM excluded — same 1000 Hz tone as WWV)")
             else:
-                logger.info(f"{channel_name}: WWVH/BPM detection disabled (WWV-only frequency)")
+                logger.info(f"{channel_name}: WWVH detection disabled (WWV-only frequency)")
         
         # State tracking
         self.last_detections_by_minute: Dict[int, List[ToneDetectionResult]] = {}
