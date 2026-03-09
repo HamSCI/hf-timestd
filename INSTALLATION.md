@@ -16,6 +16,76 @@ This guide covers installing and configuring `hf-timestd` for recording and anal
 - HF antenna covering 2.5-25 MHz
 - Linux host with multicast-capable LAN
 
+### Storage Requirements
+
+The system generates substantial data. **The minimum practical installation requires enough disk to hold at least 2 days of raw IQ data plus derived products for the number of channels configured.**
+
+#### Per-channel daily data volumes (measured, zstd compression, 24 kHz IQ)
+
+| Product | Per channel/day | Reconstructible? |
+|---|---|---|
+| Raw IQ buffer | ~6.7 GB | — source of truth |
+| `all_arrivals` | ~3.0 GB | Yes — from raw |
+| `tick_phase` | ~2.0 GB | Yes — from raw |
+| `tick_timing` | ~60 MB | Yes — from raw |
+| `detection_attempts` | ~85 MB | Yes — from raw |
+| L1 metrology | ~40 MB | Yes — from raw |
+| L2 clock_offset | ~90 MB | Yes — from raw |
+| L3 science (dtec/tec) | ~100 MB total | No — final product |
+
+**Rule of thumb: ~10 GB × N_channels per day** for raw buffer plus all derived products.
+
+#### Minimum disk by channel count
+
+| Channels | Min disk (2-day raw+derived) | Recommended (3-day) |
+|---|---|---|
+| 3 | 60 GB | 90 GB |
+| 6 | 120 GB | 180 GB |
+| 9 | 180 GB | 270 GB |
+
+> **Note:** A 120 GB disk with 9 channels is at the absolute margin — the system will fill the disk within a single day if retention is not set aggressively. See [Storage Retention Configuration](#storage-retention-configuration) below.
+
+#### Storage retention configuration
+
+The nightly prune timer (`timestd-prune.timer`, runs at 03:00 UTC) manages retention automatically. The default retention policy keeps derived products for the same number of days as the raw buffer, since **all L1/L2 derived products can be reconstructed from the raw IQ data**. Only L3 science outputs (dtec, tec) are kept longer as the final irreducible product.
+
+Default retention (sufficient for disks that comfortably hold 3+ days of data per channel):
+```
+RAW_BUFFER_DAYS=3        # and all derived products
+SCIENCE_DTEC_TS_DAYS=7
+SCIENCE_DTEC_DAYS=30
+SCIENCE_TEC_DAYS=90
+```
+
+For smaller disks, create `/etc/hf-timestd/prune.conf` with tighter values. Example for a 120 GB disk with 9 channels (`RAW_BUFFER_DAYS=1` is the minimum safe value):
+```bash
+# /etc/hf-timestd/prune.conf — tight retention for small disk
+RAW_BUFFER_DAYS=1
+ALL_ARRIVALS_DAYS=1
+TICK_PHASE_DAYS=1
+L1_DAYS=1
+L2_DAYS=1
+SCIENCE_DTEC_TS_DAYS=3
+SCIENCE_DTEC_DAYS=15
+SCIENCE_TEC_DAYS=30
+DISK_WARN_PCT=80
+DISK_CRIT_PCT=88
+```
+
+On constrained disks also change the prune timer to run hourly rather than daily, since the disk can fill within a single day:
+```bash
+sudo mkdir -p /etc/systemd/system/timestd-prune.timer.d
+sudo tee /etc/systemd/system/timestd-prune.timer.d/override.conf <<EOF
+[Timer]
+OnCalendar=
+OnCalendar=hourly
+RandomizedDelaySec=120
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart timestd-prune.timer
+```
+
+When disk usage exceeds `DISK_CRIT_PCT`, the prune script automatically flushes all `all_arrivals` and `tick_phase` files regardless of age, since these are reconstructible and are the largest products after raw IQ data.
+
 ### Software
 
 - Linux (Debian/Ubuntu class)
