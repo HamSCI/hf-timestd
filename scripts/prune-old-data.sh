@@ -88,10 +88,18 @@ if [[ "$USED_PCT" -ge "$DISK_CRIT_PCT" ]]; then
     SCIENCE_DTEC_DAYS=$(( SCIENCE_DTEC_DAYS / 2 < 3 ? 3 : SCIENCE_DTEC_DAYS / 2 ))
     SCIENCE_DTEC_DIFF_DAYS=$(( SCIENCE_DTEC_DIFF_DAYS / 2 < 3 ? 3 : SCIENCE_DTEC_DIFF_DAYS / 2 ))
     SCIENCE_TEC_DAYS=$(( SCIENCE_TEC_DAYS / 2 < 14 ? 14 : SCIENCE_TEC_DAYS / 2 ))
-    L1_DAYS=$(( L1_DAYS / 2 < 7 ? 7 : L1_DAYS / 2 ))
-    L2_DAYS=$(( L2_DAYS / 2 < 7 ? 7 : L2_DAYS / 2 ))
+    L1_DAYS=$(( L1_DAYS / 2 < 1 ? 1 : L1_DAYS / 2 ))
+    L2_DAYS=$(( L2_DAYS / 2 < 1 ? 1 : L2_DAYS / 2 ))
     ALL_ARRIVALS_DAYS=$(( ALL_ARRIVALS_DAYS / 2 < 1 ? 1 : ALL_ARRIVALS_DAYS / 2 ))
     TICK_PHASE_DAYS=$(( TICK_PHASE_DAYS / 2 < 1 ? 1 : TICK_PHASE_DAYS / 2 ))
+fi
+
+# Emergency flush: when critically full, delete ALL all_arrivals and tick_phase
+# files regardless of age — they are reconstructible from the raw buffer and
+# are the largest reconstructible products (~3 GB and ~2 GB per channel/day).
+EMERGENCY_FLUSH=0
+if [[ "$USED_PCT" -ge "$DISK_CRIT_PCT" ]]; then
+    EMERGENCY_FLUSH=1
 fi
 
 log "Retention: raw_buffer=${RAW_BUFFER_DAYS}d dtec_ts=${SCIENCE_DTEC_TS_DAYS}d dtec=${SCIENCE_DTEC_DAYS}d dtec_diff=${SCIENCE_DTEC_DIFF_DAYS}d tec=${SCIENCE_TEC_DAYS}d L1=${L1_DAYS}d L2=${L2_DAYS}d all_arrivals=${ALL_ARRIVALS_DAYS}d tick_phase=${TICK_PHASE_DAYS}d"
@@ -194,8 +202,23 @@ for channel_dir in "$PHASE2_DIR"/*/; do
 
     prune_hdf5_dir "$channel_dir/metrology" "$L1_DAYS"              "L1/${channel}/metrology"
     prune_hdf5_dir "$channel_dir/clock_offset" "$L2_DAYS"           "L2/${channel}/clock_offset"
-    prune_hdf5_dir "$channel_dir/all_arrivals" "$ALL_ARRIVALS_DAYS" "L1/${channel}/all_arrivals"
-    prune_hdf5_dir "$channel_dir/tick_phase"   "$TICK_PHASE_DAYS"   "L2/${channel}/tick_phase"
+    if [[ $EMERGENCY_FLUSH -eq 1 ]]; then
+        # Critically full — flush entire all_arrivals and tick_phase dirs now;
+        # both are reconstructible from raw buffer.
+        for flushdir in "$channel_dir/all_arrivals" "$channel_dir/tick_phase"; do
+            if [[ -d "$flushdir" ]]; then
+                flush_size=$(du -sb "$flushdir" 2>/dev/null | cut -f1 || echo 0)
+                flush_mb=$(( flush_size / 1048576 ))
+                log "EMERGENCY FLUSH ${flushdir##*/var/lib/timestd/phase2/}: ~${flush_mb}MB (disk critically full, reconstructible)"
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    find "$flushdir" -name '*.h5' -delete 2>/dev/null || true
+                fi
+            fi
+        done
+    else
+        prune_hdf5_dir "$channel_dir/all_arrivals" "$ALL_ARRIVALS_DAYS" "L1/${channel}/all_arrivals"
+        prune_hdf5_dir "$channel_dir/tick_phase"   "$TICK_PHASE_DAYS"   "L2/${channel}/tick_phase"
+    fi
 done
 
 # ── 4. Corrupt file cleanup ───────────────────────────────────────────────────
