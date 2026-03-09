@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for ResourceGuardian — resource management and cleanup logic."""
+"""Tests for ResourceGuardian — universal, self-sizing resource management."""
 
 import os
 import shutil
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -13,9 +12,13 @@ import pytest
 from hf_timestd.core.resource_guardian import (
     ResourceGuardian,
     ResourceState,
-    ResourceStatus,
-    RetentionPolicy,
-    DISK_WARN_FREE_BYTES,
+    DISK_MAX_PERCENT,
+    DISK_HARD_STOP_PERCENT,
+    BASELINE_DAYS,
+    PHASE2_BYTES_PER_CHANNEL_PER_DAY,
+    RAM_PER_CHANNEL,
+    RAM_SYSTEM_HEADROOM,
+    OVERHEAD_BYTES,
     GB,
     MB,
 )
@@ -31,195 +34,252 @@ def tmp_data_root(tmp_path):
 
 @pytest.fixture
 def guardian(tmp_data_root):
-    """Create a ResourceGuardian with temporary paths."""
+    """Create a ResourceGuardian with temporary paths and small channel count."""
     return ResourceGuardian(
         data_root=str(tmp_data_root),
-        log_dir=str(tmp_data_root / 'logs'),
-        min_disk_free_gb=0.001,  # 1 MB — low for testing
-        min_ram_available_gb=0.001,
+        n_channels=1,       # small so baseline fits any test disk
+        sample_rate=24000,
     )
 
 
+# ======================================================================
+# Baseline computation
+# ======================================================================
+
+class TestBaselineComputation:
+    """Verify the auto-sizing math."""
+
+    def test_baseline_scales_with_channels(self):
+        g1 = ResourceGuardian(n_channels=1, sample_rate=24000)
+        g9 = ResourceGuardian(n_channels=9, sample_rate=24000)
+        # 9-channel baseline should be ~9× the 1-channel baseline (minus shared overhead)
+        assert g9.baseline_bytes > g1.baseline_bytes * 8
+
+    def test_baseline_scales_with_sample_rate(self):
+        g_lo = ResourceGuardian(n_channels=9, sample_rate=12000)
+        g_hi = ResourceGuardian(n_channels=9, sample_rate=24000)
+        assert g_hi.baseline_bytes > g_lo.baseline_bytes
+
+    def test_baseline_includes_overhead(self):
+        g = ResourceGuardian(n_channels=1, sample_rate=24000)
+        assert g.baseline_bytes > OVERHEAD_BYTES
+
+    def test_min_ram_scales_with_channels(self):
+        g1 = ResourceGuardian(n_channels=1)
+        g9 = ResourceGuardian(n_channels=9)
+        assert g9.min_ram_bytes == 9 * RAM_PER_CHANNEL + RAM_SYSTEM_HEADROOM
+        assert g1.min_ram_bytes == 1 * RAM_PER_CHANNEL + RAM_SYSTEM_HEADROOM
+
+
+# ======================================================================
+# Preflight
+# ======================================================================
+
 class TestPreflight:
-    """Preflight check tests."""
+    """Preflight check: refuse to start if system can't sustain the load."""
 
     def test_preflight_passes_with_sufficient_resources(self, guardian):
+        """1-channel guardian on a real disk should always pass."""
         assert guardian.preflight_check() is True
 
-    def test_preflight_fails_on_insufficient_disk(self, tmp_data_root):
+    def test_preflight_fails_if_disk_too_small_for_baseline(self, tmp_data_root):
+        """If 80% of disk < baseline, preflight must fail."""
         g = ResourceGuardian(
             data_root=str(tmp_data_root),
-            min_disk_free_gb=999999,  # 999 TB — impossible
-            min_ram_available_gb=0.001,
+            n_channels=9999,   # absurd — baseline exceeds any disk
+            sample_rate=24000,
         )
         assert g.preflight_check() is False
 
-    def test_preflight_fails_on_insufficient_ram(self, tmp_data_root):
+    def test_preflight_fails_if_ram_too_small(self, tmp_data_root):
+        """If 80% of RAM < min_ram, preflight must fail."""
         g = ResourceGuardian(
             data_root=str(tmp_data_root),
-            min_disk_free_gb=0.001,
-            min_ram_available_gb=999999,  # impossible
+            n_channels=99999,  # min_ram will exceed any real system
+            sample_rate=24000,
         )
         assert g.preflight_check() is False
 
     def test_preflight_creates_missing_dirs(self, tmp_path):
-        # Create data_root (disk_usage needs it) but not subdirs
         fresh = tmp_path / 'fresh'
         fresh.mkdir()
-        g = ResourceGuardian(
-            data_root=str(fresh),
-            min_disk_free_gb=0.001,
-            min_ram_available_gb=0.001,
-        )
+        g = ResourceGuardian(data_root=str(fresh), n_channels=1)
         assert g.preflight_check() is True
         assert (fresh / 'state').exists()
+        assert (fresh / 'raw_buffer').exists()
+        assert (fresh / 'phase2').exists()
 
+
+# ======================================================================
+# Watchdog
+# ======================================================================
 
 class TestWatchdog:
-    """Runtime watchdog tests."""
+    """Runtime watchdog: enforce 80% disk cap."""
 
-    def test_watchdog_ok_with_sufficient_resources(self, guardian):
-        # Mock disk usage to avoid triggering quota on the real filesystem
+    def test_watchdog_ok_when_under_80_percent(self, guardian):
         with patch('shutil.disk_usage') as mock_du:
             mock_du.return_value = type('', (), {
                 'total': 500 * GB,
-                'used': 200 * GB,
+                'used': 200 * GB,   # 40%
                 'free': 300 * GB,
             })()
             status = guardian.watchdog_check(force=True)
             assert status.state == ResourceState.OK
 
     def test_watchdog_skips_when_interval_not_elapsed(self, guardian):
-        # First check runs
-        s1 = guardian.watchdog_check(force=True)
-        # Second check within interval — should skip
-        s2 = guardian.watchdog_check(force=False)
-        assert 'skipped' in s2.message
+        with patch('shutil.disk_usage') as mock_du:
+            mock_du.return_value = type('', (), {
+                'total': 500 * GB, 'used': 200 * GB, 'free': 300 * GB,
+            })()
+            guardian.watchdog_check(force=True)
+            s2 = guardian.watchdog_check(force=False)
+            assert 'skipped' in s2.message
 
-    def test_watchdog_returns_emergency_on_no_disk(self, guardian):
-        """Simulate zero disk free."""
-        fake_usage = shutil.disk_usage.__class__
+    def test_watchdog_cleans_when_over_80_percent(self, tmp_data_root, guardian):
+        """When disk > 80%, watchdog should evict oldest data."""
+        # Create an old date dir in raw_buffer
+        old_date = time.strftime('%Y%m%d', time.gmtime(time.time() - 5 * 86400))
+        ch_dir = tmp_data_root / 'raw_buffer' / 'TEST_CH'
+        date_dir = ch_dir / old_date
+        date_dir.mkdir(parents=True)
+        (date_dir / 'data.bin').write_bytes(b'\x00' * 10000)
+
+        # Mock disk_usage: first two calls (watchdog + eviction loop pre-check)
+        # return >80%, subsequent calls return <80% (simulating freed space)
+        call_count = [0]
+        def fake_disk_usage(path):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                # Watchdog check + eviction loop's first "are we under?" check
+                return type('', (), {
+                    'total': 500 * GB, 'used': 410 * GB, 'free': 90 * GB,
+                })()
+            else:
+                # After eviction: under 80%
+                return type('', (), {
+                    'total': 500 * GB, 'used': 350 * GB, 'free': 150 * GB,
+                })()
+
+        with patch('shutil.disk_usage', side_effect=fake_disk_usage):
+            status = guardian.watchdog_check(force=True)
+
+        assert status.state == ResourceState.CLEANED
+        assert not date_dir.exists(), "Old date dir should have been evicted"
+
+    def test_watchdog_emergency_when_over_95_percent(self, guardian):
+        """When disk > 95% and can't clean, should return EMERGENCY."""
         with patch('shutil.disk_usage') as mock_du:
             mock_du.return_value = type('', (), {
                 'total': 500 * GB,
-                'used': 500 * GB - 500 * MB,
-                'free': 500 * MB,  # < DISK_EMERGENCY_FREE_BYTES (1 GB)
+                'used': 480 * GB,   # 96%
+                'free': 20 * GB,
             })()
             status = guardian.watchdog_check(force=True)
             assert status.state == ResourceState.EMERGENCY
 
 
-class TestRetentionCleanup:
-    """Storage janitor tests."""
+# ======================================================================
+# Eviction logic
+# ======================================================================
 
-    def test_cleanup_dated_dirs(self, tmp_data_root, guardian):
-        """Verify that old YYYYMMDD directories are removed."""
-        channel = tmp_data_root / 'raw_buffer' / 'SHARED_10000'
-        channel.mkdir(parents=True)
+class TestEviction:
+    """Oldest-day-first eviction across raw_buffer and phase2."""
 
-        # Create old and new date dirs
-        old_date = time.strftime('%Y%m%d', time.gmtime(time.time() - 10 * 86400))
-        new_date = time.strftime('%Y%m%d', time.gmtime())
+    def test_evict_date_removes_raw_and_phase2(self, tmp_data_root, guardian):
+        """Evicting a date removes both raw_buffer dirs and phase2 files."""
+        date_str = '20260101'
 
-        old_dir = channel / old_date
-        new_dir = channel / new_date
-        old_dir.mkdir()
-        new_dir.mkdir()
+        # raw_buffer/CHANNEL/YYYYMMDD/
+        raw_ch = tmp_data_root / 'raw_buffer' / 'SHARED_10000' / date_str
+        raw_ch.mkdir(parents=True)
+        (raw_ch / 'data.bin').write_bytes(b'\x00' * 5000)
 
-        # Put a file in old dir so it has size
-        (old_dir / 'data.bin').write_bytes(b'\x00' * 1000)
-        (new_dir / 'data.bin').write_bytes(b'\x00' * 1000)
+        # phase2/CHANNEL/tick_phase/SHARED_10000_tick_phase_YYYYMMDD.h5
+        phase2_dir = tmp_data_root / 'phase2' / 'SHARED_10000' / 'tick_phase'
+        phase2_dir.mkdir(parents=True)
+        h5_file = phase2_dir / f'SHARED_10000_tick_phase_{date_str}.h5'
+        h5_file.write_bytes(b'\x00' * 3000)
 
-        # Run cleanup with 2-day retention
-        policy = RetentionPolicy(
-            path=tmp_data_root / 'raw_buffer',
-            max_age_days=2,
-            file_patterns=[],
-        )
-        freed = guardian._enforce_retention(policy)
+        freed = guardian._evict_date(date_str)
 
-        assert freed > 0
-        assert not old_dir.exists(), "Old directory should be removed"
-        assert new_dir.exists(), "New directory should be preserved"
+        assert freed == 8000
+        assert not raw_ch.exists()
+        assert not h5_file.exists()
 
-    def test_cleanup_dated_files(self, tmp_data_root, guardian):
-        """Verify that old *_YYYYMMDD.h5 files are removed."""
-        channel = tmp_data_root / 'phase2' / 'SHARED_10000' / 'tick_phase'
-        channel.mkdir(parents=True)
-
-        old_date = time.strftime('%Y%m%d', time.gmtime(time.time() - 60 * 86400))
-        new_date = time.strftime('%Y%m%d', time.gmtime())
-
-        old_file = channel / f'SHARED_10000_tick_phase_{old_date}.h5'
-        new_file = channel / f'SHARED_10000_tick_phase_{new_date}.h5'
-        old_file.write_bytes(b'\x00' * 2000)
-        new_file.write_bytes(b'\x00' * 2000)
-
-        policy = RetentionPolicy(
-            path=tmp_data_root / 'phase2',
-            max_age_days=30,
-            file_patterns=['*_????????.h5'],
-        )
-        freed = guardian._enforce_retention(policy)
-
-        assert freed > 0
-        assert not old_file.exists(), "Old HDF5 file should be removed"
-        assert new_file.exists(), "New HDF5 file should be preserved"
-
-    def test_cleanup_preserves_files_within_retention(self, tmp_data_root, guardian):
-        """Files within retention period are not deleted."""
-        channel = tmp_data_root / 'phase2' / 'CHU_7850' / 'clock_offset'
-        channel.mkdir(parents=True)
-
+    def test_evict_preserves_today(self, tmp_data_root, guardian):
+        """Today's data is never evicted."""
         today = time.strftime('%Y%m%d', time.gmtime())
-        f = channel / f'CHU_7850_clock_offset_{today}.h5'
-        f.write_bytes(b'\x00' * 1000)
+        ch = tmp_data_root / 'raw_buffer' / 'CH' / today
+        ch.mkdir(parents=True)
+        (ch / 'data.bin').write_bytes(b'\x00' * 1000)
 
-        policy = RetentionPolicy(
-            path=tmp_data_root / 'phase2',
-            max_age_days=30,
-            file_patterns=['*_????????.h5'],
-        )
-        freed = guardian._enforce_retention(policy)
+        # _evict_oldest_days_until_under should skip today
+        with patch('shutil.disk_usage') as mock_du:
+            mock_du.return_value = type('', (), {
+                'total': 500 * GB, 'used': 410 * GB, 'free': 90 * GB,
+            })()
+            guardian._evict_oldest_days_until_under(500 * GB, 80.0)
 
-        assert freed == 0
-        assert f.exists()
+        assert ch.exists(), "Today's data must not be evicted"
 
+    def test_collect_all_dates(self, tmp_data_root, guardian):
+        """Collect dates from both raw_buffer and phase2."""
+        # raw_buffer date
+        (tmp_data_root / 'raw_buffer' / 'CH' / '20260301').mkdir(parents=True)
+        # phase2 date
+        p = tmp_data_root / 'phase2' / 'CH' / 'tick'
+        p.mkdir(parents=True)
+        (p / 'CH_tick_20260302.h5').write_bytes(b'\x00')
+
+        dates = guardian._collect_all_dates()
+        assert '20260301' in dates
+        assert '20260302' in dates
+
+
+# ======================================================================
+# Config factory
+# ======================================================================
 
 class TestConfigFactory:
-    """from_config() factory method tests."""
+    """from_config() auto-detects channels and sample rate."""
 
-    def test_from_config_with_valid_toml(self, tmp_path):
+    def test_counts_channels_from_toml(self, tmp_path):
         cfg = tmp_path / 'test.toml'
         cfg.write_text('''
 [recorder]
 production_data_root = "/var/lib/timestd"
 
-[resource_guardian]
-disk_quota_percent = 90.0
-min_disk_free_gb = 100.0
-retention_raw_buffer = 3
-retention_phase2 = 60
+[[channels]]
+name = "SHARED_5000"
+frequency_hz = 5000000
+
+[[channels]]
+name = "SHARED_10000"
+frequency_hz = 10000000
+
+[[channels]]
+name = "CHU_7850"
+frequency_hz = 7850000
 ''')
         g = ResourceGuardian.from_config(str(cfg))
-        assert g.disk_quota_percent == 90.0
-        assert g.min_disk_free_bytes == 100 * GB
-        assert g.retention['raw_buffer'] == 3
-        assert g.retention['phase2'] == 60
-        # Unspecified retentions keep defaults
-        assert g.retention['upload'] == 7
+        assert g.n_channels == 3
+        assert g.data_root == Path('/var/lib/timestd')
 
-    def test_from_config_missing_file_uses_defaults(self):
+    def test_missing_config_uses_defaults(self):
         g = ResourceGuardian.from_config('/nonexistent/path.toml')
-        assert g.disk_quota_percent == 85.0
-        assert g.retention['raw_buffer'] == 2
+        # Should fallback to counting dirs or default 9
+        assert g.n_channels >= 1
+        assert g.sample_rate == 24000
 
+
+# ======================================================================
+# Helpers
+# ======================================================================
 
 class TestHelpers:
-    """Helper method tests."""
 
     def test_get_ram_available_returns_positive(self):
-        """On Linux, RAM should be available."""
         ram = ResourceGuardian._get_ram_available()
         if os.path.exists('/proc/meminfo'):
             assert ram is not None
