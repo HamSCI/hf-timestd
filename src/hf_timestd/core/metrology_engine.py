@@ -1241,7 +1241,19 @@ class MetrologyEngine:
             buf_start_utc = buffer_timing.sample0_utc
             buf_end_utc = buffer_timing.sample_to_utc(n_samples)
             
+            # Current UTC hour for BPM schedule gating
+            current_utc_hour = int(buf_start_utc // 3600) % 24
+            
             for station_name, tone_freq in station_tone_freqs:
+                # BPM broadcast schedule gate: skip BPM when it's not transmitting.
+                # Without this, WWV's 1000 Hz tone on shared frequencies produces
+                # false BPM detections (same tone freq, same matched filter).
+                if station_name == 'BPM' and hasattr(self, 'bpm_discriminator'):
+                    if current_utc_hour not in self.bpm_discriminator.active_hours:
+                        logger.debug(f"{self.channel_name}: Skipping BPM — "
+                                    f"hour {current_utc_hour} outside broadcast schedule")
+                        continue
+                
                 prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
                 prop_delay_sec = prop_delay_ms / 1000.0
                 
@@ -1396,6 +1408,11 @@ class MetrologyEngine:
             edge_results = {}
             
             for station_name, tone_freq in station_tone_freqs:
+                # Same BPM schedule gate as the per-second correlator above.
+                if station_name == 'BPM' and hasattr(self, 'bpm_discriminator'):
+                    if current_utc_hour not in self.bpm_discriminator.active_hours:
+                        continue
+                
                 prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
                 prop_delay_sec = prop_delay_ms / 1000.0
                 
