@@ -741,6 +741,13 @@ class BinaryArchiveWriter:
             
             return self._write_samples_inner(samples, rtp_timestamp, gap_samples)
     
+    # Maximum allowed age of RTP-derived data relative to wallclock.
+    # chrony (NTP at worst, GPS+PPS at best) and GPSDO-disciplined RTP
+    # should agree within milliseconds.  A large discrepancy means the
+    # processing pipeline has fallen behind real-time — drop the data
+    # rather than writing stale files that starve downstream services.
+    MAX_STALENESS_SECONDS = 120.0
+
     def _write_samples_inner(
         self,
         samples: np.ndarray,
@@ -762,6 +769,23 @@ class BinaryArchiveWriter:
         # This avoids wall clock jitter from NTP/chrony adjustments
         sample_unix_time = self._rtp_to_unix_time(rtp_timestamp)
         sample_minute = (int(sample_unix_time) // 60) * 60
+        
+        # Staleness guard: drop data that is behind wallclock.
+        # Under normal operation the difference is <1ms.  A large lag
+        # means our pipeline fell behind — continuing would create a
+        # growing backlog that starves every downstream service.
+        wallclock_now = time.time()
+        staleness = wallclock_now - sample_unix_time
+        if staleness > self.MAX_STALENESS_SECONDS:
+            if not hasattr(self, '_last_stale_log') or wallclock_now - self._last_stale_log > 10.0:
+                logger.critical(
+                    f"{self.config.channel_name}: DROPPING STALE DATA — "
+                    f"RTP-derived time is {staleness:.1f}s behind wallclock "
+                    f"(limit {self.MAX_STALENESS_SECONDS}s). "
+                    f"sample_time={sample_unix_time:.3f} wall={wallclock_now:.3f}"
+                )
+                self._last_stale_log = wallclock_now
+            return 0
         
         # Start new buffer if needed
         if self.current_buffer is None:

@@ -225,7 +225,7 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Status
 
-**Production (V6.10.0)** - Active development and field testing in progress.
+**Production (V6.11.0)** - Active development and field testing in progress.
 
 ## Credits & Support
 
@@ -234,6 +234,16 @@ The system is composed of eight independent services that form a pipeline:
 **License:** MIT - See [LICENSE](LICENSE)
 
 ### Recent Updates
+
+**v6.11.0 (March 9, 2026) - Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty**
+
+- ✅ **Unified detection path** — Eliminated RTP/Fusion fork in `process_minute()`. Both modes now use the same per-second correlator with `BufferTiming` when available; legacy `tone_detector.process_samples()` retained as Fusion fallback only when `BufferTiming` is missing
+- ✅ **Adaptive search windows** — Physics-model-derived 3σ uncertainty passed to `_measure_tone_at_known_time()`. Fusion mode adds UTC estimate uncertainty in quadrature: `σ = √(σ_physics² + σ_utc²)`
+- ✅ **Window safeguards** in `BroadcastWindowState` — staleness decay (exponential widening after 5 min), consecutive miss counter (resets after 5 misses), model floor rule (tracked variance can only narrow below model at confidence ≥ 0.95 with ≥ 30 observations)
+- ✅ **Continuous physics confidence** — Binary physics gate replaced with Gaussian confidence weighting. `FusionTimingState` feeds at confidence > 0.1 threshold, allowing marginal detections to contribute with appropriately low weight
+- ✅ **Multipath-aware uncertainty widening** — CLEAN deconvolution delay spread and per-second timing spread inflate `BroadcastWindowState` tracked variance (quadrature). Multipath-affected detections get degraded Kalman confidence
+- ✅ **Edge detection in both modes** — Tick edge ensemble now runs in Fusion mode (was RTP-only), enabling edge ensemble recovery and cross-check in all operating modes
+- 📄 **Design doc** — `docs/design/UNIFIED_MEASUREMENT_PATH.md` documents the 5-step implementation with adaptive window methodology, failure modes, and safeguards
 
 **v6.10.0 (March 7, 2026) - HDF5 SWMR + Web UI + Robustness**
 

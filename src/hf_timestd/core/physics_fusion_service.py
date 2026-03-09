@@ -289,6 +289,46 @@ class PhysicsFusionService:
 
         return True
 
+    def _timed_write_batch(self, writer: 'DataProductWriter', records: list, label: str = '') -> bool:
+        """Write a batch of measurements in a single HDF5 open/close cycle.
+
+        Same timeout semantics as _timed_write but uses
+        write_measurements_batch() — one open/append-N/close instead of N
+        open/append-1/close cycles.  Critical for high-frequency products
+        like dTEC timeseries (~55 rows/station/min × 9 channels).
+        """
+        if not records:
+            return True
+
+        import threading
+
+        result = [None]
+
+        def _do_write():
+            try:
+                writer.write_measurements_batch(records)
+            except Exception as e:
+                result[0] = e
+
+        t = threading.Thread(target=_do_write, daemon=True)
+        t.start()
+        t.join(timeout=self._write_timeout_seconds)
+
+        if t.is_alive():
+            self._write_timeout_count += 1
+            logger.warning(
+                f"HDF5 batch write timed out after {self._write_timeout_seconds}s "
+                f"({label or 'unknown'}, {len(records)} records), "
+                f"total timeouts: {self._write_timeout_count}"
+            )
+            return False
+
+        if result[0] is not None:
+            logger.error(f"HDF5 batch write failed ({label}, {len(records)} records): {result[0]}")
+            return False
+
+        return True
+
     def _discover_channels(self) -> List[str]:
         """Discover available L2 broadcast channels."""
         phase2_root = self.data_root / 'phase2'
@@ -1041,13 +1081,15 @@ class PhysicsFusionService:
 
                 # P3-B: Write full per-tick time series so ~1-second resolution
                 # is preserved for scintillation and TID analysis.
-                # Each tick is one record; epochs are absolute UTC seconds.
+                # Batch all ticks into a single HDF5 open/close cycle to avoid
+                # SSD thrashing and HDF5 heap fragmentation (~500 writes/min → ~1).
                 try:
                     epochs = dtec_result.epochs
                     rates = dtec_result.dtec_rate_tecu_per_s
                     dtecs = dtec_result.dtec_tecu
-                    for i, (ep, rate, dtec_val) in enumerate(zip(epochs, rates, dtecs)):
-                        ts_record = {
+                    ts_batch = []
+                    for ep, rate, dtec_val in zip(epochs, rates, dtecs):
+                        ts_batch.append({
                             'timestamp_utc': datetime.fromtimestamp(
                                 ep, tz=timezone.utc
                             ).isoformat(),
@@ -1062,10 +1104,12 @@ class PhysicsFusionService:
                             'anchor_status': anchor_status,
                             'snr_db': float(dtec_result.mean_snr_db),
                             'processing_version': '5.0.0',
-                        }
-                        self._timed_write(self.dtec_ts_writer, ts_record, f'dTEC_ts {station}')
-                        if i % 20 == 0:
-                            self._pet_watchdog()
+                        })
+                    self._timed_write_batch(
+                        self.dtec_ts_writer, ts_batch,
+                        f'dTEC_ts {channel}/{station}'
+                    )
+                    self._pet_watchdog()
                 except Exception as e:
                     logger.debug(f"Failed to write dTEC time series for {channel}/{station}: {e}")
 
@@ -1269,12 +1313,23 @@ class PhysicsFusionService:
         if gap_minutes <= 5:
             return 5
 
-        capped = min(gap_minutes, 24 * 60)
+        # Cap to 30 minutes.  Physics/fusion is a real-time service: spending
+        # startup time backfilling hours of old data delays chrony SHM updates
+        # and can cascade into system-clock drift.  Missed history can be
+        # reprocessed offline if needed.
+        MAX_STARTUP_LOOKBACK = 30
+        capped = min(gap_minutes, MAX_STARTUP_LOOKBACK)
         last_dt = datetime.fromtimestamp(last_written_ts, tz=timezone.utc).strftime('%H:%M:%SZ')
-        logger.info(
-            f"Startup: last L3 output at {last_dt}, gap is ~{gap_minutes} minutes — "
-            f"extending lookback to {capped} minutes to backfill"
-        )
+        if gap_minutes > MAX_STARTUP_LOOKBACK:
+            logger.warning(
+                f"Startup: last L3 output at {last_dt}, gap is ~{gap_minutes} minutes — "
+                f"capping lookback to {MAX_STARTUP_LOOKBACK} min (real-time priority)"
+            )
+        else:
+            logger.info(
+                f"Startup: last L3 output at {last_dt}, gap is ~{gap_minutes} minutes — "
+                f"extending lookback to {capped} minutes to backfill"
+            )
         return capped
 
     def run(self):

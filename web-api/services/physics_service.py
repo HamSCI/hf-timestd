@@ -120,8 +120,8 @@ class PhysicsService:
             Dictionary with time series data
         """
         try:
-            start_iso = start.isoformat() + 'Z'
-            end_iso = end.isoformat() + 'Z'
+            start_iso = start.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            end_iso = end.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
             
             measurements = self.reader.read_time_range(
                 start=start_iso,

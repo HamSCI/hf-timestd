@@ -101,6 +101,7 @@ REVISION HISTORY
 
 import logging
 import math
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, NamedTuple
 from dataclasses import dataclass, field
@@ -167,6 +168,16 @@ BOOTSTRAP_MIN_UNCERTAINTY_MS = 5.0       # Minimum window (propagation floor)
 WINDOW_NARROWING_ALPHA = 0.1  # Exponential smoothing factor for variance tracking
 WINDOW_CONFIDENCE_THRESHOLD = 0.8  # Confidence needed to start narrowing
 
+# Window safeguard parameters (see docs/design/UNIFIED_MEASUREMENT_PATH.md)
+# Safeguard 1: Staleness decay — widen toward model after silence
+STALENESS_ONSET_MINUTES = 5.0       # Begin decay after 5 min with no detection
+STALENESS_DECAY_RATE = 0.1          # Exponential decay rate per minute beyond onset
+# Safeguard 2: Consecutive miss counter — hard reset after sustained misses
+MISS_RESET_THRESHOLD = 5            # Force window to model width after N misses
+# Safeguard 3: Model floor rule — tracked can only narrow below model with strong evidence
+MODEL_OVERRIDE_CONFIDENCE = 0.95    # Confidence needed to narrow below model
+MODEL_OVERRIDE_MIN_OBS = 30         # Observations needed to narrow below model
+
 
 # =============================================================================
 # DATA STRUCTURES
@@ -202,6 +213,10 @@ class BroadcastWindowState:
     last_deviation_ms: float = 0.0
     confidence: float = 0.0  # 0-1, increases with consistent detections
     
+    # Safeguard state
+    last_detection_time: float = 0.0    # Unix timestamp of last validated detection
+    consecutive_misses: int = 0          # Minutes with no validated detection
+    
     def update_with_observation(self, deviation_ms: float, snr_db: float):
         """
         Update window state with a new observation.
@@ -218,6 +233,8 @@ class BroadcastWindowState:
         """
         self.observation_count += 1
         self.last_deviation_ms = deviation_ms
+        self.consecutive_misses = 0
+        self.last_detection_time = time.time()
         
         # Update running variance estimate (exponential smoothing)
         if self.observation_count == 1:
@@ -247,6 +264,58 @@ class BroadcastWindowState:
                     proposed_uncertainty
                 )
             )
+    
+    def record_miss(self):
+        """
+        Record a minute with no validated detection for this broadcast.
+        
+        Safeguard 2: After MISS_RESET_THRESHOLD consecutive misses, force
+        the window back to initial (physics maximum) width.  This breaks
+        the FM2 positive feedback loop where a narrow window misses a
+        shifted signal and stays narrow indefinitely.
+        """
+        self.consecutive_misses += 1
+        if self.consecutive_misses >= MISS_RESET_THRESHOLD:
+            old_unc = self.current_uncertainty_ms
+            self.current_uncertainty_ms = self.initial_uncertainty_ms
+            self.confidence = 0.0
+            self.observation_count = 0
+            self.observed_variance_ms2 = 0.0
+            logger.warning(
+                f"Window {self.station}@{self.frequency_mhz}MHz: "
+                f"{self.consecutive_misses} consecutive misses — "
+                f"reset ±{old_unc:.1f}ms → ±{self.initial_uncertainty_ms:.1f}ms")
+            self.consecutive_misses = 0
+    
+    def get_effective_uncertainty_ms(self, model_uncertainty_3sigma_ms: float) -> float:
+        """
+        Get current uncertainty with staleness decay applied.
+        
+        Safeguard 1: If no detection has arrived for longer than
+        STALENESS_ONSET_MINUTES, exponentially decay the tracked
+        uncertainty back toward the model uncertainty.  This ensures
+        a channel that goes quiet will gradually re-open its window.
+        
+        Args:
+            model_uncertainty_3sigma_ms: Current physics model 3σ uncertainty
+            
+        Returns:
+            Effective 3σ uncertainty in milliseconds
+        """
+        effective = self.current_uncertainty_ms
+        
+        if self.last_detection_time > 0:
+            minutes_since = (time.time() - self.last_detection_time) / 60.0
+            if minutes_since > STALENESS_ONSET_MINUTES:
+                # Exponential decay toward model uncertainty
+                excess_minutes = minutes_since - STALENESS_ONSET_MINUTES
+                decay_factor = math.exp(-STALENESS_DECAY_RATE * excess_minutes)
+                # Blend: decayed tracked + (1-decayed) model
+                target = max(model_uncertainty_3sigma_ms, self.initial_uncertainty_ms)
+                effective = target + (effective - target) * decay_factor
+                effective = max(effective, BOOTSTRAP_MIN_UNCERTAINTY_MS)
+        
+        return effective
     
     def get_search_window_ms(self) -> Tuple[float, float]:
         """Get current search window bounds in ms from expected."""
@@ -564,11 +633,20 @@ class ArrivalPatternMatrix:
                 state.observation_count = 0
                 state.confidence = 0.0
     
-    def get_current_uncertainty_ms(self, station: str, frequency_mhz: float) -> float:
-        """Get current dynamic uncertainty for a broadcast."""
+    def get_current_uncertainty_ms(self, station: str, frequency_mhz: float,
+                                    model_uncertainty_3sigma_ms: float = 0.0) -> float:
+        """Get current dynamic uncertainty for a broadcast.
+        
+        If model_uncertainty_3sigma_ms is provided, staleness decay
+        (Safeguard 1) is applied — the tracked window widens toward
+        the model uncertainty after STALENESS_ONSET_MINUTES of silence.
+        """
         key = (station, frequency_mhz)
         if key in self._broadcast_windows:
-            return self._broadcast_windows[key].current_uncertainty_ms
+            state = self._broadcast_windows[key]
+            if model_uncertainty_3sigma_ms > 0:
+                return state.get_effective_uncertainty_ms(model_uncertainty_3sigma_ms)
+            return state.current_uncertainty_ms
         return BOOTSTRAP_INITIAL_UNCERTAINTY_MS
     
     def record_detection(
@@ -577,7 +655,8 @@ class ArrivalPatternMatrix:
         frequency_mhz: float,
         detected_ms: float,
         expected_ms: float,
-        snr_db: float
+        snr_db: float,
+        multipath_spread_ms: float = 0.0
     ) -> float:
         """
         Record a valid detection to update window tracking.
@@ -591,6 +670,10 @@ class ArrivalPatternMatrix:
             detected_ms: Detected arrival time in ms from minute boundary
             expected_ms: Expected arrival time in ms from minute boundary
             snr_db: Signal-to-noise ratio
+            multipath_spread_ms: Delay spread from CLEAN deconvolution or
+                per-second timing spread.  When > 0, the effective deviation
+                is widened (quadrature) so the tracked variance cannot narrow
+                below what multipath physically permits.
             
         Returns:
             Current window uncertainty after update
@@ -600,30 +683,65 @@ class ArrivalPatternMatrix:
             return BOOTSTRAP_INITIAL_UNCERTAINTY_MS
         
         deviation_ms = detected_ms - expected_ms
+        
+        # Multipath-aware uncertainty widening (Step 5):
+        # When CLEAN or per-second spread detects multipath, inflate the
+        # deviation fed to the variance tracker.  This prevents the window
+        # from narrowing below the multipath-induced timing ambiguity.
+        # The spread is added in quadrature: σ_eff = √(σ_obs² + σ_mp²).
+        if multipath_spread_ms > 0:
+            sign = 1.0 if deviation_ms >= 0 else -1.0
+            deviation_ms = sign * math.sqrt(deviation_ms**2 + multipath_spread_ms**2)
+        
         state = self._broadcast_windows[key]
         old_uncertainty = state.current_uncertainty_ms
         
         state.update_with_observation(deviation_ms, snr_db)
         
         # Log significant window changes
+        mp_note = f", multipath={multipath_spread_ms:.1f}ms" if multipath_spread_ms > 0 else ""
         if abs(state.current_uncertainty_ms - old_uncertainty) > 1.0:
             logger.info(f"Window {station}@{frequency_mhz}MHz: "
                        f"±{old_uncertainty:.1f}ms → ±{state.current_uncertainty_ms:.1f}ms "
-                       f"(obs={state.observation_count}, var={state.observed_variance_ms2:.1f}ms²)")
+                       f"(obs={state.observation_count}, "
+                       f"var={state.observed_variance_ms2:.1f}ms²{mp_note})")
         
         return state.current_uncertainty_ms
+    
+    def record_miss(self, station: str, frequency_mhz: float):
+        """
+        Record a minute with no validated detection for a broadcast.
+        
+        Call this from process_minute() for any (station, frequency) that
+        had no validated detection.  Feeds Safeguard 2 (consecutive miss
+        counter) which forces the window back to initial width after
+        MISS_RESET_THRESHOLD consecutive misses.
+        
+        Args:
+            station: Station name
+            frequency_mhz: Frequency in MHz
+        """
+        key = (station, frequency_mhz)
+        if key in self._broadcast_windows:
+            self._broadcast_windows[key].record_miss()
     
     def get_window_stats(self) -> Dict[str, Dict]:
         """Get current window statistics for all broadcasts."""
         stats = {}
         for (station, freq), state in self._broadcast_windows.items():
             key = f"{station}@{freq}MHz"
+            minutes_since_detection = (
+                (time.time() - state.last_detection_time) / 60.0
+                if state.last_detection_time > 0 else float('inf')
+            )
             stats[key] = {
                 'initial_ms': state.initial_uncertainty_ms,
                 'current_ms': state.current_uncertainty_ms,
                 'variance_ms2': state.observed_variance_ms2,
                 'observations': state.observation_count,
-                'confidence': state.confidence
+                'confidence': state.confidence,
+                'consecutive_misses': state.consecutive_misses,
+                'minutes_since_detection': round(minutes_since_detection, 1),
             }
         return stats
     
@@ -943,17 +1061,36 @@ class ArrivalPatternMatrix:
         is_primary: bool
     ):
         """Add an arrival entry to the matrix (both primary and multi-mode dicts)."""
-        # Get dynamic window width — blend model uncertainty with tracked variance
-        tracked_uncertainty_ms = self.get_current_uncertainty_ms(station, freq_mhz)
+        # Get dynamic window width — blend model uncertainty with tracked variance.
+        # Pass model_uncertainty so staleness decay (Safeguard 1) can widen
+        # the tracked window toward the model after silence.
+        model_3sigma_ms = max(model_uncertainty_ms, BOOTSTRAP_MIN_UNCERTAINTY_MS * 3) if model_uncertainty_ms > 0 else 0.0
+        tracked_uncertainty_ms = self.get_current_uncertainty_ms(
+            station, freq_mhz, model_uncertainty_3sigma_ms=model_3sigma_ms)
         
-        # Adaptive uncertainty: use the TIGHTER of model and tracked,
-        # but never go below BOOTSTRAP_MIN_UNCERTAINTY_MS
+        # Adaptive uncertainty with Safeguard 3 (model floor rule):
+        # The physics model is the default floor.  Tracked variance can only
+        # narrow below the model when we have very strong empirical evidence
+        # (confidence >= 0.95, >= 30 observations).  This prevents small-sample
+        # narrowing from overriding the physics-based uncertainty floor.
         if model_uncertainty_ms > 0 and model_confidence > 0.3:
-            # Model is somewhat confident — use model uncertainty as a floor,
-            # but let tracked variance narrow it further if observations support it
-            adaptive_3sigma_ms = min(tracked_uncertainty_ms, max(model_uncertainty_ms, BOOTSTRAP_MIN_UNCERTAINTY_MS * 3))
+            key = (station, freq_mhz)
+            state = self._broadcast_windows.get(key)
+            
+            if (state is not None
+                    and state.confidence >= MODEL_OVERRIDE_CONFIDENCE
+                    and state.observation_count >= MODEL_OVERRIDE_MIN_OBS
+                    and tracked_uncertainty_ms < model_3sigma_ms):
+                # Strong empirical evidence: conditions calmer than model predicts
+                adaptive_3sigma_ms = max(tracked_uncertainty_ms, BOOTSTRAP_MIN_UNCERTAINTY_MS)
+            elif tracked_uncertainty_ms > model_3sigma_ms:
+                # Tracked is wider than model: conditions rougher — trust data
+                adaptive_3sigma_ms = tracked_uncertainty_ms
+            else:
+                # Default: model is the floor
+                adaptive_3sigma_ms = model_3sigma_ms
         else:
-            # Low confidence — use tracked or bootstrap uncertainty
+            # Low model confidence — use tracked or bootstrap uncertainty
             adaptive_3sigma_ms = tracked_uncertainty_ms
 
         # Apply per-station minimum floor: IRI model accuracy varies by path.

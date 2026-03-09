@@ -3,8 +3,8 @@
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Scope:** This document covers the *science* — what measurements mean physically and how they are validated. For *design decisions* (why the system is built this way), see `docs/ARCHITECTURE.md`. For *algorithms and data formats*, see `docs/TECHNICAL_REFERENCE.md`.  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 6.10.0 (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring + HDF5 SWMR)  
-**Last Updated:** March 7, 2026
+**System Version:** 6.11.0 (Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty)  
+**Last Updated:** March 9, 2026
 
 ---
 
@@ -341,7 +341,7 @@ Requires ≥5 detected ticks spanning ≥5 seconds for a meaningful fit.
 
 ### 3.5 Multipath and Delay Spread 
 
-**Status:** Implemented (Enhanced in v6.2)
+**Status:** Implemented (Enhanced in v6.2, v6.11)
 
 **Physics:** When multiple propagation modes arrive simultaneously, they create:
 - Delay spread (time spreading of the signal)
@@ -351,6 +351,8 @@ Requires ≥5 detected ticks spanning ≥5 seconds for a meaningful fit.
 **Implementation:** 
 - `src/hf_timestd/core/advanced_signal_analysis.py`
 - `src/hf_timestd/core/tone_detector.py` (_detect_multipath_from_correlation)
+- `src/hf_timestd/core/tick_edge_detector.py` (CLEAN deconvolution)
+- `src/hf_timestd/core/metrology_engine.py` (multipath-aware uncertainty widening)
 
 **v6.2 Enhancement: Integrated Multipath Detection**
 
@@ -383,6 +385,19 @@ if is_multipath and delay_spread_ms > 0:
     )
 ```
 
+**v6.11 Enhancement: Multipath-Aware Uncertainty Widening**
+
+The unified measurement path (v6.11) extends multipath detection to influence the adaptive search window and Kalman filter weighting.  Two complementary multipath indicators are computed per station per minute:
+
+1. **CLEAN deconvolution delay spread:** The `TickEdgeDetector` runs Högbom CLEAN on each per-second tick's correlation envelope to resolve multipath arrivals.  The maximum `delay_offset_ms` across all resolved secondary components gives the CLEAN delay spread.
+
+2. **Per-second timing spread:** The `ensemble_uncertainty_ms` from the edge ensemble (MAD of per-tick timing errors) minus the noise floor (~0.5 ms at 24 kHz) captures multipath-induced timing variance.
+
+The larger of these two indicators becomes the `multipath_spread_ms` for that station, which affects the pipeline in two ways:
+
+- **Adaptive window:** Fed to `record_detection()` in `BroadcastWindowState`, which inflates the tracked variance in quadrature: `σ_eff = √(σ_obs² + σ_mp²)`.  This prevents the window from narrowing below the multipath-induced timing ambiguity.
+- **Kalman confidence:** The `physics_confidence` for multipath-affected detections is reduced by `1/(1 + spread/3)`, which reduces their weight in the Fusion Kalman filter.
+
 **Outputs:**
 - `delay_spread_ms`: Multipath delay spread
 - `multipath_detected`: Boolean flag (now in ToneDetectionResult)
@@ -396,6 +411,7 @@ if is_multipath and delay_spread_ms > 0:
 - Mode mixing detection
 - Propagation quality assessment
 - **Rigorous uncertainty propagation** for timing measurements
+- **Adaptive window tracking** prevents false narrowing during multipath conditions
 
 <!-- LIVE: scintillation-status -->
 

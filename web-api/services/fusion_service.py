@@ -145,9 +145,10 @@ class FusionService:
             Dictionary with time series data
         """
         try:
-            # Convert to ISO8601
-            start_iso = start.isoformat() + 'Z'
-            end_iso = end.isoformat() + 'Z'
+            # Convert to ISO8601 — strftime avoids double-timezone when
+            # the datetime is already tz-aware from parse_time_param()
+            start_iso = start.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            end_iso = end.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
             
             # Read measurements
             measurements = self.reader.read_time_range(

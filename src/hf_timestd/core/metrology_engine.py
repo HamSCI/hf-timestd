@@ -654,7 +654,8 @@ class MetrologyEngine:
         expected_delay_ms: float,
         tone_freq_hz: float,
         tone_duration_sec: float,
-        station_name: str
+        station_name: str,
+        search_window_ms: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Measure a tone at a KNOWN position in the buffer.
@@ -677,6 +678,8 @@ class MetrologyEngine:
             tone_freq_hz: Tone frequency (1000 or 1200 Hz)
             tone_duration_sec: Expected tone duration (0.8s WWV, 0.5s CHU)
             station_name: Station identifier for logging
+            search_window_ms: Search window half-width in ms from physics model.
+                If None, uses legacy fixed window based on tone duration.
             
         Returns:
             Dict with measurement results.  'detected' is True only if all
@@ -757,25 +760,23 @@ class MetrologyEngine:
             base_result['rejection_reason'] = 'correlation_empty'
             return base_result
         
-        # Search window scaled by template duration.
-        # Evidence from 20K+ measurements (2026-02-11) showed that a fixed ±500ms
-        # window with 5ms tick templates causes the matched filter to lock onto
-        # adjacent-second ticks or sidelobes at -185ms, rejecting 89% of attempts.
-        # Short templates have poor temporal discrimination — constrain the search.
+        # Search window: prefer physics-model-derived adaptive window.
+        # Falls back to legacy fixed window if no model is available.
         #
-        # CRITICAL (2026-02-12): For long templates (800ms), ±500ms search window
-        # had 16-18% false positive rate on pure noise.  The correlation envelope
-        # of bandpass noise has ~55ms coherence length, giving ~18 effective
-        # independent samples in ±500ms.  Extreme value statistics push the
-        # peak/median ratio to ~6.2 dB — well into the 8 dB threshold.
-        # The physics model constrains real arrivals to ±15ms, so ±100ms is
-        # generous while cutting FP rate to ~6% (physics gate catches the rest).
+        # The adaptive window from the physics model directly improves
+        # weak-signal sensitivity by reducing the number of independent
+        # noise samples in the search region.  See
+        # docs/design/UNIFIED_MEASUREMENT_PATH.md for the full analysis.
         #
+        # Legacy fallback rationale (kept for backward compatibility):
         #   5ms tick:    ±50ms  (ionospheric variation ~30ms)
         #   100ms tone:  ±100ms
-        #   300ms+ tone: ±100ms (physics-constrained, was ±500ms)
-        #   800ms marker: ±100ms (physics-constrained, was ±500ms)
-        SEARCH_WINDOW_MS = max(50.0, min(100.0, tone_duration_sec * 625))
+        #   300ms+ tone: ±100ms (physics-constrained)
+        #   800ms marker: ±100ms (physics-constrained)
+        if search_window_ms is not None:
+            SEARCH_WINDOW_MS = max(5.0, min(200.0, search_window_ms))
+        else:
+            SEARCH_WINDOW_MS = max(50.0, min(100.0, tone_duration_sec * 625))
         
         # expected_corr_idx is relative to measurement_region (which starts at start_sample)
         expected_corr_idx = expected_sample - start_sample
@@ -1103,9 +1104,14 @@ class MetrologyEngine:
         """
         Process minute: Tone Detection + Channel Char -> L1 Measurements.
         
-        Two modes of operation:
-        - RTP Mode: Timing is authoritative. Measure signals at KNOWN times.
-        - Fusion Mode: Use tone detector to search for signals (bootstrap or post-lock).
+        Unified detection path: both RTP and Fusion modes use the same
+        per-second correlator when BufferTiming is available.  In Fusion
+        mode, UTC estimate uncertainty from FusionTimingState is added
+        to the physics model uncertainty (quadrature).  Post-detection,
+        RTP mode logs GPS+PPS residuals; Fusion mode feeds the Kalman
+        filter and chrony SHM.
+        
+        See docs/design/UNIFIED_MEASUREMENT_PATH.md for full design.
         
         Args:
             iq_samples: Raw IQ buffer (complex64)
@@ -1167,297 +1173,381 @@ class MetrologyEngine:
         # carrier phase / Doppler extraction, which correctly uses IQ mixing.
         audio_signal = envelope - np.mean(envelope)
         
-        # Compute expected delays for all stations using physics model
+        # Compute expected delays and uncertainties for all stations using physics model
         expected_delays_by_station = {}
+        expected_uncertainty_by_station = {}
         for station in ['WWV', 'WWVH', 'CHU', 'BPM']:
             expected_delay_ms, dist_km, uncertainty_ms = self._predict_geometric_delay(
                 station, system_time
             )
             if expected_delay_ms > 0:
                 expected_delays_by_station[station] = expected_delay_ms
+                expected_uncertainty_by_station[station] = uncertainty_ms
         
         # edge_results is populated in the RTP branch (Step 1 edge ensemble)
         # and consumed later in Step 2D (tick phase extraction) regardless of mode.
         edge_results = {}
         
-        # === RTP MODE: Direct Measurement at Known Times ===
-        # In RTP mode, timing is authoritative (GPSDO + GPS+PPS).
-        # BufferTiming tells us the exact UTC time of every sample.
-        # We find which seconds are in the buffer and measure tones there.
-        if self.is_rtp_authority:
-            logger.debug(f"{self.channel_name}: RTP mode - measuring at known times")
+        # === UNIFIED DETECTION PATH ===
+        # Both RTP and Fusion modes use the same per-second correlator when
+        # BufferTiming is available.  This ensures identical detection
+        # algorithms, enabling RTP mode to validate Fusion-mode metrology.
+        # See docs/design/UNIFIED_MEASUREMENT_PATH.md for design rationale.
+        #
+        # The only mode-dependent behavior:
+        #   - Fusion mode adds UTC estimate uncertainty to the search window
+        #   - Post-detection: RTP logs GPS+PPS residual; Fusion feeds Kalman
+        
+        mode_label = "RTP" if self.is_rtp_authority else "Fusion"
+        
+        # In Fusion mode, add UTC estimate uncertainty from FusionTimingState
+        # to the per-station physics model uncertainty (quadrature sum).
+        # In RTP mode, GPS+PPS gives ~50 µs — negligible.
+        utc_unc_ms = 0.0
+        if not self.is_rtp_authority and self.fusion_state is not None:
+            utc_unc_ms = self.fusion_state.get_search_window_ms() / 3.0  # Convert 3σ to 1σ
+            logger.info(f"{self.channel_name}: {mode_label} mode: "
+                       f"UTC uncertainty ±{utc_unc_ms:.0f}ms (1σ), "
+                       f"lock_tier={self.fusion_state.lock_tier.name}")
+        
+        # Define station templates based on channel type.
+        # Tone frequency is per-station; duration is per-second (set in loop).
+        channel_upper = self.channel_name.upper()
+        if 'CHU' in channel_upper:
+            station_tone_freqs = [('CHU', 1000)]
+        elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
+            station_tone_freqs = [('WWV', 1000)]
+        else:
+            # SHARED channels: try all stations
+            station_tone_freqs = [
+                ('WWV', 1000),
+                ('WWVH', 1200),
+                ('BPM', 1000),
+            ]
+        
+        measurements = []
+        all_attempts = []
+        use_per_second_correlator = (
+            buffer_timing is not None and buffer_timing.source != 'metadata_fallback'
+        )
+        
+        if use_per_second_correlator:
+            # === Per-Second Correlator (primary path, both modes) ===
+            # BufferTiming maps samples↔UTC.  Find which UTC seconds fall
+            # within this buffer and measure tones there.
+            logger.debug(f"{self.channel_name}: {mode_label} mode - "
+                        f"per-second correlator with BufferTiming")
+            n_samples = len(audio_signal)
+            buf_start_utc = buffer_timing.sample0_utc
+            buf_end_utc = buffer_timing.sample_to_utc(n_samples)
             
-            # Define station templates based on channel type.
-            # Tone frequency is per-station; duration is per-second (set in loop).
-            channel_upper = self.channel_name.upper()
-            if 'CHU' in channel_upper:
-                station_tone_freqs = [('CHU', 1000)]
-            elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
-                station_tone_freqs = [('WWV', 1000)]
-            else:
-                # SHARED channels: try all stations
-                station_tone_freqs = [
-                    ('WWV', 1000),
-                    ('WWVH', 1200),
-                    ('BPM', 1000),
-                ]
-            
-            rtp_measurements = []
-            rtp_all_attempts = []
-            
-            if buffer_timing is not None and buffer_timing.source != 'metadata_fallback':
-                # We know the UTC time of every sample.  Find which UTC
-                # seconds fall within this buffer and measure tones there.
-                n_samples = len(audio_signal)
-                buf_start_utc = buffer_timing.sample0_utc
-                buf_end_utc = buffer_timing.sample_to_utc(n_samples)
+            for station_name, tone_freq in station_tone_freqs:
+                prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
+                prop_delay_sec = prop_delay_ms / 1000.0
                 
-                for station_name, tone_freq in station_tone_freqs:
-                    prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
-                    prop_delay_sec = prop_delay_ms / 1000.0
-                    
-                    # Use the longest possible tone (minute marker) for margin calc
-                    max_tone_duration = 1.0  # 1s covers all minute markers
-                    margin_sec = max_tone_duration + 0.5
-                    
-                    # Find UTC seconds whose tone arrival falls in the buffer.
-                    # A tick transmitted at UTC second T arrives at T + prop_delay.
-                    # We need samples from T + prop_delay through T + prop_delay + margin.
-                    first_utc_sec = int(buf_start_utc) - 1
-                    last_utc_sec = int(buf_end_utc) + 1
-                    
-                    measurable = []
-                    for utc_sec in range(first_utc_sec, last_utc_sec + 1):
-                        sec_in_minute = utc_sec % 60
-                        # Skip silent seconds
-                        if station_name == 'CHU' and sec_in_minute == 29:
-                            continue
-                        if station_name in ('WWV', 'WWVH') and sec_in_minute in (29, 59):
-                            continue
-                        
-                        # CHU regular-second 300ms tones start ~74ms after the
-                        # UTC second boundary + propagation delay.
-                        #
-                        # Evidence chain (definitive):
-                        # 1. Direct AM envelope measurement (3ms energy windows,
-                        #    BP 950-1050Hz): 1000Hz pip onset at +68-80ms from
-                        #    utc_sec (= +62-74ms from utc_sec + prop_delay).
-                        # 2. Same measurement for 2225Hz FSK mark tone (seconds
-                        #    31-39, NRC spec: T+10ms): onset at +87ms from
-                        #    utc_sec (= +71ms from expected T+prop+10ms).
-                        # 3. Both 1000Hz and 2225Hz are delayed by ~74ms through
-                        #    the IDENTICAL receiver pipeline. WWV shows 0ms
-                        #    offset through the same pipeline. The delay is
-                        #    CHU-specific and in the transmitted signal.
-                        # 4. Root cause: CHU uses H3E (USB + full carrier). The
-                        #    transmitter's analog sideband filter introduces a
-                        #    group delay of ~74ms on all audio content. NRC's
-                        #    ≤1μs spec refers to the atomic clock accuracy, not
-                        #    the audio onset relative to the second marker.
-                        # 5. FSK stop-bit (T+500ms, phase transition) gives
-                        #    timing_offset=+6ms → CHU clock offset is +6ms.
-                        #    Using 0.074 gives timing_error ≈ +6ms, consistent.
-                        # Second 0 (minute marker, 500ms) starts at 0ms.
-                        chu_tx_onset_sec = 0.0
-                        if station_name == 'CHU' and sec_in_minute != 0:
-                            chu_tx_onset_sec = 0.074
-
-                        tone_arrival_utc = utc_sec + prop_delay_sec + chu_tx_onset_sec
-                        tone_end_utc = tone_arrival_utc + margin_sec
-                        
-                        onset_sample = buffer_timing.utc_to_sample(tone_arrival_utc)
-                        end_sample = buffer_timing.utc_to_sample(tone_end_utc)
-                        
-                        if onset_sample >= 0 and end_sample < n_samples:
-                            measurable.append((utc_sec, onset_sample))
-                    
-                    if not measurable:
-                        logger.debug(f"{self.channel_name}: No {station_name} tones in buffer "
-                                    f"(buf UTC {buf_start_utc:.1f}–{buf_end_utc:.1f})")
+                # Use the longest possible tone (minute marker) for margin calc
+                max_tone_duration = 1.0  # 1s covers all minute markers
+                margin_sec = max_tone_duration + 0.5
+                
+                # Find UTC seconds whose tone arrival falls in the buffer.
+                # A tick transmitted at UTC second T arrives at T + prop_delay.
+                # We need samples from T + prop_delay through T + prop_delay + margin.
+                first_utc_sec = int(buf_start_utc) - 1
+                last_utc_sec = int(buf_end_utc) + 1
+                
+                measurable = []
+                for utc_sec in range(first_utc_sec, last_utc_sec + 1):
+                    sec_in_minute = utc_sec % 60
+                    # Skip silent seconds
+                    if station_name == 'CHU' and sec_in_minute == 29:
+                        continue
+                    if station_name in ('WWV', 'WWVH') and sec_in_minute in (29, 59):
                         continue
                     
-                    # Prioritize: minute marker (sec 0) first, then other seconds.
-                    # Sort so second 0 comes first for maximum detection probability.
-                    measurable.sort(key=lambda x: (x[0] % 60 != 0, x[0]))
+                    # CHU regular-second 300ms tones start ~74ms after the
+                    # UTC second boundary + propagation delay.
+                    #
+                    # Evidence chain (definitive):
+                    # 1. Direct AM envelope measurement (3ms energy windows,
+                    #    BP 950-1050Hz): 1000Hz pip onset at +68-80ms from
+                    #    utc_sec (= +62-74ms from utc_sec + prop_delay).
+                    # 2. Same measurement for 2225Hz FSK mark tone (seconds
+                    #    31-39, NRC spec: T+10ms): onset at +87ms from
+                    #    utc_sec (= +71ms from expected T+prop+10ms).
+                    # 3. Both 1000Hz and 2225Hz are delayed by ~74ms through
+                    #    the IDENTICAL receiver pipeline. WWV shows 0ms
+                    #    offset through the same pipeline. The delay is
+                    #    CHU-specific and in the transmitted signal.
+                    # 4. Root cause: CHU uses H3E (USB + full carrier). The
+                    #    transmitter's analog sideband filter introduces a
+                    #    group delay of ~74ms on all audio content. NRC's
+                    #    ≤1μs spec refers to the atomic clock accuracy, not
+                    #    the audio onset relative to the second marker.
+                    # 5. FSK stop-bit (T+500ms, phase transition) gives
+                    #    timing_offset=+6ms → CHU clock offset is +6ms.
+                    #    Using 0.074 gives timing_error ≈ +6ms, consistent.
+                    # Second 0 (minute marker, 500ms) starts at 0ms.
+                    chu_tx_onset_sec = 0.0
+                    if station_name == 'CHU' and sec_in_minute != 0:
+                        chu_tx_onset_sec = 0.074
+
+                    tone_arrival_utc = utc_sec + prop_delay_sec + chu_tx_onset_sec
+                    tone_end_utc = tone_arrival_utc + margin_sec
                     
-                    # Try up to 15 seconds per station (was 5)
-                    for utc_sec, onset_sample in measurable[:15]:
-                        sec_in_minute = utc_sec % 60
-                        tone_duration = self._get_tone_duration(
-                            station_name, sec_in_minute, minute_number
-                        )
-                        if tone_duration <= 0:
-                            continue  # Silent second — no tone to detect
-                        
-                        expected_ms_from_buf_start = onset_sample * 1000 / self.sample_rate
-                        
-                        result = self._measure_tone_at_known_time(
-                            audio_signal=audio_signal,
-                            expected_delay_ms=expected_ms_from_buf_start,
-                            tone_freq_hz=tone_freq,
-                            tone_duration_sec=tone_duration,
-                            station_name=station_name
-                        )
-                        
-                        # Record every attempt for diagnostic summary
-                        result['utc_second'] = utc_sec
-                        result['tone_duration_sec'] = tone_duration
-                        rtp_all_attempts.append(result)
-                        
-                        if result.get('detected'):
-                            # arrival_ms is from buffer start.  Convert to UTC.
-                            arrival_utc = buffer_timing.sample_to_utc(
-                                result['arrival_ms'] * self.sample_rate / 1000
-                            )
-                            # Expected arrival UTC includes CHU tx_onset offset
-                            # so timing_error_ms reflects the true clock offset.
-                            chu_tx = 0.074 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
-                            expected_utc = utc_sec + prop_delay_sec + chu_tx
-                            result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
-                            result['arrival_utc'] = arrival_utc
-                            rtp_measurements.append(result)
+                    onset_sample = buffer_timing.utc_to_sample(tone_arrival_utc)
+                    end_sample = buffer_timing.utc_to_sample(tone_end_utc)
+                    
+                    if onset_sample >= 0 and end_sample < n_samples:
+                        measurable.append((utc_sec, onset_sample))
                 
-                # Per-minute diagnostic: what did we attempt, what passed, what failed and why?
-                if rtp_all_attempts:
-                    n_detected = sum(1 for a in rtp_all_attempts if a.get('detected'))
-                    n_rejected = len(rtp_all_attempts) - n_detected
-                    # Count rejection reasons
-                    reasons = {}
-                    rejected_snrs = []
-                    for a in rtp_all_attempts:
-                        reason = a.get('rejection_reason')
-                        if reason:
-                            reasons[reason] = reasons.get(reason, 0) + 1
-                            if a.get('corr_snr_db', -99) > -99:
-                                rejected_snrs.append(a['corr_snr_db'])
-                    
-                    reason_str = ', '.join(f"{r}={c}" for r, c in sorted(reasons.items()))
-                    snr_str = ''
-                    if rejected_snrs:
-                        snr_str = f", rejected SNRs: {min(rejected_snrs):.1f}–{max(rejected_snrs):.1f}dB"
-                    
-                    logger.info(f"{self.channel_name}: RTP attempts={len(rtp_all_attempts)} "
-                               f"detected={n_detected} rejected={n_rejected} "
-                               f"[{reason_str}]{snr_str}")
-                    
-                    if rtp_measurements:
-                        secs = [m['utc_second'] % 60 for m in rtp_measurements]
-                        logger.info(f"{self.channel_name}: RTP detected at seconds {secs}")
+                if not measurable:
+                    logger.debug(f"{self.channel_name}: No {station_name} tones in buffer "
+                                f"(buf UTC {buf_start_utc:.1f}–{buf_end_utc:.1f})")
+                    continue
                 
-                # === Per-Second Edge Detection (Tier 1) ===
-                # Run differential edge detector on all per-second ticks.
-                # This provides up to 57 independent timing measurements per
-                # minute from the tick onset edges, even when the minute marker
-                # correlation fails (low SNR, fading, etc.).
-                #
-                # The edge ensemble augments timing for stations that had NO
-                # successful minute marker correlation this minute.
-                is_dedicated = ('WWV_20' in channel_upper or 'WWV_25' in channel_upper)
-                stations_with_corr = {m['station'] for m in rtp_measurements}
-                edge_results = {}
+                # Prioritize: minute marker (sec 0) first, then other seconds.
+                # Sort so second 0 comes first for maximum detection probability.
+                measurable.sort(key=lambda x: (x[0] % 60 != 0, x[0]))
                 
-                for station_name, tone_freq in station_tone_freqs:
-                    prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
-                    prop_delay_sec = prop_delay_ms / 1000.0
+                # Try up to 15 seconds per station (was 5)
+                for utc_sec, onset_sample in measurable[:15]:
+                    sec_in_minute = utc_sec % 60
+                    tone_duration = self._get_tone_duration(
+                        station_name, sec_in_minute, minute_number
+                    )
+                    if tone_duration <= 0:
+                        continue  # Silent second — no tone to detect
                     
-                    try:
-                        edge_result = self.edge_detector.detect_edges(
-                            audio_signal=audio_signal,
-                            station=station_name,
-                            minute_number=minute_number,
-                            buffer_timing=buffer_timing,
-                            expected_delay_sec=prop_delay_sec,
-                            is_dedicated_channel=is_dedicated,
-                            iq_samples=iq_samples,
-                        )
-                    except Exception as e:
-                        logger.warning(f"{self.channel_name}: Edge detection failed for "
-                                    f"{station_name}: {e}")
-                        edge_result = None
+                    expected_ms_from_buf_start = onset_sample * 1000 / self.sample_rate
                     
-                    if edge_result is not None:
-                        edge_results[station_name] = edge_result
-                        
-                        # If this station had NO correlation detection but the
-                        # edge ensemble has sufficient confidence, create a
-                        # synthetic measurement from the ensemble.
-                        if (station_name not in stations_with_corr
-                                and edge_result.confidence >= 0.3
-                                and edge_result.ensemble_n_edges >= 5):
-                            
-                            # The ensemble timing_error is relative to expected
-                            # propagation delay.  Convert to arrival_ms from
-                            # buffer start, matching the correlation output format.
-                            # Use the middle of the buffer as reference point.
-                            mid_utc = (buf_start_utc + buf_end_utc) / 2.0
-                            mid_sec = int(mid_utc)
-                            # Synthetic arrival = expected + ensemble offset
-                            synth_arrival_utc = mid_sec + prop_delay_sec + edge_result.ensemble_timing_error_ms / 1000.0
-                            synth_arrival_sample = buffer_timing.utc_to_sample(synth_arrival_utc)
-                            synth_arrival_ms = synth_arrival_sample * 1000 / self.sample_rate
-                            
-                            synth_measurement = {
-                                'station': station_name,
-                                'frequency_hz': tone_freq,
-                                'arrival_ms': synth_arrival_ms,
-                                'expected_delay_ms': prop_delay_ms,
-                                'timing_error_ms': edge_result.ensemble_timing_error_ms,
-                                'snr_db': edge_result.mean_edge_snr_db,
-                                'corr_snr_db': edge_result.mean_edge_snr_db,
-                                'tone_power': 0.0,
-                                'peak_correlation': 0.0,
-                                'detected': True,
-                                'rejection_reason': None,
-                                'utc_second': mid_sec,
-                                'tone_duration_sec': 0.005,
-                                'arrival_utc': synth_arrival_utc,
-                                'detection_method': 'edge_ensemble',
-                                'edge_n': edge_result.ensemble_n_edges,
-                                'edge_uncertainty_ms': edge_result.ensemble_uncertainty_ms,
-                                'edge_confidence': edge_result.confidence,
-                            }
-                            rtp_measurements.append(synth_measurement)
-                            logger.info(
-                                f"{self.channel_name}: {station_name} EDGE ENSEMBLE "
-                                f"recovery: {edge_result.ensemble_n_edges} edges, "
-                                f"timing={edge_result.ensemble_timing_error_ms:+.3f}"
-                                f"±{edge_result.ensemble_uncertainty_ms:.3f}ms, "
-                                f"conf={edge_result.confidence:.2f}")
-                        
-                        elif station_name in stations_with_corr and edge_result.ensemble_n_edges >= 5:
-                            # Station already has correlation detection.
-                            # Log the edge ensemble as a cross-check.
-                            corr_err = [m['timing_error_ms'] for m in rtp_measurements 
-                                       if m['station'] == station_name]
-                            if corr_err:
-                                delta = edge_result.ensemble_timing_error_ms - corr_err[0]
-                                logger.info(
-                                    f"{self.channel_name}: {station_name} edge cross-check: "
-                                    f"corr={corr_err[0]:+.3f}ms, "
-                                    f"edge={edge_result.ensemble_timing_error_ms:+.3f}ms, "
-                                    f"Δ={delta:+.3f}ms "
-                                    f"({edge_result.ensemble_n_edges} edges)")
-                
-                # Store edge results for caller to retrieve
-                self._last_edge_results = edge_results
-                
-            else:
-                # No BufferTiming — fall back to legacy method.
-                # Without BufferTiming we don't know which second we're at,
-                # so use a conservative 20ms template as before.
-                for station_name, tone_freq in station_tone_freqs:
-                    prop_delay = expected_delays_by_station.get(station_name, 20.0)
+                    # Adaptive search window: physics model 1σ + UTC uncertainty
+                    # (quadrature), then take 3σ.
+                    station_unc_1sigma = expected_uncertainty_by_station.get(station_name)
+                    if station_unc_1sigma is not None:
+                        combined_1sigma = math.sqrt(station_unc_1sigma**2 + utc_unc_ms**2)
+                        adaptive_window = combined_1sigma * 3.0
+                    else:
+                        adaptive_window = None
+                    
                     result = self._measure_tone_at_known_time(
                         audio_signal=audio_signal,
-                        expected_delay_ms=prop_delay,
+                        expected_delay_ms=expected_ms_from_buf_start,
                         tone_freq_hz=tone_freq,
-                        tone_duration_sec=0.02,
-                        station_name=station_name
+                        tone_duration_sec=tone_duration,
+                        station_name=station_name,
+                        search_window_ms=adaptive_window
                     )
-                    if result and result.get('detected'):
-                        rtp_measurements.append(result)
+                    
+                    # Record every attempt for diagnostic summary
+                    result['utc_second'] = utc_sec
+                    result['tone_duration_sec'] = tone_duration
+                    all_attempts.append(result)
+                    
+                    if result.get('detected'):
+                        # arrival_ms is from buffer start.  Convert to UTC.
+                        arrival_utc = buffer_timing.sample_to_utc(
+                            result['arrival_ms'] * self.sample_rate / 1000
+                        )
+                        # Expected arrival UTC includes CHU tx_onset offset
+                        # so timing_error_ms reflects the true clock offset.
+                        chu_tx = 0.074 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
+                        expected_utc = utc_sec + prop_delay_sec + chu_tx
+                        result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
+                        result['arrival_utc'] = arrival_utc
+                        measurements.append(result)
             
-            if not rtp_measurements:
+            # Per-minute diagnostic: what did we attempt, what passed, what failed and why?
+            if all_attempts:
+                n_detected = sum(1 for a in all_attempts if a.get('detected'))
+                n_rejected = len(all_attempts) - n_detected
+                # Count rejection reasons
+                reasons = {}
+                rejected_snrs = []
+                for a in all_attempts:
+                    reason = a.get('rejection_reason')
+                    if reason:
+                        reasons[reason] = reasons.get(reason, 0) + 1
+                        if a.get('corr_snr_db', -99) > -99:
+                            rejected_snrs.append(a['corr_snr_db'])
+                
+                reason_str = ', '.join(f"{r}={c}" for r, c in sorted(reasons.items()))
+                snr_str = ''
+                if rejected_snrs:
+                    snr_str = f", rejected SNRs: {min(rejected_snrs):.1f}–{max(rejected_snrs):.1f}dB"
+                
+                logger.info(f"{self.channel_name}: {mode_label} attempts={len(all_attempts)} "
+                           f"detected={n_detected} rejected={n_rejected} "
+                           f"[{reason_str}]{snr_str}")
+                
+                if measurements:
+                    secs = [m['utc_second'] % 60 for m in measurements]
+                    logger.info(f"{self.channel_name}: {mode_label} detected at seconds {secs}")
+            
+            # === Per-Second Edge Detection (both modes) ===
+            # Run differential edge detector on all per-second ticks.
+            # This provides up to 57 independent timing measurements per
+            # minute from the tick onset edges, even when the minute marker
+            # correlation fails (low SNR, fading, etc.).
+            #
+            # The edge ensemble augments timing for stations that had NO
+            # successful minute marker correlation this minute.
+            is_dedicated = ('WWV_20' in channel_upper or 'WWV_25' in channel_upper)
+            stations_with_corr = {m['station'] for m in measurements}
+            edge_results = {}
+            
+            for station_name, tone_freq in station_tone_freqs:
+                prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
+                prop_delay_sec = prop_delay_ms / 1000.0
+                
+                try:
+                    edge_result = self.edge_detector.detect_edges(
+                        audio_signal=audio_signal,
+                        station=station_name,
+                        minute_number=minute_number,
+                        buffer_timing=buffer_timing,
+                        expected_delay_sec=prop_delay_sec,
+                        is_dedicated_channel=is_dedicated,
+                        iq_samples=iq_samples,
+                    )
+                except Exception as e:
+                    logger.warning(f"{self.channel_name}: Edge detection failed for "
+                                f"{station_name}: {e}")
+                    edge_result = None
+                
+                if edge_result is not None:
+                    edge_results[station_name] = edge_result
+                    
+                    # If this station had NO correlation detection but the
+                    # edge ensemble has sufficient confidence, create a
+                    # synthetic measurement from the ensemble.
+                    if (station_name not in stations_with_corr
+                            and edge_result.confidence >= 0.3
+                            and edge_result.ensemble_n_edges >= 5):
+                        
+                        # The ensemble timing_error is relative to expected
+                        # propagation delay.  Convert to arrival_ms from
+                        # buffer start, matching the correlation output format.
+                        # Use the middle of the buffer as reference point.
+                        mid_utc = (buf_start_utc + buf_end_utc) / 2.0
+                        mid_sec = int(mid_utc)
+                        # Synthetic arrival = expected + ensemble offset
+                        synth_arrival_utc = mid_sec + prop_delay_sec + edge_result.ensemble_timing_error_ms / 1000.0
+                        synth_arrival_sample = buffer_timing.utc_to_sample(synth_arrival_utc)
+                        synth_arrival_ms = synth_arrival_sample * 1000 / self.sample_rate
+                        
+                        synth_measurement = {
+                            'station': station_name,
+                            'frequency_hz': tone_freq,
+                            'arrival_ms': synth_arrival_ms,
+                            'expected_delay_ms': prop_delay_ms,
+                            'timing_error_ms': edge_result.ensemble_timing_error_ms,
+                            'snr_db': edge_result.mean_edge_snr_db,
+                            'corr_snr_db': edge_result.mean_edge_snr_db,
+                            'tone_power': 0.0,
+                            'peak_correlation': 0.0,
+                            'detected': True,
+                            'rejection_reason': None,
+                            'utc_second': mid_sec,
+                            'tone_duration_sec': 0.005,
+                            'arrival_utc': synth_arrival_utc,
+                            'detection_method': 'edge_ensemble',
+                            'edge_n': edge_result.ensemble_n_edges,
+                            'edge_uncertainty_ms': edge_result.ensemble_uncertainty_ms,
+                            'edge_confidence': edge_result.confidence,
+                        }
+                        measurements.append(synth_measurement)
+                        logger.info(
+                            f"{self.channel_name}: {station_name} EDGE ENSEMBLE "
+                            f"recovery: {edge_result.ensemble_n_edges} edges, "
+                            f"timing={edge_result.ensemble_timing_error_ms:+.3f}"
+                            f"±{edge_result.ensemble_uncertainty_ms:.3f}ms, "
+                            f"conf={edge_result.confidence:.2f}")
+                    
+                    elif station_name in stations_with_corr and edge_result.ensemble_n_edges >= 5:
+                        # Station already has correlation detection.
+                        # Log the edge ensemble as a cross-check.
+                        corr_err = [m['timing_error_ms'] for m in measurements 
+                                   if m['station'] == station_name]
+                        if corr_err:
+                            delta = edge_result.ensemble_timing_error_ms - corr_err[0]
+                            logger.info(
+                                f"{self.channel_name}: {station_name} edge cross-check: "
+                                f"corr={corr_err[0]:+.3f}ms, "
+                                f"edge={edge_result.ensemble_timing_error_ms:+.3f}ms, "
+                                f"Δ={delta:+.3f}ms "
+                                f"({edge_result.ensemble_n_edges} edges)")
+            
+            # Store edge results for caller to retrieve
+            self._last_edge_results = edge_results
+            
+        elif not self.is_rtp_authority:
+            # === Fusion fallback: tone_detector when BufferTiming unavailable ===
+            # Without BufferTiming we can't do per-second correlation.
+            # Fall back to the legacy MultiStationToneDetector.
+            logger.debug(f"{self.channel_name}: Fusion mode - tone_detector fallback "
+                        f"(no BufferTiming)")
+            
+            # Use adaptive search window based on physics model + UTC uncertainty
+            max_uncertainty_ms = 15.0
+            for station, delay in expected_delays_by_station.items():
+                _, _, unc = self._predict_geometric_delay(station, system_time)
+                max_uncertainty_ms = max(max_uncertainty_ms, unc)
+            
+            adaptive_window_ms = min(200.0, max(50.0, max_uncertainty_ms * 3))
+            
+            if self.fusion_state is not None:
+                adaptive_window_ms = self.fusion_state.get_search_window_ms()
+            
+            logger.info(f"{self.channel_name}: Fusion fallback search: "
+                       f"expected_delays={expected_delays_by_station}, "
+                       f"window=±{adaptive_window_ms:.0f}ms, "
+                       f"lock_tier={self.fusion_state.lock_tier.name if self.fusion_state else 'N/A'}")
+            
+            detections = self.tone_detector.process_samples(
+                timestamp=buffer_mid_time,
+                samples=iq_samples,
+                rtp_timestamp=rtp_timestamp,
+                original_sample_rate=self.sample_rate,
+                buffer_rtp_start=rtp_timestamp,
+                search_window_ms=adaptive_window_ms,
+                expected_delays_by_station=expected_delays_by_station
+            )
+            
+            if not detections:
+                logger.debug(f"{self.channel_name}: No detections for minute {minute_boundary}")
+                return []
+            
+            station_names = [det.station.value for det in detections]
+            logger.info(f"{self.channel_name}: Fusion fallback detected "
+                       f"{len(detections)} station(s): {station_names}")
+            # Skip the measurement→detection conversion below; tone_detector
+            # already returns ToneDetectionResult objects.  Jump to Step 2.
+            # (detections variable is already set)
+            
+        else:
+            # RTP mode without BufferTiming — fall back to legacy method.
+            # Without BufferTiming we don't know which second we're at,
+            # so use a conservative 20ms template as before.
+            for station_name, tone_freq in station_tone_freqs:
+                prop_delay = expected_delays_by_station.get(station_name, 20.0)
+                station_unc_1sigma = expected_uncertainty_by_station.get(station_name)
+                adaptive_window = station_unc_1sigma * 3.0 if station_unc_1sigma else None
+                result = self._measure_tone_at_known_time(
+                    audio_signal=audio_signal,
+                    expected_delay_ms=prop_delay,
+                    tone_freq_hz=tone_freq,
+                    tone_duration_sec=0.02,
+                    station_name=station_name,
+                    search_window_ms=adaptive_window
+                )
+                if result and result.get('detected'):
+                    measurements.append(result)
+        
+        # === Convert measurements to ToneDetectionResult ===
+        # The per-second correlator produces dicts; downstream needs ToneDetectionResult.
+        # The Fusion fallback path already has ToneDetectionResult objects.
+        if use_per_second_correlator or self.is_rtp_authority:
+            if not measurements:
                 logger.debug(f"{self.channel_name}: No signals detected at expected times")
                 return []
             
@@ -1468,7 +1558,7 @@ class MetrologyEngine:
             # a naive highest-SNR selection.
             from collections import defaultdict
             by_station = defaultdict(list)
-            for m in rtp_measurements:
+            for m in measurements:
                 by_station[m['station']].append(m)
             
             best_per_station = {}
@@ -1496,10 +1586,10 @@ class MetrologyEngine:
             for m in best_per_station.values():
                 best_keys.add((m['station'], m.get('utc_second', 0)))
             
-            # Convert RTP measurements to ToneDetectionResult format for downstream
+            # Convert to ToneDetectionResult format for downstream
             from ..interfaces.data_models import ToneDetectionResult, StationType
             detections = []
-            for m in rtp_measurements:
+            for m in measurements:
                 station_type = StationType[m['station']] if m['station'] in StationType.__members__ else StationType.UNKNOWN
                 is_best = (m['station'], m.get('utc_second', 0)) in best_keys
                 
@@ -1527,49 +1617,10 @@ class MetrologyEngine:
                 detections.append(det)
             
             n_best = len(best_per_station)
-            station_names = [m['station'] for m in rtp_measurements]
-            logger.info(f"{self.channel_name}: RTP mode measured {len(detections)} signal(s) "
+            station_names = [m['station'] for m in measurements]
+            logger.info(f"{self.channel_name}: {mode_label} mode measured "
+                       f"{len(detections)} signal(s) "
                        f"({n_best} best for timing): {station_names}")
-        
-        else:
-            # === FUSION MODE: Search for Signals ===
-            # Timing is uncertain (NTP-based). Need to search for tones.
-            logger.debug(f"{self.channel_name}: Fusion mode - searching for signals")
-            
-            # Use adaptive search window based on physics model
-            max_uncertainty_ms = 15.0
-            for station, delay in expected_delays_by_station.items():
-                _, _, unc = self._predict_geometric_delay(station, system_time)
-                max_uncertainty_ms = max(max_uncertainty_ms, unc)
-            
-            adaptive_window_ms = min(200.0, max(50.0, max_uncertainty_ms * 3))
-            
-            # Use FusionTimingState to determine search window
-            if self.fusion_state is not None:
-                adaptive_window_ms = self.fusion_state.get_search_window_ms()
-            
-            logger.info(f"{self.channel_name}: Fusion search: "
-                       f"expected_delays={expected_delays_by_station}, window=±{adaptive_window_ms:.0f}ms, "
-                       f"lock_tier={self.fusion_state.lock_tier.name if self.fusion_state else 'N/A'}")
-            
-            buffer_mid_time = system_time + len(iq_samples)/self.sample_rate/2
-            
-            detections = self.tone_detector.process_samples(
-                timestamp=buffer_mid_time,
-                samples=iq_samples,
-                rtp_timestamp=rtp_timestamp,
-                original_sample_rate=self.sample_rate,
-                buffer_rtp_start=rtp_timestamp,
-                search_window_ms=adaptive_window_ms,
-                expected_delays_by_station=expected_delays_by_station
-            )
-            
-            if not detections:
-                logger.debug(f"{self.channel_name}: No detections for minute {minute_boundary}")
-                return []
-            
-            station_names = [det.station.value for det in detections]
-            logger.info(f"{self.channel_name}: Fusion detected {len(detections)} station(s): {station_names}")
              
         # === Step 2: Channel Characterization ===
         # We need this for Station ID and Metrics
@@ -1724,6 +1775,31 @@ class MetrologyEngine:
         # Only the best detection per station (use_for_time_snap=True) creates
         # an L1 timing measurement and feeds the fusion state.  All detections
         # contribute SNR data points to the HDF5 for dashboard plotting.
+        
+        # Compute per-station multipath spread from edge detection (Step 5).
+        # Two indicators:
+        #   1. CLEAN delay spread: max delay_offset_ms across resolved components
+        #   2. Per-second timing spread: ensemble_uncertainty_ms when it exceeds
+        #      the noise floor (~0.5ms for 24kHz sample rate)
+        # Take the larger of the two as the multipath-induced timing ambiguity.
+        multipath_spread_by_station = {}
+        for stn, er in edge_results.items():
+            clean_spread_ms = 0.0
+            for tick in er.edges:
+                if tick.clean_arrivals and len(tick.clean_arrivals) >= 2:
+                    max_offset = max(abs(c.delay_offset_ms) for c in tick.clean_arrivals)
+                    clean_spread_ms = max(clean_spread_ms, max_offset)
+            
+            # Per-second spread above noise floor (~0.5ms at 24kHz)
+            timing_spread_ms = max(0.0, er.ensemble_uncertainty_ms - 0.5) if er.ensemble_n_edges >= 5 else 0.0
+            
+            spread = max(clean_spread_ms, timing_spread_ms)
+            if spread > 0.0:
+                multipath_spread_by_station[stn] = spread
+                logger.info(f"{self.channel_name}: {stn} multipath spread: "
+                           f"{spread:.2f}ms (CLEAN={clean_spread_ms:.2f}ms, "
+                           f"timing={timing_spread_ms:.2f}ms)")
+        
         results = []
         for det in detections:
             # Map station name to Enum
@@ -1802,6 +1878,28 @@ class MetrologyEngine:
                                                f"({deviation_sigma:.1f}σ)")
                             logger.info(f"{self.channel_name}: Physics VALIDATED: "
                                        f"{det.station.value} {validation_reason}")
+                        
+                        # Feed validated detection to adaptive window tracker.
+                        # Weight the effective SNR by physics_confidence so that
+                        # marginal detections have less influence on window narrowing.
+                        effective_snr = det.snr_db * physics_confidence
+                        station_mp_spread = multipath_spread_by_station.get(
+                            det.station.value, 0.0)
+                        self.arrival_matrix.record_detection(
+                            station=det.station.value,
+                            frequency_mhz=self.frequency_mhz,
+                            detected_ms=det.timing_error_ms + arrival_info.expected_delay_ms,
+                            expected_ms=arrival_info.expected_delay_ms,
+                            snr_db=effective_snr,
+                            multipath_spread_ms=station_mp_spread
+                        )
+                        
+                        # Multipath degrades timing confidence: the earliest
+                        # arrival is correct but the correlator may lock onto
+                        # a later mode.  Reduce confidence proportionally.
+                        if station_mp_spread > 0:
+                            mp_penalty = 1.0 / (1.0 + station_mp_spread / 3.0)
+                            physics_confidence *= mp_penalty
             
             # Construct L1 measurement (only for validated detections)
             meas = L1MetrologyMeasurement(
@@ -1830,7 +1928,10 @@ class MetrologyEngine:
             # Feed ONLY the best detection per station to FusionTimingState.
             # Multiple timing measurements from the same station would confuse
             # the Kalman filter with correlated noise.
-            if self.fusion_state is not None and physics_valid and det.use_for_time_snap:
+            # Gate → likelihood: use physics_confidence threshold (0.1) instead
+            # of binary physics_valid.  Marginal detections feed the Kalman
+            # filter with low weight rather than being excluded entirely.
+            if self.fusion_state is not None and physics_confidence > 0.1 and det.use_for_time_snap:
                 lock_status = self.fusion_state.add_detection(
                     station=det.station.value,
                     timing_error_ms=det.timing_error_ms,
@@ -1843,6 +1944,19 @@ class MetrologyEngine:
                     logger.info(f"{self.channel_name}: {lock_status}")
                     self._write_bootstrap_state_on_lock()
             
+        # Safeguard 2: Record misses for stations with no validated detection.
+        # This feeds the consecutive miss counter in BroadcastWindowState,
+        # which forces the search window back to initial width after
+        # MISS_RESET_THRESHOLD consecutive misses (prevents FM2 lock-up).
+        if self.arrival_matrix is not None:
+            validated_stations = {
+                meas.station_id.value if hasattr(meas.station_id, 'value') else str(meas.station_id)
+                for meas in results
+            }
+            for (station, freq) in list(self.arrival_matrix._broadcast_windows.keys()):
+                if freq == self.frequency_mhz and station not in validated_stations:
+                    self.arrival_matrix.record_miss(station, freq)
+        
         with self._lock:
             self.minutes_processed += 1
         
@@ -1858,7 +1972,7 @@ class MetrologyEngine:
         # Store ALL measurement attempts (detected + rejected) for threshold calibration.
         # This is the evidence that keeps us honest: by recording what we reject and why,
         # we can later ask whether our thresholds are correctly calibrated.
-        self._last_rtp_attempts = rtp_all_attempts if self.is_rtp_authority else None
+        self._last_rtp_attempts = all_attempts if all_attempts else None
         
         # === Step 4: Multi-Constraint Timing Validation ===
         # Validate detections using all known timing constraints:

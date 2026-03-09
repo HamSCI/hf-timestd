@@ -367,20 +367,21 @@ class MetrologyService:
         finally:
             self.stop()
     
+    # Hot buffer holds this many minutes.  Poll fallback never looks
+    # further back — if data has left the hot buffer it's too late for
+    # real-time metrology.
+    HOT_BUFFER_MINUTES = 5
+
     def _run_inotify_mode(self):
-        """Run using inotify-based file watching with polling fallback."""
-        # First, catch up on any missed minutes (files already in directory)
-        self._process_backlog()
-        
+        """Run using inotify-based file watching with polling fallback.
+
+        Reads ONLY from the hot buffer (/dev/shm).  No backlog scan,
+        no cold-archive fallback, no retry backoff — if the file is in
+        RAM it's available instantly.
+        """
         last_poll_time = time.time()
         last_success_time = time.time()
         poll_interval = 5.0  # Poll every 5 seconds as fallback
-        # Minutes to scan in poll fallback.  Widens to 30 when we haven't
-        # successfully processed anything for >5 minutes (catches stalls where
-        # inotify events stopped arriving after hot→cold archiver races).
-        POLL_NORMAL_MINUTES = 3
-        POLL_STALE_MINUTES  = 30
-        STALE_THRESHOLD_S   = 300  # 5 minutes without a successful write
         
         while self.running:
             try:
@@ -388,41 +389,34 @@ class MetrologyService:
                 minute_boundary, file_dir = self._file_queue.get(timeout=2.0)
                 
                 if minute_boundary not in self.processed_minutes:
-                    # Retry up to 3 times with backoff to survive the
-                    # hot→cold archiver race: inotify fires when .json lands
-                    # in hot buffer, but by the time we read it the archiver
-                    # may have moved it to cold before cold is visible.
-                    success = False
-                    for attempt, delay in enumerate([0.5, 1.5, 3.0]):
-                        time.sleep(delay)
-                        logger.info(f"Processing minute {minute_boundary} (inotify, attempt {attempt+1})")
-                        success = self.process_minute(minute_boundary)
-                        if success:
-                            break
-                        if attempt < 2:
-                            logger.debug(f"Minute {minute_boundary} not ready yet, retrying")
+                    # Hot-buffer read — no archiver race, no retry needed.
+                    # Small delay lets the recorder finish flushing the .json.
+                    time.sleep(0.5)
+                    logger.info(f"Processing minute {minute_boundary} (inotify)")
+                    success = self.process_minute(minute_boundary)
                     if success:
                         self.processed_minutes.add(minute_boundary)
                         self._cleanup_processed_set()
                         last_success_time = time.time()
                         logger.info(f"Minute {minute_boundary} processed successfully")
                     else:
-                        logger.warning(f"Failed to process minute {minute_boundary} after 3 attempts")
+                        logger.debug(f"Minute {minute_boundary} not in hot buffer or processing failed")
                         
             except queue.Empty:
-                # Fallback: poll for new files periodically (inotify may miss events on tmpfs)
+                # Fallback: poll hot buffer for new files (inotify may miss events on tmpfs)
                 now = time.time()
                 if now - last_poll_time >= poll_interval:
                     last_poll_time = now
-                    stale = (now - last_success_time) > STALE_THRESHOLD_S
-                    if stale:
+                    if self._poll_for_new_files(
+                        lookback_minutes=self.HOT_BUFFER_MINUTES
+                    ):
+                        last_success_time = time.time()
+                    elif (now - last_success_time) > 300:
                         logger.warning(
                             f"No successful minute processed for "
-                            f"{(now - last_success_time):.0f}s — widening poll to {POLL_STALE_MINUTES} min"
+                            f"{(now - last_success_time):.0f}s — "
+                            f"recorder may be down or hot buffer empty"
                         )
-                    self._poll_for_new_files(
-                        lookback_minutes=POLL_STALE_MINUTES if stale else POLL_NORMAL_MINUTES
-                    )
     
     def _run_polling_mode(self):
         """Fallback polling mode when watchdog is not available."""
@@ -449,17 +443,22 @@ class MetrologyService:
             logger.debug(f"Waiting {wait_time:.1f}s for next minute")
             time.sleep(wait_time)
     
-    def _poll_for_new_files(self, lookback_minutes: int = 3):
-        """Poll for new files (fallback when inotify misses events)."""
+    def _poll_for_new_files(self, lookback_minutes: int = 3) -> bool:
+        """Poll hot buffer for unprocessed minutes (fallback when inotify misses events).
+
+        Only scans back lookback_minutes (≤ HOT_BUFFER_MINUTES).
+        Returns True if at least one minute was processed successfully.
+        """
         now = time.time()
         current_minute = (int(now) // 60) * 60
+        any_success = False
         
         for minutes_ago in range(lookback_minutes, 0, -1):
             target_minute = current_minute - (minutes_ago * 60)
             if target_minute in self.processed_minutes:
                 continue
             
-            # Check if file exists
+            # _read_binary_minute reads hot buffer only
             data = self._read_binary_minute(target_minute)
             if data is not None:
                 logger.info(f"Processing minute {target_minute} (poll detected)")
@@ -467,32 +466,9 @@ class MetrologyService:
                 if success:
                     self.processed_minutes.add(target_minute)
                     self._cleanup_processed_set()
+                    any_success = True
                     logger.info(f"Minute {target_minute} processed successfully")
-    
-    def _process_backlog(self):
-        """Process any files that exist but haven't been processed yet."""
-        logger.info("Checking for backlog files...")
-        
-        # Look for existing files in the archive directory
-        now = time.time()
-        current_minute = (int(now) // 60) * 60
-        
-        # Scan up to 24 hours back — _read_binary_minute returns None quickly
-        # for missing minutes, so a large window is harmless and ensures
-        # backfill covers gaps after crashes or updates.
-        for minutes_ago in range(24 * 60, 0, -1):
-            target_minute = current_minute - (minutes_ago * 60)
-            if target_minute in self.processed_minutes:
-                continue
-            
-            # Check if file exists
-            data = self._read_binary_minute(target_minute)
-            if data is not None:
-                logger.info(f"Processing backlog minute {target_minute}")
-                success = self.process_minute(target_minute)
-                if success:
-                    self.processed_minutes.add(target_minute)
-                    logger.info(f"Backlog minute {target_minute} processed successfully")
+        return any_success
 
     def process_minute(self, minute_boundary: int) -> bool:
         """Process a single minute."""
@@ -970,38 +946,37 @@ class MetrologyService:
     def _get_latest_minute(self) -> int:
         """Get latest complete minute (wall clock - 3 min).
         
-        Files are written at the END of each minute by the core recorder,
-        then may be moved to cold storage. A 3-minute delay ensures:
+        Files are written at the END of each minute by the core recorder
+        into the hot buffer (/dev/shm).  A 3-minute delay ensures:
         - The minute has fully elapsed
-        - The file has been written (~1 min after minute start)
-        - Any tiered storage archiving has completed
+        - The recorder has flushed .bin + .json to the hot buffer
         """
         now = time.time()
-        # 3 minute delay for safety/completion
         return ((int(now) // 60) - 3) * 60
 
     def _read_binary_minute(self, target_minute: int) -> Optional[Tuple[np.ndarray, float, int]]:
-        """Read binary IQ data (Tiered Storage aware)."""
-        # Re-using logic from Phase2AnalyticsService
-        # Simplified for clarity
-        
+        """Read binary IQ data from the HOT BUFFER ONLY.
+
+        Metrology is a real-time service: if the data isn't in /dev/shm
+        it is already too old for UTC reconstruction.  Cold archive reads
+        serve physics, web-api, and GRAPE — not real-time metrology.
+        """
         from datetime import datetime
         dt = datetime.fromtimestamp(target_minute, tz=timezone.utc)
         date_str = dt.strftime('%Y%m%d')
         
-        # 1. Locate file
+        # 1. Locate file — HOT BUFFER ONLY
         bin_path = None
         json_path = None
         
         if self._tiered_manager:
-            bin_path = self._tiered_manager.find_minute_file(
+            bin_path = self._tiered_manager.find_minute_file_hot_only(
                 self.channel_name, target_minute, date_str
             )
             if bin_path:
                 json_path = bin_path.parent / f"{target_minute}.json"
-        
-        if not bin_path:
-            # Check archive
+        else:
+            # No tiered manager — archive_dir IS the hot buffer (/dev/shm/...)
             base = self.archive_dir / date_str / str(target_minute)
             for ext in ['.bin', '.bin.zst', '.bin.lz4']:
                 p = Path(str(base) + ext)
@@ -1011,7 +986,7 @@ class MetrologyService:
                     break
         
         if not bin_path:
-            logger.info(f"No binary file found for minute {target_minute}")
+            logger.debug(f"No hot-buffer file for minute {target_minute}")
             return None
             
         # 2. Read Metadata

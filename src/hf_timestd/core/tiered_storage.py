@@ -217,6 +217,39 @@ class TieredStorageManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
     
+    def find_minute_file_hot_only(
+        self,
+        channel_name: str,
+        minute_boundary: int,
+        date_str: Optional[str] = None
+    ) -> Optional[Path]:
+        """
+        Find a minute file in the hot buffer ONLY (/dev/shm).
+
+        Use this for real-time metrology — if the data isn't in RAM,
+        it's already too old to matter for UTC reconstruction.
+
+        Args:
+            channel_name: Channel name
+            minute_boundary: Unix timestamp of minute
+            date_str: Optional YYYYMMDD string (computed if not provided)
+
+        Returns:
+            Path to .bin file, or None if not in hot buffer
+        """
+        if date_str is None:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
+            date_str = dt.strftime('%Y%m%d')
+
+        hot_path = self.get_hot_buffer_path(channel_name) / date_str
+        for ext in ['.bin', '.bin.zst', '.bin.lz4']:
+            candidate = hot_path / f"{minute_boundary}{ext}"
+            if candidate.exists():
+                return candidate
+
+        return None
+
     def find_minute_file(
         self,
         channel_name: str,
@@ -225,6 +258,10 @@ class TieredStorageManager:
     ) -> Optional[Path]:
         """
         Find a minute file, checking hot buffer first, then cold.
+
+        Use this for science/physics/web-api reads that can tolerate
+        disk latency.  Real-time metrology should use
+        find_minute_file_hot_only() instead.
         
         Args:
             channel_name: Channel name

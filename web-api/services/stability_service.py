@@ -79,8 +79,8 @@ class StabilityService:
         """
         try:
             # Read fusion timing data
-            start_str = start.isoformat() + 'Z'
-            end_str = end.isoformat() + 'Z'
+            start_str = start.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            end_str = end.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
             
             measurements = self.reader.read_time_range(
                 start=start_str,

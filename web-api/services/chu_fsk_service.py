@@ -372,8 +372,8 @@ class CHUFSKService:
                     channel=channel,
                 )
                 measurements = reader.read_time_range(
-                    start=start.isoformat() + 'Z',
-                    end=end.isoformat() + 'Z',
+                    start=start.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
+                    end=end.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
                 )
                 for m in measurements:
                     timestamps.append(m.get('timestamp_utc'))

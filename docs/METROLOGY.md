@@ -1,8 +1,8 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 6.10.0 (TickEdgeDetector Unified Pipeline + Real-Time Ionospheric Model + GNSS VTEC Anchoring + HDF5 SWMR)  
-**Last Updated:** March 7, 2026  
+**System Version:** 6.11.0 (Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty)  
+**Last Updated:** March 9, 2026  
 **Author:** Michael James Hauan (AC0G)
 
 ---
@@ -397,6 +397,27 @@ When a dual-frequency GNSS receiver (e.g., u-blox ZED-F9P) is available, the sys
 **Arrival Tolerance:** ±100 ms (validates detected tone arrivals against expected propagation delay)
 
 **Key Insight:** GPSDO is the foundation. Stations are periodic calibration checks, not the primary reference.
+
+#### Physics-Driven Adaptive Windows (v6.11)
+
+The static phase progression above is augmented (v6.11) by a per-station adaptive window driven by the `HFPropagationModel`:
+
+```
+σ_physics = model uncertainty (1σ)
+σ_utc     = FusionTimingState UTC uncertainty / 3  (Fusion mode only)
+σ_total   = √(σ_physics² + σ_utc²)
+search_window = 3 × σ_total   (clamped to [5 ms, 200 ms])
+```
+
+The `BroadcastWindowState` in `ArrivalPatternMatrix` tracks observed propagation variance per (station, frequency) and blends it with the model uncertainty.  Three safeguards prevent pathological narrowing:
+
+| Safeguard | Trigger | Action |
+|-----------|---------|--------|
+| **Staleness decay** | >5 min since last detection | Exponential widening toward model+initial |
+| **Miss counter** | 5 consecutive minutes with no detection | Full reset to initial uncertainty |
+| **Model floor** | Tracked < model uncertainty | Only allowed when confidence ≥ 0.95 and ≥ 30 observations |
+
+**Implementation:** `src/hf_timestd/core/arrival_pattern_matrix.py` (`BroadcastWindowState`), `src/hf_timestd/core/metrology_engine.py` (`process_minute`)
 
 ---
 

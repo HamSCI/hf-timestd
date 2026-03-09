@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** March 7, 2026  
+**Last Updated:** March 9, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.10.0
+**Version:** V6.11.0
 
 ---
 
@@ -539,7 +539,63 @@ GRAPE decimation is intentionally decoupled from the timing/metrology pipeline. 
 
 ---
 
-**Last Updated:** March 7, 2026
+**Last Updated:** March 9, 2026
+
+## Unified Measurement Path (v6.11)
+
+The v6.11 release eliminates the RTP/Fusion fork in the per-minute detection pipeline.  Both modes now share a single detection path with mode-specific post-processing.
+
+### The Problem
+
+Prior to v6.11, `process_minute()` contained two parallel detection branches:
+- **RTP branch:** Per-second correlator with BufferTiming, edge ensemble, robust median filter
+- **Fusion branch:** `tone_detector.process_samples()` with FusionTimingState search window
+
+This fork duplicated logic, made it difficult to keep both branches feature-equivalent, and prevented Fusion mode from benefiting from edge detection and per-second analysis.
+
+### The Solution: Unified Per-Second Correlator
+
+Both modes now use the same detection path:
+1. When `BufferTiming` is available (RTP or Fusion with GPSDO), use the per-second correlator with adaptive windowing, edge detection, and consistency filtering.
+2. Only when `BufferTiming` is missing (Fusion without GPSDO), fall back to the legacy `tone_detector.process_samples()`.
+
+### Adaptive Search Windows (v6.11)
+
+The physics model provides a 1σ uncertainty for each station's expected delay.  This is converted to a 3σ search window and passed to `_measure_tone_at_known_time()`.  In Fusion mode, the UTC estimate uncertainty from `FusionTimingState` is added in quadrature:
+
+```
+σ_total = √(σ_physics² + σ_utc²)
+search_window = 3 × σ_total
+```
+
+Three safeguards prevent the adaptive window from becoming too narrow or stale:
+- **Staleness decay:** Exponential widening after 5 minutes without a detection
+- **Consecutive miss counter:** Resets window to initial width after 5 consecutive misses
+- **Model floor rule:** Tracked variance can only narrow below the model floor when confidence ≥ 0.95 and ≥ 30 observations
+
+### Physics Confidence Weighting (v6.11)
+
+The binary physics validation gate has been replaced with continuous Gaussian confidence:
+
+```python
+physics_confidence = exp(-0.5 * (deviation_sigma)²) × snr_factor
+```
+
+This confidence weights the detection's influence on both the adaptive window tracker and the Kalman filter.  Detections at >0.1 confidence feed the Fusion timing state (previously binary pass/fail).
+
+### Multipath-Aware Uncertainty Widening (v6.11)
+
+When CLEAN deconvolution or per-second timing spread detects multipath, the measurement uncertainty is inflated:
+
+- **CLEAN delay spread:** Maximum `delay_offset_ms` across resolved multipath components
+- **Per-second timing spread:** `ensemble_uncertainty_ms` minus noise floor (~0.5 ms)
+- **Widening:** Fed to `record_detection()` as `multipath_spread_ms`, which inflates the tracked variance in quadrature: `σ_eff = √(σ_obs² + σ_mp²)`
+- **Kalman penalty:** Multipath-affected detections have `physics_confidence` reduced by `1/(1 + spread/3)`
+
+**Implementation:** `src/hf_timestd/core/metrology_engine.py`, `src/hf_timestd/core/arrival_pattern_matrix.py`  
+**Design doc:** `docs/design/UNIFIED_MEASUREMENT_PATH.md`
+
+---
 
 ## Real-Time Ionospheric Propagation Model (v6.7)
 

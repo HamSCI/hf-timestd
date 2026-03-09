@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** March 7, 2026
+**Last Updated:** March 9, 2026
 
 ---
 
@@ -606,12 +606,12 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 | Module | Class/Function | Purpose |
 |--------|---------------|--------|
 | `metrology_service.py` | `MetrologyService` | Polls raw_buffer for new files, dispatches to MetrologyEngine, writes HDF5 products |
-| `metrology_engine.py` | `MetrologyEngine` | Per-minute processing: tone detection, D_clock extraction, tick edge ensemble, cross-freq discrimination |
+| `metrology_engine.py` | `MetrologyEngine` | Per-minute processing: unified per-second correlator (v6.11), adaptive windowing, multipath-aware uncertainty, D_clock extraction, tick edge ensemble, cross-freq discrimination |
 | `tone_detector.py` | `ToneDetector` | 1000/1200 Hz matched filter detection with Cramér-Rao uncertainty, multipath detection, Doppler correction |
 | `tick_matched_filter.py` | `TickMatchedFilter` | Per-second tick detection (legacy — no longer used for tick_timing product) |
 | `tick_edge_detector.py` | `TickEdgeDetector` | **Primary timing source**: D_clock (front-edge ensemble), Doppler (carrier phase slope), SNR. 50-57 ticks/minute. Inspired by ntpd refclock_wwv.c |
 | `timing_bootstrap.py` | `TimingBootstrap` | RTP-to-UTC offset establishment via metadata + NTP confirmation |
-| `arrival_pattern_matrix.py` | `ArrivalPatternMatrix` | Physics-based expected arrival predictions using IRI-2020/HFPropagationModel |
+| `arrival_pattern_matrix.py` | `ArrivalPatternMatrix` | Physics-based expected arrival predictions using IRI-2020/HFPropagationModel. `BroadcastWindowState` tracks adaptive windows with safeguards (v6.11) |
 | `chu_fsk_decoder.py` | `CHUFSKDecoder` | Bell 103 AFSK demodulation for CHU time code (seconds 31-39) |
 
 ### Phase 2: Propagation Modeling (`src/hf_timestd/core/`)
