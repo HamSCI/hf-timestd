@@ -615,7 +615,7 @@ def fig13_physics_cascade(date_str):
 
     r_shape = np.corrcoef(dc_norm, cum_scaled)[0, 1]
     ax.text(0.98, 0.92,
-            f'r(shape) = {r_shape:.3f}\nScale ratio: {scale:.0f}×',
+            f'r² = {r_shape**2:.3f}\nScale ratio: {scale:.0f}×',
             transform=ax.transAxes, fontsize=10, fontweight='bold',
             va='top', ha='right',
             bbox=dict(boxstyle='round,pad=0.4', facecolor='#fff3cd',
