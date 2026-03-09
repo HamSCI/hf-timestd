@@ -6,7 +6,7 @@ Figures 10-14: Demonstrate that shared-channel station discrimination
 produces physically self-consistent, independent ionospheric soundings.
 
 Usage:
-    python3 scripts/generate_correlation_figures.py [--date YYYYMMDD]
+    python3 scripts/generate_correlation_figures.py [--date YYYYMMDD] [--channel SHARED_15000]
 """
 
 import argparse
@@ -136,13 +136,33 @@ def smooth(arr, window=15):
 # Figure 10: 4-Panel Synchronized Time Series ("The Ionospheric Fingerprint")
 # ---------------------------------------------------------------------------
 
-def fig10_ionospheric_fingerprint(date_str):
-    print("Generating Figure 10: Ionospheric Fingerprint (4-panel time series)...")
-    data = load_tick_timing('SHARED_10000', date_str)
+def fig10_ionospheric_fingerprint(date_str, channel='SHARED_10000'):
+    freq_mhz = int(channel.split('_')[1]) / 1000
+    print(f"Generating Figure 10: Ionospheric Fingerprint ({channel}, {date_str})...")
+    data = load_tick_timing(channel, date_str)
     dtec_data = load_dtec(date_str)
     if not data:
-        print("  No SHARED_10000 tick_timing data found.")
+        print(f"  No {channel} tick_timing data found.")
         return
+
+    # BPM broadcast schedule gate — filter out records from hours when
+    # BPM is not transmitting.  Pre-fix data contains false BPM detections
+    # (WWV misidentified as BPM) at all hours.
+    bpm_active_hours = set(range(24))  # 5/10 MHz: all hours
+    if abs(freq_mhz - 2.5) < 0.1:
+        bpm_active_hours = {0} | set(range(8, 24))
+    elif abs(freq_mhz - 15.0) < 0.1:
+        bpm_active_hours = set(range(1, 9))
+    if 'BPM' in data:
+        hours = (data['BPM']['mb'] % 86400) // 3600
+        mask = np.array([int(h) in bpm_active_hours for h in hours])
+        n_before = len(data['BPM']['mb'])
+        for k in data['BPM']:
+            data['BPM'][k] = data['BPM'][k][mask]
+        n_after = len(data['BPM']['mb'])
+        if n_before != n_after:
+            print(f"  BPM schedule filter: {n_before} → {n_after} records "
+                  f"(removed {n_before - n_after} outside broadcast hours)")
 
     fig, axes = plt.subplots(4, 1, figsize=(14, 11), sharex=True,
                              gridspec_kw={'hspace': 0.08})
@@ -162,7 +182,7 @@ def fig10_ionospheric_fingerprint(date_str):
                 label=f'{st} (median {np.nanmedian(dc):.1f} ms)', alpha=0.9)
     ax.set_ylabel('D_clock (ms)', fontsize=11)
     ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
-    ax.set_title(f'SHARED 10 MHz — Three Stations, One Frequency\n'
+    ax.set_title(f'SHARED {freq_mhz:g} MHz — Three Stations, One Frequency\n'
                  f'{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}',
                  fontsize=13, fontweight='bold')
     ax.grid(True, alpha=0.3)
@@ -191,10 +211,15 @@ def fig10_ionospheric_fingerprint(date_str):
     # Panel C: dTEC rate
     ax = axes[2]
     for st in ordered_stations:
-        key = (st, 'SHARED_10000')
+        key = (st, channel)
         if key not in dtec_data:
             continue
         d = dtec_data[key]
+        # Apply same BPM schedule filter to dTEC data
+        if st == 'BPM':
+            dtec_hours = (d['mb'] % 86400) // 3600
+            dtec_mask = np.array([int(h) in bpm_active_hours for h in dtec_hours])
+            d = {k: v[dtec_mask] for k, v in d.items()}
         t = ts_array_to_dt(d['mb'])
         rate = d['dtec_rate'] * 1000  # TECU/s -> mTECU/s
         rate_s = smooth(rate, 15)
@@ -248,7 +273,7 @@ def fig10_ionospheric_fingerprint(date_str):
              ha='center', fontsize=10, fontstyle='italic', color='#555')
 
     plt.tight_layout(rect=[0, 0.03, 1, 1])
-    out = os.path.join(OUTPUT_DIR, 'fig10_ionospheric_fingerprint.png')
+    out = os.path.join(OUTPUT_DIR, f'fig10_ionospheric_fingerprint_{channel}.png')
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {out}")
@@ -738,13 +763,15 @@ def main():
         description='Generate cross-domain correlation figures')
     parser.add_argument('--date', default='20260223',
                         help='Date string YYYYMMDD (default: 20260223)')
+    parser.add_argument('--channel', default='SHARED_10000',
+                        help='Channel name (default: SHARED_10000, e.g. SHARED_15000, SHARED_5000)')
     args = parser.parse_args()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    print(f"Generating figures for {args.date}...\n")
+    print(f"Generating figures for {args.date}, channel {args.channel}...\n")
 
-    fig10_ionospheric_fingerprint(args.date)
+    fig10_ionospheric_fingerprint(args.date, channel=args.channel)
     fig11_doppler_scatter_triptych(args.date)
     fig12_correlation_heatmap(args.date)
     fig13_physics_cascade(args.date)
