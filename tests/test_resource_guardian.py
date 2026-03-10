@@ -79,8 +79,12 @@ class TestPreflight:
     """Preflight check: refuse to start if system can't sustain the load."""
 
     def test_preflight_passes_with_sufficient_resources(self, guardian):
-        """1-channel guardian on a real disk should always pass."""
-        assert guardian.preflight_check() is True
+        """1-channel guardian with mocked healthy disk should pass."""
+        with patch('shutil.disk_usage') as mock_du:
+            mock_du.return_value = type('', (), {
+                'total': 500 * GB, 'used': 200 * GB, 'free': 300 * GB,
+            })()
+            assert guardian.preflight_check() is True
 
     def test_preflight_fails_if_disk_too_small_for_baseline(self, tmp_data_root):
         """If 80% of disk < baseline, preflight must fail."""
@@ -89,7 +93,11 @@ class TestPreflight:
             n_channels=9999,   # absurd — baseline exceeds any disk
             sample_rate=24000,
         )
-        assert g.preflight_check() is False
+        with patch('shutil.disk_usage') as mock_du:
+            mock_du.return_value = type('', (), {
+                'total': 500 * GB, 'used': 200 * GB, 'free': 300 * GB,
+            })()
+            assert g.preflight_check() is False
 
     def test_preflight_fails_if_ram_too_small(self, tmp_data_root):
         """If 80% of RAM < min_ram, preflight must fail."""
@@ -98,13 +106,21 @@ class TestPreflight:
             n_channels=99999,  # min_ram will exceed any real system
             sample_rate=24000,
         )
-        assert g.preflight_check() is False
+        with patch('shutil.disk_usage') as mock_du:
+            mock_du.return_value = type('', (), {
+                'total': 500 * GB, 'used': 200 * GB, 'free': 300 * GB,
+            })()
+            assert g.preflight_check() is False
 
     def test_preflight_creates_missing_dirs(self, tmp_path):
         fresh = tmp_path / 'fresh'
         fresh.mkdir()
         g = ResourceGuardian(data_root=str(fresh), n_channels=1)
-        assert g.preflight_check() is True
+        with patch('shutil.disk_usage') as mock_du:
+            mock_du.return_value = type('', (), {
+                'total': 500 * GB, 'used': 200 * GB, 'free': 300 * GB,
+            })()
+            assert g.preflight_check() is True
         assert (fresh / 'state').exists()
         assert (fresh / 'raw_buffer').exists()
         assert (fresh / 'phase2').exists()

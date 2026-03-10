@@ -176,7 +176,7 @@ class ResourceGuardian:
             free_gb = stat.free / GB
             used_pct = (stat.used / stat.total) * 100
 
-            # The baseline must fit within 80% of total disk
+            # Step 1: Is the disk physically large enough?
             budget_bytes = stat.total * (DISK_MAX_PERCENT / 100.0)
             if self.baseline_bytes > budget_bytes:
                 logger.critical(
@@ -188,22 +188,42 @@ class ResourceGuardian:
                     f"{self.baseline_bytes / (DISK_MAX_PERCENT / 100.0) / GB:.0f} GB."
                 )
                 ok = False
-            elif stat.free < self.baseline_bytes * 0.25:
-                # Disk is big enough but currently too full to even start
-                logger.critical(
-                    f"PREFLIGHT FAIL: Disk has {free_gb:.1f} GB free but "
-                    f"need at least {self.baseline_bytes * 0.25 / GB:.0f} GB "
-                    f"free to start (25%% of baseline). "
-                    f"Free space before starting hf-timestd."
-                )
-                ok = False
             else:
-                logger.info(
-                    f"Preflight disk: {free_gb:.1f} GB free of "
-                    f"{total_gb:.0f} GB ({used_pct:.1f}%% used), "
-                    f"baseline {baseline_gb:.0f} GB fits in "
-                    f"80%% budget ({budget_bytes / GB:.0f} GB) — OK"
-                )
+                # Step 2: If currently over 80%, evict oldest data first
+                if used_pct >= DISK_MAX_PERCENT:
+                    logger.warning(
+                        f"Preflight: disk at {used_pct:.1f}%% "
+                        f"({free_gb:.1f} GB free) — running cleanup "
+                        f"to get under {DISK_MAX_PERCENT}%%"
+                    )
+                    cleaned = self._evict_oldest_days_until_under(
+                        stat.total, DISK_MAX_PERCENT
+                    )
+                    if cleaned > 0:
+                        logger.info(
+                            f"Preflight cleanup freed {cleaned / GB:.1f} GB"
+                        )
+                    # Re-check after cleanup
+                    stat = shutil.disk_usage(self.data_root)
+                    free_gb = stat.free / GB
+                    used_pct = (stat.used / stat.total) * 100
+
+                # Step 3: After cleanup, are we under 80%?
+                if used_pct >= DISK_MAX_PERCENT:
+                    logger.critical(
+                        f"PREFLIGHT FAIL: Disk still at {used_pct:.1f}%% "
+                        f"({free_gb:.1f} GB free) after cleanup. "
+                        f"Cannot get under {DISK_MAX_PERCENT}%% — "
+                        f"free space manually before starting hf-timestd."
+                    )
+                    ok = False
+                else:
+                    logger.info(
+                        f"Preflight disk: {free_gb:.1f} GB free of "
+                        f"{total_gb:.0f} GB ({used_pct:.1f}%% used), "
+                        f"baseline {baseline_gb:.0f} GB fits in "
+                        f"80%% budget ({budget_bytes / GB:.0f} GB) — OK"
+                    )
         except OSError as e:
             logger.critical(f"PREFLIGHT FAIL: Cannot stat {self.data_root}: {e}")
             ok = False
