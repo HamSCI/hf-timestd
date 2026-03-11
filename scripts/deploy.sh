@@ -727,7 +727,7 @@ if [[ "$DO_RESTART" == "true" ]]; then
         for entry in "${METROLOGY_CHANNELS[@]}"; do
             CHANNEL="${entry%%=*}"
             systemctl restart "timestd-metrology@${CHANNEL}.service" 2>/dev/null || true
-            ((MET_STARTED++))
+            MET_STARTED=$((MET_STARTED + 1))
         done
         log_info "  Restarted: $MET_STARTED metrology workers"
 
