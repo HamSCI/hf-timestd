@@ -29,7 +29,7 @@ SERVICES=(
     "timestd-physics"
     "timestd-fusion"
     "timestd-l2-calibration"
-    "timestd-metrology"
+    "timestd-metrology.target"
     "timestd-core-recorder"
 )
 

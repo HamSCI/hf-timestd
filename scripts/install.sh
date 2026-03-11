@@ -489,7 +489,6 @@ log_info "  Copying service files from $PROJECT_DIR/systemd/..."
 # Core services (always installed)
 CORE_SERVICES=(
     "timestd-core-recorder"
-    "timestd-metrology"
     "timestd-l2-calibration"
     "timestd-fusion"
     "timestd-physics"
@@ -505,6 +504,20 @@ for svc in "${CORE_SERVICES[@]}"; do
     cp "$PROJECT_DIR/systemd/${svc}.service" "$SYSTEMD_DIR/"
     log_info "    ✅ ${svc}.service"
 done
+
+# Metrology: template unit + target (one worker per frequency channel)
+cp "$PROJECT_DIR/systemd/timestd-metrology@.service" "$SYSTEMD_DIR/"
+log_info "    ✅ timestd-metrology@.service (template)"
+cp "$PROJECT_DIR/systemd/timestd-metrology.target" "$SYSTEMD_DIR/"
+log_info "    ✅ timestd-metrology.target"
+
+# Remove old monolithic metrology service if present (superseded by template)
+if [[ -f "$SYSTEMD_DIR/timestd-metrology.service" ]]; then
+    systemctl disable timestd-metrology.service 2>/dev/null || true
+    systemctl stop timestd-metrology.service 2>/dev/null || true
+    mv "$SYSTEMD_DIR/timestd-metrology.service" "$SYSTEMD_DIR/timestd-metrology.service.disabled" 2>/dev/null || true
+    log_warn "    Disabled old monolithic timestd-metrology.service (replaced by template)"
+fi
 
 # Copy timer files and optional services
 TIMER_FILES=(
@@ -587,7 +600,8 @@ systemctl daemon-reload
 
 log_info "  Installed systemd services:"
 log_info "    - timestd-core-recorder.service  (Phase 1: RTP → Raw Buffer)"
-log_info "    - timestd-metrology.service      (Phase 2: L1 Raw Measurements)"
+log_info "    - timestd-metrology@.service    (Phase 2: L1 Raw Measurements, per-channel)"
+log_info "    - timestd-metrology.target       (Phase 2: all metrology channels)"
 log_info "    - timestd-l2-calibration.service (Phase 2: L2 Calibrated Timing)"
 log_info "    - timestd-fusion.service         (Phase 3: Fusion → Chrony SHM)"
 log_info "    - timestd-physics.service        (Phase 3: TEC Estimation)"
@@ -603,7 +617,7 @@ fi
 # Enable core services
 log_step "Enabling services for auto-start..."
 systemctl enable timestd-core-recorder.service
-systemctl enable timestd-metrology.service
+systemctl enable timestd-metrology.target
 systemctl enable timestd-l2-calibration.service
 systemctl enable timestd-fusion.service
 systemctl enable timestd-physics.service

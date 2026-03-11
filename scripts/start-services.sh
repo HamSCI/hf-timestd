@@ -57,7 +57,7 @@ except:
 # Service startup order (respects dependencies)
 CORE_SERVICES=(
     "timestd-core-recorder"    # Phase 1: RTP → Raw Buffer
-    "timestd-metrology"        # Phase 2: L1 Raw Measurements  
+    "timestd-metrology.target"  # Phase 2: L1 Raw Measurements (per-channel template instances)
     "timestd-l2-calibration"   # Phase 2: L2 Calibrated Timing
     "timestd-fusion"           # Phase 3: Fusion → Chrony SHM
     "timestd-physics"          # Phase 3: TEC Estimation
@@ -201,7 +201,7 @@ sleep 2
 
 # Phase 2: Metrology services
 log_step "Phase 2: Starting metrology services..."
-start_service "timestd-metrology" "L1 Raw Measurements"
+start_service "timestd-metrology.target" "L1 Raw Measurements (all channels)"
 start_service "timestd-l2-calibration" "L2 Calibrated Timing"
 
 # Phase 3: Fusion and physics
