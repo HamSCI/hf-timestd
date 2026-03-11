@@ -403,18 +403,13 @@ try:
 except Exception:
     print('')" 2>/dev/null || echo "")
 
-NEED_PIP=false
-if [[ "$FORCE_PIP" == "true" ]]; then
-    NEED_PIP=true
-    log_info "Force pip install requested"
-elif [[ -z "$INSTALLED_VER" ]]; then
-    NEED_PIP=true
+NEED_PIP=true
+if [[ -z "$INSTALLED_VER" ]]; then
     log_info "hf-timestd not installed — will install"
 elif [[ "$PROJECT_VER" != "$INSTALLED_VER" ]]; then
-    NEED_PIP=true
     log_info "Version change: $INSTALLED_VER → $PROJECT_VER"
 else
-    log_info "hf-timestd $INSTALLED_VER already up to date"
+    log_info "hf-timestd $INSTALLED_VER — reinstalling to sync source"
 fi
 
 if [[ "$NEED_PIP" == "true" ]]; then
@@ -433,7 +428,7 @@ if [[ "$NEED_PIP" == "true" ]]; then
     find /usr/local/lib/python*/dist-packages -name '__editable__.hf_timestd*' -delete 2>/dev/null || true
 
     "$VENV_DIR/bin/pip" install --upgrade pip --quiet 2>/dev/null || true
-    "$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet
+    "$VENV_DIR/bin/pip" install --force-reinstall --no-deps "$PROJECT_DIR" --quiet
 
     INSTALLED_VER=$("$VENV_DIR/bin/python" -c "
 from importlib.metadata import version
@@ -723,6 +718,9 @@ if [[ "$DO_RESTART" == "true" ]]; then
         # Metrology: restart each instance explicitly.
         # 'systemctl restart target' does NOT start template instances that
         # have never been loaded (e.g. first deploy after enable).
+        # Reset failed state first — workers may have hit StartLimitBurst
+        # from a previous bug and systemd refuses to restart them.
+        systemctl reset-failed 'timestd-metrology@*' 2>/dev/null || true
         MET_STARTED=0
         for entry in "${METROLOGY_CHANNELS[@]}"; do
             CHANNEL="${entry%%=*}"
