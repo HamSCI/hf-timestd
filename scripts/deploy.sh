@@ -719,8 +719,19 @@ if [[ "$DO_RESTART" == "true" ]]; then
         bash "$PROJECT_DIR/scripts/start-services.sh"
     else
         # Update: selective restart (services are already running)
+
+        # Metrology: restart each instance explicitly.
+        # 'systemctl restart target' does NOT start template instances that
+        # have never been loaded (e.g. first deploy after enable).
+        MET_STARTED=0
+        for entry in "${METROLOGY_CHANNELS[@]}"; do
+            CHANNEL="${entry%%=*}"
+            systemctl restart "timestd-metrology@${CHANNEL}.service" 2>/dev/null || true
+            ((MET_STARTED++))
+        done
+        log_info "  Restarted: $MET_STARTED metrology workers"
+
         RESTART_SERVICES=(
-            "timestd-metrology.target"
             "timestd-l2-calibration"
             "timestd-fusion"
             "timestd-physics"
