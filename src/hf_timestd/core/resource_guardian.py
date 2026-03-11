@@ -128,10 +128,12 @@ class ResourceGuardian:
         data_root: str = '/var/lib/timestd',
         n_channels: int = 9,
         sample_rate: int = 24000,
+        tiered_storage: bool = False,
     ):
         self.data_root = Path(data_root)
         self.n_channels = n_channels
         self.sample_rate = sample_rate
+        self.tiered_storage = tiered_storage
 
         # Compute per-channel-per-day raw bytes from actual sample rate
         # complex IQ: sample_rate × 4 bytes × 2 (I+Q) × 86400 seconds
@@ -139,8 +141,14 @@ class ResourceGuardian:
         self.total_per_ch_per_day = self.raw_per_ch_per_day + PHASE2_BYTES_PER_CHANNEL_PER_DAY
 
         # Minimum storage: 2 days × N channels + overhead
+        # With tiered storage, raw IQ lives in /dev/shm (RAM), not on
+        # the data disk — only Phase2 HDF5 products hit persistent storage.
+        if tiered_storage:
+            disk_per_ch_per_day = PHASE2_BYTES_PER_CHANNEL_PER_DAY
+        else:
+            disk_per_ch_per_day = self.total_per_ch_per_day
         self.baseline_bytes = (
-            BASELINE_DAYS * n_channels * self.total_per_ch_per_day + OVERHEAD_BYTES
+            BASELINE_DAYS * n_channels * disk_per_ch_per_day + OVERHEAD_BYTES
         )
 
         # Minimum RAM: per-channel workers + system headroom
@@ -568,6 +576,7 @@ class ResourceGuardian:
         data_root = '/var/lib/timestd'
         n_channels = 0
         sample_rate = 24000
+        tiered_storage = False
 
         try:
             section = None
@@ -590,6 +599,8 @@ class ResourceGuardian:
                             data_root = value
                         elif key == 'sample_rate':
                             sample_rate = int(value)
+                        elif key == 'tiered_storage':
+                            tiered_storage = value.lower() == 'true'
         except (OSError, ValueError) as e:
             logger.warning(f"Could not parse {config_path}: {e}")
 
@@ -607,10 +618,12 @@ class ResourceGuardian:
         logger.info(
             f"ResourceGuardian: {n_channels} channels, "
             f"{sample_rate} Hz, data_root={data_root}"
+            f"{', tiered_storage=ON (raw IQ in /dev/shm)' if tiered_storage else ''}"
         )
 
         return cls(
             data_root=data_root,
             n_channels=n_channels,
             sample_rate=sample_rate,
+            tiered_storage=tiered_storage,
         )
