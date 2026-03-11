@@ -99,6 +99,7 @@ log_step "Stopping and disabling systemd services..."
 SERVICES=(
     "timestd-core-recorder.service"
     "timestd-metrology.service"
+    "timestd-metrology.target"
     "timestd-l2-calibration.service"
     "timestd-fusion.service"
     "timestd-physics.service"
@@ -113,6 +114,14 @@ SERVICES=(
     "timestd-analytics.service"
     "timestd-web-ui.service"
 )
+
+# Stop all metrology template instances first (glob doesn't work with systemctl stop)
+for inst in $(systemctl list-units 'timestd-metrology@*.service' --no-legend --all 2>/dev/null | awk '{print $1}'); do
+    log_info "  Stopping $inst..."
+    sudo systemctl stop "$inst" 2>/dev/null || true
+    sudo systemctl disable "$inst" 2>/dev/null || true
+    log_info "  ✅ Stopped and disabled $inst"
+done
 
 for service in "${SERVICES[@]}"; do
     if systemctl list-unit-files | grep -q "$service"; then
@@ -149,6 +158,9 @@ log_step "Removing systemd service files..."
 SERVICE_FILES=(
     "/etc/systemd/system/timestd-core-recorder.service"
     "/etc/systemd/system/timestd-metrology.service"
+    "/etc/systemd/system/timestd-metrology.service.disabled"
+    "/etc/systemd/system/timestd-metrology.target"
+    "/etc/systemd/system/timestd-metrology@.service"
     "/etc/systemd/system/timestd-l2-calibration.service"
     "/etc/systemd/system/timestd-fusion.service"
     "/etc/systemd/system/timestd-physics.service"
