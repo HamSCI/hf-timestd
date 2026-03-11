@@ -16,7 +16,7 @@ Group=timestd
 WatchdogSec=60
 NotifyAccess=main
 
-# Environment from file (set by install.sh)
+# Environment from file (set by deploy.sh)
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Working directory (production installation path)
@@ -27,9 +27,6 @@ ExecStartPre=+/bin/mkdir -p /var/lib/timestd/raw_buffer
 ExecStartPre=+/bin/mkdir -p /dev/shm/timestd/raw_buffer
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/raw_buffer
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /dev/shm/timestd
-
-# Ensure venv exists (production install)
-ExecStartPre=+/bin/bash /opt/hf-timestd/scripts/ensure-venv.sh --mode production --venv /opt/hf-timestd/venv --python python3
 
 # Core recorder V2 uses RadiodStream for RTP handling (no manual multicast)
 ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.core.core_recorder_v2 \

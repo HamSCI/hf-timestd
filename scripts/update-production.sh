@@ -1,4 +1,13 @@
 #!/bin/bash
+# =============================================================================
+# DEPRECATED — Use deploy.sh instead
+# =============================================================================
+# This script is superseded by deploy.sh, which combines install and update
+# into a single idempotent command:
+#   sudo ./scripts/deploy.sh --pull    # git pull + update + restart
+#   sudo ./scripts/deploy.sh --pull -y # non-interactive
+# =============================================================================
+#
 #
 # update-production.sh - Update production installation from git repository
 #

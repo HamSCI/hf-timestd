@@ -1,5 +1,12 @@
 #!/bin/bash
 # =============================================================================
+# DEPRECATED — Use deploy.sh instead
+# =============================================================================
+# This script is superseded by deploy.sh Phase 4 (Python), which handles
+# venv creation, pip install, and verification in a single command.
+# The ExecStartPre that called this has been removed from the systemd unit.
+# =============================================================================
+#
 # ensure-venv.sh — Ensure Python venv exists and hf-timestd is installed
 # =============================================================================
 # Idempotent: safe to re-run. Skips reinstall if the installed version

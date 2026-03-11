@@ -1,6 +1,14 @@
 #!/bin/bash
 # =============================================================================
-# TimeStd Recorder Installation Script
+# DEPRECATED — Use deploy.sh instead
+# =============================================================================
+# This script is superseded by deploy.sh, which combines install and update
+# into a single idempotent command:
+#   sudo ./scripts/deploy.sh          # first install or update
+#   sudo ./scripts/deploy.sh --pull   # git pull + update
+# =============================================================================
+#
+# TimeStd Recorder Installation Script (legacy)
 # =============================================================================
 # Usage: sudo ./install.sh [--verbose]
 #
