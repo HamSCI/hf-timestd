@@ -233,7 +233,9 @@ fi
 # Web API and monitoring
 log_step "Starting web API and monitoring..."
 start_service "timestd-web-api" "Web API & Dashboard"
-start_service "timestd-radiod-monitor" "Hardware Health Monitor"
+if [[ "$RADIOD_LOCAL" == "true" ]]; then
+    start_service "timestd-radiod-monitor" "Hardware Health Monitor"
+fi
 
 # Optional services
 if [[ ${#OPTIONAL_SERVICES[@]} -gt 0 ]]; then
