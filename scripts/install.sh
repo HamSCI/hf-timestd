@@ -395,6 +395,12 @@ cp -r "$PROJECT_DIR/scripts/"* /opt/hf-timestd/scripts/
 chown -R "$INSTALL_USER:$INSTALL_USER" /opt/hf-timestd/scripts
 log_info "Scripts installed at /opt/hf-timestd/scripts"
 
+# Sync pyproject.toml + src/ so ensure-venv.sh can pip-install from /opt/hf-timestd
+cp "$PROJECT_DIR/pyproject.toml" /opt/hf-timestd/
+rsync -a --delete "$PROJECT_DIR/src/" /opt/hf-timestd/src/
+chown -R "$INSTALL_USER:$INSTALL_USER" /opt/hf-timestd/pyproject.toml /opt/hf-timestd/src
+log_info "Source tree (pyproject.toml + src/) synced to /opt/hf-timestd"
+
 # Create config symlink for web-api (expects /opt/hf-timestd/config/)
 mkdir -p /opt/hf-timestd/config
 ln -sf /etc/hf-timestd/timestd-config.toml /opt/hf-timestd/config/timestd-config.toml
