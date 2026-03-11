@@ -76,8 +76,9 @@ BASELINE_DAYS = 2
 # Fixed overhead (logs, state, products, upload queue, IONEX, etc.)
 OVERHEAD_BYTES = 5 * GB
 
-# Memory: ~700 MB per channel (empirical: 400-700 MB Python worker)
-RAM_PER_CHANNEL = 700 * MB
+# Memory: ~250 MB per channel (empirical: 112-200 MB peak per worker
+# including IQ load, FFT, matched filters, and HDF5 writes)
+RAM_PER_CHANNEL = 250 * MB
 # System headroom: leave at least this much for OS + other processes
 RAM_SYSTEM_HEADROOM = 2 * GB
 
