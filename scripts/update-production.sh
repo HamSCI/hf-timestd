@@ -318,7 +318,7 @@ log_info "Step 4: Restarting services..."
 # List of services to restart (in order)
 # Note: Matches services in start-services.sh and install.sh
 SERVICES=(
-    "timestd-metrology"
+    "timestd-metrology.target"
     "timestd-l2-calibration"
     "timestd-fusion"
     "timestd-physics"
