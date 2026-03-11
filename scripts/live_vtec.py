@@ -81,18 +81,7 @@ def main():
     if args.download_only:
         return
 
-    # 2. Connect to Stream
-    logger.info(f"Connecting to {host}:{port}...")
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(60.0)  # 60 second timeout - will raise socket.timeout if no data
-        sock.connect((host, port))
-        logger.info("Connected!")
-    except Exception as e:
-        logger.error(f"Connection failed: {e}")
-        return
-
-    # 3. Processing Loop
+    # 2. Processing components (persist across reconnections)
     parser_ubx = UBXParser()
     analyzer = GNSSTECAnalyzer(dcb_data)
 
@@ -160,32 +149,58 @@ def main():
     VTEC_PLAUSIBLE_MAX = 150.0
     CONSECUTIVE_REJECT_LIMIT = 300  # ~5 min at 1 Hz
 
+    bytes_received = 0
+    msg_count = 0
+    last_log_time = time.time()
+    last_data_time = time.time()
+    consecutive_rejects = 0
+    hdf5_write_buffer = []
+    BATCH_FLUSH_INTERVAL = 60
+    last_hdf5_flush = time.time()
+    reconnect_delay = 5  # seconds, grows with backoff
+    MAX_RECONNECT_DELAY = 120
+
+    # ── Outer reconnection loop ──
+    # On socket errors we reconnect instead of crashing.
+    # The UBX parser and TEC analyzer persist across reconnections.
     try:
-        bytes_received = 0
-        msg_count = 0
-        last_log_time = time.time()
-        last_data_time = time.time()  # Track when we last got a SUCCESSFUL HDF5 write
-        consecutive_rejects = 0       # Plausibility rejections in a row
-        hdf5_write_buffer = []         # Buffer measurements for batch HDF5 write
-        BATCH_FLUSH_INTERVAL = 60      # Flush HDF5 buffer every 60 seconds
-        last_hdf5_flush = time.time()
-        
-        while True:
+      while True:
+        # 3. Connect to Stream
+        sock = None
+        try:
+            logger.info(f"Connecting to {host}:{port}...")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(60.0)
+            sock.connect((host, port))
+            logger.info("Connected!")
+            reconnect_delay = 5  # reset backoff on success
+            last_data_time = time.time()  # reset data watchdog on fresh connection
+        except Exception as e:
+            logger.warning(f"Connection failed: {e} — retrying in {reconnect_delay}s")
+            if SYSTEMD_AVAILABLE:
+                systemd_daemon.notify('WATCHDOG=1')
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
+            continue
+
+        # ── Inner data loop ──
+        try:
+          while True:
             try:
                 data = sock.recv(4096)
             except socket.timeout:
-                logger.warning("Socket timeout (60s no data) - reconnecting...")
-                break  # Exit loop to trigger service restart
+                logger.warning("Socket timeout (60s no data) — will reconnect")
+                break  # break inner loop → reconnect
             
             if not data:
-                logger.warning("Socket closed.")
-                break
+                logger.warning("Socket closed by peer — will reconnect")
+                break  # break inner loop → reconnect
             
             # Watchdog: Check if we've produced VTEC data recently
             # If no VTEC output for 5 minutes, something is wrong
             if time.time() - last_data_time > 300:
-                logger.error("No VTEC data produced for 5 minutes - exiting for restart")
-                break
+                logger.error("No VTEC data produced for 5 minutes — will reconnect")
+                break  # break inner loop → reconnect
             
             bytes_received += len(data)
             
@@ -254,6 +269,9 @@ def main():
                             if csv_file:
                                 csv_file.write(line)
                             
+                            # Update data watchdog on every valid VTEC
+                            last_data_time = time.time()
+
                             # Buffer for batch HDF5 write
                             if hdf5_writer:
                                 from datetime import datetime as dt, timezone as tz
@@ -268,8 +286,6 @@ def main():
                                     'dcb_corrected': bool(dcb_data)
                                 }
                                 hdf5_write_buffer.append(measurement)
-                            else:
-                                last_data_time = time.time()
                         else:
                             logger.debug(f"No valid VTEC solutions (Low elevation or no lock). Total sats: {len(results)}")
                     else:
@@ -312,7 +328,21 @@ def main():
                                     logger.debug(f"  Meas {i}: GNSS={m['gnssId']} SV={m['svId']} Sig={m['sigId']} CNO={m['cno']} Lock={m['locktime']}")
                         else:
                             logger.debug("RAWX processing returned no results")
-                            
+
+          # end inner data loop
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            # Pet watchdog during reconnection gap
+            if SYSTEMD_AVAILABLE:
+                systemd_daemon.notify('WATCHDOG=1')
+            logger.info(f"Reconnecting in {reconnect_delay}s...")
+            time.sleep(reconnect_delay)
+
+      # end outer reconnection loop
     except KeyboardInterrupt:
         logger.info("Stopping...")
     finally:
@@ -323,7 +353,11 @@ def main():
                 logger.info(f"Final flush: {len(hdf5_write_buffer)} VTEC measurements to HDF5")
             except Exception as e:
                 logger.error(f"Failed final HDF5 flush: {e}")
-        sock.close()
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
         if csv_file: csv_file.close()
         if hdf5_writer: hdf5_writer.close()
 
