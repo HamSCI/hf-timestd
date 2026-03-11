@@ -91,9 +91,10 @@ if [[ "$MODE" == "production" ]]; then
     section "Phase 0: Service Status"
     
     # Core pipeline services (failures expected if not running)
+    # Note: metrology uses a target + template instances, checked separately below
     CORE_SERVICES=(
         "timestd-core-recorder.service"
-        "timestd-metrology.service"
+        "timestd-metrology.target"
         "timestd-l2-calibration.service"
         "timestd-fusion.service"
         "timestd-physics.service"
@@ -182,6 +183,42 @@ if [[ "$MODE" == "production" ]]; then
             fi
         fi
     done
+    
+    # Check individual metrology template instances
+    # These are managed by timestd-metrology.target, one per frequency channel
+    METROLOGY_INSTANCES=$(systemctl list-units 'timestd-metrology@*.service' --no-legend --all 2>/dev/null | awk '{print $1}')
+    if [[ -n "$METROLOGY_INSTANCES" ]]; then
+        RUNNING=0
+        DEAD=0
+        FAILED=0
+        for inst in $METROLOGY_INSTANCES; do
+            if systemctl is-active --quiet "$inst"; then
+                ((RUNNING++))
+            elif systemctl is-failed --quiet "$inst"; then
+                ((FAILED++))
+                CHANNEL=$(echo "$inst" | sed 's/timestd-metrology@\(.*\)\.service/\1/')
+                check_fail "Metrology worker $CHANNEL FAILED"
+            else
+                ((DEAD++))
+            fi
+        done
+        TOTAL=$((RUNNING + DEAD + FAILED))
+        if [[ $FAILED -eq 0 && $RUNNING -eq $EXPECTED_CHANNELS ]]; then
+            check_pass "All $RUNNING/$EXPECTED_CHANNELS metrology workers running"
+        elif [[ $FAILED -eq 0 && $RUNNING -gt 0 ]]; then
+            check_warn "Only $RUNNING/$EXPECTED_CHANNELS metrology workers running ($DEAD stopped)"
+        elif [[ $RUNNING -eq 0 ]]; then
+            check_fail "No metrology workers running (0/$EXPECTED_CHANNELS)"
+        fi
+    else
+        check_fail "No metrology template instances found"
+    fi
+    
+    # Detect old monolithic service (should never be running alongside template instances)
+    if systemctl is-active --quiet "timestd-metrology.service" 2>/dev/null; then
+        check_fail "OLD monolithic timestd-metrology.service is running — causes duplicate writers!"
+        echo "  → Fix: sudo systemctl stop timestd-metrology.service && sudo systemctl disable timestd-metrology.service"
+    fi
     
     echo ""
     echo "Note: Continuing to check data outputs even if services are starting..."
