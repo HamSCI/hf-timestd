@@ -226,6 +226,42 @@ class DataProductWriter:
                 f.attrs['recreated_from_corrupt'] = recreated_from
         logger.info(f"Initialized file structure for {hdf5_path}")
 
+    def _recover_from_write_corruption(self, error: OSError) -> None:
+        """Handle corruption discovered during a write (dataset resize/setitem).
+
+        The SWMR handle is open but the underlying chunks are broken.
+        Strategy:
+        1. Close the (now-useless) SWMR handle.
+        2. Rename the corrupt file so it does not block future writes.
+        3. Next call to _ensure_file_open() will create a fresh file.
+        """
+        path = self._current_path
+        logger.error(
+            f"HDF5 write corruption on {path.name if path else '?'}: {error} "
+            f"— closing handle and rotating corrupt file"
+        )
+        # 1. Close handle
+        if self._current_file is not None:
+            try:
+                self._current_file.close()
+            except Exception:
+                pass
+        self._current_file = None
+
+        # 2. Rename corrupt file
+        if path is not None and path.exists():
+            import time as _time
+            corrupt_path = path.with_suffix(f'.h5.corrupt.{int(_time.time())}')
+            try:
+                path.rename(corrupt_path)
+                logger.warning(f"Rotated corrupt file: {path.name} -> {corrupt_path.name}")
+            except Exception as rename_err:
+                logger.error(f"Could not rename corrupt file: {rename_err}")
+
+        # 3. Reset state so _ensure_file_open creates a fresh file
+        self._current_path = None
+        # Keep _current_date so the next _ensure_file_open re-creates for today
+
     def _ensure_file_open(self, timestamp_utc: str) -> h5py.File:
         """
         Ensure the correct daily HDF5 file is open in SWMR write mode.
@@ -482,21 +518,28 @@ class DataProductWriter:
             self.validate_measurement(m)
 
         timestamp_utc = measurements[0]['timestamp_utc']
-        hdf5_file = self._ensure_file_open(timestamp_utc)
 
-        for m in measurements:
-            self._append_measurement(hdf5_file, m)
-        hdf5_file.flush()
-
-        self._measurement_count += len(measurements)
-        logger.debug(f"Batch wrote {len(measurements)} measurements to {self._current_date}")
+        for attempt in range(2):
+            hdf5_file = self._ensure_file_open(timestamp_utc)
+            try:
+                for m in measurements:
+                    self._append_measurement(hdf5_file, m)
+                hdf5_file.flush()
+                self._measurement_count += len(measurements)
+                logger.debug(f"Batch wrote {len(measurements)} measurements to {self._current_date}")
+                return
+            except OSError as e:
+                if attempt == 0:
+                    self._recover_from_write_corruption(e)
+                else:
+                    raise
 
     def write_measurement(self, measurement: Dict[str, Any]) -> None:
         """
         Write a single measurement to HDF5 file.
 
-        CRASH-SAFE: Opens the file, appends one row, closes the file.
-        No persistent file handle means no dirty flags on unclean shutdown.
+        If the file has become corrupt (e.g. from a prior unclean shutdown),
+        the corrupt file is automatically rotated and a fresh one created.
 
         Args:
             measurement: Measurement dictionary (must match schema)
@@ -507,18 +550,22 @@ class DataProductWriter:
         # Validate measurement
         self.validate_measurement(measurement)
 
-        # Ensure file is open in SWMR write mode
         timestamp_utc = measurement['timestamp_utc']
-        hdf5_file = self._ensure_file_open(timestamp_utc)
 
-        # Append and flush so readers see new data immediately
-        self._append_measurement(hdf5_file, measurement)
-        hdf5_file.flush()
-
-        self._measurement_count += 1
-
-        if self._measurement_count % 100 == 0:
-            logger.debug(f"Wrote {self._measurement_count} measurements to {self._current_date}")
+        for attempt in range(2):
+            hdf5_file = self._ensure_file_open(timestamp_utc)
+            try:
+                self._append_measurement(hdf5_file, measurement)
+                hdf5_file.flush()
+                self._measurement_count += 1
+                if self._measurement_count % 100 == 0:
+                    logger.debug(f"Wrote {self._measurement_count} measurements to {self._current_date}")
+                return
+            except OSError as e:
+                if attempt == 0:
+                    self._recover_from_write_corruption(e)
+                else:
+                    raise
 
     def _append_measurement(self, hdf5_file: h5py.File, measurement: Dict[str, Any]) -> None:
         """Append one measurement row to all datasets in an open file."""

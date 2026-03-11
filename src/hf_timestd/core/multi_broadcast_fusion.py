@@ -5065,6 +5065,10 @@ def run_fusion_service(
             except Exception as e_fuse:
                 logger.error(f"L1 fusion calculation CRASHED: {e_fuse}", exc_info=True)
             
+            # Pet watchdog between heavy fuse() calls to avoid 120s timeout
+            if SYSTEMD_AVAILABLE:
+                systemd_daemon.notify('WATCHDOG=1')
+            
             try:
                 # L2 fusion: Use L2 calibrated data (current behavior)
                 # skip_write=True because we write once after L1/L2 fields are populated
@@ -5389,6 +5393,10 @@ def run_fusion_service(
                         else:
                             logger.debug(f"Chrony feed skipped: {', '.join(reasons)}")
 
+            # Pet watchdog after heavy chrony/fusion processing
+            if SYSTEMD_AVAILABLE:
+                systemd_daemon.notify('WATCHDOG=1')
+            
             # Collect chrony source statistics (rate-limited to once per minute)
             if chrony_stats_collector:
                 try:

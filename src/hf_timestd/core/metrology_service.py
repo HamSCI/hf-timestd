@@ -11,7 +11,9 @@ Responsibility:
 4. Do NOT perform physics modeling or clock offset calculation.
 """
 
+import fcntl
 import logging
+import os
 import time
 import json
 import signal
@@ -1220,6 +1222,22 @@ if __name__ == "__main__":
         logger.critical("Resource preflight failed — exiting")
         sys.exit(1)
 
+    # --- Exclusive output-dir lock: prevent two writers on same HDF5 files ---
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = output_dir / '.metrology.lock'
+    lock_fd = None
+    try:
+        lock_fd = open(lock_path, 'w')
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fd.write(f'{os.getpid()}\n')
+        lock_fd.flush()
+    except OSError:
+        logger.critical(
+            f"Another metrology process already owns {output_dir} — "
+            f"refusing to start (duplicate writer would corrupt HDF5 files)")
+        sys.exit(1)
+
     try:
         service = MetrologyService(
             config=config,
@@ -1237,3 +1255,11 @@ if __name__ == "__main__":
     except Exception as e:
         logger.fatal(f"Service startup failed: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
