@@ -428,7 +428,10 @@ if [[ "$NEED_PIP" == "true" ]]; then
     find /usr/local/lib/python*/dist-packages -name '__editable__.hf_timestd*' -delete 2>/dev/null || true
 
     "$VENV_DIR/bin/pip" install --upgrade pip --quiet 2>/dev/null || true
-    "$VENV_DIR/bin/pip" install --force-reinstall --no-deps "$PROJECT_DIR" --quiet
+    # Uninstall first to ensure source changes are picked up (same version),
+    # then install normally so dependencies are preserved.
+    "$VENV_DIR/bin/pip" uninstall hf-timestd -y --quiet 2>/dev/null || true
+    "$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet
 
     INSTALLED_VER=$("$VENV_DIR/bin/python" -c "
 from importlib.metadata import version
