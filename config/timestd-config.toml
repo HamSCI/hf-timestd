@@ -46,6 +46,12 @@ tiered_storage = true
 hot_buffer_root = "/dev/shm/timestd"
 ram_percent = 20  # Percentage of available RAM to use for hot buffer
 
+# Archive Drive: Move evicted data to a secondary drive instead of deleting
+# When the primary disk hits 80%, oldest days are moved to archive_root.
+# The archive drive has its own 80% cap; oldest archive days are deleted when full.
+# archive_root = "/mnt/timestd-archive"
+# archive_retention_days = 90  # optional: delete archive data older than N days
+
 [recorder.channel_defaults]
 preset = "iq"
 sample_rate = 24000

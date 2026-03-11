@@ -25,7 +25,7 @@ system needs more storage before running hf-timestd.
 Three layers of protection:
 
 1. **Preflight** — at startup, compute the baseline and verify it fits.
-   Also verify minimum RAM (700 MB per channel + 2 GB system headroom).
+   Also verify minimum RAM (250 MB per channel + 2 GB system headroom).
    If either check fails → CRITICAL log → clean exit → systemd backoff.
 
 2. **Watchdog** — every 60 s, check total disk usage.  If hf-timestd's
@@ -36,8 +36,21 @@ Three layers of protection:
 3. **Hard stop** — if disk reaches 95% despite cleanup (other processes
    are filling disk), stop all writes and exit.  We will not crash the
    host.
+
+Archive drive (optional):
+
+    If ``archive_root`` is set in [recorder], evicted days are moved
+    to the archive drive instead of deleted.  The archive drive has
+    its own 80% disk cap and optional ``archive_retention_days``
+    policy.  If the archive is full or unmounted, eviction falls
+    back to deletion.  Config example::
+
+        [recorder]
+        archive_root = "/mnt/timestd-archive"
+        archive_retention_days = 90
 """
 
+import datetime
 import logging
 import os
 import re
@@ -130,11 +143,15 @@ class ResourceGuardian:
         n_channels: int = 9,
         sample_rate: int = 24000,
         tiered_storage: bool = False,
+        archive_root: Optional[str] = None,
+        archive_retention_days: Optional[int] = None,
     ):
         self.data_root = Path(data_root)
         self.n_channels = n_channels
         self.sample_rate = sample_rate
         self.tiered_storage = tiered_storage
+        self.archive_root = Path(archive_root) if archive_root else None
+        self.archive_retention_days = archive_retention_days
 
         # Compute per-channel-per-day raw bytes from actual sample rate
         # complex IQ: sample_rate × 4 bytes × 2 (I+Q) × 86400 seconds
@@ -280,6 +297,32 @@ class ResourceGuardian:
             elif not os.access(dirpath, os.W_OK):
                 logger.critical(f"PREFLIGHT FAIL: {dirpath} is not writable")
                 ok = False
+
+        # --- Archive drive ---
+        if self.archive_root:
+            if self._archive_is_mounted():
+                for dirname in ['raw_buffer', 'phase2']:
+                    adir = self.archive_root / dirname
+                    if not adir.exists():
+                        try:
+                            adir.mkdir(parents=True, exist_ok=True)
+                            logger.info(f"Preflight: created archive dir {adir}")
+                        except OSError as e:
+                            logger.warning(f"Cannot create archive dir {adir}: {e}")
+                try:
+                    astat = shutil.disk_usage(self.archive_root)
+                    logger.info(
+                        f"Preflight archive: {astat.free / GB:.1f} GB free of "
+                        f"{astat.total / GB:.0f} GB at {self.archive_root}"
+                        f"{f', retention={self.archive_retention_days}d' if self.archive_retention_days else ''}"
+                    )
+                except OSError as e:
+                    logger.warning(f"Cannot stat archive drive: {e}")
+            else:
+                logger.warning(
+                    f"Archive drive configured ({self.archive_root}) "
+                    f"but not mounted — eviction will delete instead of archive"
+                )
 
         if ok:
             logger.info("Preflight check PASSED")
@@ -463,7 +506,18 @@ class ResourceGuardian:
         return dates
 
     def _evict_date(self, date_str: str) -> int:
-        """Remove all data for a single YYYYMMDD date across all dirs."""
+        """Remove all data for a single YYYYMMDD date across all dirs.
+
+        If an archive drive is configured and mounted, data is moved
+        there instead of deleted.  The archive drive's own 80% cap
+        and retention policy are enforced separately.
+        """
+        archive = None
+        if self.archive_root and self._archive_is_mounted():
+            archive = self.archive_root
+            # Make room on archive drive before moving
+            self._enforce_archive_limits()
+
         total_freed = 0
 
         # 1. raw_buffer/CHANNEL/YYYYMMDD/ directories
@@ -474,11 +528,16 @@ class ResourceGuardian:
                     date_dir = channel_dir / date_str
                     if date_dir.is_dir():
                         size = self._dir_size(date_dir)
-                        try:
-                            shutil.rmtree(date_dir)
-                            total_freed += size
-                        except OSError as e:
-                            logger.warning(f"Cannot remove {date_dir}: {e}")
+                        if archive:
+                            total_freed += self._move_to_archive(
+                                date_dir, archive / 'raw_buffer' / channel_dir.name / date_str
+                            )
+                        else:
+                            try:
+                                shutil.rmtree(date_dir)
+                                total_freed += size
+                            except OSError as e:
+                                logger.warning(f"Cannot remove {date_dir}: {e}")
             except OSError:
                 pass
 
@@ -492,14 +551,21 @@ class ResourceGuardian:
                             fpath = Path(root) / fname
                             try:
                                 size = fpath.stat().st_size
-                                fpath.unlink()
-                                total_freed += size
+                                if archive:
+                                    # Mirror the directory structure under archive/phase2/
+                                    rel = fpath.relative_to(phase2_dir)
+                                    total_freed += self._move_to_archive(
+                                        fpath, archive / 'phase2' / rel
+                                    )
+                                else:
+                                    fpath.unlink()
+                                    total_freed += size
                             except OSError:
                                 pass
             except OSError:
                 pass
 
-        # 3. upload/ and data/ — same pattern
+        # 3. upload/ and data/ — same pattern (always delete, not archived)
         for subdir in ('upload', 'data'):
             d = self.data_root / subdir
             if d.exists():
@@ -516,6 +582,147 @@ class ResourceGuardian:
                                     pass
                 except OSError:
                     pass
+
+        action = 'archived' if archive else 'deleted'
+        logger.info(f"Eviction: {action} day {date_str}")
+        return total_freed
+
+    # ------------------------------------------------------------------
+    # 4. Archive drive management
+    # ------------------------------------------------------------------
+
+    def _archive_is_mounted(self) -> bool:
+        """Check if the archive root exists and is a mount point or writable dir."""
+        if not self.archive_root:
+            return False
+        try:
+            return self.archive_root.is_dir() and os.access(self.archive_root, os.W_OK)
+        except OSError:
+            return False
+
+    def _move_to_archive(self, src: Path, dst: Path) -> int:
+        """Move a file or directory from primary to archive.  Returns bytes freed."""
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            size = self._dir_size(src) if src.is_dir() else src.stat().st_size
+            shutil.move(str(src), str(dst))
+            return size
+        except OSError as e:
+            logger.warning(f"Archive move failed {src} → {dst}: {e}, deleting instead")
+            # Fallback: delete if move fails (e.g., cross-device + dir)
+            try:
+                if src.is_dir():
+                    size = self._dir_size(src)
+                    shutil.rmtree(src)
+                else:
+                    size = src.stat().st_size
+                    src.unlink()
+                return size
+            except OSError:
+                return 0
+
+    def _enforce_archive_limits(self) -> int:
+        """Enforce 80% disk cap and retention policy on the archive drive.
+
+        Evicts the oldest archived days until the archive disk is under
+        80% and all data is within the retention window.
+        Returns bytes freed.
+        """
+        if not self.archive_root or not self._archive_is_mounted():
+            return 0
+
+        total_freed = 0
+        today = time.strftime('%Y%m%d', time.gmtime())
+
+        # Collect all dates in the archive
+        archive_dates: Set[str] = set()
+        for subdir in ('raw_buffer', 'phase2'):
+            adir = self.archive_root / subdir
+            if not adir.exists():
+                continue
+            try:
+                for root, dirs, files in os.walk(adir):
+                    for name in dirs + files:
+                        m = DATE_RE.search(name)
+                        if m:
+                            archive_dates.add(m.group(1))
+            except OSError:
+                pass
+
+        archive_dates.discard(today)
+        dates_oldest_first = sorted(archive_dates)
+
+        for date_str in dates_oldest_first:
+            should_evict = False
+
+            # Retention policy: delete archive data older than N days
+            if self.archive_retention_days is not None:
+                try:
+                    date_obj = datetime.datetime.strptime(date_str, '%Y%m%d')
+                    age_days = (datetime.datetime.utcnow() - date_obj).days
+                    if age_days > self.archive_retention_days:
+                        should_evict = True
+                except ValueError:
+                    continue
+
+            # Disk cap: archive drive over 80%
+            if not should_evict:
+                try:
+                    astat = shutil.disk_usage(self.archive_root)
+                    if (astat.used / astat.total) * 100 >= DISK_MAX_PERCENT:
+                        should_evict = True
+                    else:
+                        break  # Under 80% and within retention — done
+                except OSError:
+                    break
+
+            if should_evict:
+                freed = self._evict_archive_date(date_str)
+                total_freed += freed
+                if freed > 0:
+                    logger.info(
+                        f"Archive eviction: deleted {date_str}, "
+                        f"freed {freed / GB:.1f} GB"
+                    )
+
+        return total_freed
+
+    def _evict_archive_date(self, date_str: str) -> int:
+        """Delete all data for a single date from the archive."""
+        total_freed = 0
+
+        # raw_buffer/CHANNEL/YYYYMMDD/
+        raw_dir = self.archive_root / 'raw_buffer'
+        if raw_dir.exists():
+            try:
+                for channel_dir in raw_dir.iterdir():
+                    date_dir = channel_dir / date_str
+                    if date_dir.is_dir():
+                        size = self._dir_size(date_dir)
+                        try:
+                            shutil.rmtree(date_dir)
+                            total_freed += size
+                        except OSError as e:
+                            logger.warning(f"Cannot remove archive {date_dir}: {e}")
+            except OSError:
+                pass
+
+        # phase2: files containing YYYYMMDD
+        phase2_dir = self.archive_root / 'phase2'
+        if phase2_dir.exists():
+            try:
+                for root, dirs, files in os.walk(phase2_dir):
+                    for fname in files:
+                        if date_str in fname:
+                            fpath = Path(root) / fname
+                            try:
+                                size = fpath.stat().st_size
+                                fpath.unlink()
+                                total_freed += size
+                            except OSError:
+                                pass
+            except OSError:
+                pass
 
         return total_freed
 
@@ -578,6 +785,8 @@ class ResourceGuardian:
         n_channels = 0
         sample_rate = 24000
         tiered_storage = False
+        archive_root = None
+        archive_retention_days = None
 
         try:
             section = None
@@ -602,6 +811,10 @@ class ResourceGuardian:
                             sample_rate = int(value)
                         elif key == 'tiered_storage':
                             tiered_storage = value.lower() == 'true'
+                        elif key == 'archive_root':
+                            archive_root = value if value else None
+                        elif key == 'archive_retention_days':
+                            archive_retention_days = int(value)
         except (OSError, ValueError) as e:
             logger.warning(f"Could not parse {config_path}: {e}")
 
@@ -627,4 +840,6 @@ class ResourceGuardian:
             n_channels=n_channels,
             sample_rate=sample_rate,
             tiered_storage=tiered_storage,
+            archive_root=archive_root,
+            archive_retention_days=archive_retention_days,
         )

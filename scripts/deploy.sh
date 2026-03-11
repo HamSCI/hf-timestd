@@ -527,12 +527,27 @@ print(f\"CFG_INSTRUMENT_ID='{s.get('instrument_id', '')}'\")
 print(f\"CFG_LATITUDE='{s.get('latitude', '')}'\")
 print(f\"CFG_LONGITUDE='{s.get('longitude', '')}'\")
 print(f\"CFG_TIERED={'true' if r.get('tiered_storage', False) else 'false'}\")
+print(f\"CFG_ARCHIVE_ROOT='{r.get('archive_root', '')}'\")
+print(f\"CFG_ARCHIVE_RETENTION='{r.get('archive_retention_days', '')}'\")
 " 2>/dev/null)"
 
 if [[ "$CFG_TIERED" == "true" ]]; then
     ARCHIVE_ROOT="/dev/shm/timestd/raw_buffer"
 else
     ARCHIVE_ROOT="$DATA_ROOT/raw_buffer"
+fi
+
+# ── Archive drive (optional) ──
+if [[ -n "$CFG_ARCHIVE_ROOT" ]]; then
+    if [[ -d "$CFG_ARCHIVE_ROOT" ]] && [[ -w "$CFG_ARCHIVE_ROOT" ]]; then
+        for adir in "$CFG_ARCHIVE_ROOT/raw_buffer" "$CFG_ARCHIVE_ROOT/phase2"; do
+            mkdir -p "$adir"
+            chown "$INSTALL_USER:$INSTALL_USER" "$adir"
+        done
+        log_info "Archive drive: $CFG_ARCHIVE_ROOT (mounted, ready)"
+    else
+        log_warn "Archive drive configured ($CFG_ARCHIVE_ROOT) but not mounted/writable"
+    fi
 fi
 
 # Channel definitions: CHANNEL_NAME=FREQUENCY_HZ
