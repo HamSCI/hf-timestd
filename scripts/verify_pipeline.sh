@@ -234,7 +234,7 @@ RADIOD_STATUS_FILE="${DATA_ROOT}/state/radiod-status.json"
 # Read [ka9q] status_address from config (works for both local and remote radiod)
 RADIOD_STATUS_ADDR=""
 if [[ -f "$CONFIG_FILE" ]]; then
-    RADIOD_STATUS_ADDR=$(awk '/^\[ka9q\]/{found=1; next} /^\[/{found=0} found && /^status_address/ {gsub(/.*=\s*"?|"$/,"",$0); print; exit}' "$CONFIG_FILE" 2>/dev/null)
+    RADIOD_STATUS_ADDR=$(awk '/^\[ka9q\]/{found=1; next} /^\[/{found=0} found && /^status_address/ {sub(/[^=]*=\s*/,""); sub(/#.*/,""); gsub(/^[\x27" \t]+|[\x27" \t]+$/,""); print; exit}' "$CONFIG_FILE" 2>/dev/null)
 fi
 
 if [[ -f "$RADIOD_STATUS_FILE" ]]; then

@@ -121,7 +121,20 @@ def read_status_address_from_config(config_path: str = '/etc/hf-timestd/timestd-
                 if section == 'ka9q' and '=' in stripped and not stripped.startswith('#'):
                     key, _, value = stripped.partition('=')
                     if key.strip() == 'status_address':
-                        return value.strip().strip('"').strip("'")
+                        # Strip inline TOML comments before unquoting
+                        val = value.strip()
+                        if val.startswith('"'):
+                            end = val.find('"', 1)
+                            if end != -1:
+                                return val[1:end]
+                        if val.startswith("'"):
+                            end = val.find("'", 1)
+                            if end != -1:
+                                return val[1:end]
+                        # Unquoted or fallback
+                        if '#' in val:
+                            val = val[:val.index('#')].strip()
+                        return val.strip('"').strip("'")
     except (OSError, ValueError):
         pass
     return None
