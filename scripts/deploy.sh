@@ -696,7 +696,7 @@ fi
 
 # ── Clear stale SHM segments ──
 for key in 0x4e545030 0x4e545031; do
-    shmid=$(ipcs -m | grep "$key" | awk '{print $2}')
+    shmid=$(ipcs -m | grep "$key" | awk '{print $2}' || true)
     [[ -n "$shmid" ]] && ipcrm -m "$shmid" 2>/dev/null || true
 done
 
