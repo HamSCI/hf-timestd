@@ -72,6 +72,7 @@ fi
 
 # Timers
 TIMERS=(
+    "timestd-pipeline-watchdog.timer"
     "timestd-ionex-download.timer"
     "timestd-chrony-monitor.timer"
     "timestd-iono-reanalysis.timer"
