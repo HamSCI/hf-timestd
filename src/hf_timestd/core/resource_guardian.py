@@ -69,8 +69,15 @@ logger = logging.getLogger(__name__)
 GB = 1024 ** 3
 MB = 1024 ** 2
 
-# The one rule: never let the filesystem exceed this percentage.
+# Runtime cleanup target: start evicting oldest data when disk exceeds this.
 DISK_MAX_PERCENT = 80.0
+
+# Preflight startup gate: allow services to start up to this level.
+# Must be higher than DISK_MAX_PERCENT so the runtime watchdog can
+# clean up after startup.  The old 80% gate created a catch-22 where
+# services couldn't start to manage data because the disk was already
+# past the threshold that blocked startup.
+DISK_PREFLIGHT_MAX_PERCENT = 90.0
 
 # If disk exceeds this despite our cleanup, something else is filling
 # the disk — stop all writes to avoid being part of the problem.
@@ -234,15 +241,35 @@ class ResourceGuardian:
                     free_gb = stat.free / GB
                     used_pct = (stat.used / stat.total) * 100
 
-                # Step 3: After cleanup, are we under 80%?
-                if used_pct >= DISK_MAX_PERCENT:
+                # Step 3: After cleanup, check against preflight threshold.
+                # The preflight gate is 90%, NOT 80%.  The runtime watchdog
+                # manages the 80% target once services are running.  Blocking
+                # startup at 80% creates a catch-22 where services can't
+                # start to manage their data.
+                if used_pct >= DISK_HARD_STOP_PERCENT:
                     logger.critical(
-                        f"PREFLIGHT FAIL: Disk still at {used_pct:.1f}%% "
+                        f"PREFLIGHT FAIL: Disk at {used_pct:.1f}%% "
+                        f"({free_gb:.1f} GB free) — above hard stop "
+                        f"({DISK_HARD_STOP_PERCENT}%%). "
+                        f"Free space manually before starting hf-timestd."
+                    )
+                    ok = False
+                elif used_pct >= DISK_PREFLIGHT_MAX_PERCENT:
+                    logger.critical(
+                        f"PREFLIGHT FAIL: Disk at {used_pct:.1f}%% "
                         f"({free_gb:.1f} GB free) after cleanup. "
-                        f"Cannot get under {DISK_MAX_PERCENT}%% — "
+                        f"Cannot get under {DISK_PREFLIGHT_MAX_PERCENT}%% — "
                         f"free space manually before starting hf-timestd."
                     )
                     ok = False
+                elif used_pct >= DISK_MAX_PERCENT:
+                    logger.warning(
+                        f"Preflight disk: {free_gb:.1f} GB free of "
+                        f"{total_gb:.0f} GB ({used_pct:.1f}%% used) — "
+                        f"above cleanup target ({DISK_MAX_PERCENT}%%) but "
+                        f"below startup gate ({DISK_PREFLIGHT_MAX_PERCENT}%%). "
+                        f"Runtime watchdog will evict old data."
+                    )
                 else:
                     logger.info(
                         f"Preflight disk: {free_gb:.1f} GB free of "
