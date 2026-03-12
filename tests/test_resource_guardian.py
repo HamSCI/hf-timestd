@@ -12,8 +12,9 @@ import pytest
 from hf_timestd.core.resource_guardian import (
     ResourceGuardian,
     ResourceState,
-    DISK_MAX_PERCENT,
+    DISK_WARN_PERCENT,
     DISK_HARD_STOP_PERCENT,
+    HEADROOM_DAYS,
     BASELINE_DAYS,
     PHASE2_BYTES_PER_CHANNEL_PER_DAY,
     RAM_PER_CHANNEL,
@@ -131,9 +132,10 @@ class TestPreflight:
 # ======================================================================
 
 class TestWatchdog:
-    """Runtime watchdog: enforce 80% disk cap."""
+    """Runtime watchdog: budget-based headroom management."""
 
-    def test_watchdog_ok_when_under_80_percent(self, guardian):
+    def test_watchdog_ok_when_headroom_sufficient(self, guardian):
+        """Plenty of free space → headroom OK."""
         with patch('shutil.disk_usage') as mock_du:
             mock_du.return_value = type('', (), {
                 'total': 500 * GB,
@@ -152,8 +154,19 @@ class TestWatchdog:
             s2 = guardian.watchdog_check(force=False)
             assert 'skipped' in s2.message
 
-    def test_watchdog_cleans_when_over_80_percent(self, tmp_data_root, guardian):
-        """When disk > 80%, watchdog should evict oldest data."""
+    def test_watchdog_cleans_when_headroom_low(self, tmp_data_root):
+        """When free < daily_disk_budget, watchdog should evict oldest data."""
+        # Use tiered storage so daily budget is ~4 GB (phase2 only),
+        # keeping the test disk percentages well below 95%.
+        g = ResourceGuardian(
+            data_root=str(tmp_data_root),
+            n_channels=1, sample_rate=24000, tiered_storage=True,
+        )
+        headroom_needed = g.daily_disk_budget * HEADROOM_DAYS  # ~4 GB
+        # Use a small disk so that "free < headroom" doesn't also
+        # trigger the 95% hard stop.  50 GB disk, 3 GB free = 94% used.
+        disk_total = 50 * GB
+
         # Create an old date dir in raw_buffer
         old_date = time.strftime('%Y%m%d', time.gmtime(time.time() - 5 * 86400))
         ch_dir = tmp_data_root / 'raw_buffer' / 'TEST_CH'
@@ -161,27 +174,42 @@ class TestWatchdog:
         date_dir.mkdir(parents=True)
         (date_dir / 'data.bin').write_bytes(b'\x00' * 10000)
 
-        # Mock disk_usage: first two calls (watchdog + eviction loop pre-check)
-        # return >80%, subsequent calls return <80% (simulating freed space)
+        # First calls: free < headroom but under 95% used.
+        # After eviction: headroom restored.
+        low_free = 3 * GB                         # 94% used, < 4 GB headroom
+        high_free = headroom_needed * 2           # ~8 GB
         call_count = [0]
         def fake_disk_usage(path):
             call_count[0] += 1
             if call_count[0] <= 2:
-                # Watchdog check + eviction loop's first "are we under?" check
                 return type('', (), {
-                    'total': 500 * GB, 'used': 410 * GB, 'free': 90 * GB,
+                    'total': disk_total,
+                    'used': disk_total - low_free,
+                    'free': low_free,
                 })()
             else:
-                # After eviction: under 80%
                 return type('', (), {
-                    'total': 500 * GB, 'used': 350 * GB, 'free': 150 * GB,
+                    'total': disk_total,
+                    'used': disk_total - high_free,
+                    'free': high_free,
                 })()
 
         with patch('shutil.disk_usage', side_effect=fake_disk_usage):
-            status = guardian.watchdog_check(force=True)
+            status = g.watchdog_check(force=True)
 
         assert status.state == ResourceState.CLEANED
         assert not date_dir.exists(), "Old date dir should have been evicted"
+
+    def test_watchdog_reports_days_retained(self, tmp_data_root, guardian):
+        """ResourceStatus should include days_retained and days_headroom."""
+        with patch('shutil.disk_usage') as mock_du:
+            mock_du.return_value = type('', (), {
+                'total': 500 * GB, 'used': 200 * GB, 'free': 300 * GB,
+            })()
+            status = guardian.watchdog_check(force=True)
+            assert hasattr(status, 'days_retained')
+            assert hasattr(status, 'days_headroom')
+            assert status.days_headroom > 0
 
     def test_watchdog_emergency_when_over_95_percent(self, guardian):
         """When disk > 95% and can't clean, should return EMERGENCY."""

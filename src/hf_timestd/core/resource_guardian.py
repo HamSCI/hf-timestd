@@ -1,41 +1,38 @@
 #!/usr/bin/env python3
 """
-Resource Guardian — ensures hf-timestd never crashes the host system.
+Resource Guardian — budget-based disk management for hf-timestd.
 
-Design principle: hf-timestd is a good citizen.  It computes its own
-resource requirements from the channel configuration, refuses to start
-if the system cannot sustain them, and at runtime enforces a hard cap:
+Design principle: **new data is always priority over old.**
 
-    **hf-timestd's total disk footprint shall never exceed 80% of the
-    filesystem, and its total memory shall never exceed 80% of RAM.**
-
-No per-system tuning is needed.  The guardian auto-sizes everything
-from the number of configured channels and the IQ sample rate.
+The 9 RTP streams arrive at a deterministic, predictable rate.  We
+compute the exact daily disk ingest budget from the channel count and
+sample rate, then manage eviction proactively to maintain headroom
+for incoming data.  No per-system tuning is needed — the guardian
+auto-sizes everything from the workload.
 
 Data budget (per channel per day, at 24 kHz IQ):
     raw_buffer      ~14 GB   (IQ binary archive, 24 kHz × 4 B × 86400 s)
     phase2           ~4 GB   (HDF5 data products)
     ────────────────────────
-    subtotal        ~18 GB/channel/day
+    subtotal        ~18 GB/channel/day  (or ~4 GB with tiered storage)
 
-Minimum baseline = 2 days × N_channels × 18 GB + 5 GB overhead.
-This must fit within 80% of the filesystem.  If it doesn't, the
-system needs more storage before running hf-timestd.
+    9 channels → ~36 GB/day on disk (tiered) or ~164 GB/day (non-tiered)
 
 Three layers of protection:
 
-1. **Preflight** — at startup, compute the baseline and verify it fits.
-   Also verify minimum RAM (250 MB per channel + 2 GB system headroom).
-   If either check fails → CRITICAL log → clean exit → systemd backoff.
+1. **Preflight** — at startup, compute the daily budget and verify the
+   disk can hold at least 2 days + 1 day headroom.  If the disk is
+   tight, proactively evict oldest days.  Only blocks at 95%.
+   Also verify minimum RAM (250 MB per channel + 2 GB headroom).
 
-2. **Watchdog** — every 60 s, check total disk usage.  If hf-timestd's
-   data footprint pushes the filesystem past 80%, evict the oldest
-   complete day of data (across raw_buffer and phase2 simultaneously)
-   until usage drops below 80%.  Always keep at least 1 day.
+2. **Watchdog** — every 60 s, ensure free space ≥ 1 day of incoming
+   data.  If headroom is low, evict oldest complete days (across
+   raw_buffer/ and phase2/ simultaneously) until room is restored.
+   Always keeps today's data.  New data is ALWAYS priority over old.
 
 3. **Hard stop** — if disk reaches 95% despite cleanup (other processes
-   are filling disk), stop all writes and exit.  We will not crash the
-   host.
+   are filling disk), stop all writes and exit.  We will not crash
+   the host.
 
 Archive drive (optional):
 
@@ -69,19 +66,17 @@ logger = logging.getLogger(__name__)
 GB = 1024 ** 3
 MB = 1024 ** 2
 
-# Runtime cleanup target: start evicting oldest data when disk exceeds this.
-DISK_MAX_PERCENT = 80.0
+# ── Budget-based disk management ──
+# Primary mechanism: always maintain room for HEADROOM_DAYS of incoming
+# data.  The 9 RTP streams arrive at a deterministic rate, so we can
+# compute the exact daily ingest budget and manage eviction proactively.
+# New data is ALWAYS priority over old — oldest days are evicted first.
+HEADROOM_DAYS = 1   # always keep room for at least this many days
 
-# Preflight startup gate: allow services to start up to this level.
-# Must be higher than DISK_MAX_PERCENT so the runtime watchdog can
-# clean up after startup.  The old 80% gate created a catch-22 where
-# services couldn't start to manage data because the disk was already
-# past the threshold that blocked startup.
-DISK_PREFLIGHT_MAX_PERCENT = 90.0
-
-# If disk exceeds this despite our cleanup, something else is filling
-# the disk — stop all writes to avoid being part of the problem.
-DISK_HARD_STOP_PERCENT = 95.0
+# Secondary safety nets (percentage-based, in case something else is
+# consuming disk outside hf-timestd's management):
+DISK_WARN_PERCENT = 80.0       # log a warning
+DISK_HARD_STOP_PERCENT = 95.0  # stop all writes — something else filling disk
 
 # Per-channel data budget (bytes per day) at 24 kHz complex IQ
 # IQ: 24000 samples/s × 4 bytes/sample × 2 (I+Q) × 86400 s/day ≈ 14.2 GB
@@ -108,10 +103,10 @@ DATE_RE = re.compile(r'(\d{8})')
 
 class ResourceState(Enum):
     """Operational state returned by the watchdog."""
-    OK = 'ok'                # All clear — normal operation
-    CLEANED = 'cleaned'      # Was over 80%, evicted oldest day, now OK
+    OK = 'ok'                # Headroom is sufficient — normal operation
+    CLEANED = 'cleaned'      # Evicted oldest day(s) to restore headroom
     STOP = 'stop'            # At 95% — something else filling disk, stop writes
-    EMERGENCY = 'emergency'  # Cannot clean enough — cease all activity
+    EMERGENCY = 'emergency'  # Cannot free enough — cease all activity
 
 
 @dataclass
@@ -125,6 +120,8 @@ class ResourceStatus:
     ram_total_bytes: int
     message: str = ''
     bytes_cleaned: int = 0
+    days_retained: int = 0       # how many days of data are on disk
+    days_headroom: float = 0.0   # how many more days can fit before eviction
 
 
 class ResourceGuardian:
@@ -165,15 +162,19 @@ class ResourceGuardian:
         self.raw_per_ch_per_day = sample_rate * 4 * 2 * 86400
         self.total_per_ch_per_day = self.raw_per_ch_per_day + PHASE2_BYTES_PER_CHANNEL_PER_DAY
 
-        # Minimum storage: 2 days × N channels + overhead
+        # Daily disk budget: exact bytes/day arriving on persistent storage.
         # With tiered storage, raw IQ lives in /dev/shm (RAM), not on
         # the data disk — only Phase2 HDF5 products hit persistent storage.
         if tiered_storage:
-            disk_per_ch_per_day = PHASE2_BYTES_PER_CHANNEL_PER_DAY
+            self.disk_per_ch_per_day = PHASE2_BYTES_PER_CHANNEL_PER_DAY
         else:
-            disk_per_ch_per_day = self.total_per_ch_per_day
+            self.disk_per_ch_per_day = self.total_per_ch_per_day
+        self.daily_disk_budget = n_channels * self.disk_per_ch_per_day
+
+        # Minimum storage: BASELINE_DAYS of data + headroom + overhead
         self.baseline_bytes = (
-            BASELINE_DAYS * n_channels * disk_per_ch_per_day + OVERHEAD_BYTES
+            (BASELINE_DAYS + HEADROOM_DAYS) * self.daily_disk_budget
+            + OVERHEAD_BYTES
         )
 
         # Minimum RAM: per-channel workers + system headroom
@@ -189,17 +190,30 @@ class ResourceGuardian:
     def preflight_check(self) -> bool:
         """Verify the system can sustain hf-timestd before starting.
 
-        Computes the minimum storage and RAM from the channel count
-        and sample rate.  No hardcoded thresholds — everything is
-        derived from the workload.
+        Budget-based: computes the exact daily ingest rate from the
+        channel count and sample rate, then verifies the disk can hold
+        at least BASELINE_DAYS + HEADROOM_DAYS of data.  If the disk
+        is tight, evicts oldest days proactively — new data is always
+        priority over old.  Only blocks startup at 95% (hard stop).
         """
         ok = True
+        headroom_bytes = self.daily_disk_budget * HEADROOM_DAYS
         baseline_gb = self.baseline_bytes / GB
+        budget_gb = self.daily_disk_budget / GB
 
         logger.info(
             f"Resource preflight: {self.n_channels} channels × "
-            f"{self.sample_rate} Hz, baseline = {baseline_gb:.0f} GB "
-            f"({BASELINE_DAYS} days + overhead)"
+            f"{self.sample_rate} Hz"
+        )
+        logger.info(
+            f"  Daily ingest budget: {budget_gb:.1f} GB/day on disk"
+            f" ({self.disk_per_ch_per_day / GB:.1f} GB/ch/day × "
+            f"{self.n_channels} channels"
+            f"{', tiered storage' if self.tiered_storage else ''})"
+        )
+        logger.info(
+            f"  Baseline requirement: {baseline_gb:.0f} GB "
+            f"({BASELINE_DAYS} days + {HEADROOM_DAYS} day headroom + overhead)"
         )
 
         # --- Disk ---
@@ -209,73 +223,61 @@ class ResourceGuardian:
             free_gb = stat.free / GB
             used_pct = (stat.used / stat.total) * 100
 
-            # Step 1: Is the disk physically large enough?
-            budget_bytes = stat.total * (DISK_MAX_PERCENT / 100.0)
-            if self.baseline_bytes > budget_bytes:
+            # Step 1: Is the disk physically large enough for the workload?
+            if self.baseline_bytes > stat.total:
                 logger.critical(
-                    f"PREFLIGHT FAIL: {self.n_channels}-channel baseline "
-                    f"needs {baseline_gb:.0f} GB, but 80%% of this "
-                    f"{total_gb:.0f} GB disk is only "
-                    f"{budget_bytes / GB:.0f} GB. "
-                    f"Need a disk of at least "
-                    f"{self.baseline_bytes / (DISK_MAX_PERCENT / 100.0) / GB:.0f} GB."
+                    f"PREFLIGHT FAIL: {self.n_channels}-channel workload "
+                    f"needs {baseline_gb:.0f} GB baseline, but disk is only "
+                    f"{total_gb:.0f} GB. Need a larger disk."
+                )
+                ok = False
+            # Step 2: Hard stop — refuse at 95% regardless (external consumer)
+            elif used_pct >= DISK_HARD_STOP_PERCENT:
+                logger.critical(
+                    f"PREFLIGHT FAIL: Disk at {used_pct:.1f}%% "
+                    f"({free_gb:.1f} GB free) — above hard stop "
+                    f"({DISK_HARD_STOP_PERCENT}%%). "
+                    f"Free space manually before starting hf-timestd."
                 )
                 ok = False
             else:
-                # Step 2: If currently over 80%, evict oldest data first
-                if used_pct >= DISK_MAX_PERCENT:
+                # Step 3: Ensure headroom for incoming data
+                if stat.free < headroom_bytes:
+                    days_short = (headroom_bytes - stat.free) / self.daily_disk_budget
                     logger.warning(
-                        f"Preflight: disk at {used_pct:.1f}%% "
-                        f"({free_gb:.1f} GB free) — running cleanup "
-                        f"to get under {DISK_MAX_PERCENT}%%"
+                        f"Preflight: {free_gb:.1f} GB free, need "
+                        f"{headroom_bytes / GB:.1f} GB headroom "
+                        f"({HEADROOM_DAYS} day × {budget_gb:.1f} GB/day) "
+                        f"— evicting oldest {days_short:.1f} days"
                     )
-                    cleaned = self._evict_oldest_days_until_under(
-                        stat.total, DISK_MAX_PERCENT
-                    )
+                    cleaned = self._ensure_headroom(headroom_bytes)
                     if cleaned > 0:
                         logger.info(
-                            f"Preflight cleanup freed {cleaned / GB:.1f} GB"
+                            f"Preflight eviction freed {cleaned / GB:.1f} GB"
                         )
                     # Re-check after cleanup
                     stat = shutil.disk_usage(self.data_root)
                     free_gb = stat.free / GB
                     used_pct = (stat.used / stat.total) * 100
 
-                # Step 3: After cleanup, check against preflight threshold.
-                # The preflight gate is 90%, NOT 80%.  The runtime watchdog
-                # manages the 80% target once services are running.  Blocking
-                # startup at 80% creates a catch-22 where services can't
-                # start to manage their data.
-                if used_pct >= DISK_HARD_STOP_PERCENT:
-                    logger.critical(
-                        f"PREFLIGHT FAIL: Disk at {used_pct:.1f}%% "
-                        f"({free_gb:.1f} GB free) — above hard stop "
-                        f"({DISK_HARD_STOP_PERCENT}%%). "
-                        f"Free space manually before starting hf-timestd."
-                    )
-                    ok = False
-                elif used_pct >= DISK_PREFLIGHT_MAX_PERCENT:
-                    logger.critical(
-                        f"PREFLIGHT FAIL: Disk at {used_pct:.1f}%% "
-                        f"({free_gb:.1f} GB free) after cleanup. "
-                        f"Cannot get under {DISK_PREFLIGHT_MAX_PERCENT}%% — "
-                        f"free space manually before starting hf-timestd."
-                    )
-                    ok = False
-                elif used_pct >= DISK_MAX_PERCENT:
+                # Report final state
+                n_days = len(self._collect_all_dates())
+                headroom_days = stat.free / self.daily_disk_budget if self.daily_disk_budget > 0 else 0
+                if stat.free < headroom_bytes:
                     logger.warning(
                         f"Preflight disk: {free_gb:.1f} GB free of "
-                        f"{total_gb:.0f} GB ({used_pct:.1f}%% used) — "
-                        f"above cleanup target ({DISK_MAX_PERCENT}%%) but "
-                        f"below startup gate ({DISK_PREFLIGHT_MAX_PERCENT}%%). "
-                        f"Runtime watchdog will evict old data."
+                        f"{total_gb:.0f} GB ({used_pct:.1f}%% used), "
+                        f"{n_days} days retained, "
+                        f"{headroom_days:.1f} days headroom — "
+                        f"below target ({HEADROOM_DAYS} day) but allowing "
+                        f"startup. Runtime watchdog will continue evicting."
                     )
                 else:
                     logger.info(
                         f"Preflight disk: {free_gb:.1f} GB free of "
                         f"{total_gb:.0f} GB ({used_pct:.1f}%% used), "
-                        f"baseline {baseline_gb:.0f} GB fits in "
-                        f"80%% budget ({budget_bytes / GB:.0f} GB) — OK"
+                        f"{n_days} days retained, "
+                        f"{headroom_days:.1f} days headroom — OK"
                     )
         except OSError as e:
             logger.critical(f"PREFLIGHT FAIL: Cannot stat {self.data_root}: {e}")
@@ -285,7 +287,7 @@ class ResourceGuardian:
         ram_available = self._get_ram_available()
         ram_total = self._get_ram_total()
         if ram_total is not None:
-            ram_budget = ram_total * (DISK_MAX_PERCENT / 100.0)  # 80% of RAM
+            ram_budget = ram_total * 0.80  # use at most 80% of RAM
             min_ram_gb = self.min_ram_bytes / GB
             if self.min_ram_bytes > ram_budget:
                 logger.critical(
@@ -365,7 +367,15 @@ class ResourceGuardian:
     # ------------------------------------------------------------------
 
     def watchdog_check(self, force: bool = False) -> ResourceStatus:
-        """Periodic check: enforce 80% disk cap by evicting oldest data.
+        """Periodic check: ensure headroom for incoming data.
+
+        Budget-based: the 9 RTP streams arrive at a deterministic rate.
+        We compute the exact daily disk budget and ensure at least
+        HEADROOM_DAYS of free space is available.  If not, evict the
+        oldest complete days until headroom is restored.
+
+        The 95% hard-stop is a secondary safety net in case something
+        outside hf-timestd is filling the disk.
 
         Call from the service main loop.  Returns quickly (no-op) if
         the check interval hasn't elapsed.
@@ -381,6 +391,8 @@ class ResourceGuardian:
             )
         self._last_watchdog_time = now
 
+        headroom_bytes = self.daily_disk_budget * HEADROOM_DAYS
+
         # Read disk and RAM
         try:
             stat = shutil.disk_usage(self.data_root)
@@ -393,18 +405,17 @@ class ResourceGuardian:
         ram_available = self._get_ram_available() or 0
         ram_total = self._get_ram_total() or 1
 
-        # --- Enforce the one rule ---
         state = ResourceState.OK
         message = ''
         bytes_cleaned = 0
+        n_days = 0
+        headroom_days = 0.0
 
+        # --- Safety net: hard stop at 95% ---
         if disk_used_pct >= DISK_HARD_STOP_PERCENT:
             # Something outside hf-timestd is filling the disk.
             # Do our best to free space, but if we can't, stop.
-            bytes_cleaned = self._evict_oldest_days_until_under(
-                disk_total, DISK_MAX_PERCENT
-            )
-            # Re-check
+            bytes_cleaned = self._ensure_headroom(headroom_bytes)
             try:
                 stat2 = shutil.disk_usage(self.data_root)
                 disk_used_pct = (stat2.used / stat2.total) * 100
@@ -415,35 +426,54 @@ class ResourceGuardian:
                 state = ResourceState.EMERGENCY
                 message = (
                     f"EMERGENCY: disk at {disk_used_pct:.1f}%% even after "
-                    f"cleanup — stopping all writes"
+                    f"evicting {bytes_cleaned / GB:.1f} GB — stopping all writes"
                 )
                 logger.critical(message)
             else:
                 state = ResourceState.STOP
                 message = (
-                    f"Disk was at ≥{DISK_HARD_STOP_PERCENT}%%, cleaned "
+                    f"Disk was ≥{DISK_HARD_STOP_PERCENT}%%, evicted "
                     f"{bytes_cleaned / GB:.1f} GB, now {disk_used_pct:.1f}%% "
                     f"— pausing to stabilize"
                 )
                 logger.error(message)
 
-        elif disk_used_pct >= DISK_MAX_PERCENT:
-            # Over 80% — evict oldest complete days until under
-            bytes_cleaned = self._evict_oldest_days_until_under(
-                disk_total, DISK_MAX_PERCENT
-            )
+        # --- Primary mechanism: budget-based headroom ---
+        elif disk_free < headroom_bytes:
+            n_days_before = len(self._collect_all_dates())
+            bytes_cleaned = self._ensure_headroom(headroom_bytes)
             try:
                 stat2 = shutil.disk_usage(self.data_root)
                 disk_used_pct = (stat2.used / stat2.total) * 100
                 disk_free = stat2.free
             except OSError:
                 pass
+            n_days = len(self._collect_all_dates())
+            headroom_days = disk_free / self.daily_disk_budget if self.daily_disk_budget > 0 else 0
             state = ResourceState.CLEANED
             message = (
-                f"Disk was ≥{DISK_MAX_PERCENT}%%, evicted oldest data, "
-                f"freed {bytes_cleaned / GB:.1f} GB, now {disk_used_pct:.1f}%%"
+                f"Headroom low: evicted {n_days_before - n_days} day(s), "
+                f"freed {bytes_cleaned / GB:.1f} GB. "
+                f"Now {disk_free / GB:.1f} GB free "
+                f"({headroom_days:.1f} days headroom, "
+                f"{n_days} days retained)"
             )
             logger.info(message)
+
+        # --- Informational: warn at 80% even if headroom is OK ---
+        elif disk_used_pct >= DISK_WARN_PERCENT:
+            n_days = len(self._collect_all_dates())
+            headroom_days = disk_free / self.daily_disk_budget if self.daily_disk_budget > 0 else 0
+            message = (
+                f"Disk at {disk_used_pct:.1f}%% but headroom OK "
+                f"({headroom_days:.1f} days, {n_days} days retained)"
+            )
+            logger.debug(message)
+
+        else:
+            if self.daily_disk_budget > 0:
+                headroom_days = disk_free / self.daily_disk_budget
+                n_days = len(self._collect_all_dates())
 
         return ResourceStatus(
             state=state,
@@ -454,40 +484,36 @@ class ResourceGuardian:
             ram_total_bytes=ram_total,
             message=message,
             bytes_cleaned=bytes_cleaned,
+            days_retained=n_days,
+            days_headroom=headroom_days,
         )
 
     # ------------------------------------------------------------------
     # 3. Storage eviction — oldest-day-first, across all directories
     # ------------------------------------------------------------------
 
-    def _evict_oldest_days_until_under(
-        self,
-        disk_total: int,
-        target_percent: float,
-    ) -> int:
-        """Remove the oldest complete day of data, repeating until
-        filesystem usage drops below *target_percent*.
+    def _ensure_headroom(self, min_free_bytes: int) -> int:
+        """Evict oldest complete days until free space >= *min_free_bytes*.
+
+        Budget-based: knows exactly how much space the pipeline needs
+        and evicts the minimum number of oldest days to make room.
+        New data is ALWAYS priority over old.
 
         A "day" is identified by YYYYMMDD and removed from raw_buffer/
-        AND phase2/ simultaneously.  Always keeps at least 1 day
-        (today) so that the live pipeline isn't disrupted.
+        AND phase2/ simultaneously.  Always keeps today so the live
+        pipeline isn't disrupted.
         """
         total_freed = 0
         today = time.strftime('%Y%m%d', time.gmtime())
 
-        # Collect all date-strings present across both directories
         all_dates = self._collect_all_dates()
-        # Remove today — never evict today's data
         all_dates.discard(today)
-        # Sort oldest first
         dates_oldest_first = sorted(all_dates)
 
         for date_str in dates_oldest_first:
-            # Check if we're under target
             try:
                 stat = shutil.disk_usage(self.data_root)
-                current_pct = (stat.used / stat.total) * 100
-                if current_pct < target_percent:
+                if stat.free >= min_free_bytes:
                     break
             except OSError:
                 break
@@ -500,6 +526,19 @@ class ResourceGuardian:
                 )
 
         return total_freed
+
+    def _evict_oldest_days_until_under(
+        self,
+        disk_total: int,
+        target_percent: float,
+    ) -> int:
+        """Legacy: evict until filesystem usage drops below *target_percent*.
+
+        Kept as a fallback for the 95% hard-stop path.  Budget-based
+        _ensure_headroom() is the primary eviction mechanism.
+        """
+        target_free = disk_total * (1.0 - target_percent / 100.0)
+        return self._ensure_headroom(int(target_free))
 
     def _collect_all_dates(self) -> Set[str]:
         """Find all YYYYMMDD date strings across raw_buffer/ and phase2/."""
@@ -696,7 +735,7 @@ class ResourceGuardian:
             if not should_evict:
                 try:
                     astat = shutil.disk_usage(self.archive_root)
-                    if (astat.used / astat.total) * 100 >= DISK_MAX_PERCENT:
+                    if (astat.used / astat.total) * 100 >= DISK_WARN_PERCENT:
                         should_evict = True
                     else:
                         break  # Under 80% and within retention — done
