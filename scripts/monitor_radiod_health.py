@@ -108,18 +108,41 @@ def get_radiod_uptime(pid):
         return None
 
 
+def read_status_address_from_config(config_path: str = '/etc/hf-timestd/timestd-config.toml') -> str:
+    """Read [ka9q] status_address from the config file."""
+    try:
+        section = None
+        with open(config_path, 'r') as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith('[') and not stripped.startswith('[['):
+                    section = stripped.strip('[]').strip()
+                    continue
+                if section == 'ka9q' and '=' in stripped and not stripped.startswith('#'):
+                    key, _, value = stripped.partition('=')
+                    if key.strip() == 'status_address':
+                        return value.strip().strip('"').strip("'")
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def check_radiod_status_channel(status_address: str = None, timeout: float = 2.0):
     """Check if radiod status channel is responding"""
     try:
         from ka9q import RadiodControl
         
-        # Try common status addresses if none specified
+        # Build address list: explicit arg > config file > hardcoded defaults
         addresses_to_try = []
         if status_address:
             addresses_to_try.append(status_address)
         else:
-            # Try to read from config or use common defaults
-            addresses_to_try = ['239.99.1.1', 'bee4-status.local', 'bee1-status.local', 'radiod-status.local']
+            # Read from config first
+            config_addr = read_status_address_from_config()
+            if config_addr:
+                addresses_to_try.append(config_addr)
+            # Hardcoded fallbacks
+            addresses_to_try.extend(['radiod-status.local', '239.99.1.1'])
         
         for addr in addresses_to_try:
             try:
@@ -256,9 +279,14 @@ def main():
     output_file = sys.argv[1] if len(sys.argv) > 1 else '/tmp/timestd-test/state/radiod-status.json'
     poll_interval = int(sys.argv[2]) if len(sys.argv) > 2 else 10  # seconds
     
+    # Read status_address from config for the primary health check
+    config_status_addr = read_status_address_from_config()
+
     logger.info(f"Starting radiod health monitor")
     logger.info(f"Output: {output_file}")
     logger.info(f"Poll interval: {poll_interval}s")
+    if config_status_addr:
+        logger.info(f"Status address from config: {config_status_addr}")
     
     consecutive_failures = 0
     last_known_good = None
@@ -275,7 +303,7 @@ def main():
             }
             
             # Primary check: Is radiod status channel responding?
-            status_check = check_radiod_status_channel()
+            status_check = check_radiod_status_channel(config_status_addr)
             status['status_channel'] = status_check
             
             if status_check.get('responding') is True:

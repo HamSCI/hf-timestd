@@ -231,26 +231,59 @@ section "Phase 0.5: Radio Hardware (Radiod)"
 
 RADIOD_STATUS_FILE="${DATA_ROOT}/state/radiod-status.json"
 
+# Read [ka9q] status_address from config (works for both local and remote radiod)
+RADIOD_STATUS_ADDR=""
+if [[ -f "$CONFIG_FILE" ]]; then
+    RADIOD_STATUS_ADDR=$(awk '/^\[ka9q\]/{found=1; next} /^\[/{found=0} found && /^status_address/ {gsub(/.*=\s*"?|"$/,"",$0); print; exit}' "$CONFIG_FILE" 2>/dev/null)
+fi
+
 if [[ -f "$RADIOD_STATUS_FILE" ]]; then
-    # Parse status using jq if available, otherwise grep
+    # Parse status from monitor service output
     if command -v jq &>/dev/null; then
         RADIOD_HEALTH=$(jq -r '.health' "$RADIOD_STATUS_FILE" 2>/dev/null)
         RADIOD_UPTIME=$(jq -r '.uptime_seconds' "$RADIOD_STATUS_FILE" 2>/dev/null)
         RX_COUNT=$(jq -r '.process.count' "$RADIOD_STATUS_FILE" 2>/dev/null)
+        STATUS_ADDR=$(jq -r '.status_channel.status_address // empty' "$RADIOD_STATUS_FILE" 2>/dev/null)
         
         if [[ "$RADIOD_HEALTH" == "healthy" ]]; then
-            check_pass "Radiod is HEALTHY (pid $RX_COUNT, uptime ${RADIOD_UPTIME}s)"
+            check_pass "Radiod is HEALTHY via ${STATUS_ADDR:-monitor} (pid $RX_COUNT, uptime ${RADIOD_UPTIME}s)"
         elif [[ "$RADIOD_HEALTH" == "degraded" ]]; then
             check_warn "Radiod is DEGRADED (running but issues detected)"
         else
             check_fail "Radiod is UNHEALTHY/CRITICAL"
         fi
     else
-        # Fallback if jq missing
         check_pass "Radiod status file exists (install jq for details)"
     fi
 else
-    check_warn "Radiod status file not found: $RADIOD_STATUS_FILE"
+    # No status file — monitor service may not be running.
+    # Try a live probe using ka9q if we know the status address.
+    LIVE_PROBE_OK=false
+    if [[ -n "$RADIOD_STATUS_ADDR" ]]; then
+        # Quick multicast probe via Python ka9q module
+        PROBE_RESULT=$(timeout 5 /opt/hf-timestd/venv/bin/python3 -c "
+from ka9q import RadiodControl
+try:
+    c = RadiodControl('$RADIOD_STATUS_ADDR')
+    if hasattr(c, 'status_mcast_addr') and c.status_mcast_addr:
+        print('ok')
+    else:
+        print('fail')
+except Exception:
+    print('fail')
+" 2>/dev/null || echo "fail")
+        if [[ "$PROBE_RESULT" == "ok" ]]; then
+            check_pass "Radiod responding on $RADIOD_STATUS_ADDR (live probe, no monitor service)"
+            LIVE_PROBE_OK=true
+        fi
+    fi
+    if [[ "$LIVE_PROBE_OK" == "false" ]]; then
+        if [[ -n "$RADIOD_STATUS_ADDR" ]]; then
+            check_warn "Radiod not responding at $RADIOD_STATUS_ADDR (no status file, live probe failed)"
+        else
+            check_warn "Radiod status file not found: $RADIOD_STATUS_FILE"
+        fi
+    fi
 fi
 
 # =============================================================================
