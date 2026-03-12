@@ -34,6 +34,7 @@ SERVICES=(
 )
 
 TIMERS=(
+    "timestd-pipeline-watchdog.timer"
     "timestd-ionex-download.timer"
     "timestd-chrony-monitor.timer"
     "timestd-iono-reanalysis.timer"
@@ -52,6 +53,19 @@ for timer in "${TIMERS[@]}"; do
     if systemctl is-active --quiet "$timer" 2>/dev/null; then
         systemctl stop "$timer" 2>/dev/null || true
         log_info "  ✓ $timer stopped"
+    fi
+done
+
+# Stop metrology template instances first (glob doesn't work with systemctl stop)
+log_step "Stopping metrology instances..."
+for inst in $(systemctl list-units 'timestd-metrology@*.service' --no-legend --all 2>/dev/null | awk '{print $1}'); do
+    if systemctl is-active --quiet "$inst" 2>/dev/null; then
+        printf "  Stopping %-35s" "$inst..."
+        if systemctl stop "$inst" 2>/dev/null; then
+            echo -e " ${GREEN}✓${NC}"
+        else
+            echo -e " ${YELLOW}(already stopped)${NC}"
+        fi
     fi
 done
 

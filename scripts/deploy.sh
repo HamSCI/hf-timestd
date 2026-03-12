@@ -701,9 +701,9 @@ else
 fi
 
 # ── IONEX download (first run only) ──
-if [[ "$FIRST_RUN" == "true" ]] && [[ -f "$PROJECT_DIR/scripts/download_ionex_daily.sh" ]]; then
+if [[ "$FIRST_RUN" == "true" ]] && [[ -f "$INSTALL_DIR/scripts/download_ionex_daily.sh" ]]; then
     log_info "Downloading initial IONEX data..."
-    sudo -u "$INSTALL_USER" "$PROJECT_DIR/scripts/download_ionex_daily.sh" 2>&1 | head -10 || true
+    sudo -u "$INSTALL_USER" "$INSTALL_DIR/scripts/download_ionex_daily.sh" 2>&1 | head -10 || true
 fi
 
 log_info "System config: OK"
