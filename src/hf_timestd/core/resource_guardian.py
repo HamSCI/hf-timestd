@@ -241,16 +241,26 @@ class ResourceGuardian:
                 )
                 ok = False
             else:
-                # Step 3: Ensure headroom for incoming data
-                if stat.free < headroom_bytes:
-                    days_short = (headroom_bytes - stat.free) / self.daily_disk_budget
+                # Step 3: Bring disk under budget.
+                # New data is ALWAYS priority over old.  At startup we
+                # aggressively evict oldest days to get under 80% AND
+                # ensure headroom for incoming data.  This puts the disk
+                # in a clean state so the runtime watchdog only has to
+                # maintain it.
+                target_free = max(
+                    headroom_bytes,
+                    int(stat.total * (1.0 - DISK_WARN_PERCENT / 100.0)),
+                )
+                if stat.free < target_free:
+                    deficit_gb = (target_free - stat.free) / GB
                     logger.warning(
-                        f"Preflight: {free_gb:.1f} GB free, need "
-                        f"{headroom_bytes / GB:.1f} GB headroom "
-                        f"({HEADROOM_DAYS} day × {budget_gb:.1f} GB/day) "
-                        f"— evicting oldest {days_short:.1f} days"
+                        f"Preflight: disk at {used_pct:.1f}%% "
+                        f"({free_gb:.1f} GB free), need {target_free / GB:.1f} GB free "
+                        f"(max of {HEADROOM_DAYS}-day headroom and "
+                        f"{DISK_WARN_PERCENT}%% target) "
+                        f"— evicting {deficit_gb:.1f} GB of oldest data"
                     )
-                    cleaned = self._ensure_headroom(headroom_bytes)
+                    cleaned = self._ensure_headroom(target_free)
                     if cleaned > 0:
                         logger.info(
                             f"Preflight eviction freed {cleaned / GB:.1f} GB"
@@ -263,14 +273,14 @@ class ResourceGuardian:
                 # Report final state
                 n_days = len(self._collect_all_dates())
                 headroom_days = stat.free / self.daily_disk_budget if self.daily_disk_budget > 0 else 0
-                if stat.free < headroom_bytes:
+                if stat.free < target_free:
                     logger.warning(
                         f"Preflight disk: {free_gb:.1f} GB free of "
                         f"{total_gb:.0f} GB ({used_pct:.1f}%% used), "
                         f"{n_days} days retained, "
                         f"{headroom_days:.1f} days headroom — "
-                        f"below target ({HEADROOM_DAYS} day) but allowing "
-                        f"startup. Runtime watchdog will continue evicting."
+                        f"could not reach target but allowing startup. "
+                        f"Runtime watchdog will continue evicting."
                     )
                 else:
                     logger.info(
