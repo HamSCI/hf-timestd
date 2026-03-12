@@ -12,8 +12,9 @@ Type=notify
 User=timestd
 Group=timestd
 
-# Enable systemd watchdog
-WatchdogSec=60
+# Systemd watchdog — recorder only pets when data is flowing.
+# If no samples for ~120s, recorder stops petting → systemd kills after 180s.
+WatchdogSec=180
 NotifyAccess=main
 
 # Environment from file (set by deploy.sh)

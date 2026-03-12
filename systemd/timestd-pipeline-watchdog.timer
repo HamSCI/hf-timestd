@@ -1,0 +1,11 @@
+[Unit]
+Description=HF-TimeStd Pipeline Health Watchdog (every 5 min)
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=300
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target

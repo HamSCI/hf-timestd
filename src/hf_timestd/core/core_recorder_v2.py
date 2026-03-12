@@ -360,9 +360,16 @@ class CoreRecorderV2:
                     self._write_status()
                     last_status_time = now
                     
-                    # Notify systemd watchdog (service is alive)
+                    # Notify systemd watchdog — conditional on data flow.
+                    # Only pet the watchdog if samples have been written
+                    # recently.  If the recorder is alive but no data is
+                    # flowing, systemd will kill and restart us after
+                    # WatchdogSec expires (180s).  During the first 5 min
+                    # of startup we always pet (channels are initializing).
                     if SYSTEMD_AVAILABLE:
-                        systemd_daemon.notify('WATCHDOG=1')
+                        uptime = now - self.start_time
+                        if uptime < 300 or self._data_is_flowing():
+                            systemd_daemon.notify('WATCHDOG=1')
                 
                 # Periodic status logging (every 60 seconds)
                 if int(now) % 60 == 0:
@@ -615,6 +622,27 @@ class CoreRecorderV2:
         except Exception as e:
             logger.error(f"Health monitoring error: {e}")
     
+    def _data_is_flowing(self) -> bool:
+        """Return True if any recorder has written samples recently.
+
+        Used by the main loop to decide whether to pet the systemd
+        watchdog.  If no samples have been written in >120s, we stop
+        petting and let systemd kill us after WatchdogSec (180s).
+        """
+        try:
+            total = sum(r.samples_written for r in self.recorders.values())
+            if not hasattr(self, '_wd_last_written'):
+                self._wd_last_written = total
+                self._wd_last_advance = time.time()
+                return True
+            if total > self._wd_last_written:
+                self._wd_last_written = total
+                self._wd_last_advance = time.time()
+                return True
+            return (time.time() - self._wd_last_advance) < 120
+        except Exception:
+            return True  # Err on the side of petting
+
     def _check_data_freshness(self):
         """Check that recorders are actively receiving and writing samples.
 
@@ -623,7 +651,7 @@ class CoreRecorderV2:
         (files land in past-dated directories) or when tiered storage moves files
         between hot and cold buffers.
 
-        If no samples have been written across all recorders for >10 minutes,
+        If no samples have been written across all recorders for >5 minutes,
         triggers a self-restart via sys.exit(1).  Systemd will restart the service.
         """
         try:
@@ -654,19 +682,19 @@ class CoreRecorderV2:
             if uptime < 300:
                 return
 
-            if silence > 300:  # 5 minutes
+            if silence > 180:  # 3 minutes
                 logger.error(
                     f"DATA FRESHNESS WARNING: No samples written in {silence:.0f}s "
                     f"across {len(self.recorders)} recorders. "
                     f"Check disk full, permissions, or network loss."
                 )
 
-            # CRITICAL: Trigger self-restart if stale for >10 minutes
+            # CRITICAL: Trigger self-restart if stale for >5 minutes
             # This ensures automatic recovery from silent failures.
             # Guard: only self-restart if we've been running long enough to have
             # written our own data. Otherwise we crash-loop on restart because
             # stale files from the previous run trigger immediate exit.
-            if silence > 600 and uptime > 660:  # 10 min stale + 11 min uptime
+            if silence > 300 and uptime > 360:  # 5 min stale + 6 min uptime
                 logger.critical(
                     f"DATA FRESHNESS CRITICAL: No samples written in {silence:.0f}s "
                     f"({silence/60:.1f} min). Triggering self-restart to recover."

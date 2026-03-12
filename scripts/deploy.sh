@@ -494,6 +494,7 @@ for tf in \
     timestd-ionex-download.service timestd-ionex-download.timer \
     timestd-chrony-monitor.service timestd-chrony-monitor.timer \
     timestd-iono-reanalysis.service timestd-iono-reanalysis.timer \
+    timestd-pipeline-watchdog.service timestd-pipeline-watchdog.timer \
     grape-daily.service grape-daily.timer \
     timestd-alert@.service
 do
@@ -618,7 +619,7 @@ if [[ "$VTEC_ENABLED" == "true" ]]; then
 fi
 
 # Enable timers
-for timer in timestd-ionex-download timestd-chrony-monitor; do
+for timer in timestd-ionex-download timestd-chrony-monitor timestd-pipeline-watchdog; do
     systemctl enable "${timer}.timer" 2>/dev/null || true
 done
 [[ -f "$SYSTEMD_DIR/timestd-iono-reanalysis.timer" ]] && systemctl enable timestd-iono-reanalysis.timer 2>/dev/null || true
@@ -739,6 +740,8 @@ if [[ "$DO_RESTART" == "true" ]]; then
         # Reset failed state first — workers may have hit StartLimitBurst
         # from a previous bug and systemd refuses to restart them.
         systemctl reset-failed 'timestd-metrology@*' 2>/dev/null || true
+        systemctl reset-failed timestd-metrology.target 2>/dev/null || true
+        systemctl reset-failed timestd-core-recorder 2>/dev/null || true
         MET_STARTED=0
         for entry in "${METROLOGY_CHANNELS[@]}"; do
             CHANNEL="${entry%%=*}"
@@ -783,7 +786,7 @@ if [[ "$DO_RESTART" == "true" ]]; then
         fi
 
         # Ensure timers are running
-        for timer in timestd-ionex-download timestd-chrony-monitor; do
+        for timer in timestd-ionex-download timestd-chrony-monitor timestd-pipeline-watchdog; do
             systemctl start "${timer}.timer" 2>/dev/null || true
         done
         [[ -f "$SYSTEMD_DIR/timestd-iono-reanalysis.timer" ]] && systemctl start timestd-iono-reanalysis.timer 2>/dev/null || true

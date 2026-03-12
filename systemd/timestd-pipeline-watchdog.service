@@ -1,0 +1,9 @@
+[Unit]
+Description=HF-TimeStd Pipeline Health Watchdog
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hf-timestd/scripts/pipeline-watchdog.sh
+User=root
+Nice=19
