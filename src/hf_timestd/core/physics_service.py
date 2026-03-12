@@ -100,11 +100,19 @@ class PhysicsService:
 
     def _process_l1_files(self):
         """Scan and process new L1 files."""
-        # Assume L1 files are in processed_dir/L1/metrology_measurements/...
-        # Or configured path.
-        # We look for today's files.
         now = datetime.now(timezone.utc)
         date_str = now.strftime("%Y%m%d")
+
+        # Daily cleanup: clear processed_files when the date changes
+        # to prevent unbounded growth (each entry is ~60 bytes).
+        if date_str != getattr(self, '_last_date', None):
+            if self.processed_files:
+                logger.info(
+                    f"Physics: Day boundary — clearing {len(self.processed_files)} "
+                    f"processed entries from {self._last_date}"
+                )
+            self.processed_files.clear()
+            self._last_date = date_str
 
         # We need to discover channels.
         # We need to discover channels.
@@ -160,32 +168,34 @@ class PhysicsService:
             new_measurements = []
             for m in measurements:
                 # Unique ID: timestamp + station
-                # We need to construct a unique ID from timestamp and station ID.
                 ts = m.get('timestamp_utc')
                 st = m.get('station_id')
                 mid = f"{ts}_{st}"
                 if mid not in self.processed_files:
-                    new_measurements.append(m)
-                    self.processed_files.add(mid)
+                    new_measurements.append((mid, m))
 
             if not new_measurements:
                 return
 
             # Process valid L1 -> L2
             l2_results = []
-            for m in new_measurements:
+            for mid, m in new_measurements:
                 res = self._process_single_measurement(m)
                 if res:
                     l2_results.append(res)
+                # Mark as processed only AFTER successful processing
+                # (or intentional skip via None return). Failed measurements
+                # will be retried on the next cycle.
+                self.processed_files.add(mid)
 
             if l2_results:
                 self._write_l2_results(channel_name, l2_results)
                 logger.info(f"Physics: Processed {len(l2_results)} measurements for {channel_name}")
 
+        except FileNotFoundError:
+            pass  # L1 file doesn't exist yet — normal during startup
         except Exception as e:
-            # File might not exist yet or other error
-            pass
-            del e
+            logger.warning(f"Physics: Error processing channel {channel_name}: {e}")
 
     def _process_single_measurement(self, l1: Dict[str, Any]) -> L2PhysicsMeasurement:
         """Run physics model on a single L1 measurement."""
