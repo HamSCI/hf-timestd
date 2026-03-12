@@ -36,10 +36,9 @@ fi
 MAIN_CONFIG="/etc/hf-timestd/timestd-config.toml"
 VENV_DIR="/opt/hf-timestd/venv"
 
-# Check if radiod runs locally
-ENV_FILE="/etc/hf-timestd/environment"
+# Auto-detect radiod co-location (for CPU affinity path watcher only)
 RADIOD_LOCAL=false
-if [[ -f "$ENV_FILE" ]] && grep -q '^TIMESTD_RADIOD_LOCAL=true' "$ENV_FILE"; then
+if pgrep -x radiod &>/dev/null; then
     RADIOD_LOCAL=true
 fi
 
@@ -62,12 +61,8 @@ CORE_SERVICES=(
     "timestd-fusion"           # Phase 3: Fusion → Chrony SHM
     "timestd-physics"          # Phase 3: TEC Estimation
     "timestd-web-api"          # Web API & Dashboard
+    "timestd-radiod-monitor"    # Hardware Health Monitor (local + remote)
 )
-
-# radiod-monitor only when radiod runs locally
-if [[ "$RADIOD_LOCAL" == "true" ]]; then
-    CORE_SERVICES+=("timestd-radiod-monitor")
-fi
 
 # Optional services (conditional)
 OPTIONAL_SERVICES=()
@@ -233,9 +228,7 @@ fi
 # Web API and monitoring
 log_step "Starting web API and monitoring..."
 start_service "timestd-web-api" "Web API & Dashboard"
-if [[ "$RADIOD_LOCAL" == "true" ]]; then
-    start_service "timestd-radiod-monitor" "Hardware Health Monitor"
-fi
+start_service "timestd-radiod-monitor" "Hardware Health Monitor"
 
 # Optional services
 if [[ ${#OPTIONAL_SERVICES[@]} -gt 0 ]]; then

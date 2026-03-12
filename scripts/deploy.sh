@@ -260,21 +260,15 @@ else
     log_info "Config exists: $MAIN_CONFIG"
 fi
 
-# ── Radiod co-location ──
-RADIOD_LOCAL=false
-if [[ -f "$ENV_FILE" ]] && grep -q '^TIMESTD_RADIOD_LOCAL=' "$ENV_FILE"; then
-    RADIOD_LOCAL=$(grep '^TIMESTD_RADIOD_LOCAL=' "$ENV_FILE" | cut -d= -f2)
-    log_info "radiod co-location (from environment): $RADIOD_LOCAL"
-elif [[ "$AUTO_YES" == "false" ]]; then
-    echo ""
-    echo "  Does radiod (ka9q-radio) run on THIS computer?"
-    echo "  If radiod runs here, CPU affinity will be configured to avoid"
-    echo "  L3 cache contention between radiod and hf-timestd."
-    echo ""
-    read -rp "  Does radiod run on this computer? [y/N] " radiod_choice < /dev/tty
-    if [[ "${radiod_choice:-N}" =~ ^[Yy]$ ]]; then
-        RADIOD_LOCAL=true
-    fi
+# ── Radiod co-location (auto-detect for CPU affinity only) ──
+# hf-timestd connects via [ka9q] status_address regardless of where radiod
+# runs.  The only reason to detect local radiod is CPU affinity pinning.
+if pgrep -x radiod &>/dev/null; then
+    RADIOD_LOCAL=true
+    log_info "radiod detected locally (CPU affinity will be configured)"
+else
+    RADIOD_LOCAL=false
+    log_info "radiod not running locally (CPU affinity not needed)"
 fi
 
 # ── Generate/update environment file ──
@@ -466,10 +460,7 @@ copy_unit() {
 }
 
 # ── Core service files ──
-CORE_UNITS=("timestd-core-recorder" "timestd-l2-calibration" "timestd-fusion" "timestd-physics" "timestd-web-api")
-if [[ "$RADIOD_LOCAL" == "true" ]]; then
-    CORE_UNITS+=("timestd-radiod-monitor")
-fi
+CORE_UNITS=("timestd-core-recorder" "timestd-l2-calibration" "timestd-fusion" "timestd-physics" "timestd-web-api" "timestd-radiod-monitor")
 
 UPDATED_COUNT=0
 for svc in "${CORE_UNITS[@]}"; do
@@ -611,9 +602,7 @@ for entry in "${METROLOGY_CHANNELS[@]}"; do
     systemctl enable "timestd-metrology@${CHANNEL}.service" 2>/dev/null || true
 done
 
-if [[ "$RADIOD_LOCAL" == "true" ]]; then
-    systemctl enable timestd-radiod-monitor.service 2>/dev/null || true
-fi
+systemctl enable timestd-radiod-monitor.service 2>/dev/null || true
 if [[ "$VTEC_ENABLED" == "true" ]]; then
     systemctl enable timestd-vtec.service 2>/dev/null || true
 fi
@@ -755,10 +744,8 @@ if [[ "$DO_RESTART" == "true" ]]; then
             "timestd-fusion"
             "timestd-physics"
             "timestd-web-api"
+            "timestd-radiod-monitor"
         )
-        if [[ "$RADIOD_LOCAL" == "true" ]]; then
-            RESTART_SERVICES+=("timestd-radiod-monitor")
-        fi
 
         for service in "${RESTART_SERVICES[@]}"; do
             if systemctl is-enabled --quiet "$service" 2>/dev/null; then

@@ -435,32 +435,23 @@ elif [[ -f "$MAIN_CONFIG" ]]; then
 fi
 
 # =============================================================================
-# Step 8b: Detect radiod co-location
+# Step 8b: Detect radiod co-location (auto-detect, no question needed)
 # =============================================================================
 # CPU affinity pinning is only needed when radiod shares this machine.
 # radiod performs high-bandwidth USB DMA and FFT (up to 129.6 MHz) and is
 # sensitive to L3 cache contention. When radiod runs on a separate networked
 # computer, none of this applies.
+#
+# hf-timestd itself doesn't care — it connects via multicast using
+# [ka9q] status_address regardless of where radiod runs.
 # =============================================================================
-RADIOD_LOCAL=false
-
-# Check if a previous choice was saved
 ENV_FILE="$CONFIG_DIR/environment"
-if [[ -f "$ENV_FILE" ]] && grep -q '^TIMESTD_RADIOD_LOCAL=' "$ENV_FILE"; then
-    RADIOD_LOCAL=$(grep '^TIMESTD_RADIOD_LOCAL=' "$ENV_FILE" | cut -d= -f2)
-    log_info "  radiod co-location (from environment): ${RADIOD_LOCAL}"
+if pgrep -x radiod &>/dev/null; then
+    RADIOD_LOCAL=true
+    log_info "  radiod detected locally (CPU affinity will be configured)"
 else
-    echo ""
-    log_step "Does radiod (ka9q-radio) run on THIS computer?"
-    echo "  If radiod runs here, CPU affinity will be configured to avoid"
-    echo "  L3 cache contention between radiod and hf-timestd."
-    echo "  If radiod runs on a separate networked computer, this is not needed."
-    echo ""
-    read -rp "  Does radiod run on this computer? [y/N] " radiod_choice < /dev/tty
-    radiod_choice=${radiod_choice:-N}
-    if [[ "$radiod_choice" =~ ^[Yy]$ ]]; then
-        RADIOD_LOCAL=true
-    fi
+    RADIOD_LOCAL=false
+    log_info "  radiod not running locally (CPU affinity not needed)"
 fi
 
 # Ensure environment file exists (setup-station.sh creates it, but ensure on re-run)
@@ -507,12 +498,8 @@ CORE_SERVICES=(
     "timestd-fusion"
     "timestd-physics"
     "timestd-web-api"
+    "timestd-radiod-monitor"
 )
-
-# radiod-monitor only needed when radiod runs locally
-if [[ "$RADIOD_LOCAL" == "true" ]]; then
-    CORE_SERVICES+=("timestd-radiod-monitor")
-fi
 
 for svc in "${CORE_SERVICES[@]}"; do
     cp "$PROJECT_DIR/systemd/${svc}.service" "$SYSTEMD_DIR/"
@@ -703,9 +690,7 @@ log_info "    - timestd-l2-calibration.service (Phase 2: L2 Calibrated Timing)"
 log_info "    - timestd-fusion.service         (Phase 3: Fusion → Chrony SHM)"
 log_info "    - timestd-physics.service        (Phase 3: TEC Estimation)"
 log_info "    - timestd-web-api.service        (Web API & Dashboard)"
-if [[ "$RADIOD_LOCAL" == "true" ]]; then
-    log_info "    - timestd-radiod-monitor.service (Hardware Health Monitor)"
-fi
+log_info "    - timestd-radiod-monitor.service (Hardware Health Monitor)"
 log_info "    - grape-daily.timer              (GRAPE/PSWS daily upload at 01:00 UTC)"
 if [[ "$VTEC_ENABLED" == "true" ]]; then
     log_info "    - timestd-vtec.service           (GNSS VTEC Monitor)"
@@ -719,9 +704,7 @@ systemctl enable timestd-l2-calibration.service
 systemctl enable timestd-fusion.service
 systemctl enable timestd-physics.service
 systemctl enable timestd-web-api.service
-if [[ "$RADIOD_LOCAL" == "true" ]]; then
-    systemctl enable timestd-radiod-monitor.service
-fi
+systemctl enable timestd-radiod-monitor.service
 
 # Enable optional services/timers
 systemctl enable timestd-ionex-download.timer
