@@ -1,3 +1,124 @@
+"""GNSS TEC estimation from u-blox `RXM-RAWX` dual-frequency measurements.
+ 
+ This module implements a lightweight, receiver-centric estimate of ionospheric
+ Total Electron Content (TEC) using dual-frequency GPS observations available
+ from u-blox `RXM-RAWX`.
+ 
+ The output of :meth:`GNSSTECAnalyzer.process_rawx` is an **epoch-by-epoch**
+ per-satellite estimate of:
+ 
+ - **STEC** (Slant TEC): electrons/m² along the line-of-sight.
+ - **VTEC** (Vertical TEC): STEC mapped to the zenith using a single-layer model.
+ 
+ ## Methodology overview
+ 
+ 1. **Parse RAWX measurements**
+ 
+    RAWX provides, per satellite and per signal, a pseudorange (`prMes`, meters)
+    and carrier phase (`cpMes`, cycles). For the ZED-F9P:
+ 
+    - `sigId == 0`: GPS L1 C/A (L1)
+    - `sigId == 3` or `4`: GPS L2C (L2)
+ 
+    The code groups these into per-satellite observations `P1, P2, L1, L2`.
+ 
+ 2. **Geometry-free code combination (ionosphere from code)**
+ 
+    To first order, the ionospheric group delay in meters is
+ 
+        I(f) = +K * STEC / f²
+ 
+    where `K = 40.308` (SI units), `f` is carrier frequency (Hz), and STEC is in
+    electrons/m². Using the geometry-free pseudorange combination:
+ 
+        P1 - P2 = K * STEC * (1/f1² - 1/f2²) + DCB_sat + DCB_rx
+ 
+    Define
+ 
+        denom = K * (1/f1² - 1/f2²)
+ 
+    For GPS L1/L2, `denom` is **negative**. Solving for STEC gives:
+ 
+        STEC_code = ((P1 - P2) - DCB_sat - DCB_rx) / denom
+ 
+    This yields STEC in electrons/m². Divide by `TECU = 1e16` to report in TECU.
+ 
+ 3. **Carrier phase smoothing / leveling (reduce code noise)**
+ 
+    Pseudorange-derived STEC is noisy. Carrier phase has much lower noise but
+    contains an unknown ambiguity. We form the geometry-free carrier phase in
+    meters:
+ 
+        L_gf = (L1 * C/f1) - (L2 * C/f2)
+ 
+    and convert to a phase-derived STEC (up to an unknown constant) via:
+ 
+        STEC_phase_raw = L_gf / (-denom)
+ 
+    The sign uses `-denom` so that increased ionospheric delay corresponds to
+    increased STEC under the chosen conventions.
+ 
+    A per-satellite leveling offset is estimated as the running mean (then a
+    slow EWMA) of:
+ 
+        diff = STEC_code - STEC_phase_raw
+ 
+    and applied as:
+ 
+        STEC_smooth = STEC_phase_raw + offset
+ 
+    This is a standard “code-minus-phase leveling” approach used to obtain a
+    smoothed ionospheric observable.
+ 
+ 4. **Cycle slip detection**
+ 
+    A cycle slip appears as a discontinuity in `L_gf`. If `|ΔL_gf|` exceeds a
+    threshold, the leveling state is reset for that satellite.
+ 
+ 5. **STEC → VTEC mapping (single-layer model)**
+ 
+    VTEC is derived from STEC using a single-layer mapping function with Earth
+    radius `Re` and ionospheric shell height `H_ion`:
+ 
+        m(e) = 1 / sqrt(1 - (Re * cos(e) / (Re + H_ion))²)
+        VTEC = STEC / m(e)
+ 
+    where `e` is elevation angle.
+ 
+ ## Bias handling (DCBs)
+ 
+ - **Satellite DCB**: optionally provided (typically from IGS/CODE DCB products
+   distributed in SINEX format). This code prefers a bias matching the receiver
+   tracking mode (for ZED-F9P, L2C): `C1C-C2L`, synthesizing it from
+   `C1C-C2W` and `C2W-C2L` if needed.
+ 
+ - **Receiver DCB**: estimated once, using a **minimum VTEC physical
+   constraint** on an initial epoch with multiple high-elevation satellites.
+   This is a pragmatic approach to remove a constant inter-frequency bias when
+   external calibration is unavailable.
+ 
+ ## Units and sign conventions
+ 
+ - `P1`, `P2` are in meters from RAWX `prMes`.
+ - `L1`, `L2` are in cycles from RAWX `cpMes` and are converted to meters.
+ - Internally, STEC/VTEC are handled in electrons/m²; `stec_u`/`vtec_u` are in
+   TECU.
+ - For GPS L1/L2, `denom` is negative; the formulas are written to maintain
+   positive STEC/VTEC under typical conditions.
+ 
+ ## References
+ 
+ - GPS ionosphere first-order delay model: IS-GPS-200 (Navstar GPS Space
+   Segment/Navigation User Interfaces).
+ - Mapping function / single-layer shell model: Schaer, Gurtner, Feltens (1998),
+   “IONEX: The IONosphere Map EXchange Format Version 1.0”.
+ - Code/phase leveling for ionospheric observables: e.g., Mannucci et al.
+   (1998), “A Global Mapping Technique for GPS-Derived Ionospheric Total
+   Electron Content Measurements”.
+ - Differential Code Bias (DCB) products: IGS/CODE DCB/SINEX documentation.
+ - u-blox receiver measurements: u-blox Interface Description for UBX-RXM-RAWX.
+"""
+
 import numpy as np
 import logging
 from collections import defaultdict
@@ -22,6 +143,23 @@ MIN_VTEC_FLOOR_TECU = 2.0
 _MODULE_VERSION = '2.0.0'  # bumped from 1.x after DCB/rx-DCB fix
 
 class GNSSTECAnalyzer:
+    """Convert dual-frequency u-blox RAWX measurements into per-satellite VTEC.
+
+    The analyzer expects two asynchronous streams:
+
+    - `NAV-SAT` (via :meth:`update_satellite_positions`) to provide per-satellite
+      elevation/azimuth (used for screening and the STEC↔VTEC mapping).
+    - `RXM-RAWX` (via :meth:`process_rawx`) to provide pseudorange and carrier
+      phase for L1 and L2.
+
+    The returned VTEC is **not** a global ionospheric model; it is a local,
+    receiver-derived estimate that depends on:
+
+    - the single-layer mapping assumptions,
+    - DCB availability/quality,
+    - the stability of the receiver DCB estimate,
+    - and the leveling convergence time after cycle slips.
+    """
     def __init__(self, dcb_data=None):
         self.dcb_data = self._build_l2c_dcbs(dcb_data) if dcb_data else {}
         self.state = defaultdict(dict) # sv_key -> {'count', 'sum_diff', 'last_l_gf'}
@@ -67,6 +205,21 @@ class GNSSTECAnalyzer:
     def update_satellite_positions(self, nav_sat_msg, timestamp):
         """
         Update satellite Elevation/Azimuth from NAV-SAT message.
+
+        Parameters
+        ----------
+        nav_sat_msg:
+            Parsed UBX-NAV-SAT message as a dict with a `sats` list.
+            Elevation and azimuth are expected in degrees.
+        timestamp:
+            Epoch time used to tag the latest update.
+
+        Notes
+        -----
+        Elevation is required for:
+
+        - screening low-elevation measurements (multipath/noise), and
+        - mapping STEC to VTEC using the single-layer mapping function.
         """
         for sat in nav_sat_msg['sats']:
             gnss_id = sat['gnssId']
@@ -93,14 +246,54 @@ class GNSSTECAnalyzer:
 
     @staticmethod
     def _slm_mapping(elev_deg):
-        """Single-layer mapping function (VTEC → STEC)."""
+        """Single-layer mapping function `m(e)`.
+
+        This uses a thin-shell single-layer ionosphere at a fixed height.
+
+        Parameters
+        ----------
+        elev_deg:
+            Satellite elevation angle (degrees).
+
+        Returns
+        -------
+        float
+            Mapping factor `m(e)` such that:
+
+            - `STEC = VTEC * m(e)`
+            - `VTEC = STEC / m(e)`
+
+        Notes
+        -----
+        The shell height is a key modeling assumption; 350 km is a common
+        choice for L-band GNSS applications.
+        """
         el_rad = np.radians(elev_deg)
         Re = 6371e3
         H_ion = 350e3
         return 1.0 / np.sqrt(1.0 - (Re * np.cos(el_rad) / (Re + H_ion))**2)
 
     def _group_observations(self, rawx_msg):
-        """Group RAWX measurements by satellite, extracting L1/L2 code + phase."""
+        """Group RAWX measurements by satellite, extracting L1/L2 code + phase.
+
+        Parameters
+        ----------
+        rawx_msg:
+            Parsed UBX-RXM-RAWX message as a dict with a `measurements` list.
+
+        Returns
+        -------
+        dict
+            Mapping from `Gxx` satellite key to an observation dict containing:
+
+            - `P1`, `P2`: pseudorange (meters)
+            - `L1`, `L2`: carrier phase (cycles)
+
+        Notes
+        -----
+        This implementation currently uses only GPS and assumes the u-blox
+        ZED-F9P RAWX `sigId` mapping documented by u-blox.
+        """
         sat_obs = defaultdict(dict)
         for meas in rawx_msg['measurements']:
             if meas['gnssId'] != 0:
@@ -222,8 +415,43 @@ class GNSSTECAnalyzer:
 
     def process_rawx(self, rawx_msg):
         """
-        Process RXM-RAWX epoch.
-        Returns dictionary of results: {sv_key: {'vtec': float, 'stec': float, 'elev': float}}
+        Process one UBX-RXM-RAWX epoch and estimate per-satellite STEC/VTEC.
+
+        Parameters
+        ----------
+        rawx_msg:
+            Parsed UBX-RXM-RAWX message.
+
+        Returns
+        -------
+        dict
+            `results[sv_key]` contains:
+
+            - `vtec`: vertical TEC (electrons/m²)
+            - `vtec_u`: vertical TEC (TECU)
+            - `stec_u`: slant TEC (TECU)
+            - `elev`: elevation (degrees)
+            - `azim`: azimuth (degrees)
+
+        Notes
+        -----
+        Processing steps:
+
+        - group L1/L2 code + phase from RAWX
+        - apply satellite DCB (if provided) and estimated receiver DCB
+        - compute code-derived STEC via the dual-frequency geometry-free
+          combination
+        - compute phase-derived STEC proxy from geometry-free carrier phase
+        - level phase to code (per-satellite smoothing) and reset on cycle slips
+        - map STEC to VTEC using a single-layer mapping function
+
+        Limitations:
+
+        - This estimates *relative* epoch-by-epoch VTEC; absolute accuracy
+          depends strongly on DCB calibration.
+        - Multipath and low-elevation tracking degrade results; measurements
+          below ~10° elevation are ignored.
+        - After a cycle slip, the leveling needs time to reconverge.
         """
         results = {}
         f1 = FREQ_GPS_L1

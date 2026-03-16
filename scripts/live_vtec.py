@@ -1,10 +1,49 @@
 #!/usr/bin/env python3
+"""Real-time GNSS VTEC monitor for ZED-F9P with dual-clock timing metadata.
+
+This script consumes UBX messages (NAV-SAT + RXM-RAWX) from a ZED-F9P (typically
+via a TCP stream) and produces a station-local VTEC time series.
+
+Timing model
+------------
+
+This pipeline carries two distinct clocks:
+
+- **GNSS observation time**: `(week, rcvTow)` from `RXM-RAWX`, where `rcvTow` is
+  a fractional (sub-second) receiver time-of-week captured by the GNSS
+  measurement engine at the observation epoch. GNSS-derived observables should
+  be indexed by this time base for defensible rate/variability metrics.
+
+- **System receipt time**: `unix_timestamp = time.time()` when the message is
+  received/processed on the host. This time base may include OS/network jitter
+  and is recorded for cross-stream alignment (e.g., to HF/RTP metadata).
+
+To support defensible cross-correlation between GNSS and HF products, the
+outputs include an explicit estimate of the system-vs-GNSS offset and a running
+mean/std of that offset.
+
+CSV output
+----------
+
+When CSV saving is enabled, each VTEC line is written as:
+
+`unix_timestamp,gnss_week,gnss_rcvTow_s,vtec_tecu,n_satellites,unix_minus_gnss_s,unix_minus_gnss_mean_s,unix_minus_gnss_std_s`
+
+HDF5 output
+-----------
+
+When HDF5 saving is enabled, each appended record includes the same fields in
+addition to standard metadata (quality flag, elevation mask, DCB corrected).
+"""
+
 import socket
 import logging
 import time
 import sys
 import argparse
 from datetime import datetime
+from collections import deque
+import math
 
 # Systemd watchdog support
 try:
@@ -160,6 +199,9 @@ def main():
     reconnect_delay = 5  # seconds, grows with backoff
     MAX_RECONNECT_DELAY = 120
 
+    gps_epoch_unix = 315964800.0
+    offset_window = deque(maxlen=600)
+
     # ── Outer reconnection loop ──
     # On socket errors we reconnect instead of crashing.
     # The UBX parser and TEC analyzer persist across reconnections.
@@ -240,6 +282,23 @@ def main():
                 elif msg_class == 0x02 and msg_id == 0x15: # RXM-RAWX
                     logger.debug(f"Processing RXM-RAWX message ({len(payload)} bytes)")
                     results = analyzer.process_rawx(payload)
+
+                    week = payload.get('week')
+                    rcvTow = payload.get('rcvTow')
+                    leapS = payload.get('leapS')
+                    recStat = payload.get('recStat')
+                    offset_s = None
+                    offset_mean_s = None
+                    offset_std_s = None
+                    if week is not None and rcvTow is not None and leapS is not None:
+                        gnss_cont_s = float(week) * 604800.0 + float(rcvTow)
+                        unix_from_gnss_s = gps_epoch_unix + gnss_cont_s - float(leapS)
+                        offset_s = float(timestamp) - unix_from_gnss_s
+                        offset_window.append(offset_s)
+                        if len(offset_window) >= 2:
+                            offset_mean_s = sum(offset_window) / len(offset_window)
+                            var = sum((x - offset_mean_s) ** 2 for x in offset_window) / (len(offset_window) - 1)
+                            offset_std_s = math.sqrt(var)
                     
                     if results:
                         logger.debug(f"RAWX processed: {len(results)} satellites with VTEC")
@@ -264,7 +323,7 @@ def main():
                             consecutive_rejects = 0
                             
                             # Write to CSV
-                            line = f"{timestamp},{avg_vtec:.2f},{len(valid_vtecs)}\n"
+                            line = f"{timestamp},{week},{rcvTow},{avg_vtec:.2f},{len(valid_vtecs)},{offset_s},{offset_mean_s},{offset_std_s}\n"
                             print(line, end='')
                             if csv_file:
                                 csv_file.write(line)
@@ -278,6 +337,13 @@ def main():
                                 measurement = {
                                     'timestamp_utc': dt.fromtimestamp(timestamp, tz.utc).isoformat().replace('+00:00', 'Z'),
                                     'unix_timestamp': timestamp,
+                                    'gnss_week': week,
+                                    'gnss_rcvTow_s': rcvTow,
+                                    'gnss_leapS': leapS,
+                                    'gnss_recStat': recStat,
+                                    'unix_minus_gnss_s': offset_s,
+                                    'unix_minus_gnss_mean_s': offset_mean_s,
+                                    'unix_minus_gnss_std_s': offset_std_s,
                                     'vtec_tecu': avg_vtec,
                                     'n_satellites': len(valid_vtecs),
                                     'quality_flag': 'GOOD' if len(valid_vtecs) >= 6 else 'MARGINAL' if len(valid_vtecs) >= 4 else 'BAD',

@@ -78,13 +78,26 @@ class UBXParser:
     def _parse_rxm_rawx(self, payload):
         """
         Parses UBX-RXM-RAWX.
+
+        The `rcvTow` field is the receiver time-of-week (seconds) captured by the
+        GNSS hardware measurement engine at the observation epoch. It is a
+        fractional (sub-second) timestamp and is the authoritative time index for
+        GNSS-derived observables (e.g., STEC/VTEC, ROT/ROTI, phase-variation
+        indices). System time at message receipt may include OS/network jitter and
+        should be treated as a secondary clock for cross-stream alignment.
+
         Returns: {
            'rcvTow': float,
            'week': int,
+           'leapS': int,
+           'recStat': int,
            'measurements': [
               {'gnssId': int, 'svId': int, 'freqId': int, 'prMes': float, 'cpMes': float, 'doMes': float, ...}, ...
            ]
         }
+
+        `leapS` is the GPS-UTC offset in seconds (for GNSS→UTC/Unix conversion).
+        `recStat` is the RAWX receiver status byte.
         """
         if len(payload) < 16: return None
         
@@ -122,6 +135,8 @@ class UBXParser:
         return {
             'rcvTow': rcvTow,
             'week': week,
+            'leapS': leapS,
+            'recStat': recStat,
             'measurements': measurements
         }
 

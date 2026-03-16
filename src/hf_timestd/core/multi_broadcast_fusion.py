@@ -212,8 +212,14 @@ try:
 except ImportError:
     _HFPropModel = None
 
-# Arrival Pattern Matrix for physics-based validation
-from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
+# Arrival Pattern Matrix for physics-based validation (optional — fusion runs without it)
+try:
+    from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix as ArrivalPatternMatrix
+    _ARRIVAL_MATRIX_AVAILABLE = True
+except Exception as _apm_exc:
+    ArrivalPatternMatrix = None  # type: ignore[assignment,misc]
+    _ARRIVAL_MATRIX_AVAILABLE = False
+    logger.warning(f"ArrivalPatternMatrix unavailable ({_apm_exc}); physics-based validation disabled")
 
 
 
@@ -565,13 +571,19 @@ class MultiBroadcastFusion:
 
         # Arrival Pattern Matrix (2026-01-29): Physics-based validation
         # Validates L1/L2 measurements against expected arrivals from IRI-2020
-        self.arrival_matrix = ArrivalPatternMatrix(
-            receiver_lat=self.receiver_lat,
-            receiver_lon=self.receiver_lon,
-            sample_rate=self.sample_rate,
-            enable_iri=True
-        )
-        logger.info("ArrivalPatternMatrix initialized for physics-based validation")
+        # Advisory only — fusion continues without it.
+        self.arrival_matrix = None
+        if _ARRIVAL_MATRIX_AVAILABLE:
+            try:
+                self.arrival_matrix = ArrivalPatternMatrix(
+                    receiver_lat=self.receiver_lat,
+                    receiver_lon=self.receiver_lon,
+                    sample_rate=self.sample_rate,
+                    enable_iri=True
+                )
+                logger.info("ArrivalPatternMatrix initialized for physics-based validation")
+            except Exception as e:
+                logger.warning(f"ArrivalPatternMatrix init failed ({e}); physics-based validation disabled")
 
         from .differential_time_solver import GlobalDifferentialSolver
         self.global_solver = GlobalDifferentialSolver(

@@ -36,7 +36,12 @@ from hf_timestd.models import (
 )
 from hf_timestd.core.wwvh_discrimination import WWVHDiscriminator
 from hf_timestd.core.tone_detector import MultiStationToneDetector
-from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix
+try:
+    from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix as ArrivalPatternMatrix
+    _ARRIVAL_MATRIX_AVAILABLE = True
+except Exception:
+    ArrivalPatternMatrix = None  # type: ignore[assignment,misc]
+    _ARRIVAL_MATRIX_AVAILABLE = False
 from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType
 from hf_timestd.core.decoder_config import get_decoder_config, DecoderConfig, DecoderComparisonTracker
 from hf_timestd.core.tick_edge_detector import TickEdgeDetector

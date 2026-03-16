@@ -16,6 +16,7 @@ Architecture:
 """
 
 import logging
+import math
 import time
 import signal
 from pathlib import Path
@@ -33,8 +34,18 @@ from ..models.measurement import (
 )
 from ..io.hdf5_writer import DataProductWriter
 from ..io.hdf5_reader import DataProductReader
-from .propagation_mode_solver import PropagationModeSolver
 from .wwv_constants import STATION_LOCATIONS
+
+logger = logging.getLogger(__name__)
+
+try:
+    from .propagation_mode_solver import PropagationModeSolver as PropagationModeSolver
+    _PROP_SOLVER_AVAILABLE = True
+    _PROP_SOLVER_WARN: Optional[str] = None
+except Exception as _pms_exc:
+    PropagationModeSolver = None  # type: ignore[assignment,misc]
+    _PROP_SOLVER_AVAILABLE = False
+    _PROP_SOLVER_WARN: Optional[str] = str(_pms_exc)  # type: ignore[no-redef]
 
 # Systemd watchdog support
 try:
@@ -42,8 +53,6 @@ try:
     SYSTEMD_AVAILABLE = True
 except ImportError:
     SYSTEMD_AVAILABLE = False
-
-logger = logging.getLogger(__name__)
 
 
 class L2CalibrationService:
@@ -83,8 +92,19 @@ class L2CalibrationService:
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
         
-        # Initialize propagation solver
-        self.prop_solver = PropagationModeSolver(receiver_grid)
+        # Initialize propagation solver (optional — falls back to geometric-only)
+        if not _PROP_SOLVER_AVAILABLE:
+            logger.warning(
+                f"PropagationModeSolver unavailable ({_PROP_SOLVER_WARN}); "
+                "L2 will use geometric-only delay with inflated uncertainty"
+            )
+            self.prop_solver = None
+        else:
+            try:
+                self.prop_solver = PropagationModeSolver(receiver_grid)
+            except Exception as e:
+                logger.warning(f"PropagationModeSolver init failed ({e}); geometric fallback active")
+                self.prop_solver = None
         
         # Initialize readers and writers per channel
         self.l1_readers: Dict[str, DataProductReader] = {}
@@ -401,42 +421,53 @@ class L2CalibrationService:
         station_lat = station_info['lat']
         station_lon = station_info['lon']
         
-        # Calculate propagation modes
+        # Calculate propagation modes (full solver if available, else geometric fallback)
         try:
-            modes = self.prop_solver.calculate_modes(
-                station=station_id,
-                frequency_mhz=frequency_mhz,
-                max_hops=3
-            )
-            
-            if not modes:
-                logger.warning(f"{channel}: No propagation modes for {station_id}")
-                return None
-            
-            # raw_toa_ms is D_clock (timing residual = arrival - expected_delay).
-            # To identify the propagation mode we need the absolute arrival time:
-            #   arrival ≈ D_clock + mode.total_delay_ms
-            # We do NOT assume the lowest-hop mode a priori — that is circular.
-            # Instead, try every candidate mode, reconstruct the implied arrival,
-            # and let identify_mode score each one.  Pick the mode whose implied
-            # arrival produces the highest identification confidence.
-            best_mode_result = None
-            for candidate_mode in modes:
-                candidate_arrival_ms = raw_toa_ms + candidate_mode.total_delay_ms
-                candidate_result = self.prop_solver.identify_mode(
+            if self.prop_solver is not None:
+                modes = self.prop_solver.calculate_modes(
                     station=station_id,
-                    measured_delay_ms=candidate_arrival_ms,
-                    frequency_mhz=frequency_mhz
+                    frequency_mhz=frequency_mhz,
+                    max_hops=3
                 )
-                if (best_mode_result is None or
-                        candidate_result.confidence > best_mode_result.confidence):
-                    best_mode_result = candidate_result
-            mode_result = best_mode_result
-            
-            # L1 raw_toa_ms currently carries timing error (D_clock), not absolute ToA.
-            # Reconstruct an absolute arrival time for L2 schema consistency:
-            #   raw_arrival_time_ms = d_clock_ms + propagation_delay_ms
-            propagation_delay_ms = mode_result.calculated_delay_ms
+
+                if not modes:
+                    logger.warning(f"{channel}: No propagation modes for {station_id}")
+                    return None
+
+                # raw_toa_ms is D_clock (timing residual = arrival - expected_delay).
+                # Try every candidate mode and pick the highest-confidence identification.
+                best_mode_result = None
+                for candidate_mode in modes:
+                    candidate_arrival_ms = raw_toa_ms + candidate_mode.total_delay_ms
+                    candidate_result = self.prop_solver.identify_mode(
+                        station=station_id,
+                        measured_delay_ms=candidate_arrival_ms,
+                        frequency_mhz=frequency_mhz
+                    )
+                    if (best_mode_result is None or
+                            candidate_result.confidence > best_mode_result.confidence):
+                        best_mode_result = candidate_result
+                mode_result = best_mode_result
+
+                propagation_delay_ms = mode_result.calculated_delay_ms
+                mode_label = mode_result.identified_mode.value
+                mode_confidence = mode_result.confidence
+                n_hops = mode_result.n_hops
+            else:
+                # Geometric-only fallback: great-circle speed-of-light delay.
+                # No ionospheric correction; uncertainty inflated accordingly.
+                station_info = STATION_LOCATIONS[station_id]
+                lat1, lon1 = math.radians(station_info['lat']), math.radians(station_info['lon'])
+                lat2, lon2 = math.radians(self.receiver_lat), math.radians(self.receiver_lon)
+                dlat, dlon = lat2 - lat1, lon2 - lon1
+                a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+                dist_km = 6371.0 * 2 * math.asin(math.sqrt(a))
+                propagation_delay_ms = dist_km / 299.792458  # vacuum speed-of-light
+                mode_label = "geometric"
+                mode_confidence = 0.0  # unknown — triggers wide uncertainty
+                n_hops = 1
+                logger.debug(f"{channel}: Geometric-only delay for {station_id}: {propagation_delay_ms:.2f} ms")
+
             d_clock_ms = raw_toa_ms
             raw_arrival_time_ms = d_clock_ms + propagation_delay_ms
             
@@ -444,14 +475,14 @@ class L2CalibrationService:
             uncertainty_budget = self._calculate_uncertainty(
                 raw_toa_ms=raw_toa_ms,
                 propagation_delay_ms=propagation_delay_ms,
-                mode_confidence=mode_result.confidence,
+                mode_confidence=mode_confidence,
                 snr_db=snr_db,
-                n_hops=mode_result.n_hops
+                n_hops=n_hops
             )
-            
+
             # Determine quality grade
             quality_grade = self._determine_quality_grade(
-                mode_result.confidence,
+                mode_confidence,
                 uncertainty_budget['combined_uncertainty_ms'],
                 snr_db
             )
@@ -490,13 +521,13 @@ class L2CalibrationService:
                 
                 # Quality
                 quality_grade=quality_grade,
-                confidence=mode_result.confidence,
-                quality_flag=QualityFlag.GOOD if mode_result.confidence > 0.7 else QualityFlag.MARGINAL,
+                confidence=mode_confidence,
+                quality_flag=QualityFlag.GOOD if mode_confidence > 0.7 else QualityFlag.MARGINAL,
                 
                 # Propagation
                 propagation_delay_ms=propagation_delay_ms,
-                propagation_mode=mode_result.identified_mode.value,
-                n_hops=mode_result.n_hops,
+                propagation_mode=mode_label,
+                n_hops=n_hops,
                 
                 # Signal
                 snr_db=snr_db,

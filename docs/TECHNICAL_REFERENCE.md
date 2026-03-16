@@ -76,6 +76,35 @@ The system is composed of eight independent systemd services, each with a specif
 - Downloads global IONEX maps from NASA CDDIS.
 - **Output:** `/var/lib/timestd/data/gnss_vtec/GNSS_gnss_vtec_YYYYMMDD.h5`, `/var/lib/timestd/ionex/`
 
+#### GNSS timing: dual-clock alignment (RAWX `rcvTow` vs system/RTP time)
+
+GNSS observables in this project can be indexed by two clocks:
+
+- **GNSS observation time** (authoritative for GNSS-derived observables):
+  `(gnss_week, gnss_rcvTow_s)` from UBX-RXM-RAWX, where `rcvTow` is a fractional
+  receiver time-of-week captured by the GNSS hardware measurement engine.
+
+- **System receipt time** (secondary; used for cross-stream alignment):
+  `unix_timestamp` recorded when a UBX message is received/processed on the
+  host. This time base may include OS/network jitter.
+
+To support defensible alignment between GNSS products and HF products (which are
+typically indexed by radiod RTP-derived time), the VTEC monitor records the
+estimated system-vs-GNSS offset per epoch:
+
+`unix_minus_gnss_s = unix_timestamp - unix_from_gnss_s`
+
+where `unix_from_gnss_s` is computed from GPS week + `rcvTow` using the GPS epoch
+and the `leapS` (GPS-UTC) offset reported by RAWX. A running mean and standard
+deviation of `unix_minus_gnss_s` are also recorded to quantify alignment jitter.
+
+Guidance:
+
+- Use `(gnss_week, gnss_rcvTow_s)` as the primary index for GNSS-derived rate and
+  variability metrics (e.g., ROT/ROTI, phase-variation indices).
+- Use `unix_minus_gnss_*` fields to align GNSS epochs with HF/RTP-derived records
+  without attributing OS/network latency to ionospheric physics.
+
 ### 5. Physics Service (`timestd-physics`)
 
 **Responsibility:** Propagation Modeling & Ionospheric Science Products
@@ -136,6 +165,60 @@ Phase 3 fusion results.
   - `/fused_solution`: Time series of the weighted mean offset.
   - `/residuals`: Per-station residuals from the mean.
   - `/calibration`: Current calibration state for each station.
+
+---
+
+## Real-Time Core vs Physics Overlay — Separation of Concerns
+
+### What is strictly necessary for UTC recapture (GPSDO mode)
+
+The real-time chrony feed requires **no ionospheric physics model** to produce a valid, converged UTC estimate. The following are sufficient:
+
+| Component | What it needs | Module |
+|---|---|---|
+| Raw TOA detection | RTP timestamp + vacuum geometric window | `metrology_engine.py` |
+| Geometric delay | Station coordinates + great-circle distance | `wwv_constants.py` + stdlib `math` |
+| Per-broadcast Kalman tracking | Repeated observations (self-correcting) | `broadcast_kalman_filter.py` |
+| WLS multi-broadcast fusion | Statistical combination only | `multi_broadcast_fusion.py` |
+| GNSS VTEC correction | Optional — already degrades gracefully | `gnss_tec.py` |
+
+**The per-broadcast Kalman filter is the key resilience mechanism.** After ~10–20 minutes of observations it has *learned* the actual delay per path from data, making any ionospheric model advisory rather than mandatory. Physics models only matter for cold-start initialization and long-outage recovery — both handled by inflated uncertainty windows.
+
+### What is NOT required for the chrony feed
+
+- IRI-2020 / WAM-IPE / GIRO / IONEX
+- Mode identification (1F / 2F / 3F)
+- `ArrivalPatternMatrix` or `HFPropagationModel`
+- `PropagationModeSolver`
+- PHaRLAP / pyLAP ray tracing
+
+These are **physics overlay** components that improve accuracy when available but must not be on the critical path.
+
+### Module-level resilience (implemented v6.8)
+
+All physics imports in the real-time core are now soft (try/except):
+
+| Module | Import | Failure behaviour |
+|---|---|---|
+| `metrology_engine.py` | `ArrivalPatternMatrix` | Falls through to vacuum/geometric 3rd-tier fallback |
+| `multi_broadcast_fusion.py` | `ArrivalPatternMatrix` | `self.arrival_matrix = None`; validation step skipped |
+| `multi_broadcast_fusion.py` | `HFPropagationModel` | Already try/except since v6.7 |
+| `l2_calibration_service.py` | `PropagationModeSolver` | Geometric-only delay, `mode_label="geometric"`, `mode_confidence=0.0` |
+
+The `l2_calibration_service` geometric fallback uses the Haversine formula (great-circle, vacuum speed-of-light). `mode_confidence=0.0` propagates through `_calculate_uncertainty()` to produce a conservatively wide `u_propagation_model_ms` (~5 ms), keeping the ISO GUM budget honest.
+
+### Physics overlay — when and how it helps
+
+| Overlay | Benefit | Activation |
+|---|---|---|
+| WAM-IPE + GIRO | ±1.5 ms (3σ) window; mode scoring | `IonoDataService` running |
+| IRI-2020 | ±4.5 ms (3σ); cold-start initialization | `iri2020` package installed |
+| GNSS VTEC | Direct dTEC/dt anchor; scintillation metrics | ZED-F9P connected |
+| PHaRLAP / pyLAP | Absolute mode-ID for science products | Offline batch only |
+
+### What L2 calibration service is responsible for
+
+`l2_calibration_service.py` is a **physics annotation layer**, not a real-time necessity. It converts L1 raw-TOA to L2 calibrated timing by applying geometric + ionospheric corrections and ISO GUM uncertainty budgets. Fusion reads both L1 and L2; it falls back to L1-only mode automatically (`force_l1_only`) if no L2 data is available. The TSL1 chrony feed therefore continues uninterrupted even if the L2 service is stopped.
 
 ---
 
