@@ -1,6 +1,6 @@
 # Project Context: HF Time Standard (hf-timestd)
 
-**Version:** 6.8.0  
+**Version:** 6.12.0  
 **Last Updated:** March 16, 2026  
 **Author:** Michael James Hauan (AC0G)
 
