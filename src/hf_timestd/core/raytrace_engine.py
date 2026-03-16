@@ -162,7 +162,10 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
                 math.cos(math.radians(rx_lat)) *
                 math.sin(dlon/2)**2)
         gc_km    = 6371.0 * 2 * math.asin(math.sqrt(a))
-        n_ranges = max(10, int(gc_km / range_inc_km) + 2)
+        # Grid must cover full multi-hop ray extent, not just the target range.
+        # PHaRLAP convention: 10000 km covers all practical HF paths.
+        grid_max_km = max(10000.0, gc_km * 2)
+        n_ranges = int(grid_max_km / range_inc_km) + 1
 
         # Sample IRI at path midpoint (horizontally uniform approximation).
         mid_lat = (tx_lat + rx_lat) / 2.0
@@ -180,8 +183,9 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
             {}
         )
 
-        ne_profile = np.asarray(outf[0, :], dtype=np.float64)  # m^-3
+        ne_profile = np.asarray(outf[0, :], dtype=np.float64)  # m^-3 from IRI
         ne_profile = np.maximum(ne_profile, 0.0)               # guard negatives
+        ne_profile = ne_profile / 1e6                          # m^-3 → cm^-3 (raytrace_2d units)
         # oarr[0] = NmF2 (m^-3), oarr[1] = hmF2 (km)
         # foF2 = 8.98 * sqrt(NmF2) Hz → MHz
         nmF2       = max(float(oarr[0]), 0.0)
@@ -289,7 +293,7 @@ class RaytraceEngine:
                 math.cos(math.radians(self.receiver_lat)) *
                 math.sin(dlon/2)**2)
         target_range_km = 6371.0 * 2 * math.asin(math.sqrt(a_gc))
-        tolerance_km    = max(200.0, target_range_km * 0.05)
+        tolerance_km    = max(300.0, target_range_km * 0.10)
 
         elevs = np.arange(elev_min, elev_max + elev_step, elev_step, dtype=np.float64)
         freqs = np.full(len(elevs), frequency_mhz, dtype=np.float64)
@@ -312,38 +316,55 @@ class RaytraceEngine:
         tol = [1e-7, 0.01, 10.0]  # [ODE tol, min step km, max step km]
 
         try:
-            for nhops in range(1, max_hops + 1):
-                ray_list, _rpath, _rstate = _pylap_raytrace_2d(
-                    tx_lat, tx_lon,
-                    elevs, bearing_deg, freqs, nhops,
-                    tol, 0,   # irreg_flag=0
-                    iono['iono_en_grid'], iono['iono_en_grid_5'],
-                    iono['collision_grid'],
-                    iono['height_start'], iono['height_inc'], iono['range_inc'],
-                    iono['irreg_grid'],
-                )
+            # Single call with max_hops avoids Fortran SAVE-variable segfault
+            # that occurs when raytrace_2d is invoked multiple times per process.
+            ray_list, _rpath, _rstate = _pylap_raytrace_2d(
+                tx_lat, tx_lon,
+                elevs, bearing_deg, freqs, max_hops,
+                tol, 0,   # irreg_flag=0
+                iono['iono_en_grid'], iono['iono_en_grid_5'],
+                iono['collision_grid'],
+                iono['height_start'], iono['height_inc'], iono['range_inc'],
+                iono['irreg_grid'],
+            )
 
-                for i, ray_dict in enumerate(ray_list):
-                    labels = np.asarray(ray_dict.get('ray_label', []))
-                    if len(labels) == 0 or not np.all(labels == 1):
-                        continue  # ray did not complete all hops cleanly
-                    ground_ranges = np.asarray(ray_dict.get('ground_range', []))
-                    group_ranges  = np.asarray(ray_dict.get('group_range',  []))
-                    apogees       = np.asarray(ray_dict.get('apogee',       []))
-                    if len(ground_ranges) == 0:
+            for i, ray_dict in enumerate(ray_list):
+                labels = np.asarray(ray_dict.get('ray_label', []))
+                if len(labels) == 0:
+                    continue
+                ground_ranges = np.asarray(ray_dict.get('ground_range', []))
+                group_ranges  = np.asarray(ray_dict.get('group_range',  []))
+                apogees       = np.asarray(ray_dict.get('apogee',       []))
+                if len(ground_ranges) == 0:
+                    continue
+
+                # hop-0 group/ground ratio is always correctly extracted.
+                # Use it to estimate total group path for any hop count.
+                gnd0 = float(ground_ranges[0])
+                grp0 = float(group_ranges[0]) if len(group_ranges) > 0 else 0.0
+                apex0 = float(apogees[0]) if len(apogees) > 0 else 0.0
+                if gnd0 > 0 and not math.isnan(grp0) and grp0 > 0:
+                    grp_factor = grp0 / gnd0
+                else:
+                    grp_factor = 1.02  # typical ionospheric slowing
+
+                for k in range(len(ground_ranges)):
+                    if int(labels[k]) != 1:
+                        continue  # this hop did not complete cleanly
+                    total_gnd = float(ground_ranges[k])
+                    if math.isnan(total_gnd):
                         continue
-                    total_gnd = float(ground_ranges[-1])
-                    total_grp = float(group_ranges[-1])
-                    apex_km   = float(apogees[-1]) if len(apogees) else 0.0
                     if abs(total_gnd - target_range_km) > tolerance_km:
                         continue  # ray doesn't land near the receiver
-                    delay_ms = (total_grp / _C_KM_S) * 1000.0
+                    # Estimate total group path from hop-0 ratio
+                    total_grp = total_gnd * grp_factor
+                    delay_ms  = (total_grp / _C_KM_S) * 1000.0
                     result.modes.append(RayMode(
-                        n_hops=nhops,
+                        n_hops=k + 1,
                         group_delay_ms=delay_ms,
                         launch_elev_deg=float(elevs[i]),
                         ground_range_km=total_gnd,
-                        apogee_km=apex_km,
+                        apogee_km=apex0,
                         confidence=1.0,
                         ray_label=1,
                     ))
