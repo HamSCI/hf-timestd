@@ -12,6 +12,7 @@ User=timestd
 Group=timestd
 EnvironmentFile=/etc/hf-timestd/environment
 Environment=NETRC=/etc/hf-timestd/earthdata-netrc
+Environment=MALLOC_ARENA_MAX=2
 WorkingDirectory=/var/lib/timestd
 
 # Watchdog: restart if no heartbeat for 60s (6 poll intervals at 10s each)
@@ -20,6 +21,10 @@ NotifyAccess=main
 
 ExecStart=/opt/hf-timestd/venv/bin/python -u /opt/hf-timestd/scripts/live_vtec.py \
     --config /etc/hf-timestd/timestd-config.toml
+
+# Resource limits
+MemoryMax=400M
+MemorySwapMax=0
 
 # Always restart - VTEC data is important for ionospheric corrections
 Restart=always

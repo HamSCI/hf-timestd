@@ -1,0 +1,26 @@
+# Exclude virtual environments from language server indexing
+# These cause the language server to grow to 16-21GB and get OOM-killed
+venv/
+web-api/venv/
+
+# Build artifacts
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Old/unused UI
+web-ui.old/
+
+# Test mock artifacts
+MagicMock/
+
+# Large data files
+*.h5
+*.hdf5
+*.bin
+*.bin.zst
+*.npz
+*.npy

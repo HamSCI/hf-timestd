@@ -19,6 +19,7 @@ NotifyAccess=main
 
 # Environment from file (set by deploy.sh)
 EnvironmentFile=-/etc/hf-timestd/environment
+Environment=MALLOC_ARENA_MAX=2
 
 # Working directory (production installation path)
 WorkingDirectory=/opt/hf-timestd
@@ -52,6 +53,7 @@ SyslogIdentifier=timestd-core-recorder
 Nice=5
 CPUAffinity=0-7
 MemoryMax=4G
+MemorySwapMax=0
 
 # Security hardening
 NoNewPrivileges=true

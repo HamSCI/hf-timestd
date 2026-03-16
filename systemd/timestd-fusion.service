@@ -21,6 +21,8 @@ WatchdogSec=120
 # The fusion service calls systemd_daemon.notify('READY=1') on startup
 # and systemd_daemon.notify('WATCHDOG=1') in the main loop
 
+Environment=MALLOC_ARENA_MAX=2
+
 # Run as the installed module from the venv
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion \
     --data-root /var/lib/timestd \
@@ -49,6 +51,9 @@ ExecStartPost=+/bin/sh -c 'sleep 3 && systemctl restart --no-block chrony 2>/dev
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
 CPUAffinity=0-7
+MemoryMax=800M
+MemoryHigh=600M
+MemorySwapMax=0
 
 # Always restart - critical for time discipline
 Restart=always

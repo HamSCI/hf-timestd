@@ -13,6 +13,8 @@ Group=timestd
 # Watchdog: restart if no heartbeat for 120s (2 minutes)
 WatchdogSec=120
 
+Environment=MALLOC_ARENA_MAX=2
+
 # Run as the installed module from the venv
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.physics_fusion_service \
     --data-root /var/lib/timestd \
@@ -30,6 +32,7 @@ Nice=5
 CPUAffinity=0-7
 MemoryHigh=3G
 MemoryMax=4G
+MemorySwapMax=0
 
 # Restart on failure
 Restart=always

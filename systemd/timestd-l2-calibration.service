@@ -9,6 +9,7 @@ Type=notify
 User=timestd
 Group=timestd
 EnvironmentFile=/etc/hf-timestd/environment
+Environment=MALLOC_ARENA_MAX=2
 WorkingDirectory=/var/lib/timestd
 
 # Watchdog: restart if no heartbeat for 180s (3 poll intervals)
@@ -23,6 +24,8 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_serv
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
 CPUAffinity=0-7
+MemoryMax=600M
+MemorySwapMax=0
 
 Restart=always
 RestartSec=30
