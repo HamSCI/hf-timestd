@@ -74,7 +74,7 @@ iono = [
 # Neither is required for the real-time chrony feed (see TECHNICAL_REFERENCE.md).
 raytrace = [
     "scipy>=1.10.0",   # already in core deps; listed here for explicitness
-    # "pylap @ file:../pylap",  # uncomment after installing pyLAP locally
+    "pylap @ file:../pylap",  # PHaRLAP 4.7.4 must be present; see setup-raytrace workflow
 ]
 
 [project.scripts]
