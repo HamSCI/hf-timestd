@@ -63,15 +63,20 @@ def _try_import_pylap() -> bool:
 
     try:
         import importlib
-        rt2d = importlib.import_module('pylap.raytrace_2d')
-        iri   = importlib.import_module('pylap.iri2016')
-        _pylap_raytrace_2d = rt2d.raytrace_2d
-        _pylap_iri2016     = iri.iri2016
+        rt2d_mod = importlib.import_module('pylap.raytrace_2d')
+        _pylap_raytrace_2d = rt2d_mod.raytrace_2d
         _PYLAP_AVAILABLE   = True
-        return True
     except Exception as exc:
         _PYLAP_ERROR = str(exc)
         return False
+
+    try:
+        iri_mod = importlib.import_module('pylap.iri2016')
+        _pylap_iri2016 = iri_mod.iri2016
+    except Exception:
+        _pylap_iri2016 = None  # raytrace still works; IRI grid falls back
+
+    return True
 
 
 _try_import_pylap()
@@ -136,17 +141,20 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
     Build a 2-D ionosphere electron-density grid along the great-circle
     path from tx to rx using IRI-2020 (via pylap.iri2016 → libiri2020).
 
+    pylap.iri2016 signature:
+        iri2016(glat, glon, r12_idx, [year,month,day,hour,min],
+                height_start, height_step, num_heights, iri_options_dict)
+    Returns: (outf_2d, oarr_1d)
+        outf_2d[0, :] = electron density profile (m^-3)
+        oarr_1d[0]    = foF2 (MHz),  oarr_1d[1] = hmF2 (km)
+
     Returns a dict ready to pass to pylap.raytrace_2d, or None on failure.
     """
     if not _PYLAP_AVAILABLE or _pylap_iri2016 is None:
         return None
 
     try:
-        ut_hours = utc.hour + utc.minute / 60.0 + utc.second / 3600.0
-        ut_arr = np.array([utc.year, utc.month, utc.day,
-                           int(ut_hours), 0], dtype=float)
-
-        # Great-circle distance & number of range steps
+        # Great-circle distance → number of range columns
         dlat = math.radians(rx_lat - tx_lat)
         dlon = math.radians(rx_lon - tx_lon)
         a    = (math.sin(dlat/2)**2 +
@@ -156,26 +164,33 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
         gc_km    = 6371.0 * 2 * math.asin(math.sqrt(a))
         n_ranges = max(10, int(gc_km / range_inc_km) + 2)
 
-        # Sample IRI along the path midpoint only (single-column grid for 2-D trace).
+        # Sample IRI at path midpoint (horizontally uniform approximation).
         mid_lat = (tx_lat + rx_lat) / 2.0
         mid_lon = (tx_lon + rx_lon) / 2.0
+        r12_idx = 100.0  # moderate solar activity
 
-        heights = (np.arange(n_heights) * height_inc_km + height_start_km)
+        ut_list = [utc.year, utc.month, utc.day,
+                   utc.hour, utc.minute]
 
-        # pylap.iri2016(lat, lon, year, month, day, UT, height_start, height_inc, n_heights)
-        iri_out = _pylap_iri2016(mid_lat, mid_lon,
-                                 int(utc.year), int(utc.month), int(utc.day),
-                                 ut_hours,
-                                 height_start_km, height_inc_km, n_heights)
-        # iri_out is a dict; electron density profile is iri_out['Ne'] (m^-3)
-        # Convert to electrons/cm^3 for PHaRLAP (it expects e/m^3 actually — keep SI)
-        ne_profile = np.array(iri_out.get('Ne', np.zeros(n_heights)), dtype=np.float64)
-        foF2_mhz   = float(iri_out.get('foF2', 0.0))
-        hmF2_km    = float(iri_out.get('hmF2', 300.0))
+        # pylap.iri2016 returns (outf[20, num_heights], oarr[100])
+        outf, oarr = _pylap_iri2016(
+            float(mid_lat), float(mid_lon), float(r12_idx),
+            ut_list,
+            float(height_start_km), float(height_inc_km), int(n_heights),
+            {}
+        )
 
-        # Broadcast profile across all range columns (horizontally uniform approximation).
-        iono_en_grid   = np.tile(ne_profile.reshape(-1, 1), (1, n_ranges)).astype(np.float64)
-        iono_en_grid_5 = iono_en_grid * 0.0   # delta-Ne/5-min: not used, set to zero
+        ne_profile = np.asarray(outf[0, :], dtype=np.float64)  # m^-3
+        ne_profile = np.maximum(ne_profile, 0.0)               # guard negatives
+        # oarr[0] = NmF2 (m^-3), oarr[1] = hmF2 (km)
+        # foF2 = 8.98 * sqrt(NmF2) Hz → MHz
+        nmF2       = max(float(oarr[0]), 0.0)
+        foF2_mhz   = 8.98 * math.sqrt(nmF2) / 1e6
+        hmF2_km    = float(oarr[1])
+
+        # Broadcast profile across all range columns.
+        iono_en_grid   = np.tile(ne_profile.reshape(-1, 1), (1, n_ranges))
+        iono_en_grid_5 = np.zeros_like(iono_en_grid)  # Doppler shift not needed
         collision_grid = np.zeros_like(iono_en_grid)
         irreg_grid     = np.zeros((4, n_ranges), dtype=np.float64)
 
@@ -287,42 +302,50 @@ class RaytraceEngine:
             iri_hmF2_km=iono['hmF2_km'],
         )
 
+        # raytrace_2d returns (ray_list, ray_path_list, ray_state_list).
+        # ray_list is a Python list with one dict per elevation angle.
+        # Each dict has arrays of length nhops_attempted for that ray:
+        #   ray_dict['ground_range'][-1]  cumulative ground range (km)
+        #   ray_dict['group_range'][-1]   cumulative group range (km)
+        #   ray_dict['apogee'][-1]        apogee height (km)
+        #   ray_dict['ray_label']         array of labels per hop (1=good)
+        tol = [1e-7, 0.01, 10.0]  # [ODE tol, min step km, max step km]
+
         try:
             for nhops in range(1, max_hops + 1):
-                tol_arr = np.array([1e-7, 0.01, 10.0])  # [ode_tol, min_step, max_step]
-                ray_out = _pylap_raytrace_2d(
+                ray_list, _rpath, _rstate = _pylap_raytrace_2d(
                     tx_lat, tx_lon,
                     elevs, bearing_deg, freqs, nhops,
-                    tol_arr, 0,   # irreg_flag=0
+                    tol, 0,   # irreg_flag=0
                     iono['iono_en_grid'], iono['iono_en_grid_5'],
                     iono['collision_grid'],
                     iono['height_start'], iono['height_inc'], iono['range_inc'],
                     iono['irreg_grid'],
                 )
-                # ray_out is a dict of arrays, one entry per elevation angle
-                ray_data  = ray_out.get('ray_data', {})
-                ray_label = ray_out.get('ray_label', np.ones(len(elevs), dtype=int))
 
-                ground_ranges = np.array(ray_data.get('ground_range', []))
-                group_ranges  = np.array(ray_data.get('group_range',  []))
-                apogees       = np.array(ray_data.get('apogee',       []))
-                labels        = np.asarray(ray_label)
-
-                for i, (gr, grp, ap, lbl) in enumerate(zip(
-                        ground_ranges, group_ranges, apogees, labels)):
-                    if lbl != 1:
-                        continue  # ray did not complete (absorbed / not-exist)
-                    if abs(gr - target_range_km) > tolerance_km:
-                        continue  # doesn't land near receiver
-                    delay_ms = (grp / _C_KM_S) * 1000.0
+                for i, ray_dict in enumerate(ray_list):
+                    labels = np.asarray(ray_dict.get('ray_label', []))
+                    if len(labels) == 0 or not np.all(labels == 1):
+                        continue  # ray did not complete all hops cleanly
+                    ground_ranges = np.asarray(ray_dict.get('ground_range', []))
+                    group_ranges  = np.asarray(ray_dict.get('group_range',  []))
+                    apogees       = np.asarray(ray_dict.get('apogee',       []))
+                    if len(ground_ranges) == 0:
+                        continue
+                    total_gnd = float(ground_ranges[-1])
+                    total_grp = float(group_ranges[-1])
+                    apex_km   = float(apogees[-1]) if len(apogees) else 0.0
+                    if abs(total_gnd - target_range_km) > tolerance_km:
+                        continue  # ray doesn't land near the receiver
+                    delay_ms = (total_grp / _C_KM_S) * 1000.0
                     result.modes.append(RayMode(
                         n_hops=nhops,
                         group_delay_ms=delay_ms,
                         launch_elev_deg=float(elevs[i]),
-                        ground_range_km=float(gr),
-                        apogee_km=float(ap),
+                        ground_range_km=total_gnd,
+                        apogee_km=apex_km,
                         confidence=1.0,
-                        ray_label=int(lbl),
+                        ray_label=1,
                     ))
 
         except Exception as exc:
