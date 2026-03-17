@@ -3,6 +3,12 @@
 venv/
 web-api/venv/
 
+# Type-checker cache (69MB, 1500+ files on bee1)
+.mypy_cache/
+
+# Jupyter notebooks (21MB+ inline output)
+*.ipynb
+
 # Build artifacts
 build/
 *.egg-info/
@@ -24,3 +30,7 @@ MagicMock/
 *.bin.zst
 *.npz
 *.npy
+
+# Presentation/document files
+*.pptx
+*.pdf
