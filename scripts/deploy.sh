@@ -487,9 +487,11 @@ except Exception: print('no')" 2>/dev/null)
             fi
 
             log_info "Building pylap into venv..."
+            PYLAP_LOG="/tmp/pylap-build.log"
             PHARLAP_HOME="$PHARLAP_HOME" \
-                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation 2>&1 | tail -30 || \
-                log_warn "pylap build failed — raytracing will use geometric fallback"
+                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation -v 2>&1 | tee "$PYLAP_LOG" | tail -30 || \
+                { log_warn "pylap build failed — full log: $PYLAP_LOG"; \
+                  grep -iE '(error:|fatal|cannot find|undefined reference|No such file)' "$PYLAP_LOG" | head -10; }
         else
             log_info "pylap already installed"
         fi
