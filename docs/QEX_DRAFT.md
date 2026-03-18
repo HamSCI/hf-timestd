@@ -576,8 +576,10 @@ addressed before final submission:
      clock driver, https://www.ntp.org/documentation/drivers/driver36/ (edge-based
      tick detection approach).
 
-[13] Hauan, M.J. (AC0G), "PyLap — Python wrapper for PHaRLAP ionospheric ray tracing,"
-     https://github.com/mijahauan/PyLap (fork with PHaRLAP 4.7.4/IRI-2020 support).
+[13] Frissell, N.A., Piccini, G., Diehl, D., and Calderon, A., "PyLap — Python wrapper
+     for PHaRLAP ionospheric ray tracing," Ham Radio Science Citizen Investigation
+     (HamSCI), https://github.com/HamSCI/PyLap, 2022; patched fork with PHaRLAP
+     4.7.4 / IRI-2020 / GCC support: https://github.com/mijahauan/PyLap.
 
 [14] Bust, G.S. and Mitchell, C.N., "History, current state, and future directions of
      ionospheric imaging," Rev. Geophys., 46, RG1003, 2008 (oblique TEC techniques).
