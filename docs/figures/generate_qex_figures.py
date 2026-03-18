@@ -401,10 +401,10 @@ def generate_fig7():
 
     # Four panels
     panels = [
-        ('WWV', 10.0, 'WWV 10 MHz (1,490 km)'),
-        ('WWVH', 10.0, 'WWVH 10 MHz (7,530 km)'),
-        ('CHU', 7.85, 'CHU 7.850 MHz (1,950 km)'),
-        ('CHU', 14.67, 'CHU 14.670 MHz (1,950 km)'),
+        ('WWV', 10.0, 'WWV 10 MHz (1,119 km)'),
+        ('WWVH', 10.0, 'WWVH 10 MHz (6,600 km)'),
+        ('CHU', 7.85, 'CHU 7.850 MHz (1,522 km)'),
+        ('CHU', 14.67, 'CHU 14.670 MHz (1,522 km)'),
     ]
 
     mode_colors = {
@@ -748,154 +748,150 @@ def generate_fig2():
 # FIGURE 6 — Synthetic ray fan diagram (illustrative, based on IRI params)
 # ══════════════════════════════════════════════════════════════════════════
 
+def _try_pylap_raytrace():
+    """Attempt to import pylap and trace a ray fan for WWV 10 MHz.
+
+    Returns (paths, rays, foF2, hmF2, target_range_km) or None if pylap unavailable.
+    """
+    try:
+        import pylap.raytrace_2d as rt_mod
+        import pylap.iri2016 as iri_mod
+    except ImportError:
+        return None
+
+    # WWV → EM38ww geometry (exact coordinates from timestd-config.toml)
+    tx_lat, tx_lon = 40.6773, -105.0421
+    rx_lat, rx_lon = 38.918461, -92.127974
+
+    # Great-circle bearing and distance
+    import math
+    dlon_r = math.radians(rx_lon - tx_lon)
+    lat1_r, lat2_r = math.radians(tx_lat), math.radians(rx_lat)
+    bearing = math.degrees(math.atan2(
+        math.sin(dlon_r) * math.cos(lat2_r),
+        math.cos(lat1_r) * math.sin(lat2_r) -
+        math.sin(lat1_r) * math.cos(lat2_r) * math.cos(dlon_r)
+    )) % 360.0
+
+    dlat = math.radians(rx_lat - tx_lat)
+    dlon = math.radians(rx_lon - tx_lon)
+    a_gc = (math.sin(dlat/2)**2 +
+            math.cos(math.radians(tx_lat)) *
+            math.cos(math.radians(rx_lat)) *
+            math.sin(dlon/2)**2)
+    target_km = 6371.0 * 2 * math.asin(math.sqrt(a_gc))
+
+    # Build IRI grid — March 16 2026, 18:00 UTC (local noon)
+    mid_lat = (tx_lat + rx_lat) / 2.0
+    mid_lon = (tx_lon + rx_lon) / 2.0
+    ut = [2026, 3, 16, 18, 0]
+    outf, oarr = iri_mod.iri2016(mid_lat, mid_lon, 100.0, ut,
+                                  60.0, 3.0, 200, {})
+    ne = np.maximum(outf[0, :], 0.0) / 1e6  # cm^-3
+    foF2 = 8.98 * np.sqrt(max(float(oarr[0]), 0.0)) / 1e6
+    hmF2 = float(oarr[1])
+
+    n_ranges = 201
+    iono_en = np.tile(ne.reshape(-1, 1), (1, n_ranges))
+    zeros = np.zeros_like(iono_en)
+    irreg = np.zeros((4, n_ranges), dtype=np.float64)
+
+    # Trace fan of rays: 2–60° in 0.5° steps
+    elevs = np.arange(2.0, 60.5, 0.5)
+    freqs = np.full(len(elevs), 10.0)
+    tol = [1e-7, 0.01, 10.0]
+
+    rays, paths, states = rt_mod.raytrace_2d(
+        tx_lat, tx_lon, elevs, bearing, freqs, 3,
+        tol, 0, iono_en, zeros, zeros, 60.0, 3.0, 50.0, irreg
+    )
+    return paths, rays, foF2, hmF2, target_km, elevs
+
+
 def generate_fig6():
     """
-    Generate an illustrative ray fan plot for WWV 10 MHz.
-
-    Since PHaRLAP/pyLAP is not installed, this computes simplified parabolic
-    ionosphere ray paths using the IRI-2020 parameters cited in the article
-    (foF2=10.47 MHz, hmF2=291 km). Clearly labeled as illustrative.
+    Generate ray fan plot for WWV 10 MHz using PHaRLAP numerical ray tracing
+    (if available) or a simplified parabolic approximation as fallback.
     """
-    print("Generating Fig 6: Illustrative ray fan (synthetic)...")
+    result = _try_pylap_raytrace()
+    if result is None:
+        print("  ✗ pylap not available — skipping Fig 6 (needs PHaRLAP)")
+        return
 
-    # ── Ionosphere and geometry parameters (from article/IRI-2020) ──
-    R_E = 6371.0          # Earth radius km
-    hmF2 = 291.0          # F2 peak height km
-    foF2 = 10.47          # critical frequency MHz
-    freq = 10.0           # WWV 10 MHz
-    target_range = 1490.0 # WWV→EM38ww km
+    paths, rays, foF2, hmF2, target_km, elevs = result
+    print(f"Generating Fig 6: PHaRLAP ray fan (foF2={foF2:.2f}, hmF2={hmF2:.1f})...")
 
-    # Parabolic layer: bottom at yb, peak at hmF2, semi-thickness ym
-    yb = 150.0   # bottom of F layer km
-    ym = hmF2 - yb  # semi-thickness
-
-    def ray_path_parabolic(elev_deg, n_hops=1):
-        """
-        Trace a ray through a parabolic F-layer for n_hops.
-        Returns (ground_ranges_km, heights_km) arrays for plotting.
-        """
-        elev = np.radians(elev_deg)
-
-        # For a parabolic layer, the skip distance per hop is approximately:
-        #   D = 2 * R_E * arctan( (hmF2 * tan(elev)) / (R_E + hmF2) )
-        # But more accurately, use the secant law for oblique incidence:
-        #   MUF = foF2 * sec(i) where i is angle of incidence at layer peak
-        # Check if ray penetrates: need f < foF2 * sec(i)
-
-        # Simplified: compute apogee height and ground range per hop
-        # using spherical earth geometry
-        cos_elev = np.cos(elev)
-        sin_elev = np.sin(elev)
-
-        # Ray apogee for reflection: solve for height where f = fp * sec(i)
-        # For parabolic layer: fp(h) = foF2 * sqrt(1 - ((h - hmF2)/ym)^2)
-        # At reflection: f = fp(h) / cos(i_local)
-        # Simplified: assume reflection near hmF2 for MUF-viable rays
-
-        # Virtual reflection height (simplified)
-        h_reflect = hmF2
-
-        # Ground range per hop (spherical geometry)
-        # Half-hop: ray goes from ground to h_reflect
-        alpha = np.arccos((R_E * cos_elev) / (R_E + h_reflect))
-        half_hop_angle = np.pi/2 - elev - alpha  # This is incorrect for low angles
-        # Better: use the geometry directly
-        # At launch angle elev, the ray reaches height h at range:
-        d_half = R_E * np.arccos(
-            (R_E + h_reflect) * np.cos(np.pi/2 - elev) / (R_E + h_reflect)
-        ) if False else 0
-
-        # Simple flat-earth approx good enough for illustration
-        d_half_km = h_reflect / np.tan(elev) if elev > np.radians(2) else 5000
-        d_hop = 2 * d_half_km
-
-        # Build ray path points
-        n_pts = 100
-        gnd = []
-        hgt = []
-        for hop in range(n_hops):
-            offset = hop * d_hop
-            for j in range(n_pts):
-                frac = j / (n_pts - 1)
-                x = offset + frac * d_hop
-                # Parabolic arc for height
-                h = h_reflect * 4 * frac * (1 - frac)  # peaks at h_reflect
-                gnd.append(x)
-                hgt.append(h)
-
-        return np.array(gnd), np.array(hgt), n_hops * d_hop
+    from matplotlib.lines import Line2D
 
     fig, ax = plt.subplots(figsize=(10, 5))
+    R_E = 6371.0
 
-    # ── Draw Earth curvature (exaggerated) ──
-    # For a 5000 km range, Earth curvature sag is ~500 km
+    # ── Ionospheric layer shading ──
     x_range = np.linspace(0, 5000, 500)
-    earth_curve = -x_range * (5000 - x_range) / (2 * R_E * 8)  # very subtle
-    ax.fill_between(x_range, -50, earth_curve, color='#8D6E63', alpha=0.15)
-
-    # ── Draw ionospheric layers ──
-    # E layer band (90-130 km)
-    ax.fill_between(x_range, 90, 130, color='#BBDEFB', alpha=0.3, label='E layer')
-    # F layer band (150-450 km)
-    ax.fill_between(x_range, 150, 450, color='#C8E6C9', alpha=0.25, label='F2 layer')
-    # hmF2 line
+    ax.fill_between(x_range, -50, 0, color='#8D6E63', alpha=0.12)
+    ax.fill_between(x_range, 90, 130, color='#BBDEFB', alpha=0.25)
+    ax.fill_between(x_range, 150, 450, color='#C8E6C9', alpha=0.20)
     ax.axhline(hmF2, color='#4CAF50', linewidth=1, linestyle='--', alpha=0.6)
-    ax.text(4600, hmF2 + 8, f'hmF2 = {hmF2} km', fontsize=8, color='#4CAF50')
-    ax.text(4600, hmF2 - 25, f'foF2 = {foF2} MHz', fontsize=8, color='#4CAF50',
-            fontstyle='italic')
+    ax.text(4550, hmF2 + 8, f'hmF2 = {hmF2:.0f} km', fontsize=8, color='#4CAF50')
+    ax.text(4550, hmF2 - 25, f'foF2 = {foF2:.2f} MHz', fontsize=8,
+            color='#4CAF50', fontstyle='italic')
 
-    # ── Trace rays at various elevation angles ──
-    elevations = np.arange(5, 65, 2.5)
-    closing_rays = []
+    # ── Classify and plot each ray ──
+    tolerance_km = 200.0
+    mode_colors = {1: '#66BB6A', 2: '#FFA726', 3: '#EF5350'}
+    closing_info = []  # (elev, nhops, ground_range, group_delay_ms)
 
-    for elev in elevations:
-        gnd, hgt, total_range = ray_path_parabolic(elev, n_hops=1)
+    for i, (path, ray) in enumerate(zip(paths, rays)):
+        gnd = np.asarray(path.get('ground_range', []))
+        hgt = np.asarray(path.get('height', []))
+        if gnd.size < 2:
+            continue
 
-        # Check each hop count for closure
-        for nhops in [1, 2, 3]:
-            gnd_n, hgt_n, total_n = ray_path_parabolic(elev, n_hops=nhops)
-            closes = abs(total_n - target_range) < 300  # ±300 km tolerance
+        # Check if ray closes on receiver (per-hop cumulative ground range)
+        labels = np.asarray(ray.get('ray_label', []))
+        gnd_cumul = np.asarray(ray.get('ground_range', []))
+        grp_cumul = np.asarray(ray.get('group_range', []))
+        closes = False
+        close_nhops = 0
 
-            if nhops == 1:
-                color = '#BDBDBD'
-                alpha = 0.2
-                lw = 0.4
-            else:
-                continue  # only plot 1-hop for non-closing rays
+        for k in range(len(labels)):
+            if int(labels[k]) != 1:
+                continue
+            if abs(float(gnd_cumul[k]) - target_km) < tolerance_km:
+                closes = True
+                close_nhops = k + 1
+                grp_km = float(grp_cumul[k]) if k < len(grp_cumul) else 0
+                delay_ms = grp_km / 299792.458 * 1000.0
+                closing_info.append((float(elevs[i]), close_nhops,
+                                     float(gnd_cumul[k]), delay_ms))
+                break
 
-            if closes:
-                closing_rays.append((elev, nhops, total_n))
-                if nhops == 1:
-                    color, lw, alpha = '#66BB6A', 2.0, 0.9
-                elif nhops == 2:
-                    color, lw, alpha = '#FFA726', 2.0, 0.9
-                elif nhops == 3:
-                    color, lw, alpha = '#EF5350', 2.0, 0.9
-
-            ax.plot(gnd_n, hgt_n, color=color, linewidth=lw, alpha=alpha)
-
-    # Plot multi-hop closing rays on top
-    for nhops in [2, 3]:
-        for elev in elevations:
-            gnd_n, hgt_n, total_n = ray_path_parabolic(elev, n_hops=nhops)
-            closes = abs(total_n - target_range) < 300
-            if closes:
-                if nhops == 2:
-                    color, lw = '#FFA726', 2.0
-                else:
-                    color, lw = '#EF5350', 2.0
-                ax.plot(gnd_n, hgt_n, color=color, linewidth=lw, alpha=0.9)
+        if closes:
+            color = mode_colors.get(close_nhops, '#888')
+            ax.plot(gnd, hgt, color=color, linewidth=1.8, alpha=0.85, zorder=5)
+        else:
+            ax.plot(gnd, hgt, color='#BDBDBD', linewidth=0.3, alpha=0.15)
 
     # ── Mark transmitter and receiver ──
     ax.plot(0, 0, 'v', color='#D32F2F', markersize=12, zorder=20)
     ax.text(50, -30, 'WWV\n(Fort Collins)', fontsize=8, fontweight='bold',
             color='#D32F2F')
-    ax.plot(target_range, 0, '*', color='#1565C0', markersize=14, zorder=20)
-    ax.text(target_range + 50, -30, 'EM38ww\n(Receiver)', fontsize=8,
+    ax.plot(target_km, 0, '*', color='#1565C0', markersize=14, zorder=20)
+    ax.text(target_km + 50, -30, 'EM38ww\n(Receiver)', fontsize=8,
             fontweight='bold', color='#1565C0')
 
-    # ── Legend for modes ──
-    from matplotlib.lines import Line2D
+    # ── Annotate closing modes ──
+    for nhops in sorted(mode_colors.keys()):
+        matches = [c for c in closing_info if c[1] == nhops]
+        if matches:
+            # Pick the median-elevation closing ray for annotation
+            matches.sort(key=lambda x: x[0])
+            best = matches[len(matches)//2]
+            ax.annotate(f'{nhops}F2: {best[0]:.1f}°, {best[3]:.1f} ms',
+                        xy=(target_km, 10 + nhops * 18),
+                        fontsize=7, color=mode_colors[nhops], fontweight='bold')
+
+    # ── Legend ──
     legend_elements = [
         Line2D([0], [0], color='#66BB6A', linewidth=2, label='1F2 (closing)'),
         Line2D([0], [0], color='#FFA726', linewidth=2, label='2F2 (closing)'),
@@ -906,23 +902,35 @@ def generate_fig6():
 
     ax.set_xlabel('Ground Range (km)', fontsize=11)
     ax.set_ylabel('Height (km)', fontsize=11)
-    ax.set_title('Ray Fan: WWV 10 MHz → EM38ww (1,490 km)\n'
-                 'IRI-2020: foF2 = 10.47 MHz, hmF2 = 291 km — Illustrative',
+    ax.set_title(f'PHaRLAP 4.7.4 Ray Fan: WWV 10 MHz → EM38ww ({target_km:.0f} km)\n'
+                 f'IRI-2020: foF2 = {foF2:.2f} MHz, hmF2 = {hmF2:.0f} km — '
+                 f'2026-03-16 18:00 UTC',
                  fontsize=11, fontweight='bold')
     ax.set_xlim(-100, 5000)
     ax.set_ylim(-50, 500)
     ax.grid(True, alpha=0.2)
 
-    # Note
-    ax.text(2500, 470, 'Simplified parabolic ionosphere — for illustration only.\n'
-            'Production uses PHaRLAP 4.7.4 numerical ray tracing.',
+    n_closing = len(closing_info)
+    modes_found = sorted(set(c[1] for c in closing_info))
+    modes_str = ', '.join(f'{n}F2' for n in modes_found)
+    ax.text(2500, 470,
+            f'PHaRLAP 4.7.4 numerical ray tracing through IRI-2020 Ne(h) profile\n'
+            f'{len(elevs)} rays, {n_closing} closing — modes: {modes_str}',
             fontsize=7, ha='center', fontstyle='italic', color='#666')
 
     fig.tight_layout()
-    outpath = OUTPUT_DIR / 'fig6_ray_fan_illustrative.png'
+    outpath = OUTPUT_DIR / 'fig6_ray_fan_pharlap.png'
     fig.savefig(outpath, dpi=DPI, bbox_inches='tight')
     plt.close(fig)
     print(f"  → {outpath}")
+    print(f"  Closing modes: {modes_str} ({n_closing} rays)")
+    for nhops in sorted(mode_colors.keys()):
+        matches = [c for c in closing_info if c[1] == nhops]
+        if matches:
+            elevs_m = [m[0] for m in matches]
+            delays = [m[3] for m in matches]
+            print(f"    {nhops}F2: elev {min(elevs_m):.1f}–{max(elevs_m):.1f}°, "
+                  f"delay {min(delays):.2f}–{max(delays):.2f} ms")
 
 
 # ══════════════════════════════════════════════════════════════════════════

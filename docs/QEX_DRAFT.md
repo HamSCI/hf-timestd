@@ -172,7 +172,7 @@ derived from a stored reference template for each station's tick waveform. Becau
 filter is coherent across the entire second-long integration window, it achieves a
 processing gain proportional to the integration time — roughly 30 dB over a single-sample
 comparison. Detected tick SNR in the system ranges from 8 dB (weak WWV/WWVH on the shared
-frequencies) to 53 dB (CHU at 14.670 MHz, ~1950 km, strong path on quiet nights;
+frequencies) to 53 dB (CHU at 14.670 MHz, ~1,520 km, strong path on quiet nights;
 median SNR 45 dB on CHU 7.850 MHz).
 
 The filter output yields three quantities per detected tick:
@@ -265,19 +265,20 @@ candidate multi-hop geometries, using foF2 and hmF2 from the IRI-2020 ionospheri
 when available. For offline validation, the system uses PHaRLAP 4.7.4 [1], a full 2D
 numerical ray-tracing package, to propagate a fan of rays through the IRI electron
 density profile along the great-circle path. For WWV 10 MHz under March 2026 daytime
-conditions (foF2 = 10.47 MHz, hmF2 = 291 km), the raytrace engine returns a 3F2 mode at
-9.03 ms group delay, 5.5° elevation — consistent with the real-time pipeline's
+conditions (foF2 = 10.45 MHz, hmF2 = 289 km), PHaRLAP finds 61 closing rays
+across three modes: 1F2 at 3.2–4.4 ms (5.5–27.5° elevation), 2F2 at 5.1–5.7 ms
+(37–50°), and 3F2 at 7.5 ms (53–60°) — consistent with the real-time pipeline's
 independent assignment.
 
-![Figure 6: Ray fan diagram for WWV 10 MHz. Parabolic F2 layer, elevation angles 5–60°, closing rays for 1F2, 2F2, 3F2.](figures/fig6_ray_fan_illustrative.png)
+![Figure 6: PHaRLAP 4.7.4 numerical ray fan for WWV 10 MHz. IRI-2020 Ne(h) profile, 117 rays at 2–60° elevation, closing rays for 1F2, 2F2, 3F2.](figures/fig6_ray_fan_pharlap.png)
 
-*Figure 6 — Ray fan, WWV 10 MHz (illustrative). foF2=10.47 MHz, hmF2=291 km. Closing rays: 1F2 (green), 2F2 (orange), 3F2 (red). Production uses PHaRLAP 4.7.4 numerical ray tracing.*
+*Figure 6 — PHaRLAP 4.7.4 ray fan, WWV 10 MHz, 2026-03-16 18:00 UTC. IRI-2020: foF2=10.45 MHz, hmF2=289 km. 61 closing rays: 1F2 (green, 5.5–27.5°), 2F2 (orange, 37–50°), 3F2 (red, 53–60°).*
 
 Mode confidence feeds the Kalman filter noise covariance: high-confidence assignments
 contribute with full weight in the WLS fusion; ambiguous assignments are down-weighted.
 In practice, mode discrimination depends more on path geometry than on timing precision.
-The 7,500 km WWVH path provides unambiguous mode identification (76% 3F2, 24% 2F2, zero
-unknown) because a single-hop path from Hawaii is geometrically impossible. The 1,490 km
+The 6,600 km WWVH path provides unambiguous mode identification (76% 3F2, 24% 2F2, zero
+unknown) because a single-hop path from Hawaii is geometrically impossible. The 1,119 km
 WWV path admits more ambiguity (62% unknown on 10 MHz) because multiple modes produce
 similar delays. This is a fundamental geometric constraint, not a limitation of the timing
 accuracy; it motivates the multi-path WLS fusion strategy of Section 3.3, which
@@ -452,7 +453,7 @@ broadcast across all range columns. A spatially varying grid would reduce the
 u_propagation_model term further.
 
 BPM (2.5–15 MHz, Pucheng, China) is nominally monitored but receives zero reliable
-detections in current production data. The trans-Asian path (~10,000 km) is long and
+detections in current production data. The trans-Pacific path (~11,500 km) is long and
 involves complex multi-hop geometry at all frequencies; the SNR at the receiver appears
 below the pipeline's detection threshold. Investigation is ongoing.
 
@@ -499,7 +500,7 @@ both, this is a practically accessible entry point.
 | 3 | §3.1 | 24h D_clock time series, all broadcasts + fusion | `fig3_dclock_24h.png` | **Done** |
 | 4 | §3.4 | Uncertainty budget waterfall | `fig4_uncertainty_budget.png` | **Done** |
 | 5 | §4 | dTEC/dt 24h + GNSS VTEC overlay | `fig5_dtec_24h.png` | **Done** |
-| 6 | §3.5 | Ray fan plot, WWV 10 MHz (illustrative) | `fig6_ray_fan_illustrative.png` | **Done** (synthetic) |
+| 6 | §3.5 | Ray fan plot, WWV 10 MHz (PHaRLAP 4.7.4) | `fig6_ray_fan_pharlap.png` | **Done** (numerical) |
 | 7 | §5 | Mode probability stacked bars (optional — Discussion supporting figure) | `fig7_mode_probability.png` | **Done** |
 
 ---
@@ -523,8 +524,8 @@ addressed before final submission:
    Characterizing this definitively (path is just too lossy vs. fixable pipeline issue)
    would either add BPM to the article or explain its absence.
 
-4. **Figure 6 (PHaRLAP ray fan)** — Requires PHARLAP_HOME environment to be set and
-   a short diagnostic script added to raytrace_engine.py to export ray paths for plotting.
+4. ~~**Figure 6 (PHaRLAP ray fan)**~~ — **Resolved.** Now uses PHaRLAP 4.7.4 numerical
+   ray tracing through IRI-2020 Ne(h) profile. 117 rays, 61 closing, modes 1F2/2F2/3F2.
 
 ---
 
