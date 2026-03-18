@@ -479,18 +479,7 @@ except Exception: print('no')" 2>/dev/null)
             log_info "Installing pylap build dependencies..."
             "$VENV_DIR/bin/pip" install setuptools wheel numpy 2>&1 | tail -5
 
-            # Patch pylap setup.py for modern Python/GCC:
-            #  1. Python 3.12+ removed distutils — uncomment setuptools import
-            #  2. GCC 14+ errors on PyArrayObject*/PyObject* return mismatch
-            if [[ -f "$PYLAP_DIR/setup.py" ]]; then
-                sed -i 's/^#import setuptools/import setuptools/' "$PYLAP_DIR/setup.py"
-                # Inject extra_compile_args into Extension() call (idempotent)
-                if ! grep -q 'extra_compile_args' "$PYLAP_DIR/setup.py"; then
-                    sed -i 's/libraries=libraries))/libraries=libraries, extra_compile_args=["-Wno-error=incompatible-pointer-types"]))/' "$PYLAP_DIR/setup.py"
-                fi
-            fi
-
-            # Clean stale build artifacts so setup.py patches take effect
+            # Clean stale build artifacts from previous attempts
             rm -rf "$PYLAP_DIR/build" "$PYLAP_DIR/pylap.egg-info"
 
             log_info "Building pylap into venv..."
