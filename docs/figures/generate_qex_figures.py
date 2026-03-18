@@ -332,7 +332,10 @@ def generate_fig5():
                      label='CHU 14.67 MHz dTEC/dt', alpha=0.95, zorder=4)
 
     ax1.set_ylabel('dTEC/dt (mTECU/min)', fontsize=11)
-    ax1.set_ylim(-25, 25)
+    # Auto-scale symmetric around 0 so no values clip
+    dtec_max = np.percentile(np.abs(dtec_rate_mtecu_min[mask]), 99.5) if mask.sum() > 10 else 25
+    dtec_lim = max(dtec_max * 1.15, 10)  # at least ±10, with 15% padding
+    ax1.set_ylim(-dtec_lim, dtec_lim)
     ax1.axhline(0, color='#666', linewidth=0.5, alpha=0.5)
     ax1.grid(True, alpha=0.3)
 
@@ -350,7 +353,9 @@ def generate_fig5():
               linestyle='--', label='Solar Zenith Angle', zorder=3)
     ax1r.axhline(90, color='#FF6F00', linewidth=0.5, alpha=0.3, linestyle=':')
     ax1r.set_ylabel('Solar Zenith Angle (°)', fontsize=10, color='#FF6F00')
-    ax1r.set_ylim(130, 20)  # Inverted: low SZA (noon) at top
+    # SZA axis symmetric around 90° so SZA=90° aligns with dTEC=0
+    sza_half = max(90.0 - sza.min(), sza.max() - 90.0, 40.0)
+    ax1r.set_ylim(90.0 + sza_half, 90.0 - sza_half)  # inverted: noon at top
     ax1r.tick_params(axis='y', labelcolor='#FF6F00', labelsize=8)
 
     # Shade night regions (SZA > 90°)
