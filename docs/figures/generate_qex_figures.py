@@ -9,7 +9,7 @@ Usage:
 Generates Figs 3–7 into docs/figures/. Figs 1–2 require separate treatment
 (diagram tool / raw IQ respectively).
 
-Target date: 2026-03-16 (complete 24h, March equinox conditions)
+Target date: 2026-03-15 (complete 24h, zero VTEC gaps, March equinox conditions)
 """
 
 import os
@@ -25,7 +25,7 @@ from pathlib import Path
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-TARGET_DATE = '20260316'
+TARGET_DATE = '20260315'
 DATA_ROOT = '/var/lib/timestd'
 PHASE2 = f'{DATA_ROOT}/phase2'
 OUTPUT_DIR = Path(__file__).parent
@@ -156,7 +156,7 @@ def generate_fig3():
                 color='#2196F3', linewidth=0.6, alpha=0.6, label='CHU mean')
 
     ax_bot.set_ylabel('D_clock (ms)', fontsize=10)
-    ax_bot.set_xlabel('UTC Hour (2026-03-16)', fontsize=11)
+    ax_bot.set_xlabel(f'UTC Hour ({TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]})', fontsize=11)
     ax_bot.set_ylim(-3, 3)
     ax_bot.set_xlim(0, 24)
     ax_bot.set_xticks(range(0, 25, 3))
@@ -256,18 +256,53 @@ def _rolling_median(x, y, window_hrs=0.25, step_hrs=0.1):
     return np.array(x_out), np.array(y_out)
 
 
-def generate_fig5():
-    print("Generating Fig 5: dTEC/dt time series + GNSS VTEC...")
+def _solar_zenith_angle(lat_deg, lon_deg, utc_hours, day_of_year):
+    """Compute solar zenith angle (degrees) for a location over a 24h period.
 
+    Parameters
+    ----------
+    lat_deg, lon_deg : float
+        Observer latitude/longitude in degrees (west negative).
+    utc_hours : array-like
+        Fractional UTC hours (0–24).
+    day_of_year : int
+        Day of year (1–366).
+
+    Returns
+    -------
+    sza : ndarray
+        Solar zenith angle in degrees for each utc_hours entry.
+    """
+    import math
+    lat_r = math.radians(lat_deg)
+    # Solar declination (Spencer formula, approximate)
+    gamma = 2.0 * math.pi * (day_of_year - 1) / 365.0
+    decl = (0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
+            - 0.006758 * math.cos(2*gamma) + 0.000907 * math.sin(2*gamma)
+            - 0.002697 * math.cos(3*gamma) + 0.00148 * math.sin(3*gamma))
+
+    utc_h = np.asarray(utc_hours, dtype=np.float64)
+    # Hour angle: 0 at solar noon (local noon = 12 - lon/15 UTC)
+    hour_angle = np.radians(15.0 * (utc_h - 12.0) + lon_deg)  # negative lon → west
+
+    cos_sza = (math.sin(lat_r) * math.sin(decl) +
+               math.cos(lat_r) * math.cos(decl) * np.cos(hour_angle))
+    cos_sza = np.clip(cos_sza, -1.0, 1.0)
+    return np.degrees(np.arccos(cos_sza))
+
+
+def generate_fig5():
+    print("Generating Fig 5: CHU 14.67 dTEC/dt + solar zenith angle + GNSS VTEC...")
+
+    date_label = f'{TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]}'
     dtec_fn = f'{PHASE2}/science/dtec_timeseries/AGGREGATED_dtec_timeseries_{TARGET_DATE}.h5'
     vtec_fn = f'{DATA_ROOT}/data/gnss_vtec/GNSS_gnss_vtec_{TARGET_DATE}.h5'
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), height_ratios=[2, 1],
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6.5), height_ratios=[2, 1],
                                     sharex=True)
 
-    # ── Top panel: dTEC/dt by station-frequency pair ──
+    # ── Top panel: CHU 14.67 MHz dTEC/dt only ──
     with h5py.File(dtec_fn, 'r') as f:
-        # Trim all arrays to shortest length (off-by-one possible in HDF5)
         n = min(f['epoch'].shape[0], f['station'].shape[0],
                 f['frequency_mhz'].shape[0], f['snr_db'].shape[0],
                 f['dtec_rate_tecu_per_s'].shape[0])
@@ -277,48 +312,60 @@ def generate_fig5():
         freqs = f['frequency_mhz'][:n]
         snr = f['snr_db'][:n]
 
-    # Convert epoch to hours
     t0 = epochs.min()
     midnight = t0 - (t0 % 86400)
     hrs = (epochs - midnight) / 3600.0
-
-    # Convert to mTECU/min
     dtec_rate_mtecu_min = dtec_rate * 1000 * 60
 
-    # Quality gate: SNR > 12 dB, reasonable rate, finite
+    # Quality gate
     good = (snr > 12.0) & (np.abs(dtec_rate_mtecu_min) < 40) & np.isfinite(dtec_rate_mtecu_min)
 
-    # Plot selected frequency pairs
-    pairs_to_show = [
-        ('WWV', 10.0, '#4CAF50', 'WWV 10 MHz'),
-        ('WWV', 5.0, '#81C784', 'WWV 5 MHz'),
-        ('CHU', 7.85, '#2196F3', 'CHU 7.85 MHz'),
-        ('CHU', 14.67, '#64B5F6', 'CHU 14.67 MHz'),
-        ('WWVH', 10.0, '#FF9800', 'WWVH 10 MHz'),
-    ]
-
-    for stn, freq, color, label in pairs_to_show:
-        mask = good & (stations == stn) & (np.abs(freqs - freq) < 0.1)
-        if mask.sum() < 10:
-            continue
-
-        # Light scatter for raw data
-        ax1.scatter(hrs[mask], dtec_rate_mtecu_min[mask], s=0.5, alpha=0.08,
-                    color=color, rasterized=True)
-
-        # Rolling median (15-min window, 6-min step)
+    # Single trace: CHU 14.67 MHz
+    mask = good & (stations == 'CHU') & (np.abs(freqs - 14.67) < 0.1)
+    if mask.sum() >= 10:
+        ax1.scatter(hrs[mask], dtec_rate_mtecu_min[mask], s=1.0, alpha=0.12,
+                    color='#2196F3', rasterized=True, zorder=2)
         xm, ym = _rolling_median(hrs[mask], dtec_rate_mtecu_min[mask],
                                   window_hrs=0.25, step_hrs=0.1)
         if len(xm) > 2:
-            ax1.plot(xm, ym, color=color, linewidth=1.5, label=label, alpha=0.9)
+            ax1.plot(xm, ym, color='#1565C0', linewidth=2.0,
+                     label='CHU 14.67 MHz dTEC/dt', alpha=0.95, zorder=4)
 
     ax1.set_ylabel('dTEC/dt (mTECU/min)', fontsize=11)
-    ax1.set_title('Carrier-Phase dTEC/dt: 24-Hour Time Series (2026-03-16)',
-                  fontsize=12, fontweight='bold')
-    ax1.legend(fontsize=8, loc='upper right', ncol=2)
-    ax1.grid(True, alpha=0.3)
     ax1.set_ylim(-25, 25)
     ax1.axhline(0, color='#666', linewidth=0.5, alpha=0.5)
+    ax1.grid(True, alpha=0.3)
+
+    # Solar zenith angle overlay on twin axis
+    # Midpoint of CHU→EM38ww path
+    mid_lat = (45.2958 + 38.918461) / 2.0  # ~42.1°N
+    mid_lon = (-75.7533 + -92.127974) / 2.0  # ~-83.9°W
+    doy = datetime(int(TARGET_DATE[:4]), int(TARGET_DATE[4:6]),
+                   int(TARGET_DATE[6:])).timetuple().tm_yday
+    sza_hours = np.linspace(0, 24, 1441)
+    sza = _solar_zenith_angle(mid_lat, mid_lon, sza_hours, doy)
+
+    ax1r = ax1.twinx()
+    ax1r.plot(sza_hours, sza, color='#FF6F00', linewidth=1.5, alpha=0.7,
+              linestyle='--', label='Solar Zenith Angle', zorder=3)
+    ax1r.axhline(90, color='#FF6F00', linewidth=0.5, alpha=0.3, linestyle=':')
+    ax1r.set_ylabel('Solar Zenith Angle (°)', fontsize=10, color='#FF6F00')
+    ax1r.set_ylim(130, 20)  # Inverted: low SZA (noon) at top
+    ax1r.tick_params(axis='y', labelcolor='#FF6F00', labelsize=8)
+
+    # Shade night regions (SZA > 90°)
+    night = sza > 90
+    for i in range(len(sza_hours) - 1):
+        if night[i]:
+            ax1.axvspan(sza_hours[i], sza_hours[i+1], color='#263238',
+                        alpha=0.06, zorder=0)
+
+    ax1.set_title(f'Carrier-Phase dTEC/dt: CHU 14.670 MHz ({date_label})',
+                  fontsize=12, fontweight='bold')
+    # Combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1r.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc='upper left')
 
     # ── Bottom panel: GNSS overhead VTEC ──
     with h5py.File(vtec_fn, 'r') as f:
@@ -331,34 +378,18 @@ def generate_fig5():
 
     ax2.plot(vtec_hrs[vtec_good], vtec[vtec_good], color='#7B1FA2',
              linewidth=0.8, alpha=0.7, label='GNSS VTEC (ZED-F9P)')
-
-    # Compute and plot VTEC rate on secondary axis
-    ax2r = ax2.twinx()
-    dt_vtec = np.diff(vtec_ts[vtec_good])
-    dvtec = np.diff(vtec[vtec_good])
-    # Avoid division by zero
-    valid_dt = dt_vtec > 0
-    vtec_rate = np.full_like(dvtec, np.nan)
-    vtec_rate[valid_dt] = dvtec[valid_dt] / dt_vtec[valid_dt] * 60 * 1000  # mTECU/min
-    vtec_rate_hrs = (vtec_ts[vtec_good][1:] - midnight) / 3600.0
-
-    # Smooth VTEC rate (5-min rolling median)
-    xvr, yvr = _rolling_median(vtec_rate_hrs[np.isfinite(vtec_rate)],
-                                vtec_rate[np.isfinite(vtec_rate)],
-                                window_hrs=1.0/12, step_hrs=1.0/30)
-    ax2r.plot(xvr, yvr, color='#E91E63', linewidth=0.8, alpha=0.5,
-              label='GNSS dVTEC/dt')
-    ax2r.set_ylabel('dVTEC/dt (mTECU/min)', fontsize=9, color='#E91E63', alpha=0.7)
-    ax2r.set_ylim(-200, 200)
-    ax2r.tick_params(axis='y', labelcolor='#E91E63', labelsize=8)
-
     ax2.set_ylabel('VTEC (TECU)', fontsize=11, color='#7B1FA2')
-    ax2.set_xlabel('UTC Hour (2026-03-16)', fontsize=11)
+    ax2.set_xlabel(f'UTC Hour ({date_label})', fontsize=11)
     ax2.legend(fontsize=8, loc='upper left')
-    ax2r.legend(fontsize=7, loc='upper right')
     ax2.grid(True, alpha=0.3)
     ax2.set_xlim(0, 24)
     ax2.set_xticks(range(0, 25, 3))
+
+    # Shade night on VTEC panel too
+    for i in range(len(sza_hours) - 1):
+        if night[i]:
+            ax2.axvspan(sza_hours[i], sza_hours[i+1], color='#263238',
+                        alpha=0.06, zorder=0)
 
     fig.tight_layout()
     outpath = OUTPUT_DIR / 'fig5_dtec_24h.png'
@@ -462,7 +493,7 @@ def generate_fig7():
 
     axes[0].legend(fontsize=9, loc='upper left', ncol=5,
                    bbox_to_anchor=(0.0, 1.25))
-    axes[-1].set_xlabel('UTC Hour (2026-03-16)', fontsize=11)
+    axes[-1].set_xlabel(f'UTC Hour ({TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]})', fontsize=11)
     axes[-1].set_xlim(-0.5, 23.5)
     axes[-1].set_xticks(range(0, 24, 2))
 
@@ -781,10 +812,10 @@ def _try_pylap_raytrace():
             math.sin(dlon/2)**2)
     target_km = 6371.0 * 2 * math.asin(math.sqrt(a_gc))
 
-    # Build IRI grid — March 16 2026, 18:00 UTC (local noon)
+    # Build IRI grid — target date 18:00 UTC (local noon)
     mid_lat = (tx_lat + rx_lat) / 2.0
     mid_lon = (tx_lon + rx_lon) / 2.0
-    ut = [2026, 3, 16, 18, 0]
+    ut = [int(TARGET_DATE[:4]), int(TARGET_DATE[4:6]), int(TARGET_DATE[6:]), 18, 0]
     outf, oarr = iri_mod.iri2016(mid_lat, mid_lon, 100.0, ut,
                                   60.0, 3.0, 200, {})
     ne = np.maximum(outf[0, :], 0.0) / 1e6  # cm^-3
@@ -902,9 +933,10 @@ def generate_fig6():
 
     ax.set_xlabel('Ground Range (km)', fontsize=11)
     ax.set_ylabel('Height (km)', fontsize=11)
+    date_label = f'{TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]}'
     ax.set_title(f'PHaRLAP 4.7.4 Ray Fan: WWV 10 MHz → EM38ww ({target_km:.0f} km)\n'
                  f'IRI-2020: foF2 = {foF2:.2f} MHz, hmF2 = {hmF2:.0f} km — '
-                 f'2026-03-16 18:00 UTC',
+                 f'{date_label} 18:00 UTC',
                  fontsize=11, fontweight='bold')
     ax.set_xlim(-100, 5000)
     ax.set_ylim(-50, 500)
@@ -934,6 +966,127 @@ def generate_fig6():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# FIGURE 8 — Measured ToA vs propagation mode (24h, multi-channel)
+# ══════════════════════════════════════════════════════════════════════════
+
+def generate_fig8():
+    """Show real correlation between measured arrival time and mode assignment.
+
+    For each of 4 representative channels, scatter-plot the raw arrival time
+    (propagation delay) over 24 hours, colored by the assigned propagation mode.
+    This demonstrates that mode discrimination is driven by measured timing.
+    """
+    print("Generating Fig 8: Measured ToA vs mode probability...")
+
+    date_label = f'{TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]}'
+
+    panels = [
+        ('SHARED_10000', 'WWV', 10.0, 'WWV 10 MHz (1,119 km)'),
+        ('SHARED_10000', 'WWVH', 10.0, 'WWVH 10 MHz (6,600 km)'),
+        ('CHU_7850', 'CHU', 7.85, 'CHU 7.850 MHz (1,522 km)'),
+        ('CHU_14670', 'CHU', 14.67, 'CHU 14.670 MHz (1,522 km)'),
+    ]
+
+    mode_colors = {
+        '1E': '#42A5F5',   # light blue
+        '1F': '#66BB6A',   # green
+        '1F2': '#66BB6A',
+        '2F': '#FFA726',   # orange
+        '2F2': '#FFA726',
+        '3F': '#EF5350',   # red
+        '3F2': '#EF5350',
+        'UNKNOWN': '#BDBDBD',
+    }
+
+    fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+
+    for idx, (channel, target_station, target_freq, title) in enumerate(panels):
+        ax = axes[idx]
+
+        fn = f'{PHASE2}/{channel}/clock_offset/{channel}_timing_measurements_{TARGET_DATE}.h5'
+        if not os.path.exists(fn):
+            ax.text(12, 0.5, 'No data', ha='center', va='center', fontsize=12,
+                    color='#999', transform=ax.get_xaxis_transform())
+            ax.set_title(title, fontsize=10, fontweight='bold')
+            continue
+
+        with h5py.File(fn, 'r') as f:
+            ts_utc = parse_ts_bytes(f['timestamp_utc'][:])
+            stations = np.array([s.decode() for s in f['station'][:]])
+            prop_delay = f['propagation_delay_ms'][:]
+            raw_toa = f['raw_arrival_time_ms'][:]
+            modes = np.array([m.decode().strip() for m in f['propagation_mode'][:]])
+            snr = f['snr_db'][:]
+            freqs = f['frequency_mhz'][:]
+            confidence = f['confidence'][:]
+
+        hrs = hours_from_midnight(ts_utc)
+
+        # Filter: correct station, reasonable SNR, tone detected
+        mask = ((stations == target_station) &
+                (np.abs(freqs - target_freq) < 0.1) &
+                (snr > 8.0) &
+                np.isfinite(prop_delay))
+
+        if mask.sum() < 10:
+            ax.text(12, 0.5, f'Insufficient data ({mask.sum()} pts)',
+                    ha='center', va='center', fontsize=10, color='#999',
+                    transform=ax.get_xaxis_transform())
+            ax.set_title(title, fontsize=10, fontweight='bold')
+            continue
+
+        h = np.array(hrs)[mask]
+        delay = prop_delay[mask]
+        m = modes[mask]
+
+        # Scatter by mode
+        plotted_labels = set()
+        for mode_name in ['1E', '1F', '2F', '3F', 'UNKNOWN']:
+            # Match mode prefixes (e.g. '1F2' matches '1F')
+            if mode_name == 'UNKNOWN':
+                mode_mask = np.array([
+                    mm.upper() in ('UNKNOWN', '', 'FALLBACK', 'TICK', 'FSK',
+                                   'CHU_FSK', 'TEC_VALIDATED', 'TEC_CORRECTED',
+                                   'TEC_UNREALISTIC', 'TEC_POOR_FIT')
+                    or mm.upper().endswith('+GNSS_TEC')
+                    or mm.upper().endswith('+GNSS_VALIDATED')
+                    for mm in m
+                ])
+            else:
+                mode_mask = np.array([mm.upper().startswith(mode_name) for mm in m])
+
+            if mode_mask.sum() == 0:
+                continue
+
+            color = mode_colors.get(mode_name, '#888')
+            label = mode_name if mode_name not in plotted_labels else None
+            ax.scatter(h[mode_mask], delay[mode_mask], s=3, alpha=0.3,
+                       color=color, label=label, rasterized=True, zorder=3)
+            plotted_labels.add(mode_name)
+
+        ax.set_title(title, fontsize=10, fontweight='bold')
+        ax.set_ylabel('Prop. Delay (ms)', fontsize=9)
+        ax.grid(True, alpha=0.2)
+        ax.legend(fontsize=7, loc='upper right', ncol=5, markerscale=3)
+
+        # Annotate tick count
+        ax.text(0.01, 0.95, f'n={mask.sum():,}', fontsize=7,
+                transform=ax.transAxes, va='top', color='#666')
+
+    axes[-1].set_xlabel(f'UTC Hour ({date_label})', fontsize=11)
+    axes[-1].set_xlim(0, 24)
+    axes[-1].set_xticks(range(0, 25, 3))
+
+    fig.suptitle('Measured Propagation Delay by Assigned Mode (24-Hour)',
+                 fontsize=13, fontweight='bold', y=0.995)
+    fig.tight_layout()
+    outpath = OUTPUT_DIR / 'fig8_toa_mode_correlation.png'
+    fig.savefig(outpath, dpi=DPI, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  → {outpath}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -949,6 +1102,7 @@ if __name__ == '__main__':
     generate_fig5()
     generate_fig6()
     generate_fig7()
+    generate_fig8()
 
     print()
-    print("All 7 figures generated.")
+    print("All 8 figures generated.")
