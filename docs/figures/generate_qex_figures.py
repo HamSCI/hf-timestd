@@ -649,7 +649,14 @@ def generate_fig1():
 # ══════════════════════════════════════════════════════════════════════════
 
 def generate_fig2():
-    """Generate spectrogram from raw IQ showing tick structure on SHARED_10000."""
+    """Generate spectrogram from raw IQ showing tick structure on SHARED_10000.
+
+    Shows ~5 seconds of the 10 MHz shared channel with:
+      - Top: time-frequency spectrogram (±3 kHz around carrier)
+      - Bottom: 800–1400 Hz bandpass AM envelope (tick pulse energy)
+    Both panels share a common time axis starting at 0, with vertical
+    highlight bars at each UTC second boundary showing where ticks occur.
+    """
     import zstandard
     import json as _json
     from scipy import signal as sp_signal
@@ -688,17 +695,25 @@ def generate_fig2():
         raw = dctx.decompress(f.read())
     iq = np.frombuffer(raw, dtype=np.complex64)
 
-    # Show 10 seconds around second boundaries (tick region)
-    show_seconds = 10
+    # Show 5 seconds — enough for 5 tick pulses, not so many that detail is lost
+    show_seconds = 5
     show_samples = show_seconds * sr
-    # Start at second 5 to capture ticks at seconds 5-14
-    start_sample = 5 * sr
+    # Start at a second boundary (second 10) to align ticks cleanly
+    start_sample = 10 * sr
     if start_sample + show_samples > len(iq):
         start_sample = 0
     segment = iq[start_sample:start_sample + show_samples]
 
-    fig, (ax_spec, ax_env) = plt.subplots(2, 1, figsize=(10, 6),
-                                           height_ratios=[3, 1], sharex=True)
+    # Use GridSpec so both panels share the same x-extent.
+    # A narrow column on the right holds the colorbar, keeping plot widths equal.
+    from matplotlib.gridspec import GridSpec
+    fig = plt.figure(figsize=(10, 5.5))
+    gs = GridSpec(2, 2, figure=fig, height_ratios=[3, 1],
+                  width_ratios=[1, 0.03], hspace=0.08, wspace=0.04)
+    ax_spec = fig.add_subplot(gs[0, 0])
+    ax_cb   = fig.add_subplot(gs[0, 1])   # colorbar axis
+    ax_env  = fig.add_subplot(gs[1, 0], sharex=ax_spec)
+    gs[1, 1].set_visible = False           # empty cell
 
     # ── Top: spectrogram ──
     nfft = 512
@@ -709,7 +724,6 @@ def generate_fig2():
     )
     # Shift to center DC, convert to audio frequency offset
     freqs_shifted = np.fft.fftshift(freqs)
-    # Wrap negative freqs to show as audio offset from carrier
     freqs_shifted = np.where(freqs_shifted > sr/2, freqs_shifted - sr, freqs_shifted)
     Sxx_shifted = np.fft.fftshift(Sxx, axes=0)
     sort_idx = np.argsort(freqs_shifted)
@@ -720,9 +734,8 @@ def generate_fig2():
     freq_mask = np.abs(freqs_sorted) <= 3000
     Sxx_db = 10 * np.log10(Sxx_sorted[freq_mask, :] + 1e-20)
 
-    # Relative time from start of segment
-    t_offset = start_sample / sr
-    extent = [t_offset, t_offset + show_seconds,
+    # Relative time axis: 0 to show_seconds
+    extent = [0, show_seconds,
               freqs_sorted[freq_mask][0], freqs_sorted[freq_mask][-1]]
 
     vmin = np.percentile(Sxx_db, 5)
@@ -731,44 +744,71 @@ def generate_fig2():
     im = ax_spec.imshow(Sxx_db, aspect='auto', origin='lower', extent=extent,
                         cmap='viridis', vmin=vmin, vmax=vmax, interpolation='bilinear')
     ax_spec.set_ylabel('Offset from 10 MHz (Hz)', fontsize=10)
-    ax_spec.set_title('SHARED_10000 Spectrogram: WWV (1000 Hz) + WWVH (1200 Hz) Ticks',
+    ax_spec.set_title('SHARED_10000: WWV + WWVH Tick Structure (5-Second Window)',
                       fontsize=12, fontweight='bold')
 
-    # Mark tick tone frequencies
+    # Mark tick tone frequencies with labels on right side for clarity
     ax_spec.axhline(1000, color='#4CAF50', linewidth=0.8, linestyle='--', alpha=0.7)
-    ax_spec.text(t_offset + 0.1, 1050, 'WWV 1000 Hz', fontsize=7, color='#4CAF50')
     ax_spec.axhline(1200, color='#FF9800', linewidth=0.8, linestyle='--', alpha=0.7)
-    ax_spec.text(t_offset + 0.1, 1250, 'WWVH 1200 Hz', fontsize=7, color='#FF9800')
+    ax_spec.axhline(-1000, color='#4CAF50', linewidth=0.8, linestyle='--', alpha=0.4)
+    ax_spec.axhline(-1200, color='#FF9800', linewidth=0.8, linestyle='--', alpha=0.4)
+    # Labels at right edge
+    ax_spec.text(show_seconds - 0.05, 1060, 'WWV 1000 Hz', fontsize=7,
+                 color='#4CAF50', ha='right', fontweight='bold')
+    ax_spec.text(show_seconds - 0.05, 1260, 'WWVH 1200 Hz', fontsize=7,
+                 color='#FF9800', ha='right', fontweight='bold')
 
-    cb = fig.colorbar(im, ax=ax_spec, pad=0.02, aspect=30)
+    cb = fig.colorbar(im, cax=ax_cb)
     cb.set_label('PSD (dB)', fontsize=9)
 
-    # ── Bottom: AM envelope showing tick pulses ──
-    # Bandpass 800-1400 Hz to isolate tick energy
-    sos = sp_signal.butter(4, [800, 1400], btype='bandpass', fs=sr, output='sos')
-    filtered = sp_signal.sosfilt(sos, segment)
-    # Compute envelope via analytic signal
-    analytic = sp_signal.hilbert(np.real(filtered))
-    envelope = np.abs(analytic)
-    # Smooth envelope (10 ms window)
-    smooth_n = int(0.010 * sr)
-    envelope_smooth = np.convolve(envelope, np.ones(smooth_n)/smooth_n, mode='same')
+    # ── Bottom: wideband AM envelope showing tick pulses ──
+    # Compute RMS power in 1 ms blocks — much cleaner than sample-by-sample
+    # magnitude, and still preserves the 5 ms tick pulse shape.
+    block_ms = 1
+    block_n = max(int(block_ms * sr / 1000), 1)
+    n_blocks = len(segment) // block_n
+    seg_trimmed = segment[:n_blocks * block_n].reshape(n_blocks, block_n)
+    rms_power = np.sqrt(np.mean(np.abs(seg_trimmed) ** 2, axis=1))
+    env_db = 20 * np.log10(rms_power + 1e-20)
+    t_blocks = (np.arange(n_blocks) + 0.5) * block_n / sr  # center of each block
 
-    t_axis = np.arange(len(segment)) / sr + t_offset
-    ax_env.plot(t_axis, 20 * np.log10(envelope_smooth + 1e-20),
-                color='#1565C0', linewidth=0.5)
-    ax_env.set_ylabel('Tick Envelope (dB)', fontsize=10)
-    ax_env.set_xlabel(f'Time (seconds from minute boundary)', fontsize=10)
-    ax_env.set_xlim(t_offset, t_offset + show_seconds)
+    ax_env.plot(t_blocks, env_db, color='#1565C0', linewidth=0.6)
+    ax_env.set_ylabel('RMS Power (dB)', fontsize=10)
+    ax_env.set_xlabel('Time (seconds)', fontsize=10)
+    ax_env.set_xlim(0, show_seconds)
 
-    # Mark integer second boundaries
-    for sec in range(int(t_offset), int(t_offset + show_seconds) + 1):
-        ax_env.axvline(sec, color='#D32F2F', linewidth=0.5, alpha=0.4, linestyle=':')
-        ax_spec.axvline(sec, color='white', linewidth=0.3, alpha=0.3, linestyle=':')
+    # ── Tick markers: vertical highlight bars at each second boundary ──
+    # WWV tick: 5 ms pulse of 1000 Hz at each UTC second
+    # WWVH tick: 5 ms pulse of 1200 Hz, offset ~25 ms after WWV
+    tick_width = 0.040  # 40 ms highlight to cover both ticks + gap
+    for sec in range(show_seconds + 1):
+        # Semi-transparent red bar spanning both panels at each second
+        ax_spec.axvspan(sec - 0.005, sec + tick_width, color='#D32F2F',
+                        alpha=0.12, zorder=0)
+        ax_env.axvspan(sec - 0.005, sec + tick_width, color='#D32F2F',
+                       alpha=0.15, zorder=0)
+        # Thin line at exact second boundary
+        ax_spec.axvline(sec, color='white', linewidth=0.5, alpha=0.4, linestyle='-')
+        ax_env.axvline(sec, color='#D32F2F', linewidth=0.8, alpha=0.5, linestyle='-')
+
+    # Label ticks on the envelope panel
+    env_ylim = ax_env.get_ylim()
+    for sec in range(show_seconds):
+        ax_env.text(sec + 0.020, env_ylim[1] - 0.5, 'tick', fontsize=6.5,
+                    color='#D32F2F', ha='center', va='top', fontstyle='italic',
+                    fontweight='bold')
+
+    # Annotate the envelope method
+    ax_env.text(show_seconds * 0.98, env_ylim[0] + 1,
+                'Wideband AM envelope |I+jQ|',
+                fontsize=7, ha='right', color='#666', fontstyle='italic')
 
     ax_env.grid(True, alpha=0.2)
 
-    fig.tight_layout()
+    # Hide the empty bottom-right cell (colorbar column, envelope row)
+    ax_empty = fig.add_subplot(gs[1, 1])
+    ax_empty.axis('off')
+
     outpath = OUTPUT_DIR / 'fig2_spectrogram_10mhz.png'
     fig.savefig(outpath, dpi=DPI, bbox_inches='tight')
     plt.close(fig)
