@@ -488,6 +488,9 @@ except Exception: print('no')" 2>/dev/null)
 
             log_info "Building pylap into venv..."
             PYLAP_LOG="/tmp/pylap-build.log"
+            # GCC 14+ treats -Wincompatible-pointer-types as error;
+            # pylap C extensions return PyArrayObject* as PyObject* (harmless).
+            CFLAGS="-Wno-error=incompatible-pointer-types" \
             PHARLAP_HOME="$PHARLAP_HOME" \
                 "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation -v 2>&1 | tee "$PYLAP_LOG" | tail -30 || \
                 { log_warn "pylap build failed — full log: $PYLAP_LOG"; \
