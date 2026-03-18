@@ -479,20 +479,21 @@ except Exception: print('no')" 2>/dev/null)
             log_info "Installing pylap build dependencies..."
             "$VENV_DIR/bin/pip" install setuptools wheel numpy 2>&1 | tail -5
 
-            # Python 3.12+ removed distutils from stdlib.  pylap's setup.py
-            # has 'import setuptools' commented out — uncomment it so the
-            # setuptools distutils shim activates before the bare distutils import.
+            # Patch pylap setup.py for modern Python/GCC:
+            #  1. Python 3.12+ removed distutils — uncomment setuptools import
+            #  2. GCC 14+ errors on PyArrayObject*/PyObject* return mismatch
             if [[ -f "$PYLAP_DIR/setup.py" ]]; then
                 sed -i 's/^#import setuptools/import setuptools/' "$PYLAP_DIR/setup.py"
+                # Inject extra_compile_args into Extension() call (idempotent)
+                if ! grep -q 'extra_compile_args' "$PYLAP_DIR/setup.py"; then
+                    sed -i 's/libraries=libraries))/libraries=libraries, extra_compile_args=["-Wno-error=incompatible-pointer-types"]))/' "$PYLAP_DIR/setup.py"
+                fi
             fi
 
             log_info "Building pylap into venv..."
             PYLAP_LOG="/tmp/pylap-build.log"
-            # GCC 14+ treats -Wincompatible-pointer-types as error;
-            # pylap C extensions return PyArrayObject* as PyObject* (harmless).
-            CFLAGS="-Wno-error=incompatible-pointer-types" \
             PHARLAP_HOME="$PHARLAP_HOME" \
-                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation -v 2>&1 | tee "$PYLAP_LOG" | tail -30 || \
+                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation 2>&1 | tee "$PYLAP_LOG" | tail -15 || \
                 { log_warn "pylap build failed — full log: $PYLAP_LOG"; \
                   grep -iE '(error:|fatal|cannot find|undefined reference|No such file)' "$PYLAP_LOG" | head -10; }
         else
