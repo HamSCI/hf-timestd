@@ -761,47 +761,33 @@ def generate_fig2():
     cb = fig.colorbar(im, cax=ax_cb)
     cb.set_label('PSD (dB)', fontsize=9)
 
-    # ── Bottom: wideband AM envelope showing tick pulses ──
-    # Compute RMS power in 1 ms blocks — much cleaner than sample-by-sample
-    # magnitude, and still preserves the 5 ms tick pulse shape.
-    block_ms = 1
-    block_n = max(int(block_ms * sr / 1000), 1)
-    n_blocks = len(segment) // block_n
-    seg_trimmed = segment[:n_blocks * block_n].reshape(n_blocks, block_n)
-    rms_power = np.sqrt(np.mean(np.abs(seg_trimmed) ** 2, axis=1))
-    env_db = 20 * np.log10(rms_power + 1e-20)
-    t_blocks = (np.arange(n_blocks) + 0.5) * block_n / sr  # center of each block
+    # ── Bottom: per-tone envelope showing WWV and WWVH ticks separately ──
+    # Narrow bandpass around each tick frequency, then Hilbert envelope.
+    # WWV tick: 5 cycles of 1000 Hz (5 ms) at the UTC second boundary.
+    # WWVH tick: 6 cycles of 1200 Hz (5 ms), arriving ~25 ms later.
+    # 100 Hz bandwidth cleanly separates the two (200 Hz apart).
+    t_axis = np.arange(len(segment)) / sr
+    smooth_n = max(int(0.002 * sr), 1)  # 2 ms smoothing
 
-    ax_env.plot(t_blocks, env_db, color='#1565C0', linewidth=0.6)
-    ax_env.set_ylabel('RMS Power (dB)', fontsize=10)
+    for lo, hi, color, label in [(950, 1050, '#4CAF50', 'WWV 1000 Hz'),
+                                  (1150, 1250, '#FF9800', 'WWVH 1200 Hz')]:
+        sos = sp_signal.butter(4, [lo, hi], btype='bandpass', fs=sr, output='sos')
+        filtered = sp_signal.sosfilt(sos, segment)
+        envelope = np.abs(sp_signal.hilbert(np.real(filtered)))
+        envelope = np.convolve(envelope, np.ones(smooth_n)/smooth_n, mode='same')
+        env_db = 20 * np.log10(envelope + 1e-20)
+        ax_env.plot(t_axis, env_db, color=color, linewidth=0.7,
+                    label=label, alpha=0.85)
+
+    ax_env.set_ylabel('Tone Power (dB)', fontsize=10)
     ax_env.set_xlabel('Time (seconds)', fontsize=10)
     ax_env.set_xlim(0, show_seconds)
+    ax_env.legend(fontsize=8, loc='lower right', ncol=2)
 
-    # ── Tick markers: vertical highlight bars at each second boundary ──
-    # WWV tick: 5 ms pulse of 1000 Hz at each UTC second
-    # WWVH tick: 5 ms pulse of 1200 Hz, offset ~25 ms after WWV
-    tick_width = 0.040  # 40 ms highlight to cover both ticks + gap
+    # ── Second-boundary markers on both panels ──
     for sec in range(show_seconds + 1):
-        # Semi-transparent red bar spanning both panels at each second
-        ax_spec.axvspan(sec - 0.005, sec + tick_width, color='#D32F2F',
-                        alpha=0.12, zorder=0)
-        ax_env.axvspan(sec - 0.005, sec + tick_width, color='#D32F2F',
-                       alpha=0.15, zorder=0)
-        # Thin line at exact second boundary
         ax_spec.axvline(sec, color='white', linewidth=0.5, alpha=0.4, linestyle='-')
-        ax_env.axvline(sec, color='#D32F2F', linewidth=0.8, alpha=0.5, linestyle='-')
-
-    # Label ticks on the envelope panel
-    env_ylim = ax_env.get_ylim()
-    for sec in range(show_seconds):
-        ax_env.text(sec + 0.020, env_ylim[1] - 0.5, 'tick', fontsize=6.5,
-                    color='#D32F2F', ha='center', va='top', fontstyle='italic',
-                    fontweight='bold')
-
-    # Annotate the envelope method
-    ax_env.text(show_seconds * 0.98, env_ylim[0] + 1,
-                'Wideband AM envelope |I+jQ|',
-                fontsize=7, ha='right', color='#666', fontstyle='italic')
+        ax_env.axvline(sec, color='#D32F2F', linewidth=0.6, alpha=0.4, linestyle=':')
 
     ax_env.grid(True, alpha=0.2)
 
