@@ -888,14 +888,22 @@ def generate_fig6():
     fig, ax = plt.subplots(figsize=(10, 5))
     R_E = 6371.0
 
+    # ── Determine x-axis extent from ray data ──
+    max_gnd = 0.0
+    for path in paths:
+        gnd = np.asarray(path.get('ground_range', []))
+        if gnd.size > 0:
+            max_gnd = max(max_gnd, float(gnd.max()))
+    x_max = max(target_km * 1.6, max_gnd * 0.55, 1800.0)
+
     # ── Ionospheric layer shading ──
-    x_range = np.linspace(0, 5000, 500)
+    x_range = np.linspace(0, x_max, 500)
     ax.fill_between(x_range, -50, 0, color='#8D6E63', alpha=0.12)
     ax.fill_between(x_range, 90, 130, color='#BBDEFB', alpha=0.25)
     ax.fill_between(x_range, 150, 450, color='#C8E6C9', alpha=0.20)
     ax.axhline(hmF2, color='#4CAF50', linewidth=1, linestyle='--', alpha=0.6)
-    ax.text(4550, hmF2 + 8, f'hmF2 = {hmF2:.0f} km', fontsize=8, color='#4CAF50')
-    ax.text(4550, hmF2 - 25, f'foF2 = {foF2:.2f} MHz', fontsize=8,
+    ax.text(x_max * 0.92, hmF2 + 8, f'hmF2 = {hmF2:.0f} km', fontsize=8, color='#4CAF50')
+    ax.text(x_max * 0.92, hmF2 - 25, f'foF2 = {foF2:.2f} MHz', fontsize=8,
             color='#4CAF50', fontstyle='italic')
 
     # ── Classify and plot each ray ──
@@ -969,14 +977,14 @@ def generate_fig6():
                  f'IRI-2020: foF2 = {foF2:.2f} MHz, hmF2 = {hmF2:.0f} km — '
                  f'{date_label} 18:00 UTC',
                  fontsize=11, fontweight='bold')
-    ax.set_xlim(-100, 5000)
+    ax.set_xlim(-100, x_max)
     ax.set_ylim(-50, 500)
     ax.grid(True, alpha=0.2)
 
     n_closing = len(closing_info)
     modes_found = sorted(set(c[1] for c in closing_info))
     modes_str = ', '.join(f'{n}F2' for n in modes_found)
-    ax.text(2500, 470,
+    ax.text(x_max * 0.5, 470,
             f'PHaRLAP 4.7.4 numerical ray tracing through IRI-2020 Ne(h) profile\n'
             f'{len(elevs)} rays, {n_closing} closing — modes: {modes_str}',
             fontsize=7, ha='center', fontstyle='italic', color='#666')
