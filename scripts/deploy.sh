@@ -476,11 +476,17 @@ try:
 except Exception: print('no')" 2>/dev/null)
 
         if [[ "$PYLAP_INSTALLED" != "yes" ]] || [[ "$FORCE_PIP" == "true" ]]; then
-            log_info "Building pylap into venv..."
-            "$VENV_DIR/bin/pip" install setuptools wheel numpy --quiet 2>/dev/null || true
-            PHARLAP_HOME="$PHARLAP_HOME" \
-                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation --quiet 2>&1 | tail -3 || \
-                log_warn "pylap build failed — raytracing will use geometric fallback"
+            log_info "Installing pylap build dependencies..."
+            "$VENV_DIR/bin/pip" install setuptools wheel numpy 2>&1 | tail -5
+            # Verify setuptools is importable
+            if ! "$VENV_DIR/bin/python" -c "import setuptools" 2>/dev/null; then
+                log_warn "setuptools not importable — cannot build pylap"
+            else
+                log_info "Building pylap into venv..."
+                PHARLAP_HOME="$PHARLAP_HOME" \
+                    "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation 2>&1 | tail -10 || \
+                    log_warn "pylap build failed — raytracing will use geometric fallback"
+            fi
         else
             log_info "pylap already installed"
         fi
