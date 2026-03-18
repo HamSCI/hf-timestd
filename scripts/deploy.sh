@@ -490,10 +490,13 @@ except Exception: print('no')" 2>/dev/null)
                 fi
             fi
 
+            # Clean stale build artifacts so setup.py patches take effect
+            rm -rf "$PYLAP_DIR/build" "$PYLAP_DIR/pylap.egg-info"
+
             log_info "Building pylap into venv..."
             PYLAP_LOG="/tmp/pylap-build.log"
             PHARLAP_HOME="$PHARLAP_HOME" \
-                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation 2>&1 | tee "$PYLAP_LOG" | tail -15 || \
+                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation --no-cache-dir 2>&1 | tee "$PYLAP_LOG" | tail -15 || \
                 { log_warn "pylap build failed — full log: $PYLAP_LOG"; \
                   grep -iE '(error:|fatal|cannot find|undefined reference|No such file)' "$PYLAP_LOG" | head -10; }
         else
