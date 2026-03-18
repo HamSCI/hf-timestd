@@ -478,15 +478,18 @@ except Exception: print('no')" 2>/dev/null)
         if [[ "$PYLAP_INSTALLED" != "yes" ]] || [[ "$FORCE_PIP" == "true" ]]; then
             log_info "Installing pylap build dependencies..."
             "$VENV_DIR/bin/pip" install setuptools wheel numpy 2>&1 | tail -5
-            # Verify setuptools is importable
-            if ! "$VENV_DIR/bin/python" -c "import setuptools" 2>/dev/null; then
-                log_warn "setuptools not importable — cannot build pylap"
-            else
-                log_info "Building pylap into venv..."
-                PHARLAP_HOME="$PHARLAP_HOME" \
-                    "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation 2>&1 | tail -10 || \
-                    log_warn "pylap build failed — raytracing will use geometric fallback"
+
+            # Python 3.12+ removed distutils from stdlib.  pylap's setup.py
+            # has 'import setuptools' commented out — uncomment it so the
+            # setuptools distutils shim activates before the bare distutils import.
+            if [[ -f "$PYLAP_DIR/setup.py" ]]; then
+                sed -i 's/^#import setuptools/import setuptools/' "$PYLAP_DIR/setup.py"
             fi
+
+            log_info "Building pylap into venv..."
+            PHARLAP_HOME="$PHARLAP_HOME" \
+                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation 2>&1 | tail -30 || \
+                log_warn "pylap build failed — raytracing will use geometric fallback"
         else
             log_info "pylap already installed"
         fi
