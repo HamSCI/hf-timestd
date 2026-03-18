@@ -337,11 +337,16 @@ class CoreRecorderV2:
             logger.warning("Invalid storage_quota format, using default 75%")
             quota_percent = 75.0
 
+        archive_root = self.recorder_config.get('archive_root')
+        if archive_root:
+            logger.info(f"QuotaManager archive root: {archive_root}")
+
         self.quota_manager = QuotaManager(
             data_root=self.output_dir,
             threshold_percent=quota_percent,
             min_days_to_keep=7,
-            dry_run=False
+            dry_run=False,
+            archive_root=archive_root,
         )
         
         # Main loop

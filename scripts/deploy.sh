@@ -440,6 +440,64 @@ log_info "Python: OK (hf-timestd $INSTALLED_VER)"
 
 
 # ════════════════════════════════════════════════════════════════════
+# Phase 4b: pyLAP / PHaRLAP (optional numerical raytracing)
+# ════════════════════════════════════════════════════════════════════
+log_step "Phase 4b: pyLAP (optional)"
+
+PHARLAP_HOME="${PHARLAP_HOME:-/opt/pharlap_4.7.4}"
+PYLAP_REPO="https://github.com/mijahauan/PyLap.git"
+PYLAP_DIR="/opt/pylap"
+
+if [[ -d "$PHARLAP_HOME/lib" ]]; then
+    log_info "PHaRLAP found at $PHARLAP_HOME"
+
+    # Check if gfortran is available (required for pyLAP build)
+    if ! command -v gfortran &>/dev/null; then
+        log_warn "gfortran not found — installing..."
+        apt-get install -y gfortran
+    fi
+
+    # Clone or update pylap fork
+    if [[ -d "$PYLAP_DIR/.git" ]]; then
+        log_info "Updating pylap fork..."
+        git -C "$PYLAP_DIR" pull --ff-only 2>/dev/null || \
+            log_warn "pylap git pull failed (non-critical)"
+    else
+        log_info "Cloning pylap fork..."
+        git clone "$PYLAP_REPO" "$PYLAP_DIR" 2>/dev/null || \
+            { log_warn "pylap clone failed — raytracing will use geometric fallback"; }
+    fi
+
+    # Build pylap into the venv if source is present
+    if [[ -f "$PYLAP_DIR/setup.py" ]]; then
+        PYLAP_INSTALLED=$("$VENV_DIR/bin/python" -c "
+try:
+    import pylap; print('yes')
+except Exception: print('no')" 2>/dev/null)
+
+        if [[ "$PYLAP_INSTALLED" != "yes" ]] || [[ "$FORCE_PIP" == "true" ]]; then
+            log_info "Building pylap into venv..."
+            PHARLAP_HOME="$PHARLAP_HOME" \
+                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation --quiet 2>&1 | tail -3 || \
+                log_warn "pylap build failed — raytracing will use geometric fallback"
+        else
+            log_info "pylap already installed"
+        fi
+    fi
+
+    # Ensure PHARLAP env vars are in the environment file
+    if ! grep -q '^PHARLAP_HOME=' "$ENV_FILE" 2>/dev/null; then
+        echo "PHARLAP_HOME=$PHARLAP_HOME" >> "$ENV_FILE"
+        echo "DIR_MODELS_REF_DAT=$PHARLAP_HOME/dat" >> "$ENV_FILE"
+        log_info "Added PHARLAP_HOME and DIR_MODELS_REF_DAT to $ENV_FILE"
+    fi
+else
+    log_info "PHaRLAP not found at $PHARLAP_HOME — raytracing disabled"
+    log_info "  See docs/EXTERNAL_PREREQUISITES.md for acquisition instructions"
+fi
+
+
+# ════════════════════════════════════════════════════════════════════
 # Phase 5: Systemd Units
 # ════════════════════════════════════════════════════════════════════
 log_step "Phase 5: Systemd"
@@ -833,5 +891,8 @@ echo "  Config:  $MAIN_CONFIG"
 echo "  Data:    $DATA_ROOT"
 echo "  Web API: http://localhost:8000"
 echo "  Verify:  scripts/verify_pipeline.sh"
+echo ""
+echo "  Optional externals (see docs/EXTERNAL_PREREQUISITES.md):"
+echo "    PHaRLAP raytracing · NASA Earthdata (IONEX) · PSWS uploads · GNSS VTEC"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

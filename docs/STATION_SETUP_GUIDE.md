@@ -373,6 +373,7 @@ port = 8000
 
 ## Related Documentation
 
+- [EXTERNAL_PREREQUISITES.md](EXTERNAL_PREREQUISITES.md) — All external dependencies (hardware, accounts, licensed software)
 - [INSTALLATION.md](../INSTALLATION.md) — Full installation guide
 - [ZED_F9P_TEC_CONFIGURATION.md](ZED_F9P_TEC_CONFIGURATION.md) — GNSS receiver setup
 - [GPS_TEC_OPTIONAL.md](GPS_TEC_OPTIONAL.md) — Optional GPS TEC capabilities and VTEC architecture

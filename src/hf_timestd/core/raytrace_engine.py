@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import math
+import multiprocessing as mp
 import os
 import sys
 from dataclasses import dataclass, field
@@ -80,6 +81,54 @@ def _try_import_pylap() -> bool:
 
 
 _try_import_pylap()
+
+# ---------------------------------------------------------------------------
+# Raytrace timeout (subprocess guard)
+# ---------------------------------------------------------------------------
+RAYTRACE_TIMEOUT_S = 120  # Max wall-clock seconds per raytrace_2d call
+
+
+def _raytrace_with_timeout(raytrace_func, args, timeout_s=RAYTRACE_TIMEOUT_S):
+    """Run raytrace_2d in a forked subprocess with hard timeout.
+
+    PHaRLAP's Fortran ODE solver can enter runaway loops for certain
+    frequency/ionosphere combinations (e.g. above-MUF at night).  A hung
+    C-extension call cannot be interrupted by Python signals, so we fork
+    a child process and kill it if it exceeds the deadline.
+    """
+    ctx = mp.get_context('fork')
+    q = ctx.Queue(maxsize=1)
+
+    def _worker(queue, fn, fn_args):
+        try:
+            result = fn(*fn_args)
+            queue.put(('ok', result))
+        except Exception as exc:
+            queue.put(('err', str(exc)))
+
+    proc = ctx.Process(target=_worker, args=(q, raytrace_func, args),
+                       daemon=True)
+    proc.start()
+    proc.join(timeout=timeout_s)
+
+    if proc.is_alive():
+        logger.warning("raytrace_2d timed out after %ds — killing subprocess",
+                       timeout_s)
+        proc.terminate()
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=2)
+        raise TimeoutError(f"raytrace_2d exceeded {timeout_s}s timeout")
+
+    if q.empty():
+        raise RuntimeError("raytrace_2d subprocess exited without result")
+
+    tag, payload = q.get_nowait()
+    if tag == 'err':
+        raise RuntimeError(f"raytrace_2d failed: {payload}")
+    return payload
+
 
 # ---------------------------------------------------------------------------
 # Station coordinates (transmitter sites)
@@ -318,14 +367,16 @@ class RaytraceEngine:
         try:
             # Single call with max_hops avoids Fortran SAVE-variable segfault
             # that occurs when raytrace_2d is invoked multiple times per process.
-            ray_list, _rpath, _rstate = _pylap_raytrace_2d(
-                tx_lat, tx_lon,
-                elevs, bearing_deg, freqs, max_hops,
-                tol, 0,   # irreg_flag=0
-                iono['iono_en_grid'], iono['iono_en_grid_5'],
-                iono['collision_grid'],
-                iono['height_start'], iono['height_inc'], iono['range_inc'],
-                iono['irreg_grid'],
+            # Wrapped in subprocess timeout to kill runaway ODE solver loops.
+            ray_list, _rpath, _rstate = _raytrace_with_timeout(
+                _pylap_raytrace_2d,
+                (tx_lat, tx_lon,
+                 elevs, bearing_deg, freqs, max_hops,
+                 tol, 0,   # irreg_flag=0
+                 iono['iono_en_grid'], iono['iono_en_grid_5'],
+                 iono['collision_grid'],
+                 iono['height_start'], iono['height_inc'], iono['range_inc'],
+                 iono['irreg_grid']),
             )
 
             for i, ray_dict in enumerate(ray_list):
@@ -369,6 +420,11 @@ class RaytraceEngine:
                         ray_label=1,
                     ))
 
+        except TimeoutError:
+            logger.warning("RaytraceEngine: raytrace_2d timed out for "
+                           "%s %.1f MHz; using geometric",
+                           station, frequency_mhz)
+            return self._geometric_fallback(station, frequency_mhz, utc_time)
         except Exception as exc:
             logger.warning(f"RaytraceEngine raytrace_2d failed ({exc}); "
                            "falling back to geometric")

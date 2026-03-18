@@ -67,12 +67,14 @@ class QuotaManager:
         data_root: Path,
         threshold_percent: float = 75.0,
         min_days_to_keep: int = 7,
-        dry_run: bool = False
+        dry_run: bool = False,
+        archive_root: Optional[Path] = None,
     ):
         self.data_root = Path(data_root)
         self.threshold_percent = threshold_percent
         self.min_days_to_keep = min_days_to_keep
         self.dry_run = dry_run
+        self.archive_root = Path(archive_root) if archive_root else None
 
         # Managed directories
         self.raw_buffer_dir = self.data_root / 'raw_buffer'
@@ -216,13 +218,82 @@ class QuotaManager:
         return entries
 
     # ------------------------------------------------------------------
-    # Deletion
+    # Archive helpers
+    # ------------------------------------------------------------------
+
+    def _archive_is_mounted(self) -> bool:
+        """Check if the archive root is writable."""
+        if not self.archive_root:
+            return False
+        try:
+            return self.archive_root.is_dir() and os.access(self.archive_root, os.W_OK)
+        except OSError:
+            return False
+
+    def _archive_entry(self, entry: DayEntry) -> int:
+        """Move a day-entry to the archive drive.  Returns bytes freed on primary."""
+        try:
+            rel = entry.path.relative_to(self.data_root)
+            dst = self.archive_root / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+
+            if entry.is_dir:
+                size = sum(
+                    f.stat().st_size for f in entry.path.rglob('*') if f.is_file()
+                )
+                if self.dry_run:
+                    logger.info(f"[DRY RUN] Would archive dir: {entry.path} -> {dst} "
+                               f"({size / 1024**2:.1f} MB, {entry.category})")
+                else:
+                    shutil.move(str(entry.path), str(dst))
+                    logger.info(f"Archived dir: {entry.path} -> {dst} "
+                               f"({size / 1024**2:.1f} MB, {entry.category})")
+            else:
+                size = entry.path.stat().st_size
+                if self.dry_run:
+                    logger.info(f"[DRY RUN] Would archive: {entry.path} -> {dst} "
+                               f"({size / 1024**2:.1f} MB, {entry.category})")
+                else:
+                    shutil.move(str(entry.path), str(dst))
+                    logger.info(f"Archived: {entry.path} -> {dst} "
+                               f"({size / 1024**2:.1f} MB, {entry.category})")
+            return size
+        except Exception as e:
+            logger.warning(f"Archive failed for {entry.path}: {e}, falling back to delete")
+            return self._force_delete_entry(entry)
+
+    def _force_delete_entry(self, entry: DayEntry) -> int:
+        """Unconditionally delete a day-entry (fallback when archive fails)."""
+        try:
+            if entry.is_dir:
+                size = sum(
+                    f.stat().st_size for f in entry.path.rglob('*') if f.is_file()
+                )
+                shutil.rmtree(entry.path)
+            else:
+                size = entry.path.stat().st_size
+                entry.path.unlink()
+            logger.info(f"Deleted (fallback): {entry.path} ({size / 1024**2:.1f} MB)")
+            return size
+        except Exception as e:
+            logger.error(f"Failed to remove {entry.path}: {e}")
+            return 0
+
+    # ------------------------------------------------------------------
+    # Deletion / archival
     # ------------------------------------------------------------------
 
     def _delete_entry(self, entry: DayEntry) -> int:
         """
-        Delete a day-entry. Returns bytes freed (estimated for dirs).
+        Remove a day-entry from primary storage.
+
+        If an archive drive is configured and mounted, the entry is moved
+        there instead of being deleted.  Falls back to deletion if the
+        archive move fails.
         """
+        if self.archive_root and self._archive_is_mounted():
+            return self._archive_entry(entry)
+
         try:
             if entry.is_dir:
                 # Estimate size before removal
