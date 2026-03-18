@@ -1019,6 +1019,18 @@ def generate_fig8():
 
     date_label = f'{TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]}'
 
+    # Receiver coordinates
+    rx_lat, rx_lon = 38.918461, -92.127974
+    # TX coordinates and path midpoints for SZA
+    tx_coords = {
+        'WWV':  (40.6773, -105.0421),
+        'WWVH': (21.9886, -159.7601),
+        'CHU':  (45.2958, -75.7533),
+    }
+    doy = datetime(int(TARGET_DATE[:4]), int(TARGET_DATE[4:6]),
+                   int(TARGET_DATE[6:])).timetuple().tm_yday
+    sza_hours = np.linspace(0, 24, 1441)
+
     panels = [
         ('SHARED_10000', 'WWV', 10.0, 'WWV 10 MHz (1,119 km)'),
         ('SHARED_10000', 'WWVH', 10.0, 'WWVH 10 MHz (6,600 km)'),
@@ -1106,7 +1118,37 @@ def generate_fig8():
         ax.set_title(title, fontsize=10, fontweight='bold')
         ax.set_ylabel('Prop. Delay (ms)', fontsize=9)
         ax.grid(True, alpha=0.2)
-        ax.legend(fontsize=7, loc='upper right', ncol=5, markerscale=3)
+
+        # Solar zenith angle overlay on twin axis
+        tx = tx_coords[target_station]
+        mid_lat = (tx[0] + rx_lat) / 2.0
+        mid_lon = (tx[1] + rx_lon) / 2.0
+        sza = _solar_zenith_angle(mid_lat, mid_lon, sza_hours, doy)
+
+        axr = ax.twinx()
+        axr.plot(sza_hours, sza, color='#FF6F00', linewidth=1.2, alpha=0.5,
+                 linestyle='--', zorder=1)
+        axr.axhline(90, color='#FF6F00', linewidth=0.5, alpha=0.3, linestyle=':')
+        axr.set_ylim(140, 20)  # inverted: noon (low SZA) at top
+        if idx == 0:
+            axr.set_ylabel('SZA (°)', fontsize=8, color='#FF6F00')
+        axr.tick_params(axis='y', labelcolor='#FF6F00', labelsize=7)
+
+        # Shade night regions (SZA > 90°)
+        night = sza > 90
+        for j in range(len(sza_hours) - 1):
+            if night[j]:
+                ax.axvspan(sza_hours[j], sza_hours[j+1], color='#263238',
+                           alpha=0.06, zorder=0)
+
+        # Legend combines scatter + SZA
+        from matplotlib.lines import Line2D
+        sza_handle = Line2D([0], [0], color='#FF6F00', linewidth=1.2,
+                            linestyle='--', alpha=0.5, label='SZA')
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles=handles + [sza_handle],
+                  labels=labels + ['SZA'],
+                  fontsize=7, loc='upper right', ncol=6, markerscale=3)
 
         # Annotate tick count
         ax.text(0.01, 0.95, f'n={mask.sum():,}', fontsize=7,
