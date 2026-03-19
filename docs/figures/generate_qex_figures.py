@@ -379,9 +379,9 @@ def generate_fig5():
         vtec_quality = np.array([q.decode() for q in f['quality_flag'][:]])
 
     vtec_hrs = (vtec_ts - midnight) / 3600.0
-    vtec_good = vtec_quality == 'GOOD'
+    vtec_usable = (vtec_quality == 'GOOD') | (vtec_quality == 'MARGINAL')
 
-    ax2.plot(vtec_hrs[vtec_good], vtec[vtec_good], color='#7B1FA2',
+    ax2.plot(vtec_hrs[vtec_usable], vtec[vtec_usable], color='#7B1FA2',
              linewidth=0.8, alpha=0.7, label='GNSS VTEC (ZED-F9P)')
     ax2.set_ylabel('VTEC (TECU)', fontsize=11, color='#7B1FA2')
     ax2.set_xlabel(f'UTC Hour ({date_label})', fontsize=11)
