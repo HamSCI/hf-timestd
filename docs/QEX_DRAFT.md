@@ -187,7 +187,7 @@ of one transmitter at one frequency.
 
 ![Figure 3: 24-hour D_clock time series. Top: per-broadcast clock offset from all 9 channels with WLS fusion. Bottom: fusion detail at ±3 ms scale.](figures/fig3_dclock_24h.png)
 
-*Figure 3 — D_clock, 2026-03-15. Top: all broadcasts (±12 ms), fusion in red. Bottom: per-station means with uncertainty envelope.*
+*Figure 3 — D_clock, 2026-03-17. Top: all broadcasts (±12 ms), fusion in red. Bottom: per-station means with uncertainty envelope.*
 
 ### 3.2 Per-Broadcast Kalman Filter
 
@@ -265,14 +265,14 @@ candidate multi-hop geometries, using foF2 and hmF2 from the IRI-2020 ionospheri
 when available. For offline validation, the system uses PHaRLAP 4.7.4 [1], a full 2D
 numerical ray-tracing package, to propagate a fan of rays through the IRI electron
 density profile along the great-circle path. For WWV 10 MHz under March 2026 daytime
-conditions (foF2 = 10.45 MHz, hmF2 = 289 km), PHaRLAP finds 61 closing rays
-across three modes: 1F2 at 3.2–4.4 ms (5.5–27.5° elevation), 2F2 at 5.1–5.7 ms
-(37–50°), and 3F2 at 7.5 ms (53–60°) — consistent with the real-time pipeline's
+conditions (foF2 = 10.41 MHz, hmF2 = 290 km), PHaRLAP finds 63 closing rays
+across three modes: 1F2 at 3.2–4.4 ms (5.5–28° elevation), 2F2 at 5.1–5.7 ms
+(37–51°), and 3F2 at 7.5–7.6 ms (53–60°) — consistent with the real-time pipeline's
 independent assignment.
 
 ![Figure 6: PHaRLAP 4.7.4 numerical ray fan for WWV 10 MHz. IRI-2020 Ne(h) profile, 117 rays at 2–60° elevation, closing rays for 1F2, 2F2, 3F2.](figures/fig6_ray_fan_pharlap.png)
 
-*Figure 6 — PHaRLAP 4.7.4 ray fan, WWV 10 MHz, 2026-03-15 18:00 UTC. IRI-2020: foF2=10.48 MHz, hmF2=289 km. 61 closing rays: 1F2 (green, 5.5–27.5°, delay 3.2–4.4 ms), 2F2 (orange, 37–50°, 5.1–5.7 ms), 3F2 (red, 53–60°, 7.4–7.5 ms).*
+*Figure 6 — PHaRLAP 4.7.4 ray fan, WWV 10 MHz, 2026-03-17 18:00 UTC. IRI-2020: foF2=10.41 MHz, hmF2=290 km. 63 closing rays: 1F2 (green, 5.5–28°, delay 3.2–4.4 ms), 2F2 (orange, 37–51°, 5.1–5.7 ms), 3F2 (red, 53–60°, 7.5–7.6 ms).*
 
 Mode confidence feeds the Kalman filter noise covariance: high-confidence assignments
 contribute with full weight in the WLS fusion; ambiguous assignments are down-weighted.
@@ -286,13 +286,13 @@ down-weights ambiguous broadcasts rather than guessing.
 
 ![Figure 7: Mode probability stacked bars for four representative paths.](figures/fig7_mode_probability.png)
 
-*Figure 7 — Hourly mode probability, 2026-03-15. WWV 10 MHz (high unknown), WWVH 10 MHz (stable 3F/2F), CHU 7.850 MHz (dominant 1F), CHU 14.670 MHz (1F daytime, gap at night below MUF).*
+*Figure 7 — Hourly mode probability, 2026-03-17. WWV 10 MHz (high unknown fraction), WWVH 10 MHz (stable 3F/2F), CHU 7.850 MHz (dominant 1E nighttime, mixed modes daytime), CHU 14.670 MHz (1E nighttime, 1F daytime, gap 03–12 UTC below MUF).*
 
 The correlation between measured arrival time and assigned propagation mode is shown directly in Figure 8. Each panel plots the measured propagation delay for every detected tick over 24 hours, color-coded by the mode assignment. On the WWVH 10 MHz path (6,600 km), the delay clusters are well separated: 2F and 3F modes occupy distinct delay bands, confirming that the mode assignment is physically meaningful and driven by the timing measurements themselves. On the shorter WWV path (1,119 km), delay overlap between modes is tighter, which explains the higher fraction of "unknown" assignments.
 
 ![Figure 8: Measured propagation delay vs assigned mode for four paths.](figures/fig8_toa_mode_correlation.png)
 
-*Figure 8 — Measured propagation delay color-coded by assigned mode, 2026-03-15. Four panels: WWV 10 MHz, WWVH 10 MHz, CHU 7.85 MHz, CHU 14.67 MHz. Distinct delay clusters confirm mode discrimination is driven by measured timing, not assumed.*
+*Figure 8 — Measured propagation delay color-coded by assigned mode, 2026-03-17. Four panels: WWV 10 MHz, WWVH 10 MHz, CHU 7.85 MHz, CHU 14.67 MHz. Distinct delay clusters confirm mode discrimination is driven by measured timing, not assumed.*
 
 ---
 
@@ -344,7 +344,7 @@ delay uncertainty that makes the group-delay TEC noisy.
 
 ![Figure 5: CHU 14.670 MHz dTEC/dt with solar zenith angle overlay and GNSS VTEC.](figures/fig5_dtec_24h.png)
 
-*Figure 5 — Carrier-phase dTEC/dt, 2026-03-15, CHU 14.670 MHz only. Top: 15-min rolling median dTEC/dt (blue) with solar zenith angle at path midpoint (dashed orange); shaded regions indicate local night. The strong correlation between dTEC/dt activity and solar illumination is immediately apparent. Bottom: GNSS overhead VTEC from the co-located ZED-F9P (zero data gaps on this date).*
+*Figure 5 — Carrier-phase dTEC/dt, 2026-03-17, CHU 14.670 MHz only. Top: 15-min rolling median dTEC/dt (blue) with solar zenith angle at path midpoint (dashed orange); shaded regions indicate local night. The strong correlation between dTEC/dt activity and solar illumination is immediately apparent. Bottom: GNSS overhead VTEC from the co-located ZED-F9P (zero data gaps on this date).*
 
 ### 4.3 Results
 
@@ -591,21 +591,21 @@ addressed before final submission:
 
 ---
 
-## Data Validation Summary (2026-03-15)
+## Data Validation Summary (2026-03-17)
 
 Key numeric claims validated against production HDF5 data:
 
-| Claim | Article Value | Measured (2026-03-15) | Status |
+| Claim | Article Value | Measured (2026-03-17) | Status |
 |-------|--------------|----------------------|--------|
-| Fusion D_clock std | ±0.5 ms (1σ) | std=0.161 ms, formal u=1.2 ms | **Conservative** — actual scatter tighter than claimed |
-| SNR range | 8–42 dB | 8–53 dB (median: CHU 45 dB, shared 8 dB) | **Updated** in text |
-| dTEC/dt precision | ~6 mTECU/min | Quiet: MAD 5.75, All-day: MAD 8.0 | **Qualified** — applies to quiet conditions |
+| Fusion D_clock std | ±0.5 ms (1σ) | std=0.298 ms, formal u=1.2 ms, n=8150 | **Conservative** — actual scatter tighter than claimed |
+| SNR range | 8–42 dB | 5–74 dB (median: CHU 46–53 dB, shared 8 dB) | **Updated** in text |
+| dTEC/dt precision | ~6 mTECU/min | All-day MAD 20.5 (active iono); no quiet window — CHU 14.67 below MUF 03–12 UTC | **Condition-dependent** — quiet-night value from calmer days |
 | N broadcasts | 17 | 3 stations active (WWV, WWVH, CHU); BPM=0 | **Noted** — BPM non-detection acknowledged |
-| Mode ID: WWVH 10 | stable 2F/3F | 76% 3F, 24% 2F, 0% unknown | **Confirmed** |
-| Mode ID: CHU 7.85 | — | 79% 1F, 15% 1E, 6% other | **Updated** in text |
-| GNSS VTEC | anchored | 87% anchored, 4–30 TECU range | **Confirmed** |
+| Mode ID: WWVH 10 | stable 2F/3F | 78% 3F, 22% 2F, 0% unknown | **Confirmed** |
+| Mode ID: CHU 7.85 | — | 60% 1E, 26% 3F, 7% 1F, 6% 2F | **Day-dependent** — E-layer dominant on this date |
+| GNSS VTEC | anchored | 2–26 TECU range, n=82,899 | **Confirmed** |
 
 ---
 
 *End of draft — March 2026*
-*Figures generated: `docs/figures/generate_qex_figures.py` (target date: 2026-03-15, 8 figures)*
+*Figures generated: `docs/figures/generate_qex_figures.py` (target date: 2026-03-17, 8 figures)*

@@ -25,7 +25,7 @@ from pathlib import Path
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-TARGET_DATE = '20260315'
+TARGET_DATE = '20260317'
 DATA_ROOT = '/var/lib/timestd'
 PHASE2 = f'{DATA_ROOT}/phase2'
 OUTPUT_DIR = Path(__file__).parent
