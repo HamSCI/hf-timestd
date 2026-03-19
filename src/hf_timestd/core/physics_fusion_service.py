@@ -194,9 +194,12 @@ class PhysicsFusionService:
         self.last_processed_minute = 0
         self.channels = self._discover_channels()
         self._reader_cache: Dict[str, DataProductReader] = {}
-        self._minute_retry_counts: Dict[int, int] = {}
+        self._minute_first_attempt: Dict[int, float] = {}  # minute_ts → first attempt epoch
+        self._minute_last_attempt: Dict[int, float] = {}  # minute_ts → last attempt epoch
         self._processed_minutes: set = set()  # Minutes successfully processed — never re-process
         self._max_retry_history = 720  # Keep at most 12h of minute retry state
+        self._retry_abandon_seconds = 300  # Abandon a minute after 5 min of failed attempts
+        self._retry_cooldown_seconds = 10  # Wait 10s between retries for the same minute
         
         # Data freshness tracking for upstream starvation detection
         self.upstream_stale_warning_issued = False
@@ -238,13 +241,15 @@ class PhysicsFusionService:
     def _prune_retry_counters(self, now_epoch: float) -> None:
         """Keep retry tracking bounded to avoid unbounded state growth."""
         cutoff = int(now_epoch) - (12 * 3600)
-        stale_minutes = [minute for minute in self._minute_retry_counts if minute < cutoff]
+        stale_minutes = [m for m in self._minute_first_attempt if m < cutoff]
         for minute in stale_minutes:
-            del self._minute_retry_counts[minute]
+            self._minute_first_attempt.pop(minute, None)
+            self._minute_last_attempt.pop(minute, None)
 
-        if len(self._minute_retry_counts) > self._max_retry_history:
-            for minute in sorted(self._minute_retry_counts)[:-self._max_retry_history]:
-                del self._minute_retry_counts[minute]
+        if len(self._minute_first_attempt) > self._max_retry_history:
+            for minute in sorted(self._minute_first_attempt)[:-self._max_retry_history]:
+                self._minute_first_attempt.pop(minute, None)
+                self._minute_last_attempt.pop(minute, None)
 
         # Prune _processed_minutes to the same 12h window
         self._processed_minutes = {m for m in self._processed_minutes if m >= cutoff}
@@ -1377,9 +1382,14 @@ class PhysicsFusionService:
                     if target_minute in self._processed_minutes:
                         continue
 
-                    retry_count = self._minute_retry_counts.get(target_minute, 0)
-                    if retry_count >= 3:
-                        continue
+                    # Time-based retry: abandon after _retry_abandon_seconds,
+                    # cooldown between attempts to avoid hammering the reader.
+                    first_attempt = self._minute_first_attempt.get(target_minute)
+                    if first_attempt is not None and (now - first_attempt) > self._retry_abandon_seconds:
+                        continue  # Abandoned — past retry window
+                    last_attempt = self._minute_last_attempt.get(target_minute, 0.0)
+                    if (now - last_attempt) < self._retry_cooldown_seconds:
+                        continue  # Cooling down — skip this pass
 
                     # Try to process this minute
                     self._pet_watchdog()
@@ -1390,14 +1400,18 @@ class PhysicsFusionService:
                         if ok:
                             self.last_processed_minute = max(self.last_processed_minute, target_minute)
                             self._processed_minutes.add(target_minute)
-                            self._minute_retry_counts.pop(target_minute, None)
+                            self._minute_first_attempt.pop(target_minute, None)
+                            self._minute_last_attempt.pop(target_minute, None)
                         else:
-                            self._minute_retry_counts[target_minute] = retry_count + 1
+                            if first_attempt is None:
+                                self._minute_first_attempt[target_minute] = now
+                            self._minute_last_attempt[target_minute] = now
                             logger.warning(f"L3 write failed for minute {target_minute}, will retry")
                     else:
-                        self._minute_retry_counts[target_minute] = retry_count + 1
-                        if retry_count == 0:
-                            logger.debug(f"No L2 data for minute {target_minute}, will retry")
+                        if first_attempt is None:
+                            self._minute_first_attempt[target_minute] = now
+                            logger.debug(f"No L2 data for minute {target_minute}, will retry for up to {self._retry_abandon_seconds}s")
+                        self._minute_last_attempt[target_minute] = now
 
                 self._prune_retry_counters(now)
                 

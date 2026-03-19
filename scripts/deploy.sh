@@ -425,7 +425,17 @@ if [[ "$NEED_PIP" == "true" ]]; then
     # Uninstall first to ensure source changes are picked up (same version),
     # then install normally so dependencies are preserved.
     "$VENV_DIR/bin/pip" uninstall hf-timestd -y --quiet 2>/dev/null || true
-    "$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet
+    # Use constraints.txt for reproducible builds across all nodes.
+    # Without this, pip resolves from live PyPI — different deploy times
+    # or Python versions silently produce different dependency trees.
+    CONSTRAINT_FILE="$PROJECT_DIR/constraints.txt"
+    if [[ -f "$CONSTRAINT_FILE" ]]; then
+        "$VENV_DIR/bin/pip" install "$PROJECT_DIR" --constraint "$CONSTRAINT_FILE" --quiet
+        log_info "Installed with constraints (reproducible)"
+    else
+        log_warn "No constraints.txt found — installing unconstrained (non-reproducible!)"
+        "$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet
+    fi
 
     INSTALLED_VER=$("$VENV_DIR/bin/python" -c "
 from importlib.metadata import version

@@ -33,7 +33,7 @@ dependencies = [
     "iri2020 @ git+https://github.com/space-physics/iri2020.git",
     "zstandard>=0.22.0",
     "sysv_ipc>=1.1.0",
-    "h5py>=3.8.0",
+    "h5py>=3.8.0,<3.16.0",  # HDF5 2.0.0 (bundled in h5py 3.16) breaks SWMR readers in long-running processes
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "python-multipart>=0.0.6",
