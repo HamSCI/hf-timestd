@@ -2,7 +2,7 @@
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
 **System Version:** 6.11.0 (Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty)  
-**Last Updated:** March 9, 2026  
+**Last Updated:** March 19, 2026  
 **Author:** Michael James Hauan (AC0G)
 
 ---
@@ -13,7 +13,7 @@
 
 **RTP Mode (Physics Pathway):** With GPS+PPS providing authoritative timing (~50 μs accuracy via radiod's RTP timestamps), the system uses the known transmission times and measured arrival times to **study the ionosphere**. The propagation delay residuals reveal carrier-phase differential TEC (dTEC, the primary ionospheric product, anchored by GNSS VTEC), traveling ionospheric disturbances (TIDs), and space weather effects.
 
-**Fusion Mode (Metrology Pathway):** The system attempts to **recover UTC from the HF broadcasts alone**, using multi-broadcast fusion to solve for the local clock offset. This pathway demonstrates how closely tone analysis can reconstruct the timing authority that RTP mode provides directly. Current accuracy: ±5-100 ms depending on ionospheric conditions (vs ±0.05 ms from RTP).
+**Fusion Mode (Metrology Pathway):** The system attempts to **recover UTC from the HF broadcasts alone**, using multi-broadcast fusion to solve for the local clock offset. This pathway demonstrates how closely tone analysis can reconstruct the timing authority that RTP mode provides directly. Measured accuracy: ±0.5 ms (1σ, conservative claim) with multi-station fusion and GNSS VTEC correction; ±2–5 ms without ionospheric correction. See Section 13 for the full error budget.
 
 The system demonstrates metrological rigor through:
 
@@ -381,6 +381,7 @@ When a dual-frequency GNSS receiver (e.g., u-blox ZED-F9P) is available, the sys
 | File | Purpose |
 |------|---------|
 | `src/hf_timestd/core/propagation_model.py` | `HFPropagationModel` — delay prediction, multi-mode, self-consistency |
+| `src/hf_timestd/core/raytrace_engine.py` | `RaytraceEngine` — PHaRLAP 2D ray tracing with spatially varying IRI grid |
 | `src/hf_timestd/core/iono_data_service.py` | `IonoDataService` — WAM-IPE/GIRO fetch, cache, great-circle TEC sampling |
 | `src/hf_timestd/core/arrival_pattern_matrix.py` | `ArrivalPatternMatrix` — integrates model into arrival predictions |
 
@@ -1041,7 +1042,7 @@ Sources 1–4 are **irreducible** (physics/algorithm). Sources 5–7 are **confi
 3. **The GPSDO matters for the ruler, not the zero-point.** It ensures measurements within a fusion window are coherent.
 4. **NTP is the ceiling for L2–L4.** NTP jitter sets a floor that multi-station fusion cannot average below.
 5. **L1 and L2 converge to the same steady-state** after bootstrap.
-6. **The current system operates at L5** and achieves 2–5 ms fused uncertainty.
+6. **The current system operates at L5** and achieves ±0.3 ms (1σ) fused uncertainty with GNSS VTEC correction (measured Mar 17–18, 2026); ±0.7 ms (1σ) with IRI-only L1 fusion.
 
 ### 14.5 Station Priority Policy (v6.5.0)
 

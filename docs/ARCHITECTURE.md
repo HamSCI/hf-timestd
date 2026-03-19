@@ -1,6 +1,6 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** March 9, 2026  
+**Last Updated:** March 19, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
 **Version:** V6.11.0
@@ -376,10 +376,13 @@ We don't just "guess" the path; we model it using a tiered hierarchy of physics 
 - **Result:** Frequency-dependent, time-varying delay predictions with multi-mode support (1F, 2F, 3F, 1E).
 - **Uncertainty:** ±0.5–1.0 ms (1σ) when WAM-IPE + GIRO available.
 
-#### Tier 1: PyLap Raytracing (Experimental)
+#### Tier 1: PHaRLAP 2D Ray Tracing (Implemented)
 
-- Full 3D raytracing using the PHaRLAP engine.
-- Most accurate, most computationally expensive.
+- **Engine:** PHaRLAP 4.7.4 via pyLAP Python interface (`raytrace_engine.py`).
+- **Grid:** Spatially varying IRI-2020 electron density profiles sampled along the great-circle path (auto-scaled: 1 per 500 km, min 5, max 25 samples). Profiles are linearly interpolated across range columns to form a true 2D Ne(h) grid.
+- **Output:** Numerical ray fan with group path delay, mode identification (1F, 2F, 3F), and reflection geometry.
+- **Cost:** ~15 ms for IRI grid construction + ray tracing computation. Used for science products and QEX figures; not in the real-time metrology loop.
+- **Horizontal variation:** Significant for long paths (WWVH: ±16–38% foF2 variation across 6,600 km); modest for short paths (WWV/CHU: ±1–5%).
 
 #### Tier 1.5: IONEX VTEC (Production)
 
@@ -539,7 +542,7 @@ GRAPE decimation is intentionally decoupled from the timing/metrology pipeline. 
 
 ---
 
-**Last Updated:** March 9, 2026
+**Last Updated:** March 19, 2026
 
 ## Unified Measurement Path (v6.11)
 

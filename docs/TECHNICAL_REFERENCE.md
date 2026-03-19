@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** March 9, 2026
+**Last Updated:** March 19, 2026
 
 ---
 
@@ -214,7 +214,7 @@ The `l2_calibration_service` geometric fallback uses the Haversine formula (grea
 | WAM-IPE + GIRO | ±1.5 ms (3σ) window; mode scoring | `IonoDataService` running |
 | IRI-2020 | ±4.5 ms (3σ); cold-start initialization | `iri2020` package installed |
 | GNSS VTEC | Direct dTEC/dt anchor; scintillation metrics | ZED-F9P connected |
-| PHaRLAP / pyLAP | Absolute mode-ID for science products | Offline batch only |
+| PHaRLAP / pyLAP | 2D ray tracing with spatially varying IRI grid; mode-ID for science products | `raytrace_engine.py` (offline/batch) |
 
 ### What L2 calibration service is responsible for
 
@@ -409,13 +409,13 @@ utc = gps_time_unix + (rtp_ts - rtp_timesnap) / sample_rate
 - Gaps filled with zeros.
 - Sample count never adjusted.
 
-### 3. HDF5 Crash-Safe Writes
+### 3. HDF5 Concurrent Access
 
-To achieve reliability while maintaining archival integrity, we use a crash-safe open-write-close pattern.
+All `h5py.File()` calls use `locking=False` to prevent HDF5 library-level file lock contention (errno=11) between concurrent readers/writers. The environment variable `HDF5_USE_FILE_LOCKING=FALSE` is set **before** `import h5py` in services that import h5py at module level.
 
-- **Analytics** opens the HDF5 file, appends measurements, and closes it per write cycle.
-- **Fusion** reads the file after Analytics closes it.
-- No persistent file handles means no dirty HDF5 consistency flags on unclean shutdown (SIGKILL, crash, etc.).
+- **Writers** (`hdf5_writer.py`) open, append, and close per write cycle.
+- **Readers** (`hdf5_reader.py`, fusion service) open with `locking=False` for concurrent access.
+- Services use open-write-close patterns to minimize dirty flags on unclean shutdown.
 
 ---
 
@@ -702,6 +702,7 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 | Module | Class/Function | Purpose |
 |--------|---------------|--------|
 | `propagation_model.py` | `HFPropagationModel` | Multi-mode delay prediction (1F/2F/3F/1E) with numerical Ne(h) integration, adaptive uncertainty |
+| `raytrace_engine.py` | `RaytraceEngine` | PHaRLAP 2D ray tracing with spatially varying IRI-2020 Ne(h) grid (science/batch) |
 | `iono_data_service.py` | `IonoDataService` | Background thread: WAM-IPE/GIRO data fetching, caching, great-circle TEC sampling |
 
 ### Phase 3: Fusion (`src/hf_timestd/core/`)
@@ -720,6 +721,7 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 | `hdf5_writer.py` | `HDF5Writer` | Schema-validated crash-safe HDF5 writes with `locking=False` |
 | `hdf5_reader.py` | `HDF5Reader` | Time-range queries on HDF5 datasets |
 | `data_product_registry.py` | `DataProductRegistry` | Schema registry for L1/L2/L3 HDF5 products |
+| `core/resource_guardian.py` | `ResourceGuardian` | Auto-sizing disk management: 80% cap, day-level eviction, preflight + 60s watchdog |
 
 ### GRAPE Pipeline (`src/hf_timestd/grape/`)
 
@@ -998,8 +1000,8 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ---
 
-**Version**: 6.8.0  
-**Last Updated**: February 27, 2026  
+**Version**: 6.11.0  
+**Last Updated**: March 19, 2026  
 **Purpose**: Technical reference for HF Time Standard developers
 
 **v6.7.1 Release (February 12, 2026) - Propagation Model Full Integration:**

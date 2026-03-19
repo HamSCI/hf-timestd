@@ -57,6 +57,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - **HFPropagationModel** — Multi-mode delay prediction with Ne(h) integration
 - **IonoDataService** — WAM-IPE (NOAA S3) + GIRO ionosonde real-time data
 - **IRI-2020 / IONEX / parametric** — Tiered fallback chain for ionospheric parameters
+- **PHaRLAP ray tracing** — 2D numerical ray tracing via pyLAP with spatially varying IRI-2020 Ne(h) grid (auto-scaled, 1 sample per 500 km)
 
 **WWV/WWVH Test Signal Analysis:**
 - **Minutes :08/:44** — Multi-tone power (2, 3, 4, 5 kHz), Frequency Selectivity Score, chirp delay spread, transient detection
@@ -74,6 +75,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 
 **Infrastructure:**
 - **systemd services** — 8+ services with dependency management, watchdog, CPU affinity
+- **ResourceGuardian** — Auto-sizing disk management (80% cap, day-level eviction, preflight + watchdog)
 - **Production installer** — `scripts/install.sh` (creates timestd user, venv, config, services)
 - **Log rotation** — Daily rotation with 14-day retention
 - **Freshness monitoring** — Cron-based alerts on stale data

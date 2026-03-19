@@ -4,7 +4,7 @@
 **Scope:** This document covers the *science* — what measurements mean physically and how they are validated. For *design decisions* (why the system is built this way), see `docs/ARCHITECTURE.md`. For *algorithms and data formats*, see `docs/TECHNICAL_REFERENCE.md`.  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
 **System Version:** 6.11.0 (Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty)  
-**Last Updated:** March 9, 2026
+**Last Updated:** March 19, 2026
 
 ---
 
@@ -774,7 +774,46 @@ The following live data demonstrates the reanalysis in operation on this install
 
 ## 6. Potential Future Capabilities
 
-### 6.1 Critical Frequency Estimation (foF2) — Partially Implemented
+### 6.1 PHaRLAP 2D Numerical Ray Tracing ✔️
+
+**Status:** Implemented (2026-03-19)
+
+**Physics:** Full 2D numerical ray tracing through the ionosphere provides the most accurate propagation delay and mode identification, accounting for refraction, reflection height, and group path length through realistic electron density profiles.
+
+**Implementation:** `src/hf_timestd/core/raytrace_engine.py`
+
+The ray tracing engine uses PHaRLAP 4.7.4 (via the pyLAP Python interface) with a **spatially varying IRI-2020 electron density grid**. Rather than sampling IRI at a single midpoint, the engine:
+
+1. Computes the great-circle bearing from TX to RX
+2. Samples IRI-2020 Ne(h) profiles at multiple points along the path (auto-scaled: 1 per 500 km, minimum 5, maximum 25)
+3. Linearly interpolates the Ne(h) profiles across all range columns to form a true 2D electron density grid
+4. Passes the grid to `pylap.raytrace_2d()` for numerical ray tracing
+
+**Horizontal variation significance:**
+
+| Path | Distance | foF2 Variation | hmF2 Variation |
+|------|----------|---------------|----------------|
+| WWV → AC0G | 1,119 km | ±1–5% | ±10 km |
+| CHU → AC0G | 1,522 km | ±1–5% | ±12 km |
+| WWVH → AC0G | 6,600 km | ±16–38% | ±54 km |
+
+The WWVH path spans tropical to mid-latitude ionosphere, where the horizontal gradient is significant — especially during dawn/dusk terminator crossing.
+
+**Outputs:**
+- Ray fan plots showing all propagation modes
+- Group path delay per ray
+- Mode identification (1F, 2F, 3F) from closing rays
+- Ionospheric grid parameters (foF2, hmF2 at midpoint)
+
+**Computational cost:** ~2–3 ms per IRI call; 5 samples add ~15 ms. Negligible compared to ray tracing itself.
+
+**Scientific value:**
+- Validates the real-time `HFPropagationModel` delay predictions
+- Provides ground truth for mode identification
+- Enables QEX article figures showing ray geometry through realistic ionosphere
+- Captures horizontal Ne gradients missed by single-point models
+
+### 6.2 Critical Frequency Estimation (foF2) — Partially Implemented
 
 **Status:** The ionospheric reanalysis service (Section 5) now estimates foF2 from solar zenith angle using the Chapman layer model. This provides a climatological estimate suitable for mode validation.
 
@@ -784,7 +823,7 @@ The following live data demonstrates the reanalysis in operation on this install
 - Compare with IRI-2020 foF2 predictions
 - Back-calculate foF2 from observed MUF using secant law (inverse problem)
 
-### 6.2 Ionospheric Tilt Detection
+### 6.3 Ionospheric Tilt Detection
 
 **Concept:** Large-scale ionospheric gradients cause systematic TEC differences between paths.
 
@@ -798,7 +837,7 @@ The following live data demonstrates the reanalysis in operation on this install
 - Good azimuthal coverage
 - Gradient calculation algorithm
 
-### 6.3 Space Weather Correlation
+### 6.4 Space Weather Correlation
 
 **Concept:** Correlate ionospheric measurements with space weather indices.
 
@@ -812,7 +851,7 @@ The following live data demonstrates the reanalysis in operation on this install
 - Historical correlation analysis
 - Prediction algorithm development
 
-### 6.4 Luxembourg Effect Detection
+### 6.5 Luxembourg Effect Detection
 
 **Concept:** Cross-modulation between powerful transmitters via ionospheric non-linearity.
 
@@ -826,7 +865,7 @@ The following live data demonstrates the reanalysis in operation on this install
 - Intermodulation product detection
 - D-layer model integration
 
-### 6.5 Geomagnetic Storm Effects
+### 6.6 Geomagnetic Storm Effects
 
 **Concept:** Track ionospheric response to geomagnetic storms.
 
@@ -1122,6 +1161,7 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 |------------|--------------|
 | **Tick Timing (D_clock, Doppler, SNR)** | `src/hf_timestd/core/tick_edge_detector.py` |
 | **Propagation Model** | `src/hf_timestd/core/propagation_model.py` |
+| **PHaRLAP Ray Tracing** | `src/hf_timestd/core/raytrace_engine.py` |
 | **Ionospheric Data** | `src/hf_timestd/core/iono_data_service.py` |
 | TEC Estimation | `src/hf_timestd/core/tec_estimator.py` |
 | Carrier-Phase dTEC + Anchoring | `src/hf_timestd/core/carrier_tec.py` |
