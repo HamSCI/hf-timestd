@@ -179,16 +179,52 @@ class RaytraceResult:
 _C_KM_S = 299792.458  # km/s
 
 
+def _gc_point(lat1_deg: float, lon1_deg: float,
+              bearing_deg: float, dist_km: float) -> tuple[float, float]:
+    """Return (lat, lon) in degrees at *dist_km* along a great circle
+    from (lat1, lon1) at initial bearing *bearing_deg*."""
+    R = 6371.0
+    d = dist_km / R
+    lat1 = math.radians(lat1_deg)
+    lon1 = math.radians(lon1_deg)
+    brg  = math.radians(bearing_deg)
+    lat2 = math.asin(math.sin(lat1) * math.cos(d) +
+                     math.cos(lat1) * math.sin(d) * math.cos(brg))
+    lon2 = lon1 + math.atan2(math.sin(brg) * math.sin(d) * math.cos(lat1),
+                              math.cos(d) - math.sin(lat1) * math.sin(lat2))
+    return math.degrees(lat2), math.degrees(lon2)
+
+
+def _gc_bearing(lat1: float, lon1: float,
+                lat2: float, lon2: float) -> float:
+    """Initial bearing in degrees from (lat1, lon1) to (lat2, lon2)."""
+    dlon = math.radians(lon2 - lon1)
+    lat1r, lat2r = math.radians(lat1), math.radians(lat2)
+    return math.degrees(math.atan2(
+        math.sin(dlon) * math.cos(lat2r),
+        math.cos(lat1r) * math.sin(lat2r) -
+        math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon)
+    )) % 360.0
+
+
 def _build_iri_grid(tx_lat: float, tx_lon: float,
                     rx_lat: float, rx_lon: float,
                     utc: datetime,
                     height_start_km: float = 60.0,
                     height_inc_km:   float = 3.0,
                     n_heights: int = 200,
-                    range_inc_km: float = 50.0) -> Optional[dict]:
+                    range_inc_km: float = 50.0,
+                    n_iri_samples: int = 0) -> Optional[dict]:
     """
     Build a 2-D ionosphere electron-density grid along the great-circle
     path from tx to rx using IRI-2020 (via pylap.iri2016 → libiri2020).
+
+    When *n_iri_samples* > 1 the IRI is evaluated at that many equally-spaced
+    points along the great-circle path (TX → grid edge) and the Ne(h) profiles
+    are linearly interpolated across all range columns.  When *n_iri_samples*
+    is 0 (default) the sample count is chosen automatically: paths ≤ 2 000 km
+    get 5 samples, longer paths get one sample per 500 km (capped at 25).
+    Setting *n_iri_samples* = 1 reproduces the legacy midpoint-only behaviour.
 
     pylap.iri2016 signature:
         iri2016(glat, glon, r12_idx, [year,month,day,hour,min],
@@ -216,36 +252,72 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
         grid_max_km = max(10000.0, gc_km * 2)
         n_ranges = int(grid_max_km / range_inc_km) + 1
 
-        # Sample IRI at path midpoint (horizontally uniform approximation).
-        mid_lat = (tx_lat + rx_lat) / 2.0
-        mid_lon = (tx_lon + rx_lon) / 2.0
+        brg = _gc_bearing(tx_lat, tx_lon, rx_lat, rx_lon)
         r12_idx = 100.0  # moderate solar activity
-
         ut_list = [utc.year, utc.month, utc.day,
                    utc.hour, utc.minute]
 
-        # pylap.iri2016 returns (outf[20, num_heights], oarr[100])
-        outf, oarr = _pylap_iri2016(
-            float(mid_lat), float(mid_lon), float(r12_idx),
-            ut_list,
-            float(height_start_km), float(height_inc_km), int(n_heights),
-            {}
-        )
+        # Determine number of IRI sample points along the path.
+        if n_iri_samples <= 0:
+            n_iri_samples = max(5, min(25, int(gc_km / 500.0) + 1))
+        if n_iri_samples == 1:
+            # Legacy single-midpoint behaviour.
+            sample_dists = [gc_km / 2.0]
+        else:
+            # Sample from TX to grid edge so rays beyond the receiver are
+            # still covered.  The first sample is at the TX, the last at
+            # grid_max_km.  Profiles beyond the last sample are held
+            # constant (extrapolated from the last IRI call).
+            sample_dists = np.linspace(0.0, grid_max_km, n_iri_samples).tolist()
 
-        ne_profile = np.asarray(outf[0, :], dtype=np.float64)  # m^-3 from IRI
-        ne_profile = np.maximum(ne_profile, 0.0)               # guard negatives
-        ne_profile = ne_profile / 1e6                          # m^-3 → cm^-3 (raytrace_2d units)
-        # oarr[0] = NmF2 (m^-3), oarr[1] = hmF2 (km)
-        # foF2 = 8.98 * sqrt(NmF2) Hz → MHz
-        nmF2       = max(float(oarr[0]), 0.0)
-        foF2_mhz   = 8.98 * math.sqrt(nmF2) / 1e6
-        hmF2_km    = float(oarr[1])
+        # Evaluate IRI at each sample point.
+        sample_profiles: list[np.ndarray] = []
+        sample_foF2: list[float] = []
+        sample_hmF2: list[float] = []
+        for d in sample_dists:
+            slat, slon = _gc_point(tx_lat, tx_lon, brg, d)
+            outf, oarr = _pylap_iri2016(
+                float(slat), float(slon), float(r12_idx),
+                ut_list,
+                float(height_start_km), float(height_inc_km), int(n_heights),
+                {}
+            )
+            ne = np.asarray(outf[0, :], dtype=np.float64)
+            ne = np.maximum(ne, 0.0) / 1e6  # m^-3 → cm^-3
+            sample_profiles.append(ne)
+            nmF2 = max(float(oarr[0]), 0.0)
+            sample_foF2.append(8.98 * math.sqrt(nmF2) / 1e6)
+            sample_hmF2.append(float(oarr[1]))
 
-        # Broadcast profile across all range columns.
-        iono_en_grid   = np.tile(ne_profile.reshape(-1, 1), (1, n_ranges))
+        n_samp = len(sample_dists)
+        logger.debug("IRI grid: %d samples along %.0f km path (%.0f km grid), "
+                     "foF2 %.2f–%.2f MHz, hmF2 %.0f–%.0f km",
+                     n_samp, gc_km, grid_max_km,
+                     min(sample_foF2), max(sample_foF2),
+                     min(sample_hmF2), max(sample_hmF2))
+
+        # Interpolate Ne profiles onto every range column.
+        if n_samp == 1:
+            iono_en_grid = np.tile(sample_profiles[0].reshape(-1, 1),
+                                  (1, n_ranges))
+        else:
+            range_km = np.arange(n_ranges) * range_inc_km
+            profiles_arr = np.column_stack(sample_profiles)  # (n_heights, n_samp)
+            sample_km = np.array(sample_dists)
+            # np.interp operates per-height row; vectorise with apply_along_axis
+            iono_en_grid = np.zeros((n_heights, n_ranges), dtype=np.float64)
+            for h in range(n_heights):
+                iono_en_grid[h, :] = np.interp(range_km, sample_km,
+                                               profiles_arr[h, :])
+
         iono_en_grid_5 = np.zeros_like(iono_en_grid)  # Doppler shift not needed
         collision_grid = np.zeros_like(iono_en_grid)
         irreg_grid     = np.zeros((4, n_ranges), dtype=np.float64)
+
+        # Report midpoint foF2/hmF2 for callers that log IRI parameters.
+        mid_idx = n_samp // 2
+        foF2_mhz = sample_foF2[mid_idx]
+        hmF2_km  = sample_hmF2[mid_idx]
 
         return dict(
             iono_en_grid=iono_en_grid,

@@ -843,18 +843,60 @@ def _try_pylap_raytrace():
             math.sin(dlon/2)**2)
     target_km = 6371.0 * 2 * math.asin(math.sqrt(a_gc))
 
-    # Build IRI grid — target date 18:00 UTC (local noon)
-    mid_lat = (tx_lat + rx_lat) / 2.0
-    mid_lon = (tx_lon + rx_lon) / 2.0
+    # Build spatially varying IRI grid — target date 18:00 UTC (local noon)
     ut = [int(TARGET_DATE[:4]), int(TARGET_DATE[4:6]), int(TARGET_DATE[6:]), 18, 0]
-    outf, oarr = iri_mod.iri2016(mid_lat, mid_lon, 100.0, ut,
-                                  60.0, 3.0, 200, {})
-    ne = np.maximum(outf[0, :], 0.0) / 1e6  # cm^-3
-    foF2 = 8.98 * np.sqrt(max(float(oarr[0]), 0.0)) / 1e6
-    hmF2 = float(oarr[1])
 
-    n_ranges = 201
-    iono_en = np.tile(ne.reshape(-1, 1), (1, n_ranges))
+    # Great-circle bearing for sampling IRI along the path
+    dlon_b = math.radians(rx_lon - tx_lon)
+    lat1_b, lat2_b = math.radians(tx_lat), math.radians(rx_lat)
+    brg = math.degrees(math.atan2(
+        math.sin(dlon_b) * math.cos(lat2_b),
+        math.cos(lat1_b) * math.sin(lat2_b) -
+        math.sin(lat1_b) * math.cos(lat2_b) * math.cos(dlon_b)
+    )) % 360.0
+
+    def _gc_pt(lat1, lon1, bearing, dist_km):
+        R = 6371.0; d = dist_km / R
+        la1 = math.radians(lat1); lo1 = math.radians(lon1); br = math.radians(bearing)
+        la2 = math.asin(math.sin(la1)*math.cos(d) + math.cos(la1)*math.sin(d)*math.cos(br))
+        lo2 = lo1 + math.atan2(math.sin(br)*math.sin(d)*math.cos(la1),
+                                math.cos(d) - math.sin(la1)*math.sin(la2))
+        return math.degrees(la2), math.degrees(lo2)
+
+    n_heights = 200
+    range_inc_km = 50.0
+    grid_max_km = max(10000.0, target_km * 2)
+    n_ranges = int(grid_max_km / range_inc_km) + 1
+
+    # Sample IRI at multiple points along the path (auto: 1 per 500 km, min 5)
+    n_iri = max(5, min(25, int(target_km / 500.0) + 1))
+    sample_dists = np.linspace(0.0, grid_max_km, n_iri)
+    sample_profiles = []
+    sample_foF2 = []
+    sample_hmF2 = []
+    for sd in sample_dists:
+        slat, slon = _gc_pt(tx_lat, tx_lon, brg, sd)
+        outf, oarr = iri_mod.iri2016(slat, slon, 100.0, ut, 60.0, 3.0, n_heights, {})
+        ne = np.maximum(outf[0, :], 0.0) / 1e6
+        sample_profiles.append(ne)
+        nmF2 = max(float(oarr[0]), 0.0)
+        sample_foF2.append(8.98 * math.sqrt(nmF2) / 1e6)
+        sample_hmF2.append(float(oarr[1]))
+
+    # Interpolate onto every range column
+    range_km = np.arange(n_ranges) * range_inc_km
+    profiles_arr = np.column_stack(sample_profiles)
+    sample_km = np.array(sample_dists)
+    iono_en = np.zeros((n_heights, n_ranges), dtype=np.float64)
+    for h in range(n_heights):
+        iono_en[h, :] = np.interp(range_km, sample_km, profiles_arr[h, :])
+
+    mid_idx = n_iri // 2
+    foF2 = sample_foF2[mid_idx]
+    hmF2 = sample_hmF2[mid_idx]
+    print(f"    IRI grid: {n_iri} samples, foF2 {min(sample_foF2):.2f}–{max(sample_foF2):.2f} MHz, "
+          f"hmF2 {min(sample_hmF2):.0f}–{max(sample_hmF2):.0f} km")
+
     zeros = np.zeros_like(iono_en)
     irreg = np.zeros((4, n_ranges), dtype=np.float64)
 
@@ -985,7 +1027,7 @@ def generate_fig6():
     modes_found = sorted(set(c[1] for c in closing_info))
     modes_str = ', '.join(f'{n}F2' for n in modes_found)
     ax.text(x_max * 0.5, 470,
-            f'PHaRLAP 4.7.4 numerical ray tracing through IRI-2020 Ne(h) profile\n'
+            f'PHaRLAP 4.7.4 numerical ray tracing through spatially varying IRI-2020 Ne(h)\n'
             f'{len(elevs)} rays, {n_closing} closing — modes: {modes_str}',
             fontsize=7, ha='center', fontstyle='italic', color='#666')
 
