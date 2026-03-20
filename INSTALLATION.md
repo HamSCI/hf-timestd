@@ -1,7 +1,7 @@
 # HF Time Standard Analysis (hf-timestd) - Installation Guide
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** February 26, 2026
+**Last Updated:** March 20, 2026
 
 This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, CHU, WWV, WWVH).
 
@@ -98,8 +98,9 @@ When disk usage exceeds `DISK_CRIT_PCT`, the prune script automatically flushes 
 Before running the installer, have the following ready:
 
 - **Station callsign** (e.g., `W1ABC`)
-- **Maidenhead grid square** (6 or 10 characters, e.g., `FN31pr` or `FN31pr42ab`)
-- **Station latitude and longitude** (decimal degrees)
+- **Station location** (either one):
+  - Maidenhead grid square (6 or 10 characters, e.g., `FN31pr` or `FN31pr42ab`)
+  - Latitude and longitude (decimal degrees)
 - **ka9q-radio status address** (e.g., `hf-status.local` — find via `avahi-browse -rt _ka9q-ctl._udp`)
 - **PSWS station ID and instrument ID** (if uploading to the HamSCI PSWS network)
 - **GNSS receiver address and port** (if using a ZED-F9P for VTEC monitoring)
@@ -113,11 +114,11 @@ Before running the installer, have the following ready:
 git clone https://github.com/mijahauan/hf-timestd.git
 cd hf-timestd
 
-# 2. Run installer (interactive wizard guides configuration)
-sudo ./scripts/install.sh
+# 2. Run deploy script (idempotent install/update)
+sudo ./scripts/deploy.sh
 ```
 
-The installer:
+The deploy script:
 
 1. Installs all apt dependencies and verifies Python 3.10+
 2. Installs and configures chrony for SHM clock discipline
@@ -125,7 +126,7 @@ The installer:
 4. Creates the `timestd` system user and production directories
 5. Sets up the Python virtual environment (`/opt/hf-timestd/venv`)
 6. Copies web-api, scripts, and systemd service files
-7. **Runs the setup wizard** (`setup-station.sh`) — an interactive prompt that collects your station identity, ka9q-radio address, timing mode, GNSS VTEC settings, and PSWS upload credentials, then generates `/etc/hf-timestd/timestd-config.toml`
+7. **Runs the setup wizard** (`setup-station.sh`) — an interactive prompt that collects your station identity, location (grid square or lat/lon), ka9q-radio address, timing mode, GNSS VTEC settings, and PSWS upload credentials, then generates `/etc/hf-timestd/timestd-config.toml`
 8. Installs and enables all systemd services and timers
 
 The installation is **idempotent** — safe to re-run. On re-run, it will skip steps that are already complete and offer to re-run the configuration wizard if a config already exists.
@@ -156,10 +157,10 @@ sudo ./scripts/start-services.sh --status
 
 ```bash
 cd /path/to/hf-timestd
-sudo ./scripts/update-production.sh --pull
+sudo ./scripts/deploy.sh --pull
 ```
 
-This pulls the latest code, reinstalls the Python package, syncs scripts/web-api/systemd files, and restarts affected services. The core recorder is **not** restarted automatically to avoid data gaps.
+This pulls the latest code, syncs `/opt/hf-timestd`, updates the Python venv, syncs scripts/web-api/systemd files, and restarts affected services.
 
 ---
 
@@ -174,7 +175,7 @@ sudo ./scripts/setup-station.sh --config /etc/hf-timestd/timestd-config.toml --r
 Or re-run the full installer, which will offer to re-run the wizard:
 
 ```bash
-sudo ./scripts/install.sh
+sudo ./scripts/deploy.sh --reconfig
 ```
 
 ---
