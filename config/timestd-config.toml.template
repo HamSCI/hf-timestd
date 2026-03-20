@@ -5,12 +5,12 @@
 
 [station]
 callsign = "<YOUR_CALLSIGN>"           # e.g., W1ABC
-grid_square = "<YOUR_GRID>"            # e.g., FN31pr (10-char Maidenhead)
+grid_square = "<YOUR_GRID>"            # e.g., FN31pr42ab (optional if latitude/longitude are provided)
 id = "<YOUR_STATION_ID>"               # e.g., S000001
 instrument_id = "<YOUR_INSTRUMENT_ID>" # e.g., 172
 description = "<YOUR_DESCRIPTION>"     # e.g., RX888 MkII with resonant dipole
-latitude = 0.0                          # Your latitude in decimal degrees (REQUIRED)
-longitude = 0.0                         # Your longitude in decimal degrees (REQUIRED)
+latitude = 0.0                          # Your latitude in decimal degrees (optional if grid_square is provided)
+longitude = 0.0                         # Your longitude in decimal degrees (optional if grid_square is provided)
 
 [ka9q]
 # Your ka9q-radio status multicast address
@@ -48,7 +48,7 @@ save_digital_rf = false
 # Tiered Storage: Use /dev/shm (RAM) for hot buffer, disk for cold storage
 tiered_storage = true
 hot_buffer_root = "/dev/shm/timestd"
-ram_percent = 20
+tiered_ram_percent = 20
 
 # Channel defaults (applied to all channel groups unless overridden per-group)
 [recorder.channel_defaults]

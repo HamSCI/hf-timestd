@@ -321,7 +321,7 @@ def main():
     elif args.command == 'grape':
         # GRAPE data products mode
         from pathlib import Path
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         
         if not args.grape_command:
             grape_parser.print_help()
@@ -332,7 +332,7 @@ def main():
         def resolve_date(date_arg):
             """Resolve date argument to YYYYMMDD string."""
             if not date_arg or date_arg.lower() == 'yesterday':
-                return (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+                return (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime('%Y%m%d')
             return date_arg.replace('-', '')
         
         if args.grape_command == 'daily':
@@ -370,7 +370,7 @@ def main():
             status_file = data_root / 'upload' / 'grape_status.json'
             pipeline_status = {
                 'date': date_str,
-                'started_at': datetime.now().isoformat(),
+                'started_at': datetime.now(tz=timezone.utc).isoformat(),
                 'completed_at': None,
                 'status': 'running',
                 'channels_expected': expected_count,
@@ -423,7 +423,7 @@ def main():
                 print(f"   Aborting — no data to package/upload")
                 pipeline_status['status'] = 'failed'
                 pipeline_status['error'] = f'0/{expected_count} channels decimated'
-                pipeline_status['completed_at'] = datetime.now().isoformat()
+                pipeline_status['completed_at'] = datetime.now(tz=timezone.utc).isoformat()
                 _save_status()
                 sys.exit(1)
             if failed_decimate:
@@ -463,7 +463,7 @@ def main():
                 print(f"   Aborting — no spectrograms to package/upload")
                 pipeline_status['status'] = 'failed'
                 pipeline_status['error'] = f'0/{len(decimated)} spectrograms generated'
-                pipeline_status['completed_at'] = datetime.now().isoformat()
+                pipeline_status['completed_at'] = datetime.now(tz=timezone.utc).isoformat()
                 _save_status()
                 sys.exit(1)
             if failed_spec:
@@ -482,7 +482,7 @@ def main():
                 print(f"   Aborting — will not upload without valid package")
                 pipeline_status['status'] = 'failed'
                 pipeline_status['error'] = f'Package failed: {e}'
-                pipeline_status['completed_at'] = datetime.now().isoformat()
+                pipeline_status['completed_at'] = datetime.now(tz=timezone.utc).isoformat()
                 _save_status()
                 sys.exit(1)
 
@@ -493,7 +493,7 @@ def main():
                 print(f"   ❌ GATE FAILED: no OBS directory in {upload_dir}")
                 pipeline_status['status'] = 'failed'
                 pipeline_status['error'] = 'No OBS directory after packaging'
-                pipeline_status['completed_at'] = datetime.now().isoformat()
+                pipeline_status['completed_at'] = datetime.now(tz=timezone.utc).isoformat()
                 _save_status()
                 sys.exit(1)
             print(f"   ✅ GATE PASSED: {len(obs_dirs)} dataset(s) ready")
@@ -590,7 +590,7 @@ def main():
 
             # Finalize status
             pipeline_status['status'] = 'completed' if upload_ok or args.no_upload else 'upload_pending'
-            pipeline_status['completed_at'] = datetime.now().isoformat()
+            pipeline_status['completed_at'] = datetime.now(tz=timezone.utc).isoformat()
             _save_status()
 
             print(f"\n✅ GRAPE daily pipeline complete for {date_str}")
@@ -659,7 +659,7 @@ def main():
                 gen.generate_rolling(hours=args.rolling)
             else:
                 # Default to yesterday
-                date_str = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+                date_str = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime('%Y%m%d')
                 gen.generate_daily(date_str)
                 
         elif args.grape_command == 'package':

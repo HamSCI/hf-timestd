@@ -163,11 +163,22 @@ class MetrologyService:
             # We need hot_buffer_root = /dev/shm/timestd and cold_buffer_root = /var/lib/timestd
             hot_root = self.archive_dir.parent.parent  # /dev/shm/timestd
             cold_root = Path('/var/lib/timestd')
+            tiered_hot_minutes = None
+            tiered_ram_percent = None
+            try:
+                tiered_hot_minutes = self.station_config.get('tiered_hot_minutes')
+                tiered_ram_percent = self.station_config.get('tiered_ram_percent')
+                if tiered_ram_percent is None:
+                    tiered_ram_percent = self.station_config.get('ram_percent')
+            except Exception:
+                pass
             tiered_config = TieredStorageConfig(
                 hot_buffer_root=hot_root,
                 cold_buffer_root=cold_root,
-                auto_configure=False,
-                hot_minutes=5
+                auto_configure=(tiered_hot_minutes is None),
+                hot_minutes=int(tiered_hot_minutes) if tiered_hot_minutes is not None else 5,
+                ram_percent=float(tiered_ram_percent) if tiered_ram_percent is not None else TieredStorageConfig.ram_percent,
+                num_channels=1,
             )
             self._tiered_manager = TieredStorageManager(tiered_config)
             logger.info(f"Tiered storage manager initialized: hot={hot_root}, cold={cold_root}")

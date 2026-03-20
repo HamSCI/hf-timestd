@@ -276,23 +276,26 @@ class CoreRecorderV2:
                 
                 num_channels = len(self.channel_specs)
                 hot_buffer_root = self.recorder_config.get('hot_buffer_root', '/dev/shm/timestd')
+                tiered_hot_minutes = self.recorder_config.get('tiered_hot_minutes')
+                tiered_ram_percent = self.recorder_config.get('tiered_ram_percent')
+                if tiered_ram_percent is None:
+                    tiered_ram_percent = self.recorder_config.get('ram_percent')
                 
                 logger.info(f"Initializing tiered storage: {num_channels} channels, "
                            f"hot_buffer={hot_buffer_root}")
                 
-                # Fixed 5-minute retention for real-time analytics/fusion pipeline
                 tiered_config = TieredStorageConfig(
                     hot_buffer_root=Path(hot_buffer_root),
                     cold_buffer_root=Path(self.output_dir),
-                    auto_configure=False,
-                    hot_minutes=5,
+                    auto_configure=(tiered_hot_minutes is None),
+                    hot_minutes=int(tiered_hot_minutes) if tiered_hot_minutes is not None else 5,
+                    ram_percent=float(tiered_ram_percent) if tiered_ram_percent is not None else TieredStorageConfig.ram_percent,
                     num_channels=num_channels,
                 )
                 
-                from .tiered_storage import _manager
-                global _manager
+                from . import tiered_storage
                 tiered_manager = TieredStorageManager(tiered_config)
-                _manager = tiered_manager
+                tiered_storage._manager = tiered_manager
                 tiered_manager.start()
                 
                 logger.info(f"✓ Tiered storage ACTIVE: hot_minutes={tiered_manager.hot_minutes}")

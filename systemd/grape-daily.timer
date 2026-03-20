@@ -5,7 +5,7 @@ Requires=grape-daily.service
 
 [Timer]
 # Run daily at 01:00 UTC (after midnight, yesterday's data is complete)
-OnCalendar=*-*-* 01:00:00
+OnCalendar=*-*-* 01:00:00 UTC
 
 # Add randomized delay to avoid load spikes
 RandomizedDelaySec=300

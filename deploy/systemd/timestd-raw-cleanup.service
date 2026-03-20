@@ -10,19 +10,51 @@ Group=timestd
 # Keep only 3 days of raw IQ buffer (today + 2 prior days)
 # Each day is ~35 GB across 9 channels; 3 days ≈ 105 GB
 ExecStart=/bin/bash -c '\
-    KEEP_DAYS=3; \
-    CUTOFF=$(date -d "-${KEEP_DAYS} days" +%%Y%%m%%d); \
-    for dir in /var/lib/timestd/raw_buffer/*/; do \
-        for day in "$dir"/20*/; do \
-            [ -d "$day" ] || continue; \
-            DAY=$(basename "$day"); \
-            if [ "$DAY" -lt "$CUTOFF" ] 2>/dev/null; then \
-                echo "Removing $day"; \
-                rm -rf "$day"; \
+    DATA_ROOT=/var/lib/timestd; \
+    RAW_ROOT="$DATA_ROOT/raw_buffer"; \
+    ARCHIVE_ROOT=/mnt/timestd-archive; \
+    THRESHOLD_PCT=80; \
+    TODAY=$(date -u +%%Y%%m%%d); \
+    usage_pct() { df -P "$DATA_ROOT" | tail -1 | awk "{gsub(/%/,\"\",\$5); print \$5}"; }; \
+    USED=$(usage_pct); \
+    echo "Raw cleanup: used=${USED}%% threshold=${THRESHOLD_PCT}%% today=${TODAY}"; \
+    if [ -z "$USED" ]; then \
+        echo "Raw cleanup: cannot determine disk usage for $DATA_ROOT"; \
+        exit 0; \
+    fi; \
+    if [ "$USED" -lt "$THRESHOLD_PCT" ] 2>/dev/null; then \
+        echo "Raw cleanup: no action needed"; \
+        exit 0; \
+    fi; \
+    DATES=$(find "$RAW_ROOT" -mindepth 2 -maxdepth 2 -type d -name "20*" -printf "%%f\n" 2>/dev/null | sort -u); \
+    for DAY in $DATES; do \
+        if [ "$DAY" = "$TODAY" ]; then \
+            continue; \
+        fi; \
+        USED=$(usage_pct); \
+        if [ "$USED" -lt "$THRESHOLD_PCT" ] 2>/dev/null; then \
+            break; \
+        fi; \
+        echo "Raw cleanup: evicting date $DAY (used=${USED}%%)"; \
+        for dir in "$RAW_ROOT"/*/; do \
+            [ -d "$dir" ] || continue; \
+            channel=$(basename "${dir%/}"); \
+            src="$dir/$DAY"; \
+            [ -d "$src" ] || continue; \
+            if mountpoint -q "$ARCHIVE_ROOT" 2>/dev/null; then \
+                dest="$ARCHIVE_ROOT/raw_buffer/$channel/$DAY"; \
+                mkdir -p "$(dirname "$dest")"; \
+                echo "Archiving $src -> $dest"; \
+                rm -rf "$dest" 2>/dev/null || true; \
+                mv "$src" "$dest"; \
+            else \
+                echo "Removing $src"; \
+                rm -rf "$src"; \
             fi; \
         done; \
     done; \
-    echo "Cleanup complete. Disk: $(df -h / | tail -1 | awk "{print \\$4, \\$5}")"'
+    USED=$(usage_pct); \
+    echo "Cleanup complete. Used=${USED}%%"'
 
 StandardOutput=journal
 StandardError=journal

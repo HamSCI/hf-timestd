@@ -190,8 +190,7 @@ echo -e "  Before you begin, have the following information ready:"
 echo ""
 echo -e "    ${BOLD}Required:${NC}"
 echo "      - Your amateur radio callsign"
-echo "      - Your Maidenhead grid square (6 or 10 character)"
-echo "      - Your precise latitude and longitude (decimal degrees)"
+echo "      - Your station location (either Maidenhead grid square OR latitude/longitude)"
 echo "      - Your ka9q-radio status multicast address"
 echo ""
 echo -e "    ${BOLD}Optional:${NC}"
@@ -209,9 +208,25 @@ echo -e "${BOLD}${BLUE}━━━ Section 1: Station Identity ━━━${NC}"
 echo ""
 
 prompt CALLSIGN "Callsign" "" "Your amateur radio callsign (e.g. W1ABC)" true
-prompt GRID_SQUARE "Grid square" "" "Maidenhead locator, 6 or 10 chars (e.g. FN42ab12cd)" true
-prompt LATITUDE "Latitude" "" "Decimal degrees, positive = North (e.g. 42.3601)" true
-prompt LONGITUDE "Longitude" "" "Decimal degrees, positive = East, negative = West (e.g. -71.0589)" true
+echo ""
+echo -e "  ${DIM}Location entry method:${NC}"
+prompt_choice LOCATION_MODE "Select location input" \
+    "grid — Enter Maidenhead grid square (6 or 10 chars)" \
+    "latlon — Enter latitude/longitude (decimal degrees)"
+
+GRID_SQUARE=""
+LATITUDE=""
+LONGITUDE=""
+
+if [[ "$LOCATION_MODE" == "grid" ]]; then
+    prompt GRID_SQUARE "Grid square" "" "Maidenhead locator, 6 or 10 chars (e.g. FN42ab12cd). More precision is better." true
+    # Lat/Lon will be derived from grid in the config generator.
+else
+    prompt LATITUDE "Latitude" "" "Decimal degrees, positive = North. More precision is better." true
+    prompt LONGITUDE "Longitude" "" "Decimal degrees, positive = East, negative = West. More precision is better." true
+    # Grid will be derived from lat/lon in the config generator.
+fi
+
 prompt DESCRIPTION "Station description" "${CALLSIGN} hf-timestd" "Free text description of your setup"
 
 # =============================================================================
@@ -325,9 +340,10 @@ echo "  ╚═══════════════════════
 echo -e "${NC}"
 echo -e "  ${BOLD}Station:${NC}"
 echo "    Callsign:     $CALLSIGN"
-echo "    Grid square:  $GRID_SQUARE"
-echo "    Latitude:     $LATITUDE"
-echo "    Longitude:    $LONGITUDE"
+echo "    Location mode: $LOCATION_MODE"
+echo "    Grid square:  ${GRID_SQUARE:-<derived>}"
+echo "    Latitude:     ${LATITUDE:-<derived>}"
+echo "    Longitude:    ${LONGITUDE:-<derived>}"
 echo "    Description:  $DESCRIPTION"
 echo ""
 echo -e "  ${BOLD}Radio:${NC}"
@@ -434,9 +450,117 @@ def set_bare(section, key, val):
 
 # Station
 set_str("station", "callsign", e("WIZ_CALLSIGN"))
-set_str("station", "grid_square", e("WIZ_GRID_SQUARE"))
-set_bare("station", "latitude", e("WIZ_LATITUDE"))
-set_bare("station", "longitude", e("WIZ_LONGITUDE"))
+grid_in = e("WIZ_GRID_SQUARE")
+lat_in = e("WIZ_LATITUDE")
+lon_in = e("WIZ_LONGITUDE")
+
+def _grid_to_latlon_center(grid: str):
+    g = "".join(ch for ch in (grid or "") if not ch.isspace())
+    g = g.strip()
+    if not g:
+        return None
+    g = g.upper()
+    if len(g) < 4:
+        return None
+    if len(g) not in (4, 6, 8, 10):
+        return None
+    A = ord('A')
+    lon = -180.0 + 20.0 * (ord(g[0]) - A)
+    lat = -90.0 + 10.0 * (ord(g[1]) - A)
+    lon_w = 20.0
+    lat_h = 10.0
+    lon += 2.0 * int(g[2])
+    lat += 1.0 * int(g[3])
+    lon_w = 2.0
+    lat_h = 1.0
+    if len(g) >= 6:
+        lon += (5.0/60.0) * (ord(g[4]) - A)
+        lat += (2.5/60.0) * (ord(g[5]) - A)
+        lon_w = 5.0/60.0
+        lat_h = 2.5/60.0
+    if len(g) >= 8:
+        lon += (0.5/60.0) * int(g[6])
+        lat += (0.25/60.0) * int(g[7])
+        lon_w = 0.5/60.0
+        lat_h = 0.25/60.0
+    if len(g) >= 10:
+        # subsquares: 24 letters a-x
+        lon += (0.5/60.0/24.0) * (ord(g[8]) - A)
+        lat += (0.25/60.0/24.0) * (ord(g[9]) - A)
+        lon_w = 0.5/60.0/24.0
+        lat_h = 0.25/60.0/24.0
+    return (lat + lat_h/2.0, lon + lon_w/2.0)
+
+def _latlon_to_grid(lat: float, lon: float, precision: int = 10) -> str:
+    # precision: 4,6,8,10
+    if precision not in (4, 6, 8, 10):
+        precision = 10
+    lon = float(lon)
+    lat = float(lat)
+    # clamp to valid range (avoid edge cases exactly at +/-180)
+    lon = max(-179.999999, min(179.999999, lon))
+    lat = max(-89.999999, min(89.999999, lat))
+    A = ord('A')
+    lon_adj = lon + 180.0
+    lat_adj = lat + 90.0
+    lon_field = int(lon_adj // 20.0)
+    lat_field = int(lat_adj // 10.0)
+    g = [chr(A + lon_field), chr(A + lat_field)]
+    lon_adj -= lon_field * 20.0
+    lat_adj -= lat_field * 10.0
+    lon_square = int(lon_adj // 2.0)
+    lat_square = int(lat_adj // 1.0)
+    g += [str(lon_square), str(lat_square)]
+    if precision >= 6:
+        lon_adj -= lon_square * 2.0
+        lat_adj -= lat_square * 1.0
+        lon_sub = int(lon_adj / (5.0/60.0))
+        lat_sub = int(lat_adj / (2.5/60.0))
+        g += [chr(A + lon_sub), chr(A + lat_sub)]
+    if precision >= 8:
+        lon_adj -= lon_sub * (5.0/60.0)
+        lat_adj -= lat_sub * (2.5/60.0)
+        lon_ext = int(lon_adj / (0.5/60.0))
+        lat_ext = int(lat_adj / (0.25/60.0))
+        g += [str(lon_ext), str(lat_ext)]
+    if precision >= 10:
+        lon_adj -= lon_ext * (0.5/60.0)
+        lat_adj -= lat_ext * (0.25/60.0)
+        lon_sub2 = int(lon_adj / ((0.5/60.0)/24.0))
+        lat_sub2 = int(lat_adj / ((0.25/60.0)/24.0))
+        g += [chr(A + lon_sub2), chr(A + lat_sub2)]
+    return "".join(g)
+
+def _parse_float(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+lat_val = _parse_float(lat_in)
+lon_val = _parse_float(lon_in)
+grid_val = (grid_in or "").strip()
+
+if grid_val and (lat_val is None or lon_val is None):
+    ll = _grid_to_latlon_center(grid_val)
+    if ll is None:
+        raise SystemExit(f"Invalid grid square: {grid_val}")
+    lat_val, lon_val = ll
+
+if (lat_val is not None and lon_val is not None) and not grid_val:
+    grid_val = _latlon_to_grid(lat_val, lon_val, precision=10)
+
+if not grid_val:
+    raise SystemExit("Missing station location: provide grid square or latitude/longitude")
+if lat_val is None or lon_val is None:
+    raise SystemExit("Missing station location: could not derive latitude/longitude")
+
+set_str("station", "grid_square", grid_val)
+set_bare("station", "latitude", f"{lat_val:.8f}")
+set_bare("station", "longitude", f"{lon_val:.8f}")
 set_str("station", "description", e("WIZ_DESCRIPTION"))
 set_str("station", "id", e("WIZ_STATION_ID"))
 set_str("station", "instrument_id", e("WIZ_INSTRUMENT_ID"))

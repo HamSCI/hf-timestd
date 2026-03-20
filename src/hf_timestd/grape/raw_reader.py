@@ -6,7 +6,7 @@ import numpy as np
 import logging
 import json
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Tuple, Generator
 
 logger = logging.getLogger(__name__)
@@ -76,29 +76,52 @@ class RawBinaryReader:
         """
         if '-' in date_str:
             date_str = date_str.replace('-', '')
+
+        # We do NOT assume that all minutes for a given UTC day live under a
+        # single YYYYMMDD directory. In practice, some pipelines can mis-bucket
+        # a small number of minutes near day boundaries into the adjacent
+        # directory. We defend against this by scanning date-1/date/date+1 and
+        # filtering by timestamp.
+        try:
+            day_start_dt = datetime.strptime(date_str, '%Y%m%d').replace(tzinfo=timezone.utc)
+        except ValueError:
+            logger.warning(f"Invalid date_str: {date_str}")
+            return []
+
+        day_start_ts = int(day_start_dt.timestamp())
+        day_end_ts = int((day_start_dt + timedelta(days=1)).timestamp())
+
+        candidate_dates = [
+            (day_start_dt - timedelta(days=1)).strftime('%Y%m%d'),
+            day_start_dt.strftime('%Y%m%d'),
+            (day_start_dt + timedelta(days=1)).strftime('%Y%m%d'),
+        ]
         
         minutes = set()
         found_any_dir = False
         
         for search_dir in self._search_dirs:
-            day_dir = search_dir / date_str
-            if not day_dir.exists():
-                continue
-            found_any_dir = True
-            
-            # Scan for binary files
-            for f in day_dir.glob('*.bin*'):
-                try:
-                    # Handle .bin, .bin.zst, .bin.lz4
-                    name = f.name
-                    if '.bin' in name:
-                        stem = name.split('.bin')[0]
-                        # Check if stem is integer timestamp
-                        if stem.isdigit():
-                            minutes.add(int(stem))
-                except Exception as e:
-                    logger.debug(f"Caught exception: {e}")
+            for date_candidate in candidate_dates:
+                day_dir = search_dir / date_candidate
+                if not day_dir.exists():
                     continue
+                found_any_dir = True
+                
+                # Scan for binary files
+                for f in day_dir.glob('*.bin*'):
+                    try:
+                        # Handle .bin, .bin.zst, .bin.lz4
+                        name = f.name
+                        if '.bin' in name:
+                            stem = name.split('.bin')[0]
+                            # Check if stem is integer timestamp
+                            if stem.isdigit():
+                                ts = int(stem)
+                                if day_start_ts <= ts < day_end_ts:
+                                    minutes.add(ts)
+                    except Exception as e:
+                        logger.debug(f"Caught exception: {e}")
+                        continue
         
         if not found_any_dir:
             logger.warning(f"No data directory for {date_str} in any search path for {self.channel_name}")
@@ -122,72 +145,89 @@ class RawBinaryReader:
         dt = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)
         date_str = dt.strftime('%Y%m%d')
         base_name = str(minute_timestamp)
+
+        # The expected directory is derived from the timestamp, but if a small
+        # number of files were mis-bucketed near day boundaries, fall back to
+        # adjacent date directories.
+        candidate_dates = [
+            (dt - timedelta(days=1)).strftime('%Y%m%d'),
+            date_str,
+            (dt + timedelta(days=1)).strftime('%Y%m%d'),
+        ]
         
         # 1. Try to read samples — search all directories
         samples = None
         
         for search_dir in self._search_dirs:
-            day_dir = search_dir / date_str
-            if not day_dir.exists():
-                continue
-            
-            # Try uncompressed .bin
-            bin_path = day_dir / f"{base_name}.bin"
-            if bin_path.exists():
-                try:
-                    # Use memmap for efficient reading, but copy to avoid memory accumulation
-                    mm = np.memmap(bin_path, dtype=np.complex64, mode='r')
-                    samples = np.array(mm, dtype=np.complex64)
-                    del mm  # Explicitly release memmap to prevent memory leak
-                except Exception as e:
-                    logger.error(f"Error reading {bin_path}: {e}")
-
-            # Try zstd compressed .bin.zst
-            if samples is None:
-                zst_path = day_dir / f"{base_name}.bin.zst"
-                if zst_path.exists():
+            for date_candidate in candidate_dates:
+                day_dir = search_dir / date_candidate
+                if not day_dir.exists():
+                    continue
+                
+                # Try uncompressed .bin
+                bin_path = day_dir / f"{base_name}.bin"
+                if bin_path.exists():
                     try:
-                        import zstandard as zstd
-                        with open(zst_path, 'rb') as f:
-                            dctx = zstd.ZstdDecompressor()
-                            data = dctx.decompress(f.read())
-                            samples = np.frombuffer(data, dtype=np.complex64).copy()
-                            del data  # Immediately release decompressed buffer
-                    except ImportError:
-                        logger.warning("zstandard module not installed - cannot read .zst files")
+                        # Use memmap for efficient reading, but copy to avoid memory accumulation
+                        mm = np.memmap(bin_path, dtype=np.complex64, mode='r')
+                        samples = np.array(mm, dtype=np.complex64)
+                        del mm  # Explicitly release memmap to prevent memory leak
                     except Exception as e:
-                        logger.error(f"Error reading {zst_path}: {e}")
+                        logger.error(f"Error reading {bin_path}: {e}")
 
-            # Try lz4 compressed .bin.lz4
-            if samples is None:
-                lz4_path = day_dir / f"{base_name}.bin.lz4"
-                if lz4_path.exists():
-                    try:
-                        import lz4.frame
-                        with open(lz4_path, 'rb') as f:
-                            data = lz4.frame.decompress(f.read())
-                            samples = np.frombuffer(data, dtype=np.complex64).copy()
-                            del data  # Immediately release decompressed buffer
-                    except ImportError:
-                        logger.warning("lz4 module not installed - cannot read .lz4 files")
-                    except Exception as e:
-                        logger.error(f"Error reading {lz4_path}: {e}")
-            
+                # Try zstd compressed .bin.zst
+                if samples is None:
+                    zst_path = day_dir / f"{base_name}.bin.zst"
+                    if zst_path.exists():
+                        try:
+                            import zstandard as zstd
+                            with open(zst_path, 'rb') as f:
+                                dctx = zstd.ZstdDecompressor()
+                                data = dctx.decompress(f.read())
+                                samples = np.frombuffer(data, dtype=np.complex64).copy()
+                                del data  # Immediately release decompressed buffer
+                        except ImportError:
+                            logger.warning("zstandard module not installed - cannot read .zst files")
+                        except Exception as e:
+                            logger.error(f"Error reading {zst_path}: {e}")
+
+                # Try lz4 compressed .bin.lz4
+                if samples is None:
+                    lz4_path = day_dir / f"{base_name}.bin.lz4"
+                    if lz4_path.exists():
+                        try:
+                            import lz4.frame
+                            with open(lz4_path, 'rb') as f:
+                                data = lz4.frame.decompress(f.read())
+                                samples = np.frombuffer(data, dtype=np.complex64).copy()
+                                del data  # Immediately release decompressed buffer
+                        except ImportError:
+                            logger.warning("lz4 module not installed - cannot read .lz4 files")
+                        except Exception as e:
+                            logger.error(f"Error reading {lz4_path}: {e}")
+
+                if samples is not None:
+                    break
+
             if samples is not None:
                 break  # Found samples, stop searching
         
         # 2. Read metadata — search all directories
         metadata = None
         for search_dir in self._search_dirs:
-            day_dir = search_dir / date_str
-            json_path = day_dir / f"{base_name}.json"
-            if json_path.exists():
-                try:
-                    with open(json_path, 'r') as f:
-                        metadata = json.load(f)
-                    break  # Found metadata, stop searching
-                except Exception as e:
-                    logger.warning(f"Error reading metadata {json_path}: {e}")
+            for date_candidate in candidate_dates:
+                day_dir = search_dir / date_candidate
+                json_path = day_dir / f"{base_name}.json"
+                if json_path.exists():
+                    try:
+                        with open(json_path, 'r') as f:
+                            metadata = json.load(f)
+                        break  # Found metadata, stop searching
+                    except Exception as e:
+                        logger.warning(f"Error reading metadata {json_path}: {e}")
+
+            if metadata is not None:
+                break
         
         return samples, metadata
 
