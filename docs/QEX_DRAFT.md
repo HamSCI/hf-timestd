@@ -16,11 +16,27 @@
 
 ## 1. Introduction
 
-HF time signals have been broadcasting from national standards laboratories for nearly a century. WWV came on the air in 1923. Generations of experimenters have set clocks by listening for the ticks and tones. The accuracy of that process has always been limited by the same feature that makes HF propagation possible: the signal does not travel at the speed of light in a straight line. It changes course and velocity in the ionosphere. The delay varies with the sun, the season, the solar cycle, and the geometry of each hop. For most timekeeping the error is tolerable; for precision metrology it is the dominant uncertainty, typically 5–30 milliseconds if left unmodeled.
+HF time signals have been broadcasting from national standards laboratories for nearly a
+century. WWV came on the air in 1923. Generations of experimenters have set clocks by
+listening for the ticks. The accuracy of that process has always been limited by the same
+problem: the signal does not travel at the speed of light in a straight line. It bounces
+off the ionosphere. The delay varies with the sun, the season, the solar cycle, and the
+geometry of each hop. For casual timekeeping the error is tolerable; for precision
+metrology it is the dominant uncertainty, typically 5–30 milliseconds if left unmodeled.
 
-This article describes a system to quantify that delay — and to extract a more accurate estimate of UTC and ionospheric science as a direct byproduct. Using a GPSDO-locked RX888 software-defined radio feeding the open-source ka9q-radio channelizer, and the **hf-timestd** software pipeline, the system monitors 17 HF time-standard broadcasts continuously from central Missouri (grid square EM38ww, ~38.9°N, 92.1°W). It recovers UTC to ±0.5 ms (1σ) from HF signals alone — a 20× improvement over uncorrected single-broadcast reception. Along the way, the same coherent phase measurements yield a carrier-phase differential TEC rate (dTEC/dt) accurate to ~6 mTECU/minute: a continuous oblique-path ionospheric observable that complements but does not duplicate what GPS or ionosondes provide.
+This article describes a system that characterizes that delay rather than ignoring it — and
+extracts ionospheric science as a direct byproduct. Using a GPSDO-locked RX888
+software-defined radio feeding the open-source ka9q-radio channelizer, and the
+hf-timestd software pipeline, the system monitors 17 HF time-standard broadcasts
+continuously from central Missouri (grid square EM38ww, ~38.9°N, 92.1°W). It recovers
+UTC to ±0.5 ms (1σ) from HF signals alone — a 20× improvement over uncorrected
+single-broadcast reception. Along the way, the same coherent phase measurements yield a
+carrier-phase differential TEC rate (dTEC/dt) accurate to ~6 mTECU/minute: a continuous
+oblique-path ionospheric observable that complements but does not duplicate what GPS or
+ionosondes provide.
 
-To appreciate what ±0.5 ms means, consider the accuracy hierarchy available to an experimenter who wants to know UTC:
+To appreciate what ±0.5 ms means, consider the accuracy hierarchy available to an
+experimenter who wants to know UTC:
 
 | Method | Typical Accuracy | Requirements |
 |--------|-----------------|--------------|
@@ -32,13 +48,41 @@ To appreciate what ±0.5 ms means, consider the accuracy hierarchy available to 
 | Internet NTP (public pool) | ~5–50 ms | Network connectivity |
 | WWVB consumer clock | ~0.5–1 s | Built-in ferrite antenna, syncs once/day |
 
-Between a GPS+PPS module at ~100 ns and the next accessible sources — WWVB at ~1 ms (with specialized 60 kHz equipment) and Internet NTP at ~1–50 ms (dependent on network path symmetry) — there is almost nothing available to an individual experimenter. The hf-timestd system occupies this gap. It achieves sub-millisecond accuracy using signals that require nothing more than a wire antenna, through a wholly software-defined processing chain, with no dependency on Internet connectivity or ground-wave propagation.
+Between a GPS+PPS module at ~100 ns and the next accessible sources — WWVB at ~1 ms
+(with specialized 60 kHz equipment) and Internet NTP at ~1–50 ms (dependent on network
+path symmetry) — there is almost nothing available to an individual experimenter. The
+hf-timestd system occupies this gap. It achieves sub-millisecond accuracy using signals
+that require nothing more than a wire antenna, through a wholly software-defined
+processing chain, with no dependency on Internet connectivity or ground-wave propagation.
 
-The enabling element is a GPS-disciplined oscillator: in effect, a metrological steel ruler applied to the received signal. The GPSDO does two things simultaneously. Its frequency stability makes carrier-phase measurements coherent across minutes — which enables dTEC/dt extraction as a direct mathematical consequence, requiring no absolute time knowledge at all. Its timestamp accuracy, propagated through ka9q-radio's mapping into each RTP packet, enables both the absolute delay measurement and the derivation of the clock offset, **D_clock**. These are two independent capabilities from a single piece of hardware: the first gives the *rate* of ionospheric change (Section 4), the second gives the *absolute state* of the clock (Section 3).
+---
+> *We need the paragraphs below to clearly distinguish **frequency** stability provided by the GPSDO from **time accuracy** provided by a GPS+PPP or other source, including hf-timestd Fusion. 
+> hf-timestd functions in **RTP mode** when GPS+PPS also informs the RTP timestamps radiod produces.
+> hf-timestd functions in **Fusion mode** when no higher time authority anchors the GPSDO "steel ruler" its analysis to recover UTC provides the highest timing authority.*
 
-What makes this doubly interesting is that the timing and the ionospheric science are not separate computations sharing hardware — they are the same computation viewed from two directions. The per-minute coherent phase integral that yields the tick time of arrival also yields the Doppler shift; the differential Doppler between two frequencies on the same path yields dTEC/dt. The system, in effect, uses HF time signals as a continuous ionospheric sounders.
+---
+ 
+The enabling element is a GPS-disciplined oscillator: in effect, a metrological steel
+ruler applied to the received signal. The GPSDO does two things simultaneously. Its
+frequency stability makes carrier-phase measurements coherent across minutes —
+enabling dTEC/dt extraction as a direct mathematical consequence, requiring no absolute
+time knowledge at all. Its timestamp accuracy, propagated through ka9q-radio's
+mapping into each RTP packet, enables the absolute delay measurement from which the clock
+offset D_clock is derived. These are two independent capabilities from a single piece of
+hardware: the first gives the *rate* of ionospheric change (Section 4), the second gives
+the *absolute state* of the clock (Section 3).
 
-The hardware is unexceptional by modern standards: a USB3 direct-conversion SDR, a commercially available GPS-disciplined oscillator, and a small server running Linux. The distinguishing elements are the software architecture and the signal processing — all of which are open source and described here.
+What makes this doubly interesting is that the timing and the ionospheric science are not
+separate computations sharing hardware — they are the same computation viewed from two
+directions. The per-minute coherent phase integral that yields the tick time of arrival
+also yields the Doppler shift; the differential Doppler between two frequencies on the
+same path yields dTEC/dt. The system is, in a precise sense, using HF time signals as a
+continuous ionospheric sounder.
+
+The hardware is unexceptional by modern standards: a USB3 direct-conversion SDR, a
+commercially available GPS-disciplined oscillator, and a small server running Linux. The
+distinguishing elements are the software architecture and the signal processing — all of
+which are open source and described here.
 
 ---
 
@@ -46,13 +90,23 @@ The hardware is unexceptional by modern standards: a USB3 direct-conversion SDR,
 
 ### 2.1 Hardware
 
-The receiving chain begins with a GPS-disciplined oscillator (GPSDO) that locks the sampling clock to an extremely stable reference frequency. The GPSDO drives an RX888 Mk II direct-conversion SDR receiver. The RX888 digitizes a wide bandwidth -- from DC to 32 or 64 MHz (at a sample rate of 64 or 128 MHz) -- and delivers the samples over SuperSpeed USB3 to the host computer. This architecture avoids the oscillator drift that would otherwise swamp the sub-millisecond timing we are trying to recover.
+The receiving chain begins with a GPS-disciplined oscillator (GPSDO) that locks the
+sampling clock to a precise frequency that varies only a few ppb over XXX time. The GPSDO drives an RX888 Mk II
+direct-conversion SDR receiver. The RX888 digitizes a wide bandwidth (up to 64 MHz with sample rates up to 128 MHz)
+and delivers the samples over USB3 to the host computer. This architecture avoids the
+oscillator drift that would otherwise swamp the sub-millisecond timing we are trying to
+recover.
 
-The front end is ka9q-radio (`radiod`), Phil Karn KA9Q's open-source SDR framework. `radiod` handles the SDR hardware interface and channelizer: it splits the broadband digitized stream into 9 individual 24 kHz complex baseband channels, one per monitoring frequency, and distributes them as RTP multicast streams over the local network. Each RTP packet carries a GPS-disciplined timestamp providing the foundation for everything downstream; hf-timestd inherits it without any additional hardware.
+The front end is ka9q-radio (`radiod`), Phil Karn KA9Q's open-source SDR framework. `radiod`
+handles the SDR hardware interface and channelizer: it splits the broadband digitized stream
+into individual 24 kHz complex baseband channels, one per monitoring frequency, and
+distributes them as RTP multicast packets over the local network. Each RTP packet carries a
+timestamp disciplined to vary less than XXX ppb over XXX time. This timestamp accuracy is the
+foundation of everything downstream; hf-timestd inherits it without any additional hardware.
 
-The antenna is a simple horizontal doublet at modest height — nothing special is required.  The time-signal stations transmit with 2.5–10 kW into omnidirectional antennas precisely because they are designed to be received with modest equipment.
-
-An optional u-blox ZED-F9P dual-frequency GNSS receiver is co-located with the SDR. This is *not* required for either the timing or the dTEC/dt product — the system achieves ±0.7 ms (1σ) using IRI model corrections alone, and the carrier-phase dTEC/dt measurement is entirely independent of any GNSS data (Section 4). When present, the ZED-F9P provides real-time overhead VTEC that refines the propagation delay model, reducing per-broadcast ionospheric uncertainty from ~1.5 ms (IRI) to ~0.3 ms (VTEC-anchored). The fused result improves from ±0.7 ms to ±0.3 ms. All results in this article include the GNSS correction where available; the system degrades gracefully when it is not.
+The antenna is a simple horizontal doublet at modest height — nothing special is required.
+The time-signal stations transmit with 2.5–10 kW into omnidirectional antennas precisely
+because they are designed to be received with modest equipment.
 
 ![Figure 1: System block diagram + station map. Left panel: great-circle paths from WWV (Fort Collins), WWVH (Kauai), CHU (Ottawa), BPM (Pucheng) to EM38ww receiver. Right panel: 8-service software pipeline from antenna through Chrony SHM, with physics branch.](figures/fig1_system_overview.png)
 
@@ -60,7 +114,8 @@ An optional u-blox ZED-F9P dual-frequency GNSS receiver is co-located with the S
 
 ### 2.2 Signals Monitored
 
-The system monitors four stations on nine physical frequencies, resolving 17 logical broadcasts by station identity.
+The system monitors four stations on nine physical frequencies, resolving 17 logical
+broadcasts by station identity.
 
 | Station | Location | Frequencies | Count |
 |---------|----------|-------------|-------|
@@ -69,9 +124,18 @@ The system monitors four stations on nine physical frequencies, resolving 17 log
 | CHU | Ottawa, Canada (45.30°N, 75.75°W) | 3.330, 7.850, 14.670 MHz | 3 |
 | BPM | Pucheng, China (34.95°N, 109.54°E) | 2.5, 5, 10, 15 MHz | 4 |
 
-Four frequencies (2.5, 5, 10, 15 MHz) are shared between WWV, WWVH, and BPM, which means three transmitters are simultaneously on the same channel. Separating them requires active signal discrimination. The `wwvh_discrimination.py` module identifies WWV vs WWVH by the tone schedule (WWV transmits a 600 Hz tone at :45–:52, WWVH at :15–:29 of each minute), voice gender via amplitude envelope matching, and a Bayesian prior weighted by path reliability. BPM is separated by its distinct modulation (double-sideband AM with no subcarrier tone) and by its characteristically longer propagation delay (~35–45 ms for the trans-Arctic path).
+Four frequencies (2.5, 5, 10, 15 MHz) are shared by WWV, WWVH, and BPM, which means
+three transmitters broadcast simultaneously on the same channel. Separating them requires active
+signal discrimination. The `wwvh_discrimination.py` module identifies WWV vs WWVH by the
+tone schedule (WWV transmits a 600 Hz tone at :45–:52, WWVH at :15–:29 of each minute),
+voice gender via amplitude envelope matching, and a Bayesian prior weighted by path
+reliability. BPM is separated by its distinct modulation (double-sideband AM with no
+subcarrier tone) and by its characteristically longer propagation delay (~35–45 ms for the
+trans-Pacific path).
 
-CHU transmits FSK-encoded timecodes at 300 baud alongside the audio tick. The `chu_fsk_decoder.py` module extracts TAI-UTC leap second count, DUT1, and UTC itself from this channel, providing an independent cross-check on the fusion output.
+CHU transmits FSK-encoded timecodes at 300 baud alongside the audio tick. The
+`chu_fsk_decoder.py` module extracts TAI-UTC leap second count, DUT1, and UTC itself from
+this channel, providing an independent cross-check on the fusion output.
 
 ![Figure 2: 10 MHz spectrogram showing WWV and WWVH ticks. Top: raw IQ spectrogram (10 s). Bottom: bandpass-filtered AM envelope showing tick pulse structure.](figures/fig2_spectrogram_10mhz.png)
 
@@ -79,7 +143,8 @@ CHU transmits FSK-encoded timecodes at 300 baud alongside the audio tick. The `c
 
 ### 2.3 Software Pipeline
 
-The hf-timestd software is organized as eight systemd services that process data in sequence from raw IQ to Chrony SHM clock discipline.
+The hf-timestd software is organized as eight systemd services that process data in
+sequence from raw IQ to Chrony SHM clock discipline.
 
 1. **timestd-core-recorder** — Writes compressed binary IQ archives (`.bin.zst` + JSON
    sidecars) to tiered storage for later reanalysis.
@@ -90,8 +155,8 @@ The hf-timestd software is organized as eight systemd services that process data
    IRI model, GNSS VTEC) to produce calibrated clock offsets.
 4. **timestd-fusion** — Per-broadcast Kalman filter for delay/drift tracking, then WLS
    fusion of all validated broadcasts. Writes TSL1/TSL2 shared-memory segments for Chrony.
-5. **timestd-vtec** — *(Optional.)* Reads the ZED-F9P GNSS receiver and downloads IONEX
-   for absolute TEC reference. When absent, the pipeline falls back to IRI-only corrections.
+5. **timestd-vtec** — Reads the ZED-F9P dual-frequency GNSS receiver and downloads IONEX
+   for absolute TEC reference.
 6. **timestd-physics** — Carrier-phase dTEC/dt estimation, group-delay TEC (validation),
    and ionospheric science products.
 7. **timestd-web-api** — FastAPI dashboard and REST API (port 8000) providing real-time
@@ -104,9 +169,18 @@ The hf-timestd software is organized as eight systemd services that process data
 
 ### 3.1 The TickEdgeDetector
 
-Every HF time-standard station transmits a 1-pulse-per-second tick — a brief amplitude modulation at each UTC second boundary. The tick is the most time-stable element of the broadcast; the carrier phase before and after the tick carries the Doppler and TEC information described in Section 4.
+Every HF time-standard station transmits a 1-pulse-per-second tick — a brief amplitude
+modulation at each UTC second boundary. The tick is the most time-stable element of the
+broadcast; the carrier phase before and after the tick carries the Doppler and TEC
+information described in Section 4.
 
-The `TickEdgeDetector` processes each 60-second IQ segment with a coherent matched filter derived from a stored reference template for each station's tick waveform. Because the filter is coherent across the entire second-long integration window, it achieves a processing gain proportional to the integration time — roughly 30 dB over a single-sample comparison. Detected tick SNR in the system ranges from 8 dB (weak WWV/WWVH on the shared frequencies) to 53 dB (CHU at 14.670 MHz, ~1,520 km, strong path on quiet nights; median SNR 45 dB on CHU 7.850 MHz).
+The `TickEdgeDetector` processes each 60-second IQ segment with a coherent matched filter
+derived from a stored reference template for each station's tick waveform. Because the
+filter is coherent across the entire second-long integration window, it achieves a
+processing gain proportional to the integration time — roughly 30 dB over a single-sample
+comparison. Detected tick SNR in the system ranges from 8 dB (weak WWV/WWVH on the shared
+frequencies) to 53 dB (CHU at 14.670 MHz, ~1,520 km, strong path on quiet nights;
+median SNR 45 dB on CHU 7.850 MHz).
 
 The filter output yields three quantities per detected tick:
 - **TOA** — time of arrival of the tick relative to the RTP timestamp, in milliseconds
@@ -114,7 +188,9 @@ The filter output yields three quantities per detected tick:
   integration window, in millihertz
 - **SNR** — correlation peak amplitude relative to noise floor, in dB
 
-The TOA minus the model-predicted propagation delay gives the raw clock offset D_clock for that broadcast: the signed difference between system time and UTC, from the perspective of one transmitter at one frequency.
+The TOA minus the model-predicted propagation delay gives the raw clock offset D_clock
+for that broadcast: the signed difference between system time and UTC, from the perspective
+of one transmitter at one frequency.
 
 ![Figure 3: 24-hour D_clock time series. Top: per-broadcast clock offset from all 9 channels with WLS fusion. Bottom: fusion detail at ±3 ms scale.](figures/fig3_dclock_24h.png)
 
@@ -122,13 +198,23 @@ The TOA minus the model-predicted propagation delay gives the raw clock offset D
 
 ### 3.2 Per-Broadcast Kalman Filter
 
-Each of the 17 broadcasts runs through a dedicated `BroadcastKalmanFilter` instance. The state vector tracks two quantities: the propagation delay residual (slow-varying bias left after the model correction) and its drift rate. The Kalman measurement noise is set from the per-tick SNR and the uncertainty budget described in Section 3.4.
+Each of the 17 broadcasts runs through a dedicated `BroadcastKalmanFilter` instance. The
+state vector tracks two quantities: the propagation delay residual (slow-varying bias left
+after the model correction) and its drift rate. The Kalman measurement noise is set from
+the per-tick SNR and the uncertainty budget described in Section 3.4.
 
-The filter serves two purposes. First, it smooths out minute-to-minute noise in the TOA measurement — particularly important for the WWVH and BPM paths where SNR is marginal.  Second, it detects sudden mode changes: a step in the delay state with high innovation energy flags a potential propagation mode transition (1F2 → 2F2, for example), which is logged and reported in the L2 product.
+The filter serves two purposes. First, it smooths out minute-to-minute noise in the TOA
+measurement — particularly important for the WWVH and BPM paths where SNR is marginal.
+Second, it detects sudden mode changes: a step in the delay state with high innovation
+energy flags a potential propagation mode transition (1F2 → 2F2, for example), which is
+logged and reported in the L2 product.
 
 ### 3.3 Multi-Broadcast Fusion
 
-The 17 Kalman-filtered delay estimates are combined by weighted least squares (WLS). Each broadcast receives a weight inversely proportional to its expanded uncertainty (Section 3.4). The fusion result is a single D_clock estimate with a formal 1σ uncertainty, updated once per minute.
+The 17 Kalman-filtered delay estimates are combined by weighted least squares (WLS). Each
+broadcast receives a weight inversely proportional to its expanded uncertainty (Section
+3.4). The fusion result is a single D_clock estimate with a formal 1σ uncertainty, updated
+once per minute.
 
 Two outputs are written to Chrony shared memory:
 - **TSL1** — the fusion result using all validated broadcasts, including those with
@@ -136,7 +222,10 @@ Two outputs are written to Chrony shared memory:
 - **TSL2** — the fusion result restricted to broadcasts with GNSS-VTEC-corrected delays.
   Smaller number of inputs but lower systematic uncertainty; used when available.
 
-Chrony combines these SHM sources with NTP in its usual filter, but configured to weight the HF-derived TSL2 source heavily when the GNSS receiver is locked. The net effect is that system time tracks UTC to within ±0.5 ms (1σ) using HF alone, with GNSS VTEC correction reducing the dominant ionospheric uncertainty when the ZED-F9P is operational.
+Chrony combines these SHM sources with NTP in its usual filter, but configured to weight
+the HF-derived TSL2 source heavily when the GNSS receiver is locked. The net effect is
+that system time tracks UTC to within ±0.5 ms (1σ) using HF alone, with GNSS VTEC
+correction reducing the dominant ionospheric uncertainty when the ZED-F9P is operational.
 
 ![Figure 4: Uncertainty budget waterfall. ISO GUM components from RTP timestamp through fused result.](figures/fig4_uncertainty_budget.png)
 
@@ -144,7 +233,8 @@ Chrony combines these SHM sources with NTP in its usual filter, but configured t
 
 ### 3.4 Uncertainty Budget
 
-The formal uncertainty budget follows ISO GUM (Guide to the Expression of Uncertainty in Measurement). The dominant terms are:
+The formal uncertainty budget follows ISO GUM (Guide to the Expression of Uncertainty in
+Measurement). The dominant terms are:
 
 | Source | Symbol | Value |
 |--------|--------|-------|
@@ -168,26 +258,38 @@ accuracy. This is why the three-tier hierarchy (geometric → IRI → GNSS VTEC)
 the system design, and why the ±0.5 ms fused result (Section 1, Table 1) represents a
 qualitative advance over uncorrected HF reception rather than merely an incremental one.
 
-The GNSS VTEC correction is beneficial but not essential. On 2026-03-17, the median
-L1–L2 difference (IRI-only vs. VTEC-corrected) was only 0.09 ms per broadcast — the IRI
-model already captures most of the ionospheric delay structure. The dominant improvement
-comes from multi-broadcast WLS fusion: the per-broadcast scatter of ~0.7 ms (IRI-only)
-reduces to ~0.3 ms when fused across all active paths. A system without the ZED-F9P
-would achieve ±0.7 ms (1σ) fused accuracy — still a 7× improvement over uncorrected
-single-broadcast reception.
-
 ### 3.5 Propagation Mode Assignment
 
-The ionosphere does not reflect HF signals from a sharp boundary — it refracts them through a region of increasing electron density. A signal can arrive via one hop (1F2), two hops (2F2), three hops (3F2), or via the lower E layer. The delays differ by roughly 0.5–1 ms per additional hop for paths of ~1000–2000 km. Assigning the wrong mode means subtracting the wrong propagation delay, injecting a systematic error comparable to the fused uncertainty itself.
+The ionosphere does not reflect HF signals from a sharp boundary — it refracts them
+through a region of increasing electron density. A signal can arrive via one hop (1F2),
+two hops (2F2), three hops (3F2), or via the lower E layer. The delays differ by roughly
+0.5–1 ms per additional hop for paths of ~1000–2000 km. Assigning the wrong mode means
+subtracting the wrong propagation delay, injecting a systematic error comparable to the
+fused uncertainty itself.
 
-The system assigns modes in real time by matching the measured arrival delay against candidate multi-hop geometries, using foF2 and hmF2 from the IRI-2020 ionospheric model when available. For offline validation, the system uses PHaRLAP 4.7.4 [1], a full 2D numerical ray-tracing package, to propagate a fan of rays through the IRI electron density profile along the great-circle path. For WWV 10 MHz under March 2026 daytime conditions (foF2 = 10.41 MHz, hmF2 = 290 km), PHaRLAP finds 63 closing rays across three modes: 1F2 at 3.2–4.4 ms (5.5–28° elevation), 2F2 at 5.1–5.7 ms (37–51°), and 3F2 at 7.5–7.6 ms (53–60°) — consistent with the real-time pipeline's
+The system assigns modes in real time by matching the measured arrival delay against
+candidate multi-hop geometries, using foF2 and hmF2 from the IRI-2020 ionospheric model
+when available. For offline validation, the system uses PHaRLAP 4.7.4 [1], a full 2D
+numerical ray-tracing package, to propagate a fan of rays through the IRI electron
+density profile along the great-circle path. For WWV 10 MHz under March 2026 daytime
+conditions (foF2 = 10.41 MHz, hmF2 = 290 km), PHaRLAP finds 63 closing rays
+across three modes: 1F2 at 3.2–4.4 ms (5.5–28° elevation), 2F2 at 5.1–5.7 ms
+(37–51°), and 3F2 at 7.5–7.6 ms (53–60°) — consistent with the real-time pipeline's
 independent assignment.
 
 ![Figure 6: PHaRLAP 4.7.4 numerical ray fan for WWV 10 MHz. IRI-2020 Ne(h) profile, 117 rays at 2–60° elevation, closing rays for 1F2, 2F2, 3F2.](figures/fig6_ray_fan_pharlap.png)
 
 *Figure 6 — PHaRLAP 4.7.4 ray fan, WWV 10 MHz, 2026-03-17 18:00 UTC. IRI-2020: foF2=10.41 MHz, hmF2=290 km. 63 closing rays: 1F2 (green, 5.5–28°, delay 3.2–4.4 ms), 2F2 (orange, 37–51°, 5.1–5.7 ms), 3F2 (red, 53–60°, 7.5–7.6 ms).*
 
-Mode confidence feeds the Kalman filter noise covariance: high-confidence assignments contribute with full weight in the WLS fusion; ambiguous assignments are down-weighted.  In practice, mode discrimination depends more on path geometry than on timing precision.  The 6,600 km WWVH path provides unambiguous mode identification (76% 3F2, 24% 2F2, zero unknown) because a single-hop path from Hawaii is geometrically impossible. The 1,119 km WWV path admits more ambiguity (62% unknown on 10 MHz) because multiple modes produce similar delays. This is a fundamental geometric constraint, not a limitation of the timing accuracy; it motivates the multi-path WLS fusion strategy of Section 3.3, which down-weights ambiguous broadcasts rather than guessing.
+Mode confidence feeds the Kalman filter noise covariance: high-confidence assignments
+contribute with full weight in the WLS fusion; ambiguous assignments are down-weighted.
+In practice, mode discrimination depends more on path geometry than on timing precision.
+The 6,600 km WWVH path provides unambiguous mode identification (76% 3F2, 24% 2F2, zero
+unknown) because a single-hop path from Hawaii is geometrically impossible. The 1,119 km
+WWV path admits more ambiguity (62% unknown on 10 MHz) because multiple modes produce
+similar delays. This is a fundamental geometric constraint, not a limitation of the timing
+accuracy; it motivates the multi-path WLS fusion strategy of Section 3.3, which
+down-weights ambiguous broadcasts rather than guessing.
 
 ![Figure 7: Mode probability stacked bars for four representative paths.](figures/fig7_mode_probability.png)
 
@@ -205,13 +307,26 @@ The correlation between measured arrival time and assigned propagation mode is s
 
 ### 4.1 Why Group-Delay TEC Is Noise-Dominated
 
-The ionosphere introduces a frequency-dependent group delay proportional to the total electron content (TEC) along the path:
+The ionosphere introduces a frequency-dependent group delay proportional to the total
+electron content (TEC) along the path:
 
     τ_iono = K · TEC / f²
 
-where K = 40.3 m³s⁻² and f is the carrier frequency in Hz. In principle, measuring the differential TOA between two frequencies on the same path allows one to solve for TEC without knowing the geometric delay. In practice, this requires the two measurements to share the same propagation mode — the same number of hops reflecting from the same ionospheric layer.
+where K = 40.3 m³s⁻² and f is the carrier frequency in Hz. In principle, measuring the
+differential TOA between two frequencies on the same path allows one to solve for TEC
+without knowing the geometric delay. In practice, this requires the two measurements to
+share the same propagation mode — the same number of hops reflecting from the same
+ionospheric layer.
 
-The group-delay TEC estimator in the system (`tec_estimator.py`) attempts this calculation across all frequencies where a station is simultaneously detected. Validation against GNSS VTEC from the co-located ZED-F9P receiver shows a signal-to-noise ratio of approximately 0.13 for the group-delay product — the measurement is noise-dominated. The problem is mode mixing: at 8–10 dB SNR for the weaker broadcasts, the propagation mode assignment carries real uncertainty, and a single mis-assigned mode injects a ~1 ms systematic error into the frequency pair, swamping the sub-millisecond ionospheric signal we are trying to extract.  The group-delay TEC product is retained in the pipeline as a validation diagnostic, not as a science product.
+The group-delay TEC estimator in the system (`tec_estimator.py`) attempts this calculation
+across all frequencies where a station is simultaneously detected. Validation against GNSS
+VTEC from the co-located ZED-F9P receiver shows a signal-to-noise ratio of approximately
+0.13 for the group-delay product — the measurement is noise-dominated. The problem is mode
+mixing: at 8–10 dB SNR for the weaker broadcasts, the propagation mode assignment carries
+real uncertainty, and a single mis-assigned mode injects a ~1 ms systematic error into the
+frequency pair, swamping the sub-millisecond ionospheric signal we are trying to extract.
+The group-delay TEC product is retained in the pipeline as a validation diagnostic, not as
+a science product.
 
 ### 4.2 The Carrier-Phase Differential Method
 
@@ -219,10 +334,7 @@ The carrier phase is a fundamentally different observable. Where the group delay
 envelope measurement subject to multipath ambiguity and mode uncertainty, the carrier phase
 changes continuously and coherently within each minute-long integration window. Its
 derivative with respect to time is the Doppler shift — which the TickEdgeDetector extracts
-as part of its matched-filter output. Crucially, this measurement depends only on the
-GPSDO's frequency stability — it requires no absolute time knowledge, no propagation model,
-and no GNSS receiver. The ZED-F9P provides a convenient overhead VTEC reference for
-*validation* (Figure 5, bottom panel), but does not enter the dTEC/dt computation itself.
+as part of its matched-filter output.
 
 The ionospheric contribution to the Doppler is:
 
@@ -232,23 +344,46 @@ Taking the differential between two co-path frequencies f₁ and f₂:
 
     d(τ₁ - τ₂)/dt = K · (dTEC/dt) · (1/f₁² - 1/f₂²)
 
-Since the geometric delay is identical for both frequencies (same path, same hop count), it cancels in the difference. The result is a direct measurement of dTEC/dt — the instantaneous rate of change of column electron density — free of the absolute geometric delay uncertainty that makes the group-delay TEC noisy.
+Since the geometric delay is identical for both frequencies (same path, same hop count),
+it cancels in the difference. The result is a direct measurement of dTEC/dt — the
+instantaneous rate of change of column electron density — free of the absolute geometric
+delay uncertainty that makes the group-delay TEC noisy.
 
 ![Figure 5: CHU 14.670 MHz dTEC/dt with solar zenith angle overlay and GNSS VTEC.](figures/fig5_dtec_24h.png)
 
-*Figure 5 — Carrier-phase dTEC/dt, 2026-03-17, CHU 14.670 MHz only. Top: 15-min rolling median dTEC/dt (blue) with solar zenith angle at path midpoint (dashed orange); shaded regions indicate local night. The strong correlation between dTEC/dt activity and solar illumination is immediately apparent. Bottom: GNSS overhead VTEC from the co-located ZED-F9P shown for independent validation — the dTEC/dt product itself uses no GNSS data.*
+*Figure 5 — Carrier-phase dTEC/dt, 2026-03-17, CHU 14.670 MHz only. Top: 15-min rolling median dTEC/dt (blue) with solar zenith angle at path midpoint (dashed orange); shaded regions indicate local night. The strong correlation between dTEC/dt activity and solar illumination is immediately apparent. Bottom: GNSS overhead VTEC from the co-located ZED-F9P (zero data gaps on this date).*
 
 ### 4.3 Results
 
-The carrier-phase dTEC/dt product achieves approximately 6 mTECU/minute precision under quiet nighttime conditions (MAD of the rate during 06–10 UTC), rising to ~8 mTECU/minute as a 24-hour average including active daytime ionosphere. The minute-to-minute instrument noise floor, estimated from consecutive-minute jitter, is ~10 mTECU/minute — the remainder of the observed variation is real ionospheric signal. This is roughly 50× better than the group-delay product from the same data.
+The carrier-phase dTEC/dt product achieves approximately 6 mTECU/minute precision
+under quiet nighttime conditions (MAD of the rate during 06–10 UTC), rising to
+~8 mTECU/minute as a 24-hour average including active daytime ionosphere. The
+minute-to-minute instrument noise floor, estimated from consecutive-minute jitter,
+is ~10 mTECU/minute — the remainder of the observed variation is real ionospheric
+signal. This is roughly 50× better than the group-delay product from the same data.
 
-Several features of the product are noteworthy:
+Several features of the product are noteworthy for the article audience:
 
-**Oblique vs. vertical geometry.** The GNSS VTEC is a measurement directly overhead — the integral of electron density vertically through the ionosphere to several satellites. The HF dTEC/dt is an oblique path measurement: the integral along the slant path from transmitter to receiver.  For a 1F path at moderate elevation angle, the oblique TEC is enhanced by the secant of the elevation angle relative to the vertical TEC. The system accounts for this geometrically, but the oblique path also samples a different cross-section of the ionosphere — tilted structures and gradient features that are invisible to a purely vertical sounder.
+**Oblique vs. vertical geometry.** The GNSS VTEC is a vertical measurement — the integral
+of electron density straight up through the ionosphere to the satellite. The HF dTEC/dt is
+an oblique path measurement: the integral along the slant path from transmitter to receiver.
+For a 1F path at moderate elevation angle, the oblique TEC is enhanced by the secant of
+the elevation angle relative to the vertical TEC. The system accounts for this geometrically,
+but the oblique path also samples a different cross-section of the ionosphere — tilted
+structures and gradient features that are invisible to a purely vertical sounder.
 
-**Complementary coverage.** The GNSS receiver provides overhead TEC from a moving ensemble of satellites, averaging over a wide sky area. The HF dTEC/dt provides continuous, uninterrupted monitoring of a fixed oblique path — from EM38ww to Ottawa (CHU), Fort Collins (WWV), and across the Pacific to Kauai (WWVH). This fixed-path geometry is well suited to detecting spatially coherent ionospheric disturbances (traveling ionospheric disturbances, storm-enhanced density events) that transit the path.
+**Complementary coverage.** The GNSS receiver provides overhead TEC from a moving ensemble
+of satellites, averaging over a wide sky area. The HF dTEC/dt provides continuous,
+uninterrupted monitoring of a fixed oblique path — from EM38ww straight across the
+central United States to Fort Collins (WWV) or across the Pacific to Kauai (WWVH). This
+fixed-path geometry is well suited to detecting spatially coherent ionospheric disturbances
+(traveling ionospheric disturbances, storm-enhanced density events) that transit the path.
 
-**Multi-frequency redundancy.** With six WWV frequencies (2.5–25 MHz) and four WWVH frequencies (2.5–15 MHz), the system can form multiple independent frequency pairs. In quiet conditions, all pairs should agree. Discordant pairs indicate either mode mixing (one frequency is propagating differently) or a frequency-selective ionospheric feature.  This redundancy provides a convenient sanity check on the physics.
+**Multi-frequency redundancy.** With six WWV frequencies (2.5–25 MHz) and four WWVH
+frequencies (2.5–15 MHz), the system can form multiple independent frequency pairs. In
+quiet conditions, all pairs should agree. Discordant pairs indicate either mode mixing
+(one frequency is propagating differently) or a frequency-selective ionospheric feature.
+This redundancy is a built-in sanity check on the physics.
 
 ---
 
@@ -256,7 +391,9 @@ Several features of the product are noteworthy:
 
 ### 5.1 Two Products from One Instrument
 
-The central point of this article deserves explicit statement. A single GPS-disciplined oscillator, applied to a commodity SDR, produces two independent and complementary products:
+The central point of this article deserves explicit statement. A single GPS-disciplined
+oscillator, applied to a commodity SDR, produces two independent and complementary
+products:
 
 1. **UTC recovery (delay domain).** The absolute RTP timestamp, propagated from GPS+PPS
    through ka9q-radio, enables measurement of the total propagation delay from each
@@ -271,13 +408,30 @@ The central point of this article deserves explicit statement. A single GPS-disc
    science product (Section 4), achieving ~50× better precision than group-delay TEC
    from the same data.
 
-These are not separate computations sharing hardware. They are the same coherent phase integral viewed from two directions: the tick TOA is a delay measurement; the Doppler is its time derivative. The ionosphere that corrupts the timing is simultaneously characterized by the timing. This coupling reflects a physical fact — the ionosphere is a dispersive medium, and dispersive effects are recoverable from the signal that suffers them — rather than a software convenience.
+These are not separate computations sharing hardware. They are the same coherent phase
+integral viewed from two directions: the tick TOA is a delay measurement; the Doppler is
+its time derivative. The ionosphere that corrupts the timing is simultaneously
+characterized by the timing. This coupling reflects a physical fact — the ionosphere is a
+dispersive medium, and dispersive effects are recoverable from the signal that suffers
+them — rather than a software convenience.
 
 ### 5.2 Science Value
 
-The fixed-path HF monitor fills a niche that neither GPS nor ionosondes occupy cleanly.  An ionosonde measures the vertical electron density profile overhead, once every few minutes. A GPS receiver at one location samples many paths to many satellites, but all are near-vertical (elevation > 15° for most measurement geometries) and overhead the receiver.  The hf-timestd system provides a continuous, unbroken oblique-path measurement at low elevation angles — precisely the geometry most sensitive to large-scale horizontal gradients in the ionosphere, traveling ionospheric disturbances, and the dawn/dusk terminator passage.
+The fixed-path HF monitor fills a niche that neither GPS nor ionosondes occupy cleanly.
+An ionosonde measures the vertical electron density profile overhead, once every few
+minutes. A GPS receiver at one location samples many paths to many satellites, but all are
+near-vertical (elevation > 15° for most measurement geometries) and overhead the receiver.
+The hf-timestd system provides a continuous, unbroken oblique-path measurement at low
+elevation angles — precisely the geometry most sensitive to large-scale horizontal
+gradients in the ionosphere, traveling ionospheric disturbances, and the dawn/dusk
+terminator passage.
 
-The three monitored paths are geometrically complementary. The WWV path (EM38ww to Fort Collins, ~1,119 km roughly east-west at 40°N) samples the mid-latitude ionosphere along a short, low-hop geometry. The CHU path (EM38ww to Ottawa, ~1,522 km northeast) crosses a similar latitude band but at a different azimuth, providing an independent cut through the same ionospheric region — and CHU's three discrete frequencies (3.330, 7.850, 14.670 MHz) span a wider frequency range than any single station, making it particularly valuable for carrier-phase dTEC/dt. The WWVH path (EM38ww to Kauai, ~6,600 km west-northwest across the Pacific) is a long multi-hop path at low elevation angle, sampling sub-tropical and equatorial ionospheric provinces at very different magnetic latitudes. Continuous monitoring of all three simultaneously, at the ~6 mTECU/min precision demonstrated here, provides a three-azimuth fixed-path baseline that would require a dedicated ionospheric instrument to replicate.
+The WWV path (EM38ww to Fort Collins, roughly east-west at 40°N) and the WWVH path
+(EM38ww to Kauai, roughly west-northwest at a low elevation angle across the Pacific) are
+geometrically complementary. They sample different ionospheric provinces and different
+magnetic latitudes. Continuous monitoring of both simultaneously, at the ~6 mTECU/min
+precision demonstrated here, provides a two-point fixed-path baseline that would require
+a dedicated ionospheric instrument to replicate.
 
 ### 5.3 Can I Build This?
 
@@ -293,29 +447,58 @@ The software is entirely open source:
 - PHaRLAP (for mode ID): available from IPS Australia
 - pyLAP Python wrapper: https://github.com/mijahauan/PyLap
 
-The principal non-obvious requirement is the GPSDO. Without a GPS-disciplined sampling clock, the RTP timestamp accuracy degrades from ~50 µs to ~1 ms or worse depending on the oscillator used, which limits D_clock uncertainty to the clock domain rather than the ionospheric domain. A crystal-controlled oscillator is adequate for signal monitoring and dTEC/dt; it is insufficient for the ±0.5 ms UTC recovery claim.
+The principal non-obvious requirement is the GPSDO. Without a GPS-disciplined sampling
+clock, the RTP timestamp accuracy degrades from ~50 µs to ~1 ms or worse depending on
+the oscillator used, which limits D_clock uncertainty to the clock domain rather than the
+ionospheric domain. A crystal-controlled oscillator is adequate for signal monitoring and
+dTEC/dt; it is insufficient for the ±0.5 ms UTC recovery claim.
 
 ### 5.4 Limitations and Future Work
 
 Several limitations are worth noting for the technically careful reader.
 
-The propagation delay model now uses a spatially varying IRI-2020 electron density grid: the IRI is evaluated at multiple points along the great-circle path (automatically scaled to one sample per 500 km, minimum 5) and linearly interpolated across all range columns. This captures the dominant horizontal gradients — particularly the dawn/dusk terminator and the latitude-dependent Ne variation on the 6,600 km WWVH path, where foF2 varies by up to ±38% between the tropical transmitter end and the mid-latitude receiver. For the shorter WWV and CHU paths (~1,100–1,500 km), horizontal variation is modest (±1–5% in foF2 under day/night conditions, rising to ±10% during terminator crossing). The remaining limitation is that the IRI is a climatological model — it does not capture real-time storm-enhanced density features or traveling ionospheric disturbances. Assimilating real-time ionosonde or GNSS TEC data into the grid would address this, but is beyond the current scope.
+The propagation delay model, even with GNSS VTEC anchoring, uses a horizontally
+uniform ionospheric approximation along the path. In reality, the ionosphere has
+horizontal gradients, particularly near the dawn/dusk terminator and during geomagnetic
+storms. PHaRLAP's 2D ray tracing can in principle accommodate a horizontally varying
+electron density profile; the current implementation uses a single midpoint IRI profile
+broadcast across all range columns. A spatially varying grid would reduce the
+u_propagation_model term further.
 
-BPM (2.5–15 MHz, Pucheng, China) is nominally monitored but receives zero reliable detections in current production data. The trans-Arctic path (~11,500 km) is long and involves complex multi-hop geometry at all frequencies; the SNR at the receiver appears below the pipeline's detection threshold. Investigation is ongoing.
+BPM (2.5–15 MHz, Pucheng, China) is nominally monitored but receives zero reliable
+detections in current production data. The trans-Pacific path (~11,500 km) is long and
+involves complex multi-hop geometry at all frequencies; the SNR at the receiver appears
+below the pipeline's detection threshold. Investigation is ongoing.
 
-The WWV 20 and 25 MHz transmissions are received at noise-floor SNR (7.8 dB). These frequencies are typically above the ionospheric MUF from the Fort Collins path, and the detections are likely artifacts of the matched filter latching onto noise. They are excluded from the fusion and mode statistics but their continued presence in the L2 product is a known data quality issue.
-
-These limitations are site-specific. The results reported here reflect a single receiver location in central Missouri — roughly 1,100 km from WWV, 1,500 km from CHU, and 6,600 km from WWVH. A station closer to Fort Collins would likely find 20 and 25 MHz usable during solar maximum daytime conditions when the MUF is high enough. A station on the US East Coast would have a shorter CHU path and a longer WWV path, shifting which broadcasts contribute most weight to the fusion. A station in the western Pacific might detect BPM reliably while losing WWVH to a too-short path. The software and processing are location-independent; only the propagation geometry changes. Replicating the system at multiple, widely-distributed sites would enable differential measurements — comparing dTEC/dt along shared paths to separate spatial from temporal ionospheric variation.
+The WWV 20 and 25 MHz transmissions are received at noise-floor SNR (7.8 dB). These
+frequencies are typically above the ionospheric MUF from the Fort Collins path, and the
+detections are likely artifacts of the matched filter latching onto noise. They are
+excluded from the fusion and mode statistics but their continued presence in the L2
+product is a known data quality issue.
 
 ---
 
 ## 6. Conclusion
 
-A GPSDO-locked RX888 SDR, running ka9q-radio and the open-source hf-timestd software, monitors 17 HF time-standard broadcasts continuously from central Missouri. A single GPS-disciplined oscillator enables two products: UTC recovery from HF signals alone to ±0.5 ms (1σ) — occupying the accuracy gap between GPS+PPS hardware and Internet NTP — and carrier-phase dTEC/dt at ~6 mTECU/minute precision, a continuous oblique-path ionospheric observable that complements overhead GNSS TEC measurements.
+A GPSDO-locked RX888 SDR, running ka9q-radio and the open-source hf-timestd software,
+monitors 17 HF time-standard broadcasts continuously from central Missouri. A single
+GPS-disciplined oscillator enables two products: UTC recovery from HF signals alone to
+±0.5 ms (1σ) — occupying the accuracy gap between GPS+PPS hardware and Internet NTP —
+and carrier-phase dTEC/dt at ~6 mTECU/minute precision, a continuous oblique-path
+ionospheric observable that complements overhead GNSS TEC measurements.
 
-The ±0.5 ms timing accuracy represents a 20× improvement over uncorrected single-broadcast HF reception and is competitive with research-grade WWVB receivers, while using higher-frequency signals that propagate via the F2 layer and support daytime operation.  The dTEC/dt product emerges as a direct mathematical consequence of the same coherent phase integration — requiring only the GPSDO's frequency stability, not absolute time.
+The ±0.5 ms timing accuracy represents a 20× improvement over uncorrected single-broadcast
+HF reception and is competitive with research-grade WWVB receivers, while using
+higher-frequency signals that propagate via the F2 layer and support daytime operation.
+The dTEC/dt product emerges as a direct mathematical consequence of the same coherent
+phase integration — requiring only the GPSDO's frequency stability, not absolute time.
 
-The system demonstrates that a modest commodity SDR receiver, disciplined by GPS, can serve simultaneously as a precision time transfer instrument and a continuous oblique-path ionospheric monitor. The hardware is reproducible for under $500. The software is open source. The signals are free, broadcast on a 24/7 schedule that has not changed in decades. For the experimenter interested in precision timekeeping, ionospheric physics, or both, this is a practically accessible entry point.
+The system demonstrates that a modest commodity SDR receiver, disciplined by GPS, can
+serve simultaneously as a precision time transfer instrument and a continuous oblique-path
+ionospheric monitor. The hardware is reproducible for under $500. The software is open
+source. The signals are free, broadcast on a 24/7 schedule that has not changed in
+decades. For the experimenter interested in precision timekeeping, ionospheric physics, or
+both, this is a practically accessible entry point.
 
 73 de AC0G
 
