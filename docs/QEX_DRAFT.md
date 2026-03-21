@@ -116,19 +116,33 @@ which are open source and described here.
 
 ### 2.1 Hardware
 
-The receiving chain begins with a GPS-disciplined oscillator (GPSDO) that locks the
-sampling clock to a precise frequency that varies only a few ppb over XXX time. The GPSDO drives an RX888 Mk II
-direct-conversion SDR receiver. The RX888 digitizes a wide bandwidth (up to 64 MHz with sample rates up to 128 MHz)
-and delivers the samples over USB3 to the host computer. This architecture avoids the
-oscillator drift that would otherwise swamp the sub-millisecond timing we are trying to
-recover.
+The receiving chain begins with a GPS-disciplined oscillator (GPSDO). The GPSDO drives
+an RX888 Mk II direct-conversion SDR receiver. The RX888 digitizes a wide bandwidth (up
+to 64 MHz) and delivers the samples over USB3 to the host computer.
 
-The front end is ka9q-radio (`radiod`), Phil Karn KA9Q's open-source SDR framework. `radiod`
-handles the SDR hardware interface and channelizer: it splits the broadband digitized stream
-into individual 24 kHz complex baseband channels, one per monitoring frequency, and
-distributes them as RTP multicast packets over the local network. Each RTP packet carries a
-timestamp disciplined to vary less than XXX ppb over XXX time. This timestamp accuracy is the
-foundation of everything downstream; hf-timestd inherits it without any additional hardware.
+The GPSDO's primary contribution is *frequency stability*: by locking its output to the
+GPS 1 pps and 10 MHz reference, it holds the RX888 sampling clock to sub-ppb stability
+over timescales from seconds to hours. A free-running crystal oscillator drifts at
+1–10 ppm, accumulating tens of microseconds of phase error per second — enough to swamp
+the carrier-phase coherence that dTEC/dt extraction requires. The GPSDO eliminates this
+drift entirely.
+
+The front end is ka9q-radio (`radiod`), Phil Karn KA9Q's open-source SDR framework.
+`radiod` handles the SDR hardware interface and channelizer: it splits the broadband
+digitized stream into individual 24 kHz complex baseband channels, one per monitoring
+frequency, and distributes them as RTP multicast packets over the local network.
+
+In **RTP mode** — the normal configuration when GPS+PPS is available — `radiod`
+disciplines each RTP packet timestamp directly from the GPS 1 pps pulse. Every IQ sample
+therefore carries a UTC timestamp accurate to approximately 50 µs, inherited without any
+additional hardware. hf-timestd uses this to measure absolute tick time-of-arrival and
+derive D_clock.
+
+In **Fusion mode**, the RTP timestamps carry only the GPSDO's frequency-disciplined clock
+— stable in rate, but not anchored to UTC. hf-timestd derives its own UTC reference from
+the HF signals themselves, as described in Section 3.3. The 50 µs RTP timestamp accuracy
+is replaced by the convergence accuracy of the multi-broadcast fusion; the GPSDO's
+frequency stability remains essential throughout.
 
 The antenna is a simple horizontal doublet at modest height — nothing special is required.
 The time-signal stations transmit with 2.5–10 kW into omnidirectional antennas precisely
