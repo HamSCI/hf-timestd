@@ -55,22 +55,48 @@ hf-timestd system occupies this gap. It achieves sub-millisecond accuracy using 
 that require nothing more than a wire antenna, through a wholly software-defined
 processing chain, with no dependency on Internet connectivity or ground-wave propagation.
 
----
-> *We need the paragraphs below to clearly distinguish **frequency** stability provided by the GPSDO from **time accuracy** provided by a GPS+PPP or other source, including hf-timestd Fusion. 
-> hf-timestd functions in **RTP mode** when GPS+PPS also informs the RTP timestamps radiod produces.
-> hf-timestd functions in **Fusion mode** when no higher time authority anchors the GPSDO "steel ruler" its analysis to recover UTC provides the highest timing authority.*
+The enabling element is a GPS-disciplined oscillator — but "GPS-disciplined" carries two
+distinct meanings that must not be conflated, because they play different roles and have
+different hardware dependencies.
 
----
- 
-The enabling element is a GPS-disciplined oscillator: in effect, a metrological steel
-ruler applied to the received signal. The GPSDO does two things simultaneously. Its
-frequency stability makes carrier-phase measurements coherent across minutes —
-enabling dTEC/dt extraction as a direct mathematical consequence, requiring no absolute
-time knowledge at all. Its timestamp accuracy, propagated through ka9q-radio's
-mapping into each RTP packet, enables the absolute delay measurement from which the clock
-offset D_clock is derived. These are two independent capabilities from a single piece of
-hardware: the first gives the *rate* of ionospheric change (Section 4), the second gives
-the *absolute state* of the clock (Section 3).
+*Frequency stability* is what the GPSDO always provides. Locking the sampling clock to
+a GPS 1 pps reference holds it to within a few parts-per-billion of nominal, regardless
+of whether the GPS receiver has a reliable fix on absolute UTC. This stability makes
+carrier-phase measurements coherent across the full minute-long integration window:
+successive phase samples can be differenced without accumulating oscillator drift. It is
+this property — and only this property — that enables dTEC/dt extraction as a direct
+mathematical consequence (Section 4). A crystal oscillator drifting at 1 ppm would
+degrade the carrier-phase coherence and destroy the dTEC/dt product; a GPSDO holds it
+essentially perfectly. Absolute time plays no role here.
+
+*Timing authority* — the assignment of absolute UTC to each received sample — is a
+separate question, and hf-timestd handles it in one of two modes:
+
+In **RTP mode**, which is the normal operating configuration when a GPS+PPS signal is
+available, ka9q-radio (`radiod`) disciplines each RTP packet timestamp directly from the
+GPS 1 pps pulse. Every IQ sample therefore carries a UTC timestamp accurate to
+approximately 50 µs, inherited without any additional hardware. The system measures tick
+time-of-arrival against this RTP timestamp, subtracts the modeled propagation delay, and
+recovers D_clock. Here the GPSDO acts simultaneously as frequency standard and time
+standard — the two roles are filled by the same device, but they are logically
+independent.
+
+In **Fusion mode**, no external timing authority is assumed. The GPSDO continues to
+provide its frequency stability — the metrological "steel ruler" — but the UTC zero point
+is established by the HF signals themselves. The multi-broadcast Kalman/WLS pipeline uses
+the known UTC transmission schedules and precisely surveyed coordinates of WWV, WWVH,
+CHU, and BPM to solve for D_clock directly from the observed propagation delays. GPS
+timing is neither required nor used; the system's own fusion output becomes the highest
+timing authority available. This is why the ±0.5 ms result in Table 1 holds even without
+a GPS time source — the 17-broadcast fusion is self-anchoring in time.
+
+These two products therefore have different hardware requirements. The dTEC/dt product
+(Section 4) needs only frequency stability: a GPSDO in either mode, or in principle any
+oscillator stable enough to maintain carrier-phase coherence across a minute. The UTC
+recovery product (Section 3) needs timing authority: either the GPS+PPS chain through
+RTP, or a long enough Fusion-mode convergence window over multiple independent HF paths.
+Both products emerge from the same coherent phase measurements; the oscillator determines
+what you can extract from them.
 
 What makes this doubly interesting is that the timing and the ionospheric science are not
 separate computations sharing hardware — they are the same computation viewed from two
