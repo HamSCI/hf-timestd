@@ -1210,6 +1210,137 @@ def generate_fig8():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# FIGURE 9 — 3D globe: ray arcs from all four stations to EM38ww
+# ══════════════════════════════════════════════════════════════════════════
+
+def generate_fig9():
+    """3D globe showing great-circle ray arcs from all four stations to EM38ww.
+
+    Uses geometric parabolic arc approximation (no pyLAP required) projected
+    onto a 3D sphere. Arc heights are representative of observed modes: 1–3 hops
+    at ~280 km F2-layer apogee. BPM shown as dashed (currently not detected in
+    production) with 5-hop geometry for the ~11,500 km trans-Pacific path.
+    """
+    import math
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    print("Generating Fig 9: 3D globe ray arcs (all four stations)...")
+
+    R_E = 6371.0
+    RX_LAT, RX_LON = 38.918461, -92.127974
+
+    # (lat, lon, color, display_label, n_hops, linestyle)
+    STATIONS = [
+        ('WWV',  40.6773, -105.0421, '#4CAF50', 'WWV (Fort Collins, 3F)',  3, '-'),
+        ('WWVH', 21.9886, -159.7601, '#FF9800', 'WWVH (Kauai, 3F)',        3, '-'),
+        ('CHU',  45.2958,  -75.7533, '#2196F3', 'CHU (Ottawa, 1F)',         1, '-'),
+        ('BPM',  34.9500,  109.5400, '#9C27B0', 'BPM (Pucheng, 5F, undetected)', 5, '--'),
+    ]
+
+    def _gc_points(lat1, lon1, lat2, lon2, n=300):
+        la1, lo1 = math.radians(lat1), math.radians(lon1)
+        la2, lo2 = math.radians(lat2), math.radians(lon2)
+        d = 2 * math.asin(math.sqrt(
+            math.sin((la2 - la1) / 2) ** 2 +
+            math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2))
+        if d < 1e-9:
+            return np.array([lat1]), np.array([lon1])
+        lats, lons = [], []
+        for i in range(n):
+            f = i / (n - 1)
+            A = math.sin((1 - f) * d) / math.sin(d)
+            B = math.sin(f * d) / math.sin(d)
+            x = A * math.cos(la1) * math.cos(lo1) + B * math.cos(la2) * math.cos(lo2)
+            y = A * math.cos(la1) * math.sin(lo1) + B * math.cos(la2) * math.sin(lo2)
+            z = A * math.sin(la1) + B * math.sin(la2)
+            lats.append(math.degrees(math.atan2(z, math.sqrt(x**2 + y**2))))
+            lons.append(math.degrees(math.atan2(y, x)))
+        return np.array(lats), np.array(lons)
+
+    def _hop_heights(n_pts, nhops, apogee=280.0):
+        h = np.zeros(n_pts)
+        for k in range(nhops):
+            s = k * n_pts // nhops
+            e = (k + 1) * n_pts // nhops if k < nhops - 1 else n_pts
+            t = np.linspace(0, 1, e - s)
+            h[s:e] = apogee * 4 * t * (1 - t)
+        return h
+
+    def _xyz(lat_deg, lon_deg, alt_km=0.0):
+        r = R_E + alt_km
+        la, lo = np.radians(np.asarray(lat_deg)), np.radians(np.asarray(lon_deg))
+        return r * np.cos(la) * np.cos(lo), r * np.cos(la) * np.sin(lo), r * np.sin(la)
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # ── Earth sphere ──
+    u = np.linspace(0, 2 * np.pi, 72)
+    v = np.linspace(0, np.pi, 36)
+    ax.plot_surface(
+        R_E * np.outer(np.cos(u), np.sin(v)),
+        R_E * np.outer(np.sin(u), np.sin(v)),
+        R_E * np.outer(np.ones(72), np.cos(v)),
+        color='#B3E5FC', alpha=0.25, linewidth=0, zorder=1)
+
+    # Equator + lon grid lines for visual reference
+    theta = np.linspace(0, 2 * np.pi, 360)
+    for lo_deg in range(-180, 180, 30):
+        lo_r = math.radians(lo_deg)
+        ax.plot(R_E * np.cos(theta) * math.cos(lo_r),
+                R_E * np.cos(theta) * math.sin(lo_r),
+                R_E * np.sin(theta),
+                color='#90A4AE', linewidth=0.3, alpha=0.25)
+    ax.plot(R_E * np.cos(theta), R_E * np.sin(theta), np.zeros(360),
+            color='#90A4AE', linewidth=0.5, alpha=0.35)
+
+    # ── Ionospheric F2 shell (thin transparent surface at ~280 km) ──
+    f2_r = R_E + 280
+    ax.plot_surface(
+        f2_r * np.outer(np.cos(u), np.sin(v)),
+        f2_r * np.outer(np.sin(u), np.sin(v)),
+        f2_r * np.outer(np.ones(72), np.cos(v)),
+        color='#C8E6C9', alpha=0.07, linewidth=0, zorder=2)
+
+    # ── Ray arcs ──
+    for stn, tx_lat, tx_lon, color, lbl, nhops, ls in STATIONS:
+        lats, lons = _gc_points(tx_lat, tx_lon, RX_LAT, RX_LON)
+        hts = _hop_heights(len(lats), nhops)
+        xs, ys, zs = _xyz(lats, lons, hts)
+        ax.plot(xs, ys, zs, color=color, linewidth=2.2 if ls == '-' else 1.4,
+                linestyle=ls, alpha=0.9 if ls == '-' else 0.55,
+                label=lbl, zorder=10)
+        # Transmitter marker
+        tx_x, tx_y, tx_z = _xyz(tx_lat, tx_lon, 15)
+        ax.scatter([tx_x], [tx_y], [tx_z], color=color, s=55,
+                   marker='o', zorder=20, depthshade=False)
+
+    # ── Receiver marker ──
+    rx_x, rx_y, rx_z = _xyz(RX_LAT, RX_LON, 15)
+    ax.scatter([rx_x], [rx_y], [rx_z], color='#D32F2F', s=120,
+               marker='*', zorder=25, depthshade=False, label='EM38ww (Receiver)')
+
+    # View angle: looking at the Pacific from above-right to show all paths
+    ax.view_init(elev=28, azim=-95)
+    lim = R_E * 1.55
+    ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim); ax.set_zlim(-lim, lim)
+    ax.set_axis_off()
+
+    ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(0.0, 0.92),
+              framealpha=0.7)
+    ax.set_title(
+        'HF Ray Propagation: All Four Stations → EM38ww (EM38ww, ~38.9°N 92.1°W)\n'
+        'Parabolic F2-layer arcs (representative modes) — IRI-2020 foF2 ≈ 280 km',
+        fontsize=10, fontweight='bold')
+
+    fig.tight_layout()
+    outpath = OUTPUT_DIR / 'fig9_3d_globe_arcs.png'
+    fig.savefig(outpath, dpi=DPI, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  → {outpath}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1226,6 +1357,7 @@ if __name__ == '__main__':
     generate_fig6()
     generate_fig7()
     generate_fig8()
+    generate_fig9()
 
     print()
-    print("All 8 figures generated.")
+    print("All 9 figures generated.")
