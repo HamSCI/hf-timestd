@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mijahauan/hf-timestd/schemas/calibration_v1.json",
+  "title": "hf-timestd Calibration File",
+  "description": "Machine-readable timing calibration output for wsprdaemon integration. Written atomically by CalibrationFileWriter after each fusion cycle. Consumed by wd-ka9q-record to align wav start times to sub-millisecond accuracy.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source",
+    "offset_ms",
+    "uncertainty_ms",
+    "convergence_state",
+    "quality_grade",
+    "usable",
+    "last_update",
+    "last_update_unix",
+    "n_broadcasts",
+    "n_stations"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version (semver). Consumers should check MAJOR for breaking changes.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "examples": ["1.0.0"]
+    },
+    "source": {
+      "type": "string",
+      "const": "hf-timestd",
+      "description": "Identifies the producing software."
+    },
+    "processing_version": {
+      "type": "string",
+      "description": "hf-timestd software version that produced this file.",
+      "examples": ["6.12.0"]
+    },
+    "offset_ms": {
+      "type": "number",
+      "description": "Fused system clock offset in milliseconds. Positive means the system clock is ahead of UTC. This is the primary timing correction for wav alignment: true_time = system_time - offset_ms/1000."
+    },
+    "uncertainty_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Combined (RSS) uncertainty of offset_ms in milliseconds, per ISO GUM. Includes statistical, systematic, and propagation components."
+    },
+    "convergence_state": {
+      "type": "string",
+      "enum": ["ACQUIRING", "LOCKED", "REACQUIRING"],
+      "description": "Kalman filter convergence state. ACQUIRING: initial convergence in progress. LOCKED: filter converged, offset is reliable. REACQUIRING: lost lock, re-converging after signal loss."
+    },
+    "quality_grade": {
+      "type": "string",
+      "enum": ["A", "B", "C", "D"],
+      "description": "Overall quality grade. A: <0.3ms uncertainty, multi-station. B: <1ms. C: <3ms. D: >3ms or single-station."
+    },
+    "usable": {
+      "type": "boolean",
+      "description": "True when the offset is suitable for wav alignment: convergence_state==LOCKED AND uncertainty_ms<10 AND not in holdover. Consumers should check this single field for a go/no-go decision."
+    },
+    "last_update": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp of when this file was written."
+    },
+    "last_update_unix": {
+      "type": "number",
+      "description": "Unix epoch timestamp (seconds, millisecond precision) of when this file was written."
+    },
+    "n_broadcasts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of time-standard broadcasts used in this fusion cycle (e.g. WWV 5/10/15/20/25 MHz, WWVH 2.5/5/10/15 MHz, CHU 3.33/7.85/14.67 MHz)."
+    },
+    "n_stations": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of unique time-standard stations contributing (max 4: WWV, WWVH, CHU, BPM)."
+    },
+    "stations_used": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of station names contributing to this cycle.",
+      "examples": [["WWV", "WWVH", "CHU"]]
+    },
+    "uncertainty_budget": {
+      "type": "object",
+      "description": "ISO GUM uncertainty budget breakdown.",
+      "properties": {
+        "statistical_ms": {
+          "type": "number",
+          "description": "Type A uncertainty: measurement scatter (weighted std of fused observations)."
+        },
+        "systematic_ms": {
+          "type": "number",
+          "description": "Type B uncertainty: calibration convergence error and hardware bias."
+        },
+        "propagation_ms": {
+          "type": "number",
+          "description": "Propagation model uncertainty: ionospheric variability and mode ambiguity."
+        }
+      }
+    },
+    "station_detail": {
+      "type": "object",
+      "description": "Per-station diagnostic breakdown.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "count": { "type": "integer", "description": "Number of broadcasts from this station." },
+          "mean_ms": { "type": ["number", "null"], "description": "Mean D_clock from this station." },
+          "intra_std_ms": { "type": ["number", "null"], "description": "Intra-station standard deviation." }
+        }
+      }
+    },
+    "consistency_flag": {
+      "type": "string",
+      "enum": ["OK", "INTRA_ANOMALY", "INTER_ANOMALY", "CROSS_STATION_DISAGREE", "DISCRIMINATION_SUSPECT"],
+      "description": "Cross-station consistency check result."
+    },
+    "single_station_mode": {
+      "type": "boolean",
+      "description": "True if only one station was available (no cross-validation possible)."
+    },
+    "holdover_mode": {
+      "type": "boolean",
+      "description": "True if the Kalman filter is coasting on predictions (no fresh measurements)."
+    },
+    "outliers_rejected": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of measurements rejected as outliers in this cycle."
+    },
+    "dominant_propagation_mode": {
+      "type": ["string", "null"],
+      "description": "Most common ionospheric propagation mode (e.g. '1F2', '2F2', '3F2')."
+    },
+    "adev_60s": {
+      "type": ["number", "null"],
+      "description": "Allan deviation at tau=60s (timing stability metric)."
+    },
+    "adev_1000s": {
+      "type": ["number", "null"],
+      "description": "Allan deviation at tau=1000s (long-term stability)."
+    }
+  },
+  "additionalProperties": true
+}

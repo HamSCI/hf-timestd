@@ -15,8 +15,14 @@ from typing import Optional
 # VERSION CONSTANTS
 # =============================================================================
 
-# Main hf-timestd version - follows semantic versioning
-TIMESTD_VERSION = "3.0.0"
+# Main hf-timestd version - derived from pyproject.toml via importlib.metadata
+# so there is exactly one source of truth.  Falls back to a hardcoded value
+# only when the package is not installed (e.g. raw source checkout).
+try:
+    from importlib.metadata import version as _pkg_version
+    TIMESTD_VERSION = _pkg_version("hf-timestd")
+except Exception:
+    TIMESTD_VERSION = "6.12.0"  # keep in sync with pyproject.toml
 
 # Component versions (for tracking algorithm changes)
 COMPONENT_VERSIONS = {

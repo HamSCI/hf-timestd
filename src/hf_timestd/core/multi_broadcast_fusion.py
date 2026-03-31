@@ -4867,7 +4867,8 @@ def run_fusion_service(
     lookback_minutes: int = 30,
     receiver_lat: Optional[float] = None,
     receiver_lon: Optional[float] = None,
-    timing_authority_level: str = 'L5'
+    timing_authority_level: str = 'L5',
+    calib_file: Optional[str] = None
 ):
     """
     Run continuous fusion service that aggregates Phase 2 timing measurements.
@@ -4887,6 +4888,11 @@ def run_fusion_service(
         receiver_lat: Receiver latitude (from config)
         receiver_lon: Receiver longitude (from config)
         timing_authority_level: Hardware timing level (L1-L6)
+        calib_file: Path to JSON calibration file for wsprdaemon integration.
+            When set, an atomic JSON file is written after each fusion cycle
+            containing offset_ms, uncertainty_ms, convergence_state, and
+            quality diagnostics.  Consumed by wd-ka9q-record to align wav
+            start times.
     """
     # Determine timing authority from config (same logic as bootstrap gate below)
     _is_rtp_authority = True
@@ -4956,7 +4962,18 @@ def run_fusion_service(
     logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
     logger.info(f"  Chrony SHM L1: {'enabled' if chrony_shm_l1 else 'disabled'}")
     logger.info(f"  Chrony SHM L2: {'enabled' if chrony_shm_l2 else 'disabled'}")
+    # Initialize calibration file writer (wsprdaemon integration)
+    calib_writer = None
+    if calib_file:
+        try:
+            from hf_timestd.io.calibration_file import CalibrationFileWriter
+            calib_writer = CalibrationFileWriter(calib_file)
+            logger.info(f"Calibration file writer enabled: {calib_file}")
+        except Exception as e:
+            logger.error(f"Failed to initialize calibration file writer: {e}")
+    
     logger.info(f"  Chrony stats: {'enabled' if chrony_stats_collector else 'disabled'}")
+    logger.info(f"  Calibration file: {calib_file or 'disabled'}")
     
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s, lookback: {lookback_minutes}m")
@@ -5405,6 +5422,13 @@ def run_fusion_service(
                         else:
                             logger.debug(f"Chrony feed skipped: {', '.join(reasons)}")
 
+            # Write calibration file (wsprdaemon integration)
+            if calib_writer:
+                try:
+                    calib_writer.update(result)
+                except Exception as e:
+                    logger.error(f"Calibration file write failed: {e}")
+
             # Pet watchdog after heavy chrony/fusion processing
             if SYSTEMD_AVAILABLE:
                 systemd_daemon.notify('WATCHDOG=1')
@@ -5441,6 +5465,10 @@ def run_fusion_service(
     except Exception as e:
         logger.error(f"Failed to save calibration on shutdown: {e}")
     
+    # Remove calibration file on shutdown so stale data is not consumed
+    if calib_writer:
+        calib_writer.remove()
+    
     logger.info("Fusion service shutdown complete")
 
 
@@ -5459,6 +5487,8 @@ if __name__ == '__main__':
                         help='Enable Chrony SHM refclock output (default: enabled)')
     parser.add_argument('--disable-chrony', action='store_true',
                         help='Disable Chrony SHM refclock output')
+    parser.add_argument('--calib-file', type=str, default=None,
+                        help='Path to JSON calibration file (wsprdaemon integration)')
     
     args = parser.parse_args()
     
@@ -5503,5 +5533,6 @@ if __name__ == '__main__':
         lookback_minutes=args.lookback,
         receiver_lat=receiver_lat,
         receiver_lon=receiver_lon,
-        timing_authority_level=timing_level
+        timing_authority_level=timing_level,
+        calib_file=args.calib_file
     )

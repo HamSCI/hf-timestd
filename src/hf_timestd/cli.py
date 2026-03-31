@@ -1,12 +1,142 @@
 #!/usr/bin/env python3
 """
 Command Line Interface for hf-timestd
+
+Subcommands for wsprdaemon / external client integration:
+    version   — machine-readable version info (--json)
+    status    — pipeline health check (exit codes 0/1/2)
+    calibrate — run fusion with JSON calibration file output
 """
 
 import sys
+import json
 import logging
 import argparse
+import time
+from pathlib import Path
 from .core.core_recorder_v2 import CoreRecorderV2
+
+
+# ============================================================================
+# Client API handlers (version, status, calibrate)
+# ============================================================================
+
+def _handle_version(args):
+    """Print hf-timestd version information."""
+    try:
+        from importlib.metadata import version as pkg_version
+        ver = pkg_version('hf-timestd')
+    except Exception:
+        ver = 'unknown (not installed as package)'
+
+    from .version import COMPONENT_VERSIONS
+
+    info = {
+        'name': 'hf-timestd',
+        'version': ver,
+        'components': COMPONENT_VERSIONS,
+        'python': sys.version.split()[0],
+        'schemas': {
+            'calibration': '1.0.0',
+        },
+    }
+
+    if getattr(args, 'json', False):
+        print(json.dumps(info, indent=2))
+    else:
+        print(f"hf-timestd {ver}")
+        print(f"  Python: {info['python']}")
+        print(f"  Calibration schema: {info['schemas']['calibration']}")
+        print(f"  Components:")
+        for k, v in COMPONENT_VERSIONS.items():
+            print(f"    {k}: {v}")
+
+
+def _handle_status(args):
+    """
+    Check pipeline health.  Returns JSON and sets exit code:
+      0 = OK (usable), 1 = WARN (running but not usable), 2 = CRIT (stale/down)
+    """
+    result = {
+        'status': 'CRIT',
+        'exit_code': 2,
+        'calibration': None,
+        'data_freshness': {},
+    }
+
+    # 1. Check calibration file if provided
+    calib_path = getattr(args, 'calib_file', None)
+    if calib_path:
+        calib_path = Path(calib_path)
+        if calib_path.exists():
+            try:
+                calib = json.loads(calib_path.read_text())
+                age_sec = time.time() - calib.get('last_update_unix', 0)
+                result['calibration'] = {
+                    'file': str(calib_path),
+                    'usable': calib.get('usable', False),
+                    'convergence_state': calib.get('convergence_state', 'UNKNOWN'),
+                    'offset_ms': calib.get('offset_ms'),
+                    'uncertainty_ms': calib.get('uncertainty_ms'),
+                    'quality_grade': calib.get('quality_grade'),
+                    'age_seconds': round(age_sec, 1),
+                    'stale': age_sec > 300,
+                }
+                if calib.get('usable') and age_sec < 300:
+                    result['status'] = 'OK'
+                    result['exit_code'] = 0
+                elif age_sec < 300:
+                    result['status'] = 'WARN'
+                    result['exit_code'] = 1
+                # else: CRIT (stale or missing)
+            except Exception as e:
+                result['calibration'] = {
+                    'file': str(calib_path),
+                    'error': str(e),
+                }
+        else:
+            result['calibration'] = {
+                'file': str(calib_path),
+                'error': 'file not found',
+            }
+
+    # 2. Check HDF5 data freshness
+    data_root = Path(getattr(args, 'data_root', '/var/lib/timestd'))
+    phase2_dir = data_root / 'phase2'
+    if phase2_dir.exists():
+        # Check fusion output
+        fusion_dir = phase2_dir / 'fusion'
+        if fusion_dir.exists():
+            h5_files = sorted(fusion_dir.glob('fusion_fusion_timing_*.h5'))
+            if h5_files:
+                latest = h5_files[-1]
+                age = time.time() - latest.stat().st_mtime
+                result['data_freshness']['fusion_hdf5'] = {
+                    'file': latest.name,
+                    'age_seconds': round(age, 1),
+                    'stale': age > 600,
+                }
+                # If no calib file was given, infer status from HDF5 freshness
+                if not calib_path and age < 600:
+                    result['status'] = 'WARN'
+                    result['exit_code'] = 1
+
+        # Check how many metrology channels have recent data
+        channel_dirs = [d for d in phase2_dir.iterdir()
+                        if d.is_dir() and d.name != 'fusion' and d.name != 'science']
+        active_channels = 0
+        for ch_dir in channel_dirs:
+            h5s = sorted(ch_dir.glob('*.h5'))
+            if h5s:
+                age = time.time() - h5s[-1].stat().st_mtime
+                if age < 300:
+                    active_channels += 1
+        result['data_freshness']['active_metrology_channels'] = active_channels
+        result['data_freshness']['total_metrology_channels'] = len(channel_dirs)
+
+    print(json.dumps(result, indent=2))
+    sys.exit(result['exit_code'])
+
 
 def main():
     """Main entry point for hf-timestd command"""
@@ -35,6 +165,36 @@ def main():
     
     # Create subparsers for different commands
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
+    
+    # Version command
+    version_parser = subparsers.add_parser('version',
+        help='Show hf-timestd version and component info')
+    version_parser.add_argument('--json', action='store_true',
+        help='Machine-readable JSON output (for wsprdaemon components.ini)')
+    
+    # Status command (machine-readable health check)
+    status_parser = subparsers.add_parser('status',
+        help='Show pipeline health status (machine-readable JSON)',
+        description='''
+Query the current health of the hf-timestd pipeline.
+
+Reads the latest calibration JSON file (if it exists) and checks data
+freshness across all pipeline stages.  Returns a JSON document suitable
+for wsprdaemon's wd-ctl status or Nagios-style monitoring.
+
+Exit codes:
+  0  OK — pipeline healthy, calibration usable
+  1  WARN — pipeline running but calibration not yet usable
+  2  CRIT — pipeline stale or not running
+''',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    status_parser.add_argument('--calib-file',
+        help='Path to calibration JSON file to check')
+    status_parser.add_argument('--data-root',
+        default='/var/lib/timestd',
+        help='Data root directory (checks HDF5 freshness)')
+    status_parser.add_argument('--json', action='store_true', default=True,
+        help='JSON output (default)')
     
     # Daemon command
     daemon_parser = subparsers.add_parser('daemon', help='Run recorder daemon')
@@ -159,6 +319,56 @@ def main():
     grape_status_parser.add_argument('--days', type=int, default=7, help='Days of history to show')
     grape_status_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
     
+    # Calibrate command (wsprdaemon integration)
+    calibrate_parser = subparsers.add_parser('calibrate',
+        help='Run fusion service with JSON calibration output (wsprdaemon integration)',
+        description='''\
+Run the multi-broadcast fusion engine and write a JSON calibration file
+that wsprdaemon's wd-ka9q-record service reads to align wav start times.
+
+IMPORTANT: This command runs the FUSION layer only (step 5 of the
+hf-timestd pipeline).  The upstream services must already be running:
+  1. timestd-core-recorder  — IQ capture from radiod
+  2. timestd-metrology@*    — per-channel tone detection → L1 HDF5
+  3. timestd-l2-calibration — cross-station calibration → L2 HDF5
+  4. timestd-physics         — propagation model (optional but recommended)
+
+If you are deploying hf-timestd for the first time, install the full
+service suite first (see docs/INTEGRATION.md), then add --calib-file to
+the existing timestd-fusion.service unit, OR use this subcommand as a
+separate systemd service that reads the same data root.
+
+The calibration file is written atomically (tmp + rename) so readers never
+see a partial write.  On SIGTERM the file is removed so consumers do not
+read stale data after shutdown.
+
+Example wsprdaemon systemd unit:
+  ExecStart=/opt/wsprdaemon/python/bin/python3 -m hf_timestd calibrate \\
+      --config /etc/hf-timestd/timestd-config.toml \\
+      --calib-file /run/wsprdaemon/KA9Q_0/hftime.json
+
+Health check:
+  hf-timestd status --calib-file /run/wsprdaemon/KA9Q_0/hftime.json
+''',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    calibrate_parser.add_argument('--config', '-c',
+        default='/etc/hf-timestd/timestd-config.toml',
+        help='Configuration file path (TOML)')
+    calibrate_parser.add_argument('--calib-file', required=True,
+        help='Path to JSON calibration output file (e.g. /run/wsprdaemon/KA9Q_0/hftime.json)')
+    calibrate_parser.add_argument('--data-root',
+        default='/var/lib/timestd',
+        help='Data root directory for HDF5 storage')
+    calibrate_parser.add_argument('--interval', type=float, default=8.0,
+        help='Fusion cycle interval in seconds (default: 8)')
+    calibrate_parser.add_argument('--enable-chrony', action='store_true', default=False,
+        help='Also write to Chrony SHM (default: disabled in calibrate mode)')
+    calibrate_parser.add_argument('--timing-level',
+        default='L5', choices=['L1', 'L2', 'L3', 'L4', 'L5', 'L6'],
+        help='Timing authority level (default: L5)')
+    calibrate_parser.add_argument('--debug', '-d', action='store_true',
+        help='Enable DEBUG logging')
+    
     args = parser.parse_args()
     
     # If no command specified, show help
@@ -174,7 +384,11 @@ def main():
         logging.info("DEBUG logging enabled")
     
     # Handle commands
-    if args.command == 'daemon':
+    if args.command == 'version':
+        _handle_version(args)
+    elif args.command == 'status':
+        _handle_status(args)
+    elif args.command == 'daemon':
         import toml
         # Load configuration
         try:
@@ -806,6 +1020,42 @@ def main():
         else:
             grape_parser.print_help()
             sys.exit(1)
+    elif args.command == 'calibrate':
+        from pathlib import Path
+        import toml
+
+        # Load configuration (for receiver coordinates, timing authority, etc.)
+        config_path = Path(args.config)
+        receiver_lat = None
+        receiver_lon = None
+        timing_level = args.timing_level
+
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = toml.load(f)
+                receiver_lat = config.get('station', {}).get('latitude')
+                receiver_lon = config.get('station', {}).get('longitude')
+                cfg_level = config.get('fusion', {}).get('timing_authority_level')
+                if cfg_level and timing_level == 'L5':
+                    timing_level = cfg_level
+                logging.info(f"Calibrate: loaded config from {config_path}")
+            except Exception as e:
+                logging.warning(f"Calibrate: could not read config: {e}")
+        else:
+            logging.info(f"Calibrate: no config at {config_path}, using defaults")
+
+        from .core.multi_broadcast_fusion import run_fusion_service
+        run_fusion_service(
+            data_root=Path(args.data_root),
+            interval_sec=args.interval,
+            enable_chrony=args.enable_chrony,
+            lookback_minutes=30,
+            receiver_lat=receiver_lat,
+            receiver_lon=receiver_lon,
+            timing_authority_level=timing_level,
+            calib_file=args.calib_file
+        )
 
 if __name__ == '__main__':
     main()

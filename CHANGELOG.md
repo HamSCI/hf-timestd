@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### wsprdaemon v4 Calibration API
+
+**Feature:** `calibrate` CLI subcommand and `CalibrationFileWriter` — primary integration point for wsprdaemon v4. Runs the full multi-broadcast fusion pipeline and writes an atomic JSON calibration file consumed by `wd-ka9q-record` for sub-millisecond wav alignment.
+
+- **`src/hf_timestd/io/calibration_file.py`**: New module — `CalibrationFileWriter` class with atomic tmp+rename writes, ISO 8601 timestamps, convergence state, uncertainty budget, and per-station diagnostics
+- **`src/hf_timestd/schemas/calibration_v1.json`**: JSON Schema for calibration file (schema version 1.0.0)
+- **`src/hf_timestd/cli.py`**: New `calibrate` subcommand with `--calib-file` (required), `--config`, `--data-root`, `--interval`, `--enable-chrony`, `--timing-level`
+- **`src/hf_timestd/core/multi_broadcast_fusion.py`**: `run_fusion_service()` gains `calib_file` parameter; calibration file written after each fusion cycle; file removed on SIGTERM for stale-data safety
+
+**Consumer contract (primary fields):**
+- `offset_ms` — fused D_clock (system clock offset from UTC)
+- `uncertainty_ms` — combined RSS uncertainty (ISO GUM)
+- `convergence_state` — ACQUIRING / LOCKED / REACQUIRING
+- `usable` — single boolean go/no-go for wav alignment
+- `quality_grade` — A/B/C/D
+
+**Additional client API subcommands:**
+- `hf-timestd version [--json]` — version and schema info for component pinning
+- `hf-timestd status --calib-file FILE [--data-root DIR]` — pipeline health check with exit codes (0=OK, 1=WARN, 2=CRIT), checks calibration file freshness and HDF5 data flow
+
+**Documentation:**
+- **`docs/INTEGRATION.md`**: Complete client integration guide covering architecture, deployment models, calibration file schema, config format, service dependencies, and forward compatibility
+
 ## [6.12.0] - 2026-03-16
 
 ### PHaRLAP/pyLAP Numerical Raytrace Integration (v6.8 Physics Overlay)
