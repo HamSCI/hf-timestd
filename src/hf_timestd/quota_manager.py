@@ -379,19 +379,69 @@ class QuotaManager:
             'dry_run': self.dry_run,
         }
 
+    def archive_raw(self) -> dict:
+        """
+        Proactively move completed raw IQ day-directories to archive storage.
+
+        Moves all raw day-directories except today's to archive_root,
+        freeing primary disk for new recordings while preserving the data.
+        Only runs if archive_root is configured and mounted.
+
+        Returns dict with counts and bytes freed on primary.
+        """
+        result = {'dirs_archived': 0, 'bytes_freed': 0, 'dry_run': self.dry_run}
+
+        if not self.archive_root or not self._archive_is_mounted():
+            return result
+
+        if not self.raw_buffer_dir.exists():
+            return result
+
+        today = datetime.now(timezone.utc).date().strftime('%Y%m%d')
+
+        for channel_dir in sorted(self.raw_buffer_dir.iterdir()):
+            if not channel_dir.is_dir():
+                continue
+            for day_dir in sorted(channel_dir.iterdir()):
+                if not day_dir.is_dir() or not _DATE_RE.fullmatch(day_dir.name):
+                    continue
+                if day_dir.name >= today:
+                    continue  # never move today (still being written)
+
+                entry = DayEntry(
+                    path=day_dir, date_str=day_dir.name,
+                    category='raw_iq', is_dir=True
+                )
+                freed = self._archive_entry(entry)
+                result['bytes_freed'] += freed
+                result['dirs_archived'] += 1
+
+        if result['dirs_archived'] > 0:
+            logger.info(
+                f"Archive: {'would move' if self.dry_run else 'moved'} "
+                f"{result['dirs_archived']} raw day-dirs to {self.archive_root}, "
+                f"freed {result['bytes_freed'] / 1024**3:.2f} GB on primary"
+            )
+
+        return result
+
     def enforce_quota(self) -> dict:
         """
-        Enforce storage policy: retention first, then threshold-based cleanup.
+        Enforce storage policy in three stages:
 
         1. Trim derived data (phase2, products) beyond derived_max_days
-        2. If still over threshold, evict by priority (products → phase2 → vtec → raw_iq)
+        2. Archive completed raw IQ days to archive_root (if mounted)
+        3. If still over threshold, evict by priority (products → phase2 → vtec → raw_iq)
 
         Returns dict compatible with the previous file-level QuotaManager.
         """
         # Step 1: proactive retention trim of derived data
         retention_result = self.enforce_retention()
 
-        # Step 2: threshold-based cleanup
+        # Step 2: archive completed raw days to external storage
+        archive_result = self.archive_raw()
+
+        # Step 3: threshold-based cleanup
         used, total, percent = self.get_disk_usage()
 
         result = {
@@ -399,6 +449,8 @@ class QuotaManager:
             'threshold_percent': self.threshold_percent,
             'files_deleted': retention_result['items_deleted'],
             'bytes_freed': retention_result['bytes_freed'],
+            'dirs_archived': archive_result['dirs_archived'],
+            'archive_bytes_freed': archive_result['bytes_freed'],
             'final_usage_percent': percent,
             'dry_run': self.dry_run
         }

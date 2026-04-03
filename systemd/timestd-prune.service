@@ -10,8 +10,9 @@ Group=timestd
 
 # Uses the QuotaManager to enforce storage policy:
 #   1. Trim derived data (phase2, products) older than 7 days
-#   2. If disk > 80%, evict by priority: products → phase2 → vtec → raw_iq
-# Raw IQ is only evicted as a last resort under disk pressure.
+#   2. Archive completed raw IQ days to archive-root (if mounted)
+#   3. If disk > 80%, evict by priority: products → phase2 → vtec → raw_iq
+# Raw IQ is preserved on archive storage; only deleted as last resort.
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.quota_manager \
     --data-root /var/lib/timestd \
     --threshold 80 \
