@@ -372,6 +372,23 @@ if [[ "$INTERACTIVE" == "true" ]]; then
         log_info "Configuration updated: $PROD_CONFIG"
         log_warn "Restart services to apply changes"
     fi
+else
+    # Non-interactive: auto-apply missing sections from template
+    if [[ ${#MISSING_SECTIONS[@]} -gt 0 ]]; then
+        echo ""
+        log_info "Auto-applying missing sections (non-interactive)..."
+        for section in "${MISSING_SECTIONS[@]}"; do
+            section_name="${section#[}"
+            section_name="${section_name%]}"
+            SECTION_CONTENT=$(extract_section "$TEMPLATE_CONFIG" "$section_name")
+            if [[ -n "$SECTION_CONTENT" ]]; then
+                echo "" | sudo tee -a "$PROD_CONFIG" > /dev/null
+                echo "$SECTION_CONTENT" | sudo tee -a "$PROD_CONFIG" > /dev/null
+                log_info "Added $section (defaults from template)"
+            fi
+        done
+        log_warn "Restart services to apply changes"
+    fi
 fi
 
 # =============================================================================
