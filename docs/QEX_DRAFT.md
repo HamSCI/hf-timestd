@@ -3,14 +3,7 @@
 
 **Author:** Michael J. Hauan, AC0G  
 **Target:** QEX — A Forum for Communications Experimenters (ARRL)  
-**Status:** Second draft, March 2026 — restructured: two-pillar framing, accuracy landscape, Mode ID demoted to §3.5
-
----
-
-> *Editorial note to self: QEX feature articles run 3,000–8,000 words. Target 5,000 for this
-> one. Equations should be numbered. Figures are essential — plan on 6–7. Sidebar on
-> ka9q-radio and one on the CHU FSK decoder would fit well. Structure: 6 sections
-> (Intro, System, Metrology, dTEC, Discussion, Conclusion). Mode ID is §3.5, not standalone.*
+**Status:** Third draft, 1 April 2026
 
 ---
 
@@ -22,7 +15,7 @@ listening for the ticks. The accuracy of that process has always been limited by
 problem: the signal does not travel at the speed of light in a straight line. It bounces
 off the ionosphere. The delay varies with the sun, the season, the solar cycle, and the
 geometry of each hop. For casual timekeeping the error is tolerable; for precision
-metrology it is the dominant uncertainty, typically 5–30 milliseconds if left unmodeled.
+metrology it is the dominant uncertainty, typically 5 to 30 milliseconds if left unmodeled.
 
 This article describes a system that characterizes that delay rather than ignoring it — and
 extracts ionospheric science as a direct byproduct. Using a GPSDO-locked RX888
@@ -40,10 +33,10 @@ experimenter who wants to know UTC:
 
 | Method | Typical Accuracy | Requirements |
 |--------|-----------------|--------------|
-| GPS+PPS receiver | ~100 ns | GPS antenna, clear sky view |
-| WWVB (research-grade) | ~0.1–1 ms | 60 kHz antenna/receiver, night-only at distance |
+| GPS+PPS (pulse-per-sec) receiver | ~100 ns | GPS antenna, clear sky view |
+| WWVB (research-grade) | ~0.05–1 ms | 60 kHz antenna/receiver, night-only at distance |
 | **hf-timestd (this work)** | **±0.5 ms (1σ)** | **GPSDO + SDR + wire antenna** |
-| Internet NTP (dedicated stratum-1) | ~1–5 ms | Network connectivity, symmetric routing |
+| Internet Network Time Protocol (NTP -- dedicated stratum-1) | ~1–5 ms | Network connectivity, symmetric routing |
 | HF single broadcast (uncorrected) | ~1–10 ms | Any HF receiver (NIST FAQ: "less than 10 ms") |
 | Internet NTP (public pool) | ~5–50 ms | Network connectivity |
 | WWVB consumer clock | ~0.5–1 s | Built-in ferrite antenna, syncs once/day |
@@ -60,7 +53,7 @@ system must not be conflated. Its *frequency stability* — holding the sampling
 sub-ppb — makes carrier-phase measurements coherent across minutes, enabling dTEC/dt
 extraction as a mathematical consequence requiring no knowledge of absolute UTC (Section 4).
 Its role as a *timing authority* is separate: in normal operation, ka9q-radio propagates
-the GPS 1 pps pulse into each RTP timestamp, giving the system ~50 µs UTC traceability;
+the GPS 1 pps pulse into each RTP (real-time protocol) timestamp, giving the system π~50 µs UTC traceability;
 when GPS time is absent, the system derives its own UTC reference from the HF broadcasts
 themselves (Section 3.3). Section 2.1 describes the hardware; the distinction matters for
 understanding which product requires what.
@@ -90,7 +83,7 @@ to 64 MHz) and delivers the samples over USB3 to the host computer.
 The GPSDO's primary contribution is *frequency stability*: by locking its output to the
 GPS 1 pps and 10 MHz reference, it holds the RX888 sampling clock to sub-ppb stability
 over timescales from seconds to hours. A free-running crystal oscillator drifts at
-1–10 ppm, accumulating tens of microseconds of phase error per second — enough to swamp
+1–10 ppm (parts-per-million), accumulating tens of microseconds of phase error per second — enough to swamp
 the carrier-phase coherence that dTEC/dt extraction requires. The GPSDO eliminates this
 drift entirely.
 
@@ -141,7 +134,7 @@ subcarrier tone) and by its characteristically longer propagation delay (~35–4
 trans-Pacific path).
 
 CHU transmits FSK-encoded timecodes at 300 baud alongside the audio tick. The
-`chu_fsk_decoder.py` module extracts TAI-UTC leap second count, DUT1, and UTC itself from
+`chu_fsk_decoder.py` module extracts TAI - UTC leap second count, DUT1, and UTC itself from
 this channel, providing an independent cross-check on the fusion output.
 
 ![Figure 2: 10 MHz spectrogram showing WWV and WWVH ticks. Top: raw IQ spectrogram (10 s). Bottom: bandpass-filtered AM envelope showing tick pulse structure.](figures/fig2_spectrogram_10mhz.png)
@@ -159,9 +152,8 @@ sequence from raw IQ to Chrony SHM clock discipline.
    filter (TickEdgeDetector), SNR estimation, Doppler extraction, station discrimination.
    Writes L1 and L2 timing measurement files.
 3. **timestd-l2-calibration** — Applies propagation corrections at three tiers (geometric,
-   IRI model, GNSS VTEC) to produce calibrated clock offsets.
-4. **timestd-fusion** — Per-broadcast Kalman filter for delay/drift tracking, then WLS
-   fusion of all validated broadcasts. Writes TSL1/TSL2 shared-memory segments for Chrony.
+   IRI (International Reference Ionosphere) model, GNSS (Global Navigation Satellite System) VTEC) to produce calibrated clock offsets.
+4. **timestd-fusion** — Per-broadcast Kalman filter for delay/drift tracking, then weighted least-squares (WLS) fusion of all validated broadcasts. Writes TSL1/TSL2 shared-memory segments for Chrony.
 5. **timestd-vtec** — Reads the ZED-F9P dual-frequency GNSS receiver and downloads IONEX
    for absolute TEC reference.
 6. **timestd-physics** — Carrier-phase dTEC/dt estimation, group-delay TEC (validation),
@@ -190,6 +182,7 @@ frequencies) to 53 dB (CHU at 14.670 MHz, ~1,520 km, strong path on quiet nights
 median SNR 45 dB on CHU 7.850 MHz).
 
 The filter output yields three quantities per detected tick:
+
 - **TOA** — time of arrival of the tick relative to the RTP timestamp, in milliseconds
 - **Doppler** — carrier frequency offset, estimated from the phase slope across the
   integration window, in millihertz
@@ -224,6 +217,7 @@ broadcast receives a weight inversely proportional to its expanded uncertainty (
 once per minute.
 
 Two outputs are written to Chrony shared memory:
+
 - **TSL1** — the fusion result using all validated broadcasts, including those with
   ionospheric model corrections. Used as the primary time source.
 - **TSL2** — the fusion result restricted to broadcasts with GNSS-VTEC-corrected delays.
@@ -319,7 +313,7 @@ electron content (TEC) along the path:
 
     τ_iono = K · TEC / f²
 
-where K = 40.3 m³s⁻² and f is the carrier frequency in Hz. In principle, measuring the
+where K = 40.3 m³s⁻² and *f* is the carrier frequency in Hz. In principle, measuring the
 differential TOA between two frequencies on the same path allows one to solve for TEC
 without knowing the geometric delay. In practice, this requires the two measurements to
 share the same propagation mode — the same number of hops reflecting from the same
@@ -443,12 +437,14 @@ a dedicated ionospheric instrument to replicate.
 ### 5.3 Can I Build This?
 
 The hardware cost for this system as built is under $500 (2026 USD):
+
 - RX888 Mk II SDR: ~$150
 - GPSDO (e.g., Leo Bodnar GPSDO or equivalent): ~$150
-- ZED-F9P GNSS receiver module: ~$50–100 (optional, for VTEC anchoring)
+- ZED-F9P GNSS receiver module or equivalent: ~$120-250 (optional, for VTEC anchoring)
 - Server/NUC to run the software: whatever you have
 
 The software is entirely open source:
+
 - ka9q-radio: https://github.com/ka9q/ka9q-radio
 - hf-timestd: https://github.com/mijahauan/hf-timestd
 - PHaRLAP (for mode ID): available from IPS Australia
@@ -495,8 +491,7 @@ and carrier-phase dTEC/dt at ~6 mTECU/minute precision, a continuous oblique-pat
 ionospheric observable that complements overhead GNSS TEC measurements.
 
 The ±0.5 ms timing accuracy represents a 20× improvement over uncorrected single-broadcast
-HF reception and is competitive with research-grade WWVB receivers, while using
-higher-frequency signals that propagate via the F2 layer and support daytime operation.
+HF reception using signals that propagate via the F2 layer and support daytime operation.
 The dTEC/dt product emerges as a direct mathematical consequence of the same coherent
 phase integration — requiring only the GPSDO's frequency stability, not absolute time.
 
@@ -526,38 +521,14 @@ both, this is a practically accessible entry point.
 
 ---
 
-## Data Gaps and Pipeline Issues to Resolve
-
-The following issues were identified during data analysis for this article and should be
-addressed before final submission:
-
-1. **CHU 14.670 MHz mode label** — Now correctly assigned 1F (31%) with 69% unknown.
-   The unknown fraction corresponds to nighttime hours (14–19 UTC) when the MUF drops
-   below 14.67 MHz and the channel goes silent. Daytime hours show clean 1F2 assignment.
-   Previous 1E (99%) bug appears resolved in current reanalysis pipeline.
-
-2. **WWV 20/25 MHz above-MUF gating** — These channels should be flagged as above-MUF
-   and excluded from the L3C propagation stats when they are consistently at noise-floor
-   SNR. The reanalysis already marks them "UNKNOWN" but L2 mode labels are garbage.
-
-3. **BPM non-detection** — Zero BPM measurements in current data. Either the path loss
-   is too high, the discrimination is failing, or the detection threshold is too high.
-   Characterizing this definitively (path is just too lossy vs. fixable pipeline issue)
-   would either add BPM to the article or explain its absence.
-
-4. ~~**Figure 6 (PHaRLAP ray fan)**~~ — **Resolved.** Now uses PHaRLAP 4.7.4 numerical
-   ray tracing through IRI-2020 Ne(h) profile. 117 rays, 61 closing, modes 1F2/2F2/3F2.
-
----
-
 ## References (Draft)
 
 [1] Cervera, M.A. and Harris, T.J., "Modeling ionospheric disturbance features in
     oblique ionograms using a combination of 3-D geometric ray tracing and
-    a tilted ionosphere," Radio Sci., 49(10), 2014. (PHaRLAP)
+    a tilted ionosphere," *Radio Sci.*, 49(10), 2014. (PHaRLAP)
 
 [2] Bilitza, D. et al., "The International Reference Ionosphere model: A review and
-    description of an ionospheric benchmark," Rev. Geophys., 60, 2022. (IRI-2020)
+    description of an ionospheric benchmark," *Rev. Geophys.*, 60, 2022. (IRI-2020)
 
 [3] Karn, P.E. (KA9Q), ka9q-radio, https://github.com/ka9q/ka9q-radio
 
@@ -566,7 +537,7 @@ addressed before final submission:
 
 [5] ITU-R Recommendation TF.460-6, "Standard-frequency and time-signal emissions," 2002.
 
-[6] hf-timestd source code: https://github.com/mijahauan/hf-timestd
+[6] Hauan, M.J. (AC0G), hf-timestd, https://github.com/mijahauan/hf-timestd
 
 [7] NIST, "NIST Radio Broadcasts Frequently Asked Questions," Time and Frequency
     Division, https://www.nist.gov/pml/time-and-frequency-division/time-distribution/
@@ -596,10 +567,10 @@ addressed before final submission:
      4.7.4 / IRI-2020 / GCC support: https://github.com/mijahauan/PyLap.
 
 [14] Bust, G.S. and Mitchell, C.N., "History, current state, and future directions of
-     ionospheric imaging," Rev. Geophys., 46, RG1003, 2008 (oblique TEC techniques).
+     ionospheric imaging," *Rev. Geophys.*, 46, RG1003, 2008 (oblique TEC techniques).
 
 [15] Lombardi, M.A. et al., "NIST Primary Frequency Standards and the Realization of
-     the SI Second," NIST J. Res., 112(4), 2007; see also Lombardi, M.A., "WWVB Radio
+     the SI Second," *NIST J. Res.*, 112(4), 2007; see also Lombardi, M.A., "WWVB Radio
      Controlled Clocks: Recommended Practices for Manufacturers and Consumers," NIST
      SP 960-14, 2010 (WWVB receiver accuracy comparison).
 
