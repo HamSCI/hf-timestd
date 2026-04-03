@@ -6,6 +6,36 @@ from HF Time Signals with a GPSDO SDR"
 Usage:
     /opt/hf-timestd/venv/bin/python3 docs/figures/generate_qex_figures.py
 
+Parameters:
+    --date YYYYMMDD
+        Target UTC date to render figures from.
+        Default: 20260317
+
+    --data-root PATH
+        Root timestd data directory containing phase2/ and data/.
+        Default: /var/lib/timestd
+
+    --output-dir PATH
+        Directory to write figure PNG outputs into.
+        Default: docs/figures (the directory containing this script)
+
+    --dpi INT
+        Raster DPI for output figures.
+        Default: 200
+
+    --channels CSV
+        Comma-separated list of channel directory names to include in plots that
+        iterate CHANNELS (e.g. Fig 3 per-broadcast scatter).
+        Default:
+            CHU_3330,CHU_7850,CHU_14670,
+            SHARED_2500,SHARED_5000,SHARED_10000,SHARED_15000,
+            WWV_20000,WWV_25000
+
+    --figs CSV
+        Comma-separated list of figure numbers to generate.
+        Supported: 1-9
+        Default: 1-9
+
 Generates Figs 3–7 into docs/figures/. Figs 1–2 require separate treatment
 (diagram tool / raw IQ respectively).
 
@@ -22,6 +52,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import argparse
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -49,6 +80,38 @@ FREQ_MARKERS = {
     2.5: 'o', 3.33: 's', 5.0: '^', 7.85: 'D',
     10.0: 'v', 14.67: 'p', 15.0: '>', 20.0: '<', 25.0: 'h',
 }
+
+
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog='generate_qex_figures.py',
+        description='Generate figures for the QEX article from hf-timestd outputs.',
+    )
+    parser.add_argument('--date', default=TARGET_DATE, help='Target UTC date (YYYYMMDD)')
+    parser.add_argument('--data-root', default=DATA_ROOT, help='Root timestd data directory')
+    parser.add_argument('--output-dir', default=str(OUTPUT_DIR), help='Output directory for figures')
+    parser.add_argument('--dpi', type=int, default=DPI, help='Output DPI')
+    parser.add_argument(
+        '--channels',
+        default=','.join(CHANNELS),
+        help='Comma-separated channel list (directory names)'
+    )
+    parser.add_argument(
+        '--figs',
+        default='1-9',
+        help='Comma-separated list of figure numbers (e.g. 3,5,7) or a range (e.g. 3-7)'
+    )
+    return parser.parse_args(argv)
+
+
+def _parse_figs(figs_str: str):
+    s = figs_str.strip()
+    if not s:
+        return list(range(1, 10))
+    if '-' in s and ',' not in s:
+        a, b = s.split('-', 1)
+        return list(range(int(a), int(b) + 1))
+    return [int(x.strip()) for x in s.split(',') if x.strip()]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -815,10 +878,16 @@ def _try_pylap_raytrace():
 
     Returns (paths, rays, foF2, hmF2, target_range_km) or None if pylap unavailable.
     """
+    # Auto-detect PHaRLAP reference data if not already set
+    if 'DIR_MODELS_REF_DAT' not in os.environ:
+        for candidate in ['/opt/pharlap_4.7.4/dat', '/opt/pharlap/dat']:
+            if os.path.isdir(candidate):
+                os.environ['DIR_MODELS_REF_DAT'] = candidate
+                break
     try:
         import pylap.raytrace_2d as rt_mod
         import pylap.iri2016 as iri_mod
-    except ImportError:
+    except (ImportError, OSError):
         return None
 
     # WWV → EM38ww geometry (exact coordinates from timestd-config.toml)
@@ -909,49 +978,92 @@ def _try_pylap_raytrace():
         tx_lat, tx_lon, elevs, bearing, freqs, 3,
         tol, 0, iono_en, zeros, zeros, 60.0, 3.0, 50.0, irreg
     )
-    return paths, rays, foF2, hmF2, target_km, elevs
+    ht_start, ht_inc = 60.0, 3.0
+    height_km = ht_start + np.arange(n_heights) * ht_inc
+
+    return dict(
+        paths=paths, rays=rays, foF2=foF2, hmF2=hmF2,
+        target_km=target_km, elevs=elevs,
+        iono_en=iono_en, height_km=height_km, range_km=range_km,
+        sample_foF2=sample_foF2, sample_hmF2=sample_hmF2,
+        sample_dists=sample_dists,
+    )
 
 
 def generate_fig6():
     """
     Generate ray fan plot for WWV 10 MHz using PHaRLAP numerical ray tracing
     (if available) or a simplified parabolic approximation as fallback.
+
+    Two-panel layout:
+      Left:  Ray paths overlaid on IRI-2020 electron density pcolormesh
+      Right: Midpoint Ne(h) profile with E/F layer annotation
+    Closing modes annotated with elevation range, group delay, virtual height,
+    and apogee from the full PHaRLAP per-hop output.
     """
     result = _try_pylap_raytrace()
     if result is None:
         print("  ✗ pylap not available — skipping Fig 6 (needs PHaRLAP)")
         return
 
-    paths, rays, foF2, hmF2, target_km, elevs = result
+    paths = result['paths']
+    rays = result['rays']
+    foF2 = result['foF2']
+    hmF2 = result['hmF2']
+    target_km = result['target_km']
+    elevs = result['elevs']
+    iono_en = result['iono_en']
+    height_km = result['height_km']
+    range_km = result['range_km']
+    sample_foF2 = result['sample_foF2']
+    sample_hmF2 = result['sample_hmF2']
+
     print(f"Generating Fig 6: PHaRLAP ray fan (foF2={foF2:.2f}, hmF2={hmF2:.1f})...")
 
     from matplotlib.lines import Line2D
+    from matplotlib.colors import LogNorm
+    import matplotlib.gridspec as gridspec
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    R_E = 6371.0
+    fig = plt.figure(figsize=(13, 6.5))
+    gs = gridspec.GridSpec(1, 2, width_ratios=[5, 1.2], wspace=0.06, figure=fig)
+    ax = fig.add_subplot(gs[0])
+    ax_ne = fig.add_subplot(gs[1], sharey=ax)
 
-    # ── Determine x-axis extent from ray data ──
-    max_gnd = 0.0
-    for path in paths:
-        gnd = np.asarray(path.get('ground_range', []))
-        if gnd.size > 0:
-            max_gnd = max(max_gnd, float(gnd.max()))
-    x_max = max(target_km * 1.6, max_gnd * 0.55, 1800.0)
+    # ── Display limits ──
+    x_max = max(target_km * 1.8, 1800.0)
+    y_min, y_max = 50.0, 500.0
 
-    # ── Ionospheric layer shading ──
-    x_range = np.linspace(0, x_max, 500)
-    ax.fill_between(x_range, -50, 0, color='#8D6E63', alpha=0.12)
-    ax.fill_between(x_range, 90, 130, color='#BBDEFB', alpha=0.25)
-    ax.fill_between(x_range, 150, 450, color='#C8E6C9', alpha=0.20)
-    ax.axhline(hmF2, color='#4CAF50', linewidth=1, linestyle='--', alpha=0.6)
-    ax.text(x_max * 0.92, hmF2 + 8, f'hmF2 = {hmF2:.0f} km', fontsize=8, color='#4CAF50')
-    ax.text(x_max * 0.92, hmF2 - 25, f'foF2 = {foF2:.2f} MHz', fontsize=8,
-            color='#4CAF50', fontstyle='italic')
+    # ── Electron density background (pcolormesh) ──
+    # Clip grid to display range
+    r_mask = range_km <= x_max
+    h_mask = (height_km >= y_min) & (height_km <= y_max)
+    ne_display = iono_en[np.ix_(h_mask, r_mask)]
+    ne_display = np.where(ne_display > 0, ne_display, np.nan)
 
-    # ── Classify and plot each ray ──
+    ne_vmin = max(np.nanmin(ne_display[ne_display > 0]) if np.any(ne_display > 0) else 1e2, 1e2)
+    ne_vmax = np.nanmax(ne_display) if np.any(~np.isnan(ne_display)) else 1e6
+    pcm = ax.pcolormesh(
+        range_km[r_mask], height_km[h_mask], ne_display,
+        norm=LogNorm(vmin=ne_vmin, vmax=ne_vmax),
+        cmap='YlGnBu', shading='auto', alpha=0.7, zorder=1, rasterized=True,
+    )
+
+    # Thin colorbar at top-right inside the main panel
+    cax = ax.inset_axes([0.72, 0.88, 0.25, 0.03])
+    cb = fig.colorbar(pcm, cax=cax, orientation='horizontal')
+    cb.set_label('Ne (cm⁻³)', fontsize=7, labelpad=2)
+    cb.ax.tick_params(labelsize=6)
+
+    # ── hmF2 dashed line ──
+    ax.axhline(hmF2, color='#2E7D32', linewidth=0.8, linestyle='--', alpha=0.6, zorder=2)
+
+    # ── Classify rays: collect rich per-mode info from PHaRLAP output ──
     tolerance_km = 200.0
-    mode_colors = {1: '#66BB6A', 2: '#FFA726', 3: '#EF5350'}
-    closing_info = []  # (elev, nhops, ground_range, group_delay_ms)
+    mode_colors = {1: '#1B5E20', 2: '#E65100', 3: '#B71C1C'}
+    # Each entry: (elev, nhops, ground_range, group_delay_ms,
+    #              virtual_height, apogee, phase_path_km, absorption_dB,
+    #              doppler_hz, tec_path, ray_idx)
+    closing_info = []
 
     for i, (path, ray) in enumerate(zip(paths, rays)):
         gnd = np.asarray(path.get('ground_range', []))
@@ -959,10 +1071,14 @@ def generate_fig6():
         if gnd.size < 2:
             continue
 
-        # Check if ray closes on receiver (per-hop cumulative ground range)
         labels = np.asarray(ray.get('ray_label', []))
         gnd_cumul = np.asarray(ray.get('ground_range', []))
         grp_cumul = np.asarray(ray.get('group_range', []))
+        phase_cumul = np.asarray(ray.get('phase_path', []))
+        apogee_arr = np.asarray(ray.get('apogee', []))
+        virt_h_arr = np.asarray(ray.get('virtual_height', []))
+        absorp_arr = np.asarray(ray.get('total_absorption', []))
+        doppler_arr = np.asarray(ray.get('Doppler_shift', []))
         closes = False
         close_nhops = 0
 
@@ -974,76 +1090,161 @@ def generate_fig6():
                 close_nhops = k + 1
                 grp_km = float(grp_cumul[k]) if k < len(grp_cumul) else 0
                 delay_ms = grp_km / 299792.458 * 1000.0
-                closing_info.append((float(elevs[i]), close_nhops,
-                                     float(gnd_cumul[k]), delay_ms))
+                ph_km = float(phase_cumul[k]) if k < len(phase_cumul) else 0
+                apg = float(apogee_arr[k]) if k < len(apogee_arr) else 0
+                vh = float(virt_h_arr[k]) if k < len(virt_h_arr) else 0
+                ab = float(absorp_arr[k]) if k < len(absorp_arr) else 0
+                dop = float(doppler_arr[k]) if k < len(doppler_arr) else 0
+                closing_info.append((
+                    float(elevs[i]), close_nhops, float(gnd_cumul[k]),
+                    delay_ms, vh, apg, ph_km, ab, dop, i,
+                ))
                 break
 
         if closes:
-            color = mode_colors.get(close_nhops, '#888')
-            ax.plot(gnd, hgt, color=color, linewidth=1.8, alpha=0.85, zorder=5)
+            color = mode_colors.get(close_nhops, '#555')
+            ax.plot(gnd, hgt, color=color, linewidth=1.6, alpha=0.9, zorder=5)
         else:
-            ax.plot(gnd, hgt, color='#BDBDBD', linewidth=0.3, alpha=0.15)
+            ax.plot(gnd, hgt, color='#9E9E9E', linewidth=0.25, alpha=0.12, zorder=3)
 
-    # ── Mark transmitter and receiver ──
-    ax.plot(0, 0, 'v', color='#D32F2F', markersize=12, zorder=20)
-    ax.text(50, -30, 'WWV\n(Fort Collins)', fontsize=8, fontweight='bold',
-            color='#D32F2F')
-    ax.plot(target_km, 0, '*', color='#1565C0', markersize=14, zorder=20)
-    ax.text(target_km + 50, -30, 'EM38ww\n(Receiver)', fontsize=8,
-            fontweight='bold', color='#1565C0')
-
-    # ── Annotate closing modes ──
+    # ── Highlight one representative closing ray per mode with thicker line ──
     for nhops in sorted(mode_colors.keys()):
         matches = [c for c in closing_info if c[1] == nhops]
-        if matches:
-            # Pick the median-elevation closing ray for annotation
-            matches.sort(key=lambda x: x[0])
-            best = matches[len(matches)//2]
-            ax.annotate(f'{nhops}F2: {best[0]:.1f}°, {best[3]:.1f} ms',
-                        xy=(target_km, 10 + nhops * 18),
-                        fontsize=7, color=mode_colors[nhops], fontweight='bold')
+        if not matches:
+            continue
+        matches.sort(key=lambda x: x[0])
+        rep = matches[len(matches) // 2]
+        rep_idx = rep[9]
+        rep_path = paths[rep_idx]
+        gnd = np.asarray(rep_path.get('ground_range', []))
+        hgt = np.asarray(rep_path.get('height', []))
+        ax.plot(gnd, hgt, color=mode_colors[nhops], linewidth=2.8, alpha=1.0,
+                zorder=6, solid_capstyle='round')
+
+    # ── Mark transmitter and receiver ──
+    ax.plot(0, y_min, 'v', color='#D32F2F', markersize=14, zorder=20,
+            markeredgecolor='white', markeredgewidth=0.8)
+    ax.annotate('WWV\nFort Collins', xy=(0, y_min), xytext=(80, y_min + 55),
+                fontsize=10, fontweight='bold', color='#D32F2F',
+                arrowprops=dict(arrowstyle='->', color='#D32F2F', lw=1.2),
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='#D32F2F', alpha=0.9),
+                zorder=25)
+    ax.plot(target_km, y_min, '*', color='#1565C0', markersize=16, zorder=20,
+            markeredgecolor='white', markeredgewidth=0.8)
+    ax.annotate('EM38ww\nReceiver', xy=(target_km, y_min),
+                xytext=(target_km - 250, y_min + 55),
+                fontsize=10, fontweight='bold', color='#1565C0',
+                arrowprops=dict(arrowstyle='->', color='#1565C0', lw=1.2),
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='#1565C0', alpha=0.9),
+                zorder=25)
+
+    # ── Per-mode summary table (top-left inset) ──
+    table_lines = []
+    for nhops in sorted(mode_colors.keys()):
+        matches = [c for c in closing_info if c[1] == nhops]
+        if not matches:
+            continue
+        el_lo = min(m[0] for m in matches)
+        el_hi = max(m[0] for m in matches)
+        dl_lo = min(m[3] for m in matches)
+        dl_hi = max(m[3] for m in matches)
+        apg_lo = min(m[5] for m in matches)
+        apg_hi = max(m[5] for m in matches)
+        vh_med = sorted(m[4] for m in matches)[len(matches) // 2]
+        n_rays = len(matches)
+        table_lines.append(
+            f'{nhops}F2  elev {el_lo:4.1f}–{el_hi:4.1f}°  '
+            f'τ_g {dl_lo:5.2f}–{dl_hi:5.2f} ms  '
+            f'apogee {apg_lo:.0f}–{apg_hi:.0f} km  '
+            f'h′ {vh_med:.0f} km  '
+            f'({n_rays} rays)'
+        )
+    if table_lines:
+        table_text = '\n'.join(table_lines)
+        ax.text(0.02, 0.97, table_text, transform=ax.transAxes,
+                fontsize=7, fontfamily='monospace', verticalalignment='top',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                          edgecolor='#BDBDBD', alpha=0.92),
+                zorder=25)
 
     # ── Legend ──
-    legend_elements = [
-        Line2D([0], [0], color='#66BB6A', linewidth=2, label='1F2 (closing)'),
-        Line2D([0], [0], color='#FFA726', linewidth=2, label='2F2 (closing)'),
-        Line2D([0], [0], color='#EF5350', linewidth=2, label='3F2 (closing)'),
-        Line2D([0], [0], color='#BDBDBD', linewidth=1, label='Non-closing rays'),
-    ]
-    ax.legend(handles=legend_elements, fontsize=8, loc='upper right')
+    legend_elements = []
+    for nhops, lbl in [(1, '1F2'), (2, '2F2'), (3, '3F2')]:
+        if any(c[1] == nhops for c in closing_info):
+            legend_elements.append(
+                Line2D([0], [0], color=mode_colors[nhops], linewidth=2.5, label=f'{lbl} (closing)'))
+    legend_elements.append(
+        Line2D([0], [0], color='#9E9E9E', linewidth=0.8, alpha=0.4, label='Non-closing'))
+    ax.legend(handles=legend_elements, fontsize=7.5, loc='upper right',
+              framealpha=0.9, edgecolor='#CCC')
 
-    ax.set_xlabel('Ground Range (km)', fontsize=11)
-    ax.set_ylabel('Height (km)', fontsize=11)
+    ax.set_xlabel('Ground Range (km)', fontsize=10)
+    ax.set_ylabel('Height (km)', fontsize=10)
     date_label = f'{TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]}'
-    ax.set_title(f'PHaRLAP 4.7.4 Ray Fan: WWV 10 MHz → EM38ww ({target_km:.0f} km)\n'
-                 f'IRI-2020: foF2 = {foF2:.2f} MHz, hmF2 = {hmF2:.0f} km — '
-                 f'{date_label} 18:00 UTC',
-                 fontsize=11, fontweight='bold')
-    ax.set_xlim(-100, x_max)
-    ax.set_ylim(-50, 500)
-    ax.grid(True, alpha=0.2)
+    ax.set_title(
+        f'PHaRLAP 4.7.4 Numerical Ray Trace — WWV 10 MHz → EM38ww '
+        f'({target_km:.0f} km)\n'
+        f'IRI-2020 Ne(h) grid: foF2 = {foF2:.2f} MHz, hmF2 = {hmF2:.0f} km — '
+        f'{date_label} 18:00 UTC',
+        fontsize=10, fontweight='bold')
+    ax.set_xlim(-50, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.tick_params(labelsize=9)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Right panel: midpoint Ne(h) profile
+    # ══════════════════════════════════════════════════════════════════════
+    mid_col = iono_en.shape[1] // 2
+    ne_mid = iono_en[:, mid_col]
+    ne_mid_plot = np.where(ne_mid > 0, ne_mid, np.nan)
+    ax_ne.plot(ne_mid_plot, height_km, color='#0D47A1', linewidth=1.2)
+    ax_ne.fill_betweenx(height_km, 0, ne_mid_plot, alpha=0.15, color='#42A5F5')
+    ax_ne.set_xscale('log')
+    ax_ne.set_xlabel('Ne (cm⁻³)', fontsize=9)
+    ax_ne.set_title('Midpoint\nNe(h)', fontsize=9, fontweight='bold')
+    ax_ne.tick_params(labelsize=7, labelleft=False)
+    ax_ne.set_xlim(left=1e2)
+    ax_ne.grid(True, alpha=0.15, which='both')
+
+    # Mark foF2/hmF2 on Ne profile
+    ax_ne.axhline(hmF2, color='#2E7D32', linewidth=0.8, linestyle='--', alpha=0.6)
+    ax_ne.annotate(f'hmF2\n{hmF2:.0f} km', xy=(ax_ne.get_xlim()[1] * 0.3, hmF2),
+                   fontsize=6.5, color='#2E7D32', fontweight='bold',
+                   verticalalignment='bottom')
+
+    # Find and mark E-layer peak (90–150 km)
+    e_mask = (height_km >= 90) & (height_km <= 150)
+    if np.any(e_mask) and np.any(ne_mid[e_mask] > 0):
+        e_idx = np.argmax(ne_mid[e_mask])
+        e_height = height_km[e_mask][e_idx]
+        ax_ne.annotate(f'E\n{e_height:.0f} km', xy=(ne_mid[e_mask][e_idx], e_height),
+                       fontsize=6.5, color='#1565C0', fontweight='bold',
+                       verticalalignment='bottom',
+                       xytext=(ne_mid[e_mask][e_idx] * 3, e_height + 10),
+                       arrowprops=dict(arrowstyle='->', color='#1565C0', lw=0.6))
+
+    # ── Save ──
+    fig.subplots_adjust(left=0.06, right=0.97, top=0.88, bottom=0.10)
+    outpath = OUTPUT_DIR / 'fig6_ray_fan_pharlap.png'
+    fig.savefig(outpath, dpi=DPI, bbox_inches='tight')
+    plt.close(fig)
 
     n_closing = len(closing_info)
     modes_found = sorted(set(c[1] for c in closing_info))
     modes_str = ', '.join(f'{n}F2' for n in modes_found)
-    ax.text(x_max * 0.5, 470,
-            f'PHaRLAP 4.7.4 numerical ray tracing through spatially varying IRI-2020 Ne(h)\n'
-            f'{len(elevs)} rays, {n_closing} closing — modes: {modes_str}',
-            fontsize=7, ha='center', fontstyle='italic', color='#666')
-
-    fig.tight_layout()
-    outpath = OUTPUT_DIR / 'fig6_ray_fan_pharlap.png'
-    fig.savefig(outpath, dpi=DPI, bbox_inches='tight')
-    plt.close(fig)
     print(f"  → {outpath}")
-    print(f"  Closing modes: {modes_str} ({n_closing} rays)")
+    print(f"  {len(elevs)} rays traced, {n_closing} closing — modes: {modes_str}")
     for nhops in sorted(mode_colors.keys()):
         matches = [c for c in closing_info if c[1] == nhops]
         if matches:
             elevs_m = [m[0] for m in matches]
             delays = [m[3] for m in matches]
+            apogees = [m[5] for m in matches]
             print(f"    {nhops}F2: elev {min(elevs_m):.1f}–{max(elevs_m):.1f}°, "
-                  f"delay {min(delays):.2f}–{max(delays):.2f} ms")
+                  f"delay {min(delays):.2f}–{max(delays):.2f} ms, "
+                  f"apogee {min(apogees):.0f}–{max(apogees):.0f} km")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1213,29 +1414,180 @@ def generate_fig8():
 # FIGURE 9 — 3D globe: ray arcs from all four stations to EM38ww
 # ══════════════════════════════════════════════════════════════════════════
 
-def generate_fig9():
-    """3D globe showing great-circle ray arcs from all four stations to EM38ww.
+def _raytrace_station_quick(tx_lat, tx_lon, rx_lat, rx_lon, freq_mhz):
+    """Run a quick PHaRLAP ray trace for one station at one frequency.
 
-    Uses geometric parabolic arc approximation (no pyLAP required) projected
-    onto a 3D sphere. Arc heights are representative of observed modes: 1–3 hops
-    at ~280 km F2-layer apogee. BPM shown as dashed (currently not detected in
-    production) with 5-hop geometry for the ~11,500 km trans-Pacific path.
+    Returns list of dicts with keys: nhops, elev, group_delay_ms, apogee_km,
+    virtual_height_km, phase_path_km, ground_range_km.
+    Returns None if PHaRLAP unavailable.
+    """
+    if 'DIR_MODELS_REF_DAT' not in os.environ:
+        for candidate in ['/opt/pharlap_4.7.4/dat', '/opt/pharlap/dat']:
+            if os.path.isdir(candidate):
+                os.environ['DIR_MODELS_REF_DAT'] = candidate
+                break
+    try:
+        import pylap.raytrace_2d as rt_mod
+        import pylap.iri2016 as iri_mod
+    except (ImportError, OSError):
+        return None
+
+    import math
+
+    # Great-circle bearing and distance
+    dlon_r = math.radians(rx_lon - tx_lon)
+    lat1_r, lat2_r = math.radians(tx_lat), math.radians(rx_lat)
+    bearing = math.degrees(math.atan2(
+        math.sin(dlon_r) * math.cos(lat2_r),
+        math.cos(lat1_r) * math.sin(lat2_r) -
+        math.sin(lat1_r) * math.cos(lat2_r) * math.cos(dlon_r)
+    )) % 360.0
+
+    dlat = math.radians(rx_lat - tx_lat)
+    dlon = math.radians(rx_lon - tx_lon)
+    a_gc = (math.sin(dlat / 2) ** 2 +
+            math.cos(math.radians(tx_lat)) *
+            math.cos(math.radians(rx_lat)) *
+            math.sin(dlon / 2) ** 2)
+    target_km = 6371.0 * 2 * math.asin(math.sqrt(a_gc))
+
+    # Simple single-midpoint IRI grid (fast, sufficient for mode finding)
+    ut = [int(TARGET_DATE[:4]), int(TARGET_DATE[4:6]), int(TARGET_DATE[6:]), 18, 0]
+    mid_lat = (tx_lat + rx_lat) / 2.0
+    mid_lon = (tx_lon + rx_lon) / 2.0
+    # Normalize longitude
+    if abs(tx_lon - rx_lon) > 180:
+        mid_lon = ((tx_lon + rx_lon + 360) / 2.0) % 360 - 180
+
+    n_heights = 200
+    ht_start, ht_inc = 60.0, 3.0
+    range_inc_km = 50.0
+    max_hops = max(3, int(target_km / 2000) + 1)
+    grid_max_km = max(target_km * 2, 5000.0)
+    n_ranges = int(grid_max_km / range_inc_km) + 1
+
+    try:
+        outf, oarr = iri_mod.iri2016(mid_lat, mid_lon, 100.0, ut,
+                                      ht_start, ht_inc, n_heights, {})
+    except Exception:
+        return None
+
+    ne = np.maximum(outf[0, :], 0.0) / 1e6
+    iono_en = np.tile(ne, (n_ranges, 1)).T  # (n_heights, n_ranges)
+    zeros = np.zeros_like(iono_en)
+    irreg = np.zeros((4, n_ranges), dtype=np.float64)
+
+    nmF2 = max(float(oarr[0]), 0.0)
+    foF2 = 8.98 * math.sqrt(nmF2) / 1e6
+    hmF2 = float(oarr[1])
+
+    # Trace a fan of rays to find closing modes
+    elevs = np.arange(2.0, 80.5, 1.0)
+    freqs = np.full(len(elevs), freq_mhz)
+    tol = [1e-7, 0.01, 10.0]
+
+    try:
+        rays, paths, states = rt_mod.raytrace_2d(
+            tx_lat, tx_lon, elevs, bearing, freqs, max_hops,
+            tol, 0, iono_en, zeros, zeros, ht_start, ht_inc,
+            range_inc_km, irreg)
+    except Exception:
+        return None
+
+    tolerance_km = max(200.0, target_km * 0.05)
+    closing = []
+    for i, (path, ray) in enumerate(zip(paths, rays)):
+        labels = np.asarray(ray.get('ray_label', []))
+        gnd_cumul = np.asarray(ray.get('ground_range', []))
+        grp_cumul = np.asarray(ray.get('group_range', []))
+        apogee_arr = np.asarray(ray.get('apogee', []))
+        virt_h_arr = np.asarray(ray.get('virtual_height', []))
+        for k in range(len(labels)):
+            if int(labels[k]) != 1:
+                continue
+            if abs(float(gnd_cumul[k]) - target_km) < tolerance_km:
+                nhops = k + 1
+                grp_km = float(grp_cumul[k]) if k < len(grp_cumul) else 0
+                closing.append(dict(
+                    nhops=nhops,
+                    elev=float(elevs[i]),
+                    group_delay_ms=grp_km / 299792.458 * 1000.0,
+                    apogee_km=float(apogee_arr[k]) if k < len(apogee_arr) else hmF2,
+                    virtual_height_km=float(virt_h_arr[k]) if k < len(virt_h_arr) else hmF2,
+                    ground_range_km=float(gnd_cumul[k]),
+                    foF2=foF2,
+                    hmF2=hmF2,
+                ))
+                break
+
+    return closing if closing else None
+
+
+def _iri_midpoint_params(tx_lat, tx_lon, rx_lat, rx_lon):
+    """Get IRI midpoint foF2 and hmF2 for a path (no PHaRLAP needed)."""
+    if 'DIR_MODELS_REF_DAT' not in os.environ:
+        for candidate in ['/opt/pharlap_4.7.4/dat', '/opt/pharlap/dat']:
+            if os.path.isdir(candidate):
+                os.environ['DIR_MODELS_REF_DAT'] = candidate
+                break
+    try:
+        import pylap.iri2016 as iri_mod
+    except (ImportError, OSError):
+        return None
+
+    import math
+    ut = [int(TARGET_DATE[:4]), int(TARGET_DATE[4:6]), int(TARGET_DATE[6:]), 18, 0]
+    mid_lat = (tx_lat + rx_lat) / 2.0
+    mid_lon = (tx_lon + rx_lon) / 2.0
+    if abs(tx_lon - rx_lon) > 180:
+        mid_lon = ((tx_lon + rx_lon + 360) / 2.0) % 360 - 180
+    try:
+        outf, oarr = iri_mod.iri2016(mid_lat, mid_lon, 100.0, ut, 60.0, 3.0, 200, {})
+    except Exception:
+        return None
+    nmF2 = max(float(oarr[0]), 0.0)
+    foF2 = 8.98 * math.sqrt(nmF2) / 1e6
+    hmF2 = float(oarr[1])
+    return dict(foF2=foF2, hmF2=hmF2)
+
+
+def generate_fig9():
+    """3D globe showing ray propagation from all four stations to EM38ww.
+
+    If PHaRLAP is available, runs a quick ray trace per station to find actual
+    closing modes with correct apogee heights, group delays, and virtual heights.
+    Falls back to IRI-derived parabolic arcs with estimated hop counts.
+
+    Shows: multi-mode arcs per station, ground bounce points, per-path
+    annotation table with distance/delay/foF2/hmF2/modes.
     """
     import math
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    try:
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    except (ImportError, ModuleNotFoundError):
+        print("  ✗ mpl_toolkits.mplot3d not usable (matplotlib version conflict) — skipping Fig 9")
+        return
 
     print("Generating Fig 9: 3D globe ray arcs (all four stations)...")
 
     R_E = 6371.0
     RX_LAT, RX_LON = 38.918461, -92.127974
 
-    # (lat, lon, color, display_label, n_hops, linestyle)
+    # Station definitions: name, lat, lon, color, representative freq MHz, detected
     STATIONS = [
-        ('WWV',  40.6773, -105.0421, '#4CAF50', 'WWV (Fort Collins, 3F)',  3, '-'),
-        ('WWVH', 21.9886, -159.7601, '#FF9800', 'WWVH (Kauai, 3F)',        3, '-'),
-        ('CHU',  45.2958,  -75.7533, '#2196F3', 'CHU (Ottawa, 1F)',         1, '-'),
-        ('BPM',  34.9500,  109.5400, '#9C27B0', 'BPM (Pucheng, 5F, undetected)', 5, '--'),
+        ('CHU',  45.2958,  -75.7533, '#2196F3', 7.85,  True),
+        ('WWV',  40.6773, -105.0421, '#4CAF50', 10.0,  True),
+        ('WWVH', 21.9886, -159.7601, '#FF9800', 10.0,  True),
+        ('BPM',  34.9500,  109.5400, '#9C27B0', 10.0,  False),
     ]
+
+    def _gc_distance(lat1, lon1, lat2, lon2):
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (math.sin(dlat / 2) ** 2 +
+             math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+             math.sin(dlon / 2) ** 2)
+        return R_E * 2 * math.asin(math.sqrt(a))
 
     def _gc_points(lat1, lon1, lat2, lon2, n=300):
         la1, lo1 = math.radians(lat1), math.radians(lon1)
@@ -1253,7 +1605,7 @@ def generate_fig9():
             x = A * math.cos(la1) * math.cos(lo1) + B * math.cos(la2) * math.cos(lo2)
             y = A * math.cos(la1) * math.sin(lo1) + B * math.cos(la2) * math.sin(lo2)
             z = A * math.sin(la1) + B * math.sin(la2)
-            lats.append(math.degrees(math.atan2(z, math.sqrt(x**2 + y**2))))
+            lats.append(math.degrees(math.atan2(z, math.sqrt(x ** 2 + y ** 2))))
             lons.append(math.degrees(math.atan2(y, x)))
         return np.array(lats), np.array(lons)
 
@@ -1268,72 +1620,199 @@ def generate_fig9():
 
     def _xyz(lat_deg, lon_deg, alt_km=0.0):
         r = R_E + alt_km
-        la, lo = np.radians(np.asarray(lat_deg)), np.radians(np.asarray(lon_deg))
+        la = np.radians(np.asarray(lat_deg, dtype=np.float64))
+        lo = np.radians(np.asarray(lon_deg, dtype=np.float64))
         return r * np.cos(la) * np.cos(lo), r * np.cos(la) * np.sin(lo), r * np.sin(la)
 
-    fig = plt.figure(figsize=(10, 8))
+    # ── Attempt PHaRLAP ray trace per station ──
+    station_results = {}  # name -> list of closing mode dicts or None
+    use_pharlap = False
+    for stn, tx_lat, tx_lon, color, freq, detected in STATIONS:
+        dist_km = _gc_distance(tx_lat, tx_lon, RX_LAT, RX_LON)
+        rt = _raytrace_station_quick(tx_lat, tx_lon, RX_LAT, RX_LON, freq)
+        if rt is not None:
+            use_pharlap = True
+            station_results[stn] = rt
+            modes_str = ', '.join(sorted(set(f"{m['nhops']}F" for m in rt)))
+            print(f"    {stn}: {dist_km:.0f} km, {len(rt)} closing rays, modes: {modes_str}")
+        else:
+            # Fallback: IRI midpoint for hmF2 + geometric hop estimate
+            iri = _iri_midpoint_params(tx_lat, tx_lon, RX_LAT, RX_LON)
+            hmF2 = iri['hmF2'] if iri else 280.0
+            foF2 = iri['foF2'] if iri else 8.0
+            # Approximate skip distance for F2 mode
+            skip_km = 2 * math.sqrt(2 * R_E * hmF2 + hmF2 ** 2)
+            nhops = max(1, round(dist_km / skip_km))
+            delay_ms = dist_km / 299792.458 * 1000.0 * 1.05  # ~5% iono excess
+            station_results[stn] = [dict(
+                nhops=nhops, elev=0.0, group_delay_ms=delay_ms,
+                apogee_km=hmF2, virtual_height_km=hmF2,
+                ground_range_km=dist_km, foF2=foF2, hmF2=hmF2,
+            )]
+            print(f"    {stn}: {dist_km:.0f} km, IRI fallback, ~{nhops}F, "
+                  f"hmF2={hmF2:.0f} km, foF2={foF2:.1f} MHz")
+
+    # ── Build 3D figure ──
+    from matplotlib.lines import Line2D
+
+    fig = plt.figure(figsize=(13, 9))
     ax = fig.add_subplot(111, projection='3d')
 
     # ── Earth sphere ──
-    u = np.linspace(0, 2 * np.pi, 72)
-    v = np.linspace(0, np.pi, 36)
+    u = np.linspace(0, 2 * np.pi, 80)
+    v = np.linspace(0, np.pi, 40)
     ax.plot_surface(
         R_E * np.outer(np.cos(u), np.sin(v)),
         R_E * np.outer(np.sin(u), np.sin(v)),
-        R_E * np.outer(np.ones(72), np.cos(v)),
-        color='#B3E5FC', alpha=0.25, linewidth=0, zorder=1)
+        R_E * np.outer(np.ones(80), np.cos(v)),
+        color='#B3E5FC', alpha=0.20, linewidth=0, zorder=1)
 
-    # Equator + lon grid lines for visual reference
+    # Latitude circles every 30°
     theta = np.linspace(0, 2 * np.pi, 360)
+    for lat_deg in range(-60, 90, 30):
+        la_r = math.radians(lat_deg)
+        r_circle = R_E * math.cos(la_r)
+        ax.plot(r_circle * np.cos(theta), r_circle * np.sin(theta),
+                np.full(360, R_E * math.sin(la_r)),
+                color='#90A4AE', linewidth=0.3, alpha=0.20)
+    # Longitude lines every 30°
+    lat_line = np.linspace(-np.pi / 2, np.pi / 2, 180)
     for lo_deg in range(-180, 180, 30):
         lo_r = math.radians(lo_deg)
-        ax.plot(R_E * np.cos(theta) * math.cos(lo_r),
-                R_E * np.cos(theta) * math.sin(lo_r),
-                R_E * np.sin(theta),
-                color='#90A4AE', linewidth=0.3, alpha=0.25)
-    ax.plot(R_E * np.cos(theta), R_E * np.sin(theta), np.zeros(360),
-            color='#90A4AE', linewidth=0.5, alpha=0.35)
+        ax.plot(R_E * np.cos(lat_line) * math.cos(lo_r),
+                R_E * np.cos(lat_line) * math.sin(lo_r),
+                R_E * np.sin(lat_line),
+                color='#90A4AE', linewidth=0.3, alpha=0.20)
 
-    # ── Ionospheric F2 shell (thin transparent surface at ~280 km) ──
+    # ── Ionospheric F2 shell ──
     f2_r = R_E + 280
     ax.plot_surface(
         f2_r * np.outer(np.cos(u), np.sin(v)),
         f2_r * np.outer(np.sin(u), np.sin(v)),
-        f2_r * np.outer(np.ones(72), np.cos(v)),
-        color='#C8E6C9', alpha=0.07, linewidth=0, zorder=2)
+        f2_r * np.outer(np.ones(80), np.cos(v)),
+        color='#C8E6C9', alpha=0.06, linewidth=0, zorder=2)
 
-    # ── Ray arcs ──
-    for stn, tx_lat, tx_lon, color, lbl, nhops, ls in STATIONS:
-        lats, lons = _gc_points(tx_lat, tx_lon, RX_LAT, RX_LON)
-        hts = _hop_heights(len(lats), nhops)
-        xs, ys, zs = _xyz(lats, lons, hts)
-        ax.plot(xs, ys, zs, color=color, linewidth=2.2 if ls == '-' else 1.4,
-                linestyle=ls, alpha=0.9 if ls == '-' else 0.55,
-                label=lbl, zorder=10)
+    # ── Ray arcs per station ──
+    mode_lw = {1: 2.8, 2: 2.0, 3: 1.5, 4: 1.2, 5: 1.0}
+    mode_ls = {1: '-', 2: '-', 3: '-', 4: '--', 5: '--'}
+
+    for stn, tx_lat, tx_lon, color, freq, detected in STATIONS:
+        results = station_results.get(stn, [])
+        if not results:
+            continue
+
+        # Group by nhops, pick median-elevation representative per mode
+        modes_seen = {}
+        for m in results:
+            nh = m['nhops']
+            if nh not in modes_seen:
+                modes_seen[nh] = []
+            modes_seen[nh].append(m)
+
+        dist_km = _gc_distance(tx_lat, tx_lon, RX_LAT, RX_LON)
+        lats, lons = _gc_points(tx_lat, tx_lon, RX_LAT, RX_LON, n=400)
+
+        for nhops, mode_rays in sorted(modes_seen.items()):
+            # Pick the median-elevation ray as representative
+            mode_rays.sort(key=lambda x: x['elev'])
+            rep = mode_rays[len(mode_rays) // 2]
+            apogee = rep['apogee_km']
+
+            hts = _hop_heights(len(lats), nhops, apogee=apogee)
+            xs, ys, zs = _xyz(lats, lons, hts)
+
+            lw = mode_lw.get(nhops, 1.0)
+            ls = mode_ls.get(nhops, '--')
+            alpha = 0.9 if detected else 0.4
+
+            ax.plot(xs, ys, zs, color=color, linewidth=lw,
+                    linestyle=ls, alpha=alpha, zorder=10)
+
+            # Ground bounce points (where arc touches ground between hops)
+            if nhops > 1:
+                for bk in range(1, nhops):
+                    frac = bk / nhops
+                    bi = int(frac * (len(lats) - 1))
+                    bx, by, bz = _xyz(lats[bi], lons[bi], 0)
+                    ax.scatter([bx], [by], [bz], color=color, s=20,
+                               marker='d', alpha=alpha * 0.7, zorder=15,
+                               depthshade=False, edgecolors='white',
+                               linewidths=0.3)
+
         # Transmitter marker
-        tx_x, tx_y, tx_z = _xyz(tx_lat, tx_lon, 15)
-        ax.scatter([tx_x], [tx_y], [tx_z], color=color, s=55,
-                   marker='o', zorder=20, depthshade=False)
+        tx_x, tx_y, tx_z = _xyz(tx_lat, tx_lon, 20)
+        ax.scatter([tx_x], [tx_y], [tx_z], color=color, s=70,
+                   marker='o', zorder=20, depthshade=False,
+                   edgecolors='white', linewidths=0.5)
 
     # ── Receiver marker ──
-    rx_x, rx_y, rx_z = _xyz(RX_LAT, RX_LON, 15)
-    ax.scatter([rx_x], [rx_y], [rx_z], color='#D32F2F', s=120,
-               marker='*', zorder=25, depthshade=False, label='EM38ww (Receiver)')
+    rx_x, rx_y, rx_z = _xyz(RX_LAT, RX_LON, 20)
+    ax.scatter([rx_x], [rx_y], [rx_z], color='#D32F2F', s=150,
+               marker='*', zorder=25, depthshade=False,
+               edgecolors='white', linewidths=0.5)
 
-    # View angle: looking at the Pacific from above-right to show all paths
-    ax.view_init(elev=28, azim=-95)
+    # View angle centred on North America to show all paths
+    ax.view_init(elev=25, azim=-95)
     lim = R_E * 1.55
-    ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim); ax.set_zlim(-lim, lim)
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_zlim(-lim, lim)
     ax.set_axis_off()
 
-    ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(0.0, 0.92),
-              framealpha=0.7)
-    ax.set_title(
-        'HF Ray Propagation: All Four Stations → EM38ww (EM38ww, ~38.9°N 92.1°W)\n'
-        'Parabolic F2-layer arcs (representative modes) — IRI-2020 foF2 ≈ 280 km',
-        fontsize=10, fontweight='bold')
+    # ── Legend (manual handles) ──
+    legend_handles = []
+    for stn, tx_lat, tx_lon, color, freq, detected in STATIONS:
+        results = station_results.get(stn, [])
+        dist_km = _gc_distance(tx_lat, tx_lon, RX_LAT, RX_LON)
+        modes = sorted(set(m['nhops'] for m in results)) if results else []
+        modes_str = '/'.join(f'{n}F' for n in modes)
+        delays = [m['group_delay_ms'] for m in results] if results else [0]
+        delay_str = f'{min(delays):.1f}–{max(delays):.1f}' if len(delays) > 1 and max(delays) - min(delays) > 0.1 else f'{delays[0]:.1f}'
+        det_str = '' if detected else ' (undetected)'
+        lbl = f'{stn}  {dist_km:.0f} km  {modes_str}  τ={delay_str} ms{det_str}'
+        ls = '-' if detected else '--'
+        legend_handles.append(
+            Line2D([0], [0], color=color, linewidth=2, linestyle=ls, label=lbl))
+    legend_handles.append(
+        Line2D([0], [0], color='#D32F2F', marker='*', linestyle='None',
+               markersize=10, label='EM38ww (Receiver)'))
+    ax.legend(handles=legend_handles, fontsize=7.5, loc='upper left',
+              bbox_to_anchor=(-0.02, 0.95), framealpha=0.85,
+              edgecolor='#CCC', handlelength=2.5)
 
-    fig.tight_layout()
+    # ── Per-path annotation table (lower right) ──
+    table_lines = ['Mode    Distance   τ_group    hmF2   foF2']
+    table_lines.append('─' * 48)
+    for stn, tx_lat, tx_lon, color, freq, detected in STATIONS:
+        results = station_results.get(stn, [])
+        dist_km = _gc_distance(tx_lat, tx_lon, RX_LAT, RX_LON)
+        modes_seen = {}
+        for m in results:
+            nh = m['nhops']
+            if nh not in modes_seen:
+                modes_seen[nh] = m
+        for nh in sorted(modes_seen):
+            m = modes_seen[nh]
+            det = '' if detected else '*'
+            table_lines.append(
+                f'{stn}{det:1s} {nh}F  {dist_km:7.0f} km  '
+                f'{m["group_delay_ms"]:6.2f} ms  '
+                f'{m["hmF2"]:5.0f} km  '
+                f'{m["foF2"]:5.1f}'
+            )
+    table_text = '\n'.join(table_lines)
+    fig.text(0.62, 0.04, table_text, fontsize=6.5, fontfamily='monospace',
+             verticalalignment='bottom',
+             bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                       edgecolor='#BDBDBD', alpha=0.90))
+
+    src_str = 'PHaRLAP 4.7.4 + IRI-2020' if use_pharlap else 'IRI-2020 (geometric)'
+    date_label = f'{TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]}'
+    ax.set_title(
+        f'HF Propagation Paths → EM38ww (38.9°N 92.1°W)\n'
+        f'{src_str} — {date_label} 18:00 UTC',
+        fontsize=11, fontweight='bold')
+
     outpath = OUTPUT_DIR / 'fig9_3d_globe_arcs.png'
     fig.savefig(outpath, dpi=DPI, bbox_inches='tight')
     plt.close(fig)
@@ -1345,19 +1824,45 @@ def generate_fig9():
 # ══════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
+    args = _parse_args(sys.argv[1:])
+
+    TARGET_DATE = args.date
+    DATA_ROOT = args.data_root
+    PHASE2 = f'{DATA_ROOT}/phase2'
+    OUTPUT_DIR = Path(args.output_dir)
+    DPI = int(args.dpi)
+    CHANNELS = [c.strip() for c in args.channels.split(',') if c.strip()]
+    figs = _parse_figs(args.figs)
+
+    fig_map = {
+        1: generate_fig1,
+        2: generate_fig2,
+        3: generate_fig3,
+        4: generate_fig4,
+        5: generate_fig5,
+        6: generate_fig6,
+        7: generate_fig7,
+        8: generate_fig8,
+        9: generate_fig9,
+    }
+
     print(f"QEX Figure Generator — target date: {TARGET_DATE}")
+    print(f"Data root: {DATA_ROOT}")
     print(f"Output directory: {OUTPUT_DIR}")
+    print(f"DPI: {DPI}")
+    print(f"Channels: {', '.join(CHANNELS)}")
+    print(f"Figures: {', '.join(str(x) for x in figs)}")
     print()
 
-    generate_fig1()
-    generate_fig2()
-    generate_fig3()
-    generate_fig4()
-    generate_fig5()
-    generate_fig6()
-    generate_fig7()
-    generate_fig8()
-    generate_fig9()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    generated = 0
+    for n in figs:
+        fn = fig_map.get(n)
+        if fn is None:
+            raise SystemExit(f"Unsupported figure number: {n}")
+        fn()
+        generated += 1
 
     print()
-    print("All 9 figures generated.")
+    print(f"Generated {generated} figure(s).")
