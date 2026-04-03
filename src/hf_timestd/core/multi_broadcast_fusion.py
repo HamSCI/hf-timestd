@@ -4918,27 +4918,35 @@ def run_fusion_service(
     # Initialize dual Chrony SHM outputs if enabled
     chrony_shm_l1 = None  # SHM 0: timestd.L1 (raw L1 metrology fusion)
     chrony_shm_l2 = None  # SHM 1: timestd.L2 (calibrated L2 timing fusion)
-    
+    _chrony_shm_available = False  # True if sysv_ipc is importable
+
     if enable_chrony:
         try:
             from hf_timestd.core.chrony_shm import ChronySHM
-            
+            _chrony_shm_available = True
+
             # Initialize L1 feed (SHM unit 0)
             chrony_shm_l1 = ChronySHM(unit=0)
             if chrony_shm_l1.connect():
                 logger.info("Chrony SHM L1 feed enabled (unit=0, refid=TSL1)")
             else:
-                logger.warning("Failed to connect to Chrony SHM unit 0 - L1 feed disabled")
-                chrony_shm_l1 = None
-            
+                logger.warning(
+                    "Failed to connect to Chrony SHM unit 0 - L1 feed disabled "
+                    "(will retry periodically)"
+                )
+                chrony_shm_l1.connected = False  # Keep object for reconnect
+
             # Initialize L2 feed (SHM unit 1)
             chrony_shm_l2 = ChronySHM(unit=1)
             if chrony_shm_l2.connect():
                 logger.info("Chrony SHM L2 feed enabled (unit=1, refid=TSL2)")
             else:
-                logger.warning("Failed to connect to Chrony SHM unit 1 - L2 feed disabled")
-                chrony_shm_l2 = None
-                
+                logger.warning(
+                    "Failed to connect to Chrony SHM unit 1 - L2 feed disabled "
+                    "(will retry periodically)"
+                )
+                chrony_shm_l2.connected = False  # Keep object for reconnect
+
         except Exception as e:
             logger.warning(f"Chrony SHM not available: {e}")
             chrony_shm_l1 = None
@@ -4960,8 +4968,8 @@ def run_fusion_service(
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
-    logger.info(f"  Chrony SHM L1: {'enabled' if chrony_shm_l1 else 'disabled'}")
-    logger.info(f"  Chrony SHM L2: {'enabled' if chrony_shm_l2 else 'disabled'}")
+    logger.info(f"  Chrony SHM L1: {'enabled' if chrony_shm_l1 and chrony_shm_l1.connected else 'disabled (will retry)' if chrony_shm_l1 else 'disabled'}")
+    logger.info(f"  Chrony SHM L2: {'enabled' if chrony_shm_l2 and chrony_shm_l2.connected else 'disabled (will retry)' if chrony_shm_l2 else 'disabled'}")
     # Initialize calibration file writer (wsprdaemon integration)
     calib_writer = None
     if calib_file:
@@ -5067,17 +5075,41 @@ def run_fusion_service(
     # Track chrony updates for discontinuity filtering
     last_chrony_d_clock = None
     last_chrony_update_time = None
-    
+
+    # SHM reconnection state — retry every 30s if initial connect failed
+    _shm_reconnect_interval = 30.0
+    _shm_last_reconnect_attempt = 0.0
+
     while running:
         try:
             # BREADCRUMB: Loop start
             loop_start_time = time.time()
             logger.debug(f"--- FUSION LOOP START (t={loop_start_time:.3f}) ---")
-            
+
             # Notify watchdog we are alive
             if SYSTEMD_AVAILABLE:
                 systemd_daemon.notify('WATCHDOG=1')
-            
+
+            # Periodic SHM reconnection: if either feed is disconnected,
+            # retry connect every 30s.  This recovers from the race where
+            # chrony recreates SHM as root:0600 between ExecStartPre and
+            # fusion's connect().
+            if enable_chrony and _chrony_shm_available:
+                _need_reconnect = (
+                    (chrony_shm_l1 and not chrony_shm_l1.connected) or
+                    (chrony_shm_l2 and not chrony_shm_l2.connected)
+                )
+                if _need_reconnect and (loop_start_time - _shm_last_reconnect_attempt) >= _shm_reconnect_interval:
+                    _shm_last_reconnect_attempt = loop_start_time
+                    if chrony_shm_l1 and not chrony_shm_l1.connected:
+                        logger.info("Attempting Chrony SHM L1 reconnect...")
+                        if chrony_shm_l1.connect():
+                            logger.info("Chrony SHM L1 reconnected (unit=0, refid=TSL1)")
+                    if chrony_shm_l2 and not chrony_shm_l2.connected:
+                        logger.info("Attempting Chrony SHM L2 reconnect...")
+                        if chrony_shm_l2.connect():
+                            logger.info("Chrony SHM L2 reconnected (unit=1, refid=TSL2)")
+
             # BREADCRUMB: Calling fuse
             logger.debug("Calling fusion.fuse()...")
             
@@ -5224,7 +5256,7 @@ def run_fusion_service(
                 # DUAL FEED ARCHITECTURE: Write both L1 (raw) and L2 (calibrated) feeds
                 # L1 feed: Uses raw L1 metrology fusion (fallback, fast)
                 # L2 feed: Uses calibrated L2 timing fusion (primary, accurate)
-                if chrony_shm_l1 or chrony_shm_l2:
+                if (chrony_shm_l1 and chrony_shm_l1.connected) or (chrony_shm_l2 and chrony_shm_l2.connected):
                     # Check quality criteria
                     # CRITICAL FIX (2026-01-10): Bootstrap-aware quality gating
                     # During bootstrap (calibration not converged), accept grade D
@@ -5342,7 +5374,7 @@ def run_fusion_service(
                         
                         try:
                             # Update L1 feed (SHM 0) - raw L1 metrology fusion only
-                            if chrony_shm_l1 and result_l1:
+                            if chrony_shm_l1 and chrony_shm_l1.connected and result_l1:
                                 reference_time_l1 = system_time - (result_l1.d_clock_fused_ms / 1000.0)
                                 uncertainty_sec_l1 = max(0.1, result_l1.uncertainty_ms) / 1000.0
                                 # Precision = log2(seconds), more negative = better
@@ -5361,7 +5393,7 @@ def run_fusion_service(
                                     logger.warning("Chrony SHM L1 write failed")
                             
                             # Update L2 feed (SHM 1) - calibrated L2 timing fusion
-                            if chrony_shm_l2 and result_l2:
+                            if chrony_shm_l2 and chrony_shm_l2.connected and result_l2:
                                 reference_time_l2 = system_time - (result_l2.d_clock_fused_ms / 1000.0)
                                 uncertainty_sec_l2 = max(0.1, result_l2.uncertainty_ms) / 1000.0
                                 # Precision = log2(seconds), more negative = better

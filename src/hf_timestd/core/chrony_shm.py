@@ -115,11 +115,15 @@ class ChronySHM:
     
     def _connect_sysv(self, sysv_ipc):
         """Connect using System V IPC shared memory.
-        
+
         Handles the chrony-creates-first race condition:
         If chrony starts before fusion, it creates SHM segments as root:0600.
         Fusion (running as timestd) can't write to them. We detect this and
         remove/recreate the segment with correct permissions.
+
+        If we can't even attach (root:0600 and we're not root), we attempt
+        to remove the segment via 'ipcrm' subprocess (requires CAP_IPC_OWNER
+        or running as root).
         """
         try:
             # Try to CREATE segment first (for fresh installs)
@@ -164,16 +168,60 @@ class ChronySHM:
                         f"Attached to existing Chrony SHM segment "
                         f"(mode={oct(current_mode)}, owner_uid={current_uid})"
                     )
-            except PermissionError:
-                # Can't even attach — need to remove via ExecStartPre or manual ipcrm
-                logger.error(
-                    f"Permission denied accessing Chrony SHM (key=0x{self.key:08x}). "
-                    f"The segment exists with restrictive permissions and we cannot attach. "
-                    f"Fix: sudo ipcrm -M 0x{self.key:08x} && sudo systemctl restart timestd-fusion"
+            except (PermissionError, sysv_ipc.PermissionsError):
+                # Can't even attach — segment exists with root:0600.
+                # Try to remove it via ipcrm subprocess and recreate.
+                logger.warning(
+                    f"Permission denied attaching to Chrony SHM (key=0x{self.key:08x}). "
+                    f"Attempting ipcrm removal..."
                 )
-                raise
-        
+                if self._try_ipcrm_remove():
+                    self.shm = sysv_ipc.SharedMemory(
+                        self.key,
+                        flags=sysv_ipc.IPC_CREAT | sysv_ipc.IPC_EXCL,
+                        size=SHM_SIZE,
+                        mode=0o666
+                    )
+                    logger.info(
+                        f"Recovered: removed stale SHM via ipcrm and recreated "
+                        f"with correct permissions (0666)"
+                    )
+                else:
+                    raise
+
         self._use_sysv = True
+
+    def _try_ipcrm_remove(self) -> bool:
+        """Attempt to remove a SHM segment via ipcrm subprocess.
+
+        This handles the case where chrony created the segment as root:0600
+        and our process (running as timestd) can't even attach.  Works when
+        the process has CAP_IPC_OWNER (set via AmbientCapabilities in the
+        systemd unit) or when running as root.
+
+        Returns:
+            True if segment was successfully removed.
+        """
+        import subprocess
+        key_hex = f"0x{self.key:08x}"
+        try:
+            result = subprocess.run(
+                ["ipcrm", "-M", key_hex],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                logger.info(f"Successfully removed SHM segment {key_hex} via ipcrm")
+                return True
+            else:
+                logger.error(
+                    f"ipcrm failed for {key_hex}: {result.stderr.strip()}. "
+                    f"Manual fix: sudo ipcrm -M {key_hex} && "
+                    f"sudo systemctl restart timestd-fusion"
+                )
+                return False
+        except Exception as e:
+            logger.error(f"ipcrm subprocess failed: {e}")
+            return False
     
     def _connect_file(self):
         """Connect using file-based shared memory (fallback)."""
