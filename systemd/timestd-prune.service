@@ -5,8 +5,21 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-User=root
-ExecStart=/usr/local/bin/prune-old-data.sh
+User=timestd
+Group=timestd
+
+# Uses the QuotaManager to enforce storage policy:
+#   1. Trim derived data (phase2, products) older than 7 days
+#   2. If disk > 80%, evict by priority: products → phase2 → vtec → raw_iq
+# Raw IQ is only evicted as a last resort under disk pressure.
+ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.quota_manager \
+    --data-root /var/lib/timestd \
+    --threshold 80 \
+    --min-days 2 \
+    --max-derived-days 7 \
+    --archive-root /mnt/timestd-archive \
+    -v
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=timestd-prune

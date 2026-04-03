@@ -69,12 +69,14 @@ class QuotaManager:
         min_days_to_keep: int = 7,
         dry_run: bool = False,
         archive_root: Optional[Path] = None,
+        derived_max_days: int = 7,
     ):
         self.data_root = Path(data_root)
         self.threshold_percent = threshold_percent
         self.min_days_to_keep = min_days_to_keep
         self.dry_run = dry_run
         self.archive_root = Path(archive_root) if archive_root else None
+        self.derived_max_days = derived_max_days
 
         # Managed directories
         self.raw_buffer_dir = self.data_root / 'raw_buffer'
@@ -326,19 +328,77 @@ class QuotaManager:
     # Public API (unchanged from previous version)
     # ------------------------------------------------------------------
 
+    def enforce_retention(self) -> dict:
+        """
+        Proactively trim derived data (phase2, products) beyond derived_max_days.
+
+        Unlike enforce_quota() which only acts when disk is over threshold,
+        this enforces a hard age limit on regenerable data to free space for
+        raw IQ archiving.  Raw IQ is never touched by this method.
+
+        Returns dict with counts and bytes freed.
+        """
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=self.derived_max_days)
+        cutoff_str = cutoff.strftime('%Y%m%d')
+        protected = self._protected_dates()
+
+        # Only scan derived categories — never touch raw_iq here
+        entries = []
+        entries.extend(self._scan_products(protected))
+        entries.extend(self._scan_phase2(protected))
+
+        # Filter to entries older than the retention cutoff
+        expired = [e for e in entries if e.date_str < cutoff_str]
+        expired.sort(key=lambda e: (e.date_str, e.category))
+
+        bytes_freed = 0
+        items_deleted = 0
+
+        for entry in expired:
+            freed = self._delete_entry(entry)
+            bytes_freed += freed
+            items_deleted += 1
+
+        if items_deleted > 0:
+            logger.info(
+                f"Retention: {'would trim' if self.dry_run else 'trimmed'} "
+                f"{items_deleted} derived entries older than {self.derived_max_days}d "
+                f"(cutoff={cutoff_str}), freed {bytes_freed / 1024**3:.2f} GB"
+            )
+        else:
+            logger.info(
+                f"Retention: no derived data older than {self.derived_max_days}d "
+                f"(cutoff={cutoff_str})"
+            )
+
+        return {
+            'items_deleted': items_deleted,
+            'bytes_freed': bytes_freed,
+            'cutoff_date': cutoff_str,
+            'derived_max_days': self.derived_max_days,
+            'dry_run': self.dry_run,
+        }
+
     def enforce_quota(self) -> dict:
         """
-        Check disk usage and delete oldest day-entries if over threshold.
+        Enforce storage policy: retention first, then threshold-based cleanup.
+
+        1. Trim derived data (phase2, products) beyond derived_max_days
+        2. If still over threshold, evict by priority (products → phase2 → vtec → raw_iq)
 
         Returns dict compatible with the previous file-level QuotaManager.
         """
+        # Step 1: proactive retention trim of derived data
+        retention_result = self.enforce_retention()
+
+        # Step 2: threshold-based cleanup
         used, total, percent = self.get_disk_usage()
 
         result = {
             'initial_usage_percent': percent,
             'threshold_percent': self.threshold_percent,
-            'files_deleted': 0,
-            'bytes_freed': 0,
+            'files_deleted': retention_result['items_deleted'],
+            'bytes_freed': retention_result['bytes_freed'],
             'final_usage_percent': percent,
             'dry_run': self.dry_run
         }
@@ -346,7 +406,7 @@ class QuotaManager:
         logger.info(f"Disk usage: {percent:.1f}% (threshold: {self.threshold_percent}%)")
 
         if percent <= self.threshold_percent:
-            logger.info("Disk usage within threshold, no action needed")
+            logger.info("Disk usage within threshold, no further action needed")
             return result
 
         target_percent = self.threshold_percent - 5  # headroom
@@ -374,14 +434,14 @@ class QuotaManager:
             bytes_freed += freed
             items_deleted += 1
 
+        result['files_deleted'] += items_deleted
+        result['bytes_freed'] += bytes_freed
+
         if not self.dry_run:
             _, _, final_percent = self.get_disk_usage()
             result['final_usage_percent'] = final_percent
         else:
             result['final_usage_percent'] = ((used - bytes_freed) / total) * 100
-
-        result['files_deleted'] = items_deleted
-        result['bytes_freed'] = bytes_freed
 
         logger.info(f"{'Would free' if self.dry_run else 'Freed'} "
                    f"{bytes_freed / 1024**3:.2f} GB "
@@ -531,6 +591,18 @@ def main():
         help='Minimum days to keep files (default: 7)'
     )
     parser.add_argument(
+        '--max-derived-days',
+        type=int,
+        default=7,
+        help='Max retention days for derived data (phase2, products). Default: 7'
+    )
+    parser.add_argument(
+        '--archive-root',
+        type=Path,
+        default=None,
+        help='Archive root for moving data instead of deleting'
+    )
+    parser.add_argument(
         '--dry-run',
         action='store_true',
         help='Only show what would be deleted'
@@ -545,17 +617,19 @@ def main():
         action='store_true',
         help='Verbose output'
     )
-    
+
     args = parser.parse_args()
-    
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-    
+
     manager = QuotaManager(
         data_root=args.data_root,
         threshold_percent=args.threshold,
         min_days_to_keep=args.min_days,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        archive_root=args.archive_root,
+        derived_max_days=args.max_derived_days,
     )
     
     if args.status:

@@ -356,6 +356,7 @@ class CoreRecorderV2:
             min_days_to_keep=7,
             dry_run=False,
             archive_root=archive_root,
+            derived_max_days=7,
         )
         
         # Main loop
