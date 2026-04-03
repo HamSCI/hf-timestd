@@ -143,6 +143,23 @@ enable_metrics = true
 port = 8000
 refresh_interval = 60
 
+[metrology]
+# Set false to run in timing-only mode on resource-constrained hardware.
+# When false, the following writers are skipped entirely (no disk I/O):
+#   tick_phase (1 Hz Doppler/scintillation phase time series)
+#   test_signal (WWV/WWVH ionospheric sounding at minutes 8 and 44)
+#   detection_attempts (threshold-calibration diagnostics)
+#   all_arrivals (multi-path propagation paths)
+# The core timing pipeline (metrology_measurements, tick_timing, chu_fsk)
+# is unaffected — Chrony discipline works identically with physics_products = false.
+physics_products = true
+
+# Set false to disable real-time ionospheric data fetching (WAM-IPE + GIRO).
+# When false, the propagation model uses climatological fallback only.
+# Chrony is still disciplined normally; only the propagation uncertainty budget
+# is slightly degraded (inflated u_propagation_model_ms, typically <5 ms).
+realtime_iono = true
+
 [timing]
 authority = "rtp"
 rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)

@@ -420,13 +420,24 @@ class IonoDataService:
                 
                 if self.enable_wamipe:
                     self._fetch_wamipe()
-                
+
                 if self.enable_giro:
                     self._fetch_giro()
+
+                # Reset exponential backoff counter after a successful iteration
+                self._bg_error_backoff = 60
                     
             except Exception as e:
-                logger.error(f"IonoDataService background error: {e}", exc_info=True)
-                time.sleep(60)  # Back off on error
+                _backoff = min(
+                    getattr(self, '_bg_error_backoff', 60) * 2,
+                    FETCH_INTERVAL_S
+                )
+                self._bg_error_backoff = _backoff
+                logger.error(
+                    f"IonoDataService background error (backing off {_backoff:.0f}s): {e}",
+                    exc_info=True
+                )
+                time.sleep(_backoff)
     
     # =========================================================================
     # WAM-IPE DATA FETCHING

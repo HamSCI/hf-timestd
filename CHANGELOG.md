@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Service Robustness — 20-issue audit pass
+
+Fixes to prevent silent data loss, ensure clean shutdown, and eliminate several classes of production failure:
+
+**Critical**
+- `leap_second.py`: New `get_current_gps_leap_seconds()` reads `/usr/share/zoneinfo/leap-seconds.list` (updated by OS tzdata packages) and falls back to 18. All five `GPS_LEAP_SECONDS = 18` literals across `buffer_timing.py`, `timing_validation.py`, `timing_validation_service.py`, `chu_fsk_listener.py`, and `binary_archive_writer.py` now call this function — eliminates the silent 1-second timing error that would have occurred at the next leap second insertion.
+- `metrology_service.py`: Added `_check_date_rollover()` — called every 5 s from the inotify poll tick; stops and re-registers the watchdog Observer when UTC midnight passes. Previously the Observer pointed at yesterday's date directory forever, causing a silent data gap every night.
+- `core_recorder_v2.py`: Removed `sys.exit(1)` from `_check_data_freshness()`. `sys.exit` raised `SystemExit` which could bypass `finally: self._shutdown()`. Setting `self.running = False` is sufficient — the main loop exits cleanly via the `finally` clause.
+- `chrony_shm.py`: Switched from SHM mode 0 to mode 1 (sequence-lock protocol). Count is incremented to odd (write-in-progress) before packing, then to even (write-complete) after the SHM write. Eliminates the torn-write window where Chrony could read a partially-updated struct and apply a spurious clock correction. Removed all diagnostic hex-dump logging and readback.
+
+**Moderate**
+- `chrony_stats.py`: Replaced `h5py.string_dtype()` (variable-length, heap-based) with `'S64'` fixed-length byte strings — VL strings are incompatible with SWMR mode and were being silently dropped.
+- `metrology_service.py`: Bounded `_file_queue` to `maxsize=60`; `on_created` now uses `put_nowait` with a logged warning on overflow instead of blocking the inotify thread. Writer close loop now wraps each of 7 writers in individual `try/except` so one failed close does not prevent the rest from flushing. Status file writes now use tmp+rename (atomic) instead of writing directly to `status.json`.
+- `hdf5_writer.py`: Separated the single `try: flush(); close()` into two independent try/except blocks — flush errors logged at `error` level, close errors at `warning`.
+- `core_recorder_v2.py`: `_wd_last_written`, `_wd_last_advance`, `_freshness_last_written`, `_freshness_last_advance` now initialized in `__init__`; `hasattr` guards removed.
+- `stream_recorder_v2.py`: Re-enabled `RobustManagedStream` monitor thread with a proper `_monitor_loop()` implementation. Added `with self._lock:` around `_create_channel()` in the health monitor to prevent concurrent mutation of `self.stream` / `self.channel_info` / `self.config.ssrc`.
+
+**Minor**
+- `iono_data_service.py`: Fixed backoff replaced with exponential backoff capped at `FETCH_INTERVAL_S`; reset to 60 s after a successful iteration.
+- `l2_calibration_service.py`: Signal handlers moved from `__init__` to top of `start()` to eliminate the SIGTERM startup race.
+- `calibration_file.py`: Bare `except:` replaced with `except Exception:` so `KeyboardInterrupt` / `SystemExit` are not swallowed.
+
+### Timing-only mode (`physics_products` / `realtime_iono`)
+
+New `[metrology]` config section allows operators to opt out of physics science products that are not required for Chrony clock discipline. See `docs/ARCHITECTURE.md §Timing-Only vs Full-Science Mode` for the full breakdown of what each flag gates.
+
+```toml
+[metrology]
+physics_products = true   # set false to skip ionospheric science writers
+realtime_iono    = true   # set false to skip WAM-IPE/GIRO network fetching
+```
+
+- `physics_products = false` suppresses four writers entirely (no HDF5 files created, no disk I/O): `tick_phase`, `test_signal`, `detection_attempts`, `all_arrivals`. Also skips the multi-path secondary-arrival search in `MetrologyEngine`. The core timing pipeline (`metrology_measurements`, `tick_timing`, `chu_fsk`) is unaffected.
+- `realtime_iono = false` suppresses the `IonoDataService` WAM-IPE/GIRO singleton in both `MetrologyService` and `L2CalibrationService`. The propagation model falls back to climatological IRI-2020 automatically. Chrony discipline continues normally; only `u_propagation_model_ms` in the uncertainty budget is slightly degraded.
+
 ### wsprdaemon v4 Calibration API
 
 **Feature:** `calibrate` CLI subcommand and `CalibrationFileWriter` — primary integration point for wsprdaemon v4. Runs the full multi-broadcast fusion pipeline and writes an atomic JSON calibration file consumed by `wd-ka9q-record` for sub-millisecond wav alignment.

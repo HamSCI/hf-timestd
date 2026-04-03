@@ -9,7 +9,7 @@ Chronyd Configuration:
 Add to /etc/chrony/chrony.conf:
 
     # HF Time Transfer via time-manager
-    refclock SHM 0 refid TMGR poll 6 precision 1e-4 offset 0.0 delay 0.2
+    refclock SHM 0 refid HF poll 6 precision 1e-4 offset 0.0 delay 0.2
     
 Restart: sudo systemctl restart chronyd
 
@@ -228,9 +228,13 @@ class ChronySHM:
             system_time = time.time()
         
         try:
-            # Increment sequence counter
-            self.count += 1
-            
+            # Mode 1 sequence-lock protocol:
+            #   odd count  = write in progress (chrony must retry if count changes)
+            #   even count = write complete    (chrony can safely use data)
+            # We increment twice: once before packing (odd) and once after writing
+            # (even), so chrony never reads a partially-updated struct.
+            self.count += 1  # now odd: write in progress
+
             # Split timestamps into seconds and microseconds
             # NOTE: Chrony SHM convention (opposite of NTP):
             # clockTimeStamp = reference time (true UTC)
@@ -239,26 +243,25 @@ class ChronySHM:
             # So: offset = system_time - reference_time = D_clock ✓
             clock_sec = int(reference_time)
             clock_usec = int((reference_time - clock_sec) * 1_000_000)
-            
+
             recv_sec = int(system_time)
             recv_usec = int((system_time - recv_sec) * 1_000_000)
-            
+
             # Nanoseconds for extended precision
             clock_nsec = int((reference_time - clock_sec) * 1_000_000_000) % 1_000_000_000
             recv_nsec = int((system_time - recv_sec) * 1_000_000_000) % 1_000_000_000
-            
+
             # Pack the SHM structure for 64-bit Linux (96 bytes total)
-            # Format: @iiqiiqiiiiii8i with proper alignment
-            # 
+            #
             # Layout (with native alignment):
             #   0-3:   int mode
-            #   4-7:   int count
+            #   4-7:   int count  (odd here = in-progress; patched to even after write)
             #   8-15:  time_t clockTimeStampSec (64-bit)
             #   16-19: int clockTimeStampUSec
             #   20-23: (padding for 8-byte alignment)
             #   24-31: time_t receiveTimeStampSec (64-bit)
             #   32-35: int receiveTimeStampUSec
-            #   36-39: (padding for 8-byte alignment)  
+            #   36-39: (padding for 8-byte alignment)
             #   40-43: int leap
             #   44-47: int precision
             #   48-51: int nsamples
@@ -266,19 +269,11 @@ class ChronySHM:
             #   56-59: unsigned clockTimeStampNSec
             #   60-63: unsigned receiveTimeStampNSec
             #   64-95: int dummy[8]
-            
-            # DIAGNOSTIC: Log values before packing
-            if self.count <= 5:
-                logger.info(
-                    f"ChronySHM pack #{self.count}: "
-                    f"mode=0, count={self.count}, leap={leap}, precision={precision}, "
-                    f"nsamples=1 (HARDCODED), valid=1"
-                )
-            
+
             data = struct.pack(
                 '@ii q i 4x q i 4x iiii II iiiiiiii',
-                0,              # mode = 0 (no count locking)
-                self.count,     # count (sequence number)
+                1,              # mode = 1 (count-locking protocol)
+                self.count,     # count (odd = write in progress)
                 clock_sec,      # clockTimeStampSec (8-15)
                 clock_usec,     # clockTimeStampUSec (16-19)
                 # 4x padding (20-23) for 8-byte alignment of receiveTimeStampSec
@@ -287,27 +282,13 @@ class ChronySHM:
                 # 4x padding (36-39) for alignment before leap
                 leap,           # leap (40-43)
                 precision,      # precision (44-47)
-                1,              # nsamples (48-51) ← CRITICAL: Must be 1
+                1,              # nsamples (48-51)
                 1,              # valid (52-55)
                 clock_nsec,     # clockTimeStampNSec (56-59)
                 recv_nsec,      # receiveTimeStampNSec (60-63)
                 0, 0, 0, 0, 0, 0, 0, 0  # dummy[8] (64-95)
             )
-            
-            # DIAGNOSTIC: Verify packed data
-            if self.count <= 5:
-                # Show raw bytes around nsamples field (offset 48)
-                raw_bytes = ' '.join(f'{b:02x}' for b in data[44:56])
-                logger.info(f"ChronySHM packed bytes [44:56]: {raw_bytes}")
-                
-                # Unpack to verify
-                verify = struct.unpack('@ii q i 4x q i 4x iiii II iiiiiiii', data)
-                logger.info(
-                    f"ChronySHM verify unpack: precision={verify[7]}, "
-                    f"nsamples={verify[8]}, valid={verify[9]}"
-                )
-            
-            
+
             # Write to SHM
             if self._use_sysv:
                 self.shm.write(data, 0)
@@ -315,41 +296,25 @@ class ChronySHM:
                 self.shm_map.seek(0)
                 self.shm_map.write(data)
                 self.shm_map.flush()
-            
-            # DIAGNOSTIC: Read back immediately to verify write
-            if self.count <= 5:
-                if self._use_sysv:
-                    readback = self.shm.read(96, 0)
-                else:
-                    self.shm_map.seek(0)
-                    readback = self.shm_map.read(96)
-                
-                # Show raw bytes around nsamples
-                rb_bytes = ' '.join(f'{b:02x}' for b in readback[44:56])
-                logger.info(f"ChronySHM readback bytes [44:56]: {rb_bytes}")
-                
-                # Unpack readback
-                rb_verify = struct.unpack('@ii q i 4x q i 4x iiii II iiiiiiii', readback)
-                logger.info(
-                    f"ChronySHM readback verify: count={rb_verify[1]}, "
-                    f"precision={rb_verify[7]}, nsamples={rb_verify[8]}, valid={rb_verify[9]}"
-                )
-                
-                if rb_verify[8] != 1:
-                    logger.error(
-                        f"ChronySHM CRITICAL BUG: nsamples readback={rb_verify[8]} (expected 1)! "
-                        f"This will cause Chrony to reject updates."
-                    )
-            
-            # Enhanced debug logging (temporary for diagnosis)
-            if self.count <= 10 or self.count % 60 == 0:
-                logger.info(
+
+            # Finalize sequence lock: advance count to next even value and
+            # patch bytes 4-7 in the SHM so chrony sees an even count.
+            self.count += 1  # now even: write complete
+            count_bytes = struct.pack('@i', self.count)
+            if self._use_sysv:
+                self.shm.write(count_bytes, 4)
+            else:
+                self.shm_map.seek(4)
+                self.shm_map.write(count_bytes)
+                self.shm_map.flush()
+
+            if self.count % 60 == 0:
+                logger.debug(
                     f"ChronySHM write #{self.count}: "
-                    f"mode=0, valid=1, nsamples=1, precision={precision}, "
-                    f"clock={reference_time:.6f}, recv={system_time:.6f}, "
+                    f"mode=1, valid=1, precision={precision}, "
                     f"offset={(system_time - reference_time)*1000:+.3f}ms"
                 )
-            
+
             return True
             
         except Exception as e:

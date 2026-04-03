@@ -81,7 +81,8 @@ class MetrologyEngine:
         sample_rate: int = SAMPLE_RATE_FULL,
         precise_lat: Optional[float] = None,
         precise_lon: Optional[float] = None,
-        is_rtp_authority: bool = True  # Default to RTP mode
+        is_rtp_authority: bool = True,  # Default to RTP mode
+        enable_physics_products: bool = True  # False = timing-only, skip secondary-arrival search
     ):
         self.raw_buffer_dir = Path(raw_buffer_dir)
         self.output_dir = Path(output_dir)
@@ -93,6 +94,7 @@ class MetrologyEngine:
         self.precise_lat = precise_lat
         self.precise_lon = precise_lon
         self.is_rtp_authority = is_rtp_authority
+        self.enable_physics_products = enable_physics_products
         
         # Pre-allocated buffers for zero-allocation DSP
         self._max_samples = 65 * self.sample_rate
@@ -1060,13 +1062,16 @@ class MetrologyEngine:
         # (e.g. 2F2, 3F2, 4F2 arriving at different delays).  The dominant peak
         # (rank 0) is the one already identified above; secondary peaks are
         # additional arrivals recorded for ionospheric science.
-        all_arrivals = self._find_all_correlation_peaks(
-            correlation=correlation,
-            dominant_peak_idx=peak_idx,
-            noise_floor=noise_floor,
-            n_template=n_template,
-            start_sample=start_sample,
-        )
+        if self.enable_physics_products:
+            all_arrivals = self._find_all_correlation_peaks(
+                correlation=correlation,
+                dominant_peak_idx=peak_idx,
+                noise_floor=noise_floor,
+                n_template=n_template,
+                start_sample=start_sample,
+            )
+        else:
+            all_arrivals = []
         # Annotate each arrival with its timing relative to minute boundary
         for arr in all_arrivals:
             arr_ms = arr['arrival_sample'] * 1000.0 / self.sample_rate

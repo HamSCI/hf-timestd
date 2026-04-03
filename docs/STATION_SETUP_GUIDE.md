@@ -19,6 +19,8 @@ After running `install.sh`, edit `/etc/hf-timestd/timestd-config.toml` and updat
 | `[ka9q]` | `status_address` | Your radiod status multicast address | `"hf-status.local"` |
 | `[gnss_vtec]` | `host` | GNSS receiver IP (if using VTEC) | `"192.168.0.202"` |
 | `[gnss_vtec]` | `port` | GNSS data stream port | `9000` |
+| `[metrology]` | `physics_products` | `false` = timing-only, skip science writers | `true` |
+| `[metrology]` | `realtime_iono` | `false` = no WAM-IPE/GIRO network fetching | `true` |
 
 ---
 
@@ -245,7 +247,83 @@ enabled = false  # Add this line
 
 ---
 
-## 6. Verification Checklist
+## 6. Timing-Only vs Full-Science Mode
+
+By default the system generates both the timing products needed to discipline Chrony **and** ionospheric science products (Doppler phase series, multi-path arrivals, ionospheric sounding, detection diagnostics). On resource-constrained hardware — Raspberry Pi, systems with limited RAM, or installations without reliable network access to NOAA/LGDC — you can opt out of the science layer without any effect on clock discipline.
+
+Add a `[metrology]` section to your config file:
+
+```toml
+[metrology]
+physics_products = true   # default; set false for timing-only mode
+realtime_iono    = true   # default; set false if no network access to NOAA/LGDC
+```
+
+### `physics_products`
+
+Controls four science-only HDF5 writers and the secondary-arrival peak search in the correlator engine.
+
+**`physics_products = true` (default)** — all data products written:
+- `L2/tick_phase/` — 1 Hz carrier-phase series (Doppler, scintillation analysis)
+- `L2/test_signal/` — ionospheric sounding amplitude/phase at WWV/WWVH test-signal minutes (8 & 44)
+- `L2/detection_attempts/` — per-attempt records for detection-threshold calibration
+- `L1/all_arrivals/` — every above-threshold correlation peak per tone (multi-path science)
+- Full secondary-arrival peak search in `MetrologyEngine` (additional CPU per tone)
+
+**`physics_products = false`** — only the Chrony-critical writers run:
+- `L1/metrology_measurements/` — raw TOA measurements (feeds L2 calibration)
+- `L2/tick_timing/` — ensemble `d_clock_ms` per minute (highest-precision timing)
+- `L2/chu_fsk/` — DUT1 and leap-second detection (CHU channels only)
+
+The four science writers are not initialised, no HDF5 files are created for them, and `MetrologyEngine` skips the secondary-arrival search entirely. Chrony receives exactly the same feed as in full-science mode.
+
+### `realtime_iono`
+
+Controls whether the `IonoDataService` background thread is started to fetch real-time ionospheric data from NOAA WAM-IPE (S3) and LGDC GIRO ionosonde networks.
+
+**`realtime_iono = true` (default)** — real-time data fetched and cached:
+- WAM-IPE 5-minute NetCDF from `noaa-nws-wam-ipe-pds.s3.amazonaws.com`
+- GIRO ionosonde data from `lgdc.uml.edu`
+- Cached to `/var/lib/timestd/iono_cache/`
+- Feeds `HFPropagationModel` for the best propagation delay correction in L2
+
+**`realtime_iono = false`** — propagation model uses climatological fallback only:
+- No network connections to NOAA or LGDC
+- `HFPropagationModel` falls back to IRI-2020 climatology → parametric → geometric
+- `u_propagation_model_ms` in the uncertainty budget may increase by up to ~5 ms at very low mode-confidence (typical quiet daytime propagation: <1 ms increase)
+- Chrony discipline continues normally
+
+Set `realtime_iono = false` if:
+- Your station has no internet access
+- You are on a metered connection and want to avoid periodic S3/HTTP traffic
+- You want to reduce log noise from network-timeout backoff retries
+
+### Typical configurations
+
+**Minimal timing station** (e.g., Raspberry Pi 4, no internet):
+```toml
+[metrology]
+physics_products = false
+realtime_iono    = false
+```
+
+**Full science station** (default, internet connected):
+```toml
+[metrology]
+physics_products = true
+realtime_iono    = true
+```
+
+**Timing + real-time iono but no heavy science writers** (e.g., Pi with internet):
+```toml
+[metrology]
+physics_products = false
+realtime_iono    = true
+```
+
+---
+
+## 7. Verification Checklist
 
 After configuration, verify your setup:
 

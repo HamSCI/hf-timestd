@@ -3,7 +3,7 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** March 19, 2026
+**Last Updated:** April 2, 2026
 
 ---
 
@@ -48,6 +48,20 @@ The system is composed of eight independent systemd services, each with a specif
 - Calculates `D_clock` (System - UTC) using physics propagation models.
 - **Timing (v6.6):** Uses authoritative RTP timestamps from GPS+PPS via radiod (no pipeline offset correction needed).
 - **Output:** `/var/lib/timestd/phase2/{CHANNEL}/` (HDF5 L1/L2)
+
+**Data products** (all under `/var/lib/timestd/phase2/{CHANNEL}/`):
+
+| Product | Level | Path | Chrony path? | Controlled by |
+|---------|-------|------|-------------|---------------|
+| `metrology_measurements` | L1 | `L1/metrology_measurements/` | Yes — input to L2 | always on |
+| `tick_timing` | L2 | `L2/tick_timing/` | Yes — ensemble `d_clock_ms` | always on |
+| `chu_fsk` | L2 | `L2/chu_fsk/` | Yes — DUT1 + leap-second detection | CHU channels only |
+| `tick_phase` | L2 | `L2/tick_phase/` | No — Doppler/scintillation science | `physics_products` |
+| `test_signal` | L2 | `L2/test_signal/` | No — ionospheric sounding | `physics_products` |
+| `detection_attempts` | L2 | `L2/detection_attempts/` | No — threshold calibration | `physics_products` |
+| `all_arrivals` | L1 | `L1/all_arrivals/` | No — multi-path science | `physics_products` |
+
+Set `[metrology] physics_products = false` to disable the four science-only products. See `docs/ARCHITECTURE.md §Timing-Only vs Full-Science Mode`.
 
 ### 3. Fusion (`timestd-fusion`)
 

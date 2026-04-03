@@ -239,6 +239,12 @@ class CoreRecorderV2:
         
         # Status tracking
         self.start_time = time.time()
+        # Watchdog and freshness counters — initialized here so _data_is_flowing()
+        # and _check_data_freshness() never see an AttributeError on first call.
+        self._wd_last_written: int = 0
+        self._wd_last_advance: float = self.start_time
+        self._freshness_last_written: int = 0
+        self._freshness_last_advance: float = self.start_time
         self.status_file = self.output_dir / 'status' / 'core-recorder-status.json'
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
         
@@ -639,10 +645,6 @@ class CoreRecorderV2:
         """
         try:
             total = sum(r.samples_written for r in self.recorders.values())
-            if not hasattr(self, '_wd_last_written'):
-                self._wd_last_written = total
-                self._wd_last_advance = time.time()
-                return True
             if total > self._wd_last_written:
                 self._wd_last_written = total
                 self._wd_last_advance = time.time()
@@ -670,12 +672,6 @@ class CoreRecorderV2:
             total_written = sum(
                 r.samples_written for r in self.recorders.values()
             )
-
-            # Initialise snapshot on first call
-            if not hasattr(self, '_freshness_last_written'):
-                self._freshness_last_written = total_written
-                self._freshness_last_advance = now
-                return
 
             if total_written > self._freshness_last_written:
                 # Progress — reset the stale timer
@@ -705,10 +701,12 @@ class CoreRecorderV2:
             if silence > 300 and uptime > 360:  # 5 min stale + 6 min uptime
                 logger.critical(
                     f"DATA FRESHNESS CRITICAL: No samples written in {silence:.0f}s "
-                    f"({silence/60:.1f} min). Triggering self-restart to recover."
+                    f"({silence/60:.1f} min). Setting running=False to trigger restart."
                 )
                 self.running = False
-                sys.exit(1)
+                # Do NOT call sys.exit() here — that bypasses finally:_shutdown()
+                # in the main loop. Setting running=False is sufficient; the while
+                # loop exits cleanly and _shutdown() runs via the finally clause.
 
         except Exception as e:
             logger.debug(f"Data freshness check error: {e}")

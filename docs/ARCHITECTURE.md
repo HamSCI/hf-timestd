@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** March 19, 2026  
+**Last Updated:** April 2, 2026  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.11.0
+**Version:** V6.12.0
 
 ---
 
@@ -17,7 +17,8 @@ This document explains **WHY** the hf-timestd system is designed the way it is. 
 
 1. [Executive Summary](#executive-summary)
 2. [Dual-Purpose Architecture](#dual-purpose-architecture)
-3. [Design Philosophy](#design-philosophy)
+3. [Timing-Only vs Full-Science Mode](#timing-only-vs-full-science-mode)
+4. [Design Philosophy](#design-philosophy)
 4. [Three-Phase Architecture](#three-phase-architecture)
 5. [ka9q-python Integration](#ka9q-python-integration)
 6. [Key Design Decisions](#key-design-decisions)
@@ -103,6 +104,80 @@ There's an apparent circularity:
 | **BPM** | Scientific | 30% | Long path, high uncertainty, scientific interest |
 
 See `docs/design/DUAL_PURPOSE_ARCHITECTURE.md` for detailed rationale.
+
+---
+
+## Timing-Only vs Full-Science Mode
+
+The pipeline has a hard boundary between the functions needed to discipline Chrony and the functions that produce ionospheric science products. Operators on resource-constrained hardware (Raspberry Pi, low-RAM systems, metered network connections) can opt out of the science layer without any effect on clock discipline.
+
+### The boundary
+
+**Timing-critical path** — must run to produce a Chrony feed:
+
+| Component | Product | Why critical |
+|-----------|---------|--------------|
+| `CoreRecorderV2` | Raw IQ `.bin.zst` | Source of all downstream data |
+| `MetrologyEngine` tone correlator + tick matched filter + edge detector | — | Produces raw TOA measurements |
+| `MetrologyEngine` WWV/WWVH/BPM discrimination | — | Identifies which station was received |
+| `MetrologyService` → `metrology_measurements` writer (L1 HDF5) | L1 timing | Input to L2CalibrationService |
+| `MetrologyService` → `tick_timing` writer (L2 HDF5) | Ensemble `d_clock_ms` | Highest-precision per-minute timing |
+| `MetrologyService` → `chu_fsk` writer (L2 HDF5) | DUT1, TAI-UTC, leap-second detection | Guards epoch correctness |
+| `L2CalibrationService` | L2 timing with propagation correction | Required by fusion |
+| `MultiBroadcastFusion` + Kalman filter | — | Produces the Chrony SHM feed |
+
+**Physics-optional path** — adds science value; Chrony does not need these:
+
+| Component | Product | Controlled by |
+|-----------|---------|---------------|
+| `MetrologyEngine._find_all_correlation_peaks` | Secondary propagation paths | `physics_products` |
+| `tick_phase` writer | 1 Hz Doppler / scintillation phase series | `physics_products` |
+| `test_signal` writer | WWV/WWVH ionospheric sounding (min 8 & 44) | `physics_products` |
+| `detection_attempts` writer | Threshold-calibration diagnostics | `physics_products` |
+| `all_arrivals` writer | Multi-path propagation paths | `physics_products` |
+| `IonoDataService` | Real-time WAM-IPE + GIRO network data | `realtime_iono` |
+| `PhysicsFusionService` | TEC, tomography, VTEC maps (L3 HDF5) | Separate systemd service |
+| GRAPE pipeline | Decimated IQ / PSWS upload | Separate systemd timer |
+
+### Configuration
+
+Add a `[metrology]` section to `/etc/hf-timestd/timestd-config.toml`:
+
+```toml
+[metrology]
+# Set false to skip ionospheric science writers and the secondary-arrival
+# peak search in MetrologyEngine.  The timing pipeline is unaffected.
+physics_products = true
+
+# Set false to disable real-time WAM-IPE and GIRO ionospheric data fetching.
+# The propagation model falls back to climatological IRI-2020 automatically.
+# Chrony discipline continues normally; u_propagation_model_ms may increase
+# by up to ~5 ms at very low mode-confidence.
+realtime_iono = true
+```
+
+Both flags default to `true` — existing deployments without this section are unaffected.
+
+### What `physics_products = false` skips
+
+With `physics_products = false`, MetrologyService initialises only the three timing-critical writers. The following are **not created** — no HDF5 files, no disk I/O, no CPU for secondary-peak search:
+
+- `L2/tick_phase/` — 1 Hz carrier-phase time series for Doppler/scintillation analysis
+- `L2/test_signal/` — ionospheric sounding amplitude/phase at WWV/WWVH test-signal minutes
+- `L2/detection_attempts/` — per-attempt records for detection-threshold calibration
+- `L1/all_arrivals/` — all above-threshold correlation peaks (multi-path propagation paths)
+
+The `MetrologyEngine` also skips `_find_all_correlation_peaks()`, saving the correlation-peak search across the full 60-second window on every detected tone.
+
+### What `realtime_iono = false` skips
+
+With `realtime_iono = false`, the `IonoDataService` singleton is never started in either `MetrologyService` or `L2CalibrationService`. Both services fall through to the climatological fallback chain automatically:
+
+```
+WAM-IPE (real-time)  →  GIRO ionosonde  →  IRI-2020 climatology  →  parametric  →  geometric
+```
+
+On a system with no network access to NOAA/LGDC, set `realtime_iono = false` to prevent repeated network-timeout log noise and avoid the exponential backoff overhead.
 
 ---
 

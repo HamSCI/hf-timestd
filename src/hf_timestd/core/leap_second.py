@@ -37,6 +37,45 @@ from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Compile-time fallback: 18 leap seconds as of 2017 (most recent insertion as of 2026)
+_GPS_LEAP_SECONDS_FALLBACK = 18
+
+
+def get_current_gps_leap_seconds() -> int:
+    """Return the current GPS-UTC leap second offset (GPS is ahead of UTC).
+
+    Reads /usr/share/zoneinfo/leap-seconds.list (IANA tzdata, updated by the OS
+    package manager when a new leap second is announced).  Falls back to the
+    compile-time constant (18) if the file is absent or unparseable.
+
+    File format: non-comment lines are:
+        <NTP_timestamp>  <cumulative_leap_seconds>  [# comment]
+    The last such line gives the current total.
+    """
+    try:
+        with open("/usr/share/zoneinfo/leap-seconds.list") as fh:
+            last_ls = None
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        last_ls = int(parts[1])
+                    except ValueError:
+                        pass
+            if last_ls is not None:
+                return last_ls
+    except OSError:
+        pass
+    logger.debug(
+        "leap-seconds.list unavailable; using fallback GPS_LEAP_SECONDS=%d",
+        _GPS_LEAP_SECONDS_FALLBACK,
+    )
+    return _GPS_LEAP_SECONDS_FALLBACK
+
+
 # Known leap seconds (positive) since 2000
 # Format: (year, month, day) - leap second inserted at 23:59:60 UTC
 KNOWN_LEAP_SECONDS = [

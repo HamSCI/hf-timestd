@@ -94,9 +94,8 @@ class RobustManagedStream:
                 # If failed, background thread will retry
                 pass
             
-            # self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-            # self._monitor_thread.start()
-            logger.info("RobustManagedStream: Monitor loop disabled by manual override")
+            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self._monitor_thread.start()
             
             return self.channel_info
 
@@ -175,6 +174,18 @@ class RobustManagedStream:
             logger.info(f"Set filter edges for SSRC {ssrc}: low={low}, high={high}")
         except Exception as e:
             logger.warning(f"Failed to set filter edges: {e}")
+
+    def _monitor_loop(self):
+        """Background thread: detect a dropped stream and re-establish it."""
+        restore_interval = self.params.get('restore_interval_sec', 30)
+        while self._running:
+            time.sleep(restore_interval)
+            if not self._running:
+                break
+            with self._lock:
+                if self._running and (self.stream is None):
+                    logger.info("RobustManagedStream: stream absent, attempting restore")
+                    self._ensure_stream()
 
     def get_quality(self) -> Optional[StreamQuality]:
         """Get current stream quality metrics."""
@@ -553,8 +564,10 @@ class StreamRecorderV2:
                     )
                     
                     try:
-                        # Recreate channel
-                        self._create_channel()
+                        # Recreate channel — acquire lock to prevent concurrent
+                        # access to self.stream / self.channel_info / self.config.ssrc
+                        with self._lock:
+                            self._create_channel()
                         logger.info(f"{self.config.description}: Channel recreated successfully")
                         
                         if self._on_stream_restored and self.channel_info:

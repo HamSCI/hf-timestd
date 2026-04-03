@@ -188,7 +188,7 @@ class CalibrationFileWriter:
                     json.dump(doc, f, indent=2, default=str)
                     f.write('\n')
                 os.replace(tmp_path, str(self.calib_path))
-            except:
+            except Exception:
                 # Clean up temp file on failure
                 try:
                     os.unlink(tmp_path)

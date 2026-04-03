@@ -70,7 +70,8 @@ class L2CalibrationService:
         receiver_lon: float,
         channels: List[str],
         poll_interval: float = 60.0,
-        lookback_minutes: int = 10
+        lookback_minutes: int = 10,
+        realtime_iono: bool = True,
     ):
         """
         Initialize L2 calibration service.
@@ -91,6 +92,7 @@ class L2CalibrationService:
         self.channels = channels
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
+        self.realtime_iono = realtime_iono
         
         # Initialize propagation solver (optional — falls back to geometric-only)
         if not _PROP_SOLVER_AVAILABLE:
@@ -140,27 +142,33 @@ class L2CalibrationService:
         self.stale_warning_issued: Dict[str, bool] = {ch: False for ch in channels}
         self.max_data_age_seconds = 300.0  # 5 minutes - warn if L1 data older than this
         
-        # Register signal handlers
-        signal.signal(signal.SIGTERM, self._handle_signal)
-        signal.signal(signal.SIGINT, self._handle_signal)
-        
         logger.info(f"L2CalibrationService initialized for {len(channels)} channels")
         logger.info(f"Receiver: {receiver_grid} ({receiver_lat:.4f}, {receiver_lon:.4f})")
     
     def start(self):
         """Start the calibration service."""
+        # Register signal handlers from start() (called from the main thread),
+        # not __init__, to avoid a race where SIGTERM arrives before self.running
+        # is set True and triggers stop() on a not-yet-started service.
+        signal.signal(signal.SIGTERM, self._handle_signal)
+        signal.signal(signal.SIGINT, self._handle_signal)
         self.running = True
         logger.info("L2 Calibration Service starting...")
 
         # Start IonoDataService background fetch thread so HFPropagationModel
         # receives real WAM-IPE foF2/hmF2 data rather than climatological fallback.
-        try:
-            from .iono_data_service import IonoDataService
-            _iono = IonoDataService.get_instance()
-            _iono.start()
-            logger.info("IonoDataService background thread started")
-        except Exception as e:
-            logger.warning(f"IonoDataService could not start: {e} — propagation model will use fallback")
+        # Gated on realtime_iono; when false the propagation model falls back to
+        # climatology — Chrony is still disciplined, only uncertainty budget quality differs.
+        if self.realtime_iono:
+            try:
+                from .iono_data_service import IonoDataService
+                _iono = IonoDataService.get_instance()
+                _iono.start()
+                logger.info("IonoDataService background thread started")
+            except Exception as e:
+                logger.warning(f"IonoDataService could not start: {e} — propagation model will use fallback")
+        else:
+            logger.info("realtime_iono=false — IonoDataService not started; propagation model uses climatological fallback")
 
         # Seed last_processed from existing L2 output files and expand the
         # lookback window to cover any gap since the last processed minute.
@@ -788,6 +796,8 @@ def main():
         logger.error("No channels configured (provide --channels or define recorder.channel_group.timestd in config)")
         sys.exit(1)
     
+    realtime_iono = cfg.get('metrology', {}).get('realtime_iono', True)
+
     # Create and start service
     service = L2CalibrationService(
         data_root=Path(data_root),
@@ -795,7 +805,8 @@ def main():
         receiver_lat=float(receiver_lat),
         receiver_lon=float(receiver_lon),
         channels=channels,
-        poll_interval=args.poll_interval
+        poll_interval=args.poll_interval,
+        realtime_iono=bool(realtime_iono),
     )
     
     try:

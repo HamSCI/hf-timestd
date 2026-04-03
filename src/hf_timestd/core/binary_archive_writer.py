@@ -202,7 +202,8 @@ class BinaryArchiveWriter:
             # Convert GPS_TIME to Unix time
             # GPS epoch is Jan 6, 1980. GPS_TIME is ns since GPS epoch.
             GPS_EPOCH_UNIX = 315964800  # Unix timestamp of GPS epoch
-            GPS_LEAP_SECONDS = 18  # Current leap seconds (GPS - UTC)
+            from .leap_second import get_current_gps_leap_seconds
+            GPS_LEAP_SECONDS = get_current_gps_leap_seconds()
             BILLION = 1_000_000_000
             
             gps_unix_ns = gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)

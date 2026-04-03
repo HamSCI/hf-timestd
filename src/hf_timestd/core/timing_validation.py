@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 # Constants for GPS/Unix time conversion
 GPS_EPOCH_UNIX = 315964800  # Unix timestamp of GPS epoch (Jan 6, 1980)
-GPS_LEAP_SECONDS = 18  # Current GPS-UTC leap second offset
+from .leap_second import get_current_gps_leap_seconds
+GPS_LEAP_SECONDS = get_current_gps_leap_seconds()
 BILLION = 1_000_000_000
 
 

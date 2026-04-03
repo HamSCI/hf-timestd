@@ -67,7 +67,12 @@ class MinuteFileHandler(FileSystemEventHandler):
         if path.suffix == '.json' and path.stem.isdigit():
             minute_boundary = int(path.stem)
             logger.debug(f"{self.channel_name}: Detected new minute file: {minute_boundary}")
-            self.file_queue.put((minute_boundary, path.parent))
+            try:
+                self.file_queue.put_nowait((minute_boundary, path.parent))
+            except queue.Full:
+                logger.warning(
+                    f"{self.channel_name}: file_queue full, dropping minute {minute_boundary}"
+                )
 
 
 class MetrologyService:
@@ -92,7 +97,23 @@ class MetrologyService:
         self.output_dir = Path(output_dir)
         self.receiver_grid = receiver_grid
         self.station_config = station_config or {}
-        
+
+        # Feature flags — read from [metrology] config section.
+        # Default both to True so existing deployments without the section are unaffected.
+        _metrology_cfg = config.get('metrology', {})
+        self._physics_products: bool = bool(_metrology_cfg.get('physics_products', True))
+        self._realtime_iono: bool = bool(_metrology_cfg.get('realtime_iono', True))
+        if not self._physics_products:
+            logger.info(
+                f"[{channel_name}] physics_products=false — "
+                f"tick_phase / test_signal / detection_attempts / all_arrivals writers disabled"
+            )
+        if not self._realtime_iono:
+            logger.info(
+                f"[{channel_name}] realtime_iono=false — "
+                f"WAM-IPE/GIRO fetcher disabled; propagation model uses climatological fallback"
+            )
+
         # State
         self.running = False
         self.minutes_processed = 0
@@ -132,7 +153,8 @@ class MetrologyService:
             sample_rate=config.get('sample_rate', 24000),
             precise_lat=lat,
             precise_lon=lon,
-            is_rtp_authority=self._is_rtp_authority
+            is_rtp_authority=self._is_rtp_authority,
+            enable_physics_products=self._physics_products,
         )
         
         # Initialize Writer
@@ -184,7 +206,10 @@ class MetrologyService:
             logger.info(f"Tiered storage manager initialized: hot={hot_root}, cold={cold_root}")
         
         # File watcher (inotify-based) for immediate processing
-        self._file_queue = queue.Queue()
+        # Bounded: ~1 hour of per-minute events (9 channels × 60 min).
+        # put_nowait in MinuteFileHandler will log and drop on overflow rather
+        # than blocking the inotify thread indefinitely.
+        self._file_queue = queue.Queue(maxsize=60)
         self._observer = None
         self._use_file_watcher = WATCHDOG_AVAILABLE
         if self._use_file_watcher:
@@ -213,8 +238,9 @@ class MetrologyService:
             logger.info(f"CHU FSK writer initialized for {channel_name}")
         
         # Test Signal Writer (for WWV/WWVH channels - minutes 8 and 44)
+        # PHYSICS-OPTIONAL: ionospheric sounding product, not needed for Chrony.
         self.test_signal_writer = None
-        if 'CHU' not in channel_name.upper():  # WWV/WWVH channels only
+        if self._physics_products and 'CHU' not in channel_name.upper():
             test_signal_output_dir = DataProductRegistry.get_data_dir(
                 channel_dir=self.output_dir,
                 product_level="L2",
@@ -251,73 +277,74 @@ class MetrologyService:
         )
         logger.info(f"Tick timing writer initialized for {channel_name}")
         
-        # Detection Attempts Writer (every measurement attempt, detected or rejected)
-        # Records rejection reasons and SNR values for threshold calibration.
-        # The evidence that keeps us honest: we can ask "were those rejections correct?"
-        attempts_output_dir = DataProductRegistry.get_data_dir(
-            channel_dir=self.output_dir,
-            product_level="L2",
-            product_name="detection_attempts",
-            create=True
-        )
-        self.attempts_writer = DataProductWriter(
-            output_dir=attempts_output_dir,
-            product_level="L2",
-            product_name="detection_attempts",
-            channel=self.channel_name,
-            version="v1",
-            processing_version="1.0.0",
-            station_metadata=self.station_config
-        )
-        logger.info(f"Detection attempts writer initialized for {channel_name}")
-        
-        # Tick Phase Writer (per-window phase from overlapping tick correlator)
-        # ~55 rows per station per minute: 1 Hz phase time series for ionospheric analysis.
-        # Phase drift → Doppler, phase jumps → mode changes, scintillation → irregularities.
-        tick_phase_output_dir = DataProductRegistry.get_data_dir(
-            channel_dir=self.output_dir,
-            product_level="L2",
-            product_name="tick_phase",
-            create=True
-        )
-        self.tick_phase_writer = DataProductWriter(
-            output_dir=tick_phase_output_dir,
-            product_level="L2",
-            product_name="tick_phase",
-            channel=self.channel_name,
-            version="v1",
-            processing_version="1.0.0",
-            station_metadata=self.station_config
-        )
-        logger.info(f"Tick phase writer initialized for {channel_name}")
+        # Detection Attempts Writer — PHYSICS-OPTIONAL: threshold-calibration diagnostics.
+        # Not consumed by fusion or Chrony; set to None in timing-only mode.
+        self.attempts_writer = None
+        if self._physics_products:
+            attempts_output_dir = DataProductRegistry.get_data_dir(
+                channel_dir=self.output_dir,
+                product_level="L2",
+                product_name="detection_attempts",
+                create=True
+            )
+            self.attempts_writer = DataProductWriter(
+                output_dir=attempts_output_dir,
+                product_level="L2",
+                product_name="detection_attempts",
+                channel=self.channel_name,
+                version="v1",
+                processing_version="1.0.0",
+                station_metadata=self.station_config
+            )
+            logger.info(f"Detection attempts writer initialized for {channel_name}")
 
-        # All Arrivals Writer (multi-path physics product)
-        # Records every significant correlation peak per second per station —
-        # not just the dominant arrival.  Each row is one propagation path
-        # (e.g. 2F2, 3F2, 4F2 arriving at different delays).  This is the
-        # raw physics observable for ionospheric science; it does not feed
-        # the metrology pipeline.
-        all_arrivals_output_dir = DataProductRegistry.get_data_dir(
-            channel_dir=self.output_dir,
-            product_level="L1",
-            product_name="all_arrivals",
-            create=True
-        )
-        self.all_arrivals_writer = DataProductWriter(
-            output_dir=all_arrivals_output_dir,
-            product_level="L1",
-            product_name="all_arrivals",
-            channel=self.channel_name,
-            version="v1",
-            processing_version="1.0.0",
-            station_metadata=self.station_config
-        )
-        logger.info(f"All-arrivals writer initialized for {channel_name}")
+        # Tick Phase Writer — PHYSICS-OPTIONAL: 1 Hz phase time series for ionospheric analysis.
+        # Phase drift → Doppler; not consumed by fusion or Chrony.
+        self.tick_phase_writer = None
+        if self._physics_products:
+            tick_phase_output_dir = DataProductRegistry.get_data_dir(
+                channel_dir=self.output_dir,
+                product_level="L2",
+                product_name="tick_phase",
+                create=True
+            )
+            self.tick_phase_writer = DataProductWriter(
+                output_dir=tick_phase_output_dir,
+                product_level="L2",
+                product_name="tick_phase",
+                channel=self.channel_name,
+                version="v1",
+                processing_version="1.0.0",
+                station_metadata=self.station_config
+            )
+            logger.info(f"Tick phase writer initialized for {channel_name}")
 
-        # Start IonoDataService background fetcher (singleton, safe to call multiple times)
-        # This enables real-time WAM-IPE and GIRO ionospheric data for the propagation model.
+        # All Arrivals Writer — PHYSICS-OPTIONAL: multi-path propagation paths.
+        # Records every significant correlation peak — not just the dominant arrival.
+        # Explicitly documented: "does not feed the metrology pipeline."
+        self.all_arrivals_writer = None
+        if self._physics_products:
+            all_arrivals_output_dir = DataProductRegistry.get_data_dir(
+                channel_dir=self.output_dir,
+                product_level="L1",
+                product_name="all_arrivals",
+                create=True
+            )
+            self.all_arrivals_writer = DataProductWriter(
+                output_dir=all_arrivals_output_dir,
+                product_level="L1",
+                product_name="all_arrivals",
+                channel=self.channel_name,
+                version="v1",
+                processing_version="1.0.0",
+                station_metadata=self.station_config
+            )
+            logger.info(f"All-arrivals writer initialized for {channel_name}")
+
+        # IonoDataService — real-time WAM-IPE/GIRO fetcher.
+        # Gated on realtime_iono; on false, propagation model uses climatological fallback.
         self._iono_service = None
-        if lat is not None and lon is not None:
+        if self._realtime_iono and lat is not None and lon is not None:
             try:
                 from .iono_data_service import IonoDataService
                 self._iono_service = IonoDataService.get_instance()
@@ -357,6 +384,25 @@ class MetrologyService:
             self._observer.join(timeout=5.0)
             self._observer = None
             logger.info("File watcher stopped")
+
+    def _check_date_rollover(self):
+        """Re-register the inotify watch if the UTC date has changed.
+
+        Called from the main loop poll tick (~every 5s).  When UTC midnight
+        passes, the date directory changes so the existing Observer watch
+        points at a directory that will receive no new files.  We stop and
+        restart the observer on the new date directory.
+        """
+        if not WATCHDOG_AVAILABLE:
+            return
+        today = datetime.now(timezone.utc).strftime('%Y%m%d')
+        if today != getattr(self, '_current_watch_date', None):
+            logger.info(
+                f"Date rollover: {self._current_watch_date} -> {today}"
+                f" — re-registering inotify watch"
+            )
+            self._stop_file_watcher()
+            self._setup_file_watcher()
 
     def run(self):
         """Main service loop with inotify-based file watching."""
@@ -440,6 +486,9 @@ class MetrologyService:
                             f"{(now - last_success_time):.0f}s — "
                             f"recorder may be down or hot buffer empty"
                         )
+
+                # Re-register inotify watch if UTC date has rolled over
+                self._check_date_rollover()
     
     def _run_polling_mode(self):
         """Fallback polling mode when watchdog is not available."""
@@ -860,20 +909,17 @@ class MetrologyService:
         logger.info("Stopping MetrologyService...")
         self.running = False
         self._stop_file_watcher()
-        if self.writer:
-            self.writer.close()
-        if self.fsk_writer:
-            self.fsk_writer.close()
-        if self.test_signal_writer:
-            self.test_signal_writer.close()
-        if self.tick_writer:
-            self.tick_writer.close()
-        if self.attempts_writer:
-            self.attempts_writer.close()
-        if self.tick_phase_writer:
-            self.tick_phase_writer.close()
-        if self.all_arrivals_writer:
-            self.all_arrivals_writer.close()
+        for _writer_attr in (
+            'writer', 'fsk_writer', 'test_signal_writer',
+            'tick_writer', 'attempts_writer', 'tick_phase_writer',
+            'all_arrivals_writer',
+        ):
+            _w = getattr(self, _writer_attr, None)
+            if _w is not None:
+                try:
+                    _w.close()
+                except Exception as _e:
+                    logger.warning(f"Error closing {_writer_attr}: {_e}")
         if self._iono_service is not None:
             try:
                 self._iono_service.stop()
@@ -1135,8 +1181,10 @@ class MetrologyService:
                 "minutes_processed": self.minutes_processed,
                 "last_results": [r.model_dump(mode='json') for r in results]
             }
-            with open(self.status_file, 'w') as f:
+            _status_tmp = self.status_file.with_suffix('.tmp')
+            with open(_status_tmp, 'w') as f:
                 json.dump(status, f, indent=2)
+            _status_tmp.replace(self.status_file)
         except Exception as e:
             logger.error(f"Status write failed: {e}")
     

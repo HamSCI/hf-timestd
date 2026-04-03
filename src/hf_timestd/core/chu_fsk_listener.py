@@ -30,7 +30,8 @@ FSK_RESULTS_DIR = Path('/dev/shm/timestd/fsk_results')
 
 # GPS epoch: 1980-01-06 00:00:00 UTC as Unix timestamp
 GPS_EPOCH_UNIX = 315964800
-GPS_LEAP_SECONDS = 18
+from .leap_second import get_current_gps_leap_seconds
+GPS_LEAP_SECONDS = get_current_gps_leap_seconds()
 BILLION = 1_000_000_000
 
 

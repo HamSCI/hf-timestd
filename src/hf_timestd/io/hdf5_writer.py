@@ -654,9 +654,12 @@ class DataProductWriter:
             )
             try:
                 self._current_file.flush()
+            except Exception as e:
+                logger.error(f"Error flushing SWMR handle on close ({self._current_date}): {e}")
+            try:
                 self._current_file.close()
             except Exception as e:
-                logger.warning(f"Error closing SWMR handle: {e}")
+                logger.warning(f"Error closing SWMR handle ({self._current_date}): {e}")
             self._current_file = None
             self._current_path = None
             self._current_date = None

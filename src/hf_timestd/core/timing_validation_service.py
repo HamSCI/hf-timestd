@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 # GPS epoch constants
 GPS_EPOCH_UNIX = 315964800  # Seconds from Unix epoch to GPS epoch
-GPS_LEAP_SECONDS = 18  # Current GPS-UTC leap seconds
+from .leap_second import get_current_gps_leap_seconds
+GPS_LEAP_SECONDS = get_current_gps_leap_seconds()
 BILLION = 1_000_000_000
 
 

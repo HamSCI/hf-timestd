@@ -467,14 +467,17 @@ class ChronyStatsCollector:
                     rms_offsets = [float('nan')] * n_new
                     ref_ids = [''] * n_new
 
-                # Write columns (create or append)
-                str_dt = h5py.string_dtype()
+                # Write columns (create or append).
+                # Fixed-length byte strings (S-type) are required for SWMR mode.
+                # Variable-length strings use the HDF5 heap and are incompatible
+                # with SWMR — using them silently corrupts writes.
+                _STR_DTYPE = 'S64'  # 64 bytes covers all chrony stat string fields
                 columns = {
-                    'timestamp_utc': (timestamps, str_dt),
+                    'timestamp_utc': (timestamps, _STR_DTYPE),
                     'unix_time': (unix_times, 'f8'),
-                    'source_name': (names, str_dt),
-                    'source_mode': (modes, str_dt),
-                    'source_state': (states, str_dt),
+                    'source_name': (names, _STR_DTYPE),
+                    'source_mode': (modes, _STR_DTYPE),
+                    'source_state': (states, _STR_DTYPE),
                     'stratum': (stratums, 'i4'),
                     'offset_us': (offsets_us, 'f8'),
                     'error_us': (errors_us, 'f8'),
@@ -485,21 +488,26 @@ class ChronyStatsCollector:
                     'reach': (reaches, 'i4'),
                     'sys_offset_s': (sys_offsets, 'f8'),
                     'rms_offset_s': (rms_offsets, 'f8'),
-                    'reference_id': (ref_ids, str_dt),
+                    'reference_id': (ref_ids, _STR_DTYPE),
                 }
 
                 for col_name, (data, dtype) in columns.items():
-                    arr = np.array(data, dtype=dtype) if dtype != str_dt else np.array(data, dtype=object)
+                    if dtype == _STR_DTYPE:
+                        arr = np.array(
+                            [v.encode('utf-8')[:64] for v in data],
+                            dtype=_STR_DTYPE
+                        )
+                    else:
+                        arr = np.array(data, dtype=dtype)
                     if col_name in grp:
                         ds = grp[col_name]
                         ds.resize(n_existing + n_new, axis=0)
                         ds[n_existing:] = arr
                     else:
-                        maxshape = (None,)
                         grp.create_dataset(
                             col_name, data=arr,
-                            maxshape=maxshape, chunks=True,
-                            dtype=dtype if dtype != str_dt else str_dt,
+                            maxshape=(None,), chunks=True,
+                            dtype=dtype,
                         )
 
         except ImportError:
