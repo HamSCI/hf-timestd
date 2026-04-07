@@ -3,28 +3,28 @@
 
 **Author:** Michael J. Hauan, AC0G  
 **Target:** QEX — A Forum for Communications Experimenters (ARRL)  
-**Status:** Third draft, 1 April 2026
+**Status:** Third draft, 6 April 2026
 
 ---
 
 ## 1. Introduction
 
-HF time signals have been broadcasting from national standards laboratories for nearly a
-century. WWV came on the air in 1923. Generations of experimenters have set clocks by
+HF time signals have been broadcasting from national standards laboratories for over a
+century. The National Bureau of Standards (now NIST) began broadcasting standard radio frequencies from station WWV in 1923 and time intervals in 1924. Generations of experimenters have set clocks by
 listening for the ticks. The accuracy of that process has always been limited by the same
-problem: the signal does not travel at the speed of light in a straight line. It bounces
-off the ionosphere. The delay varies with the sun, the season, the solar cycle, and the
-geometry of each hop. For casual timekeeping the error is tolerable; for precision
-metrology it is the dominant uncertainty, typically 5 to 30 milliseconds if left unmodeled.
+problem -- the signal does not travel at the speed of light in a straight line. Its path bounces
+off the ionosphere and varies with the sun, the season, the solar cycle, and the
+geometry of each hop, among many other factors. For casual timekeeping the variability is tolerable; for precision
+metrology it introduces marked uncertainty, typically 5 to 30 milliseconds if left unmodeled.
 
 This article describes a system that characterizes that delay rather than ignoring it — and
-extracts ionospheric science as a direct byproduct. Using a GPSDO-locked RX888
-software-defined radio feeding the open-source ka9q-radio channelizer, and the
+extracts ionospheric science as a direct byproduct. Using a RX888
+software-defined radio with a GPS-disciplined oscilator, feeding the open-source ka9q-radio channelizer, and the
 hf-timestd software pipeline, the system monitors 17 HF time-standard broadcasts
 continuously from central Missouri (grid square EM38ww, ~38.9°N, 92.1°W). It recovers
-UTC to ±0.5 ms (1σ) from HF signals alone — a 20× improvement over uncorrected
+UTC (Universal Time Coordinated) to ±0.5 ms (1σ) from HF signals alone — a 20× improvement over uncorrected
 single-broadcast reception. Along the way, the same coherent phase measurements yield a
-carrier-phase differential TEC rate (dTEC/dt) accurate to ~6 mTECU/minute: a continuous
+carrier-phase differential Total Electron Count (TEC rate or dTEC/dt) accurate to ~6 mTECU/minute -- a continuous
 oblique-path ionospheric observable that complements but does not duplicate what GPS or
 ionosondes provide.
 
@@ -48,15 +48,18 @@ hf-timestd system occupies this gap. It achieves sub-millisecond accuracy using 
 that require nothing more than a wire antenna, through a wholly software-defined
 processing chain, with no dependency on Internet connectivity or ground-wave propagation.
 
-The enabling element is a GPS-disciplined oscillator, but its two contributions to this
-system must not be conflated. Its *frequency stability* — holding the sampling clock to
-sub-ppb — makes carrier-phase measurements coherent across minutes, enabling dTEC/dt
-extraction as a mathematical consequence requiring no knowledge of absolute UTC (Section 4).
-Its role as a *timing authority* is separate: in normal operation, ka9q-radio propagates
-the GPS 1 pps pulse into each RTP (real-time protocol) timestamp, giving the system π~50 µs UTC traceability;
-when GPS time is absent, the system derives its own UTC reference from the HF broadcasts
-themselves (Section 3.3). Section 2.1 describes the hardware; the distinction matters for
-understanding which product requires what.
+The enabling hardware element is a GPS-disciplined oscillator (GPSDO). Its *frequency
+stability* — holding the sampling clock to sub-ppb — is essential for both products
+described here. When GPS+PPS timing authority is absent (no 1 pps output, or GPS
+offline), the enabling software element is hf-timestd itself: it reconstructs UTC
+from the HF time signals by leveraging the GPSDO's frequency stability, the shared
+RTP timestamps across multiple broadcast stations, geographic knowledge, and IRI-2020
+ionospheric modeling. This Fusion mode achieves ±0.5 ms accuracy — better than Internet
+NTP — filling the gap between GPS+PPS hardware (~100 ns) and network time sources
+(~5–50 ms). When GPS+PPS is available, hf-timestd can defer to it (RTP mode), but
+the system's value proposition is UTC recovery *without* GPS+PPS.
+
+Section 2.1 describes the hardware; Section 3 describes the metrology.
 
 What makes this doubly interesting is that the timing and the ionospheric science are not
 separate computations sharing hardware — they are the same computation viewed from two
@@ -76,13 +79,12 @@ which are open source and described here.
 
 ### 2.1 Hardware
 
-The receiving chain begins with a GPS-disciplined oscillator (GPSDO). The GPSDO drives
-an RX888 Mk II direct-conversion SDR receiver. The RX888 digitizes a wide bandwidth (up
+The receiving chain begins with an antenna system feeding a RX888 Mk II direct-conversion SDR receiver stabilized by a GPSDO. The RX888 digitizes a wide bandwidth (up
 to 64 MHz) and delivers the samples over USB3 to the host computer.
 
-The GPSDO's primary contribution is *frequency stability*: by locking its output to the
-GPS 1 pps and 10 MHz reference, it holds the RX888 sampling clock to sub-ppb stability
-over timescales from seconds to hours. A free-running crystal oscillator drifts at
+The GPSDO's primary contribution is *frequency stability*: by locking the RX888's ADC to
+a 27 MHz reference, it holds the RX888 sampling clock to sub-ppb stability
+over timescales from seconds to hours. By contrast, a free-running crystal oscillator drifts at
 1–10 ppm (parts-per-million), accumulating tens of microseconds of phase error per second — enough to swamp
 the carrier-phase coherence that dTEC/dt extraction requires. The GPSDO eliminates this
 drift entirely.
@@ -92,17 +94,16 @@ The front end is ka9q-radio (`radiod`), Phil Karn KA9Q's open-source SDR framewo
 digitized stream into individual 24 kHz complex baseband channels, one per monitoring
 frequency, and distributes them as RTP multicast packets over the local network.
 
-In **RTP mode** — the normal configuration when GPS+PPS is available — `radiod`
-disciplines each RTP packet timestamp directly from the GPS 1 pps pulse. Every IQ sample
-therefore carries a UTC timestamp accurate to approximately 50 µs, inherited without any
-additional hardware. hf-timestd uses this to measure absolute tick time-of-arrival and
-derive D_clock.
+In **RTP mode** — when GPS+PPS is available — `radiod` disciplines each RTP packet
+timestamp directly from the GPS 1 pps pulse. Every IQ sample carries a UTC timestamp
+accurate to ~50 µs. hf-timestd defers to this timing authority and uses the RTP
+timestamps to measure absolute tick time-of-arrival. 
 
-In **Fusion mode**, the RTP timestamps carry only the GPSDO's frequency-disciplined clock
-— stable in rate, but not anchored to UTC. hf-timestd derives its own UTC reference from
-the HF signals themselves, as described in Section 3.3. The 50 µs RTP timestamp accuracy
-is replaced by the convergence accuracy of the multi-broadcast fusion; the GPSDO's
-frequency stability remains essential throughout.
+In **Fusion mode** — when GPS+PPS is absent — the RTP timestamps carry only the
+GPSDO's frequency-disciplined clock (stable in rate, but not anchored to UTC).
+hf-timestd produces its own timing authority from the HF signals themselves via
+multi-broadcast fusion (Section 3.3), achieving ±0.5 ms convergence — better than
+Internet NTP — using only the GPSDO's frequency stability and the broadcast signals.
 
 The antenna is a simple horizontal doublet at modest height — nothing special is required.
 The time-signal stations transmit with 2.5–10 kW into omnidirectional antennas precisely
@@ -114,8 +115,7 @@ because they are designed to be received with modest equipment.
 
 ### 2.2 Signals Monitored
 
-The system monitors four stations on nine physical frequencies, resolving 17 logical
-broadcasts by station identity.
+The system monitors four broadcast stations on nine physical frequencies, resolving 17 logical broadcasts by station identity.
 
 | Station | Location | Frequencies | Count |
 |---------|----------|-------------|-------|
@@ -151,11 +151,12 @@ sequence from raw IQ to Chrony SHM clock discipline.
 2. **timestd-metrology** — The heart of the pipeline. Per-minute DSP: coherent matched
    filter (TickEdgeDetector), SNR estimation, Doppler extraction, station discrimination.
    Writes L1 and L2 timing measurement files.
-3. **timestd-l2-calibration** — Applies propagation corrections at three tiers (geometric,
-   IRI (International Reference Ionosphere) model, GNSS (Global Navigation Satellite System) VTEC) to produce calibrated clock offsets.
+3. **timestd-l2-calibration** — Applies propagation corrections at three tiers
+   (geometric, IRI-2020 ionospheric model, optional GNSS VTEC anchoring when
+   available) to produce calibrated clock offsets.
 4. **timestd-fusion** — Per-broadcast Kalman filter for delay/drift tracking, then weighted least-squares (WLS) fusion of all validated broadcasts. Writes TSL1/TSL2 shared-memory segments for Chrony.
-5. **timestd-vtec** — Reads the ZED-F9P dual-frequency GNSS receiver and downloads IONEX
-   for absolute TEC reference.
+5. **timestd-vtec** (optional) — Reads dual-frequency GNSS receiver and downloads
+   IONEX for absolute TEC reference when ZED-F9P hardware is present.
 6. **timestd-physics** — Carrier-phase dTEC/dt estimation, group-delay TEC (validation),
    and ionospheric science products.
 7. **timestd-web-api** — FastAPI dashboard and REST API (port 8000) providing real-time
@@ -169,7 +170,7 @@ sequence from raw IQ to Chrony SHM clock discipline.
 ### 3.1 The TickEdgeDetector
 
 Every HF time-standard station transmits a 1-pulse-per-second tick — a brief amplitude
-modulation at each UTC second boundary. The tick is the most time-stable element of the
+modulation at each UTC second boundary. The tick provides a core time-stable element of the
 broadcast; the carrier phase before and after the tick carries the Doppler and TEC
 information described in Section 4.
 
@@ -213,20 +214,22 @@ logged and reported in the L2 product.
 
 The 17 Kalman-filtered delay estimates are combined by weighted least squares (WLS). Each
 broadcast receives a weight inversely proportional to its expanded uncertainty (Section
-3.4). The fusion result is a single D_clock estimate with a formal 1σ uncertainty, updated
-once per minute.
+3.4). Two fusion outputs are written to Chrony shared memory:
 
-Two outputs are written to Chrony shared memory:
+- **TSL1** — fusion using geometric-only propagation corrections (great-circle path + hop count).
+  No ionospheric modeling. Used as a fallback when ionospheric data is unavailable.
+- **TSL2** — fusion using ionospheric-model-corrected delays (IRI-2020, or GNSS VTEC when
+  the optional ZED-F9P receiver is present). This is the primary time source, achieving
+  ±0.5 ms (1σ) accuracy with IRI-2020 alone.
 
-- **TSL1** — the fusion result using all validated broadcasts, including those with
-  ionospheric model corrections. Used as the primary time source.
-- **TSL2** — the fusion result restricted to broadcasts with GNSS-VTEC-corrected delays.
-  Smaller number of inputs but lower systematic uncertainty; used when available.
+Chrony combines these SHM sources with NTP, weighting TSL2 heavily when ionospheric
+corrections are available. The system operates in two modes depending on timing authority:
 
-Chrony combines these SHM sources with NTP in its usual filter, but configured to weight
-the HF-derived TSL2 source heavily when the GNSS receiver is locked. The net effect is
-that system time tracks UTC to within ±0.5 ms (1σ) using HF alone, with GNSS VTEC
-correction reducing the dominant ionospheric uncertainty when the ZED-F9P is operational.
+- **RTP mode** — when GPS+PPS is available, hf-timestd defers to the ~50 µs RTP timestamps
+  and uses them to measure absolute tick time-of-arrival. 
+- **Fusion mode** — when GPS+PPS is absent, hf-timestd produces its own timing authority
+  from the multi-broadcast fusion itself, achieving ±0.5 ms convergence (better than
+  Internet NTP) using only the GPSDO's frequency stability and the HF signals.
 
 ![Figure 4: Uncertainty budget waterfall. ISO GUM components from RTP timestamp through fused result.](figures/fig4_uncertainty_budget.png)
 
@@ -237,14 +240,14 @@ correction reducing the dominant ionospheric uncertainty when the ZED-F9P is ope
 The formal uncertainty budget follows ISO GUM (Guide to the Expression of Uncertainty in
 Measurement). The dominant terms are:
 
-| Source | Symbol | Value |
-|--------|--------|-------|
-| RTP timestamp (GPS+PPS) | u_rtp | ~50 µs |
-| Matched-filter tick detection | u_detection | ~0.2 ms |
-| Geometric propagation model | u_prop (geo) | ~5 ms |
-| IRI-2020 ionospheric correction | u_prop (IRI) | ~1.5 ms |
-| GNSS VTEC correction | u_prop (VTEC) | ~0.3 ms |
-| **WLS fusion (17 broadcasts)** | **u_fused** | **±0.5 ms (1σ)** |
+| Source | Symbol | Value | Notes |
+|--------|--------|-------|-------|
+| RTP timestamp (GPS+PPS) | u_rtp | ~50 µs | GPSDO timing authority |
+| Matched-filter tick detection | u_detection | ~0.2 ms | |
+| Geometric propagation model | u_prop (geo) | ~5 ms | Great-circle + hop count |
+| **IRI-2020 ionospheric correction** | **u_prop (IRI)** | **~1.5 ms** | **Primary correction** |
+| **WLS fusion (17 broadcasts)** | **u_fused** | **±0.5 ms (1σ)** | **Main result** |
+| GNSS VTEC correction (optional) | u_prop (VTEC) | ~0.3 ms | Requires ZED-F9P hardware |
 
 The 10× reduction from geometric to IRI and the further 5× from IRI to GNSS VTEC
 illustrates why ionospheric modeling matters. Without any correction, a single-broadcast
@@ -252,14 +255,40 @@ receiver would have ~5 ms systematic error from propagation model uncertainty al
 The fused estimate averages out random errors across 17 independent paths and applies
 the best available ionospheric model to each, driving the combined uncertainty to ±0.5 ms.
 
-The uncertainty budget reveals where the improvement comes from. The RTP timestamp and
-matched-filter detection together contribute less than 0.25 ms — negligible compared to
-the propagation model. It is the ionospheric correction, not the receiver, that limits
-accuracy. This is why the three-tier hierarchy (geometric → IRI → GNSS VTEC) dominates
-the system design, and why the ±0.5 ms fused result (Section 1, Table 1) represents a
-qualitative advance over uncorrected HF reception rather than merely an incremental one.
+The uncertainty budget reveals where the improvement comes from. The RTP timestamp
+and matched-filter detection together contribute less than 0.25 ms — negligible
+compared to the propagation model. It is the ionospheric correction (IRI-2020),
+not the receiver, that limits accuracy. The three-tier hierarchy (geometric → IRI
+→ optional GNSS VTEC) reflects this: each tier reduces the dominant uncertainty
+by 3–5×. The ±0.5 ms fused result using IRI-2020 (Section 1, Table 1) represents
+a qualitative advance over uncorrected HF reception, not merely an incremental one.
 
-### 3.5 Propagation Mode Assignment
+### 3.5 Avoiding Circularity: UTC for Metrology vs. Physics
+
+The system uses ionospheric physics (IRI-2020) to derive UTC, then uses that UTC
+to timestamp ionospheric measurements. This appears circular but is not, because
+the two uses are functionally distinct:
+
+**Metrology path (§3.1–3.4):** IRI-2020 is queried with *approximate* UTC (NTP-level,
+±50 ms) to obtain foF2 and hmF2 at the path midpoint. These parameters feed the
+geometric ray-tracing model, which predicts propagation delay. Subtracting this
+model delay from the measured TOA yields D_clock — the system's offset from UTC.
+The IRI model provides the *mean ionospheric state*; errors in the model (±1.5 ms)
+are the dominant uncertainty term in the metrology budget.
+
+**Physics path (§4):** The *derived precise UTC* (±0.5 ms) timestamps the dTEC/dt
+measurements. These are compared against IRI-2020 or GNSS VTEC to characterize
+ionospheric *variability* — the residual between the real ionosphere and the model.
+The science product is this residual, not the absolute TEC.
+
+The key separation: IRI-2020 is used as a *static lookup table* for metrology
+(queried with coarse UTC), while the science products measure *deviations from*
+that model (timestamped with precise UTC). The metrology does not depend on the
+science measurements, and the science measurements do not feed back into the
+metrology. The two pipelines share hardware and intermediate data products
+(tick TOA, Doppler) but remain logically independent.
+
+### 3.6 Propagation Mode Assignment
 
 The ionosphere does not reflect HF signals from a sharp boundary — it refracts them
 through a region of increasing electron density. A signal can arrive via one hop (1F2),
@@ -352,7 +381,10 @@ delay uncertainty that makes the group-delay TEC noisy.
 
 ![Figure 5: CHU 14.670 MHz dTEC/dt with solar zenith angle overlay and GNSS VTEC.](figures/fig5_dtec_24h.png)
 
-*Figure 5 — Carrier-phase dTEC/dt, 2026-03-17, CHU 14.670 MHz only. Top: 15-min rolling median dTEC/dt (blue) with solar zenith angle at path midpoint (dashed orange); shaded regions indicate local night. The strong correlation between dTEC/dt activity and solar illumination is immediately apparent. Bottom: GNSS overhead VTEC from the co-located ZED-F9P (zero data gaps on this date).*
+*Figure 5 — Carrier-phase dTEC/dt, 2026-03-17, CHU 14.670 MHz. Top: 15-min rolling
+median dTEC/dt (blue) with solar zenith angle at path midpoint (dashed orange).
+Bottom: overhead VTEC from co-located ZED-F9P GNSS receiver (optional hardware,
+shown for validation).*
 
 ### 4.3 Results
 
@@ -392,22 +424,27 @@ This redundancy is a built-in sanity check on the physics.
 
 ### 5.1 Two Products from One Instrument
 
-The central point of this article deserves explicit statement. A single GPS-disciplined
-oscillator, applied to a commodity SDR, produces two independent and complementary
-products:
+The central point of this article deserves explicit statement. A GPSDO-stabilized SDR
+running hf-timestd software produces two independent and complementary products:
 
-1. **UTC recovery (delay domain).** The absolute RTP timestamp, propagated from GPS+PPS
-   through ka9q-radio, enables measurement of the total propagation delay from each
-   transmitter. Subtracting the modeled ionospheric delay yields D_clock — the system's
-   offset from UTC. This is the metrology product (Section 3), occupying the accuracy gap
-   between GPS+PPS and NTP/WWVB shown in the Introduction's Table 1.
+1. **UTC recovery (delay domain).** The GPSDO's *frequency stability* (sub-ppb sampling
+   clock) enables coherent phase measurements across minutes. hf-timestd leverages this
+   stability, combined with shared RTP timestamps across multiple HF broadcast stations,
+   geographic knowledge, and IRI-2020 ionospheric modeling, to reconstruct UTC from the
+   HF signals themselves. This achieves ±0.5 ms (1σ) accuracy — better than Internet NTP
+   — *without requiring GPS+PPS timing authority*. This is the metrology product (Section 3),
+   filling the gap when GPS is absent or offline.
+   
+   When GPS+PPS is available, hf-timestd can optionally defer to it (RTP mode), using the
+   ~50 µs RTP timestamps as the absolute time reference and applying ionospheric corrections
+   to refine propagation delay estimates. But the system's value proposition is Fusion mode:
+   UTC recovery from HF alone.
 
-2. **dTEC/dt (rate domain).** The GPSDO's frequency stability — independent of absolute
-   time — makes carrier-phase measurements coherent across minutes. The differential
+2. **dTEC/dt (rate domain).** The GPSDO's frequency stability — independent of any timing
+   authority — makes carrier-phase measurements coherent across minutes. The differential
    phase rate between two co-path frequencies yields dTEC/dt directly, with no need for
    absolute delay knowledge, mode identification, or a propagation model. This is the
-   science product (Section 4), achieving ~50× better precision than group-delay TEC
-   from the same data.
+   science product (Section 4).
 
 These are not separate computations sharing hardware. They are the same coherent phase
 integral viewed from two directions: the tick TOA is a delay measurement; the Doppler is
@@ -436,12 +473,15 @@ a dedicated ionospheric instrument to replicate.
 
 ### 5.3 Can I Build This?
 
-The hardware cost for this system as built is under $500 (2026 USD):
+The hardware cost for this system is under $300 (2026 USD):
 
 - RX888 Mk II SDR: ~$150
-- GPSDO (e.g., Leo Bodnar GPSDO or equivalent): ~$150
-- ZED-F9P GNSS receiver module or equivalent: ~$120-250 (optional, for VTEC anchoring)
+- GPSDO with frequency output (e.g., Leo Bodnar GPSDO): ~$150
 - Server/NUC to run the software: whatever you have
+
+**Optional enhancements:**
+- GPS+PPS output on GPSDO (RTP mode, ~$0–50 depending on model)
+- ZED-F9P dual-frequency GNSS receiver (VTEC-anchored corrections): ~$120-250
 
 The software is entirely open source:
 
@@ -450,11 +490,17 @@ The software is entirely open source:
 - PHaRLAP (for mode ID): available from IPS Australia
 - pyLAP Python wrapper: https://github.com/mijahauan/PyLap
 
-The principal non-obvious requirement is the GPSDO. Without a GPS-disciplined sampling
-clock, the RTP timestamp accuracy degrades from ~50 µs to ~1 ms or worse depending on
-the oscillator used, which limits D_clock uncertainty to the clock domain rather than the
-ionospheric domain. A crystal-controlled oscillator is adequate for signal monitoring and
-dTEC/dt; it is insufficient for the ±0.5 ms UTC recovery claim.
+The principal non-obvious requirement is the GPSDO. Its frequency stability (sub-ppb
+sampling clock) is essential for both products. For UTC recovery, hf-timestd's Fusion
+mode achieves ±0.5 ms accuracy using only the frequency-stable clock — no GPS+PPS timing
+authority required. This is the system's primary value: filling the gap when GPS+PPS is
+absent or GPS goes offline.
+
+A GPS+PPS output (1 pps pulse) is optional: it enables RTP mode, where hf-timestd defers
+to the ~50 µs GPS timestamps instead of producing its own timing authority. But most
+experimenters don't have GPS+PPS, and even those who do may want HF-based UTC as a
+redundant source when GPS is unavailable. A crystal-controlled oscillator (no GPSDO)
+is adequate for dTEC/dt monitoring but insufficient for UTC recovery.
 
 ### 5.4 Limitations and Future Work
 
