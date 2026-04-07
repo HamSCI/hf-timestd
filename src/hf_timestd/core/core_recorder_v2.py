@@ -348,7 +348,11 @@ class CoreRecorderV2:
 
         archive_root = self.recorder_config.get('archive_root')
         if archive_root:
+            archive_root = Path(archive_root)
             logger.info(f"QuotaManager archive root: {archive_root}")
+
+        derived_max_days = int(self.recorder_config.get('derived_max_days', 7))
+        logger.info(f"QuotaManager derived_max_days: {derived_max_days}")
 
         self.quota_manager = QuotaManager(
             data_root=self.output_dir,
@@ -356,7 +360,7 @@ class CoreRecorderV2:
             min_days_to_keep=7,
             dry_run=False,
             archive_root=archive_root,
-            derived_max_days=7,
+            derived_max_days=derived_max_days,
         )
         
         # Main loop

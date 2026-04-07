@@ -200,6 +200,10 @@ Exit codes:
     daemon_parser = subparsers.add_parser('daemon', help='Run recorder daemon')
     daemon_parser.add_argument('--config', '-c', help='Configuration file path')
     daemon_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
+    daemon_parser.add_argument('--archive-root', type=Path, default=None,
+        help='Archive root for moving evicted data instead of deleting (overrides config)')
+    daemon_parser.add_argument('--max-derived-days', type=int, default=None,
+        help='Max retention days for derived data (phase2, products). Overrides config; default: 7')
     
     # Discover command
     discover_parser = subparsers.add_parser('discover', help='Discover available channels')
@@ -413,13 +417,27 @@ Health check:
             output_dir = recorder_section.get('production_data_root', '/var/lib/signal-recorder')
         
         from .core.core_recorder_v2 import _expand_channel_groups
+        # Resolve archive_root: CLI flag overrides TOML config
+        archive_root = getattr(args, 'archive_root', None)
+        if archive_root is None:
+            ar = recorder_section.get('archive_root')
+            archive_root = Path(ar) if ar else None
+
+        # Resolve derived_max_days: CLI flag overrides TOML config
+        derived_max_days = getattr(args, 'max_derived_days', None)
+        if derived_max_days is None:
+            derived_max_days = recorder_section.get('derived_max_days', 7)
+
         recorder_config = {
             'multicast_address': config.get('ka9q', {}).get('data_address', '239.103.26.231'),
             'port': 5004,
             'output_dir': output_dir,
             'station': config.get('station', {}),
             'channels': _expand_channel_groups(recorder_section),
-            'status_address': config.get('ka9q', {}).get('status_address', '239.192.152.141')
+            'status_address': config.get('ka9q', {}).get('status_address', '239.192.152.141'),
+            'storage_quota': recorder_section.get('storage_quota', '75%'),
+            'archive_root': archive_root,
+            'derived_max_days': derived_max_days,
         }
         
         # Start daemon mode
