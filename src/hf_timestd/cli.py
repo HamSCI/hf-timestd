@@ -138,6 +138,199 @@ def _handle_status(args):
     sys.exit(result['exit_code'])
 
 
+# ============================================================================
+# Profile and service handlers
+# ============================================================================
+
+def _load_config_for_profile(args):
+    """Load TOML config, returning (config_dict, config_path)."""
+    import toml
+    config_path = Path(getattr(args, 'config', '/etc/hf-timestd/timestd-config.toml'))
+    if not config_path.exists():
+        print(f"Config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+    with open(config_path, 'r') as f:
+        return toml.load(f), config_path
+
+
+def _handle_profile(args, parser):
+    """Handle 'hf-timestd profile' subcommands."""
+    from .service_profile import (
+        ServiceProfile, PROFILE_NAMES, PROFILE_DESCRIPTIONS,
+        ALL_SERVICES, get_unit_status, apply_profile,
+    )
+
+    if not args.profile_command:
+        if parser:
+            parser.print_help()
+        sys.exit(1)
+
+    if args.profile_command == 'list':
+        for name in PROFILE_NAMES:
+            print(f"  {name:10s} {PROFILE_DESCRIPTIONS[name]}")
+        return
+
+    if args.profile_command == 'show':
+        config, _ = _load_config_for_profile(args)
+        profile = ServiceProfile.from_config(config)
+        active = profile.active_services()
+
+        if getattr(args, 'json', False):
+            info = profile.summary()
+            # Enrich with live systemd state
+            for svc, row in info['services'].items():
+                row['systemd'] = get_unit_status(row['unit']) if row['unit'] else {}
+            print(json.dumps(info, indent=2))
+        else:
+            print(f"Profile: {profile.profile_name}  ({PROFILE_DESCRIPTIONS[profile.profile_name]})")
+            print()
+            print(f"  {'SERVICE':<22s} {'ENABLED':>8s}  {'SOURCE':>10s}  {'SYSTEMD UNIT'}")
+            print(f"  {'─'*22} {'─'*8}  {'─'*10}  {'─'*38}")
+            for svc in ALL_SERVICES:
+                enabled = svc in active
+                source = 'override' if svc in profile.overrides else (
+                    'always' if svc == 'core_recorder' else 'profile')
+                unit = profile.summary()['services'][svc]['unit']
+                marker = 'on' if enabled else 'off'
+                print(f"  {svc:<22s} {marker:>8s}  {source:>10s}  {unit}")
+        return
+
+    if args.profile_command == 'set':
+        config, config_path = _load_config_for_profile(args)
+        new_name = args.name
+
+        # Build profile to show what will change
+        old_profile = ServiceProfile.from_config(config)
+        old_active = old_profile.active_services()
+
+        # Update config in memory
+        if 'services' not in config:
+            config['services'] = {}
+        config['services']['profile'] = new_name
+
+        new_profile = ServiceProfile.from_config(config)
+        new_active = new_profile.active_services()
+
+        added = new_active - old_active
+        removed = old_active - new_active
+
+        print(f"Profile: {old_profile.profile_name} -> {new_name}")
+        if added:
+            print(f"  + enable:  {', '.join(sorted(added))}")
+        if removed:
+            print(f"  - disable: {', '.join(sorted(removed))}")
+        if not added and not removed:
+            print(f"  (no change)")
+
+        if args.dry_run:
+            print("\n(dry run — no changes applied)")
+            return
+
+        # Write updated config
+        import toml
+        with open(config_path, 'w') as f:
+            toml.dump(config, f)
+        print(f"\nConfig updated: {config_path}")
+
+        # Apply to systemd
+        print("Applying to systemd...")
+        actions = apply_profile(new_profile, dry_run=False)
+        for unit, action in sorted(actions.items()):
+            print(f"  {unit}: {action}")
+        return
+
+
+def _handle_service(args, parser):
+    """Handle 'hf-timestd service' subcommands."""
+    from .service_profile import (
+        ServiceProfile, ALL_SERVICES, SERVICE_UNIT_MAP,
+        get_unit_status, apply_profile,
+    )
+
+    if not args.service_command:
+        if parser:
+            parser.print_help()
+        sys.exit(1)
+
+    if args.service_command == 'status':
+        config, _ = _load_config_for_profile(args)
+        profile = ServiceProfile.from_config(config)
+        active = profile.active_services()
+
+        rows = []
+        for svc in ALL_SERVICES:
+            unit = SERVICE_UNIT_MAP.get(svc, '')
+            enabled = svc in active
+            state = get_unit_status(unit) if unit else {}
+            rows.append({
+                'service': svc,
+                'unit': unit,
+                'config_enabled': enabled,
+                'active_state': state.get('active_state', ''),
+                'sub_state': state.get('sub_state', ''),
+            })
+
+        if getattr(args, 'json', False):
+            print(json.dumps({'profile': profile.profile_name, 'services': rows}, indent=2))
+        else:
+            print(f"Profile: {profile.profile_name}")
+            print()
+            print(f"  {'SERVICE':<22s} {'CONFIG':>7s}  {'STATE':<12s} {'SYSTEMD UNIT'}")
+            print(f"  {'─'*22} {'─'*7}  {'─'*12} {'─'*38}")
+            for r in rows:
+                cfg = 'on' if r['config_enabled'] else 'off'
+                st = r['active_state']
+                if st == 'active':
+                    state_str = f"{st}({r['sub_state']})"
+                elif st == 'unknown':
+                    state_str = '-'
+                else:
+                    state_str = st
+                print(f"  {r['service']:<22s} {cfg:>7s}  {state_str:<12s} {r['unit']}")
+        return
+
+    if args.service_command in ('enable', 'disable'):
+        svc_name = args.name.replace('-', '_')
+        if svc_name not in ALL_SERVICES:
+            print(f"Unknown service: {args.name}", file=sys.stderr)
+            print(f"Available: {', '.join(ALL_SERVICES)}", file=sys.stderr)
+            sys.exit(1)
+
+        if svc_name == 'core_recorder' and args.service_command == 'disable':
+            print("Cannot disable core_recorder — it is always on.", file=sys.stderr)
+            sys.exit(1)
+
+        enable = args.service_command == 'enable'
+        config, config_path = _load_config_for_profile(args)
+
+        if 'services' not in config:
+            config['services'] = {}
+        config['services'][svc_name] = enable
+
+        new_profile = ServiceProfile.from_config(config)
+
+        action_word = 'Enabling' if enable else 'Disabling'
+        unit = SERVICE_UNIT_MAP.get(svc_name, '')
+        print(f"{action_word} {svc_name} ({unit})")
+
+        if args.dry_run:
+            print("(dry run — no changes applied)")
+            return
+
+        # Write config
+        import toml
+        with open(config_path, 'w') as f:
+            toml.dump(config, f)
+        print(f"Config updated: {config_path}")
+
+        # Apply to systemd
+        actions = apply_profile(new_profile, dry_run=False)
+        for u, a in sorted(actions.items()):
+            if u == unit or a.startswith('error'):
+                print(f"  {u}: {a}")
+        return
+
+
 def main():
     """Main entry point for hf-timestd command"""
     # Configure logging to show INFO level and above
@@ -373,8 +566,83 @@ Health check:
     calibrate_parser.add_argument('--debug', '-d', action='store_true',
         help='Enable DEBUG logging')
     
+    # ── Profile command group ──────────────────────────────────────────
+    profile_parser = subparsers.add_parser('profile',
+        help='Manage service profiles (archive, rtp, fusion, full)',
+        description='''\
+Service profiles control which systemd services are enabled.
+
+Profiles (least → most services):
+  archive — core-recorder only (raw IQ preservation)
+  rtp     — archive + web-api + monitoring (GPSDO timing)
+  fusion  — rtp + metrology + fusion (GPS-denied timing)
+  full    — fusion + physics + ionospheric (full science)
+
+Per-service overrides in [services] take precedence over the profile.
+''',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    profile_sub = profile_parser.add_subparsers(dest='profile_command')
+
+    # profile show
+    profile_show = profile_sub.add_parser('show',
+        help='Show active profile and service states')
+    profile_show.add_argument('--config', '-c',
+        default='/etc/hf-timestd/timestd-config.toml',
+        help='Configuration file path')
+    profile_show.add_argument('--json', action='store_true',
+        help='Machine-readable JSON output')
+
+    # profile list
+    profile_sub.add_parser('list',
+        help='List available profiles and their descriptions')
+
+    # profile set
+    profile_set = profile_sub.add_parser('set',
+        help='Set the active profile (updates config and applies to systemd)')
+    profile_set.add_argument('name', choices=['archive', 'rtp', 'fusion', 'full'],
+        help='Profile name')
+    profile_set.add_argument('--config', '-c',
+        default='/etc/hf-timestd/timestd-config.toml',
+        help='Configuration file path')
+    profile_set.add_argument('--dry-run', action='store_true',
+        help='Show what would change without applying')
+
+    # ── Service command group ─────────────────────────────────────────
+    service_parser = subparsers.add_parser('service',
+        help='View and control individual services')
+    service_sub = service_parser.add_subparsers(dest='service_command')
+
+    # service status
+    svc_status = service_sub.add_parser('status',
+        help='Show status of all hf-timestd services')
+    svc_status.add_argument('--config', '-c',
+        default='/etc/hf-timestd/timestd-config.toml',
+        help='Configuration file path')
+    svc_status.add_argument('--json', action='store_true',
+        help='Machine-readable JSON output')
+
+    # service enable
+    svc_enable = service_sub.add_parser('enable',
+        help='Enable a service (adds override to config)')
+    svc_enable.add_argument('name', help='Service name (e.g., metrology, physics)')
+    svc_enable.add_argument('--config', '-c',
+        default='/etc/hf-timestd/timestd-config.toml',
+        help='Configuration file path')
+    svc_enable.add_argument('--dry-run', action='store_true',
+        help='Show what would change without applying')
+
+    # service disable
+    svc_disable = service_sub.add_parser('disable',
+        help='Disable a service (adds override to config)')
+    svc_disable.add_argument('name', help='Service name (e.g., metrology, physics)')
+    svc_disable.add_argument('--config', '-c',
+        default='/etc/hf-timestd/timestd-config.toml',
+        help='Configuration file path')
+    svc_disable.add_argument('--dry-run', action='store_true',
+        help='Show what would change without applying')
+
     args = parser.parse_args()
-    
+
     # If no command specified, show help
     if not args.command:
         parser.print_help()
@@ -1038,6 +1306,10 @@ Health check:
         else:
             grape_parser.print_help()
             sys.exit(1)
+    elif args.command == 'profile':
+        _handle_profile(args, locals().get('profile_parser'))
+    elif args.command == 'service':
+        _handle_service(args, locals().get('service_parser'))
     elif args.command == 'calibrate':
         from pathlib import Path
         import toml

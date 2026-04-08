@@ -42,42 +42,80 @@ if pgrep -x radiod &>/dev/null; then
     RADIOD_LOCAL=true
 fi
 
-# Check if VTEC is enabled
-VTEC_ENABLED=$($VENV_DIR/bin/python3 -c "
-import tomllib
+# Read active profile from config — determines which services to start
+ACTIVE_UNITS=$($VENV_DIR/bin/python3 -c "
+import sys
+sys.path.insert(0, '/opt/hf-timestd/venv/lib/python3/site-packages')
 try:
-    with open('$MAIN_CONFIG', 'rb') as f:
-        config = tomllib.load(f)
-    print('true' if config.get('gnss_vtec', {}).get('enabled', False) else 'false')
-except:
-    print('false')
+    import toml
+    from hf_timestd.service_profile import ServiceProfile
+    config = toml.load('$MAIN_CONFIG')
+    profile = ServiceProfile.from_config(config)
+    for unit in profile.systemd_units(active=True):
+        print(unit)
+except Exception as e:
+    # Fallback: start everything (backwards-compatible)
+    print('FALLBACK', file=sys.stderr)
+    for u in [
+        'timestd-core-recorder.service', 'timestd-metrology.target',
+        'timestd-l2-calibration.service', 'timestd-fusion.service',
+        'timestd-physics.service', 'timestd-web-api.service',
+        'timestd-radiod-monitor.service', 'timestd-pipeline-watchdog.timer',
+        'timestd-ionex-download.timer', 'timestd-chrony-monitor.timer',
+        'timestd-iono-reanalysis.timer', 'grape-daily.timer',
+    ]:
+        print(u)
 " 2>/dev/null)
 
-# Service startup order (respects dependencies)
-CORE_SERVICES=(
-    "timestd-core-recorder"    # Phase 1: RTP → Raw Buffer
-    "timestd-metrology.target"  # Phase 2: L1 Raw Measurements (per-channel template instances)
-    "timestd-l2-calibration"   # Phase 2: L2 Calibrated Timing
-    "timestd-fusion"           # Phase 3: Fusion → Chrony SHM
-    "timestd-physics"          # Phase 3: TEC Estimation
-    "timestd-web-api"          # Web API & Dashboard
-    "timestd-radiod-monitor"    # Hardware Health Monitor (local + remote)
+PROFILE_NAME=$($VENV_DIR/bin/python3 -c "
+import toml
+try:
+    c = toml.load('$MAIN_CONFIG')
+    print(c.get('services', {}).get('profile', 'rtp'))
+except: print('rtp')
+" 2>/dev/null)
+
+log_info "Service profile: $PROFILE_NAME"
+
+# Build ordered service list from profile.  Core services are started in
+# dependency order; the profile determines which ones are included.
+# Order matters: recorder must be up before metrology, metrology before fusion.
+STARTUP_ORDER=(
+    "timestd-core-recorder.service"
+    "timestd-metrology.target"
+    "timestd-l2-calibration.service"
+    "timestd-fusion.service"
+    "timestd-physics.service"
+    "timestd-vtec.service"
+    "timestd-web-api.service"
+    "timestd-radiod-monitor.service"
 )
 
-# Optional services (conditional)
-OPTIONAL_SERVICES=()
-if [[ "$VTEC_ENABLED" == "true" ]]; then
-    OPTIONAL_SERVICES+=("timestd-vtec")
-fi
+CORE_SERVICES=()
+for unit in "${STARTUP_ORDER[@]}"; do
+    if echo "$ACTIVE_UNITS" | grep -q "^${unit}$"; then
+        # Strip .service suffix for backwards compat with wait_for_service()
+        CORE_SERVICES+=("${unit%.service}")
+    fi
+done
 
-# Timers
-TIMERS=(
+OPTIONAL_SERVICES=()
+
+# Timers — only those in the active profile
+ALL_TIMERS=(
     "timestd-pipeline-watchdog.timer"
     "timestd-ionex-download.timer"
     "timestd-chrony-monitor.timer"
     "timestd-iono-reanalysis.timer"
     "grape-daily.timer"
+    "timestd-prune.timer"
 )
+TIMERS=()
+for timer in "${ALL_TIMERS[@]}"; do
+    if echo "$ACTIVE_UNITS" | grep -q "^${timer}$"; then
+        TIMERS+=("$timer")
+    fi
+done
 
 # Path watchers (only when radiod runs locally — managed by setup-cpu-affinity.sh)
 PATH_WATCHERS=()

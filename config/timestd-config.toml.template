@@ -169,6 +169,40 @@ realtime_iono = true
 authority = "rtp"
 rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
 
+# === Service Profiles ===
+# Controls which services run.  Profiles define a baseline set of services;
+# per-service overrides let you add or remove individual services on top.
+#
+# Built-in profiles (from least to most services):
+#   archive  — core-recorder only.  Raw IQ preservation, minimal resources.
+#   rtp      — archive + web-api + monitoring timers.  Standard RTP mode
+#              where radiod's GPSDO provides timing authority.
+#   fusion   — rtp + metrology + l2-calibration + fusion + chrony-monitor.
+#              GPS-denied mode: timing derived from HF broadcasts.
+#   full     — fusion + physics + ionex-download + iono-reanalysis + vtec
+#              (if gnss_vtec.enabled).  Full science + timing.
+#
+# The active profile sets the default for each service; per-service overrides
+# take precedence.  For example, profile = "rtp" with metrology = true gives
+# you the RTP baseline plus metrology for development/study.
+[services]
+profile = "rtp"
+
+# Per-service overrides (true = force on, false = force off, omit = use profile)
+# core_recorder = true        # Always on in every profile
+# metrology = true            # Force metrology on (e.g., for study in RTP mode)
+# l2_calibration = false      # Force off even if profile includes it
+# fusion = true               # Multi-broadcast fusion → Chrony SHM
+# physics = true              # L2/L3 ionospheric products
+# vtec = false                # GNSS VTEC (also requires gnss_vtec.enabled)
+# web_api = true              # FastAPI dashboard on port 8000
+# radiod_monitor = true       # Hardware health monitor
+# grape_daily = true          # Daily GRAPE decimation + upload timer
+# chrony_monitor = true       # Chrony timing authority watchdog
+# ionex_download = true       # IONEX data fetch timer
+# iono_reanalysis = true      # Ionospheric reanalysis timer
+# pipeline_watchdog = true    # Pipeline health watchdog timer
+
 [gnss_vtec]
 enabled = false                         # Set to true if you have a GNSS receiver
 host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge

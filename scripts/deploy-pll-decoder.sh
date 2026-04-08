@@ -190,7 +190,7 @@ if [[ "$DO_GIT_PULL" == "true" ]]; then
     UPDATE_ARGS="--pull"
 fi
 
-if bash "$PROJECT_DIR/scripts/update-production.sh" $UPDATE_ARGS; then
+if bash "$PROJECT_DIR/scripts/deploy.sh" $UPDATE_ARGS; then
     log_info "  ✅ Production update completed"
 else
     log_error "Production update failed"

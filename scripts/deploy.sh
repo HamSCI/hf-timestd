@@ -665,32 +665,37 @@ else
     log_info "No unit file changes"
 fi
 
-# ── Enable services ──
-systemctl enable timestd-core-recorder.service 2>/dev/null || true
-systemctl enable timestd-metrology.target 2>/dev/null || true
-systemctl enable timestd-l2-calibration.service 2>/dev/null || true
-systemctl enable timestd-fusion.service 2>/dev/null || true
-systemctl enable timestd-physics.service 2>/dev/null || true
-systemctl enable timestd-web-api.service 2>/dev/null || true
+# ── Enable services via profile ──
+# Read the [services] profile from config; fall back to "rtp" if not set.
+# The profile controls which systemd units are enabled/disabled.
+# See: hf-timestd profile list
+PROFILE=$("$VENV_DIR/bin/python3" -c "
+import toml, sys
+try:
+    c = toml.load('$MAIN_CONFIG')
+    print(c.get('services', {}).get('profile', 'rtp'))
+except Exception:
+    print('rtp')
+" 2>/dev/null)
 
+log_info "Applying service profile: $PROFILE"
+
+# Core recorder is always enabled (profile-independent)
+systemctl enable timestd-core-recorder.service 2>/dev/null || true
+
+# Metrology template instances must be enabled individually (systemd
+# targets don't auto-enable template instances on 'systemctl enable target')
 for entry in "${METROLOGY_CHANNELS[@]}"; do
     CHANNEL="${entry%%=*}"
     systemctl enable "timestd-metrology@${CHANNEL}.service" 2>/dev/null || true
 done
 
-systemctl enable timestd-radiod-monitor.service 2>/dev/null || true
-if [[ "$VTEC_ENABLED" == "true" ]]; then
-    systemctl enable timestd-vtec.service 2>/dev/null || true
-fi
-
-# Enable timers
-for timer in timestd-ionex-download timestd-chrony-monitor timestd-pipeline-watchdog; do
-    systemctl enable "${timer}.timer" 2>/dev/null || true
+# Apply the profile — enables/disables remaining services and timers
+"$VENV_DIR/bin/python3" -m hf_timestd profile set "$PROFILE" --config "$MAIN_CONFIG" 2>&1 | while read -r line; do
+    log_info "  $line"
 done
-[[ -f "$SYSTEMD_DIR/timestd-iono-reanalysis.timer" ]] && systemctl enable timestd-iono-reanalysis.timer 2>/dev/null || true
-[[ -f "$SYSTEMD_DIR/grape-daily.timer" ]] && { systemctl enable grape-daily.timer 2>/dev/null || true; systemctl enable grape-daily.service 2>/dev/null || true; }
 
-log_info "Services enabled"
+log_info "Services enabled (profile: $PROFILE)"
 
 
 # ════════════════════════════════════════════════════════════════════
