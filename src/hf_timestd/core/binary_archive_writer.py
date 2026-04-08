@@ -108,6 +108,7 @@ class MinuteBuffer:
     start_rtp: Optional[int] = None
     start_system_time: Optional[float] = None
     timing_snapshots: List[TimingSnapshot] = field(default_factory=list)  # Snapshots for this minute
+    flush_attempts: int = 0  # Number of failed flush attempts
     
     @property
     def is_complete(self) -> bool:
@@ -128,7 +129,12 @@ class BinaryArchiveWriter:
     - Memory-mappable output
     - No complex library dependencies
     """
-    
+
+    # Maximum flush retries before abandoning a minute buffer.  At 1 retry
+    # per minute-crossing (~60 s), 3 retries gives ~3 minutes to recover
+    # from a transient I/O error (e.g. NFS stall, tmpfs pressure).
+    MAX_FLUSH_RETRIES = 3
+
     def __init__(self, config: BinaryArchiveConfig):
         self.config = config
         
@@ -151,6 +157,7 @@ class BinaryArchiveWriter:
         
         # Current minute buffer
         self.current_buffer: Optional[MinuteBuffer] = None
+        self._pending_flush_buffer: Optional[MinuteBuffer] = None  # Retained on flush failure
         self._lock = threading.Lock()
         
         # Statistics
@@ -158,6 +165,8 @@ class BinaryArchiveWriter:
         self.samples_written = 0
         self.total_gaps = 0
         self.write_errors = 0
+        self.stale_drops = 0  # Samples dropped by staleness guard
+        self.timing_drops = 0  # Samples dropped waiting for GPS_TIME
         
         # Time reference - GPS_TIME/RTP_TIMESNAP from radiod
         # In RTP mode, the GPSDO-disciplined RTP clock IS the timing authority.
@@ -182,7 +191,30 @@ class BinaryArchiveWriter:
         logger.info(f"BinaryArchiveWriter initialized for {config.channel_name}")
         logger.info(f"  Output: {self.archive_dir}")
         logger.info(f"  Format: raw complex64 binary + JSON metadata")
-    
+
+        # Clean up orphaned .tmp files from a prior crash
+        self._cleanup_orphaned_tmp_files()
+
+    def _cleanup_orphaned_tmp_files(self) -> None:
+        """Remove .tmp files left behind by a prior crash.
+
+        These are partial writes that were never atomically renamed.
+        Safe to delete at startup since no other writer instance should
+        be active for this channel.
+        """
+        try:
+            count = 0
+            for tmp_file in self.archive_dir.rglob('*.tmp'):
+                try:
+                    tmp_file.unlink()
+                    count += 1
+                except OSError as e:
+                    logger.warning(f"Failed to remove orphaned tmp file {tmp_file}: {e}")
+            if count > 0:
+                logger.info(f"{self.config.channel_name}: cleaned up {count} orphaned .tmp file(s)")
+        except Exception as e:
+            logger.warning(f"Error scanning for orphaned .tmp files: {e}")
+
     def add_timing_snapshot(self, gps_time_ns: int, rtp_timesnap: int) -> bool:
         """
         Record a GPS_TIME/RTP_TIMESNAP pair from radiod status.
@@ -259,8 +291,12 @@ class BinaryArchiveWriter:
                         )
                     # In both cases: flush and adopt new mapping
                     if self.current_buffer is not None:
-                        self._flush_minute(self.current_buffer)
-                        self.current_buffer = None
+                        if self._try_flush(self.current_buffer):
+                            self.current_buffer = None
+                        # On failure _try_flush keeps buffer for retry;
+                        # new mapping is adopted below regardless so the
+                        # retained buffer will flush with stale timing —
+                        # but partial data is better than none.
             
             # Store GPS_TIME/RTP_TIMESNAP mapping directly — no correction needed.
             self._gps_time_unix = gps_unix_sec
@@ -268,7 +304,11 @@ class BinaryArchiveWriter:
             self._rtp_timesnap = rtp_timesnap
             if not self._timing_locked:
                 self._timing_locked = True
-                logger.info(f"{self.config.channel_name}: RTP timing LOCKED - GPS_TIME={gps_unix_sec:.6f}, RTP_TIMESNAP={rtp_timesnap}")
+                wait_dur = ''
+                if hasattr(self, '_waiting_since'):
+                    wait_dur = f' (after {time.time() - self._waiting_since:.1f}s wait)'
+                    del self._waiting_since
+                logger.info(f"{self.config.channel_name}: RTP timing LOCKED{wait_dur} - GPS_TIME={gps_unix_sec:.6f}, RTP_TIMESNAP={rtp_timesnap}")
             
             snapshot = TimingSnapshot(
                 gps_time_ns=gps_time_ns,
@@ -467,6 +507,43 @@ class BinaryArchiveWriter:
             logger.warning(f"Error during quota cleanup: {e}")
             return 0
     
+    def _try_flush(self, buffer: MinuteBuffer) -> bool:
+        """Attempt to flush a minute buffer, retaining it on failure for retry.
+
+        Returns True if the buffer was successfully written (or abandoned after
+        MAX_FLUSH_RETRIES), meaning the caller should clear current_buffer.
+        Returns False if the flush failed but the buffer should be kept for a
+        later retry — the caller must NOT discard it.
+        """
+        if self._flush_minute(buffer):
+            return True  # Written successfully
+
+        buffer.flush_attempts += 1
+        if buffer.flush_attempts >= self.MAX_FLUSH_RETRIES:
+            logger.error(
+                f"{self.config.channel_name}: ABANDONING minute "
+                f"{buffer.minute_boundary} after {buffer.flush_attempts} "
+                f"flush failures — {buffer.write_pos} samples LOST"
+            )
+            return True  # Give up — let caller discard
+
+        logger.warning(
+            f"{self.config.channel_name}: flush failed for minute "
+            f"{buffer.minute_boundary} (attempt {buffer.flush_attempts}/"
+            f"{self.MAX_FLUSH_RETRIES}) — will retry"
+        )
+        return False  # Keep buffer alive
+
+    def _retry_pending_flush(self) -> None:
+        """Retry flushing a buffer that failed on a previous minute crossing.
+
+        Called (with lock held) at the start of _write_samples_inner and flush().
+        """
+        if self._pending_flush_buffer is None:
+            return
+        if self._try_flush(self._pending_flush_buffer):
+            self._pending_flush_buffer = None
+
     def _cleanup_partial_write(self, *paths: Path) -> None:
         """Clean up partial files after a failed write."""
         for path in paths:
@@ -742,12 +819,30 @@ class BinaryArchiveWriter:
             Number of samples written
         """
         with self._lock:
-            # GPS_TIME/RTP_TIMESNAP must be established before we can write
+            # GPS_TIME/RTP_TIMESNAP must be established before we can write.
+            # Every sample arriving here without timing is SILENTLY LOST.
             if self._gps_time_unix is None or self._rtp_timesnap is None:
-                # Log once per second to avoid spam
-                if not hasattr(self, '_last_waiting_log') or time.time() - self._last_waiting_log > 1.0:
-                    logger.debug("Waiting for GPS_TIME from radiod...")
-                    self._last_waiting_log = time.time()
+                now = time.time()
+                if not hasattr(self, '_waiting_since'):
+                    self._waiting_since = now
+                wait_secs = now - self._waiting_since
+                if not hasattr(self, '_last_waiting_log') or now - self._last_waiting_log > 5.0:
+                    if wait_secs > 60:
+                        logger.error(
+                            f"{self.config.channel_name}: NO GPS_TIME for {wait_secs:.0f}s — "
+                            f"samples are being DROPPED. Check radiod GPS+PPS lock."
+                        )
+                    elif wait_secs > 15:
+                        logger.warning(
+                            f"{self.config.channel_name}: Waiting for GPS_TIME from radiod "
+                            f"({wait_secs:.0f}s, samples dropped)"
+                        )
+                    else:
+                        logger.info(
+                            f"{self.config.channel_name}: Waiting for GPS_TIME from radiod..."
+                        )
+                    self._last_waiting_log = now
+                self.timing_drops += len(samples)
                 return 0  # Cannot write until we have authoritative timing
             
             return self._write_samples_inner(samples, rtp_timestamp, gap_samples)
@@ -766,6 +861,9 @@ class BinaryArchiveWriter:
         gap_samples: int = 0
     ) -> int:
         """Write samples to the buffer (called with lock held, offset calibrated)."""
+        # Retry any stale buffer from a previous failed flush before proceeding
+        self._retry_pending_flush()
+
         # Ensure complex64
         if samples.dtype != np.complex64:
             samples = samples.astype(np.complex64)
@@ -796,18 +894,26 @@ class BinaryArchiveWriter:
                     f"sample_time={sample_unix_time:.3f} wall={wallclock_now:.3f}"
                 )
                 self._last_stale_log = wallclock_now
+            self.stale_drops += len(samples)
             return 0
-        
+
         # Start new buffer if needed
         if self.current_buffer is None:
             self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
         
         # Check if we've crossed into a new minute
         if sample_minute > self.current_buffer.minute_boundary:
-            # Flush current minute
-            self._flush_minute(self.current_buffer)
-            # Start new minute
-            self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
+            # Flush current minute — on failure, retry logic keeps buffer
+            if self._try_flush(self.current_buffer):
+                self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
+            else:
+                # Flush failed but buffer retained for retry.  We cannot
+                # accumulate new-minute samples into the old buffer, so
+                # stash it aside and start a fresh buffer.  The stale
+                # buffer will be retried on the next minute crossing via
+                # _retry_pending_flush().
+                self._pending_flush_buffer = self.current_buffer
+                self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
         
         # Write to buffer at correct position based on RTP timestamp
         # In RTP mode, samples are positioned by their RTP offset from minute boundary
@@ -849,17 +955,20 @@ class BinaryArchiveWriter:
         
         # Check if minute is complete
         if buffer.is_complete:
-            self._flush_minute(buffer)
-            self.current_buffer = None
+            if self._try_flush(buffer):
+                self.current_buffer = None
+            # else: buffer retained in place; will retry on next write_samples call
         
         return samples_to_write
     
     def flush(self):
         """Flush any pending data to disk."""
         with self._lock:
+            # Retry any stale buffer first
+            self._retry_pending_flush()
             if self.current_buffer and self.current_buffer.write_pos > 0:
-                self._flush_minute(self.current_buffer)
-                self.current_buffer = None
+                if self._try_flush(self.current_buffer):
+                    self.current_buffer = None
     
     def close(self):
         """Close the writer, flushing any pending data."""
@@ -877,7 +986,10 @@ class BinaryArchiveWriter:
             'samples_written': self.samples_written,
             'total_gaps': self.total_gaps,
             'write_errors': self.write_errors,
-            'current_buffer_pos': self.current_buffer.write_pos if self.current_buffer else 0
+            'stale_drops': self.stale_drops,
+            'timing_drops': self.timing_drops,
+            'current_buffer_pos': self.current_buffer.write_pos if self.current_buffer else 0,
+            'pending_flush': self._pending_flush_buffer is not None,
         }
 
 

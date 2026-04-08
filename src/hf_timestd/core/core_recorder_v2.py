@@ -245,6 +245,10 @@ class CoreRecorderV2:
         self._wd_last_advance: float = self.start_time
         self._freshness_last_written: int = 0
         self._freshness_last_advance: float = self.start_time
+        # Per-channel write progress tracking — detects single-channel stalls
+        # where RTP data arrives but archive writes stop (no GPS_TIME, disk full, etc.)
+        self._per_channel_last_written: Dict[str, int] = {}
+        self._per_channel_last_advance: Dict[str, float] = {}
         self.status_file = self.output_dir / 'status' / 'core-recorder-status.json'
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
         
@@ -306,8 +310,15 @@ class CoreRecorderV2:
                 
                 logger.info(f"✓ Tiered storage ACTIVE: hot_minutes={tiered_manager.hot_minutes}")
             except Exception as e:
-                logger.error(f"Failed to initialize tiered storage: {e}", exc_info=True)
-                logger.warning("Continuing without tiered storage - files will accumulate in hot buffer!")
+                logger.critical(
+                    f"Failed to initialize tiered storage: {e}. "
+                    f"Cannot continue — without cold migration, the hot buffer "
+                    f"({hot_buffer_root}) will fill tmpfs and cause silent data loss. "
+                    f"Fix the tiered storage config or set tiered_storage=false to "
+                    f"write directly to disk.",
+                    exc_info=True
+                )
+                return  # Fatal — let systemd restart (and alert via OnFailure)
         else:
             logger.info("Tiered storage: disabled (files written directly to disk)")
         
@@ -626,19 +637,47 @@ class CoreRecorderV2:
     def _monitor_health(self):
         """Monitor stream health and data freshness."""
         try:
+            now = time.time()
+            uptime = now - self.start_time
+
             # Check individual channel health
             for key, recorder in self.recorders.items():
+                desc = recorder.config.description
+
                 if not recorder.is_healthy():
                     silence = recorder.get_silence_duration()
                     logger.warning(
-                        f"Channel {recorder.config.description} silent for {silence:.0f}s"
+                        f"Channel {desc} silent for {silence:.0f}s"
                     )
                     # StreamRecorderV2's health monitor will handle channel recreation
-            
+
+                # Per-channel WRITE stall detection: channel receives RTP data
+                # but archive writer is not producing files (no GPS_TIME, disk
+                # full, compression stall, etc.).  Only check after startup.
+                if uptime > 300:
+                    written = recorder.samples_written
+                    prev = self._per_channel_last_written.get(key, 0)
+                    if written > prev:
+                        self._per_channel_last_written[key] = written
+                        self._per_channel_last_advance[key] = now
+                    else:
+                        last_advance = self._per_channel_last_advance.get(key, now)
+                        stall = now - last_advance
+                        if stall > 120:
+                            logger.error(
+                                f"Channel {desc}: WRITE STALL — receiving RTP "
+                                f"but 0 samples written in {stall:.0f}s. "
+                                f"Check GPS_TIME lock or disk."
+                            )
+                        elif stall > 60:
+                            logger.warning(
+                                f"Channel {desc}: no samples written in {stall:.0f}s"
+                            )
+
             # DATA FRESHNESS CHECK: Verify output files are being written
             # This catches silent failures where process runs but doesn't write data
             self._check_data_freshness()
-            
+
         except Exception as e:
             logger.error(f"Health monitoring error: {e}")
     
