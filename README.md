@@ -75,8 +75,9 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 
 **Infrastructure:**
 - **systemd services** — 8+ services with dependency management, watchdog, CPU affinity
+- **Service profiles** — Four operational profiles (archive, rtp, fusion, full) with per-service overrides via `hf-timestd profile` CLI
 - **ResourceGuardian** — Auto-sizing disk management (80% cap, day-level eviction, preflight + watchdog)
-- **Production installer** — `scripts/install.sh` (creates timestd user, venv, config, services)
+- **Unified installer** — `scripts/deploy.sh` (idempotent install + update, creates timestd user, venv, config, services)
 - **Log rotation** — Daily rotation with 14-day retention
 - **Freshness monitoring** — Cron-based alerts on stale data
 
@@ -115,43 +116,68 @@ The ionosphere is the dominant error in all cases. Oscillator quality affects ti
 git clone https://github.com/mijahauan/hf-timestd.git
 cd hf-timestd
 
-# Run installer in production mode (creates 'timestd' system user automatically)
-sudo ./scripts/install.sh --mode production
-
-# Edit configuration
-sudo nano /etc/hf-timestd/timestd-config.toml
-
-# Start and enable all services
-sudo systemctl enable --now timestd-core-recorder
-sudo systemctl enable --now timestd-metrology
-sudo systemctl enable --now timestd-fusion
-sudo systemctl enable --now timestd-web-api
+# Install (idempotent — safe to re-run for updates)
+sudo ./scripts/deploy.sh
 ```
 
-Note: Production services assume the venv exists at `/opt/hf-timestd/venv`. The core recorder service will run the venv bootstrap on startup if needed.
+The deploy script creates the `timestd` user, installs dependencies, runs the
+configuration wizard, and enables services according to the configured profile.
+See **[INSTALLATION.md](INSTALLATION.md)** for details.
 
 ### Test/Development Mode
 
 ```bash
-./scripts/ensure-venv.sh --mode test --venv ./venv --python python3
-source venv/bin/activate
-python -m hf_timestd --config config/timestd-config.toml
+pip install -e ".[dev]"
+python -m hf_timestd daemon --config config/timestd-config.toml
 ```
 
-### Production Updates (Repo -> Live System)
+### Updating
 
-- Use **`sudo scripts/update-production.sh [--pull]`** for production updates.
-- This script syncs package code, scripts, web-api assets, systemd units, cron freshness monitor, and logrotate config.
-- Follow **[docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md](docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md)** after each update to verify correspondence and freshness gates.
+```bash
+cd /path/to/hf-timestd
+sudo ./scripts/deploy.sh --pull
+```
+
+Pulls latest code, syncs to `/opt/hf-timestd`, updates the venv, and restarts
+affected services (core-recorder is not restarted unless `--restart-all` is
+passed, to avoid a data gap).
+
+### Service Profiles
+
+Which services run is controlled by a **profile** in the config file.
+Core-recorder is always on — it is the irreplaceable raw data source.
+
+| Profile | Services | Use case |
+|---------|----------|----------|
+| `archive` | core-recorder, prune | Raw IQ preservation, minimal resources |
+| `rtp` | archive + web-api, monitoring, GRAPE | Standard GPSDO timing mode |
+| `fusion` | rtp + metrology, fusion, chrony-monitor | GPS-denied timing from HF |
+| `full` | fusion + physics, ionex, iono-reanalysis | Full science + timing |
+
+Per-service overrides layer on top (e.g., `metrology = true` in `[services]`
+enables metrology for study even in `rtp` profile).
+
+```bash
+# View profiles and current state
+hf-timestd profile list
+hf-timestd profile show
+hf-timestd service status
+
+# Switch profile (updates config + systemd)
+sudo hf-timestd profile set fusion
+
+# Toggle individual services
+sudo hf-timestd service enable metrology
+sudo hf-timestd service disable physics
+```
 
 ### Service Control
 
-| Service | Command |
-|---------|---------|
-| Core Recorder | `sudo systemctl status timestd-core-recorder` |
-| Metrology | `sudo systemctl status timestd-metrology` |
-| Fusion | `sudo systemctl status timestd-fusion` |
-| Web API | `sudo systemctl status timestd-web-api` |
+| Action | Command |
+|--------|---------|
+| Start all | `sudo ./scripts/start-services.sh` |
+| Stop all | `sudo ./scripts/stop-services.sh` |
+| Status overview | `hf-timestd service status` |
 | **All Logs** | `journalctl -u timestd-* -f` |
 
 ### Data Locations
@@ -316,7 +342,7 @@ The system is composed of eight independent services that form a pipeline:
 - ✅ **Kalman State Persistence:** Fixed state restore on service restart (no more D_clock jumps)
 - ✅ **SHM Permissions:** Automatic cleanup of stale Chrony SHM segments
 - ✅ **Install Process:** Initial IONEX download, proper service ordering
-- ✅ **Update Script:** `scripts/update-production.sh` for easy updates after `git pull`
+- ✅ **Deploy Script:** `scripts/deploy.sh` — unified idempotent installer and updater
 
 **v5.3.1 (January 12, 2026) - "Steel Ruler" & Drift Elimination**
 

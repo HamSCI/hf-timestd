@@ -10,17 +10,17 @@ HF Time Standard Analysis (`hf-timestd`) — a Python system that receives HF ti
 
 ```bash
 # Development setup
-./scripts/ensure-venv.sh --mode test --venv ./venv --python python3
-source venv/bin/activate
 pip install -e ".[dev,gnss,iono]"
-
-# Run tests
 pytest tests/
+
+# Production install/update
+sudo ./scripts/deploy.sh [--pull]
 
 # CLI
 hf-timestd version --json
-hf-timestd status --calib-file <path>
-hf-timestd calibrate --config <path>
+hf-timestd profile show              # active profile + services
+hf-timestd service status            # per-service config + systemd state
+sudo hf-timestd profile set fusion   # switch operational profile
 ```
 
 ## Project Structure
@@ -57,7 +57,7 @@ docs/                    # Technical docs, QEX paper draft
 
 - **Pipeline:** Recording (RTP -> binary IQ) -> Metrology (IQ -> HDF5 L1/L2) -> Fusion (Kalman + WLS -> Chrony SHM)
 - **Two modes:** RTP (GPSDO ground truth, testing) and FUSION (GPS-denied, production)
-- **8 independent systemd services** with dependency ordering
+- **Service profiles** (archive/rtp/fusion/full) control which of 8+ systemd services run
 - **HDF5 SWMR:** writers keep files open + flush; readers use `swmr=True`
 - **Raw IQ storage:** Configurable chunk duration (`file_duration_sec`, default 600s = 10 min). Compressed `.bin.zst` + JSON sidecar per chunk. GRAPE raw reader handles both legacy 1-min and multi-minute chunks transparently.
 - **GRAPE spectrogram:** Edge tapering at gap boundaries (half-cosine, 5s); full-window validity masking (NFFT=512 → ±25.6s). No zero interpolation.

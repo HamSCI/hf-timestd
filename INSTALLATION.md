@@ -1,7 +1,7 @@
 # HF Time Standard Analysis (hf-timestd) - Installation Guide
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** March 20, 2026
+**Last Updated:** April 8, 2026
 
 This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, CHU, WWV, WWVH).
 
@@ -127,9 +127,19 @@ The deploy script:
 5. Sets up the Python virtual environment (`/opt/hf-timestd/venv`)
 6. Copies web-api, scripts, and systemd service files
 7. **Runs the setup wizard** (`setup-station.sh`) — an interactive prompt that collects your station identity, location (grid square or lat/lon), ka9q-radio address, timing mode, GNSS VTEC settings, and PSWS upload credentials, then generates `/etc/hf-timestd/timestd-config.toml`
-8. Installs and enables all systemd services and timers
+8. Enables systemd services according to the configured **service profile** (see [Service Profiles](#service-profiles) below)
 
-The installation is **idempotent** — safe to re-run. On re-run, it will skip steps that are already complete and offer to re-run the configuration wizard if a config already exists.
+The installation is **idempotent** — safe to re-run for updates. On re-run, it will skip steps that are already complete and offer to re-run the configuration wizard if a config already exists.
+
+**Options:**
+
+| Flag | Purpose |
+|------|---------|
+| `--pull` | Run `git pull` before deploying |
+| `--reconfig` | Re-run the station configuration wizard |
+| `--restart-all` | Also restart core-recorder (causes a brief data gap) |
+| `--no-restart` | Sync everything but don't restart services |
+| `--yes` / `-y` | Accept defaults, no interactive prompts |
 
 ### After Installation
 
@@ -216,56 +226,87 @@ See [docs/ZED_F9P_TEC_CONFIGURATION.md](docs/ZED_F9P_TEC_CONFIGURATION.md) for r
 
 ---
 
-## Service Overview
+## Service Profiles
 
-### Core Services (Required)
+Which services run is controlled by a **profile** in `[services]` of the config
+file.  The core-recorder is always on — it is the irreplaceable raw data source.
 
-- **`timestd-core-recorder`** - Phase 1: Records RTP audio streams from radiod, writes raw buffer archives
-- **`timestd-metrology`** - Phase 2: L1 raw measurements (tone detection, BCD decoding, timing extraction)
-- **`timestd-l2-calibration`** - Phase 2: L2 calibrated timing (geometric + TEC + system corrections)
-- **`timestd-fusion`** - Phase 3: Multi-broadcast Kalman fusion, feeds Chrony SHM (TSL1/TSL2)
-- **`timestd-physics`** - Phase 3: TEC estimation from multi-frequency measurements
-- **`timestd-web-api`** - FastAPI web server on port 8000 (metrology dashboard, logs, API)
+| Profile | What runs | Use case |
+|---------|-----------|----------|
+| **archive** | core-recorder, prune | Raw IQ preservation, minimal resources |
+| **rtp** | archive + web-api, radiod-monitor, pipeline-watchdog, GRAPE | Standard GPSDO timing (default) |
+| **fusion** | rtp + metrology, l2-calibration, fusion, chrony-monitor | GPS-denied timing from HF broadcasts |
+| **full** | fusion + physics, ionex-download, iono-reanalysis | Full science + timing |
 
-### Optional Services
+Per-service bool overrides in `[services]` layer on top of the profile.  For
+example, `profile = "rtp"` with `metrology = true` enables metrology for
+study without switching to the full fusion profile.
 
-- **`timestd-vtec`** - GNSS VTEC monitoring (requires GNSS receiver, enabled via config)
-- **`timestd-ionex-download.timer`** - Daily download of global IONEX maps from NASA CDDIS
-- **`timestd-chrony-monitor.timer`** - Monitors Chrony reachability and alerts on issues
-- **`timestd-radiod-monitor`** - Monitors radiod health and restarts channels if needed
-- **`grape-daily.timer`** - Daily GRAPE processing: decimation, spectrograms, DRF packaging, PSWS upload (01:00 UTC)
+```bash
+# View current profile and per-service state
+hf-timestd profile show
+
+# Switch profile (updates config + enables/disables systemd units)
+sudo hf-timestd profile set fusion
+
+# Toggle individual services on top of the current profile
+sudo hf-timestd service enable metrology
+sudo hf-timestd service disable physics
+
+# Live status of all services (config vs systemd)
+hf-timestd service status
+```
+
+The profile is set during initial installation (the setup wizard defaults to
+`rtp`) and can be changed at any time.  `deploy.sh` reads the profile from
+config and applies it on every run.
+
+### Service Reference
+
+| Service | Description |
+|---------|-------------|
+| **`timestd-core-recorder`** | Records IQ from radiod RTP streams, writes binary archive + JSON metadata |
+| **`timestd-metrology@{CHANNEL}`** | Per-channel tone detection, tick timing, L1/L2 measurements (HDF5) |
+| **`timestd-l2-calibration`** | Cross-station geometric + ionospheric corrections |
+| **`timestd-fusion`** | Multi-broadcast Kalman fusion, feeds Chrony SHM (TSL1/TSL2) |
+| **`timestd-physics`** | Carrier-phase dTEC, group-delay TEC, propagation mode ID |
+| **`timestd-vtec`** | GNSS VTEC monitoring (requires `gnss_vtec.enabled = true`) |
+| **`timestd-web-api`** | FastAPI dashboard on port 8000 |
+| **`timestd-radiod-monitor`** | Hardware health monitoring |
+| **`timestd-chrony-monitor.timer`** | Chrony reachability watchdog |
+| **`timestd-pipeline-watchdog.timer`** | Pipeline health watchdog |
+| **`timestd-ionex-download.timer`** | Daily IONEX map download from NASA CDDIS |
+| **`timestd-iono-reanalysis.timer`** | Ionospheric reanalysis |
+| **`grape-daily.timer`** | Daily GRAPE decimation, spectrograms, DRF packaging, PSWS upload |
+| **`timestd-prune.timer`** | Nightly data retention enforcement |
 
 ---
 
 ## Verifying Operation
 
-### Check Core Services
+### Check Service Status
 
 ```bash
-# All should show "active (running)"
+# Overview of all services (config state + live systemd state)
+hf-timestd service status
+
+# Or check individual services
 sudo systemctl status timestd-core-recorder
-sudo systemctl status timestd-metrology
-sudo systemctl status timestd-l2-calibration
-sudo systemctl status timestd-fusion
-sudo systemctl status timestd-physics
-sudo systemctl status timestd-web-api
-```
-
-### Check Optional Services
-
-```bash
-sudo systemctl status timestd-ionex-download.timer    # Should be active
-sudo systemctl status timestd-chrony-monitor.timer    # Should be active
-sudo systemctl status timestd-radiod-monitor          # If enabled
 ```
 
 ### Verify Data Flow
 
 1. **Raw Buffer:** Check binary archives: `ls -lh /var/lib/timestd/raw_buffer/` (expect 10-min chunk files by default)
-2. **L1 Metrology:** Check L1 HDF5 files: `ls -lh /var/lib/timestd/phase2/*/metrology/`
-3. **L2 Calibration:** Check L2 HDF5 files: `ls -lh /var/lib/timestd/phase2/*/clock_offset/`
-4. **Fusion:** Check fused output: `ls -lh /var/lib/timestd/phase2/fusion/`
+2. **L1 Metrology:** `ls -lh /var/lib/timestd/phase2/*/metrology/` — HDF5 files (if metrology is enabled)
+3. **L2 Calibration:** `ls -lh /var/lib/timestd/phase2/*/clock_offset/`
+4. **Fusion:** `ls -lh /var/lib/timestd/phase2/fusion/`
 5. **Web API:** Open `http://localhost:8000` in browser
-6. **Chrony:** Run `chronyc sources` and look for TSL1/TSL2 references (should show reachability)
+6. **Chrony:** `chronyc sources` — look for TSL1/TSL2 references (if fusion is enabled)
+
+### Pipeline Health Check
+
+```bash
+sudo ./scripts/verify_pipeline.sh
+```
 
 ---
