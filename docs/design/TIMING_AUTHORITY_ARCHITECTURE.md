@@ -116,11 +116,29 @@ The quality of this mapping depends entirely on radiod's system clock (`CLOCK_RE
 
 | Level | Source | Typical Accuracy | RTP-to-UTC Mapping |
 |-------|--------|------------------|-------------------|
+| **L6** | BPSK PPS RF injector (WB6CXC) | ±5-10 μs | Measured end-to-end chain delay correction |
 | **L5** | GPS+PPS on radiod machine | ±100 ns | Direct PPS edge timestamps |
 | **L4** | GPS+PPS on LAN | ±1 μs | PPS via NTP/PTP, network jitter |
 | **L3** | HF-timestd fusion (GPSDO + 17 broadcasts) | ±0.5 ms | Multi-broadcast Kalman fusion |
 | **L2** | NTP-sync (stratum 1-2) | ±1-10 ms | Network time, variable latency |
 | **L1** | HF bootstrap only | ±5-50 ms | BCD/FSK decoded time, raw ionospheric delay |
+
+### L6: BPSK PPS Chain-Delay Calibration
+
+L6 is not a timing authority in the same sense as L1-L5. It is a **calibration layer** that refines whichever authority is in use (typically L4 or L5) by measuring the end-to-end latency through the RF front-end, ADC, DSP pipeline, and RTP packetization.
+
+**How it works:** A local GPS-disciplined transmitter (the WB6CXC PPS injector) injects a BPSK signal into the antenna feed. The signal's phase flips 180 degrees on each UTC second boundary. The `BpskPpsCalibrator` in ka9q-python detects these phase transitions in the IQ sample stream and measures where the PPS edge lands relative to the RTP timestamp grid. The offset is the chain delay.
+
+**Integration:** The measured delay is stored in `ChannelInfo.chain_delay_correction_ns` and automatically applied by `rtp_to_wallclock()` to every channel on the same radiod instance. This correction propagates through the entire pipeline — metrology, fusion, and Chrony SHM feeds all benefit without any awareness of L6.
+
+**Requirements:** GPS+PPS on radiod (L4 or L5), WB6CXC BPSK PPS injector hardware.
+
+**Configuration:**
+```toml
+[timing.l6_pps]
+enabled = true
+frequency_hz = 3500000    # RF frequency of injector (Hz)
+```
 
 ---
 

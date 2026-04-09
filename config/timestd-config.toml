@@ -62,7 +62,11 @@ agc = 0
 gain = 0
 encoding = "F32"
 
-# --- timestd: full IQ archive channels for metrology and physics analysis ---
+# --- timestd: IQ channels for time standard reception ---
+# archive: controls cold storage (disk).  When false, core-recorder still
+#   receives the stream for real-time use (metrology hot-buffer, L6
+#   calibration, tap consumers) but writes no IQ data to disk.
+#   Set true for physics post-processing; false for timing-only operation.
 [recorder.channel_group.timestd]
 preset = "iq"
 sample_rate = 24000
@@ -163,6 +167,24 @@ always_run_fusion = true
 # Timing snapshot capture rate (Hz) - matches radiod's status update rate
 # Metrological justification: Captures all NTP slew/step events
 timing_snapshot_rate_hz = 2.0
+
+[timing.l6_pps]
+# L6 BPSK PPS chain-delay calibration via WB6CXC RF injector.
+# When enabled, core-recorder creates an additional IQ channel for the
+# injected BPSK signal and uses phase-edge detection to measure the
+# end-to-end RF->ADC->DSP->RTP chain delay.  The correction is applied
+# to all channels' RTP-to-UTC mapping via ChannelInfo.chain_delay_correction_ns.
+enabled = false
+# RF frequency of the injected BPSK signal (Hz) -- set to match injector hardware
+# frequency_hz = TBD
+# Number of consecutive valid PPS edges before declaring lock
+consecutive_required = 10
+# Maximum deviation (samples) of edge from expected position within the second
+edge_tolerance_samples = 10
+# Apply 500 Hz notch filter to BPSK channel (for local interference)
+filter_500hz_notch = false
+# Channel description (appears in logs and radiod)
+description = "BPSK_PPS"
 
 [gnss_vtec]
 # If a local source of VTEC measurement present.

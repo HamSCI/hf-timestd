@@ -216,6 +216,29 @@ class CoreRecorderV2:
         
         # NTP status cache
         self.ntp_status = {'offset_ms': None, 'synced': False, 'last_update': 0}
+
+        # L6 BPSK PPS chain-delay calibrator
+        # Uses a bare RadiodStream (no archive writer) — the BPSK channel
+        # exists only to feed the calibrator, not for storage.
+        self._l6_calibrator = None
+        self._l6_stream = None  # RadiodStream for BPSK channel
+        self._l6_config = config.get('timing', {}).get('l6_pps', {})
+        if self._l6_config.get('enabled', False):
+            freq_hz = self._l6_config.get('frequency_hz')
+            if freq_hz is None:
+                logger.error("timing.l6_pps.enabled=true but frequency_hz not set — L6 disabled")
+            else:
+                from ka9q.pps_calibrator import BpskPpsCalibrator
+                sr = int(self._l6_config.get('sample_rate',
+                         self.channel_defaults.get('sample_rate', 24000)))
+                self._l6_calibrator = BpskPpsCalibrator(
+                    sample_rate=sr,
+                    consecutive_required=self._l6_config.get('consecutive_required', 10),
+                    edge_tolerance_samples=self._l6_config.get('edge_tolerance_samples', 10),
+                    enable_notch_500hz=self._l6_config.get('filter_500hz_notch', False),
+                )
+                logger.info(f"L6 BPSK PPS calibrator initialized: "
+                            f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
         self.ntp_status_lock = threading.Lock()
 
         # Timing Calibrator for SSRC registration
@@ -338,6 +361,10 @@ class CoreRecorderV2:
                 except Exception as e:
                     logger.warning(f"Failed to register SSRC for {key}: {e}")
         
+        # Start L6 BPSK PPS stream (bare RadiodStream, no archive)
+        if self._l6_calibrator is not None:
+            self._start_l6_stream()
+
         logger.info("Core recorder running. Press Ctrl+C to stop.")
         
         # Notify systemd we're ready
@@ -492,6 +519,13 @@ class CoreRecorderV2:
                 logger.info(f"Provisioning {description} ({freq/1e6:.3f} MHz) "
                             f"preset={preset} sr={sample_rate}")
 
+                # Per-channel archive control: defaults to group/global setting,
+                # overridable per-channel.  When False, core-recorder still
+                # receives the stream (for metrology hot-buffer, L6 calibration,
+                # tap consumers) but writes no IQ data to cold storage.
+                archive = ch_spec.get('archive',
+                                      self.recorder_config.get('archive', True))
+
                 rec_config = StreamRecorderConfig(
                     ssrc=None,
                     frequency_hz=freq,
@@ -519,6 +553,7 @@ class CoreRecorderV2:
                     target=ch_spec.get('target'),
                     null_targets=ch_spec.get('null_targets'),
                     combining_method=ch_spec.get('combining_method'),
+                    archive=archive,
                 )
                 recorder = StreamRecorderV2(
                     config=rec_config,
@@ -531,7 +566,65 @@ class CoreRecorderV2:
         except Exception as e:
             logger.error(f"Failed to initialize channels: {e}", exc_info=True)
             return False
-    
+
+    def _start_l6_stream(self):
+        """Create a bare RadiodStream for the BPSK PPS channel (no archive)."""
+        from ka9q import RadiodStream, Encoding
+        from ka9q.types import StatusType
+
+        l6 = self._l6_config
+        freq_hz = int(l6['frequency_hz'])
+        sr = int(l6.get('sample_rate',
+                        self.channel_defaults.get('sample_rate', 24000)))
+        desc = l6.get('description', 'BPSK_PPS')
+
+        try:
+            channel_info = self.control.ensure_channel(
+                frequency_hz=freq_hz,
+                preset='iq',
+                sample_rate=sr,
+                encoding=Encoding.F32,
+                agc_enable=False,
+                gain=0.0,
+            )
+            self._l6_stream = RadiodStream(
+                channel=channel_info,
+                on_samples=self._l6_on_samples,
+                samples_per_packet=200,
+                resequence_buffer_size=128,
+            )
+            self._l6_stream.start()
+            logger.info(f"L6 BPSK PPS stream started: {desc} at {freq_hz/1e6:.6f} MHz")
+        except Exception as e:
+            logger.error(f"Failed to start L6 BPSK PPS stream: {e}", exc_info=True)
+            self._l6_stream = None
+
+    def _l6_on_samples(self, samples, quality):
+        """Sample callback for the BPSK PPS stream — feeds the calibrator."""
+        result = self._l6_calibrator.process_samples(
+            samples, quality.last_rtp_timestamp
+        )
+        if result is not None and result.locked:
+            # Distribute the chain-delay correction to all archived channels
+            for desc, recorder in self.recorders.items():
+                ch = getattr(recorder, 'channel_info', None)
+                if ch is not None:
+                    ch.chain_delay_correction_ns = result.chain_delay_ns
+
+            # Log on first lock and periodically
+            if result.pps_consecutive == self._l6_calibrator.consecutive_required:
+                logger.info(
+                    f"L6 BPSK PPS LOCKED: chain_delay={result.chain_delay_ns} ns "
+                    f"({result.chain_delay_samples:.1f} samples), "
+                    f"ok={result.pps_ok}, noise={result.pps_noise}"
+                )
+            elif result.pps_ok % 60 == 0:
+                logger.debug(
+                    f"L6 PPS: delay={result.chain_delay_ns} ns, "
+                    f"consecutive={result.pps_consecutive}, "
+                    f"ok={result.pps_ok}, noise={result.pps_noise}"
+                )
+
     def _write_status(self):
 
         """Write status to JSON file for web-ui monitoring."""
@@ -568,12 +661,26 @@ class CoreRecorderV2:
                 status['overall']['total_samples_received'] += ch_stats.get('samples_received', 0)
                 status['overall']['total_samples_written'] += ch_stats.get('samples_written', 0)
             
+            # L6 BPSK PPS calibrator status
+            if self._l6_calibrator is not None:
+                status['l6_pps'] = {
+                    'enabled': True,
+                    'locked': self._l6_calibrator.locked,
+                    'pps_ok': self._l6_calibrator.pps_ok,
+                    'pps_noise': self._l6_calibrator.pps_noise,
+                    'pps_consecutive': self._l6_calibrator.pps_consecutive,
+                    'chain_delay_ns': (self._l6_calibrator._chain_delay_samples
+                                       * 1_000_000_000 / self._l6_calibrator.sample_rate
+                                       if self._l6_calibrator._chain_delay_samples is not None
+                                       else None),
+                }
+
             # Write atomically
             temp_file = self.status_file.with_suffix('.tmp')
             with open(temp_file, 'w') as f:
                 json.dump(status, f, indent=2)
             temp_file.replace(self.status_file)
-            
+
         except Exception as e:
             logger.error(f"Failed to write status file: {e}")
     
@@ -797,6 +904,14 @@ class CoreRecorderV2:
                 logger.error(f"Error stopping recorder for channel {key}: {e}")
         
 
+        # Stop L6 BPSK PPS stream
+        if self._l6_stream is not None:
+            try:
+                self._l6_stream.stop()
+                logger.info("L6 BPSK PPS stream stopped")
+            except Exception as e:
+                logger.debug(f"L6 stream stop: {e}")
+
         # Close RadiodControl
         try:
             self.control.close()
@@ -879,6 +994,7 @@ def main():
         'channel_defaults': recorder_section.get('channel_defaults', {}),
         'status_address': ka9q_section.get('status_address', '239.192.152.141'),
         'ka9q': ka9q_section,
+        'timing': config.get('timing', {}),
     }
     
     logger.info(f"Loaded {len(recorder_config['channels'])} channels from config")

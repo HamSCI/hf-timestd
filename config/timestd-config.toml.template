@@ -203,6 +203,18 @@ profile = "rtp"
 # iono_reanalysis = true      # Ionospheric reanalysis timer
 # pipeline_watchdog = true    # Pipeline health watchdog timer
 
+[timing.l6_pps]
+# L6 BPSK PPS chain-delay calibration via local RF injector (WB6CXC design).
+# When enabled, core-recorder creates an IQ channel for the injected BPSK
+# signal and measures end-to-end RF->ADC->DSP->RTP chain delay.
+# The correction is applied to all channels' RTP-to-UTC mapping.
+enabled = false
+# frequency_hz = TBD              # RF frequency of injector (Hz) -- REQUIRED when enabled
+# consecutive_required = 10       # Valid edges before lock (default: 10)
+# edge_tolerance_samples = 10     # Max edge position deviation (default: 10)
+# filter_500hz_notch = false      # Apply 500 Hz notch (default: false)
+# description = "BPSK_PPS"        # Channel description
+
 [gnss_vtec]
 enabled = false                         # Set to true if you have a GNSS receiver
 host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge

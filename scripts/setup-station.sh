@@ -297,6 +297,19 @@ if [[ "$TIMING_AUTHORITY" == "rtp" ]]; then
     esac
 fi
 
+# L6 BPSK PPS chain-delay calibration (advanced, requires WB6CXC injector)
+echo ""
+echo -e "  ${DIM}L6 chain-delay calibration uses a local BPSK PPS signal injected${NC}"
+echo -e "  ${DIM}into the RF front-end to measure and correct end-to-end timing.${NC}"
+echo -e "  ${DIM}This requires the WB6CXC PPS injector hardware and GPS+PPS.${NC}"
+echo ""
+prompt_yn L6_PPS_ENABLED "Do you have a BPSK PPS injector?" "n"
+
+L6_PPS_FREQUENCY=""
+if [[ "$L6_PPS_ENABLED" == "true" ]]; then
+    prompt L6_PPS_FREQUENCY "Injector RF frequency (Hz)" "" "e.g. 3500000 for 3.5 MHz" true
+fi
+
 # =============================================================================
 # Section 5: GNSS VTEC (Optional)
 # =============================================================================
@@ -324,10 +337,19 @@ echo ""
 echo -e "${BOLD}${BLUE}━━━ Section 6: Storage Options ━━━${NC}"
 echo ""
 
-prompt_choice COMPRESSION "IQ archive compression" \
-    "zstd — Best compression ratio, moderate CPU (recommended)" \
-    "lz4 — Fastest, lower compression ratio" \
-    "none — No compression (highest disk usage)"
+echo -e "  ${DIM}IQ archiving writes raw data to disk for physics post-processing.${NC}"
+echo -e "  ${DIM}Disable if you only need real-time timing (WSPR, CODAR, etc.).${NC}"
+echo ""
+prompt_yn ARCHIVE_ENABLED "Archive time standard IQ data to disk?" "y"
+
+COMPRESSION="zstd"
+if [[ "$ARCHIVE_ENABLED" == "true" ]]; then
+    echo ""
+    prompt_choice COMPRESSION "IQ archive compression" \
+        "zstd — Best compression ratio, moderate CPU (recommended)" \
+        "lz4 — Fastest, lower compression ratio" \
+        "none — No compression (highest disk usage)"
+fi
 
 # =============================================================================
 # Summary and Confirmation
@@ -355,6 +377,9 @@ echo "    Authority:    $TIMING_AUTHORITY"
 if [[ "$TIMING_AUTHORITY" == "rtp" ]]; then
 echo "    RTP accuracy: ${RTP_ACCURACY} ms"
 fi
+if [[ "$L6_PPS_ENABLED" == "true" ]]; then
+echo "    L6 PPS:       enabled (${L6_PPS_FREQUENCY} Hz)"
+fi
 echo ""
 echo -e "  ${BOLD}GNSS VTEC:${NC}"
 if [[ "$VTEC_ENABLED" == "true" ]]; then
@@ -371,7 +396,11 @@ echo "    Enabled:      no"
 fi
 echo ""
 echo -e "  ${BOLD}Storage:${NC}"
-echo "    Compression:  $COMPRESSION"
+if [[ "$ARCHIVE_ENABLED" == "true" ]]; then
+echo "    IQ archiving: enabled (compression: $COMPRESSION)"
+else
+echo "    IQ archiving: disabled (stream-only, no cold storage)"
+fi
 echo ""
 echo -e "  ${BOLD}Config will be written to:${NC} $CONFIG_PATH"
 echo ""
@@ -413,6 +442,9 @@ export WIZ_VTEC_ENABLED="$VTEC_ENABLED"
 export WIZ_VTEC_HOST="$VTEC_HOST"
 export WIZ_VTEC_PORT="$VTEC_PORT"
 export WIZ_UPLOADER_ENABLED="$UPLOADER_ENABLED"
+export WIZ_L6_PPS_ENABLED="$L6_PPS_ENABLED"
+export WIZ_L6_PPS_FREQUENCY="$L6_PPS_FREQUENCY"
+export WIZ_ARCHIVE_ENABLED="$ARCHIVE_ENABLED"
 
 PYTHON_BIN="python3"
 # If venv exists (re-run scenario), prefer it for consistency
@@ -579,6 +611,19 @@ set_str("timing", "authority", e("WIZ_TIMING_AUTHORITY"))
 rtp_acc = e("WIZ_RTP_ACCURACY")
 if rtp_acc:
     set_bare("timing", "rtp_expected_accuracy_ms", rtp_acc)
+
+# L6 BPSK PPS calibration
+l6_enabled = e("WIZ_L6_PPS_ENABLED")
+if l6_enabled == "true":
+    set_bare("timing.l6_pps", "enabled", "true")
+    l6_freq = e("WIZ_L6_PPS_FREQUENCY")
+    if l6_freq:
+        set_bare("timing.l6_pps", "frequency_hz", l6_freq)
+
+# Archive control (per channel group)
+archive_enabled = e("WIZ_ARCHIVE_ENABLED", "true")
+if archive_enabled == "false":
+    set_bare("recorder.channel_group.timestd", "archive", "false")
 
 # GNSS VTEC
 set_bare("gnss_vtec", "enabled", e("WIZ_VTEC_ENABLED"))

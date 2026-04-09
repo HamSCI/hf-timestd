@@ -21,6 +21,9 @@ After running `install.sh`, edit `/etc/hf-timestd/timestd-config.toml` and updat
 | `[gnss_vtec]` | `port` | GNSS data stream port | `9000` |
 | `[metrology]` | `physics_products` | `false` = timing-only, skip science writers | `true` |
 | `[metrology]` | `realtime_iono` | `false` = no WAM-IPE/GIRO network fetching | `true` |
+| `[timing.l6_pps]` | `enabled` | `true` if WB6CXC PPS injector present | `false` |
+| `[timing.l6_pps]` | `frequency_hz` | RF frequency of injector (Hz) | — |
+| `[recorder.channel_group.timestd]` | `archive` | `false` to disable cold IQ storage | `true` |
 
 ---
 
@@ -202,7 +205,77 @@ nc -v 192.168.0.202 9000 | xxd | head
 
 ---
 
-## 5. Channel Selection
+## 5. L6 BPSK PPS Chain-Delay Calibration (Optional)
+
+If you have a WB6CXC BPSK PPS injector — a small GPS-disciplined transmitter that injects a BPSK signal into your antenna feed — you can enable L6 chain-delay calibration. This measures the end-to-end latency through the RF, ADC, DSP, and RTP chain, producing a correction that improves the timing accuracy of all channels.
+
+**Requirements:**
+- WB6CXC PPS injector hardware (GPS+PPS disciplined)
+- GPS+PPS on radiod (L4 or L5 timing authority)
+
+### Configuration
+
+```toml
+[timing.l6_pps]
+enabled = true
+frequency_hz = 3500000          # RF frequency of injector — get from your hardware
+consecutive_required = 10        # Edges before lock (default is fine)
+edge_tolerance_samples = 10      # Edge position tolerance (default is fine)
+filter_500hz_notch = false       # Enable if local 500 Hz interference present
+```
+
+When enabled, core-recorder creates a dedicated IQ channel for the injected signal (no data archived to disk) and runs a BPSK phase-edge detector. After 10 consecutive valid PPS edges, the measured chain delay is applied to all other channels' RTP-to-UTC mapping automatically.
+
+### How it works
+
+The injector produces a BPSK signal whose phase flips 180 degrees on each UTC second boundary. The `BpskPpsCalibrator` (in ka9q-python) detects these phase transitions in the IQ stream and measures where they fall relative to the RTP timestamp grid. The difference is the chain delay — typically a few milliseconds at 24 kHz sample rate.
+
+### Verification
+
+Check the core-recorder status JSON:
+
+```bash
+cat /var/lib/timestd/status/core-recorder-status.json | python3 -m json.tool | grep -A8 l6_pps
+```
+
+You should see `"locked": true` and a stable `chain_delay_ns` value.
+
+---
+
+## 6. IQ Archiving (Optional)
+
+By default, core-recorder writes raw IQ data to cold storage (disk) for physics post-processing. If you only need real-time timing — for example, to provide calibrated timestamps to WSPR, CODAR, SuperDARN, or other applications — you can disable archiving. The streams still run for metrology and L6 calibration; only disk writes are suppressed.
+
+### Per-group control
+
+```toml
+[recorder.channel_group.timestd]
+archive = false    # No cold storage; streams still feed metrology and calibration
+```
+
+### Per-channel control
+
+```toml
+[[recorder.channel_group.timestd.channels]]
+frequency_hz = 25000000
+description = "WWV_25000"
+archive = false    # Disable archiving for this channel only
+```
+
+### When to disable archiving
+
+| Use case | `archive` setting | Reason |
+|---|---|---|
+| Full science station | `true` (default) | Physics post-processing needs raw IQ |
+| Fusion timing only (L3) | `true` | Metrology reads from the archive |
+| Timing service for other apps | `false` | No post-processing needed; saves disk |
+| Resource-constrained (Pi) | `false` | Reduces disk I/O and storage |
+
+**Note:** When `archive = false`, the channel still consumes a radiod channel slot and receives RTP data. The metrology hot-buffer (RAM) is unaffected. Only cold storage writes are suppressed.
+
+---
+
+## 7. Channel Selection
 
 The default configuration monitors all standard HF time station frequencies. Adjust based on your location and reception conditions.
 
@@ -247,7 +320,7 @@ enabled = false  # Add this line
 
 ---
 
-## 6. Timing-Only vs Full-Science Mode
+## 8. Timing-Only vs Full-Science Mode
 
 By default the system generates both the timing products needed to discipline Chrony **and** ionospheric science products (Doppler phase series, multi-path arrivals, ionospheric sounding, detection diagnostics). On resource-constrained hardware — Raspberry Pi, systems with limited RAM, or installations without reliable network access to NOAA/LGDC — you can opt out of the science layer without any effect on clock discipline.
 
@@ -323,7 +396,7 @@ realtime_iono    = true
 
 ---
 
-## 7. Verification Checklist
+## 9. Verification Checklist
 
 After configuration, verify your setup:
 

@@ -13,6 +13,7 @@ This guide covers installing and configuring `hf-timestd` for recording and anal
 
 - GPSDO-governed SDR supported by ka9q-radio (e.g. RX888 MkII, Airspy HF+, SDRplay)
 - GNSS receiver for VTEC (Optional but recommended, e.g., UBlox ZED-F9P, WaveShare LG290P)
+- BPSK PPS RF injector for L6 chain-delay calibration (Optional; WB6CXC design, requires GPS+PPS)
 - HF antenna covering 2.5-25 MHz
 - Linux host with multicast-capable LAN
 

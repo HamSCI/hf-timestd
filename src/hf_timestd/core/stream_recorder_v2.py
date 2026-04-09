@@ -263,6 +263,13 @@ class StreamRecorderConfig:
     
     # L0 settings
     use_digital_rf: bool = False
+
+    # Archive control: when False, the stream still runs (RTP reception,
+    # tap callbacks, timing snapshots) but no IQ data is written to disk.
+    # Useful when the channel is consumed only by real-time services
+    # (metrology hot-buffer, L6 calibration, etc.) and cold storage is
+    # not needed.
+    archive: bool = True
     
     def __post_init__(self):
         self.output_dir = Path(self.output_dir)
@@ -340,21 +347,26 @@ class StreamRecorderV2:
         
         # Initialize BinaryArchiveWriter for Phase 1 raw IQ storage
         # Phase 2/3 are handled by separate systemd services (6-service architecture)
-        from .binary_archive_writer import BinaryArchiveWriter, BinaryArchiveConfig
-        
-        archive_config = BinaryArchiveConfig(
-            output_dir=config.output_dir,
-            channel_name=config.description,
-            frequency_hz=config.frequency_hz,
-            sample_rate=config.sample_rate,
-            station_config=config.station_config,
-            compression=config.compression,
-            compression_level=config.compression_level,
-            use_tiered_storage=config.tiered_storage,
-            file_duration_sec=config.file_duration_sec,
-        )
-        
-        self.archive_writer = BinaryArchiveWriter(archive_config)
+        # When archive=False, the stream still runs but no IQ data is written.
+        if config.archive:
+            from .binary_archive_writer import BinaryArchiveWriter, BinaryArchiveConfig
+
+            archive_config = BinaryArchiveConfig(
+                output_dir=config.output_dir,
+                channel_name=config.description,
+                frequency_hz=config.frequency_hz,
+                sample_rate=config.sample_rate,
+                station_config=config.station_config,
+                compression=config.compression,
+                compression_level=config.compression_level,
+                use_tiered_storage=config.tiered_storage,
+                file_duration_sec=config.file_duration_sec,
+            )
+
+            self.archive_writer = BinaryArchiveWriter(archive_config)
+        else:
+            self.archive_writer = None
+            logger.info(f"{config.description}: archive=False, stream-only (no IQ storage)")
         
         # Tap callbacks: additional on_samples consumers (e.g. FSK listener)
         self._tap_callbacks: list = []
@@ -503,20 +515,21 @@ class StreamRecorderV2:
         # rtp_timesnap for our SSRC.
         gps_time = getattr(self.channel_info, 'gps_time', None)
         rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
-        if gps_time is not None and rtp_snap is not None:
-            self.archive_writer.add_timing_snapshot(
-                gps_time_ns=gps_time,
-                rtp_timesnap=rtp_snap
-            )
-            logger.info(
-                f"{self.config.description}: Seeded timing from channel_info — "
-                f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_snap}"
-            )
-        else:
-            logger.warning(
-                f"{self.config.description}: channel_info missing timing — "
-                f"gps_time={gps_time}, rtp_timesnap={rtp_snap}"
-            )
+        if self.archive_writer is not None:
+            if gps_time is not None and rtp_snap is not None:
+                self.archive_writer.add_timing_snapshot(
+                    gps_time_ns=gps_time,
+                    rtp_timesnap=rtp_snap
+                )
+                logger.info(
+                    f"{self.config.description}: Seeded timing from channel_info — "
+                    f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_snap}"
+                )
+            else:
+                logger.warning(
+                    f"{self.config.description}: channel_info missing timing — "
+                    f"gps_time={gps_time}, rtp_timesnap={rtp_snap}"
+                )
 
     def _set_filter_edges(self, ssrc: int):
         """Send filter edge commands to radiod if configured."""
@@ -650,7 +663,7 @@ class StreamRecorderV2:
                 
                 if gps_time is not None and rtp_timesnap is not None:
                     # Only store if rtp_timesnap changed (new status received)
-                    if rtp_timesnap != last_captured_rtp:
+                    if rtp_timesnap != last_captured_rtp and self.archive_writer is not None:
                         stored = self.archive_writer.add_timing_snapshot(
                             gps_time_ns=gps_time,
                             rtp_timesnap=rtp_timesnap
@@ -717,7 +730,8 @@ class StreamRecorderV2:
                 self.stream = None
             
             # Close the archive writer (flushes pending data)
-            self.archive_writer.close()
+            if self.archive_writer is not None:
+                self.archive_writer.close()
             
         except Exception as e:
             logger.error(f"{self.config.description}: Error during stop: {e}")
@@ -786,13 +800,14 @@ class StreamRecorderV2:
             # boundaries from GPS_TIME/RTP_TIMESNAP, which works in both RTP and Fusion modes.
             
             # Write to Phase 1 archive (Phase 2/3 handled by separate services)
-            self.archive_writer.write_samples(
-                samples=samples,
-                rtp_timestamp=quality.last_rtp_timestamp,
-                system_time=system_time,
-                gap_samples=batch_gap_samples
-            )
-            
+            if self.archive_writer is not None:
+                self.archive_writer.write_samples(
+                    samples=samples,
+                    rtp_timestamp=quality.last_rtp_timestamp,
+                    system_time=system_time,
+                    gap_samples=batch_gap_samples
+                )
+
             self.samples_written += len(samples)
 
             # Forward to tap callbacks
@@ -844,7 +859,7 @@ class StreamRecorderV2:
     def get_stats(self) -> Dict[str, Any]:
         """Get current statistics."""
         with self._lock:
-            archive_stats = self.archive_writer.get_stats()
+            archive_stats = self.archive_writer.get_stats() if self.archive_writer else {}
             
             uptime = 0.0
             if self.session_start_time:
