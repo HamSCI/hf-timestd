@@ -603,11 +603,12 @@ Not a software bug—HF propagation on higher bands is poor during night/early m
 
 ### 9.1 Raw Archive: Binary IQ + JSON Sidecars
 
-- **Format:** `.bin.zst` (zstd-compressed binary) + `.json` metadata sidecar per minute
+- **Format:** `.bin.zst` (zstd-compressed binary) + `.json` metadata sidecar per chunk
+- **Chunk duration:** Configurable via `file_duration_sec` (default 600s = 10 minutes). Legacy 1-minute files are still supported by the reader.
 - **Structure:**
-  - Binary file: 1,440,000 complex64 IQ samples per minute (24 kHz × 60s)
-  - JSON sidecar: RTP timestamps, gap info, system time, quality metrics
-- **Metadata:** Start RTP timestamp, start system time, sample rate (24 kHz), center frequency, gap count
+  - Binary file: `sample_rate × file_duration_sec` complex64 IQ samples per chunk (e.g., 14,400,000 at 24 kHz / 600s; 1,440,000 per minute within each chunk)
+  - JSON sidecar: RTP timestamps, gap info, system time, quality metrics, `file_duration_sec`
+- **Metadata:** Start RTP timestamp, start system time, sample rate (24 kHz), center frequency, gap count, `file_duration_sec`
 - **Size:** ~2-3 GB/day/channel
 
 > **Note:** Digital RF (MIT Haystack) is used only for GRAPE DRF packaging/upload, not for raw recording.

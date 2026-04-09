@@ -34,6 +34,9 @@ storage_quota = "80%"
 compression = "zstd"
 compression_level = 3  # zstd: 1-22, lz4: 1-12
 
+# Raw IQ file chunk duration in seconds (default 600 = 10 min)
+file_duration_sec = 600
+
 # Save L0 raw IQ data using Digital RF HDF5 format
 # This uses significant storage (~1.5GB/day/channel), managed by storage_quota
 # DISABLED: Causing OOM issues with 9 channels (2026-01-02)

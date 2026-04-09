@@ -42,6 +42,11 @@ storage_quota = "80%"
 compression = "zstd"
 compression_level = 3
 
+# Raw IQ file chunk duration in seconds.  600 (10 min) reduces filesystem
+# overhead 10x vs the legacy 60s cadence and improves compression ratio.
+# Values must divide evenly into 3600.  Common choices: 60, 300, 600, 900.
+file_duration_sec = 600
+
 # Digital RF HDF5 output (uses significant storage ~1.5GB/day/channel)
 save_digital_rf = false
 

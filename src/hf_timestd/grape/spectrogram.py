@@ -185,74 +185,52 @@ class CarrierSpectrogramGenerator:
         
         return []
     
-    def _interpolate_zeros(self, samples: np.ndarray) -> np.ndarray:
+    def _taper_gap_edges(self, samples: np.ndarray, valid_minutes: np.ndarray) -> np.ndarray:
         """
-        Replace zero samples with interpolated values to reduce spectral artifacts.
-        
-        Zeros from gaps cause dark vertical bands in spectrograms due to
-        spectral leakage. This interpolates across zero regions using
-        phase-continuous samples from surrounding valid data.
-        
+        Apply smooth tapers at gap boundaries to reduce spectral leakage.
+
+        Instead of interpolating zeros (which creates false spectral lines),
+        this applies a half-Tukey taper to the last/first few seconds of valid
+        data adjacent to gaps.  The taper smoothly brings the signal to zero,
+        avoiding the hard amplitude discontinuity that causes broadband
+        spectral leakage artifacts.
+
         Args:
-            samples: Complex64 IQ samples potentially containing zeros
-            
+            samples: Complex64 IQ samples (full day, 864000 samples)
+            valid_minutes: Boolean array (1440,) — True for valid minutes
+
         Returns:
-            Samples with zeros replaced by interpolated values
+            Samples with tapered edges at gap boundaries
         """
-        zero_mask = np.abs(samples) < 1e-10
-        
-        if not np.any(zero_mask):
-            return samples  # No zeros to interpolate
-        
+        # Taper width in samples (5 seconds at 10 Hz = 50 samples)
+        taper_width = 50
+
         result = samples.copy()
-        
-        # Find runs of zeros
-        padded = np.concatenate([[False], zero_mask, [False]])
-        diff = np.diff(padded.astype(int))
-        starts = np.where(diff == 1)[0]
-        ends = np.where(diff == -1)[0]
-        
-        for start, end in zip(starts, ends):
-            gap_len = end - start
-            
-            # Get samples before and after gap
-            before_idx = start - 1 if start > 0 else None
-            after_idx = end if end < len(samples) else None
-            
-            if before_idx is not None and after_idx is not None:
-                before_sample = samples[before_idx]
-                after_sample = samples[after_idx]
-                
-                if np.abs(before_sample) > 1e-10 and np.abs(after_sample) > 1e-10:
-                    # Linear interpolation of amplitude and phase
-                    before_phase = np.angle(before_sample)
-                    after_phase = np.angle(after_sample)
-                    before_amp = np.abs(before_sample)
-                    after_amp = np.abs(after_sample)
-                    
-                    # Unwrap phase difference
-                    phase_diff = after_phase - before_phase
-                    if phase_diff > np.pi:
-                        phase_diff -= 2 * np.pi
-                    elif phase_diff < -np.pi:
-                        phase_diff += 2 * np.pi
-                    
-                    # Interpolate
-                    t = np.linspace(0, 1, gap_len + 2)[1:-1]
-                    interp_phase = before_phase + t * phase_diff
-                    interp_amp = before_amp + t * (after_amp - before_amp)
-                    result[start:end] = interp_amp * np.exp(1j * interp_phase)
-                    
-            elif before_idx is not None:
-                before_sample = samples[before_idx]
-                if np.abs(before_sample) > 1e-10:
-                    result[start:end] = before_sample
-                    
-            elif after_idx is not None:
-                after_sample = samples[after_idx]
-                if np.abs(after_sample) > 1e-10:
-                    result[start:end] = after_sample
-        
+
+        for i in range(1440):
+            if not valid_minutes[i]:
+                continue
+
+            start = i * SAMPLES_PER_MINUTE
+            end = start + SAMPLES_PER_MINUTE
+
+            # Check if previous minute is a gap (or this is minute 0)
+            prev_is_gap = (i == 0) or not valid_minutes[i - 1]
+            # Check if next minute is a gap (or this is minute 1439)
+            next_is_gap = (i == 1439) or not valid_minutes[i + 1]
+
+            if prev_is_gap:
+                # Fade in: apply rising half-cosine taper to first taper_width samples
+                n = min(taper_width, SAMPLES_PER_MINUTE)
+                taper = 0.5 * (1 - np.cos(np.pi * np.arange(n) / n))
+                result[start:start + n] *= taper
+
+            if next_is_gap:
+                # Fade out: apply falling half-cosine taper to last taper_width samples
+                n = min(taper_width, SAMPLES_PER_MINUTE)
+                taper = 0.5 * (1 + np.cos(np.pi * np.arange(n) / n))
+                result[end - n:end] *= taper
+
         return result
     
     def _get_solar_zenith_data(self, date_str: str) -> Optional[Dict]:
@@ -584,13 +562,13 @@ class CarrierSpectrogramGenerator:
         for i, meta in enumerate(metadata_list):
             if meta.get('valid', False):
                 valid_minutes[i] = True
-        
-        # Interpolate zeros to reduce vertical bar artifacts
-        # Zeros from gaps cause spectral leakage and dark vertical bands
-        iq_interpolated = self._interpolate_zeros(iq_data)
-        
+
+        # Apply smooth tapers at gap edges to reduce spectral leakage
+        # (replaces the old _interpolate_zeros which created false spectral lines)
+        iq_tapered = self._taper_gap_edges(iq_data, valid_minutes)
+
         f, t, Sxx = signal.spectrogram(
-            iq_interpolated,
+            iq_tapered,
             fs=SAMPLE_RATE,
             window='blackman',  # Better sidelobe suppression than default Hann
             nperseg=self.config.nfft,
@@ -598,28 +576,28 @@ class CarrierSpectrogramGenerator:
             mode='magnitude',
             return_onesided=False
         )
-        
+
         f = np.fft.fftshift(f)
         Sxx = np.fft.fftshift(Sxx, axes=0)
-        
+
         Sxx_db = 20 * np.log10(np.abs(Sxx) + 1e-10)
-        
+
         # Make writable copy (scipy returns read-only arrays)
         Sxx_db = Sxx_db.copy()
-        
-        # Create time-based mask: mask columns where corresponding minute is invalid
-        # t is in seconds, convert to minute index
-        t_minutes = (t / 60).astype(int)
-        t_minutes = np.clip(t_minutes, 0, 1439)
-        
-        # Create column validity mask
-        column_valid = valid_minutes[t_minutes]
-        
-        # Set invalid columns to NaN (simple loop is clearest)
+
+        # Mask columns where ANY part of the FFT window overlaps a gap.
+        # With NFFT=512 (51.2s), a window centred in valid data can extend
+        # ±25.6s into a gap, corrupting the result.  We check whether every
+        # minute touched by the window is valid.
+        half_window_sec = self.config.nfft / (2.0 * SAMPLE_RATE)
         for t_idx in range(Sxx_db.shape[1]):
-            if not column_valid[t_idx]:
+            win_start_sec = t[t_idx] - half_window_sec
+            win_end_sec = t[t_idx] + half_window_sec
+            min_start = max(0, int(win_start_sec / 60))
+            min_end = min(1439, int(win_end_sec / 60))
+            if not np.all(valid_minutes[min_start:min_end + 1]):
                 Sxx_db[:, t_idx] = np.nan
-        
+
         # Normalize using 95th percentile instead of peak to avoid
         # single bright spots washing out the rest of the spectrogram
         if np.any(~np.isnan(Sxx_db)):

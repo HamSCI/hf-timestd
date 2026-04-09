@@ -83,9 +83,11 @@ These are enforced at write time by `DataProductWriter`:
 
 ### Raw Buffer Format
 
-- Binary IQ: `.bin.zst` (zstd-compressed complex64, 1,440,000 samples/minute at 24 kHz)
-- JSON sidecar: RTP timestamps, gap info, system time, quality metrics
-- Sample count invariant: `24000 × 60 = 1,440,000` samples exactly per minute
+- Binary IQ: `.bin.zst` (zstd-compressed complex64)
+- Chunk duration: configurable `file_duration_sec` (default 600s = 10 min; legacy 60s supported)
+- JSON sidecar: RTP timestamps, gap info, system time, quality metrics, `file_duration_sec`
+- Per-minute sample count invariant: `24000 × 60 = 1,440,000` samples per minute within each chunk
+- Per-chunk sample count: `24000 × file_duration_sec` samples per chunk file
 - Gaps filled with zeros (maintains timing alignment)
 
 ### Schema Lookup (DataProductRegistry)

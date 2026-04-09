@@ -79,83 +79,101 @@ class DecimationPipeline:
     def _process_channel_day(self, date_str: str, channel_name: str):
         """
         Process one channel for one day.
-        
+
+        Enumerates all 1440 expected minutes (minute 0 through 1439) so that
+        gap accounting is explicit and complete — including gaps at the start
+        or end of the day that the old iterator-based approach would miss.
+
         Uses a single StatefulDecimator instance across all minutes to preserve
         phase continuity. The decimator maintains filter state between calls,
         eliminating phase discontinuities at minute boundaries.
         """
         logger.info(f"Starting {channel_name} for {date_str}")
-        
+
         reader = RawBinaryReader(self.data_root, channel_name)
         output_buffer = DecimatedBuffer(self.data_root, channel_name)
-        
+
         # Determine sample rate
         input_rate = reader.get_sample_rate(date_str)
         logger.info(f"  Input rate: {input_rate} Hz")
-        
+
         expected_raw_samples = input_rate * 60  # e.g., 1440000 for 24kHz
-        
-        # Single decimator instance for entire day - preserves phase continuity
+
+        # Single decimator instance for entire day — preserves phase continuity
         decimator = StatefulDecimator(input_rate=input_rate, output_rate=10)
-        
+
+        # Build lookup of available raw minutes for this day
+        available_minutes = set(reader.get_available_minutes(date_str))
+
+        # Compute the Unix timestamp of minute-0 for this UTC day
+        from datetime import datetime as _dt, timezone as _tz
+        day_start_dt = _dt.strptime(date_str, '%Y%m%d').replace(tzinfo=_tz.utc)
+        day_start_ts = int(day_start_dt.timestamp())
+
         minutes_processed = 0
+        gap_minutes_total = 0
         samples_generated = 0
-        prev_minute_ts = None
-        
-        # Import gc for aggressive memory management
+
         import gc
-        
-        # Process minute by minute, but with continuous decimator state
-        for minute_ts, samples, meta in reader.read_day(date_str):
+
+        for minute_index in range(1440):
+            minute_ts = day_start_ts + minute_index * 60
             decimated_chunk = None
             gap_info = 0
-            
-            if samples is not None and len(samples) > 0:
-                # Check for gaps (missing minutes) - if so, feed zeros to maintain
-                # filter state and time alignment
-                if prev_minute_ts is not None:
-                    gap_minutes = int((minute_ts - prev_minute_ts) / 60) - 1
-                    if gap_minutes > 0:
-                        # Feed zeros for missing minutes to maintain filter state
-                        gap_samples = np.zeros(expected_raw_samples * gap_minutes, dtype=np.complex64)
-                        _ = decimator.process(gap_samples)  # Discard output, keep state
-                        logger.debug(f"Fed {gap_minutes} minutes of zeros for gap before {minute_ts}")
-                
-                # Pad incomplete minutes to maintain sample alignment
-                if len(samples) < expected_raw_samples:
-                    gap_info = expected_raw_samples - len(samples)
-                    padded = np.zeros(expected_raw_samples, dtype=np.complex64)
-                    padded[:len(samples)] = samples
-                    samples = padded
-                elif len(samples) > expected_raw_samples:
-                    samples = samples[:expected_raw_samples]
-                
-                # Process with continuous decimator state
-                decimated_chunk = decimator.process(samples)
-                
-                # Check for gaps in metadata
-                if meta and 'gap_samples' in meta:
-                    gap_info = max(gap_info, meta.get('gap_samples', 0))
-                
-                # Convert gap_info from raw sample space to decimated sample space
-                # so it's comparable with SAMPLES_PER_MINUTE (600 at 10 Hz)
-                decimation_ratio = input_rate // 10
-                if decimation_ratio > 0:
-                    gap_info = gap_info // decimation_ratio
-                
-                prev_minute_ts = minute_ts
-            
+
+            if minute_ts in available_minutes:
+                # Read raw data for this minute
+                samples, meta = reader.read_minute(minute_ts)
+
+                if samples is not None and len(samples) > 0:
+                    # Pad incomplete minutes to maintain sample alignment
+                    if len(samples) < expected_raw_samples:
+                        gap_info = expected_raw_samples - len(samples)
+                        padded = np.zeros(expected_raw_samples, dtype=np.complex64)
+                        padded[:len(samples)] = samples
+                        samples = padded
+                    elif len(samples) > expected_raw_samples:
+                        samples = samples[:expected_raw_samples]
+
+                    # Process with continuous decimator state
+                    decimated_chunk = decimator.process(samples)
+
+                    # Check for gaps in metadata
+                    if meta and 'gap_samples' in meta:
+                        gap_info = max(gap_info, meta.get('gap_samples', 0))
+
+                    # Convert gap_info from raw sample space to decimated space
+                    decimation_ratio = input_rate // 10
+                    if decimation_ratio > 0:
+                        gap_info = gap_info // decimation_ratio
+
+                    del samples
+                else:
+                    # File existed but read failed — treat as gap
+                    gap_samples = np.zeros(expected_raw_samples, dtype=np.complex64)
+                    _ = decimator.process(gap_samples)
+                    gap_minutes_total += 1
+                    del gap_samples
+                    meta = None
+            else:
+                # No raw file for this minute — feed zeros to maintain
+                # filter state and time alignment, discard output
+                gap_samples = np.zeros(expected_raw_samples, dtype=np.complex64)
+                _ = decimator.process(gap_samples)
+                gap_minutes_total += 1
+                del gap_samples
+                meta = None
+
             if decimated_chunk is not None and len(decimated_chunk) > 0:
-                # Metadata extraction
                 d_clock = 0.0
                 uncertainty = 999.9
                 grade = 'X'
-                
+
                 if meta:
                     d_clock = meta.get('d_clock_ms', 0.0)
                     uncertainty = meta.get('uncertainty_ms', 999.9)
                     grade = meta.get('quality_grade', 'X')
-                
+
                 success = output_buffer.write_minute(
                     minute_utc=float(minute_ts),
                     decimated_iq=decimated_chunk,
@@ -164,30 +182,27 @@ class DecimationPipeline:
                     quality_grade=grade,
                     gap_samples=gap_info
                 )
-                
+
                 if success:
                     minutes_processed += 1
                     samples_generated += len(decimated_chunk)
-            
-            # Explicitly delete sample arrays to free memory immediately
-            del samples
+
             del decimated_chunk
-            
-            # Force garbage collection after EVERY minute to prevent memory accumulation
-            # from decompressed buffers. This is aggressive but necessary for compressed data.
-            # Python's GC cannot keep up with 400 minutes of decompression otherwise.
+
+            # Force GC after every minute to prevent memory accumulation
+            # from decompressed buffers (zstd/lz4)
             gc.collect()
-        
+
         # Flush accumulated metadata to disk (single JSON write instead of 1440)
         output_buffer.flush_metadata()
-        
-        # Explicitly clean up to prevent memory accumulation across channels
+
+        # Clean up to prevent memory accumulation across channels
         del reader
         del output_buffer
         del decimator
-        
-        # Force garbage collection to release memory before next channel
-        import gc
         gc.collect()
-        
-        logger.info(f"  Completed {channel_name}: {minutes_processed} minutes, {samples_generated} samples")
+
+        logger.info(
+            f"  Completed {channel_name}: {minutes_processed} valid, "
+            f"{gap_minutes_total} gaps, {samples_generated} samples"
+        )

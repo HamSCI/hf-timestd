@@ -45,10 +45,12 @@ logger = logging.getLogger(__name__)
 # Constants
 MB = 1024 * 1024
 GB = 1024 * MB
-BYTES_PER_MINUTE = 10 * MB  # ~10 MB per channel per minute (IQ + metadata)
+BYTES_PER_SECOND_PER_CHANNEL = 192_000  # ~192 KB/s (24 kHz × 8 bytes/sample)
+BYTES_PER_MINUTE = 10 * MB  # ~10 MB per channel per minute (legacy, kept for docs)
 MIN_HOT_MINUTES = 2  # Always keep at least 2 minutes in RAM
 MAX_HOT_MINUTES = 60  # Never keep more than 1 hour in RAM
 DEFAULT_RAM_PERCENT = 20  # Use 20% of available RAM for hot buffer
+DEFAULT_FILE_DURATION_SEC = 600  # 10-minute chunks (matches BinaryArchiveConfig default)
 
 
 @dataclass
@@ -56,24 +58,28 @@ class TieredStorageConfig:
     """Configuration for tiered storage."""
     # Required path - must be provided from config (default to /var/lib/timestd for backwards compatibility)
     cold_buffer_root: Path = Path('/var/lib/timestd')
-    
+
     # Optional paths
     hot_buffer_root: Path = Path('/dev/shm/timestd')
-    
+
     # Auto-configuration
     auto_configure: bool = True  # Auto-detect RAM and set hot_minutes
     ram_percent: float = DEFAULT_RAM_PERCENT  # Percent of available RAM to use
-    
+
     # Manual override (used if auto_configure=False)
     hot_minutes: int = 5  # Minutes to keep in hot buffer
-    
+
     # Behavior
     archive_to_cold: bool = True  # Move old minutes to cold storage
     delete_after_archive: bool = True  # Delete from hot after archiving
     archive_interval_seconds: float = 30.0  # How often to run archiver
-    
+
     # Channel info (set at runtime)
     num_channels: int = 9
+
+    # File duration — must match BinaryArchiveConfig.file_duration_sec so that
+    # eviction cutoff accounts for the full chunk span.
+    file_duration_sec: int = DEFAULT_FILE_DURATION_SEC
 
 
 def get_available_ram_bytes() -> int:
@@ -114,43 +120,51 @@ def get_shm_size_bytes() -> int:
 def calculate_hot_minutes(
     num_channels: int,
     ram_percent: float = DEFAULT_RAM_PERCENT,
-    available_ram: Optional[int] = None
+    available_ram: Optional[int] = None,
+    file_duration_sec: int = DEFAULT_FILE_DURATION_SEC
 ) -> int:
     """
     Calculate optimal number of hot buffer minutes based on available RAM.
-    
+
+    The hot buffer must hold at least one complete chunk file per channel
+    (file_duration_sec worth of data) so that the writer can finish writing
+    before the archiver evicts the file.
+
     Args:
         num_channels: Number of channels being recorded
         ram_percent: Percentage of available RAM to use (0-100)
         available_ram: Override available RAM detection (for testing)
-        
+        file_duration_sec: Duration of each raw IQ file in seconds
+
     Returns:
         Number of minutes to keep in hot buffer
     """
     if available_ram is None:
         available_ram = get_available_ram_bytes()
-    
+
     # Also check /dev/shm size - can't use more than that
     shm_size = get_shm_size_bytes()
     if shm_size > 0:
         available_ram = min(available_ram, shm_size)
-    
+
     # Calculate RAM budget
     ram_budget = int(available_ram * (ram_percent / 100.0))
-    
-    # Calculate minutes that fit in budget
-    bytes_per_minute_all_channels = BYTES_PER_MINUTE * num_channels
+
+    # Calculate minutes that fit in budget using per-second byte rate
+    bytes_per_minute_all_channels = BYTES_PER_SECOND_PER_CHANNEL * 60 * num_channels
     hot_minutes = ram_budget // bytes_per_minute_all_channels
-    
-    # Clamp to valid range
-    hot_minutes = max(MIN_HOT_MINUTES, min(MAX_HOT_MINUTES, hot_minutes))
-    
+
+    # Must hold at least one complete chunk file (file_duration_sec / 60 minutes)
+    min_for_chunk = max(MIN_HOT_MINUTES, (file_duration_sec + 59) // 60 + 1)
+    hot_minutes = max(min_for_chunk, min(MAX_HOT_MINUTES, hot_minutes))
+
     logger.info(
         f"TieredStorage: Available RAM={available_ram/GB:.1f}GB, "
         f"budget={ram_budget/MB:.0f}MB ({ram_percent}%), "
-        f"channels={num_channels}, hot_minutes={hot_minutes}"
+        f"channels={num_channels}, file_duration={file_duration_sec}s, "
+        f"hot_minutes={hot_minutes}"
     )
-    
+
     return hot_minutes
 
 
@@ -174,11 +188,14 @@ class TieredStorageManager:
     def __init__(self, config: Optional[TieredStorageConfig] = None):
         self.config = config or TieredStorageConfig()
         
+        self.file_duration_sec = self.config.file_duration_sec
+
         # Auto-configure hot_minutes based on RAM
         if self.config.auto_configure:
             self.hot_minutes = calculate_hot_minutes(
                 num_channels=self.config.num_channels,
-                ram_percent=self.config.ram_percent
+                ram_percent=self.config.ram_percent,
+                file_duration_sec=self.file_duration_sec
             )
         else:
             self.hot_minutes = self.config.hot_minutes
@@ -329,12 +346,17 @@ class TieredStorageManager:
                 time.sleep(1.0)
     
     def _archive_old_minutes(self):
-        """Move minutes older than hot_minutes from hot to cold storage."""
+        """Move chunk files older than hot_minutes from hot to cold storage.
+
+        A chunk file spans file_duration_sec seconds.  We must not evict it
+        until the *end* of the chunk is older than hot_minutes, so the cutoff
+        is shifted back by file_duration_sec.
+        """
         if not self.config.archive_to_cold:
             return
-        
+
         now = int(time.time())
-        cutoff = now - (self.hot_minutes * 60)
+        cutoff = now - (self.hot_minutes * 60) - self.file_duration_sec
         
         with self._archive_lock:
             # Iterate through all channel directories in hot buffer
@@ -431,29 +453,32 @@ def init_tiered_storage(
     num_channels: int = 9,
     hot_buffer_root: str = '/dev/shm/timestd',
     ram_percent: float = DEFAULT_RAM_PERCENT,
-    auto_start: bool = True
+    auto_start: bool = True,
+    file_duration_sec: int = DEFAULT_FILE_DURATION_SEC
 ) -> TieredStorageManager:
     """
     Initialize tiered storage with auto-configuration.
-    
+
     Args:
+        cold_buffer_root: Path for disk-based cold buffer
         num_channels: Number of channels being recorded
         hot_buffer_root: Path for RAM-based hot buffer
-        cold_buffer_root: Path for disk-based cold buffer
         ram_percent: Percentage of available RAM to use for hot buffer
         auto_start: Start background archiver immediately
-        
+        file_duration_sec: Duration of each raw IQ file in seconds
+
     Returns:
         Configured TieredStorageManager
     """
     global _manager
-    
+
     config = TieredStorageConfig(
         hot_buffer_root=Path(hot_buffer_root),
         cold_buffer_root=Path(cold_buffer_root),
         auto_configure=True,
         ram_percent=ram_percent,
         num_channels=num_channels,
+        file_duration_sec=file_duration_sec,
     )
     
     _manager = TieredStorageManager(config)

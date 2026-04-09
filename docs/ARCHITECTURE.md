@@ -583,16 +583,26 @@ The system produces HamSCI GRAPE-compatible data products for community science.
 ### Pipeline
 
 ```
-raw_buffer/{CHANNEL}/ (24 kHz IQ)
+raw_buffer/{CHANNEL}/ (24 kHz IQ, configurable chunk duration)
     ↓
 grape/decimation_pipeline.py — 10 Hz IQ decimation (all 9 channels)
+  • Enumerates all 1440 expected minutes per day explicitly
+  • Single StatefulDecimator per channel preserves filter state across minutes
+  • CIC (R=60) → compensation FIR → final FIR (R=40)
     ↓
 grape/packager.py — Digital RF (DRF) packaging (MIT Haystack format)
     ↓
 grape/uploader.py — SFTP upload to HamSCI PSWS network
     ↓
 grape/spectrogram.py — Daily spectrograms from decimated data
+  • Edge tapering at gap boundaries (half-cosine, 5s) — no zero interpolation
+  • Full-window validity masking: NFFT=512 (51.2s) windows that overlap
+    any gap minute are NaN-masked, not just windows centred in a gap
 ```
+
+### Raw IQ File Cadence
+
+Raw IQ files use a configurable chunk duration (`file_duration_sec`, default **600s = 10 minutes**). This reduces filesystem overhead 10× vs the legacy 1-minute cadence and improves compression ratios. The GRAPE `RawBinaryReader` handles both legacy 1-minute files and multi-minute chunks transparently — it reads `file_duration_sec` from the JSON sidecar and extracts the requested 1-minute slice.
 
 ### Scheduling
 
@@ -762,7 +772,7 @@ The `TimingConsistencyValidator` exploits multiple timing constraints:
 | **Arrival Sequence** | Stations at different distances must arrive in order |
 | **Cross-Station** | All stations transmit at UTC second 0 |
 | **Cross-Frequency** | Ionospheric delay follows 1/f² law |
-| **Sample Interval** | Consistent 1,440,000 samples per minute |
+| **Sample Interval** | Consistent 1,440,000 samples per minute (within each chunk file) |
 
 ### Real-Time TEC Feedback
 

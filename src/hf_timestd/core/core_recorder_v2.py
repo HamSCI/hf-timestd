@@ -499,6 +499,7 @@ class CoreRecorderV2:
                         if self.recorder_config.get('hot_buffer_root') else None,
                     compression=self.recorder_config.get('compression', 'none'),
                     compression_level=self.recorder_config.get('compression_level', 3),
+                    file_duration_sec=self.recorder_config.get('file_duration_sec', 600),
                     use_digital_rf=self.recorder_config.get('save_digital_rf', False),
                     destination=None,
                     low_edge=float(low_edge) if low_edge is not None else None,

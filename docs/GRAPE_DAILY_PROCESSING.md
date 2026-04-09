@@ -46,12 +46,17 @@ sudo systemctl disable --now grape-daily.timer
 The daily job processes **yesterday's data** through the following pipeline:
 
 1. **Decimate** - Convert 24/20 kHz raw IQ to 10 Hz decimated IQ
-   - Processes all channels in `/var/lib/timestd/raw_archive/`
-   - Outputs to `/var/lib/timestd/grape/decimated/{CHANNEL}/`
+   - Reads from raw buffer (handles both legacy 1-minute files and 10-minute chunk files)
+   - Enumerates all 1440 expected minutes per day explicitly (no gaps missed at day boundaries)
+   - Single `StatefulDecimator` per channel preserves filter state across minutes
+   - Multi-stage: CIC (R=60) → compensation FIR → final FIR (R=40)
+   - Outputs to `/var/lib/timestd/products/{CHANNEL}/decimated/`
 
 2. **Spectrograms** - Generate carrier spectrograms
-   - Creates daily spectrograms for WWV 10/15 MHz and WWVH 10 MHz
-   - Outputs to `/var/lib/timestd/grape/spectrograms/{CHANNEL}/`
+   - Creates daily spectrograms for all configured channels
+   - Edge tapering at gap boundaries (half-cosine, 5s) replaces zero interpolation
+   - Full-window validity masking: any NFFT=512 window overlapping a gap is NaN-masked
+   - Outputs to `/var/lib/timestd/products/{CHANNEL}/spectrograms/`
 
 3. **Package** (optional) - Package as Digital RF
    - Creates DRF packages for PSWS upload

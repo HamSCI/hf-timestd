@@ -230,6 +230,7 @@ class StreamRecorderConfig:
     raw_buffer_file_duration_sec: int = 3600
     compression: str = 'none'  # 'none', 'zstd', or 'lz4'
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
+    file_duration_sec: int = 600  # Raw IQ file chunk duration (seconds)
     
     # RTP Destination
     destination: Optional[str] = None
@@ -350,6 +351,7 @@ class StreamRecorderV2:
             compression=config.compression,
             compression_level=config.compression_level,
             use_tiered_storage=config.tiered_storage,
+            file_duration_sec=config.file_duration_sec,
         )
         
         self.archive_writer = BinaryArchiveWriter(archive_config)

@@ -82,7 +82,13 @@ class BinaryArchiveConfig:
     storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
     use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
     radiod_snr_db: Optional[float] = None  # SNR from radiod (updated periodically)
-    
+
+    # File duration: how many seconds of IQ data per file.
+    # 600s (10 minutes) reduces filesystem overhead 10x vs 60s (1 minute),
+    # improves compression ratios, and reduces GRAPE pipeline I/O.
+    # Downstream consumers (GRAPE raw_reader) handle both cadences transparently.
+    file_duration_sec: int = 600  # 10 minutes per file (was 60)
+
     # Pre-roll: Start buffer before minute boundary to capture full minute markers.
     # The minute marker tone starts at second 0, so we need samples BEFORE the
     # minute boundary to capture the full tone onset. NTP is used as a hint for
@@ -137,7 +143,10 @@ class BinaryArchiveWriter:
         
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         
-        # Buffer sizing
+        # Buffer sizing — one file per file_duration_sec (default 600s = 10 min)
+        self.file_duration_sec = config.file_duration_sec
+        self.samples_per_chunk = int(config.sample_rate * self.file_duration_sec)
+        # Keep samples_per_minute for per-minute metadata (unchanged)
         self.samples_per_minute = int(config.sample_rate * 60)
         
         # Current minute buffer
@@ -292,47 +301,47 @@ class BinaryArchiveWriter:
         return day_dir
     
     def _start_new_minute(self, rtp_derived_time: float, rtp_timestamp: int) -> MinuteBuffer:
-        """Start a new minute buffer.
-        
+        """Start a new chunk buffer.
+
         Args:
             rtp_derived_time: Unix time derived from RTP timestamp (GPSDO-disciplined)
-            rtp_timestamp: RTP timestamp of the packet that triggered this new minute
-            
+            rtp_timestamp: RTP timestamp of the packet that triggered this new chunk
+
         The RTP stream tells us the exact time. When a packet's RTP-derived UTC
-        crosses a minute boundary, we start a new buffer.
-        
+        crosses a chunk boundary, we start a new buffer.
+
         CRITICAL: We calculate the RTP timestamp that corresponds to the exact
-        minute boundary using the GPS_TIME/RTP_TIMESNAP mapping. This ensures
-        sample position 0 = minute boundary, regardless of when the first packet
+        chunk boundary using the GPS_TIME/RTP_TIMESNAP mapping. This ensures
+        sample position 0 = chunk boundary, regardless of when the first packet
         actually arrives.
         """
-        minute_boundary = (int(rtp_derived_time) // 60) * 60
-        
-        # Calculate RTP timestamp at the exact minute boundary using the mapping:
+        chunk_boundary = (int(rtp_derived_time) // self.file_duration_sec) * self.file_duration_sec
+
+        # Calculate RTP timestamp at the exact chunk boundary using the mapping:
         #   UTC = GPS_TIME + (rtp - RTP_TIMESNAP) / sample_rate
         #   rtp = RTP_TIMESNAP + (UTC - GPS_TIME) * sample_rate
         # Note: _rtp_timesnap is already in packet counter space
         # (see counter-space reconciliation in write_samples).
-        time_delta = minute_boundary - self._gps_time_unix
+        time_delta = chunk_boundary - self._gps_time_unix
         rtp_delta = int(time_delta * self.config.sample_rate)
-        minute_boundary_rtp = (self._rtp_timesnap + rtp_delta) & 0xFFFFFFFF
-        
+        chunk_boundary_rtp = (self._rtp_timesnap + rtp_delta) & 0xFFFFFFFF
+
         buffer = MinuteBuffer(
-            minute_boundary=minute_boundary,
-            samples=np.zeros(self.samples_per_minute, dtype=np.complex64),
+            minute_boundary=chunk_boundary,
+            samples=np.zeros(self.samples_per_chunk, dtype=np.complex64),
             write_pos=0,
-            start_rtp=minute_boundary_rtp,  # RTP at actual minute boundary
-            start_system_time=float(minute_boundary),  # Exactly on minute boundary
+            start_rtp=chunk_boundary_rtp,  # RTP at actual chunk boundary
+            start_system_time=float(chunk_boundary),  # Exactly on chunk boundary
             timing_snapshots=[]
         )
-        
+
         # Transfer any pending timing snapshots to this buffer
         if self._pending_snapshots:
             buffer.timing_snapshots.extend(self._pending_snapshots)
-            logger.debug(f"Transferred {len(self._pending_snapshots)} pending timing snapshots to new minute")
+            logger.debug(f"Transferred {len(self._pending_snapshots)} pending timing snapshots to new chunk")
             self._pending_snapshots = []
-        
-        logger.debug(f"Started new minute buffer: {minute_boundary}")
+
+        logger.debug(f"Started new chunk buffer: {chunk_boundary} ({self.file_duration_sec}s)")
         return buffer
     
     def _check_disk_space(self, path: Path, required_bytes: int) -> bool:
@@ -488,7 +497,7 @@ class BinaryArchiveWriter:
             json_path = minute_dir / f"{buffer.minute_boundary}.json"
             
             # Write binary data (just the filled portion)
-            actual_samples = min(buffer.write_pos, self.samples_per_minute)
+            actual_samples = min(buffer.write_pos, self.samples_per_chunk)
             raw_data = buffer.samples[:actual_samples].tobytes()
             
             # Check disk space before writing (raw size + some overhead)
@@ -549,8 +558,9 @@ class BinaryArchiveWriter:
                 'frequency_hz': self.config.frequency_hz,
                 'sample_rate': self.config.sample_rate,
                 'samples_written': actual_samples,
-                'samples_expected': self.samples_per_minute,
-                'completeness_pct': 100.0 * actual_samples / self.samples_per_minute,
+                'samples_expected': self.samples_per_chunk,
+                'file_duration_sec': self.file_duration_sec,
+                'completeness_pct': 100.0 * actual_samples / self.samples_per_chunk,
                 'gap_count': buffer.gap_count,
                 'gap_samples': buffer.gap_samples,
                 'start_rtp_timestamp': buffer.start_rtp,
@@ -585,8 +595,8 @@ class BinaryArchiveWriter:
             
             self.minutes_written += 1
             logger.info(
-                f"📁 Wrote minute {buffer.minute_boundary}: "
-                f"{actual_samples}/{self.samples_per_minute} samples "
+                f"📁 Wrote chunk {buffer.minute_boundary}: "
+                f"{actual_samples}/{self.samples_per_chunk} samples "
                 f"({metadata['completeness_pct']:.1f}%) "
                 f"[{bin_path.name}]"
             )
@@ -766,10 +776,10 @@ class BinaryArchiveWriter:
         if gap_samples > 0:
             samples = self._interpolate_gaps(samples)
         
-        # Determine which minute this belongs to FROM RTP TIMESTAMP (GPSDO-disciplined)
+        # Determine which chunk this belongs to FROM RTP TIMESTAMP (GPSDO-disciplined)
         # This avoids wall clock jitter from NTP/chrony adjustments
         sample_unix_time = self._rtp_to_unix_time(rtp_timestamp)
-        sample_minute = (int(sample_unix_time) // 60) * 60
+        sample_minute = (int(sample_unix_time) // self.file_duration_sec) * self.file_duration_sec
         
         # Staleness guard: drop data that is behind wallclock.
         # Under normal operation the difference is <1ms.  A large lag
@@ -820,9 +830,9 @@ class BinaryArchiveWriter:
             samples = samples[skip_count:]
             sample_position = 0
         
-        samples_to_write = min(len(samples), self.samples_per_minute - sample_position)
-        
-        if samples_to_write > 0 and sample_position < self.samples_per_minute:
+        samples_to_write = min(len(samples), self.samples_per_chunk - sample_position)
+
+        if samples_to_write > 0 and sample_position < self.samples_per_chunk:
             buffer.samples[sample_position:sample_position + samples_to_write] = samples[:samples_to_write]
             # Update write_pos to track highest written position
             buffer.write_pos = max(buffer.write_pos, sample_position + samples_to_write)
@@ -874,10 +884,11 @@ class BinaryArchiveWriter:
 class BinaryArchiveReader:
     """
     Reader for binary archive files.
-    
+
     Provides memory-mapped access for zero-copy reading by Phase 2.
+    Handles both legacy 1-minute files and multi-minute chunk files.
     """
-    
+
     def __init__(self, archive_dir: Path, channel_name: str):
         # Use channel_name_to_dir for consistent path format (preserves dots)
         from ..paths import channel_name_to_dir

@@ -151,10 +151,11 @@ Guidance:
 Raw IQ data is stored as compressed binary files with JSON metadata sidecars.
 
 - **Format:** `.bin.zst` (zstd-compressed binary) + `.json` sidecar.
+- **Chunk duration:** Configurable via `file_duration_sec` (default **600s = 10 minutes**). Legacy installations may have 60s (1-minute) files; the GRAPE reader handles both transparently.
 - **Structure:**
-  - Binary file: 1,440,000 complex64 IQ samples per minute.
-  - JSON sidecar: RTP timestamps, gap info, system time, quality metrics.
-- **Metadata:** Start RTP timestamp, start system time, sample rate (24 kHz), center frequency, gap count.
+  - Binary file: `sample_rate × file_duration_sec` complex64 IQ samples per chunk (e.g., 14,400,000 at 24 kHz / 600s).
+  - JSON sidecar: RTP timestamps, gap info, system time, quality metrics, `file_duration_sec`.
+- **Metadata:** Start RTP timestamp, start system time, sample rate (24 kHz), center frequency, gap count, `file_duration_sec`.
 
 > **Note:** Digital RF (MIT Haystack) is used only for GRAPE DRF packaging/upload, not for raw recording.
 
@@ -560,7 +561,7 @@ All file paths are derived from the data root (`/var/lib/timestd/` in production
 
 ```python
 # Path construction follows a simple pattern:
-data_root / "raw_buffer" / channel / date_str / f"{minute}.bin.zst"
+data_root / "raw_buffer" / channel / date_str / f"{chunk_boundary}.bin.zst"
 data_root / "phase2" / channel / "metrology" / f"{date}_metrology_measurements.h5"
 data_root / "phase2" / "fusion" / f"fusion_timing_{date}.h5"
 data_root / "products" / channel / "spectrograms" / f"{date}_spectrogram.png"
@@ -695,7 +696,7 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 | Module | Class/Function | Purpose |
 |--------|---------------|--------|
 | `core_recorder.py` | `CoreRecorder` | Top-level orchestration: channel discovery, per-channel recording via ka9q-python `RadiodStream` |
-| `binary_archive_writer.py` | `BinaryArchiveWriter` | Writes `.bin.zst` + `.json` sidecars per minute. Gap filling, RTP timestamp preservation |
+| `binary_archive_writer.py` | `BinaryArchiveWriter` | Writes `.bin.zst` + `.json` sidecars per chunk (configurable `file_duration_sec`, default 600s). Gap filling, RTP timestamp preservation |
 | `audio_stream.py` | `AudioStream` | Per-channel RTP reception wrapper around ka9q-python |
 
 ### Phase 2: Metrology (`src/hf_timestd/core/`)
@@ -741,9 +742,11 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 
 | Module | Purpose |
 |--------|--------|
-| `grape_daily.py` | Daily processing: 24kHz→10Hz decimation, spectrogram generation, DRF packaging |
-| `drf_writer.py` | Digital RF HDF5 packaging for PSWS upload |
-| `psws_uploader.py` | SFTP upload to HamSCI PSWS network |
+| `decimation_pipeline.py` | Daily processing: enumerates all 1440 minutes, reads raw chunks, StatefulDecimator (CIC+FIR) 24kHz→10Hz |
+| `spectrogram.py` | Daily spectrograms: edge tapering at gap boundaries, full-window validity masking |
+| `packager.py` | Digital RF HDF5 packaging for PSWS upload |
+| `uploader.py` | SFTP upload to HamSCI PSWS network |
+| `raw_reader.py` | Reads raw IQ from tiered storage; handles both 1-min and multi-minute chunk files |
 
 ### Web API (`web-api/`)
 
@@ -816,7 +819,7 @@ python -m hf_timestd --config config/timestd-config.toml
 ```bash
 # Raw IQ archives (Phase 1)
 ls /var/lib/timestd/raw_buffer/SHARED_10000/$(date +%Y%m%d)/
-# Should show .bin.zst + .json files per minute
+# Should show .bin.zst + .json files per chunk (10-minute default)
 
 # HDF5 metrology products (Phase 2)
 ls /var/lib/timestd/phase2/SHARED_10000/metrology/
@@ -1211,6 +1214,7 @@ class BroadcastState:
 
 **Key Calculations:**
 
-- Samples per minute: 24000 × 60 = **1,440,000 samples**
+- Samples per minute: 24000 × 60 = **1,440,000 samples** (per-minute invariant within chunks)
+- Samples per chunk (default 600s): 24000 × 600 = **14,400,000 samples**
 - RTP timestamp wraparound: 2³² / 24000 / 3600 ≈ **49.7 hours**
 - Timing resolution: 1 / 24000 ≈ **41.67 μs**

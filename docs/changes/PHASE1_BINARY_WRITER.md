@@ -34,8 +34,8 @@ RTP Packets
 ┌─────────────────────────────────────────────────────┐
 │  Phase 1: Binary Archive Writer                     │
 │  - Append-only binary files (complex64)             │
-│  - One file per minute per channel                  │
-│  - JSON metadata sidecar                            │
+│  - One file per chunk per channel (default 10 min)  │
+│  - JSON metadata sidecar (includes file_duration_sec)│
 │  - Cannot fail (OS handles append)                  │
 └──────────────────────┬──────────────────────────────┘
                        │
@@ -63,7 +63,8 @@ RTP Packets
 ### Binary Format
 
 - **Format**: Raw complex64 (numpy compatible)
-- **Size**: 9.6 MB per minute per channel (1,200,000 samples × 8 bytes)
+- **Chunk duration**: Configurable via `file_duration_sec` (default 600s = 10 min; legacy: 60s)
+- **Size**: ~96 MB per 10-min chunk per channel at 24 kHz (14,400,000 samples × 8 bytes); ~9.6 MB per 1-min chunk at 20 kHz (legacy)
 - **Reading**: `np.memmap(path, dtype=np.complex64, mode='r')` for zero-copy access
 
 ### Metadata Sidecar (JSON)

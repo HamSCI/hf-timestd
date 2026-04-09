@@ -59,6 +59,8 @@ docs/                    # Technical docs, QEX paper draft
 - **Two modes:** RTP (GPSDO ground truth, testing) and FUSION (GPS-denied, production)
 - **8 independent systemd services** with dependency ordering
 - **HDF5 SWMR:** writers keep files open + flush; readers use `swmr=True`
+- **Raw IQ storage:** Configurable chunk duration (`file_duration_sec`, default 600s = 10 min). Compressed `.bin.zst` + JSON sidecar per chunk. GRAPE raw reader handles both legacy 1-min and multi-minute chunks transparently.
+- **GRAPE spectrogram:** Edge tapering at gap boundaries (half-cosine, 5s); full-window validity masking (NFFT=512 → ±25.6s). No zero interpolation.
 - **Config:** TOML-based (`config/timestd-config.toml.template`); production at `/etc/hf-timestd/`
 
 ## Dependencies of Note

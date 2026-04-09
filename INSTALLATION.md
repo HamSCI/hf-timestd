@@ -261,7 +261,7 @@ sudo systemctl status timestd-radiod-monitor          # If enabled
 
 ### Verify Data Flow
 
-1. **Raw Buffer:** Check binary archives: `ls -lh /var/lib/timestd/raw_buffer/`
+1. **Raw Buffer:** Check binary archives: `ls -lh /var/lib/timestd/raw_buffer/` (expect 10-min chunk files by default)
 2. **L1 Metrology:** Check L1 HDF5 files: `ls -lh /var/lib/timestd/phase2/*/metrology/`
 3. **L2 Calibration:** Check L2 HDF5 files: `ls -lh /var/lib/timestd/phase2/*/clock_offset/`
 4. **Fusion:** Check fused output: `ls -lh /var/lib/timestd/phase2/fusion/`
