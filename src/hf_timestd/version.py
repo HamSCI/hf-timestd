@@ -8,7 +8,9 @@ Provides standardized timestamp utilities that always use UTC with explicit
 timezone markers.
 """
 
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 # =============================================================================
@@ -39,6 +41,71 @@ STATE_FILE_VERSION = 2
 
 # Data contract version - for CSV/JSON schema tracking
 DATA_CONTRACT_VERSION = "2025-12-08-v1"
+
+
+# =============================================================================
+# GIT SHA OF THE RUNNING SOURCE TREE
+# =============================================================================
+#
+# Pattern A deployment means the venv imports source files directly from
+# /opt/git/hf-timestd via an editable install.  That makes it possible
+# (and useful) to ask the running code "what commit are you?" — the
+# answer comes from `git rev-parse HEAD` of the directory the source
+# files actually live in.  Sigmond uses this to detect drift between
+# what's running and what the operator thinks is running.
+#
+# Cached at module load time so repeated calls don't fork git.
+# =============================================================================
+
+def _detect_git_sha() -> dict:
+    """Return git provenance for the source tree this module loads from.
+
+    Returns a dict with keys: sha, short, ref, dirty, source.  Any field
+    that can't be determined is set to None.  Never raises.
+    """
+    info: dict = {
+        "sha":    None,
+        "short":  None,
+        "ref":    None,
+        "dirty":  None,
+        "source": None,
+    }
+    try:
+        source_dir = Path(__file__).resolve().parent
+        info["source"] = str(source_dir)
+    except Exception:
+        return info
+
+    def _git(*args) -> Optional[str]:
+        # -c safe.directory='*' bypasses git's dubious-ownership guard so
+        # this works regardless of which user the daemon runs as.  Only
+        # affects this single subprocess.
+        try:
+            r = subprocess.run(
+                ["git", "-c", "safe.directory=*", "-C", str(source_dir), *args],
+                capture_output=True, text=True, timeout=2.0,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        if r.returncode != 0:
+            return None
+        return r.stdout.strip() or None
+
+    info["sha"]   = _git("rev-parse", "HEAD")
+    info["short"] = _git("rev-parse", "--short", "HEAD")
+    info["ref"]   = _git("rev-parse", "--abbrev-ref", "HEAD")
+    porcelain = _git("status", "--porcelain")
+    if porcelain is not None:
+        info["dirty"] = bool(porcelain)
+    return info
+
+
+GIT_INFO = _detect_git_sha()
+
+
+def get_git_sha() -> Optional[str]:
+    """Short SHA of the source tree the running code was loaded from."""
+    return GIT_INFO.get("short")
 
 
 # =============================================================================

@@ -29,11 +29,12 @@ def _handle_version(args):
     except Exception:
         ver = 'unknown (not installed as package)'
 
-    from .version import COMPONENT_VERSIONS
+    from .version import COMPONENT_VERSIONS, GIT_INFO
 
     info = {
         'name': 'hf-timestd',
         'version': ver,
+        'git': GIT_INFO,
         'components': COMPONENT_VERSIONS,
         'python': sys.version.split()[0],
         'schemas': {
@@ -45,6 +46,11 @@ def _handle_version(args):
         print(json.dumps(info, indent=2))
     else:
         print(f"hf-timestd {ver}")
+        if GIT_INFO.get('short'):
+            dirty = ' (dirty)' if GIT_INFO.get('dirty') else ''
+            ref = GIT_INFO.get('ref') or '?'
+            print(f"  Git: {GIT_INFO['short']} on {ref}{dirty}")
+            print(f"  Source: {GIT_INFO.get('source')}")
         print(f"  Python: {info['python']}")
         print(f"  Calibration schema: {info['schemas']['calibration']}")
         print(f"  Components:")
@@ -136,9 +142,12 @@ def _handle_inventory(args):
     except PackageNotFoundError:
         version = 'unknown'
 
+    from .version import GIT_INFO
+
     payload = {
         'client':           'hf-timestd',
         'version':          version,
+        'git':              GIT_INFO,
         'contract_version': '0.1',
         'config_path':      str(config_path),
         'instances':        instances,
