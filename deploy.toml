@@ -1,0 +1,172 @@
+# hf-timestd deploy manifest — declares how this client gets from
+# repo source to its production location.  Conforms to the HamSCI
+# client contract v0.1 (sigmond/docs/CLIENT-CONTRACT.md).
+#
+# Sigmond reads this file to install/update hf-timestd; the existing
+# scripts/deploy.sh is the standalone-safe equivalent that does the
+# same work without sigmond present.
+
+[package]
+name             = "hf-timestd"
+version          = "6.12.0"
+description      = "HF Time Standard Analysis — WWV/WWVH/CHU/BPM timing via ka9q-radio"
+contract_version = "0.1"
+license          = "MIT"
+
+# ---------------------------------------------------------------------------
+# Build phase: install Python package into a venv at /opt/hf-timestd/venv.
+# Sigmond invokes these in order from the repo root.
+# ---------------------------------------------------------------------------
+
+[build]
+steps = [
+    "python3 -m venv /opt/hf-timestd/venv",
+    "/opt/hf-timestd/venv/bin/pip install --upgrade pip setuptools wheel",
+    "/opt/hf-timestd/venv/bin/pip install -e .",
+]
+produces = [
+    "/opt/hf-timestd/venv/bin/hf-timestd",
+    "/opt/hf-timestd/venv/bin/timestd",
+]
+
+# ---------------------------------------------------------------------------
+# Install phase: place files at FHS-compliant locations on the target.
+#
+# kind = "link"   — symlink dst → src (relative to repo root)
+# kind = "copy"   — cp with chmod
+# kind = "render" — copy a template, never overwriting an existing user file
+#                   (controlled by if_absent = true)
+# ---------------------------------------------------------------------------
+
+[install]
+
+# CLI shims (the venv binaries already exist; sigmond does not need to
+# re-symlink them, but documenting them here keeps the contract honest).
+[[install.steps]]
+kind = "link"
+src  = "/opt/hf-timestd/venv/bin/hf-timestd"
+dst  = "/usr/local/bin/hf-timestd"
+
+[[install.steps]]
+kind = "link"
+src  = "/opt/hf-timestd/venv/bin/timestd"
+dst  = "/usr/local/bin/timestd"
+
+# Systemd units — symlinked from the repo so `git pull` updates them.
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-core-recorder.service"
+dst  = "/etc/systemd/system/timestd-core-recorder.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-metrology@.service"
+dst  = "/etc/systemd/system/timestd-metrology@.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-metrology.target"
+dst  = "/etc/systemd/system/timestd-metrology.target"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-fusion.service"
+dst  = "/etc/systemd/system/timestd-fusion.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-l2-calibration.service"
+dst  = "/etc/systemd/system/timestd-l2-calibration.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-physics.service"
+dst  = "/etc/systemd/system/timestd-physics.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-radiod-monitor.service"
+dst  = "/etc/systemd/system/timestd-radiod-monitor.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-web-api.service"
+dst  = "/etc/systemd/system/timestd-web-api.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-vtec.service"
+dst  = "/etc/systemd/system/timestd-vtec.service"
+
+# Config template — never overwritten if already present.
+[[install.steps]]
+kind      = "render"
+src       = "config/timestd-config.toml.template"
+dst       = "/etc/hf-timestd/timestd-config.toml"
+mode      = "0640"
+owner     = "timestd:timestd"
+if_absent = true
+
+[[install.steps]]
+kind      = "render"
+src       = "config/environment.timestd.template"
+dst       = "/etc/hf-timestd/environment"
+mode      = "0640"
+owner     = "timestd:timestd"
+if_absent = true
+
+# Data, log, and runtime dirs.
+[[install.steps]]
+kind  = "mkdir"
+dst   = "/var/lib/timestd"
+mode  = "0755"
+owner = "timestd:timestd"
+
+[[install.steps]]
+kind  = "mkdir"
+dst   = "/var/log/hf-timestd"
+mode  = "0755"
+owner = "timestd:timestd"
+
+# ---------------------------------------------------------------------------
+# Systemd units sigmond should know about for start/stop/status.
+# Order matters: dependencies before consumers.
+# ---------------------------------------------------------------------------
+
+[systemd]
+units = [
+    "timestd-core-recorder.service",
+    "timestd-metrology.target",
+    "timestd-fusion.service",
+    "timestd-l2-calibration.service",
+    "timestd-physics.service",
+    "timestd-radiod-monitor.service",
+    "timestd-web-api.service",
+    "timestd-vtec.service",
+]
+templated_units = [
+    "timestd-metrology@.service",
+]
+
+# ---------------------------------------------------------------------------
+# Dependencies sigmond should ensure are present before installing
+# this client.  Mirrors the existing wsprdaemon-client deps.conf format.
+# ---------------------------------------------------------------------------
+
+[deps]
+
+[[deps.git]]
+name       = "ka9q-python"
+url        = "https://github.com/ka9q/ka9q-python.git"
+install_to = "/opt/ka9q-python"
+# commit pin: leave blank to track main; sigmond will warn on drift.
+commit     = ""
+
+[[deps.system]]
+# These are checked via dpkg/rpm, not installed.
+packages = [
+    "chrony",
+    "python3",
+    "python3-venv",
+    "python3-pip",
+]

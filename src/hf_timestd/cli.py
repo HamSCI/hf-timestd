@@ -52,6 +52,170 @@ def _handle_version(args):
             print(f"    {k}: {v}")
 
 
+def _handle_inventory(args):
+    """`hf-timestd inventory --json` — sigmond client-contract surface.
+
+    Emits a clean JSON document to stdout describing every hf-timestd
+    instance on this host: which radiod each one binds to, the channels
+    it will request, the disk it writes, and what it provides to other
+    clients (timing calibration).  Sigmond consumes this via subprocess
+    to learn about hf-timestd without importing any of its code.
+
+    See sigmond/docs/CLIENT-CONTRACT.md for the full schema.
+    """
+    import os
+    import toml as _toml
+    from importlib.metadata import version as pkg_version, PackageNotFoundError
+
+    config_path = Path(getattr(args, 'config', None) or
+                       os.environ.get('TIMESTD_CONFIG') or
+                       '/etc/hf-timestd/timestd-config.toml')
+
+    instances = []
+    issues    = []
+
+    if not config_path.exists():
+        issues.append({
+            'severity': 'warn',
+            'instance': None,
+            'message':  f'{config_path} not found',
+        })
+    else:
+        try:
+            with open(config_path, 'r') as f:
+                cfg = _toml.load(f)
+        except Exception as exc:
+            issues.append({
+                'severity': 'fail',
+                'instance': None,
+                'message':  f'failed to parse {config_path}: {exc}',
+            })
+            cfg = None
+
+        if cfg is not None:
+            recorder = cfg.get('recorder', {}) or {}
+            ka9q     = cfg.get('ka9q', {})     or {}
+            timing   = cfg.get('timing', {})   or {}
+
+            freqs = []
+            for group in (recorder.get('channel_group', {}) or {}).values():
+                for ch in (group.get('channels', []) or []):
+                    hz = ch.get('frequency_hz')
+                    if hz:
+                        freqs.append(int(hz))
+
+            data_root = recorder.get('production_data_root', '/var/lib/timestd')
+            mode      = recorder.get('mode', 'production')
+            if mode != 'production':
+                data_root = recorder.get('test_data_root', data_root)
+
+            instances.append({
+                'instance':                    'default',
+                'radiod_id':                   None,    # set by sigmond via coordination.toml
+                'host':                        'localhost',
+                'required_cores':              [],
+                'preferred_cores':             'worker',
+                'frequencies_hz':              freqs,
+                'ka9q_channels':               len(freqs),
+                'disk_writes': [
+                    {
+                        'path':           data_root,
+                        'mb_per_day':     0.0,    # not estimated yet
+                        'retention_days': 0,
+                    }
+                ],
+                'uses_timing_calibration':     False,
+                'provides_timing_calibration': bool(timing.get('authority')),
+                # Standalone fallback: clients can read these from their own
+                # config file when sigmond/coordination.env are absent.
+                'radiod_status_dns':           ka9q.get('status_address', ''),
+            })
+
+    try:
+        version = pkg_version('hf-timestd')
+    except PackageNotFoundError:
+        version = 'unknown'
+
+    payload = {
+        'client':           'hf-timestd',
+        'version':          version,
+        'contract_version': '0.1',
+        'config_path':      str(config_path),
+        'instances':        instances,
+        'deps': {
+            'git': [],
+            'pypi': [],
+        },
+        'issues': issues,
+    }
+    print(json.dumps(payload, indent=2))
+
+
+def _handle_validate_contract(args):
+    """`hf-timestd validate --json` — sigmond client-contract surface.
+
+    Self-validates every hf-timestd instance on this host.  Returns
+    {ok: bool, issues: [...]} per the contract.  Exit 0 on ok, 1 on
+    issues with severity == "fail".
+    """
+    import os
+    import toml as _toml
+
+    config_path = Path(getattr(args, 'config', None) or
+                       os.environ.get('TIMESTD_CONFIG') or
+                       '/etc/hf-timestd/timestd-config.toml')
+    issues = []
+
+    if not config_path.exists():
+        issues.append({
+            'severity': 'fail',
+            'instance': None,
+            'message':  f'{config_path} not found',
+        })
+    else:
+        try:
+            with open(config_path, 'r') as f:
+                cfg = _toml.load(f)
+        except Exception as exc:
+            issues.append({
+                'severity': 'fail',
+                'instance': None,
+                'message':  f'failed to parse {config_path}: {exc}',
+            })
+            cfg = None
+
+        if cfg is not None:
+            station = cfg.get('station', {}) or {}
+            if not station.get('callsign'):
+                issues.append({
+                    'severity': 'warn',
+                    'instance': 'default',
+                    'message':  'station.callsign is empty',
+                })
+            if not (cfg.get('ka9q', {}) or {}).get('status_address'):
+                issues.append({
+                    'severity': 'warn',
+                    'instance': 'default',
+                    'message':  'ka9q.status_address is empty (no radiod binding)',
+                })
+            recorder = cfg.get('recorder', {}) or {}
+            channels_count = sum(
+                len((g.get('channels', []) or []))
+                for g in (recorder.get('channel_group', {}) or {}).values()
+            )
+            if channels_count == 0:
+                issues.append({
+                    'severity': 'warn',
+                    'instance': 'default',
+                    'message':  'no channels configured under recorder.channel_group',
+                })
+
+    ok = not any(i['severity'] == 'fail' for i in issues)
+    payload = {'ok': ok, 'issues': issues}
+    print(json.dumps(payload, indent=2))
+    sys.exit(0 if ok else 1)
+
+
 def _handle_status(args):
     """
     Check pipeline health.  Returns JSON and sets exit code:
@@ -333,11 +497,16 @@ def _handle_service(args, parser):
 
 def main():
     """Main entry point for hf-timestd command"""
+    # Quiet stderr for sigmond client-contract subcommands so they emit
+    # exactly one JSON document on stdout and nothing on stderr unless
+    # something is wrong.  This must run before any logging.info() calls.
+    _contract_quiet = any(arg in ('inventory', 'validate') for arg in sys.argv[1:3])
+
     # Configure logging to show INFO level and above
     # Force level on root logger in case it was already configured
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    
+    root_logger.setLevel(logging.WARNING if _contract_quiet else logging.INFO)
+
     # Add handler if none exists
     if not root_logger.handlers:
         handler = logging.StreamHandler()
@@ -346,10 +515,10 @@ def main():
     else:
         # Set level on existing handlers too
         for handler in root_logger.handlers:
-            handler.setLevel(logging.INFO)
-    
-    # Test that INFO logging works
-    logging.info("✓ Logging configured at INFO level")
+            handler.setLevel(logging.WARNING if _contract_quiet else logging.INFO)
+
+    if not _contract_quiet:
+        logging.info("✓ Logging configured at INFO level")
     
     parser = argparse.ArgumentParser(
         description='hf-timestd',
@@ -364,6 +533,22 @@ def main():
         help='Show hf-timestd version and component info')
     version_parser.add_argument('--json', action='store_true',
         help='Machine-readable JSON output (for wsprdaemon components.ini)')
+
+    # Inventory command — sigmond client-contract surface
+    inventory_parser = subparsers.add_parser('inventory',
+        help='Emit machine-readable inventory of hf-timestd instances (for sigmond)')
+    inventory_parser.add_argument('--json', action='store_true', default=True,
+        help='JSON output (default and only mode)')
+    inventory_parser.add_argument('--config', '-c',
+        help='Configuration file path (default: $TIMESTD_CONFIG or /etc/hf-timestd/timestd-config.toml)')
+
+    # Validate command — sigmond client-contract surface
+    validate_parser = subparsers.add_parser('validate',
+        help='Self-validate every hf-timestd instance configuration (for sigmond)')
+    validate_parser.add_argument('--json', action='store_true', default=True,
+        help='JSON output (default and only mode)')
+    validate_parser.add_argument('--config', '-c',
+        help='Configuration file path (default: $TIMESTD_CONFIG or /etc/hf-timestd/timestd-config.toml)')
     
     # Status command (machine-readable health check)
     status_parser = subparsers.add_parser('status',
@@ -658,6 +843,10 @@ Per-service overrides in [services] take precedence over the profile.
     # Handle commands
     if args.command == 'version':
         _handle_version(args)
+    elif args.command == 'inventory':
+        _handle_inventory(args)
+    elif args.command == 'validate':
+        _handle_validate_contract(args)
     elif args.command == 'status':
         _handle_status(args)
     elif args.command == 'daemon':
@@ -820,7 +1009,6 @@ Per-service overrides in [services] take precedence over the profile.
             sys.exit(1)
     elif args.command == 'grape':
         # GRAPE data products mode
-        from pathlib import Path
         from datetime import datetime, timedelta, timezone
         
         if not args.grape_command:
@@ -1311,7 +1499,6 @@ Per-service overrides in [services] take precedence over the profile.
     elif args.command == 'service':
         _handle_service(args, locals().get('service_parser'))
     elif args.command == 'calibrate':
-        from pathlib import Path
         import toml
 
         # Load configuration (for receiver coordinates, timing authority, etc.)
