@@ -94,9 +94,21 @@ def _detect_git_sha() -> dict:
     info["sha"]   = _git("rev-parse", "HEAD")
     info["short"] = _git("rev-parse", "--short", "HEAD")
     info["ref"]   = _git("rev-parse", "--abbrev-ref", "HEAD")
-    porcelain = _git("status", "--porcelain")
-    if porcelain is not None:
-        info["dirty"] = bool(porcelain)
+
+    # Distinguish "git status returned empty" (clean tree) from "git not
+    # available" — _git() collapses both to None, so we re-run with raw
+    # subprocess and check returncode explicitly.
+    if info["sha"] is not None:
+        try:
+            r = subprocess.run(
+                ["git", "-c", "safe.directory=*", "-C", str(source_dir),
+                 "status", "--porcelain"],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            if r.returncode == 0:
+                info["dirty"] = bool(r.stdout.strip())
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     return info
 
 
