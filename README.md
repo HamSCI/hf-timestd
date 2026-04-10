@@ -77,7 +77,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - **systemd services** — 8+ services with dependency management, watchdog, CPU affinity
 - **Service profiles** — Four operational profiles (archive, rtp, fusion, full) with per-service overrides via `hf-timestd profile` CLI
 - **ResourceGuardian** — Auto-sizing disk management (80% cap, day-level eviction, preflight + watchdog)
-- **Unified installer** — `scripts/deploy.sh` (idempotent install + update, creates timestd user, venv, config, services)
+- **First-run installer** — `scripts/install.sh` (idempotent install: creates timestd user, venv, config, services). After first install, `scripts/deploy.sh` is the small Pattern A reload that refreshes the editable venv install and restarts services.
 - **Log rotation** — Daily rotation with 14-day retention
 - **Freshness monitoring** — Cron-based alerts on stale data
 
@@ -112,17 +112,20 @@ The ionosphere is the dominant error in all cases. Oscillator quality affects ti
 ### Production Mode (24/7 Operation)
 
 ```bash
-# Clone repository
-git clone https://github.com/mijahauan/hf-timestd.git
-cd hf-timestd
+# Clone canonical repo (must be reachable by the timestd service user;
+# typical layout is /opt/git/hf-timestd, owned by timestd:timestd)
+sudo git clone https://github.com/mijahauan/hf-timestd.git /opt/git/hf-timestd
+sudo chown -R timestd:timestd /opt/git/hf-timestd
+cd /opt/git/hf-timestd
 
-# Install (idempotent — safe to re-run for updates)
-sudo ./scripts/deploy.sh
+# First-run install (apt deps, user, dirs, venv, services)
+sudo ./scripts/install.sh
 ```
 
-The deploy script creates the `timestd` user, installs dependencies, runs the
-configuration wizard, and enables services according to the configured profile.
-See **[INSTALLATION.md](INSTALLATION.md)** for details.
+The install script creates the `timestd` user, installs dependencies, runs the
+configuration wizard, sets up an **editable** venv install pointing back at
+this repo (Pattern A), and enables services according to the configured
+profile. See **[INSTALLATION.md](INSTALLATION.md)** for details.
 
 ### Test/Development Mode
 
@@ -131,16 +134,29 @@ pip install -e ".[dev]"
 python -m hf_timestd daemon --config config/timestd-config.toml
 ```
 
-### Updating
+### Updating (Pattern A — editable venv install)
 
 ```bash
-cd /path/to/hf-timestd
-sudo ./scripts/deploy.sh --pull
+cd /opt/git/hf-timestd
+git pull                              # or use deploy.sh --pull
+sudo ./scripts/deploy.sh
 ```
 
-Pulls latest code, syncs to `/opt/hf-timestd`, updates the venv, and restarts
-affected services (core-recorder is not restarted unless `--restart-all` is
-passed, to avoid a data gap).
+`scripts/deploy.sh` is a small reload script:
+1. Refuses to deploy if the working tree is dirty (use `--force-dirty` to
+   override). This is the single rule that keeps production from drifting
+   away from the git history.
+2. Optional `git pull` (`--pull`).
+3. `pip install -e .` into `/opt/hf-timestd/venv` — no-op unless
+   `pyproject.toml` changed; refreshes entry-point shims.
+4. Restarts the units listed in `deploy.toml [systemd]`. core-recorder is
+   held back unless `--restart-recorder` is passed (causes a brief data
+   gap).
+5. Prints the new git SHA.
+
+Because the venv is an editable install, source files in this repo *are*
+the production code path. After deploy, `hf-timestd version --json`'s
+`git.short` field matches `git rev-parse --short HEAD` here.
 
 ### Service Profiles
 

@@ -13,8 +13,12 @@ HF Time Standard Analysis (`hf-timestd`) — a Python system that receives HF ti
 pip install -e ".[dev,gnss,iono]"
 pytest tests/
 
-# Production install/update
-sudo ./scripts/deploy.sh [--pull]
+# First-run install (apt deps, user, dirs, venv)
+sudo ./scripts/install.sh
+
+# Ongoing deploy after editing source (Pattern A: editable install)
+sudo ./scripts/deploy.sh           # refuses on dirty tree
+sudo ./scripts/deploy.sh --pull    # git pull then deploy
 
 # CLI
 hf-timestd version --json

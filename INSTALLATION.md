@@ -110,37 +110,36 @@ Before running the installer, have the following ready:
 
 ## Installation
 
-```bash
-# 1. Clone repository
-git clone https://github.com/mijahauan/hf-timestd.git
-cd hf-timestd
+hf-timestd uses **Pattern A** deployment: the production venv is an
+*editable* install pointing back at the canonical git checkout, so
+production code and the repo are always the same files. There is no
+wheel snapshot, no `/opt` source copy, and no drift.
 
-# 2. Run deploy script (idempotent install/update)
-sudo ./scripts/deploy.sh
+```bash
+# 1. Clone canonical repo to a path the timestd service user can read
+sudo git clone https://github.com/mijahauan/hf-timestd.git /opt/git/hf-timestd
+sudo chown -R timestd:timestd /opt/git/hf-timestd
+cd /opt/git/hf-timestd
+
+# 2. First-run install (apt deps, user, dirs, venv, services)
+sudo ./scripts/install.sh
 ```
 
-The deploy script:
+`scripts/install.sh` is the first-run installer:
 
 1. Installs all apt dependencies and verifies Python 3.10+
 2. Installs and configures chrony for SHM clock discipline
 3. Configures UDP receive buffers for RTP packet handling
 4. Creates the `timestd` system user and production directories
-5. Sets up the Python virtual environment (`/opt/hf-timestd/venv`)
-6. Copies web-api, scripts, and systemd service files
+5. Sets up the Python virtual environment (`/opt/hf-timestd/venv`) with an
+   **editable** install of this repo (`pip install -e .`)
+6. Copies web-api and systemd service files into place
 7. **Runs the setup wizard** (`setup-station.sh`) — an interactive prompt that collects your station identity, location (grid square or lat/lon), ka9q-radio address, timing mode, GNSS VTEC settings, and PSWS upload credentials, then generates `/etc/hf-timestd/timestd-config.toml`
 8. Enables systemd services according to the configured **service profile** (see [Service Profiles](#service-profiles) below)
 
-The installation is **idempotent** — safe to re-run for updates. On re-run, it will skip steps that are already complete and offer to re-run the configuration wizard if a config already exists.
-
-**Options:**
-
-| Flag | Purpose |
-|------|---------|
-| `--pull` | Run `git pull` before deploying |
-| `--reconfig` | Re-run the station configuration wizard |
-| `--restart-all` | Also restart core-recorder (causes a brief data gap) |
-| `--no-restart` | Sync everything but don't restart services |
-| `--yes` / `-y` | Accept defaults, no interactive prompts |
+`install.sh` is **idempotent** — safe to re-run on an existing installation.
+After first install, day-to-day deployments use `scripts/deploy.sh`
+(see [Updating](#updating) below) which is much smaller.
 
 ### After Installation
 
@@ -167,11 +166,39 @@ sudo ./scripts/start-services.sh --status
 ## Updating
 
 ```bash
-cd /path/to/hf-timestd
+cd /opt/git/hf-timestd
 sudo ./scripts/deploy.sh --pull
 ```
 
-This pulls the latest code, syncs `/opt/hf-timestd`, updates the Python venv, syncs scripts/web-api/systemd files, and restarts affected services.
+`scripts/deploy.sh` is the small Pattern A reload script:
+
+1. **Refuses to deploy** if the working tree has uncommitted changes
+   (use `--force-dirty` to override). This is the single rule that
+   keeps production from drifting away from the git history.
+2. Optional `git pull` (`--pull`).
+3. `pip install -e .` into `/opt/hf-timestd/venv` — no-op unless
+   `pyproject.toml` changed; refreshes entry-point shims.
+4. Restarts the units listed in `deploy.toml [systemd]`. core-recorder
+   is held back by default unless `--restart-recorder` is passed
+   (causes a brief data gap).
+5. Prints the new git SHA.
+
+| Flag | Purpose |
+|------|---------|
+| `--pull` | `git pull --ff-only` before deploying |
+| `--force-dirty` | Bypass the clean-tree check (use with care) |
+| `--restart-recorder` | Also restart `timestd-core-recorder.service` (brief data gap) |
+| `--no-restart` | Refresh the venv without touching services |
+| `--dry-run` / `-n` | Show what would happen |
+
+After deploy, you can confirm what's running matches the repo:
+
+```bash
+hf-timestd version --json | jq .git
+git -C /opt/git/hf-timestd rev-parse --short HEAD
+```
+
+Both should print the same short SHA.
 
 ---
 
@@ -183,10 +210,10 @@ To change station settings after installation:
 sudo ./scripts/setup-station.sh --config /etc/hf-timestd/timestd-config.toml --reconfig
 ```
 
-Or re-run the full installer, which will offer to re-run the wizard:
+Or re-run the first-run installer, which will offer to re-run the wizard:
 
 ```bash
-sudo ./scripts/deploy.sh --reconfig
+sudo ./scripts/install.sh --reconfig
 ```
 
 ---
@@ -259,8 +286,9 @@ hf-timestd service status
 ```
 
 The profile is set during initial installation (the setup wizard defaults to
-`rtp`) and can be changed at any time.  `deploy.sh` reads the profile from
-config and applies it on every run.
+`rtp`) and can be changed at any time.  `install.sh` reads the profile from
+config and applies it on every run; `deploy.sh` does not touch the profile,
+it just refreshes the editable install and restarts the units already enabled.
 
 ### Service Reference
 
