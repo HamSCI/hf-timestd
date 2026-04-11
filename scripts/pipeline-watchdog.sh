@@ -90,7 +90,10 @@ RESTARTS=0
 
 # ── Thresholds (seconds) ──
 RECORDER_STALE=300      # 5 min: recorder should write every ~20s
-METROLOGY_STALE=600     # 10 min: metrology writes every ~60s
+# Phase 2: metrology reads from the ring buffer and produces HDF5 data
+# every 60 s.  Lowered from 600 s (set when chunks were 10 min) to 180 s
+# so genuine stalls trip the watchdog within ~3 minutes.
+METROLOGY_STALE=180
 FUSION_STALE=600        # 10 min: fusion writes every ~60s
 PHYSICS_STALE=3600      # 1 hour: physics may write less often
 

@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """
-Metrology Service (Phase 1)
-===========================
+Metrology Service
+=================
 Real-time DSP and Timestamping Service.
 
 Responsibility:
-1. Ingest raw IQ data streams (from tiered storage).
+1. Ingest raw IQ data from the core-recorder's shared-memory ring buffer.
 2. Run MetrologyEngine (Tone Detection, Channel Characterization).
 3. Write L1_Metrology data products (HDF5).
 4. Do NOT perform physics modeling or clock offset calculation.
+
+Data path
+---------
+`timestd-core-recorder` publishes each batch of samples into a per-channel
+SysV ring buffer (see :mod:`hf_timestd.core.ring_buffer`).  This service
+attaches to the ring for its own channel and extracts 60-second windows
+aligned to UTC minute boundaries.  There is no file I/O on the hot path.
+The archive writer in the recorder handles long-term .bin.zst chunks
+independently of metrology latency.
 """
 
 import fcntl
@@ -18,61 +27,23 @@ import time
 import json
 import signal
 import sys
-import threading
-import queue
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, Tuple
 import numpy as np
 
-# inotify for file watching
-try:
-    from watchdog.observers import Observer
-    from watchdog.events import FileSystemEventHandler, FileCreatedEvent
-    WATCHDOG_AVAILABLE = True
-except ImportError:
-    WATCHDOG_AVAILABLE = False
-
-# Imports
 from hf_timestd.core.metrology_engine import MetrologyEngine
 from hf_timestd.models import L1MetrologyMeasurement
 from hf_timestd.io.hdf5_writer import DataProductWriter
 from hf_timestd.data_product_registry import DataProductRegistry
 from hf_timestd.interfaces.data_models import TimingConfig, TimingAuthority
-# Needed for binary reading
-try:
-    from hf_timestd.io.tiered_storage import TieredStorageManager
-except ImportError:
-    TieredStorageManager = None
+from hf_timestd.core.ring_buffer import (
+    RingBufferError,
+    RingBufferOverrunError,
+)
+from hf_timestd.core.ring_buffer_reader import RingBufferReader
 
 logger = logging.getLogger(__name__)
-
-
-class MinuteFileHandler(FileSystemEventHandler):
-    """Watchdog handler that detects new minute files (.json sidecars)."""
-    
-    def __init__(self, channel_name: str, file_queue: queue.Queue):
-        super().__init__()
-        self.channel_name = channel_name
-        self.file_queue = file_queue
-    
-    def on_created(self, event):
-        """Called when a file is created."""
-        if event.is_directory:
-            return
-        
-        path = Path(event.src_path)
-        # We watch for .json files as they're written after .bin.zst
-        # This ensures the binary file is complete
-        if path.suffix == '.json' and path.stem.isdigit():
-            minute_boundary = int(path.stem)
-            logger.debug(f"{self.channel_name}: Detected new minute file: {minute_boundary}")
-            try:
-                self.file_queue.put_nowait((minute_boundary, path.parent))
-            except queue.Full:
-                logger.warning(
-                    f"{self.channel_name}: file_queue full, dropping minute {minute_boundary}"
-                )
 
 
 class MetrologyService:
@@ -85,7 +56,6 @@ class MetrologyService:
         config: Dict[str, Any],
         channel_name: str,
         frequency_hz: float,
-        archive_dir: Path,
         output_dir: Path,
         receiver_grid: str,
         station_config: Dict[str, Any] = None
@@ -93,7 +63,6 @@ class MetrologyService:
         self.config = config
         self.channel_name = channel_name
         self.frequency_hz = frequency_hz
-        self.archive_dir = Path(archive_dir)
         self.output_dir = Path(output_dir)
         self.receiver_grid = receiver_grid
         self.station_config = station_config or {}
@@ -145,7 +114,10 @@ class MetrologyService:
         lon = self.station_config.get('longitude')
         
         self.engine = MetrologyEngine(
-            raw_buffer_dir=self.archive_dir,
+            # raw_buffer_dir is a legacy constructor argument that the
+            # engine stores but no longer reads.  Pass a placeholder so
+            # we don't have to change the engine signature in Phase 2.
+            raw_buffer_dir=Path('/dev/null'),
             output_dir=self.output_dir,
             channel_name=self.channel_name,
             frequency_hz=self.frequency_hz,
@@ -176,47 +148,10 @@ class MetrologyService:
             station_metadata=self.station_config
         )
         
-        # Tiered Storage (Hot/Cold buffer)
-        self._tiered_manager = None
-        if TieredStorageManager:
-            # Import config class
-            from hf_timestd.core.tiered_storage import TieredStorageConfig
-            # archive_dir is typically /dev/shm/timestd/raw_buffer/CHANNEL
-            # We need hot_buffer_root = /dev/shm/timestd and cold_buffer_root = /var/lib/timestd
-            hot_root = self.archive_dir.parent.parent  # /dev/shm/timestd
-            cold_root = Path('/var/lib/timestd')
-            tiered_hot_minutes = None
-            tiered_ram_percent = None
-            try:
-                tiered_hot_minutes = self.station_config.get('tiered_hot_minutes')
-                tiered_ram_percent = self.station_config.get('tiered_ram_percent')
-                if tiered_ram_percent is None:
-                    tiered_ram_percent = self.station_config.get('ram_percent')
-            except Exception:
-                pass
-            tiered_config = TieredStorageConfig(
-                hot_buffer_root=hot_root,
-                cold_buffer_root=cold_root,
-                auto_configure=(tiered_hot_minutes is None),
-                hot_minutes=int(tiered_hot_minutes) if tiered_hot_minutes is not None else 5,
-                ram_percent=float(tiered_ram_percent) if tiered_ram_percent is not None else TieredStorageConfig.ram_percent,
-                num_channels=1,
-            )
-            self._tiered_manager = TieredStorageManager(tiered_config)
-            logger.info(f"Tiered storage manager initialized: hot={hot_root}, cold={cold_root}")
-        
-        # File watcher (inotify-based) for immediate processing
-        # Bounded: ~1 hour of per-minute events (9 channels × 60 min).
-        # put_nowait in MinuteFileHandler will log and drop on overflow rather
-        # than blocking the inotify thread indefinitely.
-        self._file_queue = queue.Queue(maxsize=60)
-        self._observer = None
-        self._use_file_watcher = WATCHDOG_AVAILABLE
-        if self._use_file_watcher:
-            self._setup_file_watcher()
-        else:
-            logger.warning("watchdog not available, falling back to polling mode")
-        
+        # Ring buffer reader — lazily attached in _run_ringbuffer_mode so
+        # that a producer restart during our startup does not race us.
+        self._ring_reader: Optional[RingBufferReader] = None
+
         # CHU FSK Writer (for CHU channels only)
         self.fsk_writer = None
         if 'CHU' in channel_name.upper():
@@ -355,216 +290,234 @@ class MetrologyService:
              
         logger.info(f"MetrologyService initialized for {channel_name}")
 
-    def _setup_file_watcher(self):
-        """Set up inotify-based file watcher for immediate processing."""
-        if not WATCHDOG_AVAILABLE:
-            return
-        
-        # Watch today's date directory specifically (more reliable than recursive)
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        watch_dir = self.archive_dir / today
-        
-        # Ensure directory exists
-        watch_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create observer and handler
-        self._observer = Observer()
-        self._file_handler = MinuteFileHandler(self.channel_name, self._file_queue)
-        self._current_watch_date = today
-        
-        # Watch the specific date directory (non-recursive is more reliable on tmpfs)
-        self._observer.schedule(self._file_handler, str(watch_dir), recursive=False)
-        self._observer.start()
-        logger.info(f"File watcher started on {watch_dir}")
-    
-    def _stop_file_watcher(self):
-        """Stop the file watcher."""
-        if self._observer:
-            self._observer.stop()
-            self._observer.join(timeout=5.0)
-            self._observer = None
-            logger.info("File watcher stopped")
-
-    def _check_date_rollover(self):
-        """Re-register the inotify watch if the UTC date has changed.
-
-        Called from the main loop poll tick (~every 5s).  When UTC midnight
-        passes, the date directory changes so the existing Observer watch
-        points at a directory that will receive no new files.  We stop and
-        restart the observer on the new date directory.
-        """
-        if not WATCHDOG_AVAILABLE:
-            return
-        today = datetime.now(timezone.utc).strftime('%Y%m%d')
-        if today != getattr(self, '_current_watch_date', None):
-            logger.info(
-                f"Date rollover: {self._current_watch_date} -> {today}"
-                f" — re-registering inotify watch"
-            )
-            self._stop_file_watcher()
-            self._setup_file_watcher()
+    # Poll interval for the ring-buffer consumer loop.
+    _RING_POLL_SEC = 0.5
+    # How long (seconds) to wait past a minute boundary before extracting.
+    # Keeps the producer a little ahead of us on every minute and masks
+    # jitter in the first few batches of the next minute.
+    _RING_BOUNDARY_SETTLE_SEC = 0.5
+    # Fresh bootstrap sits this many minutes behind the head so the very
+    # first extract is comfortably inside the ring.
+    _RING_BOOTSTRAP_LAG_MIN = 2
+    # On RingBufferOverrunError the consumer jumps forward this many
+    # minutes past whatever the current head is so the next extract lands
+    # in freshly-written territory.
+    _RING_OVERRUN_JUMP_MIN = 2
+    # How long (seconds) of head stagnation triggers a "recorder wedged"
+    # log line.  Real stalls are caught by the systemd watchdog pattern
+    # via the pipeline watchdog; this is diagnostics only.
+    _RING_STALL_WARN_SEC = 120.0
 
     def run(self):
-        """Main service loop with inotify-based file watching."""
+        """Main service loop — attach to the ring buffer and consume minutes."""
         self.running = True
         self._resource_guardian = getattr(self, '_resource_guardian', None)
-        logger.info("Starting MetrologyService loop")
-        
-        # Handle signals
+        logger.info("Starting MetrologyService loop (ring-buffer mode)")
+
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
-        
+
         try:
-            if self._use_file_watcher:
-                logger.info("Entering main loop (inotify mode)")
-                self._run_inotify_mode()
-            else:
-                logger.info("Entering main loop (polling mode)")
-                self._run_polling_mode()
-                
+            self._run_ringbuffer_mode()
         except Exception as e:
             logger.error(f"MetrologyService crashed: {e}", exc_info=True)
         finally:
             self.stop()
-    
-    # Hot buffer holds this many minutes.  Poll fallback never looks
-    # further back — if data has left the hot buffer it's too late for
-    # real-time metrology.
-    HOT_BUFFER_MINUTES = 5
 
-    def _run_inotify_mode(self):
-        """Run using inotify-based file watching with polling fallback.
-
-        Reads ONLY from the hot buffer (/dev/shm).  No backlog scan,
-        no cold-archive fallback, no retry backoff — if the file is in
-        RAM it's available instantly.
-        """
-        last_poll_time = time.time()
-        last_success_time = time.time()
-        poll_interval = 5.0  # Poll every 5 seconds as fallback
-        
+    def _attach_ring(self) -> Optional[RingBufferReader]:
+        """Attach to the per-channel ring buffer, retrying until the producer is up."""
         while self.running:
             try:
-                # Wait for new file notification (with short timeout)
-                minute_boundary, file_dir = self._file_queue.get(timeout=2.0)
-                
-                if minute_boundary not in self.processed_minutes:
-                    # Hot-buffer read — no archiver race, no retry needed.
-                    # Small delay lets the recorder finish flushing the .json.
-                    time.sleep(0.5)
-                    logger.info(f"Processing minute {minute_boundary} (inotify)")
-                    success = self.process_minute(minute_boundary)
-                    if success:
-                        self.processed_minutes.add(minute_boundary)
-                        self._cleanup_processed_set()
-                        last_success_time = time.time()
-                        logger.info(f"Minute {minute_boundary} processed successfully")
-                    else:
-                        logger.debug(f"Minute {minute_boundary} not in hot buffer or processing failed")
-                        
-            except queue.Empty:
-                # Resource watchdog (runs every ~60s, cheap no-op otherwise)
-                if self._resource_guardian:
+                reader = RingBufferReader.attach(self.channel_name)
+                logger.info(
+                    f"[{self.channel_name}] attached to ring buffer "
+                    f"(sample_rate={reader._sample_rate}, "
+                    f"ring_size={reader._ring_size_samples})"
+                )
+                return reader
+            except RingBufferError as exc:
+                logger.info(
+                    f"[{self.channel_name}] waiting for producer: {exc}"
+                )
+                time.sleep(2.0)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error(
+                    f"[{self.channel_name}] ring attach failed: {exc}",
+                    exc_info=True,
+                )
+                time.sleep(2.0)
+        return None
+
+    def _run_ringbuffer_mode(self):
+        """Consume sample windows from the producer's per-channel ring buffer.
+
+        Poll the write cursor every ``_RING_POLL_SEC`` seconds.  When the
+        head has advanced past ``next_minute + 60 + settle``, extract 60 s
+        of samples starting at ``next_minute`` and hand them to
+        :meth:`_process_minute_data`.
+
+        Recovery semantics:
+        - No samples yet / anchor not installed → poll.
+        - :class:`RingBufferOverrunError` → jump forward to
+          ``head_utc - _RING_OVERRUN_JUMP_MIN * 60`` and continue.
+        - Producer restart → next ``extract_interval`` call raises overrun
+          when the epoch changes; handled as above.
+        """
+        from hf_timestd.core.buffer_timing import resolve_buffer_timing
+
+        self._ring_reader = self._attach_ring()
+        if self._ring_reader is None:
+            return
+        reader = self._ring_reader
+
+        next_minute: Optional[int] = None
+        last_head_utc: Optional[float] = None
+        last_head_change = time.monotonic()
+        last_guardian_check = 0.0
+
+        while self.running:
+            try:
+                now_mono = time.monotonic()
+
+                # Resource guardian — cheap, no-op most of the time.
+                if (
+                    self._resource_guardian
+                    and now_mono - last_guardian_check >= 30.0
+                ):
                     from hf_timestd.core.resource_guardian import ResourceState
                     rs = self._resource_guardian.watchdog_check()
+                    last_guardian_check = now_mono
                     if rs.state in (ResourceState.STOP, ResourceState.EMERGENCY):
-                        logger.critical(f"Resource guardian: {rs.message} — stopping")
+                        logger.critical(
+                            f"[{self.channel_name}] resource guardian: "
+                            f"{rs.message} — stopping"
+                        )
                         self.running = False
                         break
 
-                # Fallback: poll hot buffer for new files (inotify may miss events on tmpfs)
-                now = time.time()
-                if now - last_poll_time >= poll_interval:
-                    last_poll_time = now
-                    if self._poll_for_new_files(
-                        lookback_minutes=self.HOT_BUFFER_MINUTES
-                    ):
-                        last_success_time = time.time()
-                    elif (now - last_success_time) > 300:
+                cursor = reader.write_cursor()
+                if cursor == 0:
+                    time.sleep(self._RING_POLL_SEC)
+                    continue
+                head_utc = reader.head_utc(cursor)
+                if head_utc is None:
+                    time.sleep(self._RING_POLL_SEC)
+                    continue
+
+                # Bootstrap: seed the first minute to process once the
+                # head UTC is known.  Start a couple of minutes back so
+                # the very first extract is well inside the ring window.
+                if next_minute is None:
+                    next_minute = (
+                        (int(head_utc) // 60) * 60
+                        - self._RING_BOOTSTRAP_LAG_MIN * 60
+                    )
+                    logger.info(
+                        f"[{self.channel_name}] bootstrap: head_utc={head_utc:.3f}, "
+                        f"next_minute={next_minute}"
+                    )
+
+                # Head stagnation check for diagnostics only.
+                if last_head_utc is None or head_utc > last_head_utc:
+                    last_head_utc = head_utc
+                    last_head_change = now_mono
+                elif (now_mono - last_head_change) > self._RING_STALL_WARN_SEC:
+                    logger.warning(
+                        f"[{self.channel_name}] ring head stagnant for "
+                        f"{(now_mono - last_head_change):.0f}s — "
+                        f"recorder may be wedged"
+                    )
+                    last_head_change = now_mono  # rate-limit
+
+                target_end = next_minute + 60.0 + self._RING_BOUNDARY_SETTLE_SEC
+                if head_utc < target_end:
+                    time.sleep(self._RING_POLL_SEC)
+                    continue
+
+                try:
+                    samples, metadata = reader.extract_interval(
+                        utc_start=float(next_minute),
+                        duration_sec=60.0,
+                    )
+                except RingBufferOverrunError as exc:
+                    new_next = (
+                        (int(head_utc) // 60) * 60
+                        - self._RING_OVERRUN_JUMP_MIN * 60
+                    )
+                    logger.warning(
+                        f"[{self.channel_name}] overrun on minute {next_minute}: "
+                        f"{exc}; resyncing next_minute={new_next}"
+                    )
+                    next_minute = new_next
+                    continue
+                except RingBufferError as exc:
+                    logger.debug(
+                        f"[{self.channel_name}] extract_interval failed: {exc}"
+                    )
+                    time.sleep(self._RING_POLL_SEC)
+                    continue
+
+                buffer_timing = resolve_buffer_timing(
+                    metadata, sample_rate=self.engine.sample_rate
+                )
+                if buffer_timing.source == 'no_timing':
+                    logger.warning(
+                        f"[{self.channel_name}] no RTP timing for minute "
+                        f"{next_minute}, skipping"
+                    )
+                    next_minute += 60
+                    continue
+                system_time = buffer_timing.sample0_utc
+                rtp_timestamp = int(metadata.get('start_rtp_timestamp', 0))
+
+                if next_minute not in self.processed_minutes:
+                    logger.info(
+                        f"[{self.channel_name}] processing minute {next_minute}"
+                    )
+                    success = self._process_minute_data(
+                        minute_boundary=next_minute,
+                        iq_samples=samples,
+                        system_time=system_time,
+                        rtp_timestamp=rtp_timestamp,
+                        metadata=metadata,
+                        buffer_timing=buffer_timing,
+                    )
+                    if success:
+                        self.processed_minutes.add(next_minute)
+                        self._cleanup_processed_set()
+                        logger.info(
+                            f"[{self.channel_name}] minute {next_minute} "
+                            f"processed successfully"
+                        )
+                    else:
                         logger.warning(
-                            f"No successful minute processed for "
-                            f"{(now - last_success_time):.0f}s — "
-                            f"recorder may be down or hot buffer empty"
+                            f"[{self.channel_name}] minute {next_minute} "
+                            f"processing failed"
                         )
 
-                # Re-register inotify watch if UTC date has rolled over
-                self._check_date_rollover()
-    
-    def _run_polling_mode(self):
-        """Fallback polling mode when watchdog is not available."""
-        while self.running:
-            # Resource watchdog (runs every ~60s, cheap no-op otherwise)
-            if self._resource_guardian:
-                from hf_timestd.core.resource_guardian import ResourceState
-                rs = self._resource_guardian.watchdog_check()
-                if rs.state in (ResourceState.STOP, ResourceState.EMERGENCY):
-                    logger.critical(f"Resource guardian: {rs.message} — stopping")
-                    self.running = False
-                    break
+                next_minute += 60
 
-            # Determine next minute to process
-            target_minute = self._get_latest_minute()
-            logger.info(f"Target minute: {target_minute}")
-            
-            # Process
-            if target_minute not in self.processed_minutes:
-                logger.info(f"Processing minute {target_minute}")
-                success = self.process_minute(target_minute)
-                if success:
-                    self.processed_minutes.add(target_minute)
-                    self._cleanup_processed_set()
-                    logger.info(f"Minute {target_minute} processed successfully")
-                else:
-                    logger.debug(f"Minute {target_minute} not ready yet")
-            
-            # Wait until next minute boundary (with 5s margin)
-            now = time.time()
-            seconds_into_minute = now % 60
-            wait_time = max(5.0, 65.0 - seconds_into_minute)
-            logger.debug(f"Waiting {wait_time:.1f}s for next minute")
-            time.sleep(wait_time)
-    
-    def _poll_for_new_files(self, lookback_minutes: int = 3) -> bool:
-        """Poll hot buffer for unprocessed minutes (fallback when inotify misses events).
+            except Exception as exc:
+                logger.error(
+                    f"[{self.channel_name}] ring consumer error: {exc}",
+                    exc_info=True,
+                )
+                time.sleep(1.0)
 
-        Only scans back lookback_minutes (≤ HOT_BUFFER_MINUTES).
-        Returns True if at least one minute was processed successfully.
+    def _process_minute_data(
+        self,
+        minute_boundary: int,
+        iq_samples: np.ndarray,
+        system_time: float,
+        rtp_timestamp: int,
+        metadata: Dict[str, Any],
+        buffer_timing,
+    ) -> bool:
+        """Run the engine on pre-extracted samples and write data products.
+
+        This is the tail of the old file-mode ``process_minute`` — every
+        caller now feeds samples from the ring buffer.
         """
-        now = time.time()
-        current_minute = (int(now) // 60) * 60
-        any_success = False
-        
-        for minutes_ago in range(lookback_minutes, 0, -1):
-            target_minute = current_minute - (minutes_ago * 60)
-            if target_minute in self.processed_minutes:
-                continue
-            
-            # _read_binary_minute reads hot buffer only
-            data = self._read_binary_minute(target_minute)
-            if data is not None:
-                logger.info(f"Processing minute {target_minute} (poll detected)")
-                success = self.process_minute(target_minute)
-                if success:
-                    self.processed_minutes.add(target_minute)
-                    self._cleanup_processed_set()
-                    any_success = True
-                    logger.info(f"Minute {target_minute} processed successfully")
-        return any_success
-
-    def process_minute(self, minute_boundary: int) -> bool:
-        """Process a single minute."""
-        # Read IQ Data
-        data = self._read_binary_minute(minute_boundary)
-        if data is None:
-            logger.debug(f"No data for minute {minute_boundary}")
-            return False
-            
-        iq_samples, system_time, rtp_timestamp, metadata = data
-        
-        # Build buffer timing solution from metadata snapshots
-        from hf_timestd.core.buffer_timing import resolve_buffer_timing
-        buffer_timing = resolve_buffer_timing(metadata, sample_rate=self.engine.sample_rate)
-        
         # Run Engine
         try:
             results = self.engine.process_minute(
@@ -908,7 +861,12 @@ class MetrologyService:
         """Stop service."""
         logger.info("Stopping MetrologyService...")
         self.running = False
-        self._stop_file_watcher()
+        if self._ring_reader is not None:
+            try:
+                self._ring_reader.close()
+            except Exception as _e:
+                logger.debug(f"Ring reader close: {_e}")
+            self._ring_reader = None
         for _writer_attr in (
             'writer', 'fsk_writer', 'test_signal_writer',
             'tick_writer', 'attempts_writer', 'tick_phase_writer',
@@ -1021,155 +979,6 @@ class MetrologyService:
         logger.info(f"Received signal {signum}")
         self.stop()
 
-    def _get_latest_minute(self) -> int:
-        """Get latest complete minute (wall clock - 3 min).
-        
-        Files are written at the END of each minute by the core recorder
-        into the hot buffer (/dev/shm).  A 3-minute delay ensures:
-        - The minute has fully elapsed
-        - The recorder has flushed .bin + .json to the hot buffer
-        """
-        now = time.time()
-        return ((int(now) // 60) - 3) * 60
-
-    def _read_binary_minute(self, target_minute: int) -> Optional[Tuple[np.ndarray, float, int]]:
-        """Read binary IQ data from the HOT BUFFER ONLY.
-
-        Metrology is a real-time service: if the data isn't in /dev/shm
-        it is already too old for UTC reconstruction.  Cold archive reads
-        serve physics, web-api, and GRAPE — not real-time metrology.
-        """
-        from datetime import datetime
-        dt = datetime.fromtimestamp(target_minute, tz=timezone.utc)
-        date_str = dt.strftime('%Y%m%d')
-        
-        # 1. Locate file — HOT BUFFER ONLY
-        bin_path = None
-        json_path = None
-        
-        if self._tiered_manager:
-            bin_path = self._tiered_manager.find_minute_file_hot_only(
-                self.channel_name, target_minute, date_str
-            )
-            if bin_path:
-                json_path = bin_path.parent / f"{target_minute}.json"
-        else:
-            # No tiered manager — archive_dir IS the hot buffer (/dev/shm/...)
-            base = self.archive_dir / date_str / str(target_minute)
-            for ext in ['.bin', '.bin.zst', '.bin.lz4']:
-                p = Path(str(base) + ext)
-                if p.exists():
-                    bin_path = p
-                    json_path = Path(str(base) + ".json")
-                    break
-        
-        if not bin_path:
-            logger.debug(f"No hot-buffer file for minute {target_minute}")
-            return None
-            
-        # 2. Read Metadata
-        metadata = {}
-        if json_path and json_path.exists():
-            try:
-                with open(json_path) as f:
-                    metadata = json.load(f)
-            except (OSError, IOError, json.JSONDecodeError) as e:
-                logger.debug(f"Could not load metadata file {json_path}: {e}")
-                
-        # 3. Read Data
-        try:
-            # Decompression logic...
-            # For brevity, implementing basic read. 
-            # In production, ensure zstd/lz4 imports.
-            # I will assume standard .bin for now or use library if available.
-             
-            iq_samples = self._load_iq_file(bin_path)
-            if iq_samples is None:
-                return None
-                
-            # 4. Determine Time
-            # -------------------------------------------------------------
-            # ARCHITECTURE (2026-01-29):
-            # The raw buffer metadata already contains start_system_time which is
-            # NTP-derived wallclock time from the GPSDO "steel ruler". Use this
-            # directly - it's already per-channel and doesn't require RTP conversion.
-            #
-            # The bootstrap reference is SSRC-specific and cannot be used across
-            # channels (each channel has its own RTP epoch).
-            #
-            # Timing Authority Check (2026-02-01):
-            # - RTP mode: start_system_time from metadata IS authoritative (GPS+PPS)
-            #   No need to wait for bootstrap BCD/FSK confirmation
-            # - FUSION mode: Process immediately with wide search window, engine handles lock
-            #
-            # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
-            # The engine's fusion_state handles timing lock internally - no external
-            # bootstrap service or reference file needed. We always process; the engine
-            # uses wider search windows until lock is achieved.
-            if not self._is_rtp_authority:
-                # Log fusion state for diagnostics
-                if self.engine.fusion_state is not None:
-                    fs = self.engine.fusion_state
-                    if self.minutes_processed % 5 == 0:
-                        logger.info(f"[FUSION] lock_tier={fs.lock_tier.name}, "
-                                   f"stations={list(fs._stations_seen)}, "
-                                   f"measurements={len(fs.measurements)}")
-            
-            # Derive system_time from the RTP timestamp chain — the sole
-            # timing authority.  start_system_time is NOT trusted because
-            # the writer may have computed it from a stale GPS/RTP mapping.
-            from .buffer_timing import resolve_buffer_timing
-            buffer_timing = resolve_buffer_timing(metadata)
-            if buffer_timing.source == 'no_timing':
-                logger.warning(f"No RTP timing in metadata for {target_minute}, skipping")
-                return None
-            system_time = buffer_timing.sample0_utc
-            rtp_timestamp = int(metadata.get('start_rtp_timestamp', 0))
-            logger.info(
-                f"[TIMING_DIAG] Minute {target_minute}: source={buffer_timing.source}, "
-                f"system_time={system_time:.6f}"
-            )
-
-            # No padding — the buffer is whatever size it is.
-            # BufferTiming handles the sample-to-UTC mapping regardless of size.
-                 
-            return iq_samples, system_time, rtp_timestamp, metadata
-            
-        except Exception as e:
-            logger.error(f"Read error: {e}")
-            return None
-
-    def _load_iq_file(self, path: Path) -> Optional[np.ndarray]:
-        """Helper to load IQ file."""
-        try:
-            if path.suffix == '.zst':
-                import zstandard as zstd
-                with open(path, 'rb') as f:
-                    dctx = zstd.ZstdDecompressor()
-                    data = dctx.decompress(f.read())
-                    # .copy() so the array owns its memory; without it the
-                    # numpy array holds a reference to the bytes object,
-                    # preventing GC of the large decompressed buffer.
-                    return np.frombuffer(data, dtype=np.complex64).copy()
-            elif path.suffix == '.lz4':
-                import lz4.frame
-                with open(path, 'rb') as f:
-                    data = lz4.frame.decompress(f.read())
-                    return np.frombuffer(data, dtype=np.complex64).copy()
-            else:
-                # np.memmap keeps the file descriptor open and pages mapped.
-                # Read into a regular array so the fd is released promptly.
-                mm = np.memmap(path, dtype=np.complex64, mode='r')
-                arr = np.array(mm)
-                del mm
-                return arr
-        except ImportError:
-            logger.error("Compression library missing")
-            return None
-        except (OSError, IOError, ValueError) as e:
-            logger.debug(f"Error loading IQ file {path}: {e}")
-            return None
-
     def _write_status(self, minute: int, results: List[L1MetrologyMeasurement]):
         """Write status.json."""
         try:
@@ -1199,33 +1008,40 @@ if __name__ == "__main__":
     import argparse
     import sys
     
-    parser = argparse.ArgumentParser(description="Metrology Service (Phase 1)")
-    
+    parser = argparse.ArgumentParser(description="Metrology Service")
+
     # Required args
-    parser.add_argument("--archive-dir", required=True, type=Path, help="Input raw buffer directory")
     parser.add_argument("--output-dir", required=True, type=Path, help="Output directory for L1 products")
     parser.add_argument("--channel-name", required=True, help="Channel name (e.g. WWV_15000)")
     parser.add_argument("--frequency-hz", required=True, type=float, help="Center frequency in Hz")
-    
+
     # Optional Station Metadata
     parser.add_argument("--callsign", default="UNKNOWN", help="Receiver callsign")
     parser.add_argument("--grid-square", default="XX00xx", help="Receiver grid square")
     parser.add_argument("--receiver-name", default="HF-TimeStd", help="Receiver name")
     parser.add_argument("--station-id", default="UNKNOWN", help="Station ID")
     parser.add_argument("--instrument-id", default="UNKNOWN", help="Instrument ID")
-    
+
     # Optional Precise Coordinates
     parser.add_argument("--latitude", type=float, help="Receiver latitude")
     parser.add_argument("--longitude", type=float, help="Receiver longitude")
-    
+
     # Service Config
-    parser.add_argument("--poll-interval", type=float, default=10.0, help="Polling interval (not used in current loop logic but kept for compat)")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
-    parser.add_argument("--state-file", type=Path, help="Persistence state file")
-    parser.add_argument("--use-tiered-storage", action="store_true", help="Enable tiered storage manager")
-    parser.add_argument("--config-file", type=Path, default=Path("/opt/hf-timestd/config/timestd-config.toml"),
+    parser.add_argument("--state-file", type=Path, help="Persistence state file (legacy; unused)")
+    parser.add_argument("--config-file", type=Path, default=Path("/etc/hf-timestd/timestd-config.toml"),
                         help="Path to timestd-config.toml for timing authority settings")
-    
+
+    # Legacy args, accepted and ignored for backwards compatibility with
+    # older systemd unit files that still pass them through.  Removed
+    # from the template unit in Phase 2.
+    parser.add_argument("--archive-dir", type=Path, default=None,
+                        help="(deprecated) ignored — metrology now reads the ring buffer")
+    parser.add_argument("--use-tiered-storage", action="store_true",
+                        help="(deprecated) ignored — metrology no longer uses tiered storage")
+    parser.add_argument("--poll-interval", type=float, default=10.0,
+                        help="(deprecated) ignored — ring poll interval is internal")
+
     args = parser.parse_args()
     
     # Setup Logging - force level on root logger since basicConfig may be ignored
@@ -1256,11 +1072,24 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Could not load config file {args.config_file}: {e}")
     
+    # Warn once if deprecated args are still being passed by an old
+    # systemd unit file.  They are accepted for startup compatibility
+    # but have no effect.
+    if args.archive_dir is not None:
+        logger.warning(
+            "--archive-dir is deprecated and ignored; metrology reads "
+            "the producer's ring buffer"
+        )
+    if args.use_tiered_storage:
+        logger.warning(
+            "--use-tiered-storage is deprecated and ignored"
+        )
+
     # Config dict construction - merge TOML timing section
     config = {
-        "sample_rate": 24000, # Hardcoded for now, or could be arg/config
-        "tiered_storage": args.use_tiered_storage,
-        "timing": toml_config.get("timing", {})  # Pass timing section for authority mode
+        "sample_rate": 24000,
+        "timing": toml_config.get("timing", {}),  # Pass timing section for authority mode
+        "metrology": toml_config.get("metrology", {}),
     }
     
     station_config = {
@@ -1302,10 +1131,9 @@ if __name__ == "__main__":
             config=config,
             channel_name=args.channel_name,
             frequency_hz=args.frequency_hz,
-            archive_dir=args.archive_dir,
             output_dir=args.output_dir,
             receiver_grid=args.grid_square,
-            station_config=station_config
+            station_config=station_config,
         )
         service._resource_guardian = guardian
         service.run()

@@ -1,8 +1,11 @@
 [Unit]
 Description=HF-TimeStd Metrology — %i
 Documentation=https://github.com/mijahauan/hf-timestd
+# Phase 2: metrology reads from the core-recorder's ring buffer.
+# Requires (not just Wants) the producer so workers don't loop attaching.
 After=timestd-core-recorder.service
-Wants=timestd-core-recorder.service
+Requires=timestd-core-recorder.service
+RequiresMountsFor=/dev/shm
 # Isolate failures: one channel crashing doesn't affect others
 PartOf=timestd-metrology.target
 # Prevent old monolithic service from running alongside template instances
@@ -20,12 +23,9 @@ EnvironmentFile=/etc/hf-timestd/metrology-channels/%i.env
 Environment=MALLOC_ARENA_MAX=2
 
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.metrology_service \
-    --archive-dir ${ARCHIVE_ROOT}/%i \
     --output-dir ${DATA_ROOT}/phase2/%i \
     --channel-name %i \
     --frequency-hz ${FREQUENCY_HZ} \
-    --state-file ${DATA_ROOT}/state/phase2-%i.json \
-    --poll-interval 10.0 \
     --log-level ${TIMESTD_LOG_LEVEL} \
     --callsign ${CALLSIGN} \
     --grid-square ${GRID_SQUARE} \
@@ -33,8 +33,7 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.metrology_service \
     --station-id ${STATION_ID} \
     --instrument-id ${INSTRUMENT_ID} \
     --latitude ${LATITUDE} \
-    --longitude ${LONGITUDE} \
-    --use-tiered-storage
+    --longitude ${LONGITUDE}
 
 WorkingDirectory=/var/lib/timestd
 
