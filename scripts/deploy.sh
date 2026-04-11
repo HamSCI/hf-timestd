@@ -12,18 +12,25 @@
 #      (unless --force-dirty).  This is the single rule that keeps
 #      production from drifting away from the git history.
 #   2. Optionally `git pull` (--pull).
-#   3. `pip install -e .` into /opt/hf-timestd/venv.  No-op unless
+#   3. Verify the service user (timestd) can traverse and read the
+#      source tree.  An editable install into a directory the service
+#      user cannot reach will succeed as root but fail at systemd
+#      runtime — we catch that here before pip writes a broken .pth.
+#   4. `pip install -e .` into /opt/hf-timestd/venv.  No-op unless
 #      pyproject.toml or its dependencies changed; refreshes
-#      entry-point shims.
-#   4. `systemctl restart` the units listed in deploy.toml [systemd].
+#      entry-point shims.  Post-install verify runs as the service
+#      user, not root.
+#   5. `systemctl restart` the units listed in deploy.toml [systemd].
 #      core-recorder is held back unless --restart-recorder, since
 #      restarting it causes a brief data gap.
-#   5. Print the active git SHA so you can see what just deployed.
+#   6. Print the active git SHA so you can see what just deployed.
 #
 # Pattern A means: the venv imports source files from this repo via an
 # editable install (pip install -e .).  After deploy.sh, what is running
 # in production is byte-identical to `git rev-parse HEAD` here.  No
-# wheel snapshot, no /opt copy, no drift.
+# wheel snapshot, no /opt copy, no drift.  The canonical repo lives at
+# /opt/git/hf-timestd so the service user can reach it without relying
+# on home-directory permissions.
 #
 # Usage:
 #   sudo ./scripts/deploy.sh                  # check, install editable, restart
@@ -36,9 +43,9 @@
 # Exit codes:
 #   0  success
 #   1  uncommitted changes blocked the run
-#   2  pip install failed
+#   2  pip install failed or post-install import verify failed
 #   3  systemctl restart failed
-#   4  generic error
+#   4  generic error (including source tree unreachable by service user)
 # =============================================================================
 
 set -euo pipefail
@@ -49,6 +56,13 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALL_DIR="/opt/hf-timestd"
 VENV_DIR="$INSTALL_DIR/venv"
 DEPLOY_TOML="$PROJECT_DIR/deploy.toml"
+
+# Service user the systemd units run as.  An editable install is only
+# useful if this user can actually reach the source tree at runtime,
+# so we verify traversability before `pip install -e` and re-verify by
+# importing as this user after.  Keep in sync with systemd/*.service
+# User= directives.
+SERVICE_USER="timestd"
 
 DO_GIT_PULL=false
 FORCE_DIRTY=false
@@ -64,7 +78,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 log_step()  { echo -e "\n${BLUE}━━━ $* ━━━${NC}" >&2; }
 
 usage() {
-    sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -143,8 +157,44 @@ if [[ "$DO_GIT_PULL" == "true" ]]; then
     fi
 fi
 
-# ── Step 3: editable install refresh ────────────────────────────────────────
-log_step "Step 3: pip install -e ."
+# ── Step 3: source-tree traversability pre-flight ──────────────────────────
+# An editable install records $PROJECT_DIR inside the venv's
+# __editable__*.pth file.  If the service user cannot traverse the path
+# (e.g. repo cloned under /home/<someuser> with mode 700), the install
+# succeeds as root but every systemd-managed import fails at runtime.
+# We hit this on bee3 (/home/mjh 700) and resolved it by relocating
+# the canonical repo to /opt/git/hf-timestd.  Catch the trap here
+# before pip writes the broken .pth file.
+log_step "Step 3: source-tree traversability as $SERVICE_USER"
+if ! id -u "$SERVICE_USER" &>/dev/null; then
+    log_warn "user '$SERVICE_USER' does not exist — run scripts/install.sh first"
+    log_warn "skipping traversability check"
+else
+    PROBE="$PROJECT_DIR/src/hf_timestd/__init__.py"
+    if ! sudo -u "$SERVICE_USER" test -r "$PROBE"; then
+        log_error "$SERVICE_USER cannot read $PROBE"
+        log_error ""
+        log_error "an editable install into $VENV_DIR would succeed here as"
+        log_error "root but the service would fail to import hf_timestd at"
+        log_error "runtime, because one of the parent directories of"
+        log_error "$PROJECT_DIR is not traversable by $SERVICE_USER"
+        log_error "(typically a home directory with mode 700)."
+        log_error ""
+        log_error "fix, in order of preference:"
+        log_error "  1. relocate the canonical repo to /opt/git/hf-timestd"
+        log_error "     (the 'Pattern A' layout used on bee3 — symlink"
+        log_error "     ~/git/hf-timestd back for developer convenience)"
+        log_error "  2. chmod g+rx the parent directories and add"
+        log_error "     $SERVICE_USER to the owning group"
+        log_error ""
+        log_error "refusing to deploy."
+        exit 4
+    fi
+    log_info "$SERVICE_USER can read $PROBE"
+fi
+
+# ── Step 4: editable install refresh ────────────────────────────────────────
+log_step "Step 4: pip install -e ."
 if [[ "$DRY_RUN" == "true" ]]; then
     log_info "(dry run) would: $VENV_DIR/bin/pip install -e $PROJECT_DIR"
 else
@@ -157,7 +207,10 @@ else
     fi
     log_info "editable install refreshed"
 
-    # Confirm site-packages now resolves to the canonical source path.
+    # Confirm site-packages now resolves to the canonical source path,
+    # and — crucially — that $SERVICE_USER can actually import it.
+    # The root check alone is not enough: it will happily bless an
+    # install that systemd later cannot read.
     RESOLVED="$("$VENV_DIR/bin/python" -c 'import hf_timestd, inspect; print(inspect.getfile(hf_timestd))')"
     EXPECTED_PREFIX="$PROJECT_DIR/src/hf_timestd/"
     if [[ "$RESOLVED" != "$EXPECTED_PREFIX"* ]]; then
@@ -165,10 +218,20 @@ else
         log_error "the editable install did not take effect; investigate before restarting services"
         exit 2
     fi
-    log_info "venv import path: $RESOLVED"
+    log_info "venv import path (root): $RESOLVED"
+
+    if id -u "$SERVICE_USER" &>/dev/null; then
+        if ! sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python" -c 'import hf_timestd' &>/dev/null; then
+            log_error "$SERVICE_USER cannot 'import hf_timestd' from $VENV_DIR"
+            log_error "the editable install blessed by root is not reachable by the service user;"
+            log_error "check path traversability, .pth file readability, and venv ownership"
+            exit 2
+        fi
+        log_info "import verified as $SERVICE_USER"
+    fi
 fi
 
-# ── Step 4: systemctl restart (units from deploy.toml) ──────────────────────
+# ── Step 5: systemctl restart (units from deploy.toml) ──────────────────────
 read_units_from_deploy_toml() {
     # Tiny TOML reader good enough for [systemd] units = [...] block.
     # No tomllib in bash, but the structure is regular enough.
@@ -187,7 +250,7 @@ read_units_from_deploy_toml() {
 }
 
 if [[ "$DO_RESTART" == "true" ]]; then
-    log_step "Step 4: restart services from deploy.toml"
+    log_step "Step 5: restart services from deploy.toml"
 
     if [[ ! -f "$DEPLOY_TOML" ]]; then
         log_error "deploy.toml not found at $DEPLOY_TOML"
@@ -230,11 +293,11 @@ if [[ "$DO_RESTART" == "true" ]]; then
         log_warn "core-recorder bounced — expect a few seconds of missing IQ"
     fi
 else
-    log_info "step 4 skipped (--no-restart)"
+    log_info "step 5 skipped (--no-restart)"
 fi
 
-# ── Step 5: report ─────────────────────────────────────────────────────────
-log_step "Step 5: summary"
+# ── Step 6: report ─────────────────────────────────────────────────────────
+log_step "Step 6: summary"
 FINAL_SHA="$(sudo -u "$REPO_OWNER" git -C "$PROJECT_DIR" rev-parse --short HEAD)"
 FINAL_DESC="$(sudo -u "$REPO_OWNER" git -C "$PROJECT_DIR" log -1 --pretty=format:'%h %s')"
 log_info "deployed: $FINAL_DESC"
