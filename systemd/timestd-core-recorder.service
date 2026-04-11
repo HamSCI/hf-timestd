@@ -53,12 +53,13 @@ SyslogIdentifier=timestd-core-recorder
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
 CPUAffinity=0-7
-# MemoryHigh is the soft throttle point; MemoryMax is the hard cap.
-# Ring buffer + archive + Python baseline should stay well under 3 GiB
-# in steady state, but the ring depth scales with available RAM, so
-# leave 4 GiB of headroom.
-MemoryHigh=3G
-MemoryMax=4G
+# Hard memory cap only.  MemoryHigh was removed after a first deploy
+# attempt where setting it to 3G throttled the recorder hard enough to
+# miss the systemd watchdog (180s) with the ring buffer in play — RSS
+# under load is ~3.3 GB (9 × 220 MB ring + ~1.3 GB recorder baseline),
+# which sits above the 3G soft-throttle point and stalls the main loop.
+# Raise MemoryMax for headroom now that the ring is part of RSS.
+MemoryMax=6G
 MemorySwapMax=0
 
 # Security hardening
