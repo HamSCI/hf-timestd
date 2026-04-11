@@ -45,16 +45,23 @@ def get_current_gps_leap_seconds() -> int:
     """Return the current GPS-UTC leap second offset (GPS is ahead of UTC).
 
     Reads /usr/share/zoneinfo/leap-seconds.list (IANA tzdata, updated by the OS
-    package manager when a new leap second is announced).  Falls back to the
-    compile-time constant (18) if the file is absent or unparseable.
+    package manager when a new leap second is announced) and converts from
+    TAI-UTC to GPS-UTC.  Falls back to the compile-time constant (18) if the
+    file is absent or unparseable.
 
-    File format: non-comment lines are:
-        <NTP_timestamp>  <cumulative_leap_seconds>  [# comment]
-    The last such line gives the current total.
+    File format: non-comment lines are
+        <NTP_timestamp>  <DTAI>  [# comment]
+    where DTAI = TAI-UTC in seconds (currently 37).  GPS time is fixed
+    relative to TAI by 19 s, so GPS-UTC = DTAI - 19 (currently 18).  Before
+    this conversion was added, this helper returned the DTAI value directly,
+    which produced a 19-second offset in every UTC derived from radiod's
+    GPS_TIME and showed up as a ~19 s lag in RingBufferReader.head_utc
+    after Phase 2 ring-buffer metrology went live.  Hosts without
+    leap-seconds.list hit the 18 fallback and were accidentally correct.
     """
     try:
         with open("/usr/share/zoneinfo/leap-seconds.list") as fh:
-            last_ls = None
+            last_dtai = None
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith('#'):
@@ -62,11 +69,11 @@ def get_current_gps_leap_seconds() -> int:
                 parts = line.split()
                 if len(parts) >= 2:
                     try:
-                        last_ls = int(parts[1])
+                        last_dtai = int(parts[1])
                     except ValueError:
                         pass
-            if last_ls is not None:
-                return last_ls
+            if last_dtai is not None:
+                return last_dtai - 19  # TAI-UTC → GPS-UTC
     except OSError:
         pass
     logger.debug(
