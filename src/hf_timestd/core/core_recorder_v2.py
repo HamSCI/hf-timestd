@@ -47,7 +47,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("systemd-python not available, watchdog disabled")
 
-from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding
+from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding, generate_multicast_ip
 
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig, RobustManagedStream
@@ -179,18 +179,32 @@ class CoreRecorderV2:
 
         # Station config
         self.station_config = config.get('station', {})
-        
-        # Let radiod use its configured default destination, OR force one if missing.
-        # Logic update: We default to the standard multicast group to ensuring functional channels
-        # when radiod doesn't auto-assign one for F32.
-        self.data_destination = config.get('radiod_multicast_group')
-        if not self.data_destination:
-            # Try to get from individual channel configs if any (though usually global)
-            # or default to a configurable system-wide default if we must.
-            # For now, if None, ka9q-python's RadiodStream will let radiod decide or fail gracefully.
-            logger.info("No explicit radiod_multicast_group in config, letting radiod decide destination")
+
+        # HamSCI client-contract v0.2 §7: each peer client on a station
+        # runs on its own data-multicast group, derived deterministically
+        # from the client identity so standalone installs (no sigmond)
+        # cannot collide with other peer clients on the same host.
+        # Override order:
+        #   1. [ka9q] data_destination — operator override for collisions
+        #   2. [core] radiod_multicast_group — legacy key, honored for
+        #      rollback compatibility during the v0.2 bump
+        #   3. derived from "hf-timestd:<station_id>:<instrument_id>"
+        ka9q_cfg = config.get('ka9q', {}) or {}
+        override = ka9q_cfg.get('data_destination') or config.get('radiod_multicast_group')
+        if override:
+            self.data_destination = override
+            logger.info(
+                f"Using configured data_destination override: {self.data_destination}"
+            )
         else:
-            logger.info(f"Using configured multicast destination: {self.data_destination}")
+            station_id = str(self.station_config.get('id', 'S000000'))
+            instrument_id = str(self.station_config.get('instrument_id', '0'))
+            client_id = f"hf-timestd:{station_id}:{instrument_id}"
+            self.data_destination = generate_multicast_ip(client_id)
+            logger.info(
+                f"Derived data_destination {self.data_destination} from "
+                f"client_id={client_id!r} (contract v0.2 §7)"
+            )
         
         # Channel specs and defaults
         # Channels can be at top level or in recorder section
@@ -571,7 +585,7 @@ class CoreRecorderV2:
                     compression_level=self.recorder_config.get('compression_level', 3),
                     file_duration_sec=self.recorder_config.get('file_duration_sec', 600),
                     use_digital_rf=self.recorder_config.get('save_digital_rf', False),
-                    destination=None,
+                    destination=self.data_destination,
                     low_edge=float(low_edge) if low_edge is not None else None,
                     high_edge=float(high_edge) if high_edge is not None else None,
                     reception_mode=ch_spec.get('reception_mode'),
@@ -612,6 +626,7 @@ class CoreRecorderV2:
                 encoding=Encoding.F32,
                 agc_enable=False,
                 gain=0.0,
+                destination=self.data_destination,
             )
             self._l6_stream = RadiodStream(
                 channel=channel_info,

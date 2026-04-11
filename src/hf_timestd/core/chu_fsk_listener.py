@@ -181,13 +181,18 @@ class CHUFSKListener:
     MetrologyService to pick up and correlate with the IQ channel.
     """
 
-    def __init__(self, config: dict, control):
+    def __init__(self, config: dict, control, data_destination: Optional[str] = None):
         """
         Args:
             config: Full recorder config dict (contains 'chu_fsk' sub-dict)
             control: RadiodControl instance (shared with core recorder)
+            data_destination: Multicast group to request for the FSK USB
+                channels (contract v0.2 §7).  Share with the core
+                recorder's IQ channels on the same client so the whole
+                hf-timestd client lives on a single group.
         """
         self.control = control
+        self._data_destination = data_destination
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
@@ -297,7 +302,7 @@ class CHUFSKListener:
             agc_enable=self.agc,
             gain=self.gain,
             encoding=self.encoding,
-            destination=None,
+            destination=self._data_destination,
             timeout=30.0,
         )
 

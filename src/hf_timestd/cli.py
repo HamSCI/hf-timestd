@@ -102,6 +102,7 @@ def _handle_inventory(args):
             recorder = cfg.get('recorder', {}) or {}
             ka9q     = cfg.get('ka9q', {})     or {}
             timing   = cfg.get('timing', {})   or {}
+            station  = cfg.get('station', {})  or {}
 
             freqs = []
             for group in (recorder.get('channel_group', {}) or {}).values():
@@ -115,6 +116,29 @@ def _handle_inventory(args):
             if mode != 'production':
                 data_root = recorder.get('test_data_root', data_root)
 
+            # Contract v0.2 §7: resolve the data multicast destination the
+            # same way core_recorder_v2 does, so inventory reflects what
+            # the running service will actually request.
+            data_destination = (
+                ka9q.get('data_destination')
+                or cfg.get('radiod_multicast_group')
+            )
+            if not data_destination:
+                try:
+                    from ka9q import generate_multicast_ip
+                    station_id    = str(station.get('id', 'S000000'))
+                    instrument_id = str(station.get('instrument_id', '0'))
+                    data_destination = generate_multicast_ip(
+                        f"hf-timestd:{station_id}:{instrument_id}"
+                    )
+                except Exception as exc:
+                    issues.append({
+                        'severity': 'warn',
+                        'instance': 'default',
+                        'message':  f'unable to derive data_destination: {exc}',
+                    })
+                    data_destination = None
+
             instances.append({
                 'instance':                    'default',
                 'radiod_id':                   None,    # set by sigmond via coordination.toml
@@ -123,6 +147,7 @@ def _handle_inventory(args):
                 'preferred_cores':             'worker',
                 'frequencies_hz':              freqs,
                 'ka9q_channels':               len(freqs),
+                'data_destination':            data_destination,
                 'disk_writes': [
                     {
                         'path':           data_root,
@@ -148,7 +173,7 @@ def _handle_inventory(args):
         'client':           'hf-timestd',
         'version':          version,
         'git':              GIT_INFO,
-        'contract_version': '0.1',
+        'contract_version': '0.2',
         'config_path':      str(config_path),
         'instances':        instances,
         'deps': {

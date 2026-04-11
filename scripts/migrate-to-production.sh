@@ -37,8 +37,8 @@ fi
 # Step 1: Stop running test processes
 echo -e "${YELLOW}Step 1: Stopping test processes...${NC}"
 # Use specific patterns to avoid killing unrelated processes (like IDEs)
-pkill -f "python.*hf_timestd.core.channel_recorder" 2>/dev/null || true
-pkill -f "python.*hf_timestd.core.phase2_analytics" 2>/dev/null || true
+pkill -f "python.*hf_timestd.core.core_recorder_v2" 2>/dev/null || true
+pkill -f "python.*hf_timestd.core.metrology_service" 2>/dev/null || true
 pkill -f "python.*hf_timestd.core.multi_broadcast_fusion" 2>/dev/null || true
 sleep 2
 
