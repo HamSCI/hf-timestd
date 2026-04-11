@@ -4,12 +4,290 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-04-11
+
+Major release.  Two architectural changes — a Pattern A editable deploy
+model and a shared-memory ring-buffer IPC between the core recorder
+and metrology workers — plus HamSCI Client Contract v0.2 compliance
+and three service-critical bug fixes.  Bumped to 7.0.0 because the
+`MetrologyService.__init__` signature changed (dropped `archive_dir`),
+the production multicast data group changed, the client contract
+version bumped, and the legacy v1 `ChannelRecorder` module was
+removed.
+
+### Highlights
+
+- **Pattern A editable install** — `scripts/install.sh` (first-run)
+  and `scripts/deploy.sh` (reload).  Editable `pip install -e
+  /opt/git/hf-timestd` so production runs byte-identically to
+  `git rev-parse HEAD`.  No more wheel-snapshot drift.
+- **Ring-buffer IPC (Phase 1 + Phase 2)** — recorder publishes IQ
+  into a per-channel SysV shared-memory segment via a seqlock-guarded
+  anchor; metrology workers attach and extract 60-second windows.
+  Fixes the 10-minute-chunk stall where `_read_binary_minute`'s exact
+  filename match made minutes 1–9 of each chunk invisible.
+- **HamSCI Client Contract v0.2 §7** — deterministic data multicast
+  destination per peer client, derived via
+  `ka9q.generate_multicast_ip("hf-timestd:<station_id>:<instrument_id>")`.
+  Makes standalone multi-client installs collision-free with no
+  sigmond mediation.  Paired with contract v0.2 §8 (BPSK PPS
+  chain-delay distribution, hook-ready on this release,
+  implementation gated on sigmond Phase 4).
+- **L6 BPSK PPS chain-delay calibrator** — shipped and live in code
+  but `enabled = false` on B3-1 pending WB6CXC injector hardware.
+- **Three critical bug fixes** — leap_second TAI/GPS-UTC confusion,
+  MemoryHigh throttle regression, and the `find_minute_file_hot_only`
+  exact-match bug (subsumed by the ring-buffer refactor).
+
+### Pattern A deployment (2026-04-10)
+
+Shipped as commits `927c71e`, `f05b169`, `1c49aaf`.
+
+- `scripts/install.sh` (renamed from the old `scripts/deploy.sh`) is
+  the 900-line first-run installer: apt deps, user creation, venv,
+  wizard, systemd units.
+- `scripts/deploy.sh` is new, ~280 lines: refuses on uncommitted
+  changes, optional `--pull`, `pip install -e .` refresh, systemctl
+  restart of units declared in `deploy.toml [systemd]`, prints new git
+  SHA.  After `deploy.sh`, running production is byte-identical to
+  `git rev-parse HEAD` in the canonical repo.
+- `hf-timestd version --json` now answers "what's running?" with a
+  `.git` block (`sha`, `short`, `ref`, `dirty`, `source`) via
+  `hf_timestd.version.GIT_INFO`.
+- **Known deploy.sh limitation:** the awk parser for `deploy.toml
+  [systemd]` is broken and reports "deploy.toml lists no units to
+  restart".  Workaround: manually `sudo systemctl daemon-reload` and
+  `sudo systemctl restart timestd-core-recorder.service` after running
+  `deploy.sh`.  Pattern A also does NOT auto-sync systemd unit files;
+  they are static copies at `/etc/systemd/system/<unit>` that must be
+  re-installed when edited in the repo.
+
+### L6 BPSK PPS calibration (2026-04-09)
+
+`_start_l6_stream` / `_l6_on_samples` in `core_recorder_v2.py` plus
+`BpskPpsCalibrator` in ka9q-python 3.6.0 implement L6 chain-delay
+calibration against a WB6CXC-style HF PPS injector.  Writes
+`chain_delay_correction_ns` onto every channel's `ChannelInfo`,
+feeding ka9q-python's `rtp_to_wallclock()` correction.  Disabled in
+config (`[timing.l6_pps] enabled = false`) pending injector hardware.
+Contract v0.2 §8 defines how this value will be distributed to peer
+clients via `RADIOD_<id>_CHAIN_DELAY_NS` in sigmond's
+`coordination.env` once sigmond Phase 4 lands; **do not re-enable L6
+in production until §8 is implemented**, or peer clients will
+silently disagree with hf-timestd by the chain-delay amount.
+
+### HamSCI Client Contract v0.1 (2026-04-10)
+
+Commit `339dec4`.  Implements the first cut of sigmond's client
+contract:
+
+- `hf-timestd inventory --json` — per-instance resource view
+  (channels, freqs, radiod binding, disk writes, timing role).
+- `hf-timestd validate --json` — self-validation
+  `{ok: bool, issues: [...]}`.
+- `deploy.toml` at repo root — declares build + install steps +
+  systemd units + deps for sigmond and for `scripts/deploy.sh`.
+- Both subcommands emit clean JSON with zero stderr noise (the routine
+  `Logging configured` line is suppressed for them via a guard at the
+  top of `main()`).
+- Also fixes a pre-existing `from pathlib import Path` scoping bug in
+  `cli.py` that would have crashed `daemon` parsing.
+
+### Ring-buffer IPC — Phase 1 (commit `e70464b`)
+
+*Additive.*  The recorder now publishes each batch of IQ samples into
+a per-channel SysV shared-memory segment in addition to the existing
+archive path.  Nothing reads from the ring in Phase 1; Phase 2 wires
+metrology onto it.
+
+New modules:
+
+- `src/hf_timestd/core/ring_buffer.py` — producer.  SysV segment per
+  channel, keyed by `SHA-256(f"hf-timestd:ring:{channel_name}")`.
+  4 KiB header (static shape at offsets 0–256, hot fields — cursor,
+  seqlock-guarded GPS/RTP anchor, heartbeat — in a uint64 numpy view
+  at offset 256) followed by a `complex64` sample region of length
+  `sample_rate × ring_seconds`.  Seqlock bump protocol for anchor
+  re-seeding; x86-only platform gate; adopts compatible existing
+  segments and destroys/recreates on shape mismatch.
+- `src/hf_timestd/core/ring_buffer_reader.py` — consumer.  `attach()`,
+  `write_cursor()`, `head_utc()`, `extract_interval(utc_start,
+  duration_sec)`, `extract_samples(count)`.  Returns metadata in the
+  exact shape `buffer_timing.resolve_buffer_timing()` already
+  consumes — zero downstream code changes needed.
+- `tests/test_ring_buffer.py` — 15 tests covering platform gate,
+  header verify, SPSC roundtrip, wraparound, overrun detection,
+  seqlock bump and read-under-concurrent-updates, `head_utc`
+  correctness, `extract_interval` end-to-end into
+  `resolve_buffer_timing`.
+
+Integration:
+
+- `StreamRecorderConfig` gains `ring_seconds: int = 0` (default off).
+  `RingBuffer.create()` runs in `__init__` when `ring_seconds > 0`;
+  `update_anchor()` runs in `_create_channel`; `write_samples()` runs
+  in `_handle_samples` **after** the archive write so a ring-buffer
+  bug can never affect disk durability.  `ring_buffer.destroy()` runs
+  last in `stop()`.  All ring calls are wrapped in try/except —
+  failures log and continue.
+- `core_recorder_v2._initialize_channels` computes ring depth once
+  via `calculate_hot_minutes()` and passes it as
+  `ring_seconds = hot_minutes * 60`.  On bee3 with 9 channels and
+  9.8 GB available RAM this produces 20 minutes × 60 s × 24000 Hz
+  × 8 B ≈ 220 MB per channel ≈ 2.0 GiB total.  Gated by the new
+  `recorder.ring_buffer` config key (default true).
+- `tiered_storage.MIN_HOT_MINUTES` raised from 2 to 4 as a floor for
+  small-RAM hosts.
+- `systemd/timestd-core-recorder.service` gains an
+  `ExecStartPre=+/bin/mkdir -p /dev/shm/timestd/ring` line.
+
+### Ring-buffer IPC — Phase 2 (commit `26482e4`)
+
+*Metrology workers read from the ring.*  This is the commit that
+actually fixes the production stall.
+
+`src/hf_timestd/core/metrology_service.py` is a ~700-line rewrite:
+
+- **Deleted:** `MinuteFileHandler`, `_file_queue`, `_observer`,
+  `_use_file_watcher`, `_setup_file_watcher`, `_stop_file_watcher`,
+  `_check_date_rollover`, `_run_inotify_mode`, `_run_polling_mode`,
+  `_poll_for_new_files`, `_read_binary_minute`, `_load_iq_file`,
+  `_get_latest_minute`, the `watchdog` (pyinotify) import, and the
+  `TieredStorageManager` construction.
+- **Constructor signature changed** — dropped the `archive_dir`
+  parameter.  This is a module-level API break and drives the major
+  version bump.
+- **New `_run_ringbuffer_mode()` consumer loop.**  `RingBufferReader.attach()`
+  with retry, polls `write_cursor`/`head_utc` every 500 ms, bootstraps
+  `next_minute` 2 minutes behind current head, extracts once head has
+  advanced 60 s past the boundary + 0.5 s settle.  On
+  `RingBufferOverrunError` the consumer jumps forward to
+  `head_utc − 2 min` and continues.  Head-stagnation warning at 120 s.
+  Resource guardian still checked every 30 s.
+- The old `process_minute` body is refactored into
+  `_process_minute_data(minute_boundary, iq_samples, system_time,
+  rtp_timestamp, metadata, buffer_timing)`; `buffer_timing` is produced
+  from `resolve_buffer_timing(metadata)` on the reader's synthesized
+  metadata dict.  **Zero `MetrologyEngine` changes.**
+- `__main__` argparse: `--archive-dir`, `--use-tiered-storage`,
+  `--poll-interval` now accepted-but-ignored for backwards compat with
+  older unit files.
+
+`systemd/timestd-metrology@.service`:
+
+- `Requires=timestd-core-recorder.service` (upgraded from `Wants`).
+- `RequiresMountsFor=/dev/shm`.
+- `ExecStart` drops `--archive-dir`, `--state-file`,
+  `--poll-interval`, `--use-tiered-storage`.
+
+`scripts/pipeline-watchdog.sh`:
+
+- `METROLOGY_STALE` lowered from 600 s to 180 s.  The 600 s threshold
+  was tied to the 10-minute chunk cadence; ring-mode metrology
+  produces HDF5 every minute, so 3 minutes of silence is a real stall.
+
+**Verified on B3-1:** 6 consecutive minute boundaries processed
+across all 9 workers in a 5-minute window, `NRestarts=0` across all
+10 services post-deploy.
+
+### Ring-buffer IPC — Memory regression fix (commit `1955d9d`)
+
+The first Phase 2 deploy hit a systemd-watchdog kill loop:
+`MemoryHigh=3G` throttled the recorder's main loop hard once RSS
+crept past 3 GiB (unavoidable with 9 × 220 MiB ring + ~1.3 GiB
+recorder baseline), and the 180 s `WatchdogSec` elapsed before the
+main loop could pet.
+
+- `systemd/timestd-core-recorder.service`: removed `MemoryHigh=3G`
+  entirely; raised `MemoryMax` from 4G to 6G.
+
+After the fix, core-recorder adopts existing ring segments on restart
+via `RingBuffer._open_or_recreate`, metrology workers resync on epoch
+bump, and minute-boundary processing hits every subsequent minute.
+
+### leap_second TAI/GPS-UTC bugfix (commit `1404f5e`)
+
+**Symptom.** After Phase 2 went live, `RingBufferReader.head_utc()`
+reported UTC values consistently ~19.4 s behind wallclock on all 9
+channels, even though the per-channel anchor math was self-consistent.
+
+**Root cause.** `get_current_gps_leap_seconds()` was named "GPS-UTC
+leap second offset" but returned column 2 of
+`/usr/share/zoneinfo/leap-seconds.list`, which is `DTAI = TAI-UTC`
+(currently 37).  GPS time is fixed 19 s from TAI, so the true
+GPS-UTC offset is 37 − 19 = 18.  Every UTC derived from
+`radiod.gps_time_ns` via
+`UTC = gps_ns/1e9 + GPS_EPOCH_UNIX - GPS_LEAP_SECONDS` was therefore
+19 s too early.  Hosts without `leap-seconds.list` hit the
+`_GPS_LEAP_SECONDS_FALLBACK = 18` path and were accidentally correct.
+On B3-1 the file was installed Jan 6 2026 via tzdata update, so the
+bug has been latent since then — invisible before Phase 2 because
+file-mode metrology processed so few minutes that the engine's wide
+fusion-lock search window absorbed the offset silently.
+
+**Fix.**  `leap_second.py: return last_dtai - 19`.  Every module that
+caches `GPS_LEAP_SECONDS = get_current_gps_leap_seconds()` at import
+time needs a restart to pick up the fix: `ring_buffer_reader.py`,
+`chu_fsk_listener.py`, `timing_validation_service.py`,
+`timing_validation.py`, `binary_archive_writer.py`,
+`buffer_timing.py`.
+
+**Verified on B3-1 post-fix:** `head_utc - wallclock ≈ -0.3 s`
+across all 9 channels (real ka9q RTP latency), metrology `d_clock`
+values in the -10 ms to +2 ms range (realistic HF propagation),
+Chrony SHM refclocks `TSL1`/`TSL2` offsets `+1112 µs` / `+8466 ns`.
+
+### HamSCI Client Contract v0.2 §7 — deterministic multicast (commit `2b83793`)
+
+Every hf-timestd instance now requests its own data multicast group
+from radiod, derived deterministically via
+`ka9q.generate_multicast_ip(f"hf-timestd:{station_id}:{instrument_id}")`.
+Before this change, `core_recorder_v2` passed `destination=None` and
+logged "letting radiod decide destination"; all 9 production channels
+ended up on radiod's global default `239.100.112.151:5004`, where any
+future peer client (wsprdaemon, psk-recorder, ka9q-web) would have
+piled on the same group and fanned out every RTP packet to every
+client's socket via the kernel.
+
+- `core_recorder_v2.py`: imports `generate_multicast_ip`, resolves
+  `data_destination` in `__init__` with precedence:
+  1. `[ka9q] data_destination` — operator override for collisions,
+  2. `[core] radiod_multicast_group` — legacy key, rollback compat,
+  3. `generate_multicast_ip("hf-timestd:<station_id>:<instrument_id>")`.
+  Passes the resolved value to every `StreamRecorderConfig(destination=...)`
+  and to the L6 BPSK PPS `ensure_channel()` call.
+- `chu_fsk_listener.py`: accepts `data_destination` in its
+  constructor and plumbs it through `_ensure_channel_compat`.  Not
+  instantiated in production today but primed for Phase 4 of the
+  ring-buffer refactor.
+- `cli.py`: `hf-timestd inventory --json` bumps `contract_version` to
+  `"0.2"` and emits a new `data_destination` field per instance,
+  resolved the same way as the runtime.
+
+**Operational change:** on B3-1 the production multicast group moves
+from `239.100.112.151:5004` to `239.45.120.115:5004`.  Any firewall
+rules, tcpdump captures, or Wireshark filters keyed on the old group
+need to be updated.
+
+### Legacy v1 recorder removed
+
+`src/hf_timestd/core/channel_recorder.py` — the dead v1 recorder that
+imported `generate_timestd_multicast_ip` and did the right thing, but
+was never reachable from the `core_recorder_v2` production path — has
+been removed.  It was the source of a session-long distraction
+(right code in the dead file, wrong code in the live file, invisible
+in every grep until the production path was traced by hand).
+`scripts/migrate-to-production.sh` had a stale
+`pkill -f "python.*hf_timestd.core.channel_recorder"` line left over
+from v1; updated to `core_recorder_v2`, and `phase2_analytics` refreshed
+to `metrology_service` while at it.
+
 ### Service Robustness — 20-issue audit pass
 
 Fixes to prevent silent data loss, ensure clean shutdown, and eliminate several classes of production failure:
 
 **Critical**
-- `leap_second.py`: New `get_current_gps_leap_seconds()` reads `/usr/share/zoneinfo/leap-seconds.list` (updated by OS tzdata packages) and falls back to 18. All five `GPS_LEAP_SECONDS = 18` literals across `buffer_timing.py`, `timing_validation.py`, `timing_validation_service.py`, `chu_fsk_listener.py`, and `binary_archive_writer.py` now call this function — eliminates the silent 1-second timing error that would have occurred at the next leap second insertion.
+- `leap_second.py`: New `get_current_gps_leap_seconds()` reads `/usr/share/zoneinfo/leap-seconds.list` (updated by OS tzdata packages) and falls back to 18. All five `GPS_LEAP_SECONDS = 18` literals across `buffer_timing.py`, `timing_validation.py`, `timing_validation_service.py`, `chu_fsk_listener.py`, and `binary_archive_writer.py` now call this function — eliminates the silent 1-second timing error that would have occurred at the next leap second insertion.  **Note:** the initial implementation in this audit pass returned `DTAI = TAI-UTC` (37) instead of `GPS-UTC` (18), introducing a 19-second offset; that bug is corrected by the `leap_second` bugfix above.
 - `metrology_service.py`: Added `_check_date_rollover()` — called every 5 s from the inotify poll tick; stops and re-registers the watchdog Observer when UTC midnight passes. Previously the Observer pointed at yesterday's date directory forever, causing a silent data gap every night.
 - `core_recorder_v2.py`: Removed `sys.exit(1)` from `_check_data_freshness()`. `sys.exit` raised `SystemExit` which could bypass `finally: self._shutdown()`. Setting `self.running = False` is sufficient — the main loop exits cleanly via the `finally` clause.
 - `chrony_shm.py`: Switched from SHM mode 0 to mode 1 (sequence-lock protocol). Count is incremented to odd (write-in-progress) before packing, then to even (write-complete) after the SHM write. Eliminates the torn-write window where Chrony could read a partially-updated struct and apply a spurious clock correction. Removed all diagnostic hex-dump logging and readback.

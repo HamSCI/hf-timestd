@@ -24,7 +24,7 @@ try:
     from importlib.metadata import version as _pkg_version
     TIMESTD_VERSION = _pkg_version("hf-timestd")
 except Exception:
-    TIMESTD_VERSION = "6.12.0"  # keep in sync with pyproject.toml
+    TIMESTD_VERSION = "7.0.0"  # keep in sync with pyproject.toml
 
 # Component versions (for tracking algorithm changes)
 COMPONENT_VERSIONS = {
