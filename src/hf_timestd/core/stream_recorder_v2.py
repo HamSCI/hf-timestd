@@ -270,7 +270,14 @@ class StreamRecorderConfig:
     # (metrology hot-buffer, L6 calibration, etc.) and cold storage is
     # not needed.
     archive: bool = True
-    
+
+    # Shared-memory ring-buffer depth in seconds.  Phase 1 additive path:
+    # when > 0 the recorder publishes samples into a per-channel SysV
+    # ring segment.  Nothing reads from it yet (Phase 1 is invisible to
+    # production); Phase 2 wires metrology workers to it.  ring_seconds
+    # == 0 disables the ring entirely.
+    ring_seconds: int = 0
+
     def __post_init__(self):
         self.output_dir = Path(self.output_dir)
         if self.station_config is None:
@@ -367,7 +374,30 @@ class StreamRecorderV2:
         else:
             self.archive_writer = None
             logger.info(f"{config.description}: archive=False, stream-only (no IQ storage)")
-        
+
+        # Phase 1 ring buffer (additive).  When ring_seconds > 0, the
+        # recorder also publishes samples into a SysV shared-memory
+        # segment keyed by channel name.  Nothing reads from it until
+        # Phase 2 wires metrology workers onto the ring.
+        self.ring_buffer = None
+        if config.ring_seconds > 0:
+            try:
+                from .ring_buffer import RingBuffer
+                self.ring_buffer = RingBuffer.create(
+                    channel_name=config.description,
+                    sample_rate=config.sample_rate,
+                    ring_seconds=config.ring_seconds,
+                )
+            except Exception as exc:
+                # Never let a ring-buffer failure take the recorder down
+                # during Phase 1 rollout — the file-based path is still
+                # authoritative.
+                logger.error(
+                    f"{config.description}: RingBuffer.create failed "
+                    f"({exc}); continuing with file-only path"
+                )
+                self.ring_buffer = None
+
         # Tap callbacks: additional on_samples consumers (e.g. FSK listener)
         self._tap_callbacks: list = []
         self._tap_lock = threading.Lock()
@@ -515,21 +545,31 @@ class StreamRecorderV2:
         # rtp_timesnap for our SSRC.
         gps_time = getattr(self.channel_info, 'gps_time', None)
         rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
-        if self.archive_writer is not None:
-            if gps_time is not None and rtp_snap is not None:
+        if gps_time is not None and rtp_snap is not None:
+            if self.archive_writer is not None:
                 self.archive_writer.add_timing_snapshot(
                     gps_time_ns=gps_time,
                     rtp_timesnap=rtp_snap
                 )
-                logger.info(
-                    f"{self.config.description}: Seeded timing from channel_info — "
-                    f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_snap}"
-                )
-            else:
-                logger.warning(
-                    f"{self.config.description}: channel_info missing timing — "
-                    f"gps_time={gps_time}, rtp_timesnap={rtp_snap}"
-                )
+            if self.ring_buffer is not None:
+                try:
+                    self.ring_buffer.update_anchor(
+                        gps_time_ns=gps_time,
+                        rtp_timesnap=rtp_snap,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"{self.config.description}: ring update_anchor failed: {exc}"
+                    )
+            logger.info(
+                f"{self.config.description}: Seeded timing from channel_info — "
+                f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_snap}"
+            )
+        else:
+            logger.warning(
+                f"{self.config.description}: channel_info missing timing — "
+                f"gps_time={gps_time}, rtp_timesnap={rtp_snap}"
+            )
 
     def _set_filter_edges(self, ssrc: int):
         """Send filter edge commands to radiod if configured."""
@@ -732,7 +772,20 @@ class StreamRecorderV2:
             # Close the archive writer (flushes pending data)
             if self.archive_writer is not None:
                 self.archive_writer.close()
-            
+
+            # Destroy the ring buffer LAST so any late callback from the
+            # stream has already been drained.  Consumers attached to the
+            # segment will see the next attach fail or get overrun on
+            # their next read and should resync.
+            if self.ring_buffer is not None:
+                try:
+                    self.ring_buffer.destroy()
+                except Exception as exc:
+                    logger.warning(
+                        f"{self.config.description}: ring destroy failed: {exc}"
+                    )
+                self.ring_buffer = None
+
         except Exception as e:
             logger.error(f"{self.config.description}: Error during stop: {e}")
         
@@ -807,6 +860,26 @@ class StreamRecorderV2:
                     system_time=system_time,
                     gap_samples=batch_gap_samples
                 )
+
+            # Publish the batch into the ring buffer AFTER the archive
+            # write so any ring-buffer bug during Phase 1 rollout cannot
+            # affect disk writes.  RTP of the first sample in this batch
+            # is (total_delivered - len) relative to first_rtp_timestamp,
+            # matching chu_fsk_listener's head_rtp computation.
+            if self.ring_buffer is not None:
+                try:
+                    batch_first_rtp = (
+                        quality.first_rtp_timestamp
+                        + quality.total_samples_delivered
+                        - len(samples)
+                    ) & 0xFFFFFFFF
+                    self.ring_buffer.write_samples(samples, batch_first_rtp)
+                    if batch_gap_samples:
+                        self.ring_buffer.record_gap(batch_gap_samples)
+                except Exception as exc:
+                    logger.error(
+                        f"{self.config.description}: ring write_samples failed: {exc}"
+                    )
 
             self.samples_written += len(samples)
 

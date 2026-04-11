@@ -47,7 +47,10 @@ MB = 1024 * 1024
 GB = 1024 * MB
 BYTES_PER_SECOND_PER_CHANNEL = 192_000  # ~192 KB/s (24 kHz × 8 bytes/sample)
 BYTES_PER_MINUTE = 10 * MB  # ~10 MB per channel per minute (legacy, kept for docs)
-MIN_HOT_MINUTES = 2  # Always keep at least 2 minutes in RAM
+MIN_HOT_MINUTES = 4  # Always keep at least 4 minutes in RAM
+# Raised from 2 to 4 for the ring-buffer refactor: metrology workers
+# need breathing room past the longest file-chunk duration so a slow
+# worker never trips overrun on a 1-minute extract.
 MAX_HOT_MINUTES = 60  # Never keep more than 1 hour in RAM
 DEFAULT_RAM_PERCENT = 20  # Use 20% of available RAM for hot buffer
 DEFAULT_FILE_DURATION_SEC = 600  # 10-minute chunks (matches BinaryArchiveConfig default)

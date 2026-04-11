@@ -27,6 +27,7 @@ WorkingDirectory=/opt/hf-timestd
 # Ensure directories exist and have correct permissions
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/raw_buffer
 ExecStartPre=+/bin/mkdir -p /dev/shm/timestd/raw_buffer
+ExecStartPre=+/bin/mkdir -p /dev/shm/timestd/ring
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/raw_buffer
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /dev/shm/timestd
 
@@ -52,6 +53,11 @@ SyslogIdentifier=timestd-core-recorder
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
 CPUAffinity=0-7
+# MemoryHigh is the soft throttle point; MemoryMax is the hard cap.
+# Ring buffer + archive + Python baseline should stay well under 3 GiB
+# in steady state, but the ring depth scales with available RAM, so
+# leave 4 GiB of headroom.
+MemoryHigh=3G
 MemoryMax=4G
 MemorySwapMax=0
 

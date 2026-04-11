@@ -500,6 +500,31 @@ class CoreRecorderV2:
 
             logger.info(f"Initializing {len(self.channel_specs)} configured channels...")
 
+            # Compute ring-buffer depth once for all channels using the
+            # same RAM-budget policy the tiered-storage hot buffer used.
+            # The ring minimum (MIN_HOT_MINUTES) now starts at 4 to give
+            # metrology workers at least a couple of minutes of headroom
+            # past the longest file-chunk duration.  Phase 1 is additive:
+            # ring_seconds > 0 just means "also publish into the ring";
+            # nothing reads from it yet.
+            file_duration_sec = int(self.recorder_config.get('file_duration_sec', 600))
+            ring_enabled = bool(self.recorder_config.get('ring_buffer', True))
+            if ring_enabled:
+                from .tiered_storage import calculate_hot_minutes
+                hot_minutes = calculate_hot_minutes(
+                    num_channels=len(self.channel_specs),
+                    ram_percent=float(self.recorder_config.get('ring_ram_percent', 20)),
+                    file_duration_sec=file_duration_sec,
+                )
+                ring_seconds = hot_minutes * 60
+                logger.info(
+                    f"Ring buffer enabled: {hot_minutes} minutes "
+                    f"({ring_seconds}s) per channel × {len(self.channel_specs)} channels"
+                )
+            else:
+                ring_seconds = 0
+                logger.info("Ring buffer disabled (recorder.ring_buffer = false)")
+
             for ch_spec in self.channel_specs:
                 freq = int(ch_spec['frequency_hz'])
 
@@ -554,6 +579,7 @@ class CoreRecorderV2:
                     null_targets=ch_spec.get('null_targets'),
                     combining_method=ch_spec.get('combining_method'),
                     archive=archive,
+                    ring_seconds=ring_seconds,
                 )
                 recorder = StreamRecorderV2(
                     config=rec_config,
