@@ -28,170 +28,13 @@ from typing import Dict, Any, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from ka9q import RadiodStream, ChannelInfo, StreamQuality, ManagedStream, RadiodControl
+from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
 
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
 # The recorder now always archives immediately. MetrologyEngine's fusion_state
 # handles timing lock internally using wider search windows until locked.
 
 logger = logging.getLogger(__name__)
-
-
-class RobustManagedStream:
-    """
-    Drop-in replacement for ka9q.ManagedStream that supports explicit encoding (F32).
-    
-    The standard ManagedStream (as of ka9q-python 3.2.2) does not support the 'encoding' 
-    parameter, defaulting to S16. This causes duplicates when the client enforces F32.
-    This class implements the same auto-recovery logic but passes 'encoding' to ensure_channel.
-    """
-    def __init__(self, control: RadiodControl, frequency_hz: float, preset: str = 'iq',
-                 sample_rate: int = 24000, agc_enable: int = 0, gain: float = 0.0,
-                 encoding: int = 4, # F32 default
-                 destination: Optional[str] = None, ssrc: Optional[int] = None,
-                 on_samples=None, on_stream_dropped=None, on_stream_restored=None,
-                 drop_timeout_sec: float = 3.0, restore_interval_sec: float = 1.0,
-                 samples_per_packet: int = 320, resequence_buffer_size: int = 64,
-                 low_edge: Optional[float] = None, high_edge: Optional[float] = None):
-        self.control = control
-        self.config = {
-            'frequency_hz': frequency_hz,
-            'preset': preset,
-            'sample_rate': sample_rate,
-            'agc_enable': agc_enable,
-            'gain': gain,
-            'encoding': encoding,
-            'destination': destination,
-            'ssrc': ssrc,
-            'low_edge': low_edge,
-            'high_edge': high_edge,
-        }
-        self.callbacks = {
-            'on_samples': on_samples,
-            'on_stream_dropped': on_stream_dropped,
-            'on_stream_restored': on_stream_restored
-        }
-        self.params = {
-            'drop_timeout_sec': drop_timeout_sec,
-            'restore_interval_sec': restore_interval_sec,
-            'samples_per_packet': samples_per_packet,
-            'resequence_buffer_size': resequence_buffer_size
-        }
-        
-        self.stream = None
-        self.channel_info = None
-        self._running = False
-        self._monitor_thread = None
-        self._lock = threading.RLock()
-
-    def start(self) -> Optional[ChannelInfo]:
-        """Start the stream and monitoring."""
-        with self._lock:
-            self._running = True
-            
-            # Initial setup
-            if not self._ensure_stream():
-                # If failed, background thread will retry
-                pass
-            
-            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-            self._monitor_thread.start()
-            
-            return self.channel_info
-
-    def stop(self):
-        """Stop the stream."""
-        with self._lock:
-            self._running = False
-        
-        if self._monitor_thread:
-            self._monitor_thread.join(timeout=2.0)
-            
-        if self.stream:
-            self.stream.stop()
-
-    def _ensure_stream(self) -> bool:
-        """Attempt to create/find channel and start RadiodStream."""
-        try:
-            # explicit ensure_channel with ENCODING
-            self.channel_info = self.control.ensure_channel(
-                frequency_hz=self.config['frequency_hz'],
-                preset=self.config['preset'],
-                sample_rate=self.config['sample_rate'],
-                agc_enable=self.config['agc_enable'],
-                gain=self.config['gain'],
-                encoding=self.config['encoding'], # CRITICAL FIX
-                destination=self.config['destination'],
-                # ssrc=self.config['ssrc'] # Let ka9q decide/find
-            )
-            
-            if self.channel_info:
-                # Set filter edges if configured (widens passband for FSK etc.)
-                self._set_filter_edges(self.channel_info.ssrc)
-                # Start RadiodStream
-                self.stream = RadiodStream(
-                    channel=self.channel_info,
-                    on_samples=self.callbacks['on_samples'],
-                    samples_per_packet=self.params['samples_per_packet'],
-                    resequence_buffer_size=self.params['resequence_buffer_size']
-                )
-                self.stream.start()
-                
-                if self.callbacks['on_stream_restored']:
-                    self.callbacks['on_stream_restored'](self.channel_info)
-                return True
-                
-        except Exception as e:
-            logger.warning(f"RobustManagedStream: ensure failed: {e}")
-            
-        return False
-
-    def _set_filter_edges(self, ssrc: int):
-        """Send filter edge commands to radiod if configured."""
-        low = self.config.get('low_edge')
-        high = self.config.get('high_edge')
-        if low is None and high is None:
-            return
-        
-        try:
-            import secrets
-            from ka9q.types import StatusType
-            from ka9q.control import encode_int, encode_double, encode_eol, CMD
-            
-            cmdbuffer = bytearray()
-            cmdbuffer.append(CMD)
-            encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
-            encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
-            
-            if low is not None:
-                encode_double(cmdbuffer, StatusType.LOW_EDGE, float(low))
-            if high is not None:
-                encode_double(cmdbuffer, StatusType.HIGH_EDGE, float(high))
-            
-            encode_eol(cmdbuffer)
-            self.control.send_command(cmdbuffer)
-            
-            logger.info(f"Set filter edges for SSRC {ssrc}: low={low}, high={high}")
-        except Exception as e:
-            logger.warning(f"Failed to set filter edges: {e}")
-
-    def _monitor_loop(self):
-        """Background thread: detect a dropped stream and re-establish it."""
-        restore_interval = self.params.get('restore_interval_sec', 30)
-        while self._running:
-            time.sleep(restore_interval)
-            if not self._running:
-                break
-            with self._lock:
-                if self._running and (self.stream is None):
-                    logger.info("RobustManagedStream: stream absent, attempting restore")
-                    self._ensure_stream()
-
-    def get_quality(self) -> Optional[StreamQuality]:
-        """Get current stream quality metrics."""
-        if self.stream:
-            return self.stream.get_quality()
-        return None
 
 
 class StreamRecorderState(Enum):
@@ -747,7 +590,7 @@ class StreamRecorderV2:
                 self._timing_poll_thread.join(timeout=2.0)
                 self._timing_poll_thread = None
             
-            # Stop ManagedStream/RadiodStream (returns final quality/stats)
+            # Stop RadiodStream (returns final quality/stats)
             if self.stream:
                 if hasattr(self.stream, 'get_quality'):
                     final_quality = self.stream.get_quality()
@@ -756,7 +599,7 @@ class StreamRecorderV2:
                 
                 if hasattr(self.stream, 'stop') and final_quality is not None:
                     # If it's RadiodStream, stop() already returned final_quality
-                    # If it's ManagedStream, stop() returns stats, so we call it after get_quality()
+                    # Defensive: stop() after get_quality() in case of unexpected type
                     if not isinstance(final_quality, StreamQuality):
                         # This shouldn't happen with RadiodStream, but just in case
                         self.stream.stop()
@@ -904,7 +747,7 @@ class StreamRecorderV2:
             logger.error(f"{self.config.description}: Sample processing error: {e}", exc_info=True)
     
     def _handle_stream_dropped(self, reason: str):
-        """Handle stream drop notification from ManagedStream."""
+        """Handle stream drop notification."""
         logger.warning(f"{self.config.description}: Stream DROPPED - {reason}")
         
         # Forward to external callback if provided
@@ -915,7 +758,7 @@ class StreamRecorderV2:
                 logger.error(f"Error in stream_dropped callback: {e}")
     
     def _handle_stream_restored(self, channel: ChannelInfo):
-        """Handle stream restoration notification from ManagedStream."""
+        """Handle stream restoration notification."""
         logger.info(f"{self.config.description}: Stream RESTORED - SSRC={channel.ssrc}")
         
         # Update channel info with new values

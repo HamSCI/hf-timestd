@@ -36,7 +36,7 @@ idna==3.11
 ifaddr==0.2.0
 iniconfig==2.3.0
 invoke==2.2.1
-ka9q-python==3.4.2
+ka9q-python==3.7.1
 kiwisolver==1.4.9
 matplotlib==3.10.8
 numpy==2.4.2

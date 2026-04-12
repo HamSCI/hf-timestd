@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ka9q-python 3.7.1 — encoding-aware streams
+
+- **pyproject.toml / constraints.txt**: Bumped `ka9q-python` from `>=3.3.0` / `==3.4.2` to `>=3.7.1` / `==3.7.1`. Required for multi-encoding `_parse_samples()` dispatch and `ManagedStream` encoding passthrough on init/restore.
+- **stream_recorder_v2.py**: Removed obsolete `RobustManagedStream` wrapper class (~150 lines). ka9q-python 3.7.1 `ManagedStream` natively supports the `encoding` parameter, making the wrapper unnecessary. Cleaned stale "ManagedStream" references in comments/docstrings.
+- **core_recorder_v2.py**: Completed `_resolve_encoding()` map — was only 3 of 9 encodings (`F32`, `S16LE`, `OPUS`); now covers all ka9q-python encodings (`S16BE`, `S16LE`, `F32`, `F32LE`, `F32BE`, `F16`, `F16LE`, `F16BE`, `OPUS`). Removed stale `RobustManagedStream` import.
+
 ## [7.0.0] - 2026-04-11
 
 Major release.  Two architectural changes — a Pattern A editable deploy
@@ -297,7 +303,7 @@ Fixes to prevent silent data loss, ensure clean shutdown, and eliminate several 
 - `metrology_service.py`: Bounded `_file_queue` to `maxsize=60`; `on_created` now uses `put_nowait` with a logged warning on overflow instead of blocking the inotify thread. Writer close loop now wraps each of 7 writers in individual `try/except` so one failed close does not prevent the rest from flushing. Status file writes now use tmp+rename (atomic) instead of writing directly to `status.json`.
 - `hdf5_writer.py`: Separated the single `try: flush(); close()` into two independent try/except blocks — flush errors logged at `error` level, close errors at `warning`.
 - `core_recorder_v2.py`: `_wd_last_written`, `_wd_last_advance`, `_freshness_last_written`, `_freshness_last_advance` now initialized in `__init__`; `hasattr` guards removed.
-- `stream_recorder_v2.py`: Re-enabled `RobustManagedStream` monitor thread with a proper `_monitor_loop()` implementation. Added `with self._lock:` around `_create_channel()` in the health monitor to prevent concurrent mutation of `self.stream` / `self.channel_info` / `self.config.ssrc`.
+- `stream_recorder_v2.py`: Added `with self._lock:` around `_create_channel()` in the health monitor to prevent concurrent mutation of `self.stream` / `self.channel_info` / `self.config.ssrc`. (Note: `RobustManagedStream` was re-enabled in this pass but later removed — see ka9q-python 3.7.1 entry above.)
 
 **Minor**
 - `iono_data_service.py`: Fixed backoff replaced with exponential backoff capped at `FETCH_INTERVAL_S`; reset to 60 s after a successful iteration.

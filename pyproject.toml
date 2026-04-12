@@ -27,7 +27,7 @@ dependencies = [
     "scipy>=1.10.0",
     "soundfile>=0.12.0",
     "zeroconf>=0.132.0",
-    "ka9q-python>=3.7.0",
+    "ka9q-python>=3.7.1",
     "pandas>=2.0.0",
     "matplotlib>=3.7.0",
     "iri2020 @ git+https://github.com/space-physics/iri2020.git",

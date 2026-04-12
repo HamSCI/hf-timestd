@@ -50,7 +50,7 @@ except ImportError:
 from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding, generate_multicast_ip
 
 from ..quota_manager import QuotaManager
-from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig, RobustManagedStream
+from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 from .timing_calibrator import TimingCalibrator
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
 # The recorder now always archives immediately. MetrologyEngine's fusion_state
@@ -472,8 +472,14 @@ class CoreRecorderV2:
         """Map encoding string or value to Encoding constant."""
         if isinstance(encoding_val, str):
             return {
-                'F32': Encoding.F32,
+                'S16BE': Encoding.S16BE,
                 'S16LE': Encoding.S16LE,
+                'F32': Encoding.F32,
+                'F32LE': Encoding.F32LE,
+                'F32BE': Encoding.F32BE,
+                'F16': Encoding.F16,
+                'F16LE': Encoding.F16LE,
+                'F16BE': Encoding.F16BE,
                 'OPUS': Encoding.OPUS,
             }.get(encoding_val.upper(), Encoding.NO_ENCODING)
         return encoding_val
@@ -483,7 +489,7 @@ class CoreRecorderV2:
         Initialize all channels via a single unified path.
 
         Every [[recorder.channels]] entry is provisioned through
-        RobustManagedStream / ensure_channel() and archived to disk
+        ensure_channel() and archived to disk
         via StreamRecorderV2.
         """
         try:
