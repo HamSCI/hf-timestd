@@ -116,28 +116,19 @@ def _handle_inventory(args):
             if mode != 'production':
                 data_root = recorder.get('test_data_root', data_root)
 
-            # Contract v0.2 §7: resolve the data multicast destination the
-            # same way core_recorder_v2 does, so inventory reflects what
-            # the running service will actually request.
-            data_destination = (
-                ka9q.get('data_destination')
-                or cfg.get('radiod_multicast_group')
-            )
-            if not data_destination:
-                try:
-                    from ka9q import generate_multicast_ip
-                    station_id    = str(station.get('id', 'S000000'))
-                    instrument_id = str(station.get('instrument_id', '0'))
-                    data_destination = generate_multicast_ip(
-                        f"hf-timestd:{station_id}:{instrument_id}"
-                    )
-                except Exception as exc:
-                    issues.append({
-                        'severity': 'warn',
-                        'instance': 'default',
-                        'message':  f'unable to derive data_destination: {exc}',
-                    })
-                    data_destination = None
+            # Contract v0.3 §7: ka9q-python owns data multicast derivation.
+            # Inventory reports null here and the running daemon resolves
+            # it from ChannelInfo at runtime.  Warn if a deprecated
+            # override key is present.
+            if ka9q.get('data_destination') or cfg.get('radiod_multicast_group'):
+                issues.append({
+                    'severity': 'warn',
+                    'instance': 'default',
+                    'message':  ('[ka9q].data_destination / radiod_multicast_group '
+                                 'is deprecated under contract v0.3 §7; ka9q-python '
+                                 'now derives the multicast group automatically'),
+                })
+            data_destination = None
 
             instances.append({
                 'instance':                    'default',
@@ -173,7 +164,7 @@ def _handle_inventory(args):
         'client':           'hf-timestd',
         'version':          version,
         'git':              GIT_INFO,
-        'contract_version': '0.2',
+        'contract_version': '0.4',
         'config_path':      str(config_path),
         'log_paths': {
             'stderr':   'journal',
