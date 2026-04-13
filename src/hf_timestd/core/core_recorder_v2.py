@@ -47,7 +47,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("systemd-python not available, watchdog disabled")
 
-from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding, generate_multicast_ip
+from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding
 
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
@@ -180,31 +180,22 @@ class CoreRecorderV2:
         # Station config
         self.station_config = config.get('station', {})
 
-        # HamSCI client-contract v0.2 §7: each peer client on a station
-        # runs on its own data-multicast group, derived deterministically
-        # from the client identity so standalone installs (no sigmond)
-        # cannot collide with other peer clients on the same host.
-        # Override order:
-        #   1. [ka9q] data_destination — operator override for collisions
-        #   2. [core] radiod_multicast_group — legacy key, honored for
-        #      rollback compatibility during the v0.2 bump
-        #   3. derived from "hf-timestd:<station_id>:<instrument_id>"
+        # Contract v0.3 §7: ka9q-python owns data-multicast derivation.
+        # Clients do not compute or pass destination=; ka9q-python assigns
+        # it deterministically and returns the resolved address in
+        # ChannelInfo.  Deprecated override keys are warned about but
+        # still honored for rollback (remove in v8.0.0).
         ka9q_cfg = config.get('ka9q', {}) or {}
-        override = ka9q_cfg.get('data_destination') or config.get('radiod_multicast_group')
-        if override:
-            self.data_destination = override
-            logger.info(
-                f"Using configured data_destination override: {self.data_destination}"
+        deprecated_override = (ka9q_cfg.get('data_destination')
+                               or config.get('radiod_multicast_group'))
+        if deprecated_override:
+            logger.warning(
+                "config key [ka9q].data_destination / radiod_multicast_group "
+                "is deprecated under contract v0.3 §7; ka9q-python now "
+                "derives the multicast group.  Ignoring override "
+                f"{deprecated_override!r}."
             )
-        else:
-            station_id = str(self.station_config.get('id', 'S000000'))
-            instrument_id = str(self.station_config.get('instrument_id', '0'))
-            client_id = f"hf-timestd:{station_id}:{instrument_id}"
-            self.data_destination = generate_multicast_ip(client_id)
-            logger.info(
-                f"Derived data_destination {self.data_destination} from "
-                f"client_id={client_id!r} (contract v0.2 §7)"
-            )
+        self.data_destination = None  # filled from ChannelInfo at runtime
         
         # Channel specs and defaults
         # Channels can be at top level or in recorder section
@@ -632,8 +623,13 @@ class CoreRecorderV2:
                 encoding=Encoding.F32,
                 agc_enable=False,
                 gain=0.0,
-                destination=self.data_destination,
             )
+            if self.data_destination is None and channel_info is not None:
+                self.data_destination = getattr(channel_info, 'multicast_address', None)
+                logger.info(
+                    f"ka9q-python assigned data_destination "
+                    f"{self.data_destination} for L6 channel"
+                )
             self._l6_stream = RadiodStream(
                 channel=channel_info,
                 on_samples=self._l6_on_samples,

@@ -116,28 +116,19 @@ def _handle_inventory(args):
             if mode != 'production':
                 data_root = recorder.get('test_data_root', data_root)
 
-            # Contract v0.2 §7: resolve the data multicast destination the
-            # same way core_recorder_v2 does, so inventory reflects what
-            # the running service will actually request.
-            data_destination = (
-                ka9q.get('data_destination')
-                or cfg.get('radiod_multicast_group')
-            )
-            if not data_destination:
-                try:
-                    from ka9q import generate_multicast_ip
-                    station_id    = str(station.get('id', 'S000000'))
-                    instrument_id = str(station.get('instrument_id', '0'))
-                    data_destination = generate_multicast_ip(
-                        f"hf-timestd:{station_id}:{instrument_id}"
-                    )
-                except Exception as exc:
-                    issues.append({
-                        'severity': 'warn',
-                        'instance': 'default',
-                        'message':  f'unable to derive data_destination: {exc}',
-                    })
-                    data_destination = None
+            # Contract v0.3 §7: ka9q-python owns data multicast derivation.
+            # Inventory reports null here and the running daemon resolves
+            # it from ChannelInfo at runtime.  Warn if a deprecated
+            # override key is present.
+            if ka9q.get('data_destination') or cfg.get('radiod_multicast_group'):
+                issues.append({
+                    'severity': 'warn',
+                    'instance': 'default',
+                    'message':  ('[ka9q].data_destination / radiod_multicast_group '
+                                 'is deprecated under contract v0.3 §7; ka9q-python '
+                                 'now derives the multicast group automatically'),
+                })
+            data_destination = None
 
             instances.append({
                 'instance':                    'default',
@@ -173,8 +164,15 @@ def _handle_inventory(args):
         'client':           'hf-timestd',
         'version':          version,
         'git':              GIT_INFO,
-        'contract_version': '0.2',
+        'contract_version': '0.4',
         'config_path':      str(config_path),
+        'log_paths': {
+            'stderr':   'journal',
+            'file_dir': '/var/log/hf-timestd',
+        },
+        'log_level':        os.environ.get('HF_TIMESTD_LOG_LEVEL')
+                             or os.environ.get('CLIENT_LOG_LEVEL')
+                             or 'INFO',
         'instances':        instances,
         'deps': {
             'git': [],
@@ -244,8 +242,40 @@ def _handle_validate_contract(args):
                     'message':  'no channels configured under recorder.channel_group',
                 })
 
+            # §12.2 (v0.4): SSRC uniqueness within a radiod block.
+            # (freq, preset, sample_rate, encoding) collides on SSRC;
+            # ka9q-python's MultiStream silently drops duplicates.
+            seen = {}
+            for gname, group in (recorder.get('channel_group', {}) or {}).items():
+                preset = group.get('preset', 'iq')
+                rate   = group.get('sample_rate')
+                enc    = group.get('encoding', 's16be')
+                for ch in (group.get('channels', []) or []):
+                    hz = ch.get('frequency_hz')
+                    if hz is None:
+                        continue
+                    key = (int(hz), preset, rate, enc)
+                    if key in seen:
+                        issues.append({
+                            'severity': 'fail',
+                            'instance': 'default',
+                            'message': (
+                                f'SSRC collision: channels in groups '
+                                f'{seen[key]!r} and {gname!r} share '
+                                f'(freq={hz}, preset={preset}, '
+                                f'rate={rate}, enc={enc}) — '
+                                f'ka9q-python will silently drop one'
+                            ),
+                        })
+                    else:
+                        seen[key] = gname
+
     ok = not any(i['severity'] == 'fail' for i in issues)
-    payload = {'ok': ok, 'issues': issues}
+    payload = {
+        'ok':          ok,
+        'config_path': str(config_path),
+        'issues':      issues,
+    }
     print(json.dumps(payload, indent=2))
     sys.exit(0 if ok else 1)
 
@@ -529,6 +559,34 @@ def _handle_service(args, parser):
         return
 
 
+def _resolve_log_level(default=logging.INFO):
+    """§11 (v0.3): honor HF_TIMESTD_LOG_LEVEL / CLIENT_LOG_LEVEL env vars."""
+    import os
+    lvl = (os.environ.get('HF_TIMESTD_LOG_LEVEL')
+           or os.environ.get('CLIENT_LOG_LEVEL'))
+    if not lvl:
+        return default
+    try:
+        return getattr(logging, lvl.upper())
+    except AttributeError:
+        return default
+
+
+def _install_sighup_log_handler():
+    """§11 (v0.3): SIGHUP re-reads log level env and applies it live."""
+    import signal
+
+    def _reload(_signum, _frame):
+        new_level = _resolve_log_level()
+        root = logging.getLogger()
+        root.setLevel(new_level)
+        for h in root.handlers:
+            h.setLevel(new_level)
+        logging.info(f"SIGHUP: log level → {logging.getLevelName(new_level)}")
+
+    signal.signal(signal.SIGHUP, _reload)
+
+
 def main():
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
@@ -536,10 +594,13 @@ def main():
     # something is wrong.  This must run before any logging.info() calls.
     _contract_quiet = any(arg in ('inventory', 'validate') for arg in sys.argv[1:3])
 
+    # §11: startup log level from env (overrides hard-coded INFO default).
+    _env_level = _resolve_log_level(default=logging.INFO)
+
     # Configure logging to show INFO level and above
     # Force level on root logger in case it was already configured
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.WARNING if _contract_quiet else logging.INFO)
+    root_logger.setLevel(logging.WARNING if _contract_quiet else _env_level)
 
     # Add handler if none exists
     if not root_logger.handlers:
@@ -549,7 +610,7 @@ def main():
     else:
         # Set level on existing handlers too
         for handler in root_logger.handlers:
-            handler.setLevel(logging.WARNING if _contract_quiet else logging.INFO)
+            handler.setLevel(logging.WARNING if _contract_quiet else _env_level)
 
     if not _contract_quiet:
         logging.info("✓ Logging configured at INFO level")
@@ -931,6 +992,9 @@ Per-service overrides in [services] take precedence over the profile.
             'derived_max_days': derived_max_days,
         }
         
+        # §11: SIGHUP re-reads log level env without restart.
+        _install_sighup_log_handler()
+
         # Start daemon mode
         recorder = CoreRecorderV2(recorder_config)
         recorder.run()
