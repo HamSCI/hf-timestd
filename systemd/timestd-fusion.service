@@ -64,9 +64,10 @@ MemorySwapMax=0
 Restart=always
 RestartSec=10
 
-# Standard output logging
-StandardOutput=append:/var/log/hf-timestd/fusion.log
-StandardError=append:/var/log/hf-timestd/fusion.log
+# Unified journal sink — see docs/DEBUGGING.md §2 for access patterns.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-fusion
 
 [Install]
 WantedBy=multi-user.target

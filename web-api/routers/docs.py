@@ -243,19 +243,21 @@ async def get_section(doc_name: str, section_id: str):
 # The frontend calls /api/living-docs/evidence/{source}/{filter} to fetch.
 # =============================================================================
 
-# Evidence sources: maps source name to (log_file, service_name_for_journalctl)
-# Updated for v6.5.0 data locations and new modules
+# Evidence sources: maps source name to (unused, service_name_for_journalctl).
+# As of v6.12 all timestd-* services log to journald — the first tuple element
+# is retained as None for API shape stability.  Consumers should pull evidence
+# via `journalctl -u <unit>` (or the /logs endpoint) using the unit name.
 EVIDENCE_SOURCES = {
-    "bootstrap": ("/var/log/hf-timestd/core-recorder.log", "timestd-core-recorder"),
-    "fusion": ("/var/log/hf-timestd/fusion.log", "timestd-fusion"),
-    "physics": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
-    "TEC": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
-    "TID": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
-    "L1-L2": ("/var/log/hf-timestd/l2-calibration.log", "timestd-l2-calibration"),
-    "metrology": ("/var/log/hf-timestd/metrology.log", "timestd-metrology"),
-    "arrival_matrix": ("/var/log/hf-timestd/core-recorder.log", "timestd-core-recorder"),
-    "consistency": ("/var/log/hf-timestd/physics.log", "timestd-physics"),
-    "reanalysis": (None, "timestd-iono-reanalysis"),
+    "bootstrap":      (None, "timestd-core-recorder"),
+    "fusion":         (None, "timestd-fusion"),
+    "physics":        (None, "timestd-physics"),
+    "TEC":            (None, "timestd-physics"),
+    "TID":            (None, "timestd-physics"),
+    "L1-L2":          (None, "timestd-l2-calibration"),
+    "metrology":      (None, "timestd-metrology"),
+    "arrival_matrix": (None, "timestd-core-recorder"),
+    "consistency":    (None, "timestd-physics"),
+    "reanalysis":     (None, "timestd-iono-reanalysis"),
 }
 
 # Predefined filter patterns for each source
@@ -367,21 +369,19 @@ def _fetch_evidence(source: str, filter_name: str, max_lines: int = 20) -> Evide
     location = None
     
     try:
-        # Try log file first
-        if log_file:
-            cmd = f"tail -10000 {log_file} 2>/dev/null | grep -iE '{pattern}' | tail -{max_lines}"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-            log_lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-        
-        # Fall back to journalctl if no results from file
-        if not log_lines and service_name:
+        # Unified journal read.  All timestd-* units log to journald as of
+        # v6.12 so we no longer split between file-tail and journalctl paths.
+        if service_name:
             cmd = f"journalctl -u {service_name} --no-pager -n 5000 2>/dev/null | grep -iE '{pattern}' | tail -{max_lines}"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             log_lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-        
-        # For bootstrap, try to extract installation location
+
+        # For bootstrap, try to extract installation location from the journal.
         if source == "bootstrap":
-            loc_cmd = f"tail -10000 {log_file} 2>/dev/null | grep -oP 'receiver at \\(\\K[^)]+' | tail -1"
+            loc_cmd = (
+                f"journalctl -u {service_name} --no-pager -n 10000 2>/dev/null "
+                f"| grep -oP 'receiver at \\(\\K[^)]+' | tail -1"
+            )
             loc_result = subprocess.run(loc_cmd, shell=True, capture_output=True, text=True, timeout=5)
             if loc_result.stdout.strip():
                 location = loc_result.stdout.strip()

@@ -287,28 +287,79 @@ except Exception:
 fi
 
 # =============================================================================
-# Phase 1: Binary Archive (L0 Raw IQ Data)
+# Phase 0.7: Ring Buffer (SysV /dev/shm IPC — primary L0 path for metrology)
 # =============================================================================
-section "Phase 1: Binary Archive (L0 Raw IQ)"
+section "Phase 0.7: Ring Buffer (SysV IPC)"
+
+# Producer (core-recorder) creates one SysV segment per channel; each consumer
+# (timestd-metrology@<CHANNEL>) attaches read-only. Healthy nattch == 2.
+RING_SEGS=$(ipcs -m 2>/dev/null | awk -v u="timestd" '$3==u {print}')
+RING_COUNT=$(echo "$RING_SEGS" | grep -c .)
+if [[ $RING_COUNT -eq 0 ]]; then
+    check_fail "No SysV ring segments owned by timestd (core-recorder not creating rings?)"
+elif [[ $RING_COUNT -eq $EXPECTED_CHANNELS ]]; then
+    check_pass "Ring segments: $RING_COUNT/$EXPECTED_CHANNELS present"
+else
+    check_warn "Ring segments: $RING_COUNT (expected $EXPECTED_CHANNELS)"
+fi
+
+if [[ $RING_COUNT -gt 0 ]]; then
+    BAD_NATTCH=$(echo "$RING_SEGS" | awk '$6 != 2 {print $2" nattch="$6}')
+    if [[ -z "$BAD_NATTCH" ]]; then
+        check_pass "All ring segments have nattch=2 (producer + consumer)"
+    else
+        check_warn "Ring segments with nattch != 2:"
+        echo "$BAD_NATTCH" | sed 's/^/    /'
+        echo "  → 1 = consumer not attached (metrology worker down or stale)"
+        echo "  → >2 = leaked attachment from previous worker"
+    fi
+fi
+
+# Overrun detection in metrology workers since boot (consumer fell behind producer)
+if [[ "$MODE" == "production" ]]; then
+    OVERRUNS=$(journalctl -u 'timestd-metrology@*' --since "1 hour ago" --no-pager 2>/dev/null \
+        | grep -c "RingBufferOverrunError" || true)
+    if [[ "$OVERRUNS" -eq 0 ]]; then
+        check_pass "No ring overruns in last hour"
+    else
+        check_warn "$OVERRUNS ring overrun event(s) in last hour (consumer falling behind)"
+        echo "  → Diagnose: journalctl -u 'timestd-metrology@*' --since '1 hour ago' | grep Overrun"
+    fi
+
+    # Head-UTC lag: per-channel, via hf-timestd CLI if it exposes it; fall back to log scrape
+    HEAD_LAG_LINE=$(journalctl -u timestd-core-recorder --since "2 minutes ago" --no-pager 2>/dev/null \
+        | grep -oE 'head_utc[^ ]* lag[^ ]*' | tail -1)
+    if [[ -n "$HEAD_LAG_LINE" ]]; then
+        echo "  → Recent head_utc indicator: $HEAD_LAG_LINE"
+    fi
+fi
+
+# =============================================================================
+# Phase 1: Binary Archive (L0 Raw IQ Data — cold tier; metrology no longer reads this)
+# =============================================================================
+section "Phase 1: Binary Archive (L0 Raw IQ — cold archive only)"
 
 RAW_BUFFER_DIR="$DATA_ROOT/raw_buffer"
 if [[ -d "$RAW_BUFFER_DIR" ]]; then
     check_pass "Binary archive directory exists: $RAW_BUFFER_DIR"
     
     SEARCH_PATHS="$RAW_BUFFER_DIR"
+    # TODO(ring-buffer Phase 3): delete this hot-tier block once TieredStorageManager
+    # is retired and BinaryArchiveWriter.run_from_ring() writes only to the cold path.
     if [[ -d "/dev/shm/timestd/raw_buffer" ]]; then
         SEARCH_PATHS="$SEARCH_PATHS /dev/shm/timestd/raw_buffer"
         check_pass "Hot buffer (tiered storage) exists: /dev/shm/timestd/raw_buffer"
     fi
     
-    # Check for recent .bin.zst files (within last 5 minutes)
-    RECENT_BIN=$(find $SEARCH_PATHS -name "*.bin.zst" -mmin -5 2>/dev/null | wc -l)
-    
+    # Cold archive writes 10-minute chunks aligned to wall clock; widen window
+    # so a recent core-recorder restart doesn't trigger a false negative.
+    RECENT_BIN=$(find $SEARCH_PATHS -name "*.bin.zst" -mmin -15 2>/dev/null | wc -l)
+
     if [[ $RECENT_BIN -gt 0 ]]; then
-        check_pass "Found $RECENT_BIN recent binary archive files (last 5 min)"
-        
+        check_pass "Found $RECENT_BIN recent binary archive files (last 15 min)"
+
         # Check for matching .json metadata sidecars
-        RECENT_JSON=$(find $SEARCH_PATHS -name "*.json" -mmin -5 2>/dev/null | wc -l)
+        RECENT_JSON=$(find $SEARCH_PATHS -name "*.json" -mmin -15 2>/dev/null | wc -l)
         if [[ $RECENT_JSON -ge $RECENT_BIN ]]; then
             check_pass "All binary files have matching JSON metadata sidecars"
         else
@@ -331,30 +382,20 @@ if [[ -d "$RAW_BUFFER_DIR" ]]; then
                     MB_INT=${MINUTE_BOUNDARY%.*}
                     SST_INT=${START_SYSTEM_TIME%.*}
                     
+                    # Archive metadata consistency only — metrology no longer
+                    # reads these JSON sidecars (it reads the SysV ring directly).
+                    # Drift here means cold-archive metadata is off, NOT timing.
                     if [[ "$MB_INT" == "$SST_INT" ]]; then
-                        # Check if there's a fractional offset
-                        if [[ "$START_SYSTEM_TIME" == *"."* ]] && [[ "${START_SYSTEM_TIME#*.}" != "0" ]]; then
-                            FRAC="${START_SYSTEM_TIME#*.}"
-                            # If fractional part is significant (>1ms = 0.001)
-                            if [[ "${FRAC:0:3}" != "000" ]] && [[ "${FRAC:0:3}" != "0" ]]; then
-                                check_warn "Buffer alignment: start_system_time has offset (${START_SYSTEM_TIME} vs ${MINUTE_BOUNDARY})"
-                                echo "  → May cause timing errors - consider updating to v5.3.12+"
-                            else
-                                check_pass "Buffer alignment: start_system_time = minute_boundary (exact)"
-                            fi
-                        else
-                            check_pass "Buffer alignment: start_system_time = minute_boundary (exact)"
-                        fi
+                        check_pass "Archive metadata: start_system_time aligns with minute_boundary"
                     else
-                        check_fail "Buffer alignment BROKEN: start_system_time ($START_SYSTEM_TIME) != minute_boundary ($MINUTE_BOUNDARY)"
-                        echo "  → CRITICAL: This causes timing errors of 100s of milliseconds"
-                        echo "  → Fix: Update to v5.3.12+ and restart core-recorder"
+                        check_warn "Archive metadata drift: start_system_time ($START_SYSTEM_TIME) != minute_boundary ($MINUTE_BOUNDARY)"
+                        echo "  → Cold-archive sidecar drift only; metrology timing unaffected (reads from ring)"
                     fi
                 fi
             fi
         fi
     else
-        check_warn "No recent binary archive files (last 5 min) - recorder may not be running"
+        check_warn "No recent binary archive files (last 15 min) - recorder may not be running, or first chunk not yet closed after restart"
     fi
 else
     check_fail "Binary archive directory not found: $RAW_BUFFER_DIR"
@@ -413,16 +454,18 @@ if [[ -d "$PHASE2_DIR" ]]; then
                 HDF5_MTIME=$(stat -c %Y "$LATEST_HDF5")
                 LATENCY=$((NOW - HDF5_MTIME))
                 
-                # Metrology updates vary by channel (10-30 min typical)
-                # Use 30-minute threshold to avoid false positives
-                if [[ $LATENCY -lt 1800 ]]; then
-                    check_pass "$CHANNEL: Metrology measurements found (latency: ${LATENCY}s, $SIZE)"
+                # Ring-mode metrology writes every 60s; matches pipeline-watchdog
+                # METROLOGY_STALE=180. >180s is a real stall, not a quiet channel.
+                if [[ $LATENCY -lt 180 ]]; then
+                    check_pass "$CHANNEL: Metrology measurements fresh (latency: ${LATENCY}s, $SIZE)"
+                elif [[ $LATENCY -lt 600 ]]; then
+                    check_warn "$CHANNEL: Metrology latency ${LATENCY}s (expected <180s in ring mode)"
                 else
-                    check_warn "$CHANNEL: Metrology measurements found but STALE (latency: ${LATENCY}s)"
+                    check_fail "$CHANNEL: Metrology STALE (latency: ${LATENCY}s) — worker stalled?"
                 fi
                 ((HDF5_COUNT++))
             else
-                check_warn "$CHANNEL: No HDF5 metrology measurements found"
+                check_fail "$CHANNEL: No HDF5 metrology measurements found (ring-mode worker should always produce)"
             fi
         fi
     done
@@ -484,48 +527,45 @@ if [[ -d "$FUSION_DIR" ]]; then
             fi
         fi
         
-        # Check fusion service log file for activity (production only)
-        # Note: Logs rotate at midnight, check both .log and .log.1
+        # Check fusion service activity via journald (production only).
+        # All timestd-* units log to journald as of v6.12 — no per-service
+        # log files to hunt for.
         if [[ "$MODE" == "production" ]]; then
-            FUSION_LOG="/var/log/hf-timestd/fusion.log"
-            FUSION_LOG_1="/var/log/hf-timestd/fusion.log.1"
-            
-            # Use whichever log is more recent
-            if [[ -f "$FUSION_LOG" ]] && [[ -s "$FUSION_LOG" ]]; then
-                ACTIVE_LOG="$FUSION_LOG"
-            elif [[ -f "$FUSION_LOG_1" ]]; then
-                ACTIVE_LOG="$FUSION_LOG_1"
+            LAST_LOG_TS=$(journalctl -u timestd-fusion.service -n 1 --no-pager \
+                --output=short-unix 2>/dev/null | awk 'NR==1{print $1}')
+
+            if [[ -z "$LAST_LOG_TS" ]]; then
+                check_fail "Fusion service has no journal entries"
+                echo "  → Diagnose: sudo journalctl -u timestd-fusion -n 100"
             else
-                ACTIVE_LOG=""
-            fi
-            
-            if [[ -n "$ACTIVE_LOG" ]]; then
-                LOG_MTIME=$(stat -c %Y "$ACTIVE_LOG" 2>/dev/null || echo "0")
-                LOG_AGE=$((NOW - LOG_MTIME))
-                
+                LOG_AGE=$((NOW - ${LAST_LOG_TS%.*}))
+
                 if [[ $LOG_AGE -gt 120 ]]; then
-                    check_fail "Fusion service SILENT (log not updated in ${LOG_AGE}s)"
+                    check_fail "Fusion service SILENT (no journal entry in ${LOG_AGE}s)"
                     echo "  → Cause: Python crash during initialization, import error"
                     echo "  → Diagnose: sudo journalctl -u timestd-fusion -n 100"
                 else
-                    # Check for recent errors in log
-                    ERROR_COUNT=$(tail -50 "$ACTIVE_LOG" 2>/dev/null | grep -c -E "(ERROR|CRITICAL|Traceback|Exception|CRASHED)" 2>/dev/null || echo "0")
+                    # Check for recent errors in the journal.
+                    ERROR_COUNT=$(journalctl -u timestd-fusion.service -n 200 \
+                        --no-pager 2>/dev/null \
+                        | grep -c -E "(ERROR|CRITICAL|Traceback|Exception|CRASHED)" \
+                        || echo "0")
                     ERROR_COUNT=$(echo "$ERROR_COUNT" | tr -d '\n' | tr -d ' ')
                     if [[ "$ERROR_COUNT" -gt 0 ]] 2>/dev/null; then
-                        check_warn "Fusion service has $ERROR_COUNT recent errors in logs"
-                        echo "  → Check: tail -50 $ACTIVE_LOG | grep ERROR"
+                        check_warn "Fusion service has $ERROR_COUNT recent errors in journal"
+                        echo "  → Check: journalctl -u timestd-fusion -n 200 | grep ERROR"
                     fi
-                    
-                    # D_clock sanity check - extract recent D_clock values
-                    DCLOCK_LINE=$(grep "Fused D_clock" "$ACTIVE_LOG" 2>/dev/null | tail -1)
+
+                    # D_clock sanity check — extract the most recent Fused
+                    # D_clock line from the journal.
+                    DCLOCK_LINE=$(journalctl -u timestd-fusion.service -n 2000 \
+                        --no-pager 2>/dev/null | grep "Fused D_clock" | tail -1)
                     if [[ -n "$DCLOCK_LINE" ]]; then
-                        # Extract D_clock value (e.g., "+31.952 ms" or "-1.772 ms")
                         DCLOCK_MS=$(echo "$DCLOCK_LINE" | grep -oP 'D_clock: [+-]?\d+\.?\d*' | grep -oP '[+-]?\d+\.?\d*')
                         if [[ -n "$DCLOCK_MS" ]]; then
-                            # Check if absolute value is reasonable (<100ms)
-                            DCLOCK_ABS=${DCLOCK_MS#-}  # Remove leading minus
-                            DCLOCK_INT=${DCLOCK_ABS%.*}  # Get integer part
-                            
+                            DCLOCK_ABS=${DCLOCK_MS#-}
+                            DCLOCK_INT=${DCLOCK_ABS%.*}
+
                             if [[ -n "$DCLOCK_INT" ]] && [[ "$DCLOCK_INT" -lt 100 ]]; then
                                 check_pass "D_clock sanity: ${DCLOCK_MS}ms (within ±100ms)"
                             elif [[ -n "$DCLOCK_INT" ]] && [[ "$DCLOCK_INT" -lt 500 ]]; then
@@ -534,7 +574,7 @@ if [[ -d "$FUSION_DIR" ]]; then
                             else
                                 check_fail "D_clock UNSTABLE: ${DCLOCK_MS}ms (expected <100ms)"
                                 echo "  → CRITICAL: Check buffer alignment (v5.3.12 fix)"
-                                echo "  → Diagnose: grep 'expected_marker_at_sample' /var/log/hf-timestd/phase2-*.log*"
+                                echo "  → Diagnose: journalctl -u timestd-metrology@* --grep='expected_marker_at_sample' -n 200"
                             fi
                         fi
                     fi

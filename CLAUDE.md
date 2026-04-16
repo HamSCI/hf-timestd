@@ -43,7 +43,7 @@ src/hf_timestd/          # Main package
 web-api/                 # FastAPI dashboard (port 8000)
 tests/                   # Unit/integration tests
 config/                  # Config templates (TOML, chrony, systemd env)
-systemd/                 # 8 systemd service files
+systemd/                 # ~25 unit files (8-service core pipeline + timers/housekeeping)
 scripts/                 # Utility/deployment scripts
 docs/                    # Technical docs, QEX paper draft
 ```
@@ -61,7 +61,8 @@ docs/                    # Technical docs, QEX paper draft
 
 - **Pipeline:** Recording (RTP -> binary IQ) -> Metrology (IQ -> HDF5 L1/L2) -> Fusion (Kalman + WLS -> Chrony SHM)
 - **Two modes:** RTP (GPSDO ground truth, testing) and FUSION (GPS-denied, production)
-- **Service profiles** (archive/rtp/fusion/full) control which of 8+ systemd services run
+- **Service profiles** (archive/rtp/fusion/full) control which of the core services run
+- **Logging:** every `timestd-*` unit logs to journald — no per-service log files. See `docs/DEBUGGING.md`.
 - **HDF5 SWMR:** writers keep files open + flush; readers use `swmr=True`
 - **Raw IQ storage:** Configurable chunk duration (`file_duration_sec`, default 600s = 10 min). Compressed `.bin.zst` + JSON sidecar per chunk. GRAPE raw reader handles both legacy 1-min and multi-minute chunks transparently.
 - **GRAPE spectrogram:** Edge tapering at gap boundaries (half-cosine, 5s); full-window validity masking (NFFT=512 → ±25.6s). No zero interpolation.
@@ -72,3 +73,56 @@ docs/                    # Technical docs, QEX paper draft
 - `h5py>=3.8.0,<3.16.0` — h5py 3.16 bundles HDF5 2.0.0 which breaks SWMR in long-running processes
 - `ka9q-python>=3.3` — RTP stream interface to ka9q-radio
 - `pylap` (optional) — PHaRLAP ray tracing for propagation mode identification
+
+## General Workflow Orchestration in Any Project
+
+### 1. Plan Mode Default
+- Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)
+- If something goes sideways, STOP and re-plan immediately — don't keep pushing
+- Use plan mode for verification steps, not just building
+- Write detailed specs upfront to reduce ambiguity
+
+### 2. Subagent Strategy
+- Use subagents liberally to keep main context window clean
+- Offload research, exploration, and parallel analysis to subagents
+- For complex problems, throw more compute at it via subagents
+- One task per subagent for focused execution
+
+### 3. Self-Improvement Loop
+- After ANY correction from the user: update `tasks/lessons.md` with the pattern
+- Write rules for yourself that prevent the same mistake
+- Ruthlessly iterate on these lessons until mistake rate drops
+- Review lessons at session start for relevant project
+
+### 4. Verification Before Done
+- Never mark a task complete without proving it works
+- Diff behavior between main and your changes when relevant
+- Ask yourself: "Would a staff engineer approve this?"
+- Run tests, check logs, demonstrate correctness
+
+### 5. Demand Elegance (Balanced)
+- For non-trivial changes: pause and ask "is there a more elegant way?"
+- If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
+- Skip this for simple, obvious fixes — don't over-engineer
+- Challenge your own work before presenting it
+
+### 6. Autonomous Bug Fixing
+- When given a bug report: just fix it. Don't ask for hand-holding
+- Point at logs, errors, failing tests — then resolve them
+- Zero context switching required from the user
+- Go fix failing CI tests without being told how
+
+## Task Management
+
+1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
+2. **Verify Plan**: Check in before starting implementation
+3. **Track Progress**: Mark items complete as you go
+4. **Explain Changes**: High-level summary at each step
+5. **Document Results**: Add review section to `tasks/todo.md`
+6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
+
+## Core Principles
+
+- **Simplicity First**: Make every change as simple as possible. Impact minimal code.
+- **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
+- **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.

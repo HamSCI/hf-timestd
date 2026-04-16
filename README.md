@@ -194,7 +194,14 @@ sudo hf-timestd service disable physics
 | Start all | `sudo ./scripts/start-services.sh` |
 | Stop all | `sudo ./scripts/stop-services.sh` |
 | Status overview | `hf-timestd service status` |
-| **All Logs** | `journalctl -u timestd-* -f` |
+| **Live logs (all)** | `journalctl -u 'timestd-*' -f` |
+| **Errors, last hour** | `journalctl -u 'timestd-*' -p warning..err --since -1h` |
+| **Single service** | `journalctl -u timestd-fusion -f` |
+| **Templated (per-channel)** | `journalctl -u 'timestd-metrology@*' -f` |
+
+All `timestd-*` units log to journald — there are no per-service log files
+to hunt for. See [docs/DEBUGGING.md](docs/DEBUGGING.md) for the full log
+cookbook and stage-by-stage troubleshooting.
 
 ### Data Locations
 
@@ -216,9 +223,9 @@ sudo hf-timestd service disable physics
 
 ---
 
-## Architecture (The Eight Services)
+## Architecture
 
-The system is composed of eight independent services that form a pipeline:
+The system has an eight-service core pipeline plus a set of housekeeping units (timers, maintenance, monitoring, GRAPE subsystem). In total [systemd/](systemd/) carries ~25 unit files; [docs/SERVICES.md](docs/SERVICES.md) (when present — see also [systemd/](systemd/)) covers the full set. The eight core services:
 
 ```text
 [ka9q-radio] (RTP Multicast)
@@ -257,11 +264,12 @@ The system is composed of eight independent services that form a pipeline:
 
 ## Detailed Documentation
 
-- **[INSTALLATION.md](INSTALLATION.md)** - Detailed setup guide.
-- **[TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)** - Deep dive into algorithms, data formats, and physics models.
-- **[METROLOGY.md](docs/METROLOGY.md)** - RTP-to-UTC calibration methodology and timing bootstrap.
-- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System design philosophy ("The Why").
-- **[docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md](docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md)** - Production deployment and verification gates.
+- **[INSTALLATION.md](INSTALLATION.md)** — setup and deployment (standalone + Pattern A editable-venv).
+- **[docs/DEBUGGING.md](docs/DEBUGGING.md)** — operator troubleshooting runbook: log access, stage-by-stage triage, failure recipes, diagnostic bundle.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system design and data flow.
+- **[docs/METROLOGY.md](docs/METROLOGY.md)** — RTP-to-UTC calibration, timing bootstrap, error budget.
+- **[docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)** — algorithms, data formats, physics models.
+- **[docs/PIPELINE_VERIFICATION.md](docs/PIPELINE_VERIFICATION.md)** — end-to-end health gates.
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mijahauan/hf-timestd)
 
@@ -277,96 +285,16 @@ The system is composed of eight independent services that form a pipeline:
 
 **License:** MIT - See [LICENSE](LICENSE)
 
-### Recent Updates
+### Recent changes
 
-**v6.11.0 (March 9, 2026) - Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty**
+The full version history lives in [CHANGELOG.md](CHANGELOG.md). Highlights of recent cycles:
 
-- ✅ **Unified detection path** — Eliminated RTP/Fusion fork in `process_minute()`. Both modes now use the same per-second correlator with `BufferTiming` when available; legacy `tone_detector.process_samples()` retained as Fusion fallback only when `BufferTiming` is missing
-- ✅ **Adaptive search windows** — Physics-model-derived 3σ uncertainty passed to `_measure_tone_at_known_time()`. Fusion mode adds UTC estimate uncertainty in quadrature: `σ = √(σ_physics² + σ_utc²)`
-- ✅ **Window safeguards** in `BroadcastWindowState` — staleness decay (exponential widening after 5 min), consecutive miss counter (resets after 5 misses), model floor rule (tracked variance can only narrow below model at confidence ≥ 0.95 with ≥ 30 observations)
-- ✅ **Continuous physics confidence** — Binary physics gate replaced with Gaussian confidence weighting. `FusionTimingState` feeds at confidence > 0.1 threshold, allowing marginal detections to contribute with appropriately low weight
-- ✅ **Multipath-aware uncertainty widening** — CLEAN deconvolution delay spread and per-second timing spread inflate `BroadcastWindowState` tracked variance (quadrature). Multipath-affected detections get degraded Kalman confidence
-- ✅ **Edge detection in both modes** — Tick edge ensemble now runs in Fusion mode (was RTP-only), enabling edge ensemble recovery and cross-check in all operating modes
-- 📄 **Design doc** — `docs/design/UNIFIED_MEASUREMENT_PATH.md` documents the 5-step implementation with adaptive window methodology, failure modes, and safeguards
-
-**v6.10.0 (March 7, 2026) - HDF5 SWMR + Web UI + Robustness**
-
-- ✅ **HDF5 SWMR throughout** — Replaced `open-write-close` + `locking=False` with proper SWMR across all 13 reader/writer sites. Writer keeps daily file open in SWMR mode, flushes after each append. `h5clear -s` called unconditionally on every open-for-write — this is the key fix that makes SWMR robust to unclean shutdowns (previous SWMR attempt abandoned Feb 6 due to this)
-- ✅ **32-bit RTP counter wraparound** fix (49.7 hr period at 24 kHz)
-- ✅ **Recorder crash-loop prevention** on restart (uptime-gated freshness self-restart)
-- ✅ **GRAPE pipeline** robustness: tiered storage search, 2-day retention, non-fatal SFTP upload
-- ✅ **GNSS TEC**: correct DCB sign, C1C-C2L synthesis, receiver DCB estimation, plausibility gate
-- ✅ **QuotaManager** rewritten: day-level circular buffer deletion with priority ordering
-- ✅ **Phase page**: dynamic channel/station filters, solar zenith overlay, gap line breaks
-- ✅ **Logs page**: all services grouped with error guidance panel
-- ✅ **Dead code archived** from `wwvh_discrimination.py` (3918 → 1237 lines)
-
-**v6.8.0 (February 26, 2026) - Web UI Polish & Physics Service Resilience**
-
-- ✅ **Custom date range** on all time-selector pages (ionogram, dTEC, metrology, logs) — browse any historical day
-- ✅ **Solar elevation overlay** on ionogram ToF/SNR time series — curve-only, no shading, consistent across all pages
-- ✅ **Brighter color scheme** for dark backgrounds — station colors and secondary markers improved on ionogram and dTEC pages
-- ✅ **Removed integrated dTEC panel** from dTEC page (rarely detectable, compressed useful plots)
-- ✅ **Physics service crash-loop protection** — `_timed_write()` wraps all HDF5 writes with 30s timeout; `_pet_watchdog()` called 17× throughout `process_minute()` to prevent watchdog kills during heavy I/O
-- ✅ **Logs API `until` parameter** — enables custom date range queries for journal logs
-
-**v6.7.1 (February 12, 2026) - Propagation Model Full Integration**
-
-- ✅ **Full pipeline migration** - `multi_broadcast_fusion.py` and `bootstrap_validator.py` migrated from `PhysicsPropagationModel` to `HFPropagationModel`
-- ✅ **Great-circle TEC sampling** - `IonoDataService._gc_intermediate()` uses spherical trigonometry for accurate path TEC
-- ✅ **Altitude-dependent obliquity** - Thin-shell mapping `M(h)` replaces `1/sin(e)` for low-elevation accuracy
-- ✅ **Web API endpoints** - `/model/predict`, `/model/all-stations`, `/model/iono-status` for live model observability
-- ✅ **Self-consistency check wired** - `HFPropagationModel.self_consistency_check()` integrated into `ArrivalPatternMatrix`
-- ✅ **Deprecated** - `physics_propagation.py` retained for backward compatibility; all callers migrated
-
-**v6.7.0 (February 12, 2026) - Real-Time Ionospheric Propagation Model**
-
-- ✅ **Real-time ionospheric data** - `IonoDataService` fetches WAM-IPE grids from NOAA S3 and GIRO ionosonde data for real-time hmF2/foF2 corrections
-- ✅ **Physics-based group delay** - `HFPropagationModel` computes frequency-dependent ionospheric delay via numerical Ne(h) integration
-- ✅ **Multi-mode predictions** - Evaluates 1F, 2F, 3F, 1E propagation modes with MUF checks and geometric feasibility
-- ✅ **Adaptive uncertainty** - Windows adapt from ±1.5 ms (WAM-IPE+GIRO) to ±15 ms (no model), blended with tracked variance
-- ✅ **Self-consistency check** - Multi-frequency differential delay validates model TEC predictions
-- ✅ **23 new tests** - All passing, 0 regressions in existing test suite
-
-**v6.5.1 (February 7, 2026) - Dual Kalman & Chrony Feed Fixes**
-
-- ✅ **Dual Kalman architecture** - Independent L1 and L2 Kalman filters so TSL1 and TSL2 carry genuinely different estimates to chrony
-- ✅ **Chrony SHM reachability fix** - Discontinuity filter no longer permanently latches; threshold scales with measurement uncertainty
-- ✅ **HDF5 file lock fix** - Moved `HDF5_USE_FILE_LOCKING=FALSE` before h5py import; added `locking=False` to all h5py.File() calls
-- ✅ **Silent exception fix** - Upgraded HDF5 read error logging from DEBUG to WARNING to prevent invisible data starvation
-- ✅ **FUSION mode documentation** - Comprehensive accuracy analysis and error budget in docs/METROLOGY.md
-
-**v6.3.0 (January 25, 2026) - Timing Bootstrap System**
-
-- ✅ **RTP-to-UTC Bootstrap:** Two-phase calibration using metadata + broadcast validation
-- ✅ **Discriminating Features:** Tone frequency, schedule, geographic ordering validation
-- ✅ **State Machine:** ACQUIRING → CORRELATING → TRACKING → LOCKED progression
-- ✅ **Geographic Priors:** Expected propagation delays based on transmitter/receiver locations
-- ✅ **Unambiguous Channels:** High-confidence station ID on CHU and WWV 20/25 MHz
-
-**v6.2.0 (January 24, 2026) - Metrological Enhancements**
-
-- ✅ **Cramér-Rao Uncertainty:** Rigorous ToA uncertainty from SNR, bandwidth, duration
-- ✅ **Multipath Detection:** Integrated into tone detector with uncertainty inflation
-- ✅ **Doppler Correction:** Removes systematic timing bias from ionospheric motion
-- ✅ **Adaptive SNR Threshold:** CFAR-like approach improves sensitivity 10-20%
-- ✅ **CHU Tick Timing:** High-precision timing from 1000 Hz tick (~0.05 ms)
-- ✅ **Complex Correlation:** Phase-preserving correlation for sub-sample refinement
-
-**v5.3.2 (January 20, 2026) - Fusion Restart & Install Improvements**
-
-- ✅ **Kalman State Persistence:** Fixed state restore on service restart (no more D_clock jumps)
-- ✅ **SHM Permissions:** Automatic cleanup of stale Chrony SHM segments
-- ✅ **Install Process:** Initial IONEX download, proper service ordering
-- ✅ **Deploy Script:** `scripts/deploy.sh` — unified idempotent installer and updater
-
-**v5.3.1 (January 12, 2026) - "Steel Ruler" & Drift Elimination**
-
-- ✅ **"Steel Ruler" Metrology:** Strict GPSDO-anchored Kalman tuning (Q ≈ 0)
-- ✅ **Drift Elimination:** Hard-clamped drift to 0.0 after convergence
-
-**v5.0.0 (January 7, 2026) - HDF5-Native Pipeline**
-
-- ✅ **Binary IQ Archive:** Compressed `.bin.zst` + JSON sidecars for raw IQ (replaced Digital RF)
-- ✅ **HDF5-Native Analytics:** All L1/L2/L3 data uses HDF5 (crash-safe open-write-close)
-- ✅ **Physics-Informed Propagation:** IONEX VTEC maps for precise path delay
+- **v6.12** — Unified journald logging across every `timestd-*` unit (core-recorder, fusion, and physics moved off file sinks). Web UI Logs page and the `/api/living-docs/evidence/*` endpoint now read a single source and stay in sync.
+- **v6.11** — Unified measurement path (RTP/Fusion fork eliminated), adaptive search windows driven by physics-model 3σ uncertainty, multipath-aware uncertainty widening, edge detection in both modes.
+- **v6.10** — HDF5 SWMR throughout (h5clear on every open-for-write), 32-bit RTP wraparound fix, recorder crash-loop prevention, GRAPE pipeline robustness, QuotaManager rewrite.
+- **v6.8** — Physics service crash-loop protection (`_timed_write` + watchdog pets), web-UI custom date range on all time-selector pages.
+- **v6.7** — Real-time ionospheric propagation model (WAM-IPE + GIRO), multi-mode prediction, self-consistency check.
+- **v6.5** — Dual Kalman architecture (independent L1/L2 filters feeding Chrony), SHM permission cleanup.
+- **v6.3** — RTP-to-UTC bootstrap state machine (ACQUIRING → CORRELATING → TRACKING → LOCKED) with geographic priors.
+- **v6.2** — Cramér-Rao uncertainty, multipath detection, Doppler correction, CFAR-like adaptive SNR.
+- **v5.0** — HDF5-native pipeline; replaced Digital RF with `.bin.zst` binary IQ archive.

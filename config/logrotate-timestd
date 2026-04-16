@@ -1,39 +1,30 @@
-# Logrotate configuration for HF-TimeStd
+# Logrotate configuration for HF-TimeStd auxiliary log files.
 # Install to: /etc/logrotate.d/timestd
+#
+# As of v6.12, every `timestd-*` systemd unit logs to journald; journald
+# handles its own rotation via SystemMaxUse= in /etc/systemd/journald.conf
+# (see docs/DEBUGGING.md §2).
+#
+# The only files covered below are legacy paths maintained by non-systemd
+# helper scripts that still write to /var/log/hf-timestd/:
+#   - data-retention.log  (written by scripts/data-retention cron, if used)
+#   - freshness-monitor.log (written by scripts/check-freshness-alert.sh)
+#
+# If none of those scripts are configured on a given host this file is a no-op.
 
-/var/log/hf-timestd/*.log {
-    # Rotate daily, or sooner if a log exceeds 50 MB.
-    # maxsize prevents log floods (e.g. per-packet warnings) from filling
-    # the disk before the daily rotation fires.
-    daily
-    maxsize 50M
-    
-    # Keep 14 days of logs
-    rotate 14
-    
-    # Compress old logs
-    compress
-    delaycompress
-    
-    # Don't error if log file is missing
-    missingok
-    notifempty
-    
-    # Long-running services keep file descriptors open (StandardOutput=append).
-    # copytruncate keeps the same inode so logs continue in *.log after rotate.
-    copytruncate
-    
-    # Use date+time extension so multiple rotations per day don't collide
-    dateext
-    dateformat -%Y%m%d-%H%M%S
-    
-    # Shared scripts block intentionally omitted: no daemon signal needed with copytruncate.
-}
-
-# Separate config for data retention log (less frequent rotation)
 /var/log/hf-timestd/data-retention.log {
     weekly
     rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 timestd timestd
+}
+
+/var/log/hf-timestd/freshness-monitor.log {
+    weekly
+    rotate 4
     compress
     delaycompress
     missingok

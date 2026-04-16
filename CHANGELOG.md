@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Unified journald logging (v6.12)
+
+- **systemd units** — `timestd-core-recorder.service`, `timestd-fusion.service`, and `timestd-physics.service` switched from `StandardOutput=append:/var/log/hf-timestd/<svc>.log` to `StandardOutput=journal` / `StandardError=journal` with `SyslogIdentifier=` set. Every `timestd-*` unit now routes through journald.
+- **Why** — the web-api `/api/living-docs/evidence/*` endpoint and the Logs page read via `journalctl -u <unit>`. The three file-sinked services never reached journald, so the web UI silently fell out of sync. One sink means one tool and one source of truth.
+- **Behavior change** — `/var/log/hf-timestd/core-recorder.log`, `fusion.log`, and `physics.log` are no longer written by the services. Operators should read logs via `journalctl -u '<unit>' ...` or the web UI.
+- **Callers updated** — `web-api/routers/docs.py` (EVIDENCE_SOURCES no longer carries file paths; `/evidence/*` handler reads journald only), `scripts/verify_pipeline.sh` (fusion-activity check uses `journalctl`), `config/logrotate-timestd` (reduced to the non-systemd helpers that still write files: data-retention, freshness-monitor), `src/hf_timestd/cli.py` inventory `log_paths` (reflects journald primary + legacy file_dir for helpers).
+- **Capacity** — operators should set `SystemMaxUse=` in `/etc/systemd/journald.conf` (2–4 GB recommended on a dedicated timestd host); see `docs/DEBUGGING.md` §2.
+- **Docs** — added `docs/DEBUGGING.md` (operator troubleshooting runbook). Pruned `CONTEXT.md`, `CRITIC_CONTEXT.md`, `docs/AUDIT_FINDINGS.md`, `docs/DOCUMENTATION_AUDIT_2026_02_14.md`, `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md`, `docs/DEPENDENCY_CASCADE.md`. README trimmed: "Recent Updates" tail collapsed to a short pointer at `CHANGELOG.md`; "eight services" claim replaced with "eight-service core pipeline + housekeeping units".
+
 ### ka9q-python 3.7.1 — encoding-aware streams
 
 - **pyproject.toml / constraints.txt**: Bumped `ka9q-python` from `>=3.3.0` / `==3.4.2` to `>=3.7.1` / `==3.7.1`. Required for multi-encoding `_parse_samples()` dispatch and `ManagedStream` encoding passthrough on init/restore.

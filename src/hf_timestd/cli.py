@@ -167,7 +167,12 @@ def _handle_inventory(args):
         'contract_version': '0.4',
         'config_path':      str(config_path),
         'log_paths': {
-            'stderr':   'journal',
+            # As of v6.12 every timestd-* unit writes to journald.
+            # Clients read via `journalctl -u <unit>` (or the /logs
+            # web-api endpoint).  `file_dir` is retained for a small
+            # number of non-systemd helper scripts (freshness,
+            # data-retention cron) that still log to files.
+            'journal':  'timestd-*',
             'file_dir': '/var/log/hf-timestd',
         },
         'log_level':        os.environ.get('HF_TIMESTD_LOG_LEVEL')

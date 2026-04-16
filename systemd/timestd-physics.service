@@ -38,9 +38,10 @@ MemorySwapMax=0
 Restart=always
 RestartSec=10
 
-# Standard output logging
-StandardOutput=append:/var/log/hf-timestd/physics.log
-StandardError=append:/var/log/hf-timestd/physics.log
+# Unified journal sink — see docs/DEBUGGING.md §2 for access patterns.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-physics
 
 [Install]
 WantedBy=multi-user.target

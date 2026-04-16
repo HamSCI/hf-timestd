@@ -45,9 +45,9 @@ TimeoutStartSec=300
 Restart=always
 RestartSec=5
 
-# Logging to file and journal
-StandardOutput=append:/var/log/hf-timestd/core-recorder.log
-StandardError=inherit
+# Unified journal sink — see docs/DEBUGGING.md §2 for access patterns.
+StandardOutput=journal
+StandardError=journal
 SyslogIdentifier=timestd-core-recorder
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
@@ -69,7 +69,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 
 # Paths we need write access to
-ReadWritePaths=/var/lib/timestd /var/log/hf-timestd /dev/shm/timestd
+ReadWritePaths=/var/lib/timestd /dev/shm/timestd
 ReadOnlyPaths=/etc/hf-timestd
 
 # Network access for RTP multicast
