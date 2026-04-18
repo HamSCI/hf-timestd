@@ -130,6 +130,10 @@ profile. See **[INSTALLATION.md](INSTALLATION.md)** for details.
 ### Test/Development Mode
 
 ```bash
+uv sync --extra dev                   # standard; creates .venv/ and locks via uv.lock
+uv run python -m hf_timestd daemon --config config/timestd-config.toml
+
+# pip fallback (if uv is unavailable):
 pip install -e ".[dev]"
 python -m hf_timestd daemon --config config/timestd-config.toml
 ```

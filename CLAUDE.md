@@ -9,9 +9,9 @@ HF Time Standard Analysis (`hf-timestd`) — a Python system that receives HF ti
 ## Quick Reference
 
 ```bash
-# Development setup
-pip install -e ".[dev,gnss,iono]"
-pytest tests/
+# Development setup (uv is the standard; see README for pip fallback)
+uv sync --extra dev --extra gnss --extra iono
+uv run pytest tests/
 
 # First-run install (apt deps, user, dirs, venv)
 sudo ./scripts/install.sh

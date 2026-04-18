@@ -69,12 +69,14 @@ iono = [
     "boto3>=1.28.0",
 ]
 # Physics overlay: ray-tracing and advanced propagation science (offline/batch only).
-# Install pyLAP from source: pip install -e ../pylap
-# PHaRLAP is MATLAB-based; pyLAP provides the Python interface.
 # Neither is required for the real-time chrony feed (see TECHNICAL_REFERENCE.md).
+# pyLAP is NOT listed here because its setup.py requires PHARLAP_HOME at build time,
+# which breaks lockfile resolution on machines without PHaRLAP installed.
+# Install it manually after setting up PHaRLAP 4.7.4:
+#     uv pip install -e ../pylap          # or: pip install -e ../pylap
+# See setup-raytrace workflow for PHaRLAP setup.
 raytrace = [
     "scipy>=1.10.0",   # already in core deps; listed here for explicitness
-    "pylap @ git+https://github.com/mijahauan/PyLap.git@main",  # PHaRLAP 4.7.4 must be present; see setup-raytrace workflow
 ]
 
 [project.scripts]
