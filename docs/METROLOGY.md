@@ -15,6 +15,8 @@
 
 **Fusion Mode (Metrology Pathway):** The system attempts to **recover UTC from the HF broadcasts alone**, using multi-broadcast fusion to solve for the local clock offset. This pathway demonstrates how closely tone analysis can reconstruct the timing authority that RTP mode provides directly. Measured accuracy: ±0.5 ms (1σ, conservative claim) with multi-station fusion and GNSS VTEC correction; ±2–5 ms without ionospheric correction. See Section 13 for the full error budget.
 
+These two modes are operational shortcuts over a finer-grained **timing authority hierarchy** (T-levels) described in §4.5, which governs how the system selects, cross-checks, and falls back between UTC sources at runtime.
+
 The system demonstrates metrological rigor through:
 
 - **Authoritative RTP timestamps** from GPS+PPS-disciplined radiod (no pipeline offset correction needed)
@@ -188,6 +190,8 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 - **No calibration needed**: GPS_TIME/RTP_TIMESNAP mapping is direct — no wall-clock calibration bias
 - **Reprocessable**: Raw data can be reanalyzed with improved algorithms
 
+**Prerequisites for "authoritative"**: the ~50 μs claim presumes the ADC is GPSDO-disciplined (A-level A1 in §4.5) and RTP_TIMESNAP is fresh. Under A0 (free-running TCXO) the RTP tick rate drifts at ~±5 ppm, and under a stale RTP_TIMESNAP the origin carries whatever system-clock error existed at the last snapshot. In both cases RTP timestamps remain *sample-accurate* (gaps and sequencing are still unambiguous) but are no longer UTC-authoritative at the μs scale. The T-level hierarchy in §4.5 makes this explicit.
+
 ### 4.4 Data Levels
 
 | Level | Description | Content |
@@ -197,6 +201,117 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 | **L1B** | BCD Timecode | Decoded time information |
 | **L2** | Timing Measurements | D_clock + ISO GUM uncertainty |
 | **L3** | Fused Timing | Kalman filtered, multi-broadcast |
+
+### 4.5 Timing Authority Hierarchy (A- and T-Levels)
+
+> **Note:** The T-level hierarchy defined here is a **distinct axis** from the data-product levels L0–L3 in §4.4. L-levels describe *what a product is*. T-levels describe *how well the system knows UTC* at a given moment. A host has exactly one active T-level; it produces L0–L3 data products at whatever T-level is currently active. The two hierarchies are orthogonal.
+
+A hf-timestd host's UTC alignment has two independent axes: the **ADC timebase** (hardware property) and the **UTC alignment source** (how RTP timestamps map to wall-clock UTC). Each is ranked separately, and the authority manager selects among valid (A, T) combinations at runtime.
+
+#### Axis A — ADC Timebase
+
+| Level | Hardware | Effect on RTP timestamps |
+|-------|----------|-------------------------|
+| **A1** | RX888 ADC governed by external GPSDO | Rate is GPS-locked (ppb stability); RTP tick spacing is authoritative |
+| **A0** | ADC free-running on local TCXO | Rate drifts at ~±5 ppm; RTP tick spacing unreliable over long windows |
+
+A1 is a hard prerequisite for T5 and T1. For other T-levels it is a quality multiplier, not a gate — hf-timestd can produce useful Fusion output even under A0.
+
+#### Axis T — UTC Alignment Source
+
+Ranked from highest authority (most accurate, most independent of external state) to lowest:
+
+| T-level | Source | Hard prereq | (A1, T) uncertainty | (A0, T) uncertainty |
+|---|---|---|---|---|
+| **T6** | hf-timestd detects GPS-timed BPSK-PPS injected in HF payload | injector present + detection lock | ~μs | ~tens of μs (per-tick; drifts between ticks at TCXO rate) |
+| **T5** | system clock chronyed to on-host GPS+PPS (gpsd or direct PPS) | A1 + PPS wired to host | ~1–10 μs | *not available* |
+| **T4** | system clock chronyed to LAN GPS+PPS timeserver via NTP | reachable GPS-backed peer | ~100 μs – few ms | ~1–5 ms (adds TCXO drift between syncs) |
+| **T3** | hf-timestd recovers UTC from WWV/WWVH/CHU tick Fusion | ≥2 stations detected + ionospheric model | ~0.5–2 ms | ~5–10 ms |
+| **T2** | system clock chronyed to public NTP via WAN | internet reachability; stratum ≤3 | ~1–50 ms | ~5–50 ms (NTP dominates; TCXO negligible at this scale) |
+| **T1** | A1 only — ADC rate locked but no UTC discipline beyond last RTP_TIMESNAP | A1 | const offset at snapshot + 0 drift | *not available* |
+| **T0** | free-running system clock, no GPSDO | none | *not available* | unbounded |
+
+"Not available" entries are structural: (A0, T5) and (A0, T1) are by-definition invalid — those T-levels are *defined* by GPSDO presence. (A1, T0) collapses to T1, because A1 alone is a timing authority worth naming.
+
+#### T-Level Classification
+
+**T6 and T3 share an architecture.** Both are hf-timestd's payload-signal offset products — a known-timed signal is detected in the audio and correlated against RTP time. They differ only in signal: T6's injected BPSK-PPS has a tighter edge and no ionospheric path (~μs); T3's multi-hop HF ticks have larger, partially-modeled ionospheric delay (~ms). Both are independent of the system clock entirely and survive arbitrary system-clock drift as long as A holds.
+
+**T5 / T4 / T2 are system-clock disciplines.** They align the system clock itself, which hf-timestd then trusts as a proxy for UTC. Silent failure here — peer unreachable, drift accumulating — only becomes visible when something external cross-checks. This is the failure mode behind the 2026-04-20 incident, where T4 (192.168.1.80) became unreachable after a DHCP reassignment and the system drifted ~107 s over ~32 hours without alarm.
+
+**T1 is a degraded holdover, not a steady operating point.** When T2 and above all fail but A1 still holds, RTP timestamps remain rate-accurate; their UTC origin is whatever RTP_TIMESNAP was at the last good sync, with no drift (because A1 is perfect rate-wise). T1 is the "coasting on the GPSDO" state.
+
+**T0 is terminal.** No GPSDO, no NTP, no Fusion. Data products produced at T0 must be marked as such and excluded from shared products (fusion input, SHM output, science archives).
+
+#### Selection, Cross-Check, and Transition Rules
+
+The authority manager selects the **highest available** T-level per decision period. "Available" means the level's health probe has passed within the probe window:
+
+- **T6 probe**: hf-timestd reports ≥ N BPSK-PPS detections in the last minute with q95 < threshold.
+- **T5/T4/T2 probe**: `chronyc -n tracking` shows the relevant peer reachable (`reach` ≠ 0), offset stable, RMS within tier limit.
+- **T3 probe**: hf-timestd reports ≥ 2 stations with tick detections in the last minute and Kalman innovation within bounds. Zero detections → T3 unavailable (the Saturday failure's missing alarm).
+- **T1 probe**: A1 present AND last RTP_TIMESNAP within freshness window.
+
+When multiple levels are simultaneously healthy, the higher wins as **active** and the lower remain **witnesses** for cross-check. Disagreement between active and witness beyond threshold raises `TIMING_DISAGREEMENT` and forces a downgrade to the closest agreeing pair. Initial proposed thresholds (subject to empirical tuning on live data):
+
+| Pair | Threshold | Rationale |
+|---|---|---|
+| T6 ↔ T5 | 50 μs | Both μs-class; agreement within combined uncertainty |
+| T3 ↔ T4 | 2 ms | T3 worst-case meets T4 typical |
+| T3 ↔ T2 | 5 ms | T2 NTP-level tolerance |
+
+Transitions are logged and stamped in sidecars:
+
+```json
+{"t_level_active": "T3", "a_level": "A1",
+ "t_level_witnesses": ["T2"], "disagreement_ms": 0.8,
+ "t_level_previous": "T4", "t_level_transition_utc": "2026-04-22T16:13:44Z"}
+```
+
+**Upgrade hysteresis:** a level must pass its probe for N consecutive windows (default N=3, ~3 min for one-minute windows) before it can become active, to prevent flapping.
+
+**Downgrade is immediate:** a failed probe disables the level at the next authority decision. No hysteresis on failure — the whole point is to stop trusting a broken source as soon as we notice.
+
+#### Published State Tuple
+
+Every hf-timestd host continuously publishes its authority state at `/run/hf-timestd/authority.json`:
+
+```json
+{
+  "a_level": "A1",
+  "t_level_active": "T3",
+  "t_level_available": ["T3", "T2"],
+  "last_transition_utc": "2026-04-22T16:13:44Z",
+  "disagreement_flags": [],
+  "q95_ms": 0.8
+}
+```
+
+Consumers — sidecar writers, chrony SHM, LAN peers discovering via mDNS — derive their confidence from this tuple.
+
+#### Sidecar History
+
+Each L-level sidecar records the full T-level history covering the data product's time range, not just the active level at file start. This preserves forensic traceability through mid-file transitions:
+
+```json
+{
+  "authority_history": [
+    {"utc": "2026-04-22T16:00:00Z", "a": "A1", "t": "T4", "q95_ms": 1.2},
+    {"utc": "2026-04-22T16:13:44Z", "a": "A1", "t": "T3", "q95_ms": 0.8, "reason": "T4 peer unreachable"}
+  ]
+}
+```
+
+History is bulkier than the single-value encoding but essential for reprocessing — downstream analysis needs to know at what authority each sample was taken.
+
+#### Relationship to "RTP Mode" and "Fusion Mode"
+
+The §1 and §4.3 shortcuts map onto the T-level space:
+
+- **RTP Mode** ≈ (A1, T5) or (A1, T4). System clock is trusted; radiod's RTP timestamps are ground truth; hf-timestd focuses on physics (dTEC, TIDs).
+- **Fusion Mode** ≈ (A1, T6) or (A1 or A0, T3). System clock is not trusted (or is being actively corrected); hf-timestd's payload-derived offset is the authority; SHM output disciplines chrony.
+
+The two modes are no longer a binary toggle but a consequence of which T-levels are active. The same binary runs either way; `[timing] authority =` in `timestd-config.toml` becomes a *preference* (which T-level to prefer when multiple are available), not a hard mode switch. Runtime authority is determined by the manager's probes and cross-checks.
 
 ---
 
