@@ -4982,6 +4982,20 @@ def run_fusion_service(
     
     logger.info(f"  Chrony stats: {'enabled' if chrony_stats_collector else 'disabled'}")
     logger.info(f"  Calibration file: {calib_file or 'disabled'}")
+
+    # Fusion status writer for authority manager (METROLOGY.md §4.5).
+    # Publishes /run/hf-timestd/fusion_status.json atomically every cycle so
+    # the authority manager can probe T3 availability without reading HDF5.
+    fusion_status_writer = None
+    try:
+        from hf_timestd.core.fusion_status_writer import FusionStatusWriter
+        fusion_status_writer = FusionStatusWriter(
+            path=Path('/run/hf-timestd/fusion_status.json'),
+            cycle_interval_sec=interval_sec,
+        )
+        logger.info("Fusion status writer enabled: /run/hf-timestd/fusion_status.json")
+    except Exception as e:
+        logger.warning(f"Fusion status writer not available: {e}")
     
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s, lookback: {lookback_minutes}m")
@@ -5085,6 +5099,11 @@ def run_fusion_service(
             # BREADCRUMB: Loop start
             loop_start_time = time.time()
             logger.debug(f"--- FUSION LOOP START (t={loop_start_time:.3f}) ---")
+
+            # Per-cycle authority/status bookkeeping (consumed by
+            # FusionStatusWriter before the watchdog notify at end of loop).
+            chrony_fed_this_cycle = False
+            chrony_skip_reasons: List[str] = []
 
             # Notify watchdog we are alive
             if SYSTEMD_AVAILABLE:
@@ -5367,6 +5386,8 @@ def run_fusion_service(
                             f"flag={result.consistency_flag}, unc={result.uncertainty_ms:.1f}ms, "
                             f"cal_converged={calibration_converged}]"
                         )
+                        # Expose the same reasons to the status writer.
+                        chrony_skip_reasons = list(gate_reasons)
                     
                     if quality_ok and multi_station and consistent and discontinuity_ok:
                         now = time.time()
@@ -5384,6 +5405,7 @@ def run_fusion_service(
                                 
                                 update_success_l1 = chrony_shm_l1.update(reference_time_l1, system_time, precision_l1)
                                 if update_success_l1:
+                                    chrony_fed_this_cycle = True
                                     logger.debug(
                                         f"Chrony SHM L1 (unit=0) updated: D_clock={result_l1.d_clock_fused_ms:+.3f}ms, "
                                         f"uncertainty={result_l1.uncertainty_ms:.1f}ms, precision={precision_l1} "
@@ -5403,6 +5425,7 @@ def run_fusion_service(
                                 
                                 update_success_l2 = chrony_shm_l2.update(reference_time_l2, system_time, precision_l2)
                                 if update_success_l2:
+                                    chrony_fed_this_cycle = True
                                     logger.debug(
                                         f"Chrony SHM L2 (unit=1) updated: D_clock={result_l2.d_clock_fused_ms:+.3f}ms, "
                                         f"uncertainty={result_l2.uncertainty_ms:.1f}ms, precision={precision_l2} "
@@ -5460,6 +5483,20 @@ def run_fusion_service(
                     calib_writer.update(result)
                 except Exception as e:
                     logger.error(f"Calibration file write failed: {e}")
+
+            # Publish fusion status for the authority manager (§4.5).
+            # Always called, even when result is None, so utc_published stays
+            # fresh and consumers can distinguish "service alive, no data"
+            # from "service dead."
+            if fusion_status_writer:
+                try:
+                    fusion_status_writer.update(
+                        result=result,
+                        chrony_fed=chrony_fed_this_cycle,
+                        skip_reasons=chrony_skip_reasons,
+                    )
+                except Exception as e:
+                    logger.warning(f"Fusion status write failed: {e}")
 
             # Pet watchdog after heavy chrony/fusion processing
             if SYSTEMD_AVAILABLE:
