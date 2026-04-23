@@ -1254,7 +1254,9 @@ Each feed has its own independent Kalman filter state. TSL2 should show lower ji
 
 ## 14. Timing Authority Levels: Achievable Uncertainty Analysis
 
-The system's achievable timing uncertainty depends critically on the hardware configuration and timing reference chain. Six levels (L1–L6) represent progressively better timing infrastructure.
+> **Note on taxonomy.** An earlier revision of this section classified the system along a single linear scale L1–L6. That scale has been superseded by the two-axis A/T hierarchy defined in §4.5. The achievable uncertainty analysis below is written in A/T terms and references §4.5 throughout; the old L-scale is retired and should not be used in new discussion.
+
+The uncertainty hf-timestd delivers depends on the active (A, T) pair from §4.5, the ionospheric conditions during the measurement window, and the fusion averaging duration. This section characterizes what each T-level *delivers in practice* — single-cycle and fused uncertainty, the primary limiter, and the quality-grade implications. §4.5 defines the hierarchy and the runtime selection / cross-check rules; §14 gives the practical numbers.
 
 ### 14.1 Error Source Taxonomy
 
@@ -1264,11 +1266,11 @@ The system's achievable timing uncertainty depends critically on the hardware co
 | 2 | **Ionospheric propagation** | σ_iono | Path delay variation (dominant for HF) |
 | 3 | **Multipath/mode structure** | σ_mode | Multiple ionospheric modes |
 | 4 | **Detection algorithm** | σ_det | TickEdgeDetector ensemble + sub-sample interpolation |
-| 5 | **ADC sample clock** | σ_adc | Frequency accuracy and stability |
-| 6 | **RTP-to-UTC mapping** | σ_rtp | Mapping RTP timestamps to wall-clock UTC |
-| 7 | **Timing authority** | σ_auth | How well the system knows "what time is it now" |
+| 5 | **ADC sample clock** | σ_adc | Rate stability of the RX888 ADC timebase (Axis A) |
+| 6 | **RTP-to-UTC mapping** | σ_rtp | Uncertainty of the published Fusion offset at the active T-level (Axis T) |
+| 7 | **Timing authority** | σ_auth | Composite: which (A, T) is active at measurement time |
 
-Sources 1–4 are **irreducible** (physics/algorithm). Sources 5–7 are **configuration-dependent**.
+Sources 1–4 are **irreducible** (physics/algorithm). Sources 5–7 are **configuration-dependent** and collapse onto the two §4.5 axes: σ_adc tracks Axis A; σ_rtp tracks Axis T; σ_auth is the composite tag the authority manager attaches to each published offset. Under the §4.5 RTP-reference labeling invariant, data-labeling error in downstream products is σ_rtp alone — σ_adc manifests only as coherence-loss within a single fusion window at A0.
 
 ### 14.2 Irreducible Error Sources
 
@@ -1277,36 +1279,44 @@ Sources 1–4 are **irreducible** (physics/algorithm). Sources 5–7 are **confi
 - **σ_mode = 1–5 ms**: Multiple propagation modes (1F2, 2F2, 1E) arrive at different times.
 - **σ_det ≈ 0.05 ms**: TickEdgeDetector ensemble of 50–57 ticks achieves ~38.6 dB processing gain. Negligible compared to σ_iono.
 
-### 14.3 Level Summary
+### 14.3 Per-T-Level Uncertainty
 
-| Level | Sample Clock | Timing Authority | Single Meas. | Fused (10 min) | Best Grade | Primary Limiter |
-|-------|-------------|-----------------|-------------|----------------|------------|-----------------|
-| **L6** | GPSDO (< 1 ppb) | PPS in stream | 3–15 ms | 0.3–1.0 ms | **A** | Ionospheric scatter |
-| **L5** | GPSDO (< 1 ppb) | GPS+PPS local | 3–15 ms | 0.5–1.7 ms | **A–B** | RTP mapping + iono |
-| **L4** | GPSDO (< 1 ppb) | PTP/NTP via LAN | 3–15 ms | 0.5–2.0 ms | **B** | LAN timing jitter |
-| **L3** | GPSDO (< 1 ppb) | NTP via WAN | 3–15 ms | 1–3 ms | **B–C** | NTP wander |
-| **L2** | TCXO (1–2 ppm) | NTP via LAN | 3–15 ms | 2–5 ms | **C** | Oscillator drift + NTP |
-| **L1** | TCXO (1–2 ppm) | HF self-derived | 3–15 ms* | 2–5 ms | **C** | Oscillator drift + bootstrap |
+Each row summarizes the **published Fusion offset's uncertainty** at one T-level — i.e., the σ tag attached to `rtp_to_utc_offset_ns` in `authority.json`. For T5/T4/T2, the offset is near zero (no correction; RTP is externally disciplined) and the σ characterizes how well that zero is known. For T3/T6, the offset is an active correction hf-timestd produces, and the σ characterizes Fusion's self-assessment. "Single cycle" is one fusion interval (default 8 s); "Fused 10 min" is steady-state after ~75 cycles of continuous coverage. The (A1) and (A0) columns apply where §4.5 allows both A-levels; `—` indicates §4.5 gates the combination as structurally unavailable.
 
-*L1 single measurement: 200+ ms during bootstrap, 3–15 ms after lock.
+| T-level | Source (recap from §4.5) | σ single cycle (A1) | σ fused 10 min (A1) | σ single cycle (A0) | σ fused 10 min (A0) | Primary limiter |
+|---|---|---|---|---|---|---|
+| **T6** | Payload BPSK-PPS detection | ~μs | < 10 μs | ~tens μs per detection | ~100 μs¹ | BPSK-PPS SNR + coverage |
+| **T5** | Host-local GPS+PPS → system clock | 1–10 μs | < 10 μs | — | — | GPS+PPS jitter + chrony PLL |
+| **T4** | LAN GPS timeserver via NTP → system clock | 100 μs – few ms | ~300 μs | 1–5 ms | ~1.5 ms | LAN NTP jitter (+ TCXO drift between syncs at A0) |
+| **T3** | HF tick Fusion of WWV/WWVH/CHU | 3–15 ms | 0.3–1.0 ms | 5–20 ms | 1–3 ms | σ_iono single-cycle; A-level × window length for fused |
+| **T2** | Public NTP via WAN → system clock | 1–50 ms | ~10 ms | 5–50 ms | ~15 ms | NTP wander dominates; A-level invisible at this scale |
+| **T1** | GPSDO-coast from last good RTP_TIMESNAP | const offset + ~0 drift² | — (not applicable) | — | — | Snapshot age + accumulated A1 rate error (ppb × hours) |
+| **T0** | *(no UTC alignment available)* | — (offset unavailable) | — | — | — | Terminal — data tagged `no_utc_alignment_available` |
+
+¹ T6 at A0 is re-anchored at each BPSK-PPS detection but drifts at TCXO rate (~5 ppm) between detections. Fused uncertainty assumes continuous coverage; a detection gap of length Δt inflates σ by ~5 ppm × Δt.
+
+² T1 has no ongoing UTC measurement — the offset is whatever it was at the last T ≥ 2 sync. At A1, rate is perfect, so the offset does not drift; only snapshot freshness matters. Uncertainty grows with coast time only via residual A1 rate error, which is sub-ms for coasts of hours.
+
+**Measured performance at A1/T5** (March 17–18, 2026): ±0.3 ms (1σ) fused uncertainty with GNSS VTEC correction applied; ±0.7 ms (1σ) with raw L1-only data products (no L2 calibration). Consistent with the A1/T3 10-minute fused prediction above, since the HF Fusion witness at T5 operates under the same σ_iono floor that gates T3.
 
 ### 14.4 Key Insights
 
-1. **The ionosphere is always the dominant single-measurement error** (3–15 ms). No hardware improvement changes this.
-2. **Grade A (< 0.5 ms) requires L5 or L6** — sub-µs timing authority AND long averaging.
-3. **The GPSDO matters for the ruler, not the zero-point.** It ensures measurements within a fusion window are coherent.
-4. **NTP is the ceiling for L2–L4.** NTP jitter sets a floor that multi-station fusion cannot average below.
-5. **L1 and L2 converge to the same steady-state** after bootstrap.
-6. **The current system operates at L5** and achieves ±0.3 ms (1σ) fused uncertainty with GNSS VTEC correction (measured Mar 17–18, 2026); ±0.7 ms (1σ) with IRI-only L1 fusion.
+1. **σ_iono is the single-cycle floor at T3.** 3–15 ms per cycle is ionospheric physics; no hardware or algorithm change moves it. Fusion averaging pulls 10-minute σ ≈ 10× below the single-cycle number because independent iono realizations across ~75 cycles de-correlate.
+2. **Grade A (σ < 0.5 ms) is reachable at T3/A1 with enough averaging** — the 10-minute number lands in grade A under clean conditions. Without A1 (ppb rate stability), the same averaging can't close the gap because cycle-to-cycle coherence degrades.
+3. **A1 is the rate anchor, not the zero-point.** A1 alone gives T1 (rate perfect, zero unknown). The zero-point always comes from Axis T; A1 just keeps measurements within a fusion window coherent.
+4. **At T2-scale σ, the A-level is noise.** NTP wander (~10 ms) dominates so thoroughly that TCXO drift over an 8-second cycle (~5 ppm × 8 s ≈ 40 μs) is invisible. This is why §4.5 lists similar uncertainty for (A1, T2) and (A0, T2).
+5. **T3 and T6 degrade gracefully under A0.** Unlike T5 and T1, which §4.5 structurally gates on A1, the hf-timestd-derived levels survive GPSDO loss — the authority manager shifts from (A1, T3) to (A0, T3) without a T-level transition, only a σ inflation in the published offset. Operators see this as a widened sigma_ns in authority.json, not a failed probe.
+6. **Cross-check confirms provenance, not precision.** §4.5's disagreement thresholds (T6↔T5 @ 50 μs, T3↔T4 @ 2 ms, T3↔T2 @ 5 ms) raise `TIMING_DISAGREEMENT` when the active level's published offset diverges from a witness; they do not reduce the σ quoted above. The σ of the active level is whatever Axis T's source delivers; cross-check is an alarm on "is the active level still meaningful," not a noise reduction.
+7. **Default operating point is (A1, T5) when all peers are healthy**, downgrading to (A1, T3) active with (A1, T2) witness on LAN-GPS failure, and further to (A1, T2) active (no Fusion) if Fusion also loses lock. Each downgrade widens σ and is recorded in the `authority_history` sidecar entries (§4.5) so downstream reprocessing can tag samples by their σ at acquisition time.
 
-### 14.5 Station Priority Policy (v6.5.0)
+### 14.5 Station Priority Policy
 
 | Station | Role | Rationale |
 |---------|------|----------|
-| **CHU** | Reference | Unique frequencies, FSK-verified timing |
-| **WWV** | Primary | Closest station, best SNR |
-| **WWVH** | Primary | Independent path, cross-validation |
-| **BPM** | Scientific | Very long path (~11,000 km), weight reduced to 30% |
+| **CHU** | Reference | Unique frequencies, FSK-verified timing; coarse UTC producer for bootstrap |
+| **WWV** | Primary | Closest U.S. station, best SNR for the typical receiver latitude |
+| **WWVH** | Primary | Independent Pacific path, cross-validates WWV |
+| **BPM** | Science only — excluded from fusion | 11,000 km trans-Pacific path introduces 18–36 ms cross-station disagreement that dominates fusion uncertainty. Since 2026-02-07, BPM measurements are removed from the fusion pipeline in `MultiBroadcastFusion.fuse()` (`BPM exclusion: removed N BPM measurements from fusion (kept for science)`). Per-broadcast Kalmans still track BPM for ionospheric science products (TEC, propagation mode identification). |
 
 ---
 
