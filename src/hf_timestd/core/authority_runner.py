@@ -96,44 +96,72 @@ def build_authority_runner_from_config(
 ) -> AuthorityRunner:
     """Build an AuthorityRunner from a timestd-config.toml dict.
 
+    Config lives under the `[timing.authority_manager]` namespace so it
+    cannot collide with the `[timing] authority = "rtp" | "auto" | ...`
+    scalar key that already exists as the operator's preference hint
+    (see METROLOGY.md §4.5 "Relationship to 'RTP Mode' and 'Fusion
+    Mode'"). The two are independent: `[timing] authority` is the
+    preferred T-level; `[timing.authority_manager]` is how the manager
+    runs.
+
     Expected config shape (all optional — missing sections disable the
     corresponding probes):
 
-        [timing.authority]
+        [timing.authority_manager]
         interval_sec = 30.0
         upgrade_hysteresis = 3
         a_level = "A1"           # "A1" (GPSDO) or "A0"
 
-        [timing.authority.t5]
+        [timing.authority_manager.t5]
         refid = "GPS"            # optional — default: any refclock
 
-        [timing.authority.t4]
+        [timing.authority_manager.t4]
         peers = ["timeserver.lan", "192.168.1.80"]
 
-        [timing.authority.t2]
+        [timing.authority_manager.t2]
         enabled = true           # if true, match any non-T4 server
 
-        [timing.authority.t3]
+        [timing.authority_manager.t3]
         min_stations = 2
         freshness_sec = 60.0
 
-        [timing.authority.bootstrap]
+        [timing.authority_manager.bootstrap]
         enabled = true
         coarse_time_path = "/run/hf-timestd/coarse_time.json"
         threshold_sec = 5.0
         max_step_sec = 3600.0
         dry_run = false          # if true, log but don't invoke chronyc
 
-        [timing.authority.chrony_gate]
+        [timing.authority_manager.chrony_gate]
         enabled = true
         refid = "HFSN"           # must match the chrony.conf refclock entry
         dry_run = false
 
-        [timing.authority.mdns]
+        [timing.authority_manager.mdns]
         enabled = true
         dry_run = false          # if true, log TXT but don't fork avahi
+
+    For backward compatibility the old `[timing.authority]` sub-table
+    is still read when it appears as a dict, but it is deprecated
+    because it namespace-clashes with `[timing] authority = "..."` (a
+    legitimate scalar preference key): if both are present in a TOML
+    file it's a parse error, and if only the scalar is present (the
+    common deployed case today) the old code path raised AttributeError
+    on startup. The wrapper below handles all three shapes defensively:
+    the new `authority_manager` sub-table, the legacy `authority`
+    sub-table (dict), or a scalar `authority` under `[timing]` (ignored
+    for manager configuration, falls back to defaults).
     """
-    auth_cfg = (config.get("timing", {}) or {}).get("authority", {}) or {}
+    _timing = config.get("timing", {}) or {}
+    if not isinstance(_timing, dict):
+        _timing = {}
+    # Prefer the new key; accept the legacy sub-table if it happens to
+    # be a dict; silently fall through to {} for any other shape.
+    auth_cfg = _timing.get("authority_manager", None)
+    if not isinstance(auth_cfg, dict):
+        auth_cfg = _timing.get("authority", None)
+    if not isinstance(auth_cfg, dict):
+        auth_cfg = {}
     interval_sec = float(auth_cfg.get("interval_sec", 30.0))
     hysteresis = int(auth_cfg.get("upgrade_hysteresis", 3))
     a_level_cfg = auth_cfg.get("a_level", "A1")

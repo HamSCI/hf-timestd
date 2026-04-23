@@ -161,6 +161,46 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
         t_levels = sorted(p.t_level for p in runner.manager.probes)
         self.assertEqual(t_levels, ["T2", "T3"])
 
+    def test_authority_manager_namespace_is_primary(self) -> None:
+        """[timing.authority_manager] is the canonical location and
+        takes precedence over the legacy [timing.authority] fallback."""
+        cfg = {
+            "timing": {
+                "authority_manager": {
+                    "interval_sec": 7.0,
+                    "t4": {"peers": ["timeserver.lan"]},
+                },
+            }
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        self.assertEqual(runner.interval_sec, 7.0)
+        self.assertIn("T4", [p.t_level for p in runner.manager.probes])
+
+    def test_timing_authority_as_scalar_does_not_raise(self) -> None:
+        """Regression: if the deployed config sets `[timing] authority
+        = "rtp"` (a scalar operator preference), the old code tried to
+        call `.get(...)` on a string and raised AttributeError. Now we
+        detect the non-dict and fall back to defaults cleanly."""
+        cfg = {
+            "timing": {
+                "authority": "rtp",  # scalar preference, NOT a sub-table
+                "rtp_expected_accuracy_ms": 0.001,
+            }
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        # Defaults applied; T3 FusionStatusProbe is the only baseline probe.
+        self.assertEqual([p.t_level for p in runner.manager.probes], ["T3"])
+        self.assertEqual(runner.interval_sec, 30.0)
+        self.assertEqual(runner.manager.upgrade_hysteresis, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
