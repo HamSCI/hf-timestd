@@ -250,5 +250,91 @@ class TestAuthorityManager(unittest.TestCase):
         self.assertIsNone(s.t_level_active)
 
 
+class _FakeBootstrap:
+    """Minimal BootstrapCoordinator stand-in for the manager tests."""
+    def __init__(self, state):
+        self._state = state
+        self.calls = 0
+
+    def check_and_step(self, now_fn):
+        self.calls += 1
+        return self._state
+
+
+class TestAuthorityManagerBootstrap(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.out = self.tmp / "authority.json"
+        self.clock = _Clock(datetime(2026, 4, 23, 12, 0, 0, tzinfo=timezone.utc))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mgr(self, probes, coord, upgrade_hysteresis=1) -> AuthorityManager:
+        return AuthorityManager(
+            probes=probes,
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=upgrade_hysteresis,
+            now_fn=self.clock,
+            bootstrap_coordinator=coord,
+        )
+
+    def _read(self) -> dict:
+        with self.out.open() as f:
+            return json.load(f)
+
+    def test_bootstrap_pending_suppresses_probing_and_publishes_bootstrap_block(self) -> None:
+        from hf_timestd.core.bootstrap_coordinator import BootstrapState
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        coord = _FakeBootstrap(
+            BootstrapState(complete=False, reason="no_coarse_time"),
+        )
+        mgr = self._mgr([probe], coord)
+        s = mgr.tick()
+        # Probes suppressed — active must be None even though T3 was available.
+        self.assertIsNone(s.t_level_active)
+        self.assertEqual(s.t_level_available, [])
+        payload = self._read()
+        self.assertIn("bootstrap", payload)
+        self.assertFalse(payload["bootstrap"]["complete"])
+        self.assertEqual(payload["bootstrap"]["reason"], "no_coarse_time")
+
+    def test_bootstrap_complete_lets_probes_run(self) -> None:
+        from hf_timestd.core.bootstrap_coordinator import BootstrapState
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        coord = _FakeBootstrap(
+            BootstrapState(complete=True, reason="within_threshold", delta_sec=1.0),
+        )
+        mgr = self._mgr([probe], coord)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T3")
+        payload = self._read()
+        self.assertIn("bootstrap", payload)
+        self.assertTrue(payload["bootstrap"]["complete"])
+
+    def test_bootstrap_stepped_records_reason_and_delta(self) -> None:
+        from hf_timestd.core.bootstrap_coordinator import BootstrapState
+        from hf_timestd.core.coarse_time_source import CoarseTimeObservation
+        obs = CoarseTimeObservation(
+            utc=datetime(2026, 4, 23, 11, 58, 13, tzinfo=timezone.utc),
+            source="BCD", station="WWV", max_error_sec=1.0,
+        )
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        coord = _FakeBootstrap(
+            BootstrapState(
+                complete=True, reason="stepped",
+                delta_sec=107.0, stepped=True, coarse=obs,
+            ),
+        )
+        mgr = self._mgr([probe], coord)
+        mgr.tick()
+        payload = self._read()
+        self.assertTrue(payload["bootstrap"]["stepped"])
+        self.assertAlmostEqual(payload["bootstrap"]["delta_sec"], 107.0)
+        self.assertEqual(payload["bootstrap"]["coarse_source"], "BCD")
+        self.assertEqual(payload["bootstrap"]["coarse_station"], "WWV")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,7 +27,10 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Protocol, Sequence
+from typing import Callable, Dict, List, Optional, Protocol, Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator, BootstrapState
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +115,7 @@ class AuthorityManager:
         upgrade_hysteresis: int = 3,
         pair_thresholds_ms: Optional[Dict[frozenset, float]] = None,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        bootstrap_coordinator: Optional["BootstrapCoordinator"] = None,
     ):
         self.probes = list(probes)
         self.output_path = Path(output_path)
@@ -123,16 +127,33 @@ class AuthorityManager:
             else DEFAULT_PAIR_THRESHOLDS_MS
         )
         self.now_fn = now_fn
+        self.bootstrap_coordinator = bootstrap_coordinator
 
         self._avail_counters: Dict[str, int] = {lvl: 0 for lvl in T_LEVELS_RANKED}
         self._t_active: Optional[str] = None
         self._last_transition_utc: Optional[str] = None
+        self._last_bootstrap: Optional["BootstrapState"] = None
 
     def tick(self) -> AuthorityState:
         """Run one authority-decision cycle: poll probes, update
         hysteresis, select active, cross-check, publish. Intended to be
         called on a fixed cadence (default 30 s) from a service thread,
-        or directly from tests."""
+        or directly from tests.
+
+        When a bootstrap coordinator is attached and reports the system
+        clock is too far off to run normal probes, this method publishes
+        a bootstrap-pending state and returns early without polling. The
+        probes resume on the next tick once the coordinator reports
+        complete (either because the gap closed on its own or because a
+        chronyc makestep ran and brought us into range).
+        """
+        if self.bootstrap_coordinator is not None:
+            self._last_bootstrap = self.bootstrap_coordinator.check_and_step(self.now_fn)
+            if not self._last_bootstrap.complete:
+                state = self._build_bootstrap_pending_state()
+                self._write_state(state)
+                return state
+
         results = self._poll_all()
         self._update_hysteresis(results)
         active = self._pick_active(results)
@@ -141,6 +162,22 @@ class AuthorityManager:
         state = self._build_state(results, active, witnesses, flags)
         self._write_state(state)
         return state
+
+    def _build_bootstrap_pending_state(self) -> AuthorityState:
+        """Authority state when the bootstrap coordinator has gated
+        normal probing. No active level, no offset, but A-level and
+        transition history preserved so consumers see continuity."""
+        return AuthorityState(
+            a_level=self.a_level_provider(),
+            t_level_active=None,
+            t_level_available=[],
+            t_level_witnesses=[],
+            rtp_to_utc_offset_ns=None,
+            sigma_ns=None,
+            stations_contributing=[],
+            last_transition_utc=self._last_transition_utc,
+            disagreement_flags=[],
+        )
 
     def _poll_all(self) -> Dict[str, ProbeResult]:
         results: Dict[str, ProbeResult] = {}
@@ -318,7 +355,7 @@ class AuthorityManager:
         )
 
     def _write_state(self, state: AuthorityState) -> None:
-        payload = {
+        payload: dict = {
             "schema": SCHEMA_VERSION,
             "utc_published": _iso_z(self.now_fn()),
             "a_level": state.a_level,
@@ -331,6 +368,20 @@ class AuthorityManager:
             "last_transition_utc": state.last_transition_utc,
             "disagreement_flags": state.disagreement_flags,
         }
+
+        # Additive v1 extension: include bootstrap block when the
+        # coordinator has touched anything this tick. Omit entirely
+        # when no coordinator is attached so legacy output is unchanged.
+        bs = self._last_bootstrap
+        if bs is not None:
+            payload["bootstrap"] = {
+                "complete": bs.complete,
+                "reason": bs.reason,
+                "delta_sec": bs.delta_sec,
+                "stepped": bs.stepped,
+                "coarse_source": bs.coarse.source if bs.coarse else None,
+                "coarse_station": bs.coarse.station if bs.coarse else None,
+            }
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w",

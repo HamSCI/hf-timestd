@@ -19,12 +19,15 @@ from hf_timestd.core.authority_manager import (
     AuthorityManager,
     Probe,
 )
+from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator
+from hf_timestd.core.chrony_stepper import ChronyStepper
 from hf_timestd.core.chrony_tracking_probe import (
     ChronyTrackingProbe,
     match_any_server_not_in,
     match_by_names,
     match_refclock,
 )
+from hf_timestd.core.coarse_time_source import CoarseTimeFileSource
 from hf_timestd.core.fusion_status_probe import FusionStatusProbe
 
 log = logging.getLogger(__name__)
@@ -102,6 +105,13 @@ def build_authority_runner_from_config(
         [timing.authority.t3]
         min_stations = 2
         freshness_sec = 60.0
+
+        [timing.authority.bootstrap]
+        enabled = true
+        coarse_time_path = "/run/hf-timestd/coarse_time.json"
+        threshold_sec = 5.0
+        max_step_sec = 3600.0
+        dry_run = false          # if true, log but don't invoke chronyc
     """
     auth_cfg = (config.get("timing", {}) or {}).get("authority", {}) or {}
     interval_sec = float(auth_cfg.get("interval_sec", 30.0))
@@ -144,10 +154,22 @@ def build_authority_runner_from_config(
             source_matcher=match_any_server_not_in(t4_peers),
         ))
 
+    bootstrap_coordinator = None
+    boot_cfg = auth_cfg.get("bootstrap", {}) or {}
+    if boot_cfg.get("enabled"):
+        coarse_path = Path(boot_cfg.get("coarse_time_path", "/run/hf-timestd/coarse_time.json"))
+        bootstrap_coordinator = BootstrapCoordinator(
+            coarse_source=CoarseTimeFileSource(path=coarse_path),
+            stepper=ChronyStepper(dry_run=bool(boot_cfg.get("dry_run", False))),
+            threshold_sec=float(boot_cfg.get("threshold_sec", 5.0)),
+            max_step_sec=float(boot_cfg.get("max_step_sec", 3600.0)),
+        )
+
     manager = AuthorityManager(
         probes=probes,
         output_path=authority_output_path,
         a_level_provider=a_level_provider,
         upgrade_hysteresis=hysteresis,
+        bootstrap_coordinator=bootstrap_coordinator,
     )
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)
