@@ -162,6 +162,7 @@ import json
 import os
 import time
 import re
+from contextlib import nullcontext
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -539,6 +540,13 @@ class MultiBroadcastFusion:
                               In Fusion mode (False) TEC correction improves D_clock.
         """
         self.data_root = Path(data_root)
+        # Optional per-cycle metrics hook installed by run_fusion_service
+        # before the main loop starts. When set, fuse() wraps its three
+        # named sub-phases (hdf5_read, kalman_apply, calibration_apply)
+        # with self.loop_metrics.phase(). When None, _phase() returns a
+        # no-op context manager so fuse() is unaffected outside a
+        # service context (e.g., unit tests, ad-hoc REPL calls).
+        self.loop_metrics = None
         self.timing_authority_level = timing_authority_level.upper()
         if self.timing_authority_level not in self.GRADE_THRESHOLDS:
             logger.warning(f"Unknown timing authority level '{timing_authority_level}', defaulting to L5")
@@ -3253,13 +3261,22 @@ class MultiBroadcastFusion:
         
         return all_valid, reason, station_deviations
     
+    def _phase(self, name: str):
+        """Return the service-provided phase timer if installed, else a
+        no-op context manager so unit tests and ad-hoc callers don't
+        need a metrics stub."""
+        if self.loop_metrics is None:
+            from contextlib import nullcontext
+            return nullcontext()
+        return self.loop_metrics.phase(name)
+
     def fuse(self, lookback_minutes: int = 30, force_l1_only: bool = False, skip_write: bool = False) -> Optional[FusedResult]:
         """
         Perform multi-broadcast fusion.
-        
+
         Combines all available broadcasts into a single D_clock estimate
         that converges toward UTC(NIST).
-        
+
         Returns:
             FusedResult with fused D_clock and statistics
         """
@@ -3271,7 +3288,8 @@ class MultiBroadcastFusion:
             logger.debug(f"Global differential solve failed: {e}")
 
         # Read latest measurements (L1-only mode skips L2 calibration data)
-        measurements = self._read_latest_measurements(lookback_minutes, force_l1_only=force_l1_only)
+        with self._phase("hdf5_read"):
+            measurements = self._read_latest_measurements(lookback_minutes, force_l1_only=force_l1_only)
         
         # ====================================================================
         # BPM EXCLUSION (2026-02-07): Remove BPM from fusion pipeline
@@ -3298,7 +3316,8 @@ class MultiBroadcastFusion:
         # ====================================================================
         # Each broadcast's d_clock is filtered by its own Kalman filter.
         # This rejects detection glitches while preserving real ionospheric dynamics.
-        measurements = self._apply_broadcast_kalmans(measurements)
+        with self._phase("kalman_apply"):
+            measurements = self._apply_broadcast_kalmans(measurements)
         
         # Filter out NaN measurements immediately (tone not detected)
         # CRITICAL FIX (2026-01-08): Leverage GPSDO stability during detection gaps
@@ -3320,7 +3339,8 @@ class MultiBroadcastFusion:
         # Using raw values makes the MAD huge, letting real outliers slip through.
         # Apply calibration first so outlier detection sees the residual scatter.
         if len(measurements) > 2:
-            cal_for_outlier = self._apply_calibration(measurements)
+            with self._phase("calibration_apply"):
+                cal_for_outlier = self._apply_calibration(measurements)
             d_clocks = np.array(cal_for_outlier)
             median_d = np.median(d_clocks)
             # CRITICAL FIX: MAD-based Robust Outlier Rejection
@@ -3860,7 +3880,8 @@ class MultiBroadcastFusion:
         raw_d_clocks = [m.d_clock_ms for m in measurements]
         
         # Apply calibration to get calibrated D_clock values for fusion
-        calibrated_d_clocks = self._apply_calibration(measurements)
+        with self._phase("calibration_apply"):
+            calibrated_d_clocks = self._apply_calibration(measurements)
         
         # ====================================================================
         # INTER-STATION AGREEMENT CHECK (Priority 1D - 2026-01-04)
@@ -4915,7 +4936,31 @@ def run_fusion_service(
         )
     except Exception as e:
         logger.warning(f"Authority manager not available: {e}")
-    
+
+    # Fusion loop metrics (fusion audit measurement phase). Enabled by
+    # default; gate via [timing.fusion_metrics] enabled=false if we ever
+    # want to turn it off. Watchdog budget is hardcoded to 120.0 s to
+    # match systemd/timestd-fusion.service WatchdogSec; adjust both
+    # together if the unit file changes.
+    loop_metrics = None
+    try:
+        _fm_cfg = (_auth_config.get('timing', {}) or {}).get('fusion_metrics', {}) or {}
+        _fm_enabled = bool(_fm_cfg.get('enabled', True))
+        if _fm_enabled:
+            from hf_timestd.core.fusion_loop_metrics import FusionLoopMetrics
+            _fm_path = _fm_cfg.get('path')
+            _fm_kwargs = {'watchdog_sec': 120.0}
+            if _fm_path:
+                _fm_kwargs['path'] = Path(_fm_path)
+            loop_metrics = FusionLoopMetrics(**_fm_kwargs)
+            fusion.loop_metrics = loop_metrics
+            logger.info(
+                "Fusion loop metrics enabled: %s (watchdog_budget=%.0fs)",
+                loop_metrics.path, loop_metrics.watchdog_sec,
+            )
+    except Exception as e:
+        logger.warning(f"Fusion loop metrics not available: {e}")
+
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s, lookback: {lookback_minutes}m")
     logger.info(f"Timing authority level: {fusion.timing_authority_level}")
@@ -5019,6 +5064,11 @@ def run_fusion_service(
             loop_start_time = time.time()
             logger.debug(f"--- FUSION LOOP START (t={loop_start_time:.3f}) ---")
 
+            # Reset per-cycle phase accumulator (fusion audit measurement
+            # phase). No-op when loop_metrics is None.
+            if loop_metrics is not None:
+                loop_metrics.start_cycle()
+
             # Per-cycle authority/status bookkeeping (consumed by
             # FusionStatusWriter before the watchdog notify at end of loop).
             chrony_fed_this_cycle = False
@@ -5038,40 +5088,47 @@ def run_fusion_service(
                     (chrony_shm_l2 and not chrony_shm_l2.connected)
                 )
                 if _need_reconnect and (loop_start_time - _shm_last_reconnect_attempt) >= _shm_reconnect_interval:
-                    _shm_last_reconnect_attempt = loop_start_time
-                    if chrony_shm_l1 and not chrony_shm_l1.connected:
-                        logger.info("Attempting Chrony SHM L1 reconnect...")
-                        if chrony_shm_l1.connect():
-                            logger.info("Chrony SHM L1 reconnected (unit=0, refid=TSL1)")
-                    if chrony_shm_l2 and not chrony_shm_l2.connected:
-                        logger.info("Attempting Chrony SHM L2 reconnect...")
-                        if chrony_shm_l2.connect():
-                            logger.info("Chrony SHM L2 reconnected (unit=1, refid=TSL2)")
+                    with (loop_metrics.phase("shm_reconnect") if loop_metrics else nullcontext()):
+                        _shm_last_reconnect_attempt = loop_start_time
+                        if chrony_shm_l1 and not chrony_shm_l1.connected:
+                            logger.info("Attempting Chrony SHM L1 reconnect...")
+                            if chrony_shm_l1.connect():
+                                logger.info("Chrony SHM L1 reconnected (unit=0, refid=TSL1)")
+                                if loop_metrics:
+                                    loop_metrics.mark_event("shm_reconnect_l1")
+                        if chrony_shm_l2 and not chrony_shm_l2.connected:
+                            logger.info("Attempting Chrony SHM L2 reconnect...")
+                            if chrony_shm_l2.connect():
+                                logger.info("Chrony SHM L2 reconnected (unit=1, refid=TSL2)")
+                                if loop_metrics:
+                                    loop_metrics.mark_event("shm_reconnect_l2")
 
             # BREADCRUMB: Calling fuse
             logger.debug("Calling fusion.fuse()...")
-            
+
             # DUAL FEED ARCHITECTURE: Run fusion twice for L1 and L2 feeds
             # L1 feed: Force L1-only mode (raw metrology, no L2 calibration)
             # L2 feed: Use L2 calibrated data when available
             result_l1 = None
             result_l2 = None
-            
+
             try:
                 # L1-only fusion: Force use of raw L1 metrology only
                 # skip_write=True because we write once after L1/L2 fields are populated
-                result_l1 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=True, skip_write=True)
+                with (loop_metrics.phase("fuse_l1") if loop_metrics else nullcontext()):
+                    result_l1 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=True, skip_write=True)
             except Exception as e_fuse:
                 logger.error(f"L1 fusion calculation CRASHED: {e_fuse}", exc_info=True)
-            
+
             # Pet watchdog between heavy fuse() calls to avoid 120s timeout
             if SYSTEMD_AVAILABLE:
                 systemd_daemon.notify('WATCHDOG=1')
-            
+
             try:
                 # L2 fusion: Use L2 calibrated data (current behavior)
                 # skip_write=True because we write once after L1/L2 fields are populated
-                result_l2 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=False, skip_write=True)
+                with (loop_metrics.phase("fuse_l2") if loop_metrics else nullcontext()):
+                    result_l2 = fusion.fuse(lookback_minutes=lookback_minutes, force_l1_only=False, skip_write=True)
             except Exception as e_fuse:
                 logger.error(f"L2 fusion calculation CRASHED: {e_fuse}", exc_info=True)
             
@@ -5311,7 +5368,8 @@ def run_fusion_service(
                     if quality_ok and multi_station and consistent and discontinuity_ok:
                         now = time.time()
                         system_time = now
-                        
+
+                        _shm_write_t0 = time.monotonic()
                         try:
                             # Update L1 feed (SHM 0) - raw L1 metrology fusion only
                             if chrony_shm_l1 and chrony_shm_l1.connected and result_l1:
@@ -5363,6 +5421,8 @@ def run_fusion_service(
                                 
                         except Exception as e:
                             logger.error(f"Chrony SHM update exception: {e}")
+                        if loop_metrics is not None:
+                            loop_metrics.record_phase("shm_write", time.monotonic() - _shm_write_t0)
                     # Always advance the discontinuity reference to track the
                     # current signal.  Without this, a rejected update freezes
                     # last_chrony_d_clock at a stale value and every subsequent
@@ -5398,16 +5458,20 @@ def run_fusion_service(
 
             # Write calibration file (wsprdaemon integration)
             if calib_writer:
+                _cal_t0 = time.monotonic()
                 try:
                     calib_writer.update(result)
                 except Exception as e:
                     logger.error(f"Calibration file write failed: {e}")
+                if loop_metrics is not None:
+                    loop_metrics.record_phase("calib_file_write", time.monotonic() - _cal_t0)
 
             # Publish fusion status for the authority manager (§4.5).
             # Always called, even when result is None, so utc_published stays
             # fresh and consumers can distinguish "service alive, no data"
             # from "service dead."
             if fusion_status_writer:
+                _fsw_t0 = time.monotonic()
                 try:
                     fusion_status_writer.update(
                         result=result,
@@ -5416,22 +5480,36 @@ def run_fusion_service(
                     )
                 except Exception as e:
                     logger.warning(f"Fusion status write failed: {e}")
+                if loop_metrics is not None:
+                    loop_metrics.record_phase("fusion_status_write", time.monotonic() - _fsw_t0)
 
             # Pet watchdog after heavy chrony/fusion processing
             if SYSTEMD_AVAILABLE:
                 systemd_daemon.notify('WATCHDOG=1')
-            
+
             # Collect chrony source statistics (rate-limited to once per minute)
             if chrony_stats_collector:
+                _cs_t0 = time.monotonic()
                 try:
                     chrony_stats_collector.collect()
                 except Exception as e:
                     logger.debug(f"Chrony stats collection error: {e}")
+                if loop_metrics is not None:
+                    loop_metrics.record_phase("chrony_stats", time.monotonic() - _cs_t0)
+
+            # Emit per-cycle metrics (fusion audit measurement phase).
+            # After all other per-cycle work, before sleep, so the
+            # recorded loop_duration captures everything.
+            if loop_metrics is not None:
+                try:
+                    loop_metrics.finalize_and_emit()
+                except Exception as e:
+                    logger.warning(f"Fusion loop metrics emit failed: {e}")
 
             # BREADCRUMB: Sleeping
             loop_duration = time.time() - loop_start_time
             logger.debug(f"Loop finished in {loop_duration:.3f}s. Sleeping {interval_sec}s...")
-            
+
             time.sleep(interval_sec)
             
         except KeyboardInterrupt:

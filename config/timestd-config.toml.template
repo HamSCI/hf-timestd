@@ -179,6 +179,18 @@ rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
 enabled = true
 # path = "/run/hf-timestd/coarse_time.json"  # default; override only for tests
 
+# === Fusion loop metrics (measurement-phase instrumentation) ===
+# timestd-fusion emits a per-cycle schema-v1 JSON snapshot at
+# /run/hf-timestd/fusion_metrics.json plus a structured INFO line
+# to journald (prefix: fusion_metrics). Covers loop duration,
+# watchdog-budget consumption, per-phase times (fuse_l1/fuse_l2/
+# hdf5_read/kalman_apply/calibration_apply/shm_write/
+# fusion_status_write/chrony_stats), RSS, and discrete events.
+# See the fusion parsimony/stability audit.
+[timing.fusion_metrics]
+enabled = true
+# path = "/run/hf-timestd/fusion_metrics.json"  # default; override only for tests
+
 # === Service Profiles ===
 # Controls which services run.  Profiles define a baseline set of services;
 # per-service overrides let you add or remove individual services on top.
