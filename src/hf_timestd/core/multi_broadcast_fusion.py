@@ -4996,6 +4996,36 @@ def run_fusion_service(
         logger.info("Fusion status writer enabled: /run/hf-timestd/fusion_status.json")
     except Exception as e:
         logger.warning(f"Fusion status writer not available: {e}")
+
+    # Authority manager — METROLOGY.md §4.5 / §4.6. Publishes
+    # /run/hf-timestd/authority.json on a 30s cadence from its own thread.
+    # Per the single-writer / coupling rule, this runs INSIDE the fusion
+    # service so a fusion hang decays authority.json, chrony SHM reach,
+    # and mDNS advertisement together.
+    authority_runner = None
+    try:
+        from hf_timestd.core.authority_runner import build_authority_runner_from_config
+        # Re-read config for the authority block (config was loaded earlier
+        # for station coords and timing_authority; the authority.* subtree
+        # may only be present in fresh configs, so handle absence gracefully).
+        _auth_config: dict = {}
+        try:
+            import toml as _toml_auth
+            _auth_cfg_path = Path('/etc/hf-timestd/timestd-config.toml')
+            if _auth_cfg_path.exists():
+                _auth_config = _toml_auth.load(_auth_cfg_path)
+        except Exception as _e:
+            logger.warning(f"Could not re-read config for authority manager: {_e}")
+        authority_runner = build_authority_runner_from_config(config=_auth_config)
+        authority_runner.start()
+        probe_levels = [p.t_level for p in authority_runner.manager.probes]
+        logger.info(
+            "Authority manager started: probes=%s interval=%.1fs hysteresis=%d",
+            probe_levels, authority_runner.interval_sec,
+            authority_runner.manager.upgrade_hysteresis,
+        )
+    except Exception as e:
+        logger.warning(f"Authority manager not available: {e}")
     
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s, lookback: {lookback_minutes}m")
@@ -5537,7 +5567,15 @@ def run_fusion_service(
     # Remove calibration file on shutdown so stale data is not consumed
     if calib_writer:
         calib_writer.remove()
-    
+
+    # Stop authority manager thread cleanly (publishes its final state
+    # before exiting if it is in the middle of a tick).
+    if authority_runner is not None:
+        try:
+            authority_runner.stop(timeout=5.0)
+        except Exception as e:
+            logger.warning(f"Authority manager stop failed: {e}")
+
     logger.info("Fusion service shutdown complete")
 
 
