@@ -31,6 +31,7 @@ from typing import Callable, Dict, List, Optional, Protocol, Sequence, TYPE_CHEC
 
 if TYPE_CHECKING:
     from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator, BootstrapState
+    from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ class AuthorityManager:
         pair_thresholds_ms: Optional[Dict[frozenset, float]] = None,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         bootstrap_coordinator: Optional["BootstrapCoordinator"] = None,
+        chrony_gate: Optional["ChronyRefclockGate"] = None,
     ):
         self.probes = list(probes)
         self.output_path = Path(output_path)
@@ -128,6 +130,7 @@ class AuthorityManager:
         )
         self.now_fn = now_fn
         self.bootstrap_coordinator = bootstrap_coordinator
+        self.chrony_gate = chrony_gate
 
         self._avail_counters: Dict[str, int] = {lvl: 0 for lvl in T_LEVELS_RANKED}
         self._t_active: Optional[str] = None
@@ -152,6 +155,7 @@ class AuthorityManager:
             if not self._last_bootstrap.complete:
                 state = self._build_bootstrap_pending_state()
                 self._write_state(state)
+                self._apply_chrony_gate(state.t_level_active)
                 return state
 
         results = self._poll_all()
@@ -161,7 +165,31 @@ class AuthorityManager:
         self._note_transition(active)
         state = self._build_state(results, active, witnesses, flags)
         self._write_state(state)
+        self._apply_chrony_gate(state.t_level_active)
         return state
+
+    def _apply_chrony_gate(self, t_level_active: Optional[str]) -> None:
+        """Update chrony's view of the Fusion SHM refclock based on the
+        current active T-level (§4.6)."""
+        if self.chrony_gate is None:
+            return
+        try:
+            result = self.chrony_gate.apply(t_level_active)
+        except Exception as e:
+            log.exception("Chrony refclock gate raised: %s", e)
+            return
+        if result.applied:
+            log.info(
+                "Chrony refclock gate: %s (%s)", result.target_state, result.reason,
+            )
+        elif result.reason and result.reason != "no change":
+            # Soft failures (chronyc not found, timeout, permission denied)
+            # are worth flagging once per transition; noisy in steady state
+            # otherwise so we rely on the "no change" fast-path above.
+            log.warning(
+                "Chrony refclock gate unapplied: target=%s reason=%s",
+                result.target_state, result.reason,
+            )
 
     def _build_bootstrap_pending_state(self) -> AuthorityState:
         """Authority state when the bootstrap coordinator has gated

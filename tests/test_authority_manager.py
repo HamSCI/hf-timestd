@@ -249,6 +249,34 @@ class TestAuthorityManager(unittest.TestCase):
         s = mgr.tick()
         self.assertIsNone(s.t_level_active)
 
+    def test_chrony_gate_called_with_active_t_level(self) -> None:
+        from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
+
+        class _RecordingGate(ChronyRefclockGate):
+            def __init__(self):
+                super().__init__(refid="HFSN", dry_run=True)
+                self.calls = []
+            def apply(self, t_level_active):
+                self.calls.append(t_level_active)
+                return super().apply(t_level_active)
+
+        gate = _RecordingGate()
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        mgr = AuthorityManager(
+            probes=[probe],
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=1,
+            now_fn=self.clock,
+            chrony_gate=gate,
+        )
+        mgr.tick()
+        self.assertEqual(gate.calls, ["T3"])
+        # Flip to unavailable; gate should now see None.
+        probe.set(_unavail("T3"))
+        mgr.tick()
+        self.assertEqual(gate.calls, ["T3", None])
+
 
 class _FakeBootstrap:
     """Minimal BootstrapCoordinator stand-in for the manager tests."""
@@ -312,6 +340,37 @@ class TestAuthorityManagerBootstrap(unittest.TestCase):
         payload = self._read()
         self.assertIn("bootstrap", payload)
         self.assertTrue(payload["bootstrap"]["complete"])
+
+    def test_bootstrap_pending_also_disables_chrony_gate(self) -> None:
+        # When bootstrap hasn't completed, the refclock should be
+        # DISABLED (no active level to justify offering it). Verifies
+        # the gate is called from the bootstrap-pending branch.
+        from hf_timestd.core.bootstrap_coordinator import BootstrapState
+        from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
+
+        class _RecordingGate(ChronyRefclockGate):
+            def __init__(self):
+                super().__init__(refid="HFSN", dry_run=True)
+                self.calls = []
+            def apply(self, t_level_active):
+                self.calls.append(t_level_active)
+                return super().apply(t_level_active)
+
+        gate = _RecordingGate()
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        coord = _FakeBootstrap(BootstrapState(complete=False, reason="no_coarse_time"))
+        mgr = AuthorityManager(
+            probes=[probe],
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=1,
+            now_fn=self.clock,
+            bootstrap_coordinator=coord,
+            chrony_gate=gate,
+        )
+        mgr.tick()
+        # Gate was called with None (no active level during bootstrap-pending)
+        self.assertEqual(gate.calls, [None])
 
     def test_bootstrap_stepped_records_reason_and_delta(self) -> None:
         from hf_timestd.core.bootstrap_coordinator import BootstrapState

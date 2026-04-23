@@ -20,6 +20,7 @@ from hf_timestd.core.authority_manager import (
     Probe,
 )
 from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator
+from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
 from hf_timestd.core.chrony_stepper import ChronyStepper
 from hf_timestd.core.chrony_tracking_probe import (
     ChronyTrackingProbe,
@@ -112,6 +113,11 @@ def build_authority_runner_from_config(
         threshold_sec = 5.0
         max_step_sec = 3600.0
         dry_run = false          # if true, log but don't invoke chronyc
+
+        [timing.authority.chrony_gate]
+        enabled = true
+        refid = "HFSN"           # must match the chrony.conf refclock entry
+        dry_run = false
     """
     auth_cfg = (config.get("timing", {}) or {}).get("authority", {}) or {}
     interval_sec = float(auth_cfg.get("interval_sec", 30.0))
@@ -165,11 +171,20 @@ def build_authority_runner_from_config(
             max_step_sec=float(boot_cfg.get("max_step_sec", 3600.0)),
         )
 
+    chrony_gate = None
+    gate_cfg = auth_cfg.get("chrony_gate", {}) or {}
+    if gate_cfg.get("enabled"):
+        chrony_gate = ChronyRefclockGate(
+            refid=str(gate_cfg.get("refid", "HFSN")),
+            dry_run=bool(gate_cfg.get("dry_run", False)),
+        )
+
     manager = AuthorityManager(
         probes=probes,
         output_path=authority_output_path,
         a_level_provider=a_level_provider,
         upgrade_hysteresis=hysteresis,
         bootstrap_coordinator=bootstrap_coordinator,
+        chrony_gate=chrony_gate,
     )
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)

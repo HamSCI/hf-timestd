@@ -380,19 +380,33 @@ When authority.json reports T3 or T6 active and non-stale, an hf-timestd host fu
 
 From a consumer's perspective — including non-HamSCI hosts, hobbyist NTP clients, embedded devices — this is indistinguishable from any other NTP server whose upstream is a local reference clock. Classical NTP source-selection logic (Marzullo intersection + combine) applies unchanged.
 
-#### Stratum, refid, and precision — authority-manager-driven
+#### Stratum, refid, precision — install-time convention; noselect — runtime-mutable
 
-The Fusion SHM refclock's chrony config reflects the currently active T-level. The authority manager updates these fields at each transition so downstream NTP consumers can make informed selection decisions:
+Chrony exposes runtime control of a source's **select policy** via `chronyc selectopts <refid> ±noselect` (and related flags). It does **not** expose runtime setters for `refid`, `stratum`, or the config-time `precision` — those are fixed per refclock line in chrony.conf at install time. The authority manager therefore splits the §4.6 policy into two layers:
 
-| Active T-level | Stratum | refid | precision | Rationale |
-|---|---|---|---|---|
-| T6 (BPSK-PPS detected) | 1 | `HFPP` | `1e-5` | Tightest payload offset; stratum 1 is substantiated |
-| T3 multi-station (A1) | 1 | `HFSN` | `1e-3` | Multi-broadcast Fusion with GPSDO rate; ~ms |
-| T3 degraded (A0) | 2 | `HFSN` | `1e-2` | Without GPSDO, claim one stratum lower |
-| T1 (GPSDO coast, stale) | marked `noselect` | `HFST` | `1e-2` | Not authoritative; keep visible but unselectable |
-| No T3/T6 (T2 or below active) | refclock `noselect` | — | — | Fall back to configured NTP peers entirely |
+**Install-time convention** (static per deployment — operator chooses once via the chrony.conf drop-in):
 
-refids follow the convention that chrony/ntpd refids are 4 ASCII characters: `HFPP` = HF PPS, `HFSN` = HF station (Fusion), `HFST` = HF stale. These are more informative than the current `TMGR` (see §7.3) when diagnosing with `chronyc sources -v`. The existing `TMGR` refid remains valid in installed deployments until the authority-manager migration; new installs adopt the scheme above.
+| Expected best T-level on this host | Recommended stratum | refid | Rationale |
+|---|---|---|---|
+| T6 (BPSK-PPS injection available) | 1 | `HFPP` | Tightest payload offset; stratum 1 substantiated |
+| T3 multi-station, A1 host | 1 | `HFSN` | Multi-broadcast Fusion with GPSDO rate; ~ms |
+| T3 only, A0 host | 2 | `HFSN` | Without GPSDO, claim one stratum lower |
+| T1 coast (rare primary) | 3 | `HFST` | Not authoritative; keep discoverable but visibly lower-ranked |
+
+refids are 4-char ASCII: `HFPP` = HF PPS, `HFSN` = HF station (Fusion), `HFST` = HF stale. These are more informative than the legacy `TMGR` (see §7.3) when diagnosing with `chronyc sources -v`. Existing installs keep `TMGR` until operators migrate; the authority manager is refid-agnostic and reads the configured value.
+
+**Per-sample precision** (dynamic, via the SHM segment): Fusion already publishes `precision_l1` / `precision_l2` per cycle based on the current uncertainty (see `multi_broadcast_fusion.py` SHM update logic). This reflects the authority's current quality without needing to restart chrony.
+
+**Runtime gating** (authority-manager-driven, via `chronyc selectopts`):
+
+| Active T-level | Gate action | Effect |
+|---|---|---|
+| T6 or T3 | `-noselect` | Refclock offered as upstream; may be used to discipline the local clock and served to LAN peers |
+| T5 / T4 / T2 / T1 / T0 or no active | `+noselect` | Refclock visible in `chronyc sources` for diagnostics; not used for discipline and not served to LAN |
+
+The gate fires only on T-level transitions — steady state makes no `chronyc` calls. This gives us the critical safety property from §4.5: **if Fusion breaks, we stop offering our refclock as an authoritative source within one authority cycle, regardless of the static stratum**. A Fusion host that has lost its HF signals cannot silently poison consumers on the LAN.
+
+Dynamic stratum / refid mutation would require either multiple pre-configured refclock lines with different stratum values (switched via selectopts) or a chrony upstream feature that does not currently exist. Operators who want this behavior today can install multiple refclock lines (e.g., one at stratum 1 `HFSN` and one at stratum 2 `HFSN2` with the same SHM unit) and extend the gate to toggle between them; the current implementation supports a single refid and treats stratum as install-time.
 
 #### mDNS advertisement — RFC 6763 with a documented TXT extension
 
