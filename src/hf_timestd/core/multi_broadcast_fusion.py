@@ -162,7 +162,6 @@ import json
 import os
 import time
 import re
-import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -4748,116 +4747,6 @@ class MultiBroadcastFusion:
                 for station, cal in self.calibration.items()
             }
         }
-
-
-class ChronySHMUpdater:
-    """
-    Threaded Chrony SHM updater that runs independently of fusion loop.
-    
-    This ensures chrony receives updates at its poll interval (8s) even if
-    fusion runs at a different cadence (e.g., 60s).
-    """
-    
-    def __init__(self, chrony_shm, poll_interval: float = 8.0):
-        self.chrony_shm = chrony_shm
-        self.poll_interval = poll_interval
-        self.latest_result = None
-        self.result_lock = threading.Lock()
-        self.running = False
-        self.thread = None
-        self.consecutive_failures = 0
-        self.total_writes = 0
-        self.failed_writes = 0
-        
-    def update_result(self, result):
-        """Update the latest fusion result (called by main fusion loop)."""
-        with self.result_lock:
-            self.latest_result = result
-    
-    def _updater_thread(self):
-        """Background thread that writes to Chrony SHM at poll interval."""
-        logger.info(f"Chrony SHM updater thread started (poll interval: {self.poll_interval}s)")
-        
-        while self.running:
-            try:
-                with self.result_lock:
-                    result = self.latest_result
-                
-                if result and result.quality_grade in ('A', 'B', 'C', 'D'):
-                    now = time.time()
-                    system_time = now
-                    reference_time = system_time - (result.d_clock_fused_ms / 1000.0)
-                    
-                    # Precision based on uncertainty (log2 of seconds)
-                    precision = max(-13, min(-4, int(-10 - np.log2(max(0.1, result.uncertainty_ms)))))
-                    
-                    try:
-                        update_success = self.chrony_shm.update(reference_time, system_time, precision)
-                        
-                        if update_success:
-                            self.consecutive_failures = 0
-                            self.total_writes += 1
-                            if self.total_writes <= 5 or self.total_writes % 60 == 0:
-                                logger.info(
-                                    f"Chrony SHM updated: D_clock={result.d_clock_fused_ms:+.3f}ms, "
-                                    f"offset={(system_time-reference_time)*1000:+.3f}ms, "
-                                    f"precision={precision} (write #{self.total_writes})"
-                                )
-                        else:
-                            self.consecutive_failures += 1
-                            self.failed_writes += 1
-                            logger.error(
-                                f"Chrony SHM write failed (consecutive: {self.consecutive_failures}, "
-                                f"total: {self.failed_writes}/{self.total_writes + self.failed_writes})"
-                            )
-                            
-                            # Try to reconnect after multiple failures
-                            if self.consecutive_failures >= 3:
-                                try:
-                                    logger.warning("Attempting Chrony SHM reconnect...")
-                                    self.chrony_shm.disconnect()
-                                    if self.chrony_shm.connect():
-                                        logger.info("Chrony SHM reconnected successfully")
-                                        self.consecutive_failures = 0
-                                except Exception as e:
-                                    logger.error(f"Failed to reconnect Chrony SHM: {e}")
-                    
-                    except Exception as e:
-                        logger.error(f"Chrony SHM update exception: {e}", exc_info=True)
-                        self.consecutive_failures += 1
-                        self.failed_writes += 1
-                else:
-                    if result:
-                        logger.debug(f"Skipping SHM write: quality grade {result.quality_grade} not acceptable")
-                    else:
-                        logger.debug("Skipping SHM write: no fusion result available yet")
-                
-            except Exception as e:
-                logger.error(f"Chrony SHM updater thread error: {e}", exc_info=True)
-            
-            # Sleep for poll interval
-            time.sleep(self.poll_interval)
-    
-    def start(self):
-        """Start the background updater thread."""
-        if self.running:
-            logger.warning("Chrony SHM updater already running")
-            return
-        
-        self.running = True
-        self.thread = threading.Thread(target=self._updater_thread, daemon=True, name="ChronySHMUpdater")
-        self.thread.start()
-        logger.info("Chrony SHM updater thread started")
-    
-    def stop(self):
-        """Stop the background updater thread."""
-        if not self.running:
-            return
-        
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=2.0)
-        logger.info("Chrony SHM updater thread stopped")
 
 
 def run_fusion_service(
