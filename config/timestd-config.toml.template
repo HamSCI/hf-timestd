@@ -169,6 +169,16 @@ realtime_iono = true
 authority = "rtp"
 rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
 
+# === Coarse-time producer (bootstrap input) ===
+# The authority manager's bootstrap coordinator consumes
+# /run/hf-timestd/coarse_time.json to detect a wildly-wrong system
+# clock at startup.  MetrologyEngine emits this file whenever a CHU
+# channel produces a successful FSK decode (minute-precision UTC,
+# max_error_sec=60).  See METROLOGY.md §4.5.
+[timing.coarse_time]
+enabled = true
+# path = "/run/hf-timestd/coarse_time.json"  # default; override only for tests
+
 # === Service Profiles ===
 # Controls which services run.  Profiles define a baseline set of services;
 # per-service overrides let you add or remove individual services on top.

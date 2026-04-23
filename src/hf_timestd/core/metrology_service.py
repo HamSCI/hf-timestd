@@ -113,6 +113,14 @@ class MetrologyService:
         lat = self.station_config.get('latitude')
         lon = self.station_config.get('longitude')
         
+        # Coarse-time producer (METROLOGY.md §4.5 / 2c). Only CHU
+        # channels emit, but the config knob is service-level so a
+        # single setting covers the whole host.
+        _coarse_cfg = (config.get('timing', {}) or {}).get('coarse_time', {}) or {}
+        _coarse_enabled = bool(_coarse_cfg.get('enabled', True))
+        _coarse_path_str = _coarse_cfg.get('path')
+        _coarse_path = Path(_coarse_path_str) if _coarse_path_str else None
+
         self.engine = MetrologyEngine(
             # raw_buffer_dir is a legacy constructor argument that the
             # engine stores but no longer reads.  Pass a placeholder so
@@ -127,6 +135,8 @@ class MetrologyService:
             precise_lon=lon,
             is_rtp_authority=self._is_rtp_authority,
             enable_physics_products=self._physics_products,
+            enable_coarse_time=_coarse_enabled,
+            coarse_time_path=_coarse_path,
         )
         
         # Initialize Writer

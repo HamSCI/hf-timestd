@@ -82,7 +82,9 @@ class MetrologyEngine:
         precise_lat: Optional[float] = None,
         precise_lon: Optional[float] = None,
         is_rtp_authority: bool = True,  # Default to RTP mode
-        enable_physics_products: bool = True  # False = timing-only, skip secondary-arrival search
+        enable_physics_products: bool = True,  # False = timing-only, skip secondary-arrival search
+        enable_coarse_time: bool = True,
+        coarse_time_path: Optional[Path] = None,
     ):
         self.raw_buffer_dir = Path(raw_buffer_dir)
         self.output_dir = Path(output_dir)
@@ -95,11 +97,32 @@ class MetrologyEngine:
         self.precise_lon = precise_lon
         self.is_rtp_authority = is_rtp_authority
         self.enable_physics_products = enable_physics_products
-        
+
         # Pre-allocated buffers for zero-allocation DSP
         self._max_samples = 65 * self.sample_rate
         self._envelope_buffer = np.empty(self._max_samples, dtype=np.float32)
         self.is_chu_channel = 'CHU' in channel_name.upper()
+
+        # CHU FSK coarse-time producer for the authority manager's
+        # bootstrap coordinator (METROLOGY.md §4.5). Only CHU channels
+        # carry the BCD/FSK burst, so non-CHU instances never publish.
+        # Best-effort init: a missing /run/hf-timestd directory (e.g.
+        # unit-test runs without the service unit's RuntimeDirectory=)
+        # logs a warning and leaves the writer None.
+        self._coarse_time_writer = None
+        if self.is_chu_channel and enable_coarse_time:
+            try:
+                from hf_timestd.core.coarse_time_writer import CoarseTimeWriter
+                if coarse_time_path is not None:
+                    self._coarse_time_writer = CoarseTimeWriter(path=coarse_time_path)
+                else:
+                    self._coarse_time_writer = CoarseTimeWriter()
+                logger.info(
+                    f"{channel_name}: coarse-time writer enabled "
+                    f"({self._coarse_time_writer.path})"
+                )
+            except Exception as e:
+                logger.warning(f"{channel_name}: coarse-time writer disabled: {e}")
         
         # Initialize sub-components
         self._init_components()
@@ -2238,7 +2261,7 @@ class MetrologyEngine:
             logger.warning(f"{self.channel_name}: Failed to write FSK result JSON: {e}")
 
     def _decode_fsk_from_iq(self, iq_samples: np.ndarray, minute_boundary: int) -> dict:
-        """Decode CHU FSK directly from IQ buffer (fallback when sidecar not running)."""
+        """Decode CHU FSK directly from IQ buffer (live IQ-tapped path)."""
         try:
             result = self.chu_fsk_decoder.decode_minute(
                 iq_samples, float(minute_boundary), is_audio=False
@@ -2246,6 +2269,10 @@ class MetrologyEngine:
             if not result.detected:
                 logger.debug(f"{self.channel_name}: IQ-direct FSK: not detected")
                 return {}
+            # Publish minute-level UTC for the authority manager's bootstrap
+            # coordinator (METROLOGY.md §4.5). Best-effort — any failure is
+            # logged inside the helper and does not affect the decode path.
+            self._publish_coarse_time(result)
             chu_metrics = {
                 'fsk_valid': True,
                 'fsk_frames_decoded': result.frames_decoded,
@@ -2280,6 +2307,48 @@ class MetrologyEngine:
         if 'WWVH' in self.channel_name.upper(): return 'WWVH'
         if 'WWV' in self.channel_name.upper(): return 'WWV'
         return 'UNKNOWN'
+
+    def _publish_coarse_time(self, result) -> None:
+        """Translate a successful CHU FSK decode into a coarse_time.json
+        record for the authority manager's bootstrap coordinator.
+
+        Precision is minute-level — Frame A of the FSK burst carries
+        (day_of_year, hour, minute) but the decode window does not tell
+        us which second inside the minute we are observing at write time.
+        `max_error_sec=60` reflects that; the bootstrap coordinator's
+        threshold must be > 60 s for the comparison to be meaningful
+        (METROLOGY.md §4.5 sets the default to 90 s).
+
+        Year resolution comes from Frame B (result.year). If Frame B
+        was not decoded this minute, we fall back to the current
+        system-clock year — still independent of the second-level clock
+        error that bootstrap exists to correct.
+        """
+        if self._coarse_time_writer is None:
+            return
+        try:
+            day = result.decoded_day
+            hour = result.decoded_hour
+            minute = result.decoded_minute
+            year = getattr(result, 'year', None)
+            if day is None or hour is None or minute is None:
+                return
+
+            from datetime import timedelta as _td
+            if year is None:
+                year = datetime.now(timezone.utc).year
+            coarse_utc = datetime(
+                int(year), 1, 1, 0, 0, 0, tzinfo=timezone.utc,
+            ) + _td(days=int(day) - 1, hours=int(hour), minutes=int(minute))
+
+            self._coarse_time_writer.publish(
+                source="FSK",
+                station=self._station_from_channel_name(),
+                coarse_utc=coarse_utc,
+                max_error_sec=60.0,
+            )
+        except Exception as e:
+            logger.warning(f"{self.channel_name}: coarse_time publish failed: {e}")
 
     def _load_calibration(self):
         """Simple calibration loader for BPM."""

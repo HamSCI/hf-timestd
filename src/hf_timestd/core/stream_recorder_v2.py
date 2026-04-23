@@ -707,8 +707,7 @@ class StreamRecorderV2:
             # Publish the batch into the ring buffer AFTER the archive
             # write so any ring-buffer bug during Phase 1 rollout cannot
             # affect disk writes.  RTP of the first sample in this batch
-            # is (total_delivered - len) relative to first_rtp_timestamp,
-            # matching chu_fsk_listener's head_rtp computation.
+            # is (total_delivered - len) relative to first_rtp_timestamp.
             if self.ring_buffer is not None:
                 try:
                     batch_first_rtp = (
