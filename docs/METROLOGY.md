@@ -350,6 +350,83 @@ The §1 and §4.3 shortcuts map onto the T-level space — but with the RTP-refe
 
 The `[timing] authority =` key in `timestd-config.toml` becomes a *preference* (which T-level to prefer when multiple are simultaneously available), not a hard mode switch. Runtime authority — and therefore whether the offset is a no-op or a correction — is determined by the manager's probes and cross-checks. `authority = "auto"` is the default: always pick the highest available level, let the uniform client contract handle the rest.
 
+### 4.6 Relationship to Chrony and Standard NTP Practice
+
+The authority hierarchy in §4.5 **extends** — it does not replace — the established chrony/NTP framework. Every mechanism we use is defined by existing standards (RFC 5905 for NTP, RFC 6763 for DNS-SD, chrony's standard `refclock SHM` driver). What's novel is the **separation of data-label authority from system-clock authority**, enforced by the RTP-reference invariant. This subsection maps our architecture to standard practice, names the chrony conventions we rely on, and declares the one application-level extension (mDNS TXT metadata schema).
+
+#### Chrony's role — disciplined clock, not data label
+
+Chrony retains its classical role of disciplining the host system clock from the best available time sources. It consumes:
+
+- The Fusion-produced RTP→UTC offset via the standard **SHM refclock** driver (segments 2–3 in the dual-feed configuration of §13.4).
+- Configured NTP peers — WAN NTP, LAN GPS+PPS servers, other LAN hf-timestd hosts serving Fusion — via standard `server`/`peer` directives.
+
+Chrony then:
+
+- **Outputs** a disciplined system clock for host-level uses: syslog timestamps, UI wall-clock displays, cron, journald, anything outside the HamSCI suite's data pipeline.
+- **Optionally serves** NTP to the LAN via the `allow` directive, at whatever stratum the upstream source quality implies.
+
+**Chrony is not load-bearing for data labels.** Under the RTP-reference invariant (§4.5), every data-product timestamp is `rtp_time + rtp_to_utc_offset_ns`. Chrony may drift, fail, lose all sources, or be wildly wrong — data labels remain correct because they travel a different path. Chrony's health becomes an operational concern for the host, not a correctness concern for the science data.
+
+This is the structural fix for the 2026-04-20 failure mode: when chrony lost all usable sources and the system clock drifted ~107 s, the wspr-recorder WAV labels followed. Under the RTP-reference invariant, the same chrony outage would leave data labels untouched — only the operator's wall clock and syslog timestamps would go wrong.
+
+#### hf-timestd as a LAN NTP server — standard mechanisms only
+
+When authority.json reports T3 or T6 active and non-stale, an hf-timestd host functions as a standard NTP server for its LAN, using entirely unextended mechanisms:
+
+- **Chrony SHM refclock** driver — RFC-compatible, unchanged from existing hf-timestd installations.
+- **`allow <cidr>`** directive (RFC 5905 / chrony-standard NTP serving). Installed as a drop-in at `/etc/chrony/conf.d/10-hf-timestd-serve.conf`; activated at runtime via `chronyc allow` without requiring a chrony restart (per §4.5's LAN NTP service rules).
+- **Standard UDP 123** for NTP queries. No custom clients, no protocol extensions.
+
+From a consumer's perspective — including non-HamSCI hosts, hobbyist NTP clients, embedded devices — this is indistinguishable from any other NTP server whose upstream is a local reference clock. Classical NTP source-selection logic (Marzullo intersection + combine) applies unchanged.
+
+#### Stratum, refid, and precision — authority-manager-driven
+
+The Fusion SHM refclock's chrony config reflects the currently active T-level. The authority manager updates these fields at each transition so downstream NTP consumers can make informed selection decisions:
+
+| Active T-level | Stratum | refid | precision | Rationale |
+|---|---|---|---|---|
+| T6 (BPSK-PPS detected) | 1 | `HFPP` | `1e-5` | Tightest payload offset; stratum 1 is substantiated |
+| T3 multi-station (A1) | 1 | `HFSN` | `1e-3` | Multi-broadcast Fusion with GPSDO rate; ~ms |
+| T3 degraded (A0) | 2 | `HFSN` | `1e-2` | Without GPSDO, claim one stratum lower |
+| T1 (GPSDO coast, stale) | marked `noselect` | `HFST` | `1e-2` | Not authoritative; keep visible but unselectable |
+| No T3/T6 (T2 or below active) | refclock `noselect` | — | — | Fall back to configured NTP peers entirely |
+
+refids follow the convention that chrony/ntpd refids are 4 ASCII characters: `HFPP` = HF PPS, `HFSN` = HF station (Fusion), `HFST` = HF stale. These are more informative than the current `TMGR` (see §7.3) when diagnosing with `chronyc sources -v`. The existing `TMGR` refid remains valid in installed deployments until the authority-manager migration; new installs adopt the scheme above.
+
+#### mDNS advertisement — RFC 6763 with a documented TXT extension
+
+Service discovery uses the IANA-registered `_ntp._udp` DNS-SD type (RFC 6763), advertised via `avahi-publish-service`. PTR and SRV records follow RFC 6763 exactly; any compliant mDNS client sees a standard NTP service.
+
+RFC 6763 §6 permits application-defined `key=value` pairs in TXT records and there is no standard schema for `_ntp._udp` TXT. We define a versioned schema for HamSCI-aware consumers to prefer hf-timestd hosts based on Fusion quality:
+
+```
+schema=v1
+source=fusion
+host=<hostname>
+A=A1
+T=T3
+q95_ms=0.8
+stations=WWV,CHU
+disagreement=none
+```
+
+- Consumers gate on `schema ∈ {v1, …}`; unknown versions treat the record as plain NTP.
+- Non-HamSCI consumers ignore TXT entirely and use us as a standard NTP server. This graceful-degradation property is explicit.
+- Future schema bumps add fields; old consumers continue to work.
+
+#### What the authority manager does NOT do
+
+To keep the scope clean and interoperability intact:
+
+- **Does not replace chrony.** Chrony remains the system-clock disciplinarian and the NTP server implementation.
+- **Does not replace NTP.** LAN time distribution uses standard NTP on UDP 123 between chrony peers.
+- **Does not invent a service discovery protocol.** Standard `_ntp._udp` mDNS with documented TXT extensions.
+- **Does not expose a new client-facing network API.** HamSCI consumers read `authority.json` locally (schema v1, §4.5); classical UNIX apps read the disciplined system clock from chrony; neither is a new interface.
+- **Does not claim stratum it cannot substantiate.** Stratum is set per T-level per the table above; chrony's own source-selection handles the rest.
+
+The authority manager is a **policy layer** on top of standard mechanisms. It chooses which T-level is active, keeps the chrony SHM refclock's stratum/refid/precision consistent with that choice, publishes the offset tuple for in-suite clients, and gates mDNS advertisements on live Fusion health. All underlying transport and discovery is standard.
+
 ---
 
 ## 5. Physics Models
