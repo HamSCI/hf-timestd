@@ -233,6 +233,26 @@ Ranked from highest authority (most accurate, most independent of external state
 
 "Not available" entries are structural: (A0, T5) and (A0, T1) are by-definition invalid — those T-levels are *defined* by GPSDO presence. (A1, T0) collapses to T1, because A1 alone is a timing authority worth naming.
 
+#### The RTP-reference labeling invariant
+
+Data products across the HamSCI suite — hf-timestd's own services, wspr-recorder, psk-recorder, and future clients — label samples using **RTP time from radiod as the authoritative reference**, optionally corrected by a published Fusion offset:
+
+```
+label_utc = rtp_time + rtp_to_utc_offset_ns
+```
+
+This is a hard invariant. Clients do **not** consult their own system clock for data labeling. The rationale is multi-host coherence: a single radiod serves RTP to many client hosts, each of which may have its own chrony state and drift independently. Labeling with RTP-time plus a shared offset means all clients agree on labels by construction, regardless of per-host clock state. The 2026-04-20 incident — system clock drift of ~107 s mislabeling WSPR WAV files — is structurally impossible under this invariant, because system-clock drift does not propagate into labels.
+
+**The offset is always applied, regardless of T-level.** Its magnitude and uncertainty tell the provenance story; the client code path is uniform:
+
+- **T5, T4**: radiod's RTP_TIMESNAP is derived from a GPS-disciplined system clock (on-host GPS+PPS or LAN GPS+PPS via NTP). RTP-time is inherently μs- to ms-accurate UTC. The published offset is near zero with μs/ms uncertainty; applying it is a no-op.
+- **T6**: hf-timestd's detection of GPS-timed BPSK-PPS injected into the HF payload produces a μs-level RTP→UTC offset **independent of radiod's clock source**. Measured near-zero if radiod already has GPS (cross-check confirmation), non-zero if it does not (active correction). Supersedes RTP-inherent accuracy at the μs level either way.
+- **T3–T0**: hf-timestd's HF time-station tick analysis produces an offset with ms–seconds uncertainty. RTP origin is limited by radiod's available reference (stale NTP, free-running TCXO, or no reference at all), and the Fusion offset is the primary UTC correction.
+
+Because the offset is applied uniformly, no client branches on T-level. The authority manager publishes `(offset, σ, T_level, …)` as one tuple; clients read and apply. T-level is provenance metadata for sidecar recording and operator surfacing, not a control flow gate in consumer code.
+
+At T0 with no HF signals reaching the receiver and no other source, the published offset may be unavailable. Clients then record RTP-time only and stamp the sidecar with an explicit `no_utc_alignment_available` flag. They do **not** substitute the system clock.
+
 #### T-Level Classification
 
 **T6 and T3 share an architecture.** Both are hf-timestd's payload-signal offset products — a known-timed signal is detected in the audio and correlated against RTP time. They differ only in signal: T6's injected BPSK-PPS has a tighter edge and no ionospheric path (~μs); T3's multi-hop HF ticks have larger, partially-modeled ionospheric delay (~ms). Both are independent of the system clock entirely and survive arbitrary system-clock drift as long as A holds.
@@ -272,22 +292,39 @@ Transitions are logged and stamped in sidecars:
 
 **Downgrade is immediate:** a failed probe disables the level at the next authority decision. No hysteresis on failure — the whole point is to stop trusting a broken source as soon as we notice.
 
-#### Published State Tuple
+#### Published Authority State (schema v1)
 
-Every hf-timestd host continuously publishes its authority state at `/run/hf-timestd/authority.json`:
+Every hf-timestd host continuously publishes its authority state at `/run/hf-timestd/authority.json`. This file is the single published contract between the authority manager and every consumer (sidecar writers, chrony SHM feeder, mDNS advertiser, wspr-recorder, psk-recorder, LAN peers, sigmond watchdog).
 
 ```json
 {
+  "schema": "v1",
+  "utc_published": "2026-04-22T16:13:44.123456Z",
   "a_level": "A1",
   "t_level_active": "T3",
   "t_level_available": ["T3", "T2"],
+  "t_level_witnesses": ["T2"],
+  "rtp_to_utc_offset_ns": 812345,
+  "sigma_ns": 940000,
+  "stations_contributing": ["WWV", "CHU"],
   "last_transition_utc": "2026-04-22T16:13:44Z",
-  "disagreement_flags": [],
-  "q95_ms": 0.8
+  "disagreement_flags": []
 }
 ```
 
-Consumers — sidecar writers, chrony SHM, LAN peers discovering via mDNS — derive their confidence from this tuple.
+**Freshness rule.** Consumers treat the state as valid only if `utc_published` is within a freshness window (default 60 s). Beyond that, the offset is "unavailable" and clients fall back to RTP-time-only labeling with `authority_stale=true` stamped in the sidecar. No client ever substitutes the system clock for UTC labeling, even when the offset is stale.
+
+**Atomic write.** The authority manager writes this file via write-to-temp + rename so consumers never observe a partial state.
+
+**Single-writer / coupling rule.** The authority manager's main loop is the single gate for three outputs: (1) writing `authority.json`, (2) writing chrony SHM segments, (3) refreshing the mDNS advertisement subprocess. If the manager loop hangs or crashes, all three signals decay in lockstep:
+
+- `authority.json` ages past its freshness window within 60 s → local consumers see "authority stale."
+- Chrony SHM refclock stops receiving fresh timestamps → `chronyc sources` shows `reach=0` within ~5 polling intervals.
+- mDNS advertisement is not refreshed → avahi ages the record out within ~120 s → LAN consumers see the service disappear.
+
+Because sigmond's `smd lan-fusion-watch` polls chrony reach and browses `_ntp._udp`, both of the cross-host signals naturally disappear when the manager hangs — there is no separate heartbeat file to maintain. The coupling rule guarantees that "signals look healthy" cannot diverge from "the manager is actually running."
+
+**Schema versioning.** The `schema` field is gated at the consumer; unknown versions are treated as unavailable. Future additions bump the version; consumers gate on `schema ∈ {v1, v2, …}`.
 
 #### Sidecar History
 
@@ -306,12 +343,12 @@ History is bulkier than the single-value encoding but essential for reprocessing
 
 #### Relationship to "RTP Mode" and "Fusion Mode"
 
-The §1 and §4.3 shortcuts map onto the T-level space:
+The §1 and §4.3 shortcuts map onto the T-level space — but with the RTP-reference invariant in force, "mode" is no longer about *whether* RTP or Fusion is trusted. RTP is always the label reference. What changes between modes is **whether the published Fusion offset is a no-op or an active correction**:
 
-- **RTP Mode** ≈ (A1, T5) or (A1, T4). System clock is trusted; radiod's RTP timestamps are ground truth; hf-timestd focuses on physics (dTEC, TIDs).
-- **Fusion Mode** ≈ (A1, T6) or (A1 or A0, T3). System clock is not trusted (or is being actively corrected); hf-timestd's payload-derived offset is the authority; SHM output disciplines chrony.
+- **RTP Mode** ≈ (A1, T5) or (A1, T4). RTP-time is inherently μs/ms UTC because radiod's clock source is GPS-disciplined. The published Fusion offset is near zero with low uncertainty; applying it is a no-op. hf-timestd's focus in this mode is physics products (dTEC, TIDs) — timing is a solved problem and Fusion runs mainly as a cross-check witness.
+- **Fusion Mode** ≈ (A1, T6) or (A0/A1, T3–T0). RTP origin is imperfect, missing, or drifting; the published Fusion offset carries real correction. hf-timestd's primary contribution in this mode is the offset itself. SHM output disciplines chrony as a secondary benefit, useful for logs and external NTP serving, but irrelevant to data labeling.
 
-The two modes are no longer a binary toggle but a consequence of which T-levels are active. The same binary runs either way; `[timing] authority =` in `timestd-config.toml` becomes a *preference* (which T-level to prefer when multiple are available), not a hard mode switch. Runtime authority is determined by the manager's probes and cross-checks.
+The `[timing] authority =` key in `timestd-config.toml` becomes a *preference* (which T-level to prefer when multiple are simultaneously available), not a hard mode switch. Runtime authority — and therefore whether the offset is a no-op or a correction — is determined by the manager's probes and cross-checks. `authority = "auto"` is the default: always pick the highest available level, let the uniform client contract handle the rest.
 
 ---
 
