@@ -277,6 +277,68 @@ class TestAuthorityManager(unittest.TestCase):
         mgr.tick()
         self.assertEqual(gate.calls, ["T3", None])
 
+    def test_governor_radiod_surfaced_in_authority_json(self) -> None:
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        mgr = AuthorityManager(
+            probes=[probe],
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=1,
+            now_fn=self.clock,
+            governor_radiod_provider=lambda: "bee1-hf-status.local",
+        )
+        mgr.tick()
+        payload = self._read()
+        self.assertEqual(payload["governor_radiod"], "bee1-hf-status.local")
+
+    def test_governor_radiod_omitted_when_no_provider(self) -> None:
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        mgr = self._mgr([probe], upgrade_hysteresis=1)
+        mgr.tick()
+        self.assertNotIn("governor_radiod", self._read())
+
+    def test_governor_radiod_provider_exception_is_soft_fail(self) -> None:
+        def boom():
+            raise RuntimeError("kaboom")
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        mgr = AuthorityManager(
+            probes=[probe],
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=1,
+            now_fn=self.clock,
+            governor_radiod_provider=boom,
+        )
+        mgr.tick()  # must not raise
+        self.assertNotIn("governor_radiod", self._read())
+
+    def test_mdns_advertiser_called_with_state_and_governor(self) -> None:
+        from hf_timestd.core.mdns_fusion_advertiser import (
+            AdvertiseResult, MdnsFusionAdvertiser,
+        )
+
+        class _RecordingAdv(MdnsFusionAdvertiser):
+            def __init__(self):
+                super().__init__(dry_run=True)
+                self.apply_calls = []
+            def apply(self, state, governor_radiod=None):
+                self.apply_calls.append((state.t_level_active, governor_radiod))
+                return AdvertiseResult(target_state="advertising", applied=False, reason="test")
+
+        adv = _RecordingAdv()
+        probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+        mgr = AuthorityManager(
+            probes=[probe],
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=1,
+            now_fn=self.clock,
+            governor_radiod_provider=lambda: "gov-radiod.local",
+            mdns_advertiser=adv,
+        )
+        mgr.tick()
+        self.assertEqual(adv.apply_calls, [("T3", "gov-radiod.local")])
+
 
 class _FakeBootstrap:
     """Minimal BootstrapCoordinator stand-in for the manager tests."""

@@ -253,6 +253,14 @@ Because the offset is applied uniformly, no client branches on T-level. The auth
 
 At T0 with no HF signals reaching the receiver and no other source, the published offset may be unavailable. Clients then record RTP-time only and stamp the sidecar with an explicit `no_utc_alignment_available` flag. They do **not** substitute the system clock.
 
+##### Multi-radiod stations — one governor radiod
+
+At stations with more than one radiod, "RTP time" is ambiguous — each radiod has its own `RTP_TIMESNAP` anchor derived from its own host's clock at snapshot time. The Fusion offset is computed from one specific radiod: the one hf-timestd reads IQ from. That radiod is the **governor**, and the published offset is relative to its RTP timebase.
+
+Clients that subscribe to the governor radiod apply the offset directly. Clients that subscribe to a *different* radiod on the same station still apply the offset, but inherit the clock-skew between radiod hosts as additional uncertainty. The governor's identifier — `[ka9q].status_address` from hf-timestd's own config — is published in `authority.json` as `governor_radiod` so consumers can record it in sidecars alongside their own `client_radiod`, making the pair traceable through later analysis.
+
+**Operator assumption**: multi-radiod stations should have all radiod hosts chrony-synced to a shared time source (typically the station's GPS timeserver) so `delta_host_clocks` stays within ms. This is standard station practice; the invariant as stated holds under that assumption and degrades gracefully (with added ms-level uncertainty) as host-clock synchrony degrades. Radiod-host timing is the operator's responsibility — outside sigmond's scope.
+
 #### T-Level Classification
 
 **T6 and T3 share an architecture.** Both are hf-timestd's payload-signal offset products — a known-timed signal is detected in the audio and correlated against RTP time. They differ only in signal: T6's injected BPSK-PPS has a tighter edge and no ionospheric path (~μs); T3's multi-hop HF ticks have larger, partially-modeled ionospheric delay (~ms). Both are independent of the system clock entirely and survive arbitrary system-clock drift as long as A holds.
@@ -308,9 +316,12 @@ Every hf-timestd host continuously publishes its authority state at `/run/hf-tim
   "sigma_ns": 940000,
   "stations_contributing": ["WWV", "CHU"],
   "last_transition_utc": "2026-04-22T16:13:44Z",
-  "disagreement_flags": []
+  "disagreement_flags": [],
+  "governor_radiod": "bee1-hf-status.local"
 }
 ```
+
+`governor_radiod` is optional and additive within schema v1 — legacy consumers that don't know the field simply ignore it. When present it names the radiod whose RTP timebase the offset is computed against (see multi-radiod clarification in §4.5.1).
 
 **Freshness rule.** Consumers treat the state as valid only if `utc_published` is within a freshness window (default 60 s). Beyond that, the offset is "unavailable" and clients fall back to RTP-time-only labeling with `authority_stale=true` stamped in the sidecar. No client ever substitutes the system clock for UTC labeling, even when the offset is stale.
 

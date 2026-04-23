@@ -32,6 +32,7 @@ from typing import Callable, Dict, List, Optional, Protocol, Sequence, TYPE_CHEC
 if TYPE_CHECKING:
     from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator, BootstrapState
     from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
+    from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,8 @@ class AuthorityManager:
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         bootstrap_coordinator: Optional["BootstrapCoordinator"] = None,
         chrony_gate: Optional["ChronyRefclockGate"] = None,
+        governor_radiod_provider: Optional[Callable[[], Optional[str]]] = None,
+        mdns_advertiser: Optional["MdnsFusionAdvertiser"] = None,
     ):
         self.probes = list(probes)
         self.output_path = Path(output_path)
@@ -131,6 +134,8 @@ class AuthorityManager:
         self.now_fn = now_fn
         self.bootstrap_coordinator = bootstrap_coordinator
         self.chrony_gate = chrony_gate
+        self.governor_radiod_provider = governor_radiod_provider
+        self.mdns_advertiser = mdns_advertiser
 
         self._avail_counters: Dict[str, int] = {lvl: 0 for lvl in T_LEVELS_RANKED}
         self._t_active: Optional[str] = None
@@ -156,6 +161,7 @@ class AuthorityManager:
                 state = self._build_bootstrap_pending_state()
                 self._write_state(state)
                 self._apply_chrony_gate(state.t_level_active)
+                self._apply_mdns_advertiser(state)
                 return state
 
         results = self._poll_all()
@@ -166,7 +172,36 @@ class AuthorityManager:
         state = self._build_state(results, active, witnesses, flags)
         self._write_state(state)
         self._apply_chrony_gate(state.t_level_active)
+        self._apply_mdns_advertiser(state)
         return state
+
+    def _apply_mdns_advertiser(self, state: AuthorityState) -> None:
+        """Let the mDNS advertiser react to the current state. Publish /
+        withdraw is decided by the advertiser's own policy (T3/T6 eligible)
+        so this method is just the dispatch point."""
+        if self.mdns_advertiser is None:
+            return
+        governor = None
+        if self.governor_radiod_provider is not None:
+            try:
+                governor = self.governor_radiod_provider()
+            except Exception as e:
+                log.debug("governor_radiod_provider raised: %s", e)
+                governor = None
+        try:
+            result = self.mdns_advertiser.apply(state, governor)
+        except Exception as e:
+            log.exception("mDNS advertiser raised: %s", e)
+            return
+        if result.applied:
+            log.info(
+                "mDNS advertiser: %s (%s)", result.target_state, result.reason,
+            )
+        elif result.reason and result.reason != "no change":
+            log.warning(
+                "mDNS advertiser unapplied: target=%s reason=%s",
+                result.target_state, result.reason,
+            )
 
     def _apply_chrony_gate(self, t_level_active: Optional[str]) -> None:
         """Update chrony's view of the Fusion SHM refclock based on the
@@ -396,6 +431,19 @@ class AuthorityManager:
             "last_transition_utc": state.last_transition_utc,
             "disagreement_flags": state.disagreement_flags,
         }
+
+        # Additive v1 extension: governor_radiod names which radiod's
+        # RTP timebase this Fusion offset is computed against (§4.5.1
+        # multi-radiod clarification). Omitted when no provider is
+        # configured so legacy output is byte-compatible.
+        if self.governor_radiod_provider is not None:
+            try:
+                governor = self.governor_radiod_provider()
+            except Exception as e:
+                log.debug("governor_radiod_provider raised: %s", e)
+                governor = None
+            if governor:
+                payload["governor_radiod"] = str(governor)
 
         # Additive v1 extension: include bootstrap block when the
         # coordinator has touched anything this tick. Omit entirely

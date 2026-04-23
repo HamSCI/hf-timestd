@@ -22,6 +22,7 @@ from hf_timestd.core.authority_manager import (
 from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator
 from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
 from hf_timestd.core.chrony_stepper import ChronyStepper
+from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
 from hf_timestd.core.chrony_tracking_probe import (
     ChronyTrackingProbe,
     match_any_server_not_in,
@@ -56,11 +57,19 @@ class AuthorityRunner:
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
         t = self._thread
-        if t is None:
-            return
-        t.join(timeout=timeout)
-        if t.is_alive():
-            log.warning("Authority manager thread did not exit in %.1fs", timeout)
+        if t is not None:
+            t.join(timeout=timeout)
+            if t.is_alive():
+                log.warning("Authority manager thread did not exit in %.1fs", timeout)
+        # Tear down any long-running subprocesses the manager owns (mDNS
+        # advertiser's avahi-publish-service child, primarily). Done after
+        # the thread joins so we don't race with a final tick.
+        adv = getattr(self.manager, "mdns_advertiser", None)
+        if adv is not None:
+            try:
+                adv.close()
+            except Exception as e:
+                log.warning("mDNS advertiser close failed: %s", e)
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
@@ -83,6 +92,7 @@ def build_authority_runner_from_config(
     fusion_status_path: Path = Path("/run/hf-timestd/fusion_status.json"),
     authority_output_path: Path = Path("/run/hf-timestd/authority.json"),
     a_level_provider: Optional[Callable[[], str]] = None,
+    governor_radiod_provider: Optional[Callable[[], Optional[str]]] = None,
 ) -> AuthorityRunner:
     """Build an AuthorityRunner from a timestd-config.toml dict.
 
@@ -118,6 +128,10 @@ def build_authority_runner_from_config(
         enabled = true
         refid = "HFSN"           # must match the chrony.conf refclock entry
         dry_run = false
+
+        [timing.authority.mdns]
+        enabled = true
+        dry_run = false          # if true, log TXT but don't fork avahi
     """
     auth_cfg = (config.get("timing", {}) or {}).get("authority", {}) or {}
     interval_sec = float(auth_cfg.get("interval_sec", 30.0))
@@ -125,6 +139,15 @@ def build_authority_runner_from_config(
     a_level_cfg = auth_cfg.get("a_level", "A1")
     if a_level_provider is None:
         a_level_provider = lambda: a_level_cfg  # noqa: E731
+
+    # Governor-radiod identifier for the multi-radiod case
+    # (METROLOGY.md §4.5.1). Default: read [ka9q].status_address so the
+    # name hf-timestd uses for its own input is what's exposed to
+    # cross-host consumers (wspr-recorder, LAN NTP peers).
+    if governor_radiod_provider is None:
+        governor_cfg = (config.get("ka9q", {}) or {}).get("status_address")
+        if governor_cfg:
+            governor_radiod_provider = lambda: str(governor_cfg)  # noqa: E731
 
     t3_cfg = auth_cfg.get("t3", {}) or {}
     t4_cfg = auth_cfg.get("t4", {}) or {}
@@ -179,6 +202,13 @@ def build_authority_runner_from_config(
             dry_run=bool(gate_cfg.get("dry_run", False)),
         )
 
+    mdns_advertiser = None
+    mdns_cfg = auth_cfg.get("mdns", {}) or {}
+    if mdns_cfg.get("enabled"):
+        mdns_advertiser = MdnsFusionAdvertiser(
+            dry_run=bool(mdns_cfg.get("dry_run", False)),
+        )
+
     manager = AuthorityManager(
         probes=probes,
         output_path=authority_output_path,
@@ -186,5 +216,7 @@ def build_authority_runner_from_config(
         upgrade_hysteresis=hysteresis,
         bootstrap_coordinator=bootstrap_coordinator,
         chrony_gate=chrony_gate,
+        governor_radiod_provider=governor_radiod_provider,
+        mdns_advertiser=mdns_advertiser,
     )
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)
