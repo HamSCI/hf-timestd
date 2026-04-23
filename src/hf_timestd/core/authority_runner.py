@@ -190,7 +190,7 @@ def build_authority_runner_from_config(
         bootstrap_coordinator = BootstrapCoordinator(
             coarse_source=CoarseTimeFileSource(path=coarse_path),
             stepper=ChronyStepper(dry_run=bool(boot_cfg.get("dry_run", False))),
-            threshold_sec=float(boot_cfg.get("threshold_sec", 5.0)),
+            threshold_sec=float(boot_cfg.get("threshold_sec", 90.0)),
             max_step_sec=float(boot_cfg.get("max_step_sec", 3600.0)),
         )
 

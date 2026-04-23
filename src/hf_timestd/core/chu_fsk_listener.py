@@ -229,6 +229,19 @@ class CHUFSKListener:
         self._results: Dict[str, object] = {}
         self._results_lock = threading.Lock()
 
+        # Coarse-time producer for the authority manager's bootstrap
+        # coordinator (METROLOGY.md §4.5 / 2c). Writing is best-effort;
+        # initialization failure is logged but does not break the
+        # listener.
+        self._coarse_time_writer = None
+        try:
+            from .coarse_time_writer import CoarseTimeWriter
+            self._coarse_time_writer = CoarseTimeWriter()
+            logger.info("CHUFSKListener: coarse-time writer enabled "
+                        "(/run/hf-timestd/coarse_time.json)")
+        except Exception as e:
+            logger.warning(f"CHUFSKListener: coarse-time writer disabled: {e}")
+
         logger.info(f"CHUFSKListener: {len(self.channels)} channels, "
                     f"preset={self.preset}, sr={self.sample_rate}")
 
@@ -516,6 +529,10 @@ class CHUFSKListener:
                                 f"day={result.decoded_day} "
                                 f"{result.decoded_hour}:{result.decoded_minute}"
                             )
+                            # Publish coarse UTC for the authority manager's
+                            # bootstrap coordinator. Best-effort — any
+                            # failure is logged and the decode loop continues.
+                            self._publish_coarse_time(ch, result)
 
                         # Store result keyed by IQ channel name
                         with self._results_lock:
@@ -537,6 +554,48 @@ class CHUFSKListener:
             except Exception as e:
                 logger.error(f"CHU FSK decode loop error: {e}", exc_info=True)
                 time.sleep(10)
+
+    def _publish_coarse_time(self, ch, result) -> None:
+        """Translate a successful CHU FSK decode into a coarse_time.json
+        record for the authority manager's bootstrap coordinator.
+
+        Precision is minute-level — Frame A of the FSK burst carries
+        (day_of_year, hour, minute) but our window does not tell us
+        which second inside the minute we are observing at write time.
+        `max_error_sec=60` reflects that; the bootstrap coordinator's
+        threshold must be > 60 s for the comparison to be meaningful,
+        which is why METROLOGY.md §4.5 bumped the default.
+
+        Year resolution comes from Frame B (result.year). If Frame B
+        was not decoded this minute, we fall back to the current
+        system-clock year — still independent of the second-level
+        clock error that bootstrap exists to correct.
+        """
+        if self._coarse_time_writer is None:
+            return
+        try:
+            day = result.decoded_day
+            hour = result.decoded_hour
+            minute = result.decoded_minute
+            year = result.year  # May be None when Frame B decode failed
+            if day is None or hour is None or minute is None:
+                return
+
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            if year is None:
+                year = _dt.now(_tz.utc).year
+            # Jan 1 of `year` + (day_of_year - 1) days + HH:MM
+            coarse_utc = _dt(year, 1, 1, 0, 0, 0, tzinfo=_tz.utc) \
+                + _td(days=int(day) - 1, hours=int(hour), minutes=int(minute))
+
+            self._coarse_time_writer.publish(
+                source="FSK",
+                station=ch.description.split("_")[0] if ch.description else "CHU",
+                coarse_utc=coarse_utc,
+                max_error_sec=60.0,
+            )
+        except Exception as e:
+            logger.warning(f"{ch.description}: coarse_time publish failed: {e}")
 
     def _write_result_hdf5(self, writer, iq_channel: str, result, minute_boundary: int):
         """Write FSK result to HDF5 for persistent history."""

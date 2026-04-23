@@ -61,9 +61,25 @@ class BootstrapCoordinator:
         self,
         coarse_source: CoarseTimeSource,
         stepper: ChronyStepper,
-        threshold_sec: float = 5.0,
+        threshold_sec: float = 90.0,
         max_step_sec: float = 3600.0,
     ):
+        """
+        Args:
+            coarse_source: Publisher-independent UTC source.
+            stepper: chronyc makestep wrapper.
+            threshold_sec: Minimum |system_clock - coarse_utc| that
+                triggers a step. Default 90 s reflects the minute-level
+                precision of the CHU FSK / WWV BCD producers (max_error
+                ~60 s in the producer contract) plus margin for the
+                few seconds of decode/publish latency. Finer-precision
+                coarse sources can safely lower this at deployment.
+            max_step_sec: Refuse to step if |delta| exceeds this.
+                Default 1 h keeps us from stepping through a config
+                or signal-source misconfiguration (e.g., wrong year
+                from a Frame-B decode) that would otherwise destroy
+                state on downstream consumers.
+        """
         self.coarse_source = coarse_source
         self.stepper = stepper
         self.threshold_sec = float(threshold_sec)
