@@ -31,6 +31,7 @@ from hf_timestd.core.chrony_tracking_probe import (
 )
 from hf_timestd.core.coarse_time_source import CoarseTimeFileSource
 from hf_timestd.core.fusion_status_probe import FusionStatusProbe
+from hf_timestd.core.gpsdo_probe import GpsdoProbe
 
 log = logging.getLogger(__name__)
 
@@ -137,6 +138,13 @@ def build_authority_runner_from_config(
         refid = "HFSN"           # must match the chrony.conf refclock entry
         dry_run = false
 
+        [timing.authority_manager.gpsdo]
+        enabled = true           # read gpsdo-monitor's /run/gpsdo/*.json
+        run_dir = "/run/gpsdo"   # optional — match the gpsdo-monitor daemon
+        # serial = "LBE1421-ABC123"   # optional — restrict to one device
+        # staleness_factor = 3.0      # optional — max age in units of the
+                                      #   device's probe_interval_sec (floored 30s)
+
         [timing.authority_manager.mdns]
         enabled = true
         dry_run = false          # if true, log TXT but don't fork avahi
@@ -166,7 +174,24 @@ def build_authority_runner_from_config(
     hysteresis = int(auth_cfg.get("upgrade_hysteresis", 3))
     a_level_cfg = auth_cfg.get("a_level", "A1")
     if a_level_provider is None:
-        a_level_provider = lambda: a_level_cfg  # noqa: E731
+        gpsdo_cfg = auth_cfg.get("gpsdo", {}) or {}
+        if gpsdo_cfg.get("enabled"):
+            # Hand A-level off to the gpsdo-monitor daemon running on
+            # this host. If the daemon isn't running or its files are
+            # stale, GpsdoProbe.poll() returns "A0" — the authority
+            # manager then treats this host as having no local GPSDO
+            # witness, which is the correct degradation.
+            probe = GpsdoProbe(
+                run_dir=Path(gpsdo_cfg.get("run_dir", "/run/gpsdo")),
+                serial=gpsdo_cfg.get("serial"),
+                staleness_factor=float(
+                    gpsdo_cfg.get("staleness_factor",
+                                  GpsdoProbe.DEFAULT_STALENESS_FACTOR)
+                ),
+            )
+            a_level_provider = probe.poll
+        else:
+            a_level_provider = lambda: a_level_cfg  # noqa: E731
 
     # Governor-radiod identifier for the multi-radiod case
     # (METROLOGY.md §4.5.1). Default: read [ka9q].status_address so the

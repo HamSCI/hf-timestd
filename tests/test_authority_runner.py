@@ -201,6 +201,64 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
         self.assertEqual(runner.interval_sec, 30.0)
         self.assertEqual(runner.manager.upgrade_hysteresis, 3)
 
+    def test_gpsdo_probe_wires_as_a_level_provider_when_enabled(self) -> None:
+        """[timing.authority_manager.gpsdo].enabled swaps the static
+        a_level string for GpsdoProbe.poll(). With an empty run_dir the
+        probe returns "A0" — proves the wiring goes through the probe
+        rather than echoing the `a_level` fallback."""
+        cfg = {
+            "timing": {
+                "authority_manager": {
+                    "a_level": "A1",   # would be used if probe were disabled
+                    "gpsdo": {
+                        "enabled": True,
+                        "run_dir": str(self.tmp / "gpsdo-empty"),
+                    },
+                }
+            }
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        self.assertEqual(runner.manager.a_level_provider(), "A0")
+
+    def test_gpsdo_probe_disabled_falls_back_to_static_a_level(self) -> None:
+        cfg = {
+            "timing": {
+                "authority_manager": {
+                    "a_level": "A1",
+                    "gpsdo": {"enabled": False},
+                }
+            }
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        self.assertEqual(runner.manager.a_level_provider(), "A1")
+
+    def test_explicit_a_level_provider_overrides_gpsdo_config(self) -> None:
+        """Callers that pass an a_level_provider directly (embedded use
+        case, e.g. a test harness) retain full control — the gpsdo
+        block is ignored when a provider is supplied."""
+        cfg = {
+            "timing": {
+                "authority_manager": {
+                    "gpsdo": {"enabled": True, "run_dir": "/run/gpsdo"},
+                }
+            }
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+            a_level_provider=lambda: "A1",
+        )
+        self.assertEqual(runner.manager.a_level_provider(), "A1")
+
 
 if __name__ == "__main__":
     unittest.main()
