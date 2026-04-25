@@ -36,10 +36,7 @@ Parameters:
         Supported: 1-9
         Default: 1-9
 
-Generates Figs 3–7 into docs/figures/. Figs 1–2 require separate treatment
-(diagram tool / raw IQ respectively).
-
-Target date: 2026-03-15 (complete 24h, zero VTEC gaps, March equinox conditions)
+Generates Figs 1–9 into docs/figures/.
 """
 
 import os
@@ -355,16 +352,14 @@ def _solar_zenith_angle(lat_deg, lon_deg, utc_hours, day_of_year):
 
 
 def generate_fig5():
-    print("Generating Fig 5: CHU 14.67 dTEC/dt + solar zenith angle + GNSS VTEC...")
+    print("Generating Fig 5: CHU 14.67 dTEC/dt + solar zenith angle...")
 
     date_label = f'{TARGET_DATE[:4]}-{TARGET_DATE[4:6]}-{TARGET_DATE[6:]}'
     dtec_fn = f'{PHASE2}/science/dtec_timeseries/AGGREGATED_dtec_timeseries_{TARGET_DATE}.h5'
-    vtec_fn = f'{DATA_ROOT}/data/gnss_vtec/GNSS_gnss_vtec_{TARGET_DATE}.h5'
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6.5), height_ratios=[2, 1],
-                                    sharex=True)
+    fig, ax1 = plt.subplots(1, 1, figsize=(10, 5.0))
 
-    # ── Top panel: CHU 14.67 MHz dTEC/dt only ──
+    # ── CHU 14.67 MHz dTEC/dt ──
     with h5py.File(dtec_fn, 'r') as f:
         n = min(f['epoch'].shape[0], f['station'].shape[0],
                 f['frequency_mhz'].shape[0], f['snr_db'].shape[0],
@@ -396,7 +391,7 @@ def generate_fig5():
 
     ax1.set_ylabel('dTEC/dt (mTECU/min)', fontsize=11)
     # Auto-scale symmetric around 0 so no values clip
-    dtec_max = np.percentile(np.abs(dtec_rate_mtecu_min[mask]), 99.5) if mask.sum() > 10 else 25
+    dtec_max = np.percentile(np.abs(dtec_rate_mtecu_min[mask]), 99.5) if mask.sum() >= 10 else 25
     dtec_lim = max(dtec_max * 1.15, 10)  # at least ±10, with 15% padding
     ax1.set_ylim(-dtec_lim, dtec_lim)
     ax1.axhline(0, color='#666', linewidth=0.5, alpha=0.5)
@@ -430,34 +425,13 @@ def generate_fig5():
 
     ax1.set_title(f'Carrier-Phase dTEC/dt: CHU 14.670 MHz ({date_label})',
                   fontsize=12, fontweight='bold')
+    ax1.set_xlabel(f'UTC Hour ({date_label})', fontsize=11)
+    ax1.set_xlim(0, 24)
+    ax1.set_xticks(range(0, 25, 3))
     # Combined legend
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax1r.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc='upper left')
-
-    # ── Bottom panel: GNSS overhead VTEC ──
-    with h5py.File(vtec_fn, 'r') as f:
-        vtec_ts = f['unix_timestamp'][:]
-        vtec = f['vtec_tecu'][:]
-        vtec_quality = np.array([q.decode() for q in f['quality_flag'][:]])
-
-    vtec_hrs = (vtec_ts - midnight) / 3600.0
-    vtec_usable = (vtec_quality == 'GOOD') | (vtec_quality == 'MARGINAL')
-
-    ax2.plot(vtec_hrs[vtec_usable], vtec[vtec_usable], color='#7B1FA2',
-             linewidth=0.8, alpha=0.7, label='GNSS VTEC (ZED-F9P)')
-    ax2.set_ylabel('VTEC (TECU)', fontsize=11, color='#7B1FA2')
-    ax2.set_xlabel(f'UTC Hour ({date_label})', fontsize=11)
-    ax2.legend(fontsize=8, loc='upper left')
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xlim(0, 24)
-    ax2.set_xticks(range(0, 25, 3))
-
-    # Shade night on VTEC panel too
-    for i in range(len(sza_hours) - 1):
-        if night[i]:
-            ax2.axvspan(sza_hours[i], sza_hours[i+1], color='#263238',
-                        alpha=0.06, zorder=0)
 
     fig.tight_layout()
     outpath = OUTPUT_DIR / 'fig5_dtec_24h.png'
@@ -703,8 +677,6 @@ def generate_fig1():
                                           facecolor=color, edgecolor='#333'))
         ax_block.text(7.0, 8.95 - i*0.5, label, fontsize=7, va='center')
 
-    fig.suptitle('Figure 1: System Overview — Hardware, Paths, and Software Pipeline',
-                 fontsize=11, fontweight='bold', y=0.98)
 
     outpath = OUTPUT_DIR / 'fig1_system_overview.png'
     fig.savefig(outpath, dpi=DPI, bbox_inches='tight')
@@ -731,34 +703,61 @@ def generate_fig2():
 
     print("Generating Fig 2: 10 MHz spectrogram from raw IQ...")
 
-    # Find a recent raw IQ file for SHARED_10000
+    # Find a raw IQ file for SHARED_10000 on TARGET_DATE; fall back to the
+    # most recent day if the target's raw buffer is missing.
     raw_dir = f'{DATA_ROOT}/raw_buffer/SHARED_10000'
-    candidates = []
-    for daydir in sorted(os.listdir(raw_dir), reverse=True):
-        daypath = os.path.join(raw_dir, daydir)
-        if not os.path.isdir(daypath):
-            continue
-        jsons = sorted([f for f in os.listdir(daypath) if f.endswith('.json')])
-        for jf in jsons[-10:]:  # check last 10 files of most recent day
-            jpath = os.path.join(daypath, jf)
-            bpath = jpath.replace('.json', '.bin.zst')
-            if os.path.exists(bpath):
-                candidates.append((jpath, bpath))
-        if candidates:
-            break
+
+    def _collect(daypath):
+        out = []
+        for jf in sorted(f for f in os.listdir(daypath) if f.endswith('.json')):
+            jp = os.path.join(daypath, jf)
+            bp = jp.replace('.json', '.bin.zst')
+            if os.path.exists(bp):
+                out.append((jp, bp))
+        return out
+
+    target_path = os.path.join(raw_dir, TARGET_DATE)
+    candidates = _collect(target_path) if os.path.isdir(target_path) else []
+    if not candidates:
+        for daydir in sorted(os.listdir(raw_dir), reverse=True):
+            daypath = os.path.join(raw_dir, daydir)
+            if not os.path.isdir(daypath):
+                continue
+            candidates = _collect(daypath)
+            if candidates:
+                print(f"  ⚠ No raw IQ for {TARGET_DATE}; using {daydir}")
+                break
 
     if not candidates:
         print("  ✗ No raw IQ data found for SHARED_10000")
         return
 
-    # Pick a file from the middle of the available set (avoid edge effects)
-    jpath, bpath = candidates[len(candidates)//2]
+    # Pick the strongest file in the middle 60% of the day (avoid silent
+    # segments — RX may have been off, or the chunk may straddle a gap).
+    dctx = zstandard.ZstdDecompressor()
+
+    def _mean_power(bp):
+        try:
+            with open(bp, 'rb') as fh:
+                raw = dctx.decompress(fh.read())
+            iq = np.frombuffer(raw, dtype=np.complex64)
+            if iq.size == 0:
+                return -np.inf
+            step = max(1, iq.size // 200_000)
+            return float(np.mean(np.abs(iq[::step]) ** 2))
+        except Exception:
+            return -np.inf
+
+    n = len(candidates)
+    lo = n // 5
+    hi = n - n // 5 if n > 5 else n
+    pool = candidates[lo:hi] if hi > lo else candidates
+    jpath, bpath = max(pool, key=lambda c: _mean_power(c[1]))
 
     with open(jpath) as f:
         meta = _json.load(f)
 
     sr = meta['sample_rate']
-    dctx = zstandard.ZstdDecompressor()
     with open(bpath, 'rb') as f:
         raw = dctx.decompress(f.read())
     iq = np.frombuffer(raw, dtype=np.complex64)
@@ -781,7 +780,6 @@ def generate_fig2():
     ax_spec = fig.add_subplot(gs[0, 0])
     ax_cb   = fig.add_subplot(gs[0, 1])   # colorbar axis
     ax_env  = fig.add_subplot(gs[1, 0], sharex=ax_spec)
-    gs[1, 1].set_visible = False           # empty cell
 
     # ── Top: spectrogram ──
     nfft = 512
