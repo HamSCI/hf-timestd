@@ -1,0 +1,36 @@
+[Unit]
+Description=HF-TimeStd PHaRLAP/IRI-2020 Indices Update
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+OnFailure=timestd-alert@%n.service
+
+[Service]
+Type=oneshot
+
+# Must run as root: /opt/pharlap_4.7.4/dat/iri2020 is root-owned
+User=root
+Group=root
+
+ExecStart=/opt/hf-timestd/scripts/update-iri-indices.sh
+
+Restart=on-failure
+RestartSec=600
+
+TimeoutStartSec=180
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-iri-update
+
+# Hardening: only need write access to PHaRLAP IRI data dir
+ProtectSystem=strict
+ReadWritePaths=/opt/pharlap_4.7.4/dat/iri2020
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

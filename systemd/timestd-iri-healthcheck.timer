@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly IRI Indices Health Check Timer
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Timer]
+# Weekly on Monday at 06:00 UTC — 90 minutes after the update timer
+# (Mon 04:30 + up to 30 min jitter + ~1 hour fetch buffer).
+OnCalendar=Mon *-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

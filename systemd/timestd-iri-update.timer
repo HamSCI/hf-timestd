@@ -1,0 +1,16 @@
+[Unit]
+Description=Weekly PHaRLAP/IRI-2020 Indices Update Timer
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Timer]
+# Weekly on Monday at 04:30 UTC. Upstream files (chain-new.chain-project.net,
+# eCHAIM mirror) update daily, but apf107.dat and ig_rz.dat only need to lead
+# the requested ray-trace date — weekly is plenty.
+OnCalendar=Mon *-*-* 04:30:00
+# Run on boot if missed
+Persistent=true
+# Randomize start by up to 30 minutes to avoid mirror load spikes
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target
