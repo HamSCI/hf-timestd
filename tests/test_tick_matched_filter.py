@@ -307,21 +307,21 @@ class TestOverlappingWindows(unittest.TestCase):
     
     def test_window_coverage(self):
         """Verify windows cover expected seconds"""
+        np.random.seed(42)
         f = create_tick_filter('WWV', window_seconds=5, overlap_seconds=1)
-        
+
         iq = np.random.randn(60 * 20000) + 1j * np.random.randn(60 * 20000)
         result = f.process_minute(iq, minute_number=0, min_snr_db=-100)
-        
-        # First window is the minute marker (second 0)
-        # Second window is the first overlapping tick window (seconds 1-5)
-        if result.window_results:
-            first = result.window_results[0]
-            self.assertEqual(first.window_start_second, 0)
-            self.assertEqual(first.window_end_second, 1)
-            if len(result.window_results) > 1:
-                second = result.window_results[1]
-                self.assertEqual(second.window_start_second, 1)
-                self.assertEqual(second.window_end_second, 6)
+
+        # First window is the minute marker (second 0); subsequent are overlapping
+        # 5-second tick windows starting at seconds 1, 2, 3, ...
+        self.assertTrue(result.window_results, "expected windows to be produced")
+        first = result.window_results[0]
+        self.assertEqual(first.window_start_second, 0)
+        self.assertEqual(first.window_end_second, 1)
+        second = result.window_results[1]
+        self.assertEqual(second.window_start_second, 1)
+        self.assertEqual(second.window_end_second, 6)
 
 
 class TestPhaseContinuity(unittest.TestCase):

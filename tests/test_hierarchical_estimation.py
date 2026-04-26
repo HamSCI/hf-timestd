@@ -195,21 +195,20 @@ class TestTECEstimator:
         # With good 1/f² fit, confidence should be high
         assert result.confidence > 0.5
     
-    def test_negative_slope_handled(self):
-        """Test negative slope (physically impossible) is handled."""
+    def test_negative_slope_rejected(self):
+        """Negative slope (higher freq arriving later) is unphysical and must be rejected."""
         estimator = TECEstimator()
-        
+
         # Inverted relationship (higher freq arrives later - impossible)
         measurements = [
             {'frequency_hz': 5e6, 'toa_ms': 33.0, 'uncertainty_ms': 0.5},
             {'frequency_hz': 10e6, 'toa_ms': 35.0, 'uncertainty_ms': 0.5},
         ]
-        
+
         result = estimator.estimate_tec(measurements, 'WWV', 0.0)
-        
-        # Should handle gracefully (force TEC to 0 or return low confidence)
-        assert result is not None
-        assert result.confidence == 0.0 or result.tec_u == 0.0
+
+        # Estimator rejects unphysical data outright (mode mixing / noise)
+        assert result is None
     
     def test_group_delay_calculation(self):
         """Test per-frequency group delay is calculated."""

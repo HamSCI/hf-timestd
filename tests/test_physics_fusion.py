@@ -146,16 +146,26 @@ class TestPhysicsFusionService(unittest.TestCase):
     def test_prune_retry_counters_bounds_state(self):
         """Retry tracking must remain bounded over long runtimes."""
         now = int(time.time())
-        # Add stale entries older than 12h and recent entries that should remain
+        # Add stale entries older than 12h (must be pruned) and recent entries
+        # filling beyond _max_retry_history (must be capped).
         for i in range(10):
-            self.service._minute_retry_counts[now - (13 * 3600) - i] = 1
+            self.service._minute_first_attempt[now - (13 * 3600) - i] = float(now)
+            self.service._minute_last_attempt[now - (13 * 3600) - i] = float(now)
         for i in range(self.service._max_retry_history + 20):
-            self.service._minute_retry_counts[now - i] = 1
+            self.service._minute_first_attempt[now - i] = float(now)
+            self.service._minute_last_attempt[now - i] = float(now)
 
         self.service._prune_retry_counters(now)
 
-        self.assertLessEqual(len(self.service._minute_retry_counts), self.service._max_retry_history)
-        oldest_kept = min(self.service._minute_retry_counts)
+        # Both retry maps remain in sync and bounded
+        self.assertLessEqual(len(self.service._minute_first_attempt), self.service._max_retry_history)
+        self.assertEqual(
+            set(self.service._minute_first_attempt),
+            set(self.service._minute_last_attempt),
+            "first/last attempt maps must track the same minutes"
+        )
+        # No entries older than 12h
+        oldest_kept = min(self.service._minute_first_attempt)
         self.assertGreaterEqual(oldest_kept, now - (12 * 3600))
 
 if __name__ == '__main__':

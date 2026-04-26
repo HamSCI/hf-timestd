@@ -89,6 +89,11 @@
             "description": "Processing version"
         }
     ],
+    "quality_flags": {
+        "GOOD": "is_anchored=True (ANCHORED_GNSS or ANCHORED_GROUP_DELAY) and snr_db >= 10",
+        "MARGINAL": "is_anchored=False (NO_ANCHOR or ANCHOR_LOW_CONF) — dtec_tecu is relative-only; dtec_rate_tecu_per_s still valid",
+        "BAD": "snr_db < 5 — carrier-phase noise dominates dtec_rate"
+    },
     "quality_notes": {
         "dtec_rate_tecu_per_s": "Valid regardless of anchor status. Primary science observable.",
         "dtec_tecu": "Absolute only when is_anchored=True. When unanchored, value is relative to minute start and drifts freely across minutes."

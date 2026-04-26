@@ -42,6 +42,12 @@ def generate_fsk_audio(
     Phase is accumulated continuously to avoid discontinuities at bit
     boundaries — critical for the delay-line discriminator.
 
+    The data start is placed at ~220ms (well past the 200ms cutoff used by the
+    Frame B start-bit search, which skips the tick + mark-sync region to avoid
+    false UART framing matches). With 10 bytes × 11 bits × 3.33ms ≈ 367ms of
+    data, the FSK ends near 587ms — still inside the per-second processing
+    slice. Frame A's search starts at 30ms, so it remains unaffected.
+
     Args:
         byte_sequence: List of 10 byte values to encode
         sample_rate: Audio sample rate
@@ -61,7 +67,7 @@ def generate_fsk_audio(
     audio[:tick_end] = 0.5 * np.sin(2 * np.pi * 1000 * t_tick)
 
     # Build a frequency profile for the FSK portion (mark sync + data)
-    data_start_ms = 133.0 + timing_offset_ms
+    data_start_ms = 220.0 + timing_offset_ms
     mark_start = tick_end
     mark_end = int(data_start_ms * sample_rate / 1000)
 

@@ -298,7 +298,7 @@ class BootstrapValidator:
         self.stats['candidates_proposed'] += 1
         
         logger.info(
-            f"[BOOTSTRAP] New offset candidate from {channel_key}: "
+            f"[BOOTSTRAP] New offset candidate from {channel_key_mhz}: "
             f"correction={offset_correction_sec*1000:+.1f}ms, "
             f"confidence={timing.confidence:.2f}, SNR={timing.snr_db:.1f}dB"
         )
