@@ -392,9 +392,31 @@ class CoreRecorderV2:
                     except Exception as e:
                         logger.warning(f"Failed to register SSRC for {key}: {e}")
         
-        # Start T6 BPSK PPS stream (bare RadiodStream, no archive)
+        # Start T6 BPSK PPS stream (bare RadiodStream, no archive).  In
+        # shared mode this just adds the channel to self._multi; the
+        # actual receive loop kicks off below in self._multi.start().
         if self._t6_calibrator is not None:
             self._start_t6_stream()
+
+        # Begin receiving on the shared MultiStream now that every
+        # channel (archive + T6) is queued via add_channel — ka9q-python
+        # requires all add_channel calls to precede start() for one
+        # consistent multicast-group bind.
+        if self._use_shared_multistream and self._multi is not None:
+            try:
+                self._multi.start()
+                channel_count = len(self.recorders) + (
+                    1 if self._t6_calibrator is not None else 0
+                )
+                logger.info(
+                    f"Shared MultiStream started: 1 UDP socket serving "
+                    f"{channel_count} SSRC-demuxed channels"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to start shared MultiStream: {e}", exc_info=True,
+                )
+                return
 
         logger.info("Core recorder running. Press Ctrl+C to stop.")
         
@@ -1063,7 +1085,18 @@ class CoreRecorderV2:
     def _shutdown(self):
         """Graceful shutdown."""
         logger.info("Shutting down core recorder...")
-        
+
+        # Stop the shared MultiStream FIRST so its receive loop and
+        # health-monitor thread aren't dispatching callbacks into
+        # recorders that are mid-teardown below.  (Legacy mode stops
+        # per-channel RadiodStreams inside recorder.stop().)
+        if self._multi is not None:
+            try:
+                self._multi.stop()
+                logger.info("Shared MultiStream stopped")
+            except Exception as e:
+                logger.error(f"Error stopping shared MultiStream: {e}", exc_info=True)
+
         # Stop all recorders
         for key, recorder in self.recorders.items():
             try:

@@ -111,5 +111,56 @@ class TestT6SharedMode(unittest.TestCase):
         self.assertIs(cr._t6_stream, stream_instance)
 
 
+class TestSharedMultiShutdown(unittest.TestCase):
+    """Step 4 of the plan: _shutdown() must stop the shared MultiStream
+    BEFORE iterating recorders, so per-SSRC callbacks aren't dispatched
+    into recorders mid-teardown."""
+
+    def _make_cr_for_shutdown(self, *, with_multi: bool):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr.control = MagicMock()
+        cr._multi = MagicMock() if with_multi else None
+        cr.recorders = {}  # empty — keeps the recorder loop a no-op
+        cr._t6_stream = None
+        cr.start_time = 0.0
+        cr.output_dir = Path('/tmp/timestd-shared-test')
+        cr.output_dir.mkdir(parents=True, exist_ok=True)
+        cr.metrics = MagicMock()
+        # _write_status reads several attrs we don't care about; stub it.
+        cr._write_status = MagicMock()
+        return cr
+
+    def test_shutdown_stops_multi_when_present(self):
+        cr = self._make_cr_for_shutdown(with_multi=True)
+        cr._shutdown()
+        cr._multi.stop.assert_called_once()
+
+    def test_shutdown_with_no_multi_does_not_crash(self):
+        # Legacy mode: cr._multi stays None.  _shutdown must not call
+        # methods on it.
+        cr = self._make_cr_for_shutdown(with_multi=False)
+        cr._shutdown()  # must complete without raising
+
+    def test_shutdown_stops_multi_before_recorders(self):
+        # Order is load-bearing: callbacks must stop firing before
+        # recorders go down, otherwise a sample arriving mid-teardown
+        # could touch a half-closed archive_writer.
+        cr = self._make_cr_for_shutdown(with_multi=True)
+        recorder = MagicMock()
+        recorder.config.ssrc = 0xC0FFEE
+        recorder.config.description = 'TEST'
+        recorder.stop.return_value = None
+        cr.recorders = {'TEST': recorder}
+
+        sequence: list = []
+        cr._multi.stop.side_effect = lambda: sequence.append('multi.stop')
+        recorder.stop.side_effect = lambda: sequence.append('recorder.stop')
+
+        cr._shutdown()
+
+        self.assertEqual(sequence[0], 'multi.stop')
+        self.assertEqual(sequence[1], 'recorder.stop')
+
+
 if __name__ == '__main__':
     unittest.main()
