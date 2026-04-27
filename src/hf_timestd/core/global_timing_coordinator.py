@@ -183,7 +183,7 @@ class GlobalTimingCoordinator:
             json.dump(data, f, indent=2)
         temp_file.rename(detection_file)
         
-        logger.debug(f"Wrote detection: {channel} {station} {frequency_mhz}MHz → {timing_ms:.2f}ms")
+        logger.debug(f"Wrote detection: {channel} {station} {frequency_mhz}MHz → {timing_error_ms:.2f}ms")
     
     def solve_minute(self, minute_utc: datetime) -> Optional[GlobalTimingResult]:
         """
