@@ -89,7 +89,11 @@ do_restart() {
 RESTARTS=0
 
 # ── Thresholds (seconds) ──
-RECORDER_STALE=300      # 5 min: recorder should write every ~20s
+# Recorder flushes a chunk every file_duration_sec (default 600 = 10 min).
+# Threshold must exceed one chunk duration plus normal flush jitter, otherwise
+# a healthy recorder mid-chunk trips the watchdog and gets killed — which
+# leaves the in-progress chunk overwritten with zeros on the next start.
+RECORDER_STALE=900      # 15 min: > one 10-min chunk duration + flush jitter
 # Phase 2: metrology reads from the ring buffer and produces HDF5 data
 # every 60 s.  Lowered from 600 s (set when chunks were 10 min) to 180 s
 # so genuine stalls trip the watchdog within ~3 minutes.
@@ -112,22 +116,16 @@ check_recorder() {
         return
     fi
 
-    # Check hot buffer (tiered) then cold buffer
+    # Recorder writes *.bin / *.bin.zst / *.bin.lz4 plus a *.json sidecar
+    # at chunk flush.  The previous "*.raw" glob never matched anything.
     local age=999999
     for buf_dir in /dev/shm/timestd/raw_buffer "$DATA_ROOT/raw_buffer"; do
         if [[ -d "$buf_dir" ]]; then
-            local a
-            a=$(newest_file_age "$buf_dir" "*.raw")
-            [[ $a -lt $age ]] && age=$a
-        fi
-    done
-
-    # Also check .json sidecars
-    for buf_dir in /dev/shm/timestd/raw_buffer "$DATA_ROOT/raw_buffer"; do
-        if [[ -d "$buf_dir" ]]; then
-            local a
-            a=$(newest_file_age "$buf_dir" "*.json")
-            [[ $a -lt $age ]] && age=$a
+            for pattern in "*.bin" "*.bin.zst" "*.bin.lz4" "*.json"; do
+                local a
+                a=$(newest_file_age "$buf_dir" "$pattern")
+                [[ $a -lt $age ]] && age=$a
+            done
         fi
     done
 
