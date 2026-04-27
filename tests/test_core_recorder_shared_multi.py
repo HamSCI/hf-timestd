@@ -178,6 +178,24 @@ class TestSharedMultiStreamInit(unittest.TestCase):
                 ok = cr._initialize_channels()
         self.assertTrue(ok)
 
+    def test_shared_multi_uses_correct_packet_size(self):
+        # Hf-timestd's 24 kHz IQ channels carry 200 samples per RTP packet.
+        # If the shared MultiStream uses ka9q-python's default of 320, the
+        # resequencer's gap-detection skews by ~1.6× and reports phantom
+        # losses.  Pin samples_per_packet=200 / resequence_buffer_size=128.
+        cr = _make_core_recorder(use_shared=True, n_channels=1)
+        sr_log: list = []
+        with patch(
+            'hf_timestd.core.core_recorder_v2.StreamRecorderV2',
+            side_effect=_fake_streamrecorder_factory(sr_log),
+        ):
+            with patch('ka9q.MultiStream', create=True) as MockMulti:
+                cr._initialize_channels()
+
+        kwargs = MockMulti.call_args.kwargs
+        self.assertEqual(kwargs['samples_per_packet'], 200)
+        self.assertEqual(kwargs['resequence_buffer_size'], 128)
+
     def test_legacy_mode_skips_shared_wiring(self):
         # When the flag is off, _initialize_channels must NOT create a
         # MultiStream or call register_with — the existing run()-driven

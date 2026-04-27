@@ -637,7 +637,16 @@ class CoreRecorderV2:
             # API contract.
             if self._use_shared_multistream:
                 from ka9q import MultiStream
-                self._multi = MultiStream(control=self.control)
+                # samples_per_packet=200 / resequence_buffer_size=128 match
+                # the legacy per-channel RadiodStream construction in
+                # stream_recorder_v2._create_channel and _start_t6_stream.
+                # Mismatch here would skew the resequencer's gap-detection
+                # heuristics on hf-timestd's 24 kHz IQ channels.
+                self._multi = MultiStream(
+                    control=self.control,
+                    samples_per_packet=200,
+                    resequence_buffer_size=128,
+                )
                 for description, recorder in self.recorders.items():
                     try:
                         recorder.register_with(self._multi)
@@ -679,16 +688,63 @@ class CoreRecorderV2:
             return False
 
     def _start_t6_stream(self):
-        """Create a bare RadiodStream for the BPSK PPS channel (no archive)."""
+        """Provision the BPSK PPS channel (no archive).
+
+        In shared-MultiStream mode the channel registers on
+        ``self._multi`` alongside the archive channels — one socket for
+        the whole service.  In legacy mode it owns its own
+        ``RadiodStream`` (and its own UDP socket) as it always has.
+        """
         from ka9q import RadiodStream, Encoding
         from ka9q.types import StatusType
 
-        l6 = self._t6_config
-        freq_hz = int(l6['frequency_hz'])
-        sr = int(l6.get('sample_rate',
+        t6 = self._t6_config
+        freq_hz = int(t6['frequency_hz'])
+        sr = int(t6.get('sample_rate',
                         self.channel_defaults.get('sample_rate', 24000)))
-        desc = l6.get('description', 'BPSK_PPS')
+        desc = t6.get('description', 'BPSK_PPS')
 
+        if self._use_shared_multistream:
+            if self._multi is None:
+                logger.error(
+                    "T6 BPSK PPS shared-mode requested but self._multi is None — "
+                    "shared-mode init must run before _start_t6_stream"
+                )
+                return
+            try:
+                # Add the T6 channel to the shared MultiStream.  add_channel
+                # internally calls ensure_channel; the returned ChannelInfo
+                # comes from the same protocol roundtrip the legacy path uses,
+                # so data_destination capture below is identical.
+                channel_info = self._multi.add_channel(
+                    frequency_hz=float(freq_hz),
+                    preset='iq',
+                    sample_rate=sr,
+                    encoding=Encoding.F32,
+                    agc_enable=False,
+                    gain=0.0,
+                    on_samples=self._t6_on_samples,
+                )
+                if self.data_destination is None and channel_info is not None:
+                    self.data_destination = getattr(
+                        channel_info, 'multicast_address', None
+                    )
+                    logger.info(
+                        f"ka9q-python assigned data_destination "
+                        f"{self.data_destination} for T6 channel"
+                    )
+                logger.info(
+                    f"T6 BPSK PPS registered on shared MultiStream: "
+                    f"{desc} at {freq_hz/1e6:.6f} MHz"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to register T6 BPSK PPS on shared MultiStream: {e}",
+                    exc_info=True,
+                )
+            return
+
+        # Legacy: dedicated RadiodStream + per-channel UDP socket.
         try:
             channel_info = self.control.ensure_channel(
                 frequency_hz=freq_hz,
@@ -718,6 +774,18 @@ class CoreRecorderV2:
 
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
+        # One-shot smoke log on the first batch so the journal records
+        # whether quality.last_rtp_timestamp is flowing in shared mode.
+        # Same hook helps confirm legacy-mode startup health.
+        if not getattr(self, '_t6_first_sample_logged', False):
+            mode = 'shared MultiStream' if self._use_shared_multistream else 'dedicated RadiodStream'
+            logger.info(
+                f"T6 BPSK PPS first samples: {mode}, "
+                f"len={len(samples)}, "
+                f"last_rtp_timestamp={getattr(quality, 'last_rtp_timestamp', None)}"
+            )
+            self._t6_first_sample_logged = True
+
         result = self._t6_calibrator.process_samples(
             samples, quality.last_rtp_timestamp
         )
