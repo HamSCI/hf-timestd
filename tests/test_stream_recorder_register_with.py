@@ -204,6 +204,34 @@ class TestSharedModeLifecycle(unittest.TestCase):
         # State machine settles back to IDLE.
         self.assertEqual(self.sr.state, StreamRecorderState.IDLE)
 
+    def test_register_with_forwards_drop_restore_callbacks(self):
+        # Step 6: shared-mode delegates drop detection to MultiStream's
+        # _handle_drop / _attempt_restore.  Operator-supplied callbacks
+        # must reach the parent MultiStream's per-slot wiring, not get
+        # stranded on the StreamRecorderV2 instance.
+        on_dropped = MagicMock()
+        on_restored = MagicMock()
+        sr = StreamRecorderV2(
+            config=_make_config(),
+            control=self.control,
+            on_stream_dropped=on_dropped,
+            on_stream_restored=on_restored,
+        )
+        sr._set_filter_edges = MagicMock()
+        multi = MagicMock()
+        sr.register_with(multi)
+
+        kwargs = multi.add_channel.call_args.kwargs
+        self.assertIs(kwargs['on_stream_dropped'], on_dropped)
+        self.assertIs(kwargs['on_stream_restored'], on_restored)
+
+    def test_register_with_does_not_spawn_health_monitor_thread(self):
+        # In shared mode MultiStream's monitor handles drop/restore
+        # globally; spawning the per-channel one would be redundant
+        # work duplicating ensure_channel calls on every silence event.
+        self.sr.register_with(MagicMock())
+        self.assertIsNone(self.sr._health_monitor_thread)
+
     def test_stop_in_legacy_mode_still_stops_stream(self):
         # _parent_multi stays None in legacy mode; stop() must take the
         # original RadiodStream-stopping path.

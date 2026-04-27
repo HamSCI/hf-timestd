@@ -491,7 +491,16 @@ class StreamRecorderV2:
         )
 
         # Register on the shared MultiStream — its on_samples is wired here,
-        # the parent owns the socket and the receive thread.
+        # the parent owns the socket and the receive thread.  We forward the
+        # operator-supplied on_stream_dropped/on_stream_restored callbacks
+        # through to MultiStream's per-slot drop detector
+        # (ka9q.MultiStream._handle_drop/_attempt_restore), which replaces
+        # this recorder's own _health_monitor_loop in shared mode.  The
+        # legacy per-channel health monitor's job (silence detection +
+        # ensure_channel recovery on radiod restart) is now done centrally
+        # by MultiStream against the shared socket — so register_with does
+        # NOT spawn _health_monitor_thread and stop() tolerates it being
+        # None.
         multi.add_channel(
             frequency_hz=float(self.config.frequency_hz),
             preset=self.config.preset,
@@ -500,6 +509,8 @@ class StreamRecorderV2:
             agc_enable=self.config.agc_enable,
             gain=self.config.gain,
             on_samples=self._handle_samples,
+            on_stream_dropped=self._on_stream_dropped,
+            on_stream_restored=self._on_stream_restored,
         )
         self._parent_multi = multi
         self._last_sample_time = time.time()
