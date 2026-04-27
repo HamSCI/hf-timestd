@@ -503,6 +503,14 @@ class StreamRecorderV2:
         )
         self._parent_multi = multi
         self._last_sample_time = time.time()
+        # Transition to RECORDING so _handle_samples accepts the first
+        # batch the parent MultiStream will deliver — start() does this
+        # for the legacy path; register_with is the analogue for shared
+        # mode.  session_start_time is also set here so disk-budget /
+        # uptime accounting is sane.
+        self.session_start_time = time.time()
+        with self._lock:
+            self.state = StreamRecorderState.RECORDING
         logger.info(
             f"{self.config.description}: Registered on shared MultiStream"
         )
@@ -717,13 +725,21 @@ class StreamRecorderV2:
                 self._timing_poll_thread.join(timeout=2.0)
                 self._timing_poll_thread = None
             
-            # Stop RadiodStream (returns final quality/stats)
-            if self.stream:
+            # In shared-MultiStream mode the parent CoreRecorderV2 owns
+            # the socket and stops the MultiStream itself; this recorder
+            # never opened a per-channel RadiodStream.  Use the most
+            # recent StreamQuality observed via _handle_samples as the
+            # final stats — it's continually updated and persists after
+            # callbacks stop firing.
+            if self._parent_multi is not None:
+                final_quality = self.last_quality
+            elif self.stream:
+                # Legacy: stop the per-channel RadiodStream.
                 if hasattr(self.stream, 'get_quality'):
                     final_quality = self.stream.get_quality()
                 else:
                     final_quality = self.stream.stop()
-                
+
                 if hasattr(self.stream, 'stop') and final_quality is not None:
                     # If it's RadiodStream, stop() already returned final_quality
                     # Defensive: stop() after get_quality() in case of unexpected type
@@ -736,7 +752,7 @@ class StreamRecorderV2:
                 else:
                     # Ensure it's stopped
                     self.stream.stop()
-                
+
                 self.stream = None
             
             # Close the archive writer (flushes pending data)

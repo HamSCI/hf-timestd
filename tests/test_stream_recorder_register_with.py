@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
 from hf_timestd.core.stream_recorder_v2 import (
     StreamRecorderConfig,
+    StreamRecorderState,
     StreamRecorderV2,
 )
 
@@ -154,6 +155,74 @@ class TestRegisterWith(unittest.TestCase):
         self.sr.register_with(self.multi)
         self.sr.archive_writer.add_timing_snapshot.assert_not_called()
         self.sr.ring_buffer.update_anchor.assert_not_called()
+
+
+class TestSharedModeLifecycle(unittest.TestCase):
+    """register_with() transitions to RECORDING (so _handle_samples
+    accepts samples) and stop() takes the shared-mode path — no
+    self.stream teardown, last_quality returned as final."""
+
+    def setUp(self):
+        self.control = MagicMock()
+        self.channel_info = _make_channel_info()
+        self.control.ensure_channel.return_value = self.channel_info
+        self.control.get_capabilities.return_value = {}
+
+        self.sr = StreamRecorderV2(
+            config=_make_config(),
+            control=self.control,
+        )
+        self.sr._set_filter_edges = MagicMock()
+
+    def test_register_with_transitions_to_recording(self):
+        self.assertEqual(self.sr.state, StreamRecorderState.IDLE)
+        self.sr.register_with(MagicMock())
+        # Without RECORDING, _handle_samples early-returns and every
+        # delivered batch is silently dropped — exactly the failure
+        # mode shared mode would otherwise hit.
+        self.assertEqual(self.sr.state, StreamRecorderState.RECORDING)
+
+    def test_register_with_sets_session_start_time(self):
+        self.assertIsNone(self.sr.session_start_time)
+        self.sr.register_with(MagicMock())
+        self.assertIsNotNone(self.sr.session_start_time)
+
+    def test_stop_in_shared_mode_returns_last_quality_without_touching_stream(self):
+        from hf_timestd.core.stream_recorder_v2 import StreamQuality
+        self.sr.register_with(MagicMock())
+        # Simulate a couple of batches having been delivered.
+        sentinel_quality = MagicMock(spec=StreamQuality)
+        sentinel_quality.completeness_pct = 99.5  # for stop()'s log line
+        self.sr.last_quality = sentinel_quality
+        # Our stream attribute is None in shared mode; ensure stop()
+        # never tries to call .stop() on it.
+        self.sr.stream = None
+
+        result = self.sr.stop()
+
+        self.assertIs(result, sentinel_quality)
+        # State machine settles back to IDLE.
+        self.assertEqual(self.sr.state, StreamRecorderState.IDLE)
+
+    def test_stop_in_legacy_mode_still_stops_stream(self):
+        # _parent_multi stays None in legacy mode; stop() must take the
+        # original RadiodStream-stopping path.
+        from hf_timestd.core.stream_recorder_v2 import StreamQuality
+        self.sr._parent_multi = None
+        fake_stream = MagicMock()
+        fake_quality = MagicMock(spec=StreamQuality)
+        fake_quality.completeness_pct = 99.5  # for stop()'s log line
+        fake_stream.get_quality.return_value = fake_quality
+        self.sr.stream = fake_stream
+        # Force into RECORDING so stop()'s state guard lets us through.
+        with self.sr._lock:
+            self.sr.state = StreamRecorderState.RECORDING
+
+        result = self.sr.stop()
+
+        fake_stream.get_quality.assert_called_once()
+        self.assertIs(result, fake_quality)
+        self.assertIsNone(self.sr.stream)
 
 
 class TestPhaseEngineKwargsForwarded(unittest.TestCase):
