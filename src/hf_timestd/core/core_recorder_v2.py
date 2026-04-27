@@ -222,6 +222,20 @@ class CoreRecorderV2:
         # NTP status cache
         self.ntp_status = {'offset_ms': None, 'synced': False, 'last_update': 0}
 
+        # Shared-MultiStream rollout flag (plan: tasks/todo.md).  When
+        # true, _initialize_channels() registers every archive channel
+        # on a single MultiStream that owns one UDP socket for the
+        # whole service, instead of every StreamRecorderV2 owning its
+        # own RadiodStream + socket.  Default false during the
+        # step-by-step rollout; the flag flips once steps 1-6 land
+        # and step-7 verification on bee1 confirms the timing chain
+        # is preserved.  Operator can keep it false to roll back.
+        self._use_shared_multistream = bool(
+            self.recorder_config.get('shared_multistream', False)
+        )
+        # Populated in _initialize_channels when shared mode is on.
+        self._multi = None
+
         # T6 BPSK PPS chain-delay calibrator
         # Uses a bare RadiodStream (no archive writer) — the BPSK channel
         # exists only to feed the calibrator, not for storage.
@@ -355,21 +369,28 @@ class CoreRecorderV2:
         else:
             logger.info("Tiered storage: disabled (files written directly to disk)")
         
-        # Start all recorders
-        for key, recorder in self.recorders.items():
-            recorder.start()
-            logger.info(f"Started recorder for {recorder.config.frequency_hz/1e6:.3f} MHz ({recorder.config.description})")
+        # Start all recorders.  In shared-MultiStream mode, channels
+        # were already provisioned in _initialize_channels() via
+        # register_with() — skip the per-channel start path.  Calibrator
+        # SSRC registration also moved into _initialize_channels for
+        # shared mode (it needs ssrc to be populated, which register_with
+        # does).  The legacy path is preserved verbatim below for
+        # rollback safety.
+        if not self._use_shared_multistream:
+            for key, recorder in self.recorders.items():
+                recorder.start()
+                logger.info(f"Started recorder for {recorder.config.frequency_hz/1e6:.3f} MHz ({recorder.config.description})")
 
-            # Register SSRC now that recorder is started and SSRC is resolved
-            if self.calibrator:
-                try:
-                    if recorder.config.ssrc:
-                        self.calibrator.register_channel_ssrc(recorder.config.description, recorder.config.ssrc)
-                        logger.info(f"Registered SSRC {recorder.config.ssrc:x} for {recorder.config.description}")
-                    else:
-                        logger.warning(f"Recorder {recorder.config.description} started but has no SSRC")
-                except Exception as e:
-                    logger.warning(f"Failed to register SSRC for {key}: {e}")
+                # Register SSRC now that recorder is started and SSRC is resolved
+                if self.calibrator:
+                    try:
+                        if recorder.config.ssrc:
+                            self.calibrator.register_channel_ssrc(recorder.config.description, recorder.config.ssrc)
+                            logger.info(f"Registered SSRC {recorder.config.ssrc:x} for {recorder.config.description}")
+                        else:
+                            logger.warning(f"Recorder {recorder.config.description} started but has no SSRC")
+                    except Exception as e:
+                        logger.warning(f"Failed to register SSRC for {key}: {e}")
         
         # Start T6 BPSK PPS stream (bare RadiodStream, no archive)
         if self._t6_calibrator is not None:
@@ -604,6 +625,54 @@ class CoreRecorderV2:
                 self.recorders[description] = recorder
 
             logger.info(f"✓ Initialized {len(self.recorders)} archive recorders")
+
+            # Shared-MultiStream wiring (recorder.shared_multistream = true):
+            # build one MultiStream that all archive channels register on
+            # via register_with(), so the kernel only clones each radiod
+            # multicast packet ONCE for this service instead of N times.
+            # multi.start() is intentionally deferred — the T6 BPSK PPS
+            # channel will also be added (by _start_t6_stream() in shared
+            # mode) and the parent run() flow starts the multi after both
+            # additions complete, per ka9q-python's add-before-start
+            # API contract.
+            if self._use_shared_multistream:
+                from ka9q import MultiStream
+                self._multi = MultiStream(control=self.control)
+                for description, recorder in self.recorders.items():
+                    try:
+                        recorder.register_with(self._multi)
+                        logger.info(
+                            f"Registered {description} on shared MultiStream "
+                            f"(SSRC {recorder.config.ssrc:08x})"
+                        )
+                        # Calibrator SSRC registration happens here in
+                        # shared mode (legacy mode does it in run() after
+                        # recorder.start()).  ssrc is populated by
+                        # register_with -> ensure_channel.
+                        if self.calibrator and recorder.config.ssrc:
+                            try:
+                                self.calibrator.register_channel_ssrc(
+                                    description, recorder.config.ssrc
+                                )
+                                logger.info(
+                                    f"Registered SSRC {recorder.config.ssrc:x} "
+                                    f"with calibrator for {description}"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to register SSRC for {description}: {e}"
+                                )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to register {description} on shared "
+                            f"MultiStream: {e}", exc_info=True,
+                        )
+                        return False
+                logger.info(
+                    f"✓ {len(self.recorders)} channels registered on shared "
+                    f"MultiStream (multi.start deferred)"
+                )
+
             return True
         except Exception as e:
             logger.error(f"Failed to initialize channels: {e}", exc_info=True)
