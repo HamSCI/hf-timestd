@@ -110,7 +110,7 @@ class StreamRecorderConfig:
     # Archive control: when False, the stream still runs (RTP reception,
     # tap callbacks, timing snapshots) but no IQ data is written to disk.
     # Useful when the channel is consumed only by real-time services
-    # (metrology hot-buffer, L6 calibration, etc.) and cold storage is
+    # (metrology hot-buffer, T6 calibration, etc.) and cold storage is
     # not needed.
     archive: bool = True
 

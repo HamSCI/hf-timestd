@@ -222,27 +222,32 @@ class CoreRecorderV2:
         # NTP status cache
         self.ntp_status = {'offset_ms': None, 'synced': False, 'last_update': 0}
 
-        # L6 BPSK PPS chain-delay calibrator
+        # T6 BPSK PPS chain-delay calibrator
         # Uses a bare RadiodStream (no archive writer) — the BPSK channel
         # exists only to feed the calibrator, not for storage.
-        self._l6_calibrator = None
-        self._l6_stream = None  # RadiodStream for BPSK channel
-        self._l6_config = config.get('timing', {}).get('l6_pps', {})
-        if self._l6_config.get('enabled', False):
-            freq_hz = self._l6_config.get('frequency_hz')
+        # NOTE: the public terminology was renamed L6→T6 (T-level authority
+        # tier; see authority_manager.T_LEVELS_RANKED). The config section
+        # is still ``[timing.l6_pps]`` so existing /etc/hf-timestd/timestd-
+        # config.toml files keep working — rename the section in a
+        # deploy-coordinated commit.
+        self._t6_calibrator = None
+        self._t6_stream = None  # RadiodStream for BPSK channel
+        self._t6_config = config.get('timing', {}).get('l6_pps', {})
+        if self._t6_config.get('enabled', False):
+            freq_hz = self._t6_config.get('frequency_hz')
             if freq_hz is None:
-                logger.error("timing.l6_pps.enabled=true but frequency_hz not set — L6 disabled")
+                logger.error("timing.l6_pps.enabled=true but frequency_hz not set — T6 disabled")
             else:
                 from ka9q.pps_calibrator import BpskPpsCalibrator
-                sr = int(self._l6_config.get('sample_rate',
+                sr = int(self._t6_config.get('sample_rate',
                          self.channel_defaults.get('sample_rate', 24000)))
-                self._l6_calibrator = BpskPpsCalibrator(
+                self._t6_calibrator = BpskPpsCalibrator(
                     sample_rate=sr,
-                    consecutive_required=self._l6_config.get('consecutive_required', 10),
-                    edge_tolerance_samples=self._l6_config.get('edge_tolerance_samples', 10),
-                    enable_notch_500hz=self._l6_config.get('filter_500hz_notch', False),
+                    consecutive_required=self._t6_config.get('consecutive_required', 10),
+                    edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 10),
+                    enable_notch_500hz=self._t6_config.get('filter_500hz_notch', False),
                 )
-                logger.info(f"L6 BPSK PPS calibrator initialized: "
+                logger.info(f"T6 BPSK PPS calibrator initialized: "
                             f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
         self.ntp_status_lock = threading.Lock()
 
@@ -366,9 +371,9 @@ class CoreRecorderV2:
                 except Exception as e:
                     logger.warning(f"Failed to register SSRC for {key}: {e}")
         
-        # Start L6 BPSK PPS stream (bare RadiodStream, no archive)
-        if self._l6_calibrator is not None:
-            self._start_l6_stream()
+        # Start T6 BPSK PPS stream (bare RadiodStream, no archive)
+        if self._t6_calibrator is not None:
+            self._start_t6_stream()
 
         logger.info("Core recorder running. Press Ctrl+C to stop.")
         
@@ -557,7 +562,7 @@ class CoreRecorderV2:
 
                 # Per-channel archive control: defaults to group/global setting,
                 # overridable per-channel.  When False, core-recorder still
-                # receives the stream (for metrology hot-buffer, L6 calibration,
+                # receives the stream (for metrology hot-buffer, T6 calibration,
                 # tap consumers) but writes no IQ data to cold storage.
                 archive = ch_spec.get('archive',
                                       self.recorder_config.get('archive', True))
@@ -604,12 +609,12 @@ class CoreRecorderV2:
             logger.error(f"Failed to initialize channels: {e}", exc_info=True)
             return False
 
-    def _start_l6_stream(self):
+    def _start_t6_stream(self):
         """Create a bare RadiodStream for the BPSK PPS channel (no archive)."""
         from ka9q import RadiodStream, Encoding
         from ka9q.types import StatusType
 
-        l6 = self._l6_config
+        l6 = self._t6_config
         freq_hz = int(l6['frequency_hz'])
         sr = int(l6.get('sample_rate',
                         self.channel_defaults.get('sample_rate', 24000)))
@@ -628,23 +633,23 @@ class CoreRecorderV2:
                 self.data_destination = getattr(channel_info, 'multicast_address', None)
                 logger.info(
                     f"ka9q-python assigned data_destination "
-                    f"{self.data_destination} for L6 channel"
+                    f"{self.data_destination} for T6 channel"
                 )
-            self._l6_stream = RadiodStream(
+            self._t6_stream = RadiodStream(
                 channel=channel_info,
-                on_samples=self._l6_on_samples,
+                on_samples=self._t6_on_samples,
                 samples_per_packet=200,
                 resequence_buffer_size=128,
             )
-            self._l6_stream.start()
-            logger.info(f"L6 BPSK PPS stream started: {desc} at {freq_hz/1e6:.6f} MHz")
+            self._t6_stream.start()
+            logger.info(f"T6 BPSK PPS stream started: {desc} at {freq_hz/1e6:.6f} MHz")
         except Exception as e:
-            logger.error(f"Failed to start L6 BPSK PPS stream: {e}", exc_info=True)
-            self._l6_stream = None
+            logger.error(f"Failed to start T6 BPSK PPS stream: {e}", exc_info=True)
+            self._t6_stream = None
 
-    def _l6_on_samples(self, samples, quality):
+    def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
-        result = self._l6_calibrator.process_samples(
+        result = self._t6_calibrator.process_samples(
             samples, quality.last_rtp_timestamp
         )
         if result is not None and result.locked:
@@ -655,15 +660,15 @@ class CoreRecorderV2:
                     ch.chain_delay_correction_ns = result.chain_delay_ns
 
             # Log on first lock and periodically
-            if result.pps_consecutive == self._l6_calibrator.consecutive_required:
+            if result.pps_consecutive == self._t6_calibrator.consecutive_required:
                 logger.info(
-                    f"L6 BPSK PPS LOCKED: chain_delay={result.chain_delay_ns} ns "
+                    f"T6 BPSK PPS LOCKED: chain_delay={result.chain_delay_ns} ns "
                     f"({result.chain_delay_samples:.1f} samples), "
                     f"ok={result.pps_ok}, noise={result.pps_noise}"
                 )
             elif result.pps_ok % 60 == 0:
                 logger.debug(
-                    f"L6 PPS: delay={result.chain_delay_ns} ns, "
+                    f"T6 PPS: delay={result.chain_delay_ns} ns, "
                     f"consecutive={result.pps_consecutive}, "
                     f"ok={result.pps_ok}, noise={result.pps_noise}"
                 )
@@ -704,17 +709,17 @@ class CoreRecorderV2:
                 status['overall']['total_samples_received'] += ch_stats.get('samples_received', 0)
                 status['overall']['total_samples_written'] += ch_stats.get('samples_written', 0)
             
-            # L6 BPSK PPS calibrator status
-            if self._l6_calibrator is not None:
+            # T6 BPSK PPS calibrator status
+            if self._t6_calibrator is not None:
                 status['l6_pps'] = {
                     'enabled': True,
-                    'locked': self._l6_calibrator.locked,
-                    'pps_ok': self._l6_calibrator.pps_ok,
-                    'pps_noise': self._l6_calibrator.pps_noise,
-                    'pps_consecutive': self._l6_calibrator.pps_consecutive,
-                    'chain_delay_ns': (self._l6_calibrator._chain_delay_samples
-                                       * 1_000_000_000 / self._l6_calibrator.sample_rate
-                                       if self._l6_calibrator._chain_delay_samples is not None
+                    'locked': self._t6_calibrator.locked,
+                    'pps_ok': self._t6_calibrator.pps_ok,
+                    'pps_noise': self._t6_calibrator.pps_noise,
+                    'pps_consecutive': self._t6_calibrator.pps_consecutive,
+                    'chain_delay_ns': (self._t6_calibrator._chain_delay_samples
+                                       * 1_000_000_000 / self._t6_calibrator.sample_rate
+                                       if self._t6_calibrator._chain_delay_samples is not None
                                        else None),
                 }
 
@@ -947,13 +952,13 @@ class CoreRecorderV2:
                 logger.error(f"Error stopping recorder for channel {key}: {e}")
         
 
-        # Stop L6 BPSK PPS stream
-        if self._l6_stream is not None:
+        # Stop T6 BPSK PPS stream
+        if self._t6_stream is not None:
             try:
-                self._l6_stream.stop()
-                logger.info("L6 BPSK PPS stream stopped")
+                self._t6_stream.stop()
+                logger.info("T6 BPSK PPS stream stopped")
             except Exception as e:
-                logger.debug(f"L6 stream stop: {e}")
+                logger.debug(f"T6 stream stop: {e}")
 
         # Close RadiodControl
         try:
