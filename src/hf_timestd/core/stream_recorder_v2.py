@@ -181,9 +181,12 @@ class StreamRecorderV2:
         self.state = StreamRecorderState.IDLE
         self._lock = threading.Lock()
         
-        # RadiodStream instance (created on start)
+        # RadiodStream instance (created on start in legacy per-channel mode).
+        # When register_with(multi) is used instead of start(), this stays None
+        # and ``_parent_multi`` holds the shared MultiStream that owns the socket.
         self.stream: Optional[RadiodStream] = None
-        
+        self._parent_multi = None
+
         # Health monitoring
         self._health_monitor_thread: Optional[threading.Thread] = None
         self._running = False
@@ -386,6 +389,130 @@ class StreamRecorderV2:
         # multicast group — not the global status multicast, which mixes
         # status packets from ALL decoders and can return the wrong
         # rtp_timesnap for our SSRC.
+        gps_time = getattr(self.channel_info, 'gps_time', None)
+        rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
+        if gps_time is not None and rtp_snap is not None:
+            if self.archive_writer is not None:
+                self.archive_writer.add_timing_snapshot(
+                    gps_time_ns=gps_time,
+                    rtp_timesnap=rtp_snap
+                )
+            if self.ring_buffer is not None:
+                try:
+                    self.ring_buffer.update_anchor(
+                        gps_time_ns=gps_time,
+                        rtp_timesnap=rtp_snap,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"{self.config.description}: ring update_anchor failed: {exc}"
+                    )
+            logger.info(
+                f"{self.config.description}: Seeded timing from channel_info — "
+                f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_snap}"
+            )
+        else:
+            logger.warning(
+                f"{self.config.description}: channel_info missing timing — "
+                f"gps_time={gps_time}, rtp_timesnap={rtp_snap}"
+            )
+
+    def register_with(self, multi):
+        """Register this channel on a shared ``MultiStream`` instead of opening a per-channel ``RadiodStream``.
+
+        Performs ``ensure_channel()`` with the same kwargs as
+        :meth:`_create_channel` (so phase-engine extensions and
+        filter-edge commands behave identically), seeds the archive
+        writer + ring buffer with GPS/RTP timing from the returned
+        ``ChannelInfo``, and registers ``self._handle_samples`` as the
+        per-SSRC callback on the parent ``MultiStream``. The parent
+        owns the receive socket; this recorder remains responsible for
+        archive writing, ring-buffer hot data, and its own health
+        monitor.
+
+        ``MultiStream.add_channel`` re-runs ``ensure_channel`` internally —
+        idempotent for a SSRC we just provisioned, so the second call
+        is a cheap status probe and does not disturb the channel's
+        phase-engine state.
+
+        This method is the ``CoreRecorderV2``-driven entry point for
+        the shared-socket architecture. The legacy :meth:`start` /
+        :meth:`_create_channel` path remains in place so the change
+        can be rolled back via configuration without code edits.
+        """
+        logger.info(
+            f"{self.config.description}: Requesting channel at "
+            f"{self.config.frequency_hz/1e6:.3f} MHz (shared MultiStream mode)"
+        )
+        logger.info(
+            f"  Parameters: preset={self.config.preset}, "
+            f"rate={self.config.sample_rate}, agc={self.config.agc_enable}, "
+            f"gain={self.config.gain}, enc={self.config.encoding}"
+        )
+
+        kwargs = {
+            'frequency_hz': float(self.config.frequency_hz),
+            'preset': self.config.preset,
+            'sample_rate': self.config.sample_rate,
+            'agc_enable': self.config.agc_enable,
+            'gain': self.config.gain,
+            'destination': self.config.destination,
+            'encoding': self.config.encoding,
+            'timeout': 10.0,
+            'frequency_tolerance': 1.0,
+        }
+
+        caps = {}
+        try:
+            if hasattr(self._control, 'get_capabilities'):
+                caps = self._control.get_capabilities()
+        except Exception as e:
+            logger.debug(f"{self.config.description}: get_capabilities failed: {e}")
+
+        if caps.get("backend") == "phase-engine":
+            if getattr(self.config, 'reception_mode', None):
+                kwargs['reception_mode'] = self.config.reception_mode
+            if getattr(self.config, 'target', None):
+                kwargs['target'] = self.config.target
+            if getattr(self.config, 'null_targets', None):
+                kwargs['null_targets'] = self.config.null_targets
+            if getattr(self.config, 'combining_method', None):
+                kwargs['combining_method'] = self.config.combining_method
+
+        self.channel_info = self._control.ensure_channel(**kwargs)
+        self.config.ssrc = self.channel_info.ssrc
+        self._set_filter_edges(self.channel_info.ssrc)
+
+        logger.info(
+            f"{self.config.description}: Channel ready SSRC "
+            f"{self.channel_info.ssrc:08x} at "
+            f"{self.channel_info.multicast_address}:"
+            f"{getattr(self.channel_info, 'port', 5004)}"
+        )
+
+        # Register on the shared MultiStream — its on_samples is wired here,
+        # the parent owns the socket and the receive thread.
+        multi.add_channel(
+            frequency_hz=float(self.config.frequency_hz),
+            preset=self.config.preset,
+            sample_rate=self.config.sample_rate,
+            encoding=self.config.encoding,
+            agc_enable=self.config.agc_enable,
+            gain=self.config.gain,
+            on_samples=self._handle_samples,
+        )
+        self._parent_multi = multi
+        self._last_sample_time = time.time()
+        logger.info(
+            f"{self.config.description}: Registered on shared MultiStream"
+        )
+
+        # Seed archive writer with GPS/RTP mapping from the channel's own
+        # ChannelInfo.  ensure_channel() returns timing from our dedicated
+        # multicast group — not the global status multicast, which mixes
+        # status packets from ALL decoders and can return the wrong
+        # rtp_timesnap for our SSRC.  This block is intentionally identical
+        # to the seeding at the end of _create_channel().
         gps_time = getattr(self.channel_info, 'gps_time', None)
         rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
         if gps_time is not None and rtp_snap is not None:
