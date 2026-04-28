@@ -66,6 +66,15 @@ class RawBinaryReader:
         # Primary archive_dir for backward compat (first available)
         self.archive_dir = self._search_dirs[0] if self._search_dirs else cold_dir
 
+        # Cache of {day_dir: {minute_ts: (file_stem, offset_seconds_into_chunk)}}.
+        # Built lazily by _chunk_index_for() — exactly one directory scan per
+        # day_dir per reader lifetime.  The previous implementation guessed
+        # chunk durations from a hardcoded list (600/300/900/3600); any
+        # other recorder file_duration_sec silently produced "gap" reads.
+        # The index is authoritative because it learns the duration from
+        # each chunk's own JSON sidecar.
+        self._chunk_index_cache: Dict[Path, Dict[int, Tuple[str, int]]] = {}
+
         logger.debug(f"RawBinaryReader initialized for {channel_name}, "
                      f"search dirs: {[str(d) for d in self._search_dirs]}")
 
@@ -115,24 +124,10 @@ class RawBinaryReader:
                     continue
                 found_any_dir = True
 
-                # Scan for binary files
-                for f in day_dir.glob('*.bin*'):
-                    try:
-                        name = f.name
-                        if '.bin' in name:
-                            stem = name.split('.bin')[0]
-                            if stem.isdigit():
-                                file_ts = int(stem)
-                                # Determine file duration from JSON sidecar
-                                dur = self._get_file_duration(day_dir, stem)
-                                # Expand chunk into per-minute timestamps
-                                for offset in range(0, dur, 60):
-                                    ts = file_ts + offset
-                                    if day_start_ts <= ts < day_end_ts:
-                                        minutes.add(ts)
-                    except Exception as e:
-                        logger.debug(f"Caught exception: {e}")
-                        continue
+                index = self._chunk_index_for(day_dir)
+                for ts in index:
+                    if day_start_ts <= ts < day_end_ts:
+                        minutes.add(ts)
 
         if not found_any_dir:
             logger.warning(f"No data directory for {date_str} in any search path for {self.channel_name}")
@@ -151,13 +146,72 @@ class RawBinaryReader:
                 pass
         return 60  # legacy 1-minute files have no file_duration_sec field
 
+    def _chunk_index_for(self, day_dir: Path) -> Dict[int, Tuple[str, int]]:
+        """Return ``{minute_ts: (file_stem, offset_seconds)}`` for ``day_dir``.
+
+        Built once per directory by globbing ``*.bin*`` and reading each
+        sidecar's ``file_duration_sec``; cached on the reader instance.
+
+        This is the authoritative replacement for the old
+        "guess from {600, 300, 900, 3600}" heuristic.  Any chunk
+        duration the recorder writes — including non-standard values —
+        is honored because we learn it from each file's own sidecar.
+        Files with a missing or unparseable sidecar fall back to the
+        legacy 60-second assumption (one minute per file).
+
+        Returns an empty dict (not None) for empty / nonexistent dirs.
+        """
+        cached = self._chunk_index_cache.get(day_dir)
+        if cached is not None:
+            return cached
+
+        index: Dict[int, Tuple[str, int]] = {}
+        if not day_dir.exists():
+            self._chunk_index_cache[day_dir] = index
+            return index
+
+        for f in day_dir.glob('*.bin*'):
+            name = f.name
+            if '.bin' not in name:
+                continue
+            stem = name.split('.bin')[0]
+            if not stem.isdigit():
+                continue
+            chunk_ts = int(stem)
+            dur = self._get_file_duration(day_dir, stem)
+            if dur <= 0 or dur % 60 != 0:
+                logger.warning(
+                    f"chunk {f} has unusable file_duration_sec={dur}; "
+                    f"skipping"
+                )
+                continue
+            for offset in range(0, dur, 60):
+                minute_ts = chunk_ts + offset
+                if minute_ts in index:
+                    existing_stem, _ = index[minute_ts]
+                    if existing_stem == stem:
+                        continue  # same chunk seen via .bin and .bin.zst
+                    logger.warning(
+                        f"duplicate chunk for minute {minute_ts}: "
+                        f"{existing_stem} vs {stem} in {day_dir} "
+                        f"(keeping first)"
+                    )
+                    continue
+                index[minute_ts] = (stem, offset)
+
+        self._chunk_index_cache[day_dir] = index
+        return index
+
     def read_minute(self, minute_timestamp: int) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
         """
         Read IQ samples and metadata for a specific minute.
 
-        Handles both legacy 1-minute files (named by minute timestamp) and
-        multi-minute chunk files (named by chunk boundary timestamp).  For
-        chunk files the correct 1-minute slice is extracted.
+        Looks up ``minute_timestamp`` in the directory's chunk index
+        (built once and cached), then reads the containing chunk and
+        extracts the correct 1-minute slice.  Handles legacy 1-minute
+        files (each chunk is its own minute) and multi-minute chunks
+        of any duration the recorder happens to use, because the
+        index learns each chunk's duration from its own JSON sidecar.
 
         Args:
             minute_timestamp: Unix timestamp of the minute start
@@ -165,79 +219,63 @@ class RawBinaryReader:
         Returns:
             Tuple of (samples, metadata)
             samples: complex64 numpy array (1 minute of samples) or None
-            metadata: dict or None
+            metadata: dict or None when no chunk covers this minute
         """
         dt = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)
-        date_str = dt.strftime('%Y%m%d')
-        base_name = str(minute_timestamp)
-
         candidate_dates = [
             (dt - timedelta(days=1)).strftime('%Y%m%d'),
-            date_str,
+            dt.strftime('%Y%m%d'),
             (dt + timedelta(days=1)).strftime('%Y%m%d'),
         ]
-
-        # 1. Try to read samples — search all directories
-        samples = None
-        metadata = None
 
         for search_dir in self._search_dirs:
             for date_candidate in candidate_dates:
                 day_dir = search_dir / date_candidate
-                if not day_dir.exists():
+                index = self._chunk_index_for(day_dir)
+                entry = index.get(minute_timestamp)
+                if entry is None:
                     continue
 
-                # --- Try exact-match file (legacy 1-minute or this IS the chunk start) ---
-                samples, metadata = self._try_read_file(day_dir, base_name)
+                stem, offset_sec = entry
+                chunk_samples, chunk_meta = self._try_read_file(day_dir, stem)
+                if chunk_samples is None:
+                    # Index pointed at a file we couldn't actually read
+                    # (corruption, vanished mid-run, etc.).  Try the next
+                    # search dir; gap detection will pick this up.
+                    logger.warning(
+                        f"chunk index for minute {minute_timestamp} pointed "
+                        f"at {day_dir}/{stem}.bin* but the file is unreadable"
+                    )
+                    continue
 
-                if samples is not None:
-                    # Check if this is a chunk file and we need a slice
-                    file_dur = 60
-                    if metadata and 'file_duration_sec' in metadata:
-                        file_dur = int(metadata['file_duration_sec'])
+                sample_rate = (
+                    int(chunk_meta.get('sample_rate', 24000))
+                    if chunk_meta else 24000
+                )
+                samples_per_min = sample_rate * 60
+                offset_samples = offset_sec * sample_rate
 
-                    if file_dur > 60:
-                        # This minute IS the chunk start — extract first minute
-                        sample_rate = int(metadata.get('sample_rate', 24000))
-                        samples_per_min = sample_rate * 60
-                        samples = samples[:samples_per_min].copy()
-                    break
+                if offset_samples + samples_per_min > len(chunk_samples):
+                    logger.warning(
+                        f"chunk {stem} too short for minute {minute_timestamp}: "
+                        f"need {offset_samples}+{samples_per_min} samples, "
+                        f"have {len(chunk_samples)}"
+                    )
+                    del chunk_samples
+                    continue
 
-                # --- Try containing chunk file (minute is inside a larger chunk) ---
-                # Search for chunk files that could contain this minute.
-                # Try common durations: 600 (10 min), 300 (5 min), 900 (15 min), 3600 (1 hr)
-                for dur in (600, 300, 900, 3600):
-                    chunk_boundary = (minute_timestamp // dur) * dur
-                    if chunk_boundary == minute_timestamp:
-                        continue  # Already tried exact match above
-                    chunk_name = str(chunk_boundary)
-                    chunk_samples, chunk_meta = self._try_read_file(day_dir, chunk_name)
-                    if chunk_samples is not None:
-                        # Verify file_duration_sec covers our minute
-                        chunk_dur = 60
-                        if chunk_meta and 'file_duration_sec' in chunk_meta:
-                            chunk_dur = int(chunk_meta['file_duration_sec'])
-                        if chunk_dur < dur:
-                            continue  # Chunk doesn't actually span this minute
+                samples = chunk_samples[
+                    offset_samples:offset_samples + samples_per_min
+                ].copy()
+                del chunk_samples
+                return samples, chunk_meta
 
-                        sample_rate = int(chunk_meta.get('sample_rate', 24000)) if chunk_meta else 24000
-                        samples_per_min = sample_rate * 60
-                        offset_sec = minute_timestamp - chunk_boundary
-                        offset_samples = offset_sec * sample_rate
-
-                        if offset_samples + samples_per_min <= len(chunk_samples):
-                            samples = chunk_samples[offset_samples:offset_samples + samples_per_min].copy()
-                            metadata = chunk_meta
-                        del chunk_samples
-                        if samples is not None:
-                            break
-
-                if samples is not None:
-                    break
-            if samples is not None:
-                break
-
-        return samples, metadata
+        # No covering chunk in any search dir.  This is the common
+        # "real gap" path; the decimation pipeline treats it as such.
+        logger.debug(
+            f"no chunk covering minute {minute_timestamp} for {self.channel_name}"
+        )
+        return None, None
 
     def _try_read_file(self, day_dir: Path, base_name: str) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
         """Try to read a binary file and its JSON sidecar from day_dir.

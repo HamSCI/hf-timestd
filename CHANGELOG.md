@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### GRAPE raw reader — chunk durations discovered, not guessed
+
+- **The bug.** `RawBinaryReader.read_minute` searched for the chunk file containing a given minute by trying a hardcoded list of plausible durations: `dur ∈ (600, 300, 900, 3600)`. For each candidate, it computed `chunk_boundary = (minute_ts // dur) * dur` and tried to open `<chunk_boundary>.bin*`. Any `file_duration_sec` outside that list — say, the 1200s the recorder might be reconfigured to write — produced a silent miss. `decimation_pipeline.py` then treated the empty result as a "gap" and fed zeros into the decimator. No error, no warning, just quiet zeros where data should have been.
+- **The fix.** New `_chunk_index_for(day_dir)` builds a `{minute_ts: (file_stem, offset_seconds)}` map by globbing `*.bin*` once per directory and reading each chunk's own JSON sidecar to learn its `file_duration_sec`. The index is cached per directory on the reader instance, so a 1440-minute walk does one directory scan, not 1440. `read_minute` and `get_available_minutes` both go through the index; the heuristic guess loop is gone.
+- **Visibility.** Chunks with an unparseable / non-positive / non-60-multiple `file_duration_sec` are skipped with a `warning` log line. Index pointers to files that turn out to be unreadable likewise log a warning instead of silently failing. Genuine missing minutes (the common case — a real gap) still log only at `debug` level so journald isn't drowned.
+- **Tests** — `tests/test_grape_raw_reader.py` adds 11 tests pinning down: legacy 1-minute files, 600s chunks (every minute resolves to the right offset), non-standard 1200s chunks (the case the old heuristic would have missed entirely), missing dirs, unparseable durations, the cache (one glob across three lookups), end-to-end `read_minute` slice correctness against a ramp-encoded chunk, the `(None, None)` gap path, day-boundary filtering in `get_available_minutes`.
+
 ### GRAPE upload — auto-retry of failed uploads
 
 - **The gap.** `grape-daily.timer` is `Type=oneshot` daily with no `Restart=`/`OnFailure=`. When a daily run hit transient SFTP trouble, `process_queue()` exhausted `max_retries` (5 attempts, exponential backoff totalling ~30 minutes) and parked the task at `status="failed"` in `queue.json` permanently. The next day's daily run would upload tomorrow's data and never re-attempt yesterday's; the orphaned `<data-root>/upload/<YYYYMMDD>/` directory just sat there.
