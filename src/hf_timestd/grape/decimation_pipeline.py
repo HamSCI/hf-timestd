@@ -14,6 +14,33 @@ from .decimation import StatefulDecimator
 
 logger = logging.getLogger(__name__)
 
+
+def _per_minute_gap(meta: Optional[dict]) -> int:
+    """Estimate per-minute raw-sample gap from a chunk's sidecar metadata.
+
+    The recorder writes one ``gap_samples`` value covering the entire
+    chunk file (``file_duration_sec`` seconds — typically 600 = 10 min).
+    ``RawBinaryReader.read_minute`` returns one minute's slice plus the
+    chunk's full metadata, so naively assigning ``meta['gap_samples']``
+    to each minute inflates ``total_gap_samples`` by ``chunk_minutes×``
+    when summed across the chunk (a 30-second gap shows up as 5 minutes
+    of gap in the daily summary).
+
+    Spread the chunk-wide value evenly across the chunk's minutes so
+    aggregates are exact: ``N × (chunk_gap // N) ≈ chunk_gap`` (modulo
+    integer-division rounding ≤ ``N - 1`` raw samples per chunk).
+    Per-minute precision is approximate, but it was already an illusion
+    — every minute reported the same chunk-wide value before this fix.
+    """
+    if not meta:
+        return 0
+    chunk_gap = int(meta.get('gap_samples', 0) or 0)
+    if chunk_gap <= 0:
+        return 0
+    chunk_dur_sec = int(meta.get('file_duration_sec', 60) or 60)
+    chunk_minutes = max(1, chunk_dur_sec // 60)
+    return chunk_gap // chunk_minutes
+
 class DecimationPipeline:
     """
     Pipeline to process raw high-rate station data into 10 Hz products.
@@ -138,9 +165,11 @@ class DecimationPipeline:
                     # Process with continuous decimator state
                     decimated_chunk = decimator.process(samples)
 
-                    # Check for gaps in metadata
-                    if meta and 'gap_samples' in meta:
-                        gap_info = max(gap_info, meta.get('gap_samples', 0))
+                    # Check for gaps in metadata.  The sidecar's
+                    # gap_samples is chunk-wide; spread it across the
+                    # chunk's minutes so aggregate completeness adds up
+                    # correctly (see _per_minute_gap docstring).
+                    gap_info = max(gap_info, _per_minute_gap(meta))
 
                     # Convert gap_info from raw sample space to decimated space
                     decimation_ratio = input_rate // 10

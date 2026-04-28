@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### GRAPE decimation — `gap_samples` is now per-minute, not chunk-wide
+
+- **The bug.** The recorder's `MinuteBuffer` is misleadingly named — it's actually a chunk-sized buffer (`samples_per_chunk = sample_rate × file_duration_sec`) and its `gap_samples` accumulates across the entire chunk's lifetime. The reader returns the chunk's full sidecar metadata with each per-minute slice, so each of the 10 minutes in a 10-min chunk got the same chunk-wide gap value attributed to it. `DecimatedBuffer.update_summary()` then summed those identical values: a 30-second gap somewhere in a 10-minute chunk showed up as **5 minutes of gap** in the daily summary, and `completeness_pct` was off by a corresponding 10× margin. Recent commit `3caccf3` fixed only the raw→decimated unit conversion, not the chunk-vs-minute attribution.
+- **The fix.** New `_per_minute_gap(meta)` helper in `decimation_pipeline.py` divides the chunk-wide `gap_samples` by `max(1, file_duration_sec // 60)` so the per-minute value, summed across the chunk's minutes, equals the chunk-wide value (modulo integer-division rounding ≤ `n_minutes - 1` raw samples per chunk — vanishingly small at 24 kHz). Per-minute precision is approximate, but it was already an illusion before this fix; aggregate `total_gap_samples` and `completeness_pct` are now exact.
+- **Sidecar schema unchanged.** This is a reader-side correction — no recorder change, no migration of the 97 sidecars `3caccf3` already touched. Old chunks still load correctly because the helper falls back to legacy 60s assumption when `file_duration_sec` is absent.
+- **Tests** — `tests/test_grape_per_minute_gap.py` adds 11 tests pinning down the per-minute math (legacy 60s → unchanged, 600s → divided by 10, 1200s → divided by 20, missing field → assume legacy, zero/negative → 0) and the aggregate-correctness invariant (per-minute × chunk_minutes ≈ chunk_gap). One test explicitly documents the old-vs-new behavior so any regression jumps out.
+
 ### GRAPE raw reader — chunk durations discovered, not guessed
 
 - **The bug.** `RawBinaryReader.read_minute` searched for the chunk file containing a given minute by trying a hardcoded list of plausible durations: `dur ∈ (600, 300, 900, 3600)`. For each candidate, it computed `chunk_boundary = (minute_ts // dur) * dur` and tried to open `<chunk_boundary>.bin*`. Any `file_duration_sec` outside that list — say, the 1200s the recorder might be reconfigured to write — produced a silent miss. `decimation_pipeline.py` then treated the empty result as a "gap" and fed zeros into the decimator. No error, no warning, just quiet zeros where data should have been.
