@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### GRAPE decimated buffer — durable writes survive power loss
+
+- **The bug.** `DecimatedBuffer.write_minute()` did `seek + write` of 4800 bytes per minute under an exclusive `flock` and returned, with no `fsync`. The bytes lived in the kernel's page cache; a power loss before the next page-cache writeback (typically 5–30s on Linux) would lose the write while the in-memory metadata cache still believed the minute was valid. Worse, `_save_metadata()` opened the JSON catalog in `'w'` mode and dumped directly into it — a crash mid-write left a truncated JSON that `_load_metadata()` silently discarded (catching the parse error and returning a fresh empty `DayMetadata`), erasing every prior minute record for that day from the operator's view.
+- **The fix.**
+  - `write_minute()` now calls `f.flush(); os.fsync(f.fileno())` inside the locked section so each minute's write is durable before the function returns.
+  - `_save_metadata()` writes to `<file>.tmp`, fsyncs the contents, atomically renames over the canonical file (`os.replace`), and fsyncs the parent directory so the rename itself is durable on POSIX. Matches the established pattern in [authority_manager.py:472](hf-timestd/src/hf_timestd/core/authority_manager.py#L472), [coarse_time_writer.py:101](hf-timestd/src/hf_timestd/core/coarse_time_writer.py#L101), and friends.
+  - `_create_day_file()` fsyncs the 6.9 MB preallocation so a crash before the first `write_minute` doesn't leave a truncated/sparse day file.
+- **Cost.** ~9 fsyncs/minute across 9 channels = 0.15/sec. Negligible on NVMe (~50 µs each), still trivial on rotating disk (~5 ms each). Metadata fsync is per-`flush_metadata()` call (driven by the orchestrator, not per-write).
+- **Tests** — `tests/test_grape_decimated_buffer_durability.py` adds 7 tests: `write_minute` calls `fsync`; `_save_metadata` writes via tmp+rename and leaves no `.tmp` orphan on success; a corrupt `.tmp` left behind after a simulated mid-write crash never corrupts the canonical JSON; `_save_metadata` failure mid-write leaves the canonical file unchanged; `_create_day_file` fsyncs after preallocation; round-trip read/write returns the same samples; metadata survives a simulated daemon restart (cache cleared, re-load from disk).
+
 ### GRAPE decimation — `gap_samples` is now per-minute, not chunk-wide
 
 - **The bug.** The recorder's `MinuteBuffer` is misleadingly named — it's actually a chunk-sized buffer (`samples_per_chunk = sample_rate × file_duration_sec`) and its `gap_samples` accumulates across the entire chunk's lifetime. The reader returns the chunk's full sidecar metadata with each per-minute slice, so each of the 10 minutes in a 10-min chunk got the same chunk-wide gap value attributed to it. `DecimatedBuffer.update_summary()` then summed those identical values: a 30-second gap somewhere in a 10-minute chunk showed up as **5 minutes of gap** in the daily summary, and `completeness_pct` was off by a corresponding 10× margin. Recent commit `3caccf3` fixed only the raw→decimated unit conversion, not the chunk-vs-minute attribution.

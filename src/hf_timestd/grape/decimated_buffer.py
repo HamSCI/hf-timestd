@@ -27,6 +27,7 @@ Usage:
 import numpy as np
 import json
 import logging
+import os
 import fcntl
 from pathlib import Path
 from datetime import datetime, timezone, date, timedelta
@@ -169,11 +170,37 @@ class DecimatedBuffer:
         )
     
     def _save_metadata(self, date_str: str, metadata: DayMetadata):
-        """Save metadata to JSON file."""
+        """Save metadata to JSON file atomically.
+
+        Writes to ``<file>.tmp``, fsyncs the contents, then renames over
+        the target so a crash mid-write can never leave the operator
+        with a truncated/parse-broken JSON catalog.  Also fsyncs the
+        parent directory so the rename itself is durable on POSIX
+        filesystems (without this, a crash between rename and the dir's
+        update being flushed could lose the rename even though the
+        new inode survived).
+        """
         _, meta_path = self._get_paths(date_str)
-        
-        with open(meta_path, 'w') as f:
+        tmp_path = meta_path.with_suffix(meta_path.suffix + '.tmp')
+
+        with open(tmp_path, 'w') as f:
             json.dump(metadata.to_dict(), f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, meta_path)
+
+        # Make the rename durable.
+        try:
+            dir_fd = os.open(meta_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError as e:
+            # Some filesystems (e.g. tmpfs in unusual configurations)
+            # reject directory fsync; the data fsync above is enough
+            # for our durability story on those.
+            logger.debug(f"Could not fsync {meta_path.parent}: {e}")
     
     def write_minute(
         self,
@@ -231,6 +258,16 @@ class DecimatedBuffer:
                 try:
                     f.seek(byte_offset)
                     f.write(decimated_iq.tobytes())
+                    # Make the per-minute write durable.  Without
+                    # fsync, a crash between this return and the
+                    # next page-cache writeback would leave the day
+                    # file with old zeros at this minute's offset
+                    # while the in-memory metadata cache (and
+                    # eventually the JSON sidecar via
+                    # flush_metadata) still claims the minute as
+                    # valid — readers would silently see zeros.
+                    f.flush()
+                    os.fsync(f.fileno())
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             
@@ -259,14 +296,19 @@ class DecimatedBuffer:
     def _create_day_file(self, bin_path: Path):
         """Create a preallocated day file filled with zeros."""
         file_size = SAMPLES_PER_DAY * BYTES_PER_SAMPLE  # 6.9 MB
-        
+
         with open(bin_path, 'wb') as f:
             # Write in chunks to avoid memory issues
             chunk_size = SAMPLES_PER_MINUTE * BYTES_PER_SAMPLE * 60  # 1 hour at a time
             zeros = np.zeros(SAMPLES_PER_MINUTE * 60, dtype=np.complex64)
             for _ in range(24):
                 f.write(zeros.tobytes())
-        
+            # Materialise the preallocation on disk so a crash before
+            # the first write_minute fsync doesn't leave a sparse /
+            # truncated day file that confuses recovery.
+            f.flush()
+            os.fsync(f.fileno())
+
         logger.info(f"Created day file: {bin_path} ({file_size / 1e6:.1f} MB)")
     
     def read_minute(self, minute_utc: float) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
