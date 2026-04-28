@@ -787,6 +787,12 @@ Exit codes:
     grape_upload_parser = grape_subparsers.add_parser('upload', help='Upload to PSWS repository')
     grape_upload_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
     grape_upload_parser.add_argument('--date', help='Date to upload (default: yesterday)')
+    grape_upload_parser.add_argument('--resume', action='store_true',
+                                     help="Drain every undelivered date directory under "
+                                          "<data-root>/upload/ and reset failed-status tasks "
+                                          "back to pending.  Used by grape-upload-retry.timer; "
+                                          "ignores --date.  Exits 0 even when there is nothing "
+                                          "to do, so the timer no-ops cleanly.")
     grape_upload_parser.add_argument('--dry-run', action='store_true', help='Show what would be uploaded')
     grape_upload_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
     
@@ -1470,10 +1476,8 @@ Per-service overrides in [services] take precedence over the profile.
         elif args.grape_command == 'upload':
             from .grape.uploader import UploadManager, SFTPUpload
             import toml
-            
-            date_str = resolve_date(args.date)
-            
-            # Load config for station info
+
+            # Load config for station info (shared by --date and --resume).
             config_path = Path('/etc/hf-timestd/timestd-config.toml')
             if config_path.exists():
                 with open(config_path, 'r') as f:
@@ -1481,24 +1485,55 @@ Per-service overrides in [services] take precedence over the profile.
             else:
                 print(f"❌ Config not found: {config_path}")
                 sys.exit(1)
-            
+
             station = config.get('station', {})
-            
-            # Find packaged data for the date
-            upload_dir = data_root / 'upload' / date_str
-            if not upload_dir.exists():
-                print(f"❌ No packaged data for {date_str} at {upload_dir}")
-                print(f"   Run 'grape package --date {date_str}' first")
-                sys.exit(1)
-            
-            # Find OBS directories
-            obs_dirs = list(upload_dir.rglob('OBS*'))
-            if not obs_dirs:
-                print(f"❌ No OBS directories found in {upload_dir}")
-                sys.exit(1)
-            
-            print(f"📤 Upload for {date_str}")
-            print(f"   Found {len(obs_dirs)} dataset(s)")
+
+            # --resume: scan every undelivered <data-root>/upload/<YYYYMMDD>/
+            # directory and feed everything found into the queue.  Used by
+            # grape-upload-retry.timer to drain stuck failures.
+            if args.resume:
+                upload_root = data_root / 'upload'
+                if not upload_root.exists():
+                    print(f"📤 Resume: nothing to do (no {upload_root})")
+                    sys.exit(0)
+
+                date_dirs = sorted(
+                    p for p in upload_root.iterdir()
+                    if p.is_dir() and len(p.name) == 8 and p.name.isdigit()
+                )
+                if not date_dirs:
+                    print(f"📤 Resume: queue drained — no date directories under {upload_root}")
+                    sys.exit(0)
+
+                obs_dirs = []
+                date_strs = {}
+                for d in date_dirs:
+                    obs_in_d = list(d.rglob('OBS*'))
+                    for o in obs_in_d:
+                        obs_dirs.append(o)
+                        date_strs[o] = d.name
+                if not obs_dirs:
+                    print(f"📤 Resume: no OBS directories under {upload_root}")
+                    sys.exit(0)
+                print(f"📤 Resume: found {len(obs_dirs)} dataset(s) "
+                      f"across {len(date_dirs)} day(s)")
+                date_str = None  # signals downstream that we're in resume mode
+            else:
+                date_str = resolve_date(args.date)
+                upload_dir = data_root / 'upload' / date_str
+                if not upload_dir.exists():
+                    print(f"❌ No packaged data for {date_str} at {upload_dir}")
+                    print(f"   Run 'grape package --date {date_str}' first")
+                    sys.exit(1)
+
+                obs_dirs = list(upload_dir.rglob('OBS*'))
+                if not obs_dirs:
+                    print(f"❌ No OBS directories found in {upload_dir}")
+                    sys.exit(1)
+                date_strs = {o: date_str for o in obs_dirs}
+
+                print(f"📤 Upload for {date_str}")
+                print(f"   Found {len(obs_dirs)} dataset(s)")
             
             if args.dry_run:
                 print("   (Dry run - no actual upload)")
@@ -1525,18 +1560,42 @@ Per-service overrides in [services] take precedence over the profile.
             }
             
             manager = UploadManager(upload_config)
-            
-            # Enqueue and process
+
+            # In --resume mode, reset any task in the persistent queue
+            # whose status is "failed" but whose dataset_path still
+            # exists on disk back to "pending" with attempts=0.  Without
+            # this, the retry timer is a no-op for everything stuck at
+            # max_retries — defeating its purpose.  Cleanup-deleted
+            # datasets stay "failed" because their disk path is gone.
+            if args.resume:
+                resurrected = 0
+                for task in manager.queue:
+                    if task.status != "failed":
+                        continue
+                    if Path(task.dataset_path).exists():
+                        task.status = "pending"
+                        task.attempts = 0
+                        task.error_message = ""
+                        task.last_attempt = None
+                        resurrected += 1
+                if resurrected:
+                    print(f"   Reset {resurrected} failed task(s) → pending for retry")
+                    manager._save_queue()
+
+            # Enqueue and process.  enqueue() dedupes on dataset_path,
+            # so calling it twice for a task already in the queue
+            # leaves the existing attempt counter intact.
             for obs_dir in obs_dirs:
+                ds = date_strs[obs_dir]
                 metadata = {
-                    'date': f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}",
+                    'date': f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}",
                     'callsign': station.get('callsign', 'AC0G'),
                     'grid_square': station.get('grid_square', 'EM38ww'),
                     'station_id': station.get('id', 'S000171'),
                     'instrument_id': station.get('instrument_id', '172')
                 }
                 manager.enqueue(obs_dir, metadata)
-            
+
             manager.process_queue()
             
             status = manager.get_status()

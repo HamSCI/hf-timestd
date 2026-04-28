@@ -563,6 +563,7 @@ for tf in \
     timestd-iono-reanalysis.service timestd-iono-reanalysis.timer \
     timestd-pipeline-watchdog.service timestd-pipeline-watchdog.timer \
     grape-daily.service grape-daily.timer \
+    grape-upload-retry.service grape-upload-retry.timer \
     timestd-alert@.service
 do
     copy_unit "$PROJECT_DIR/systemd/$tf" && ((UPDATED_COUNT++)) || true

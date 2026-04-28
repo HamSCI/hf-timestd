@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### GRAPE upload — auto-retry of failed uploads
+
+- **The gap.** `grape-daily.timer` is `Type=oneshot` daily with no `Restart=`/`OnFailure=`. When a daily run hit transient SFTP trouble, `process_queue()` exhausted `max_retries` (5 attempts, exponential backoff totalling ~30 minutes) and parked the task at `status="failed"` in `queue.json` permanently. The next day's daily run would upload tomorrow's data and never re-attempt yesterday's; the orphaned `<data-root>/upload/<YYYYMMDD>/` directory just sat there.
+- **`grape upload --resume`** drains the persistent queue independent of the daily timer. It walks every `<data-root>/upload/<YYYYMMDD>/` subdir still on disk (= post-upload cleanup didn't run = upload not confirmed), enqueues each `OBS*` directory, runs `process_queue`, and exits 0 even when there's nothing to do. `enqueue()` already dedupes on `dataset_path`, so this is safe to run repeatedly.
+- **Failed → pending reset.** In `--resume` mode, any task with `status="failed"` whose `dataset_path` still exists on disk is reset to `status="pending"` with `attempts=0`. Without this the retry timer would no-op forever on stuck failures. Datasets the cleanup branch already deleted stay failed (their disk path is gone), so a successful prior upload can't be re-attempted by accident.
+- **`grape-upload-retry.service` + `.timer`** — new oneshot service that runs `grape upload --resume`, fired by a 30-minute timer (`OnUnitActiveSec=30min`, `OnBootSec=5min`, `RandomizedDelaySec=120`). Lighter resource caps than `grape-daily` (CPU 20%, mem 512M) since there's no decimation work. Operators enable with `sudo systemctl enable --now grape-upload-retry.timer`. `scripts/install.sh` now installs both files alongside the existing `grape-daily.*` units.
+- **Tests** — `tests/test_grape_upload_resume.py` adds 5 tests pinning down the reset semantics: failed→pending happens iff disk path exists; pending and completed tasks are untouched; the reset persists to `queue.json`; mixed live+orphaned queues classify correctly.
+
 ### GRAPE upload — real verify, no more silent data loss
 
 - **`SFTPUpload.verify()` was a hardcoded `return True`.** The "PSWS will email if there are issues" comment glossed over the consequence: a successful `sftp` exit code with corrupted bytes on the wire flipped `task.status` to `completed`, ran the `_mark_upload_complete` marker, and triggered the success callback that the `grape daily` orchestrator uses to `rmtree` the DRF upload package and unlink each channel's decimated `.bin` and `_meta.json`. A truncated upload could permanently lose a day's PSWS contribution.

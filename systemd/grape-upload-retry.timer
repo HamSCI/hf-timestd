@@ -1,0 +1,25 @@
+[Unit]
+Description=GRAPE Upload Retry Timer — drain stuck PSWS uploads
+Documentation=https://github.com/mijahauan/hf-timestd
+Requires=grape-upload-retry.service
+
+[Timer]
+# Run a few minutes after boot so a power-cycle doesn't lose pending
+# uploads, then every 30 minutes thereafter.  This complements the
+# daily grape-daily.timer:
+#
+#   - grape-daily fires at 01:00 UTC, decimates yesterday's data,
+#     and pushes the result to PSWS.
+#   - grape-upload-retry fires every 30 min and drains anything that
+#     daily couldn't push (transient network loss, PSWS outage,
+#     queue.json entries left behind by a prior crash).
+#
+# RandomizedDelaySec smooths the load across stations on the
+# half-hour boundary.
+OnBootSec=5min
+OnUnitActiveSec=30min
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target
