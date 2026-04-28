@@ -5,6 +5,7 @@ Handles reliable upload of processed datasets to remote repositories.
 """
 
 import os
+import re
 import subprocess
 import logging
 import time
@@ -220,6 +221,67 @@ def test_psws_connectivity(toml_config: Dict) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Verification helpers (used by SFTPUpload.verify; module-level for testing).
+# ---------------------------------------------------------------------------
+
+def _build_remote_manifest(local_path: Path,
+                           dataset_name: str) -> List[Tuple[str, int]]:
+    """Walk a freshly-uploaded local dataset and return the list of
+    ``(remote_relative_path, byte_size)`` pairs that the SFTP server
+    should now hold under the operator's home directory.
+
+    The walk is fully deterministic — directories are visited in
+    sorted order, files are sorted within each directory.  Order
+    matters because ``verify()`` zips the returned list against the
+    SFTP ``ls -l`` reply order; if either side reordered, a swap of
+    two same-size files between paths would slip through.
+    """
+    manifest: List[Tuple[str, int]] = []
+    for root, dirs, files in os.walk(local_path):
+        # Sort dirs in-place so os.walk descends in the same order
+        # every run, on every filesystem.
+        dirs.sort()
+        rel = os.path.relpath(root, local_path)
+        prefix = dataset_name if rel == '.' else f"{dataset_name}/{rel}"
+        for fname in sorted(files):
+            local_file = os.path.join(root, fname)
+            try:
+                size = os.path.getsize(local_file)
+            except OSError:
+                continue
+            manifest.append((f"{prefix}/{fname}", size))
+    return manifest
+
+
+# Matches a single sftp "ls -l" line.  sftp emits a Unix-like long
+# listing; the size column is the 5th whitespace-separated field,
+# preceded by the mode, link count, owner, and group.  We don't try
+# to parse the trailing date or filename — only the size.
+_SFTP_LS_LINE_RE = re.compile(
+    r"^[\-dlpcsb][rwxXstST\-]{9}\S*\s+\d+\s+\S+\s+\S+\s+(\d+)\s+"
+)
+
+
+def _parse_sftp_ls_sizes(stdout: str) -> List[int]:
+    """Extract byte sizes from sftp ``ls -l`` lines, preserving order.
+
+    Lines that look like a long-listing entry contribute one size;
+    every other line (the trigger-dir ``ls -d``, blank lines, banners)
+    is ignored, so the trigger-dir line falls out of the size list
+    naturally and is checked separately by the caller.
+    """
+    sizes: List[int] = []
+    for line in (stdout or "").splitlines():
+        m = _SFTP_LS_LINE_RE.match(line)
+        if m:
+            try:
+                sizes.append(int(m.group(1)))
+            except ValueError:
+                continue
+    return sizes
+
+
 @dataclass
 class UploadTask:
     """Represents an upload task in the queue"""
@@ -401,7 +463,7 @@ class SFTPUpload(UploadProtocol):
     def __init__(self, config: Dict):
         """
         Initialize SFTP uploader
-        
+
         Args:
             config: Upload configuration with keys:
                 - host: PSWS server hostname
@@ -409,12 +471,19 @@ class SFTPUpload(UploadProtocol):
                 - ssh.key_file: Path to SSH private key
                 - bandwidth_limit_kbps: Upload bandwidth limit (default: 100)
                 - psws_server_url: PSWS server URL (default from config['host'])
+                - verify_timeout_sec: SFTP verify-call timeout (default: 600)
         """
         self.host = config['host']
         self.user = config['user']  # PSWS station ID
         self.ssh_key = config.get('ssh', {}).get('key_file')
         self.bandwidth_limit_kbps = config.get('bandwidth_limit_kbps', 100)
         self.psws_server_url = config.get('psws_server_url', self.host)
+        self.verify_timeout_sec = int(config.get('verify_timeout_sec', 600))
+
+        # State carried from upload() to verify() so that verify can ask
+        # the remote server about the exact files we just sent.  Set by
+        # upload() on success; verify() refuses to confirm without it.
+        self._last_upload: Optional[Dict] = None
     
     def upload(self, local_path: Path, remote_path: str, metadata: Dict) -> bool:
         """
@@ -475,7 +544,13 @@ class SFTPUpload(UploadProtocol):
             if result.returncode != 0:
                 logger.error(f"sftp failed (exit {result.returncode}): {result.stderr}")
                 return False
-            
+
+            # Stash the context verify() needs to confirm the remote state.
+            self._last_upload = {
+                'local_path':   local_path,
+                'dataset_name': dataset_name,
+                'trigger_dir':  trigger_dir,
+            }
             logger.info(f"Upload successful: {local_path}")
             return True
         
@@ -562,18 +637,115 @@ class SFTPUpload(UploadProtocol):
             return False
     
     def verify(self, remote_path: str) -> bool:
-        """
-        Verify upload by checking if trigger directory exists
-        
+        """Verify the upload actually arrived intact.
+
+        Walks the local dataset, asks the PSWS SFTP server for an
+        ``ls -l`` of every uploaded leaf file (in submission order),
+        and confirms each remote entry's byte size matches local.
+        Also checks that the trigger directory was created.
+
+        Returns True only when every file matches; any missing file,
+        size mismatch, or sftp error returns False so the
+        ``UploadManager`` re-queues the task instead of allowing the
+        post-upload cleanup branch in ``cli.py grape daily`` to delete
+        local data that may not have actually arrived.
+
         Args:
-            remote_path: Not used - verification checks home directory
-            
-        Returns:
-            True if verified (always True for SFTP, PSWS will report issues)
+            remote_path: kept for the ``UploadProtocol`` interface;
+                actual paths are taken from the context stashed by
+                ``upload()`` so verify always asks about exactly what
+                upload() just sent.
         """
-        # PSWS will email if there are issues, so we assume success
-        # Alternative: could SSH and check for dataset directory
-        logger.info("SFTP upload verification: assuming success (PSWS will report issues)")
+        if not self._last_upload:
+            logger.error("verify: no upload context — refusing to confirm")
+            return False
+
+        local_path: Path = self._last_upload['local_path']
+        dataset_name: str = self._last_upload['dataset_name']
+        trigger_dir: str = self._last_upload['trigger_dir']
+
+        manifest = _build_remote_manifest(local_path, dataset_name)
+        if not manifest:
+            logger.error(f"verify: local dataset {local_path} has no files")
+            return False
+
+        # Build a single sftp batch: one `ls -l` per leaf file plus the
+        # trigger dir.  sftp doesn't support recursive ls, so we walk
+        # the manifest explicitly.  Order is preserved in the response,
+        # which is what _parse_sftp_ls_sizes relies on.
+        batch_cmds: List[str] = []
+        for remote_rel, _ in manifest:
+            batch_cmds.append(f'ls -l "{remote_rel}"')
+        batch_cmds.append(f'ls -d "{trigger_dir}"')
+        batch_cmds.append("quit")
+        batch_input = "\n".join(batch_cmds) + "\n"
+
+        sftp_cmd = [
+            "sftp", "-q", "-b", "-",
+            "-i", str(self.ssh_key),
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            f"{self.user}@{self.psws_server_url}",
+        ]
+
+        try:
+            result = subprocess.run(
+                sftp_cmd, input=batch_input,
+                capture_output=True, text=True,
+                timeout=self.verify_timeout_sec,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                f"verify: sftp ls timed out after "
+                f"{self.verify_timeout_sec}s ({len(manifest)} files)"
+            )
+            return False
+        except OSError as exc:
+            logger.error(f"verify: failed to spawn sftp: {exc}")
+            return False
+
+        # Any "not found" / "Can't ls" in stderr is a missing file.
+        # sftp prints to stderr per failed command but doesn't
+        # necessarily set a non-zero exit code, so we have to look.
+        stderr = (result.stderr or "")
+        for marker in ("Can't ls", "No such file", "Couldn't stat",
+                       "not found"):
+            if marker in stderr:
+                logger.error(
+                    f"verify: remote ls reported missing files; "
+                    f"sftp stderr:\n{stderr.strip()}"
+                )
+                return False
+
+        remote_sizes = _parse_sftp_ls_sizes(result.stdout)
+        if len(remote_sizes) < len(manifest):
+            logger.error(
+                f"verify: expected {len(manifest)} ls -l replies, "
+                f"got {len(remote_sizes)} — possible upload truncation"
+            )
+            return False
+
+        for (remote_rel, expected_size), actual_size in zip(
+                manifest, remote_sizes[:len(manifest)]):
+            if actual_size != expected_size:
+                logger.error(
+                    f"verify: size mismatch on {remote_rel}: "
+                    f"local={expected_size} remote={actual_size}"
+                )
+                return False
+
+        # Final ls was the trigger directory; verify it appeared.
+        if trigger_dir not in result.stdout:
+            logger.error(
+                f"verify: trigger directory {trigger_dir} not present "
+                f"in remote ls output"
+            )
+            return False
+
+        logger.info(
+            f"verify OK: {len(manifest)} files match by size, "
+            f"trigger dir present"
+        )
         return True
 
 

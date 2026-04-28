@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### GRAPE upload — real verify, no more silent data loss
+
+- **`SFTPUpload.verify()` was a hardcoded `return True`.** The "PSWS will email if there are issues" comment glossed over the consequence: a successful `sftp` exit code with corrupted bytes on the wire flipped `task.status` to `completed`, ran the `_mark_upload_complete` marker, and triggered the success callback that the `grape daily` orchestrator uses to `rmtree` the DRF upload package and unlink each channel's decimated `.bin` and `_meta.json`. A truncated upload could permanently lose a day's PSWS contribution.
+- **`SFTPUpload.verify()` now actually verifies.** It runs an SFTP batch that fetches `ls -l` for every leaf file the upload just transferred (in deterministic walk order) plus `ls -d` for the trigger directory. It returns False — re-queueing the task for retry — if any file is missing, any size doesn't match, the trigger dir is absent, or the sftp call times out / errors. The post-upload cleanup branch in `cli.py grape daily` is naturally gated on this because `upload_ok` only flips True when `failed == 0`.
+- **`SFTPUpload.upload()` now stashes upload context** (`local_path`, `dataset_name`, `trigger_dir`) only on a non-zero-exit success. Verify refuses to confirm without a fresh context, so a stale prior context from an unrelated run can't satisfy verify.
+- **Walk order is now deterministic.** `_build_remote_manifest()` sorts both directories and files in `os.walk`, closing a foot-gun where same-size-file swaps between paths could pass size-by-position checking on filesystems that return entries in arbitrary order.
+- **First automated test coverage of the GRAPE upload path** — `tests/test_grape_upload_verify.py` adds 14 tests covering the manifest builder, the sftp-output parser, and the verify contract (match, size mismatch, missing remote, missing trigger, sftp timeout, upload context lifecycle). Closes a gap that had let several "fix:" rounds of this code ship without a regression net.
+
 ### Unified journald logging (v6.12)
 
 - **systemd units** — `timestd-core-recorder.service`, `timestd-fusion.service`, and `timestd-physics.service` switched from `StandardOutput=append:/var/log/hf-timestd/<svc>.log` to `StandardOutput=journal` / `StandardError=journal` with `SyslogIdentifier=` set. Every `timestd-*` unit now routes through journald.
