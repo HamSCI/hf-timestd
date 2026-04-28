@@ -282,10 +282,12 @@ if [[ "$INTERACTIVE" == "true" ]]; then
         case $REPLY in
             1)
                 echo ""
-                NEW_CALL=$(prompt_value "  Callsign" "$CALLSIGN")
-                NEW_GRID=$(prompt_value "  Grid square" "$GRID")
-                NEW_LAT=$(prompt_value "  Latitude" "$LAT")
-                NEW_LON=$(prompt_value "  Longitude" "$LON")
+                # Defaults: existing config wins; sigmond's commons fill in
+                # any field that's empty in the live config (CONTRACT-v0.5 §14).
+                NEW_CALL=$(prompt_value "  Callsign" "${CALLSIGN:-${STATION_CALL:-}}")
+                NEW_GRID=$(prompt_value "  Grid square" "${GRID:-${STATION_GRID:-}}")
+                NEW_LAT=$(prompt_value "  Latitude"  "${LAT:-${STATION_LAT:-}}")
+                NEW_LON=$(prompt_value "  Longitude" "${LON:-${STATION_LON:-}}")
                 
                 if [[ "$NEW_CALL" != "$CALLSIGN" ]] || [[ "$NEW_GRID" != "$GRID" ]] || \
                    [[ "$NEW_LAT" != "$LAT" ]] || [[ "$NEW_LON" != "$LON" ]]; then

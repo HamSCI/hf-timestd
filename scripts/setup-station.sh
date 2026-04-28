@@ -207,7 +207,9 @@ echo ""
 echo -e "${BOLD}${BLUE}━━━ Section 1: Station Identity ━━━${NC}"
 echo ""
 
-prompt CALLSIGN "Callsign" "" "Your amateur radio callsign (e.g. W1ABC)" true
+# Defaults from sigmond's env var bag (CONTRACT-v0.5 §14) when present.
+# Empty otherwise; existing standalone behavior is preserved.
+prompt CALLSIGN "Callsign" "${STATION_CALL:-}" "Your amateur radio callsign (e.g. W1ABC)" true
 echo ""
 echo -e "  ${DIM}Location entry method:${NC}"
 prompt_choice LOCATION_MODE "Select location input" \
@@ -219,11 +221,11 @@ LATITUDE=""
 LONGITUDE=""
 
 if [[ "$LOCATION_MODE" == "grid" ]]; then
-    prompt GRID_SQUARE "Grid square" "" "Maidenhead locator, 6 or 10 chars (e.g. FN42ab12cd). More precision is better." true
+    prompt GRID_SQUARE "Grid square" "${STATION_GRID:-}" "Maidenhead locator, 6 or 10 chars (e.g. FN42ab12cd). More precision is better." true
     # Lat/Lon will be derived from grid in the config generator.
 else
-    prompt LATITUDE "Latitude" "" "Decimal degrees, positive = North. More precision is better." true
-    prompt LONGITUDE "Longitude" "" "Decimal degrees, positive = East, negative = West. More precision is better." true
+    prompt LATITUDE "Latitude" "${STATION_LAT:-}" "Decimal degrees, positive = North. More precision is better." true
+    prompt LONGITUDE "Longitude" "${STATION_LON:-}" "Decimal degrees, positive = East, negative = West. More precision is better." true
     # Grid will be derived from lat/lon in the config generator.
 fi
 
@@ -259,7 +261,7 @@ echo ""
 echo -e "${BOLD}${BLUE}━━━ Section 3: Radio Source (ka9q-radio) ━━━${NC}"
 echo ""
 
-prompt KA9Q_STATUS "ka9q-radio status address" "" \
+prompt KA9Q_STATUS "ka9q-radio status address" "${SIGMOND_RADIOD_STATUS:-}" \
     "Multicast address or mDNS name (e.g. hf-status.local or 239.x.x.x)" true
 
 echo ""

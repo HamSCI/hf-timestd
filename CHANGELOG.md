@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Sigmond configurations contract v0.5 §14 — wrapper
+
+- **`deploy.toml [contract.config]`** advertises the existing `setup-station.sh` (init) and `config-review.sh` (edit) scripts to sigmond's `smd config init|edit hf-timestd` dispatcher. No rewrite — sigmond just spawns the existing wizards, with the §14.3 env var bag (STATION_*, SIGMOND_RADIOD_STATUS, SIGMOND_INSTANCE) populated from `coordination.toml`. Operators running standalone get unchanged behavior; operators running under sigmond get callsign/grid/radiod-status pre-filled as prompt defaults.
+- **`scripts/setup-station.sh`** uses the env vars as `prompt` defaults (5 one-line changes — `${STATION_CALL:-}`, `${STATION_GRID:-}`, `${STATION_LAT:-}`, `${STATION_LON:-}`, `${SIGMOND_RADIOD_STATUS:-}`). When env vars are unset (standalone invocation), prompts are exactly as before.
+- **`scripts/config-review.sh`** uses the env vars as fallback defaults — existing config values still win, but missing fields fall back to `${CALLSIGN:-${STATION_CALL:-}}` etc. so newly-introduced template fields surface a sensible default.
+
 ### GRAPE decimated buffer — durable writes survive power loss
 
 - **The bug.** `DecimatedBuffer.write_minute()` did `seek + write` of 4800 bytes per minute under an exclusive `flock` and returned, with no `fsync`. The bytes lived in the kernel's page cache; a power loss before the next page-cache writeback (typically 5–30s on Linux) would lose the write while the in-memory metadata cache still believed the minute was valid. Worse, `_save_metadata()` opened the JSON catalog in `'w'` mode and dumped directly into it — a crash mid-write left a truncated JSON that `_load_metadata()` silently discarded (catching the parse error and returning a fresh empty `DayMetadata`), erasing every prior minute record for that day from the operator's view.

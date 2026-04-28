@@ -14,6 +14,16 @@ contract_version = "0.4"
 license          = "MIT"
 
 # ---------------------------------------------------------------------------
+# Configuration interview (CONTRACT-v0.5 §14).  Sigmond invokes these when
+# the operator runs `smd config init|edit hf-timestd`.  The scripts honor
+# the §14.3 env var bag (STATION_*, SIGMOND_*) as prompt defaults.
+# ---------------------------------------------------------------------------
+
+[contract.config]
+init = "scripts/setup-station.sh"
+edit = "scripts/config-review.sh"
+
+# ---------------------------------------------------------------------------
 # Build phase: install Python package into a venv at /opt/hf-timestd/venv.
 # Sigmond invokes these in order from the repo root.
 # ---------------------------------------------------------------------------
