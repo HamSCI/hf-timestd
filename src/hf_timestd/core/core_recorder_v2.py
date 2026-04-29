@@ -51,6 +51,7 @@ from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, E
 
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
+from .quality_snapshot import QualitySnapshotWriter
 from .timing_calibrator import TimingCalibrator
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
 # The recorder now always archives immediately. MetrologyEngine's fusion_state
@@ -454,16 +455,24 @@ class CoreRecorderV2:
             derived_max_days=derived_max_days,
         )
         
+        # Quality snapshot writer — surfaces per-recorder StreamQuality
+        # to /run/hf-timestd/quality.json for sigmond's `hf-timestd
+        # quality --json` CLI to read.  Intentionally driven from the
+        # main loop (not a thread) so a hung loop produces a stale
+        # snapshot, which sigmond uses as a daemon-health signal.
+        quality_writer = QualitySnapshotWriter(self.recorders)
+
         # Main loop
         last_status_time = 0
         last_health_check = 0
         last_quota_check = 0
-        
+        last_quality_tick = 0
+
         try:
             while self.running:
                 time.sleep(1)
                 now = time.time()
-                
+
                 # Update NTP status (every 10 seconds)
                 if now - last_status_time >= 10:
                     self._update_ntp_status()
@@ -494,6 +503,11 @@ class CoreRecorderV2:
                 if now - last_quota_check >= 300:
                     self._enforce_quota()
                     last_quota_check = now
+
+                # Quality snapshot for sigmond (every 5 seconds)
+                if now - last_quality_tick >= 5:
+                    quality_writer.tick()
+                    last_quality_tick = now
         
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")

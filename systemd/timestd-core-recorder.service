@@ -24,6 +24,11 @@ Environment=MALLOC_ARENA_MAX=2
 # Working directory (production installation path)
 WorkingDirectory=/opt/hf-timestd
 
+# /run/hf-timestd — tmpfs created by systemd, owned by User=timestd,
+# cleaned on stop.  Used by the QualitySnapshotWriter to write
+# quality.json for sigmond's `hf-timestd quality --json` to read.
+RuntimeDirectory=hf-timestd
+
 # Ensure directories exist and have correct permissions
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/raw_buffer
 ExecStartPre=+/bin/mkdir -p /dev/shm/timestd/raw_buffer

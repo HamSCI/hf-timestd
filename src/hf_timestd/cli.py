@@ -285,6 +285,47 @@ def _handle_validate_contract(args):
     sys.exit(0 if ok else 1)
 
 
+def _handle_quality(args):
+    """`hf-timestd quality --json` — sigmond-readable runtime stream quality.
+
+    Reads the snapshot the running daemon writes via QualitySnapshotWriter
+    (every ~5s, atomic).  Always exits 0 — a missing or stale snapshot
+    is not a CLI failure, just data the consumer of the JSON should
+    interpret.  Caller distinguishes via:
+
+      * payload["error"] == "snapshot_missing"  → daemon never started
+      * payload["stale_seconds"] > expected     → daemon hung / stopped
+
+    See sigmond/tasks/plan-stream-quality-surface.md for the contract.
+    """
+    snapshot_path = Path(getattr(args, 'snapshot_path', None) or
+                         '/run/hf-timestd/quality.json')
+
+    if not snapshot_path.exists():
+        print(json.dumps({
+            "client":        "hf-timestd",
+            "error":         "snapshot_missing",
+            "snapshot_path": str(snapshot_path),
+        }, indent=2))
+        return
+
+    try:
+        payload = json.loads(snapshot_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(json.dumps({
+            "client":        "hf-timestd",
+            "error":         f"snapshot_unreadable: {e.__class__.__name__}",
+            "snapshot_path": str(snapshot_path),
+        }, indent=2))
+        return
+
+    captured_at = float(payload.get("captured_at", 0.0) or 0.0)
+    payload["stale_seconds"] = round(time.time() - captured_at, 2) \
+        if captured_at > 0 else None
+    payload["snapshot_path"] = str(snapshot_path)
+    print(json.dumps(payload, indent=2))
+
+
 def _handle_status(args):
     """
     Check pipeline health.  Returns JSON and sets exit code:
@@ -650,6 +691,14 @@ def main():
     validate_parser.add_argument('--config', '-c',
         help='Configuration file path (default: $TIMESTD_CONFIG or /etc/hf-timestd/timestd-config.toml)')
     
+    # Quality command — sigmond client-contract surface (runtime data)
+    quality_parser = subparsers.add_parser('quality',
+        help='Emit per-recorder StreamQuality snapshot (for sigmond)')
+    quality_parser.add_argument('--json', action='store_true', default=True,
+        help='JSON output (default and only mode)')
+    quality_parser.add_argument('--snapshot-path',
+        help='Path to the snapshot file (default: /run/hf-timestd/quality.json)')
+
     # Status command (machine-readable health check)
     status_parser = subparsers.add_parser('status',
         help='Show pipeline health status (machine-readable JSON)',
@@ -953,6 +1002,8 @@ Per-service overrides in [services] take precedence over the profile.
         _handle_inventory(args)
     elif args.command == 'validate':
         _handle_validate_contract(args)
+    elif args.command == 'quality':
+        _handle_quality(args)
     elif args.command == 'status':
         _handle_status(args)
     elif args.command == 'daemon':
