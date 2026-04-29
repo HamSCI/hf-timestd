@@ -117,9 +117,9 @@ wheel snapshot, no `/opt` source copy, and no drift.
 
 ```bash
 # 1. Clone canonical repo to a path the timestd service user can read
-sudo git clone https://github.com/mijahauan/hf-timestd.git /opt/git/hf-timestd
-sudo chown -R timestd:timestd /opt/git/hf-timestd
-cd /opt/git/hf-timestd
+sudo git clone https://github.com/mijahauan/hf-timestd.git /opt/git/sigmond/hf-timestd
+sudo chown -R timestd:timestd /opt/git/sigmond/hf-timestd
+cd /opt/git/sigmond/hf-timestd
 
 # 2. First-run install (apt deps, user, dirs, venv, services)
 sudo ./scripts/install.sh
@@ -166,7 +166,7 @@ sudo ./scripts/start-services.sh --status
 ## Updating
 
 ```bash
-cd /opt/git/hf-timestd
+cd /opt/git/sigmond/hf-timestd
 sudo ./scripts/deploy.sh --pull
 ```
 
@@ -195,7 +195,7 @@ After deploy, you can confirm what's running matches the repo:
 
 ```bash
 hf-timestd version --json | jq .git
-git -C /opt/git/hf-timestd rev-parse --short HEAD
+git -C /opt/git/sigmond/hf-timestd rev-parse --short HEAD
 ```
 
 Both should print the same short SHA.

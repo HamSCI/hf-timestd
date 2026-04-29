@@ -29,7 +29,7 @@
 # editable install (pip install -e .).  After deploy.sh, what is running
 # in production is byte-identical to `git rev-parse HEAD` here.  No
 # wheel snapshot, no /opt copy, no drift.  The canonical repo lives at
-# /opt/git/hf-timestd so the service user can reach it without relying
+# /opt/git/sigmond/hf-timestd so the service user can reach it without relying
 # on home-directory permissions.
 #
 # Usage:
@@ -163,7 +163,7 @@ fi
 # (e.g. repo cloned under /home/<someuser> with mode 700), the install
 # succeeds as root but every systemd-managed import fails at runtime.
 # We hit this on bee3 (/home/mjh 700) and resolved it by relocating
-# the canonical repo to /opt/git/hf-timestd.  Catch the trap here
+# the canonical repo to /opt/git/sigmond/hf-timestd.  Catch the trap here
 # before pip writes the broken .pth file.
 log_step "Step 3: source-tree traversability as $SERVICE_USER"
 if ! id -u "$SERVICE_USER" &>/dev/null; then
@@ -181,7 +181,7 @@ else
         log_error "(typically a home directory with mode 700)."
         log_error ""
         log_error "fix, in order of preference:"
-        log_error "  1. relocate the canonical repo to /opt/git/hf-timestd"
+        log_error "  1. relocate the canonical repo to /opt/git/sigmond/hf-timestd"
         log_error "     (the 'Pattern A' layout used on bee3 — symlink"
         log_error "     ~/git/hf-timestd back for developer convenience)"
         log_error "  2. chmod g+rx the parent directories and add"

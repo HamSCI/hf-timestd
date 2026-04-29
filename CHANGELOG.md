@@ -80,7 +80,7 @@ removed.
 
 - **Pattern A editable install** — `scripts/install.sh` (first-run)
   and `scripts/deploy.sh` (reload).  Editable `pip install -e
-  /opt/git/hf-timestd` so production runs byte-identically to
+  /opt/git/sigmond/hf-timestd` so production runs byte-identically to
   `git rev-parse HEAD`.  No more wheel-snapshot drift.
 - **Ring-buffer IPC (Phase 1 + Phase 2)** — recorder publishes IQ
   into a per-channel SysV shared-memory segment via a seqlock-guarded

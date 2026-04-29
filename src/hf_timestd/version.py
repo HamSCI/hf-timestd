@@ -48,7 +48,7 @@ DATA_CONTRACT_VERSION = "2025-12-08-v1"
 # =============================================================================
 #
 # Pattern A deployment means the venv imports source files directly from
-# /opt/git/hf-timestd via an editable install.  That makes it possible
+# /opt/git/sigmond/hf-timestd via an editable install.  That makes it possible
 # (and useful) to ask the running code "what commit are you?" — the
 # answer comes from `git rev-parse HEAD` of the directory the source
 # files actually live in.  Sigmond uses this to detect drift between

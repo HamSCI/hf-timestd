@@ -113,10 +113,10 @@ The ionosphere is the dominant error in all cases. Oscillator quality affects ti
 
 ```bash
 # Clone canonical repo (must be reachable by the timestd service user;
-# typical layout is /opt/git/hf-timestd, owned by timestd:timestd)
-sudo git clone https://github.com/mijahauan/hf-timestd.git /opt/git/hf-timestd
-sudo chown -R timestd:timestd /opt/git/hf-timestd
-cd /opt/git/hf-timestd
+# typical layout is /opt/git/sigmond/hf-timestd, owned by timestd:timestd)
+sudo git clone https://github.com/mijahauan/hf-timestd.git /opt/git/sigmond/hf-timestd
+sudo chown -R timestd:timestd /opt/git/sigmond/hf-timestd
+cd /opt/git/sigmond/hf-timestd
 
 # First-run install (apt deps, user, dirs, venv, services)
 sudo ./scripts/install.sh
@@ -141,7 +141,7 @@ python -m hf_timestd daemon --config config/timestd-config.toml
 ### Updating (Pattern A — editable venv install)
 
 ```bash
-cd /opt/git/hf-timestd
+cd /opt/git/sigmond/hf-timestd
 git pull                              # or use deploy.sh --pull
 sudo ./scripts/deploy.sh
 ```
