@@ -104,17 +104,19 @@ class QualitySnapshotWriter:
             entry["no_data"] = True
             return entry
 
-        # Cumulative counters from StreamQuality
+        # Cumulative counters from StreamQuality.  Internal keys drop
+        # any "total_" prefix that ka9q-python applied — the suffix
+        # below makes the public schema "<name>_total", and we don't
+        # want "total_X_total" doubling-up.
         cur = {
             "packets_received":    int(getattr(q, "rtp_packets_received", 0) or 0),
             "packets_lost":        int(getattr(q, "rtp_packets_lost", 0) or 0),
             "packets_late":        int(getattr(q, "rtp_packets_late", 0) or 0),
             "packets_duplicate":   int(getattr(q, "rtp_packets_duplicate", 0) or 0),
             "packets_resequenced": int(getattr(q, "rtp_packets_resequenced", 0) or 0),
-            "total_gaps_filled":   int(getattr(q, "total_gaps_filled", 0) or 0),
-            "total_gap_events":    int(getattr(q, "total_gap_events", 0) or 0),
-            "total_samples_delivered":
-                int(getattr(q, "total_samples_delivered", 0) or 0),
+            "gaps_filled":         int(getattr(q, "total_gaps_filled", 0) or 0),
+            "gap_events":          int(getattr(q, "total_gap_events", 0) or 0),
+            "samples_delivered":   int(getattr(q, "total_samples_delivered", 0) or 0),
         }
         entry.update({f"{k}_total": v for k, v in cur.items()})
         entry["completeness_pct"] = float(

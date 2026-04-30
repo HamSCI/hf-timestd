@@ -91,6 +91,29 @@ class PayloadShapeTests(unittest.TestCase):
         self.assertNotIn("packets_lost_total", r)
         self.assertNotIn("completeness_pct", r)
 
+    def test_no_double_total_in_field_names(self):
+        # Regression: ka9q-python's StreamQuality already prefixes some
+        # cumulative counters with "total_" (total_gaps_filled,
+        # total_gap_events, total_samples_delivered).  The writer must
+        # NOT produce "total_*_total" doubled names — schema is
+        # cumulative-suffix only.
+        recs = {"X": _recorder("X", 1, 1, quality=_quality(
+            total_gaps_filled=2400, total_gap_events=5,
+            total_samples_delivered=86400000))}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "q.json"
+            QualitySnapshotWriter(recs, path=str(path),
+                                  clock=lambda: 100.0).tick()
+            r = json.loads(path.read_text())["recorders"][0]
+        # New, clean names exist:
+        self.assertEqual(r["gaps_filled_total"], 2400)
+        self.assertEqual(r["gap_events_total"], 5)
+        self.assertEqual(r["samples_delivered_total"], 86400000)
+        # Old, doubled names must not:
+        self.assertNotIn("total_gaps_filled_total", r)
+        self.assertNotIn("total_gap_events_total", r)
+        self.assertNotIn("total_samples_delivered_total", r)
+
     def test_uptime_computed_from_session_start_time(self):
         recs = {"X": _recorder("X", 1, 1,
                                session_start_time=50.0,
