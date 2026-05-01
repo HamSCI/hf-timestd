@@ -153,6 +153,13 @@ units = [
     "timestd-radiod-monitor.service",
     "timestd-web-api.service",
     "timestd-vtec.service",
+    # Timers — listed here so `smd start/stop` toggles them too.
+    "timestd-chrony-monitor.timer",
+    "timestd-ionex-download.timer",
+    "timestd-iono-reanalysis.timer",
+    "timestd-pipeline-watchdog.timer",
+    "grape-daily.timer",
+    "grape-upload-retry.timer",
 ]
 templated_units = [
     "timestd-metrology@.service",
