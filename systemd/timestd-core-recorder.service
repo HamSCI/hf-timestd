@@ -57,7 +57,6 @@ SyslogIdentifier=timestd-core-recorder
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
-CPUAffinity=0-7
 # Hard memory cap only.  MemoryHigh was removed after a first deploy
 # attempt where setting it to 3G throttled the recorder hard enough to
 # miss the systemd watchdog (180s) with the ring buffer in play — RSS

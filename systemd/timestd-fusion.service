@@ -62,7 +62,6 @@ ExecStartPost=+/bin/sh -c 'sleep 3 && systemctl restart --no-block chrony 2>/dev
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
-CPUAffinity=0-7
 MemoryMax=800M
 MemoryHigh=600M
 MemorySwapMax=0

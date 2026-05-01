@@ -29,7 +29,6 @@ ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5
-CPUAffinity=0-7
 MemoryHigh=3G
 MemoryMax=4G
 MemorySwapMax=0

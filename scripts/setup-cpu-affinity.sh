@@ -25,6 +25,19 @@
 
 set -e
 
+# Skip when sigmond owns CPU affinity.  TIMESTD_SKIP_AFFINITY=1 is the
+# explicit override; presence of /etc/sigmond/topology.toml is the
+# autodetect signal (sigmond is installed).  Either short-circuits this
+# script — sigmond's smd-cpu-affinity.conf drop-ins will own radiod
+# pinning and the timestd-radiod-affinity.path watcher won't be
+# installed (so it can't fight sigmond's drop-in on the next radiod
+# restart).
+if [ "${TIMESTD_SKIP_AFFINITY:-0}" = "1" ] || [ -f /etc/sigmond/topology.toml ]; then
+    echo "setup-cpu-affinity: skipping (sigmond manages CPU affinity for managed services)"
+    exit 0
+fi
+
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

@@ -59,7 +59,6 @@ MemorySwapMax=0
 OOMScoreAdjust=-500
 
 # Pin to first 8 logical CPUs (same as old taskset 0x00ff)
-CPUAffinity=0 1 2 3 4 5 6 7
 
 # Limit each worker to 50% of one core; 9 workers × 50% = 450% max
 # Leaves headroom for radiod (~110%) and system on 800% total
