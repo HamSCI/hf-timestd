@@ -151,6 +151,20 @@ def _handle_inventory(args):
                 # Standalone fallback: clients can read these from their own
                 # config file when sigmond/coordination.env are absent.
                 'radiod_status_dns':           ka9q.get('status_address', ''),
+                # CONTRACT-v0.5 §16.3: declare data source.  hf-timestd
+                # uses ka9q-python; radiod_id is null at inventory time
+                # because sigmond resolves it via coordination.toml.
+                'data_path': {
+                    'kind':      'radiod-ka9q-python',
+                    'radiod_id': None,
+                },
+                # CONTRACT-v0.5 §3 amendment + §13.1: per-instance
+                # control-socket path.  hf-timestd already exposes a web
+                # API (port 8000) for deep debug per §13.5; the unix
+                # socket is a parallel surface that will be served when
+                # the §13 control surface phase ships.  The path here is
+                # advisory.
+                'control_socket': '/run/hf-timestd/control.sock',
             })
 
     try:
@@ -164,7 +178,7 @@ def _handle_inventory(args):
         'client':           'hf-timestd',
         'version':          version,
         'git':              GIT_INFO,
-        'contract_version': '0.4',
+        'contract_version': '0.5',
         'config_path':      str(config_path),
         'log_paths': {
             # As of v6.12 every timestd-* unit writes to journald.
