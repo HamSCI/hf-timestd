@@ -166,6 +166,14 @@ class BpskPpsCalibrator:
         samples bracketing the BPSK transition. Removes the 1/2-sample
         quantization floor; new floor is SNR-bounded. Default True.
         PATCH (hf-timestd): added by local override; pending upstream PR.
+    amplitude_gate_fraction : float
+        Per-batch amplitude gate: only consider phase-jump events for
+        edge detection when both bracketing samples have ``|s|`` above
+        this fraction of the batch's median amplitude.  Default 0.5
+        is permissive but eliminates the noise-edge floor we observe
+        at higher sample rates (15-33 % noise rate without the gate
+        on bee1; <1 % with).  Set to 0.0 to disable.
+        PATCH (hf-timestd): added by local override; pending upstream PR.
     """
 
     def __init__(
@@ -176,12 +184,17 @@ class BpskPpsCalibrator:
         min_pulse_fraction: float = 0.99,
         enable_notch_500hz: bool = False,
         enable_fractional_interpolation: bool = True,
+        amplitude_gate_fraction: float = 0.05,
     ):
         self.sample_rate = sample_rate
         self.consecutive_required = consecutive_required
         self.edge_tolerance_samples = edge_tolerance_samples
         self.min_pulse_samples = int(sample_rate * min_pulse_fraction)
         self.enable_fractional_interpolation = bool(enable_fractional_interpolation)
+        self.amplitude_gate_fraction = float(amplitude_gate_fraction)
+        # Cross-batch amplitude tracking for the gate: we need the
+        # previous sample's amplitude when i == 0 of a new batch.
+        self._last_amp_sq: Optional[float] = None
 
         # Edge detection state
         self._last_angle: Optional[float] = None
@@ -217,6 +230,7 @@ class BpskPpsCalibrator:
         self.pps_noise = 0
         self.pps_consecutive = 0
         self._chain_delay_samples = None
+        self._last_amp_sq = None
         if self._notch is not None:
             self._notch = NotchFilter500Hz(self.sample_rate)
 
@@ -251,6 +265,17 @@ class BpskPpsCalibrator:
         # Compute per-sample phase angle in degrees
         angles = np.degrees(np.angle(samples))
 
+        # PATCH (hf-timestd): pre-compute |s|^2 per sample for the
+        # amplitude gate.  Using batch median as a robust signal-level
+        # estimate — most samples are at signal amplitude; transitions
+        # and noise dips are a small minority that the median rejects.
+        amps_sq = (samples.real.astype(np.float64) ** 2
+                   + samples.imag.astype(np.float64) ** 2)
+        if self.amplitude_gate_fraction > 0.0 and len(amps_sq) > 0:
+            amp_threshold = self.amplitude_gate_fraction * float(np.median(amps_sq))
+        else:
+            amp_threshold = 0.0
+
         sr = self.sample_rate
 
         for i in range(len(angles)):
@@ -258,7 +283,20 @@ class BpskPpsCalibrator:
             # RTP timestamp for this specific sample
             ts = (rtp_timestamp + i) & 0xFFFFFFFF
 
-            if self._last_angle is not None:
+            # PATCH (hf-timestd): amplitude gate.  Phase angle of a
+            # low-amplitude sample is essentially random; gating the
+            # edge classification on both bracketing samples having
+            # signal-level amplitude eliminates the noise-edge floor
+            # that otherwise cascades through ``_last_edge_rtp``.
+            cur_amp_sq = float(amps_sq[i])
+            prev_amp_sq = (float(amps_sq[i - 1]) if i > 0
+                           else (self._last_amp_sq if self._last_amp_sq is not None else 0.0))
+            amplitude_ok = (
+                amp_threshold == 0.0
+                or (cur_amp_sq >= amp_threshold and prev_amp_sq >= amp_threshold)
+            )
+
+            if self._last_angle is not None and amplitude_ok:
                 # Phase difference between consecutive samples
                 angle_diff = angle - self._last_angle
                 # Wrap to [-360, 360] -- not strictly necessary but matches
@@ -328,6 +366,7 @@ class BpskPpsCalibrator:
                     self._last_edge_rtp = ts
 
             self._last_angle = angle
+            self._last_amp_sq = float(amps_sq[i])
 
         self._sample_counter += len(angles)
 
