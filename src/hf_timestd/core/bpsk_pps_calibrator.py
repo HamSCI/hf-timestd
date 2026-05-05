@@ -174,6 +174,24 @@ class BpskPpsCalibrator:
         at higher sample rates (15-33 % noise rate without the gate
         on bee1; <1 % with).  Set to 0.0 to disable.
         PATCH (hf-timestd): added by local override; pending upstream PR.
+    cascade_tolerance_ms : float
+        Once acquired (pps_consecutive has reached consecutive_required
+        at least once), the reference ``_last_edge_rtp`` only updates on
+        edges within this many milliseconds of the current reference.
+        Edges further away are likely noise-induced cascade jumps and
+        leaving the reference where it is prevents subsequent valid
+        edges from being misclassified.  Wide enough to accommodate the
+        natural per-edge drift of the calibrator's chosen sample (~0.02
+        sample/edge observed on bee1) and gentle multi-minute drift
+        (~2.5 ms over 30 min); narrow enough to reject random-position
+        noise jumps (typically tens to hundreds of ms).  Default 3 ms
+        gives ~3000x margin over per-edge drift.  During acquisition
+        (before first lock), behaviour is unchanged from the original
+        algorithm: every detected edge updates the reference, so the
+        algorithm's bootstrap walk can find consistent edge positions.
+        Set to a very large value (e.g., 10000) to effectively disable
+        and revert to original always-update behaviour.
+        PATCH (hf-timestd): added by local override; pending upstream PR.
     """
 
     def __init__(
@@ -185,6 +203,7 @@ class BpskPpsCalibrator:
         enable_notch_500hz: bool = False,
         enable_fractional_interpolation: bool = True,
         amplitude_gate_fraction: float = 0.05,
+        cascade_tolerance_ms: float = 3.0,
     ):
         self.sample_rate = sample_rate
         self.consecutive_required = consecutive_required
@@ -192,9 +211,26 @@ class BpskPpsCalibrator:
         self.min_pulse_samples = int(sample_rate * min_pulse_fraction)
         self.enable_fractional_interpolation = bool(enable_fractional_interpolation)
         self.amplitude_gate_fraction = float(amplitude_gate_fraction)
+        # Cascade-protection: convert ms to samples once at construction.
+        # Used in the TRACKING phase (post-acquisition) to bound how far
+        # _last_edge_rtp is allowed to drift per update.
+        self.cascade_tolerance_samples = max(
+            1, int(round(cascade_tolerance_ms * sample_rate / 1000.0))
+        )
         # Cross-batch amplitude tracking for the gate: we need the
         # previous sample's amplitude when i == 0 of a new batch.
         self._last_amp_sq: Optional[float] = None
+        # Acquisition vs tracking state.  False = ACQUIRING (any
+        # detected edge updates _last_edge_rtp — original bootstrap
+        # behaviour, lets the algorithm walk the reference toward
+        # consistent positions when nothing is anchored yet).  True =
+        # TRACKING (only edges within cascade_tolerance_samples update
+        # _last_edge_rtp — accommodates natural calibrator drift while
+        # blocking noise-edge cascade jumps).  Transitions to True the
+        # first time pps_consecutive reaches consecutive_required;
+        # never falls back automatically — explicit reset() to
+        # re-acquire if signal conditions change.
+        self._acquired: bool = False
 
         # Edge detection state
         self._last_angle: Optional[float] = None
@@ -231,6 +267,7 @@ class BpskPpsCalibrator:
         self.pps_consecutive = 0
         self._chain_delay_samples = None
         self._last_amp_sq = None
+        self._acquired = False
         if self._notch is not None:
             self._notch = NotchFilter500Hz(self.sample_rate)
 
@@ -363,7 +400,41 @@ class BpskPpsCalibrator:
                         if self._chain_delay_samples > sr / 2:
                             self._chain_delay_samples -= sr
 
-                    self._last_edge_rtp = ts
+                        # PATCH (hf-timestd): once we hit lock for the
+                        # first time, transition to TRACKING.  Cascade
+                        # protection on the reference update kicks in
+                        # below; until then the ACQUIRING bootstrap
+                        # behaviour applies.
+                        if (not self._acquired
+                                and self.pps_consecutive >= self.consecutive_required):
+                            self._acquired = True
+
+                    # PATCH (hf-timestd): cascade-protected reference
+                    # update.  ACQUIRING (not yet acquired): always
+                    # update — original bootstrap behaviour walks the
+                    # reference toward consistent positions.  TRACKING
+                    # (acquired): only update on edges within
+                    # cascade_tolerance_samples of the current reference
+                    # AND respecting the min_pulse_samples gap.  This
+                    # accommodates the natural ~0.02-sample-per-edge
+                    # drift while blocking noise-edge cascade jumps
+                    # (typically tens to hundreds of ms away).
+                    if not self._acquired:
+                        self._last_edge_rtp = ts
+                    elif self._last_edge_rtp is not None:
+                        delta_for_ref = _signed_mod(
+                            (ts % sr) - (self._last_edge_rtp % sr), sr
+                        )
+                        gap_for_ref = (ts - self._last_edge_rtp) & 0xFFFFFFFF
+                        if gap_for_ref > 0x7FFFFFFF:
+                            gap_for_ref -= 0x100000000
+                        if (abs(delta_for_ref) <= self.cascade_tolerance_samples
+                                and abs(gap_for_ref) >= self.min_pulse_samples):
+                            self._last_edge_rtp = ts
+                    else:
+                        # Edge case: TRACKING with no reference (after
+                        # reset() during TRACKING) — accept first edge.
+                        self._last_edge_rtp = ts
 
             self._last_angle = angle
             self._last_amp_sq = float(amps_sq[i])
