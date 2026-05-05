@@ -20,6 +20,7 @@ from hf_timestd.core.authority_manager import (
     Probe,
 )
 from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator
+from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
 from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
 from hf_timestd.core.chrony_stepper import ChronyStepper
 from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
@@ -113,6 +114,13 @@ def build_authority_runner_from_config(
         upgrade_hysteresis = 3
         a_level = "A1"           # "A1" (GPSDO) or "A0"
 
+        [timing.authority_manager.t6]
+        enabled = true           # opt-in — only sites with a BPSK PPS injector
+        # status_path = "/var/lib/timestd/status/core-recorder-status.json"
+        # freshness_sec = 60.0   # max age of core-recorder-status.json
+        # min_consecutive = 30   # require this many clean PPS edges
+        # sigma_ms = 0.050       # published T6 uncertainty (50 µs default)
+
         [timing.authority_manager.t5]
         refid = "GPS"            # optional — default: any refclock
 
@@ -205,6 +213,7 @@ def build_authority_runner_from_config(
     t3_cfg = auth_cfg.get("t3", {}) or {}
     t4_cfg = auth_cfg.get("t4", {}) or {}
     t5_cfg = auth_cfg.get("t5", {}) or {}
+    t6_cfg = auth_cfg.get("t6", {}) or {}
     t2_cfg = auth_cfg.get("t2", {}) or {}
 
     t4_peers: List[str] = list(t4_cfg.get("peers", []) or [])
@@ -216,6 +225,16 @@ def build_authority_runner_from_config(
             min_stations=int(t3_cfg.get("min_stations", 2)),
         ),
     ]
+
+    if t6_cfg.get("enabled"):
+        probes.append(BpskPpsProbe(
+            status_path=Path(t6_cfg.get(
+                "status_path", "/var/lib/timestd/status/core-recorder-status.json",
+            )),
+            freshness_sec=float(t6_cfg.get("freshness_sec", 60.0)),
+            min_consecutive=int(t6_cfg.get("min_consecutive", 30)),
+            sigma_ms=float(t6_cfg.get("sigma_ms", 0.050)),
+        ))
 
     if "refid" in t5_cfg or t5_cfg.get("enabled"):
         probes.append(ChronyTrackingProbe(

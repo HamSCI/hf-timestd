@@ -247,6 +247,29 @@ class CoreRecorderV2:
         # deploy-coordinated commit.
         self._t6_calibrator = None
         self._t6_stream = None  # RadiodStream for BPSK channel
+        # T6 channel's ChannelInfo — saved during _start_t6_stream so that
+        # rtp_to_wallclock can compute wall-time of detected edges for the
+        # TSL3 SHM feed below.
+        self._t6_channel_info = None
+        # SHM unit 2 (TSL3): direct BPSK PPS feed to chrony.  Bypasses
+        # fusion's tick-detection uncertainty so chrony can see BPSK
+        # precision at its own quantization-limited floor (~31 us at
+        # 16 kHz) rather than the HF-fusion floor (~150 us).
+        self._t6_shm = None
+        self._t6_last_pushed_rtp = None
+        # Wrap-rejection guard: the BPSK calibrator algorithm has a known
+        # cascade where a noise edge near the half-second mark from a real
+        # edge displaces the reference and causes chain_delay to wrap by
+        # ~half a second (62.5 us natural sample wobble vs 322 ms wrap).
+        # We track the last accepted chain_delay and reject jumps > 1 ms,
+        # keeping the previously-good correction in place. Reset to None
+        # on calibrator restart so the first stable lock is always accepted.
+        self._t6_last_chain_delay_ns = None
+        self._t6_wrap_rejections = 0
+        # Set at first stable lock from system-clock comparison; constant
+        # offset added to every calibrator chain_delay report so all
+        # measurements share a common disambiguated reference frame.
+        self._t6_disambiguation_ns = 0
         self._t6_config = config.get('timing', {}).get('l6_pps', {})
         if self._t6_config.get('enabled', False):
             freq_hz = self._t6_config.get('frequency_hz')
@@ -264,6 +287,21 @@ class CoreRecorderV2:
                 )
                 logger.info(f"T6 BPSK PPS calibrator initialized: "
                             f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
+                # Init TSL3 SHM feed (unit 2). Failure is non-fatal —
+                # calibration still drives chain_delay_correction_ns.
+                try:
+                    from hf_timestd.core.chrony_shm import ChronySHM
+                    self._t6_shm = ChronySHM(unit=2)
+                    if self._t6_shm.connect():
+                        logger.info("T6 TSL3 SHM feed enabled (unit=2)")
+                    else:
+                        logger.warning("T6 TSL3 SHM unit=2 connect failed; "
+                                       "TSL3 disabled (chain_delay_correction "
+                                       "still applied to channels)")
+                        self._t6_shm = None
+                except Exception as e:
+                    logger.warning(f"T6 TSL3 SHM init failed: {e}")
+                    self._t6_shm = None
         self.ntp_status_lock = threading.Lock()
 
         # Timing Calibrator for SSRC registration
@@ -761,6 +799,7 @@ class CoreRecorderV2:
                     gain=0.0,
                     on_samples=self._t6_on_samples,
                 )
+                self._t6_channel_info = channel_info
                 if self.data_destination is None and channel_info is not None:
                     self.data_destination = getattr(
                         channel_info, 'multicast_address', None
@@ -790,6 +829,7 @@ class CoreRecorderV2:
                 agc_enable=False,
                 gain=0.0,
             )
+            self._t6_channel_info = channel_info
             if self.data_destination is None and channel_info is not None:
                 self.data_destination = getattr(channel_info, 'multicast_address', None)
                 logger.info(
@@ -826,11 +866,111 @@ class CoreRecorderV2:
             samples, quality.last_rtp_timestamp
         )
         if result is not None and result.locked:
+            # Wrap-rejection: refuse jumps > 1 ms from the last accepted
+            # value. 1 ms is far above natural sample-quantization wobble
+            # (62.5 us at 16 kHz, single sample) and far below the
+            # half-second wrap value (~322 ms) the algorithm is known to
+            # produce when a noise edge corrupts _last_edge_rtp.
+            WRAP_THRESHOLD_NS = 1_000_000
+            if self._t6_last_chain_delay_ns is None:
+                # First stable lock — disambiguate WHICH whole sample is the
+                # real PPS edge by comparing against the system clock (now
+                # disciplined by chrony / LAN GPS to <1us). The calibrator
+                # picks one consistent edge position from possibly multiple
+                # candidates (real PPS plus noise edges). The system clock
+                # tells us which is the "right" sample, but the BPSK provides
+                # sub-sample precision once disambiguated.
+                #
+                # Compute the integer-sample shift that would move corrected
+                # wall_time onto a UTC integer second; lock that shift in as
+                # _t6_disambiguation_ns. Subsequent calibrator reports are
+                # adjusted by the same constant so all measurements share the
+                # same disambiguated reference frame.
+                try:
+                    last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
+                    if last_edge_rtp is not None and self._t6_channel_info is not None:
+                        self._t6_channel_info.chain_delay_correction_ns = result.chain_delay_ns
+                        from ka9q.rtp_recorder import rtp_to_wallclock
+                        wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
+                        if wall_time_sec is not None:
+                            ref_time = round(wall_time_sec)
+                            offset_sec = wall_time_sec - ref_time
+                            sr_local = self._t6_calibrator.sample_rate
+                            shift_samples = round(offset_sec * sr_local)
+                            self._t6_disambiguation_ns = int(round(
+                                shift_samples * 1e9 / sr_local
+                            ))
+                            if shift_samples != 0:
+                                logger.info(
+                                    f"T6 chain_delay disambiguated: raw={result.chain_delay_ns} ns "
+                                    f"implied wall-time offset {offset_sec*1000:+.1f} ms; "
+                                    f"adding {shift_samples} samples ({self._t6_disambiguation_ns} ns) "
+                                    f"to align with system clock"
+                                )
+                except Exception as e:
+                    logger.warning(f"T6 disambiguation failed: {e}")
+                # Apply disambiguation to the chain_delay we lock in
+                effective = result.chain_delay_ns + self._t6_disambiguation_ns
+                self._t6_last_chain_delay_ns = effective
+                logger.info(
+                    f"T6 chain_delay initial accept: {result.chain_delay_ns} ns "
+                    f"(effective with disambiguation: {effective} ns)"
+                )
+            elif abs((result.chain_delay_ns + self._t6_disambiguation_ns) - self._t6_last_chain_delay_ns) > WRAP_THRESHOLD_NS:
+                # Suspicious jump — log once per burst and skip propagation.
+                # Existing chain_delay_correction_ns on each ChannelInfo
+                # stays in place, so wall-time alignment is preserved.
+                self._t6_wrap_rejections += 1
+                if self._t6_wrap_rejections == 1 or self._t6_wrap_rejections % 60 == 0:
+                    logger.warning(
+                        f"T6 chain_delay jump rejected: "
+                        f"new={result.chain_delay_ns} ns, "
+                        f"last_accepted={self._t6_last_chain_delay_ns} ns, "
+                        f"delta={result.chain_delay_ns - self._t6_last_chain_delay_ns} ns "
+                        f"(threshold {WRAP_THRESHOLD_NS} ns); "
+                        f"rejections={self._t6_wrap_rejections}"
+                    )
+                return
+            else:
+                # Within tolerance — accept and update reference.
+                self._t6_last_chain_delay_ns = result.chain_delay_ns + self._t6_disambiguation_ns
+                self._t6_wrap_rejections = 0
+
+            effective_chain_delay = result.chain_delay_ns + self._t6_disambiguation_ns
+
             # Distribute the chain-delay correction to all archived channels
             for desc, recorder in self.recorders.items():
                 ch = getattr(recorder, 'channel_info', None)
                 if ch is not None:
-                    ch.chain_delay_correction_ns = result.chain_delay_ns
+                    ch.chain_delay_correction_ns = effective_chain_delay
+
+            # TSL3 SHM feed: push wall-time of detected edge to chrony so
+            # it sees BPSK precision directly. Only push when the
+            # calibrator has advanced to a NEW edge (once per second), and
+            # only after wrap-rejection has accepted the chain_delay.
+            if self._t6_shm is not None and self._t6_channel_info is not None:
+                try:
+                    last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
+                    if last_edge_rtp is not None and last_edge_rtp != self._t6_last_pushed_rtp:
+                        # Set chain_delay on the T6 channel so rtp_to_wallclock
+                        # applies the same (disambiguated) correction.
+                        self._t6_channel_info.chain_delay_correction_ns = effective_chain_delay
+                        from ka9q.rtp_recorder import rtp_to_wallclock
+                        wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
+                        if wall_time_sec is not None:
+                            ref_time = round(wall_time_sec)
+                            # precision -14 = 61 us, matches T6 sigma claim of 50 us
+                            self._t6_shm.update(
+                                reference_time=float(ref_time),
+                                system_time=wall_time_sec,
+                                precision=-14,
+                            )
+                            self._t6_last_pushed_rtp = last_edge_rtp
+                except Exception as e:
+                    # SHM push is non-fatal — log once per ~60 s of failures
+                    if not getattr(self, '_t6_shm_warned', False):
+                        logger.warning(f"T6 TSL3 SHM push failed: {e}")
+                        self._t6_shm_warned = True
 
             # Log on first lock and periodically
             if result.pps_consecutive == self._t6_calibrator.consecutive_required:

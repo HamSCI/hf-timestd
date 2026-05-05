@@ -1,0 +1,92 @@
+--- /opt/hf-timestd/venv/lib/python3.11/site-packages/ka9q/pps_calibrator.py.bak-2026-05-05-130851-pre-interp	2026-05-05 13:08:51.688644208 +0000
++++ /opt/hf-timestd/venv/lib/python3.11/site-packages/ka9q/pps_calibrator.py	2026-05-05 13:11:36.859556619 +0000
+@@ -142,6 +142,12 @@
+         Edges closer than this are rejected as noise.  Default 0.99.
+     enable_notch_500hz : bool
+         Apply a 500 Hz notch filter before edge detection.
++    enable_fractional_interpolation : bool
++        Estimate sub-sample edge position by linear-interpolating the
++        zero-crossing of the rotated in-phase component between the two
++        samples bracketing the BPSK transition. Removes the 1/2-sample
++        quantization floor; new floor is SNR-bounded. Default True.
++        PATCH (hf-timestd): added by local override; pending upstream PR.
+     """
+ 
+     def __init__(
+@@ -151,11 +157,13 @@
+         edge_tolerance_samples: int = 10,
+         min_pulse_fraction: float = 0.99,
+         enable_notch_500hz: bool = False,
++        enable_fractional_interpolation: bool = True,
+     ):
+         self.sample_rate = sample_rate
+         self.consecutive_required = consecutive_required
+         self.edge_tolerance_samples = edge_tolerance_samples
+         self.min_pulse_samples = int(sample_rate * min_pulse_fraction)
++        self.enable_fractional_interpolation = bool(enable_fractional_interpolation)
+ 
+         # Edge detection state
+         self._last_angle: Optional[float] = None
+@@ -279,7 +287,22 @@
+                         # PPS edge *should* land exactly on a second
+                         # boundary (ts % sr == 0).  The measured offset is
+                         # the chain delay.
+-                        self._chain_delay_samples = float(ts % sr)
++                        #
++                        # PATCH (hf-timestd): if fractional interpolation
++                        # is enabled, refine the integer-sample edge index
++                        # by linear-interpolating the zero-crossing of the
++                        # rotated in-phase component between samples[i-1]
++                        # and samples[i]. Falls back to integer when
++                        # interpolation is not possible.
++                        ts_fractional = float(ts)
++                        if self.enable_fractional_interpolation:
++                            sub = self._interpolate_edge(samples, i)
++                            if sub is not None:
++                                ts_fractional = float(ts) - 1.0 + sub
++
++                        ts_int = int(ts_fractional)
++                        ts_frac = ts_fractional - ts_int
++                        self._chain_delay_samples = float(ts_int % sr) + ts_frac
+                         # Handle wrap: if offset > sr/2 it's negative
+                         if self._chain_delay_samples > sr / 2:
+                             self._chain_delay_samples -= sr
+@@ -306,6 +329,38 @@
+         return None
+ 
+ 
++    def _interpolate_edge(self, samples, i):
++        """PATCH (hf-timestd): linear-interpolate sub-sample edge position.
++
++        At a BPSK transition, the in-phase component (after rotating to
++        align the pre-transition phase with the real axis) flips sign.
++        The zero-crossing between samples[i-1] and samples[i] gives the
++        true edge position with sub-sample precision.
++
++        Returns offset in [0, 1] from sample i-1 to sample i, or None if
++        interpolation is not possible (edge near batch start, near-zero
++        reference amplitude, or no sign change).
++        """
++        if i < 3:
++            return None
++        ref = samples[i - 3]
++        ref_amp = abs(ref)
++        if ref_amp < 1e-9:
++            return None
++        rot = np.conj(ref) / ref_amp
++        i_prev = (samples[i - 1] * rot).real
++        i_cur = (samples[i] * rot).real
++        if (i_prev >= 0) == (i_cur >= 0):
++            return None
++        denom = i_prev - i_cur
++        if denom == 0:
++            return None
++        offset = i_prev / denom
++        if not (0.0 <= offset <= 1.0):
++            return None
++        return float(offset)
++
++
+ def _signed_mod(value: int, modulus: int) -> int:
+     """Signed modular distance -- returns value in [-modulus/2, modulus/2)."""
+     result = value % modulus

@@ -1,0 +1,141 @@
+"""
+BpskPpsProbe — T6 authority probe.
+
+Reads /var/lib/timestd/status/core-recorder-status.json (written by
+timestd-core-recorder) and translates the embedded ``l6_pps`` block
+into a ProbeResult for the AuthorityManager. T6 outranks T5 in
+T_LEVELS_RANKED, so when this probe reports available, the manager
+promotes the active level to T6 (subject to upgrade hysteresis) and
+publishes the BPSK-calibrated sigma instead of the fusion-only sigma.
+
+The probe is deliberately strict so an injector glitch can't masquerade
+as a high-authority source:
+  - status file missing/unparseable → unavailable
+  - status timestamp stale beyond ``freshness_sec`` → unavailable
+  - ``l6_pps.enabled == false`` → unavailable
+  - ``l6_pps.locked == false`` → unavailable
+  - ``pps_consecutive < min_consecutive`` → unavailable (rides over
+    a single bursty noise edge but drops T6 during sustained noise)
+
+offset_ms is published as 0.0: BPSK directly defines the wall-time
+alignment via chain_delay_correction_ns applied at rtp_to_wallclock,
+so from T6's reference frame there is no residual RTP→UTC offset.
+The published sigma_ms captures the calibration uncertainty
+(quantization + jitter); 0.050 ms (50 µs) matches the reserved
+{T6,T5} cross-check threshold and is consistent with the
+half-quantization-step bias at 16 kHz sample rate.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from hf_timestd.core.authority_manager import ProbeResult
+
+log = logging.getLogger(__name__)
+
+
+class BpskPpsProbe:
+    t_level = "T6"
+
+    def __init__(
+        self,
+        status_path: Path = Path("/var/lib/timestd/status/core-recorder-status.json"),
+        freshness_sec: float = 60.0,
+        min_consecutive: int = 30,
+        sigma_ms: float = 0.050,
+        now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ):
+        self.status_path = Path(status_path)
+        self.freshness_sec = float(freshness_sec)
+        self.min_consecutive = int(min_consecutive)
+        self.sigma_ms = float(sigma_ms)
+        self.now_fn = now_fn
+
+    def poll(self) -> ProbeResult:
+        try:
+            with self.status_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return ProbeResult(
+                self.t_level, available=False,
+                reason="core-recorder-status.json missing",
+            )
+        except (OSError, json.JSONDecodeError) as e:
+            return ProbeResult(
+                self.t_level, available=False,
+                reason=f"read error: {e}",
+            )
+
+        ts_str = data.get("timestamp")
+        if not isinstance(ts_str, str):
+            return ProbeResult(
+                self.t_level, available=False,
+                reason="status timestamp missing",
+            )
+        try:
+            ts = _parse_iso(ts_str)
+        except ValueError as e:
+            return ProbeResult(
+                self.t_level, available=False,
+                reason=f"timestamp parse: {e}",
+            )
+
+        age_sec = (self.now_fn() - ts).total_seconds()
+        if age_sec > self.freshness_sec:
+            return ProbeResult(
+                self.t_level, available=False,
+                reason=f"stale {age_sec:.0f}s > {self.freshness_sec:.0f}s",
+            )
+
+        l6 = data.get("l6_pps")
+        if not isinstance(l6, dict):
+            return ProbeResult(
+                self.t_level, available=False,
+                reason="l6_pps block missing",
+            )
+
+        if not l6.get("enabled"):
+            return ProbeResult(
+                self.t_level, available=False,
+                reason="l6_pps disabled",
+            )
+        if not l6.get("locked"):
+            return ProbeResult(
+                self.t_level, available=False,
+                reason="not locked",
+            )
+
+        consec = int(l6.get("pps_consecutive", 0))
+        if consec < self.min_consecutive:
+            return ProbeResult(
+                self.t_level, available=False,
+                reason=f"pps_consecutive={consec} < {self.min_consecutive}",
+            )
+
+        return ProbeResult(
+            self.t_level,
+            available=True,
+            offset_ms=0.0,
+            sigma_ms=self.sigma_ms,
+            detail={
+                "pps_ok": int(l6.get("pps_ok", 0)),
+                "pps_noise": int(l6.get("pps_noise", 0)),
+                "pps_consecutive": consec,
+                "chain_delay_ns": l6.get("chain_delay_ns"),
+                "age_sec": round(age_sec, 3),
+            },
+        )
+
+
+def _parse_iso(s: str) -> datetime:
+    """Parse an ISO-8601 timestamp; ensure tz-aware UTC."""
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
