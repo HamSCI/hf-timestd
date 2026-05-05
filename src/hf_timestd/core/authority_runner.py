@@ -118,7 +118,12 @@ def build_authority_runner_from_config(
         enabled = true           # opt-in — only sites with a BPSK PPS injector
         # status_path = "/var/lib/timestd/status/core-recorder-status.json"
         # freshness_sec = 60.0   # max age of core-recorder-status.json
-        # min_consecutive = 30   # require this many clean PPS edges
+        # min_consecutive = 1    # require this many clean PPS edges
+        #                          # 1 = follow calibrator's own "locked" boolean,
+        #                          # let AuthorityManager hysteresis (3 ticks) smooth
+        #                          # 10 matches calibrator's consecutive_required
+        #                          # 30 (former default) was too strict given typical
+        #                          # 10-15% noise rate causing brief consec resets
         # sigma_ms = 0.050       # published T6 uncertainty (50 µs default)
 
         [timing.authority_manager.t5]

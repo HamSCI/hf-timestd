@@ -1385,6 +1385,26 @@ class CoreRecorderV2:
             except Exception as e:
                 logger.debug(f"T6 stream stop: {e}")
 
+        # Remove T6 BPSK channel from radiod.  Unlike archived channels
+        # (whose SSRC is deterministic from a stable description), the
+        # T6 channel's SSRC is a hash of (freq, sample_rate, preset);
+        # changing sample rate creates a new SSRC, so orphans accumulate
+        # in radiod's channel table across restarts unless we explicitly
+        # remove the previous one.  RadiodControl.remove_channel sets
+        # frequency to 0 and radiod cleans it up on the next polling
+        # cycle.  This is best-effort; failure is logged but non-fatal.
+        if self._t6_channel_info is not None:
+            ssrc = getattr(self._t6_channel_info, 'ssrc', None)
+            if ssrc is not None and ssrc != 0:
+                try:
+                    self.control.remove_channel(ssrc)
+                    logger.info(
+                        f"T6 BPSK PPS channel removed from radiod: "
+                        f"SSRC=0x{ssrc:08x}"
+                    )
+                except Exception as e:
+                    logger.warning(f"T6 channel removal failed (SSRC=0x{ssrc:08x}): {e}")
+
         # Close RadiodControl
         try:
             self.control.close()
