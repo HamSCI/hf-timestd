@@ -848,6 +848,49 @@ class CoreRecorderV2:
             logger.error(f"Failed to start T6 BPSK PPS stream: {e}", exc_info=True)
             self._t6_stream = None
 
+    # Maximum sigma of a non-T6 reference we'll trust for disambiguation.
+    # Half-second wrap value is ~322 ms; we need our reference to be tighter
+    # than that to be useful for disambiguating which side of the wrap is
+    # correct.  250 ms gives margin without being unrealistically tight.
+    T6_DISAMBIGUATION_MAX_SIGMA_MS = 250.0
+
+    def _get_disambiguation_reference(self):
+        """Return the highest-rank non-T6 timing-authority offset estimate.
+
+        Walks the T-level hierarchy in descending rank order (T5 > T4 > T3),
+        returning the first probe that publishes an offset_ms with sigma <
+        ``T6_DISAMBIGUATION_MAX_SIGMA_MS``.  Returns
+        ``(offset_ms, sigma_ms, tier_name)`` or ``None`` if no suitable
+        reference is available (e.g., a site with only BPSK and no other
+        timing authority).
+
+        Currently implemented:
+          - T3 via ``/run/hf-timestd/fusion_status.json``
+
+        Future (when probes are wired up at sites that have them):
+          - T5 via on-host GPS+PPS chrony refclock tracking
+          - T4 via LAN GPS+PPS chrony peer tracking
+        """
+        # T5: not yet wired (requires on-host GPS+PPS probe in core-recorder)
+        # T4: not yet wired (requires LAN-NTP probe in core-recorder)
+
+        # T3: fusion_status.json from timestd-fusion service
+        try:
+            fusion_path = Path('/run/hf-timestd/fusion_status.json')
+            data = json.loads(fusion_path.read_text())
+            if data.get('schema') == 'v1':
+                fusion = data.get('fusion') or {}
+                if (fusion.get('available')
+                        and fusion.get('kalman_state') in ('LOCKED', 'ACQUIRING')):
+                    offset_ms = float(fusion['d_clock_fused_ms'])
+                    sigma_ms = float(fusion['uncertainty_ms'])
+                    if sigma_ms <= self.T6_DISAMBIGUATION_MAX_SIGMA_MS:
+                        return offset_ms, sigma_ms, 'T3'
+        except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError):
+            pass
+
+        return None
+
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
         # One-shot smoke log on the first batch so the journal records
@@ -886,38 +929,68 @@ class CoreRecorderV2:
                 # sub-sample precision once disambiguated.
                 #
                 # Compute the integer-sample shift that would move corrected
-                # wall_time onto a UTC integer second; lock that shift in as
-                # _t6_disambiguation_ns. Subsequent calibrator reports are
-                # adjusted by the same constant so all measurements share the
-                # same disambiguated reference frame.
+                # wall_time into agreement with the highest-rank-available
+                # non-T6 timing-authority tier (T5 > T4 > T3).  Per the
+                # timing model, the system clock is downstream of the
+                # authority hierarchy, not a peer source — using it for
+                # disambiguation would be circular.  We use the explicit
+                # tier that publishes an offset_ms.  Sigma sanity check:
+                # reject any reference whose sigma is larger than the
+                # half-second-wrap value we're trying to disambiguate
+                # against (250 ms).  Lock the shift in as
+                # _t6_disambiguation_ns; subsequent calibrator reports
+                # are adjusted by the same constant so all measurements
+                # share the same disambiguated reference frame.
                 try:
                     last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
                     if last_edge_rtp is not None and self._t6_channel_info is not None:
-                        # Compute raw wall-time of the detected edge WITHOUT
-                        # ka9q applying chain_delay (chain_delay_correction_ns
-                        # is kept None on ChannelInfo so the subtraction
-                        # inside rtp_to_wallclock is a no-op).  Apply
-                        # chain_delay manually here so metrology semantics
-                        # stay in hf-timestd, not in the transport library.
-                        self._t6_channel_info.chain_delay_correction_ns = None
-                        from ka9q.rtp_recorder import rtp_to_wallclock
-                        raw_wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
-                        if raw_wall_time_sec is not None:
-                            wall_time_sec = raw_wall_time_sec - (result.chain_delay_ns / 1e9)
-                            ref_time = round(wall_time_sec)
-                            offset_sec = wall_time_sec - ref_time
-                            sr_local = self._t6_calibrator.sample_rate
-                            shift_samples = round(offset_sec * sr_local)
-                            self._t6_disambiguation_ns = int(round(
-                                shift_samples * 1e9 / sr_local
-                            ))
-                            if shift_samples != 0:
-                                logger.info(
-                                    f"T6 chain_delay disambiguated: raw={result.chain_delay_ns} ns "
-                                    f"implied wall-time offset {offset_sec*1000:+.1f} ms; "
-                                    f"adding {shift_samples} samples ({self._t6_disambiguation_ns} ns) "
-                                    f"to align with system clock"
-                                )
+                        ref = self._get_disambiguation_reference()
+                        if ref is None:
+                            logger.info(
+                                f"T6 chain_delay initial accept: no usable "
+                                f"non-T6 timing authority for disambiguation; "
+                                f"accepting calibrator value as-is"
+                            )
+                        else:
+                            ref_offset_ms, ref_sigma_ms, ref_tier = ref
+                            # Compute raw wall-time of the detected edge
+                            # WITHOUT ka9q applying chain_delay (kept None
+                            # on ChannelInfo so the subtraction inside
+                            # rtp_to_wallclock is a no-op).
+                            self._t6_channel_info.chain_delay_correction_ns = None
+                            from ka9q.rtp_recorder import rtp_to_wallclock
+                            raw_wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
+                            if raw_wall_time_sec is not None:
+                                wall_time_sec = raw_wall_time_sec - (result.chain_delay_ns / 1e9)
+                                ref_time = round(wall_time_sec)
+                                offset_sec = wall_time_sec - ref_time
+                                # The reference tier's offset_ms is its
+                                # estimate of (system_clock - true_UTC).
+                                # Our wall_time_offset is also that same
+                                # quantity (modulo BPSK calibration error).
+                                # Disagreement reveals the wrap.
+                                disagreement_sec = offset_sec - (ref_offset_ms / 1000.0)
+                                sr_local = self._t6_calibrator.sample_rate
+                                shift_samples = round(disagreement_sec * sr_local)
+                                self._t6_disambiguation_ns = int(round(
+                                    shift_samples * 1e9 / sr_local
+                                ))
+                                if shift_samples != 0:
+                                    logger.info(
+                                        f"T6 chain_delay disambiguated against {ref_tier} "
+                                        f"(offset={ref_offset_ms:+.3f} ms, "
+                                        f"sigma={ref_sigma_ms:.3f} ms): raw="
+                                        f"{result.chain_delay_ns} ns implied wall-time "
+                                        f"offset {offset_sec*1000:+.3f} ms; disagreement "
+                                        f"{disagreement_sec*1000:+.1f} ms; shifting "
+                                        f"{shift_samples} samples ({self._t6_disambiguation_ns} ns)"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"T6 chain_delay disambiguated against {ref_tier}: "
+                                        f"already aligned within one sample "
+                                        f"(disagreement {disagreement_sec*1000:+.3f} ms)"
+                                    )
                 except Exception as e:
                     logger.warning(f"T6 disambiguation failed: {e}")
                 # Apply disambiguation to the chain_delay we lock in
