@@ -866,12 +866,16 @@ class CoreRecorderV2:
             samples, quality.last_rtp_timestamp
         )
         if result is not None and result.locked:
-            # Wrap-rejection: refuse jumps > 1 ms from the last accepted
-            # value. 1 ms is far above natural sample-quantization wobble
-            # (62.5 us at 16 kHz, single sample) and far below the
-            # half-second wrap value (~322 ms) the algorithm is known to
-            # produce when a noise edge corrupts _last_edge_rtp.
-            WRAP_THRESHOLD_NS = 1_000_000
+            # Wrap-rejection: refuse jumps > 10 ms from the last accepted
+            # value. 10 ms is well above natural sample-quantization
+            # wobble (62.5 us at 16 kHz) and well above legitimate
+            # multi-sample drift in the calibrator's chosen edge
+            # position (~2-5 ms typical over hours), but well below the
+            # half-second wrap value (~322 ms) the algorithm produces
+            # when a noise edge displaces the reference. The earlier
+            # 1 ms threshold was too tight; observed-on-bee1 calibrator
+            # drift of 2.5 ms in 30 min triggered constant rejections.
+            WRAP_THRESHOLD_NS = 10_000_000
             if self._t6_last_chain_delay_ns is None:
                 # First stable lock — disambiguate WHICH whole sample is the
                 # real PPS edge by comparing against the system clock (now
