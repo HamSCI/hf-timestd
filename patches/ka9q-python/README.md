@@ -39,6 +39,10 @@ sudo patch /opt/hf-timestd/venv/lib/python3.11/site-packages/ka9q/pps_calibrator
 sudo systemctl restart timestd-core-recorder
 ```
 
-**Upstream PR status**: not yet filed. The change is small and self-contained;
-`BpskPpsCalibrator` already returns `chain_delay_samples` as a `float`,
-so the patch only refines the value at one call site.
+**Upstream PR status**: NOT going upstream. The proper resolution is to
+**port `BpskPpsCalibrator` entirely out of ka9q-python and into
+`hf_timestd.core`**, since ka9q-python is a generic RTP stream container
+library and BPSK chain-delay calibration is hf-timestd-specific payload
+semantics. This patch directory is a stopgap until the in-tree port
+lands. See `project_bpsk_pps_calibrator.md` memory note for the
+architectural rationale.
