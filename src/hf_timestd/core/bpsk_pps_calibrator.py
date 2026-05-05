@@ -195,6 +195,16 @@ class BpskPpsCalibrator:
         # Cross-batch amplitude tracking for the gate: we need the
         # previous sample's amplitude when i == 0 of a new batch.
         self._last_amp_sq: Optional[float] = None
+        # Acquisition vs tracking state.  False = ACQUIRING (any
+        # detected edge updates _last_edge_rtp, including noise — the
+        # algorithm's original bootstrap mechanism for finding consistent
+        # edge positions when nothing is anchored yet).  True = TRACKING
+        # (only valid edges update _last_edge_rtp — protects the
+        # reference from noise-edge corruption once we have a known-good
+        # lock).  Transitions to True the first time pps_consecutive
+        # reaches consecutive_required; never falls back automatically —
+        # explicit reset() to re-acquire if conditions change.
+        self._acquired: bool = False
 
         # Edge detection state
         self._last_angle: Optional[float] = None
@@ -231,6 +241,7 @@ class BpskPpsCalibrator:
         self.pps_consecutive = 0
         self._chain_delay_samples = None
         self._last_amp_sq = None
+        self._acquired = False
         if self._notch is not None:
             self._notch = NotchFilter500Hz(self.sample_rate)
 
@@ -363,7 +374,23 @@ class BpskPpsCalibrator:
                         if self._chain_delay_samples > sr / 2:
                             self._chain_delay_samples -= sr
 
-                    self._last_edge_rtp = ts
+                        # PATCH (hf-timestd): once we hit lock for the
+                        # first time, transition to TRACKING — noise
+                        # edges no longer update the reference.
+                        if (not self._acquired
+                                and self.pps_consecutive >= self.consecutive_required):
+                            self._acquired = True
+
+                    # PATCH (hf-timestd): conditional reference update.
+                    # ACQUIRING (not yet acquired): always update
+                    # _last_edge_rtp so the original bootstrap mechanism
+                    # can walk the reference toward consistent positions.
+                    # TRACKING (acquired): update only on valid edges so
+                    # noise events can't displace the reference and
+                    # cascade subsequent valid edges into being
+                    # misclassified.
+                    if not self._acquired or not noisy:
+                        self._last_edge_rtp = ts
 
             self._last_angle = angle
             self._last_amp_sq = float(amps_sq[i])
