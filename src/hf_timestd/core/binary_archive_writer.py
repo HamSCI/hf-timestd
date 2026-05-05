@@ -167,6 +167,16 @@ class BinaryArchiveWriter:
         self.write_errors = 0
         self.stale_drops = 0  # Samples dropped by staleness guard
         self.timing_drops = 0  # Samples dropped waiting for GPS_TIME
+
+        # BPSK PPS chain-delay metadata (set externally by core_recorder).
+        # As of 2026-05, archive wall_times are RAW RTP-derived values —
+        # the chain_delay is reported in metadata but NOT applied to the
+        # stored timestamps.  Downstream consumers apply chain_delay (if
+        # they want UTC-aligned timing) using the value here.  Pre-2026-05
+        # archives have these fields absent and an implied "applied=True"
+        # convention (BPSK was applied via ka9q's rtp_to_wallclock).
+        self._bpsk_chain_delay_ns: Optional[int] = None
+        self._bpsk_chain_delay_applied: bool = False
         
         # Time reference - GPS_TIME/RTP_TIMESNAP from radiod
         # In RTP mode, the GPSDO-disciplined RTP clock IS the timing authority.
@@ -214,6 +224,20 @@ class BinaryArchiveWriter:
                 logger.info(f"{self.config.channel_name}: cleaned up {count} orphaned .tmp file(s)")
         except Exception as e:
             logger.warning(f"Error scanning for orphaned .tmp files: {e}")
+
+    def set_bpsk_metadata(self, chain_delay_ns: Optional[int],
+                          applied: bool = False) -> None:
+        """Record the current BPSK PPS chain_delay value for archive metadata.
+
+        Called by core_recorder when the BPSK calibrator publishes a new
+        accepted chain_delay (post wrap-rejection + disambiguation).  The
+        value is written into the next sidecar JSON's
+        ``bpsk_chain_delay_ns`` and ``bpsk_chain_delay_applied`` fields,
+        so downstream consumers know whether the stored wall_times have
+        the chain_delay correction applied (legacy: True; current: False).
+        """
+        self._bpsk_chain_delay_ns = chain_delay_ns
+        self._bpsk_chain_delay_applied = bool(applied)
 
     def add_timing_snapshot(self, gps_time_ns: int, rtp_timesnap: int) -> bool:
         """
@@ -659,7 +683,15 @@ class BinaryArchiveWriter:
                 'pipeline_offset_samples': 0,
                 # Timing snapshots: GPS_TIME/RTP_TIMESNAP pairs from radiod (~2 Hz)
                 # Enables post-hoc RTP-to-UTC conversion and timing validation
-                'timing_snapshots': [s.to_dict() for s in buffer.timing_snapshots]
+                'timing_snapshots': [s.to_dict() for s in buffer.timing_snapshots],
+                # BPSK PPS chain-delay metadata.  As of 2026-05 archives
+                # store RAW RTP-derived wall_times (chain_delay is in
+                # metadata but NOT applied).  Pre-2026-05 archives lack
+                # these fields and have an implied "applied=True"
+                # convention.  Downstream readers can apply the value
+                # here if they want UTC-aligned timing.
+                'bpsk_chain_delay_ns': self._bpsk_chain_delay_ns,
+                'bpsk_chain_delay_applied': self._bpsk_chain_delay_applied,
             }
             
             # Atomic write: write to temp file, fsync, then rename

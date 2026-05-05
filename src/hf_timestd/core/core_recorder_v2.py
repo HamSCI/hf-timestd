@@ -276,7 +276,7 @@ class CoreRecorderV2:
             if freq_hz is None:
                 logger.error("timing.l6_pps.enabled=true but frequency_hz not set — T6 disabled")
             else:
-                from ka9q.pps_calibrator import BpskPpsCalibrator
+                from hf_timestd.core.bpsk_pps_calibrator import BpskPpsCalibrator
                 sr = int(self._t6_config.get('sample_rate',
                          self.channel_defaults.get('sample_rate', 24000)))
                 self._t6_calibrator = BpskPpsCalibrator(
@@ -889,10 +889,17 @@ class CoreRecorderV2:
                 try:
                     last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
                     if last_edge_rtp is not None and self._t6_channel_info is not None:
-                        self._t6_channel_info.chain_delay_correction_ns = result.chain_delay_ns
+                        # Compute raw wall-time of the detected edge WITHOUT
+                        # ka9q applying chain_delay (chain_delay_correction_ns
+                        # is kept None on ChannelInfo so the subtraction
+                        # inside rtp_to_wallclock is a no-op).  Apply
+                        # chain_delay manually here so metrology semantics
+                        # stay in hf-timestd, not in the transport library.
+                        self._t6_channel_info.chain_delay_correction_ns = None
                         from ka9q.rtp_recorder import rtp_to_wallclock
-                        wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
-                        if wall_time_sec is not None:
+                        raw_wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
+                        if raw_wall_time_sec is not None:
+                            wall_time_sec = raw_wall_time_sec - (result.chain_delay_ns / 1e9)
                             ref_time = round(wall_time_sec)
                             offset_sec = wall_time_sec - ref_time
                             sr_local = self._t6_calibrator.sample_rate
@@ -917,9 +924,11 @@ class CoreRecorderV2:
                     f"(effective with disambiguation: {effective} ns)"
                 )
             elif abs((result.chain_delay_ns + self._t6_disambiguation_ns) - self._t6_last_chain_delay_ns) > WRAP_THRESHOLD_NS:
-                # Suspicious jump — log once per burst and skip propagation.
-                # Existing chain_delay_correction_ns on each ChannelInfo
-                # stays in place, so wall-time alignment is preserved.
+                # Suspicious jump — log once per burst and use the
+                # last-accepted chain_delay for downstream propagation.
+                # Falling through (rather than `return`-ing early) keeps
+                # TSL3's SHM updates flowing with the proven-good value
+                # so chrony does not lose Reach during a wrap event.
                 self._t6_wrap_rejections += 1
                 if self._t6_wrap_rejections == 1 or self._t6_wrap_rejections % 60 == 0:
                     logger.warning(
@@ -930,19 +939,31 @@ class CoreRecorderV2:
                         f"(threshold {WRAP_THRESHOLD_NS} ns); "
                         f"rejections={self._t6_wrap_rejections}"
                     )
-                return
+                effective_chain_delay = self._t6_last_chain_delay_ns
             else:
                 # Within tolerance — accept and update reference.
                 self._t6_last_chain_delay_ns = result.chain_delay_ns + self._t6_disambiguation_ns
                 self._t6_wrap_rejections = 0
+                effective_chain_delay = self._t6_last_chain_delay_ns
 
-            effective_chain_delay = result.chain_delay_ns + self._t6_disambiguation_ns
-
-            # Distribute the chain-delay correction to all archived channels
+            # Record BPSK metadata in archive sidecars.  Per the
+            # architectural separation (chain_delay is metrology, not
+            # transport), we no longer set chain_delay_correction_ns on
+            # the recorder ChannelInfos — that would silently invoke
+            # ka9q's rtp_to_wallclock subtraction.  Instead, we hand the
+            # value to each archive writer to record in metadata; archive
+            # wall_times stay raw (RTP-derived without chain_delay), and
+            # downstream readers apply the correction if they want UTC
+            # alignment.  Pre-2026-05 archives lacked this metadata field
+            # and had chain_delay applied at write time — readers should
+            # treat absence as "applied=True".
             for desc, recorder in self.recorders.items():
-                ch = getattr(recorder, 'channel_info', None)
-                if ch is not None:
-                    ch.chain_delay_correction_ns = effective_chain_delay
+                writer = getattr(recorder, 'archive_writer', None)
+                if writer is not None and hasattr(writer, 'set_bpsk_metadata'):
+                    writer.set_bpsk_metadata(
+                        chain_delay_ns=effective_chain_delay,
+                        applied=False,
+                    )
 
             # TSL3 SHM feed: push wall-time of detected edge to chrony so
             # it sees BPSK precision directly. Only push when the
@@ -952,12 +973,15 @@ class CoreRecorderV2:
                 try:
                     last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
                     if last_edge_rtp is not None and last_edge_rtp != self._t6_last_pushed_rtp:
-                        # Set chain_delay on the T6 channel so rtp_to_wallclock
-                        # applies the same (disambiguated) correction.
-                        self._t6_channel_info.chain_delay_correction_ns = effective_chain_delay
+                        # Compute raw wall-time without ka9q applying
+                        # chain_delay (chain_delay_correction_ns kept None
+                        # on the T6 channel), then apply chain_delay
+                        # manually as a metrology operation.
+                        self._t6_channel_info.chain_delay_correction_ns = None
                         from ka9q.rtp_recorder import rtp_to_wallclock
-                        wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
-                        if wall_time_sec is not None:
+                        raw_wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
+                        if raw_wall_time_sec is not None:
+                            wall_time_sec = raw_wall_time_sec - (effective_chain_delay / 1e9)
                             ref_time = round(wall_time_sec)
                             # precision -14 = 61 us, matches T6 sigma claim of 50 us
                             self._t6_shm.update(
