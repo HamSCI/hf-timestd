@@ -890,20 +890,56 @@ class CoreRecorderV2:
         returning the first probe that publishes an offset_ms with sigma <
         ``T6_DISAMBIGUATION_MAX_SIGMA_MS``.  Returns
         ``(offset_ms, sigma_ms, tier_name)`` or ``None`` if no suitable
-        reference is available (e.g., a site with only BPSK and no other
-        timing authority).
+        reference is available.
 
-        Currently implemented:
-          - T3 via ``/run/hf-timestd/fusion_status.json``
+        Used ONCE at first lock to resolve which integer GPS-second the
+        BPSK edge belongs to (the per-channel-creation RTP-grid alignment
+        is non-deterministic against GPS seconds — could be off by any
+        integer-sample multiple). Once disambiguated, T6 trusts its own
+        measurements; we do NOT continuously slew toward the reference.
+        T6 is the highest-quality timing authority available — its edges
+        come directly from the LB-1421 GPSDO via TS1, and the MF measures
+        them at ~150 ns precision. Tracking lower-quality references
+        (T3 fusion at ~100 µs, even T4 LAN GPS at ~10 µs) would only
+        contaminate T6's precision.
 
-        Future (when probes are wired up at sites that have them):
-          - T5 via on-host GPS+PPS chrony refclock tracking
-          - T4 via LAN GPS+PPS chrony peer tracking
+        Reference order:
+          - T5 (highest): on-host GPS+PPS chrony refclock, not wired
+          - T4: LAN GPS+PPS via chrony tracking (chronyc tracking output)
+          - T3: HF fusion via /run/hf-timestd/fusion_status.json
         """
         # T5: not yet wired (requires on-host GPS+PPS probe in core-recorder)
-        # T4: not yet wired (requires LAN-NTP probe in core-recorder)
 
-        # T3: fusion_status.json from timestd-fusion service
+        # T4: chrony's tracking offset against the LAN GPS source.
+        # `Last offset` from `chronyc tracking` is (true_time - local_time);
+        # we want (system_clock - true_UTC) = -Last_offset.  RMS offset
+        # is the appropriate sigma estimate.
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['chronyc', 'tracking'],
+                capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0:
+                last_offset_sec = None
+                rms_offset_sec = None
+                for line in result.stdout.splitlines():
+                    if line.startswith('Last offset'):
+                        last_offset_sec = float(line.split(':', 1)[1].split()[0])
+                    elif line.startswith('RMS offset'):
+                        rms_offset_sec = float(line.split(':', 1)[1].split()[0])
+                if last_offset_sec is not None and rms_offset_sec is not None:
+                    # Sign convention: chrony's "Last offset" is true−local.
+                    # We need system_clock − true_UTC = −Last_offset.
+                    offset_ms = -last_offset_sec * 1000.0
+                    sigma_ms = rms_offset_sec * 1000.0
+                    if sigma_ms <= self.T6_DISAMBIGUATION_MAX_SIGMA_MS:
+                        return offset_ms, sigma_ms, 'T4'
+        except (FileNotFoundError, OSError,
+                subprocess.SubprocessError, ValueError, IndexError) as e:
+            logger.debug(f"T4 chrony tracking unavailable: {e}")
+
+        # T3: fusion_status.json from timestd-fusion service (fallback).
         try:
             fusion_path = Path('/run/hf-timestd/fusion_status.json')
             data = json.loads(fusion_path.read_text())
@@ -1049,69 +1085,17 @@ class CoreRecorderV2:
                 effective_chain_delay = self._t6_last_chain_delay_ns
             else:
                 # Within tolerance — accept and update reference.
-                # Continuously refine `_t6_disambiguation_ns` against the
-                # current T3 reading. The initial-accept disambiguation
-                # snaps to integer-sample alignment against whatever T3
-                # reported AT FIRST LOCK; T3 itself has settling
-                # transients of hundreds of microseconds in the first
-                # several minutes of fusion uptime, and longer-term drift
-                # of tens of microseconds. Without this refinement, TSL3
-                # inherits the T3-at-lock reference frame permanently
-                # and chrony sees a constant-bias outlier (#x excluded).
-                #
-                # Slow IIR (α=0.01 per edge) → time-constant ≈ 100 edges
-                # ≈ 100 s; ~95% convergence in ~5 minutes from a fresh
-                # lock. T3's per-cycle noise (typically ~10–20 µs) is
-                # injected into TSL3 with √(α/(2-α)) ≈ 0.07 weighting,
-                # so TSL3 inherits ~700 ns–1.4 µs of T3 noise — well
-                # above MF's intrinsic 150 ns precision but acceptable.
-                # An earlier α=0.05 attempt converged faster (~60 s) but
-                # injected ~5 µs of T3 noise into TSL3's reported offset.
-                ref = self._get_disambiguation_reference()
-                if ref is not None:
-                    ref_offset_ms, _ref_sigma_ms, _ref_tier = ref
-                    # Recompute current implied offset using effective
-                    # chain_delay (raw + disambiguation). offset_sec is
-                    # how far the corrected wall-time falls from its
-                    # nearest integer GPS-second boundary, modulo wrap.
-                    try:
-                        last_edge_rtp = getattr(
-                            self._t6_calibrator, '_last_edge_rtp', None
-                        )
-                        if (last_edge_rtp is not None
-                                and self._t6_channel_info is not None):
-                            self._t6_channel_info.chain_delay_correction_ns = None
-                            from ka9q.rtp_recorder import rtp_to_wallclock
-                            raw_wall = rtp_to_wallclock(
-                                last_edge_rtp, self._t6_channel_info
-                            )
-                            if raw_wall is not None:
-                                effective_now = (
-                                    result.chain_delay_ns
-                                    + self._t6_disambiguation_ns
-                                )
-                                wts_now = raw_wall - (effective_now / 1e9)
-                                offset_sec_now = wts_now - round(wts_now)
-                                disagreement_sec = (
-                                    offset_sec_now - (ref_offset_ms / 1000.0)
-                                )
-                                # IIR step. Cap per-edge correction at
-                                # 10 ms so a transient T3 glitch can't
-                                # whip TSL3 violently.
-                                step_ns = int(round(
-                                    disagreement_sec * 1e9 * 0.01
-                                ))
-                                if abs(step_ns) <= 10_000_000:
-                                    self._t6_disambiguation_ns += step_ns
-                    except Exception as e:
-                        # Refinement is best-effort; never break the
-                        # accept path on a refinement error.
-                        if not getattr(self, '_t6_refine_warned', False):
-                            logger.warning(
-                                f"T6 disambiguation refinement failed: {e}"
-                            )
-                            self._t6_refine_warned = True
-
+                # NOTE (2026-05-06): a previous version of this branch
+                # continuously slewed `_t6_disambiguation_ns` toward T3
+                # via a slow IIR.  Removed because it made T6 a
+                # noise-reduced *follower* of T3 instead of an
+                # independent timing authority.  T6 is the highest-
+                # quality timing source available (LB-1421 GPSDO via
+                # TS1, MF precision ~150 ns); it should NOT be tracked
+                # against any lower-quality reference.  The one-shot
+                # disambiguation at first lock is the only place we use
+                # an external reference, and that's only to resolve
+                # which integer GPS second the edge belongs to.
                 self._t6_last_chain_delay_ns = result.chain_delay_ns + self._t6_disambiguation_ns
                 self._t6_wrap_rejections = 0
                 effective_chain_delay = self._t6_last_chain_delay_ns
