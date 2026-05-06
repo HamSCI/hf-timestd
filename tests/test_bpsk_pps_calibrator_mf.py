@@ -1,0 +1,215 @@
+"""Tests for the matched-filter BPSK PPS calibrator.
+
+Focus on the algorithmic contract: given a synthetic polarity-flip BPSK
+signal with a known sub-sample edge offset, does the calibrator
+  (a) lock within a reasonable number of seconds,
+  (b) report a chain_delay that matches the injected offset, and
+  (c) stay robust under added noise representative of in-line TS1 SNR?
+
+We don't exercise radiod / RTP transport — those are integration concerns.
+"""
+
+import numpy as np
+import pytest
+
+from hf_timestd.core.bpsk_pps_calibrator_mf import BpskPpsCalibratorMF
+
+
+SR = 96_000  # design-point sample rate
+
+
+def _make_bpsk_signal(
+    duration_s: float,
+    sample_rate: int = SR,
+    edge_offset_samples: float = 0.0,
+    amplitude: float = 1.0,
+    noise_std: float = 0.0,
+    carrier_phase: float = 0.0,
+    transition_width_samples: float = 2.0,
+    seed: int = 42,
+) -> np.ndarray:
+    """Synthesize a band-limited polarity-flip BPSK signal at DC.
+
+    Each PPS edge is a tanh transition of width ``transition_width_samples``
+    samples (matched roughly to a ±25 kHz channel filter at 96 kHz, which
+    has rise time ≈ 1/(2·BW) ≈ 20 µs ≈ 2 samples). The zero-crossing of
+    the smoothed polarity sits precisely at ``edge_offset_samples`` modulo
+    ``sample_rate``, so the calibrator's recovered chain_delay should
+    match the injected offset to sub-sample precision (limited by noise
+    and the parabolic-interp residual error).
+
+    Without band-limiting, an instantaneous discrete-step flip places
+    the discrete MF peak at a 2-sample flat-top whose centroid is at
+    sub-sample 0.5, which would make sub-sample tests fragile.
+
+    Returns complex64 IQ samples of length ``duration_s * sample_rate``.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(duration_s * sample_rate)
+    t = np.arange(n)
+
+    # Distance to the nearest PPS edge, with the sign of the polarity
+    # transition at that edge: +1 for even-indexed edges (going - → +)
+    # and -1 for odd (going + → -).
+    nearest_k = np.round((t - edge_offset_samples) / sample_rate).astype(np.int64)
+    nearest_edge = nearest_k * sample_rate + edge_offset_samples
+    distance = t - nearest_edge
+    sign = np.where(nearest_k % 2 == 0, +1.0, -1.0)
+    polarity = sign * np.tanh(distance / transition_width_samples)
+
+    if noise_std > 0:
+        signal_real = amplitude * polarity + rng.normal(0, noise_std, size=n)
+        noise_imag = rng.normal(0, noise_std, size=n)
+    else:
+        signal_real = amplitude * polarity
+        noise_imag = np.zeros(n)
+    s = (signal_real + 1j * noise_imag) * np.exp(1j * carrier_phase)
+    return s.astype(np.complex64)
+
+
+def _feed_in_batches(cal, signal, rtp_start=0, batch_size=480):
+    """Feed signal to the calibrator in batches, return final result."""
+    last_result = None
+    rtp = rtp_start
+    for i in range(0, len(signal), batch_size):
+        batch = signal[i : i + batch_size]
+        r = cal.process_samples(batch, rtp)
+        if r is not None:
+            last_result = r
+        rtp = (rtp + len(batch)) & 0xFFFFFFFF
+    return last_result
+
+
+class TestNoiseFreeLock:
+    """In an idealized noise-free signal, the MF should lock within
+    a handful of edges and report chain_delay matching the injected
+    sub-sample offset to within ~0.05 samples."""
+
+    def test_lock_at_zero_offset(self):
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5, edge_tolerance_samples=20,
+        )
+        signal = _make_bpsk_signal(duration_s=10.0, edge_offset_samples=0.0)
+        result = _feed_in_batches(cal, signal)
+        assert result is not None, "MF calibrator failed to lock noise-free"
+        assert result.locked
+        # Edge at sample 0 (and every SR samples after) → chain_delay = 0
+        # (or very close, given the squaring-based phase recovery on DC).
+        assert abs(result.chain_delay_samples) < 0.5, \
+            f"chain_delay={result.chain_delay_samples} samples, expected ~0"
+
+    def test_chain_delay_matches_injected_offset(self):
+        """Inject a 12.3-sample edge offset; calibrator should recover
+        it to within ~0.05 samples (parabolic interp limit on noise-free
+        signal). At SR=96 kHz, 0.05 sample = ~520 ps — well below the
+        physical timing precision."""
+        injected = 12.3
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5, edge_tolerance_samples=20,
+        )
+        signal = _make_bpsk_signal(
+            duration_s=10.0, edge_offset_samples=injected,
+        )
+        result = _feed_in_batches(cal, signal)
+        assert result is not None
+        # chain_delay reports sample-of-second of the edge, which is
+        # the injected offset modulo SR (positive or negative within
+        # the [-SR/2, SR/2) wrap range).
+        recovered = result.chain_delay_samples
+        err = abs(recovered - injected)
+        assert err < 0.1, \
+            f"recovered={recovered}, injected={injected}, err={err}"
+
+
+class TestNoiseRobustness:
+    """At signal-dominated SNRs (≥20 dB per sample) the calibrator
+    should still lock and report chain_delay within a few sample
+    fractions of the truth.
+
+    bee1's TS1 in-line install has SNR_per_sample of ≥40 dB; we test
+    at 20 dB to validate robustness, not the operating point."""
+
+    def test_lock_at_20db_snr(self):
+        injected = 5.7
+        # SNR_per_sample = (A/σ)² → 20 dB = 100 ratio → σ = A/10
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5, edge_tolerance_samples=50,
+        )
+        signal = _make_bpsk_signal(
+            duration_s=15.0, edge_offset_samples=injected,
+            amplitude=1.0, noise_std=0.1,
+        )
+        result = _feed_in_batches(cal, signal)
+        assert result is not None, "Failed to lock at 20 dB per-sample SNR"
+        recovered = result.chain_delay_samples
+        # At 20 dB SNR over a half-second integration, σ_t per edge is
+        # ≪ 1 sample. Allow 2 samples of slack for robustness.
+        assert abs(recovered - injected) < 2.0
+
+
+class TestStreamingBehaviour:
+    """Locking should not depend on how the input is sliced into
+    batches — the streaming buffer should handle PPS edges that
+    straddle batch boundaries."""
+
+    def test_small_batches(self):
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5, edge_tolerance_samples=20,
+        )
+        signal = _make_bpsk_signal(duration_s=10.0, edge_offset_samples=3.0)
+        # Use 100-sample batches — about 1 ms per batch, much smaller
+        # than the typical 200-sample radiod packet.
+        result = _feed_in_batches(cal, signal, batch_size=100)
+        assert result is not None
+        assert abs(result.chain_delay_samples - 3.0) < 0.1
+
+    def test_one_giant_batch(self):
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5, edge_tolerance_samples=20,
+        )
+        signal = _make_bpsk_signal(duration_s=10.0, edge_offset_samples=3.0)
+        result = cal.process_samples(signal, rtp_timestamp=0)
+        assert result is not None
+        assert abs(result.chain_delay_samples - 3.0) < 0.1
+
+
+class TestCarrierPhaseRecovery:
+    """The carrier-phase tracker must recover lock regardless of the
+    initial carrier phase."""
+
+    @pytest.mark.parametrize("phi", [0.0, np.pi / 4, np.pi / 2, np.pi, 1.234])
+    def test_locks_at_arbitrary_phase(self, phi):
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5, edge_tolerance_samples=20,
+        )
+        signal = _make_bpsk_signal(
+            duration_s=10.0, edge_offset_samples=2.0, carrier_phase=phi,
+        )
+        result = _feed_in_batches(cal, signal)
+        assert result is not None, f"Failed to lock at carrier phase {phi}"
+        # chain_delay should still be ~2.0 samples regardless of phase.
+        assert abs(result.chain_delay_samples - 2.0) < 0.2
+
+
+class TestResetClearsState:
+    def test_reset_clears_lock(self):
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5, edge_tolerance_samples=20,
+        )
+        signal = _make_bpsk_signal(duration_s=10.0, edge_offset_samples=0.0)
+        _feed_in_batches(cal, signal)
+        assert cal.locked
+        cal.reset()
+        assert not cal.locked
+        assert cal.pps_consecutive == 0
+        assert cal.pps_ok == 0
+
+
+class TestConstructorValidation:
+    def test_rejects_low_sample_rate(self):
+        with pytest.raises(ValueError, match="sample_rate"):
+            BpskPpsCalibratorMF(sample_rate=4000)
+
+    def test_accepts_minimum_sample_rate(self):
+        cal = BpskPpsCalibratorMF(sample_rate=8000)
+        assert cal.sample_rate == 8000

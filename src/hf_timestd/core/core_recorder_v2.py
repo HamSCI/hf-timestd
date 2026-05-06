@@ -276,17 +276,34 @@ class CoreRecorderV2:
             if freq_hz is None:
                 logger.error("timing.l6_pps.enabled=true but frequency_hz not set — T6 disabled")
             else:
-                from hf_timestd.core.bpsk_pps_calibrator import BpskPpsCalibrator
                 sr = int(self._t6_config.get('sample_rate',
                          self.channel_defaults.get('sample_rate', 24000)))
-                self._t6_calibrator = BpskPpsCalibrator(
-                    sample_rate=sr,
-                    consecutive_required=self._t6_config.get('consecutive_required', 10),
-                    edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 10),
-                    enable_notch_500hz=self._t6_config.get('filter_500hz_notch', False),
-                )
-                logger.info(f"T6 BPSK PPS calibrator initialized: "
-                            f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
+                # Calibrator selection. The matched-filter calibrator
+                # (textbook Costas + integrate-and-dump MF) replaces the
+                # legacy per-sample-Δφ heuristic; it expects a wider
+                # channel filter (±25 kHz at 96 kHz SR) for full benefit.
+                # Default False to keep deployed behaviour unchanged
+                # until a config bump explicitly opts in.
+                if self._t6_config.get('use_matched_filter', False):
+                    from hf_timestd.core.bpsk_pps_calibrator_mf import BpskPpsCalibratorMF
+                    self._t6_calibrator = BpskPpsCalibratorMF(
+                        sample_rate=sr,
+                        consecutive_required=self._t6_config.get('consecutive_required', 10),
+                        edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 30),
+                        costas_loop_bw_hz=self._t6_config.get('costas_loop_bw_hz', 1.0),
+                    )
+                    logger.info(f"T6 BPSK PPS calibrator (matched-filter) initialized: "
+                                f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
+                else:
+                    from hf_timestd.core.bpsk_pps_calibrator import BpskPpsCalibrator
+                    self._t6_calibrator = BpskPpsCalibrator(
+                        sample_rate=sr,
+                        consecutive_required=self._t6_config.get('consecutive_required', 10),
+                        edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 10),
+                        enable_notch_500hz=self._t6_config.get('filter_500hz_notch', False),
+                    )
+                    logger.info(f"T6 BPSK PPS calibrator (legacy) initialized: "
+                                f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
                 # Init TSL3 SHM feed (unit 2). Failure is non-fatal —
                 # calibration still drives chain_delay_correction_ns.
                 try:
@@ -777,6 +794,14 @@ class CoreRecorderV2:
         sr = int(t6.get('sample_rate',
                         self.channel_defaults.get('sample_rate', 24000)))
         desc = t6.get('description', 'BPSK_PPS')
+        # Optional channel filter overrides — None means use the iq
+        # preset's defaults (±5 kHz). The matched-filter calibrator
+        # benefits from a wider channel filter (±25 kHz) since σ_t
+        # scales as 1/B for a band-limited polarity-flip step. Requires
+        # ka9q-python ≥3.11 for low_edge/high_edge plumbing through
+        # add_channel / ensure_channel.
+        low_edge_hz = t6.get('low_edge_hz')
+        high_edge_hz = t6.get('high_edge_hz')
 
         if self._use_shared_multistream:
             if self._multi is None:
@@ -798,6 +823,8 @@ class CoreRecorderV2:
                     agc_enable=False,
                     gain=0.0,
                     on_samples=self._t6_on_samples,
+                    low_edge=low_edge_hz,
+                    high_edge=high_edge_hz,
                 )
                 self._t6_channel_info = channel_info
                 if self.data_destination is None and channel_info is not None:
@@ -828,6 +855,8 @@ class CoreRecorderV2:
                 encoding=Encoding.F32,
                 agc_enable=False,
                 gain=0.0,
+                low_edge=low_edge_hz,
+                high_edge=high_edge_hz,
             )
             self._t6_channel_info = channel_info
             if self.data_destination is None and channel_info is not None:

@@ -226,16 +226,38 @@ profile = "rtp"
 # pipeline_watchdog = true    # Pipeline health watchdog timer
 
 [timing.l6_pps]
-# L6 BPSK PPS chain-delay calibration via local RF injector (WB6CXC design).
+# L6 BPSK PPS chain-delay calibration via local RF injector (WB6CXC / TS1).
 # When enabled, core-recorder creates an IQ channel for the injected BPSK
 # signal and measures end-to-end RF->ADC->DSP->RTP chain delay.
 # The correction is applied to all channels' RTP-to-UTC mapping.
 enabled = false
 # frequency_hz = TBD              # RF frequency of injector (Hz) -- REQUIRED when enabled
-# consecutive_required = 10       # Valid edges before lock (default: 10)
-# edge_tolerance_samples = 10     # Max edge position deviation (default: 10)
-# filter_500hz_notch = false      # Apply 500 Hz notch (default: false)
+# sample_rate = 96000             # Channel SR. Recommended 96000 with the matched-filter
+#                                 # calibrator + ±25 kHz channel filter; legacy default 16000.
+# consecutive_required = 10       # Valid edges before lock
+# edge_tolerance_samples = 30     # Max edge position deviation in samples
+#                                 # (scale with sample_rate: 5 at 16 kHz, 30 at 96 kHz)
+# filter_500hz_notch = false      # Apply 500 Hz notch (legacy calibrator only; default false)
 # description = "BPSK_PPS"        # Channel description
+#
+# Calibrator selection:
+# use_matched_filter = false      # When true, use the textbook matched-filter
+#                                 # calibrator (Costas + integrate-and-dump MF +
+#                                 # parabolic interp). Default false keeps the
+#                                 # legacy per-sample-Δφ calibrator running until
+#                                 # explicitly opted in.
+# costas_loop_bw_hz = 1.0         # Loop bandwidth of the carrier-phase tracker
+#                                 # (matched-filter only). Default 1.0; the GPSDO
+#                                 # topology means residual carrier offset is
+#                                 # sub-Hz, so a slow loop is plenty.
+#
+# Channel filter overrides (require ka9q-python ≥ 3.11):
+# low_edge_hz = -25000            # Channel filter low edge (Hz, relative to center).
+# high_edge_hz = 25000            # Channel filter high edge. Recommended ±25 kHz with
+#                                 # use_matched_filter=true: σ_t scales as 1/B for a
+#                                 # band-limited polarity-flip step, so wider is
+#                                 # better up to the receiver / aliasing limit.
+#                                 # Omit (or None) to use the iq preset's ±5 kHz default.
 
 [gnss_vtec]
 enabled = false                         # Set to true if you have a GNSS receiver
