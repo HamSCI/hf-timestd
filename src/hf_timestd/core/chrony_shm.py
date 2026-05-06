@@ -299,42 +299,59 @@ class ChronySHM:
             clock_nsec = int((reference_time - clock_sec) * 1_000_000_000) % 1_000_000_000
             recv_nsec = int((system_time - recv_sec) * 1_000_000_000) % 1_000_000_000
 
-            # Pack the SHM structure for 64-bit Linux (96 bytes total)
+            # Pack the SHM structure to match chrony's `struct shmTime`
+            # exactly (refclock_shm.c). This is the NTP shmTime layout
+            # used by chrony, ntpd, and gpsd — 92 bytes on x86_64 Linux.
             #
-            # Layout (with native alignment):
+            # Layout (native C alignment, time_t = int64):
             #   0-3:   int mode
-            #   4-7:   int count  (odd here = in-progress; patched to even after write)
-            #   8-15:  time_t clockTimeStampSec (64-bit)
+            #   4-7:   int count                    (sequence-lock counter)
+            #   8-15:  time_t clockTimeStampSec
             #   16-19: int clockTimeStampUSec
-            #   20-23: (padding for 8-byte alignment)
-            #   24-31: time_t receiveTimeStampSec (64-bit)
+            #   20-23: padding (q field below needs 8-byte alignment)
+            #   24-31: time_t receiveTimeStampSec
             #   32-35: int receiveTimeStampUSec
-            #   36-39: (padding for 8-byte alignment)
-            #   40-43: int leap
-            #   44-47: int precision
-            #   48-51: int nsamples
-            #   52-55: int valid
-            #   56-59: unsigned clockTimeStampNSec
-            #   60-63: unsigned receiveTimeStampNSec
-            #   64-95: int dummy[8]
-
+            #   36-39: int leap                     (NO padding here — `int`
+            #                                        is 4-byte aligned and 36
+            #                                        is already 4-aligned)
+            #   40-43: int precision
+            #   44-47: int nsamples
+            #   48-51: int valid
+            #   52-55: unsigned clockTimeStampNSec
+            #   56-59: unsigned receiveTimeStampNSec
+            #   60-91: int dummy[8]
+            #
+            # 2026-05-06 fix: a previous version of this struct format
+            # inserted an extra `4x` between recv_usec and leap, claiming
+            # "alignment for leap". That was wrong — `int leap` is already
+            # 4-aligned at offset 36. The bogus padding shifted leap onwards
+            # by 4 bytes against chrony's actual layout, so chrony read:
+            #   - writer's `nsamples` (offset 48) as `valid`             — usually OK (nsamples=1)
+            #   - writer's `valid` (offset 52) as `clockTimeStampNSec`   — read as 1ns
+            #   - writer's `clock_nsec` (offset 56) as `receiveTimeStampNSec` — wrong field
+            #   - writer's `recv_nsec` (offset 60) as `dummy[0]`         — silently dropped
+            # TSL1/TSL2 mostly worked anyway because their `ref_time` is
+            # a fractional UTC second, so writer's `clock_nsec` was a
+            # plausible sub-second NSec that chrony tolerated. TSL3
+            # rounds `ref_time` to integer GPS seconds, making clock_nsec
+            # = 0 and exposing the bug fully — chrony saw recv_time off
+            # by ~1 second and excluded TSL3 as an outlier (#x).
             data = struct.pack(
-                '@ii q i 4x q i 4x iiii II iiiiiiii',
+                '@ii q i 4x q i iiii II iiiiiiii',
                 1,              # mode = 1 (count-locking protocol)
                 self.count,     # count (odd = write in progress)
                 clock_sec,      # clockTimeStampSec (8-15)
                 clock_usec,     # clockTimeStampUSec (16-19)
-                # 4x padding (20-23) for 8-byte alignment of receiveTimeStampSec
+                # 4x padding (20-23) for q below
                 recv_sec,       # receiveTimeStampSec (24-31)
                 recv_usec,      # receiveTimeStampUSec (32-35)
-                # 4x padding (36-39) for alignment before leap
-                leap,           # leap (40-43)
-                precision,      # precision (44-47)
-                1,              # nsamples (48-51)
-                1,              # valid (52-55)
-                clock_nsec,     # clockTimeStampNSec (56-59)
-                recv_nsec,      # receiveTimeStampNSec (60-63)
-                0, 0, 0, 0, 0, 0, 0, 0  # dummy[8] (64-95)
+                leap,           # leap (36-39)
+                precision,      # precision (40-43)
+                1,              # nsamples (44-47)
+                1,              # valid (48-51)
+                clock_nsec,     # clockTimeStampNSec (52-55)
+                recv_nsec,      # receiveTimeStampNSec (56-59)
+                0, 0, 0, 0, 0, 0, 0, 0  # dummy[8] (60-91)
             )
 
             # Write to SHM
