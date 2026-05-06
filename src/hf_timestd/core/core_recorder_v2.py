@@ -1059,10 +1059,14 @@ class CoreRecorderV2:
                 # inherits the T3-at-lock reference frame permanently
                 # and chrony sees a constant-bias outlier (#x excluded).
                 #
-                # Slow IIR (α=0.05 per edge) → time-constant ≈ 20 edges
-                # ≈ 20 s. Fast enough to track T3's settling, slow enough
-                # that T3's per-cycle noise (typically ~10–20 µs) doesn't
-                # contaminate TSL3's per-edge precision (~150 ns).
+                # Slow IIR (α=0.01 per edge) → time-constant ≈ 100 edges
+                # ≈ 100 s; ~95% convergence in ~5 minutes from a fresh
+                # lock. T3's per-cycle noise (typically ~10–20 µs) is
+                # injected into TSL3 with √(α/(2-α)) ≈ 0.07 weighting,
+                # so TSL3 inherits ~700 ns–1.4 µs of T3 noise — well
+                # above MF's intrinsic 150 ns precision but acceptable.
+                # An earlier α=0.05 attempt converged faster (~60 s) but
+                # injected ~5 µs of T3 noise into TSL3's reported offset.
                 ref = self._get_disambiguation_reference()
                 if ref is not None:
                     ref_offset_ms, _ref_sigma_ms, _ref_tier = ref
@@ -1095,7 +1099,7 @@ class CoreRecorderV2:
                                 # 10 ms so a transient T3 glitch can't
                                 # whip TSL3 violently.
                                 step_ns = int(round(
-                                    disagreement_sec * 1e9 * 0.05
+                                    disagreement_sec * 1e9 * 0.01
                                 ))
                                 if abs(step_ns) <= 10_000_000:
                                     self._t6_disambiguation_ns += step_ns
